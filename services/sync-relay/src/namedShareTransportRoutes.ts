@@ -116,7 +116,7 @@ export function createNamedShareTransportRoutes(
           const fresh = requireShareAction(route.shareId, actor.userId, "read");
           if (fresh.share.workspaceId !== share.workspaceId ||
               (channelWireId !== null && chatSideOf(fresh.effectiveSelector)?.channelWireId !== channelWireId)) throw notFound();
-          return filteredLogPage(share.workspaceId, share.shareId, fresh.effectiveSelector, scanSince, limit, "authenticated", half);
+          return filteredLogPage(share.workspaceId, share.shareId, fresh.effectiveSelector, scanSince, limit, "authenticated", half, ["user", actor.userId]);
         };
         while (!request.signal.aborted && Date.now() < deadline) {
           try {

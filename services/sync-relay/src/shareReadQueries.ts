@@ -238,12 +238,15 @@ export function createShareReadQueries(
               )
             : null;
         if (payload === null) return null;
-        if (recipient) tokenizeReceivedPayload({ identity, recipient, workspaceId, selector, chat: chatResolver,
-          opKind: row.opKind, original: JSON.parse(row.payloadJson), served: payload as Record<string, unknown>,
+        const authenticatedMoment = audience === "authenticated" && row.opKind === "moment.append";
+        const original = recipient || authenticatedMoment
+          ? JSON.parse(row.payloadJson) as Record<string, unknown>
+          : undefined;
+        if (recipient && original) tokenizeReceivedPayload({ identity, recipient, workspaceId, selector, chat: chatResolver,
+          opKind: row.opKind, original, served: payload as Record<string, unknown>,
           ...(accountlessProjection ? { projectPath: accountlessProjection.projectPath } : {}) });
-        if (audience === "authenticated" && row.opKind === "moment.append") {
+        if (authenticatedMoment && original) {
           (payload as Record<string, unknown>).authors = sharedMomentAuthors(row.admittedAuthorSnapshot);
-          const original = JSON.parse(row.payloadJson) as Record<string, unknown>;
           const mark = original.attributionUnavailable;
           if (mark && typeof mark === "object" && !Array.isArray(mark)) {
             const unavailable = mark as Record<string, unknown>;
