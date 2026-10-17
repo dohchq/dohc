@@ -88,6 +88,7 @@ vi.mock("node:fs", async original => {
 const person = { kind: "human", humanId: "local:test" } as const;
 async function fixture(systemAccepts = false, tracked = ["folder/tracked.txt"]) {
   const root = await createTestScratch("delete-recovery-faults-");
+  const os = await createTestScratch("delete-recovery-faults-os-");
   faults.copyTarget = join(root, "folder/rowless.txt");
   await mkdir(join(root, ".dohc"));
   const write = async (path: string, body: string) => { await mkdir(join(root, "folder"), { recursive: true }); await writeFile(join(root, path), body); };
@@ -99,14 +100,14 @@ async function fixture(systemAccepts = false, tracked = ["folder/tracked.txt"]) 
     work({ policy: await readWorkspaceEnginePolicy(root), recordDisk: async () => tracked, delete: recordDelete } as never) };
   const options = { capture, requestId: "caller-request", markDeleted: vi.fn(), trashItem: async (path: string) => {
     if (!systemAccepts) throw new Error("OS refuses");
-    await rm(path, { recursive: true });
+    await rename(path, join(os, basename(path)));
   } };
   const history = { readHistoryPage: vi.fn(async () => ({ moments: tracked.map(path => ({ operation: "delete", path })), protectedMoments: [], nextCursor: null }) as never), undoHistoryOperation: vi.fn(async () => ({ operationId: "unused", versionId: "main", momentCount: 1,
     compensationOperationId: "undo", deduped: false, materialized: false })) };
   const remove = (hand = false) => hand ? deleteWorkspacePathByHand(operation, "folder", person, options)
     : prepareDeleteWorkspacePathAs(operation, "folder", person, options).then(finish => finish());
   const undo = (id: string) => undoWorkspaceHistoryOperation(operation, { operationId: id }, person, { agent: false, history });
-  return { root, write, remove, undo, operation, recordDelete, history, options };
+  return { root, os, write, remove, undo, operation, recordDelete, history, options };
 }
 async function deleted(f: Awaited<ReturnType<typeof fixture>>) {
   const result = await f.remove();
@@ -211,16 +212,44 @@ describe("delete recovery failures", () => {
       expect(existsSync(join(f.root, "folder"))).toBe(false);
     } finally { faults.failRecord = false; }
   });
-  it.each([false, true])("a save failure after bytes moved preserves the completed delete (hand=%s)", async hand => {
-    const f = await fixture();
+  it.each([false, true])("a save failure during system trash preserves the completed delete (hand=%s)", async hand => {
+    const f = await fixture(true, ["folder/tracked.txt", "folder/rowless.txt"]);
     const trash = f.options.trashItem;
-    f.options.trashItem = async path => { faults.failRecord = true; await trash(path); };
+    const saves = faults.recordSaves;
+    f.options.trashItem = async path => { await trash(path); faults.failRecord = true; };
     try {
       const result = await f.remove(hand);
-      expect(result).toMatchObject({ trashed: false, undo: { available: false } });
-      if (!hand) expect(result).toMatchObject({ ok: true, trashPath: expect.stringContaining(".dohc/trash/") });
+      expect(result).toMatchObject({ trashed: true, undo: { available: false, reason: expect.stringContaining("could not save Undo information") } });
+      if (!hand) expect(result).toMatchObject({ ok: true });
+      expect(faults.recordSaves - saves).toBe(hand ? 1 : 2);
+      expect(faults.failRecord).toBe(false);
       expect(f.recordDelete).toHaveBeenCalledWith("folder/tracked.txt");
       expect(existsSync(join(f.root, "folder"))).toBe(false);
+      if (!hand) {
+        const record = await readDeleteRecovery(f.root, result.operationId!);
+        expect(record?.staged).toBeDefined();
+        expect(existsSync(join(f.root, ".dohc/trash", record!.staged!))).toBe(false);
+        expect(await readFile(join(f.os, record!.staged!, "rowless.txt"), "utf8")).toBe("not retained");
+        expect(await f.undo(result.operationId!)).toMatchObject({ ok: true });
+      }
+    } finally { faults.failRecord = false; }
+  });
+  it("points to system trash when the final record save fails after an accepted move", async () => {
+    const f = await fixture(true, []);
+    const trash = f.options.trashItem;
+    f.options.trashItem = async path => { await trash(path); faults.failRecord = true; };
+    try {
+      const result = await f.remove();
+      expect(result).toMatchObject({ ok: true, trashed: true, undo: { available: false,
+        reason: `Cannot undo the delete. folder is in the ${process.platform === "win32" ? "Recycle Bin" : "Trash"}. Restore it there.` } });
+      expect(faults.failRecord).toBe(false);
+      const record = await readDeleteRecovery(f.root, result.operationId!);
+      expect(record?.staged).toBeDefined();
+      expect(existsSync(join(f.root, ".dohc/trash", record!.staged!))).toBe(false);
+      expect(await readFile(join(f.os, record!.staged!, "rowless.txt"), "utf8")).toBe("not retained");
+      expect(await f.undo(result.operationId!)).toEqual({ ok: false,
+        reason: `Cannot undo the delete. folder is no longer in the workspace trash, and History has no copy of it. Check the ${process.platform === "win32" ? "Recycle Bin" : "Trash"}.` });
+      expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
     } finally { faults.failRecord = false; }
   });
   it("a healthy OS trash does not require healthy workspace trash", async () => {
@@ -614,7 +643,7 @@ describe("delete recovery placement and receipts", () => {
     const trash = join(f.root, ".dohc/trash");
     const staged = (await readdir(trash)).find(name => name.endsWith("-folder"))!;
     await rm(whole ? join(trash, staged) : join(trash, staged, "rowless.txt"), { recursive: true });
-    expect(await f.undo(id)).toMatchObject({ ok: false, reason: expect.stringContaining("is no longer in the workspace trash, and History has no copy of it.") });
+    expect(await f.undo(id)).toMatchObject({ ok: false, reason: expect.stringContaining(`is no longer in the workspace trash, and History has no copy of it. Check the ${process.platform === "win32" ? "Recycle Bin" : "Trash"}.`) });
     expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
   });
   it("expires metadata without deleting fallback bytes", async () => {
@@ -658,7 +687,7 @@ it.each(["ipc", "cli", "mcp"] as const)("shows an occupied pending copy and retr
     faults.failCopy = ""; await rm(faults.copyTarget); await writeFile(faults.copyTarget, "occupant");
     const owner = createWorkspaceFileMutationOwner({
       historyFor: () => f.history, assertTrustedSender: () => undefined,
-      withRendererWorkspaceOperation: async (_event, _id, work) => work({ workspace: f.operation.workspace,
+      withRendererWorkspaceOperation: async (_event, _id, work) => work({ workspace: f.operation.workspace, signal: f.operation.signal,
         authorityId: f.operation.workspace.attachmentId, capture: null,
         yDocSessions: { withDocumentUnowned: async (_id, _path, work) => work(), markDeletedUnderPath: () => undefined }, assertCurrent: () => undefined }),
       shareViewFiles: { change: async () => { throw new Error("No share writes"); } }, trashItem: async () => undefined,

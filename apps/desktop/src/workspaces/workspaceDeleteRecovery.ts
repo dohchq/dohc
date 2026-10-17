@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { addAbortListener } from "node:events";
 import { createReadStream } from "node:fs";
 import { chmod, link, lstat, mkdir, open, readFile, readdir, readlink, realpath, rename, rm, rmdir, stat, symlink, unlink } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
@@ -18,7 +19,7 @@ const UndoResult = HistoryOperationUndoResult.options[1].extend({
 });
 export type DeleteUndoResult = z.infer<typeof HistoryOperationUndoResult>;
 const Record = z.object({
-  operationId: z.string(), staged: z.string().optional(), base: z.string(), paths: z.array(z.string()),
+  operationId: z.string(), staged: z.string().optional(), noUndo: z.string().optional(), base: z.string(), paths: z.array(z.string()),
   emptyFolders: z.array(z.string()), tracked: z.boolean(),
   copies: z.array(z.object({
     path: z.string(), dev: z.number(), ino: z.number(), birthtimeMs: z.number(), size: z.number(),
@@ -30,6 +31,23 @@ export type DeleteRecoveryPlan = { operationId: string; record?: RecoveryRecord;
 const code = (error: unknown) => error && typeof error === "object" && "code" in error ? error.code : undefined;
 const info = async (path: string) => lstat(path).catch(error => { if (code(error) === "ENOENT") return null; throw error; });
 const recordName = (id: string) => `delete-${createHash("sha256").update(id).digest("hex")}.json`;
+// Undo waits outside the workspace queue; reads can inspect the staged record.
+const pendingDeletes = new Map<string, Promise<void>>();
+export function beginPendingDeleteRecovery(operationId: string): () => void {
+  let resolve!: () => void;
+  pendingDeletes.set(operationId, new Promise<void>(done => { resolve = done; }));
+  return () => { pendingDeletes.delete(operationId); resolve(); };
+}
+export async function waitForDeleteRecovery(operationId: string, signal?: AbortSignal): Promise<void> {
+  const pending = pendingDeletes.get(operationId);
+  if (!pending || signal?.aborted) return;
+  if (!signal) { await pending; return; }
+  let retirement!: ReturnType<typeof addAbortListener>;
+  const retired = new Promise<void>(done => { retirement = addAbortListener(signal, () => done()); });
+  try { await Promise.race([pending, retired]); }
+  finally { retirement[Symbol.dispose](); }
+}
+const systemTrash = process.platform === "win32" ? "Recycle Bin" : "Trash";
 const MAX_RECORD_AGE = 30 * 24 * 60 * 60 * 1_000;
 const invalidRecovery = "Cannot undo the delete. Its recovery record is invalid. Restore files from History or the trash.";
 export const missingDeleteRecoveryReason = "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History or the trash.";
@@ -131,16 +149,22 @@ export async function stageDeleteRecovery(operationId: string, staged: string, b
       ...(invalid ? { noUndo: `Cannot undo the delete. Invalid recovery path: ${invalid}. Restore it from the trash.` } : {}) };
   } catch { return { operationId }; }
 }
-export async function finishDeleteRecovery(root: string, plan: DeleteRecoveryPlan, trashed: boolean, staged?: string): Promise<DeleteRecovery> {
+export async function finishDeleteRecovery(root: string, plan: DeleteRecoveryPlan,
+  { trashed, staged }: { trashed: boolean; staged?: string }): Promise<DeleteRecovery> {
   const { operationId, record } = plan;
   try {
     if (!record) throw new Error("Recovery collection failed");
     record.staged = trashed || staged === undefined ? undefined : basename(staged);
     if (!plan.noUndo && trashed && record.paths.length) {
-      const where = process.platform === "win32" ? "in the Recycle Bin" : "in the Trash";
+      const where = `in the ${systemTrash}`;
       plan.noUndo = `Cannot undo the delete. ${record.paths.join(", ")} ${record.paths.length === 1 ? "is" : "are"} ${where}. Restore ${record.paths.length === 1 ? "it" : "them"} there.`;
+      record.noUndo = plan.noUndo;
+      await save(root, record).catch(() => undefined);
+      schedulePrune(root);
     }
-    if (plan.noUndo) return { operationId, undo: { available: false, reason: plan.noUndo, paths: record.paths } };
+    if (plan.noUndo) {
+      return { operationId, undo: { available: false, reason: plan.noUndo, paths: record.paths } };
+    }
     await save(root, record);
     schedulePrune(root);
     return { operationId, undo: { available: true } };
@@ -241,6 +265,7 @@ export async function undoDeleteRecovery(root: string, record: RecoveryRecord, a
   history: Pick<HistoryOperationsStore, "undoHistoryOperation">, workspaceId: string,
   assertCurrent: () => void, markChanged: () => void): Promise<DeleteUndoResult> {
   assertCurrent();
+  if (record.noUndo) return { ok: false, reason: record.noUndo };
   const expose = (result: z.infer<typeof UndoResult>): DeleteUndoResult => ({ ...result,
     remaining: result.remaining.map(item => ({ ...item, retry: record.copies?.some(copy => copy.path === item.path) ?? false })) });
   const engineUndo = () => history.undoHistoryOperation({ workspaceId, operationId: record.operationId,
@@ -262,7 +287,7 @@ export async function undoDeleteRecovery(root: string, record: RecoveryRecord, a
       if (occupant && !(record.emptyFolders.includes(path) && occupant.isDirectory())) return { ok: false, reason: `Cannot undo the delete. ${path} now occupies the old path. Move it first.` };
       if (record.paths.includes(path)) {
         const source = await sourcePath(root, record, path).catch(error => { if (code(error) === "ENOENT") return undefined; throw error; });
-        if (!source || !await info(source)) return { ok: false, reason: `Cannot undo the delete. ${path} is no longer in the workspace trash, and History has no copy of it.` };
+        if (!source || !await info(source)) return { ok: false, reason: `Cannot undo the delete. ${path} is no longer in the workspace trash, and History has no copy of it. Check the ${systemTrash}.` };
       }
     }
     assertCurrent();

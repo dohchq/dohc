@@ -13,7 +13,7 @@ import type { AuthoredPathChanges, WorkspaceEngineCapture } from "./workspaceEng
 import { historyExcludesSubtree, historyPathAdmission, type WorkspaceEnginePolicySnapshot } from "./workspaceEnginePolicyFile";
 import { deletePath, moveIntoWorkspaceTrash, prepareWorkspaceDelete, removeEmptyWorkspaceFolder } from "./workspaceFiles";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
-import { finishDeleteRecovery, stageDeleteRecovery, type DeleteRecovery, type DeleteRecoveryPlan } from "./workspaceDeleteRecovery";
+import { beginPendingDeleteRecovery, finishDeleteRecovery, stageDeleteRecovery, type DeleteRecovery, type DeleteRecoveryPlan } from "./workspaceDeleteRecovery";
 
 type PathChangeWorkspace = { rootPath: string; readOnly?: boolean; shareView?: unknown };
 
@@ -476,13 +476,14 @@ export async function prepareDeleteWorkspacePathAs<Workspace extends PathChangeW
   const rootPath = operation.workspace.rootPath;
   const failed = `dohc could not delete ${path}.`;
   const operationId = `${OPERATION_ID_PREFIX}${randomUUID()}`;
+  const releaseRecovery = beginPendingDeleteRecovery(operationId);
   try {
     assertWritable(operation);
     const changed = await withExclusiveWorkspaceOperation(rootPath, async markChanged => {
       let gone: string[] = [];
       // The capture settles, closes and checks this endpoint before the hold.
       const endpoint = (await admitPath(rootPath, path)).physical;
-      return await options.capture.changePathsAs<Changed<{ path: string; withoutHistory: string[]; recovery: DeleteRecoveryPlan }, DeleteFailure>>([endpoint],
+      const changed = await options.capture.changePathsAs<Changed<{ path: string; withoutHistory: string[]; recovery: DeleteRecoveryPlan }, DeleteFailure>>([endpoint],
         { operation: "delete", author, operationId },
         async engine => {
           // Admission runs here, with capture held, right before the disk changes.
@@ -535,17 +536,24 @@ export async function prepareDeleteWorkspacePathAs<Workspace extends PathChangeW
           return { done: { path: target.path, withoutHistory, recovery }, trash: staged };
         },
         () => gone);
+      if ("failed" in changed) return changed;
+      const recovery = await finishDeleteRecovery(rootPath, changed.done.recovery, { trashed: false, staged: changed.trash });
+      return { ...changed, recovery };
     });
-    if ("failed" in changed) return async () => changed.failed;
+    if ("failed" in changed) { releaseRecovery(); return async () => changed.failed; }
     return async () => {
-      const trashed = changed.trash !== undefined && await toSystemTrash(options, changed.trash);
-      const { withoutHistory, recovery: plan, ...done } = changed.done;
-      const recovery = await finishDeleteRecovery(rootPath, plan, trashed, changed.trash);
-      return { ok: true, ...done, trashed, ...recovery,
-        ...(trashed || changed.trash === undefined ? {} : { trashPath: workspaceTrashPath(changed.trash) }),
-        ...(withoutHistory.length ? { withoutHistory } : {}) };
+      try {
+        const trashed = changed.trash !== undefined && await toSystemTrash(options, changed.trash);
+        const { withoutHistory, recovery: plan, ...done } = changed.done;
+        // Only this delete writes the record until releaseRecovery admits Undo.
+        const recovery = trashed ? await finishDeleteRecovery(rootPath, plan, { trashed: true }) : changed.recovery;
+        return { ok: true, ...done, trashed, ...recovery,
+          ...(trashed || changed.trash === undefined ? {} : { trashPath: workspaceTrashPath(changed.trash) }),
+          ...(withoutHistory.length ? { withoutHistory } : {}) };
+      } finally { releaseRecovery(); }
     };
   } catch (error) {
+    releaseRecovery();
     return async () => ({ ok: false, deleted: [], path, reason: reason(error, failed) });
   }
 }
@@ -599,7 +607,7 @@ export async function deleteWorkspacePathByHand(
       markChanged();
       options.markDeleted(endpoint);
       const collected = staged === undefined ? plan : await stageDeleteRecovery(operationId, staged, endpoint, recorded);
-      return { ...trashed, recovery: await finishDeleteRecovery(rootPath, collected, trashed.trashed, staged) };
+      return { ...trashed, recovery: await finishDeleteRecovery(rootPath, collected, { trashed: trashed.trashed, staged }) };
     };
     // History holds nothing the engine cannot address, and nothing is open there.
     if (capture === null || !engineAddresses(endpoint)) {

@@ -31,6 +31,7 @@ import type { AuthoredPathChanges, WorkspaceEngineMomentSummary, WorkspaceEngine
 import { readWorkspaceEnginePolicy } from "../workspaces/workspaceEnginePolicyFile";
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import { createWorkspaceAuthorityOwner } from "../workspaces/workspaceAuthorityOwner";
+import { readDeleteRecovery, waitForDeleteRecovery } from "../workspaces/workspaceDeleteRecovery";
 
 function deferred() {
   let release!: () => void;
@@ -715,10 +716,11 @@ describe("raw fileWrite socket requests", () => {
 });
 
 describe("raw fileMove and fileDelete socket requests", () => {
-  async function setup() {
+  async function setup(configure?: (f: ReturnType<typeof fixture>) => void) {
     const root = await createTestScratch("dohc-cli-file-move-");
     await mkdir(join(root, ".dohc"));
     const f = fixture(root);
+    configure?.(f);
     await f.create().startDesktopCliServer();
     const invoke = async (verb: "fileMove" | "fileDelete", args: Record<string, unknown>, actor = "agent") => {
       const line = await handleCliRequestLine(JSON.stringify({
@@ -730,8 +732,32 @@ describe("raw fileMove and fileDelete socket requests", () => {
     return { ...f, root, invoke };
   }
 
+  it("finishes a prepared delete when the post-work authority check throws", async () => {
+    let drained: Promise<void> | undefined;
+    const f = await setup(f => {
+      f.dependencies.withPhysicalWorkspaceOperation = (id, work) => f.authorities.withOperation(id, async operation => {
+        const result = await work(operation);
+        // Retire after preparation returns, before withOperation's assertCurrent.
+        if (vi.mocked(f.dependencies.markDeletedUnderPath).mock.calls.length) drained = f.authorities.invalidate(id);
+        return result;
+      });
+    });
+    await writeFile(join(f.root, "plain.txt"), "original");
+    expect(await f.invoke("fileDelete", { path: "plain.txt" }))
+      .toMatchObject({ ok: false, reason: expect.stringContaining("retired workspace authority") });
+    expect(f.dependencies.trashItem).toHaveBeenCalledOnce();
+    const { operationId } = vi.mocked(f.capture.changePathsAs).mock.calls[0]![1];
+    await waitForDeleteRecovery(operationId);
+    const record = await readDeleteRecovery(f.root, operationId);
+    expect(record?.staged).toBeDefined();
+    expect(await readFile(join(f.root, ".dohc/trash", record!.staged!), "utf8")).toBe("original");
+    await drained;
+    await f.authorities.close();
+  });
+
   it.each(["delete", "overwrite"] as const)("a hung trash during %s holds neither file verbs nor workspace close", async change => {
     const f = await setup();
+    const context = await f.create().openCliWorkspace(f.workspace);
     await writeFile(join(f.root, "first.txt"), "first");
     await writeFile(join(f.root, "source.txt"), "source");
     await writeFile(join(f.root, "next.txt"), "next");
@@ -743,12 +769,20 @@ describe("raw fileMove and fileDelete socket requests", () => {
     const pending = change === "delete" ? f.invoke("fileDelete", { path: "first.txt" })
       : f.invoke("fileMove", { fromPath: "source.txt", toPath: "first.txt", overwrite: true });
     await entered.promise;
+    let undo: Promise<unknown> | undefined;
     try {
+      if (change === "delete") {
+        const { operationId } = vi.mocked(f.capture.changePathsAs).mock.calls[0]![1];
+        undo = context.historyUndo!({ operationId }, { attribution: { actorKind: "agent", onBehalfOf: "person-local", depth: 0 } })
+          .catch(error => ({ ok: false, reason: error.message }));
+      }
       expect(await f.invoke("fileMove", { fromPath: "next.txt", toPath: "after.txt" })).toMatchObject({ ok: true });
       await f.authorities.close();
+      if (undo) expect(await undo).toEqual({ ok: false, reason: "This workspace was closed. Open it again." });
     } finally {
       released.release();
       expect(await pending).toMatchObject({ ok: true });
+      await undo;
     }
   });
 

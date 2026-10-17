@@ -82,6 +82,7 @@ async function harness() {
     withRendererWorkspaceOperation: (event, id, work) => withOperation(event.sender, id, "mutation retired", async (operation) => work({
       assertCurrent: () => operation.assertCurrent(),
       authorityId: operation.workspace.attachmentId, workspace: operation.workspace, capture: null,
+      signal: operation.signal,
       yDocSessions: {
         withDocumentUnowned: async (_authority, _path, run) => run(),
         markDeletedUnderPath: () => undefined,
