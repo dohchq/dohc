@@ -1597,6 +1597,11 @@ async fn committed_adoption_and_claims_are_announced_before_a_sibling_busy_retry
                     .as_array()
                     .is_some_and(|paths| paths.iter().any(|path| path == "tasks/beta.md"))
             {
+                assert_eq!(
+                    notice.payload["paths"],
+                    serde_json::json!(["tasks/beta.md"]),
+                    "the retry announces only B; a capture repaint is not its announcement"
+                );
                 break;
             }
         }
