@@ -3272,6 +3272,18 @@
       }
     },
     {
+      "name": "dohc_stop_workspace_sync",
+      "description": "Stop this computer's sync for the owning workspace after saving live document edits. Keep local work, shares, history, and protected-file keys. Groups you joined and received-share mounts keep syncing. Record who paused and when. Resume in Settings.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_test_app",
       "description": "Run bounded static validation for an app folder: detector diagnostics and entry presence.",
       "inputSchema": {
