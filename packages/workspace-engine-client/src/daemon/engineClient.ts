@@ -602,6 +602,26 @@ export class EngineRequestError extends EngineClientError {
 }
 
 /**
+ * The engine refused a hosted document that is not ready: its hosted replica
+ * holds, backfills or parked it, or it left the scope. A later pull may make
+ * it ready. Any other CONFLICT on the same request is a divergence.
+ */
+export function isHostedDocumentUnready(error: unknown): boolean {
+  return error instanceof EngineRequestError && error.wireError?.code === "CONFLICT" &&
+    error.wireError.message === "hosted-document-unready";
+}
+
+/**
+ * The engine refused a first capture because the document has no Y.Doc
+ * lineage, as a file only ever written as text: nothing can activate until a
+ * device opens it.
+ */
+export function isLiveDocumentWithoutLineage(error: unknown): boolean {
+  return error instanceof EngineRequestError && error.wireError?.code === "CONFLICT" &&
+    error.wireError.message === "live-document-without-lineage";
+}
+
+/**
  * A request the caller deadlined ran out of time before the daemon answered.
  *
  * Expiry can precede transmission. The code remains `transport-error` for

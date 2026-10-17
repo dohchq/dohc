@@ -153,7 +153,7 @@ async function fixture() {
   storage.enrollServiceHostDocument({workspaceId:workspace,ownerUserId:deleted,shareId:ownedShare,path:"docs/file.md",nowMs:2000,guard:storage.captureStanding()});
   const serviceKey={key:Buffer.alloc(32,1),namespace:deployment.history.namespace};
   const serviceBearer=deriveServiceHostBearer(storage.currentServiceHostWorkspace(workspace)!,serviceKey);
-  const serviceAccess=()=>authorizeServiceHostReplication(storage,{...serviceKey,workspaceId:workspace,bearer:serviceBearer,method:"GET",pathname:"/sync/"+workspace+"/log"});
+  const serviceAccess=()=>authorizeServiceHostReplication(storage,{...serviceKey,workspaceId:workspace,bearer:serviceBearer,method:"GET",pathname:"/sync/"+workspace+"/hosted/log"});
   expect(serviceAccess()).toBe(deleted);
   const comment = await h(request(deleted,"/sync/shares/"+receivedShare+"/discussion",jsonBody({body:"Keep this contribution",idempotencyKey:"message"})));
   expect(comment.status,await comment.clone().text()).toBe(200);

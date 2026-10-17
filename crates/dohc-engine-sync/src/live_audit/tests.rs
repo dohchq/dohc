@@ -4708,7 +4708,7 @@ fn a_parked_hosted_document_resumes_its_activation_after_it_returns() {
             &activation.activation_id,
             1_000_000
         ),
-        Err(dohc_engine_collab::live_update_application::ApplicationError::Conflict)
+        Err(dohc_engine_collab::live_update_application::ApplicationError::HostedDocumentUnready)
     ));
 
     // It returns: its head comes back, every row it applied skips, the host's

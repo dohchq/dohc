@@ -1153,6 +1153,81 @@ pub(crate) fn redelivered_unready(
     Ok(standing)
 }
 
+/// Hold the ready document whose ordinary `ydoc.update` at this coordinate
+/// was just refused because its live session never admitted it, when the
+/// update is of its current lineage. Its content here is now incomplete, so
+/// it is no longer ready, in the refusal's own transaction. Its own read
+/// starts where the main feed is, which applied everything of it before, and
+/// only [`completed_hold`] clears the hold. A document that is not ready
+/// meets the refusal there when its read completes.
+pub(crate) fn hold_unadmitted_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    origin_id: &str,
+    origin_seq: i64,
+) -> Result<(), SyncError> {
+    tx.execute(
+        "UPDATE hosted_documents SET state='held',held_reason=?4,held_path=NULL,held_by=NULL, \
+           held_conflict_id=NULL,backfill_cursor=MAX(backfill_cursor, \
+             (SELECT main_cursor FROM hosted_replicas WHERE workspace_id=?1)) \
+         WHERE workspace_id=?1 AND state='ready' \
+           AND scope_generation=(SELECT scope_generation FROM hosted_replicas WHERE workspace_id=?1) \
+           AND object_id=(SELECT d.object_id FROM replication_log l JOIN ydoc_docs d \
+             ON d.workspace_id=l.workspace_id \
+             AND d.version_id=json_extract(l.payload_json,'$.versionId') \
+             AND d.object_id=json_extract(l.payload_json,'$.objectId') \
+             AND d.lineage_claim_id=json_extract(l.payload_json,'$.lineageClaimId') \
+             WHERE l.workspace_id=?1 AND l.origin_id=?2 AND l.origin_seq=?3 \
+               AND l.op_kind='ydoc.update')",
+        params![workspace_id, origin_id, origin_seq, LIVE_EDIT_UNADMITTED],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(())
+}
+
+/// What holds `object_id` as its row records it now, or `None` when its row
+/// is not held.
+pub(crate) fn recorded_hold(
+    conn: &Connection,
+    workspace_id: &str,
+    object_id: &str,
+) -> Result<Option<HostedHold>, SyncError> {
+    let row = conn
+        .query_row(
+            "SELECT path,state,held_reason,held_path,held_by,held_conflict_id \
+             FROM hosted_documents WHERE workspace_id=?1 AND object_id=?2 AND state='held'",
+            params![workspace_id, object_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    let Some((path, state, reason, held_path, held_by, conflict_id)) = row else {
+        return Ok(None);
+    };
+    Ok(
+        match decode_status(
+            &path,
+            &state,
+            reason.as_deref(),
+            held_path,
+            held_by,
+            conflict_id,
+        )? {
+            HostedDocumentStatus::Held(hold) => Some(hold),
+            _ => None,
+        },
+    )
+}
+
 /// Whether this replica refused an ordinary `ydoc.update` of `object_id`'s
 /// current lineage because its live session never admitted it. The refusal
 /// keeps the row journaled, so no later read applies it.

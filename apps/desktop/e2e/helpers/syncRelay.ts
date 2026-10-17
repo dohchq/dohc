@@ -1,5 +1,5 @@
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -45,7 +45,8 @@ export async function spawnSyncRelay(input: {
 }): Promise<SyncRelayHandle> {
   const started = performance.now();
   const deployment = input.editLinks ? join(dirname(dirname(input.dbPath)), "relay-deployment") : null;
-  if (deployment) {
+  // A restart keeps the deployment and live host stores the first start made.
+  if (deployment && !existsSync(join(deployment, "deployment.json"))) {
     execFileSync(process.execPath, ["--import", "tsx/esm", "src/relayDeploymentCommand.ts", "initialize",
       "--config", join(deployment, "deployment.json"), "--database", input.dbPath, "--continuity-directory", join(deployment, "continuity")],
     { cwd: relayRoot, stdio: "pipe", windowsHide: true });

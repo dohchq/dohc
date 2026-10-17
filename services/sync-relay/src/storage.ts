@@ -384,6 +384,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   listServiceHostEnrollments(workspaceId?: string) {
     return serviceHostEnrollmentStorage.listServiceHostEnrollments(this, workspaceId);
   }
+  listUndrainedServiceHostEnrollments(after?: serviceHostEnrollmentStorage.ServiceHostEnrollmentCursor) {
+    return serviceHostEnrollmentStorage.listUndrainedServiceHostEnrollments(this, after);
+  }
   hasKeptServiceHostEnrollment(workspaceId: string, path: string) {
     return serviceHostEnrollmentStorage.hasKeptServiceHostEnrollment(this, workspaceId, path);
   }
@@ -402,6 +405,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
   listServiceHostDocumentRows(input: Parameters<typeof serviceHostFeedStorage.listServiceHostDocumentRows>[1]) {
     return serviceHostFeedStorage.listServiceHostDocumentRows(this, input);
+  }
+  latestServiceHostDocumentUpdate(input: Parameters<typeof serviceHostFeedStorage.latestServiceHostDocumentUpdate>[1]) {
+    return serviceHostFeedStorage.latestServiceHostDocumentUpdate(this, input);
   }
   putServiceHostBlob(input: Parameters<typeof serviceHostUploadStorage.putServiceHostBlob>[1]) {
     return serviceHostUploadStorage.putServiceHostBlob(this, input);

@@ -82,3 +82,11 @@ export function listServiceHostDocumentRows(storage: StorageContext, input: {
     WHERE workspace_id=? AND ${OBJECT}=? AND op_kind IN (${KINDS}) AND relay_seq>? ORDER BY relay_seq LIMIT ?`)
     .all(input.workspaceId, input.objectId, input.afterRelaySeq, input.limit).map(rowToLogRow);
 }
+
+/** The relay sequence of the document's latest Y.Doc update, or 0 while it has none. */
+export function latestServiceHostDocumentUpdate(storage: StorageContext, input: {workspaceId: string; objectId: string}): number {
+  const row = storage.db.prepare(`SELECT relay_seq FROM sync_relay_log INDEXED BY ${INDEX}
+    WHERE workspace_id=? AND ${OBJECT}=? AND op_kind IN (${KINDS}) AND op_kind='ydoc.update' ORDER BY relay_seq DESC LIMIT 1`)
+    .get(input.workspaceId, input.objectId);
+  return row ? Number(row.relay_seq) : 0;
+}

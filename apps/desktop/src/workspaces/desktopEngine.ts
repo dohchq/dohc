@@ -41,7 +41,7 @@ export interface ServerOwnerDelivery {
   } | null>;
 }
 export type OwnerLiveDeliveryStatus = "preparing" | "active" | "retrying";
-type OwnerLiveDeliveryReason = "document-unavailable" | "workspace-changed" | "restart-required";
+type OwnerLiveDeliveryReason = "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted" | "restart-required";
 
 type EngineAuthorityState = {
   collectionAutomations: CollectionAutomationsLifecycle;
@@ -182,11 +182,23 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               const response = await session.documents(signal);
               const documents = readyOwnerDeliveryDocuments(response, workspaceId);
               check();
-              const rows = (response as {documents: {status: string; reason?: unknown}[]}).documents;
+              const {documents: rows, diverged} = response as {documents: {status: string; reason?: unknown}[]; diverged?: unknown};
               const preparing = rows.some(row => row.status === "preparing");
-              const unavailable = rows.some(row => row.status === "unavailable");
-              const reason = rows.some(row => row.status === "unavailable" && row.reason === "workspace-changed") ? "workspace-changed" :
-                rows.some(row => row.status === "unavailable" && row.reason === "document-unavailable") ? "document-unavailable" : undefined;
+              // The server reports a diverged copy even after its owner stopped every document.
+              const unavailable = diverged === true || rows.some(row => row.status === "unavailable");
+              const unavailableFor = (reason: OwnerLiveDeliveryReason) => rows.some(row => row.status === "unavailable" && row.reason === reason);
+              // A document the server refused stays stopped until its owner tries again, so no other reason hides it.
+              // One it cannot start goes before it: the owner must open it before a Resume can help.
+              // One that changed while live editing was off follows both: no Resume continues it.
+              // A diverged server copy goes first: only the server's operator can continue it.
+              const reason = diverged === true ? "session-host-diverged" :
+                unavailableFor("live-document-without-lineage") ? "live-document-without-lineage" :
+                unavailableFor("session-host-refused") ? "session-host-refused" :
+                unavailableFor("live-edit-unadmitted") ? "live-edit-unadmitted" :
+                unavailableFor("workspace-changed") ? "workspace-changed" :
+                unavailableFor("document-unavailable") ? "document-unavailable" : undefined;
+              const ownerMustAct = reason === "session-host-diverged" || reason === "live-document-without-lineage" ||
+                reason === "session-host-refused" || reason === "live-edit-unadmitted";
               const failures = failedOwnerDocuments.get(workspaceId) ?? new Set<string>();
               const frozen = frozenOwnerDocuments.get(workspaceId) ?? new Set<string>();
               for (const path of failures) if (!documents.some(document => document.binding.currentPath === path)) failures.delete(path);
@@ -220,7 +232,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               else if (result !== "retry") frozen.delete(document.binding.currentPath);
               if (result === "acknowledged" || result === "frozen") notifyRenderer({workspaceId});
               setOwnerDeliveryStatus(workspaceId, failures.size || unavailable ? "retrying" : preparing ? "preparing" : "active",
-                frozen.size ? "document-unavailable" : reason);
+                frozen.size && !ownerMustAct ? "document-unavailable" : reason);
               return {documentCount: documents.length, acknowledged: result === "acknowledged"};
               } catch (error) {
                 if (!operation.signal.aborted && !session.signal.aborted && generation === ownerDeliveryGeneration && !isQuitting()) {

@@ -1261,7 +1261,10 @@ fn a_hosted_document_that_is_not_ready_refuses_a_new_restore_fence() {
         f.owner
             .fence_restore(&mut f.store, input.clone(), f.host.clone(), 50, &NoFaults)
     };
-    assert!(matches!(fence(&mut f), Err(ApplicationError::Conflict)));
+    assert!(matches!(
+        fence(&mut f),
+        Err(ApplicationError::HostedDocumentUnready)
+    ));
     assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 0);
 
     set(
@@ -3778,7 +3781,7 @@ fn a_hosted_reconnect_or_close_keeps_a_held_documents_accepted_update_provable()
                     reconnected.clone(),
                     f.binding.clone()
                 ),
-                Err(ApplicationError::Conflict)
+                Err(ApplicationError::HostedDocumentUnready)
             ));
         } else {
             f.owner.invalidate(&mut f.store).unwrap();
@@ -3791,7 +3794,7 @@ fn a_hosted_reconnect_or_close_keeps_a_held_documents_accepted_update_provable()
                         reconnected,
                         f.binding.clone()
                     ),
-                    Err(ApplicationError::Conflict)
+                    Err(ApplicationError::HostedDocumentUnready)
                 ));
             }
         }

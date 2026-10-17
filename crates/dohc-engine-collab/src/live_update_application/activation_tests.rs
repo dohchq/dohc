@@ -339,7 +339,7 @@ fn hosted_activation_waits_for_its_document_backfill_not_the_ordinary_cursor() {
     );
     assert!(matches!(
         capture_imported(&mut f, 1_000_000),
-        Err(ApplicationError::Conflict)
+        Err(ApplicationError::HostedDocumentUnready)
     ));
     set(&mut f, "UPDATE hosted_documents SET state='ready'");
     let captured = capture_imported(&mut f, 1_000_000).unwrap();
@@ -354,8 +354,156 @@ fn hosted_activation_waits_for_its_document_backfill_not_the_ordinary_cursor() {
     set(&mut f, "UPDATE hosted_replicas SET scope_generation=2");
     assert!(matches!(
         resume_imported(&mut f, &captured.activation_id, 1_000_000),
+        Err(ApplicationError::HostedDocumentUnready)
+    ));
+}
+
+/// The relay waits for a document that is not ready and stops resuming one
+/// that diverged, so a held document's resume says it is unready even when
+/// its state no longer matches the retained activation, and a ready
+/// document whose state diverged keeps the conflict.
+#[test]
+fn a_held_documents_resume_is_unready_and_a_ready_divergence_conflicts() {
+    let mut f = imported_fixture();
+    let set = |f: &mut Fixture, sql: &str| {
+        f.store
+            .write_with(&NoFaults, |tx| tx.execute(sql, []).map_err(write_sql))
+            .unwrap();
+    };
+    set(&mut f, "DELETE FROM sync_relay_cursors");
+    set(
+        &mut f,
+        "INSERT OR IGNORE INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+         VALUES ('workspace','service-host:host','epoch','stream',1)",
+    );
+    set(
+        &mut f,
+        "INSERT INTO hosted_replicas (workspace_id,scope_token,scope_generation,main_cursor,created_at_ms) \
+         VALUES ('workspace','scope',1,9,1)",
+    );
+    set(
+        &mut f,
+        "INSERT INTO hosted_documents (workspace_id,object_id,path,state,scope_generation) \
+         VALUES ('workspace','object','object.md','ready',1)",
+    );
+    let captured = capture_imported(&mut f, 1_000_000).unwrap();
+    // The document's base no longer matches the activation's.
+    set(&mut f, "UPDATE ydoc_docs SET base_relay_seq=8");
+    set(
+        &mut f,
+        "UPDATE hosted_documents SET state='held',held_reason='hosted-backfill-work-waiting'",
+    );
+    assert!(matches!(
+        resume_imported(&mut f, &captured.activation_id, 1_000_000),
+        Err(ApplicationError::HostedDocumentUnready)
+    ));
+    set(&mut f, "UPDATE hosted_documents SET state='ready',held_reason=NULL");
+    assert!(matches!(
+        resume_imported(&mut f, &captured.activation_id, 1_000_000),
         Err(ApplicationError::Conflict)
     ));
+}
+
+/// A file written only as text has no Y.Doc to activate, so its capture says
+/// so, unlike a conflict the relay retries. A hosted document that is not
+/// ready, or Y.Doc input waiting for its base, may still bring a lineage, and
+/// a document with one keeps its answers.
+#[test]
+fn a_document_without_lineage_refuses_capture_unlike_one_whose_lineage_may_arrive() {
+    let mut f = imported_fixture();
+    let set = |f: &mut Fixture, sql: &str| {
+        f.store
+            .write_with(&NoFaults, |tx| tx.execute(sql, []).map_err(write_sql))
+            .unwrap();
+    };
+    VersionedTextStore::new(&mut f.store)
+        .write_text(
+            &WriteText {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                object_id: "plain".into(),
+                path: "plain.md".into(),
+                text: "Written as text".into(),
+                moment_id: "plain-write".into(),
+                metadata_origin: "sync".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 4,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    let plain = DocKey::new("workspace", "main", "plain").unwrap();
+    let capture_plain = |f: &mut Fixture| {
+        capture_imported_owner_activation(&mut f.store, "namespace", &plain, "plain.md", 1_000_000, &NoFaults)
+    };
+    assert!(matches!(
+        capture_plain(&mut f),
+        Err(ApplicationError::LiveDocumentWithoutLineage)
+    ));
+    set(
+        &mut f,
+        "INSERT INTO ydoc_deferred_updates(workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms) \
+         VALUES ('workspace','main','plain','remote',8,4)",
+    );
+    assert!(matches!(capture_plain(&mut f), Err(ApplicationError::Conflict)));
+    set(&mut f, "DELETE FROM ydoc_deferred_updates");
+    set(&mut f, "DELETE FROM sync_relay_cursors");
+    set(
+        &mut f,
+        "INSERT OR IGNORE INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+         VALUES ('workspace','service-host:host','epoch','stream',1)",
+    );
+    set(
+        &mut f,
+        "INSERT INTO hosted_replicas (workspace_id,scope_token,scope_generation,main_cursor,created_at_ms) \
+         VALUES ('workspace','scope',1,9,1)",
+    );
+    set(
+        &mut f,
+        "INSERT INTO hosted_documents (workspace_id,object_id,path,state,backfill_cursor,scope_generation) \
+         VALUES ('workspace','plain','plain.md','backfilling',4,1), \
+                ('workspace','object','owner.md','ready',0,1)",
+    );
+    assert!(matches!(
+        capture_plain(&mut f),
+        Err(ApplicationError::HostedDocumentUnready)
+    ));
+    set(&mut f, "UPDATE hosted_documents SET state='ready' WHERE object_id='plain'");
+    assert!(matches!(
+        capture_plain(&mut f),
+        Err(ApplicationError::LiveDocumentWithoutLineage)
+    ));
+    // The document with a lineage still activates, and its base past the
+    // committed position is still a conflict.
+    capture_imported(&mut f, 1_000_000).unwrap();
+    set(&mut f, "UPDATE ydoc_docs SET base_relay_seq=10");
+    assert!(matches!(
+        capture_imported(&mut f, 1_000_000),
+        Err(ApplicationError::Conflict)
+    ));
+}
+
+/// A store that does not hold the retained activation, as one an identity
+/// change selected, refuses its resume as a conflict, so the relay stops
+/// resuming it instead of retrying an internal error.
+#[test]
+fn a_store_without_the_retained_activation_refuses_its_resume_as_a_conflict() {
+    let mut f = imported_fixture();
+    let captured = capture_imported(&mut f, 1_000_000).unwrap();
+    let other = format!("ordinary-activation-{}", "0".repeat(64));
+    assert!(matches!(
+        resume_imported(&mut f, &other, 1_000_000),
+        Err(ApplicationError::Conflict)
+    ));
+    assert_eq!(
+        resume_imported(&mut f, &captured.activation_id, 1_000_000)
+            .unwrap()
+            .activation_id,
+        captured.activation_id
+    );
 }
 
 #[test]

@@ -74,6 +74,8 @@ type BrowserRouteOptions = LiveRouteOptions & {
   sessions: { resolve(request: Request, discriminator: string, access?: "read" | "edit"): Promise<LiveBrowserContext | null> };
   tickets: ReturnType<typeof createLiveTickets>;
   membership?: Pick<ReturnType<typeof createLiveMembershipRegistry>, "join">;
+  /** Whether the session host cannot continue the document until its owner or operator acts. */
+  sessionHostBlocked?: (document: {workspaceId: string; objectId: string}) => boolean;
 };
 type OwnerRouteOptions = LiveRouteOptions & { kind: "owner"; resolveActor: ResolveActor };
 export function createNamedLiveRoutes(options: BrowserRouteOptions) { return createLiveRoutes(options); }
@@ -110,6 +112,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
   const shutdown = new AbortController();
   const storage = options.storage, editors = liveEditors(storage);
   const captureNative = options.captureNative.bind(options), validate = options.validate;
+  const sessionHostBlocked = options.kind === "owner" ? undefined : options.sessionHostBlocked;
   const accountSnapshot = async (accountId: string): Promise<TrustedLiveAccount> => ({accountId,
     name: await accountDisplayName(options.lookupUserDisplayName,accountId) ?? "Unnamed"});
 
@@ -156,6 +159,8 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
           if (binding.kind === "refused") return binding.reason === "host-unavailable" || binding.reason === "stale-document"
             ? linkRefusal("link_live_unavailable") : refusal();
         }
+        if (sessionHostBlocked?.({workspaceId: context.workspaceId, objectId: objectId as string}))
+          return context.kind === "link" ? linkRefusal("link_live_unavailable") : refusal();
         const minted = await options.tickets.mint({ objectId }, context, signal); signal.throwIfAborted(); check();
         if (!minted) return refusal();
         const body = JSON.stringify(minted);

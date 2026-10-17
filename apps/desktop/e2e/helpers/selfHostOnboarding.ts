@@ -96,10 +96,22 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
 } = {}) {
   let authInternalUrl: string | undefined;
   let relayUrl: string | undefined;
+  // While set, a session host's hosted-feed pulls wait for it. Its pushes pass.
+  let hostedPulls: Promise<void> | undefined;
+  let heldHostedPulls = 0;
   const upstreams = new Set<ReturnType<typeof requestHttp>>();
   const upgraded = new Set<Duplex>();
   const route = (path: string) => path.startsWith("/sync/") || path === "/health" ? relayUrl : authInternalUrl;
   const handle: RequestListener = (incoming, outgoing) => {
+    const path = incoming.url ?? "/";
+    if (hostedPulls && incoming.method === "GET" && /^\/sync\/[^/]+\/hosted\/log(?:\?|$)/u.test(path)) {
+      heldHostedPulls++;
+      void hostedPulls.then(() => { if (!outgoing.destroyed) forward(incoming, outgoing); });
+      return;
+    }
+    forward(incoming, outgoing);
+  };
+  const forward: RequestListener = (incoming, outgoing) => {
     const path = incoming.url ?? "/";
     const target = route(path);
     if (!target) { outgoing.writeHead(503).end(); return; }
@@ -170,6 +182,15 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
     origin: `${tls ? "https" : "http"}://127.0.0.1:${address.port}`,
     routeAuthTo(url: string) { authInternalUrl = url; },
     routeRelayTo(url: string) { relayUrl = url; },
+    /** Holds the session host's hosted-feed pulls until the returned release runs. */
+    holdHostedPulls() {
+      let release!: () => void;
+      const held = new Promise<void>(resolve => { release = resolve; });
+      hostedPulls = held;
+      return () => { if (hostedPulls === held) hostedPulls = undefined; release(); };
+    },
+    /** How many hosted-feed pulls arrived while held. */
+    heldHostedPulls: () => heldHostedPulls,
     async close() {
       for (const request of upstreams) request.destroy();
       for (const socket of upgraded) socket.destroy();

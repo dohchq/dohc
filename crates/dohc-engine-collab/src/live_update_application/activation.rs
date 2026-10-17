@@ -58,7 +58,7 @@ fn committed_position(
         .map_err(read_sql)?;
     if let Some((state, cursor, epoch, stream)) = hosted {
         if state.as_deref() != Some("ready") {
-            return Err(ApplicationError::Conflict);
+            return Err(ApplicationError::HostedDocumentUnready);
         }
         return Ok((cursor, epoch, stream));
     }
@@ -143,7 +143,14 @@ pub fn capture_imported_owner_activation(
         return Err(invalid("invalid ordinary activation capture"));
     }
     let result = store.write_with(faults, |tx| {
-        let marker = durable::read_marker_in(tx, key)?.ok_or(ApplicationError::Conflict)?;
+        let Some(marker) = durable::read_marker_in(tx, key)? else {
+            // A hosted document that is not ready, or Y.Doc input waiting for
+            // its base, may still bring a lineage.
+            committed_position(tx, key)?;
+            let deferred: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
+                params![key.workspace_id,key.version_id,key.object_id], |row| row.get(0)).map_err(read_sql)?;
+            return Err(if deferred { ApplicationError::Conflict } else { ApplicationError::LiveDocumentWithoutLineage });
+        };
         if marker.content_kind != ContentKind::Richdoc || marker.regime != Regime::Replicated
             || marker.lineage_claim_status != durable::LineageClaimStatus::Exact
             || marker.path.as_deref() != Some(path)
@@ -243,13 +250,15 @@ pub fn resume_imported_owner_activation(
         return Err(invalid("invalid ordinary activation resume"));
     }
     store.read_with(|conn| {
+        // A store that does not hold the activation, as one an identity change
+        // selected, can never resume it.
         let sizes: (i64,i64,i64) = conn.query_row(
             "SELECT length(CAST(a.descriptor_json AS BLOB)),length(b.bytes),length(f.bytes)
              FROM ydoc_owner_activation_sources a JOIN binary_blobs b ON b.sha256=a.lineage_claim_id
              JOIN binary_blobs f ON f.sha256=a.full_state_digest WHERE a.activation_id=?1
              AND a.relay_database_namespace=?2 AND a.workspace_id=?3 AND a.version_id=?4 AND a.object_id=?5",
             params![activation_id,namespace,key.workspace_id,key.version_id,key.object_id],
-            |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(read_sql)?;
+            |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(read_sql)?.ok_or(ApplicationError::Conflict)?;
         let mut total=0usize;
         for length in [sizes.0,sizes.1,sizes.2] {
             let length=usize::try_from(length).map_err(|_|ApplicationError::Corrupt)?;
@@ -261,6 +270,9 @@ pub fn resume_imported_owner_activation(
         let json:String=conn.query_row("SELECT descriptor_json FROM ydoc_owner_activation_sources WHERE activation_id=?1",[activation_id],|r|r.get(0)).map_err(read_sql)?;
         if format!("ordinary-activation-{}",hex_sha256(json.as_bytes()))!=activation_id { return Err(ApplicationError::Corrupt); }
         let source:ImportedOwnerSource=serde_json::from_str(&json).map_err(|_|ApplicationError::Corrupt)?;
+        // A document that is not ready may still be changing, so readiness is
+        // decided before its state is compared with the retained activation.
+        let (cursor,epoch,stream)=committed_position(conn,key)?;
         let marker=durable::read_marker_in(conn,key)?.ok_or(ApplicationError::Conflict)?;
         if marker.content_kind!=ContentKind::Richdoc || marker.regime!=Regime::Replicated
             || marker.lineage_claim_status!=durable::LineageClaimStatus::Exact
@@ -275,7 +287,6 @@ pub fn resume_imported_owner_activation(
         let verified=adoption::read_adoption_source(conn,namespace,activation_id,&binding)?
             .and_then(|(_,_,_,_,source)|source).ok_or(ApplicationError::Corrupt)?;
         if verified!=source { return Err(ApplicationError::Corrupt); }
-        let (cursor,epoch,stream)=committed_position(conn,key)?;
         if cursor<source.committed_cursor || epoch!=source.replication_epoch || stream!=source.stream_identity {
             return Err(ApplicationError::Conflict);
         }

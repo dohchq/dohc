@@ -612,12 +612,17 @@ export interface SyncRelayStorage {
   enrollServiceHostDocuments(inputs: readonly import("./serviceHostEnrollment").EnrollServiceHostDocumentInput[]): readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];
   enrollServiceHostDocument(input: import("./serviceHostEnrollment").EnrollServiceHostDocumentInput): import("./serviceHostEnrollment").ServiceHostEnrollment;
   listServiceHostEnrollments(workspaceId?: string): readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];
+  listUndrainedServiceHostEnrollments(after?: import("./serviceHostEnrollment").ServiceHostEnrollmentCursor): {
+    documents: readonly import("./serviceHostEnrollment").ServiceHostEnrollment[]; nextCursor: import("./serviceHostEnrollment").ServiceHostEnrollmentCursor | null;
+  };
   hasKeptServiceHostEnrollment(workspaceId: string, path: string): boolean;
   readServiceHostEnrollment(workspaceId: string, path: string): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
   listRetiredServiceHostEnrollments(workspaceId: string, after?: string): {documents: readonly import("./serviceHostEnrollment").ServiceHostEnrollment[]; nextCursor: string | null};
   currentServiceHostWorkspace(workspaceId: string, includeUndrained?: boolean): import("./serviceHostEnrollment").ServiceHostWorkspace | null;
   readServiceHostFeedScope(workspaceId: string): import("./serviceHostFeed").ServiceHostFeedScope | null;
   listServiceHostDocumentRows(input: {workspaceId: string; objectId: string; afterRelaySeq: number; limit: number}): SyncRelayLogRow[];
+  /** The relay sequence of the document's latest Y.Doc update, or 0 while it has none. */
+  latestServiceHostDocumentUpdate(input: {workspaceId: string; objectId: string}): number;
   /** Stores blob bytes the service host uploaded, with its proof of holding them. */
   putServiceHostBlob(input: {workspaceId: string; sha256: string; content: Uint8Array; createdAtMs: number}): PutBlobResult;
   serviceHostUploaded(workspaceId: string, sha256: string): boolean;

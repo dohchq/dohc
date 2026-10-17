@@ -2281,6 +2281,17 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     }
                     settled.insert(object_id, read);
                 }
+                // A ready document that a refusal of this pass held is held
+                // too. It reads its own rows from the next pass.
+                for (object_id, document) in &replica.documents {
+                    if document.status == crate::HostedDocumentStatus::Ready
+                        && !settled.contains_key(object_id)
+                        && let Some(hold) =
+                            crate::hosted::recorded_hold(conn, workspace_id, object_id)?
+                    {
+                        held.insert(object_id.clone(), hold);
+                    }
+                }
                 Ok::<_, SyncError>((settled, held, unparks, standing, heads))
             })
             .map_err(local)?;

@@ -306,11 +306,9 @@ it("keeps a refused row's coordinate without its payload, its blobs or any proje
     {kind: "chat", channelWireId: "general", access: "read-write"}];
   for (const selector of selectors) expect(filterOpForShare(selector, "relay.refused", owner[0]!.payloadJson).allowed).toBe(false);
   // Only the relay writes one.
-  const ordinary = await f.handle(new Request(`https://relay.test/sync/${ws}/log`, {method: "POST",
-    headers: {authorization: `Bearer ${f.bearer}`, "content-type": "application/json"},
-    body: JSON.stringify({replicationEpoch: "epoch", streamIdentity: "stream", originId: "owner-device",
-      ops: [{originSeq: 100, opKind: "relay.refused", recordedAtMs: 3, payload: {}}]})}));
-  expect(ordinary.status).toBe(400);
+  const claimed = await f.request("POST", "log", JSON.stringify({replicationEpoch: "epoch", streamIdentity: "stream", originId: HOST_ORIGIN,
+    ops: [{originSeq: 100, opKind: "relay.refused", recordedAtMs: 3, payload: {}}]}));
+  expect(claimed.status).toBe(400);
   const next = f.storage.maxOriginSeq(ws, "owner-device") + 1;
   const forged = parseLogOp({originSeq: next, opKind: "moment.append", recordedAtMs: 3, payload: {}});
   forged.opKind = "relay.refused";
@@ -527,11 +525,12 @@ it("writes only from the service host's reserved origins, which no other route a
   const edit = ["ydoc.update", ydoc(binding.objectId, "docs/a.md", Y)] satisfies [string, Record<string, unknown>];
   expect((await f.push([edit], 0, "owner-device")).status).toBe(400);
   expect((await f.push([edit])).status).toBe(200);
+  // The host's credential has no ordinary route; ordinary provenance refuses these origins from everyone else.
   const ordinary = await f.handle(new Request(`https://relay.test/sync/${ws}/log`, {method: "POST",
     headers: {authorization: `Bearer ${f.bearer}`, "content-type": "application/json"},
     body: JSON.stringify({replicationEpoch: "epoch", streamIdentity: "stream", originId: `${SERVICE_HOST_ORIGIN_PREFIX}other`,
       ops: [{originSeq: 0, opKind: edit[0], recordedAtMs: 3, payload: edit[1]}]})}));
-  expect(ordinary.status).toBe(400);
+  expect(ordinary.status).toBe(404);
 });
 
 it("keeps each document's blob reach across scope changes and drops an idle workspace", async () => {
@@ -546,12 +545,99 @@ it("keeps each document's blob reach across scope changes and drops an idle work
     expect(await f.blobStatus(A.sha256)).toBe(200);
     return reads.map(({objectId, afterRelaySeq}) => [objectId, afterRelaySeq > 0]);
   };
-  expect(await scans()).toEqual([[binding.objectId, false]]);
+  // The warm-up scans a document with no reach, then the request catches up each one.
+  expect(await scans()).toEqual([[binding.objectId, false], [binding.objectId, true]]);
   // A joining document is scanned; the unchanged one resumes where it stopped.
   f.enroll("docs/b.md");
-  expect(await scans()).toEqual([[binding.objectId, true], ["object-b", false]]);
+  expect(await scans()).toEqual([["object-b", false], [binding.objectId, true], ["object-b", true]]);
   vi.setSystemTime(1_000_000 + 10 * 60_000);
-  expect(await scans()).toEqual([[binding.objectId, false], ["object-b", false]]);
+  expect(await scans()).toEqual([[binding.objectId, false], ["object-b", false], [binding.objectId, true], ["object-b", true]]);
+});
+
+// Proves: a cold reach over a long history lets other work run between its
+// pages, and concurrent requests share one warm-up that reads each page once.
+it("rebuilds a cold blob reach a page at a time in one warm-up that concurrent requests share", async () => {
+  const f = await fixture();
+  f.append(...Array.from({length: 1_100}, (): [string, Record<string, unknown>] => ["ydoc.update", ydoc(binding.objectId, "docs/a.md", Y)]));
+  const reads: number[] = [];
+  const list = f.storage.listServiceHostDocumentRows.bind(f.storage);
+  f.storage.listServiceHostDocumentRows = input => {reads.push(input.afterRelaySeq); return list(input);};
+  const order: string[] = [];
+  setImmediate(() => order.push("other work"));
+  const answered = async (status: Promise<number>) => {const value = await status; order.push("answer"); return value;};
+  expect(await Promise.all([answered(f.blobStatus(Y.sha256)), answered(f.blobStatus(A.sha256))])).toEqual([200, 200]);
+  expect(order).toEqual(["other work", "answer", "answer"]);
+  // Three pages of history, read once, then each request's catch-up from the end.
+  const end = reads.at(-1)!;
+  expect(reads.slice(0, 3)).toEqual([0, expect.any(Number), expect.any(Number)]);
+  expect(reads.slice(3)).toEqual([end, end]);
+  expect(new Set(reads.slice(0, 3)).size).toBe(3);
+});
+
+it("warms a cold reach before the first admission check of a write", async () => {
+  const f = await fixture();
+  f.append(...Array.from({length: 1_100}, (): [string, Record<string, unknown>] => ["ydoc.update", ydoc(binding.objectId, "docs/a.md", Y)]));
+  const order: string[] = [];
+  setImmediate(() => order.push("other work"));
+  const pushed = f.push([["ydoc.update", ydoc(binding.objectId, "docs/a.md", Y)]]).then(response => {order.push("answer"); return response;});
+  expect(await (await pushed).json()).toMatchObject({inserted: 1});
+  expect(order).toEqual(["other work", "answer"]);
+});
+
+// Proves: a write whose credential is revoked during its warm-up answers like
+// any revoked credential, and nothing is screened or prepared under it.
+it("answers a write whose credential is revoked during its warm-up like any revoked credential", async () => {
+  const f = await fixture();
+  let revoked = false;
+  const authorize = (input: {workspaceId: string; bearer: string; method: string; pathname: string}) =>
+    authorizeServiceHostReplication(f.storage, {key, namespace, ...input});
+  const handle = createServiceHostReplication({storage: f.storage, prefix: "dohc-service-v1.", hostedFeed: true,
+    authorize, revalidate: input => revoked ? null : authorize(input)});
+  const list = f.storage.listServiceHostDocumentRows.bind(f.storage);
+  f.storage.listServiceHostDocumentRows = input => {revoked = true; return list(input);};
+  const steps: string[] = [];
+  const held = f.storage.maxOriginSeq.bind(f.storage), prepare = f.storage.prepareLogAppend.bind(f.storage);
+  f.storage.maxOriginSeq = (...args) => {steps.push("screen"); return held(...args);};
+  f.storage.prepareLogAppend = async (...args) => {steps.push("prepare"); return prepare(...args);};
+  // The private blob would fail screening as missing.
+  const push = async () => {
+    const response = await handle(new Request(`https://relay.test/sync/${ws}/hosted/log`, {method: "POST",
+      headers: {authorization: `Bearer ${f.bearer}`, "content-type": "application/json"},
+      body: JSON.stringify({replicationEpoch: "epoch", streamIdentity: "stream", originId: HOST_ORIGIN,
+        ops: [{originSeq: 0, opKind: "ydoc.update", recordedAtMs: 3, payload: ydoc(binding.objectId, "docs/a.md", P)}]})}));
+    return [response.status, await response.json()];
+  };
+  const during = await push();
+  expect(revoked).toBe(true);
+  expect(during).toEqual(await push());
+  expect(during[0]).toBe(404);
+  expect(steps).toEqual([]);
+});
+
+// Proves: a document that joins after a write's warm-up is not scanned inside
+// the append's writer, and the host's next write warms it first.
+it("never scans a document that joins after the warm-up inside the append's writer", async () => {
+  const f = await fixture();
+  f.append(...Array.from({length: 1_100}, (): [string, Record<string, unknown>] => ["ydoc.update", ydoc("object-b", "docs/b.md", B)]));
+  const own = blob("host edit");
+  await f.upload(own);
+  let writing = false;
+  const written: Array<[string, boolean]> = [];
+  const list = f.storage.listServiceHostDocumentRows.bind(f.storage);
+  f.storage.listServiceHostDocumentRows = input => {if (writing) written.push([input.objectId, input.afterRelaySeq > 0]); return list(input);};
+  const append = f.storage.appendLogBatch.bind(f.storage);
+  f.storage.appendLogBatch = input => {writing = true; try {return append(input);} finally {writing = false;}};
+  const prepare = f.storage.prepareLogAppend.bind(f.storage);
+  // The document joins after the write's warm-up and screening.
+  f.storage.prepareLogAppend = async (...args) => {f.storage.prepareLogAppend = prepare; f.enroll("docs/b.md"); return prepare(...args);};
+  expect(await (await f.push([["ydoc.update", ydoc(binding.objectId, "docs/a.md", own)]])).json()).toMatchObject({inserted: 1});
+  // The writer only caught up the document it already had.
+  expect(written).toEqual([[binding.objectId, true]]);
+  written.length = 0;
+  // The next write warms the joined document first, so naming its blob lands and the writer only catches up.
+  expect(await (await f.push([["moment.append", write(binding.objectId, "docs/a.md", B, {momentId: "copied"})]], 1)).json())
+    .toMatchObject({inserted: 1});
+  expect(written).toEqual([[binding.objectId, true], ["object-b", true]]);
 });
 
 it("keeps upload proof through later uploads and idle time", async () => {
@@ -678,8 +764,8 @@ it("reads only the current scope with the workspace's one credential as document
   expect((await f.request("GET", `log?${identity}&scope=${left.scope.token}&since=0&object=object-b`)).status).toBe(400);
   expect(await (await f.push([["moment.append", write("object-b", "docs/b.md", B)]])).json())
     .toMatchObject({refusals: [{reason: "outside-hosted-documents"}]});
-  // Ordinary replication stays open to the same credential until the session host switches over.
-  expect((await f.handle(new Request(`https://relay.test/sync/${ws}/log?${identity}`, {headers: {authorization: `Bearer ${f.bearer}`}}))).status).toBe(200);
+  // The credential never reaches the workspace's ordinary replication.
+  expect((await f.handle(new Request(`https://relay.test/sync/${ws}/log?${identity}`, {headers: {authorization: `Bearer ${f.bearer}`}}))).status).toBe(404);
   // A new workspace identity leaves the enrollments, and so the credential, behind.
   f.storage.rotateWorkspaceIdentity({workspaceId: ws, ownerUserId: "owner-1", replicationEpoch: "epoch-2", streamIdentity: "stream-2", rotatedAtMs: 40});
   expect((await f.request("GET", "log?replicationEpoch=epoch-2&streamIdentity=stream-2")).status).toBe(404);
@@ -729,13 +815,13 @@ it("cuts a paused document's reads at once and keeps its writes until the sessio
   expect((await f.request("GET", `log?${identity}`)).status).toBe(404);
 });
 
-it("keeps only the hosted credential alive for an undrained Stop and then drops it", async () => {
+it("keeps the hosted credential alive for an undrained Stop and then drops it, never granting ordinary routes", async () => {
   const f = await fixture();
   const ordinary = () => authorizeServiceHostReplication(f.storage, {key, namespace, workspaceId: ws, bearer: f.bearer,
     method: "GET", pathname: `/sync/${ws}/log`});
   const hosted = () => authorizeServiceHostReplication(f.storage, {key, namespace, workspaceId: ws, bearer: f.bearer,
     method: "GET", pathname: `/sync/${ws}/hosted/log`});
-  expect(ordinary()).toBe("owner-1");
+  expect(ordinary()).toBeNull();
   expect(hosted()).toBe("owner-1");
   expect(f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path: "docs/a.md", ownerUserId: "owner-1",
     enabled: false, retire: true, nowMs: 20, guard() {}})).toMatchObject({retired: true, enabled: false, hostDrainedAtMs: null});
@@ -748,8 +834,15 @@ it("keeps only the hosted credential alive for an undrained Stop and then drops 
   expect(empty.scope.documents).toEqual([]);
   expect(f.objects(empty)).toEqual(["workspace"]);
   expect(await f.blobStatus(A.sha256)).toBe(404);
-  expect((await f.request("POST", "blobs/have", JSON.stringify({sha256s: [A.sha256]}))).status).toBe(404);
-  expect((await f.request("PUT", `blobs/${A.sha256}`, A.content, "application/octet-stream")).status).toBe(404);
+  // The host's last accepted work asks to upload nothing, writes no bytes, and is refused like any op outside the scope.
+  const last = blob("last accepted edit");
+  expect(await (await f.request("POST", "blobs/have", JSON.stringify({sha256s: [A.sha256, last.sha256]}))).json()).toEqual({ok: true, missing: []});
+  expect((await f.request("PUT", `blobs/${last.sha256}`, last.content, "application/octet-stream")).status).toBe(404);
+  expect(f.uploads()).toBe(0);
+  expect(await (await f.push([["ydoc.update", ydoc(binding.objectId, "docs/a.md", last)]])).json())
+    .toMatchObject({refusals: [{originSeq: 0, reason: "outside-hosted-documents"}]});
+  expect(f.storage.getBlob(ws, last.sha256)).toBeNull();
+  expect(await f.blobStatus(last.sha256)).toBe(404);
 
   expect(f.storage.releaseServiceHostEnrollment({workspaceId: ws, objectId: binding.objectId, nowMs: 21}))
     .toMatchObject({retired: true, enabled: false, hostDrainedAtMs: 21});

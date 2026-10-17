@@ -144,6 +144,8 @@ impl RuntimeError {
                     }
                     ApplicationError::Corrupt => "live-application-corrupt",
                     ApplicationError::Conflict => "live-application-conflict",
+                    ApplicationError::HostedDocumentUnready => "hosted-document-unready",
+                    ApplicationError::LiveDocumentWithoutLineage => "live-document-without-lineage",
                     ApplicationError::ConfiguredBudgetMismatch => {
                         "owner-outbox-configured-budget-mismatch"
                     }
