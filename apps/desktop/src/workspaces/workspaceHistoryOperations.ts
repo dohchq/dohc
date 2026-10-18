@@ -187,8 +187,8 @@ export async function undoWorkspaceHistoryOperation(operation: Operation & { sig
       } while (cursor && (floor || !deleted));
       const history: OperationHistory = { ...options.history, undoHistoryOperation: async input => {
         const result = await options.history.undoHistoryOperation(input);
-        if (result.momentCount) markChanged();
-        if (floor) for (const path of result.notRestored) await floor(path);
+        try { if (floor) for (const path of result.notRestored) await floor(path); }
+        catch (error) { markChanged(); throw error; }
         return result;
       } };
       if (move) return undoMoveRecovery(rootPath, move, author, history, workspaceId, () => writable(operation), markChanged, (root, from, to) => placeBack(root, from, to, "", true));
