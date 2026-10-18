@@ -108,9 +108,7 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
       clearTimeout(entry.history); entry.history=undefined;
       const due = options.storage.nextReplicaHistoryPinAt(entry.lease.workspaceId);
       if (due !== null && !entry.stopping) {
-        entry.history=setTimeout(()=>{
-          try {persist(entry,entry.newest,true);} catch (error) {report(entry,error); void retire(entry).catch(e=>report(entry,e));}
-        },Math.max(1,due-Date.now())); entry.history.unref();
+        entry.history=setTimeout(()=>{void flush(entry,true);},Math.max(1,due-Date.now())); entry.history.unref();
       }
     } catch (error) {
       if (!(error instanceof ReplicaCurrentViewRefused)) throw error;
@@ -118,12 +116,28 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
       entry.newest = undefined; entry.pendingView = false;
     }
   }
+  async function flush(entry: Entry, force = false) {
+    try {
+      const selectors = options.storage.replicaCurrentViewSelectors(entry.lease.workspaceId);
+      const pending = entry.newest;
+      // Restore can fence a pending view while the next journal page is in flight.
+      if (pending && [...pending.files, ...pending.omitted].some(file => !currentViewFileVisible(selectors, file))) {
+        await schedule(entry);
+      }
+      if (!entry.stopping) persist(entry,entry.newest,force);
+    } catch (error) {report(entry, error); void retire(entry).catch(e => report(entry, e));}
+  }
   function acceptView(entry: Entry, view: ReplicaCurrentView, spilled: boolean) {
     if (!principal.current(entry.lease)) return;
     const previous = entry.newest ?? options.storage.readReplicaCurrentView(entry.lease.workspaceId) ?? undefined;
     const next = new Map(view.files.map(f=>[historyObjectKey(f),f]));
     const omitted = new Set(view.omitted.map(historyObjectKey));
-    if (previous?.files.some(f=>!omitted.has(historyObjectKey(f)) && historyStructuralReason(f,next.get(historyObjectKey(f))))) persist(entry,previous,false,true);
+    if (entry.pendingView && previous?.files.some(f=>!omitted.has(historyObjectKey(f)) && historyStructuralReason(f,next.get(historyObjectKey(f))))) {
+      const selectors=options.storage.replicaCurrentViewSelectors(entry.lease.workspaceId);
+      const files=previous.files.filter(file=>currentViewFileVisible(selectors,file)), shas=new Set(files.map(file=>file.sha256));
+      persist(entry,{...previous,files,texts:previous.texts.filter(text=>shas.has(text.sha256)),
+        omitted:previous.omitted.filter(file=>currentViewFileVisible(selectors,file))},false,true);
+    }
     entry.historyObservations ??= new Map();
     const prior = new Map(previous?.files.map(f=>[historyObjectKey(f),f]) ?? []), now=Date.now();
     for (const key of new Set([...prior.keys(),...next.keys()])) {
@@ -154,19 +168,8 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
       persist(entry);
       return;
     }
-    const flush = async () => {
-      try {
-        const selectors = options.storage.replicaCurrentViewSelectors(entry.lease.workspaceId);
-        const pending = entry.newest;
-        // Restore can fence a pending view while the next journal page is in flight.
-        if (pending && [...pending.files, ...pending.omitted].some(file => !currentViewFileVisible(selectors, file))) {
-          await schedule(entry);
-        }
-        if (!entry.stopping) persist(entry);
-      } catch (error) {report(entry, error); void retire(entry).catch(e => report(entry, e));}
-    };
-    clearTimeout(entry.quiet); entry.quiet = setTimeout(flush, 2000); entry.quiet.unref();
-    entry.ceiling ??= setTimeout(flush, 30_000); entry.ceiling.unref();
+    clearTimeout(entry.quiet); entry.quiet = setTimeout(()=>{void flush(entry);}, 2000); entry.quiet.unref();
+    entry.ceiling ??= setTimeout(()=>{void flush(entry);}, 30_000); entry.ceiling.unref();
   }
 
   async function retire(entry: Entry): Promise<void> {

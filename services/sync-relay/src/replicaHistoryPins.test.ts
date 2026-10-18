@@ -499,6 +499,44 @@ it("never retains transient edits as History or orphaned text", async () => {
   expect(f.db.prepare("SELECT DISTINCT sha256 FROM sync_relay_replica_cut_texts").all()).toEqual([{sha256:sha256("transient-20")}]);
 });
 
+it.each([false,true])("saves only still-shared pending predecessors when restore removes access (survivor=%s)", async survivor => {
+  const f=await fixture(false), errors:unknown[]=[];
+  const view=(text:string,renamed=false)=>{
+    const v=f.view(text);
+    if(survivor)v.files.push({...v.files[0]!,objectId:"other",path:`docs/public/${renamed?"renamed":"b"}.md`});
+    return v;
+  };
+  let latest=view("baseline");
+  const supervisor=createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("history-revoked-predecessor"),onError:(_,e)=>errors.push(e),
+    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...latest,moved:false,nextCursor:null,refusedFiles:[]})})});
+  try {
+    await supervisor.activate("w");latest=view("pending");await supervisor.activate("w");
+    f.db.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({paths:survivor?["docs/public"]:[],versionId:null}));
+    latest=view("pending",true);latest.files=latest.files.filter(file=>file.objectId==="other");latest.texts=survivor?latest.texts:[];
+    await supervisor.activate("w");
+    expect(errors).toEqual([]);
+    expect(f.storage.readReplicaCurrentView("w")!.files.map(file=>file.path)).toEqual(survivor?["docs/public/renamed.md"]:[]);
+    if(survivor)expect(f.pins().find(pin=>pin.object_id==="other" && pin.reason==="rename")).toMatchObject({sha256:sha256("pending")});
+    else expect(f.pins().some(pin=>pin.sha256===sha256("pending"))).toBe(false);
+  } finally {await supervisor.close();}
+});
+
+it("refreshes a hidden head before the History timer samples it",async()=>{
+  const f=await fixture(false),errors:unknown[]=[];
+  let latest=f.view("baseline"), pulls=0;
+  const supervisor=createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("history-hidden-timer"),onError:(_,e)=>errors.push(e),
+    startChild:async()=>({pull:async()=>{pulls++;},close:async()=>{},currentView:async()=>({...latest,moved:false,nextCursor:null,refusedFiles:[]})})});
+  try {
+    await supervisor.activate("w");latest=f.view("edited");await supervisor.activate("w");
+    await vi.advanceTimersByTimeAsync(2000);
+    f.db.prepare("UPDATE sync_relay_shares SET selector_json=?").run('{"paths":[],"versionId":null}');
+    latest={...latest,files:[],texts:[]};
+    await vi.advanceTimersByTimeAsync(28000);
+    expect(errors).toEqual([]);expect(pulls).toBe(3);
+    expect(f.storage.readReplicaCurrentView("w")!.files).toEqual([]);
+  } finally {await supervisor.close();}
+});
+
 it("pins an unflushed pre-restore head even after the relay raises its generation fence", async () => {
   const f = await fixture(), lineage=sha256("restore-live");
   f.db.exec(`INSERT INTO sync_relay_live_documents
