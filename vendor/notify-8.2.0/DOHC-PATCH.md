@@ -23,3 +23,8 @@ the workspace moves to a stable release with that fix.
 The crate is excluded from workspace membership and selected by the root Cargo
 patch. `dohc-engine-files/tests/watch.rs` creates a file with a non-UTF-8 name
 on a FAT32 disk image and checks that the watcher keeps reporting changes.
+
+A crate taken from a path is outside `cargo deny` and `cargo audit` advisory
+checks. Before updating or keeping this copy, check the RustSec advisory
+database for notify by hand. `dohc-engine-files` pins `=8.2.0`, so a version
+bump fails to resolve instead of quietly bringing back the upstream crate.

@@ -33,7 +33,7 @@ tokio-util = "0.7"
 # Native workspace notifications. The watcher owns `RecommendedWatcher` on a
 # dedicated thread and reduces every settled burst to the actor's sticky dirty
 # signal; no notify callback ever runs the scan or actor command loop.
-notify = "8"
+notify = "=8.2.0"
 # OS file identity ((st_dev, st_ino) / (volume serial, file index)) for the
 # watcher root-liveness check: existence alone can't distinguish the ORIGINAL
 # watched directory object from a delete-then-recreate that leaves the OS watch
