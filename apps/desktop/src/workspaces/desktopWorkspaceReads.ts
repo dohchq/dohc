@@ -1,3 +1,4 @@
+import type { WorkspacePathListing } from "../ipc/bridgeContract";
 import type { createDesktopEngine } from "./desktopEngine";
 import type { createOwnedProjectionRepairer } from "./ownedProjectionRepair";
 import { createOwnedWorkspaceFileReader } from "./ownedWorkspaceFileReader";
@@ -9,7 +10,7 @@ import { shareMountRegistryIsPresent, storedShareMounts } from "./shareViewFiles
 import { shareViewIsPresent } from "./shareViewMarker";
 import type { WorkspaceAuthorityOperation } from "./workspaceAuthorityOwner";
 import { listFiles } from "./workspaceFiles";
-import type { WorkspaceFileListingScope } from "./workspaceFileListingScope";
+import { matchesFileListingScope, type WorkspaceFileListingScope } from "./workspaceFileListingScope";
 
 export interface DesktopWorkspaceReadsDependencies {
   readonly desktopEngine: Pick<ReturnType<typeof createDesktopEngine>, "startup">;
@@ -96,19 +97,21 @@ export function createDesktopWorkspaceReads(dependencies: DesktopWorkspaceReadsD
   async function lookupOwnedWorkspaceFilesFor(
     workspace: RegistryEntry & { readonly attachmentId: symbol }, paths: readonly string[],
   ) {
-    const files: Awaited<ReturnType<typeof listFiles>>["files"] = [];
     if (shareViewIsPresent(workspace.shareView)) {
       await dependencies.desktopEngine.startup;
       return dependencies.shareViewFiles.lookup({ kind: "standalone", workspaceId: workspace.workspaceId }, paths);
     }
+    const files: Awaited<ReturnType<typeof listFiles>>["files"] = [];
     const local: string[] = [];
+    const hasMountRegistry = shareMountRegistryIsPresent(workspace);
     const mounts = storedShareMounts(workspace);
     const routed = new Map<string, { paths: string[]; prefix: string }>();
     for (const path of paths) {
-      if (shareMountRegistryIsPresent(workspace)) {
+      if (hasMountRegistry) {
         let projection;
         try { projection = classifyResolvedShareProjectionPath(path, mounts); }
         catch { continue; }
+        if (projection.kind === "projection-root") continue;
         if (projection.kind === "mount") {
           const prefix = `shared-with-me/${projection.mount.label}/`;
           if (path !== prefix + projection.path) continue;
@@ -130,47 +133,61 @@ export function createDesktopWorkspaceReads(dependencies: DesktopWorkspaceReadsD
     return { files, folders: [] };
   }
 
+  function scoped(listed: WorkspacePathListing, scope?: WorkspaceFileListingScope) {
+    return {
+      files: listed.files.filter(file => matchesFileListingScope(file.path, scope)),
+      folders: (listed.folders ?? []).filter(path => matchesFileListingScope(path, scope)),
+    };
+  }
+
+  async function listCanonicalFiles(target: ShareViewFilesTarget, path?: string) {
+    const under = path && path !== "." ? path : undefined;
+    const listed = await dependencies.shareViewFiles.list(target, {
+      includeContentIdentity: true,
+      ...(under === undefined ? {} : { under }),
+    });
+    // Engine subtree listings omit a file whose path equals the scope.
+    if (under !== undefined && listed.files.length === 0) {
+      const exact = await dependencies.shareViewFiles.lookup(target, [under]);
+      listed.files.push(...exact.files);
+    }
+    return listed;
+  }
+
   async function listOwnedWorkspaceFilesFor(
     workspace: RegistryEntry & { readonly attachmentId: symbol },
     scope?: WorkspaceFileListingScope,
-    bounded = false,
   ) {
     if (shareViewIsPresent(workspace.shareView)) {
       // The shell lists at mount, which can precede the daemon handshake now
       // that the window loads during it; the share store needs sessions. A
       // plain workspace's disk listing below stays ungated on purpose.
       await dependencies.desktopEngine.startup;
-      return dependencies.shareViewFiles.list(
-        {
-          kind: "standalone",
-          workspaceId: workspace.workspaceId,
-        },
-        { includeContentIdentity: true, ...(bounded && scope?.path && scope.path !== "." ? { under: scope.path } : {}) },
-      );
+      return scoped(await listCanonicalFiles({ kind: "standalone", workspaceId: workspace.workspaceId }, scope?.path), scope);
     }
     const mounts = storedShareMounts(workspace);
     const disk = await (dependencies.listDiskFiles ?? listFiles)(workspace.rootPath, {
       includeContentIdentity: true,
-      ...(bounded || !shareMountRegistryIsPresent(workspace) ? scope : {}),
+      ...scope,
     });
     if (!shareMountRegistryIsPresent(workspace)) return disk;
     await dependencies.desktopEngine.startup;
-    return overlayCanonicalShareMountFiles({
+    const overlaid = await overlayCanonicalShareMountFiles({
       disk,
       mounts,
       listCanonical: (mount) => {
         const prefix = `shared-with-me/${mount.label}`;
-        const path = bounded ? scope?.path : undefined;
+        const path = scope?.path;
         if (path && path !== "." && path !== prefix && !path.startsWith(prefix + "/") && !prefix.startsWith(path + "/")) {
           return Promise.resolve({ files: [], folders: [] });
         }
-        return dependencies.shareViewFiles.list(
+        return listCanonicalFiles(
           {
             kind: "mount",
             workspaceId: workspace.workspaceId,
             shareId: mount.shareId,
           },
-          { includeContentIdentity: true, ...(path?.startsWith(prefix + "/") ? { under: path.slice(prefix.length + 1) } : {}) },
+          path?.startsWith(prefix + "/") ? path.slice(prefix.length + 1) : undefined,
         );
       },
       onFailure: (mount, error) => {
@@ -183,6 +200,7 @@ export function createDesktopWorkspaceReads(dependencies: DesktopWorkspaceReadsD
         );
       },
     });
+    return scoped(overlaid, scope);
   }
 
   function ownedWorkspaceReadsFor(
@@ -190,7 +208,7 @@ export function createDesktopWorkspaceReads(dependencies: DesktopWorkspaceReadsD
   ) {
     return createOwnedWorkspaceReads({
       workspace,
-      listFiles: (scope, bounded) => listOwnedWorkspaceFilesFor(workspace, scope, bounded),
+      listFiles: (scope) => listOwnedWorkspaceFilesFor(workspace, scope),
       lookupFiles: (paths) => lookupOwnedWorkspaceFilesFor(workspace, paths),
       repairProjection: (target) =>
         dependencies.ensureOwnedProjectionTargetCurrent({

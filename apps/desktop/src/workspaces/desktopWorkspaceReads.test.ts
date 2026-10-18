@@ -113,15 +113,28 @@ describe("desktop workspace reads", () => {
     expect((await test.reads.listOwnedWorkspaceFilesFor(test.attached)).files).toHaveLength(3);
   });
 
-  it.each(["standalone", "mount"] as const)("keeps the complete canonical %s listing for scoped reads", async (mode) => {
+  it.each(["standalone", "mount"] as const)("honors canonical %s listing scopes and depth", async (mode) => {
     const test = await fixture(mode);
     await test.disk("local.md", "local");
     await test.disk(test.path("recipient-only.md"), "stale disk");
     test.canonical.set("owner.md", { kind: "text", bytes: Buffer.from("owner") });
-    test.canonical.set("deep/other.md", { kind: "text", bytes: Buffer.from("other") });
+    test.canonical.set("notes/child.md", { kind: "text", bytes: Buffer.from("child") });
+    test.canonical.set("notes/deep/other.md", { kind: "text", bytes: Buffer.from("other") });
     const complete = await test.reads.listOwnedWorkspaceFilesFor(test.attached);
     const port = test.reads.ownedWorkspaceReadsFor(test.attached);
-    expect(await port.listFiles({ path: test.path("owner.md"), recursive: false })).toEqual(complete);
+    expect((await port.listFiles({ path: test.path("owner.md"), recursive: false })).files.map(file => file.path))
+      .toEqual([test.path("owner.md")]);
+    expect((await port.listFiles({ path: test.path("notes"), recursive: false })).files.map(file => file.path))
+      .toEqual([test.path("notes/child.md")]);
+    expect((await port.listFiles({ path: test.path("notes") })).files.map(file => file.path))
+      .toEqual([test.path("notes/child.md"), test.path("notes/deep/other.md")]);
+    if (mode === "mount") {
+      test.store.listTextFileMetadata.mockClear();
+      const local = await port.listFiles({ path: "local.md" });
+      expect(local.files.map(file => file.path)).toEqual(["local.md"]);
+      expect(local.folders).toEqual([]);
+      expect(test.store.listTextFileMetadata).not.toHaveBeenCalled();
+    }
     expect(complete.files.map((file) => file.path)).not.toContain(test.path("recipient-only.md"));
   });
 
@@ -205,7 +218,7 @@ describe("desktop workspace reads", () => {
     const listed = await test.reads.listOwnedWorkspaceFilesFor(attached);
     expect(listed.files.map((file) => file.path)).toEqual(["local.md"]);
     expect(await test.reads.ownedWorkspaceReadsFor(attached).listFiles({ path: "shared-with-me", recursive: false }))
-      .toEqual(listed);
+      .toEqual({ files: [], folders: ["shared-with-me"] });
     await expect(test.reads.readOwnedWorkspaceTextFor(attached, "shared-with-me/alice/stale.md")).rejects.toThrow();
     expect(test.store.listTextFileMetadata).not.toHaveBeenCalled();
     expect(test.lateReads).toContain("engine");
@@ -280,13 +293,13 @@ it.each(["standalone", "mount"] as const)("gets a %s app through bounded owner p
   await test.disk(test.path("unowned/package.json"), JSON.stringify({ scripts: { dev: "vite" } }));
   test.canonical.set("app/index.html", { kind: "text", bytes: Buffer.from("<h1>app</h1>") });
   const { createOwnedSiteCatalog } = await import("./ownedSiteCatalog");
-  const { getSitePackage } = await import("./sitePackage");
+  const { selectListedSitePackage } = await import("../testing/sitePackageTestOracle");
   const catalog = createOwnedSiteCatalog({ reads: test.reads.ownedWorkspaceReadsFor });
   const old = await catalog.list(test.attached);
   test.store.listTextFileMetadata.mockClear();
   repair.mockClear();
   expect(await catalog.get(test.attached, test.path("app/index.html"), undefined))
-    .toEqual(await getSitePackage(test.rootPath, test.path("app/index.html"), old));
+    .toEqual(await selectListedSitePackage(test.path("app/index.html"), old));
   expect(repair).toHaveBeenCalledOnce();
   expect(test.store.listTextFileMetadata).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ under: "app" }));
   test.store.listTextFileMetadata.mockClear();
@@ -306,4 +319,32 @@ it("bounds shared lookup batches by UTF-8 bytes and pins the main version", asyn
     expect(Buffer.byteLength(JSON.stringify({ versionId: "main", targets: request.targets }))).toBeLessThanOrEqual(48 * 1024);
   }
   expect(test.store.listTextFileMetadata).not.toHaveBeenCalled();
+});
+
+it("rejects a failed canonical mount lookup after repair rather than selecting the root app", async () => {
+  const test = await fixture("mount");
+  await test.disk("index.html", "<h1>root</h1>");
+  const repair = vi.fn(async () => undefined);
+  test.repair.run = repair;
+  const error = Error("Canonical mount lookup failed");
+  test.store.resolveFiles.mockRejectedValueOnce(error);
+  const { createOwnedSiteCatalog } = await import("./ownedSiteCatalog");
+  const catalog = createOwnedSiteCatalog({ reads: test.reads.ownedWorkspaceReadsFor });
+  await expect(catalog.get(test.attached, "shared-with-me/alice/app/x", undefined)).rejects.toBe(error);
+  expect(repair).toHaveBeenCalledOnce();
+  test.store.resolveFiles.mockClear();
+  expect((await test.reads.lookupOwnedWorkspaceFilesFor(test.attached, ["index.html"])).files)
+    .toEqual([expect.objectContaining({ path: "index.html" })]);
+  expect(test.store.resolveFiles).not.toHaveBeenCalled();
+});
+
+it.each(["shared-with-me", "SHARED-WITH-ME"])("hides a bare projection-root disk file %s when the registry exists", async path => {
+  const test = await fixture();
+  const attached = { ...test.attached, shareMounts: [] };
+  await test.disk(path, "not an owned file");
+  await test.disk("local.md", "local");
+  const listed = await test.reads.listOwnedWorkspaceFilesFor(attached);
+  const found = await test.reads.lookupOwnedWorkspaceFilesFor(attached, [path, "local.md"]);
+  expect(found.files.map(file => file.path)).toEqual(["local.md"]);
+  expect(found.files.map(file => file.path)).toEqual(listed.files.map(file => file.path));
 });

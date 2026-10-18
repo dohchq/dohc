@@ -1,4 +1,4 @@
-import { discoverSites, parseDohcSiteConfig, SITE_DISCOVERY_FILE_NAMES } from "@dohc/workspace-core";
+import { BUILD_OUTPUT_DIRS, discoverSites, parseDohcSiteConfig, SITE_DISCOVERY_FILE_NAMES } from "@dohc/workspace-core";
 import type { SitePreviewMode } from "../ipc/bridgeContract";
 import {
   getDetectedSitePackage,
@@ -36,15 +36,15 @@ export function createOwnedSiteCatalog<Workspace extends { rootPath: string }>(
     async get(workspace, path, effectiveMode) {
       const lookup = await input.reads(workspace).prepareLookup();
       const roots = new Set(["."]);
-      const segments = path.split("/");
-      if (segments.every(segment => segment !== "" && segment !== "." && segment !== ".." && !segment.includes("\\"))) {
-        for (let length = 1; length <= segments.length; length++) roots.add(segments.slice(0, length).join("/"));
+      for (let i = path.indexOf("/"); i !== -1; i = path.indexOf("/", i + 1)) {
+        roots.add(path.slice(0, i));
       }
+      roots.add(path);
       const join = (root: string, name: string) => root === "." ? name : `${root}/${name}`;
       const signals = [...roots].flatMap(root => SITE_DISCOVERY_FILE_NAMES.map(name => join(root, name)));
       const found = await lookup.lookupFiles(signals);
-      const sources = await Promise.all(found.files.toSorted((a, b) => a.path.localeCompare(b.path)).map(file => sourceForFile(workspace.rootPath, file.path)));
-      const outputs = [...roots].flatMap(root => ["dist", "build", "out"].map(output => join(root, output + "/index.html")));
+      const sources = await Promise.all(found.files.map(file => sourceForFile(workspace.rootPath, file.path)));
+      const outputs = [...roots].flatMap(root => BUILD_OUTPUT_DIRS.map(output => join(root, output + "/index.html")));
       for (const source of sources) {
         if (typeof source === "string" || !source.path.endsWith("dohc.json") || !source.body) continue;
         const output = parseDohcSiteConfig(source.body, source.path).config?.build?.output;

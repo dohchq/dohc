@@ -30,14 +30,13 @@ it("reads a missing view file without creating it and never overwrites a changed
 });
 
 it.each([
-  { name: "present file", files: [{ path: `collection-views/${id(1)}/${id(2)}.json` }], cached: false, absent: false },
-  { name: "folder", files: [], cached: false, absent: true },
-  { name: "missing", files: [], cached: false, absent: true },
-  { name: "cached absence", files: [], cached: true, absent: false },
-])("checks only the saved-view path after a failed read: $name", async ({ files, cached, absent }) => {
+  { name: "present file", files: [{ path: `collection-views/${id(1)}/${id(2)}.json` }], absent: false },
+  { name: "folder", files: [], absent: true },
+  { name: "missing", files: [], absent: true },
+])("checks only the saved-view path after a failed read: $name", async ({ files, absent }) => {
   const error = Error("read failed");
   backend.readWorkspaceText.mockRejectedValueOnce(error);
-  backend.listWorkspaceFiles.mockResolvedValueOnce({ files, folders: [`collection-views/${id(1)}/${id(2)}.json`], cached });
+  backend.listWorkspaceFiles.mockResolvedValueOnce({ files, folders: [`collection-views/${id(1)}/${id(2)}.json`] });
   const pending = readTableViews("w", id(1), id(2), new AbortController().signal);
   if (absent) expect(await pending).toEqual({ document, contentHash: null });
   else await expect(pending).rejects.toBe(error);

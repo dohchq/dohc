@@ -3388,29 +3388,8 @@ export async function getDetectedSitePackage(
   return { ...mapped, shareManifest: await shareManifestForSite(rootPath, info, effectiveMode) };
 }
 
-export async function getSitePackage(
-  rootPath: string,
-  anyPath: string,
-  knownSites: readonly SitePackageInfo[],
-  // See shareManifestForSite: overrides the matched site's own
-  // shareManifest to select the artifact this specific request's caller
-  // is actually previewing, instead of listSitePackages' batch
-  // (dohc.json-pin-only) computation. Scoped to just the one matched
-  // site — listSitePackages' own batch result for every other site, and
-  // for callers that pass no mode, is unaffected.
-  effectiveMode?: SitePackageInfo["configuredPreviewMode"],
-): Promise<SitePackageInfo | null> {
-  const matched =
-    knownSites
-      .filter((site) => anyPath === site.root || isUnder(site.root, anyPath))
-      .sort((a, b) => b.root.length - a.root.length)[0] ?? null;
-  if (!matched || effectiveMode === undefined) return matched;
-  const { shareManifest: _staleShareManifest, ...packageInfo } = matched;
-  return { ...matched, shareManifest: await shareManifestForSite(rootPath, packageInfo, effectiveMode) };
-}
-
 /**
- * `getSitePackage` intentionally returns the deepest containing site for a
+ * The app catalog returns the deepest containing site for a
  * path, which is correct for ordinary lookups (a file inside a site still
  * belongs to it). Starting a preview is different: a stale tab can name a
  * root that stopped being a detected site while a detected ancestor still

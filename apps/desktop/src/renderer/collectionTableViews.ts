@@ -48,7 +48,7 @@ export async function readTableViews(workspaceId:string,datasetId:string,tableId
   catch(error) {
     signal.throwIfAborted();
     const listing=await bridge().listWorkspaceFiles({workspaceId,filePath:relativePath});signal.throwIfAborted();
-    if(listing.cached||listing.files.some(file=>file.path===relativePath))throw error;
+    if(listing.files.some(file=>file.path===relativePath))throw error;
     return {document:{formatVersion:1,datasetId,tableId,views:[]},contentHash:null};
   }
   signal.throwIfAborted();if(read.truncated)throw Error("The saved views file is too large. Keep it below 256 KB.");

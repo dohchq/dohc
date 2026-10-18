@@ -18,7 +18,7 @@ import type { WorkspaceFileListingScope } from "./workspaceFileListingScope";
 /** Compose the production read port from the workspace's owner records. */
 export function createOwnedWorkspaceReads(input: {
   workspace: ShareViewFilesWorkspaceRecord;
-  listFiles(scope?: WorkspaceFileListingScope, bounded?: boolean): Promise<WorkspacePathListing>;
+  listFiles(scope?: WorkspaceFileListingScope): Promise<WorkspacePathListing>;
   lookupFiles(paths: readonly string[]): Promise<WorkspacePathListing>;
   repairProjection(target: ShareViewFilesTarget): Promise<void>;
   onSearchSourceFailure?: (

@@ -156,7 +156,7 @@ const PACKAGE_SCRIPT_KEYS = [
   "poststart",
   "build",
 ] as const;
-const BUILD_OUTPUT_DIRS = ["dist", "build", "out"];
+export const BUILD_OUTPUT_DIRS = ["dist", "build", "out"];
 // Matches the bridge contract's SitePackageInfo.title bound (z.string().max(200))
 // — a title over this length must never reach discoverSites' output, or the
 // whole listSites response fails to parse over one site's config value.

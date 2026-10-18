@@ -166,12 +166,12 @@ it("matches the old catalog for files, folders, missing paths, nested apps, and 
   }
   const listing = { files: Object.keys(bodies).map(path => ({ path, kind: "file" as const })), folders: [] };
   const catalog = catalogWith(listing);
-  const { getSitePackage } = await import("./sitePackage");
+  const { selectListedSitePackage } = await import("../testing/sitePackageTestOracle");
   const old = await catalog.list({ rootPath: root });
   for (const path of ["portal", "portal/src/readme.txt", "portal/src", "portal/missing.txt", "portal/child/missing", "portal/public", "missing"]) {
     catalog.prepare.mockClear();
     vi.mocked(catalog.reads.listFiles).mockClear();
-    expect(await catalog.get({ rootPath: root }, path, undefined)).toEqual(await getSitePackage(root, path, old));
+    expect(await catalog.get({ rootPath: root }, path, undefined)).toEqual(await selectListedSitePackage(path, old));
     expect(catalog.prepare).not.toHaveBeenCalled();
     expect(vi.mocked(catalog.reads.listFiles).mock.calls.every(([scope]) => scope?.path !== ".")).toBe(true);
   }
@@ -183,8 +183,28 @@ it("keeps a root app's complete inventory after bounded discovery and rejects ex
   const listing = { files: ["index.html", "note.txt"].map(path => ({ path, kind: "file" as const })), folders: [] };
   const catalog = catalogWith(listing);
   const old = await catalog.list({ rootPath: root });
-  const { getSitePackage } = await import("./sitePackage");
+  const { selectListedSitePackage } = await import("../testing/sitePackageTestOracle");
   for (const path of [".", "note.txt", "missing", "unowned-site", ".dohc/private", "./note.txt"]) {
-    expect(await catalog.get({ rootPath: root }, path, undefined)).toEqual(await getSitePackage(root, path, old));
+    expect(await catalog.get({ rootPath: root }, path, undefined)).toEqual(await selectListedSitePackage(path, old));
   }
+});
+
+it.each(["app/", "app//x", "app/./x", "app/../x"])("matches listing selection for non-normalized input %s", async path => {
+  await writeFile(join(root, "index.html"), "<h1>root</h1>");
+  await mkdir(join(root, "app"));
+  await writeFile(join(root, "app/index.html"), "<h1>app</h1>");
+  const catalog = catalogWith({ files: ["index.html", "app/index.html"].map(path => ({ path, kind: "file" as const })), folders: [] });
+  const { selectListedSitePackage } = await import("../testing/sitePackageTestOracle");
+  const listed = await catalog.list({ rootPath: root });
+  const selected = await catalog.get({ rootPath: root }, path, undefined);
+  expect(selected?.root).toBe("app");
+  expect(selected).toEqual(selectListedSitePackage(path, listed));
+});
+
+it("selects a one-character nested app ahead of the workspace-root app", async () => {
+  await writeFile(join(root, "index.html"), "<h1>root</h1>");
+  await mkdir(join(root, "a"));
+  await writeFile(join(root, "a/index.html"), "<h1>nested</h1>");
+  const catalog = catalogWith({ files: ["index.html", "a/index.html"].map(path => ({ path, kind: "file" as const })), folders: [] });
+  expect((await catalog.get({ rootPath: root }, "a/x", undefined))?.root).toBe("a");
 });

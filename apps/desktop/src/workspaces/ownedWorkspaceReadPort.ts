@@ -11,7 +11,7 @@ export interface OwnedWorkspaceSearchSource {
 }
 
 export interface OwnedWorkspaceReadPortInput {
-  listFiles(scope?: WorkspaceFileListingScope, bounded?: boolean): Promise<WorkspacePathListing>;
+  listFiles(scope?: WorkspaceFileListingScope): Promise<WorkspacePathListing>;
   lookupFiles(paths: readonly string[]): Promise<WorkspacePathListing>;
   hasShareState: boolean;
   searchSources: readonly OwnedWorkspaceSearchSource[];
@@ -92,7 +92,7 @@ export function createOwnedWorkspaceReadPort(
       folders: (listed.folders ?? []).filter(allowed),
     });
     return {
-      listFiles: async scope => visible(scope === undefined ? await input.listFiles() : await input.listFiles(scope, true)),
+      listFiles: async scope => visible(scope === undefined ? await input.listFiles() : await input.listFiles(scope)),
       lookupFiles: async paths => visible(await input.lookupFiles(paths.filter(allowed))),
     };
   }
