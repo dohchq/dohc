@@ -107,6 +107,7 @@ function fixture(configure?: (dependencies: Dependencies) => void) {
     },
     launch: {
       finished: vi.fn(() => { log.push("launch-finished"); }),
+      settled: vi.fn(() => { log.push("launch-settled"); }),
     },
     beforeQuit: vi.fn(),
     shutdown: {
@@ -366,6 +367,28 @@ describe("desktop bootstrap", () => {
     expect(f.dependencies.launch.finished).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
     expect(f.dependencies.launch.finished).toHaveBeenCalledOnce();
+    expect(f.dependencies.launch.settled).toHaveBeenCalledOnce();
+  });
+
+  // Settling starts the engine's startup check, which must not run on the
+  // way out: the timer can still fire during quit or after Windows ends the
+  // session, neither of which stops the process at once.
+  it.each(["quit", "session end"] as const)("does not settle the launch after a %s", async (ending) => {
+    vi.useFakeTimers();
+    const f = fixture();
+    await boot(f);
+    f.loaded.resolve(true);
+    await vi.advanceTimersByTimeAsync(5_000);
+    if (ending === "quit") {
+      f.app.emit("will-quit", event());
+    } else {
+      const window = new EventEmitter();
+      f.app.emit("browser-window-created", {}, window);
+      window.emit("session-end", {});
+    }
+    await vi.advanceTimersByTimeAsync(LAUNCH_SETTLED_MS);
+    expect(f.dependencies.launch.finished).toHaveBeenCalled();
+    expect(f.dependencies.launch.settled).not.toHaveBeenCalled();
   });
 
   it("finishes the launch at a clean quit before 30 s have passed", async () => {

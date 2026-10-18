@@ -114,6 +114,9 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
   // Windows session ends.
   launch: {
     finished(): void;
+    // The app ran LAUNCH_SETTLED_MS after its first window loaded, with no
+    // quit or session end first. Never called on the way out.
+    settled(): void;
   };
   beforeQuit(event: QuitEvent): void;
   beforeQuitWithoutWindows?(event: QuitEvent): void;
@@ -135,6 +138,7 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
 }) {
   const { app, runtime, handoff, windows, workspaces, bootstrap, services, launch, shutdown } = dependencies;
   let quitting = false;
+  let sessionEnded = false;
   let bootstrapComplete = false;
   const pendingOpenPaths: string[] = [];
   let cliServer: CliServer | null = null;
@@ -314,7 +318,10 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     workspaces.refreshNativeSurfaces();
     void windowLoaded.then((loaded) => {
       if (!loaded) return;
-      setTimeout(() => launch.finished(), LAUNCH_SETTLED_MS).unref?.();
+      setTimeout(() => {
+        launch.finished();
+        if (!quitting && !sessionEnded) launch.settled();
+      }, LAUNCH_SETTLED_MS).unref?.();
       if (activatedWorkspace) windows.activate(window, activatedWorkspace);
       // Intents received during the last open await still need a drain after
       // activation. They are later intents and must win over launch paths.
@@ -364,6 +371,7 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
       app.on("browser-window-created", (_event, window) => {
         window.on("session-end", () => {
           try {flushTypingCheckpointsSync();} catch {/* Session end cannot be cancelled. */}
+          sessionEnded = true;
           launch.finished();
         });
       });

@@ -628,8 +628,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       return engineDaemonStartup;
     },
     launchSettled() {
-      // A quit also settles the launch, and must not start the smoke.
-      startupSmoke.resolve(isQuitting() ? "skip" : "run");
+      startupSmoke.resolve("run");
     },
   };
 }

@@ -995,11 +995,17 @@ export class EngineDaemonLifecycle {
   ): Promise<void> {
     try {
       if (this.options.startupSmoke) {
-        const stopped = new Promise<"skip">((resolve) => {
-          if (this.stopController.signal.aborted) resolve("skip");
-          this.stopController.signal.addEventListener("abort", () => resolve("skip"), { once: true });
-        });
-        const decision = await Promise.race([this.options.startupSmoke.catch((): "run" => "run"), stopped]);
+        const stop = this.stopController.signal;
+        let onStop!: () => void;
+        const stopped = new Promise<"skip">((resolve) => { onStop = () => resolve("skip"); });
+        stop.addEventListener("abort", onStop, { once: true });
+        if (stop.aborted) onStop();
+        let decision: "run" | "skip";
+        try {
+          decision = await Promise.race([this.options.startupSmoke.catch((): "run" => "run"), stopped]);
+        } finally {
+          stop.removeEventListener("abort", onStop);
+        }
         if (decision === "skip" || !this.probedGenerationIsLive(generation, client)) return;
       }
       await this.runSmoke(client);

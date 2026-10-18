@@ -154,13 +154,12 @@ describe("desktop engine construction", () => {
     } finally { await f.close(); }
   });
 
-  it.each(["opens a workspace", "quits", "settles idle"] as const)("runs the startup smoke only when the launch %s", async (launch) => {
+  it.each(["opens a workspace", "settles idle"] as const)("runs the startup smoke only when the launch %s", async (launch) => {
     const f = fixture();
     const workspace = { workspaceId: "smoke-gate-workspace", rootPath: await createTestScratch("smoke-gate-") };
     try {
       await f.engine.start();
       if (launch === "opens a workspace") await f.engine.sessions!.run(workspace, async () => undefined);
-      if (launch === "quits") f.setQuitting(true);
       f.engine.launchSettled();
       await expect(f.options().startupSmoke).resolves.toBe(launch === "settles idle" ? "run" : "skip");
       if (launch === "settles idle") await f.client.smokeClosed.promise;
