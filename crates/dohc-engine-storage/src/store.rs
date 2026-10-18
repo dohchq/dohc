@@ -544,13 +544,7 @@ impl EngineStore {
 
     /// Read a materialization payload from its existing text or binary blob.
     pub fn get_materialization_blob(&self, sha256: &str) -> Result<Option<Vec<u8>>, StorageError> {
-        let row: Option<(i64, String)> = self
-            .conn
-            .query_row(
-                "SELECT byte_length, text FROM blobs WHERE sha256 = ?1",
-                [sha256],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
+        let row: Option<(i64, String)> = crate::text::with_length(&self.conn, sha256)
             .optional()
             .map_err(StorageError::corrupt)?;
         if let Some((byte_length, text)) = row {
@@ -564,7 +558,7 @@ impl EngineStore {
             }
             return Ok(Some(text.into_bytes()));
         }
-        self.get_binary_blob(sha256)
+        crate::text::read_materialization_bytes(&self.conn, sha256)
     }
 
     /// Whether a binary blob with this key exists.

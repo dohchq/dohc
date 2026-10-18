@@ -1,4 +1,5 @@
 use super::*;
+use dohc_engine_storage::text;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -88,10 +89,10 @@ impl VersionedTextStore<'_> {
                     .filter(|size| *size <= MAX_SOURCE_CAPTURE_METADATA_BYTES)
                     .ok_or_else(|| invalid("source capture metadata bounds exceeded"))?;
                 let (file, live): (CapturedSource, bool) = tx.query_row(
-                    "SELECT s.object_id, COALESCE(s.content_kind,'text'), CASE COALESCE(s.content_kind,'text') WHEN 'binary' THEN bb.sha256 ELSE b.sha256 END, CASE COALESCE(s.content_kind,'text') WHEN 'binary' THEN bb.byte_length ELSE LENGTH(CAST(b.text AS BLOB)) END, s.latest_moment_id, EXISTS(SELECT 1 FROM ydoc_docs d WHERE d.workspace_id=s.workspace_id AND d.version_id=s.version_id AND d.object_id=s.object_id) FROM path_aliases a JOIN snapshots s ON s.workspace_id=a.workspace_id AND s.version_id=a.version_id AND s.object_id=a.object_id AND s.path=a.path LEFT JOIN blobs b ON b.sha256=s.blob_sha256 LEFT JOIN binary_blobs bb ON bb.sha256=s.binary_sha256 WHERE a.workspace_id=?1 AND a.version_id=?2 AND a.path=?3",
+                    "SELECT s.object_id, COALESCE(s.content_kind,'text'), CASE COALESCE(s.content_kind,'text') WHEN 'binary' THEN bb.sha256 ELSE b.sha256 END, CASE COALESCE(s.content_kind,'text') WHEN 'binary' THEN bb.byte_length ELSE b.sha256 END, s.latest_moment_id, EXISTS(SELECT 1 FROM ydoc_docs d WHERE d.workspace_id=s.workspace_id AND d.version_id=s.version_id AND d.object_id=s.object_id) FROM path_aliases a JOIN snapshots s ON s.workspace_id=a.workspace_id AND s.version_id=a.version_id AND s.object_id=a.object_id AND s.path=a.path LEFT JOIN blobs b ON b.sha256=s.blob_sha256 LEFT JOIN binary_blobs bb ON bb.sha256=s.binary_sha256 WHERE a.workspace_id=?1 AND a.version_id=?2 AND a.path=?3",
                     params![workspace_id, version_id, path], |row| Ok((CapturedSource {
                         path: path.to_owned(), object_id: row.get(0)?, content_kind: row.get(1)?,
-                        sha256: row.get(2)?, byte_length: row.get::<_, i64>(3)?.try_into().map_err(|_| rusqlite::Error::IntegralValueOutOfRange(3, -1))?, latest_moment_id: row.get(4)?,
+                        sha256: row.get(2)?, byte_length: text::length_from_row::<i64, _>(&tx, row, 3)?.try_into().map_err(|_| rusqlite::Error::IntegralValueOutOfRange(3, -1))?, latest_moment_id: row.get(4)?,
                     }, row.get(5)?)),
                 ).map_err(DomainError::sql_corrupt)?;
                 if live { return Err(invalid("live-backed sources are not supported by this capture operation")); }

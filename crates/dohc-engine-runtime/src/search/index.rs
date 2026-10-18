@@ -17,6 +17,7 @@ use dohc_engine_domain::chats::{
     chat_message_search_text, chat_thread_display_title, upsert_chat_search_index_row,
 };
 use dohc_engine_files::search_text::extract_search_text;
+use dohc_engine_storage::text;
 use dohc_engine_storage::{FaultAction, FaultInjector, FaultPoint};
 use rusqlite::{Connection, params};
 use std::path::Path;
@@ -88,11 +89,7 @@ fn insert_file_index_row(
     path: &str,
     text: &str,
 ) -> Result<(), SearchError> {
-    conn.prepare_cached(
-        "INSERT INTO engine_search_files_fts \
-         (workspace_id, version_id, object_id, path, text) VALUES (?1, ?2, ?3, ?4, ?5)",
-    )?
-    .execute(params![workspace_id, version_id, object_id, path, text])?;
+    text::index_file(conn, workspace_id, version_id, object_id, path, text)?;
     Ok(())
 }
 
@@ -328,7 +325,7 @@ fn rebuild_file_index_for_version(
     // blob — those are treated as text everywhere else via COALESCE and must stay
     // indexed; only an explicit binary head is excluded.
     let mut stmt = conn.prepare(
-        "SELECT candidate.object_id, candidate.path, b.text \
+        "SELECT candidate.object_id, candidate.path, b.sha256 \
          FROM ( \
            SELECT s.object_id, s.path, s.blob_sha256 \
            FROM snapshots s \
@@ -358,7 +355,7 @@ fn rebuild_file_index_for_version(
         }
         let object_id: String = row.get(0)?;
         let path: String = row.get(1)?;
-        let text: String = row.get(2)?;
+        let text: String = text::from_row(conn, row, 2)?;
         if !path_is_search_indexed(policy, &path) {
             continue;
         }

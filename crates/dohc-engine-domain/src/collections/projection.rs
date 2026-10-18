@@ -83,10 +83,7 @@ pub fn project_collections_in_tx(
         .map(|path| parent_path(path).to_owned())
         .collect();
     let read_text = |hash: &str| -> Result<String, crate::DomainError> {
-        tx.query_row("SELECT text FROM blobs WHERE sha256=?1", [hash], |row| {
-            row.get(0)
-        })
-        .map_err(crate::DomainError::sql_corrupt)
+        text::read(tx, hash).map_err(crate::DomainError::sql_corrupt)
     };
     for collection_path in &changed_schemas {
         let schema_path = if collection_path.is_empty() {
@@ -214,3 +211,4 @@ pub fn project_collections_in_tx(
     projected_paths.dedup();
     Ok((next, projected_paths))
 }
+use dohc_engine_storage::text;

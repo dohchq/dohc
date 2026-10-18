@@ -13,6 +13,7 @@ use dohc_engine_files::{
     MAX_CANONICAL_WORKSPACE_PATH_BYTES, PathClassification, classify_engine_file_path_normalized,
     search_policy::SearchPolicySnapshot,
 };
+use dohc_engine_storage::text;
 use dohc_engine_storage::{EngineStore, FaultInjector, Preimage, StorageError, TxnOutcome};
 use rusqlite::{OptionalExtension, params};
 
@@ -516,7 +517,7 @@ fn verify_recovery(
                    AND moment.metadata_origin='sync' AND moment.metadata_summary=?8
                    AND moment.metadata_correlation_id=?9
                    AND moment.author_json IS ?12 AND moment.sync_record_only IS NULL
-                   AND blob.byte_length=?10 AND blob.text=?11
+                   AND blob.byte_length=?10
              )",
             params![
                 key.workspace_id,
@@ -535,7 +536,7 @@ fn verify_recovery(
             |row| row.get(0),
         )
         .map_err(SyncError::corrupt)?;
-    if !exact {
+    if !exact || !text::equals(conn, &markdown_sha, markdown).map_err(SyncError::corrupt)? {
         return Err(SyncError::CoordinateDiverged);
     }
     Ok(())
@@ -578,7 +579,7 @@ pub(crate) fn recorded_recovery_in_tx(
     validate_decision_binding(&decision, key, original_path, incoming, recorded_at_ms)?;
     let current: Option<String> = tx
         .query_row(
-            "SELECT blob.text FROM snapshots AS snapshot
+            "SELECT blob.sha256 FROM snapshots AS snapshot
              JOIN path_aliases AS alias
                ON alias.workspace_id=snapshot.workspace_id
               AND alias.version_id=snapshot.version_id
@@ -595,7 +596,7 @@ pub(crate) fn recorded_recovery_in_tx(
                 decision.recovered_path,
                 decision.recovery_moment_id,
             ],
-            |row| row.get(0),
+            |row| text::from_row(tx, row, 0),
         )
         .optional()
         .map_err(SyncError::corrupt)?;
@@ -682,7 +683,7 @@ pub(crate) fn recover_lineage_in_tx(
         // or deleted the sibling. Never recreate it on redelivery.
         let current: Option<String> = tx
             .query_row(
-                "SELECT blob.text FROM snapshots AS snapshot
+                "SELECT blob.sha256 FROM snapshots AS snapshot
                  JOIN blobs AS blob ON blob.sha256=snapshot.blob_sha256
                  WHERE snapshot.workspace_id=?1 AND snapshot.version_id=?2
                    AND snapshot.object_id=?3 AND snapshot.path=?4
@@ -694,7 +695,7 @@ pub(crate) fn recover_lineage_in_tx(
                     decision.recovered_path,
                     decision.recovery_moment_id,
                 ],
-                |row| row.get(0),
+                |row| text::from_row(tx, row, 0),
             )
             .optional()
             .map_err(SyncError::corrupt)?;
@@ -1256,7 +1257,7 @@ fn relocate_collided_local_recovery_in_tx(
     );
     let copy: Option<CopyRow> = tx
         .query_row(
-            "SELECT moment.version_id, moment.object_id, moment.path, blob.text,
+            "SELECT moment.version_id, moment.object_id, moment.path, blob.sha256,
                     moment.metadata_summary, moment.metadata_correlation_id,
                     moment.author_json, moment.recorded_at_ms
                FROM moments AS moment
@@ -1268,7 +1269,7 @@ fn relocate_collided_local_recovery_in_tx(
                     row.get(0)?,
                     row.get(1)?,
                     row.get(2)?,
-                    row.get(3)?,
+                    text::from_row(tx, row, 3)?,
                     row.get(4)?,
                     row.get(5)?,
                     row.get(6)?,
@@ -1444,11 +1445,11 @@ fn relocate_conflicted_recovery_in_tx(
     .map_err(map_collab_hard_error)?;
     let recovery_markdown: Option<String> = tx
         .query_row(
-            "SELECT blob.text FROM moments AS moment
+            "SELECT blob.sha256 FROM moments AS moment
              JOIN blobs AS blob ON blob.sha256=moment.after_blob_sha256
              WHERE moment.workspace_id=?1 AND moment.moment_id=?2",
             params![workspace_id, decision.recovery_moment_id],
-            |row| row.get(0),
+            |row| text::from_row(tx, row, 0),
         )
         .optional()
         .map_err(SyncError::corrupt)?;
@@ -1496,7 +1497,7 @@ fn relocate_conflicted_recovery_in_tx(
             if job_status == "pending" {
                 let markdown: String = tx
                     .query_row(
-                        "SELECT blob.text FROM snapshots AS snapshot
+                        "SELECT blob.sha256 FROM snapshots AS snapshot
                          JOIN blobs AS blob ON blob.sha256=snapshot.blob_sha256
                          WHERE snapshot.workspace_id=?1 AND snapshot.version_id=?2
                            AND snapshot.object_id=?3 AND snapshot.path=?4
@@ -1508,7 +1509,7 @@ fn relocate_conflicted_recovery_in_tx(
                             decision.recovered_path,
                             decision.recovery_moment_id,
                         ],
-                        |row| row.get(0),
+                        |row| text::from_row(tx, row, 0),
                     )
                     .map_err(SyncError::corrupt)?;
                 verify_recovery(tx, &key, &decision, &markdown)?;

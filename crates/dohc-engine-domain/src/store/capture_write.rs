@@ -15,6 +15,7 @@ use crate::records::{
     CaptureRetireResult, DeleteResult, DeleteTextFile, FileObjectRecord, MomentOp, MomentRecord,
     SnapshotRecord, TextSnapshot, WriteResult, WriteText,
 };
+use dohc_engine_storage::text;
 use dohc_engine_storage::{
     EngineStore, FaultInjector, MaterializationJobSpec, Preimage, put_binary_blob,
 };
@@ -1693,12 +1694,14 @@ fn write_normalized_text_in_tx(
     }
     #[cfg(feature = "fault-injection")]
     let blob_phase = dohc_engine_storage::capture_phase::Measure::new("blob_SQL");
-    let blob_inserted = tx
-        .execute(
-            "INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?1, ?2, ?3)",
-            params![blob, input.text.len() as i64, input.text.as_ref()],
-        )
-        .map_err(DomainError::sql_persist)?
+    let blob_inserted = text::insert(
+        tx,
+        &(blob),
+        input.text.len() as i64,
+        input.text.as_ref(),
+        true,
+    )
+    .map_err(DomainError::sql_persist)?
         != 0;
     #[cfg(feature = "fault-injection")]
     drop(blob_phase);

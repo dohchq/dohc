@@ -1,5 +1,6 @@
 use super::*;
 use crate::{ContentKind, Ydoc};
+use dohc_engine_storage::text;
 
 /// A source read and retained by the native actor after ordinary cursor commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -196,7 +197,7 @@ pub fn capture_imported_owner_activation(
         // file keeps a body the engine reads differently still activates.
         let text = local
             .settled_markdown_source(&projection, || {
-                tx.query_row("SELECT text FROM blobs WHERE sha256=?1", [&source_digest], |row| row.get(0))
+                text::read(tx, &source_digest)
                     .optional()
                     .map(Option::flatten)
                     .map_err(read_sql)

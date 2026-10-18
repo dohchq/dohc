@@ -221,17 +221,18 @@ pub fn query_search_index_keyset(
             } else {
                 ">"
             };
+        let body_columns = dohc_engine_storage::text::SEARCH_BODY_COLUMNS;
         let sql = if is_short {
             format!(
                 "SELECT rowid, workspace_id, version_id, path, object_id, \
-                        length(CAST(text AS BLOB)), text \
+                        {body_columns} \
              FROM engine_search_files_fts \
              WHERE workspace_id = ?1 AND version_id = ?2 AND rowid {comparison} ?3 \
              ORDER BY rowid LIMIT ?4"
             )
         } else {
             format!(
-                "SELECT rowid, path, object_id, length(CAST(text AS BLOB)), text \
+                "SELECT rowid, path, object_id, {body_columns} \
              FROM engine_search_files_fts \
              WHERE engine_search_files_fts MATCH ?4 \
                AND workspace_id = ?1 AND version_id = ?2 AND rowid {comparison} ?3 \
@@ -314,8 +315,11 @@ pub fn query_search_index_keyset(
                 resume_after = Some(scanned_anchor);
                 continue;
             }
-            let text_bytes = usize::try_from(row.get::<_, i64>(length_column)?)
-                .map_err(|_| SearchError::Corrupt("negative search candidate length"))?;
+            let text_bytes = usize::try_from(dohc_engine_storage::text::search_value::<i64>(
+                row,
+                length_column,
+            )?)
+            .map_err(|_| SearchError::Corrupt("negative search candidate length"))?;
             if text_bytes > row_byte_budget {
                 return Err(SearchError::Bounds(
                     "search candidate exceeded per-result byte budget",
@@ -330,7 +334,7 @@ pub fn query_search_index_keyset(
                     resume_after,
                 });
             }
-            let text: String = row.get(text_column)?;
+            let text: String = dohc_engine_storage::text::search_value(row, text_column)?;
             source_text_bytes = source_text_bytes.saturating_add(text_bytes);
             resume_after = Some(scanned_anchor);
             if is_short && !text.to_lowercase().contains(&normalized) {

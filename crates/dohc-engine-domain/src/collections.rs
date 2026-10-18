@@ -4,6 +4,7 @@
 //! hold this port to the same schema recovery, Field value, and Record id
 //! outcomes.
 
+use dohc_engine_storage::text;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::Hash;
@@ -2445,13 +2446,13 @@ fn load_collection_schema(
 ) -> Result<CollectionSchema, crate::DomainError> {
     let text: String = conn
         .query_row(
-            "SELECT b.text FROM collections c \
+            "SELECT b.sha256 FROM collections c \
              JOIN snapshots s ON s.workspace_id=c.workspace_id \
                AND s.version_id=c.version_id AND s.path=c.schema_path \
              JOIN blobs b ON b.sha256=s.blob_sha256 \
              WHERE c.workspace_id=?1 AND c.version_id=?2 AND c.collection_path=?3",
             params![workspace_id, version_id, collection_path],
-            |row| row.get(0),
+            |row| text::from_row(conn, row, 0),
         )
         .map_err(crate::DomainError::sql_corrupt)?;
     Ok(parse_collection_schema(&text).schema)
@@ -2763,7 +2764,7 @@ pub fn collection_record_id_mismatch_in_tx(
 ) -> Result<bool, crate::DomainError> {
     let mut statement = conn
         .prepare(
-            "SELECT r.record_id,b.text,r.adoption_state FROM collection_records r \
+            "SELECT r.record_id,b.sha256,r.adoption_state FROM collection_records r \
              LEFT JOIN snapshots s ON s.workspace_id=r.workspace_id \
                AND s.version_id=r.version_id AND s.path=r.file_path \
                AND s.object_id=r.object_id \
@@ -2777,7 +2778,7 @@ pub fn collection_record_id_mismatch_in_tx(
             .query_row(params![workspace_id, version_id, path], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
+                    text::from_row::<Option<String>, _>(conn, row, 1)?,
                     row.get::<_, String>(2)?,
                 ))
             })
@@ -3745,8 +3746,8 @@ fn unindexed_or_conflicted_relation_targets_still_present(
 
     let mut statement = conn
         .prepare(
-            "SELECT witness.text FROM (\
-               SELECT s.path,b.text,0 AS moment_order FROM snapshots s \
+            "SELECT witness.sha256 FROM (\
+               SELECT s.path,b.sha256,0 AS moment_order FROM snapshots s \
                JOIN blobs b ON b.sha256=s.blob_sha256 \
                WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.content_kind='text' \
                  AND lower(substr(s.path,-3))='.md' \
@@ -3754,7 +3755,7 @@ fn unindexed_or_conflicted_relation_targets_still_present(
                  AND substr(s.path,length(?3)+1,1)='/' \
                  AND instr(substr(s.path,length(?3)+2),'/')=0 \
                UNION ALL \
-               SELECT s.path,b.text,m.moment_order FROM snapshots s \
+               SELECT s.path,b.sha256,m.moment_order FROM snapshots s \
                JOIN moments m ON m.workspace_id=s.workspace_id AND m.version_id=s.version_id \
                  AND m.object_id=s.object_id \
                JOIN blobs b ON b.sha256=m.after_blob_sha256 \
@@ -3776,7 +3777,7 @@ fn unindexed_or_conflicted_relation_targets_still_present(
         let mut matched_count = 0_usize;
         let rows = statement
             .query_map(params![workspace_id, version_id, collection_path], |row| {
-                row.get::<_, String>(0)
+                text::from_row::<String, _>(conn, row, 0)
             })
             .map_err(crate::DomainError::sql_corrupt)?;
         for text in rows {
@@ -3823,7 +3824,7 @@ fn load_collection_snapshots(
                        AND instr(substr(s.path,length(c.prefix)+2),'/')=0\
                    )))\
              ) \
-             SELECT s.path,s.object_id,b.text FROM collection_snapshots s \
+             SELECT s.path,s.object_id,b.sha256 FROM collection_snapshots s \
              JOIN blobs b ON b.sha256=s.blob_sha256 \
              ORDER BY s.path",
         )
@@ -3835,7 +3836,7 @@ fn load_collection_snapshots(
                 Ok(CollectionSnapshot {
                     path: row.get(0)?,
                     object_id: row.get(1)?,
-                    text: row.get(2)?,
+                    text: text::from_row(conn, row, 2)?,
                 })
             },
         )
@@ -3883,7 +3884,7 @@ pub fn index_historical_record_owner_moment_in_tx(
     let moment = tx
         .query_row(
             concat!(
-                "SELECT m.version_id,m.object_id,m.path,b.text FROM moments m \
+                "SELECT m.version_id,m.object_id,m.path,b.sha256 FROM moments m \
              JOIN blobs b ON b.sha256=m.after_blob_sha256 \
              WHERE m.workspace_id=?1 AND m.moment_order=?2 \
                AND m.after_content_kind='text' \
@@ -3897,7 +3898,7 @@ pub fn index_historical_record_owner_moment_in_tx(
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
+                    text::from_row::<String, _>(tx, row, 3)?,
                 ))
             },
         )
@@ -3961,7 +3962,7 @@ fn ensure_historical_record_owners_backfilled(
 
     let mut statement = tx
         .prepare(concat!(
-            "SELECT m.moment_order,m.object_id,m.path,b.text FROM moments m \
+            "SELECT m.moment_order,m.object_id,m.path,b.sha256 FROM moments m \
              JOIN blobs b ON b.sha256=m.after_blob_sha256 \
              WHERE m.workspace_id=?1 AND m.version_id=?2 \
                AND m.after_content_kind='text' AND lower(substr(m.path,-3))='.md' \
@@ -3977,7 +3978,7 @@ fn ensure_historical_record_owners_backfilled(
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
+                text::from_row::<String, _>(tx, row, 3)?,
             ))
         })
         .map_err(crate::DomainError::sql_corrupt)?
@@ -5984,13 +5985,7 @@ fn collection_button_fields(
     if let Some(buttons) = cache().get(&schema_sha256) {
         return Ok(Arc::clone(buttons));
     }
-    let text: String = conn
-        .query_row(
-            "SELECT text FROM blobs WHERE sha256=?1",
-            params![schema_sha256],
-            |row| row.get(0),
-        )
-        .map_err(crate::DomainError::sql_corrupt)?;
+    let text: String = text::read(conn, &schema_sha256).map_err(crate::DomainError::sql_corrupt)?;
     let buttons = Arc::new(
         parse_collection_schema(&text)
             .schema
