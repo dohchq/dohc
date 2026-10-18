@@ -31,6 +31,37 @@ pub type RestoreApplyObserver =
     Arc<dyn Fn(&dohc_engine_domain::CollectionRecordApplyFacts) + Send + Sync>;
 pub type RestoreSettlementObserver = Arc<dyn Fn(&LiveSettlementResult) + Send + Sync>;
 
+/// A reply that carries the actor's share of its request's reservation. Fields
+/// drop in declaration order, so a reply that nobody takes frees its result
+/// before the capacity that covered it.
+pub(super) struct Reserved<T> {
+    result: Result<T, RuntimeError>,
+    reservation: Option<Arc<dyn Send + Sync>>,
+}
+type ReservedReply<T> = oneshot::Sender<Reserved<T>>;
+
+fn reply_reserved<T>(
+    reply: ReservedReply<T>,
+    reservation: impl Into<Option<Arc<dyn Send + Sync>>>,
+    result: Result<T, RuntimeError>,
+) {
+    let _ = reply.send(Reserved {
+        result,
+        reservation: reservation.into(),
+    });
+}
+
+/// Release the actor's share before the caller sees the result, so a caller
+/// that drops the result finds that capacity free again.
+async fn receive_reserved<T>(receive: oneshot::Receiver<Reserved<T>>) -> Result<T, RuntimeError> {
+    let Reserved {
+        result,
+        reservation,
+    } = receive.await.map_err(|_| RuntimeError::ActorUnavailable)?;
+    drop(reservation);
+    result
+}
+
 /// The caller authenticates the connection, workspace, and relay namespace.
 /// Dropping this owner retires every captured document handle immediately.
 pub struct ActorLiveApplicationOwner {
@@ -128,9 +159,7 @@ impl ActorLiveApplicationOwner {
             })))
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)?;
-        let receipt = receive
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)??;
+        let receipt = receive_reserved(receive).await?;
         current(&self.actor, &self.token)?;
         Ok(receipt)
     }
@@ -200,9 +229,7 @@ impl ActorLiveApplicationOwner {
             })))
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)?;
-        let result = receive
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)??;
+        let result = receive_reserved(receive).await?;
         current(&self.actor, &self.token)?;
         Ok(result)
     }
@@ -265,9 +292,7 @@ impl ActorLiveApplicationOwner {
             })))
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)?;
-        let receipt = receive
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)??;
+        let receipt = receive_reserved(receive).await?;
         current(&self.actor, &self.token)?;
         Ok(receipt)
     }
@@ -302,9 +327,7 @@ impl ActorLiveApplicationOwner {
             )))
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)?;
-        let proposal = receive
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)??;
+        let proposal = receive_reserved(receive).await?;
         current(&self.actor, &self.token)?;
         Ok(proposal)
     }
@@ -492,9 +515,7 @@ impl ActorLiveApplicationHandle {
             })))
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)?;
-        let result = receive
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)??;
+        let result = receive_reserved(receive).await?;
         current(&self.actor, &self.token)?;
         Ok(result)
     }
@@ -525,9 +546,7 @@ impl ActorLiveApplicationHandle {
             )))
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)?;
-        let result = receive
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)??;
+        let result = receive_reserved(receive).await?;
         current(&self.actor, &self.token)?;
         Ok(result)
     }
@@ -582,9 +601,7 @@ impl ActorLiveApplicationHandle {
             })))
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)?;
-        let result = receive
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)??;
+        let result = receive_reserved(receive).await?;
         current(&self.actor, &self.token)?;
         Ok(result)
     }
@@ -618,9 +635,7 @@ impl ActorLiveApplicationHandle {
             })))
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)?;
-        let result = receive
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)??;
+        let result = receive_reserved(receive).await?;
         current(&self.actor, &self.token)?;
         Ok(result)
     }
@@ -658,9 +673,7 @@ impl ActorLiveApplicationHandle {
             })))
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)?;
-        let result = receive
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)??;
+        let result = receive_reserved(receive).await?;
         current(&self.actor, &self.token)?;
         Ok(result)
     }
@@ -709,9 +722,7 @@ impl ActorLiveApplicationHandle {
             })))
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)?;
-        let result = receive
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)??;
+        let result = receive_reserved(receive).await?;
         current(&self.actor, &self.token)?;
         Ok(result)
     }
@@ -762,7 +773,7 @@ pub(super) enum Request {
         policy: AppliedSyncPolicy,
         cancel: tokio_util::sync::CancellationToken,
         reservation: Arc<dyn Send + Sync>,
-        reply: Reply<AppliedSyncCut>,
+        reply: ReservedReply<AppliedSyncCut>,
     },
     ReadNextApplied {
         workspace_id: String,
@@ -772,7 +783,7 @@ pub(super) enum Request {
         policy: AppliedSyncPolicy,
         cancel: tokio_util::sync::CancellationToken,
         reservation: Arc<dyn Send + Sync>,
-        reply: Reply<Option<NextAppliedUpdate>>,
+        reply: ReservedReply<Option<NextAppliedUpdate>>,
     },
     ReadAck {
         workspace_id: String,
@@ -793,7 +804,7 @@ pub(super) enum Request {
         faults: Arc<dyn FaultInjector>,
         cancel: tokio_util::sync::CancellationToken,
         reservation: Arc<dyn Send + Sync>,
-        reply: Reply<NativeRestoreResumeReceipt>,
+        reply: ReservedReply<NativeRestoreResumeReceipt>,
     },
     SettleRestore {
         workspace_id: String,
@@ -808,7 +819,7 @@ pub(super) enum Request {
         cancel: tokio_util::sync::CancellationToken,
         reservation: Arc<dyn Send + Sync>,
         observer: Option<RestoreSettlementObserver>,
-        reply: Reply<LiveSettlementResult>,
+        reply: ReservedReply<LiveSettlementResult>,
     },
     ApplyRestore {
         workspace_id: String,
@@ -821,7 +832,7 @@ pub(super) enum Request {
         faults: Arc<dyn FaultInjector>,
         reservation: Arc<dyn Send + Sync>,
         observer: Option<RestoreApplyObserver>,
-        reply: Reply<NativeRestoreApplicationReceipt>,
+        reply: ReservedReply<NativeRestoreApplicationReceipt>,
     },
     PrepareRestore {
         workspace_id: String,
@@ -832,7 +843,7 @@ pub(super) enum Request {
         max_events: usize,
         faults: Arc<dyn FaultInjector>,
         reservation: Arc<dyn Send + Sync>,
-        reply: Reply<NativeRestoreProposal>,
+        reply: ReservedReply<NativeRestoreProposal>,
     },
     FenceRestore {
         workspace_id: String,
@@ -853,7 +864,7 @@ pub(super) enum Request {
         max_events: usize,
         faults: Arc<dyn FaultInjector>,
         reservation: Arc<dyn Send + Sync>,
-        reply: Reply<OwnerAdoptionAck>,
+        reply: ReservedReply<OwnerAdoptionAck>,
     },
     Settle {
         workspace_id: String,
@@ -866,7 +877,7 @@ pub(super) enum Request {
         faults: Arc<dyn FaultInjector>,
         cancel: tokio_util::sync::CancellationToken,
         reconstruction: AdmittedNativeHistoryReconstruction,
-        reply: Reply<LiveSettlementResult>,
+        reply: ReservedReply<LiveSettlementResult>,
     },
     Bootstrap {
         workspace_id: String,
@@ -877,7 +888,7 @@ pub(super) enum Request {
         root: std::path::PathBuf,
         faults: Arc<dyn FaultInjector>,
         reservation: Option<Arc<dyn Send + Sync>>,
-        reply: Reply<BootstrapResult>,
+        reply: ReservedReply<BootstrapResult>,
     },
     Open {
         workspace_id: String,
@@ -900,7 +911,7 @@ pub(super) enum Request {
         faults: Arc<dyn FaultInjector>,
         reservation: Option<Arc<dyn Send + Sync>>,
         working_reserve_bytes: usize,
-        reply: Reply<ApplicationResult>,
+        reply: ReservedReply<ApplicationResult>,
     },
     Unload {
         workspace_id: String,
@@ -933,7 +944,7 @@ impl Request {
                 client_vector,
                 policy,
                 cancel,
-                reservation: _reservation,
+                reservation,
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|_| {
@@ -950,7 +961,7 @@ impl Request {
                     )
                     .map_err(Into::into)
                 });
-                let _ = reply.send(result);
+                reply_reserved(reply, reservation, result);
             }
             Self::ReadNextApplied {
                 workspace_id,
@@ -959,7 +970,7 @@ impl Request {
                 after,
                 policy,
                 cancel,
-                reservation: _reservation,
+                reservation,
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|_| {
@@ -976,7 +987,7 @@ impl Request {
                     )
                     .map_err(Into::into)
                 });
-                let _ = reply.send(result);
+                reply_reserved(reply, reservation, result);
             }
             Self::ReadAck {
                 workspace_id,
@@ -1001,7 +1012,7 @@ impl Request {
                 now_ms,
                 faults,
                 cancel,
-                reservation: _reservation,
+                reservation,
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|owner| {
@@ -1026,7 +1037,7 @@ impl Request {
                             Ok(())
                         }).map_err(Into::into)
                 });
-                let _ = reply.send(result);
+                reply_reserved(reply, reservation, result);
             }
             Self::SettleRestore {
                 workspace_id,
@@ -1039,7 +1050,7 @@ impl Request {
                 now_ms,
                 faults,
                 cancel,
-                reservation: _reservation,
+                reservation,
                 observer,
                 reply,
             } => {
@@ -1057,7 +1068,7 @@ impl Request {
                 if let (Some(observer), Ok(result)) = (&observer, &result) {
                     observer(result);
                 }
-                let _ = reply.send(result);
+                reply_reserved(reply, reservation, result);
             }
             Self::ApplyRestore {
                 workspace_id,
@@ -1068,7 +1079,7 @@ impl Request {
                 max_events,
                 now_ms,
                 faults,
-                reservation: _reservation,
+                reservation,
                 observer,
                 reply,
             } => {
@@ -1103,7 +1114,7 @@ impl Request {
                         })
                         .map_err(Into::into)
                 });
-                let _ = reply.send(result);
+                reply_reserved(reply, reservation, result);
             }
             Self::PrepareRestore {
                 workspace_id,
@@ -1113,7 +1124,7 @@ impl Request {
                 max_bytes,
                 max_events,
                 faults,
-                reservation: _reservation,
+                reservation,
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|owner| {
@@ -1128,7 +1139,7 @@ impl Request {
                         )
                         .map_err(Into::into)
                 });
-                let _ = reply.send(result);
+                reply_reserved(reply, reservation, result);
             }
             Self::FenceRestore {
                 workspace_id,
@@ -1164,7 +1175,7 @@ impl Request {
                 max_bytes,
                 max_events,
                 faults,
-                reservation: _reservation,
+                reservation,
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|_| {
@@ -1195,7 +1206,7 @@ impl Request {
                     )
                     .map_err(Into::into)
                 });
-                let _ = reply.send(result);
+                reply_reserved(reply, reservation, result);
             }
             Self::Settle {
                 workspace_id,
@@ -1210,7 +1221,6 @@ impl Request {
                 reconstruction,
                 reply,
             } => {
-                let _reservation = reconstruction.reservation;
                 let result = registry.owner(&workspace_id, &token).and_then(|_| {
                     if cancel.is_cancelled() {
                         return Err(RuntimeError::Cancelled);
@@ -1234,7 +1244,7 @@ impl Request {
                         },
                     )
                 });
-                let _ = reply.send(result);
+                reply_reserved(reply, reconstruction.reservation, result);
             }
             Self::Bootstrap {
                 workspace_id,
@@ -1244,7 +1254,7 @@ impl Request {
                 bytes,
                 root,
                 faults,
-                reservation: _reservation,
+                reservation,
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|_| {
@@ -1273,7 +1283,7 @@ impl Request {
                         },
                     )
                 });
-                let _ = reply.send(result);
+                reply_reserved(reply, reservation, result);
             }
             Self::Open {
                 workspace_id,
@@ -1317,7 +1327,7 @@ impl Request {
                 application,
                 event,
                 faults,
-                reservation: _reservation,
+                reservation,
                 working_reserve_bytes,
                 reply,
             } => {
@@ -1338,7 +1348,7 @@ impl Request {
                     )
                     .map_err(Into::into)
                 });
-                let _ = reply.send(result);
+                reply_reserved(reply, reservation, result);
             }
             Self::Unload {
                 workspace_id,
@@ -1522,5 +1532,54 @@ impl ActorHandle {
             Ok(result)
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    type Order = Arc<Mutex<Vec<&'static str>>>;
+
+    struct Dropped(&'static str, Order);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.1.lock().unwrap().push(self.0);
+        }
+    }
+
+    fn send(reply: ReservedReply<Dropped>, order: &Order) {
+        let reservation: Arc<dyn Send + Sync> = Arc::new(Dropped("reservation", order.clone()));
+        reply_reserved(reply, reservation, Ok(Dropped("result", order.clone())));
+    }
+
+    #[test]
+    fn a_reply_nobody_takes_frees_its_result_before_its_reservation() {
+        // The caller gave up before the actor replied, so the send fails.
+        let order = Order::default();
+        let (reply, receive) = oneshot::channel();
+        drop(receive);
+        send(reply, &order);
+        assert_eq!(*order.lock().unwrap(), ["result", "reservation"]);
+
+        // The caller gave up after the reply arrived but before taking it.
+        let order = Order::default();
+        let (reply, receive) = oneshot::channel();
+        send(reply, &order);
+        assert!(order.lock().unwrap().is_empty());
+        drop(receive);
+        assert_eq!(*order.lock().unwrap(), ["result", "reservation"]);
+    }
+
+    #[tokio::test]
+    async fn a_taken_reply_frees_its_reservation_before_the_caller_sees_the_result() {
+        let order = Order::default();
+        let (reply, receive) = oneshot::channel();
+        send(reply, &order);
+        let result = receive_reserved(receive).await.unwrap();
+        assert_eq!(*order.lock().unwrap(), ["reservation"]);
+        drop(result);
+        assert_eq!(*order.lock().unwrap(), ["reservation", "result"]);
     }
 }

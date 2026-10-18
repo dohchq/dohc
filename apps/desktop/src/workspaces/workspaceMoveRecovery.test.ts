@@ -413,9 +413,15 @@ it("keeps the visible source when rowless Undo cannot hard link it", async () =>
   expect(await readFile(join(f.rootPath, "archive/oversized.bin"), "utf8")).toBe("kept");
 });
 
-it("uses the live-session and debt fence when the person's destination exceeds the engine path limit", async () => {
+// The engine addresses no path past 1,024 bytes or holding a control
+// character. macOS caps a whole path at 1,024 bytes, so no file there can lie
+// past the engine's bound, and Windows refuses control characters in names.
+const unaddressable: [string, string][] = [
+  ...(process.platform === "darwin" ? [] : [["exceeds the engine path limit", Array.from({ length: 11 }, () => "a".repeat(95)).join("/") + "/moved.txt"] as [string, string]]),
+  ...(process.platform === "win32" ? [] : [["holds a control character", "moved\u0001.txt"] as [string, string]]),
+];
+it.each(unaddressable)("uses the live-session and debt fence when the person's destination %s", async (_case, to) => {
   const f = await fixture(); await f.write("a.txt");
-  const to = Array.from({ length: 11 }, () => "a".repeat(95)).join("/") + "/moved.txt";
   const finish = vi.fn(async () => undefined), begin = vi.spyOn(f.capture, "beginFileRename").mockResolvedValue(finish);
   const authored = vi.spyOn(f.capture, "changePathsAs");
   const moved = await moveWorkspacePathByHand(f.operation, { fromPath: "a.txt", toPath: to }, person, f.options);
