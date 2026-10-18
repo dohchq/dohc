@@ -123,7 +123,7 @@ export function createWorkspaceAuthorityOwner<
 
   function assertOpen(): void {
     if (closing) {
-      throw new Error("Workspace authority owner is closing.");
+      throw new Error("dohc is closing. Open dohc again to continue.");
     }
   }
 
@@ -250,13 +250,16 @@ export function createWorkspaceAuthorityOwner<
   }
 
   function assertRecordCurrent(record: AuthorityRecord<Workspace, State>): void {
+    assertOpen();
     const slot = slots.get(record.binding.workspaceId);
     const workspace = options.findWorkspace(record.binding.workspaceId);
+    if (workspace && !bindingMatchesWorkspace(record.binding, workspace)) {
+      throw new Error("This workspace changed while this ran. Try again.");
+    }
     if (
       record.retired ||
       slot?.current !== record ||
-      !workspace ||
-      !bindingMatchesWorkspace(record.binding, workspace)
+      !workspace
     ) {
       throw new Error("This workspace was closed. Open it again.");
     }
@@ -289,8 +292,12 @@ export function createWorkspaceAuthorityOwner<
   function recordForBinding(
     binding: WorkspaceAuthorityBinding<Workspace>,
   ): AuthorityRecord<Workspace, State> {
+    assertOpen();
     const record = slots.get(binding.workspaceId)?.current;
-    if (!record || record.binding !== binding) {
+    if (record && record.binding !== binding) {
+      throw new Error("This workspace changed while this ran. Try again.");
+    }
+    if (!record) {
       throw new Error("This workspace was closed. Open it again.");
     }
     return record;

@@ -464,7 +464,7 @@ describe("registered chat reads and reader-local state", () => {
     await test.authorities.invalidate("workspace");
     const successor = test.authorities.acquire("workspace");
     successor.release();
-    await expect(test.chatScope.chatFileObjectId(scope, "notes/a.md")).rejects.toThrow("This workspace was closed. Open it again.");
+    await expect(test.chatScope.chatFileObjectId(scope, "notes/a.md")).rejects.toThrow("This workspace changed while this ran. Try again.");
     expect(test.resolveEngineFiles).not.toHaveBeenCalled();
   });
 });

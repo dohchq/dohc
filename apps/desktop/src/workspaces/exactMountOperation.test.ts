@@ -56,7 +56,7 @@ describe("exact mount operations", () => {
         },
         h.mutate,
       ),
-    ).rejects.toThrow("retired workspace");
+    ).rejects.toThrow("This workspace was closed. Open it again.");
     expect(h.engineReady).not.toHaveBeenCalled();
     expect(h.mutate).not.toHaveBeenCalled();
   });

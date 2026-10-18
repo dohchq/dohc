@@ -1369,7 +1369,7 @@ async function labelsForOwnerShare(workspace: EngineWorkspace, credentials: Clou
   try {
     lease.assertCurrent();
     if (cachedCredentials?.token !== credentials.token || cachedCredentials.userId !== credentials.userId) throw new Error("Your server session changed. Try again.");
-    if (workspace.attachmentId !== undefined && workspace.attachmentId !== lease.binding.attachmentId) throw new Error("This share belongs to a retired workspace.");
+    if (workspace.attachmentId !== undefined && workspace.attachmentId !== lease.binding.attachmentId) throw new Error("This workspace was closed. Open it again.");
     const lookup = async <T>(read: () => Promise<T>): Promise<T | null> => {
       try {return await read();} catch (error) {if (options.refresh) throw error; return null;}
     };
@@ -2840,7 +2840,7 @@ function linkedChatStoreFor(
       workspaceOrLease.attachmentId !== undefined &&
       workspaceOrLease.attachmentId !== lease.binding.attachmentId
     ) {
-      throw new Error("This chat store request belongs to a retired workspace.");
+      throw new Error("This workspace was closed. Open it again.");
     }
   const existing = lease.state.linkedChatStore;
   if (existing) return existing;
@@ -2881,7 +2881,7 @@ function agentDispatchStoreHandleFor(workspace: {
       workspace.attachmentId !== undefined &&
       workspace.attachmentId !== lease.binding.attachmentId
     ) {
-      throw new Error("This dispatch store request belongs to a retired workspace.");
+      throw new Error("This workspace was closed. Open it again.");
     }
     const existing = lease.state.agentDispatchStoreHandle;
   if (existing) return existing;
@@ -4337,7 +4337,7 @@ function createRelayedPressHostFor(workspaceId: string): RelayedPressHost {
     },
     heldClaim: async (press) => {
       const executor = collectionAutomationsOf(workspaceId);
-      if (!executor) throw new Error("This workspace was closed.");
+      if (!executor) throw new Error("This workspace was closed. Open it again.");
       return await executor.relayedClaim({ automationId: press.automationId, collectionPath: press.collectionPath, definitionHash: press.definitionHash, pressId: press.hostPressId });
     },
     inspect: async (inspectionIds, signal) => {
@@ -4346,7 +4346,7 @@ function createRelayedPressHostFor(workspaceId: string): RelayedPressHost {
     },
     press: async (input, watch) => {
       const executor = collectionAutomationsOf(workspaceId);
-      if (!executor) throw new Error("This workspace was closed.");
+      if (!executor) throw new Error("This workspace was closed. Open it again.");
       return await executor.pressRelayed(input, (claimId) => watch(claimId));
     },
     notifyFailure: async (failure) => {
@@ -4379,7 +4379,7 @@ function createCollectionAutomationsFor(
     const person = await localPerson();
     return await withPhysicalWorkspaceOperation(workspaceId, async (operation) => {
       if (operation.workspace.attachmentId !== attachmentId) {
-        throw new Error("This workspace was closed.");
+        throw new Error("This workspace was closed. Open it again.");
       }
       const capture = activity.engineCaptureFor(workspaceId);
       if (!capture) throw new Error(captureRefusal("Automations"));
@@ -4394,7 +4394,7 @@ function createCollectionAutomationsFor(
     readText: (path) => readWorkspaceTextIfPresent(rootPath, path),
     writeText: async (path, text, expectedContentHash, automationId) => {
       return withPhysicalWorkspaceOperation(workspaceId, async operation => {
-        if (operation.workspace.attachmentId !== attachmentId) throw new Error("This workspace was closed.");
+        if (operation.workspace.attachmentId !== attachmentId) throw new Error("This workspace was closed. Open it again.");
         const capture = activity.engineCaptureFor(workspaceId);
         if (!capture || operation.workspace.shareView !== undefined) return writeWorkspaceText(rootPath, path, text, expectedContentHash);
         const result = await writeWorkspaceFilesAs(operation, [{ path, contentBase64: Buffer.from(text).toString("base64"), expectedSha256: expectedContentHash }],
@@ -4411,7 +4411,7 @@ function createCollectionAutomationsFor(
     cachedRoster: () => shareRosters.cached(workspaceId),
     evaluator: automationEvaluator.forWorkspace(workspaceId),
     store: createAutomationRunStore(rootPath, resolveWorkspaceMetadataDir, () => {
-      if (!workspaceAuthorities.isCurrentAttachment(workspaceId, attachmentId)) throw new Error("This workspace was closed.");
+      if (!workspaceAuthorities.isCurrentAttachment(workspaceId, attachmentId)) throw new Error("This workspace was closed. Open it again.");
     }),
     onRunsChanged: () => notifyAutomationRunsChanged(workspaceId),
     onUsageSuccess: invocation => { usageStore?.recordSuccess(invocation); },
@@ -4504,7 +4504,7 @@ function createCollectionAutomationsFor(
       if (opened) return await work((await opened).automations);
       if (!open) return null;
       return await withPhysicalWorkspaceOperation(workspaceId, async (operation) => {
-        if (operation.workspace.attachmentId !== attachmentId) throw new Error("This workspace was closed.");
+        if (operation.workspace.attachmentId !== attachmentId) throw new Error("This workspace was closed. Open it again.");
         // A workspace that never approved a dataset has no dataset store to open.
         if (!(await localDatasetStoreExists(rootPath))) return null;
         const host = await localDatasetHostFor(operation.workspace, operation.signal);
@@ -4684,7 +4684,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
   automations: (workspace) => {
     const opened = async () => {
       const automations = collectionAutomationsOf(workspace.workspaceId);
-      if (!automations) throw new Error("This workspace was closed.");
+      if (!automations) throw new Error("This workspace was closed. Open it again.");
       await automations.open();
       return automations;
     };
@@ -5081,7 +5081,7 @@ function createShareViewFilesForOperation(
         target.schedulingRootPath !== operation.workspace.rootPath
       ) {
         throw new Error(
-          "Share file cache request belongs to a retired workspace.",
+          "This workspace was closed. Open it again.",
         );
       }
       return operation.state.shareViewFiles;

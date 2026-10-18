@@ -25,7 +25,7 @@ export function createExactMountOperationRunner<
       input.workspace.workspaceId,
       async (operation) => {
         if (operation.workspace.attachmentId !== attachmentId) {
-          throw new Error("Share mount work belongs to a retired workspace.");
+          throw new Error("This workspace was closed. Open it again.");
         }
         await dependencies.engineReady();
         const assertCurrent = (): void => {

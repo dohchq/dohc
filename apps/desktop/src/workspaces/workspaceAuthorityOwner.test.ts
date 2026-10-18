@@ -33,6 +33,27 @@ function testOwner(initial: Workspace | null) {
 }
 
 describe("workspace authority owner", () => {
+  it("tells held work that dohc is closing", async () => {
+    const test = testOwner({ workspaceId: "workspace", rootPath: "root", label: "A" });
+    const lease = test.owner.acquire("workspace");
+    const closing = test.owner.close();
+    expect(() => lease.assertCurrent()).toThrow("dohc is closing. Open dohc again to continue.");
+    lease.release();
+    await closing;
+  });
+
+  it("tells a cached binding to retry after its attachment changes", async () => {
+    const test = testOwner({ workspaceId: "workspace", rootPath: "root", label: "A" });
+    const first = test.owner.acquire("workspace");
+    first.release();
+    await test.owner.invalidate("workspace");
+    const replacement = test.owner.acquire("workspace");
+    expect(() => test.owner.acquireBinding(first.binding))
+      .toThrow("This workspace changed while this ran. Try again.");
+    replacement.release();
+    await test.owner.close();
+  });
+
   it("canonicalizes one registry binding once and owns its state", async () => {
     const test = testOwner({
       workspaceId: "workspace",
@@ -127,7 +148,7 @@ describe("workspace authority owner", () => {
       const identity = lease.binding.attachmentId;
       await held;
       expect(test.disposed).not.toContain(identity);
-      expect(() => lease.assertCurrent()).toThrow("This workspace was closed. Open it again.");
+      expect(() => lease.assertCurrent()).toThrow("This workspace changed while this ran. Try again.");
       return identity;
     });
 
@@ -289,7 +310,7 @@ describe("workspace authority owner", () => {
     );
 
     daemonReady.resolve();
-    await expect(opening).rejects.toThrow("This workspace was closed. Open it again.");
+    await expect(opening).rejects.toThrow("This workspace changed while this ran. Try again.");
     await retirement;
     const attachmentB = test.owner.acquire("workspace");
     expect(attachmentB.binding.attachmentId).not.toBe(attachmentA);
