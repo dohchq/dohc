@@ -1,13 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
-import { readFile, readdir, writeFile } from "node:fs/promises";
+import { readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createJoinedWorkspaceRunner } from "./createJoinedWorkspace";
-import { createWorkspaceFolder } from "./createWorkspaceFolder";
+import { canonicalWorkspaceRoot, createWorkspaceFolder } from "./createWorkspaceFolder";
 import { createWorkspaceAuthorityOwner } from "./workspaceAuthorityOwner";
 import { createTestScratch } from "./testTemp";
 import type { RegistryEntry } from "./registryStore";
 
-function harness(rootPath = "/joined") {
+// Folder creation against a real folder, as main wires it.
+const createRealFolder = async (input: { rootPath: string; workspaceId: string; kind: "personal" }) =>
+  createWorkspaceFolder({ ...input, homeDir: await createTestScratch("dohc-join-home-") });
+
+function harness(rootPath = "/joined", canonicalizeRoot = (root: string) => root) {
   const registry = new Map<string, RegistryEntry>();
   const authorities = createWorkspaceAuthorityOwner<RegistryEntry, object>({
     findWorkspace: (id) => registry.get(id) ?? null,
@@ -21,7 +25,7 @@ function harness(rootPath = "/joined") {
     kind: "personal",
     mode: "local-first",
   };
-  const createFolder = vi.fn(async () => {
+  const createFolder = vi.fn(async (_input: { rootPath: string; workspaceId: string; kind: "personal" }) => {
     events.push("create");
     return workspace;
   });
@@ -32,6 +36,7 @@ function harness(rootPath = "/joined") {
     events.push("notify");
   });
   const run = createJoinedWorkspaceRunner({
+    canonicalizeRoot,
     reserve: (input) => authorities.reserveBinding(input),
     createFolder,
     register: (reservation, entry) => {
@@ -98,12 +103,8 @@ describe("joined workspace creation", () => {
 
   it.each(["prepare", "populate"] as const)("preserves files added during %s and permits retry in another empty folder", async (phase) => {
     const root = await createTestScratch("dohc-join-preserve-");
-    const h = harness(root);
-    h.createFolder.mockImplementation(() => createWorkspaceFolder({
-      rootPath: h.workspace.rootPath,
-      workspaceId: h.workspace.workspaceId,
-      kind: "personal",
-    }));
+    const h = harness(root, canonicalWorkspaceRoot);
+    h.createFolder.mockImplementation(createRealFolder);
     const entered = Promise.withResolvers<void>();
     const resumed = Promise.withResolvers<void>();
     const fail = async () => {
@@ -127,10 +128,24 @@ describe("joined workspace creation", () => {
     expect(h.cleanup).toHaveBeenCalledWith("joined");
 
     const retryRoot = await createTestScratch("dohc-join-retry-");
-    h.workspace.rootPath = retryRoot;
-    await expect(h.run({ ...h.input, rootPath: retryRoot })).resolves.toMatchObject({ rootPath: retryRoot });
-    expect(h.registry.get("joined")?.rootPath).toBe(retryRoot);
+    await expect(h.run({ ...h.input, rootPath: retryRoot })).resolves.toMatchObject({ rootPath: canonicalWorkspaceRoot(retryRoot) });
+    expect(h.registry.get("joined")?.rootPath).toBe(canonicalWorkspaceRoot(retryRoot));
     expect(await readFile(join(root, "local-work.md"), "utf8")).toBe("unsynced local work");
+  });
+
+  it("reserves, creates, and registers a folder chosen through a link under its real path", async () => {
+    const real = await createTestScratch("dohc-join-real-");
+    const link = join(await createTestScratch("dohc-join-link-"), "linked");
+    await symlink(real, link, process.platform === "win32" ? "junction" : "dir");
+    const h = harness(link, canonicalWorkspaceRoot);
+    h.createFolder.mockImplementation(createRealFolder);
+
+    const created = await h.run({ ...h.input, rootPath: link });
+
+    expect(created.rootPath).toBe(canonicalWorkspaceRoot(real));
+    expect(h.registry.get("joined")?.rootPath).toBe(created.rootPath);
+    expect(h.authorities.currentBinding("joined").canonicalRootPath).toBe(created.rootPath);
+    expect(await readdir(real)).toEqual([".dohc"]);
   });
 
   it("prepares identity before registration and starts population afterward", async () => {

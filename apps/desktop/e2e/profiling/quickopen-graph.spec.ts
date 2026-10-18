@@ -12,7 +12,7 @@ test("profiles eight Quick Open keystrokes and Graph construction", async () => 
   try {
     const { page, manifest } = context;
     await startLongTaskObserver(page);
-    await page.keyboard.press("Control+p");
+    await page.keyboard.press("ControlOrMeta+p");
     const palette = page.getByTestId("quick-open");
     await expect(palette).toBeVisible();
     const input = palette.getByRole("textbox", { name: "File" });

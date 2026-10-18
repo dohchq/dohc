@@ -205,6 +205,10 @@ jobs:
     environment: desktop-release
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
+    # pnpm checks the install before each pnpm run or exec and reinstalls
+    # without the Install step's --cpu. No later step changes dependencies.
+    env:
+      pnpm_config_verify_deps_before_run: "false"
     strategy:
       fail-fast: false
       # Windows and WSL share the same PC for this selection.
@@ -228,8 +232,10 @@ jobs:
           corepack enable
           corepack prepare pnpm@11.20.0 --activate
 
+      # pnpm installs only the runner's native binaries. The Apple silicon
+      # runner also packages macOS x64, which needs the x64 ones.
       - name: Install
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile --cpu=current --cpu=${{ matrix.arch }}
 
       - name: Stamp desktop package version
         env:
@@ -266,6 +272,11 @@ jobs:
         run: |
           rustup target add "${{ matrix.target }}"
           pnpm --filter @dohc/desktop run build:engine --target "${{ matrix.target }}"
+
+      # The desktop build staged the Collection compiler for the runner.
+      # Packaging requires the one for the package's architecture.
+      - name: Stage app compiler
+        run: node apps/desktop/scripts/stage-app-compiler.mjs --arch=${{ matrix.arch }}
 
       - id: signing
         name: Resolve signing mode

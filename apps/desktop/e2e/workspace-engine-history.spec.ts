@@ -125,7 +125,7 @@ test("History lists the first document of a new workspace while it is open", asy
     const rootPath = join(temp.rootPath, "my-notes");
     const workspace = await activeWorkspace(page, rootPath);
 
-    await page.keyboard.press("Control+n");
+    await page.keyboard.press("ControlOrMeta+n");
     await page.getByRole("textbox", { name: "File name" }).fill("trip/plan");
     await page.keyboard.press("Enter");
     const editor = page.getByTestId("markdown-editor");

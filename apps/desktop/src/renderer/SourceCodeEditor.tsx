@@ -1,3 +1,4 @@
+import { hasPrimaryModifier } from "../shortcuts/shortcutRegistry";
 import { extensionOf } from "./path";
 import {
   defaultKeymap,
@@ -201,7 +202,7 @@ export function SourceCodeEditor(props: {
               return false;
             },
             keydown(event) {
-              if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
+              if (hasPrimaryModifier(event, window.dohcDesktop?.platform) && event.key.toLowerCase() === "s") {
                 event.preventDefault();
                 onSaveRef.current();
                 return true;

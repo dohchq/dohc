@@ -239,6 +239,7 @@
   "updateState",
   "usageRecordStopped",
   "userSettingsChanged",
+  "windowFullScreen",
   "withdrawShareChanges",
   "workspaceActivated",
   "workspaceActivity",

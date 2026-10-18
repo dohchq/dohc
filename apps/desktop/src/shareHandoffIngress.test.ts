@@ -269,6 +269,7 @@ describe("share handoff runtime registration", () => {
   it.each([true, false])("leaves the OS handler untouched for isolated QA (defaultApp=%s)", (defaultApp) => {
     const setAsDefaultProtocolClient = vi.fn(() => true);
     expect(registerShareHandoffProtocol({ setAsDefaultProtocolClient }, {
+      platform: "win32",
       defaultApp,
       execPath: "dohc.exe",
       argv: ["dohc.exe", "--dohc-isolated-test", `--user-data-dir=${resolve("isolated-profile")}`],
@@ -281,6 +282,7 @@ describe("share handoff runtime registration", () => {
   ])("rejects an isolated launch without one absolute profile: %j", (...profileArgs) => {
     const setAsDefaultProtocolClient = vi.fn(() => true);
     expect(() => registerShareHandoffProtocol({ setAsDefaultProtocolClient }, {
+      platform: "win32",
       execPath: "dohc.exe",
       argv: ["dohc.exe", "--dohc-isolated-test", ...profileArgs],
     })).toThrow("one absolute --user-data-dir");
@@ -290,6 +292,7 @@ describe("share handoff runtime registration", () => {
   it("keeps protocol registration for a normal launch with a custom profile", () => {
     const setAsDefaultProtocolClient = vi.fn(() => true);
     expect(registerShareHandoffProtocol({ setAsDefaultProtocolClient }, {
+      platform: "win32",
       execPath: "dohc.exe",
       argv: ["dohc.exe", `--user-data-dir=${resolve("custom-profile")}`],
     })).toBe(true);
@@ -307,6 +310,7 @@ describe("share handoff runtime registration", () => {
 
     expect(
       registerShareHandoffProtocol(registrar, {
+        platform: "win32",
         defaultApp: true,
         execPath: "C:\\runtime\\electron.exe",
         argv: ["electron", "relative/app-entry.js"],
@@ -321,6 +325,28 @@ describe("share handoff runtime registration", () => {
     ]);
   });
 
+  it("leaves the macOS handler alone in development, where it would claim the scheme for Electron", () => {
+    const setAsDefaultProtocolClient = vi.fn(() => true);
+    expect(registerShareHandoffProtocol({ setAsDefaultProtocolClient }, {
+      platform: "darwin",
+      defaultApp: true,
+      execPath: "/repo/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron",
+      argv: ["Electron", "dist/main/main.js"],
+    })).toBe(false);
+    expect(setAsDefaultProtocolClient).not.toHaveBeenCalled();
+  });
+
+  it("registers the packaged macOS app with the scheme alone", () => {
+    const setAsDefaultProtocolClient = vi.fn(() => true);
+    expect(registerShareHandoffProtocol({ setAsDefaultProtocolClient }, {
+      platform: "darwin",
+      defaultApp: false,
+      execPath: "/Applications/dohc.app/Contents/MacOS/dohc",
+      argv: ["/Applications/dohc.app/Contents/MacOS/dohc"],
+    })).toBe(true);
+    expect(setAsDefaultProtocolClient).toHaveBeenCalledWith("dohc");
+  });
+
   it("does not register a development handler without an app entry argument", () => {
     const setAsDefaultProtocolClient = vi.fn(() => true);
 
@@ -328,6 +354,7 @@ describe("share handoff runtime registration", () => {
       registerShareHandoffProtocol(
         { setAsDefaultProtocolClient },
         {
+          platform: "win32",
           defaultApp: true,
           execPath: "C:\\runtime\\electron.exe",
           argv: ["electron"],
@@ -348,6 +375,7 @@ describe("share handoff runtime registration", () => {
 
     expect(
       registerShareHandoffProtocol(registrar, {
+        platform: "win32",
         defaultApp: false,
         execPath: "C:\\Program Files\\dohc\\dohc.exe",
         argv: ["dohc.exe"],

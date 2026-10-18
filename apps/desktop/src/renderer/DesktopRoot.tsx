@@ -1,6 +1,6 @@
 import { bindOwnPresentation } from "./workbench/actorPresentation";
 import { useRequestSequence } from "./useRequestSequence";
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useContext, useEffect, useRef, useState } from "react";
 import {
   DesktopUserSettingsResult,
   ShareHandoffStatus,
@@ -13,10 +13,13 @@ import { applyLookSettings, differsOnlyInLook } from "./theme";
 import { WorkspaceManager } from "./WorkspaceManager";
 import { DevPanel } from "./DevPanel";
 import { DesktopWorkspaceShell, type Workspace } from "./DesktopWorkspaceShell";
+import { workspaceName } from "./Titlebar";
 import { ChevronRight } from "lucide-react";
 import { readError } from "../ipc/errorWords";
 import { errorDetails } from "./shell/copyDetails";
 import { StandaloneNotices } from "./shell/connectionNotices";
+import { ShellErrorReporter } from "./shell/useShellError";
+import { useMenuCommandsWithoutWorkspace } from "./appMenuCommands";
 import { CopyButton } from "./ui/CopyButton";
 import { useSentNotices } from "./shell/useSentNotices";
 import { useHeldWorkspacePathOpenFailures, WorkspacePathOpenFailures } from "./shell/workspacePathOpenFailures";
@@ -24,11 +27,23 @@ import type { OpenOnSwitch } from "./shell/useSentNoticeProps";
 import { useStatesPageOpen } from "./dev/statesRoute";
 import { ReactionStoreProvider } from "./workbench/reactionStore";
 import { useAccountDeletion } from "./shell/useAccountDeletion";
+import { TITLEBAR_HEIGHT_PX } from "./tokens";
 
 // Development only, and its own chunk: the app's bundle does not carry it.
 const LazyStatesPage = lazy(() =>
   import("./dev/StatesPage").then((module) => ({ default: module.StatesPage })),
 );
+
+// The registry error has no workspace shell; it answers menu commands
+// itself and reports into its own notices.
+function RegistryErrorMenuCommands() {
+  const reportFailure = useContext(ShellErrorReporter);
+  useMenuCommandsWithoutWorkspace(useCallback(
+    (message: string, cause: unknown) => reportFailure?.({ message, cause }),
+    [reportFailure],
+  ));
+  return null;
+}
 
 export function DesktopRoot() {
   useEffect(() => bindOwnPresentation(bridge()), []);
@@ -220,6 +235,13 @@ export function DesktopRoot() {
     });
   }, []);
 
+  // The window list, Mission Control, and the Dock tell windows apart by
+  // their workspace.
+  const shownWorkspace = isManagerWindow ? null : workspace;
+  useEffect(() => {
+    document.title = shownWorkspace ? workspaceName(shownWorkspace) : "dohc";
+  }, [shownWorkspace]);
+
   // Signal first paint when real content is about to mount (not while the
   // registry IPC is still pending and the root renders null).
   useEffect(() => {
@@ -245,7 +267,10 @@ export function DesktopRoot() {
     ]);
     return (
       <StandaloneNotices>
-      <div className="flex h-screen flex-col items-center justify-center gap-2 bg-bg px-8 text-center">
+      <RegistryErrorMenuCommands />
+      <div className="relative flex h-screen flex-col items-center justify-center gap-2 bg-bg px-8 text-center">
+        {/* No title bar here, so this strip moves the window. */}
+        <div aria-hidden className="titlebar-drag absolute inset-x-0 top-0" style={{ height: TITLEBAR_HEIGHT_PX }} />
         <span className="text-sm font-semibold text-ink">
           dohc couldn't read its workspace registry
         </span>

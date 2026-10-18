@@ -4513,6 +4513,68 @@ mod tests {
         );
     }
 
+    /// An older build captured Finder's `.DS_Store`. A version forked over
+    /// that head ships every other head, and leaves the ignored path out.
+    #[test]
+    fn a_fork_leaves_heads_at_ignored_paths_out() {
+        let (_scratch, _, mut store) = open_store();
+        seed_main(&mut store);
+        write_text(
+            &mut store,
+            "main",
+            "notes",
+            "moment-notes",
+            "notes",
+            "capture",
+            10,
+        );
+        write_text(
+            &mut store,
+            "main",
+            "finder",
+            "moment-finder",
+            "finder",
+            "capture",
+            11,
+        );
+        store
+            .write_with(&NoFaults, |tx| {
+                for table in ["snapshots", "path_aliases"] {
+                    tx.execute(
+                        &format!("UPDATE {table} SET path='.DS_Store' WHERE path='finder.md'"),
+                        [],
+                    )
+                    .map_err(crate::SyncError::persist)?;
+                }
+                Ok::<_, crate::SyncError>(())
+            })
+            .expect("an older build's head");
+        let record = VersionedTextStore::new(&mut store)
+            .create_named_version(
+                &CreateNamedVersion {
+                    workspace_id: "ws".to_owned(),
+                    from_version_id: "main".to_owned(),
+                    new_version_id: "named".to_owned(),
+                    name: "Named".to_owned(),
+                    now_ms: 20,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("named version");
+        store
+            .write_with(&NoFaults, |tx| journal_version_create_in_tx(tx, &record))
+            .expect("journal named version");
+
+        let shipped: Vec<serde_json::Value> = local_ops(&store)
+            .into_iter()
+            .filter(|(kind, _)| kind == "version.create")
+            .flat_map(|(_, payload)| payload["forkSnapshots"].as_array().cloned().unwrap())
+            .map(|snapshot| snapshot["path"].clone())
+            .collect();
+        assert_eq!(shipped, vec![serde_json::json!("notes.md")]);
+    }
+
     #[test]
     fn imported_secret_moments_are_not_echoed_by_enrolment() {
         let (_scratch, _, mut store) = open_store();

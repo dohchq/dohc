@@ -8,6 +8,7 @@ import {
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { CHANNELS } from "../ipc/channels";
 import { palette, TITLEBAR_HEIGHT_PX } from "../renderer/tokens";
 import {
   createMainWindowWebPreferences,
@@ -22,6 +23,7 @@ import {
 } from "../systemThemeIcon";
 import { stateDir } from "../workspaces/WorkspaceRegistry";
 import { installRendererCrashRecovery } from "./rendererCrashRecovery";
+import { installTextContextMenu } from "./textContextMenu";
 import {
   createDebouncedSaver,
   DEFAULT_WINDOW_SIZE,
@@ -278,7 +280,8 @@ export function createMainWindow(options?: {
     ...(process.platform === "darwin"
       ? {
           titleBarStyle: "hiddenInset" as const,
-          trafficLightPosition: { x: 16, y: 18 },
+          // Centers the 14pt-tall buttons on the renderer's title bar.
+          trafficLightPosition: { x: 16, y: (TITLEBAR_HEIGHT_PX - 14) / 2 },
         }
       : {
           titleBarStyle: "hidden" as const,
@@ -317,6 +320,8 @@ export function createMainWindow(options?: {
   // through the explicit, audited openExternalUrl IPC.
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
 
+  installTextContextMenu(window);
+
   // Top-frame navigations, server redirects, and subframe navigations all
   // go through the same policy: each is a separate Electron surface.
   const denyDisallowed = (event: { preventDefault(): void }, url: string) => {
@@ -332,6 +337,16 @@ export function createMainWindow(options?: {
   });
 
   window.once("ready-to-show", () => window.show());
+
+  // Each load and each change tells this window's renderer whether it is
+  // full screen, where macOS hides the traffic lights.
+  const contents = window.webContents;
+  const sendFullScreen = (fullScreen: boolean) => {
+    if (!contents.isDestroyed()) contents.send(CHANNELS.windowFullScreen, { fullScreen });
+  };
+  window.on("enter-full-screen", () => sendFullScreen(true));
+  window.on("leave-full-screen", () => sendFullScreen(false));
+  contents.on("dom-ready", () => sendFullScreen(window.isFullScreen()));
 
   const devServer = devServerUrl();
   const query = role === "manager" ? { view: "manager" } : undefined;

@@ -1,4 +1,5 @@
 import { holdSystemClipboard } from "./helpers/systemClipboard";
+import { DOCUMENT_END } from "./helpers/keys";
 import { test, expect } from "@playwright/test";
 import { readFile, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -128,7 +129,7 @@ test("rich doc edits through the engine Y.Doc: settle lands on .md + engine.db, 
 
     const editor = page.getByTestId("markdown-editor");
     await editor.click();
-    await page.keyboard.press("ControlOrMeta+End");
+    await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.type(sentinel);
 
     // The debounced settle projects the edit into engine.db and writes the.md.
@@ -279,7 +280,7 @@ test("@restart-durability-overlapping-typing overlapping typing on an externally
     await writeWorkspaceFiles(temp, [{path, contents: `# Rich\n\n${external}\n`}]);
     // The live lease defers capture. Settlement must preserve the outside bytes.
     await page.getByTestId("markdown-editor").click();
-    await page.keyboard.press("ControlOrMeta+End");
+    await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.type(human);
     await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "error");
     expect(await readFile(join(temp.rootPath, path), "utf8")).toContain(external);
@@ -330,7 +331,7 @@ test("@restart-durability-capture-before-reopen kept typing survives capture bef
     await writeWorkspaceFiles(temp, [{path, contents: `# Rich\n\n${external}\n`}]);
     // The live lease defers capture. Settlement must preserve the outside bytes.
     await page.getByTestId("markdown-editor").click();
-    await page.keyboard.press("ControlOrMeta+End");
+    await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.type(human);
     await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "error");
     expect(await readFile(join(temp.rootPath, path), "utf8")).toContain(external);
@@ -448,7 +449,7 @@ test("creating a version while a rich doc is live flushes + closes the session (
 
     const editor = page.getByTestId("markdown-editor");
     await editor.click();
-    await page.keyboard.press("ControlOrMeta+End");
+    await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.type(sentinel);
 
     // Create a version through the bridge while the doc is still live. The main-

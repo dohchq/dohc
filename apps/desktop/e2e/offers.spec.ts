@@ -1,4 +1,5 @@
 import { holdSystemClipboard } from "./helpers/systemClipboard";
+import { DOCUMENT_END } from "./helpers/keys";
 import { test, expect } from "@playwright/test";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
@@ -80,9 +81,9 @@ test("@offers a pasted URL offers Link and Plain text, and Undo, from the keyboa
       await holdSystemClipboard(test.info(), async (remainingMs) => {
         await desktop!.app.evaluate(({ clipboard }, text) => clipboard.writeText(text), url);
         await editor.click({ timeout: remainingMs() });
-        await page.keyboard.press("Control+End");
+        await page.keyboard.press(DOCUMENT_END);
         await page.keyboard.press("Enter");
-        await page.keyboard.press("Control+V");
+        await page.keyboard.press("ControlOrMeta+V");
         await expect(row).toBeVisible({ timeout: remainingMs() });
       });
     };
@@ -91,7 +92,7 @@ test("@offers a pasted URL offers Link and Plain text, and Undo, from the keyboa
     await pasteOnNewLine();
     await expect(link).toHaveCount(1);
     await expect(page.getByTestId("url-paste-link")).toHaveAttribute("aria-pressed", "true");
-    await page.keyboard.press("Control+K");
+    await page.keyboard.press("ControlOrMeta+K");
     await expect(page.getByTestId("url-paste-link")).toBeFocused();
     await page.keyboard.press("ArrowRight");
     await expect(page.getByTestId("url-paste-plain")).toBeFocused();
@@ -107,7 +108,7 @@ test("@offers a pasted URL offers Link and Plain text, and Undo, from the keyboa
     // Link, the current form: the row closes and nothing changes.
     await pasteOnNewLine();
     await expect(link).toHaveCount(2);
-    await page.keyboard.press("Control+K");
+    await page.keyboard.press("ControlOrMeta+K");
     await expect(page.getByTestId("url-paste-link")).toBeFocused();
     await page.keyboard.press("Enter");
     await expect(row).toHaveCount(0);

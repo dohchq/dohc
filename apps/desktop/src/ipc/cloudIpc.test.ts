@@ -142,7 +142,7 @@ async function harness() {
     finalize, removeBinding: () => { registry.delete(binding.workspaceId); },
   }));
   const createJoinedWorkspace = createJoinedWorkspaceRunner({
-    reserve: (input) => authorities.reserveBinding(input), createFolder,
+    canonicalizeRoot: (root) => root, reserve: (input) => authorities.reserveBinding(input), createFolder,
     register: (reservation, entry) => authorities.registerReservedBinding(reservation, entry, {
       persist: () => { steps.push("register"); registry.set(entry.workspaceId, entry); },
       rollback: () => { registry.delete(entry.workspaceId); },

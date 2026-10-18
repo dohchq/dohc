@@ -94,8 +94,11 @@ pub fn request_retry_in(
 }
 
 impl EngineStore {
-    /// Empty workspace is the legacy placement sentinel. It must also park.
-    pub fn placement_is_held(&self, workspace: &str, path: &str) -> Result<bool, StorageError> {
+    /// The paths capture holds in `workspace`. Empty workspace is the legacy
+    /// placement sentinel and lists every hold, so it must also park.
+    /// `dohc_engine_files::placement_is_held_in` decides which paths a hold
+    /// covers.
+    pub fn held_paths(&self, workspace: &str) -> Result<Vec<String>, StorageError> {
         self.read_with(|conn| {
             let sql = if workspace.is_empty() {
                 "SELECT path FROM capture_file_holds"
@@ -110,30 +113,15 @@ impl EngineStore {
             } else {
                 vec![workspace]
             };
-            let rows = statement
+            statement
                 .query_map(rusqlite::params_from_iter(arguments), |row| {
                     row.get::<_, String>(0)
                 })
-                .map_err(StorageError::corrupt_public)?;
-            for held in rows {
-                if path_is_held(&held.map_err(StorageError::corrupt_public)?, path) {
-                    return Ok(true);
-                }
-            }
-            Ok(false)
+                .map_err(StorageError::corrupt_public)?
+                .collect::<Result<_, _>>()
+                .map_err(StorageError::corrupt_public)
         })
     }
-}
-
-/// Whether a hold on `held` covers `path`: the same path in any case, or a
-/// path beneath it. Case aliases deliberately over-hold distinct paths on
-/// case-sensitive volumes.
-pub fn path_is_held(held: &str, path: &str) -> bool {
-    let (held, path) = (held.to_lowercase(), path.to_lowercase());
-    path == held
-        || path
-            .strip_prefix(&held)
-            .is_some_and(|tail| tail.starts_with('/'))
 }
 
 /// Release only holds whose source alias has left the held object.
@@ -170,20 +158,20 @@ pub fn pin_in(
 
 /// Capture has recorded this observation or its absence in the source version.
 /// Only that commit can re-authorize selected-version placement against it.
+/// `names_path` says whether a job's target names the recorded path on disk.
 pub fn rebase_switch_jobs_in(
     tx: &Transaction<'_>,
     workspace: &str,
-    path: &str,
+    names_path: impl Fn(&str) -> bool,
     preimage: &crate::Preimage,
 ) -> Result<(), StorageError> {
     let jobs = crate::pending_switch_jobs_in(tx, workspace)?;
-    let path = path.to_lowercase();
     let (present, sha) = match preimage {
         crate::Preimage::Absent => (0, None),
         crate::Preimage::Present(sha) => (1, Some(sha.as_str())),
     };
     for (id, target) in jobs {
-        if target.to_lowercase() == path {
+        if names_path(&target) {
             tx.execute("UPDATE materialization_jobs SET preimage_present=?2,preimage_sha256=?3 WHERE job_id=?1",
                 params![id,present,sha]).map_err(StorageError::persist_public)?;
         }

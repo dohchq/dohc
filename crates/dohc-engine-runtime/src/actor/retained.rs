@@ -85,7 +85,11 @@ impl Worker {
                             .into_iter()
                             .map(|row| {
                                 Ok((
-                                    s.placement_is_held(&row.workspace_id, &row.target_path)?,
+                                    dohc_engine_files::placement_is_held_in(
+                                        s,
+                                        &row.workspace_id,
+                                        &row.target_path,
+                                    )?,
                                     row,
                                 ))
                             })
@@ -187,7 +191,7 @@ fn release(
     handle.run_blocking(move |s, _| {
         // Serialize hold creation with the last check and unlink. Changed reads
         // still import above; only source release waits for the hold to clear.
-        if s.placement_is_held(&row.workspace_id, &row.target_path)? {
+        if dohc_engine_files::placement_is_held_in(s, &row.workspace_id, &row.target_path)? {
             return Ok(());
         }
         if let Some(source) = source

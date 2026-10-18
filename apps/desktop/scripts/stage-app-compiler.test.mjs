@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
@@ -32,15 +32,22 @@ test("staging refuses an unpinned executable without running it", async t => {
   t.after(() => rm(root, { recursive: true, force: true }));
   const nodeExecutable = join(root, "node.exe"); await writeFile(nodeExecutable, "not Node");
   await assert.rejects(stageAppCompiler({ platform: "win32", arch: "x64", nodeExecutable, destination: join(root, "staged") }), /official Node/);
-  assert.deepEqual(await stageAppCompiler({ platform: "win32", arch: "arm64" }), { supported: false });
-  assert.deepEqual(await stageAppCompiler({ platform: "linux", arch: "arm64" }), { supported: false });
+  for (const [platform, arch] of [["win32", "arm64"], ["linux", "arm"], ["freebsd", "x64"]]) {
+    assert.deepEqual(await stageAppCompiler({ platform, arch }), { supported: false });
+  }
   await assert.rejects(requireAppCompiler(root, "win32", "arm64"), /Windows x64/);
-  await assert.rejects(requireAppCompiler(root, "win32", "x64"), /ENOENT/);
-  await assert.rejects(requireAppCompiler(root, "linux", "x64"), /ENOENT/);
-  assert.equal(await requireAppCompiler(root, "linux", "arm64"), undefined);
+  for (const [platform, arch] of [["win32", "x64"], ["linux", "x64"], ["linux", "arm64"], ["darwin", "x64"], ["darwin", "arm64"]]) {
+    await assert.rejects(requireAppCompiler(root, platform, arch), /ENOENT/);
+  }
+  assert.equal(await requireAppCompiler(root, "linux", "arm"), undefined);
+  // Default installs carry only the host's esbuild binary; another target names the install that adds it.
+  const foreign = process.platform === "linux" ? "darwin" : "linux";
+  await assert.rejects(stageAppCompiler({ platform: foreign, arch: "arm64", destination: join(root, "foreign") }),
+    { message: `App compiler requires @esbuild/${foreign}-arm64. Install it with pnpm install --cpu=current --cpu=arm64.` });
 });
 
-test("installed Linux Collection compiler runs electron-builder resources after relocation", { skip: process.platform !== "linux" || process.arch !== "x64", timeout: 30000 }, async t => {
+const posixTarget = ["darwin", "linux"].includes(process.platform) && ["arm64", "x64"].includes(process.arch);
+test("installed macOS and Linux Collection compiler runs electron-builder resources after relocation", { skip: !posixTarget, timeout: 30000 }, async t => {
   const root = await mkdtemp(join(tmpdir(), "dohc-installed-dataset-compiler-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const sourceRoot = join(root, "source");
@@ -52,11 +59,15 @@ test("installed Linux Collection compiler runs electron-builder resources after 
   await rm(sourceRoot, { recursive: true, force: true });
   const destination = join(resourcesRoot, "app-compiler");
   await requireAppCompiler(destination);
+  // Packaging for the other architecture needs that architecture's binary.
+  await assert.rejects(requireAppCompiler(destination, process.platform, process.arch === "x64" ? "arm64" : "x64"), /does not match/);
+  const binary = join(destination, `node_modules/@esbuild/${process.platform}-${process.arch}/bin/esbuild`);
+  assert.equal((await stat(binary)).mode & 0o111, 0o111, "every user can run the packaged binary");
   await build({ entryPoints: [fileURLToPath(new URL("../../../packages/app-backend-runtime/src/dataset-compiler.ts", import.meta.url))],
     outfile: join(resourcesRoot, "app-backend-runtime/dataset-compiler.mjs"), bundle: true, platform: "node", format: "esm", logLevel: "silent" });
   const compile = await createInstalledDatasetCompiler(resourcesRoot);
   assert.match(await compile("const answer: number = 42; globalThis.answer = answer;", "actions.ts", AbortSignal.timeout(10000)), /answer = 42/);
-  await writeFile(join(destination, "node_modules/@esbuild/linux-x64/bin/esbuild"), "changed");
+  await writeFile(binary, "changed");
   await assert.rejects(requireAppCompiler(destination), /asset changed/);
 });
 

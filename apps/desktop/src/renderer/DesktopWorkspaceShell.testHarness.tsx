@@ -319,6 +319,7 @@ function makeBaseBridge(
   const agentRunStateCallbacks = new Set<(event: AgentRunStateEvent) => void>();
   let searchCallback: ((batch: SearchResultsEvent) => void) | null = null;
   let menuCallback: ((command: MenuCommand) => void) | null = null;
+  const activatedCallbacks = new Set<(workspace: Workspace, file?: string) => void>();
   return {
     platform,
     typingRecovery: vi.fn(async () => ({failures: []})),
@@ -673,6 +674,7 @@ function makeBaseBridge(
         menuCallback = null;
       };
     }),
+    closeThisWindow: vi.fn(async (): Promise<void> => undefined),
     listKeptCopies: vi.fn(async (): Promise<ListKeptCopiesResult> => ({ keptCopies: [], more: false })),
     saveKeptCopy: vi.fn(async () => ({ status: "gone" as const })),
     // Typed to the contract: the capture recovery tests swap the answer.
@@ -735,6 +737,13 @@ function makeBaseBridge(
     }),
     onUsageRecordStopped: vi.fn((_listener: () => void) => () => {}),
     emitMenuCommand: (command: MenuCommand) => menuCallback?.(command),
+    emitWorkspaceActivated: (workspace: Workspace, file?: string) => {
+      for (const callback of [...activatedCallbacks]) callback(workspace, file);
+    },
+    onWorkspaceActivated: vi.fn((callback: (workspace: Workspace, file?: string) => void) => {
+      activatedCallbacks.add(callback);
+      return () => activatedCallbacks.delete(callback);
+    }),
     onUpdateState: vi.fn(() => () => {}),
     // Content search (E5.0): the shell subscribes on mount.
     onSearchResults: vi.fn((callback: (batch: SearchResultsEvent) => void) => {

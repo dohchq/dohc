@@ -239,6 +239,7 @@ export const CHANNELS = {
   runnerSelfTest: "desktop:runner-self-test",
   detectAgentTools: "desktop:detect-agent-tools",
   setTitlebarTheme: "desktop:set-titlebar-theme",
+  windowFullScreen: "desktop:window-full-screen",
   stepWindowZoom: "desktop:step-window-zoom",
   userSettingsChanged: "desktop:user-settings-changed",
   folderAppChanged: "desktop:folder-app-changed",

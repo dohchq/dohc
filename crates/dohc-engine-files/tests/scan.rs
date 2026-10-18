@@ -56,6 +56,15 @@ fn path_floor_excludes_reserved_and_sidecars() {
     ws.write("finance/ledger.sqlite", b"SQLite format 3\0"); // tracked (real db file)
     ws.write("finance/ledger.sqlite-wal", b"sidecar"); // excluded (db sidecar)
     ws.write("notes/draft-wal", b"not a sidecar"); // tracked (no db base)
+    // OS metadata, at any depth.
+    ws.write(".DS_Store", b"finder");
+    ws.write("notes/.DS_Store", b"finder");
+    ws.write("notes/._a.md", b"appledouble");
+    ws.write(".Spotlight-V100/Store-V2/index", b"spotlight");
+    ws.write("Thumbs.db", b"explorer");
+    ws.write("notes/desktop.ini", b"explorer");
+    #[cfg(unix)]
+    ws.write("notes/Icon\r", b"folder icon");
 
     let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
     let listing = scan(&scanner, ws.path());

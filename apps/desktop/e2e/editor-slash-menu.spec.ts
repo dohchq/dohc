@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { DOCUMENT_END } from "./helpers/keys";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   cleanupDesktopWorkspace,
@@ -87,7 +88,7 @@ test("@slash-menu slash menu neither remounts nor detaches while filtering", asy
 
     // ── 1. remount churn while typing and erasing a query ──
     await editor.click();
-    await page.keyboard.press("Control+End");
+    await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.press("Enter");
     await page.keyboard.type("/", { delay: 40 });
     const menu = page.locator(".dohc-slash-menu");

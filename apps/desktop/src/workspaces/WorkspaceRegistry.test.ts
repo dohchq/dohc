@@ -1,6 +1,7 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import { canonicalWorkspaceRoot, FOLDER_CHANGED } from "./createWorkspaceFolder";
 import { mergeShareSkippedOps, type RegistryEntry } from "./registryStore";
 import { endJoinedChannel, mergeJoinedChannel } from "./sharedChannels";
 import { updateShareMountRecords, withoutShareMountRecords } from "./shareMounts";
@@ -37,7 +38,7 @@ async function workspace(
   folder: "never-synced" | "unwritable-folder" | "unwritable-record",
   received: Pick<RegistryEntry, "shareMounts" | "sharedChannels"> = {},
 ) {
-  const rootPath = await createTestScratch("dohc-registry-workspace-");
+  const rootPath = canonicalWorkspaceRoot(await createTestScratch("dohc-registry-workspace-"));
   if (folder === "unwritable-folder") await writeFile(join(rootPath, ".dohc"), "");
   else await mkdir(join(rootPath, ".dohc"));
   if (folder === "never-synced") await recordNeverSynced(rootPath);
@@ -136,5 +137,24 @@ describe("changes that wait on the folder record", () => {
       { ...mount("a"), ended: true, skippedOps: { ...skippedOps, acknowledgedGeneration: skippedOps.generation } },
       ended(mount("b")),
     ]);
+  });
+});
+
+describe("a folder reached through a link", () => {
+  it("is saved only under its real path, once", async () => {
+    const real = await createTestScratch("dohc-registry-real-");
+    const link = join(await createTestScratch("dohc-registry-links-"), "linked");
+    await symlink(real, link, process.platform === "win32" ? "junction" : "dir");
+    const entry = (workspaceId: string, rootPath: string): RegistryEntry =>
+      ({ workspaceId, rootPath, kind: "personal", mode: "local-first" });
+
+    // A root that is not its own real path changed after its check: nothing is saved.
+    expect(() => registerWorkspace(entry("w-linked", link))).toThrow(FOLDER_CHANGED);
+    expect(findWorkspace("w-linked")).toBeNull();
+
+    registerWorkspace(entry("w-real", canonicalWorkspaceRoot(real)));
+    expect(findWorkspace("w-real")?.rootPath).toBe(canonicalWorkspaceRoot(link));
+    expect(() => registerWorkspace(entry("w-again", canonicalWorkspaceRoot(link)))).toThrow("Folder is already attached");
+    expect(findWorkspace("w-again")).toBeNull();
   });
 });

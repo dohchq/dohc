@@ -1,12 +1,17 @@
-import { describe, expect, it } from "vitest";
+// @vitest-environment jsdom
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { Editor } from "@tiptap/core";
+import { keydownHandler } from "@tiptap/pm/keymap";
 import { EditorState } from "@tiptap/pm/state";
-import { DecorationSet } from "@tiptap/pm/view";
+import { DecorationSet, type EditorView } from "@tiptap/pm/view";
+import { StarterKit } from "@tiptap/starter-kit";
 import { boldText, codeBlock, doc, hardBreak, paragraph, schema } from "./testDocs";
 import {
   buildReplaceActiveTransaction,
   buildReplaceAllTransaction,
   CLOSED_FIND_REPLACE_STATE,
   computeMatches,
+  findReplaceExtension,
   findReplaceKey,
   findReplaceReducer,
   makeFindReplacePlugin,
@@ -277,5 +282,43 @@ describe("makeFindReplacePlugin (registered plugin, real EditorState)", () => {
     // pick it up.
     const next = state.apply(state.tr.insertText("the ", 1));
     expect(findReplaceKey.getState(next)?.matches).toHaveLength(3);
+  });
+});
+
+describe("findReplaceExtension keys", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  // jsdom reports no Mac navigator, so ProseMirror reads Mod as Control here.
+  function replaceOpenAfter(platform: string, init: KeyboardEventInit): boolean {
+    vi.stubGlobal("dohcDesktop", { platform });
+    const editor = new Editor({ extensions: [StarterKit, findReplaceExtension], content: "<p>the cat</p>" });
+    try {
+      const event = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
+      editor.view.someProp("handleKeyDown", (handle) => handle(editor.view, event));
+      return findReplaceKey.getState(editor.state)?.replaceOpen ?? false;
+    } finally {
+      editor.destroy();
+    }
+  }
+
+  it("opens Replace with ⌥⌘F on macOS and leaves ⌘H to Hide", () => {
+    expect(replaceOpenAfter("darwin", { key: "ƒ", keyCode: 70, ctrlKey: true, altKey: true })).toBe(true);
+    expect(replaceOpenAfter("darwin", { key: "h", keyCode: 72, ctrlKey: true })).toBe(false);
+  });
+
+  it.each(["win32", "linux"])("opens Replace with Ctrl+H on %s", (platform) => {
+    expect(replaceOpenAfter(platform, { key: "h", keyCode: 72, ctrlKey: true })).toBe(true);
+    expect(replaceOpenAfter(platform, { key: "f", keyCode: 70, ctrlKey: true, altKey: true })).toBe(false);
+  });
+
+  it("matches ⌥⌘F through the keymap's keyCode fallback, where macOS reports ƒ", () => {
+    // On macOS, prosemirror-keymap normalizes Mod-Alt-f to Meta-Alt-f.
+    const run = vi.fn(() => true);
+    const handled = keydownHandler({ "Meta-Alt-f": run })(
+      {} as EditorView,
+      new KeyboardEvent("keydown", { key: "ƒ", keyCode: 70, metaKey: true, altKey: true }),
+    );
+    expect(handled).toBe(true);
+    expect(run).toHaveBeenCalledOnce();
   });
 });

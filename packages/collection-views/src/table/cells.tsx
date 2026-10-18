@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { KeyboardEvent, ReactNode } from "react";
 import type {
   CollectionIndexedValue,
   CollectionValue,
@@ -131,6 +131,12 @@ function wrapFlagged(
   );
 }
 
+// During IME composition, Enter and Escape work the candidate list. Some
+// browsers mark those keys only with keyCode 229.
+function composing(event: KeyboardEvent): boolean {
+  return event.nativeEvent.isComposing || event.keyCode === 229;
+}
+
 interface CellInputProps {
   defaultValue: string;
   type?: string;
@@ -146,6 +152,7 @@ function CellInput({ defaultValue, type = "text", commit, cancel }: CellInputPro
       defaultValue={defaultValue}
       className="w-full rounded border border-line bg-bg px-1 text-[13px]"
       onKeyDown={(event) => {
+        if (composing(event)) return;
         if (event.key === "Enter") commit(event.currentTarget.value);
         else if (event.key === "Escape") cancel();
       }}
@@ -174,6 +181,7 @@ function AddOptionInput({
       placeholder="Add option"
       className="w-full rounded border border-line bg-bg px-1 text-[13px] placeholder:text-subtle"
       onKeyDown={(event) => {
+        if (composing(event)) return;
         if (event.key === "Escape") return cancel();
         if (event.key !== "Enter") return;
         const option = event.currentTarget.value.trim();

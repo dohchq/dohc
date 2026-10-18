@@ -30,7 +30,9 @@ test('packaging preserves the relocated child and Wasm closure and rejects resou
   await rm(source, { recursive: true, force: true });
   const staged = join(resources, 'app-backend-runtime');
   await requireAppBackendRuntime(staged);
-  const native = { 'win32-x64': 'win32-x64/esbuild.exe', 'linux-x64': 'linux-x64/bin/esbuild' }[`${process.platform}-${process.arch}`];
+  const target = `${process.platform}-${process.arch}`;
+  const native = target === 'win32-x64' ? 'win32-x64/esbuild.exe'
+    : ['darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64'].includes(target) ? `${target}/bin/esbuild` : undefined;
   if (native) {
     const binary = join(resources, 'app-compiler/node_modules/@esbuild', native);
     await mkdir(dirname(binary), { recursive: true });

@@ -10,7 +10,10 @@ beforeEach(() => {
   // row visible with it.
   Element.prototype.scrollIntoView = vi.fn();
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 function setup() {
   const ran: string[] = [];
@@ -34,6 +37,7 @@ describe("CommandPalette keyboard selection", () => {
       SHORTCUTS["command-palette"].accelerators.map((binding) => ({ platform, focus, binding })),
     ),
   ))("handles $binding on $platform with focus on the $focus", ({ platform, focus, binding }) => {
+    vi.stubGlobal("dohcDesktop", { platform });
     const { ran, onClose } = setup();
     const target = focus === "input"
       ? screen.getByRole("textbox", { name: "Command" })
@@ -52,6 +56,26 @@ describe("CommandPalette keyboard selection", () => {
     expect(event.defaultPrevented).toBe(true);
     expect(onClose).toHaveBeenCalledOnce();
     expect(ran).toEqual([]);
+  });
+
+  it("leaves macOS Control+K to the text field", () => {
+    vi.stubGlobal("dohcDesktop", { platform: "darwin" });
+    const { onClose } = setup();
+    const event = new KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true, cancelable: true });
+    fireEvent(screen.getByRole("textbox", { name: "Command" }), event);
+    expect(event.defaultPrevented).toBe(false);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("leaves an Enter that confirms an IME composition to the input method", () => {
+    const { ran, onClose } = setup();
+    const input = screen.getByRole("textbox", { name: "Command" });
+    fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+    fireEvent.keyDown(input, { key: "Enter", keyCode: 229 });
+    fireEvent.keyDown(input, { key: "ArrowDown", isComposing: true });
+    expect(ran).toEqual([]);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(selectedLabel()).toBe("alpha");
   });
 
   it("Arrow keys move the selection (wrapping) and Enter runs it", async () => {

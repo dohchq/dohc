@@ -130,6 +130,42 @@ describe("MentionComposer autocomplete", () => {
     expect(screen.queryByTestId("chats-mention-menu")).not.toBeNull();
   });
 
+  it.each([
+    ["darwin", "closes the menu and leaves the line break to the textarea", false],
+    ["win32", "completes the highlighted mention", true],
+  ] as const)("Option+Return with the mention menu open on %s %s", async (platform, _result, completes) => {
+    vi.stubGlobal("dohcDesktop", { platform });
+    try {
+      const onSend = vi.fn();
+      render(<Harness onSend={onSend} />);
+      const composer = screen.getByTestId("chats-composer") as HTMLTextAreaElement;
+      await userEvent.type(composer, "hey @ag");
+      await screen.findByTestId("chats-mention-menu");
+      const event = new KeyboardEvent("keydown", { key: "Enter", altKey: true, bubbles: true, cancelable: true });
+      fireEvent(composer, event);
+      expect(event.defaultPrevented).toBe(completes);
+      expect(composer.value).toBe(completes ? "hey @agent " : "hey @ag");
+      expect(screen.queryByTestId("chats-mention-menu") !== null).toBe(false);
+      expect(onSend).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("starts a new line on Option+Return on macOS instead of sending", async () => {
+    vi.stubGlobal("dohcDesktop", { platform: "darwin" });
+    try {
+      const onSend = vi.fn();
+      render(<Harness onSend={onSend} />);
+      const composer = screen.getByTestId("chats-composer") as HTMLTextAreaElement;
+      await userEvent.type(composer, "hello");
+      fireEvent.keyDown(composer, { key: "Enter", altKey: true });
+      expect(onSend).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("does not send on Enter while IME composing (no menu)", async () => {
     const onSend = vi.fn();
     render(<Harness onSend={onSend} />);

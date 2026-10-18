@@ -67,7 +67,7 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
 function confirmText(select: "one" | "two"): string {
   const rows = within(screen.getByTestId("file-tree")).getAllByTestId("tree-row");
   fireEvent.click(rows[0]!);
-  if (select === "two") fireEvent.click(rows[1]!, { ctrlKey: true, metaKey: true });
+  if (select === "two") fireEvent.click(rows[1]!, { ctrlKey: true });
   fireEvent.keyDown(rows[0]!, { key: "Delete" });
   return screen.getByTestId("delete-confirm").textContent ?? "";
 }

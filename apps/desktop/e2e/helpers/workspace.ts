@@ -4,6 +4,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 import { normalizeAbsolutePath } from "@dohc/workspace-core";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../../src/workspaces/workspaceSettings";
+import { canonicalWorkspaceRoot } from "../../src/workspaces/createWorkspaceFolder";
 import {
   createTestScratch,
   removeTestScratch,
@@ -179,8 +180,8 @@ export async function seedWorkspaceRegistry(
         version: 1,
         workspaces: entries.map((entry) => ({
           workspaceId: entry.workspaceId,
-          // Store the app-canonical forward-slash form, exactly as the app
-          // itself writes registry entries (matters on Windows).
+          // The forward-slash form (matters on Windows). The app moves a
+          // spelling through a link to the folder's real path when it loads.
           rootPath: normalizeAbsolutePath(entry.rootPath),
           ...SEEDED_WORKSPACE_SHAPE,
           ...(entry.remote ? { remote: entry.remote } : {}),
@@ -292,10 +293,9 @@ export async function activeWorkspace(
   page: Page,
   rootPath: string,
 ): Promise<WorkspaceSummary> {
-  // The registry stores rootPath in the app's canonical forward-slash form
-  // (normalizeAbsolutePath); canonicalize the expected native path the same
-  // way so the comparison holds on Windows.
-  const expected = normalizeAbsolutePath(rootPath);
+  // The registry stores a workspace by its real path in the app's forward-slash
+  // form. Scratch roots can lead through links (macOS /tmp, Windows 8.3 names).
+  const expected = canonicalWorkspaceRoot(rootPath);
   const workspace = await page.waitForFunction(
     async (expectedRootPath) => {
       const api = (window as unknown as {

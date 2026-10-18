@@ -328,26 +328,35 @@ body {
 }
 
 /* Native feel: slim macOS-style scrollbars instead of Chromium's web
- * gutters. A 4px pill inside a 10px hit area, visible only as an ink tint;
- * the track never paints. */
-::-webkit-scrollbar {
+ * gutters on Windows and Linux. A 4px pill inside a 10px hit area, visible
+ * only as an ink tint; the track never paints. macOS keeps its own
+ * scrollbars, which follow the "Show scroll bars" setting; any
+ * ::-webkit-scrollbar rule would replace them. main.tsx sets data-platform.
+ * Each rule names the root's own scrollbar (the window's, when a screen
+ * outgrows it) and its descendants'. */
+:root:not([data-platform="darwin"])::-webkit-scrollbar,
+:root:not([data-platform="darwin"]) ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
 }
 
-::-webkit-scrollbar-track,
-::-webkit-scrollbar-corner {
+:root:not([data-platform="darwin"])::-webkit-scrollbar-track,
+:root:not([data-platform="darwin"]) ::-webkit-scrollbar-track,
+:root:not([data-platform="darwin"])::-webkit-scrollbar-corner,
+:root:not([data-platform="darwin"]) ::-webkit-scrollbar-corner {
   background: transparent;
 }
 
-::-webkit-scrollbar-thumb {
+:root:not([data-platform="darwin"])::-webkit-scrollbar-thumb,
+:root:not([data-platform="darwin"]) ::-webkit-scrollbar-thumb {
   border: 3px solid transparent;
   border-radius: 999px;
   background: color-mix(in srgb, var(--dohc-ink) 18%, transparent);
   background-clip: padding-box;
 }
 
-::-webkit-scrollbar-thumb:hover {
+:root:not([data-platform="darwin"])::-webkit-scrollbar-thumb:hover,
+:root:not([data-platform="darwin"]) ::-webkit-scrollbar-thumb:hover {
   background: color-mix(in srgb, var(--dohc-ink) 32%, transparent);
   background-clip: padding-box;
 }
@@ -396,6 +405,14 @@ body {
 
 .app-chrome :is(button, [role="button"], [role="tab"], [role="treeitem"]):not(:disabled, [aria-disabled="true"]) {
   cursor: pointer;
+}
+
+/* macOS controls keep the arrow; the pointing hand is for links. This rule
+ * outranks the rule above, the editor's checkbox rule, and the
+ * cursor-pointer utility. A disabled control keeps its own cursor, and a
+ * link and everything inside it keep the hand. */
+:root[data-platform="darwin"] :is(.cursor-pointer, .app-chrome :is(button, [role="button"], [role="tab"], [role="treeitem"]), input[type="checkbox"]):not(:disabled, [aria-disabled="true"], a[href], a[href] *) {
+  cursor: default;
 }
 
 /* Native window chrome: the titlebar strip drags the window; every

@@ -1,9 +1,13 @@
+// @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
 import type { MenuItemConstructorOptions } from "electron";
 import { MENU_COMMANDS } from "../ipc/channels";
 import { COMMAND_ROWS, type StaticCommandId } from "../renderer/commands/commandRows";
 import { buildMenuTemplate } from "../window/applicationMenu";
-import { SHORTCUTS, shortcutAccelerators, shortcutKeys, shortcutText, type ShortcutId } from "./shortcutRegistry";
+import {
+  SHORTCUTS, hasPrimaryModifier, matchShellShortcut, matchShellShortcutChord, shortcutAccelerators, shortcutKeys, shortcutText, shortcutTitle,
+  type ShortcutId,
+} from "./shortcutRegistry";
 
 function flatten(items: MenuItemConstructorOptions[]): MenuItemConstructorOptions[] {
   return items.flatMap((item) => [item, ...(Array.isArray(item.submenu) ? flatten(item.submenu) : [])]);
@@ -22,7 +26,7 @@ describe("shortcut menu contract", () => {
     const expected: string[] = [];
     for (const [id, row] of Object.entries(SHORTCUTS)) {
       if (row.owner !== "shell" && row.owner !== "main" && row.owner !== "native") continue;
-      for (const [index, accelerator] of row.accelerators.entries()) {
+      for (const [index, accelerator] of shortcutAccelerators(id as ShortcutId, platform).entries()) {
         expected.push(accelerator);
         const matches = items.filter((item) => item.accelerator === accelerator);
         expect(matches, id).toHaveLength(1);
@@ -61,12 +65,16 @@ describe("shortcut menu contract", () => {
         expect(item.label).toBe("About dohc");
         continue;
       }
-      expect(item.accelerator, id).toBe(shortcutAccelerators(id as StaticCommandId)[0]);
+      // macOS's Help menu repeats the palette without the keys View registers.
+      const helpCopy = platform === "darwin" && id === "command-palette" && item.accelerator === undefined;
+      expect(item.accelerator, id).toBe(helpCopy ? undefined : shortcutAccelerators(id as StaticCommandId, platform)[0]);
       labels[id] = item.label!;
     }
+    // macOS's app menu marks Settings with the ellipsis of a command that opens a window.
+    const settingsLabel = platform === "darwin" ? "Settings…" : "Settings";
     const rowLabels = Object.fromEntries([...MENU_COMMANDS, ...Object.values(zoomIds)].map((id) => [
       id,
-      id === "command-palette" ? "Command palette" : COMMAND_ROWS[id].label.replace(/^View: /, ""),
+      id === "command-palette" ? "Command palette" : id === "settings" ? settingsLabel : COMMAND_ROWS[id].label.replace(/^View: /, ""),
     ]));
     expect(labels).toEqual(rowLabels);
     expect(labels).toEqual({
@@ -76,7 +84,7 @@ describe("shortcut menu contract", () => {
       "command-palette": "Command palette", "quick-open": "Go to", "new-editor-group-right": "New editor group right",
       "toggle-sidebar": "Toggle sidebar", "toggle-about": "Toggle About", "show-chats": "Chats",
       "toggle-theme": "Toggle light/dark theme", "zoom-reset": "Reset zoom", "zoom-in": "Zoom in", "zoom-out": "Zoom out",
-      "settings": "Settings", "check-updates": "Check for updates", "install-update": "Update and restart",
+      "settings": settingsLabel, "check-updates": "Check for updates", "install-update": "Update and restart",
     });
   });
 
@@ -107,33 +115,68 @@ describe("shortcut menu contract", () => {
     const nonPalette = Object.entries(SHORTCUTS).filter(([id, row]) => !(id in COMMAND_ROWS) && row.owner !== "editor" && row.owner !== "history-restore").map(([id]) => id);
     expect(nonPalette.sort()).toEqual([
       "close-window", "command-palette", "dev-panel",
+      "find-close", "find-next", "find-previous",
       "palette-accept", "palette-dismiss", "palette-move",
     ].sort());
-    expect(shortcutAccelerators("show-chats")).toEqual([]);
+    expect(shortcutAccelerators("show-chats", "darwin")).toEqual([]);
   });
 });
 
-describe("existing shortcut display", () => {
-  it("keeps each display-only hint aligned with its accelerator", () => {
-    const canonical = (chord: string) => chord.toLowerCase().split(/[+ ]/).map((key) =>
-      ["ctrl", "cmd", "commandorcontrol"].includes(key) ? "mod" : key,
-    ).sort();
-    const hints = Object.entries(SHORTCUTS).filter(([, row]) => "hint" in row);
-    expect(hints.map(([id]) => id)).toEqual(["toggle-markdown-source", "editor-link"]);
-    for (const [id, row] of hints) {
-      if ("hint" in row) expect(canonical(row.hint), id).toEqual(canonical(row.accelerators[0]));
+describe("shortcut display", () => {
+  it.each(["win32", "darwin", "linux"])("keeps the exact %s text", (platform) => {
+    const mac = platform === "darwin";
+    expect(shortcutText("quick-open", platform)).toBe(mac ? "⌘P" : "Ctrl P");
+    for (const [id, key] of [["zoom-in", "="], ["zoom-out", "-"], ["zoom-reset", "0"]] as const) {
+      expect(shortcutKeys(id, platform)).toEqual([mac ? "⌘" : "Ctrl", key]);
+    }
+    expect(shortcutText("dev-panel", platform)).toBe(mac ? "⇧⌘D" : "Ctrl Shift D");
+    expect(shortcutText("command-palette", platform)).toBe(mac ? "⇧⌘P" : "Ctrl Shift P");
+    expect(shortcutText("toggle-about", platform)).toBe(mac ? "⌥⌘B" : "Ctrl Alt B");
+    expect(shortcutText("editor-replace", platform)).toBe(mac ? "⌥⌘F" : "Ctrl H");
+    expect(["palette-move", "palette-accept", "palette-dismiss"].map((id) => shortcutText(id as ShortcutId, platform)))
+      .toEqual(["↑↓", mac ? "↩" : "↵", "esc"]);
+  });
+
+  it.each(["win32", "darwin", "linux"])("writes %s chords for tooltips", (platform) => {
+    const mac = platform === "darwin";
+    expect(shortcutTitle("toggle-markdown-source", platform)).toBe(mac ? "⌘/" : "Ctrl+/");
+    expect(shortcutTitle("editor-link", platform)).toBe(mac ? "⌘K" : "Ctrl+K");
+    expect(shortcutTitle("dev-panel", platform)).toBe(mac ? "⇧⌘D" : "Ctrl+Shift+D");
+    expect(["find-previous", "find-next", "find-close"].map((id) => shortcutTitle(id as ShortcutId, platform)))
+      .toEqual(mac ? ["⇧↩", "↩", "esc"] : ["Shift+Enter", "Enter", "Esc"]);
+  });
+
+  it("gives Replace ⌥⌘F on macOS, where ⌘H hides the app", () => {
+    expect(shortcutAccelerators("editor-replace", "darwin")).toEqual(["CommandOrControl+Alt+F"]);
+    expect(shortcutAccelerators("editor-replace", "win32")).toEqual(["CommandOrControl+H"]);
+    expect(shortcutAccelerators("editor-replace", "linux")).toEqual(["CommandOrControl+H"]);
+  });
+});
+
+describe("shell shortcut matching", () => {
+  const press = (key: string, init: KeyboardEventInit = {}) => new KeyboardEvent("keydown", { key, ...init });
+
+  it.each([
+    ["darwin", { metaKey: true }, { ctrlKey: true }],
+    ["win32", { ctrlKey: true }, { metaKey: true }],
+    ["linux", { ctrlKey: true }, { metaKey: true }],
+  ] as const)("takes only the %s primary modifier", (platform, primary, other) => {
+    expect(hasPrimaryModifier({ metaKey: false, ctrlKey: false, ...primary }, platform)).toBe(true);
+    expect(hasPrimaryModifier({ metaKey: false, ctrlKey: false, ...other }, platform)).toBe(false);
+    expect(hasPrimaryModifier({ metaKey: true, ctrlKey: true }, platform)).toBe(false);
+    for (const [key, id] of [["n", "new-file"], ["p", "quick-open"], ["k", "command-palette"], ["b", "toggle-sidebar"],
+      ["w", "close-tab"], [",", "settings"], ["\\", "new-editor-group-right"], ["z", "history-restore-undo"]] as const) {
+      expect(matchShellShortcut(press(key, primary), platform), key).toBe(id);
+      expect(matchShellShortcutChord(press(key, primary), platform), key).toBe(id);
+      expect(matchShellShortcut(press(key, other), platform), key).toBeNull();
+      expect(matchShellShortcutChord(press(key, other), platform), key).toBeNull();
+      expect(matchShellShortcut(press(key, { metaKey: true, ctrlKey: true }), platform), key).toBeNull();
     }
   });
-  it.each(["win32", "darwin", "linux"])("keeps the exact %s text", (platform) => {
-    expect(shortcutText("quick-open", platform)).toBe(platform === "darwin" ? "⌘P" : "Ctrl P");
-    for (const [id, key] of [["zoom-in", "="], ["zoom-out", "-"], ["zoom-reset", "0"]] as const) {
-      expect(shortcutKeys(id, platform)).toEqual([platform === "darwin" ? "⌘" : "Ctrl", key]);
-    }
-    expect(shortcutText("toggle-markdown-source", platform)).toBe("Ctrl+/");
-    expect(shortcutText("editor-link", platform)).toBe("Cmd+K");
-    expect(shortcutText("dev-panel", platform)).toBe(platform === "darwin" ? "⇧⌘D" : "Ctrl Shift D");
-    expect(shortcutText("command-palette", platform)).toBe(platform === "darwin" ? "⇧⌘P" : "Ctrl Shift P");
-    expect(shortcutText("toggle-about", platform)).toBe(platform === "darwin" ? "⌥⌘B" : "Ctrl Alt B");
-    expect(["palette-move", "palette-accept", "palette-dismiss"].map((id) => shortcutText(id as ShortcutId, platform))).toEqual(["↑↓", "↵", "esc"]);
+
+  it("matches ⌥⌘B by its physical key only on macOS", () => {
+    const optionB = { key: "∫", code: "KeyB", altKey: true };
+    expect(matchShellShortcut(press(optionB.key, { ...optionB, metaKey: true }), "darwin")).toBe("toggle-about");
+    expect(matchShellShortcut(press(optionB.key, { ...optionB, ctrlKey: true }), "win32")).toBeNull();
   });
 });

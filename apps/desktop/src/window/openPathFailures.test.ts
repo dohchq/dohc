@@ -28,6 +28,7 @@ function fixture(limit?: number) {
     workspaceIdOf: (target: Renderer) => target.workspaceId,
     notify: vi.fn((_renderer: Renderer) => undefined),
     reopen,
+    moveAgain: vi.fn(async (): Promise<void> => undefined),
     record: vi.fn(),
     ...(limit === undefined ? {} : { limit }),
   };
@@ -95,6 +96,27 @@ describe("open path failures", () => {
     expect(f.record).toHaveBeenCalledExactlyOnceWith("C:\\work\\Trips", refused);
     expect(f.failures.take(window)).toEqual([]);
     expect(f.notify).toHaveBeenCalledOnce();
+  });
+
+  it("holds a failed move to Applications apart from folders, newest first, and moves again once on Try again", async () => {
+    const f = fixture(1);
+    const window = renderer(7, "a");
+    f.failures.report("C:\\work\\Trips", refused, window);
+    f.failures.reportMove(new Error("disk full"), window);
+    f.failures.reportMove(new Error("Failed to copy dohc.app"), window);
+    const taken = f.failures.take(window);
+    expect(taken).toEqual([
+      expect.objectContaining({ path: "C:\\work\\Trips" }),
+      { attemptId: expect.any(String), moveToApplications: true, cause: "Error: Failed to copy dohc.app", workspaceId: "a" },
+    ]);
+    const move = taken[1]!;
+
+    f.moveAgain.mockRejectedValueOnce(new Error("still full"));
+    await f.failures.retry(move.attemptId, window);
+    expect(f.moveAgain).toHaveBeenCalledOnce();
+    expect(f.reopen).not.toHaveBeenCalled();
+    expect(f.failures.take(window)).toEqual([expect.objectContaining({ moveToApplications: true, cause: "Error: still full" })]);
+    await expect(f.failures.retry(move.attemptId, window)).rejects.toThrow("Open the folder again.");
   });
 
   it("forgets a closed window's failures and attempts", async () => {

@@ -31,6 +31,8 @@ import type { AuthoredPathChanges, WorkspaceEngineMomentSummary, WorkspaceEngine
 import { readWorkspaceEnginePolicy } from "../workspaces/workspaceEnginePolicyFile";
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import { createWorkspaceAuthorityOwner } from "../workspaces/workspaceAuthorityOwner";
+import { createWorkspaceFolder } from "../workspaces/createWorkspaceFolder";
+import { realpathSync } from "node:fs";
 import { readDeleteRecovery, waitForRecovery } from "../workspaces/workspaceDeleteRecovery";
 
 function deferred() {
@@ -43,7 +45,7 @@ type State = Record<string, never>;
 type Dependencies = Parameters<typeof createDesktopCliServer<State>>[0];
 type Capture = NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>;
 
-function fixture(rootPath = resolve("cli-workspace")) {
+function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: string) => string = resolve) {
   const workspace: RegistryEntry = {
     workspaceId: "workspace", rootPath, kind: "personal", mode: "local-first",
     remote: { serverUrl: "https://cloud.test", ownerUserId: "owner" },
@@ -51,7 +53,7 @@ function fixture(rootPath = resolve("cli-workspace")) {
   const rows = new Map([[workspace.workspaceId, workspace]]);
   const authorities = createWorkspaceAuthorityOwner({
     findWorkspace: (id) => rows.get(id) ?? null,
-    canonicalizeRoot: resolve,
+    canonicalizeRoot,
     createState: (): State => ({}),
   });
   const store = {
@@ -703,6 +705,25 @@ describe("raw fileWrite socket requests", () => {
         .toMatchObject({ ok: false, written: [], reason: expect.stringContaining("Windows removes trailing dots and spaces") });
     }
     expect(f.capture.writeAuthoredFile).not.toHaveBeenCalled();
+  });
+
+  it("writes for an agent in a workspace opened through a link", async () => {
+    const real = await createTestScratch("dohc-cli-linked-real-");
+    const opened = join(await createTestScratch("dohc-cli-linked-"), "linked");
+    await symlink(real, opened, process.platform === "win32" ? "junction" : "dir");
+    const registered = await createWorkspaceFolder({
+      rootPath: opened, homeDir: await createTestScratch("dohc-cli-linked-home-"), kind: "personal",
+    });
+    // The authority resolves roots the way main does.
+    const f = fixture(registered.rootPath, (root) => realpathSync.native(root));
+    await f.create().startDesktopCliServer();
+    const line = await handleCliRequestLine(JSON.stringify({
+      token: "a".repeat(64), protocolVersion: CLI_PROTOCOL_VERSION, verb: "fileWrite",
+      args: { cwd: opened, actor: "agent", requestId: "linked", files: [{ path: "plain.txt", contentBase64: "bmV3" }] },
+    }), "a".repeat(64), f.options());
+    const transport = cliTransportResponseSchema.parse(JSON.parse(line));
+    expect(transport.ok ? parseCliResult("fileWrite", transport.result) : transport.error).toEqual({ ok: true, written: ["plain.txt"] });
+    expect(await readFile(join(real, "plain.txt"), "utf8")).toBe("new");
   });
 
   it("returns currentSha256 through the raw request on a stale write", async () => {

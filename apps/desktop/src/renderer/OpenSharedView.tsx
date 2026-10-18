@@ -1,4 +1,5 @@
 import {shareAccessLabel, shareSubjectFallback, shareSenderLabel} from "@dohc/security-contract/share-labels";
+import { isComposingKey } from "./ui/keys";
 import { useMouseBackButton } from "./useMouseBackButton";
 import { useRequestSequence } from "./useRequestSequence";
 import { ipcErrorMessage } from "./ipcError";
@@ -301,7 +302,7 @@ export function OpenSharedView(props: {
                 setError(null);
               }}
               onKeyDown={(event) => {
-                if (event.key === "Enter") void open();
+                if (event.key === "Enter" && !isComposingKey(event)) void open();
               }}
               placeholder="dohc-share:…"
               spellCheck={false}

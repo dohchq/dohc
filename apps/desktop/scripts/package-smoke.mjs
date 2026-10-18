@@ -163,8 +163,12 @@ if (config) {
   const fileExtensions = config.fileAssociations?.flatMap((entry) =>
     Array.isArray(entry.ext) ? entry.ext : [entry.ext],
   ) ?? [];
-  for (const ext of ["md", "markdown", "txt", "csv", "json"]) {
+  // Markdown may make dohc its default app; text, CSV and JSON never do.
+  const expectedRanks = { md: "Default", markdown: "Default", txt: "Alternate", csv: "Alternate", json: "Alternate" };
+  for (const [ext, rank] of Object.entries(expectedRanks)) {
     check(fileExtensions.includes(ext), `Open with dohc association includes .${ext}`);
+    const entry = config.fileAssociations?.find((candidate) => [candidate.ext].flat().includes(ext));
+    check(entry?.rank === rank, `.${ext} association ranks dohc ${rank} (${entry?.rank ?? "missing"})`);
   }
   check(
     Array.isArray(config.protocols) &&

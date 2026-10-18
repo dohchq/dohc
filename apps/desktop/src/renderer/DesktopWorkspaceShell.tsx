@@ -174,6 +174,7 @@ import {
 import { LazyDesktopSettings } from "./settings/LazyDesktopSettings";
 import { workspaceName } from "./Titlebar";
 import { toggleTheme } from "./theme";
+import { runUpdateCheck, runUpdateInstall } from "./appMenuCommands";
 import {
   PrimaryButton,
   SecondaryButton,
@@ -191,7 +192,6 @@ import {
   remapOrphanedDraftPaths,
   useOrphanedDraftPaths,
 } from "./orphanedDrafts";
-import { requestGuardedUpdateInstall } from "./RecoveryCloseGuard";
 import { useFocusReturn, useFocusSurface } from "./ui/focusReturn";
 import { CUSTOMIZE_TARGETS, CustomizeContext, type CustomizePart } from "./settings/customize";
 import { useAskAgent } from "./shell/useAskAgent";
@@ -2472,6 +2472,17 @@ export function DesktopWorkspaceShell(props: {
     };
     openSwitch();
   }, [openAutomationControls, openFile, reportShellError, workspaceIsReady]);
+  // A file the OS opened with dohc. Main sends it once this window has opened
+  // this workspace, and it opens when the workspace is ready.
+  const [openedFromOs, setOpenedFromOs] = useState<{ path: string } | null>(null);
+  useEffect(() => bridge().onWorkspaceActivated((next, file) => {
+    if (file !== undefined && next.workspaceId === workspaceId) setOpenedFromOs({ path: file });
+  }), [workspaceId]);
+  useEffect(() => {
+    if (!workspaceIsReady || openedFromOs === null) return;
+    setOpenedFromOs(null);
+    openFile(openedFromOs.path);
+  }, [openFile, openedFromOs, workspaceIsReady]);
   const clearAutomationFocus = useCallback(() => setAutomationFocus(null), []);
   const recordHistory = useRecordHistory(workspaceId, { reportShellError, clearKind, openAutomationRun: openAutomation });
   // A Collection page's errors and notices, which can answer after this
@@ -2984,8 +2995,12 @@ export function DesktopWorkspaceShell(props: {
       void closeTabsAfterFlush([{ groupId: group.id, tab }]);
     } else if (current.editorGroups.length > 1) {
       mutateWb((state) => closeEditorGroup(state, group.id));
+    } else if (group.tabs.length === 0 && bridge().platform === "darwin") {
+      // With nothing left to close, macOS closes the window.
+      void bridge().closeThisWindow().catch((error) =>
+        reportShellError("Could not close this window.", error));
     }
-  }, [closeTabsAfterFlush, mutateWb]);
+  }, [closeTabsAfterFlush, mutateWb, reportShellError]);
 
   const closeAllTabs = useCallback(() => {
     void closeTabsAfterFlush(
@@ -3332,36 +3347,14 @@ export function DesktopWorkspaceShell(props: {
       reportShellError("Could not refresh workspace files.", error),
     );
   }, [refreshFiles, reportShellError]);
-  const checkForDesktopUpdates = useCallback(async () => {
-    try {
-      const result = await bridge().checkForUpdates();
-      if (!result.checked) {
-        reportShellError("No update check was started.", new Error(result.state.message));
-      }
-    } catch (error) {
-      reportShellError("Could not check for updates.", error);
-    }
-  }, [reportShellError]);
-  const installDesktopUpdate = useCallback(async () => {
-    try {
-      // Through the guard: with set-aside drafts
-      // present the recovery dialog opens instead of the one-shot install.
-      const result = await requestGuardedUpdateInstall();
-      if (result === null) return;
-      if (!result.accepted) {
-        reportShellError(
-          "Could not install the update.",
-          new Error(
-            result.state.status === "error"
-              ? result.state.message
-              : "The restart request was not accepted.",
-          ),
-        );
-      }
-    } catch (error) {
-      reportShellError("Could not install the update.", error);
-    }
-  }, [reportShellError]);
+  const checkForDesktopUpdates = useCallback(
+    () => runUpdateCheck(reportShellError),
+    [reportShellError],
+  );
+  const installDesktopUpdate = useCallback(
+    () => runUpdateInstall(reportShellError),
+    [reportShellError],
+  );
 
   const moveTabIntoNewGroup = useCallback(
     (groupId: string = wbRef.current.activeEditorGroup, path?: string) => {
@@ -3560,7 +3553,7 @@ export function DesktopWorkspaceShell(props: {
 
   const showWorkbenchMenu = useCallback(
     async (
-      context: "tab" | "editor" | "status",
+      context: "tab" | "status",
       path?: string,
       groupId?: string,
     ) => {
@@ -3923,15 +3916,16 @@ export function DesktopWorkspaceShell(props: {
       // A stopped workspace answers no workspace shortcut.
       if (storeUpdateRequiredRef.current) return;
       const blockingModal = hasBlockingModal();
-      const command = blockingModal ? matchShellShortcutChord(event) : matchShellShortcut(event);
+      const platform = bridge().platform;
+      const command = blockingModal ? matchShellShortcutChord(event, platform) : matchShellShortcut(event, platform);
       if (!command) return;
       // A modal owns the keyboard while it is visible. Native/main-owned
       // shortcuts such as Close Window and zoom never reach this listener,
       // so they continue to work over a modal.
       if (blockingModal) {
-        // Consume Command chords before macOS can route them through the menu.
-        // Text inputs keep Control-key editing and native undo.
-        if (command !== "history-restore-undo" && event.metaKey) event.preventDefault();
+        // Consume the chord before macOS can route it through the menu.
+        // Text inputs keep native undo.
+        if (command !== "history-restore-undo" && platform === "darwin") event.preventDefault();
         return;
       }
       if (command === "settings") {
@@ -5362,13 +5356,7 @@ export function DesktopWorkspaceShell(props: {
                         : {})}
                     />
                   )}>
-                    <div
-                      className="flex min-h-0 flex-1 flex-col"
-                      onContextMenu={(event) => {
-                        event.preventDefault();
-                        void showWorkbenchMenu("editor", tabPath ?? undefined, editorGroup.id);
-                      }}
-                    >
+                    <div className="flex min-h-0 flex-1 flex-col">
             {/* The editor island: a document/tab view that throws (hostile
                 markdown tripping the WYSIWYG parse, a failed editor chunk, a
                 view bug) contains to this pane — tabs, explorer, and rail

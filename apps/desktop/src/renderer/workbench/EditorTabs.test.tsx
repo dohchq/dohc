@@ -630,6 +630,22 @@ describe("EditorTabs pointer drag", () => {
     flushFrames();
   }
 
+  it("leaves a macOS Control press to the context menu instead of dragging", () => {
+    vi.stubGlobal("dohcDesktop", { platform: "darwin" });
+    try {
+      renderGroup();
+      const second = screen.getByTestId("tab-b.md");
+      vi.mocked(document.elementFromPoint).mockReturnValue(second);
+      fireEvent.pointerDown(second, { button: 0, ctrlKey: true, pointerId: 3, clientX: 110, clientY: 10 });
+      fireEvent.pointerMove(second, { pointerId: 3, buttons: 1, clientX: 260, clientY: 10 });
+      flushFrames();
+      expect(second.dataset.dragging).toBeUndefined();
+      expect(second.style.transform).toBe("");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("moves the pressed tab under the pointer and shifts the tabs it passes", () => {
     const { onMove } = renderGroup();
     const first = screen.getByTestId("tab-a.md");
@@ -1249,6 +1265,18 @@ it("keeps focus on the surviving tab, then the editor when closing the last tab"
   }
   fireEvent.keyDown(document.activeElement!, { key: "Delete" });
   await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId("editor-surface")));
+});
+// ⌘⌫ deletes in Finder's file list; macOS has no such key for closing a tab.
+it("leaves a focused tab open on ⌘⌫ on macOS", () => {
+  vi.stubGlobal("dohcDesktop", { platform: "darwin" });
+  try {
+    render(<KeyboardTabs />);
+    screen.getByTestId("tab-a.md").focus();
+    fireEvent.keyDown(document.activeElement!, { key: "Backspace", metaKey: true });
+    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
+  } finally {
+    vi.unstubAllGlobals();
+  }
 });
 it("returns from a removed close button to the surviving tab", async () => {
   render(<KeyboardTabs />);

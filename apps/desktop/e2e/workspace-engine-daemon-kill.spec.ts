@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { DOCUMENT_END } from "./helpers/keys";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { launchDesktopApp } from "./helpers/desktopApp";
@@ -87,7 +88,7 @@ async function killDaemonMidTyping(
 
   const editor = page.getByTestId("markdown-editor");
   await editor.click();
-  await page.keyboard.press("ControlOrMeta+End");
+  await page.keyboard.press(DOCUMENT_END);
 
   // A first settled edit proves the session is genuinely live before the kill,
   // so a later missing sentinel cannot be blamed on a doc that never worked.
@@ -314,7 +315,7 @@ test("a document reopened after an app crash reads Saved only once its file has 
     await waitForWorkspaceFile(desktop.page, workspace.workspaceId, docPath);
     await openEngineDoc(desktop.page, docPath);
     await desktop.page.getByTestId("markdown-editor").click();
-    await desktop.page.keyboard.press("ControlOrMeta+End");
+    await desktop.page.keyboard.press(DOCUMENT_END);
 
     // Crash once the engine has journaled the edit.
     const journaled = ydocUpdateCount(temp.rootPath);

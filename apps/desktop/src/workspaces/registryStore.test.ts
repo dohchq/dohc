@@ -7,8 +7,9 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { normalizeAbsolutePath } from "@dohc/workspace-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   MAX_RETAINED_SKIPPED_OPS,
@@ -23,6 +24,7 @@ import {
 // store produces: one rule, and the surfaces that show the warning read it
 // from the same place.
 import { hasUnacknowledgedShareSkips } from "../renderer/shareSkipNotice";
+import { canonicalWorkspaceRoot } from "./createWorkspaceFolder";
 import { createTestScratch } from "./testTemp";
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -648,6 +650,34 @@ describe("registry store", () => {
     expect(() =>
       store.register({ ...personal, rootPath: "/home/sam/dohc/personal-copy" }),
     ).toThrow(/identity .* already attached|already attached .* identity/i);
+  });
+
+  it("reads an entry saved through a link under its folder's real path, and keeps a missing folder's path", async () => {
+    const real = await createTestScratch("dohc-registry-real-");
+    const link = join(dirname(registryPath), "linked");
+    await symlink(real, link, process.platform === "win32" ? "junction" : "dir");
+    const missing = normalizeAbsolutePath(join(dirname(registryPath), "gone"));
+    await writeFile(registryPath, JSON.stringify({ version: 1, workspaces: [
+      { ...personal, rootPath: normalizeAbsolutePath(link) },
+      { ...personal, workspaceId: "ws-gone", rootPath: missing },
+    ] }));
+
+    const reopened = createRegistryStore(registryPath);
+    expect(reopened.list().map((entry) => entry.rootPath)).toEqual([canonicalWorkspaceRoot(real), missing]);
+    expect(() => reopened.register({ ...personal, workspaceId: "ws-real", rootPath: canonicalWorkspaceRoot(real) }))
+      .toThrow(/already attached/i);
+    // The next write saves the real path.
+    reopened.markOpened("ws-1", 5);
+    const saved = JSON.parse(await readFile(registryPath, "utf8")) as { workspaces: Array<{ rootPath: string }> };
+    expect(saved.workspaces.map((entry) => entry.rootPath)).toEqual([canonicalWorkspaceRoot(real), missing]);
+  });
+
+  it.skipIf(process.platform === "win32")("reads a backslash in a folder's name as part of the name", async () => {
+    const folder = join(dirname(registryPath), "trip\\2026");
+    await mkdir(folder);
+    await writeFile(registryPath, JSON.stringify({ version: 1, workspaces: [{ ...personal, rootPath: canonicalWorkspaceRoot(folder) }] }));
+    expect(createRegistryStore(registryPath).find("ws-1")?.rootPath).toBe(canonicalWorkspaceRoot(folder));
+    expect(canonicalWorkspaceRoot(folder).endsWith("/trip\\2026")).toBe(true);
   });
 
   it("persists across store instances", () => {

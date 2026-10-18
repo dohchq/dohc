@@ -80,6 +80,24 @@ WSLg can display the packaged app, and Xvfb supports automated startup checks.
 These checks do not prove Linux desktop installation, protocol registration, or real AppImage upgrades.
 Use a normal Linux desktop or desktop VM for those release rehearsals.
 
+### Package macOS x64 on Apple silicon
+
+The Apple silicon runner packages both macOS architectures.
+pnpm installs only the host's native binaries unless the install names another CPU.
+The package job installs the binaries for its architecture and stages the Collection compiler for it.
+Before each `pnpm run` or `pnpm exec`, pnpm checks the install and can reinstall without `--cpu`.
+The package job turns that check off with `pnpm_config_verify_deps_before_run=false`.
+Packaging refuses a compiler staged for another architecture.
+
+To package macOS x64 on an Apple silicon Mac, use one shell for every step:
+
+1. Set `pnpm_config_verify_deps_before_run` to `false`.
+2. Run `pnpm install --frozen-lockfile --cpu=current --cpu=x64`.
+3. Run `pnpm build:desktop`. It stages the arm64 compiler.
+4. Run `node apps/desktop/scripts/stage-app-compiler.mjs --arch=x64`.
+5. Run `pnpm --filter @dohc/desktop run build:engine --target x86_64-apple-darwin`.
+6. Run `pnpm --filter @dohc/desktop exec electron-builder --x64 --publish never`.
+
 ## Contributor access to releases
 
 The committed `dohc-release` skill is a public procedure. It contains no credentials and grants no GitHub permissions.

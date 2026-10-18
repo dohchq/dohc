@@ -119,6 +119,22 @@ describe("AppErrorBoundary", () => {
     fireEvent.click(screen.getByTestId("app-crash-reload"));
     expect(reloadRenderer).toHaveBeenCalledOnce();
   });
+
+  // The window has no OS title bar, so the crash screen draws its own drag
+  // strip over its top edge without moving the message.
+  it("keeps the window movable", () => {
+    vi.stubGlobal("dohcDesktop", { reloadRenderer: vi.fn(async () => undefined) });
+    render(
+      <AppErrorBoundary>
+        <Bomb />
+      </AppErrorBoundary>,
+    );
+    const page = screen.getByTestId("app-crash-screen");
+    const strip = page.querySelector<HTMLElement>(":scope > .titlebar-drag");
+    expect(page.className).toContain("relative");
+    expect(strip?.className).toContain("absolute");
+    expect(strip?.style.height).toBe("40px");
+  });
 });
 
 describe("installGlobalErrorReporters", () => {

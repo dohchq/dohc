@@ -13,6 +13,7 @@ import { ShareHandoffSurface } from "./ShareHandoffSurface";
 import { ConnectionNotices, useConnectionNotices } from "./shell/connectionNotices";
 import { useCrashReport } from "./shell/useCrashReport";
 import { useWorkspacePathOpenFailures } from "./shell/workspacePathOpenFailures";
+import { useMenuCommandsWithoutWorkspace } from "./appMenuCommands";
 import { Titlebar, workspaceName } from "./Titlebar";
 import { IconButton, SecondaryButton } from "./ui/controls";
 import { Menu } from "./ui/Menu";
@@ -198,6 +199,9 @@ export function WorkspaceManager(props: {
   const crashReportNotice = useCrashReport(connectionNotices);
   // A folder the command line or the OS asked for that did not open.
   useWorkspacePathOpenFailures(null, connectionNotices.reportFailure);
+  // Without the workspace shell, the manager answers the menu commands that
+  // need no workspace.
+  useMenuCommandsWithoutWorkspace(connectionNotices.reportError);
   // The address a failed attempt used, put back when a notice's Try again
   // reopens the route it came from.
   const [retryServerUrl, setRetryServerUrl] = useState("");

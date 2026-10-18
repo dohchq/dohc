@@ -70,6 +70,37 @@ describe("ChatComposer Enter-to-send", () => {
     expect(onSend).toHaveBeenCalledTimes(1);
   });
 
+  it("leaves an Escape that cancels an IME composition to the input method", () => {
+    const onEscape = vi.fn();
+    renderComposer({ onEscape });
+    const composer = screen.getByTestId("test-chat-composer");
+    fireEvent.keyDown(composer, { key: "Escape", isComposing: true });
+    fireEvent.keyDown(composer, { key: "Escape", keyCode: 229 });
+    expect(onEscape).not.toHaveBeenCalled();
+    fireEvent.keyDown(composer, { key: "Escape" });
+    expect(onEscape).toHaveBeenCalledOnce();
+  });
+
+  it("does not send on an Enter that IME marks only with keyCode 229", () => {
+    const { onSend } = renderComposer();
+    fireEvent.keyDown(screen.getByTestId("test-chat-composer"), { key: "Enter", keyCode: 229 });
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["darwin", "starts a new line", false],
+    ["win32", "still sends", true],
+  ] as const)("Option+Return on %s %s", (platform, _result, sends) => {
+    vi.stubGlobal("dohcDesktop", { platform });
+    try {
+      const { onSend } = renderComposer();
+      fireEvent.keyDown(screen.getByTestId("test-chat-composer"), { key: "Enter", altKey: true });
+      expect(onSend).toHaveBeenCalledTimes(sends ? 1 : 0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("does not send on Shift+Enter (newline stays a newline)", () => {
     const { onSend } = renderComposer();
     fireEvent.keyDown(screen.getByTestId("test-chat-composer"), {

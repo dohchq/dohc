@@ -32,6 +32,7 @@ import {
   movedPointer,
   revealMenuRow,
 } from "../ui/Menu";
+import { isComposingKey, isOptionReturn, isSendKey } from "../ui/keys";
 
 export interface FileMentionCandidate {
   path: string;
@@ -432,8 +433,16 @@ export function MentionComposer(props: {
       // IME guard first: Enter during composition confirms the composed
       // characters — it must never accept a mention candidate or send, even
       // when the mention menu is open. Let the browser handle the keystroke.
-      if (event.nativeEvent.isComposing) return;
+      if (isComposingKey(event)) return;
       if (showMenu) {
+        if (isOptionReturn(event)) {
+          // ⌥↩ starts a new line here too, so it closes the menu and leaves
+          // the key to the textarea.
+          fileRequest.current += 1;
+          setFileStage(null);
+          setMenuOpen(false);
+          return;
+        }
         if (event.key === "ArrowDown") {
           event.preventDefault();
           setHighlight((value) => (value + 1) % menuLength);
@@ -478,9 +487,8 @@ export function MentionComposer(props: {
           return;
         }
       }
-      // isComposing: Enter during IME composition confirms characters — never
-      // sends. Matches the shared ChatComposer contract.
-      if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+      // Matches the shared ChatComposer contract.
+      if (isSendKey(event)) {
         event.preventDefault();
         props.onSend();
         return;

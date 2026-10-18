@@ -33,5 +33,21 @@
   { "input": "Ꭰꭰ", "folded": "ᎠᎠ", "ignored": false },
   { "input": "CAFÉ", "folded": "café", "ignored": false },
   { "input": "CAFÉ", "folded": "café", "ignored": false },
-  { "input": "①", "folded": "①", "ignored": false }
+  { "input": "①", "folded": "①", "ignored": false },
+  { "input": ".DS_Store", "folded": ".ds_store", "ignored": true },
+  { "input": "._Report.docx", "folded": "._report.docx", "ignored": true },
+  { "input": ".localized", "folded": ".localized", "ignored": true },
+  { "input": "Icon\r", "folded": "icon\r", "ignored": true },
+  { "input": ".Spotlight-V100", "folded": ".spotlight-v100", "ignored": true },
+  { "input": ".fseventsd", "folded": ".fseventsd", "ignored": true },
+  { "input": ".Trashes", "folded": ".trashes", "ignored": true },
+  { "input": ".TemporaryItems", "folded": ".temporaryitems", "ignored": true },
+  { "input": ".DocumentRevisions-V100", "folded": ".documentrevisions-v100", "ignored": true },
+  { "input": "Thumbs.db", "folded": "thumbs.db", "ignored": true },
+  { "input": "desktop.ini", "folded": "desktop.ini", "ignored": true },
+  { "input": "DS_Store", "folded": "ds_store", "ignored": false },
+  { "input": ".DS_Store.md", "folded": ".ds_store.md", "ignored": false },
+  { "input": "Icon", "folded": "icon", "ignored": false },
+  { "input": "_notes.md", "folded": "_notes.md", "ignored": false },
+  { "input": "Thumbs.db.md", "folded": "thumbs.db.md", "ignored": false }
 ]

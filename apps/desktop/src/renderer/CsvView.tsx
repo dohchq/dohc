@@ -3,6 +3,7 @@ import { Code, Database, LoaderCircle, Plus, Table, Trash2 } from "lucide-react"
 import { EmptyState, IconButton, SecondaryButton } from "./ui/controls";
 import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore, type KeyboardEvent } from "react";
 import type { ImportToDatabaseResult } from "../ipc/bridgeContract";
+import { hasPrimaryModifier } from "../shortcuts/shortcutRegistry";
 import { bridge } from "./bridge";
 import type { ReportButtonError } from "./collections/useAutomationButtons";
 import { ViewActions } from "./fileInspectorUi";
@@ -22,6 +23,7 @@ import {
 } from "./ui/DataGrid";
 import { SegmentedControl, type SegmentedOption } from "./ui/SegmentedControl";
 import { StateMark } from "./ui/StateMark";
+import { isComposingKey } from "./ui/keys";
 import {
   useAutosavedTextDraft,
   type DraftFlush,
@@ -223,7 +225,7 @@ const DELETE_BUTTON =
 // An Enter that finishes composing a character is the input method's.
 const endEditOnEnter = (onEndEdit: (cellIndex: number) => void, cellIndex: number) =>
   (event: KeyboardEvent<HTMLInputElement>) => {
-    if (event.key === "Enter" && !event.nativeEvent.isComposing) onEndEdit(cellIndex);
+    if (event.key === "Enter" && !isComposingKey(event)) onEndEdit(cellIndex);
   };
 
 const CsvTableHeader = memo(function CsvTableHeader({
@@ -665,7 +667,7 @@ export function CsvView({
           value={draft.draft}
           onChange={(event) => draft.setDraft(event.target.value)}
           onKeyDown={(event) => {
-            if ((event.metaKey || event.ctrlKey) && event.key === "s") {
+            if (hasPrimaryModifier(event, window.dohcDesktop?.platform) && event.key === "s") {
               event.preventDefault();
               void draft.saveNow();
             }

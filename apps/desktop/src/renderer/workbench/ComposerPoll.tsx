@@ -1,6 +1,7 @@
 import { Plus, Trash2, X } from "lucide-react";
 import { Fragment, useLayoutEffect, useRef, type Ref } from "react";
 import { MAX_POLL_CHOICE_LENGTH, MAX_POLL_CHOICES, repeatedPollChoices, trimChoice, type PollDraft } from "./chatPoll";
+import { isComposingKey } from "../ui/keys";
 
 const GHOST_ICON =
   "grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink dohc-focus-visible disabled:opacity-40";
@@ -79,7 +80,7 @@ export function ComposerPoll(props: {
                 }
                 onKeyDown={(event) => {
                   // IME guard first: Enter confirms the composed characters.
-                  if (event.nativeEvent.isComposing) return;
+                  if (isComposingKey(event)) return;
                   if (event.key === "Enter") {
                     // Never the form's send: Enter here moves between choices.
                     event.preventDefault();

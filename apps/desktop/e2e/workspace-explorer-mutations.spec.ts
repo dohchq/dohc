@@ -1,4 +1,5 @@
 import { editorTabTestId } from "../src/testPins";
+import { DOCUMENT_END } from "./helpers/keys";
 import { expect, test } from "@playwright/test";
 import { access, readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -29,7 +30,7 @@ test("Explorer creates, renames, cancels, and confirms recoverable deletion", as
     await openWorkspaceFromFirstRun(page, temp);
 
     const filesHeader = page.getByTestId("explorer-files-header");
-    await page.keyboard.press("Control+n");
+    await page.keyboard.press("ControlOrMeta+n");
     await page.getByRole("textbox", { name: "File name" }).fill("Welcome.md");
     await page.getByRole("button", { name: "Create file" }).click();
     await expect(explorerRow(page, "Welcome.md")).toBeVisible();
@@ -143,7 +144,7 @@ test("renaming a live Markdown file first lands the newest editor update", async
     const editor = page.getByTestId("markdown-editor");
     await expect(editor).toBeVisible();
     await editor.click();
-    await page.keyboard.press("ControlOrMeta+End");
+    await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.insertText(`\n${marker}`);
     await expect(editor).toContainText(marker);
 
