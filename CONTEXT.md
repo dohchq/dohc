@@ -181,7 +181,13 @@ A replica current view is the relay-owned view of a shared workspace after the p
 It contains a complete file manifest, current text, and the applied ordinary and journal cursors.
 The union of current share selectors limits collection. It grants no recipient access.
 The relay replaces the stored view atomically and removes text with no remaining references.
-Settlement cuts remain a separate concept. Recipient access and pinned History are separate changes.
+Settlement cuts remain a separate concept.
+
+## History pin
+
+An immutable recipient History version of one shared object, sampled from a stored replica current view.
+The current grant, selector, and object visibility control access. A grant cannot read a pin superseded at or before that grant began.
+Pins do not enter the owner's replication log or count against the owner's quota.
 
 ## History operation
 
