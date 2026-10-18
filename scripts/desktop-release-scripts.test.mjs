@@ -94,7 +94,7 @@ test("release platform selection defaults to Windows and keeps every native targ
   // macOS ships for Apple silicon only.
   const macos = desktopReleaseTargets("macos");
   assert.deepEqual(macos.map((target) => [target.label, target.target]), [["macOS arm64", "aarch64-apple-darwin"]]);
-  assert.deepEqual(macos[0].runner, ["self-hosted", "macos", "arm64"]);
+  assert.deepEqual(macos[0].runner, ["macos-26"]);
   assert.equal(macos[0].require_signing, "1");
   const all = desktopReleaseTargets("all");
   assert.deepEqual(all.map((target) => [target.arch, target.target]), [
@@ -102,7 +102,7 @@ test("release platform selection defaults to Windows and keeps every native targ
     ["arm64", "aarch64-apple-darwin"],
     ["x64", "x86_64-unknown-linux-gnu"],
   ]);
-  for (const target of all) assert.equal(target.runner[0], "self-hosted");
+  for (const target of all) assert.equal(target.runner[0], target.os === "macOS" ? "macos-26" : "self-hosted");
   assert.throws(() => desktopReleaseTargets("mac"), /Invalid release platforms/);
 });
 
@@ -409,13 +409,13 @@ function workflowValues(value) {
   return [value];
 }
 
-function releaseExpression(expression, needs, secrets = {}, inputs = {}) {
+function releaseExpression(expression, needs, secrets = {}, inputs = {}, matrix = {}) {
   // These release guards use string comparisons and operators shared by Actions and JavaScript.
   assert.match(expression, /^\$\{\{[\s\S]*\}\}$/u);
-  return Function("needs", "secrets", "inputs", "fromJSON", `return (${expression.slice(3, -2)});`)(needs, secrets, inputs, JSON.parse);
+  return Function("needs", "secrets", "inputs", "matrix", "fromJSON", `return (${expression.slice(3, -2)});`)(needs, secrets, inputs, matrix, JSON.parse);
 }
 
-test("desktop releases start only by dispatch, run on self-hosted runners, and preserve unsigned package smoke", () => {
+test("desktop releases start only by dispatch, keep macOS off self-hosted runners, and preserve unsigned package smoke", () => {
   const { jobs } = releaseWorkflow;
   assert.deepEqual(Object.keys(releaseWorkflow.on), ["workflow_dispatch"], "only a dispatch can start a release");
   assert.equal(releaseWorkflow.concurrency["cancel-in-progress"], false, "a publish in progress must finish");
@@ -423,10 +423,9 @@ test("desktop releases start only by dispatch, run on self-hosted runners, and p
   assert.equal(jobs.preflight.if, "github.ref == 'refs/heads/main'");
   for (const job of [jobs.build, jobs.publish]) assert.equal(job.environment, "desktop-release");
 
-  // Cloud runners stay off (AGENTS.md). Packaging runs on the matrix preflight
-  // selects from the release targets. Every other job runs on the Linux runner
-  // for a Linux dispatch, on the Mac for a macOS dispatch, and on the Windows
-  // runner otherwise.
+  // Packaging runs on the matrix preflight selects from the release targets.
+  // Every other job runs on the Linux runner for a Linux dispatch, on a
+  // GitHub-hosted Mac for a macOS dispatch, and on the Windows runner otherwise.
   assert.equal(jobs.build["runs-on"], "${{ matrix.runner }}");
   assert.equal(jobs.build.strategy.matrix.include, "${{ fromJSON(needs.preflight.outputs.matrix) }}");
   // Windows and WSL share one PC, so a combined dispatch packages one platform at a time.
@@ -438,24 +437,31 @@ test("desktop releases start only by dispatch, run on self-hosted runners, and p
       ? desktopReleaseTargets("all").map(target => target.runner)
       : dispatchPlatforms.map(platforms => releaseExpression(job["runs-on"], {}, {}, { platforms }));
     if (name !== "build") {
-      const coordinators = { linux: ["self-hosted", "linux", "x64"], macos: ["self-hosted", "macos", "arm64"] };
+      const coordinators = { linux: ["self-hosted", "linux", "x64"], macos: ["macos-26"] };
       assert.deepEqual(runners, dispatchPlatforms.map(platforms => coordinators[platforms] ?? ["self-hosted", "windows", "x64"]),
-        `${name} runs on the Linux runner only for a Linux dispatch and on the Mac only for a macOS dispatch`);
+        `${name} runs on the Linux runner only for a Linux dispatch and on a hosted Mac only for a macOS dispatch`);
     }
     assert.ok(runners.length > 0, `${name} has a runner`);
+    // Signing secrets never reach a self-hosted Mac, whose account outlives the job.
     for (const runner of runners) {
       assert.ok(Array.isArray(runner), `${name} has explicit runner labels`);
-      assert.ok(runner.includes("self-hosted"));
-      assert.ok(runner.some(label => ["linux", "windows", "macos"].includes(label)));
-      assert.ok(runner.some(label => ["x64", "arm64"].includes(label)));
+      if (runner.includes("self-hosted")) {
+        assert.ok(runner.some(label => ["linux", "windows"].includes(label)), `${name} runs no macOS job on a self-hosted runner`);
+        assert.ok(runner.includes("x64"));
+      } else {
+        assert.deepEqual(runner, ["macos-26"], `${name} runs macOS jobs on a GitHub-hosted Apple silicon runner`);
+      }
     }
   }
 
-  // The Mac's own bash 3.2 rejects the coordinator jobs' scripts, so a macOS
-  // dispatch stops before any work when the runner lacks a newer bash.
-  const [requireBash] = jobs.preflight.steps;
-  assert.equal(requireBash.if, "runner.os == 'macOS'");
-  assert.match(requireBash.run, /\(\( BASH_VERSINFO\[0\] < 4 \)\)/);
+  // The hosted Mac's bash 3.2 rejects the preflight and publish scripts, so
+  // both jobs install Homebrew bash first on macOS.
+  for (const job of [jobs.preflight, jobs.publish]) {
+    const [installBash] = job.steps;
+    assert.equal(installBash.if, "runner.os == 'macOS'");
+    assert.match(installBash.run, /^brew install bash$/m);
+    assert.match(installBash.run, /command -v bash/);
+  }
 
   // Desktop tests need the built runtime exports and the native engine.
   const preflightOrder = step => jobs.preflight.steps.indexOf(step);
@@ -535,8 +541,15 @@ test("desktop releases start only by dispatch, run on self-hosted runners, and p
   assert.ok(secretExpressions.length > 0, "the workflow still declares release secrets");
   for (const expression of secretExpressions) {
     const secrets = Object.fromEntries([...expression.matchAll(/secrets\.(\w+)/gu)].map(([, name]) => [name, `configured-${name}`]));
-    assert.equal(releaseExpression(expression, { preflight: { outputs: { dry_run: "true" } } }, secrets), "", "dry runs receive no release secrets");
-    assert.ok(releaseExpression(expression, { preflight: { outputs: { dry_run: "false" } } }, secrets), "publishing can use configured secrets");
+    const macOnly = /secrets\.(MACOS|APPLE)_/u.test(expression);
+    for (const target of desktopReleaseTargets("all")) {
+      const matrix = { os: target.os };
+      assert.equal(releaseExpression(expression, { preflight: { outputs: { dry_run: "true" } } }, secrets, {}, matrix), "", "dry runs receive no release secrets");
+      const published = releaseExpression(expression, { preflight: { outputs: { dry_run: "false" } } }, secrets, {}, matrix);
+      // Only the hosted macOS job receives the macOS signing and notarization secrets.
+      if (macOnly && target.os !== "macOS") assert.equal(published, "", `${target.label} receives no macOS secret`);
+      else assert.ok(published, `${target.label} publishing can use configured secrets`);
+    }
   }
 });
 

@@ -23,7 +23,8 @@ export function desktopReleaseTargets(platforms = "windows") {
       label: "macOS arm64",
       os: "macOS",
       artifact_platform: "mac",
-      runner: ["self-hosted", "macos", "arm64"],
+      // GitHub-hosted Apple silicon: a fresh VM for each job that receives signing secrets.
+      runner: ["macos-26"],
       arch: "arm64",
       target: "aarch64-apple-darwin",
       require_signing: "1",

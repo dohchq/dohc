@@ -22,7 +22,8 @@ release.
 
 Store signing and notarization secrets in the GitHub `desktop-release` environment.
 Do not store them as repository or organization secrets available to arbitrary branches.
-Restrict that environment to the `main` branch, with no tag rules.
+Limit that environment's deployment branches to `main`, with no tag rules.
+Add a required reviewer to that environment. For a private repository, GitHub offers required reviewers only on GitHub Enterprise; without it, anyone who can change `main` can publish.
 Review organization-level signing-secret access before adding credentials.
 Rotate any signing secrets that pull-request builds could have read.
 Confirm that changes reaching `main` receive review before enabling signing.
@@ -31,27 +32,30 @@ The release workflow starts only when someone dispatches it.
 Dispatches can start on other refs, but the preflight guard permits release jobs only on `main`.
 Pull requests use local verification. Dry runs receive empty signing credentials.
 The package and publish jobs both use the restricted environment.
+The macOS signing and notarization secrets reach only the macOS package job, which runs on a fresh GitHub-hosted VM.
+The Windows and Linux jobs receive empty values for them.
+No release job runs on the self-hosted Mac. That runner's account outlives each job, and any repository writer can run code there.
 
-## Provide self-hosted runners
+## Provide release runners
 
-Every release job runs on a self-hosted runner. Cloud runners stay off.
+Windows and Linux release jobs run on self-hosted runners.
+macOS release jobs run on GitHub's hosted Apple silicon runner, `macos-26`, and bill the repository's Actions minutes.
 
 | Jobs | Runner labels |
 | --- | --- |
 | Preflight, version check, and Publish for `linux` | `self-hosted`, `linux`, `x64` |
-| Preflight, version check, and Publish for `macos` | `self-hosted`, `macos`, `arm64` |
+| Preflight, version check, and Publish for `macos` | `macos-26` (GitHub-hosted) |
 | Preflight, version check, and Publish for other selections | `self-hosted`, `windows`, `x64` |
 | Windows x64 package | `self-hosted`, `windows`, `x64` |
 | Linux x64 package | `self-hosted`, `linux`, `x64` |
-| macOS arm64 package | `self-hosted`, `macos`, `arm64` |
+| macOS arm64 package | `macos-26` (GitHub-hosted) |
 
 A job waits in the queue until a runner with its labels is online.
 Each runner needs Git with bash, rustup, and the platform's native build tools.
 The coordinator runner also needs the GitHub CLI, `gh`, for the version check and publishing.
-Run the Windows and macOS runners in a signed-in desktop session for the packaged app check.
+Run the Windows runner in a signed-in desktop session for the packaged app check.
 The Linux runner also needs `xvfb-run` for the fuse smoke.
-The macOS runner needs bash 4 or newer first on its `PATH`, because the coordinator jobs do not run under the bash 3.2 that macOS ships.
-The [Mac runner guide](macos-runner.md) lists its other tools.
+The hosted macOS image ships bash 3.2, so the macOS Preflight and Publish jobs install Homebrew bash first.
 After packaging, that check verifies the actual executable's fuse values and starts it with an isolated profile.
 The smoke looks for `apps/desktop/release/linux-unpacked` on Linux, and on a Mac for `apps/desktop/release/mac-arm64/dohc.app`. Point `DOHC_SMOKE_PACKAGE_DIRECTORY` at any other unpacked directory or app bundle.
 The package and publish jobs receive the environment's secrets.
@@ -98,6 +102,8 @@ A branch restriction alone does not require an owner's approval.
 
 Keep self-hosted runners restricted to trusted code when the repository becomes public.
 Do not enable fork pull-request execution on the owner's PC.
+Require approval for all external contributors in the repository's Actions settings.
+The [Mac runner guide](macos-runner.md) explains why any repository writer can run code on a self-hosted runner.
 
 ## Choose versions
 
@@ -128,7 +134,7 @@ The published prerelease records the source commit and includes generated releas
 ## Build a macOS nightly
 
 Dispatch `Desktop Release` from `main` with `channel=nightly`, `platforms=macos`, and `dry_run=true`.
-The Mac runner performs every job for this selection. A Windows runner is not required.
+GitHub-hosted macOS runners perform every job for this selection. No self-hosted runner is required.
 Download the run's `desktop-macOS-arm64` artifact after every job passes.
 It contains the `.dmg`, the `.zip` update package, and the nightly macOS update manifest.
 Verify the files with `--platform mac`, `--arch arm64`, the generated version, and `--channel nightly`.

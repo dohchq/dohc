@@ -1,7 +1,8 @@
 name: Desktop Release
 
-# Releases start only by dispatch and run only on self-hosted runners.
-# Cloud runners stay off (AGENTS.md).
+# Releases start only by dispatch. Windows and Linux jobs run on self-hosted
+# runners. macOS jobs run on GitHub-hosted Apple silicon runners: each job is
+# a fresh VM, so no shared machine holds the signing secrets between runs.
 on:
   workflow_dispatch:
     inputs:
@@ -47,7 +48,7 @@ jobs:
   preflight:
     name: Preflight
     if: github.ref == 'refs/heads/main'
-    runs-on: ${{ fromJSON(inputs.platforms == 'linux' && '["self-hosted","linux","x64"]' || inputs.platforms == 'macos' && '["self-hosted","macos","arm64"]' || '["self-hosted","windows","x64"]') }}
+    runs-on: ${{ fromJSON(inputs.platforms == 'linux' && '["self-hosted","linux","x64"]' || inputs.platforms == 'macos' && '["macos-26"]' || '["self-hosted","windows","x64"]') }}
     timeout-minutes: 40
     outputs:
       release_channel: ${{ steps.release.outputs.release_channel }}
@@ -60,15 +61,14 @@ jobs:
       matrix: ${{ steps.release.outputs.matrix }}
     steps:
       # macOS ships bash 3.2, which rejects an empty array under set -u and
-      # globstar. The coordinator jobs share this runner.
-      - name: Require bash 4 or newer
+      # globstar. Later bash steps run Homebrew's bash from PATH.
+      - name: Install bash 5
         if: runner.os == 'macOS'
-        shell: bash
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
         run: |
-          if (( BASH_VERSINFO[0] < 4 )); then
-            echo "::error::bash ${BASH_VERSION} is too old. Install Homebrew bash and put /opt/homebrew/bin first on the runner's PATH."
-            exit 1
-          fi
+          brew install bash
+          [[ "$(command -v bash)" == "$(brew --prefix)/bin/bash" ]]
 
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -150,7 +150,7 @@ jobs:
   unused-version:
     name: Check release publication
     needs: preflight
-    runs-on: ${{ fromJSON(inputs.platforms == 'linux' && '["self-hosted","linux","x64"]' || inputs.platforms == 'macos' && '["self-hosted","macos","arm64"]' || '["self-hosted","windows","x64"]') }}
+    runs-on: ${{ fromJSON(inputs.platforms == 'linux' && '["self-hosted","linux","x64"]' || inputs.platforms == 'macos' && '["macos-26"]' || '["self-hosted","windows","x64"]') }}
     timeout-minutes: 5
     permissions:
       contents: write
@@ -287,7 +287,7 @@ jobs:
           DRY_RUN: ${{ needs.preflight.outputs.dry_run }}
           OS_NAME: ${{ matrix.os }}
           REQUIRE_SIGNING: ${{ matrix.require_signing }}
-          MACOS_CSC_LINK: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.MACOS_CSC_LINK || '' }}
+          MACOS_CSC_LINK: ${{ needs.preflight.outputs.dry_run != 'true' && matrix.os == 'macOS' && secrets.MACOS_CSC_LINK || '' }}
           WIN_CSC_LINK: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.WIN_CSC_LINK || '' }}
         run: |
           set -euo pipefail
@@ -313,14 +313,16 @@ jobs:
 
           echo "require=$require" >> "$GITHUB_OUTPUT"
 
+      # The macOS signing and notarization secrets reach only the macOS
+      # target's job, which runs on a fresh GitHub-hosted VM.
       - name: Package smoke
         env:
           DOHC_REQUIRE_SIGNING: ${{ steps.signing.outputs.require }}
-          CSC_LINK: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.MACOS_CSC_LINK || '' }}
+          CSC_LINK: ${{ needs.preflight.outputs.dry_run != 'true' && matrix.os == 'macOS' && secrets.MACOS_CSC_LINK || '' }}
           WIN_CSC_LINK: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.WIN_CSC_LINK || '' }}
-          APPLE_ID: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.APPLE_ID || '' }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
-          APPLE_TEAM_ID: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.APPLE_TEAM_ID || '' }}
+          APPLE_ID: ${{ needs.preflight.outputs.dry_run != 'true' && matrix.os == 'macOS' && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ needs.preflight.outputs.dry_run != 'true' && matrix.os == 'macOS' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ needs.preflight.outputs.dry_run != 'true' && matrix.os == 'macOS' && secrets.APPLE_TEAM_ID || '' }}
         run: pnpm smoke:package:desktop
 
       - name: Package desktop
@@ -328,11 +330,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           DOHC_REQUIRE_SIGNING: ${{ steps.signing.outputs.require }}
-          CSC_LINK: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.MACOS_CSC_LINK || '' }}
-          CSC_KEY_PASSWORD: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.MACOS_CSC_KEY_PASSWORD || '' }}
-          APPLE_ID: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.APPLE_ID || '' }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
-          APPLE_TEAM_ID: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.APPLE_TEAM_ID || '' }}
+          CSC_LINK: ${{ needs.preflight.outputs.dry_run != 'true' && matrix.os == 'macOS' && secrets.MACOS_CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ needs.preflight.outputs.dry_run != 'true' && matrix.os == 'macOS' && secrets.MACOS_CSC_KEY_PASSWORD || '' }}
+          APPLE_ID: ${{ needs.preflight.outputs.dry_run != 'true' && matrix.os == 'macOS' && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ needs.preflight.outputs.dry_run != 'true' && matrix.os == 'macOS' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ needs.preflight.outputs.dry_run != 'true' && matrix.os == 'macOS' && secrets.APPLE_TEAM_ID || '' }}
           WIN_CSC_LINK: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.WIN_CSC_LINK || '' }}
           WIN_CSC_KEY_PASSWORD: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.WIN_CSC_KEY_PASSWORD || '' }}
         run: |
@@ -396,12 +398,22 @@ jobs:
       - preflight
       - build
     if: ${{ needs.preflight.outputs.dry_run != 'true' }}
-    runs-on: ${{ fromJSON(inputs.platforms == 'linux' && '["self-hosted","linux","x64"]' || inputs.platforms == 'macos' && '["self-hosted","macos","arm64"]' || '["self-hosted","windows","x64"]') }}
+    runs-on: ${{ fromJSON(inputs.platforms == 'linux' && '["self-hosted","linux","x64"]' || inputs.platforms == 'macos' && '["macos-26"]' || '["self-hosted","windows","x64"]') }}
     timeout-minutes: 20
     permissions:
       # Required for creating GitHub releases via softprops/action-gh-release.
       contents: write
     steps:
+      # macOS ships bash 3.2, which rejects an empty array under set -u and
+      # globstar. Later bash steps run Homebrew's bash from PATH.
+      - name: Install bash 5
+        if: runner.os == 'macOS'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          brew install bash
+          [[ "$(command -v bash)" == "$(brew --prefix)/bin/bash" ]]
+
       - name: Checkout release scripts
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
