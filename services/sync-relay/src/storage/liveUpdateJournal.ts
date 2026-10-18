@@ -539,7 +539,6 @@ function snapshotJournalCut(value: unknown): LiveUpdateJournalCut {
 interface IssuedJournalCut {
   storage: StorageContext;
   cut: LiveUpdateJournalCut;
-  coverage: LiveUpdateStructRange[];
   current: () => boolean;
 }
 const issuedJournalCuts = new WeakMap<object, IssuedJournalCut>();
@@ -710,7 +709,7 @@ export function readLiveUpdateJournalCut(storage: StorageContext, input: { docum
     if (result.kind === "cut") {
       verifyJournalCut(result.cut);
       const cut = structuredClone(result.cut);
-      issuedJournalCuts.set(cut, { storage, cut: result.cut, coverage: result.coverage, current: current! });
+      issuedJournalCuts.set(cut, { storage, cut: result.cut, current: current! });
       return { kind: "cut", cut };
     }
     return result;
@@ -777,6 +776,11 @@ export function appendValidatedLiveJournal(storage: StorageContext, input: {
   const metadataBytes = Buffer.byteLength(JSON.stringify([nextCursor, ...values, checkpointDigest, namespace, eventCount, evidenceDigest, acceptedMetadataBytes,restoreOperationId,
     2,authorContextJson,authorSnapshotJson,deletesJson,checkpointCoverageJson,seedJson]));
   const storedRanges = [...firstSeen,...seedFirstSeen].sort((a,b) => a.clientId-b.clientId || a.startClock-b.startClock);
+  for (let index = 1; index < storedRanges.length; index++) {
+    const a = storedRanges[index-1]!, b = storedRanges[index]!;
+    journalIntegrity(a.clientId !== b.clientId || a.endClock < b.startClock);
+  }
+  journalIntegrity(isDeepStrictEqual(subtractJournalRanges(storedRanges, liveJournalCoverageWithin(storage, document, storedRanges)), storedRanges));
   const provenanceBytes = storedRanges.reduce((total, range) => total + Buffer.byteLength(JSON.stringify([
     ...documentParams(document), range.clientId, range.startClock, range.endClock, nextCursor,
   ])), 0);
@@ -878,7 +882,7 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
             !isDeepStrictEqual(previous.authority, current.authority) ||
             (trustedAutomation ? !isDeepStrictEqual(row.admitted.metadata.authorSnapshot, [{kind: "automation", ...trustedAutomation}]) : row.admitted.metadata.authorSnapshot?.some(author => author.kind === "automation")) ||
             replayRaw.author_context_json !== (metadata.authorContext === undefined ? null : JSON.stringify(metadata.authorContext))) return refused({ kind: "refused", reason: "delivery-conflict" });
-          liveJournalCoverage(storage, document, stored.ranges);
+          liveJournalCoverageWithin(storage, document, [...row.admitted.metadata.firstSeen, ...journalRanges(JSON.parse(String(replayRaw.seed_first_seen_json)))]);
           return { reply: { result: { kind: "accepted" as const, receipt: { ...previous.receipt }, replayed: true }, admitted: row.admitted }, row, history };
         }
         if (trustedAutomationPress && (request.actor.kind !== "owner" || !automationPressAdmissionAllowed(storage, {
@@ -895,7 +899,7 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
           ...trustedAutomationGrant, declaration: trustedAutomation!,
         }))) return refused({kind: "refused", reason: "authority-refused"});
         // BEGIN IMMEDIATE excludes competing writers after this revision check.
-        const read = issued?.current() && isDeepStrictEqual(token.document, document) ? { kind: "cut" as const, cut: token, coverage: issued.coverage }
+        const read = issued?.current() && isDeepStrictEqual(token.document, document) ? { kind: "cut" as const, cut: token }
           : readJournalCut(storage, document, token);
         if (read.kind !== "cut") return refused({ kind: "refused", reason: read.reason });
         if (read.cut.highWater !== token.highWater) {
@@ -904,10 +908,11 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
         }
         journalIntegrity(isDeepStrictEqual(read.cut, token));
         if (validation.kind === "refused") return refused(journalValidationRefusal(validation));
-        requireRestoreSourceCoverage(storage, document, namespace, validation.evidence.candidate.ranges, validation.evidence.checkpointRanges, read.coverage);
+        const coverage = liveJournalCoverageWithin(storage, document, validation.evidence.candidate.ranges);
+        requireRestoreSourceCoverage(storage, document, namespace, validation.evidence.candidate.ranges, validation.evidence.checkpointRanges, coverage);
         const allFirstSeen = validation.evidence.candidate.firstSeen;
         journalIntegrity(subtractJournalRanges(allFirstSeen, validation.evidence.candidate.ranges).length === 0);
-        if (!isDeepStrictEqual(subtractJournalRanges(allFirstSeen, read.coverage), allFirstSeen)) {
+        if (!isDeepStrictEqual(subtractJournalRanges(allFirstSeen, coverage), allFirstSeen)) {
           return refused({kind:"refused",reason:"provenance-refused"});
         }
         let authorSnapshot: LiveAuthorSnapshot = trustedAutomation ? [{kind: "automation", ...trustedAutomation}] : deriveLiveAuthorSnapshot(storage, current.authority, metadata.authorContext, trustedAccount);
@@ -973,12 +978,12 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
   }
 
 export function liveJournalCut(storage: StorageContext, document: LiveDocumentKey):
-    | { kind: "cut"; cut: LiveUpdateJournalCut; coverage: LiveUpdateStructRange[] }
+    | { kind: "cut"; cut: LiveUpdateJournalCut }
     | Exclude<LiveUpdateJournalCutResult, { kind: "cut" }> {
   return readJournalCut(storage, document);
 }
 function readJournalCut(storage: StorageContext, document: LiveDocumentKey, expected?: LiveUpdateJournalCut):
-    | { kind: "cut"; cut: LiveUpdateJournalCut; coverage: LiveUpdateStructRange[] }
+    | { kind: "cut"; cut: LiveUpdateJournalCut }
     | Exclude<LiveUpdateJournalCutResult, { kind: "cut" }> {
     const history = journalAuthorityHistory(storage, document);
     if (!history.length) return { kind: "refused", reason: "baseline-missing" };
@@ -1040,29 +1045,55 @@ function readJournalCut(storage: StorageContext, document: LiveDocumentKey, expe
       return { cursor: receipt.journalCursor, digest: receipt.updateDigest, bytes: row.admitted.updateBytes, metadata: row.admitted.metadata };
     });
     journalIntegrity(last === (highWater ?? 0) && suffixBytes < 20_971_520);
-    const coverage = liveJournalCoverage(storage, document, stored.ranges);
     const cut: LiveUpdateJournalCut = { authorityHistory: history.map(row => ({ ...row, baselineBytes: new Uint8Array(row.baselineBytes) })),
       document: { ...document }, currentPath: stored.binding.currentPath, restoreFenceGeneration: stored.binding.restoreFenceGeneration,
       baseline: { sequence: stored.baselineSequence, digest: stored.baselineDigest, bytes: new Uint8Array(stored.baselineBytes),
         ranges: stored.ranges, projectedDigest: stored.projectedDigest, projectedLength: stored.projectedLength,
         registeredAtMs: stored.registeredAtMs, replacesLineageClaimId: stored.replacesLineageClaimId },
       checkpoint, suffix, highWater, suffixCount: suffix.length, suffixBytes };
-    return { kind: "cut", cut, coverage };
+    return { kind: "cut", cut };
   }
 
-export function liveJournalCoverage(storage: StorageContext, document: LiveDocumentKey, baseline: readonly LiveUpdateStructRange[]): LiveUpdateStructRange[] {
-    const rows = storage.db.prepare(`SELECT p.*, j.workspace_id AS parent_workspace, j.main_version_id AS parent_version,
+const coverageStatements = new WeakMap<SqliteDb, {provenance: ReturnType<SqliteDb["prepare"]>; baseline: ReturnType<SqliteDb["prepare"]>}>();
+
+function prepareCoverageStatements(db: SqliteDb) {
+    let statements = coverageStatements.get(db);
+    if (statements) return statements;
+    const provenance = db.prepare(`SELECT p.*, j.workspace_id AS parent_workspace, j.main_version_id AS parent_version,
       j.object_id AS parent_object, j.lineage_claim_id AS parent_lineage FROM ${LIVE_JOURNAL_PROVENANCE} p
       LEFT JOIN ${LIVE_JOURNAL_TABLE} j ON j.journal_cursor=p.journal_cursor
-      WHERE p.workspace_id=? AND p.main_version_id=? AND p.object_id=? AND p.lineage_claim_id=? ORDER BY p.client_id,p.start_clock`)
-      .all(...documentParams(document));
-    const ranges = rows.map(row => {
-      journalIntegrity(row.parent_workspace === document.workspaceId && row.parent_version === document.mainVersionId &&
-        row.parent_object === document.objectId && row.parent_lineage === document.lineageClaimId);
-      return { ...parseLiveUpdateStructRange({ clientId: row.client_id, startClock: row.start_clock, endClock: row.end_clock }),
-        cursor: authorityInteger(row.journal_cursor, 1) };
-    });
-    const combined = [...baseline.map(range => ({ ...range, cursor: null })), ...ranges].sort((a,b) => a.clientId-b.clientId || a.startClock-b.startClock);
+      WHERE p.workspace_id=? AND p.main_version_id=? AND p.object_id=? AND p.lineage_claim_id=?
+        AND p.client_id=? AND p.start_clock<=? AND p.start_clock>=COALESCE(
+          (SELECT MAX(start_clock) FROM ${LIVE_JOURNAL_PROVENANCE} WHERE ${JOURNAL_DOCUMENT_WHERE} AND client_id=? AND start_clock<?), ?)
+      ORDER BY p.start_clock`);
+    const baseline = db.prepare(`SELECT client_id,start_clock,end_clock FROM sync_relay_live_document_baseline_ranges
+      WHERE ${JOURNAL_DOCUMENT_WHERE} AND client_id=? AND start_clock<=? AND start_clock>=COALESCE(
+        (SELECT MAX(start_clock) FROM sync_relay_live_document_baseline_ranges WHERE ${JOURNAL_DOCUMENT_WHERE} AND client_id=? AND start_clock<?), ?)
+      ORDER BY start_clock`);
+    statements = {provenance, baseline};
+    coverageStatements.set(db, statements);
+    return statements;
+}
+
+export function liveJournalCoverageWithin(storage: StorageContext, document: LiveDocumentKey, windows: readonly LiveUpdateStructRange[]): LiveUpdateStructRange[] {
+    if (windows.length === 0) return [];
+    const {provenance, baseline} = prepareCoverageStatements(storage.db);
+    const ranges = new Map<string, LiveUpdateStructRange & {cursor: number | null}>();
+    for (const window of windows) {
+      const params = [...documentParams(document), window.clientId, window.endClock,
+        ...documentParams(document), window.clientId, window.startClock, window.startClock];
+      for (const row of provenance.all(...params)) {
+        journalIntegrity(row.parent_workspace === document.workspaceId && row.parent_version === document.mainVersionId &&
+          row.parent_object === document.objectId && row.parent_lineage === document.lineageClaimId);
+        const range = parseLiveUpdateStructRange({ clientId: row.client_id, startClock: row.start_clock, endClock: row.end_clock });
+        ranges.set(`p:${range.clientId}:${range.startClock}`, {...range, cursor: authorityInteger(row.journal_cursor, 1)});
+      }
+      for (const row of baseline.all(...params)) {
+        const range = parseLiveUpdateStructRange({ clientId: row.client_id, startClock: row.start_clock, endClock: row.end_clock });
+        ranges.set(`b:${range.clientId}:${range.startClock}`, {...range, cursor: null});
+      }
+    }
+    const combined = [...ranges.values()].sort((a,b) => a.clientId-b.clientId || a.startClock-b.startClock);
     for (let index = 1; index < combined.length; index++) {
       const a = combined[index-1]!, b = combined[index]!;
       journalIntegrity(a.clientId !== b.clientId || (a.endClock <= b.startClock && (a.endClock !== b.startClock || a.cursor !== b.cursor)));
@@ -1079,10 +1110,7 @@ export function readCommittedLiveUpdate(storage: StorageContext, input: { host: 
       const raw = storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_TABLE} WHERE ${JOURNAL_DOCUMENT_WHERE} AND journal_cursor=?`).get(...documentParams(document), cursor);
       if (!raw) return { kind: "missing" as const };
       const row = decodeJournalRow(storage.db, raw); assertJournalCheckpointPosition(storage.db, row);
-      const baseline = storage.db.prepare(`SELECT client_id,start_clock,end_clock FROM sync_relay_live_document_baseline_ranges
-        WHERE ${JOURNAL_DOCUMENT_WHERE} ORDER BY client_id,start_clock`).all(...documentParams(document));
-      const ranges = journalRanges(baseline.map(range => ({ clientId: range.client_id, startClock: range.start_clock, endClock: range.end_clock })));
-      liveJournalCoverage(storage, document, ranges);
+      liveJournalCoverageWithin(storage, document, [...row.admitted.metadata.firstSeen, ...journalRanges(JSON.parse(String(raw.seed_first_seen_json)))]);
       return { kind: "committed" as const, row };
     });
     if (result.kind === "committed") { verifyJournalRow(result.row); return { kind: "committed", admitted: result.row.admitted }; }
