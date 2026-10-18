@@ -968,10 +968,7 @@ fn worker_main(
 /// owed, so the next reply drains again even when its command flushed
 /// nothing. The work's own error comes first; a failed drain turns a success
 /// into an I/O error.
-fn drained<R>(
-    store: &EngineStore,
-    outcome: Result<R, RuntimeError>,
-) -> Result<R, RuntimeError> {
+fn drained<R>(store: &EngineStore, outcome: Result<R, RuntimeError>) -> Result<R, RuntimeError> {
     let drain = store.drain_flushes().map_err(|error| {
         RuntimeError::Materialize(dohc_engine_files::MaterializeError::Io {
             path: store.database_path().to_string_lossy().into_owned(),

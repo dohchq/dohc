@@ -346,11 +346,11 @@ impl EngineStore {
     }
 
     /// Make every file flushed with a barrier durable by draining the drive
-    /// cache once, through the database's folder. A no-op when no drain is
-    /// owed. A failed drain stays owed until one succeeds. It does not sync
-    /// the WAL, so NORMAL commits are no more durable after it.
+    /// cache once, through the database's real folder. A no-op when no drain
+    /// is owed. A failed drain stays owed until one succeeds. It does not
+    /// sync the WAL, so NORMAL commits are no more durable after it.
     pub fn drain_flushes(&self) -> std::io::Result<()> {
-        self.flushes.drain(&self.database_path)
+        self.flushes.drain()
     }
 
     /// Take the flushes recorded since the last call.
@@ -363,6 +363,13 @@ impl EngineStore {
     #[cfg(feature = "fault-injection")]
     pub fn fail_next_drain(&self) {
         self.flushes.fail_next_drain();
+    }
+
+    /// Call `observer` with each flush as it runs, in place of any earlier one.
+    #[cfg(feature = "fault-injection")]
+    pub fn observe_flushes(&self, observer: impl Fn(crate::FlushEvent) + Send + 'static) {
+        self.flushes
+            .observe(crate::flush::FlushObserver(Box::new(observer)));
     }
 
     /// Order flushes on `device` instead of the database file's, as if the

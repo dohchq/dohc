@@ -8,7 +8,9 @@
 //! On Apple silicon, a barrier (`F_BARRIERFSYNC`) orders the file before every
 //! later write on the same device, including the WAL frame that holds the
 //! status, without the drain. Only a file whose `st_dev` matches the database
-//! file's takes a barrier; any other file is still drained at once. A barrier
+//! file's takes a barrier; any other file is still drained at once. A
+//! symlinked database counts where its link points, and its drain runs there.
+//! A barrier
 //! leaves a drain owed. The actor pays it before each reply, so the files a
 //! command projected are as durable at its reply as a drain per file made
 //! them. The drain does not sync the WAL, so the command's NORMAL commits are
@@ -51,32 +53,66 @@ pub struct FlushEvent {
 
 #[derive(Debug)]
 pub(crate) struct Flushes {
-    /// The database file's `st_dev`. `None` drains every file.
+    /// The `st_dev` that the database file and its real folder share. `None`
+    /// drains every file.
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     device: Cell<Option<u64>>,
+    /// The database file's folder with every link resolved, where the drain
+    /// runs.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    folder: Option<std::path::PathBuf>,
     /// A barrier ran since the last successful drain.
     drain_owed: Cell<bool>,
     #[cfg(feature = "fault-injection")]
     trace: std::cell::RefCell<Vec<FlushEvent>>,
     #[cfg(feature = "fault-injection")]
     fail_next_drain: Cell<bool>,
+    #[cfg(feature = "fault-injection")]
+    observer: std::cell::RefCell<Option<FlushObserver>>,
+}
+
+/// Called with each recorded flush, as it happens.
+#[cfg(feature = "fault-injection")]
+pub(crate) struct FlushObserver(pub(crate) Box<dyn Fn(FlushEvent) + Send>);
+
+#[cfg(feature = "fault-injection")]
+impl std::fmt::Debug for FlushObserver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FlushObserver")
+    }
+}
+
+/// The database file's real folder and the device it shares with the file. A
+/// symlinked database lives where its link points, so the lexical folder may
+/// sit on another device. `None` when the path does not resolve or the two
+/// devices differ; every file then drains at once.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn real_folder(database: &Path) -> Option<(u64, std::path::PathBuf)> {
+    use std::os::unix::fs::MetadataExt;
+    let real = std::fs::canonicalize(database).ok()?;
+    let folder = real.parent()?.to_path_buf();
+    let device = std::fs::metadata(&real).ok()?.dev();
+    (std::fs::metadata(&folder).ok()?.dev() == device).then_some((device, folder))
 }
 
 impl Flushes {
     pub(crate) fn for_database(path: &Path) -> Self {
         #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
         let _ = path;
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        let (device, folder) = real_folder(path).unzip();
         Self {
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-            device: Cell::new({
-                use std::os::unix::fs::MetadataExt;
-                std::fs::metadata(path).ok().map(|metadata| metadata.dev())
-            }),
+            device: Cell::new(device),
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            folder,
             drain_owed: Cell::new(false),
             #[cfg(feature = "fault-injection")]
             trace: std::cell::RefCell::default(),
             #[cfg(feature = "fault-injection")]
             fail_next_drain: Cell::new(false),
+            #[cfg(feature = "fault-injection")]
+            observer: std::cell::RefCell::default(),
         }
     }
 
@@ -100,9 +136,10 @@ impl Flushes {
 
     /// Drain the drive cache when a barrier ran since the last successful
     /// drain. `F_FULLFSYNC` drains the whole device, so it runs on the
-    /// database's folder: closing a descriptor on the database file would drop
-    /// every POSIX lock SQLite holds on it.
-    pub(crate) fn drain(&self, database: &Path) -> std::io::Result<()> {
+    /// database's real folder: closing a descriptor on the database file would
+    /// drop every POSIX lock SQLite holds on it. A folder that has left the
+    /// barriers' device fails the drain, which stays owed.
+    pub(crate) fn drain(&self) -> std::io::Result<()> {
         if !self.drain_owed.get() {
             return Ok(());
         }
@@ -110,15 +147,24 @@ impl Flushes {
         if self.fail_next_drain.take() {
             return Err(std::io::Error::other("injected drain failure"));
         }
-        let folder = match database.parent() {
-            Some(folder) if !folder.as_os_str().is_empty() => folder,
-            _ => Path::new("."),
-        };
-        let folder = File::open(folder)?;
-        folder.sync_all()?;
-        self.drain_owed.set(false);
-        #[cfg(feature = "fault-injection")]
-        self.record(FlushKind::Drain, &folder);
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let folder = self
+                .folder
+                .as_deref()
+                .ok_or_else(|| std::io::Error::other("no database folder to drain"))?;
+            let folder = File::open(folder)?;
+            if Some(folder.metadata()?.dev()) != self.device.get() {
+                return Err(std::io::Error::other(
+                    "the database folder is not on the device its barriers ran on",
+                ));
+            }
+            folder.sync_all()?;
+            self.drain_owed.set(false);
+            #[cfg(feature = "fault-injection")]
+            self.record(FlushKind::Drain, &folder);
+        }
         Ok(())
     }
 
@@ -135,11 +181,20 @@ impl Flushes {
             let _ = file;
             (0, 0)
         };
-        self.trace.borrow_mut().push(FlushEvent {
+        let event = FlushEvent {
             kind,
             device,
             inode,
-        });
+        };
+        self.trace.borrow_mut().push(event);
+        if let Some(FlushObserver(observe)) = &*self.observer.borrow() {
+            observe(event);
+        }
+    }
+
+    #[cfg(feature = "fault-injection")]
+    pub(crate) fn observe(&self, observer: FlushObserver) {
+        self.observer.replace(Some(observer));
     }
 
     #[cfg(feature = "fault-injection")]
@@ -241,5 +296,131 @@ mod tests {
             another_process_can_lock(&db),
             "the probe locks a closed store"
         );
+    }
+
+    /// A database reached through a link drains the folder the link points
+    /// to, not the folder holding the link.
+    #[cfg(all(
+        feature = "fault-injection",
+        target_os = "macos",
+        target_arch = "aarch64"
+    ))]
+    #[test]
+    fn a_linked_database_drains_its_real_folder() {
+        use std::os::unix::fs::MetadataExt;
+        let scratch = ScratchDir::new_named("drain-linked").unwrap();
+        std::fs::create_dir(scratch.path().join("real")).unwrap();
+        std::fs::create_dir(scratch.path().join("alias")).unwrap();
+        drop(EngineStore::open(&scratch.path().join("real/engine.db"), 1).unwrap());
+        let alias = scratch.path().join("alias/engine.db");
+        std::os::unix::fs::symlink(scratch.path().join("real/engine.db"), &alias).unwrap();
+        let store = EngineStore::open(&alias, 1).unwrap();
+        let note = scratch.path().join("note.md");
+        std::fs::write(&note, b"ordered").unwrap();
+        store
+            .flush_before_commits(&std::fs::File::open(&note).unwrap())
+            .unwrap();
+        store.drain_flushes().unwrap();
+        let drain = store.take_flush_trace().pop().unwrap();
+        let real = std::fs::metadata(scratch.path().join("real")).unwrap();
+        assert_eq!(drain.kind, crate::FlushKind::Drain);
+        assert_eq!((drain.device, drain.inode), (real.dev(), real.ino()));
+    }
+
+    /// An APFS disk image, detached on drop. `None` when this host cannot
+    /// create or attach one.
+    #[cfg(all(
+        feature = "fault-injection",
+        target_os = "macos",
+        target_arch = "aarch64"
+    ))]
+    struct Volume {
+        mount: std::path::PathBuf,
+    }
+
+    #[cfg(all(
+        feature = "fault-injection",
+        target_os = "macos",
+        target_arch = "aarch64"
+    ))]
+    impl Volume {
+        fn attach(dir: &Path) -> Option<Self> {
+            let image = dir.join("other.dmg");
+            let mount = dir.join("other");
+            std::fs::create_dir(&mount).ok()?;
+            let hdiutil = || std::process::Command::new("hdiutil");
+            let made = hdiutil()
+                .args(["create", "-quiet", "-size", "40m", "-fs", "APFS"])
+                .args(["-volname", "DOHCFLUSH"])
+                .arg(&image)
+                .status()
+                .ok()?
+                .success();
+            let attached = made
+                && hdiutil()
+                    .args(["attach", "-quiet", "-nobrowse", "-mountpoint"])
+                    .arg(&mount)
+                    .arg(&image)
+                    .status()
+                    .ok()?
+                    .success();
+            attached.then_some(Self { mount })
+        }
+    }
+
+    #[cfg(all(
+        feature = "fault-injection",
+        target_os = "macos",
+        target_arch = "aarch64"
+    ))]
+    impl Drop for Volume {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("hdiutil")
+                .args(["detach", "-quiet", "-force"])
+                .arg(&self.mount)
+                .status();
+        }
+    }
+
+    /// A link on the startup disk to a database on another volume: files on
+    /// the database's volume take barriers, files beside the link drain at
+    /// once, and the owed drain flushes the database's volume.
+    #[cfg(all(
+        feature = "fault-injection",
+        target_os = "macos",
+        target_arch = "aarch64"
+    ))]
+    #[test]
+    fn a_database_linked_across_volumes_orders_and_drains_its_own_volume() {
+        use crate::FlushKind::{Barrier, Drain, Full};
+        use std::os::unix::fs::MetadataExt;
+        let scratch = ScratchDir::new_named("drain-across-volumes").unwrap();
+        let Some(volume) = Volume::attach(scratch.path()) else {
+            eprintln!("skipped: this host cannot attach a disk image");
+            return;
+        };
+        let real = volume.mount.join("engine.db");
+        drop(EngineStore::open(&real, 1).unwrap());
+        let alias = scratch.path().join("engine.db");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let store = EngineStore::open(&alias, 1).unwrap();
+        let remote = volume.mount.join("remote.md");
+        let local = scratch.path().join("local.md");
+        for file in [&remote, &local] {
+            std::fs::write(file, b"ordered").unwrap();
+            store
+                .flush_before_commits(&std::fs::File::open(file).unwrap())
+                .unwrap();
+        }
+        store.drain_flushes().unwrap();
+        let trace = store.take_flush_trace();
+        let kinds: Vec<_> = trace.iter().map(|event| event.kind).collect();
+        assert_eq!(kinds, [Barrier, Full, Drain]);
+        let mount = std::fs::metadata(&volume.mount).unwrap();
+        assert_eq!(
+            (trace[2].device, trace[2].inode),
+            (mount.dev(), mount.ino())
+        );
+        drop(store);
     }
 }
