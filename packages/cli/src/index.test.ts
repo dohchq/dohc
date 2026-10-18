@@ -577,3 +577,8 @@ it.each([
   expect(JSON.parse(result.stdout)).toHaveProperty("unknownReason", "other-account");
   expect(request).toHaveBeenCalledWith(expect.objectContaining({ verb }));
 });
+
+it("prints an absent incoming subject as JSON null", async () => {
+  const result = await executeCli({ argv: ["links", "in", JSON.stringify({ path: "missing.md" }), "--json"], cwd: "/tmp/links", env: {}, request: async () => null });
+  expect(result).toEqual({ exitCode: 0, stdout: "null\n", stderr: "" });
+});

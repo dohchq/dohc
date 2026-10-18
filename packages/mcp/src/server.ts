@@ -100,11 +100,11 @@ function shareAccessArg(value: string | undefined): ShareAccess {
   );
 }
 
-function text(structuredContent: Record<string, unknown>) {
+function text(structuredContent: Record<string, unknown> | null) {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(structuredContent, null, 2) }],
-    structuredContent,
-    ...(structuredContent.ok === false || structuredContent.kind === "partial" ? { isError: true } : {}),
+    ...(structuredContent === null ? {} : { structuredContent }),
+    ...(structuredContent?.ok === false || structuredContent?.kind === "partial" ? { isError: true } : {}),
   };
 }
 
