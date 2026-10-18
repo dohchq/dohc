@@ -1,4 +1,5 @@
 use super::*;
+use dohc_engine_collab::live_update_application::owner_activations::ACTIVATE_ADOPTION;
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicI64};
 
@@ -3084,7 +3085,7 @@ fn accept_live_update(
             tx.execute_batch(&format!(
                 "INSERT INTO live_device_application_bindings VALUES \
                    ('relay','ws','main','{object_id}','{lineage}','a.md','[]',0,'host',1,'instance', \
-                    'connection',1); \
+                    'connection',1,NULL); \
                  INSERT INTO live_device_update_applications (relay_database_namespace,workspace_id, \
                    delivery_id,main_version_id,object_id,lineage_claim_id,current_path, \
                    selector_paths_json,restore_fence_generation,update_digest,update_byte_length, \
@@ -5056,6 +5057,8 @@ fn adopt_activation(store: &mut EngineStore, object_id: &str, lineage: &str, nam
                 params![namespace, object_id, lineage, text_sha("hosted b")],
             )
             .map_err(SyncError::persist)?;
+            tx.execute(ACTIVATE_ADOPTION, params![namespace, "activation"])
+                .map_err(SyncError::persist)?;
             Ok::<_, SyncError>(())
         })
         .unwrap();
@@ -5083,9 +5086,10 @@ fn a_document_parks_only_once_every_activation_is_adopted() {
 
     store
         .write_with(&NoFaults, |tx| {
-            tx.execute(
-                "UPDATE live_owner_adoptions SET relay_database_namespace='relay'",
-                [],
+            tx.execute_batch(
+                "PRAGMA defer_foreign_keys=ON; \
+                 UPDATE live_owner_adoptions SET relay_database_namespace='relay'; \
+                 UPDATE live_owner_activations SET relay_database_namespace='relay';",
             )
             .map_err(SyncError::persist)
         })

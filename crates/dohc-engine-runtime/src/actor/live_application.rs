@@ -11,7 +11,8 @@ use dohc_engine_collab::live_update_application::{
     NativeRestorePreparation, NativeRestoreProposal, NativeRestoreResume,
     NativeRestoreResumeReceipt, OwnerAdoptionAck, OwnerAdoptionCut, UnloadPending,
     adopt_owner_committed, apply_committed, bootstrap_committed, read_application_ack,
-    unload_pending, validate_application_binding, with_settlement,
+    unload_pending, validate_application_binding, validate_registration_activation,
+    with_settlement,
 };
 use dohc_engine_collab::live_update_application::{
     AppliedPosition, AppliedSyncCut, AppliedSyncPolicy, NextAppliedUpdate,
@@ -373,8 +374,14 @@ impl ActorLiveApplicationOwner {
         current(&self.actor, &self.token).is_ok()
     }
 
-    /// Check durable binding identity before the transport retires output guards.
-    pub async fn validate_binding(&self, binding: LiveObjectBinding) -> Result<(), RuntimeError> {
+    /// Check durable binding identity, and the activation a session host
+    /// names, before the transport retires output guards.
+    pub async fn validate_binding(
+        &self,
+        namespace: String,
+        binding: LiveObjectBinding,
+        activation_id: Option<String>,
+    ) -> Result<(), RuntimeError> {
         current(&self.actor, &self.token)?;
         let workspace_id = self.workspace_id.clone();
         let token = self.token.clone();
@@ -383,7 +390,11 @@ impl ActorLiveApplicationOwner {
                 if !token.load(Ordering::Acquire) {
                     return Err(RuntimeError::ActorUnavailable);
                 }
-                validate_application_binding(store, &workspace_id, &binding).map_err(Into::into)
+                validate_application_binding(store, &workspace_id, &binding)?;
+                if let Some(activation_id) = &activation_id {
+                    validate_registration_activation(store, &namespace, &binding, activation_id)?;
+                }
+                Ok(())
             })
             .await?;
         current(&self.actor, &self.token)
@@ -396,6 +407,30 @@ impl ActorLiveApplicationOwner {
         coordinate: ApplicationHostCoordinate,
         binding: LiveObjectBinding,
     ) -> Result<ActorLiveApplicationHandle, RuntimeError> {
+        self.register_with(namespace, coordinate, binding, None)
+            .await
+    }
+
+    /// Register a session host for one activation; see
+    /// [`ApplicationOwner::register_activation`].
+    pub async fn register_activation(
+        &self,
+        namespace: String,
+        coordinate: ApplicationHostCoordinate,
+        binding: LiveObjectBinding,
+        activation_id: String,
+    ) -> Result<ActorLiveApplicationHandle, RuntimeError> {
+        self.register_with(namespace, coordinate, binding, Some(activation_id))
+            .await
+    }
+
+    async fn register_with(
+        &self,
+        namespace: String,
+        coordinate: ApplicationHostCoordinate,
+        binding: LiveObjectBinding,
+        activation_id: Option<String>,
+    ) -> Result<ActorLiveApplicationHandle, RuntimeError> {
         current(&self.actor, &self.token)?;
         let (reply, receive) = oneshot::channel();
         self.actor
@@ -406,6 +441,7 @@ impl ActorLiveApplicationOwner {
                 namespace,
                 coordinate,
                 binding,
+                activation_id,
                 reply,
             })))
             .await
@@ -890,6 +926,7 @@ pub(super) enum Request {
         namespace: String,
         coordinate: ApplicationHostCoordinate,
         binding: LiveObjectBinding,
+        activation_id: Option<String>,
         reply: Reply<ApplicationHandle>,
     },
     Apply {
@@ -1302,12 +1339,21 @@ impl Request {
                 namespace,
                 coordinate,
                 binding,
+                activation_id,
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|owner| {
-                    owner
-                        .register(store, namespace, coordinate, binding)
-                        .map_err(Into::into)
+                    match activation_id {
+                        Some(activation_id) => owner.register_activation(
+                            store,
+                            namespace,
+                            coordinate,
+                            binding,
+                            activation_id,
+                        ),
+                        None => owner.register(store, namespace, coordinate, binding),
+                    }
+                    .map_err(Into::into)
                 });
                 let _ = reply.send(result);
             }

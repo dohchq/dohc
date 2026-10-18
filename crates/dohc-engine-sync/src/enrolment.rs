@@ -3653,7 +3653,7 @@ mod tests {
             "UPDATE ydoc_docs SET head_snapshot_seq=1",
             "UPDATE snapshots SET blob_sha256=(SELECT sha256 FROM blobs WHERE text='rival')",
             "INSERT INTO live_device_application_bindings VALUES \
-             ('relay','ws','main','seed-object','lineage','seed-object.md','[\"seed-object.md\"]',0,'host',1,'instance','connection',1)",
+             ('relay','ws','main','seed-object','lineage','seed-object.md','[\"seed-object.md\"]',0,'host',1,'instance','connection',1,NULL)",
             "INSERT INTO replication_log \
              (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) \
              VALUES ('ws','peer',0,'moment.append','{\"momentId\":\"seed-moment\"}',12,1)",

@@ -3318,7 +3318,96 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: "ALTER TABLE agent_run_records RENAME COLUMN failure_note_posted TO failure_handled;",
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 61,
+        id: "v2-live-owner-activations",
+        sql: V2_LIVE_OWNER_ACTIVATIONS_DDL,
+        sets_user_version: None,
+    },
 ];
+
+/// A lineage keeps its one immutable adoption. Each activation that held the
+/// document since has a row: at most one unreleased per document lineage, at
+/// most one successor per activation, and both links stay on one lineage.
+/// An adopted activation carries every adoption fact; a released activation
+/// that never adopted carries none. Every adoption becomes its own current
+/// activation, and a binding names the activation of its lineage's adoption.
+const V2_LIVE_OWNER_ACTIVATIONS_DDL: &str = "\
+CREATE UNIQUE INDEX live_owner_adoptions_lineage ON live_owner_adoptions
+    (relay_database_namespace,adoption_id,workspace_id,main_version_id,object_id,lineage_claim_id);
+CREATE TABLE live_owner_activations (
+    relay_database_namespace TEXT NOT NULL CHECK (length(CAST(relay_database_namespace AS BLOB)) > 0),
+    activation_id TEXT NOT NULL CHECK (length(CAST(activation_id AS BLOB)) BETWEEN 1 AND 1024),
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    origin_adoption_id TEXT,
+    predecessor_activation_id TEXT CHECK (predecessor_activation_id IS NOT activation_id),
+    binding_json TEXT NOT NULL CHECK (json_valid(binding_json)),
+    source_moment_id TEXT NOT NULL,
+    source_digest TEXT NOT NULL,
+    source_byte_length INTEGER NOT NULL CHECK (source_byte_length BETWEEN 0 AND 9007199254740991),
+    baseline_moment_relay_sequence INTEGER NOT NULL CHECK (baseline_moment_relay_sequence BETWEEN 0 AND 9007199254740991),
+    baseline_registered_at_ms INTEGER NOT NULL CHECK (baseline_registered_at_ms BETWEEN 0 AND 9007199254740991),
+    host_coordinate_json TEXT NOT NULL CHECK (json_valid(host_coordinate_json)),
+    evidence_digest TEXT,
+    coverage_digest TEXT,
+    covered_outbox_sequence INTEGER CHECK (covered_outbox_sequence BETWEEN 0 AND 9007199254740991),
+    local_ydoc_sequence INTEGER CHECK (local_ydoc_sequence BETWEEN 0 AND 9007199254740991),
+    terminal_cursor INTEGER CHECK (terminal_cursor BETWEEN 0 AND 9007199254740991),
+    terminal_receipt_json TEXT CHECK (json_valid(terminal_receipt_json)),
+    max_pending_bytes INTEGER CHECK (max_pending_bytes BETWEEN 1 AND 9007199254740991),
+    max_pending_age_ms INTEGER CHECK (max_pending_age_ms BETWEEN 1 AND 9007199254740991),
+    boundary_json TEXT CHECK (json_valid(boundary_json)),
+    released_at_ms INTEGER CHECK (released_at_ms BETWEEN 0 AND 9007199254740991),
+    released_restore_generation INTEGER CHECK (released_restore_generation BETWEEN 0 AND 9007199254740991),
+    released_accepted_cursor INTEGER CHECK (released_accepted_cursor BETWEEN 0 AND 9007199254740991),
+    released_boundary_json TEXT CHECK (json_valid(released_boundary_json)),
+    carried_manifest_json TEXT CHECK (json_valid(carried_manifest_json)),
+    CHECK ((evidence_digest IS NULL AND coverage_digest IS NULL AND covered_outbox_sequence IS NULL
+            AND local_ydoc_sequence IS NULL AND terminal_cursor IS NULL AND terminal_receipt_json IS NULL
+            AND max_pending_bytes IS NULL AND max_pending_age_ms IS NULL AND boundary_json IS NULL)
+        OR (evidence_digest IS NOT NULL AND coverage_digest IS NOT NULL AND covered_outbox_sequence IS NOT NULL
+            AND local_ydoc_sequence IS NOT NULL AND terminal_cursor IS NOT NULL AND terminal_receipt_json IS NOT NULL
+            AND max_pending_bytes IS NOT NULL AND max_pending_age_ms IS NOT NULL)),
+    CHECK ((released_at_ms IS NULL AND released_restore_generation IS NULL AND released_accepted_cursor IS NULL
+            AND released_boundary_json IS NULL AND carried_manifest_json IS NULL)
+        OR (released_at_ms IS NOT NULL AND released_restore_generation IS NOT NULL AND released_accepted_cursor IS NOT NULL
+            AND released_boundary_json IS NOT NULL AND carried_manifest_json IS NOT NULL)),
+    CHECK (released_at_ms IS NOT NULL OR evidence_digest IS NOT NULL),
+    PRIMARY KEY (relay_database_namespace, activation_id),
+    UNIQUE (relay_database_namespace, activation_id, workspace_id, main_version_id, object_id, lineage_claim_id),
+    FOREIGN KEY (relay_database_namespace, origin_adoption_id, workspace_id, main_version_id, object_id, lineage_claim_id)
+        REFERENCES live_owner_adoptions(relay_database_namespace, adoption_id, workspace_id, main_version_id, object_id, lineage_claim_id),
+    FOREIGN KEY (relay_database_namespace, predecessor_activation_id, workspace_id, main_version_id, object_id, lineage_claim_id)
+        REFERENCES live_owner_activations(relay_database_namespace, activation_id, workspace_id, main_version_id, object_id, lineage_claim_id),
+    FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE,
+    FOREIGN KEY (lineage_claim_id) REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    FOREIGN KEY (source_digest) REFERENCES blobs(sha256) ON DELETE RESTRICT
+) STRICT;
+CREATE UNIQUE INDEX live_owner_activations_current ON live_owner_activations
+    (workspace_id,main_version_id,object_id,lineage_claim_id) WHERE released_at_ms IS NULL;
+CREATE UNIQUE INDEX live_owner_activations_successor ON live_owner_activations
+    (relay_database_namespace,predecessor_activation_id) WHERE predecessor_activation_id IS NOT NULL;
+INSERT INTO live_owner_activations (relay_database_namespace,activation_id,workspace_id,main_version_id,
+    object_id,lineage_claim_id,origin_adoption_id,binding_json,source_moment_id,source_digest,source_byte_length,
+    baseline_moment_relay_sequence,baseline_registered_at_ms,host_coordinate_json,evidence_digest,coverage_digest,
+    covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,max_pending_bytes,max_pending_age_ms)
+  SELECT relay_database_namespace,adoption_id,workspace_id,main_version_id,object_id,lineage_claim_id,adoption_id,
+    binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,
+    baseline_registered_at_ms,host_coordinate_json,evidence_digest,coverage_digest,covered_outbox_sequence,
+    local_ydoc_sequence,terminal_cursor,terminal_receipt_json,max_pending_bytes,max_pending_age_ms
+  FROM live_owner_adoptions;
+ALTER TABLE live_device_application_bindings ADD COLUMN activation_id TEXT
+    CHECK (length(CAST(activation_id AS BLOB)) BETWEEN 1 AND 1024);
+UPDATE live_device_application_bindings SET activation_id=(SELECT a.adoption_id FROM live_owner_adoptions a
+    WHERE a.relay_database_namespace=live_device_application_bindings.relay_database_namespace
+      AND a.workspace_id=live_device_application_bindings.workspace_id
+      AND a.main_version_id=live_device_application_bindings.main_version_id
+      AND a.object_id=live_device_application_bindings.object_id
+      AND a.lineage_claim_id=live_device_application_bindings.lineage_claim_id);
+";
 
 /// A hosted document that left the scope parks instead of losing its state.
 /// Its heads and path aliases move to the parked tables, whose blob keys keep
@@ -4333,6 +4422,10 @@ mod tests {
                 "v2-agent-run-failure-handled",
                 "56e87a5adcc33c2af1f301c3c25c91fe7c6b1c738f34e35ccd629080d89bcc50",
             ),
+            (
+                "v2-live-owner-activations",
+                "341d95507e8c0e23eddc72130811c5d66b72dce37a4a17aefe8192892cc436cf",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -4367,8 +4460,9 @@ mod tests {
         }
 
         let mut conn = open_bare(&path);
+        let through = &BASELINE_MIGRATIONS[..=before];
         assert_eq!(
-            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("upgrade"),
+            run_migrations(&mut conn, through, &ctx, &NoFaults).expect("upgrade"),
             MigrationOutcome::Applied { newly_applied: 1 }
         );
         let runs = conn
@@ -4410,6 +4504,168 @@ mod tests {
                 )
                 .unwrap()
         );
+        assert_eq!(
+            run_migrations(&mut conn, through, &ctx, &NoFaults).expect("reopen"),
+            MigrationOutcome::Applied { newly_applied: 0 }
+        );
+    }
+
+    const ADOPTION_FACTS: &str = "json_array(binding_json,source_moment_id,source_digest,source_byte_length,\
+        baseline_moment_relay_sequence,baseline_registered_at_ms,host_coordinate_json,evidence_digest,\
+        coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,\
+        max_pending_bytes,max_pending_age_ms)";
+
+    #[test]
+    fn live_owner_activations_upgrade_backfills_each_adoption_and_its_binding() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-live-owner-activations");
+        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 60);
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 61);
+        let mut conn = open_bare(&path);
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults)
+            .expect("previous store version");
+        let lineage = crate::blob::put_binary_blob(&conn, b"lineage").unwrap();
+        let other = crate::blob::put_binary_blob(&conn, b"other").unwrap();
+        let source = crate::blob::hex_sha256(b"");
+        conn.execute(
+            "INSERT INTO blobs(sha256,text,byte_length) VALUES (?1,'',0)",
+            [&source],
+        )
+        .unwrap();
+        conn.execute_batch("INSERT INTO versioned_workspaces VALUES ('ws','main')")
+            .unwrap();
+        for (adoption, object, receipt) in [
+            ("adoption-a", "a", "null"),
+            (
+                "adoption-b",
+                "b",
+                r#"{"deliveryId":"d","updateDigest":"u","journalCursor":7,"acceptingHostEpoch":1}"#,
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO live_owner_adoptions VALUES ('relay',?1,'ws','main',?2,?3,?4,'moment',?5,0,3,4,'evidence','coverage',5,6,?6,?7,'{\"hostId\":\"host\"}',1000,2000)",
+                rusqlite::params![adoption, object, lineage, format!("{{\"objectId\":\"{object}\"}}"), source,
+                    if object == "a" { 0 } else { 7 }, receipt],
+            )
+            .unwrap();
+        }
+        for (object, claim) in [("a", &lineage), ("b", &other), ("c", &lineage)] {
+            conn.execute(
+                "INSERT INTO live_device_application_bindings VALUES ('relay','ws','main',?1,?2,'a.md','[\"a.md\"]',0,'host',1,'instance','connection',1)",
+                rusqlite::params![object, claim],
+            )
+            .unwrap();
+        }
+        let adoptions = |conn: &Connection| -> Vec<String> {
+            conn.prepare(&format!("SELECT json_array(relay_database_namespace,adoption_id,workspace_id,main_version_id,object_id,lineage_claim_id)||{ADOPTION_FACTS} FROM live_owner_adoptions ORDER BY adoption_id"))
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        let roots = adoptions(&conn);
+
+        assert_eq!(
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("upgrade"),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        assert_eq!(
+            adoptions(&conn),
+            roots,
+            "the lineage origin stays as it was"
+        );
+        let backfilled: Vec<(String, String, Option<String>, bool)> = conn
+            .prepare(&format!(
+                "SELECT v.activation_id,v.origin_adoption_id,v.predecessor_activation_id,
+                    {ADOPTION_FACTS}=(SELECT {ADOPTION_FACTS} FROM live_owner_adoptions a WHERE a.adoption_id=v.activation_id)
+                    AND v.boundary_json IS NULL AND v.released_at_ms IS NULL
+                 FROM live_owner_activations v ORDER BY v.activation_id"
+            ))
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            backfilled,
+            vec![
+                ("adoption-a".into(), "adoption-a".into(), None, true),
+                ("adoption-b".into(), "adoption-b".into(), None, true),
+            ]
+        );
+        let bindings: Vec<(String, Option<String>)> = conn
+            .prepare("SELECT object_id,activation_id FROM live_device_application_bindings ORDER BY object_id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            bindings,
+            vec![
+                ("a".into(), Some("adoption-a".into())),
+                ("b".into(), None),
+                ("c".into(), None),
+            ],
+            "a binding names the adoption of its own lineage only"
+        );
+
+        let insert = |id: &str,
+                      predecessor: Option<&str>,
+                      object: &str,
+                      released: bool,
+                      adopted: bool| {
+            conn.execute(
+                "INSERT INTO live_owner_activations (relay_database_namespace,activation_id,workspace_id,main_version_id,
+                    object_id,lineage_claim_id,origin_adoption_id,predecessor_activation_id,binding_json,source_moment_id,
+                    source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,
+                    host_coordinate_json,evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,
+                    terminal_cursor,terminal_receipt_json,max_pending_bytes,max_pending_age_ms,released_at_ms,
+                    released_restore_generation,released_accepted_cursor,released_boundary_json,carried_manifest_json)
+                 VALUES ('relay',?1,'ws','main',?3,?4,iif(?3='a','adoption-a',NULL),?2,'{}','moment',?5,0,0,0,'{}',
+                    iif(?7,'e',NULL),iif(?7,'c',NULL),iif(?7,0,NULL),iif(?7,0,NULL),iif(?7,0,NULL),iif(?7,'null',NULL),
+                    iif(?7,1,NULL),iif(?7,1,NULL),iif(?6,9,NULL),iif(?6,1,NULL),iif(?6,0,NULL),iif(?6,'[]',NULL),iif(?6,'[]',NULL))",
+                rusqlite::params![id, predecessor, object, lineage, source, released, adopted],
+            )
+        };
+        assert!(
+            insert("second-current", None, "a", false, true).is_err(),
+            "one unreleased activation per document lineage"
+        );
+        assert!(
+            insert("never-adopted", None, "a", false, false).is_err(),
+            "an unreleased activation is adopted"
+        );
+        insert("released", Some("adoption-a"), "a", true, false).expect("a released successor");
+        assert!(
+            insert("sibling", Some("adoption-a"), "a", true, false).is_err(),
+            "one successor per activation"
+        );
+        assert!(
+            insert("elsewhere", Some("released"), "b", true, false).is_err(),
+            "a predecessor stays on its lineage"
+        );
+        assert!(
+            conn.execute(
+                "UPDATE live_owner_activations SET carried_manifest_json=NULL WHERE activation_id='released'",
+                []
+            )
+            .is_err(),
+            "release facts arrive together"
+        );
+        assert!(
+            conn.execute(
+                "UPDATE live_owner_activations SET terminal_receipt_json=NULL WHERE activation_id='adoption-a'",
+                []
+            )
+            .is_err(),
+            "adoption facts arrive together"
+        );
+        assert_eq!(adoptions(&conn), roots);
         assert_eq!(
             run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("reopen"),
             MigrationOutcome::Applied { newly_applied: 0 }

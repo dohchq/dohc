@@ -108,6 +108,7 @@ pub(super) fn replaced_head(
         namespace: fence.relay_database_namespace.clone(),
         coordinate: held.coordinate.clone(),
         binding: fence.old_binding.clone(),
+        activation_id: held.activation_id.clone(),
         live: false,
     };
     let terminal = fence.terminal.as_ref().map_or(0, |r| r.journal_cursor);
@@ -123,7 +124,7 @@ pub(super) fn replaced_head(
 }
 
 /// The digest, cursor, and sequence of the origin `with_restore_settlement`
-/// would choose for `held`: its adoption, else its bootstrap at zero.
+/// would choose for `held`: its current activation, else its bootstrap at zero.
 fn origin_head(
     conn: &Connection,
     held: &Registration,
@@ -131,6 +132,7 @@ fn origin_head(
 ) -> Result<(String, i64, i64), ApplicationError> {
     let b = &held.binding;
     let row = "WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5";
+    let current = owner_activations::CURRENT_ACTIVATIONS;
     let p = params![
         held.namespace,
         b.workspace_id,
@@ -140,7 +142,7 @@ fn origin_head(
     ];
     let adopted: bool = conn
         .query_row(
-            &format!("SELECT EXISTS(SELECT 1 FROM live_owner_adoptions {row})"),
+            &format!("SELECT EXISTS(SELECT 1 FROM {current} {row})"),
             p,
             |r| r.get(0),
         )
@@ -149,7 +151,7 @@ fn origin_head(
         budget.sql_json_array(
             conn,
             &["source_digest", "terminal_cursor", "local_ydoc_sequence"],
-            &format!("FROM live_owner_adoptions {row}"),
+            &format!("FROM {current} {row}"),
             p,
         )?
     } else {
@@ -215,6 +217,7 @@ fn saved_in(
         namespace: held.namespace.clone(),
         coordinate: held.coordinate.clone(),
         binding: receipt.binding.clone(),
+        activation_id: held.activation_id.clone(),
         live: false,
     };
     let anchor = settlement::restore::read_anchor_in(
@@ -304,6 +307,7 @@ fn native_saved(
         namespace: held.namespace.clone(),
         coordinate: held.coordinate.clone(),
         binding: receipt.binding.clone(),
+        activation_id: held.activation_id.clone(),
         live: false,
     };
     accepted_history::validate_resume_checkpoint(
@@ -425,6 +429,7 @@ impl ApplicationOwner {
             namespace: operation.relay_database_namespace.clone(),
             coordinate: coordinate.clone(),
             binding: operation.old_binding.clone(),
+            activation_id: None,
             live: false,
         };
         if let Some(receipt) =

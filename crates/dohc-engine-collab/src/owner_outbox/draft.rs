@@ -448,7 +448,7 @@ pub fn install_observed_binding_in_tx(
         return Err(OwnerOutboxError::ParentMismatch);
     }
     let adopted: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM live_owner_adoptions WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)",
+        &format!("SELECT EXISTS(SELECT 1 FROM {} WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)", crate::live_update_application::owner_activations::CURRENT_ACTIVATIONS),
         params![b.workspace_id,b.main_version_id,b.object_id], |row| row.get(0),
     ).map_err(read_sql)?;
     if adopted {

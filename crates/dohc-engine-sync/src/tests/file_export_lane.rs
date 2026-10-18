@@ -2066,7 +2066,7 @@ fn lane_drain_and_promotion_keep_deferred_and_owner_binding_exclusions() {
             match blocker {
                 "deferred"=>{tx.execute("INSERT INTO ydoc_deferred_updates(workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms) VALUES ('ws','main','doc','peer',0,20)",[]).map_err(SyncError::persist)?;}
                 "owner"=>{tx.execute("INSERT INTO ydoc_owner_bindings VALUES ('ws','main','doc',?1,'{}','relay',1,0,0,?1,1024,1000)",[&binary]).map_err(SyncError::persist)?;}
-                "audit"=>{tx.execute("INSERT INTO live_device_application_bindings VALUES ('relay','ws','main','doc','claim','doc.md','[]',0,'host',1,'instance','connection',1)",[]).map_err(SyncError::persist)?;}
+                "audit"=>{tx.execute("INSERT INTO live_device_application_bindings VALUES ('relay','ws','main','doc','claim','doc.md','[]',0,'host',1,'instance','connection',1,NULL)",[]).map_err(SyncError::persist)?;}
                 _=>unreachable!(),
             }
             crate::enrolment::backfill_file_versions_in_tx(tx,"ws")?;assert_eq!(originate_ydoc_base_in_tx(tx,&key,"doc.md",None,None,30)?,BaseOrigination::NothingToDo);Ok::<_,SyncError>(())

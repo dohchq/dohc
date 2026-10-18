@@ -5997,6 +5997,7 @@ mod doc_cache_reset_tests {
                     "adopted" => {
                         let claim = dohc_engine_storage::put_binary_blob(tx, b"lineage claim").unwrap();
                         tx.execute("INSERT INTO live_owner_adoptions(relay_database_namespace,adoption_id,workspace_id,main_version_id,object_id,lineage_claim_id,binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,host_coordinate_json,max_pending_bytes,max_pending_age_ms) VALUES('relay','adoption','workspace','main','document',?1,'{\"currentPath\":\"record.md\"}','creation',?2,15,0,1,?2,?2,0,1,0,'{}','{}',1024,1000)", params![claim, expected]).unwrap();
+                        tx.execute(dohc_engine_collab::live_update_application::owner_activations::ACTIVATE_ADOPTION, params!["relay", "adoption"]).unwrap();
                     },
                     "fenced" => {tx.execute("INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,input_json,receipt_json) VALUES('workspace','main','document','relay','restore','{\"oldBinding\":{\"lineageClaimId\":\"claim\",\"restoreFenceGeneration\":0},\"newFence\":1}','{}')", []).unwrap();},
                     "finish" => {tx.execute_batch("CREATE TRIGGER refuse_lineage_retirement BEFORE DELETE ON ydoc_docs BEGIN SELECT RAISE(FAIL, 'retirement refused'); END").unwrap();},

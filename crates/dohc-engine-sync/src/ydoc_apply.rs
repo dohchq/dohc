@@ -1,4 +1,5 @@
 use dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD;
+use dohc_engine_collab::live_update_application::owner_activations::CURRENT_ACTIVATIONS;
 use dohc_engine_collab::{
     CollabError, CompactOutcome, ContentKind, DocKey, RemoteAppendProbe, RemoteUpdate,
     ReplicationApplyOutcome, WriterDocCache, apply_remote_update_in_transaction_with_projection,
@@ -1825,7 +1826,8 @@ pub enum ResultingHead<'a> {
 }
 
 /// A folder move must check durable owner bindings, including owners that
-/// have never queued an update. Closing a session does not end adoption.
+/// have never queued an update. Closing a session does not end adoption;
+/// releasing its activation does.
 pub fn ensure_no_adopted_owner_under_path(
     conn: &Connection,
     workspace_id: &str,
@@ -1834,10 +1836,12 @@ pub fn ensure_no_adopted_owner_under_path(
 ) -> Result<(), SyncError> {
     let adopted: bool = conn
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM live_owner_adoptions
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM {CURRENT_ACTIVATIONS}
          WHERE workspace_id=?1 AND main_version_id=?2
            AND (json_extract(binding_json,'$.currentPath')=?3
-             OR substr(json_extract(binding_json,'$.currentPath'),1,length(?3)+1)=?3||'/'))",
+             OR substr(json_extract(binding_json,'$.currentPath'),1,length(?3)+1)=?3||'/'))"
+            ),
             params![workspace_id, version_id, path],
             |row| row.get(0),
         )
@@ -1855,9 +1859,11 @@ fn ensure_adopted_owner_binding_unchanged(
 ) -> Result<(), SyncError> {
     let changes_binding: bool = conn
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM live_owner_adoptions
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM {CURRENT_ACTIVATIONS}
          WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3
-           AND (?4 IS NULL OR json_extract(binding_json,'$.currentPath') IS NOT ?4))",
+           AND (?4 IS NULL OR json_extract(binding_json,'$.currentPath') IS NOT ?4))"
+            ),
             params![
                 key.workspace_id,
                 key.version_id,

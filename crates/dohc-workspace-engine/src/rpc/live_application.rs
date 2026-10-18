@@ -383,7 +383,8 @@ impl EngineService {
                 .map_err(|_| workspace_unavailable())?;
             let state = store.read_with(|conn| -> Result<Value,dohc_engine_storage::StorageError> {
                 use rusqlite::OptionalExtension;
-                let prior: Option<(String,i64,i64)> = conn.query_row("SELECT adoption_id,local_ydoc_sequence,terminal_cursor FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5",
+                let prior: Option<(String,i64,i64)> = conn.query_row(&format!("SELECT activation_id,local_ydoc_sequence,terminal_cursor FROM {} WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5",
+                    dohc_engine_collab::live_update_application::owner_activations::CURRENT_ACTIVATIONS),
                     rusqlite::params![registration.host.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(dohc_engine_storage::StorageError::persist_public)?;
                 let (outbox_id,pending_bytes,outbox_state) = read_owner_outbox(conn,b)?.map_or((None,0,None),|(id,bytes,state)|(Some(id),bytes,Some(state)));
                 if let Some((id,sequence,cursor)) = prior { return Ok(json!({"adoptionId":id,"expectedLocalSequence":sequence,"throughCursor":cursor,"outboxId":outbox_id,"pendingBytes":pending_bytes,"outboxState":outbox_state})); }
@@ -831,12 +832,17 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
         struct Params {
             binding: LiveObjectBinding,
+            /// Only the configured session host names the activation it serves.
+            activation_id: Option<String>,
         }
         let params: Params = serde_json::from_value(params)
             .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid-live-registration"))?;
+        if params.activation_id.is_some() {
+            self.configured_host_caller(ctx)?;
+        }
         let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
         let workspace = workspace.ok_or_else(workspace_unavailable)?;
         let host = lock(&self.live_applications)
@@ -856,7 +862,11 @@ impl EngineService {
             return Err(workspace_unavailable());
         }
         host.owner
-            .validate_binding(params.binding.clone())
+            .validate_binding(
+                host.namespace.clone(),
+                params.binding.clone(),
+                params.activation_id.clone(),
+            )
             .await
             .map_err(map_runtime)?;
         if !host.current(connection) || !Arc::ptr_eq(&self.open(Some(&workspace))?, &host.open) {
@@ -892,15 +902,28 @@ impl EngineService {
         }
         let object_id = params.binding.object_id.clone();
         let binding = params.binding.clone();
-        let handle = host
-            .owner
-            .register(
-                host.namespace.clone(),
-                host.coordinate.clone(),
-                params.binding,
-            )
-            .await
-            .map_err(map_runtime)?;
+        let handle = match params.activation_id {
+            Some(activation_id) => {
+                host.owner
+                    .register_activation(
+                        host.namespace.clone(),
+                        host.coordinate.clone(),
+                        params.binding,
+                        activation_id,
+                    )
+                    .await
+            }
+            None => {
+                host.owner
+                    .register(
+                        host.namespace.clone(),
+                        host.coordinate.clone(),
+                        params.binding,
+                    )
+                    .await
+            }
+        }
+        .map_err(map_runtime)?;
         let mut registry = lock(&self.live_applications);
         if !host.current(connection) || !Arc::ptr_eq(&self.open(Some(&workspace))?, &host.open) {
             return Err(workspace_unavailable());
@@ -2644,6 +2667,49 @@ mod tests {
             progress: false,
             params: json!({"objectId": object_id}),
         }
+    }
+
+    #[tokio::test]
+    async fn an_activation_registration_is_refused_before_the_existing_one_retires() {
+        let (_scratch, service, owner, workspace, document, _sibling) = unload_fixture().await;
+        let params = json!({"binding": unload_binding("document"), "activationId": "unknown"});
+        let stranger = dohc_engine_protocol::transport::ConnectionOwner::authenticated();
+        let mut foreign = RequestContext::unbounded();
+        foreign.connection = Some(stranger.handle());
+        assert_eq!(
+            service
+                .live_application_register(&foreign, Some(workspace.clone()), params.clone())
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::SessionExpired,
+            "only the configured session host names an activation"
+        );
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        assert!(
+            service
+                .live_application_register(&ctx, Some(workspace.clone()), params)
+                .await
+                .is_err()
+        );
+        assert!(
+            service
+                .live_application_registration(&owner.handle(), Some(&workspace), document)
+                .is_ok()
+        );
+        let open = service.open(Some(&workspace)).unwrap();
+        let store = dohc_engine_storage::EngineStore::open_read_only(&open.db_path).unwrap();
+        let available: i64 = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT available FROM live_device_application_bindings WHERE object_id='document'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(available, 1);
     }
 
     #[tokio::test]

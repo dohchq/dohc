@@ -35,6 +35,7 @@ impl RestoreAudit {
             namespace: audit.namespace.clone(),
             coordinate: audit.coordinate.clone(),
             binding: self.input.preparation.fence.operation.old_binding.clone(),
+            activation_id: None,
             live: false,
         }
     }
@@ -180,6 +181,7 @@ impl ApplicationOwner {
             namespace: operation.relay_database_namespace.clone(),
             coordinate,
             binding: operation.old_binding.clone(),
+            activation_id: None,
             live: false,
         };
         let result = store.write_with(&NoFaults, |tx| -> Result<LiveSettlementAudit, ApplicationError> {

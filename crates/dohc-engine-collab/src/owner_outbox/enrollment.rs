@@ -44,7 +44,7 @@ fn native_state(
         .map_err(OwnerOutboxError::InvalidInput)?;
     let key = key(binding)?;
     let (configured,stopped):(bool,bool) = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM live_device_application_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3) OR EXISTS(SELECT 1 FROM live_owner_adoptions WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3), CASE WHEN ?4 THEN 0 ELSE EXISTS(SELECT 1 FROM owner_live_stops WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3) END",
+        &format!("SELECT EXISTS(SELECT 1 FROM live_device_application_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3) OR EXISTS(SELECT 1 FROM {} WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3), CASE WHEN ?4 THEN 0 ELSE EXISTS(SELECT 1 FROM owner_live_stops WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3) END", crate::live_update_application::owner_activations::CURRENT_ACTIVATIONS),
         params![key.workspace_id,key.version_id,key.object_id,successor], |r| Ok((r.get(0)?,r.get(1)?)),
     ).map_err(read_sql)?;
     if configured {

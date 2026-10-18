@@ -1172,6 +1172,7 @@ mod tests {
                     connection_id: "connection".into(),
                 },
                 binding,
+                activation_id: None,
                 live: true,
             };
             let initial = initial_digest(&held.namespace, &held.binding).unwrap();

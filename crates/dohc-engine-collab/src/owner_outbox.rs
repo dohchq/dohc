@@ -6,6 +6,7 @@
 //! durable receipt for each ordered update.
 
 use crate::live_object_binding::LiveObjectBinding;
+use crate::live_update_application::owner_activations::CURRENT_ACTIVATIONS;
 use dohc_engine_domain::{AgentDeclaration, AutomationDeclaration};
 use dohc_engine_storage::{
     get_binary_blob, hex_sha256, put_binary_blob_with_sha, EngineStore, NoFaults, StorageError,
@@ -31,7 +32,7 @@ pub fn has_adopted_owner_in(
     conn: &Connection,
     key: &crate::DocKey,
 ) -> Result<bool, crate::CollabError> {
-    conn.query_row("SELECT EXISTS(SELECT 1 FROM live_owner_adoptions WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)",
+    conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {CURRENT_ACTIVATIONS} WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)"),
         params![key.workspace_id,key.version_id,key.object_id], |r| r.get(0))
         .map_err(|error| crate::CollabError::Storage(StorageError::corrupt_public(error)))
 }
@@ -425,10 +426,14 @@ fn native_refusal_checkpoint_in_tx(
     if active != *binding {
         return Err(OwnerOutboxError::ParentMismatch);
     }
-    let adoption: Option<String> = tx.query_row(
-        "SELECT adoption_id FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5",
-        params![namespace,binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id], |r| r.get(0),
-    ).optional().map_err(read_sql)?;
+    let adoption = crate::live_update_application::owner_activations::current_activation(
+        tx,
+        Some(namespace.as_str()),
+        &key,
+        &binding.lineage_claim_id,
+    )
+    .map_err(|_| OwnerOutboxError::Corrupt)?
+    .map(|(activation, _)| activation.activation_id);
     if adoption.as_deref() != Some(source.adoption_id.as_str()) {
         return Err(OwnerOutboxError::ParentMismatch);
     }
@@ -527,7 +532,7 @@ fn append_with_retained_base(
     // The private retained-base path already read these controls in this transaction.
     if retained_base.is_none() {
         let adopted: Option<(String, i64, i64)> = tx.query_row(
-        "SELECT binding_json,max_pending_bytes,max_pending_age_ms FROM live_owner_adoptions WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
+        &format!("SELECT binding_json,max_pending_bytes,max_pending_age_ms FROM {CURRENT_ACTIVATIONS} WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4"),
         params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id],
         |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
     ).optional().map_err(read_sql)?;
@@ -827,8 +832,8 @@ pub fn append_adopted_local_update_in_tx(
     };
     let saved: Option<(String, i64, i64, String)> = tx
         .query_row(
-            "SELECT binding_json,max_pending_bytes,max_pending_age_ms,adoption_id FROM live_owner_adoptions
-         WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
+            &format!("SELECT binding_json,max_pending_bytes,max_pending_age_ms,activation_id FROM {CURRENT_ACTIVATIONS}
+         WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4"),
             params![key.workspace_id, key.version_id, key.object_id, lineage],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )

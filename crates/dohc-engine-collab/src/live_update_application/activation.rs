@@ -81,16 +81,19 @@ pub fn release_imported_owner_activation(
     session: Option<(&DocKey, &str)>,
     faults: &dyn FaultInjector,
 ) -> Result<(), ApplicationError> {
+    // A source stays while its lineage's current activation or its own
+    // activation, even a released one, records it.
     let outcome = store.write_with(faults, |tx| {
         let removed: Option<String> = tx
             .query_row(
                 "DELETE FROM ydoc_owner_activation_sources AS a WHERE a.activation_id=?1
              AND a.relay_database_namespace=?2 AND a.workspace_id=?3
              AND (?4 IS NULL OR (a.version_id=?4 AND a.object_id=?5 AND a.lineage_claim_id=?6))
-             AND NOT EXISTS(SELECT 1 FROM live_owner_adoptions adopted
+             AND NOT EXISTS(SELECT 1 FROM live_owner_activations adopted
                  WHERE adopted.workspace_id=a.workspace_id AND adopted.main_version_id=a.version_id
                  AND adopted.object_id=a.object_id AND adopted.lineage_claim_id=a.lineage_claim_id
-                 AND adopted.relay_database_namespace=a.relay_database_namespace) RETURNING full_state_digest",
+                 AND adopted.relay_database_namespace=a.relay_database_namespace
+                 AND (adopted.activation_id=a.activation_id OR adopted.released_at_ms IS NULL)) RETURNING full_state_digest",
                 params![
                     activation_id,
                     namespace,
@@ -290,11 +293,9 @@ pub fn resume_imported_owner_activation(
         if cursor<source.committed_cursor || epoch!=source.replication_epoch || stream!=source.stream_identity {
             return Err(ApplicationError::Conflict);
         }
-        let adopted:Option<(String,String,i64,String,String,i64)>=conn.query_row(
-            "SELECT relay_database_namespace,adoption_id,local_ydoc_sequence,source_moment_id,source_digest,source_byte_length
-             FROM live_owner_adoptions WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
-            params![key.workspace_id,key.version_id,key.object_id,source.lineage_claim_id],
-            |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional().map_err(read_sql)?;
+        let adopted=owner_activations::current_activation(conn,None,key,&source.lineage_claim_id)?
+            .map(|(activation,adopted)|(activation.namespace,activation.activation_id,adopted.local_ydoc_sequence,
+                activation.source_moment_id,activation.source_digest,activation.source_byte_length));
         if let Some((saved_namespace,id,sequence,moment,digest,length))=adopted {
             if saved_namespace!=namespace || id!=activation_id || sequence!=source.native_head_sequence
                 || marker.head_update_seq<sequence || moment!=source.source_moment_id

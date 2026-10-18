@@ -197,6 +197,7 @@ fn registration_in(
                         instance_id: row.get(7)?,
                         connection_id: row.get(8)?,
                     },
+                    activation_id: None,
                     live: row.get::<_, i64>(9)? == 1,
                 })
             },

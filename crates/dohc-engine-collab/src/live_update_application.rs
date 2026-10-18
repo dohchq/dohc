@@ -43,6 +43,7 @@ pub use activation::{
     resume_imported_owner_activation, ImportedOwnerActivation, ImportedOwnerSource,
 };
 mod adoption;
+pub mod owner_activations;
 pub use accepted_history::{NativeAcceptedCheckpoint, NativeRestoreHistoryProof};
 mod bootstrap;
 pub use adoption::{adopt_owner_committed, OwnerAdoptionAck, OwnerAdoptionCut};
@@ -927,6 +928,8 @@ struct Registration {
     namespace: String,
     coordinate: ApplicationHostCoordinate,
     binding: LiveObjectBinding,
+    /// The activation its binding row names; a read-only view leaves it unset.
+    activation_id: Option<String>,
     live: bool,
 }
 /// One trusted delivery owner for an engine workspace. Never deserialize this
@@ -956,6 +959,28 @@ impl ApplicationOwner {
         coordinate: ApplicationHostCoordinate,
         binding: LiveObjectBinding,
     ) -> Result<ApplicationHandle, ApplicationError> {
+        self.register_with(store, namespace, coordinate, binding, None)
+    }
+    /// Register a session host for one activation. The binding row names it,
+    /// and a mismatch refuses before any existing registration is retired.
+    pub fn register_activation(
+        &mut self,
+        store: &mut EngineStore,
+        namespace: String,
+        coordinate: ApplicationHostCoordinate,
+        binding: LiveObjectBinding,
+        activation_id: String,
+    ) -> Result<ApplicationHandle, ApplicationError> {
+        self.register_with(store, namespace, coordinate, binding, Some(activation_id))
+    }
+    fn register_with(
+        &mut self,
+        store: &mut EngineStore,
+        namespace: String,
+        coordinate: ApplicationHostCoordinate,
+        binding: LiveObjectBinding,
+        activation_id: Option<String>,
+    ) -> Result<ApplicationHandle, ApplicationError> {
         if namespace.is_empty() {
             return Err(invalid("relay namespace is empty"));
         }
@@ -966,8 +991,15 @@ impl ApplicationOwner {
             &binding.main_version_id,
             &binding.object_id,
         )?;
-        store.read_with(|conn| {
-            restore_fence::require_registration(conn, &key, &namespace, &binding)
+        let requested = activation_id;
+        let activation_id = store.read_with(|conn| {
+            restore_fence::require_registration(conn, &key, &namespace, &binding)?;
+            owner_activations::registration_activation(
+                conn,
+                &namespace,
+                &binding,
+                requested.as_deref(),
+            )
         })?;
         let connection_changed = self.current.iter().any(|entry| {
             entry.lock().map_or(true, |r| {
@@ -994,6 +1026,7 @@ impl ApplicationOwner {
             namespace,
             coordinate,
             binding,
+            activation_id,
             live: true,
         };
         let outcome = store.write_with(&NoFaults, |tx| {
@@ -1005,6 +1038,15 @@ impl ApplicationOwner {
                 &registration.namespace,
                 &registration.binding,
             )?;
+            if owner_activations::registration_activation(
+                tx,
+                &registration.namespace,
+                &registration.binding,
+                requested.as_deref(),
+            )? != registration.activation_id
+            {
+                return Err(ApplicationError::Conflict);
+            }
             install_binding(tx, &registration)
         })?;
         if !matches!(outcome, TxnOutcome::Committed(())) {
@@ -1109,8 +1151,9 @@ const UNLOAD_PENDING: &str = "SELECT
                 WHERE s.relay_database_namespace=a.relay_database_namespace AND s.workspace_id=a.workspace_id
                 AND s.main_version_id=a.main_version_id AND s.object_id=a.object_id
                 AND s.lineage_claim_id=a.lineage_claim_id),0),
-            COALESCE((SELECT o.terminal_cursor FROM live_owner_adoptions o
-                WHERE o.relay_database_namespace=a.relay_database_namespace AND o.workspace_id=a.workspace_id
+            COALESCE((SELECT o.terminal_cursor FROM live_owner_activations o
+                WHERE o.released_at_ms IS NULL
+                AND o.relay_database_namespace=a.relay_database_namespace AND o.workspace_id=a.workspace_id
                 AND o.main_version_id=a.main_version_id AND o.object_id=a.object_id
                 AND o.lineage_claim_id=a.lineage_claim_id),0)))";
 
@@ -1169,8 +1212,8 @@ fn invalidate_registration(
     let c = &held.coordinate;
     let b = &held.binding;
     let outcome = store.write_with(&NoFaults, |tx| {
-            tx.execute("UPDATE live_device_application_bindings SET available=0 WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND host_id=?5 AND host_epoch=?6 AND instance_id=?7 AND connection_id=?8",
-                params![held.namespace, held.workspace_id, b.main_version_id, b.object_id, c.host_id, c.host_epoch, c.instance_id, c.connection_id]).map_err(write_sql)?;
+            tx.execute("UPDATE live_device_application_bindings SET available=0 WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND host_id=?5 AND host_epoch=?6 AND instance_id=?7 AND connection_id=?8 AND activation_id IS ?9",
+                params![held.namespace, held.workspace_id, b.main_version_id, b.object_id, c.host_id, c.host_epoch, c.instance_id, c.connection_id, held.activation_id]).map_err(write_sql)?;
             Ok::<_, ApplicationError>(())
         })?;
     if matches!(outcome, TxnOutcome::Committed(())) {
@@ -1223,6 +1266,20 @@ pub fn validate_application_binding(
     store.read_with(|conn| require_binding_workspace(conn, workspace_id, binding))
 }
 
+/// Refuse an activation this binding's registration cannot serve before
+/// retiring an existing registration.
+pub fn validate_registration_activation(
+    store: &EngineStore,
+    namespace: &str,
+    binding: &LiveObjectBinding,
+    activation_id: &str,
+) -> Result<(), ApplicationError> {
+    store.read_with(|conn| {
+        owner_activations::registration_activation(conn, namespace, binding, Some(activation_id))
+            .map(|_| ())
+    })
+}
+
 fn require_binding_workspace(
     tx: &Connection,
     workspace_id: &str,
@@ -1247,8 +1304,8 @@ fn require_binding_workspace(
 fn install_binding(tx: &Transaction<'_>, r: &Registration) -> Result<(), ApplicationError> {
     let b = &r.binding;
     let c = &r.coordinate;
-    tx.execute("INSERT INTO live_device_application_bindings (relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,host_id,host_epoch,instance_id,connection_id,available) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,1) ON CONFLICT(relay_database_namespace,workspace_id,main_version_id,object_id) DO UPDATE SET lineage_claim_id=excluded.lineage_claim_id,current_path=excluded.current_path,selector_paths_json=excluded.selector_paths_json,restore_fence_generation=excluded.restore_fence_generation,host_id=excluded.host_id,host_epoch=excluded.host_epoch,instance_id=excluded.instance_id,connection_id=excluded.connection_id,available=1",
-        params![r.namespace,r.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.current_path,serde_json::to_string(&b.selector_paths).map_err(|_| invalid("selector JSON"))?,b.restore_fence_generation,c.host_id,c.host_epoch,c.instance_id,c.connection_id]).map_err(write_sql)?;
+    tx.execute("INSERT INTO live_device_application_bindings (relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,host_id,host_epoch,instance_id,connection_id,available,activation_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,1,?13) ON CONFLICT(relay_database_namespace,workspace_id,main_version_id,object_id) DO UPDATE SET lineage_claim_id=excluded.lineage_claim_id,current_path=excluded.current_path,selector_paths_json=excluded.selector_paths_json,restore_fence_generation=excluded.restore_fence_generation,host_id=excluded.host_id,host_epoch=excluded.host_epoch,instance_id=excluded.instance_id,connection_id=excluded.connection_id,available=1,activation_id=excluded.activation_id",
+        params![r.namespace,r.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.current_path,serde_json::to_string(&b.selector_paths).map_err(|_| invalid("selector JSON"))?,b.restore_fence_generation,c.host_id,c.host_epoch,c.instance_id,c.connection_id,r.activation_id]).map_err(write_sql)?;
     Ok(())
 }
 

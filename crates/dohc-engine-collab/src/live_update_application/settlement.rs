@@ -78,6 +78,7 @@ impl LiveSettlementAudit {
             namespace: self.namespace.clone(),
             coordinate: self.coordinate.clone(),
             binding: b.clone(),
+            activation_id: None,
             live: true,
         };
         require_workspace(conn, &registration).map_err(audit_error)?;
@@ -174,6 +175,7 @@ impl LiveSettlementAudit {
                 namespace: self.namespace.clone(),
                 coordinate: self.coordinate.clone(),
                 binding: b.clone(),
+                activation_id: None,
                 live: true,
             };
             require_workspace(tx, &registration).map_err(audit_error)?;
@@ -219,6 +221,7 @@ impl LiveSettlementAudit {
                 namespace: self.namespace.clone(),
                 coordinate: self.coordinate.clone(),
                 binding: b.clone(),
+                activation_id: None,
                 live: true,
             };
             if restore::restored_origin(tx, &held)
@@ -604,8 +607,14 @@ fn private_tail(
     head: i64,
 ) -> Result<PrivateTail, ApplicationError> {
     let b = &held.binding;
-    let adoption: Option<String> = conn.query_row("SELECT adoption_id FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5",
-        params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],|row|row.get(0)).optional().map_err(read_sql)?;
+    let key = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)?;
+    let adoption = owner_activations::current_activation(
+        conn,
+        Some(&held.namespace),
+        &key,
+        &b.lineage_claim_id,
+    )?
+    .map(|(activation, _)| activation.activation_id);
     let Some(adoption) = adoption else {
         return Ok(PrivateTail::default());
     };

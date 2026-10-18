@@ -70,6 +70,17 @@ impl EngineService {
         } else {
             None
         };
+        // A session serving another activation is not this release's to close.
+        if session.as_ref().is_some_and(|session| {
+            session
+                .activation_id
+                .as_ref()
+                .is_some_and(|tagged| *tagged != params.activation_id)
+        }) {
+            return Err(map_runtime(
+                dohc_engine_collab::live_update_application::ApplicationError::Conflict.into(),
+            ));
+        }
         let had_session = session.is_some();
         let workspace_id = open.workspace_id.clone();
         let session_binding = session
@@ -249,8 +260,8 @@ impl EngineService {
             return Err(workspace_unavailable());
         }
         let session_id = if let Some(id) = existing {
+            let mut sessions = lock(&self.sessions);
             if resuming {
-                let mut sessions = lock(&self.sessions);
                 let session = sessions.get_mut(&id).ok_or_else(workspace_unavailable)?;
                 if session.lineage_claim_id.as_deref()
                     != Some(captured.source.lineage_claim_id.as_str())
@@ -258,6 +269,10 @@ impl EngineService {
                     return Err(workspace_unavailable());
                 }
                 session.restore_generation = captured.restore_generation;
+            }
+            // The reused session now serves the activation this capture names.
+            if let Some(session) = sessions.get_mut(&id) {
+                session.activation_id = Some(captured.activation_id.clone());
             }
             id
         } else {

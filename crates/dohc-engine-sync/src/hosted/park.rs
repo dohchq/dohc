@@ -695,10 +695,11 @@ fn parkable(conn: &Connection, workspace_id: &str, object_id: &str) -> Result<bo
                    WHERE workspace_id=?1 AND object_id=?2) \
                  AND NOT EXISTS(SELECT 1 FROM ydoc_owner_activation_sources a \
                    WHERE a.workspace_id=?1 AND a.object_id=?2 \
-                     AND NOT EXISTS(SELECT 1 FROM live_owner_adoptions o \
+                     AND NOT EXISTS(SELECT 1 FROM live_owner_activations o \
                        WHERE o.workspace_id=a.workspace_id AND o.main_version_id=a.version_id \
                          AND o.object_id=a.object_id AND o.lineage_claim_id=a.lineage_claim_id \
-                         AND o.relay_database_namespace=a.relay_database_namespace))"
+                         AND o.relay_database_namespace=a.relay_database_namespace \
+                         AND (o.activation_id=a.activation_id OR o.released_at_ms IS NULL)))"
             ),
             params![workspace_id, object_id],
             |row| row.get(0),

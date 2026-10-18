@@ -771,13 +771,17 @@ fn release_is_not_blocked_by_an_adoption_in_another_lineage_or_namespace() {
         f.cut.adoption_id = captured.activation_id.clone();
         f.adopt().unwrap();
         f.store.write_with(&NoFaults, |tx| {
-            if other_lineage {
-                let lineage = dohc_engine_storage::put_binary_blob(tx, &[0, 0])?;
-                tx.execute("UPDATE live_owner_adoptions SET lineage_claim_id=?1,
-                    binding_json=json_set(binding_json,'$.lineageClaimId',?1)", [&lineage])
-            } else {
-                tx.execute("UPDATE live_owner_adoptions SET relay_database_namespace='other-namespace'", [])
-            }.map_err(write_sql)
+            tx.execute_batch("PRAGMA defer_foreign_keys=ON").map_err(write_sql)?;
+            for table in ["live_owner_adoptions", "live_owner_activations"] {
+                if other_lineage {
+                    let lineage = dohc_engine_storage::put_binary_blob(tx, &[0, 0])?;
+                    tx.execute(&format!("UPDATE {table} SET lineage_claim_id=?1,
+                        binding_json=json_set(binding_json,'$.lineageClaimId',?1)"), [&lineage])
+                } else {
+                    tx.execute(&format!("UPDATE {table} SET relay_database_namespace='other-namespace'"), [])
+                }.map_err(write_sql)?;
+            }
+            Ok::<_, ApplicationError>(())
         }).unwrap();
         release_imported_owner_activation(
             &mut f.store,

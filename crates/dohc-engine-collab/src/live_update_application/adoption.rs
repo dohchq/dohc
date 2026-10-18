@@ -29,6 +29,7 @@ mod tests {
     use dohc_test_scratch::ScratchDir;
     include!("adoption_restore_tail_tests.rs");
     include!("activation_tests.rs");
+    include!("owner_activations_tests.rs");
 
     struct Fixture {
         store: EngineStore,
@@ -1390,7 +1391,7 @@ pub fn adopt_owner_committed(
         i64,
     ) -> Result<(), ApplicationError>,
 ) -> Result<OwnerAdoptionAck, ApplicationError> {
-    let held = handle
+    let mut held = handle
         .registration
         .lock()
         .map_err(|_| ApplicationError::Interrupted)?;
@@ -1436,28 +1437,29 @@ pub fn adopt_owner_committed(
             || get_binary_blob(tx, &b.lineage_claim_id)?.as_deref() != Some(cut.baseline_bytes.as_slice()) {
             return Err(ApplicationError::Conflict);
         }
-        let previous: Option<(String,String,i64,i64,String,i64)> = tx.query_row(
-            "SELECT evidence_digest,binding_json,local_ydoc_sequence,terminal_cursor,coverage_digest,covered_outbox_sequence FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND adoption_id=?2",
-            params![held.namespace,cut.adoption_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional().map_err(read_sql)?;
+        // A replay matches the activation this adoption made, while it is current.
+        let previous = owner_activations::activation_by_id(tx,&held.namespace,&cut.adoption_id)?;
         let binding_json=serde_json::to_string(b).map_err(|_| ApplicationError::Corrupt)?;
-        if let Some((saved_digest,saved_binding,sequence,cursor,coverage,covered_sequence)) = previous {
-            let (bytes,age): (i64,i64) = tx.query_row("SELECT max_pending_bytes,max_pending_age_ms FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND adoption_id=?2",
-                params![held.namespace,cut.adoption_id],|row|Ok((row.get(0)?,row.get(1)?))).map_err(read_sql)?;
-            if cut.outbox_limits.max_pending_bytes < bytes || cut.outbox_limits.max_pending_age_ms < age {
+        if let Some(previous) = previous {
+            let Some(saved) = previous.adoption.filter(|_| !previous.released) else { return Err(ApplicationError::Conflict) };
+            if cut.outbox_limits.max_pending_bytes < saved.max_pending_bytes || cut.outbox_limits.max_pending_age_ms < saved.max_pending_age_ms {
                 return Err(ApplicationError::ConfiguredBudgetMismatch);
             }
             let origin = read_origin(tx,&held)?.ok_or(ApplicationError::Corrupt)?;
             if origin.terminal != cut.terminal_receipt { return Err(ApplicationError::Corrupt); }
-            if saved_digest != evidence_digest || saved_binding != binding_json || sequence != cut.expected_local_sequence
+            let (sequence,cursor) = (saved.local_ydoc_sequence,saved.terminal_cursor);
+            if saved.evidence_digest != evidence_digest || previous.binding_json != binding_json || sequence != cut.expected_local_sequence
                 || marker.head_update_seq < sequence || cursor != cut.terminal_receipt.as_ref().map_or(0,|r|r.journal_cursor) {
                 return Err(ApplicationError::Conflict);
             }
-            if outbox_coverage(tx,b,&cut.events,max_events,Some(covered_sequence))? != (coverage,covered_sequence) { return Err(ApplicationError::Corrupt); }
+            if outbox_coverage(tx,b,&cut.events,max_events,Some(saved.covered_outbox_sequence))? != (saved.coverage_digest,saved.covered_outbox_sequence) { return Err(ApplicationError::Corrupt); }
             return Ok(OwnerAdoptionAck {adoption_id:cut.adoption_id.clone(),local_ydoc_sequence:sequence,terminal_cursor:cursor,adoption_replayed:true});
         }
-        let existing_document: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM live_owner_adoptions WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4)",
-            params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id], |r| r.get(0)).map_err(read_sql)?;
-        if existing_document { return Err(ApplicationError::Conflict); }
+        // A lineage adopts once, under the activation its registration named.
+        if owner_activations::lineage_origin_id(tx,None,&key,&b.lineage_claim_id)?.is_some()
+            || held.activation_id.as_ref().is_some_and(|id| *id != cut.adoption_id) {
+            return Err(ApplicationError::Conflict);
+        }
         if marker.head_update_seq != cut.expected_local_sequence { return Err(invalid("owner adoption evidence is stale")); }
         require_local_replay_budget(tx, &key, max_bytes)?;
         let local = durable::load_doc_in(tx, &key)?;
@@ -1511,13 +1513,19 @@ pub fn adopt_owner_committed(
         tx.execute("INSERT INTO live_owner_adoptions(relay_database_namespace,adoption_id,workspace_id,main_version_id,object_id,lineage_claim_id,binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,host_coordinate_json,max_pending_bytes,max_pending_age_ms)
             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
             params![held.namespace,cut.adoption_id,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,binding_json,cut.source_moment_id,cut.source_digest,cut.source_byte_length,cut.baseline_moment_relay_sequence,cut.baseline_registered_at_ms,evidence_digest,coverage,covered_sequence,marker.head_update_seq,terminal_cursor,serde_json::to_string(&cut.terminal_receipt).map_err(|_|ApplicationError::Corrupt)?,serde_json::to_string(&held.coordinate).map_err(|_|ApplicationError::Corrupt)?,cut.outbox_limits.max_pending_bytes,cut.outbox_limits.max_pending_age_ms]).map_err(write_sql)?;
+        tx.execute(owner_activations::ACTIVATE_ADOPTION,params![held.namespace,cut.adoption_id]).map_err(write_sql)?;
+        tx.execute("UPDATE live_device_application_bindings SET activation_id=?5 WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4",
+            params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,cut.adoption_id]).map_err(write_sql)?;
         accepted_history::initialize(tx, &held, &cut.baseline_bytes)?;
         for event in &cut.events { accepted_history::append_native(tx, &held, event, max_bytes)?; }
         follow_up(tx, &held.namespace, b, cut.events.len() as i64)?;
         Ok(OwnerAdoptionAck { adoption_id:cut.adoption_id.clone(),local_ydoc_sequence:marker.head_update_seq,terminal_cursor,adoption_replayed:false })
     })?;
     match result {
-        TxnOutcome::Committed(ack) => Ok(ack),
+        TxnOutcome::Committed(ack) => {
+            held.activation_id = Some(ack.adoption_id.clone());
+            Ok(ack)
+        }
         TxnOutcome::Crashed { .. } => Err(ApplicationError::Interrupted),
     }
 }
@@ -1661,8 +1669,9 @@ pub(super) fn read_origin(
     read_origin_with(conn, held, None)
 }
 
-/// With a budget, the adoption row, its source metadata, the original
-/// snapshot, and any resumed generation are charged before they are read.
+/// The current activation's adopted origin. With a budget, its row, source
+/// metadata, the original snapshot, and any resumed generation are charged
+/// before they are read.
 pub(super) fn read_origin_with(
     conn: &Connection,
     held: &Registration,
@@ -1671,28 +1680,38 @@ pub(super) fn read_origin_with(
     let b = &held.binding;
     if let Some(budget) = budget.as_deref_mut() {
         let length: i64 = conn.query_row(
-            "SELECT coalesce((SELECT length(CAST(a.binding_json AS BLOB))+length(CAST(a.source_moment_id AS BLOB))+length(CAST(a.source_digest AS BLOB))+length(CAST(a.terminal_receipt_json AS BLOB))+length(CAST(a.adoption_id AS BLOB))
-               +coalesce((SELECT sum(length(CAST(s.descriptor_json AS BLOB))) FROM ydoc_owner_activation_sources s WHERE s.activation_id=a.adoption_id),0)
+            &format!("SELECT coalesce((SELECT length(CAST(a.binding_json AS BLOB))+length(CAST(a.source_moment_id AS BLOB))+length(CAST(a.source_digest AS BLOB))+length(CAST(a.terminal_receipt_json AS BLOB))+length(CAST(a.activation_id AS BLOB))
+               +coalesce((SELECT sum(length(CAST(s.descriptor_json AS BLOB))) FROM ydoc_owner_activation_sources s WHERE s.activation_id=a.activation_id),0)
                +coalesce((SELECT sum(length(CAST(o.source_moment_id AS BLOB))+length(CAST(o.source_blob_sha256 AS BLOB))) FROM ydoc_owner_base_sources o WHERE o.workspace_id=a.workspace_id AND o.version_id=a.main_version_id AND o.object_id=a.object_id AND o.lineage_claim_id=a.lineage_claim_id),0)
                +coalesce((SELECT sum(length(CAST(n.snapshot_blob_sha256 AS BLOB))) FROM ydoc_snapshots n WHERE n.workspace_id=a.workspace_id AND n.version_id=a.main_version_id AND n.object_id=a.object_id AND n.up_to_seq=0),0)
-             FROM live_owner_adoptions a WHERE a.relay_database_namespace=?1 AND a.workspace_id=?2 AND a.main_version_id=?3 AND a.object_id=?4 AND a.lineage_claim_id=?5),0)",
+             FROM {} a WHERE a.relay_database_namespace=?1 AND a.workspace_id=?2 AND a.main_version_id=?3 AND a.object_id=?4 AND a.lineage_claim_id=?5),0)", owner_activations::CURRENT_ACTIVATIONS),
             params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],
             |r| r.get(0),
         ).map_err(read_sql)?;
         budget.charge(usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?)?;
     }
-    let raw: Option<(String,String,String,i64,i64,String,String)> = conn.query_row(
-        "SELECT binding_json,source_moment_id,source_digest,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,adoption_id FROM live_owner_adoptions
-         WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5",
-        params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],
-        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional().map_err(read_sql)?;
-    let Some((binding, source_moment, source_digest, sequence, cursor, terminal, adoption_id)) =
-        raw
+    let key = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)?;
+    let Some((activation, adopted)) = owner_activations::current_activation(
+        conn,
+        Some(&held.namespace),
+        &key,
+        &b.lineage_claim_id,
+    )?
     else {
         return Ok(None);
     };
+    let (source_moment, source_digest, adoption_id) = (
+        activation.source_moment_id,
+        activation.source_digest,
+        activation.activation_id,
+    );
+    let (sequence, cursor, terminal) = (
+        adopted.local_ydoc_sequence,
+        adopted.terminal_cursor,
+        adopted.terminal_receipt_json,
+    );
     let binding: LiveObjectBinding =
-        serde_json::from_str(&binding).map_err(|_| ApplicationError::Corrupt)?;
+        serde_json::from_str(&activation.binding_json).map_err(|_| ApplicationError::Corrupt)?;
     // This document selected the row, and its decoded binding scopes the
     // source reads below. It must name this document before any of them.
     if binding.workspace_id != b.workspace_id

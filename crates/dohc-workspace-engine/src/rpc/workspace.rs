@@ -1038,7 +1038,8 @@ impl EngineService {
                         map_runtime(dohc_engine_runtime::RuntimeError::Storage(error))
                     })?;
                     let mismatch: bool = store.read_with(|conn| conn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM live_owner_adoptions a JOIN ydoc_docs d ON d.workspace_id=a.workspace_id AND d.version_id=a.main_version_id AND d.object_id=a.object_id AND d.lineage_claim_id=a.lineage_claim_id WHERE a.workspace_id=?1 AND (a.max_pending_bytes>?2 OR a.max_pending_age_ms>?3))",
+                    &format!("SELECT EXISTS(SELECT 1 FROM {} a JOIN ydoc_docs d ON d.workspace_id=a.workspace_id AND d.version_id=a.main_version_id AND d.object_id=a.object_id AND d.lineage_claim_id=a.lineage_claim_id WHERE a.workspace_id=?1 AND (a.max_pending_bytes>?2 OR a.max_pending_age_ms>?3))",
+                        dohc_engine_collab::live_update_application::owner_activations::CURRENT_ACTIVATIONS),
                     rusqlite::params![budget_workspace_id,owner_outbox.max_pending_bytes,owner_outbox.max_pending_age_ms],|row|row.get(0)
                 )).map_err(|_| WireError::new(ErrorCode::Internal,"owner-outbox-budget-read-failed"))?;
                     Ok::<_, WireError>(mismatch)

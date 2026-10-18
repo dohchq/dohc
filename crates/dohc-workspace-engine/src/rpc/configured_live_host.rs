@@ -487,9 +487,10 @@ impl EngineService {
             let mismatch = tokio::task::spawn_blocking(move || {
                 let store = dohc_engine_storage::EngineStore::open_read_only(&db_path).map_err(|_|invalid("owner adoption budget read failed"))?;
                 store.read_with(|conn|conn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM live_owner_adoptions a JOIN ydoc_docs d
+                    &format!("SELECT EXISTS(SELECT 1 FROM {} a JOIN ydoc_docs d
                      ON d.workspace_id=a.workspace_id AND d.version_id=a.main_version_id AND d.object_id=a.object_id
                      AND d.lineage_claim_id=a.lineage_claim_id WHERE a.workspace_id=?1 AND (a.max_pending_bytes>?2 OR a.max_pending_age_ms>?3))",
+                     dohc_engine_collab::live_update_application::owner_activations::CURRENT_ACTIVATIONS),
                     rusqlite::params![workspace_id,limits.max_pending_bytes,limits.max_pending_age_ms],|row|row.get::<_,bool>(0)))
                     .map_err(|_|invalid("owner adoption budget read failed"))
             }).await.map_err(|_|invalid("owner adoption budget read interrupted"))??;
