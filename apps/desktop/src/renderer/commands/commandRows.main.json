@@ -52,6 +52,14 @@
       "label": "Close tab"
     },
     {
+      "id": "next-tab",
+      "label": "Show next tab"
+    },
+    {
+      "id": "previous-tab",
+      "label": "Show previous tab"
+    },
+    {
       "id": "new-editor-group-right",
       "label": "New editor group right"
     },

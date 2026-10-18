@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { editorTabTestId } from "../src/testPins";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   cleanupDesktopWorkspace, createTempWorkspace, explorerRow, openWorkspaceFromFirstRun, waitForWorkspaceFile, writeWorkspaceFiles,
@@ -102,6 +103,55 @@ test("opens a document's Replace with the platform's chord", async () => {
     await expect(page.getByPlaceholder("Replace", { exact: true })).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(page.getByRole("search", { name: "find and replace" })).toHaveCount(0);
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+// ⌃Tab works from the document and wraps. macOS adds ⇧⌘], Windows and Linux
+// Ctrl+PageDown. The renderer claims each chord, so no menu item runs it a second time.
+test("switches editor tabs with the platform's chords", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  try {
+    const files = ["one.md", "two.md", "three.md"];
+    await writeWorkspaceFiles(temp, files.map((path) => ({ path, contents: `# ${path}\n\nBody.\n` })));
+    desktop = await launchDesktopApp({ workspace: temp });
+    const page = desktop.page;
+    const workspace = await openWorkspaceFromFirstRun(page, temp);
+    for (const path of files) {
+      await waitForWorkspaceFile(page, workspace.workspaceId, path);
+      await explorerRow(page, path).click();
+      await expect(page.getByTestId(editorTabTestId(path))).toHaveAttribute("aria-selected", "true");
+    }
+    await page.evaluate(() => {
+      const commands: string[] = [];
+      Reflect.set(window, "shortcutNativeCommands", commands);
+      window.dohcDesktop!.onMenuCommand((command) => commands.push(command));
+    });
+    const expectActive = async (path: string) => {
+      await expect(page.getByTestId(editorTabTestId(path))).toHaveAttribute("aria-selected", "true");
+      const commands = await page.evaluate(async () => {
+        await window.dohcDesktop!.getUserSettings();
+        return Reflect.get(window, "shortcutNativeCommands");
+      });
+      expect(commands).toEqual([]);
+    };
+
+    // From inside the document, where Tab indents a list item.
+    const editor = page.getByTestId("markdown-editor");
+    await editor.click();
+    await page.keyboard.press("Control+Tab");
+    await expectActive("one.md");
+    await page.keyboard.press("Control+Shift+Tab");
+    await expectActive("three.md");
+    await page.keyboard.press("Control+Shift+Tab");
+    await expectActive("two.md");
+    const mac = process.platform === "darwin";
+    await page.keyboard.press(mac ? "Meta+Shift+BracketRight" : "Control+PageDown");
+    await expectActive("three.md");
+    await page.keyboard.press(mac ? "Meta+Shift+BracketLeft" : "Control+PageUp");
+    await expectActive("two.md");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

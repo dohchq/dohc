@@ -81,6 +81,7 @@ describe("shortcut menu contract", () => {
       "new-file": "New file", "new-folder": "New folder", "new-collection": "New collection",
       "open-workspace": "Open workspace folder…", "import-files": "Import files",
       "export-workspace": "Export workspace as zip", "close-tab": "Close tab",
+      "next-tab": "Show next tab", "previous-tab": "Show previous tab",
       "command-palette": "Command palette", "quick-open": "Go to", "new-editor-group-right": "New editor group right",
       "toggle-sidebar": "Toggle sidebar", "toggle-about": "Toggle About", "show-chats": "Chats",
       "toggle-theme": "Toggle light/dark theme", "zoom-reset": "Reset zoom", "zoom-in": "Zoom in", "zoom-out": "Zoom out",
@@ -172,6 +173,38 @@ describe("shell shortcut matching", () => {
       expect(matchShellShortcutChord(press(key, other), platform), key).toBeNull();
       expect(matchShellShortcut(press(key, { metaKey: true, ctrlKey: true }), platform), key).toBeNull();
     }
+  });
+
+  it.each([
+    ["darwin", [
+      [{ key: "Tab", ctrlKey: true }, "next-tab"],
+      [{ key: "Tab", ctrlKey: true, shiftKey: true }, "previous-tab"],
+      // Shift turns ] into } on the key it reports.
+      [{ key: "}", code: "BracketRight", metaKey: true, shiftKey: true }, "next-tab"],
+      [{ key: "{", code: "BracketLeft", metaKey: true, shiftKey: true }, "previous-tab"],
+      [{ key: "Tab", metaKey: true }, null],
+      [{ key: "PageDown", ctrlKey: true }, null],
+      [{ key: "]", code: "BracketRight", ctrlKey: true, shiftKey: true }, null],
+    ]],
+    ...(["win32", "linux"] as const).map((platform) => [platform, [
+      [{ key: "Tab", ctrlKey: true }, "next-tab"],
+      [{ key: "Tab", ctrlKey: true, shiftKey: true }, "previous-tab"],
+      [{ key: "PageDown", ctrlKey: true }, "next-tab"],
+      [{ key: "PageUp", ctrlKey: true }, "previous-tab"],
+      [{ key: "}", code: "BracketRight", ctrlKey: true, shiftKey: true }, null],
+      [{ key: "Tab", metaKey: true }, null],
+    ]] as const),
+  ] as const)("switches tabs with the %s chords", (platform, chords) => {
+    for (const [init, id] of chords) {
+      expect(matchShellShortcut(press(init.key, init), platform), JSON.stringify(init)).toBe(id);
+    }
+  });
+
+  it("leaves a tab chord to the control that claimed it", () => {
+    const claimed = press("Tab", { ctrlKey: true, cancelable: true });
+    claimed.preventDefault();
+    expect(matchShellShortcut(claimed, "darwin")).toBeNull();
+    expect(matchShellShortcut(claimed, "win32")).toBeNull();
   });
 
   it("matches ⌥⌘B by its physical key only on macOS", () => {

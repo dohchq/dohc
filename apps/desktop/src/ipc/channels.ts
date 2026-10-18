@@ -22,6 +22,8 @@ export const MENU_COMMANDS = [
   "install-update",
   "new-editor-group-right",
   "close-tab",
+  "next-tab",
+  "previous-tab",
 ] as const satisfies readonly (CommandId | "command-palette")[];
 
 // Explorer context menu: the renderer names what was right-clicked, main pops

@@ -3,7 +3,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { makeBridge, renderShell, STORED_STATE, storedStateWithTabs } from "./DesktopWorkspaceShell.testHarness";
-import { SHORTCUTS, matchShellShortcut, type ShortcutId } from "../shortcuts/shortcutRegistry";
+import { SHORTCUTS, matchShellShortcut, shortcutAccelerators, type ShortcutId } from "../shortcuts/shortcutRegistry";
 import { buildMenuTemplate } from "../window/applicationMenu";
 import type { MenuItemConstructorOptions } from "electron";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
@@ -14,15 +14,19 @@ async function ready(platform: NodeJS.Platform = "win32") {
   await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
   return bridge;
 }
+// An accelerator as the platform's keyboard sends it: CommandOrControl is
+// Command on macOS and Control elsewhere, and Ctrl is Control everywhere.
 function keyEvent(accelerator: string, platform: NodeJS.Platform, extra: KeyboardEventInit = {}) {
   const parts = accelerator.split("+");
+  const primary = parts.includes("CommandOrControl");
   return new KeyboardEvent("keydown", {
-    key: parts.at(-1)!, ctrlKey: platform !== "darwin", metaKey: platform === "darwin",
+    key: parts.at(-1)!, ctrlKey: parts.includes("Ctrl") || (primary && platform !== "darwin"), metaKey: primary && platform === "darwin",
     shiftKey: parts.includes("Shift"), altKey: parts.includes("Alt"), bubbles: true, cancelable: true, ...extra,
   });
 }
-const shellBindings = Object.entries(SHORTCUTS).filter(([, row]) => row.owner === "shell")
-  .flatMap(([id, row]) => row.accelerators.map((accelerator) => [id as ShortcutId, accelerator] as const));
+// Each platform's own chords: a row's macOS keys replace its others there.
+const shellBindings = (platform: NodeJS.Platform) => Object.entries(SHORTCUTS).filter(([, row]) => row.owner === "shell")
+  .flatMap(([id]) => shortcutAccelerators(id as ShortcutId, platform).map((accelerator) => [id as ShortcutId, accelerator] as const));
 
 describe.each(["win32", "darwin"] as const)("%s shell shortcuts", (platform) => {
   it("matches the separate history-restore owner without taking editor undo", async () => {
@@ -56,7 +60,7 @@ describe.each(["win32", "darwin"] as const)("%s shell shortcuts", (platform) => 
     }
   });
 
-  it.each(shellBindings)("claims %s: %s and keeps menu registration disabled", async (_id, accelerator) => {
+  it.each(shellBindings(platform))("claims %s: %s and keeps menu registration disabled", async (_id, accelerator) => {
     const bridge = await ready(platform);
     const menu = buildMenuTemplate({ isDev: false, platform, sendCommand: vi.fn(), stepZoom: vi.fn(), showAbout: vi.fn() });
     const items = menu.flatMap((item) => Array.isArray(item.submenu) ? item.submenu : []) as MenuItemConstructorOptions[];
@@ -68,7 +72,7 @@ describe.each(["win32", "darwin"] as const)("%s shell shortcuts", (platform) => 
     expect(bridge.stepWindowZoom).not.toHaveBeenCalled();
   });
 
-  it.each(shellBindings)("leaves %s: %s with a focused editor that claimed it", async (_id, accelerator) => {
+  it.each(shellBindings(platform))("leaves %s: %s with a focused editor that claimed it", async (_id, accelerator) => {
     await ready(platform);
     const editor = document.createElement("textarea");
     screen.getByTestId("workspace-shell").append(editor);
@@ -83,7 +87,7 @@ describe.each(["win32", "darwin"] as const)("%s shell shortcuts", (platform) => 
     expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
   });
 
-  it.each(shellBindings)("blocks %s: %s during composition and repeat", async (_id, accelerator) => {
+  it.each(shellBindings(platform))("blocks %s: %s during composition and repeat", async (_id, accelerator) => {
     await ready(platform);
     for (const init of [{ isComposing: true }, { repeat: true }]) {
       const event = keyEvent(accelerator, platform, init);

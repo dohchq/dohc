@@ -231,6 +231,7 @@ import {
   activeGroup,
   activeTabPath,
   activateTab,
+  adjacentTabPath,
   allTabs,
   closeTab,
   closeEditorGroup,
@@ -3002,6 +3003,16 @@ export function DesktopWorkspaceShell(props: {
     }
   }, [closeTabsAfterFlush, mutateWb, reportShellError]);
 
+  // ⌃Tab and its alternates cycle through the focused group's tabs.
+  const showAdjacentTab = useCallback(
+    (step: 1 | -1) => {
+      const group = activeGroup(wbRef.current);
+      const path = adjacentTabPath(group, step);
+      if (path !== null) activateEditorTab(group.id, path);
+    },
+    [activateEditorTab],
+  );
+
   const closeAllTabs = useCallback(() => {
     void closeTabsAfterFlush(
       wbRef.current.editorGroups.flatMap((group) =>
@@ -3854,6 +3865,8 @@ export function DesktopWorkspaceShell(props: {
         ),
       "toggle-sidebar": toggleSidePanel,
       "close-tab": closeActiveTab,
+      "next-tab": () => showAdjacentTab(1),
+      "previous-tab": () => showAdjacentTab(-1),
       "new-editor-group-right": () => openEditorGroupRight(),
       "toggle-markdown-source": () => toggleSource(wbRef.current.activeEditorGroup),
       "toggle-about": () => mutateWb(toggleAbout),
@@ -3893,6 +3906,7 @@ export function DesktopWorkspaceShell(props: {
       createUntitledDrawing,
       openWorkspaceFolder,
       closeActiveTab,
+      showAdjacentTab,
       importFiles,
       mutateWb,
       requestExplorerCreate,
