@@ -156,7 +156,12 @@ impl ActorHandle {
                     ).map_err(sql)?;
                     let complete = complete && candidates.unchecked.is_empty() && after.2;
                     let subject_paths = {
-                        let mut stmt = c.prepare_cached("SELECT path FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3").map_err(sql)?;
+                        let mut stmt = c
+                            .prepare_cached(
+                                "SELECT path FROM path_aliases
+                                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                            )
+                            .map_err(sql)?;
                         let paths = stmt
                             .query_map(params![ws, version, object], |r| r.get::<_, String>(0))
                             .map_err(sql)?
@@ -170,7 +175,9 @@ impl ActorHandle {
                         .filter(|(source, _)| source != &object)
                         .map(|(object, path)| (path, Some(object)))
                         .chain(candidates.unchecked.into_iter().map(|path| (path, None)))
-                        .filter(|(path, _)| path > &after.0 || (path == &after.0 && after.1 != usize::MAX))
+                        .filter(|(path, _)| {
+                            path > &after.0 || (path == &after.0 && after.1 != usize::MAX)
+                        })
                         .filter(|(path, _)| !subject_paths.contains(path))
                         .collect();
                     sources.sort_by(|a, b| a.0.cmp(&b.0));
