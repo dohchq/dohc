@@ -7,7 +7,7 @@ type EditorShortcutId = "editor-mac-backspace" | "editor-mac-delete" | "editor-m
   | "editor-code" | "editor-code-block" | "editor-italic" | "editor-strike" | "editor-underline" | "editor-ordered-list" | "editor-task-list";
 type OwnedShortcutId = "command-palette" | "close-window" | "history-restore-undo"
   | EditorShortcutId
-  | "palette-move" | "palette-accept" | "palette-dismiss" | "find-next" | "find-previous" | "find-close" | "dev-panel";
+  | "palette-move" | "palette-accept" | "palette-dismiss" | "find-next" | "find-previous" | "find-again-next" | "find-again-previous" | "find-close" | "dev-panel";
 type ShortcutOwner = "history-restore" | "shell" | "main" | "native" | "document" | "editor" | "palette" | "find" | "dev";
 interface ShortcutKeys {
   accelerators: readonly string[];
@@ -80,6 +80,11 @@ export const SHORTCUTS = {
   "palette-dismiss": { owner: "palette", accelerators: ["Escape"], keys: ["esc"] },
   "find-next": { owner: "find", accelerators: ["Enter"] },
   "find-previous": { owner: "find", accelerators: ["Shift+Enter"] },
+  // While the find bar has a query, from the bar or the document: ⌘G on
+  // macOS, as in Safari and TextEdit, and F3 elsewhere, as in VS Code. The
+  // find feature answers them itself; no editor keymap mounts them.
+  "find-again-next": { owner: "find", accelerators: ["F3"], mac: { accelerators: ["CommandOrControl+G"] } },
+  "find-again-previous": { owner: "find", accelerators: ["Shift+F3"], mac: { accelerators: ["CommandOrControl+Shift+G"] } },
   "find-close": { owner: "find", accelerators: ["Escape"] },
   "dev-panel": { owner: "dev", accelerators: ["CommandOrControl+Shift+D"] },
 } as const satisfies Partial<Record<StaticCommandId | OwnedShortcutId, ShortcutDefinition>>;

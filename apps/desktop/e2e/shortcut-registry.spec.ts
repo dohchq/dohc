@@ -156,3 +156,40 @@ test("switches editor tabs with the platform's chords", async () => {
     await cleanupDesktopWorkspace(desktop, temp);
   }
 });
+
+// Find again: ⌘G and ⇧⌘G on macOS, F3 and Shift+F3 elsewhere. They work from
+// the find field and, while the bar has a query, from the document.
+test("finds the next and previous match with the platform's chords", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  try {
+    await writeWorkspaceFiles(temp, [{ path: "notes.md", contents: "# Notes\n\nOne cat, two cat, three cat.\n" }]);
+    desktop = await launchDesktopApp({ workspace: temp });
+    const page = desktop.page;
+    const workspace = await openWorkspaceFromFirstRun(page, temp);
+    await waitForWorkspaceFile(page, workspace.workspaceId, "notes.md");
+    await explorerRow(page, "notes.md").click();
+    const editor = page.getByTestId("markdown-editor");
+    await expect(editor).toBeVisible({ timeout: 15_000 });
+    await editor.click();
+    const mac = process.platform === "darwin";
+    await page.keyboard.press(mac ? "Meta+f" : "Control+f");
+    await page.getByPlaceholder("Find", { exact: true }).fill("cat");
+    const count = page.locator(".dohc-find-replace__count");
+    await expect(count).toHaveText("1/3");
+    const next = mac ? "Meta+g" : "F3";
+    const previous = mac ? "Meta+Shift+g" : "Shift+F3";
+    await page.keyboard.press(next);
+    await expect(count).toHaveText("2/3");
+    await editor.getByRole("heading", { name: "Notes" }).click();
+    await expect(page.getByPlaceholder("Find", { exact: true })).not.toBeFocused();
+    await page.keyboard.press(next);
+    await expect(count).toHaveText("3/3");
+    await page.keyboard.press(next);
+    await expect(count).toHaveText("1/3");
+    await page.keyboard.press(previous);
+    await expect(count).toHaveText("3/3");
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});

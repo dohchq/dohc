@@ -116,7 +116,7 @@ describe("shortcut menu contract", () => {
     const nonPalette = Object.entries(SHORTCUTS).filter(([id, row]) => !(id in COMMAND_ROWS) && row.owner !== "editor" && row.owner !== "history-restore").map(([id]) => id);
     expect(nonPalette.sort()).toEqual([
       "close-window", "command-palette", "dev-panel",
-      "find-close", "find-next", "find-previous",
+      "find-close", "find-next", "find-previous", "find-again-next", "find-again-previous",
       "palette-accept", "palette-dismiss", "palette-move",
     ].sort());
     expect(shortcutAccelerators("show-chats", "darwin")).toEqual([]);
