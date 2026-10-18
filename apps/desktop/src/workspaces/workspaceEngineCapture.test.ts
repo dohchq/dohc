@@ -45,7 +45,7 @@ import {
   type Response,
 } from "@dohc/workspace-engine-client";
 import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
-import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
+import { EngineWorkspaceSessions, EngineWorkspaceShuttingDownError } from "@dohc/workspace-engine-client/daemon";
 import {
   createCaptureLiveStores,
   type CaptureVersionedTextStore,
@@ -2503,6 +2503,34 @@ describe("workspaceEngineCapture batch capture", () => {
       }
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  // Quit abandons a workspace open that has not finished (#2187). Its store
+  // holds nothing yet, so the stop must finish or the workspace close skips
+  // the closes after it.
+  it("stops a capture at quit whose workspace never finished opening", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+    const liveStore = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID },
+      sessions,
+    ).store;
+    const unopened = new Proxy(liveStore, {
+      get(target, property) {
+        if (property === "listPendingCollectionAdoptions" || property === "flushCapture") {
+          return async () => { throw new EngineWorkspaceShuttingDownError(); };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const engine = capture(root, { store: unopened, rustEngineSessions: sessions, onError: () => {} });
+    try {
+      engine.beginShutdown();
+      await expect(engine.stop()).resolves.toBeUndefined();
+    } finally {
+      await liveStore.close();
     }
   });
 
