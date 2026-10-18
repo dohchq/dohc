@@ -6953,7 +6953,7 @@ export function createWorkspaceEngineCapture(
           (input.createOnly && (input.expectedObjectId || input.recoverExistingText)) ||
           (input.expectedObjectId && input.recoverExistingText)
         ) {
-          throw new Error("dohc could not determine which document to save. Reopen the workspace and try again.");
+          throw new Error("The document save request has conflicting options: createOnly, expectedObjectId, or recoverExistingText.");
         }
         if (input.createOnly && current) {
           throw new Error(`Generated Markdown destination already exists: ${path}`);
@@ -7047,7 +7047,7 @@ export function createWorkspaceEngineCapture(
         }
         if (Boolean(input.expectedObjectId) === Boolean(input.recoverExistingText)) {
           throw new Error(
-            "dohc could not determine which document to archive. Reopen the workspace and try again.",
+            "The document archive request requires exactly one of expectedObjectId or recoverExistingText.",
           );
         }
         await settleAndCloseLiveYDocSessions(

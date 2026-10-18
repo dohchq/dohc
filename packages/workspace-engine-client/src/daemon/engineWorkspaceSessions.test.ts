@@ -1580,7 +1580,7 @@ describe("EngineWorkspaceSessions", () => {
         { ...workspace, rootPath: await tempRoot() },
         async () => undefined,
       ),
-    ).rejects.toThrow("Rust engine workspace authority changed");
+    ).rejects.toThrow("This workspace no longer matches the open session. Open the workspace again.");
     expect(
       client.requests.filter((request) => request.method === "workspace.open"),
     ).toHaveLength(1);

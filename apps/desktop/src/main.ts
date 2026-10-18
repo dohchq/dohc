@@ -684,7 +684,7 @@ protocol.registerSchemesAsPrivileged([
 
 function requireWorkspace(workspaceId: string) {
   const workspace = findWorkspace(workspaceId);
-  if (!workspace) throw new Error(`Unknown workspace: ${workspaceId}`);
+  if (!workspace) throw new Error("This workspace is not open. Open it again.");
   return workspace;
 }
 
@@ -2849,7 +2849,7 @@ function linkedChatStoreFor(
   }
   const current = findWorkspace(lease.binding.workspaceId);
     if (!current) {
-      throw new Error(`Unknown workspace: ${lease.binding.workspaceId}`);
+      throw new Error("This workspace is not open. Open it again.");
     }
     const binding = lease.binding;
     const engineWorkspace = receivedShareEngine.workspaceForRegistered({
@@ -3064,7 +3064,7 @@ function canonicalWorkspaceFor(
   lease.assertCurrent();
 const workspace = findWorkspace(lease.binding.workspaceId);
   if (!workspace) {
-    throw new Error(`Unknown workspace: ${lease.binding.workspaceId}`);
+    throw new Error("This workspace is not open. Open it again.");
   }
   return {
     ...workspace,
@@ -4576,7 +4576,7 @@ const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: s
         // refuses the invocation rather than write as the owner at depth 0.
         agentRun: () => {
           const run = withWorkspaceAttachment(attachment, lease => workspaceActivity.agentRun(lease.state.activity));
-          if (run === undefined) throw new Error("This workspace changed while this ran. Try again.");
+          if (run === undefined) throw new Error("This workspace is no longer available for this Collection operation.");
           return run;
         },
         // A commit that made failed claims, as a chain stop does, sends their notices now.
@@ -4598,7 +4598,7 @@ const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: s
         },
         collectionAuthor: async () => {
           const run = withWorkspaceAttachment(attachment, lease => workspaceActivity.agentRun(lease.state.activity));
-          if (run === undefined) throw new Error("This workspace changed while this ran. Try again.");
+          if (run === undefined) throw new Error("This workspace is no longer available for this Collection operation.");
           return run ? { kind: "agent", agentId: run.agentId, onBehalfOf: run.onBehalfOf, agentRunId: run.agentRunId, ...(run.depth > 0 ? { depth: run.depth } : {}) } : await localPerson();
         },
       });
