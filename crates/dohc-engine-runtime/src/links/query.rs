@@ -1,4 +1,4 @@
-use super::{incoming, resolver::Resolver, sql};
+use super::{cache, incoming, resolver::Resolver, sql};
 use crate::{ActorHandle, RuntimeError};
 use dohc_engine_crypto::{SealedSecret, SecretDataKey, open, seal};
 use dohc_engine_domain::{FileResolution, FileResolveTarget, VersionedTextStore};
@@ -79,6 +79,7 @@ impl ActorHandle {
         literals: Vec<(String, String)>,
         token: CancellationToken,
     ) -> Result<Value, RuntimeError> {
+        let cache = self.link_resolvers.clone();
         let (version, source, paths) = self
             .run(move |store, _| {
                 if token.is_cancelled() {
@@ -94,12 +95,12 @@ impl ActorHandle {
                     Some(FileResolution::Invalid) => return Err(invalid()),
                     _ => None,
                 };
-                let paths = store.read_with(|c| Resolver::paths_for_version(c, &ws, &version))?;
+                let paths = store.read_with(|c| cache::prepare(c, &cache, &ws, &version))?;
                 Ok((version, source, paths))
             })
             .await?;
         tokio::task::spawn_blocking(move || {
-            let resolver = Resolver::new(paths);
+            let resolver = paths.build();
             let results: Vec<Value> = literals
                 .into_iter()
                 .map(|(kind, literal)| {
@@ -125,6 +126,7 @@ impl ActorHandle {
         token: CancellationToken,
     ) -> Result<Value, RuntimeError> {
         let workspace = ws.clone();
+        let cache = self.link_resolvers.clone();
         let prepared = self
             .run(move |store, _| {
                 if token.is_cancelled() {
@@ -139,7 +141,7 @@ impl ActorHandle {
                 };
                 let after = decode_cursor(&ws, &version, &object, cursor)?;
                 store.read_with(|c| {
-                    let _snapshot = c.unchecked_transaction().map_err(sql)?;
+                    let snapshot = c.unchecked_transaction().map_err(sql)?;
                     let candidates =
                         incoming::candidates(c, &ws, &version, &target, &["wikilink", "markdown"])?;
                     let complete: bool = c.query_row(
@@ -164,12 +166,14 @@ impl ActorHandle {
                             .flatten();
                         prepared.push((path, source));
                     }
+                    let resolver = cache::prepare(c, &cache, &ws, &version)?;
+                    snapshot.commit().map_err(sql)?;
                     Ok::<_, StorageError>(Some((
                         version.clone(),
                         object.clone(),
                         target.clone(),
                         after.clone(),
-                        Resolver::paths_for_version(c, &ws, &version)?,
+                        resolver,
                         prepared,
                         complete,
                         more,
@@ -182,7 +186,7 @@ impl ActorHandle {
             return Ok(Value::Null);
         };
         tokio::task::spawn_blocking(move || {
-            let resolver = Resolver::new(paths);
+            let resolver = paths.build();
             let mut page = json!({
                 "versionId":version,"subject":{"objectId":object,"path":target},
                 "entries":[],"unchecked":[],"complete":complete,

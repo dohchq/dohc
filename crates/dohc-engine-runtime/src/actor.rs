@@ -206,6 +206,7 @@ pub struct WorkspaceActor {
     link_metrics: SharedMetrics,
     link_drain_holds: Arc<AtomicU64>,
     current_views: Arc<std::sync::Mutex<dohc_engine_sync::replica_cut::CurrentViewCache>>,
+    pub(crate) link_resolvers: Arc<std::sync::Mutex<crate::links::cache::Cache>>,
 }
 
 impl WorkspaceActor {
@@ -368,6 +369,7 @@ impl WorkspaceActor {
                     link_metrics,
                     link_drain_holds,
                     current_views: Arc::default(),
+                    link_resolvers: Arc::default(),
                 };
                 #[cfg(unix)]
                 if matches!(mode, ActorOpenMode::ReadWrite) {
@@ -401,6 +403,7 @@ impl WorkspaceActor {
             link_metrics: Arc::clone(&self.link_metrics),
             link_drain_holds: Arc::clone(&self.link_drain_holds),
             current_views: Arc::clone(&self.current_views),
+            link_resolvers: Arc::clone(&self.link_resolvers),
         }
     }
 
@@ -465,6 +468,7 @@ impl WorkspaceActor {
                 let _ = self.tx.try_send(Command::Close);
             }
         }
+        self.link_resolvers.lock().unwrap().close();
         match worker.join() {
             Ok(()) => Ok(()),
             Err(_) => Err(RuntimeError::WorkerPanicked),
@@ -493,6 +497,7 @@ pub struct ActorHandle {
     link_metrics: SharedMetrics,
     link_drain_holds: Arc<AtomicU64>,
     current_views: Arc<std::sync::Mutex<dohc_engine_sync::replica_cut::CurrentViewCache>>,
+    pub(crate) link_resolvers: Arc<std::sync::Mutex<crate::links::cache::Cache>>,
 }
 
 /// Keeps derived link writes behind capture, including its queued commands.
@@ -1068,6 +1073,7 @@ mod saturation_tests {
             link_metrics: metrics,
             link_drain_holds: holds,
             current_views: Arc::default(),
+            link_resolvers: Arc::default(),
         };
         prepare(&actor.handle());
         let (startup_tx, startup_rx) = std_sync_channel(1);

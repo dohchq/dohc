@@ -1,5 +1,6 @@
 //! Persisted derived links. Reads and writes here run only on the owning actor;
 //! body integrity checks, parsing and lexical key construction run off it.
+pub(crate) mod cache;
 mod incoming;
 mod parser;
 mod query;
