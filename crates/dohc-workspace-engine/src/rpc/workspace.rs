@@ -2279,6 +2279,7 @@ mod tests {
                 lock(&open.automation_recovery).is_some(),
                 seed_claim && !read_only
             );
+            assert_eq!(lock(&open.undo_recovery).is_some(), !read_only);
 
             // The synchronous cleanup fallback has no Tokio runtime. Taking
             // background tasks must cancel through their captured runtime handle.
@@ -2287,7 +2288,10 @@ mod tests {
                 .expect("background cancellation needs no runtime");
             assert_eq!(
                 tasks.iter().flatten().count(),
-                usize::from(capture_enabled) + usize::from(seed_claim && !read_only) + 1,
+                usize::from(capture_enabled)
+                    + usize::from(seed_claim && !read_only)
+                    + usize::from(!read_only)
+                    + 1,
             );
             for task in tasks.into_iter().flatten() {
                 task.await
@@ -2296,6 +2300,7 @@ mod tests {
             let open = service.open(Some(&handle)).expect("binding still open");
             assert!(lock(&open.capture).is_none());
             assert!(lock(&open.automation_recovery).is_none());
+            assert!(lock(&open.undo_recovery).is_none());
             if capture_enabled {
                 let attached = service
                     .workspace_open(

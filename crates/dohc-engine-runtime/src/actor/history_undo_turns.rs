@@ -244,8 +244,8 @@ impl ActorHandle {
         .await
         .map_err(|_| RuntimeError::ActorUnavailable)??;
         let deduped = prior.is_some();
-        let plan = if let Some((plan, _, _)) = prior {
-            plan
+        let (plan, mut prepared_cursor) = if let Some((plan, cursor, _)) = prior {
+            (Arc::new(plan), cursor)
         } else {
             if let Some(replay) = self
                 .preflight_history_undo(
@@ -313,45 +313,55 @@ impl ActorHandle {
             .map_err(|_| RuntimeError::ActorUnavailable)??;
             let disk_root = root.clone();
             let (prepared, body) = tokio::task::spawn_blocking(move || {
+                #[cfg(test)]
+                let started = Instant::now();
                 for member in &prepared.members {
                     disk_check(&disk_root, member)?;
                 }
                 let body = serde_json::to_string(&prepared).map_err(|_| corrupt())?;
+                #[cfg(test)]
+                tests::record_phase(
+                    &prepared.request,
+                    "all-member-disk-check (worker)",
+                    None,
+                    started.elapsed(),
+                    false,
+                );
                 Ok::<_, RuntimeError>((prepared, body))
             })
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)??;
-            let p = prepared.clone();
-            let f = faults.clone();
-            self.run(move |store,_| {
+            let prepared = Arc::new(prepared);
+            let body = Arc::new(body);
+            let plan = loop {
+                let (p, body, f) = (prepared.clone(), body.clone(), faults.clone());
+                let outcome = self.run(move |store,_| {
                 #[cfg(test)]
                 let started = Instant::now();
-                if let Some((plan,_,_)) = store.read_with(|conn| load(conn,&p.workspace,&p.operation,&p.request,p.author.as_deref()))? { return Ok(plan); }
-                let outcome = store.write_with(f.as_ref(),|tx| -> Result<(),RuntimeError> {
+                if let Some((plan,_,_)) = store.read_with(|conn| load(conn,&p.workspace,&p.operation,&p.request,p.author.as_deref()))? { return Ok(Arc::new(plan)); }
+                let outcome = store.write_background_with(f.as_ref(),|tx| -> Result<(),RuntimeError> {
                     let busy: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM engine_requests p JOIN engine_requests r ON r.request_id=json_extract(CASE WHEN p.kind='history-undo-plan' THEN p.payload_hash ELSE '{}' END,'$.request') WHERE p.kind='history-undo-plan' AND r.kind='history-undo-pending' AND json_extract(CASE WHEN p.kind='history-undo-plan' THEN p.payload_hash ELSE '{}' END,'$.workspace')=?1 AND json_extract(CASE WHEN p.kind='history-undo-plan' THEN p.payload_hash ELSE '{}' END,'$.operation')=?2)",params![p.workspace,p.operation],|r|r.get(0)).map_err(StorageError::corrupt_public)?;
                     if busy { return Err(DomainError::UndoRefused {path:p.operation.clone(),reason:"Undo in progress"}.into()); }
                     tx.execute("INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) VALUES(?1,?2,0,?3,'history-undo-pending')",params![p.request,undo_request_fingerprint(&p.workspace,&p.operation,p.author.as_deref()),now]).map_err(StorageError::persist_public)?;
-                    tx.execute("INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) VALUES(?1,?2,0,?3,'history-undo-plan')",params![undo_progress_key(&p.request),body,now]).map_err(StorageError::persist_public)?;
+                    tx.execute("INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) VALUES(?1,?2,0,?3,'history-undo-plan')",params![undo_progress_key(&p.request),body.as_str(),now]).map_err(StorageError::persist_public)?;
                     Ok(())
                 });
                 #[cfg(test)]
                 tests::record_phase(&p.request,"persist-plan",None,started.elapsed(),true);
                 match outcome? { TxnOutcome::Committed(()) => Ok(p), TxnOutcome::Crashed {..} => Err(RuntimeError::OperationCrashed) }
-            }).await?
+            }).await;
+                match outcome {
+                    Ok(plan) => break plan,
+                    Err(RuntimeError::Storage(StorageError::FileLocked)) => {
+                        tokio::task::yield_now().await
+                    }
+                    Err(error) => return Err(error),
+                }
+            };
+            (plan, 0)
         };
-        let plan = Arc::new(plan);
         loop {
-            let p = plan.clone();
-            let (prepared_cursor, complete): (i64, bool) = self.run(move |store, _| {
-                #[cfg(test)]
-                let started = Instant::now();
-                let outcome = store.read_with(|conn| conn.query_row("SELECT result_seq,kind='history-undo-complete' FROM engine_requests WHERE request_id=?1",[&p.request],|r| Ok((r.get(0)?,r.get(1)?)))).map_err(StorageError::corrupt_public).map_err(Into::into)
-                ;
-                #[cfg(test)]
-                tests::record_phase(&p.request,"read-progress",None,started.elapsed(),true);
-                outcome
-            }).await?;
-            if complete {
+            if prepared_cursor == plan.members.len() {
                 let p = plan.clone();
                 return tokio::task::spawn_blocking(move || {
                     #[cfg(test)]
@@ -371,8 +381,11 @@ impl ActorHandle {
                 .await
                 .map_err(|_| RuntimeError::ActorUnavailable)?;
             }
-            let index = usize::try_from(prepared_cursor).map_err(|_| corrupt())?;
-            let member = plan.members.get(index).ok_or_else(corrupt)?.clone();
+            let member = plan
+                .members
+                .get(prepared_cursor)
+                .ok_or_else(corrupt)?
+                .clone();
             let disk_root = root.clone();
             let (disk, policy) = tokio::task::spawn_blocking(move || {
                 (
@@ -385,7 +398,7 @@ impl ActorHandle {
             let _capture = gates[0].clone().lock_owned().await;
             let _sessions = gates[1].clone().lock_owned().await;
             let (p, f) = (plan.clone(), faults.clone());
-            self.run(move |store,cache| {
+            let next = self.run(move |store,cache| {
                 let _guards = (_capture,_sessions);
                 #[cfg(test)]
                 let started = Instant::now();
@@ -393,8 +406,9 @@ impl ActorHandle {
                 let mut check_time = std::time::Duration::ZERO;
                 let outcome = with_local_file_mutation_cache_reset(cache, || {
                     let (cursor,complete): (i64,bool) = store.read_with(|conn| conn.query_row("SELECT result_seq,kind='history-undo-complete' FROM engine_requests WHERE request_id=?1",[&p.request],|r| Ok((r.get(0)?,r.get(1)?)))).map_err(StorageError::corrupt_public)?;
-                    if complete || cursor != prepared_cursor { return Ok(()); }
                     let index = usize::try_from(cursor).map_err(|_| corrupt())?;
+                    if complete { return Ok(p.members.len()); }
+                    if index != prepared_cursor { return Ok(index); }
                     let member = p.members.get(index).ok_or_else(corrupt)?;
                     let active = VersionedTextStore::new(store).get_active_version(&p.workspace)?.version_id;
                     let unchanged = active == p.version && store.read_with(|conn| signature(conn,&p.workspace,&p.version,&member.effect.object_id))? == member.head;
@@ -408,7 +422,7 @@ impl ActorHandle {
                     if !changed { admitted?; disk?; }
                     #[cfg(test)]
                     { check_time = started.elapsed(); }
-                    match store.write_with(f.as_ref(),|tx| -> Result<(),RuntimeError> {
+                    match store.write_background_with(f.as_ref(),|tx| -> Result<(),RuntimeError> {
                         if changed {
                             let path = tx.query_row("SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![p.workspace,p.version,member.effect.object_id],|r| r.get::<_,String>(0)).optional().map_err(StorageError::corrupt_public)?.unwrap_or_else(|| member.effect.path.clone());
                             tx.execute("INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) VALUES(?1,?2,?3,?4,'history-undo-skipped')",params![format!("{}:{cursor}",undo_progress_key(&p.request)),path,cursor,now]).map_err(StorageError::persist_public)?;
@@ -429,12 +443,17 @@ impl ActorHandle {
                         tx.execute("UPDATE engine_requests SET result_seq=?2,kind=?3,committed_at=?4 WHERE request_id=?1",params![p.request,cursor+1,if index+1==p.members.len() {"history-undo-complete"} else {"history-undo-pending"},now]).map_err(StorageError::persist_public)?;
                         Ok(())
                     })? { TxnOutcome::Committed(()) => {}, TxnOutcome::Crashed {..} => return Err(RuntimeError::OperationCrashed) }
-                    Ok(())
+                    Ok(index + 1)
                 });
                 #[cfg(test)]
-                tests::record(&p.request, prepared_cursor as usize, &p.members[prepared_cursor as usize].effect.operation, prepared_cursor as usize + 1 == p.members.len(), started.elapsed(), check_time);
+                tests::record(&p.request, prepared_cursor, &p.members[prepared_cursor].effect.operation, prepared_cursor + 1 == p.members.len(), started.elapsed(), check_time);
                 outcome
-            }).await?;
+            }).await;
+            match next {
+                Ok(cursor) => prepared_cursor = cursor,
+                Err(RuntimeError::Storage(StorageError::FileLocked)) => {}
+                Err(error) => return Err(error),
+            }
             tokio::task::yield_now().await;
         }
     }

@@ -254,6 +254,9 @@ impl EngineStore {
 
     /// Request background work and finish only bounded writer-side tails.
     pub fn request_checkpoint(&mut self) {
+        self.request_checkpoint_mode(false);
+    }
+    fn request_checkpoint_mode(&mut self, background: bool) {
         #[cfg(feature = "fault-injection")]
         let _checkpoint = crate::capture_phase::Measure::new("writer_checkpoint_and_request");
         let changes = self.conn.total_changes();
@@ -262,10 +265,12 @@ impl EngineStore {
         }
         self.checkpoint_changes = changes;
         if let Some(checkpoints) = &self.checkpoints {
-            checkpoints.checkpoint_on_writer_if_needed(&self.conn);
-        }
-        if let Some(checkpoints) = &self.checkpoints {
-            checkpoints.request();
+            if background {
+                checkpoints.request_full();
+            } else {
+                checkpoints.checkpoint_on_writer_if_needed(&self.conn);
+                checkpoints.request();
+            }
         }
     }
 
@@ -299,7 +304,7 @@ impl EngineStore {
             .wait_for_completion_for_test(before);
     }
 
-    fn prepare_write(&mut self) -> Result<(), StorageError> {
+    fn prepare_write(&mut self, background: bool) -> Result<(), StorageError> {
         #[cfg(feature = "fault-injection")]
         let _admission = crate::capture_phase::Measure::new("prepare_write");
         if self.checkpoints.as_ref().is_some_and(|c| c.has_stopped()) {
@@ -308,7 +313,7 @@ impl EngineStore {
             self.checkpoints.replace(replacement);
         }
         if let Some(checkpoints) = &self.checkpoints {
-            checkpoints.prepare_for_write(&self.conn)?;
+            checkpoints.prepare_for_write(&self.conn, background)?;
         }
 
         Ok(())
@@ -322,7 +327,7 @@ impl EngineStore {
     where
         E: From<StorageError>,
     {
-        self.prepare_write().map_err(E::from)?;
+        self.prepare_write(false).map_err(E::from)?;
         let result = f(&self.conn);
         self.request_checkpoint();
         result
@@ -463,9 +468,9 @@ impl EngineStore {
         let changes = self.conn.total_changes();
         #[cfg(feature = "fault-injection")]
         crate::capture_phase::wal(&self.conn, &mut phase, true);
-        self.prepare_write().map_err(E::from)?;
+        self.prepare_write(false).map_err(E::from)?;
         let outcome = Self::write_on_connection(&self.conn, faults, f)?;
-        self.record_write_outcome(&outcome);
+        self.record_write_outcome(&outcome, false);
         #[cfg(feature = "fault-injection")]
         {
             crate::capture_phase::wal(&self.conn, &mut phase, false);
@@ -482,6 +487,22 @@ impl EngineStore {
         Ok(outcome)
     }
 
+    /// Commit atomically, with WAL backfill on the checkpoint worker. A full
+    /// WAL refuses before BEGIN; an async caller can retry between actor turns.
+    pub fn write_background_with<T, E>(
+        &mut self,
+        faults: &dyn FaultInjector,
+        f: impl FnOnce(&Transaction<'_>) -> Result<T, E>,
+    ) -> Result<TxnOutcome<T>, E>
+    where
+        E: From<StorageError>,
+    {
+        self.prepare_write(true).map_err(E::from)?;
+        let outcome = Self::write_on_connection(&self.conn, faults, f)?;
+        self.record_write_outcome(&outcome, true);
+        Ok(outcome)
+    }
+
     /// One FULL commit syncs this transaction and every earlier WAL commit.
     pub fn write_durable_with<T, E>(
         &mut self,
@@ -491,20 +512,20 @@ impl EngineStore {
     where
         E: From<StorageError>,
     {
-        self.prepare_write().map_err(E::from)?;
+        self.prepare_write(false).map_err(E::from)?;
         let outcome = crate::durability::with_full_synchronous(&self.conn, |conn| {
             Self::write_on_connection(conn, faults, f)
         })?;
-        self.record_write_outcome(&outcome);
+        self.record_write_outcome(&outcome, false);
         Ok(outcome)
     }
 
-    fn record_write_outcome<T>(&mut self, outcome: &TxnOutcome<T>) {
+    fn record_write_outcome<T>(&mut self, outcome: &TxnOutcome<T>, background: bool) {
         if matches!(
             outcome,
             TxnOutcome::Committed(_) | TxnOutcome::Crashed { committed: true }
         ) {
-            self.request_checkpoint();
+            self.request_checkpoint_mode(background);
             #[cfg(feature = "fault-injection")]
             {
                 self.harness_commits += 1;
@@ -1096,3 +1117,7 @@ impl Drop for EngineStore {
         self.checkpoints.take();
     }
 }
+
+#[cfg(test)]
+#[path = "store/background_checkpoint_tests.rs"]
+mod background_checkpoint_tests;
