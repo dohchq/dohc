@@ -38,7 +38,10 @@ export const LinksInResult = z.object({
 }).strict().nullable();
 export const LinksResolveResult = z.object({
   versionId: z.string(),
-  results: z.array(z.object({ path, fragment: z.string().nullable() }).strict().nullable()).max(128),
+  results: z.array(z.union([
+    z.object({ path, fragment: z.string().nullable() }).strict(),
+    z.object({ path: z.null(), create: path, fragment: z.string().nullable() }).strict(),
+  ]).nullable()).max(128),
   mountsCovered: z.boolean(),
 }).strict();
 export type LinksInInput = z.infer<typeof LinksInInput>;

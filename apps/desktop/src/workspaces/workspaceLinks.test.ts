@@ -1,4 +1,7 @@
-import { expect, it, vi } from "vitest";
+import { resolveOwnedWorkspaceSharePath } from "./ownedWorkspaceFileReader";
+vi.mock("./ownedWorkspaceFileReader", () => ({ resolveOwnedWorkspaceSharePath: vi.fn(async () => null) }));
+afterEach(() => vi.mocked(resolveOwnedWorkspaceSharePath).mockReset().mockResolvedValue(null));
+import { afterEach, expect, it, vi } from "vitest";
 import { createWorkspaceLinksReader } from "./workspaceLinks";
 import type { RegistryEntry } from "./registryStore";
 import type { ShareViewFiles } from "./shareViewFiles";
@@ -25,4 +28,24 @@ it("throws when the owner engine session is unavailable, without confusing an ab
   const workspace = { workspaceId: "ws", rootPath: "root" } as RegistryEntry;
   await expect(reader.incoming(workspace, { subject: { path: "a.md" } })).rejects.toThrow("unavailable");
   await expect(reader.resolve(workspace, { source: "a.md", literals: [] })).rejects.toThrow("unavailable");
+});
+
+it("resolves a mounted source through its store and projects found and creation paths", async () => {
+  const target = { kind: "mount" as const, workspaceId: "ws", shareId: "share" };
+  vi.mocked(resolveOwnedWorkspaceSharePath).mockResolvedValue({ target, path: "notes/source.md" });
+  const linksResolve = vi.fn().mockResolvedValue({ versionId: "share-version", mountsCovered: true, results: [
+    { path: "found.md", fragment: "section" }, { path: null, create: "notes/new.md", fragment: null },
+  ] });
+  const owner = vi.fn();
+  const reader = createWorkspaceLinksReader(owner, () => ({ linksResolve }) as unknown as ShareViewFiles);
+  const workspace = { workspaceId: "ws", rootPath: "root", shareMounts: [{ shareId: "share", label: "Team" }] } as RegistryEntry;
+  const literals = [{ kind: "wikilink" as const, literal: "found#section" }, { kind: "wikilink" as const, literal: "new" }];
+  expect(await reader.resolve(workspace, { source: "shared-with-me/Team/notes/source.md", literals })).toMatchObject({
+    versionId: "share-version", results: [
+      { path: "shared-with-me/Team/found.md", fragment: "section" },
+      { path: null, create: "shared-with-me/Team/notes/new.md", fragment: null },
+    ],
+  });
+  expect(linksResolve).toHaveBeenCalledWith(target, { source: "notes/source.md", literals });
+  expect(owner).not.toHaveBeenCalled();
 });

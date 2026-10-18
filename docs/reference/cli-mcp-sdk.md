@@ -106,7 +106,7 @@ Resolve wikilink or Markdown literals from one source document using the engine'
 - `source`: `string`. Required.
 - `literals`: `({ kind: "wikilink" | "markdown", literal: string })[]`. Required.
 
-Returns `{ versionId, results: ({ path, fragment } | null)[], mountsCovered }`.
+Returns `{ versionId, results: ({ path, fragment } | { path, create, fragment } | null)[], mountsCovered }`.
 
 ### `dohc_read_operation`
 
@@ -569,7 +569,7 @@ dohc links resolve <source> <literals-json> [options]
 
 Resolve links from one document.
 
-With `--json`, prints `{ schemaVersion, versionId, results: ({ path, fragment } | null)[], mountsCovered }`.
+With `--json`, prints `{ schemaVersion, versionId, results: ({ path, fragment } | { path, create, fragment } | null)[], mountsCovered }`.
 
 ### `dohc sync`
 

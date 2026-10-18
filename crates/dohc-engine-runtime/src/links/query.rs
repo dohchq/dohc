@@ -88,12 +88,12 @@ impl ActorHandle {
                 let (version, results) = VersionedTextStore::new(store).resolve_files(
                     &ws,
                     None,
-                    &[FileResolveTarget::Path(source)],
+                    &[FileResolveTarget::Path(source.clone())],
                 )?;
                 let source = match results.into_iter().next() {
-                    Some(FileResolution::Found { path, .. }) => Some(path),
+                    Some(FileResolution::Found { path, .. }) => path,
                     Some(FileResolution::Invalid) => return Err(invalid()),
-                    _ => None,
+                    _ => source,
                 };
                 let paths = store.read_with(|c| cache::prepare(c, &cache, &ws, &version))?;
                 Ok((version, source, paths))
@@ -104,12 +104,17 @@ impl ActorHandle {
             let results: Vec<Value> = literals
                 .into_iter()
                 .map(|(kind, literal)| {
-                    source
-                        .as_ref()
-                        .and_then(|source| resolve(&resolver, source, &literal, &kind))
-                        .map_or(Value::Null, |path| {
-                            json!({"path":path,"fragment":literal.split_once('#').map(|(_, fragment)|fragment)})
+                    let fragment = literal.split_once('#').map(|(_, fragment)| fragment);
+                    if literal.starts_with('#') {
+                        return json!({"path":source,"fragment":fragment});
+                    }
+                    if let Some(path) = resolve(&resolver, &source, &literal, &kind) {
+                        json!({"path":path,"fragment":fragment})
+                    } else {
+                        super::resolver::creation_path(&source, &literal, &kind).map_or(Value::Null, |path| {
+                            json!({"path":null,"create":path,"fragment":fragment})
                         })
+                    }
                 })
                 .collect();
             Ok(json!({"versionId":version,"results":results,"mountsCovered":true}))

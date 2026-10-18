@@ -1175,7 +1175,7 @@ export function createShareViewFiles(
         const parsed = LinksResolveInput.parse(input);
         if (classifyEngineFilePath(validatedReadPath(parsed.source)).kind !== "tracked") throw new SharedFileReadOnlyError("This path is not available through the shared view.");
         const result = await store.resolveLinks(parsed);
-        return { ...result, results: result.results.map(row => row && classifyEngineFilePath(row.path).kind === "tracked" ? row : null) };
+        return { ...result, results: result.results.map(row => row && classifyEngineFilePath(row.path ?? row.create).kind === "tracked" ? row : null) };
       }));
     },
     async read(requested, request) {

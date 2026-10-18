@@ -90,6 +90,27 @@ pub(super) fn target(raw: &str) -> Option<String> {
     Some(decode(raw))
 }
 
+/// The path a click opens when no unique alias exists.
+pub(super) fn creation_path(source: &str, raw: &str, kind: &str) -> Option<String> {
+    let target = target(raw)?;
+    let directory = source.rsplit_once('/').map_or("", |(dir, _)| dir);
+    let candidate = if target.starts_with('/') || directory.is_empty() {
+        target.trim_start_matches('/').to_owned()
+    } else {
+        format!("{directory}/{target}")
+    };
+    let mut path = super::normalize_path(&candidate)?;
+    if path.is_empty() {
+        return None;
+    }
+    if kind == "wikilink" || without_extension(&path) == path {
+        if !markdown_extension(&path) {
+            path.push_str(".md");
+        }
+    }
+    Some(path)
+}
+
 impl Resolver {
     pub(super) fn paths_for_version(
         conn: &rusqlite::Connection,

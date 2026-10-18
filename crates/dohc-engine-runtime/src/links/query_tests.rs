@@ -97,7 +97,7 @@ async fn incoming_pages_share_resolution_and_survive_settles_without_writing() {
         .unwrap();
     assert_eq!(
         resolved["results"],
-        json!([{"path":"target.md","fragment":null},{"path":"target.md","fragment":null},null])
+        json!([{"path":"target.md","fragment":null},{"path":"target.md","fragment":null},{"path":"doc.md","fragment":"local"}])
     );
     invalid_cursor(&actor, "ws", "near/target.md", cursor.clone()).await;
     invalid_cursor(&actor, "ws", "target.md", format!("{cursor}x")).await;
@@ -354,7 +354,7 @@ async fn incoming_and_resolve_share_alias_invalidation_and_close_releases_maps()
         )
         .await
         .unwrap();
-    assert_eq!(resolved["results"][0], Value::Null);
+    assert_eq!(resolved["results"][0], json!({"path":null,"create":"target.md","fragment":null}));
     assert_eq!(resolved["results"][1]["path"], "renamed.md");
     assert!(
         page(&actor, "renamed.md", None).await["entries"]
@@ -402,4 +402,34 @@ async fn secret_floor_writes_never_become_incoming_sources() {
     assert!(!result.to_string().contains("private"));
     assert!(!result.to_string().contains(".env"));
     assert_eq!(result["unchecked"], json!([]));
+}
+
+#[tokio::test]
+async fn resolve_uses_uncaptured_source_paths_and_returns_creation_paths() {
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    let mut store = open(&db);
+    write(&mut store, "target", "target.md", "", 1);
+    write(&mut store, "one", "a/ambiguous.md", "", 2);
+    write(&mut store, "two", "b/ambiguous.md", "", 3);
+    drop(store);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).unwrap().actor;
+    let cases = [
+        ("wikilink", "target", json!({"path":"target.md","fragment":null})),
+        ("wikilink", "missing", json!({"path":null,"create":"notes/missing.md","fragment":null})),
+        ("wikilink", "ambiguous", json!({"path":null,"create":"notes/ambiguous.md","fragment":null})),
+        ("markdown", "./guide", json!({"path":null,"create":"notes/guide.md","fragment":null})),
+        ("markdown", "./GUIDE.MARKDOWN", json!({"path":null,"create":"notes/GUIDE.MARKDOWN","fragment":null})),
+        ("markdown", "./new%23release%231.md#decisions", json!({"path":null,"create":"notes/new#release#1.md","fragment":"decisions"})),
+        ("markdown", "../new%20file.md", json!({"path":null,"create":"new file.md","fragment":null})),
+        ("wikilink", "#local", json!({"path":"notes/uncaptured.md","fragment":"local"})),
+        ("markdown", "https://example.com", Value::Null),
+        ("markdown", "../../escape.md", Value::Null),
+    ];
+    for (kind, literal, expected) in cases {
+        let result = actor.resolve_links("ws".into(), "notes/uncaptured.md".into(),
+            vec![(kind.into(), literal.into())], CancellationToken::new()).await.unwrap();
+        assert_eq!(result["results"][0], expected, "{kind} {literal}");
+    }
 }

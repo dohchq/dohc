@@ -1583,7 +1583,7 @@ describe("markdown editor unmount flush", () => {
 
   it("keeps encoded filename delimiters in the literal sent to the engine", async () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({ text: "[Hash](new%23plan.md) [FAQ](faq%3F.md#answers)", truncated: false, contentHash: TEST_CONTENT_HASH });
-    const linksResolve = vi.fn().mockResolvedValue({ results: [null] });
+    const linksResolve = vi.fn().mockResolvedValueOnce({ results: [{ path: null, create: "notes/new#plan.md", fragment: null }] }).mockResolvedValueOnce({ results: [{ path: null, create: "notes/faq?.md", fragment: "answers" }] });
     vi.stubGlobal("dohcDesktop", { ...bridgeMock, linksResolve });
     const onOpenPath = vi.fn();
     render(<FileInspector workspaceId="ws-1" path="notes/status.md" readOnly onOpenPath={onOpenPath} />);
@@ -1591,7 +1591,8 @@ describe("markdown editor unmount flush", () => {
     await waitFor(() => expect(linksResolve).toHaveBeenCalledWith({ workspaceId: "ws-1", source: "notes/status.md", literals: [{ kind: "markdown", literal: "./new%23plan.md" }] }));
     fireEvent.click(screen.getByRole("link", { name: "FAQ" }));
     await waitFor(() => expect(linksResolve).toHaveBeenLastCalledWith({ workspaceId: "ws-1", source: "notes/status.md", literals: [{ kind: "markdown", literal: "./faq%3F.md#answers" }] }));
-    expect(onOpenPath).not.toHaveBeenCalled();
+    expect(onOpenPath).toHaveBeenNthCalledWith(1, "notes/new#plan.md");
+    expect(onOpenPath).toHaveBeenNthCalledWith(2, "notes/faq?.md", { headingTarget: { anchor: "answers", nonce: expect.any(Number) } });
   });
 
   it("keeps local source mode and selects the target heading line", async () => {

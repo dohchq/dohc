@@ -18,7 +18,7 @@ export async function resolveLinkNavigation(
   });
   const target = result.results[0];
   return target ? {
-    path: target.path,
+    path: target.path ?? target.create,
     ...(target.fragment !== null ? { headingTarget: { anchor: target.fragment, nonce } } : {}),
   } : null;
 }
