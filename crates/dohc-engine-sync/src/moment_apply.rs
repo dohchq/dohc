@@ -3,6 +3,7 @@ use dohc_engine_domain::collections::{COLLECTION_SCHEMA_FILENAME, is_collection_
 use dohc_engine_files::{
     PathClassification, classify_engine_file_path_normalized, search_policy::SearchPolicySnapshot,
 };
+use dohc_engine_storage::text;
 use dohc_engine_storage::{EngineStore, FaultInjector, get_binary_blob, hex_sha256};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -2297,12 +2298,7 @@ pub(crate) fn retain_refused_moment_blobs(
 }
 
 fn require_blob_text(tx: &Transaction<'_>, sha: &str) -> Result<String, SyncError> {
-    let row: Option<(i64, String)> = tx
-        .query_row(
-            "SELECT byte_length,text FROM blobs WHERE sha256=?1",
-            [sha],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
+    let row: Option<(i64, String)> = text::with_length(tx, sha)
         .optional()
         .map_err(SyncError::corrupt)?;
     let (byte_length, text) = row.ok_or(SyncError::BlobInvalid)?;
@@ -2331,7 +2327,7 @@ fn select_snapshot_by_object(
 ) -> Result<Option<Snapshot>, SyncError> {
     tx.query_row(
         "SELECT s.object_id,s.version_id,s.path,COALESCE(s.content_kind,'text'), \
-                s.blob_sha256,s.binary_sha256,b.text,COALESCE(b.byte_length,bb.byte_length), \
+                s.blob_sha256,s.binary_sha256,b.sha256,COALESCE(b.byte_length,bb.byte_length), \
                 s.updated_at_ms,s.latest_moment_id,s.metadata_origin,
                 s.metadata_summary,s.metadata_correlation_id \
          FROM snapshots s \
@@ -2339,7 +2335,7 @@ fn select_snapshot_by_object(
          LEFT JOIN binary_blobs bb ON bb.sha256=s.binary_sha256 AND COALESCE(s.content_kind,'text')='binary' \
          WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3",
         params![workspace_id, version_id, object_id],
-        snapshot_from_row,
+        |row| snapshot_from_row(tx, row),
     )
     .optional()
     .map_err(SyncError::corrupt)?
@@ -2355,7 +2351,7 @@ fn select_snapshot_by_path(
     let aliased = tx
         .query_row(
             "SELECT s.object_id,s.version_id,s.path,COALESCE(s.content_kind,'text'), \
-                    s.blob_sha256,s.binary_sha256,b.text,COALESCE(b.byte_length,bb.byte_length), \
+                    s.blob_sha256,s.binary_sha256,b.sha256,COALESCE(b.byte_length,bb.byte_length), \
                     s.updated_at_ms,s.latest_moment_id,s.metadata_origin,
                     s.metadata_summary,s.metadata_correlation_id \
              FROM path_aliases a \
@@ -2364,7 +2360,7 @@ fn select_snapshot_by_path(
              LEFT JOIN binary_blobs bb ON bb.sha256=s.binary_sha256 AND COALESCE(s.content_kind,'text')='binary' \
              WHERE a.workspace_id=?1 AND a.version_id=?2 AND a.path=?3",
             params![workspace_id, version_id, path],
-            snapshot_from_row,
+            |row| snapshot_from_row(tx, row),
         )
         .optional()
         .map_err(SyncError::corrupt)?
@@ -2378,7 +2374,7 @@ fn select_snapshot_by_path(
     let mut statement = tx
         .prepare(
             "SELECT s.object_id,s.version_id,s.path,COALESCE(s.content_kind,'text'), \
-                    s.blob_sha256,s.binary_sha256,b.text,COALESCE(b.byte_length,bb.byte_length), \
+                    s.blob_sha256,s.binary_sha256,b.sha256,COALESCE(b.byte_length,bb.byte_length), \
                     s.updated_at_ms,s.latest_moment_id,s.metadata_origin,
                     s.metadata_summary,s.metadata_correlation_id \
              FROM snapshots s \
@@ -2388,7 +2384,9 @@ fn select_snapshot_by_path(
         )
         .map_err(SyncError::corrupt)?;
     let rows = statement
-        .query_map(params![workspace_id, version_id, path], snapshot_from_row)
+        .query_map(params![workspace_id, version_id, path], |row| {
+            snapshot_from_row(tx, row)
+        })
         .map_err(SyncError::corrupt)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(SyncError::corrupt)?;
@@ -2398,7 +2396,10 @@ fn select_snapshot_by_path(
     rows.into_iter().next().transpose()
 }
 
-fn snapshot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Snapshot, SyncError>> {
+fn snapshot_from_row(
+    conn: &rusqlite::Connection,
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<Result<Snapshot, SyncError>> {
     let kind: String = row.get(3)?;
     let kind = match kind.as_str() {
         "text" => ContentKind::Text,
@@ -2407,7 +2408,7 @@ fn snapshot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Snapsho
             return Ok(Err(SyncError::CoordinateDiverged));
         }
     };
-    let text: Option<String> = row.get(6)?;
+    let text: Option<String> = text::optional_from_row(conn, row, 6)?;
     let digest = match kind {
         ContentKind::Text => row.get::<_, Option<String>>(4)?,
         ContentKind::Binary => row.get::<_, Option<String>>(5)?,

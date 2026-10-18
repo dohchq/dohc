@@ -10,6 +10,7 @@ use crate::store::{
     validate_delete_input, validate_identifier, validate_moment_id, validate_moment_metadata,
     validate_path, validate_write_input, version_is_active, write_text_in_tx,
 };
+use dohc_engine_storage::text;
 use dohc_engine_storage::{
     FaultInjector, MaterializationJobSpec, Preimage, StorageError, TxnOutcome, enqueue_delete_job,
     enqueue_job, has_binary_blob, put_binary_blob_verified,
@@ -609,13 +610,12 @@ pub fn insert_text_conflict_if_absent(
     // so the row's blob FKs hold on a peer that has not yet materialized them.
     for side in [&conflict.base, &conflict.current, &conflict.incoming] {
         if let Some(snapshot) = &side.snapshot {
-            tx.execute(
-                "INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?1, ?2, ?3)",
-                params![
-                    snapshot.blob_sha256,
-                    snapshot.text.len() as i64,
-                    snapshot.text
-                ],
+            text::insert(
+                tx,
+                &(snapshot.blob_sha256),
+                snapshot.text.len() as i64,
+                &(snapshot.text),
+                true,
             )
             .map_err(DomainError::sql_persist)?;
         }
@@ -1659,7 +1659,9 @@ fn list_conflicts(
     let mut stmt = conn.prepare(&sql).map_err(DomainError::sql_corrupt)?;
     let mut out = Vec::new();
     let rows = stmt
-        .query_map(rusqlite::params_from_iter(values.iter()), map_conflict_row)
+        .query_map(rusqlite::params_from_iter(values.iter()), |row| {
+            map_conflict_row(conn, row)
+        })
         .map_err(DomainError::sql_corrupt)?;
     for row in rows {
         out.push(row.map_err(DomainError::sql_corrupt)??);
@@ -1674,16 +1676,18 @@ pub fn load_text_conflict_in_tx(
     conflict_id: &str,
 ) -> Result<Option<TextConflict>, DomainError> {
     let sql = format!("{CONFLICT_SELECT} WHERE c.workspace_id = ?1 AND c.conflict_id = ?2");
-    conn.query_row(&sql, params![workspace_id, conflict_id], map_conflict_row)
-        .optional()
-        .map_err(DomainError::sql_corrupt)?
-        .transpose()
+    conn.query_row(&sql, params![workspace_id, conflict_id], |row| {
+        map_conflict_row(conn, row)
+    })
+    .optional()
+    .map_err(DomainError::sql_corrupt)?
+    .transpose()
 }
 
 const CONFLICT_SELECT: &str = "SELECT c.*,
-    base_blob.text AS base_text,
-    current_blob.text AS current_text,
-    incoming_blob.text AS incoming_text,
+    base_blob.sha256 AS base_blob,
+    current_blob.sha256 AS current_blob,
+    incoming_blob.sha256 AS incoming_blob,
     base_binary.byte_length AS base_binary_byte_length,
     current_binary.byte_length AS current_binary_byte_length,
     incoming_binary.byte_length AS incoming_binary_byte_length
@@ -1696,6 +1700,7 @@ const CONFLICT_SELECT: &str = "SELECT c.*,
     LEFT JOIN binary_blobs incoming_binary ON incoming_binary.sha256 = c.incoming_binary_sha256";
 
 fn map_conflict_row(
+    conn: &Connection,
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<Result<TextConflict, DomainError>> {
     let workspace_id: String = row.get("workspace_id")?;
@@ -1735,14 +1740,15 @@ fn map_conflict_row(
                     .get("metadata_correlation_id")
                     .map_err(DomainError::sql_corrupt)?,
             },
-            base: map_side(row, "base", &workspace_id, &source_version_id)?,
-            current: map_side(row, "current", &workspace_id, &target_version_id)?,
-            incoming: map_side(row, "incoming", &workspace_id, &source_version_id)?,
+            base: map_side(conn, row, "base", &workspace_id, &source_version_id)?,
+            current: map_side(conn, row, "current", &workspace_id, &target_version_id)?,
+            incoming: map_side(conn, row, "incoming", &workspace_id, &source_version_id)?,
         })
     })())
 }
 
 fn map_side(
+    conn: &Connection,
     row: &rusqlite::Row<'_>,
     prefix: &str,
     workspace_id: &str,
@@ -1792,8 +1798,7 @@ fn map_side(
                     .get(column("object_id").as_str())
                     .map_err(DomainError::sql_corrupt)?,
                 path: path.clone(),
-                text: row
-                    .get(format!("{prefix}_text").as_str())
+                text: text::from_row(conn, row, format!("{prefix}_blob").as_str())
                     .map_err(DomainError::sql_corrupt)?,
                 blob_sha256: text_blob_sha256.ok_or(DomainError::StateCorrupt {
                     reason: "text conflict side is missing its blob reference",
@@ -1933,7 +1938,7 @@ pub fn select_snapshot_by_path_in_tx(
     );
     let row: Option<HeadRow> = conn
         .query_row(
-            "SELECT s.object_id, s.path, b.text, s.blob_sha256, s.updated_at_ms, \
+            "SELECT s.object_id, s.path, b.sha256, s.blob_sha256, s.updated_at_ms, \
              s.latest_moment_id, s.metadata_origin, s.metadata_summary, \
               s.metadata_correlation_id, COALESCE(s.content_kind, 'text'), \
               bb.sha256, bb.byte_length, LENGTH(bb.bytes) FROM snapshots s \
@@ -1945,7 +1950,7 @@ pub fn select_snapshot_by_path_in_tx(
                 Ok((
                     row.get(0)?,
                     row.get(1)?,
-                    row.get(2)?,
+                    text::optional_from_row(conn, row, 2)?,
                     row.get(3)?,
                     row.get(4)?,
                     row.get(5)?,

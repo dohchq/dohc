@@ -23,6 +23,7 @@ mod resolver;
 mod tests;
 mod worker;
 
+use dohc_engine_storage::text;
 use dohc_engine_storage::{EngineStore, FaultInjector, NoFaults, StorageError, TxnOutcome};
 use parser::{MAX_DOCUMENT_BYTES, Parsed};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -82,11 +83,11 @@ fn head(conn: &Connection, w: &Work, hydrate: bool) -> Result<Option<Head>, Stor
            WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3
            AND NOT EXISTS(SELECT 1 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)
         ) SELECT e.path,COALESCE(e.blob_sha256,e.binary_sha256),e.content_kind,COALESCE(b.byte_length,-1),
-          CASE WHEN ?4 AND b.byte_length<=?5 THEN b.text ELSE NULL END
+          CASE WHEN ?4 AND b.byte_length<=?5 THEN b.sha256 ELSE NULL END
           FROM effective e LEFT JOIN blobs b ON b.sha256=e.blob_sha256
           WHERE EXISTS(SELECT 1 FROM link_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3) LIMIT 1",
         params![w.workspace,w.version,w.object,hydrate,MAX_DOCUMENT_BYTES as i64],
-        |r| Ok(Head {path:r.get(0)?,hash:r.get(1)?,kind:r.get(2)?,byte_length:r.get(3)?,text:r.get(4)?,aliases:Vec::new(),unindexed_reason:None}),
+        |r| Ok(Head {path:r.get(0)?,hash:r.get(1)?,kind:r.get(2)?,byte_length:r.get(3)?,text:text::optional_from_row(conn, r, 4)?,aliases:Vec::new(),unindexed_reason:None}),
     ).optional().map_err(sql)?;
     if let Some(h) = h.as_mut() {
         if h.kind == "text" && h.byte_length < 0 {

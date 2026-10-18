@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use dohc_engine_domain::{DeleteTextFile, DomainError, VersionedTextStore, WriteBinary, WriteText};
+use dohc_engine_storage::text;
 use dohc_engine_storage::{
     EngineStore, FaultInjector, FaultPoint, StorageError, TxnOutcome, hex_sha256,
 };
@@ -4040,12 +4041,7 @@ pub(crate) fn local_blob_bytes(
     store
         .read_with(|conn| match kind {
             BlobKind::Text => {
-                let row = conn
-                    .query_row(
-                        "SELECT byte_length,text FROM blobs WHERE sha256=?1",
-                        [sha256],
-                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-                    )
+                let row = text::with_length(conn, sha256)
                     .optional()
                     .map_err(SyncError::corrupt)?;
                 let Some((byte_length, text)) = row else {

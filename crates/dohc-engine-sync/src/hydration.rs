@@ -1,5 +1,6 @@
 use dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES;
 use dohc_engine_domain::{MAX_CAPTURE_BINARY_FILE_BYTES, MAX_TEXT_BYTES};
+use dohc_engine_storage::text;
 use dohc_engine_storage::{EngineStore, FaultInjector, FaultPoint, TxnOutcome, hex_sha256};
 use rusqlite::{OptionalExtension, params};
 
@@ -143,12 +144,7 @@ impl<'a> VerifiedBlob<'a> {
         let outcome = store.write_with(faults, |tx| {
             match text {
                 Some(text) => {
-                    let existing: Option<(i64, String)> = tx
-                        .query_row(
-                            "SELECT byte_length,text FROM blobs WHERE sha256=?1",
-                            [sha256],
-                            |row| Ok((row.get(0)?, row.get(1)?)),
-                        )
+                    let existing: Option<(i64, String)> = text::with_length(tx, sha256)
                         .optional()
                         .map_err(SyncError::corrupt)?;
                     let byte_length =
@@ -158,11 +154,8 @@ impl<'a> VerifiedBlob<'a> {
                             return Err(SyncError::BlobInvalid);
                         }
                     } else {
-                        tx.execute(
-                            "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
-                            params![sha256, byte_length, text],
-                        )
-                        .map_err(SyncError::persist)?;
+                        text::insert(tx, sha256, byte_length, text, false)
+                            .map_err(SyncError::persist)?;
                     }
                 }
                 // A Y.Doc payload shares `binary_blobs` with a captured file: the
