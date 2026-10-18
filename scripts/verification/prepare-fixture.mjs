@@ -50,7 +50,7 @@ export function createPrepareFixture(root, buildSource, { commit = true } = {}) 
       }
       assert.deepEqual([command,...args],['pnpm','--filter','@dohc/desktop','build']);
       for(const path of ['apps/desktop/dist','apps/desktop/resources/cli-bin','apps/desktop/resources/app-backend-runtime',
-        ...(process.arch==='x64' && ['win32','linux'].includes(process.platform)?['apps/desktop/resources/app-compiler']:[]),
+        ...(['win32-x64','darwin-arm64','darwin-x64','linux-arm64','linux-x64'].includes(process.platform+'-'+process.arch)?['apps/desktop/resources/app-compiler']:[]),
         ...(process.platform==='win32' && process.arch==='x64'?['apps/desktop/resources/agent-probe']:[])])
         put(join(repoRoot,path,'built.txt'),readFileSync(join(repoRoot,'node_modules/installed.txt')));
       for(const name of ['dohc','dohc-mcp']) {

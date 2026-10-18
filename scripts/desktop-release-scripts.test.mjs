@@ -616,7 +616,7 @@ test("desktop releases start only by dispatch, run on self-hosted runners, and p
   }
 });
 
-test("desktop release stages the Rust engine built for the packaged architecture", async () => {
+test("desktop release stages the Rust engine and Collection compiler for the packaged architecture", async () => {
   const root = await mkdtemp(join(tmpdir(), "dohc-engine-cross-build-"));
   const scriptDir = join(root, "apps/desktop/scripts");
   await mkdir(scriptDir, { recursive: true });
@@ -737,6 +737,17 @@ test("desktop release stages the Rust engine built for the packaged architecture
     .replace('"${{ matrix.target }}"', target)
     .trim().split(/\s+/);
   assert.equal(buildModule.parseTargetArgument(engineArgs), target);
+  // The Apple silicon runner packages macOS x64 with the x64 Collection compiler.
+  const installs = build.steps.filter(step => /\bpnpm (install|i)\b/.test(step.run ?? ""));
+  assert.deepEqual(installs.map(step => step.run), ["pnpm install --frozen-lockfile --cpu=current --cpu=${{ matrix.arch }}"]);
+  // A later pnpm run or exec would otherwise reinstall without --cpu.
+  assert.equal(build.env.pnpm_config_verify_deps_before_run, "false");
+  for (const step of build.steps) assert.equal(step.env?.pnpm_config_verify_deps_before_run, undefined, `${step.name} keeps the install`);
+  const stageCompiler = releaseStep(build, "stage-app-compiler.mjs");
+  assert.equal(stageCompiler.run, "node apps/desktop/scripts/stage-app-compiler.mjs --arch=${{ matrix.arch }}");
+  const order = step => build.steps.indexOf(step);
+  assert.ok(order(releaseStep(build, "pnpm build:desktop")) < order(stageCompiler), "target staging replaces the build's runner staging");
+  assert.ok(order(stageCompiler) < order(releaseStep(build, "electron-builder")), "packaging checks the target's compiler");
 });
 
 test("desktop release workflow uploads only distributable release assets", () => {

@@ -12,20 +12,21 @@ const nodeUrl = `https://nodejs.org/dist/v${NODE_VERSION}/win-x64/node.exe`;
 const maxNodeBytes = 128 * 1024 * 1024;
 const desktopRoot = fileURLToPath(new URL("..", import.meta.url));
 const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
-// Linux x64 ships only the esbuild binary Collection actions compile with.
+const windowsFiles = [
+  "node.exe", "adapter.mjs", "worker.mjs", "compilerProcessRelay.mjs", "windowsCompilerJob.ps1",
+  "node_modules/esbuild/package.json", "node_modules/esbuild/lib/main.js", "node_modules/esbuild/LICENSE.md",
+  "node_modules/@esbuild/win32-x64/package.json", "node_modules/@esbuild/win32-x64/esbuild.exe",
+  "licenses/node.txt", "licenses/acorn.txt", "licenses/parse5.txt", "licenses/entities.txt",
+];
+
+// macOS and Linux ship only the esbuild binary Collection actions compile with.
 // Publishing apps needs the Windows compiler process and its job limits.
-const stagedFiles = {
-  win32: [
-    "node.exe", "adapter.mjs", "worker.mjs", "compilerProcessRelay.mjs", "windowsCompilerJob.ps1",
-    "node_modules/esbuild/package.json", "node_modules/esbuild/lib/main.js", "node_modules/esbuild/LICENSE.md",
-    "node_modules/@esbuild/win32-x64/package.json", "node_modules/@esbuild/win32-x64/esbuild.exe",
-    "licenses/node.txt", "licenses/acorn.txt", "licenses/parse5.txt", "licenses/entities.txt",
-  ],
-  linux: [
-    "node_modules/esbuild/LICENSE.md",
-    "node_modules/@esbuild/linux-x64/package.json", "node_modules/@esbuild/linux-x64/bin/esbuild",
-  ],
-};
+function stagedFiles(platform, arch) {
+  if (platform === "win32") return arch === "x64" ? windowsFiles : undefined;
+  if (!["darwin", "linux"].includes(platform) || !["arm64", "x64"].includes(arch)) return undefined;
+  const native = `node_modules/@esbuild/${platform}-${arch}`;
+  return ["node_modules/esbuild/LICENSE.md", `${native}/package.json`, `${native}/bin/esbuild`];
+}
 
 async function packageRoot(resolve, name) {
   for (let directory = dirname(resolve(name)); directory !== dirname(directory); directory = dirname(directory)) {
@@ -36,14 +37,14 @@ async function packageRoot(resolve, name) {
 }
 
 export async function requireAppCompiler(root = join(desktopRoot, "resources/app-compiler"), platform = process.platform, arch = process.arch) {
-  const files = stagedFiles[platform];
-  if (!files || platform === "linux" && arch !== "x64") return;
-  if (arch !== "x64") throw new Error("The packaged app compiler currently requires Windows x64.");
+  if (platform === "win32" && arch !== "x64") throw new Error("The packaged app compiler currently requires Windows x64.");
+  const files = stagedFiles(platform, arch);
+  if (!files) return;
   const manifest = JSON.parse(await readFile(join(root, "manifest.json"), "utf8"));
   if (platform === "win32" && (manifest.nodeVersion !== NODE_VERSION || manifest.nodeSha256 !== NODE_SHA256) ||
-      manifest.platform !== platform || manifest.arch !== "x64" ||
+      manifest.platform !== platform || manifest.arch !== arch ||
       JSON.stringify(Object.keys(manifest.files).sort()) !== JSON.stringify([...files].sort())) {
-    throw new Error("App compiler staging manifest does not match this build.");
+    throw new Error(`App compiler staging manifest does not match ${platform}-${arch}.`);
   }
   for (const path of files) {
     const bytes = await readFile(join(root, path));
@@ -84,8 +85,8 @@ export async function readPinnedCompilerNode(options = {}) {
 /** Stage only trusted build inputs, without running dependency install scripts. */
 export async function stageAppCompiler(options = {}) {
   const platform = options.platform ?? process.platform, arch = options.arch ?? process.arch;
-  const files = stagedFiles[platform];
-  if (!files || arch !== "x64") return { supported: false };
+  const files = stagedFiles(platform, arch);
+  if (!files) return { supported: false };
   const destination = resolve(options.destination ?? join(desktopRoot, "resources/app-compiler"));
   const sourceRoot = resolve(options.desktopRoot ?? desktopRoot);
   const node = platform === "win32" ? await readPinnedCompilerNode({ nodeExecutable: options.nodeExecutable, stagedNodePath: join(destination, "node.exe") }) : null;
@@ -93,14 +94,20 @@ export async function stageAppCompiler(options = {}) {
   const esbuildRoot = dirname(require.resolve("esbuild/package.json"));
   if (JSON.parse(await readFile(join(esbuildRoot, "package.json"), "utf8")).version !== "0.28.1") throw new Error("App compiler requires esbuild 0.28.1.");
   const esbuildRequire = createRequire(join(esbuildRoot, "package.json"));
-  const nativePackage = `@esbuild/${platform}-x64`;
-  const platformRoot = dirname(esbuildRequire.resolve(`${nativePackage}/package.json`));
+  const nativePackage = `@esbuild/${platform}-${arch}`;
+  let platformRoot;
+  try { platformRoot = dirname(esbuildRequire.resolve(`${nativePackage}/package.json`)); }
+  catch (error) {
+    if (error.code !== "MODULE_NOT_FOUND") throw error;
+    // pnpm installs only the host's binary unless asked for another architecture.
+    throw new Error(`App compiler requires ${nativePackage}. Install it with pnpm install --cpu=current --cpu=${arch}.`);
+  }
   if (JSON.parse(await readFile(join(platformRoot, "package.json"), "utf8")).version !== "0.28.1") throw new Error(`App compiler requires ${nativePackage} 0.28.1.`);
   await mkdir(dirname(destination), { recursive: true });
   const staging = await mkdtemp(`${destination}.staging-`);
   try {
     for (const path of files) await mkdir(dirname(join(staging, path)), { recursive: true });
-    if (platform === "linux") {
+    if (platform !== "win32") {
       await cp(join(esbuildRoot, "LICENSE.md"), join(staging, "node_modules/esbuild/LICENSE.md"));
       for (const file of ["package.json", "bin/esbuild"]) await cp(join(platformRoot, file), join(staging, "node_modules", nativePackage, file));
     } else {
