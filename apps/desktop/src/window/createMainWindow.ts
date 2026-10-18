@@ -23,6 +23,7 @@ import {
 } from "../systemThemeIcon";
 import { stateDir } from "../workspaces/WorkspaceRegistry";
 import { installRendererCrashRecovery } from "./rendererCrashRecovery";
+import { installTextContextMenu } from "./textContextMenu";
 import {
   createDebouncedSaver,
   DEFAULT_WINDOW_SIZE,
@@ -318,6 +319,8 @@ export function createMainWindow(options?: {
   // views today, app iframes in 7b) must never reach the OS browser except
   // through the explicit, audited openExternalUrl IPC.
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+
+  installTextContextMenu(window);
 
   // Top-frame navigations, server redirects, and subframe navigations all
   // go through the same policy: each is a separate Electron surface.

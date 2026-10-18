@@ -5580,6 +5580,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       cachedAgentName = settings.profile.agentName;
       desktopWindows.seedZoomLevel(settings.appearance.zoomLevel);
       applyThemeMode(settings.appearance.themeMode);
+      session.defaultSession.setSpellCheckerEnabled(settings.editor.spellcheck);
     },
     prepareCli: () => {
       if (!app.isPackaged || process.platform !== "linux" || !isAppImageBoot()) return;
@@ -5933,6 +5934,7 @@ const settingsIpc = createSettingsIpc<WebContents, IpcMainInvokeEvent, DesktopRe
   stateDir,
   setCachedPreferredName: (preferredName, agentName) => { cachedPreferredName = preferredName; cachedAgentName = agentName; },
   applyZoomLevelToWindows, applyThemeMode, refreshDispatchTray, openDispatchWorkspaces,
+  setSpellCheckerEnabled: (enabled) => session.defaultSession.setSpellCheckerEnabled(enabled),
   chatDispatchService, withRendererWorkspaceOperation, notifyRenderer,
   broadcastUserSettings: (settings) => {
     // Reports follow the switches before any window learns of them.
