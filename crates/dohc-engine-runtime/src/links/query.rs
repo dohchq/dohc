@@ -177,7 +177,8 @@ impl ActorHandle {
                 }).map_err(RuntimeError::from)
             })
             .await?;
-        let Some((version, object, target, after, paths, sources, complete, more)) = prepared else {
+        let Some((version, object, target, after, paths, sources, complete, more)) = prepared
+        else {
             return Ok(Value::Null);
         };
         tokio::task::spawn_blocking(move || {
@@ -218,7 +219,9 @@ impl ActorHandle {
                         if path == after.0 && ordinal <= after.1 {
                             continue;
                         }
-                        if examined == 512 || page["entries"].as_array().expect("array").len() == 100 {
+                        if examined == 512
+                            || page["entries"].as_array().expect("array").len() == 100
+                        {
                             stopped = true;
                             break 'sources;
                         }
@@ -238,7 +241,8 @@ impl ActorHandle {
                             "highlightEnd":occurrence.end_utf16-occurrence.snippet_offset_utf16
                         });
                         page["entries"].as_array_mut().expect("array").push(entry);
-                        page["nextCursor"] = json!(encode_cursor(&workspace, &version, &object, &last)?);
+                        page["nextCursor"] =
+                            json!(encode_cursor(&workspace, &version, &object, &last)?);
                         if page.to_string().len() > 64 * 1024 - 128 {
                             page["entries"].as_array_mut().expect("array").pop();
                             last = previous;
