@@ -26,7 +26,11 @@ A job can also reach what every account on the Mac shares:
 
 - **Other users' home folders.** macOS gives every standard user the `staff` group, and a new home folder lets that group read it. Setup closes Ice's home folder.
 - **Services on `127.0.0.1`.** Every account can connect to them. T3 Code listens on `127.0.0.1:3773` from the launch agent `com.icedevera.t3-desktop`, and it runs full-access agents as Ice. A caller that can drive it can act as Ice.
-- **`/tmp`.** It is shared by every account. Tests fall back to `/tmp/dohc-test-scratch` when `TMPDIR` is unset, and that folder already exists, owned by `ice`. Setup gives the runner its own `TMPDIR`.
+- **`/tmp`.** It is shared by every account. The desktop tests put their scratch folders under `/tmp/dohc-test-scratch` whenever `/tmp` exists, whatever `TMPDIR` says.
+  That folder already exists, owned by `ice` with mode 755, so the nightly's desktop tests fail when `dohc-ci` cannot write into it.
+  After a restart clears `/tmp`, a job could create the folder first, and Ice's tests would then write into a folder that `dohc-ci` owns.
+  `DOHC_TEST_SCRATCH_ROOT` does not fix this: set for the whole suite, it fails the scratch module's own tests.
+  The nightly cannot run until the desktop tests use a scratch folder per user.
 
 For pull requests from forks:
 
@@ -70,6 +74,11 @@ Ice runs this setup once with administrator rights.
 It creates `dohc-ci`, gives it its own login session, and registers the runner inside that session.
 The session is necessary because the e2e suite opens Electron windows.
 
+Do not register the runner until both of these hold:
+
+- T3 Code refuses a caller without credentials, as step 6 below confirms.
+- The desktop tests use a scratch folder per user instead of the shared `/tmp/dohc-test-scratch`.
+
 ### Prepare the Mac as Ice
 
 Complete every step in this part before you register the runner.
@@ -109,14 +118,21 @@ Complete every step in this part before you register the runner.
    `dohc-ci` runs these programs but cannot change them.
 
 6. Confirm that a caller without credentials cannot drive any service on `127.0.0.1`.
+   Repeat this step after every T3 Code update. If a repeat fails, [reset the runner](#reset-the-runner), and do not register it again until a check passes.
    List the services with `lsof -nP -iTCP -sTCP:LISTEN`. Check each one that listens on `127.0.0.1` or `*`.
    For T3 Code, check both of its entry points:
    - `curl -s -w ' %{http_code}\n' http://127.0.0.1:3773/mcp` must print `401`.
-   - The web UI at `http://127.0.0.1:3773/` must not show threads or start a turn for a browser that has no T3 Code credentials. Open it from the `dohc-ci` session in step 2 of the next part, before you register.
+   - Connect to its UI socket, `ws://127.0.0.1:3773/ws`, as a client that speaks orchestration protocol 2 and sends no credentials.
+     T3 Code's maintainers or its source say how a client declares protocol 2.
+     T3 Code must refuse the connection, or reject the client's first request because it has no credentials.
 
-   The known state, from a probe on 2026-10-19 without credentials: `/mcp` answered `401 {"error":"invalid_mcp_credential"}`, and `/` served the web UI with status 200.
-   That probe did not show whether the UI's socket accepts callers without credentials.
-   If you cannot confirm that it refuses them, do not run the runner while T3 Code runs. Stop the runner with `./svc.sh stop` as `dohc-ci` before you start T3 Code.
+   The known state, from a probe on 2026-10-19 without credentials:
+   - `/mcp` answered `401 {"error":"invalid_mcp_credential"}`.
+   - `/` served the web UI.
+   - A WebSocket handshake to `/ws` got HTTP `426 {"code":"orchestration_protocol_incompatible","message":"Update this client to one that supports orchestration protocol 2."}`.
+
+   The `426` is a protocol version check, not authentication. Nobody has yet confirmed that the socket refuses a protocol 2 client without credentials.
+   Until someone confirms it, do not register the runner.
 
 7. Create a runner registration token. Keep it for the next part. It expires after one hour.
 
@@ -138,15 +154,13 @@ Switch to `dohc-ci` with fast user switching, sign in, and open Terminal.
    cargo install --locked cargo-nextest --version 0.9.143
    ```
 
-2. Complete Ice's step 6 for T3 Code's web UI from this session.
-
-3. Start this user's own Colima VM once: `colima start`.
+2. Start this user's own Colima VM once: `colima start`.
    Each job starts it again if it is not running.
    Do not give `dohc-ci` another user's Docker socket. A Docker client controls the Colima VM, and Colima mounts its owner's home folder into that VM.
 
-4. Download the macOS ARM64 runner into `~/actions-runner`. Follow the download step on the repository's Settings > Actions > Runners > New self-hosted runner page.
+3. Download the macOS ARM64 runner into `~/actions-runner`. Follow the download step on the repository's Settings > Actions > Runners > New self-hosted runner page.
 
-5. Register and start the runner with the token from Ice's step 7.
+4. Register and start the runner with the token from Ice's step 7.
    `read -s` keeps the token out of the shell history.
 
    ```sh
@@ -161,10 +175,10 @@ Switch to `dohc-ci` with fast user switching, sign in, and open Terminal.
    ```
 
    The runner records that `PATH` in `.path`. Jobs find `cargo`, `colima`, and `docker` through it.
-   The `TMPDIR` line in `.env` gives jobs this user's own temporary folder instead of the shared `/tmp`.
+   The `TMPDIR` line in `.env` gives Rust and other tools this user's own temporary folder instead of the shared `/tmp`.
    `svc.sh` installs a launch agent for `dohc-ci`, so it starts each time `dohc-ci` signs in.
 
-6. Switch back to your own account. Leave `dohc-ci` signed in.
+5. Switch back to your own account. Leave `dohc-ci` signed in.
 
 Each job downloads the Node version in `.node-version` and the pnpm version in `package.json`.
 The verifier installs the pinned Playwright Chromium for `dohc-ci`. Xcode Command Line Tools are installed for every user.
