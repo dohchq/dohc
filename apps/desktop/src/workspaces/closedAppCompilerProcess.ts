@@ -11,7 +11,7 @@ const ordered = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
 
 /** Runtime paths are installed dohc assets, never fields from an app manifest. */
 export async function compileClosedAppInProcess(
-  runtime: Pick<CompilerProcessRuntime, "nodeExecutable" | "workerPath" | "onOwnerSpawn">,
+  runtime: Pick<CompilerProcessRuntime, "nodeExecutable" | "workerPath" | "ownerExecutable" | "onOwnerSpawn">,
   request: ClosedAppBuildRequest,
   bounds: CompilerProcessBounds,
   signal?: AbortSignal,
