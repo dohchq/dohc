@@ -25,7 +25,7 @@ for (const worker of ["workspace-database-worker", "document-projection-worker",
     `build output exists: dist/main/${worker}.js`,
   );
 }
-for (const icon of ["build/icon.png", "build/icon-light.png", "build/icon-dark.png"]) {
+for (const icon of ["build/icon.png", "build/icon-light.png", "build/icon-dark.png", "build/icon.icns", "build/trayTemplate.png", "build/trayTemplate@2x.png"]) {
   check(existsSync(join(desktopDir, icon)), `system theme icon exists: ${icon}`);
 }
 check(
@@ -183,6 +183,14 @@ if (config) {
 const hasSigningCredentials = Boolean(process.env.CSC_LINK || process.env.WIN_CSC_LINK);
 if (process.env.DOHC_REQUIRE_SIGNING === "1") {
   check(hasSigningCredentials, "DOHC_REQUIRE_SIGNING=1 demands CSC_LINK/WIN_CSC_LINK in the env");
+  // electron-builder skips notarization without these, and Gatekeeper blocks
+  // a signed Mac app that is not notarized.
+  if (process.platform === "darwin") {
+    check(
+      Boolean(process.env.APPLE_ID && process.env.APPLE_APP_SPECIFIC_PASSWORD && process.env.APPLE_TEAM_ID),
+      "DOHC_REQUIRE_SIGNING=1 on macOS demands APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD and APPLE_TEAM_ID for notarization",
+    );
+  }
 }
 console.log(hasSigningCredentials
   ? "SIGNING: credentials present (CSC env set)"

@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="dohc">
+  <title>dohc — macOS app icon</title>
+  <!-- Apple's macOS icon grid: an 824px rounded body inside a 1024px canvas,
+       with room for the drop shadow. Warm paper, faint paper grid, graphite
+       mark. scripts/render-icon.mjs renders it to icon.icns; sizes of 32px
+       and under use the heavier small-size mark and drop the grid. -->
+  <style>
+    .mark { stroke-width: 8; }
+    .dot { r: 9; }
+  </style>
+  <defs>
+    <linearGradient id="paper" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fcfbf7"/>
+      <stop offset="1" stop-color="#ebe8df"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.9"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+      <stop offset="1" stop-color="#1c1b18" stop-opacity="0.1"/>
+    </linearGradient>
+    <pattern id="grid" width="41.2" height="41.2" patternUnits="userSpaceOnUse" x="100" y="100">
+      <path d="M41.2 0V41.2M0 41.2H41.2" fill="none" stroke="#1c1b18" stroke-opacity="0.045" stroke-width="2"/>
+    </pattern>
+    <clipPath id="body"><rect x="100" y="100" width="824" height="824" rx="185.4"/></clipPath>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="10" flood-color="#000" flood-opacity="0.28"/>
+    </filter>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185.4" fill="url(#paper)" filter="url(#shadow)"/>
+  <g class="grid" clip-path="url(#body)"><rect x="100" y="100" width="824" height="824" fill="url(#grid)"/></g>
+  <rect x="102" y="102" width="820" height="820" rx="183.4" fill="none" stroke="url(#rim)" stroke-width="4"/>
+  <g transform="translate(291 251) scale(4.75)">
+    <path class="mark" d="M48 10c14 0 25 9 25 23 0 5-2 9-4 13 10 5 17 15 17 27 0 16-12 27-29 27-12 0-22-5-31-12L12 78C8 68 7 56 10 44 15 23 29 10 48 10Z"
+      fill="none" stroke="#2d342e" stroke-linejoin="round"/>
+    <circle class="dot" cx="38" cy="58" fill="#2d342e"/>
+  </g>
+</svg>

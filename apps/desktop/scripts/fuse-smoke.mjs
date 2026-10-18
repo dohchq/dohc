@@ -20,7 +20,9 @@ const FUSE_OPTION = {
 
 export function assertReleaseFuses(actual, configured) {
   if (actual.version !== FuseVersion.V1) throw new Error("Unsupported packaged fuse wire version.");
-  for (const [name, enabled] of Object.entries(configured)) {
+  // A packaging instruction beside the fuses, not a fuse in the wire.
+  const { resetAdHocDarwinSignature: _resign, ...fuses } = configured;
+  for (const [name, enabled] of Object.entries(fuses)) {
     if (!Object.hasOwn(FUSE_OPTION, name) || typeof enabled !== "boolean") {
       throw new Error(`Unsupported release fuse setting: ${name}`);
     }
@@ -31,15 +33,35 @@ export function assertReleaseFuses(actual, configured) {
   }
 }
 
+// electron-builder's unpacked output for each platform the smoke boots. A Mac
+// package is the .app bundle; @electron/fuses reads its Electron Framework.
+const PACKAGES = {
+  linux: { name: "Linux", directory: "release/linux-unpacked", binary: "dohc", asar: "resources/app.asar", fuses: "dohc" },
+  darwin: {
+    name: "macOS",
+    directory: process.arch === "arm64" ? "release/mac-arm64/dohc.app" : "release/mac/dohc.app",
+    binary: "Contents/MacOS/dohc",
+    asar: "Contents/Resources/app.asar",
+    fuses: ".",
+  },
+};
+
 async function smoke() {
-  if (process.platform !== "linux") throw new Error("Fuse smoke supports Linux packages only.");
-  const packageDir = resolve(process.env.DOHC_SMOKE_PACKAGE_DIRECTORY ?? join(desktopDir, "release/linux-unpacked"));
-  const binary = join(packageDir, "dohc");
-  if (!existsSync(binary) || !existsSync(join(packageDir, "resources/app.asar"))) {
-    throw new Error(`Linux package missing: ${packageDir}. Run electron-builder before fuse smoke.`);
+  const target = PACKAGES[process.platform];
+  if (!target) throw new Error("Fuse smoke supports Linux and macOS packages only.");
+  const packageDir = resolve(process.env.DOHC_SMOKE_PACKAGE_DIRECTORY ?? join(desktopDir, target.directory));
+  const binary = join(packageDir, target.binary);
+  if (!existsSync(binary) || !existsSync(join(packageDir, target.asar))) {
+    throw new Error(`${target.name} package missing: ${packageDir}. Run electron-builder before fuse smoke.`);
   }
   const configured = require("js-yaml").load(readFileSync(join(desktopDir, "electron-builder.yml"), "utf8")).electronFuses;
-  assertReleaseFuses(await getCurrentFuseWire(binary), configured);
+  assertReleaseFuses(await getCurrentFuseWire(join(packageDir, target.fuses)), configured);
+  // Apple silicon will not load a framework whose signature no longer matches
+  // its bytes, which is what a fuse flip without a re-sign leaves behind.
+  if (process.platform === "darwin") {
+    const signature = spawnSync("codesign", ["--verify", "--deep", "--strict", packageDir], { encoding: "utf8" });
+    if (signature.status !== 0) throw new Error(`The macOS package's signature does not verify:\n${signature.stderr}`);
+  }
 
   const profile = mkdtempSync(join(tmpdir(), "dohc-fuse-smoke-"));
   try {
