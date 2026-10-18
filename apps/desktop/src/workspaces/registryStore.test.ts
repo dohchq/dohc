@@ -672,6 +672,14 @@ describe("registry store", () => {
     expect(saved.workspaces.map((entry) => entry.rootPath)).toEqual([canonicalWorkspaceRoot(real), missing]);
   });
 
+  it.skipIf(process.platform === "win32")("reads a backslash in a folder's name as part of the name", async () => {
+    const folder = join(dirname(registryPath), "trip\\2026");
+    await mkdir(folder);
+    await writeFile(registryPath, JSON.stringify({ version: 1, workspaces: [{ ...personal, rootPath: canonicalWorkspaceRoot(folder) }] }));
+    expect(createRegistryStore(registryPath).find("ws-1")?.rootPath).toBe(canonicalWorkspaceRoot(folder));
+    expect(canonicalWorkspaceRoot(folder).endsWith("/trip\\2026")).toBe(true);
+  });
+
   it("persists across store instances", () => {
     store.register(personal);
     const reopened = createRegistryStore(store.registryFile);

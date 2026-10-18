@@ -11,7 +11,7 @@ import {
   type ShareMountRecord,
   type ShareViewIdentity,
 } from "./registryStore";
-import { canonicalWorkspaceRoot } from "./createWorkspaceFolder";
+import { canonicalWorkspaceRoot, FOLDER_CHANGED } from "./createWorkspaceFolder";
 import { storedShareMounts } from "./shareViewFilesTarget";
 import { recordReceivedShare, recordSynced } from "./syncHistory";
 
@@ -49,10 +49,13 @@ export function listWorkspaces(): RegistryEntry[] {
   return store().list();
 }
 
-// Stores the root by its real path, so a folder reached through a link has
-// the one root every workspace operation receives.
+// Saves only a root that is its folder's real path, the one every workspace
+// operation receives. A root that no longer resolves to itself changed after
+// createWorkspaceFolder checked it, so nothing is saved.
 export function registerWorkspace(workspace: RegistryEntry): void {
-  const rootPath = canonicalWorkspaceRoot(workspace.rootPath);
+  if (canonicalWorkspaceRoot(workspace.rootPath) !== workspace.rootPath) {
+    throw new Error(FOLDER_CHANGED);
+  }
   for (const existing of store().list()) {
     let existingRoot: string;
     try {
@@ -60,11 +63,11 @@ export function registerWorkspace(workspace: RegistryEntry): void {
     } catch {
       continue;
     }
-    if (existingRoot === rootPath) {
+    if (existingRoot === workspace.rootPath) {
       throw new Error(`Folder is already attached: ${existing.rootPath}`);
     }
   }
-  store().register({ ...workspace, rootPath });
+  store().register(workspace);
 }
 
 export function findWorkspace(workspaceId: string): RegistryEntry | null {

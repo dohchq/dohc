@@ -53,7 +53,7 @@ export function createWorkspaceRootApproval(effectiveHome: () => string) {
   // suggestion or dialog pick — a renderer cannot scope fs ops to a path it
   // invented. All downstream ops use the normalized root.
   function usableRoot(rootPath: string): string {
-    const check = validateWorkspaceRootChoice(rootPath, effectiveHome(), process.platform);
+    const check = validateWorkspaceRootChoice(rootPath, effectiveHome());
     if (!check.ok) throw new Error(check.reason);
     if (!isApprovedRoot(check.normalized)) {
       throw new Error(

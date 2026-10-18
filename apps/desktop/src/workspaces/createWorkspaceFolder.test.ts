@@ -1,9 +1,18 @@
-import { mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
-import { join, parse } from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { existsSync } from "node:fs";
+import { chmod, mkdir, readFile, readdir, rename, stat, symlink, writeFile } from "node:fs/promises";
+import { dirname, join, parse } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { FILESYSTEM_ROOT_REFUSAL, HOME_FOLDER_REFUSAL } from "@dohc/workspace-core";
 import { canonicalWorkspaceRoot, createWorkspaceFolder } from "./createWorkspaceFolder";
 import { readSyncHistory, recordSynced } from "./syncHistory";
 import { createTestScratch } from "./testTemp";
+
+// Seams for a folder swapped mid-open and for a mounted disk.
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, mkdir: vi.fn(actual.mkdir), readFile: vi.fn(actual.readFile), stat: vi.fn(actual.stat) };
+});
+const actualFs = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
 
 let base: string;
 let homeDir: string;
@@ -13,6 +22,18 @@ beforeEach(async () => {
   base = await createTestScratch("dohc-create-");
   homeDir = await createTestScratch("dohc-create-home-");
 });
+
+afterEach(() => {
+  for (const seam of [mkdir, readFile, stat]) vi.mocked(seam).mockReset();
+});
+
+// stat answers as the filesystem does, except a bigint stat of `path` reports `answer`'s.
+function statOf(path: string, answer: (real: import("node:fs").BigIntStats) => Promise<import("node:fs").BigIntStats>) {
+  vi.mocked(stat).mockImplementation((async (target: string, options?: { bigint?: boolean }) => {
+    const real = await actualFs.stat(target, options);
+    return target === path && options?.bigint ? answer(real as import("node:fs").BigIntStats) : real;
+  }) as typeof stat);
+}
 
 describe("createWorkspaceFolder", () => {
   it.each(["link", "shares", "notices"])("refuses a manifest with reserved id %s without changing it", async (workspaceId) => {
@@ -203,6 +224,109 @@ describe("createWorkspaceFolder", () => {
       .rejects.toThrow("workspace root cannot be the home directory itself");
     expect(await readdir(homeDir)).toEqual([]);
   });
+
+  it.each(["a link to the home folder", "another folder"] as const)(
+    "writes nothing when %s replaces the folder while its manifest is read",
+    async (replacement) => {
+      const root = join(base, "swapped");
+      const moved = join(base, "moved");
+      await mkdir(root);
+      // Each replacement has a .dohc folder, so a write that followed the path would land.
+      const replaced = replacement === "another folder" ? root : homeDir;
+      vi.mocked(readFile).mockImplementationOnce((async (...args: Parameters<typeof readFile>) => {
+        await rename(root, moved);
+        await mkdir(join(replaced, ".dohc"), { recursive: true });
+        if (replacement === "a link to the home folder") await symlink(homeDir, root, linkType);
+        return actualFs.readFile(...args);
+      }) as typeof readFile);
+
+      await expect(createWorkspaceFolder({ rootPath: root, homeDir, kind: "personal" }))
+        .rejects.toThrow("The folder changed while dohc was opening it. Open it again.");
+      expect(await readdir(join(replaced, ".dohc"))).toEqual([]);
+      expect(await readdir(join(moved, ".dohc"))).toEqual([]);
+    },
+  );
+
+  it("refuses a folder where another disk is mounted, wherever it is, and writes nothing", async () => {
+    const mounted = join(homeDir, "disk");
+    await mkdir(mounted);
+    // The folder's parent reports another device, as a disk mounted in home or /mnt does.
+    statOf(dirname(canonicalWorkspaceRoot(mounted)), async (parent) => {
+      parent.dev += 1n;
+      return parent;
+    });
+
+    await expect(createWorkspaceFolder({ rootPath: mounted, homeDir, kind: "personal" }))
+      .rejects.toThrow(FILESYSTEM_ROOT_REFUSAL);
+    expect(await readdir(mounted)).toEqual([]);
+  });
+
+  it.skipIf(process.platform === "win32")("refuses a link to a mounted filesystem such as /dev", async () => {
+    const link = join(base, "device-link");
+    await symlink("/dev", link, linkType);
+    await expect(createWorkspaceFolder({ rootPath: link, homeDir, kind: "personal" }))
+      .rejects.toThrow(FILESYSTEM_ROOT_REFUSAL);
+  });
+
+  it("refuses a folder that is the home folder under another name, and writes nothing", async () => {
+    const root = join(base, "alias");
+    const otherName = join(base, "home-by-another-name");
+    await mkdir(root);
+    await mkdir(otherName);
+    // A bind mount or firmlink gives one folder two real paths.
+    statOf(otherName, async () => await actualFs.stat(root, { bigint: true }));
+
+    await expect(createWorkspaceFolder({ rootPath: root, homeDir: otherName, kind: "personal" }))
+      .rejects.toThrow(HOME_FOLDER_REFUSAL);
+    expect(await readdir(root)).toEqual([]);
+  });
+
+  it.skipIf(process.platform !== "darwin")("refuses the home folder through macOS's data volume alias", async () => {
+    const alias = `/System/Volumes/Data${canonicalWorkspaceRoot(homeDir)}`;
+    expect(existsSync(alias)).toBe(true);
+    await expect(createWorkspaceFolder({ rootPath: alias, homeDir, kind: "personal" }))
+      .rejects.toThrow(HOME_FOLDER_REFUSAL);
+    expect(await readdir(homeDir)).toEqual([]);
+  });
+
+  it.skipIf(process.platform === "win32")("keeps a backslash that is part of a folder's name", async () => {
+    const root = join(base, "trip\\2026");
+    const created = await createWorkspaceFolder({ rootPath: root, homeDir, kind: "personal" });
+    expect(created.rootPath).toBe(canonicalWorkspaceRoot(root));
+    expect(created.rootPath.endsWith("/trip\\2026")).toBe(true);
+    expect(await readdir(base)).toEqual(["trip\\2026"]);
+    expect(await readdir(root)).toEqual([".dohc"]);
+  });
+
+  it("checks an existing folder before creating anything, and creates only a missing one", async () => {
+    const toHome = join(base, "home-link");
+    await symlink(homeDir, toHome, linkType);
+    await expect(createWorkspaceFolder({ rootPath: toHome, homeDir, kind: "personal" }))
+      .rejects.toThrow(HOME_FOLDER_REFUSAL);
+    expect(vi.mocked(mkdir).mock.calls.map(([path]) => path)).not.toContain(toHome);
+
+    const fresh = join(base, "new", "Trip");
+    await createWorkspaceFolder({ rootPath: fresh, homeDir, kind: "personal" });
+    expect(await readdir(fresh)).toEqual([".dohc"]);
+  });
+
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "stops before writing when it cannot resolve the home folder",
+    async () => {
+      const locked = join(base, "locked");
+      const root = join(base, "workspace");
+      await mkdir(join(locked, "home"), { recursive: true });
+      await mkdir(root);
+      await chmod(locked, 0o000);
+      try {
+        await expect(createWorkspaceFolder({ rootPath: root, homeDir: join(locked, "home"), kind: "personal" }))
+          .rejects.toMatchObject({ code: "EACCES" });
+      } finally {
+        await chmod(locked, 0o700);
+      }
+      expect(await readdir(root)).toEqual([]);
+    },
+  );
 
   it("rejects relative workspace roots", async () => {
     await expect(

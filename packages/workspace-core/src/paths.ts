@@ -66,34 +66,36 @@ type RootChoiceValidation =
   | { ok: true; normalized: string }
   | { ok: false; reason: string };
 
+export const FILESYSTEM_ROOT_REFUSAL = "workspace root cannot be the filesystem root";
+export const HOME_FOLDER_REFUSAL = "workspace root cannot be the home directory itself";
+
 // Registry policy: a workspace root must be a real folder choice — never the
-// filesystem root, a disk, or the home directory itself, which would hand
-// workspace file operations the user's entire disk or home. Callers must use
-// the returned normalized path so registry equality checks are canonical.
+// filesystem root or the home directory itself, which would hand workspace
+// file operations the user's entire disk or home. Callers must use the
+// returned normalized path so registry equality checks are canonical. Only
+// the filesystem can say where another disk is mounted; the desktop checks
+// that where it creates the workspace.
 export function validateWorkspaceRootChoice(
   rootPath: string,
   homeDir: string,
-  platform: string,
 ): RootChoiceValidation {
   const attached = validateAttachedFolder(rootPath);
   if (!attached.ok) return attached;
   const normalized = normalizeAbsolutePath(rootPath);
   const home = normalizeAbsolutePath(homeDir);
-  // Filesystem root, a drive root (C:), a UNC server/share root (//server,
-  // //server/share), or macOS's /Volumes and the disks mounted in it — never
-  // a workspace.
+  // Filesystem root, a drive root (C:), or a UNC server/share root (//server,
+  // //server/share) — never a workspace.
   if (
     normalized === "/" ||
     /^[A-Za-z]:$/.test(normalized) ||
-    /^\/\/[^/]*(\/[^/]*)?$/.test(normalized) ||
-    (platform === "darwin" && /^\/volumes(\/[^/]+)?$/i.test(normalized))
+    /^\/\/[^/]*(\/[^/]*)?$/.test(normalized)
   ) {
-    return { ok: false, reason: "workspace root cannot be the filesystem root" };
+    return { ok: false, reason: FILESYSTEM_ROOT_REFUSAL };
   }
   // Case-insensitive compare: on macOS/Windows "/Home/Sam" aliases the home
   // directory, so a case variant must not slip past this guard.
   if (normalized.toLowerCase() === home.toLowerCase()) {
-    return { ok: false, reason: "workspace root cannot be the home directory itself" };
+    return { ok: false, reason: HOME_FOLDER_REFUSAL };
   }
   return { ok: true, normalized };
 }

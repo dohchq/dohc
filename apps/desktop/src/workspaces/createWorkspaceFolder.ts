@@ -1,16 +1,19 @@
 import {
   checkManifest,
+  FILESYSTEM_ROOT_REFUSAL,
+  HOME_FOLDER_REFUSAL,
   ReservedWorkspaceIdError,
   createWorkspaceManifest,
   defaultWorkspaceMode,
   normalizeAbsolutePath,
+  sameFsEntry,
   validateAttachedFolder,
   validateWorkspaceRootChoice,
   type WorkspaceKind,
 } from "@dohc/workspace-core";
 import { randomUUID } from "node:crypto";
-import { realpathSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { realpathSync, type BigIntStats } from "node:fs";
+import { lstat, mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 import { recordNeverSynced, recordSynced } from "./syncHistory";
@@ -23,12 +26,18 @@ export interface CreatedWorkspace {
   mode: ReturnType<typeof defaultWorkspaceMode>;
 }
 
-// A workspace folder's one spelling: its real path after every link, in the
-// app's forward-slash form. The registry holds only this spelling, so the root
-// it lists and the root a workspace operation receives are the same string.
-// Throws when the folder does not exist.
+// A workspace folder's one spelling: its real path after every link. The
+// registry holds only this spelling, so the root it lists and the root a
+// workspace operation receives are the same string. Throws when the folder
+// does not exist.
 export function canonicalWorkspaceRoot(rootPath: string): string {
-  return normalizeAbsolutePath(realpathSync.native(rootPath));
+  return rootSpelling(realpathSync.native(rootPath));
+}
+
+// The app spells Windows paths with forward slashes. Elsewhere a backslash is
+// part of a folder's name, so the real path stays as it is.
+function rootSpelling(realPath: string): string {
+  return process.platform === "win32" ? normalizeAbsolutePath(realPath) : realPath;
 }
 
 // The mount code creates this on first use; it is exported so every path
@@ -90,6 +99,49 @@ async function inspectManifest(metadataDir: string): Promise<ManifestState> {
   throw new WorkspaceManifestError("unreadable", `this folder has an invalid .dohc/manifest.json: ${reason}`);
 }
 
+export const FOLDER_CHANGED = "The folder changed while dohc was opening it. Open it again.";
+
+// An existing folder is judged before anything is made, so a refused link
+// target gains nothing. Only a missing folder is created, and a file there
+// fails as mkdir reports it.
+async function realFolderPath(path: string): Promise<string> {
+  const existing = await stat(path).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  if (!existing?.isDirectory()) await mkdir(path, { recursive: true });
+  return canonicalWorkspaceRoot(path);
+}
+
+// The folder at a real path, while that path still has no link in it.
+async function folderAt(rootPath: string): Promise<BigIntStats> {
+  const folder = await lstat(rootPath, { bigint: true });
+  if (!folder.isDirectory() || rootSpelling(await realpath(rootPath)) !== rootPath) {
+    throw new Error(FOLDER_CHANGED);
+  }
+  return folder;
+}
+
+// A folder on another device than its parent is where a disk or share is
+// mounted, wherever that is: /Volumes, /mnt, or a folder in home.
+async function isMountRoot(rootPath: string, folder: BigIntStats): Promise<boolean> {
+  const parent = dirname(rootPath);
+  return parent === rootPath || (await stat(parent, { bigint: true })).dev !== folder.dev;
+}
+
+// The home folder's real path and identity. The identity also catches an
+// alias realpath keeps, as macOS's /System/Volumes/Data/Users/<name>. Only a
+// home folder that does not exist may go unresolved; any other failure stops
+// before anything is written.
+async function homeFolder(homeDir: string): Promise<{ path: string; identity: BigIntStats | null }> {
+  try {
+    return { path: canonicalWorkspaceRoot(homeDir), identity: await stat(homeDir, { bigint: true }) };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { path: homeDir, identity: null };
+    throw error;
+  }
+}
+
 export async function createWorkspaceFolder(input: {
   rootPath: string;
   // The home folder the root must not resolve to.
@@ -107,26 +159,29 @@ export async function createWorkspaceFolder(input: {
     throw new Error(`Invalid workspace root: ${folderCheck.reason}`);
   }
 
-  await mkdir(input.rootPath, { recursive: true });
   // Judge the folder a link leads to, not the link: a link to the home folder
   // or a disk is refused like the folder itself. Everything below writes and
   // registers this same real path.
-  const rootPath = canonicalWorkspaceRoot(input.rootPath);
-  let home = input.homeDir;
-  try {
-    home = canonicalWorkspaceRoot(home);
-  } catch {
-    // A home folder that does not exist is no folder's real path.
-  }
-  const rootCheck = validateWorkspaceRootChoice(rootPath, home, process.platform);
+  const rootPath = await realFolderPath(input.rootPath);
+  const folder = await folderAt(rootPath);
+  const home = await homeFolder(input.homeDir);
+  const rootCheck = validateWorkspaceRootChoice(rootPath, home.path);
   if (!rootCheck.ok) throw new Error(rootCheck.reason);
+  if (home.identity && sameFsEntry(folder, home.identity) === "same") throw new Error(HOME_FOLDER_REFUSAL);
+  if (await isMountRoot(rootPath, folder)) throw new Error(FILESYSTEM_ROOT_REFUSAL);
+  // Node cannot write relative to an open folder, so each step below first
+  // proves the path still leads to the folder judged above. A folder or link
+  // put in its place is refused.
+  const assertSameFolder = async () => {
+    if (sameFsEntry(folder, await folderAt(rootPath)) === "replaced") throw new Error(FOLDER_CHANGED);
+  };
+  await assertSameFolder();
   const metadataDir = await resolveWorkspaceMetadataDir(rootPath);
   // The metadata resolver reads the real path again. A different answer means
-  // a folder on the path became a link after the check above.
-  if (normalizeAbsolutePath(dirname(metadataDir)) !== rootPath) {
-    throw new Error("The folder changed while dohc was opening it. Open it again.");
-  }
+  // a folder on the path became a link meanwhile.
+  if (rootSpelling(dirname(metadataDir)) !== rootPath) throw new Error(FOLDER_CHANGED);
   const state = await inspectManifest(metadataDir);
+  await assertSameFolder();
   // A folder that is already a dohc workspace keeps its identity — sync and
   // history hang off workspaceId, so overwriting the manifest severs them.
   if (state.kind === "valid") {
@@ -144,12 +199,13 @@ export async function createWorkspaceFolder(input: {
   });
 
   // wx: manifest is absent (inspectManifest returned "absent"); never clobber
-  // an unexpected file that appeared between the check and the write.
+  // an unexpected file, or follow a link, that appeared since the check.
   await writeFile(
     join(metadataDir, "manifest.json"),
     `${JSON.stringify(manifest, null, 2)}\n`,
     { flag: "wx" },
   );
+  await assertSameFolder();
   // A folder that had no manifest was never a dohc workspace. A join names
   // the synced workspace's id, and its folder records that it synced.
   if (input.workspaceId === undefined) await recordNeverSynced(rootPath);
