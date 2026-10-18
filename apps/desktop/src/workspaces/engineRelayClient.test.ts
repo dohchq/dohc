@@ -29,11 +29,11 @@ import {
 import {
   allowInsecureLoopbackRelayForTests,
   EngineRelayClient,
-  INSECURE_LOOPBACK_RELAY_TEST_ENV,
   MixedRelayTransportError,
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
+import { INSECURE_LOOPBACK_RELAY_TEST_ENV } from "./cloudConfiguration";
 import {
   mountRootFor,
   mountStoreWorkspaceIdFor,

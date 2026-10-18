@@ -7045,6 +7045,9 @@ export interface DohcDesktopBridge
   // renderer shows the debug panel on it; every dev channel is separately
   // gated in main, so this is a hint, not authority.
   devTools: boolean;
+  // Constant: the e2e switch that lets sign-in use a plain http server on
+  // this machine. The address field checks with it; main decides again.
+  insecureLoopbackServersForTests: boolean;
   reloadRenderer(): Promise<void>;
   devForgetWorkspaces(): Promise<DevForgetWorkspacesResult>;
   devRevealPath(payload: DevRevealPathPayload): Promise<void>;

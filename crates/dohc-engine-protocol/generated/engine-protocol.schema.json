@@ -401,6 +401,11 @@
           "const": "RELAY_INVALID_RESPONSE"
         },
         {
+          "description": "The relay address is not an https origin, so the engine refused it\nbefore sending anything.",
+          "type": "string",
+          "const": "RELAY_HTTPS_REQUIRED"
+        },
+        {
           "description": "Internal engine failure; details in redacted diagnostics only.",
           "type": "string",
           "const": "INTERNAL"

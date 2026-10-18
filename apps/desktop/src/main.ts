@@ -366,6 +366,7 @@ import {
 } from "./workspaces/cloudLogin";
 import { createServerAccountDeletion } from "./workspaces/serverAccountDeletion";
 import { registerServerAccountIpc } from "./ipc/serverAccountIpc";
+import { insecureLoopbackServersForTests } from "./workspaces/cloudConfiguration";
 import { createJoinedWorkspaceRunner } from "./workspaces/createJoinedWorkspace";
 import { createRelaySharesIpcHandlers } from "./ipc/relaySharesIpc";
 import { requireCredentials } from "./workspaces/credentialScopedOperation";
@@ -842,6 +843,7 @@ let cachedCloudLogin: CloudLogin | null = null;
 function cloudLogin(): CloudLogin {
   if (!cachedCloudLogin) {
     cachedCloudLogin = createCloudLogin({
+      allowInsecureLoopbackForTests: !app.isPackaged && insecureLoopbackServersForTests(process.env),
       store: createCloudCredentialStore({
         dir: stateDir(),
         cipher: {
