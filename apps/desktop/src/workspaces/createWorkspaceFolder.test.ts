@@ -277,6 +277,15 @@ describe("createWorkspaceFolder", () => {
     }
   });
 
+  // On a case-sensitive disk, /volumes is a folder of its own; only /Volumes's identity marks it.
+  it.skipIf(process.platform !== "darwin")("refuses /Volumes by identity, not by name", async () => {
+    const other = join(base, "mounts");
+    await mkdir(other);
+    statOf("/Volumes", async () => await actualFs.stat(other, { bigint: true }));
+    await expect(createWorkspaceFolder({ rootPath: other, homeDir, kind: "personal" })).rejects.toThrow(DISK_ROOT_REFUSAL);
+    expect(await readdir(other)).toEqual([]);
+  });
+
   it("refuses the filesystem root under another name, as a bind mount of / gives it", async () => {
     const root = join(base, "bound-root");
     await mkdir(root);

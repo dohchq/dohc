@@ -130,9 +130,10 @@ async function isFilesystemRoot(folder: BigIntStats): Promise<boolean> {
 
 // Where a disk or share is mounted: a folder on another device than its parent,
 // wherever it is (/Volumes/<disk>, /mnt, a folder in home), and macOS's
-// /Volumes, which holds every disk but reports the system's device.
+// /Volumes, which holds every disk but reports the system's device. /Volumes
+// is matched by identity: on a case-sensitive disk, /volumes is another folder.
 async function isDiskRoot(rootPath: string, folder: BigIntStats): Promise<boolean> {
-  if (process.platform === "darwin" && rootPath.toLowerCase() === "/volumes") return true;
+  if (process.platform === "darwin" && sameFsEntry(folder, await stat("/Volumes", { bigint: true })) === "same") return true;
   const parent = dirname(rootPath);
   return parent !== rootPath && (await stat(parent, { bigint: true })).dev !== folder.dev;
 }
