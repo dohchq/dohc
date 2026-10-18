@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { revealInFileManagerLabel } from "../src/workspaces/explorerMenu";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun } from "./helpers/workspace";
 
@@ -110,7 +111,7 @@ test("workspace manager keeps bottom-row menus reachable by keyboard and follows
     await trigger.scrollIntoViewIfNeeded();
     await trigger.focus();
     await manager.keyboard.press("Enter");
-    const reveal = manager.getByRole("menuitem", { name: "Reveal in folder", exact: true });
+    const reveal = manager.getByRole("menuitem", { name: revealInFileManagerLabel(process.platform), exact: true });
     const forget = manager.getByRole("menuitem", { name: "Forget", exact: true });
     await expect(reveal).toBeFocused();
     await expect(forget).toBeInViewport();
