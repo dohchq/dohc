@@ -158,7 +158,7 @@ export function BacklinksPanel(props: {
         }
       } else if (++failures >= 3) {
         setWalkInFlight(false);
-        reportError.current?.("Linked mentions could not be loaded.", outcome.error,
+        reportError.current?.("dohc could not load linked mentions.", outcome.error,
           () => { if (active) setFocusNonce(nonce => nonce + 1); });
         return;
       }

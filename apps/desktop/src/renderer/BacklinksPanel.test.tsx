@@ -483,7 +483,7 @@ it("stops failed walks after three attempts and offers a fresh walk through Noti
     await act(async () => vi.advanceTimersByTimeAsync(250 + 500 + 1000));
     expect(linksIn).toHaveBeenCalledTimes(4);
     expect(onError).toHaveBeenCalledOnce();
-    expect(onError).toHaveBeenCalledWith("Linked mentions could not be loaded.", error, expect.any(Function));
+    expect(onError).toHaveBeenCalledWith("dohc could not load linked mentions.", error, expect.any(Function));
     expect(screen.queryByRole("status")).toBeNull();
     expect(screen.getByTestId("backlink-source").textContent).toContain("Kept");
     await act(async () => vi.advanceTimersByTimeAsync(60000));
