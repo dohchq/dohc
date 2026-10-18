@@ -1922,9 +1922,7 @@ async fn a_lease_release_reoffers_quarantined_outside_writes() {
 // must receive them in that order: written first, `Notes.md` would be the
 // file the later retire of `notes.md` deletes. While an editor holds
 // `notes.md` open its retire waits, so the ingest of `Notes.md` waits with
-// it. Skips where the disk keeps case apart. Windows keeps the old behavior
-// until the respell check passes a Windows run.
-#[cfg(not(windows))]
+// it. Skips where the disk keeps case apart.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_respelled_file_waits_for_its_open_old_spelling_to_retire() {
     let store_scratch = ScratchDir::new().expect("store scratch");
@@ -2013,9 +2011,7 @@ async fn a_respelled_file_waits_for_its_open_old_spelling_to_retire() {
 // retires it. A respell is not an absence: the file is still there under the
 // new spelling. Renamed only by case, the synced head retires at its old
 // spelling and the new spelling is captured, so peers keep one file instead
-// of two heads that share it. Skips where the disk keeps case apart. Windows
-// keeps the old behavior until the respell check passes a Windows run.
-#[cfg(not(windows))]
+// of two heads that share it. Skips where the disk keeps case apart.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_respelled_synced_file_leaves_one_head() {
     let store_scratch = ScratchDir::new().expect("store scratch");

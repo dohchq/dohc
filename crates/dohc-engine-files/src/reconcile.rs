@@ -300,25 +300,18 @@ impl AbsenceProbe for StdAbsenceProbe {
 
 /// Whether `relative` reaches an entry under `root` only through another
 /// stored spelling of its file name. APFS ignores case and Unicode
-/// normalization, so a lookup of `notes.md` finds a file renamed to
-/// `Notes.md`. The stored spelling shows that `relative` itself is gone. A
-/// symlink is never another spelling, and a folder renamed by case or
-/// normalization is not proven: its files keep their old handling.
-///
-/// Always false on Windows. NTFS ignores case too, so a case-only rename
-/// there has the same fault, but this check must pass a Windows run before
-/// it applies there.
+/// normalization; NTFS ignores case. A lookup of `notes.md` can therefore
+/// find a file renamed to `Notes.md`. The stored spelling shows that
+/// `relative` itself is gone. A symlink is never another spelling, and a
+/// renamed folder is not proven: its files keep their old handling.
 pub fn stored_under_other_spelling(root: &Path, relative: &str) -> bool {
     stored_spelling(root, relative).is_some()
 }
 
 /// The spelling under which `relative`'s entry is stored, when that differs
 /// from `relative` only in case or Unicode normalization. See
-/// [`stored_under_other_spelling`]; `None` on Windows.
+/// [`stored_under_other_spelling`]. NTFS keeps normalization forms distinct.
 fn stored_spelling(root: &Path, relative: &str) -> Option<String> {
-    if cfg!(windows) {
-        return None;
-    }
     let root = root.canonicalize().ok()?;
     let stored = root.join(relative).canonicalize().ok()?;
     let stored = stored.strip_prefix(&root).ok()?;
@@ -326,6 +319,18 @@ fn stored_spelling(root: &Path, relative: &str) -> Option<String> {
     if stored.components().count() != tracked.len() {
         return None;
     }
+    // Query each component's directory entry on Windows. A handle's final
+    // path alone need not describe the spelling of the link we looked up.
+    #[cfg(windows)]
+    let stored = {
+        let mut lookup = root.clone();
+        let mut stored = PathBuf::new();
+        for part in &tracked {
+            lookup.push(part);
+            stored.push(dohc_windows_files::stored_leaf_name(&lookup).ok()?);
+        }
+        stored
+    };
     let mut lookup = root.clone();
     let mut spelling = Vec::with_capacity(tracked.len());
     let leaf = tracked.len() - 1;

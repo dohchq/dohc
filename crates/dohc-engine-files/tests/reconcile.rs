@@ -162,9 +162,7 @@ fn rename_looks_like_remove_plus_add() {
 /// APFS keeps finding a file through its old spelling after a rename that
 /// changes only case or Unicode normalization. The old spelling must still
 /// retire, or it stays tracked beside the new one and every pass is degraded.
-/// A case-sensitive volume passes trivially. Windows keeps the old behavior
-/// until the check passes a Windows run.
-#[cfg(not(windows))]
+/// A case-sensitive volume passes through ordinary absence handling.
 #[test]
 fn respelled_rename_retires_the_old_spelling() {
     for (before, after) in [
@@ -201,7 +199,6 @@ fn respelled_rename_retires_the_old_spelling() {
 /// A folder renamed only by case is not proven a respell: its files keep
 /// their old handling, so nothing retires and peers get no delete. Skips
 /// where the volume keeps case apart.
-#[cfg(not(windows))]
 #[test]
 fn a_folder_respell_retires_nothing() {
     let ws = Scratch::new();
@@ -222,7 +219,6 @@ fn a_folder_respell_retires_nothing() {
     assert!(ctrl.tracks_path("drafts/a.md"));
 }
 
-#[cfg(not(windows))]
 #[test]
 fn the_tracked_spelling_is_not_another_spelling() {
     let ws = Scratch::new();
@@ -252,7 +248,6 @@ fn the_tracked_spelling_is_not_another_spelling() {
 /// links to one file. Each is its own spelling, so neither reads as gone,
 /// even after the other link was opened last. Skips where the disk ignores
 /// case.
-#[cfg(not(windows))]
 #[test]
 fn a_case_variant_hard_link_is_not_another_spelling() {
     let ws = Scratch::new();
@@ -285,6 +280,72 @@ fn a_symlink_is_never_another_spelling() {
         ws.path(),
         "notes/a.md"
     ));
+}
+
+#[cfg(windows)]
+#[test]
+fn the_windows_name_lookup_rejects_wildcards_and_nul() {
+    let ws = Scratch::new();
+    ws.write("Notes.md", b"a");
+    for name in ["*.md", "Note?.md", "Notes.md\0"] {
+        assert_eq!(
+            dohc_windows_files::stored_leaf_name(&ws.path().join(name))
+                .expect_err("an exact path is required")
+                .kind(),
+            ErrorKind::InvalidInput
+        );
+    }
+    assert_eq!(
+        dohc_windows_files::stored_leaf_name(&ws.path().join("notes.md"))
+            .expect("read stored name"),
+        "Notes.md"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn a_reparse_parent_inside_the_workspace_has_no_spelling_proof() {
+    let ws = Scratch::new();
+    ws.write("real/Notes.md", b"a");
+    if !ws.try_symlink_dir("alias", &ws.path().join("real")) {
+        eprintln!("SKIP: platform refused a directory symlink");
+        return;
+    }
+    assert!(!dohc_engine_files::stored_under_other_spelling(
+        ws.path(),
+        "alias/notes.md"
+    ));
+}
+
+/// Even when the leaf also changes case, a changed parent is not proven.
+#[cfg(windows)]
+#[test]
+fn a_folder_and_leaf_respell_is_not_proven() {
+    let ws = Scratch::new();
+    ws.write("drafts/a.md", b"a");
+    ws.rename("drafts", "Drafts");
+    ws.rename("Drafts/a.md", "Drafts/A.md");
+    assert!(!dohc_engine_files::stored_under_other_spelling(
+        ws.path(),
+        "drafts/a.md"
+    ));
+}
+
+/// NTFS treats normalization forms as distinct names, so the old path is absent.
+#[cfg(windows)]
+#[test]
+fn a_normalization_rename_uses_ordinary_absence() {
+    let ws = Scratch::new();
+    let before = "caf\u{e9}.md";
+    let after = "cafe\u{301}.md";
+    ws.write(before, b"a");
+    ws.rename(before, after);
+    assert!(!ws.path().join(before).exists());
+    assert!(!dohc_engine_files::stored_under_other_spelling(
+        ws.path(),
+        before
+    ));
+    assert!(dohc_engine_files::StdAbsenceProbe.confirms_absent(ws.path(), before));
 }
 
 /// A head captured before the floor named `.DS_Store` comes back in the
