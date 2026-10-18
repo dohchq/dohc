@@ -972,18 +972,6 @@ impl EngineStore {
         self.require_materialization_owner()?;
         materialize::record_retained_read(&self.conn, old, new, bytes, now_ms)
     }
-    /// Restart the quiet period of a source whose unlink was refused, so an
-    /// unchanged source is not read again before the period ends.
-    pub fn restart_retained_quiet(&self, id: i64, now_ms: i64) -> Result<(), StorageError> {
-        self.require_materialization_owner()?;
-        self.conn
-            .execute(
-                "UPDATE materialization_retained SET changed_at_ms=?2 WHERE displacement_id=?1",
-                [id, now_ms],
-            )
-            .map_err(StorageError::persist)?;
-        Ok(())
-    }
     pub fn release_retained(&self, id: i64) -> Result<(), StorageError> {
         self.require_materialization_owner()?;
         self.conn

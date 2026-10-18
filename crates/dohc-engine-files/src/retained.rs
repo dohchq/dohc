@@ -93,6 +93,8 @@ pub enum Inspection {
 }
 /// Owns the descriptor until the last identity check and unlink. On macOS it
 /// closes the descriptor just before the unlink, which an open file refuses.
+/// `remove` returns false when the source stays: its stamp changed, or, on
+/// macOS, a process has it open or its file system cannot tell.
 pub struct Release {
     path: PathBuf,
     file: std::fs::File,
@@ -115,12 +117,11 @@ impl Release {
         {
             return Ok(false);
         }
-        // macOS cannot list another process's writers. Its file systems can
-        // refuse to unlink a file any process has open, so close ours first.
+        // macOS cannot list another process's writers, but the file systems
+        // it knows refuse to unlink a file any process has open.
         #[cfg(target_vendor = "apple")]
         {
-            drop(self.file);
-            dohc_macos_files::remove_unless_open(&self.path)
+            dohc_macos_files::remove_unless_open(self.file, &self.path)
                 .map_err(|e| MaterializeError::io(&self.path, &e))
         }
         #[cfg(not(target_vendor = "apple"))]
@@ -131,13 +132,17 @@ impl Release {
     }
 }
 
+/// `refused` says the last release of `row`'s source was refused after its
+/// bytes were read at the row's stamp. While that stamp holds, the release is
+/// retried without reading them again.
 pub fn inspect(
     root: &Path,
     row: &RetainedDisplacement,
     now_ms: i64,
     held: bool,
+    refused: bool,
 ) -> Result<Inspection, MaterializeError> {
-    inspect_with_reader(root, row, now_ms, held, read_source)
+    inspect_with_reader(root, row, now_ms, held, refused, read_source)
 }
 
 fn read_source(file: &std::fs::File, path: &Path) -> Result<Vec<u8>, MaterializeError> {
@@ -153,6 +158,7 @@ fn inspect_with_reader(
     row: &RetainedDisplacement,
     now_ms: i64,
     held: bool,
+    refused: bool,
     read: impl FnOnce(&std::fs::File, &Path) -> Result<Vec<u8>, MaterializeError>,
 ) -> Result<Inspection, MaterializeError> {
     let rel = Path::new(&row.source_path);
@@ -208,6 +214,13 @@ fn inspect_with_reader(
     #[cfg(target_os = "linux")]
     if lease_checked && writer_present(&file, &path)? {
         return Ok(Inspection::Keep);
+    }
+    if refused && !identity_changed && !changed {
+        return Ok(Inspection::Release(Release {
+            path,
+            file,
+            stamp: initial,
+        }));
     }
     let bytes = read(&file, &path)?;
     if bytes.len() > MAX_MATERIALIZE_BYTES {
@@ -285,14 +298,14 @@ fn materialize_held_source_reads_only_after_stamp_changes() {
     };
     for _ in 0..10 {
         assert!(matches!(
-            inspect_with_reader(root, &row, 60_000, true, read).unwrap(),
+            inspect_with_reader(root, &row, 60_000, true, false, read).unwrap(),
             Inspection::Keep
         ));
     }
     println!("10 quiet held inspections: {} reads", reads.get());
     assert_eq!(reads.get(), 0, "quiet held sources must not be read");
     std::fs::write(&source, b"late outside write").unwrap();
-    match inspect_with_reader(root, &row, 60_000, true, read).unwrap() {
+    match inspect_with_reader(root, &row, 60_000, true, false, read).unwrap() {
         Inspection::Changed { current, bytes } => {
             assert_eq!(bytes, b"late outside write");
             row = current;
@@ -303,13 +316,13 @@ fn materialize_held_source_reads_only_after_stamp_changes() {
     assert_eq!(reads.get(), 1);
     for _ in 0..10 {
         assert!(matches!(
-            inspect_with_reader(root, &row, 90_000, true, read).unwrap(),
+            inspect_with_reader(root, &row, 90_000, true, false, read).unwrap(),
             Inspection::Keep
         ));
     }
     assert_eq!(reads.get(), 1, "imported held sources must not be re-read");
     row.device = "previous mount".into();
-    match inspect_with_reader(root, &row, 90_000, true, read).unwrap() {
+    match inspect_with_reader(root, &row, 90_000, true, false, read).unwrap() {
         Inspection::Changed { current, bytes } => {
             assert_eq!(bytes, b"late outside write");
             row = current;
@@ -317,16 +330,71 @@ fn materialize_held_source_reads_only_after_stamp_changes() {
         _ => panic!("held remounts must refresh the stamp once"),
     }
     assert!(matches!(
-        inspect_with_reader(root, &row, 90_000, true, read).unwrap(),
+        inspect_with_reader(root, &row, 90_000, true, false, read).unwrap(),
         Inspection::Keep
     ));
     assert_eq!(reads.get(), 2);
     assert!(matches!(
-        inspect_with_reader(root, &row, 90_000, false, read).unwrap(),
+        inspect_with_reader(root, &row, 90_000, false, false, read).unwrap(),
         Inspection::Release(_)
     ));
     assert_eq!(reads.get(), 3);
     println!(
         "20 quiet held inspections: 0 reads; changed source, remount and cleared hold: 1 read each"
     );
+}
+
+#[cfg(test)]
+#[test]
+fn a_refused_release_retries_without_reading_until_the_stamp_changes() {
+    use std::cell::Cell;
+    let scratch = dohc_test_scratch::ScratchDir::new_named("refused-release-reads").unwrap();
+    let root = scratch.path();
+    let source = root.join("source");
+    std::fs::write(&source, b"before").unwrap();
+    let (device, inode, size, mtime, ctime) = stamp(&std::fs::metadata(&source).unwrap());
+    let row = RetainedDisplacement {
+        displacement_id: 1,
+        job_id: "refused".into(),
+        workspace_id: "ws".into(),
+        target_path: "notes.md".into(),
+        source_path: "source".into(),
+        device,
+        inode,
+        digest: hex_sha256(b"before"),
+        size,
+        mtime,
+        ctime,
+        changed_at_ms: 0,
+    };
+    let reads = Cell::new(0);
+    let read = |file: &std::fs::File, path: &Path| {
+        reads.set(reads.get() + 1);
+        read_source(file, path)
+    };
+    let reader = std::fs::File::open(&source).unwrap();
+    let Inspection::Release(release) =
+        inspect_with_reader(root, &row, 60_000, false, false, read).unwrap()
+    else {
+        panic!("a quiet unchanged source is released");
+    };
+    assert_eq!(reads.get(), 1);
+    #[cfg(target_vendor = "apple")]
+    assert!(!release.remove().unwrap(), "an open source stays on macOS");
+    #[cfg(not(target_vendor = "apple"))]
+    drop(release);
+    for now in 61_000..61_010 {
+        assert!(matches!(
+            inspect_with_reader(root, &row, now, false, true, read).unwrap(),
+            Inspection::Release(_)
+        ));
+    }
+    assert_eq!(reads.get(), 1, "a refused source is not read again");
+    drop(reader);
+    std::fs::write(&source, b"changed").unwrap();
+    assert!(matches!(
+        inspect_with_reader(root, &row, 62_000, false, true, read).unwrap(),
+        Inspection::Changed { .. }
+    ));
+    assert_eq!(reads.get(), 2, "a changed stamp is read at once");
 }

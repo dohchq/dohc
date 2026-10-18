@@ -63,6 +63,9 @@ impl Worker {
                 let mut cursor = 0;
                 let mut delay = Duration::ZERO;
                 let mut generation = 0;
+                // Sources whose unlink was refused after a read at their row's
+                // stamp. Their release is retried without another read.
+                let mut refused = std::collections::HashSet::new();
                 loop {
                     let (lock, cv) = &*control.0;
                     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -76,6 +79,9 @@ impl Worker {
                         .unwrap_or_else(|e| e.into_inner());
                     if state.stopped {
                         break;
+                    }
+                    if generation != state.generation {
+                        refused.clear();
                     }
                     generation = state.generation;
                     let path = state.root.clone().expect("bound root");
@@ -124,7 +130,13 @@ impl Worker {
                                 .unwrap_or_default()
                                 .as_millis()
                                 .min(i64::MAX as u128) as i64;
-                            let result = match inspect(&path, &row, now, held) {
+                            let id = row.displacement_id;
+                            let inspection = inspect(&path, &row, now, held, refused.contains(&id));
+                            if !matches!(inspection, Ok(Inspection::Release(_) | Inspection::Keep))
+                            {
+                                refused.remove(&id);
+                            }
+                            let result = match inspection {
                                 Ok(Inspection::Changed { current, bytes }) => {
                                     #[cfg(test)]
                                     control.before_import();
@@ -136,9 +148,17 @@ impl Worker {
                                     Ok(s.keep_oversized_retained(&row, now)?)
                                 }),
                                 Ok(Inspection::Release(source)) => {
-                                    release(&handle, &path, row, Some(source), now)
+                                    release(&handle, &path, row, Some(source)).map(|stays| {
+                                        if stays {
+                                            refused.insert(id);
+                                        } else {
+                                            refused.remove(&id);
+                                        }
+                                    })
                                 }
-                                Ok(Inspection::Missing) => release(&handle, &path, row, None, now),
+                                Ok(Inspection::Missing) => {
+                                    release(&handle, &path, row, None).map(|_| ())
+                                }
                                 Ok(Inspection::Keep) => Ok(()),
                                 Err(e) => Err(RuntimeError::Materialize(e)),
                             };
@@ -177,13 +197,14 @@ impl Worker {
         }
     }
 }
+/// Release `row` and unlink its source. Return whether the source stays
+/// because its unlink was refused.
 fn release(
     handle: &ActorHandle,
     root: &std::path::Path,
     row: dohc_engine_storage::RetainedDisplacement,
     source: Option<dohc_engine_files::retained::Release>,
-    now: i64,
-) -> Result<(), RuntimeError> {
+) -> Result<bool, RuntimeError> {
     let root = root.to_path_buf();
     let directory = root
         .join(&row.source_path)
@@ -193,19 +214,18 @@ fn release(
         // Serialize hold creation with the last check and unlink. Changed reads
         // still import above; only source release waits for the hold to clear.
         if dohc_engine_files::placement_is_held_in(s, &row.workspace_id, &row.target_path)? {
-            return Ok(());
+            return Ok(false);
         }
         if let Some(source) = source
             && !source.remove().map_err(RuntimeError::Materialize)?
         {
-            s.restart_retained_quiet(row.displacement_id, now)?;
-            return Ok(());
+            return Ok(true);
         }
         s.release_retained(row.displacement_id)?;
         if let Some(directory) = directory {
             cleanup_staging_directory(s, &root, &directory)?;
         }
-        Ok(())
+        Ok(false)
     })
 }
 impl Drop for Worker {

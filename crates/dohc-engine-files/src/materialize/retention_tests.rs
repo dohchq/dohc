@@ -57,7 +57,7 @@ fn sweep(store: &EngineStore, root: &Path, now: i64) {
                 &row.target_path,
             )
             .unwrap();
-            match inspect(root, &row, now, held).unwrap() {
+            match inspect(root, &row, now, held, false).unwrap() {
                 Inspection::Release(token) => {
                     if crate::materialize::placement_is_held_in(
                         store,
@@ -69,9 +69,6 @@ fn sweep(store: &EngineStore, root: &Path, now: i64) {
                         continue;
                     }
                     if !token.remove().unwrap() {
-                        store
-                            .restart_retained_quiet(row.displacement_id, now)
-                            .unwrap();
                         continue;
                     }
                     store.release_retained(row.displacement_id).unwrap();
@@ -257,13 +254,7 @@ fn macos_open_descriptor_keeps_the_original_until_it_closes() {
     sweep(&store, root, 200_000);
     assert!(source.exists(), "a reader also keeps the original");
     drop(reader);
-    let row = store.retained_displacements_after(0).unwrap().remove(0);
-    assert_eq!(row.changed_at_ms, 200_000, "a refused unlink restarts Q");
-    assert!(matches!(
-        crate::retained::inspect(root, &row, 229_999, false).unwrap(),
-        crate::retained::Inspection::Keep
-    ));
-    sweep(&store, root, 230_000);
+    sweep(&store, root, 200_001);
     assert!(!source.exists());
     assert!(store.retained_displacements_after(0).unwrap().is_empty());
     assert_eq!(std::fs::read(&target).unwrap(), b"after");
@@ -482,12 +473,12 @@ fn remounted_identity_compares_digest_and_never_keeps_forever() {
         .unwrap();
     let row = store.retained_displacements_after(0).unwrap().remove(0);
     assert!(matches!(
-        inspect(root, &row, 30_000, false).unwrap(),
+        inspect(root, &row, 30_000, false, false).unwrap(),
         Inspection::Release(_)
     ));
     let source = root.join(&row.source_path);
     std::fs::write(&source, b"outside after mount").unwrap();
-    match inspect(root, &row, 30_001, false).unwrap() {
+    match inspect(root, &row, 30_001, false, false).unwrap() {
         Inspection::Changed { current, bytes } => {
             assert_eq!(bytes, b"outside after mount");
             assert_ne!(current.device, row.device);
@@ -531,7 +522,7 @@ fn oversized_retained_source_becomes_a_recoverable_kept_copy() {
         .set_len(MAX_MATERIALIZE_BYTES as u64 + 1)
         .unwrap();
     assert!(matches!(
-        inspect(root, &row, 1, false).unwrap(),
+        inspect(root, &row, 1, false, false).unwrap(),
         Inspection::Oversized
     ));
     store.keep_oversized_retained(&row, 1).unwrap();
@@ -1151,7 +1142,7 @@ fn checked_delete_release_failure_preserves_receipt_error_and_rolls_back() {
         } else {
             assert!(!root.join(&row.source_path).exists());
             assert!(matches!(
-                crate::retained::inspect(root, &row, 1000, false).unwrap(),
+                crate::retained::inspect(root, &row, 1000, false, false).unwrap(),
                 crate::retained::Inspection::Missing
             ));
         }
