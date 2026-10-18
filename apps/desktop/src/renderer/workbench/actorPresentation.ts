@@ -67,6 +67,15 @@ function hueFor(token: ActorPresentation, kind: "human" | "agent"): IdentityHue 
   if (kind === "agent") return agentChoice(token) ?? (token.self ? chosenHue("agent") : null);
   return (token.self ? chosenHue("human") : null) ?? token.hue;
 }
+const AGENT_TEXT: Record<IdentityHue, string> = {
+  rust: "text-hue-rust", amber: "text-hue-amber", teal: "text-hue-teal", blue: "text-hue-blue",
+  indigo: "text-hue-indigo", plum: "text-hue-plum", rose: "text-hue-rose",
+};
+/** An agent's name and mark in its avatar's hue, olive by default. */
+export function agentTextClass(token: ActorPresentation): string {
+  const hue = hueFor(token, "agent");
+  return hue ? AGENT_TEXT[hue] : "text-agent";
+}
 export function presentationClasses(token: ActorPresentation, kind: "human" | "agent" = "human"): string {
   const hue = hueFor(token, kind);
   return kind === "agent" ? hue ? AGENT_CLASSES[hue] : "border-agent bg-bg text-agent"

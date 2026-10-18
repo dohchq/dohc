@@ -3,7 +3,8 @@ import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { neutralPresentation, ownPresentation, setOwnPresentation, bindAgentColorUpdates, clearAgentColorOverrides } from "./actorPresentation";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
-import { ChatAvatar } from "./ChatAvatar";
+import { AgentName, ChatAvatar } from "./ChatAvatar";
+import { AgentBadge } from "./AgentBadge";
 import { setChosenColors } from "./chosenColors";
 
 afterEach(() => {
@@ -75,6 +76,36 @@ describe("ChatAvatar presentation", () => {
     expect(screen.getByTitle("You").className).toContain("text-hue-teal");
     expect(screen.getByTitle("Agent").className).toContain("text-agent");
   });
+});
+
+it("paints an agent's name and sparkle in its avatar's hue, olive by default, and repaints them together", () => {
+  let changed: Parameters<import("../../ipc/bridgeContract").DohcDesktopBridge["onAgentColorChanged"]>[0] = () => undefined;
+  const stop = bindAgentColorUpdates({ onAgentColorChanged: listener => { changed = listener; return () => undefined; } }, () => "w");
+  const orbit = { group: "orbit", hue: "plum" as const, self: false };
+  const nova = { group: "nova", hue: null, self: false };
+  render(<>
+    <ChatAvatar name="Orbit" kind="agent" presentation={orbit} />
+    <AgentName kind="agent" presentation={orbit}>Orbit name</AgentName>
+    <AgentBadge testIdPrefix="orbit" author={{ authorDisplayName: "Orbit" }} presentation={orbit} />
+    <AgentName kind="agent" presentation={nova}>Nova name</AgentName>
+    <AgentBadge testIdPrefix="nova" author={{ authorDisplayName: "Nova" }} presentation={nova} />
+    <p><AgentName kind="human" presentation={{ ...neutralPresentation, hue: "teal" }}>Sam name</AgentName></p>
+  </>);
+  const badge = (prefix: string) => screen.getByTestId(`${prefix}-agent-badge`).parentElement!.className;
+  expect(screen.getByText("Orbit name").className).toBe("text-hue-plum");
+  expect(badge("orbit")).toContain("text-hue-plum");
+  expect(screen.getByText("Nova name").className).toBe("text-agent");
+  expect(badge("nova")).toContain("text-agent");
+  // A person's name keeps its own row's ink; no hue span wraps it.
+  expect(screen.getByText("Sam name").tagName).not.toBe("SPAN");
+  act(() => changed({ workspaceId: "w", group: "orbit", hue: "teal" }));
+  expect(screen.getByTitle("Orbit").className).toContain("text-hue-teal");
+  expect(screen.getByText("Orbit name").className).toBe("text-hue-teal");
+  expect(badge("orbit")).toContain("text-hue-teal");
+  act(() => changed({ workspaceId: "w", group: "orbit", hue: null }));
+  expect(screen.getByText("Orbit name").className).toBe("text-agent");
+  expect(badge("orbit")).toContain("text-agent");
+  stop();
 });
 
 it("repaints an own avatar when main supplies its default hue", () => {

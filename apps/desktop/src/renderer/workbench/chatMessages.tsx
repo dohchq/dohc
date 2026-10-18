@@ -3,7 +3,7 @@ import { AgentBadge } from "./AgentBadge";
 import { AutomationBadge } from "./AutomationBadge";
 import { LegendList, type LegendListRef, type OnViewableItemsChanged } from "@legendapp/list/react";
 import { formatChatDay, formatChatTime, formatClock, formatClockDigits, sameChatDay } from "../time";
-import { ChatAvatar } from "./ChatAvatar";
+import { AgentName, ChatAvatar } from "./ChatAvatar";
 import { AgentColorAvatar, AgentColorName, AgentColorScope } from "./AgentColorPicker";
 import { ComposerSendButton } from "./ComposerSendButton";
 import { Ref } from "../ui/Ref";
@@ -769,13 +769,13 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
                 <span
                   data-testid={`${props.testIdPrefix}-message-author`}
                   data-author-kind={message.authorKind}
-                  className={`shrink-0 text-[13px] font-semibold ${
-                    isAgent ? "text-agent" : "text-ink"
-                  }`}
+                  className="shrink-0 text-[13px] font-semibold text-ink"
                 >
-                  <AgentColorName>{chatAuthorLabel(message)}</AgentColorName>
+                  <AgentName kind={message.authorKind} presentation={message.presentation}>
+                    <AgentColorName>{chatAuthorLabel(message)}</AgentColorName>
+                  </AgentName>
                 </span>
-                {isAgent ? <AgentBadge testIdPrefix={props.testIdPrefix} author={message} viewerAuthorId={props.reactionControls?.viewerAuthorId} /> : null}
+                {isAgent ? <AgentBadge testIdPrefix={props.testIdPrefix} author={message} viewerAuthorId={props.reactionControls?.viewerAuthorId} presentation={message.presentation} /> : null}
                 {message.authorKind === "automation" ? (
                   <AutomationBadge
                     testIdPrefix={props.testIdPrefix}

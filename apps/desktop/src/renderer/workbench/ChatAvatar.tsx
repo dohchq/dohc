@@ -1,7 +1,18 @@
-import { useSyncExternalStore } from "react";
+import { useSyncExternalStore, type ReactNode } from "react";
 import { Sparkles, Zap } from "lucide-react";
 import type { ActorPresentation } from "../../ipc/bridgeContract";
-import { presentationClasses, subscribePresentation } from "./actorPresentation";
+import { agentTextClass, presentationClasses, subscribePresentation } from "./actorPresentation";
+
+/** An agent's name or mark in its avatar's hue, repainting with it. Olive without a token. */
+export function useAgentInk(token: ActorPresentation | undefined): string {
+  return useSyncExternalStore(subscribePresentation, () => token ? agentTextClass(token) : "text-agent");
+}
+
+/** An author's name beside their avatar: an agent's in its avatar's hue, anyone else's as it is. */
+export function AgentName(props: { kind: "human" | "agent" | "automation"; presentation: ActorPresentation; children: ReactNode }) {
+  const ink = useAgentInk(props.kind === "agent" ? props.presentation : undefined);
+  return props.kind === "agent" ? <span className={ink}>{props.children}</span> : <>{props.children}</>;
+}
 
 // One avatar for every chat surface: a person's initials on a tint of their
 // admitted hue, the agent's sparkle in the agent voice, or an automation's bare

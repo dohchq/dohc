@@ -167,6 +167,11 @@ it("puts the choice on an agent's message in a conversation, and saves it with t
     </AgentColorContext.Provider>,
   );
   expect(screen.queryByRole("button", { name: "Color for Sam" })).toBeNull();
+  // The name and the sparkle take the avatar's plum; the person's name stays ink.
+  const authors = await screen.findAllByTestId("chat-message-author");
+  expect(authors.map((author) => author.querySelector(".text-hue-plum")?.textContent ?? null)).toEqual([null, "Orbit"]);
+  expect(authors[0]!.className).toContain("text-ink");
+  expect(screen.getByTestId("chat-agent-badge").parentElement!.className).toContain("text-hue-plum");
   await user.click(await screen.findByRole("button", { name: "Color for Orbit" }));
   await user.click(swatch("Blue"));
   expect(api.setAgentColor).toHaveBeenCalledWith({ workspaceId: "workspace-a", group: "7", hue: "blue" });

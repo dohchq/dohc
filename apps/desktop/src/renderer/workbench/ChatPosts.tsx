@@ -17,7 +17,7 @@ import { Ref } from "../ui/Ref";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { formatChatTime, formatClockDigits, formatShortTime } from "../time";
 import { CopyButton } from "../ui/CopyButton";
-import { ChatAvatar } from "./ChatAvatar";
+import { AgentName, ChatAvatar } from "./ChatAvatar";
 import { AgentColorAvatar, AgentColorName, AgentColorScope } from "./AgentColorPicker";
 import {
   MentionText,
@@ -558,13 +558,13 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             <span
               data-testid="chats-message-author"
               data-author-kind={comment.authorKind}
-              className={`text-[13px] font-semibold ${
-                isAgent ? "text-agent" : "text-ink"
-              }`}
+              className="text-[13px] font-semibold text-ink"
             >
-              <AgentColorName>{chatAuthorLabel(comment)}</AgentColorName>
+              <AgentName kind={comment.authorKind} presentation={comment.presentation}>
+                <AgentColorName>{chatAuthorLabel(comment)}</AgentColorName>
+              </AgentName>
             </span>
-            {isAgent && !continues ? <AgentBadge testIdPrefix="chats-comment" author={comment} viewerAuthorId={reactionControls.viewerAuthorId} /> : null}
+            {isAgent && !continues ? <AgentBadge testIdPrefix="chats-comment" author={comment} viewerAuthorId={reactionControls.viewerAuthorId} presentation={comment.presentation} /> : null}
             {comment.authorKind === "automation" && !continues ? (
               <AutomationBadge
                 testIdPrefix="chats-comment"
@@ -728,13 +728,13 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             <span
               data-testid="chats-message-author"
               data-author-kind={openingMessage.authorKind}
-              className={`truncate text-[13px] font-semibold ${
-                openingIsAgent ? "text-agent" : "text-ink"
-              }`}
+              className="truncate text-[13px] font-semibold text-ink"
             >
-              <AgentColorName>{chatAuthorLabel(openingMessage)}</AgentColorName>
+              <AgentName kind={openingMessage.authorKind} presentation={openingMessage.presentation}>
+                <AgentColorName>{chatAuthorLabel(openingMessage)}</AgentColorName>
+              </AgentName>
             </span>
-            {openingIsAgent ? <AgentBadge testIdPrefix="chats-message" author={openingMessage} viewerAuthorId={reactionControls.viewerAuthorId} /> : null}
+            {openingIsAgent ? <AgentBadge testIdPrefix="chats-message" author={openingMessage} viewerAuthorId={reactionControls.viewerAuthorId} presentation={openingMessage.presentation} /> : null}
             {openingMessage.authorKind === "automation" ? (
               <AutomationBadge
                 testIdPrefix="chats-message"
