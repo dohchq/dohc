@@ -465,7 +465,8 @@ fn map_domain(error: DomainError) -> WireError {
                 | CryptoError::InvalidBase64 => InvalidParams,
                 CryptoError::DecryptFailed
                 | CryptoError::InvalidKeyLength
-                | CryptoError::KeyFileMalformed => Internal,
+                | CryptoError::KeyFileMalformed
+                | CryptoError::VolumeSharesNewFiles => Internal,
             };
             (code, error.code())
         }
@@ -619,6 +620,17 @@ mod tests {
         let root = super::map_root_binding(crate::root_binding::RootBindingError::PrivacyDenied);
         assert_eq!(root.message, "privacy-denied");
         assert_eq!(write.message, "privacy-denied");
+    }
+
+    /// A write on a volume that adds sharing permissions to new files names
+    /// that limit on the wire, not a generic io failure.
+    #[test]
+    fn a_volume_that_shares_new_files_reaches_rpc_by_its_code() {
+        let write = super::map_runtime(dohc_engine_runtime::RuntimeError::Materialize(
+            dohc_engine_files::MaterializeError::VolumeSharesNewFiles,
+        ));
+        assert_eq!(write.code, dohc_engine_protocol::ErrorCode::Internal);
+        assert_eq!(write.message, "volume-shares-new-files");
     }
 
     #[test]
@@ -904,6 +916,11 @@ mod tests {
                 CryptoError::KeyFileMalformed,
                 ErrorCode::Internal,
                 "key-corrupt",
+            ),
+            (
+                CryptoError::VolumeSharesNewFiles,
+                ErrorCode::Internal,
+                "volume-shares-new-files",
             ),
             (
                 CryptoError::InvalidIvLength,

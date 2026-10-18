@@ -837,6 +837,13 @@ pub enum MaterializeError {
     /// The content or an on-disk file exceeded the materialization byte cap.
     #[error("materialization content {actual} bytes exceeds the cap")]
     TooLarge { actual: usize },
+    /// The volume gave a new temp ACL entries, so neither a secret nor a
+    /// file's own access could be kept. The write is refused like an io
+    /// failure.
+    #[error(
+        "this volume adds sharing permissions to new files, so dohc can't keep this file private"
+    )]
+    VolumeSharesNewFiles,
 }
 
 impl MaterializeError {
@@ -865,6 +872,7 @@ impl MaterializeError {
             MaterializeError::FileLocked => "file-locked",
             MaterializeError::RecoveryUnavailable => "recovery-unavailable",
             MaterializeError::TooLarge { .. } => "materialize-too-large",
+            MaterializeError::VolumeSharesNewFiles => "volume-shares-new-files",
         }
     }
 }
@@ -5161,6 +5169,16 @@ fn temp_mode(
     }
 }
 
+#[cfg(all(test, target_vendor = "apple"))]
+#[test]
+fn a_volume_that_shares_new_files_reaches_the_caller_by_its_code() {
+    let refused = std::io::Error::other(dohc_macos_files::VolumeSharesNewFiles);
+    let err = temp_create_error(Path::new("ws/.env"), &refused);
+    assert!(matches!(err, MaterializeError::VolumeSharesNewFiles));
+    assert_eq!(err.code(), "volume-shares-new-files");
+    assert!(!err.to_string().contains(".env"), "{err}");
+}
+
 #[cfg(all(test, unix))]
 mod temp_mode_tests {
     use super::temp_mode;
@@ -5219,20 +5237,18 @@ fn write_temp_at_unix(
         TempAccess::New => 0o666,
         TempAccess::Owner | TempAccess::Like(_) => 0o600,
     });
-    let create = || {
+    let create = || -> std::io::Result<std::fs::File> {
         #[cfg(target_vendor = "apple")]
         if !matches!(access, TempAccess::New) {
             return dohc_macos_files::create_uninherited(parent_fd, name, mode.bits())
-                .map(std::fs::File::from)
-                .map_err(|err| {
-                    rustix::io::Errno::from_io_error(&err).unwrap_or(rustix::io::Errno::IO)
-                });
+                .map(std::fs::File::from);
         }
-        rustix::fs::openat(parent_fd, name, flags, mode).map(std::fs::File::from)
+        Ok(rustix::fs::openat(parent_fd, name, flags, mode)?.into())
     };
+    let errno = |err: &std::io::Error| rustix::io::Errno::from_io_error(err);
     let mut file = match create() {
         Ok(file) => file,
-        Err(err) if err == rustix::io::Errno::EXIST => {
+        Err(err) if errno(&err) == Some(rustix::io::Errno::EXIST) => {
             let stale = match rustix::fs::openat(
                 parent_fd,
                 name,
@@ -5259,17 +5275,12 @@ fn write_temp_at_unix(
             rustix::fs::unlinkat(parent_fd, name, rustix::fs::AtFlags::empty())
                 .map_err(std::io::Error::from)
                 .map_err(|remove_err| MaterializeError::io(display_path, &remove_err))?;
-            create()
-                .map_err(std::io::Error::from)
-                .map_err(|retry_err| MaterializeError::io(display_path, &retry_err))?
+            create().map_err(|retry_err| temp_create_error(display_path, &retry_err))?
         }
-        Err(err) if err == rustix::io::Errno::LOOP => {
+        Err(err) if errno(&err) == Some(rustix::io::Errno::LOOP) => {
             return Err(MaterializeError::SymlinkTarget);
         }
-        Err(err) => {
-            let err = std::io::Error::from(err);
-            return Err(MaterializeError::io(display_path, &err));
-        }
+        Err(err) => return Err(temp_create_error(display_path, &err)),
     };
     if let TempAccess::Like(replaced) = &access {
         replaced.apply_to(&file);
@@ -5280,6 +5291,16 @@ fn write_temp_at_unix(
         return Err(MaterializeError::io(display_path, &err));
     }
     Ok(file)
+}
+
+/// The error for a temp that could not be created at `display_path`.
+#[cfg(unix)]
+fn temp_create_error(display_path: &Path, err: &std::io::Error) -> MaterializeError {
+    #[cfg(target_vendor = "apple")]
+    if dohc_macos_files::volume_shares_new_files(err) {
+        return MaterializeError::VolumeSharesNewFiles;
+    }
+    MaterializeError::io(display_path, err)
 }
 
 fn temp_sibling(target: &Path, job_id: &str) -> PathBuf {

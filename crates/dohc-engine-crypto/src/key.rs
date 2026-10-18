@@ -292,7 +292,7 @@ pub fn create_key_file(root: &std::path::Path) -> Result<SecretDataKey, CryptoEr
         let name = temp.file_name().ok_or_else(invalid)?;
         Ok(dohc_macos_files::create_uninherited(folder, name, 0o600)?.into())
     })()
-    .map_err(|_| CryptoError::KeyFileMalformed)?;
+    .map_err(|err| key_create_error(&err))?;
     let written = (|| -> std::io::Result<()> {
         #[cfg(not(target_vendor = "apple"))]
         let mut file = {
@@ -319,6 +319,16 @@ pub fn create_key_file(root: &std::path::Path) -> Result<SecretDataKey, CryptoEr
     }
     let publication = std::fs::hard_link(&temp, &path);
     finish_key_publication(&path, &temp, publication)
+}
+
+/// The error for a key file that could not be created.
+#[cfg(target_vendor = "apple")]
+fn key_create_error(err: &std::io::Error) -> CryptoError {
+    if dohc_macos_files::volume_shares_new_files(err) {
+        CryptoError::VolumeSharesNewFiles
+    } else {
+        CryptoError::KeyFileMalformed
+    }
 }
 
 fn finish_key_publication(
@@ -379,6 +389,17 @@ mod tests {
             .unwrap();
         let listing = String::from_utf8(listing.stdout).unwrap();
         assert_eq!(listing.lines().count(), 1, "{listing}");
+    }
+
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn a_volume_that_shares_new_files_reaches_the_caller_by_its_code() {
+        let refused = std::io::Error::other(dohc_macos_files::VolumeSharesNewFiles);
+        let err = key_create_error(&refused);
+        assert_eq!(err, CryptoError::VolumeSharesNewFiles);
+        assert_eq!(err.code(), "volume-shares-new-files");
+        let other = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert_eq!(key_create_error(&other), CryptoError::KeyFileMalformed);
     }
 
     #[test]

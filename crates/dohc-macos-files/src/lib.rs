@@ -32,8 +32,9 @@ const FILESEC_ACL: c_int = 5;
 // SAFETY: These match `<xattr_flags.h>`, macOS 10.10 and later, where
 // `xattr_operation_intent_t` is `unsigned int`, `<sys/acl.h>`, where
 // `acl_type_t` and `acl_flag_t` are C enums, `entry_id` is an `int`, and
-// `acl_t`, `acl_entry_t` and `acl_flagset_t` are pointers, and `<sys/fcntl.h>`, where `filesec_property_t` is a C enum
-// and `filesec_t` is a pointer.
+// `acl_t`, `acl_entry_t` and `acl_flagset_t` are pointers, and
+// `<sys/fcntl.h>`, where `filesec_property_t` is a C enum and `filesec_t` is
+// a pointer.
 #[allow(unsafe_code)]
 unsafe extern "C" {
     fn xattr_preserve_for_intent(name: *const c_char, intent: c_uint) -> c_int;
@@ -56,7 +57,7 @@ unsafe extern "C" {
 /// every new file. The kernel applies the empty ACL as it creates the file,
 /// so nobody but the owner and root can open it before it gets another. A
 /// file that is not in `dir`, or that has any ACL entry, is removed and
-/// refused: a network file system may apply the server's entries instead.
+/// refused. A file with entries fails with [`VolumeSharesNewFiles`].
 pub fn create_uninherited(dir: impl AsFd, name: &OsStr, mode: u16) -> io::Result<OwnedFd> {
     create_uninherited_with(dir.as_fd(), name, mode, || {}, |_| {})
 }
@@ -100,6 +101,26 @@ fn create_uninherited_with(
     Ok(file)
 }
 
+/// The volume gave a new file ACL entries in place of the empty ACL it was
+/// created with, as a network file system can apply its server's. Nothing
+/// written there can be kept private.
+#[derive(Debug)]
+pub struct VolumeSharesNewFiles;
+
+impl std::fmt::Display for VolumeSharesNewFiles {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("this volume adds sharing permissions to new files, so dohc can't keep this file private")
+    }
+}
+
+impl std::error::Error for VolumeSharesNewFiles {}
+
+/// Whether `err` is [`VolumeSharesNewFiles`].
+pub fn volume_shares_new_files(err: &io::Error) -> bool {
+    err.get_ref()
+        .is_some_and(|inner| inner.is::<VolumeSharesNewFiles>())
+}
+
 /// Check that `file` is `name` in `dir` and has no ACL entries.
 fn check_created(dir: BorrowedFd<'_>, name: &OsStr, file: &OwnedFd) -> io::Result<()> {
     let created = rustix::fs::fstat(file)?;
@@ -108,15 +129,13 @@ fn check_created(dir: BorrowedFd<'_>, name: &OsStr, file: &OwnedFd) -> io::Resul
         return Err(io::Error::other("the new file is not in its folder"));
     }
     if has_entries(file.as_fd())? {
-        return Err(io::Error::other(
-            "the file system gave the new file ACL entries",
-        ));
+        return Err(io::Error::other(VolumeSharesNewFiles));
     }
     Ok(())
 }
 
-/// Unlink `path` only while it still names `file`, so an entry that took its
-/// place is never removed.
+/// Unlink `path` only if it still names `file` when checked. An entry that
+/// takes its place between the check and the unlink is still removed.
 fn remove_if_same(file: &OwnedFd, path: &CStr) {
     if let (Ok(open), Ok(named)) = (rustix::fs::fstat(file), rustix::fs::lstat(path))
         && (open.st_dev, open.st_ino) == (named.st_dev, named.st_ino)
@@ -503,7 +522,7 @@ mod tests {
         let name = std::ffi::OsStr::new("temp");
         let err =
             super::create_uninherited_with(folder.as_fd(), name, 0o600, || {}, grant).unwrap_err();
-        assert!(err.to_string().contains("ACL entries"), "{err}");
+        assert!(super::volume_shares_new_files(&err), "{err}");
         assert!(!scratch.path().join("temp").exists());
     }
 
