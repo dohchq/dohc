@@ -77,7 +77,9 @@ export function serviceOwnerTransport(options: {
         captured={activationId:capture.activationId,sessionId:capture.sessionId,source:{...capture.source}};
       }
       if(params.resumeAdoptionId!==undefined && params.resumeAdoptionId!==captured.activationId)throw new Error("Service owner binding changed.");
-      const response=await client.sendRequest({...request,params:{binding:{...binding,selectorPaths:[...binding.selectorPaths]}}},signal);
+      // Naming the activation tags the registration, so retiring it ends this registration too.
+      const response=await client.sendRequest({...request,params:{binding:{...binding,selectorPaths:[...binding.selectorPaths]},
+        activationId:captured.activationId}},signal);
       check(signal);
       registrationId=authorityInteger(configRecord(response.result,["registrationId"]).registrationId,1);
       if(params.resumeAdoptionId!==undefined) {

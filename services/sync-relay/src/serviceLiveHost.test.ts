@@ -558,9 +558,9 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
           if (next instanceof Error) throw next;
           return reply(next);
         }
-        // Native registration accepts exactly the binding.
+        // Native registration accepts exactly the binding and the activation it serves.
         case "liveApplication.register":
-          if (Object.keys(request.params).join() !== "binding") throw new Error("INVALID_PARAMS: invalid-live-registration");
+          if (Object.keys(request.params).join() !== "binding,activationId") throw new Error("INVALID_PARAMS: invalid-live-registration");
           if (registrationRefusal) throw registrationRefusal;
           if (!registrations) return reply({registrationId: 7});
           registrations.live = ++registrations.next;
@@ -742,7 +742,7 @@ it("reloads the retained activation after a restart only for a stop that registe
   expect(o.client().captureOwnerActivation).toHaveBeenCalledTimes(captures + 2);
   expect(o.client().captureOwnerActivation).toHaveBeenLastCalledWith(expect.anything(), "docs/a.md", 1_000_000, expect.any(AbortSignal), `ordinary-activation-${"a".repeat(64)}`);
   expect(o.ownerCalls().slice(sent)).toEqual([
-    ["liveApplication.register", {binding: current.binding}],
+    ["liveApplication.register", {binding: current.binding, activationId: `ordinary-activation-${"a".repeat(64)}`}],
     ["liveApplication.ownerState", {registrationId: 7, sessionId: "native-session"}],
     ["liveApplication.fenceRestore", expect.anything()],
     ["liveApplication.fenceRestore", expect.anything()],
@@ -892,7 +892,7 @@ it.each(["settlement-pending", "delivery-pending"])("settles a stopped last docu
   const methods = o.client().sendRequest.mock.calls.map(call => ((call as unknown[])[0] as {method: string}).method);
   expect(methods.slice(methods.lastIndexOf("liveApplication.settle"))).toEqual(["liveApplication.settle", "sync.push", "liveApplication.unloadDocument"]);
   // The unload names the activation the relay retains for the document.
-  const departure = [["liveApplication.register", {binding: current.binding}], ["liveApplication.settle", {registrationId: 7, terminalReceipt: tip}],
+  const departure = [["liveApplication.register", {binding: current.binding, activationId: `ordinary-activation-${"a".repeat(64)}`}], ["liveApplication.settle", {registrationId: 7, terminalReceipt: tip}],
     ["liveApplication.unloadDocument", {objectId: "object", activationId: `ordinary-activation-${"a".repeat(64)}`}]];
   expect(o.ownerCalls().slice(sent)).toEqual(departure);
   // The engine answers pending, so the document stays, and the next pass settles and unloads it again.
@@ -959,7 +959,7 @@ it("leaves an accepted edit the engine never applied unapplied, and settles thro
   expect(o.applied.has(edit.deliveryId)).toBe(false);
   expect(o.client().readLiveApplicationAck).toHaveBeenLastCalledWith(expect.objectContaining({registrationId: 7}), edit, expect.any(AbortSignal));
   expect(o.tip()).toEqual(seed);
-  expect(o.ownerCalls().slice(sent)).toEqual([["liveApplication.register", {binding: o.binding}],
+  expect(o.ownerCalls().slice(sent)).toEqual([["liveApplication.register", {binding: o.binding, activationId: `ordinary-activation-${"a".repeat(64)}`}],
     ["liveApplication.settle", {registrationId: 7, terminalReceipt: seed}],
     ["liveApplication.unloadDocument", {objectId: "object", activationId: `ordinary-activation-${"a".repeat(64)}`}]]);
 });
@@ -1111,7 +1111,7 @@ it("registers the owner again when a stopped document resumes before its departu
   await expect(o.host.drain(o.document)).resolves.toMatchObject({kind: "done"});
   // A departure reads no owner state, so the first read after Stop is the owner's, right after it registered again.
   const calls = o.ownerCalls(), resumed = calls.findIndex(([method], index) => index >= sent && method === "liveApplication.ownerState");
-  expect(calls.slice(resumed - 1, resumed + 1)).toEqual([["liveApplication.register", {binding: o.binding}],
+  expect(calls.slice(resumed - 1, resumed + 1)).toEqual([["liveApplication.register", {binding: o.binding, activationId: `ordinary-activation-${"a".repeat(64)}`}],
     ["liveApplication.ownerState", {registrationId: o.liveRegistration(), sessionId: "native-session"}]]);
   expect(o.membership.filter(row => row.method === "liveApplication.unloadDocument")).toEqual([]);
 });
@@ -1895,7 +1895,7 @@ async function stopDormant(o: Awaited<ReturnType<typeof idleHost>>) {
   expect(o.client().captureOwnerActivation.mock.calls.length).toBe(captures + 1);
   const stopping = o.requests().slice(sent).filter(request => request.method.startsWith("liveApplication."));
   expect(stopping.map(request => [request.method, request.params])).toEqual([
-    ["liveApplication.register", {binding}],
+    ["liveApplication.register", {binding, activationId: `ordinary-activation-${"a".repeat(64)}`}],
     ["liveApplication.ownerState", {registrationId: 7, sessionId: "native-session"}],
     ["liveApplication.fenceRestore", expect.anything()],
     ["liveApplication.fenceRestore", expect.anything()],

@@ -1184,7 +1184,7 @@ impl EngineService {
                 .owner
                 .begin_retirement(scope.clone(), host.coordinate.clone(), key.clone())
                 .await?;
-            // Only state tagged with this activation, on this host, goes.
+            // Only this document's state tagged with this activation, on this host, goes.
             if !target.released {
                 let serves = |tag: Option<&str>| tag == Some(key.activation_id.as_str());
                 {
@@ -1192,6 +1192,7 @@ impl EngineService {
                     let _fence = lock(&host.output_fence);
                     registry.registrations.retain(|_, registration| {
                         if Arc::ptr_eq(&registration.host, &host)
+                            && registration.object_id == key.object_id
                             && serves(registration.activation_id().as_deref())
                         {
                             registration.retired.cancel();
@@ -1202,7 +1203,9 @@ impl EngineService {
                     });
                 }
                 lock(&sessions).retain(|_, session| {
-                    session.workspace != workspace || !serves(session.activation_id.as_deref())
+                    session.workspace != workspace
+                        || session.key.object_id != key.object_id
+                        || !serves(session.activation_id.as_deref())
                 });
             }
             host.owner
@@ -3265,27 +3268,28 @@ mod tests {
         );
     }
 
-    /// Register the document again, so its registration takes the
-    /// activation that now holds its lineage.
+    /// Register the document again, naming `activation` as the relay does,
+    /// or else taking the activation that now holds its lineage.
     async fn register_document(
         service: &EngineService,
         owner: &dohc_engine_protocol::transport::ConnectionOwner,
         workspace: &WorkspaceHandle,
-    ) -> u64 {
-        service
-            .live_application_register(
-                &host_context(owner),
-                Some(workspace.clone()),
-                json!({"binding": unload_binding("document")}),
-            )
-            .await
-            .unwrap()["registrationId"]
+        activation: Option<&str>,
+    ) -> Result<u64, WireError> {
+        let mut params = json!({"binding": unload_binding("document")});
+        if let Some(activation) = activation {
+            params["activationId"] = json!(activation);
+        }
+        Ok(service
+            .live_application_register(&host_context(owner), Some(workspace.clone()), params)
+            .await?["registrationId"]
             .as_u64()
-            .unwrap()
+            .unwrap())
     }
 
-    /// The fixture with the document's source retained and, when `adopted`,
-    /// its activation adopted and its registration serving it.
+    /// The fixture with the document's source retained and its registration
+    /// naming that activation, as the relay registers, and, when `adopted`,
+    /// the activation adopted.
     async fn retirement_fixture(
         adopted: bool,
     ) -> (
@@ -3296,20 +3300,22 @@ mod tests {
         u64,
         u64,
     ) {
-        let (scratch, service, owner, workspace, mut document, sibling) = unload_fixture().await;
+        let (scratch, service, owner, workspace, _, sibling) = unload_fixture().await;
         retain_source(&service, &workspace);
         if adopted {
             record_activation(&service, &workspace, "activation", None, false);
-            document = register_document(&service, &owner, &workspace).await;
-            assert_eq!(
-                service
-                    .live_application_registration(&owner.handle(), Some(&workspace), document)
-                    .unwrap()
-                    .activation_id()
-                    .as_deref(),
-                Some("activation")
-            );
         }
+        let document = register_document(&service, &owner, &workspace, Some("activation"))
+            .await
+            .unwrap();
+        assert_eq!(
+            service
+                .live_application_registration(&owner.handle(), Some(&workspace), document)
+                .unwrap()
+                .activation_id()
+                .as_deref(),
+            Some("activation")
+        );
         (scratch, service, owner, workspace, document, sibling)
     }
 
@@ -3528,9 +3534,8 @@ mod tests {
                 reconciled["adoption"]["adoptionId"].as_str(),
                 adopted.then_some("activation")
             );
-            // A registration made before adoption serves no activation, so it stays.
             let after = teardown(&service, &owner, &workspace, document);
-            assert_eq!(after, (!adopted, None, before.2, true), "adopted={adopted}");
+            assert_eq!(after, (false, None, before.2, true), "adopted={adopted}");
             service.workspace_close(Some(workspace)).await.unwrap();
         }
     }
@@ -3548,7 +3553,9 @@ mod tests {
                 released_accepted_cursor=5,released_boundary_json='{}',carried_manifest_json='{}'",
         );
         record_activation(&service, &workspace, "successor", Some("activation"), false);
-        let successor = register_document(&service, &owner, &workspace).await;
+        let successor = register_document(&service, &owner, &workspace, None)
+            .await
+            .unwrap();
         lock(&service.sessions)
             .get_mut("ydoc-unload-document")
             .unwrap()
@@ -3676,6 +3683,148 @@ mod tests {
         assert_eq!(
             teardown(&service, &owner, &workspace, document).2,
             (1, Some("activation".into()))
+        );
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    /// Sol's round 3a blocker: the relay names the activation it captured
+    /// when it registers, so retiring a never-adopted activation ends that
+    /// registration too. Its old handle is refused, the activation cannot
+    /// register again, and an ordinary registration naming none stays.
+    #[tokio::test]
+    async fn a_never_adopted_retirement_ends_its_named_registration() {
+        let (_scratch, service, owner, workspace, document, sibling) =
+            retirement_fixture(false).await;
+        let held = |registration| {
+            service
+                .live_application_registration(&owner.handle(), Some(&workspace), registration)
+                .unwrap()
+        };
+        let (old, ordinary) = (held(document), held(sibling));
+        assert_eq!(ordinary.activation_id(), None);
+        let output = |registration: &Arc<Registration>| ApplicationOutputGuard {
+            activation_id: registration.activation_id(),
+            registration: registration.clone(),
+            cancel: CancelSignal::new(),
+            deadline: None,
+            _reservation: Arc::new(()),
+        };
+        let (old_output, ordinary_output) = (output(&old), output(&ordinary));
+        let identity = || dohc_engine_collab::live_update_application::LiveApplicationAckIdentity {
+            delivery_id: "missing".into(),
+            update_digest: "00".repeat(32),
+        };
+        assert_eq!(old.handle.read_ack(identity()).await.unwrap(), None);
+        let reconciled = service
+            .call(
+                host_context(&owner),
+                reconcile_request(&workspace, retirement_key("activation")),
+            )
+            .await
+            .unwrap()
+            .response
+            .result;
+        assert_eq!(
+            (&reconciled["status"], &reconciled["adoption"]),
+            (&json!("reconciled"), &Value::Null)
+        );
+        assert_eq!(
+            teardown(&service, &owner, &workspace, document),
+            (false, None, (1, Some("activation".into())), true)
+        );
+        assert!(old.handle.read_ack(identity()).await.is_err());
+        assert!(!old_output.is_current());
+        assert_eq!(
+            register_document(&service, &owner, &workspace, Some("activation"))
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Conflict
+        );
+        assert!(
+            service
+                .live_application_registration(&owner.handle(), Some(&workspace), sibling)
+                .is_ok()
+        );
+        assert!(ordinary_output.is_current());
+        assert_eq!(ordinary.handle.read_ack(identity()).await.unwrap(), None);
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    /// Opus's round 3a note: a host that reconnects mid-Stop gets a new
+    /// native owner. The retired set outlasts the old one, so the
+    /// reconnected host still refuses the retired activation.
+    #[tokio::test]
+    async fn a_reconnected_host_still_refuses_a_retired_activation() {
+        let (_scratch, service, owner, workspace, _, _) = retirement_fixture(true).await;
+        let reconciled = service
+            .call(
+                host_context(&owner),
+                reconcile_request(&workspace, retirement_key("activation")),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reconciled.response.result["status"], "reconciled");
+        let reconnected = dohc_engine_protocol::transport::ConnectionOwner::authenticated();
+        service
+            .provision_live_application(
+                reconnected.handle(),
+                LiveApplicationHostConfig {
+                    workspace: workspace.clone(),
+                    namespace: "unload-test".into(),
+                    coordinate: ApplicationHostCoordinate {
+                        host_id: "host".into(),
+                        host_epoch: 1,
+                        instance_id: "instance".into(),
+                        connection_id: "reconnected".into(),
+                    },
+                    max_registrations: 4,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            lock(&service.live_applications)
+                .retired_activations(&workspace)
+                .unwrap()
+                .contains("activation")
+        );
+        assert_eq!(
+            register_document(&service, &reconnected, &workspace, None)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Conflict,
+            "the registration would serve the retired activation"
+        );
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    /// Phase A ends only the reconciled document's state: another
+    /// document's session carrying the same activation tag stays.
+    #[tokio::test]
+    async fn phase_a_leaves_another_documents_state() {
+        let (_scratch, service, owner, workspace, _, sibling) = retirement_fixture(true).await;
+        install_session(&service, &workspace, "sibling", "activation");
+        let reconciled = service
+            .call(
+                host_context(&owner),
+                reconcile_request(&workspace, retirement_key("activation")),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reconciled.response.result["status"], "reconciled");
+        assert!(!lock(&service.sessions).contains_key("ydoc-unload-document"));
+        assert_eq!(
+            lock(&service.sessions)["ydoc-unload-sibling"]
+                .activation_id
+                .as_deref(),
+            Some("activation")
+        );
+        assert!(
+            service
+                .live_application_registration(&owner.handle(), Some(&workspace), sibling)
+                .is_ok()
         );
         service.workspace_close(Some(workspace)).await.unwrap();
     }

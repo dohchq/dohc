@@ -19,6 +19,9 @@ function fixture(){
 it("uses the captured native session and translates owner outbox calls to its native outbox",async()=>{
   const f=fixture();
   await f.transport.client.sendRequest({...f.request,method:"liveApplication.register",params:{binding:f.binding}});
+  // Native registration names the captured activation, so its retirement ends this registration.
+  expect(f.sendRequest).toHaveBeenLastCalledWith(expect.objectContaining({method:"liveApplication.register",
+    params:{binding:f.binding,activationId:f.capture.activationId}}),undefined);
   const state=await f.transport.client.sendRequest({...f.request,id:2,method:"liveApplication.ownerState",params:{registrationId:7}});
   expect(state.result).toEqual({adoptionId:f.capture.activationId,expectedLocalSequence:2,throughCursor:0,sessionId:"actual-native-session"});
   expect(f.sendRequest).toHaveBeenLastCalledWith(expect.objectContaining({params:{registrationId:7,sessionId:"actual-native-session"}}),undefined);

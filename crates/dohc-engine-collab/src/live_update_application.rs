@@ -964,11 +964,25 @@ impl RetiredActivations {
             .unwrap_or_else(PoisonError::into_inner)
             .contains(activation_id)
     }
+    /// Run `action` unless `activation_id` is retired, holding the set
+    /// throughout, so a retirement lands wholly before the check or after
+    /// the action. Returns false, running nothing, for a retired one.
+    pub fn unless_retired(&self, activation_id: &str, action: impl FnOnce() -> bool) -> bool {
+        let retired = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        !retired.contains(activation_id) && action()
+    }
+    /// Whether an [`unless_retired`](Self::unless_retired) action holds the set now.
+    #[cfg(feature = "test-support")]
+    pub fn fenced(&self) -> bool {
+        matches!(self.0.try_lock(), Err(std::sync::TryLockError::WouldBlock))
+    }
 }
 /// A captured lifetime. Replacement invalidates every clone of the old handle.
 #[derive(Clone)]
 pub struct ApplicationHandle {
     registration: Arc<Mutex<Registration>>,
+    /// Its owner's retired activations; none of them adopts through it.
+    retired: RetiredActivations,
 }
 
 impl ApplicationHandle {
@@ -985,11 +999,19 @@ impl ApplicationHandle {
 
 impl ApplicationOwner {
     pub fn new(workspace_id: String) -> Result<Self, ApplicationError> {
+        Self::with_retired(workspace_id, RetiredActivations::default())
+    }
+    /// An owner that shares `retired` with the owners it replaces, so a
+    /// retirement outlasts a host reconnect.
+    pub fn with_retired(
+        workspace_id: String,
+        retired: RetiredActivations,
+    ) -> Result<Self, ApplicationError> {
         identifier(&workspace_id, 512)?;
         Ok(Self {
             workspace_id,
             current: Vec::new(),
-            retired: RetiredActivations::default(),
+            retired,
         })
     }
     /// The activations this owner retired, shared with its transport's output guards.
@@ -1104,7 +1126,10 @@ impl ApplicationOwner {
         }
         let registration = Arc::new(Mutex::new(registration));
         self.current.push(registration.clone());
-        Ok(ApplicationHandle { registration })
+        Ok(ApplicationHandle {
+            registration,
+            retired: self.retired.clone(),
+        })
     }
     /// Retire every registration, on a reconnect or a close. A hosted replica
     /// retires them in memory only, as [`release`](Self::release) does: a

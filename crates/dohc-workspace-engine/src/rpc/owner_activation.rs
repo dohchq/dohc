@@ -32,14 +32,25 @@ impl std::fmt::Debug for ActivationOutputGuard {
 }
 impl OutputGuard for ActivationOutputGuard {
     fn is_current(&self) -> bool {
-        self.connection.is_current()
-            && !self.activation_id.as_deref().is_some_and(|id| {
-                self.retired
-                    .as_ref()
-                    .is_some_and(|retired| retired.contains(id))
-            })
-            && !self.cancel.is_cancelled()
-            && self.deadline.is_none_or(|limit| Instant::now() < limit)
+        self.with_current(&mut || {})
+    }
+    /// The check and the output hold the retired set, as Phase A does to
+    /// retire, so no output for the activation lands once it is retired.
+    fn with_current(&self, action: &mut dyn FnMut()) -> bool {
+        let mut output = || {
+            if !self.connection.is_current()
+                || self.cancel.is_cancelled()
+                || self.deadline.is_some_and(|limit| Instant::now() >= limit)
+            {
+                return false;
+            }
+            action();
+            true
+        };
+        match (&self.retired, &self.activation_id) {
+            (Some(retired), Some(id)) => retired.unless_retired(id, output),
+            _ => output(),
+        }
     }
     fn cancel_signal(&self) -> CancelSignal {
         self.cancel.clone()
@@ -395,6 +406,74 @@ mod tests {
         );
         assert!(!retiring.is_current());
         assert!(other.is_current());
+    }
+
+    /// Sol's round 3a race: a capture write passes its check and pauses,
+    /// then Phase A starts. The paused write holds the fence Phase A takes,
+    /// so Phase A ends only after it, and no later write for the activation
+    /// runs.
+    #[test]
+    fn phase_a_waits_for_a_capture_write_that_passed_its_check() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc::channel;
+        let mut owner =
+            dohc_engine_collab::live_update_application::ApplicationOwner::new("workspace".into())
+                .unwrap();
+        let retired = owner.retired_activations();
+        let connection = dohc_engine_protocol::transport::ConnectionOwner::authenticated();
+        let guard = Arc::new(ActivationOutputGuard {
+            connection: connection.handle(),
+            activation_id: Some("retiring".into()),
+            retired: Some(retired.clone()),
+            cancel: CancelSignal::new(),
+            deadline: None,
+            _reservation: Arc::new(()),
+        });
+        let wrote = Arc::new(AtomicBool::new(false));
+        let (entered, paused) = channel();
+        let (resume, resumed) = channel::<()>();
+        let writer = {
+            let (guard, wrote) = (guard.clone(), wrote.clone());
+            std::thread::spawn(move || {
+                guard.with_current(&mut || {
+                    entered.send(()).unwrap();
+                    resumed.recv().unwrap();
+                    wrote.store(true, Ordering::SeqCst);
+                })
+            })
+        };
+        paused.recv().unwrap();
+        assert!(retired.fenced(), "the paused write holds the fence");
+        let (started, starting) = channel();
+        let phase_a = {
+            let wrote = wrote.clone();
+            std::thread::spawn(move || {
+                started.send(()).unwrap();
+                owner.retire_activation(
+                    &mut dohc_engine_collab::WriterDocCache::new(),
+                    "namespace",
+                    &dohc_engine_collab::live_update_application::ApplicationHostCoordinate {
+                        host_id: "host".into(),
+                        host_epoch: 1,
+                        instance_id: "instance".into(),
+                        connection_id: "connection".into(),
+                    },
+                    &DocKey::new("workspace", "main", "document").unwrap(),
+                    "retiring",
+                );
+                wrote.load(Ordering::SeqCst)
+            })
+        };
+        starting.recv().unwrap();
+        resume.send(()).unwrap();
+        assert!(
+            writer.join().unwrap(),
+            "the write that passed its check lands"
+        );
+        assert!(phase_a.join().unwrap(), "Phase A ended after that write");
+        let mut late = false;
+        assert!(!guard.with_current(&mut || late = true));
+        assert!(!late, "no write for the retired activation runs");
     }
 
     /// A release names the activation it ends. One naming another activation

@@ -81,6 +81,40 @@ fn imported_activation_retains_original_source_without_minting_native_seed() {
     assert!(ack.adoption_replayed);
 }
 
+/// Opus's round 3a note: a registration that serves no activation outlives
+/// Phase A, and after a reconnect one could adopt the retired activation,
+/// committing an adoption whose answer is withheld. The replacement owner
+/// keeps the retired set, and adoption refuses before writing anything.
+#[test]
+fn a_retired_activation_never_adopts_after_a_reconnect() {
+    let mut f = imported_fixture();
+    f.cut.adoption_id = capture_imported(&mut f, 1_000_000).unwrap().activation_id;
+    let coordinate = ApplicationHostCoordinate {
+        host_id: "host".into(),
+        host_epoch: 1,
+        instance_id: "instance".into(),
+        connection_id: "connection".into(),
+    };
+    f._owner.retire_activation(
+        &mut WriterDocCache::new(),
+        "namespace",
+        &coordinate,
+        &f.key,
+        &f.cut.adoption_id,
+    );
+    let mut reconnected =
+        ApplicationOwner::with_retired("workspace".into(), f._owner.retired_activations())
+            .unwrap();
+    f.handle = reconnected
+        .register(&mut f.store, "namespace".into(), coordinate, f.binding.clone())
+        .unwrap();
+    assert_eq!(f.handle.activation_id(), None, "it serves no activation");
+    let before = f.counts();
+    assert!(matches!(f.adopt(), Err(ApplicationError::Conflict)));
+    assert_eq!(f.counts(), before);
+    assert_eq!(f.store.table_row_count("live_owner_activations").unwrap(), 0);
+}
+
 #[test]
 fn imported_activation_rejects_uncommitted_cursor_budget_and_changed_provenance() {
     let mut f = imported_fixture();

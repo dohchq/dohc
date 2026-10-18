@@ -860,14 +860,19 @@ impl Drop for OwnedRegistration {
 }
 
 #[derive(Default)]
-pub(super) struct Registry(HashMap<String, OwnedRegistration>);
+pub(super) struct Registry {
+    owners: HashMap<String, OwnedRegistration>,
+    /// Each workspace's retired activations. They outlast its owners, so a
+    /// host that reconnects mid-Stop still refuses them.
+    retired: HashMap<String, RetiredActivations>,
+}
 impl Registry {
     fn owner(
         &mut self,
         workspace: &str,
         token: &Token,
     ) -> Result<&mut ApplicationOwner, RuntimeError> {
-        self.0
+        self.owners
             .get_mut(workspace)
             .filter(|entry| Arc::ptr_eq(&entry.token, token) && token.load(Ordering::Acquire))
             .map(|entry| &mut entry.application)
@@ -877,7 +882,7 @@ impl Registry {
     /// Release every registration of `object_ids` in `workspace_id`, whichever
     /// owner holds it, in memory only. Their durable application state stays.
     pub(super) fn release(&mut self, workspace_id: &str, object_ids: &[String]) {
-        if let Some(entry) = self.0.get_mut(workspace_id) {
+        if let Some(entry) = self.owners.get_mut(workspace_id) {
             for object_id in object_ids {
                 entry.application.release(object_id);
             }
@@ -1435,14 +1440,19 @@ impl Request {
                     if !token.load(Ordering::Acquire) {
                         return Err(RuntimeError::ActorUnavailable);
                     }
-                    let application = ApplicationOwner::new(workspace_id.clone())?;
-                    if let Some(old) = registry.0.get_mut(&workspace_id) {
+                    let retired = registry
+                        .retired
+                        .entry(workspace_id.clone())
+                        .or_default()
+                        .clone();
+                    let application =
+                        ApplicationOwner::with_retired(workspace_id.clone(), retired.clone())?;
+                    if let Some(old) = registry.owners.get_mut(&workspace_id) {
                         old.token.store(false, Ordering::Release);
                         old.application.invalidate(store)?;
                     }
-                    let retired = application.retired_activations();
                     registry
-                        .0
+                        .owners
                         .insert(workspace_id, OwnedRegistration { token, application });
                     Ok(retired)
                 })();
@@ -1584,7 +1594,7 @@ impl Request {
                 reply,
             } => {
                 let result = if let Some(entry) = registry
-                    .0
+                    .owners
                     .get_mut(&workspace_id)
                     .filter(|entry| Arc::ptr_eq(&entry.token, &token))
                 {
@@ -1593,7 +1603,7 @@ impl Request {
                     Err(RuntimeError::ActorUnavailable)
                 };
                 if result.is_ok() {
-                    registry.0.remove(&workspace_id);
+                    registry.owners.remove(&workspace_id);
                 }
                 let _ = reply.send(result);
             }

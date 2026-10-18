@@ -1412,6 +1412,10 @@ pub fn adopt_owner_committed(
     if !held.live {
         return Err(ApplicationError::Interrupted);
     }
+    // A retired activation never adopts, so nothing commits whose answer is withheld.
+    if handle.retired.contains(&cut.adoption_id) {
+        return Err(ApplicationError::Conflict);
+    }
     if cut.relay_database_namespace != held.namespace {
         return Err(ApplicationError::Conflict);
     }

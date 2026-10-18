@@ -194,7 +194,7 @@ export class ServiceActivationDriver {
     const workspace=o.workspaces.get(document.workspaceId);
     if(!target || !saved || !workspace)throw new Error("Service restore source is unavailable.");
     // Stopping access re-registers the retained owner. Only the activated session's
-    // verified transport can check that adoption; native registration takes the binding alone.
+    // verified transport can check that adoption.
     const activated=this.#owners.get(key);
     if(activated && !activated.activationPending)return activated.consumer;
     // Without that session, as for a dormant document or after a restart, the
@@ -280,7 +280,7 @@ export class ServiceActivationDriver {
     let registered;
     try{
       registered=await o.client.sendRequest({...request(),method:"liveApplication.register",
-        params:{binding:{...delivery.binding,selectorPaths:[...delivery.binding.selectorPaths]}}},signal);
+        params:{binding:{...delivery.binding,selectorPaths:[...delivery.binding.selectorPaths]},activationId:saved.activationId}},signal);
     }catch(error){
       // A parked document, or one its replica's scope still holds but not ready.
       if(isHostedDocumentUnready(error))return {kind:"unready"};
