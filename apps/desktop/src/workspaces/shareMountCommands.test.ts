@@ -159,6 +159,7 @@ function harness() {
   };
 
   const files: ShareViewFiles = {
+    lookup: vi.fn(async () => ({ files: [], folders: [] })),
     narrow: vi.fn(async () => undefined),
     end: vi.fn(async () => undefined),
     mount: vi.fn(async (_lease, target: PreparedShareViewFilesMount) => {

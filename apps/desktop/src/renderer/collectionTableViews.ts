@@ -47,9 +47,8 @@ export async function readTableViews(workspaceId:string,datasetId:string,tableId
   try {read=await bridge().readWorkspaceText({workspaceId,relativePath});}
   catch(error) {
     signal.throwIfAborted();
-    // A complete workspace listing distinguishes an absent source from a failed read.
-    const listing=await bridge().listWorkspaceFiles({workspaceId});signal.throwIfAborted();
-    if(listing.cached||listing.files.some(file=>file.path===relativePath))throw error;
+    const listing=await bridge().listWorkspaceFiles({workspaceId,filePath:relativePath});signal.throwIfAborted();
+    if(listing.files.some(file=>file.path===relativePath))throw error;
     return {document:{formatVersion:1,datasetId,tableId,views:[]},contentHash:null};
   }
   signal.throwIfAborted();if(read.truncated)throw Error("The saved views file is too large. Keep it below 256 KB.");
