@@ -161,7 +161,17 @@ pub(super) fn applied_tip(
     let b = &held.binding;
     let origin = match &input.origin {
         RestoreDeliveryOrigin::Bootstrap { id } => {
-            if adoption::read_origin(conn, held)?.is_some() {
+            // A lineage an owner adopted never restores from a bootstrap,
+            // even once its activation is released.
+            let key = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)?;
+            if owner_activations::lineage_origin_id(
+                conn,
+                Some(&held.namespace),
+                &key,
+                &b.lineage_claim_id,
+            )?
+            .is_some()
+            {
                 return Err(ApplicationError::Conflict);
             }
             let (bootstrap, binding, coordinate, sequence) =
@@ -275,6 +285,7 @@ impl ApplicationOwner {
             live: true,
         };
         let input_json = serde_json::to_string(&input).map_err(|_| ApplicationError::Corrupt)?;
+        let retired = self.retired.clone();
         let outcome = store.write_with(faults, |tx| {
             require_workspace(tx, &held)?;
             let saved: Option<(String, String)> = tx.query_row(
@@ -307,6 +318,14 @@ impl ApplicationOwner {
             let key = DocKey::new(&b.workspace_id,&b.main_version_id,&b.object_id)?;
             require_hosted_ready(tx, &key)?;
             require_registration(tx,&key,&held.namespace,b)?;
+            // A restore moves the generation a retirement's key names, so a
+            // retiring activation keeps it waiting until its release.
+            if let Some((current, _)) = owner_activations::current_activation(tx, Some(&held.namespace), &key, &b.lineage_claim_id)? {
+                if retired.contains(&current.activation_id)
+                    || matches!(seed_hold(tx, &held.namespace, b)?, Some(SeedHold::Abandoned)) {
+                    return Err(ApplicationError::Conflict);
+                }
+            }
             let previous=restore_resume::generation(tx,&held)?.map(|receipt|receipt.operation_id);
             if !read_binding(tx, &held)?.is_some_and(|(binding, coordinate, available)| {
                 binding == *b && available && (coordinate == held.coordinate

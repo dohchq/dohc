@@ -515,27 +515,37 @@ impl EngineService {
         ctx: RequestContext,
         request: Request,
     ) -> Result<ServiceResponse, WireError> {
+        /// A registration's settlement, or a retirement's, never both.
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase", deny_unknown_fields)]
         struct Params {
-            registration_id: u64,
+            registration_id: Option<u64>,
+            retirement: Option<dohc_engine_collab::live_update_application::RetirementKey>,
             terminal_receipt:
                 Option<dohc_engine_collab::live_update_application::LiveUpdateReceipt>,
         }
+        let invalid = || WireError::new(ErrorCode::InvalidParams, "invalid-live-settlement");
         if request.idempotency_key.is_some() || request.params.get("terminalReceipt").is_none() {
-            return Err(WireError::new(
-                ErrorCode::InvalidParams,
-                "invalid-live-settlement",
-            ));
+            return Err(invalid());
         }
         require_caller_deadline(&request)?;
-        let params: Params = serde_json::from_value(request.params)
-            .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid-live-settlement"))?;
+        let params: Params =
+            serde_json::from_value(request.params.clone()).map_err(|_| invalid())?;
+        let registration_id = match (params.registration_id, params.retirement) {
+            (Some(id), None) => id,
+            (None, Some(key)) => {
+                self.configured_host_caller(&ctx)?;
+                return self
+                    .live_application_settle_retirement(ctx, request, key, params.terminal_receipt)
+                    .await;
+            }
+            _ => return Err(invalid()),
+        };
         let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
         let registration = self.live_application_registration(
             connection,
             request.workspace.as_ref(),
-            params.registration_id,
+            registration_id,
         )?;
         let host = registration.host.clone();
         let cancellation = super::request::OperationCancellation::new(&ctx);
@@ -1151,13 +1161,6 @@ impl EngineService {
         }
         let params: Params = serde_json::from_value(params).map_err(|_| invalid())?;
         let scope = self.configured_retirement_scope(ctx, params.max_applications)?;
-        let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
-        let workspace = workspace.ok_or_else(workspace_unavailable)?;
-        let host = lock(&self.live_applications)
-            .hosts
-            .get(&workspace)
-            .cloned()
-            .ok_or_else(workspace_unavailable)?;
         let key = RetirementKey {
             object_id: params.object_id,
             lineage_claim_id: params.lineage_claim_id,
@@ -1165,11 +1168,179 @@ impl EngineService {
             restore_fence_generation: params.restore_fence_generation,
             accepted_through: params.accepted_through,
         };
+        let reconciliation = self
+            .run_retirement(
+                ctx,
+                workspace,
+                scope,
+                key,
+                false,
+                "live reconciliation",
+                move |host, scope, key| async move {
+                    host.owner
+                        .reconcile_activation(scope, key, params.after_receipt, params.journal)
+                        .await
+                },
+            )
+            .await?
+            .map_err(map_runtime)?;
+        Ok(match reconciliation {
+            Reconciliation::PendingDelivery(deliveries) => {
+                json!({"status":"pending","reason":"delivery","deliveries":deliveries})
+            }
+            Reconciliation::SeedQuarantined(deliveries) => {
+                json!({"status":"pending","reason":"seed-quarantined","deliveries":deliveries})
+            }
+            Reconciliation::Reconciled {
+                adoption,
+                applications,
+                has_more_applications,
+                settle,
+            } => json!({"status":"reconciled","adoption":adoption,"applications":applications,
+                "hasMoreApplications":has_more_applications,"settle":settle}),
+        })
+    }
+
+    /// `liveApplication.releaseActivation`: release the activation the relay
+    /// fenced once its document parked, proving its delivery, application
+    /// and settlement again in the release's own transaction. A never-adopted
+    /// source may release before parking. A released activation answers
+    /// from its stored release.
+    pub(super) async fn live_application_release(
+        &self,
+        ctx: &RequestContext,
+        workspace: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        use dohc_engine_collab::live_update_application::{Release, ReleasePending, RetirementKey};
+        self.configured_host_caller(ctx)?;
+        let key: RetirementKey = serde_json::from_value(params)
+            .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid-live-release"))?;
+        let scope = self.configured_retirement_scope(ctx, 1)?;
+        let now_ms = super::request::now_ms()?;
+        let release = self
+            .run_retirement(
+                ctx,
+                workspace,
+                scope,
+                key,
+                true,
+                "live release",
+                move |host, scope, key| async move {
+                    host.owner
+                        .release_activation(scope, host.coordinate.clone(), key, now_ms)
+                        .await
+                },
+            )
+            .await?
+            .map_err(map_runtime)?;
+        Ok(match release {
+            Release::Released { replayed, boundary } => {
+                json!({"status":"released","replayed":replayed,"boundary":boundary})
+            }
+            Release::Pending(reason) => json!({"status":"pending","reason":match reason {
+                ReleasePending::Parking => "parking",
+                ReleasePending::Reconciliation => "reconciliation",
+            }}),
+        })
+    }
+
+    /// The retirement form of `liveApplication.settle`: settle the activation
+    /// a retirement names through its durable binding. It needs no live
+    /// registration and opens no session.
+    async fn live_application_settle_retirement(
+        &self,
+        ctx: RequestContext,
+        request: Request,
+        key: dohc_engine_collab::live_update_application::RetirementKey,
+        terminal: Option<dohc_engine_collab::live_update_application::LiveUpdateReceipt>,
+    ) -> Result<ServiceResponse, WireError> {
+        let (max_applications, reconstruction) = self.configured_settlement_admission(&ctx)?;
+        let scope = self.configured_retirement_scope(&ctx, max_applications)?;
+        let now_ms = super::request::now_ms()?;
+        let cancellation = super::request::OperationCancellation::new(&ctx);
+        let token = cancellation.token();
+        let settled = self
+            .run_retirement(
+                &ctx,
+                request.workspace.clone(),
+                scope,
+                key,
+                false,
+                "live settlement",
+                move |host, scope, key| async move {
+                    host.owner
+                        .settle_retirement(
+                            scope,
+                            host.coordinate.clone(),
+                            key,
+                            terminal,
+                            max_applications,
+                            host.open.root.clone(),
+                            now_ms,
+                            Arc::new(NoFaults),
+                            token,
+                            reconstruction,
+                        )
+                        .await
+                },
+            )
+            .await?
+            .map_err(|error| match error {
+                dohc_engine_runtime::RuntimeError::Cancelled => {
+                    cancellation.interruption("live settlement")
+                }
+                error => map_runtime(error),
+            })?;
+        Ok(ServiceResponse::response(Response {
+            id: request.id,
+            result: json!({"status":"settled", "settlement":settled}),
+        }))
+    }
+
+    /// One retirement step for the configured host. Its key validates, then,
+    /// unless its activation is released, Phase A ends only this document's
+    /// state tagged with that activation on this host: its registrations and
+    /// their output, its sessions and leases, and its cache entry. Then
+    /// `step` runs the durable pass. One task holding `session_ops` runs all
+    /// of it, so a caller that stops waiting cannot leave Phase A half done,
+    /// and a retry answers the same. An invalid key tears nothing down, nor
+    /// does a `release` whose document is still in the scope.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_retirement<T, F>(
+        &self,
+        ctx: &RequestContext,
+        workspace: Option<WorkspaceHandle>,
+        scope: dohc_engine_runtime::actor::OwnedRetirementScope,
+        key: dohc_engine_collab::live_update_application::RetirementKey,
+        release: bool,
+        label: &'static str,
+        step: impl FnOnce(
+            Arc<Host>,
+            dohc_engine_runtime::actor::OwnedRetirementScope,
+            dohc_engine_collab::live_update_application::RetirementKey,
+        ) -> F
+        + Send
+        + 'static,
+    ) -> Result<Result<T, dohc_engine_runtime::RuntimeError>, WireError>
+    where
+        T: Send + 'static,
+        F: std::future::Future<Output = Result<T, dohc_engine_runtime::RuntimeError>>
+            + Send
+            + 'static,
+    {
+        let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
+        let workspace = workspace.ok_or_else(workspace_unavailable)?;
+        let host = lock(&self.live_applications)
+            .hosts
+            .get(&workspace)
+            .cloned()
+            .ok_or_else(workspace_unavailable)?;
         let cancellation = super::request::OperationCancellation::new(ctx);
         let serial = tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
-                return Err(cancellation.interruption("live reconciliation (queued)"));
+                return Err(cancellation.interruption(&format!("{label} (queued)")));
             }
             serial = Arc::clone(&host.open.session_ops).lock_owned() => serial,
         };
@@ -1182,9 +1353,8 @@ impl EngineService {
             let _serial = serial;
             let target = host
                 .owner
-                .begin_retirement(scope.clone(), host.coordinate.clone(), key.clone())
+                .begin_retirement(scope.clone(), host.coordinate.clone(), key.clone(), release)
                 .await?;
-            // Only this document's state tagged with this activation, on this host, goes.
             if !target.released {
                 let serves = |tag: Option<&str>| tag == Some(key.activation_id.as_str());
                 {
@@ -1208,29 +1378,11 @@ impl EngineService {
                         || !serves(session.activation_id.as_deref())
                 });
             }
-            host.owner
-                .reconcile_activation(scope, key, params.after_receipt, params.journal)
-                .await
+            step(host, scope, key).await
         });
-        let reconciliation = operation
+        operation
             .await
-            .map_err(|_| WireError::new(ErrorCode::Internal, "live-reconciliation-interrupted"))?
-            .map_err(map_runtime)?;
-        Ok(match reconciliation {
-            Reconciliation::PendingDelivery(deliveries) => {
-                json!({"status":"pending","reason":"delivery","deliveries":deliveries})
-            }
-            Reconciliation::SeedQuarantined(deliveries) => {
-                json!({"status":"pending","reason":"seed-quarantined","deliveries":deliveries})
-            }
-            Reconciliation::Reconciled {
-                adoption,
-                applications,
-                has_more_applications,
-                settle,
-            } => json!({"status":"reconciled","adoption":adoption,"applications":applications,
-                "hasMoreApplications":has_more_applications,"settle":settle}),
-        })
+            .map_err(|_| WireError::new(ErrorCode::Internal, "live-retirement-interrupted"))
     }
 
     /// Run a hosted pull or commit, then drop the registrations and editor
@@ -3223,7 +3375,9 @@ mod tests {
             workspace,
             &format!(
                 "INSERT INTO ydoc_owner_activation_sources VALUES ('activation','unload-test','workspace',
-                 'main','document','{lineage}','moment','{lineage}','{lineage}','{descriptor}')"
+                 'main','document','{lineage}','moment','{lineage}','{lineage}','{descriptor}');
+                 INSERT OR IGNORE INTO binary_blobs VALUES ('{lineage}',1,x'00');
+                 INSERT OR IGNORE INTO blobs VALUES ('{lineage}',0,'')"
             ),
         );
     }
@@ -3250,7 +3404,7 @@ mod tests {
                     source_moment_id,source_digest,source_byte_length,host_coordinate_json,released_at_ms,
                     released_restore_generation,released_accepted_cursor,released_boundary_json,carried_manifest_json)
                  VALUES ('unload-test','{activation}','workspace','main','document','{lineage}',{predecessor},
-                    '{binding}','moment','{lineage}',0,'{{}}',1,0,5,'{{}}','{{}}')"
+                    '{binding}','moment','{lineage}',0,'{{}}',1,0,5,'null','[]')"
             )
             } else {
                 format!(
@@ -3549,8 +3703,8 @@ mod tests {
         shape(
             &service,
             &workspace,
-            "UPDATE live_owner_activations SET released_at_ms=1,released_restore_generation=0,
-                released_accepted_cursor=5,released_boundary_json='{}',carried_manifest_json='{}'",
+            &format!("UPDATE live_owner_activations SET released_at_ms=1,released_restore_generation=0,
+                released_accepted_cursor=5,released_boundary_json='{RELEASED_BOUNDARY}',carried_manifest_json='[]'"),
         );
         record_activation(&service, &workspace, "successor", Some("activation"), false);
         let successor = register_document(&service, &owner, &workspace, None)
@@ -3957,6 +4111,277 @@ mod tests {
         assert_eq!(waiting.await.unwrap_err().code, ErrorCode::Conflict);
         assert_eq!(teardown(&service, &owner, &workspace, document), before);
         assert_eq!(before.1, Some(Some("successor".into())));
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    /// The boundary a release of the fixture's adopted activation stores:
+    /// its adopted origin, with nothing applied after it.
+    const RELEASED_BOUNDARY: &str = r#"{"terminalReceipt":null,"eventCount":0,"historyEvidenceDigest":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}"#;
+
+    fn release_request(workspace: &WorkspaceHandle, activation: &str) -> Request {
+        Request {
+            id: 97,
+            method: "liveApplication.releaseActivation".into(),
+            workspace: Some(workspace.clone()),
+            deadline_ms: None,
+            idempotency_key: None,
+            progress: false,
+            params: json!({"objectId":"document","lineageClaimId":lineage(),"activationId":activation,
+                "restoreFenceGeneration":0,"acceptedThrough":5}),
+        }
+    }
+
+    /// The document as the hosted replica holds it: departed from its scope
+    /// or not, and parked or not.
+    fn host_document(
+        service: &EngineService,
+        workspace: &WorkspaceHandle,
+        departed: bool,
+        parked: bool,
+    ) {
+        shape(
+            service,
+            workspace,
+            &format!(
+                "INSERT OR IGNORE INTO sync_identity(workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms)
+                   VALUES ('workspace','origin','epoch','stream',0);
+                 INSERT OR IGNORE INTO hosted_replicas(workspace_id,scope_generation,created_at_ms) VALUES ('workspace',1,0);
+                 INSERT OR REPLACE INTO hosted_documents(workspace_id,object_id,path,state,scope_generation)
+                   VALUES ('workspace','document','document.md','{}',{})",
+                if parked { "parked" } else { "ready" },
+                if departed { 0 } else { 1 }
+            ),
+        );
+    }
+
+    fn bindings(service: &EngineService, workspace: &WorkspaceHandle) -> i64 {
+        let open = service.open(Some(workspace)).unwrap();
+        let store = dohc_engine_storage::EngineStore::open_read_only(&open.db_path).unwrap();
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT count(*) FROM live_device_application_bindings WHERE object_id='document'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap()
+    }
+
+    /// Release is only for the configured host, and only for a document that
+    /// left the scope: until then it tears nothing down. An adopted activation
+    /// then ends its runtime and waits to park, releases, and answers a
+    /// duplicate from its stored release. After a reconnect, nothing registers
+    /// for it, named or not.
+    #[tokio::test]
+    async fn an_adopted_release_waits_to_park_and_answers_its_replay() {
+        let (_scratch, service, owner, workspace, document, _) = retirement_fixture(true).await;
+        // The lineage's root adoption, which the adopted activation names.
+        let (claim, binding) = (
+            lineage(),
+            serde_json::to_string(&unload_binding("document")).unwrap(),
+        );
+        shape(
+            &service,
+            &workspace,
+            &format!(
+                "INSERT INTO live_owner_adoptions VALUES ('unload-test','activation','workspace','main','document',
+                    '{claim}','{binding}','moment','{claim}',0,0,0,'{claim}','{claim}',0,0,0,'null','{{}}',1,1)"
+            ),
+        );
+        let before = teardown(&service, &owner, &workspace, document);
+        let stranger = dohc_engine_protocol::transport::ConnectionOwner::authenticated();
+        let release = |ctx| service.call(ctx, release_request(&workspace, "activation"));
+        assert_eq!(
+            release(host_context(&stranger)).await.unwrap_err().code,
+            ErrorCode::SessionExpired
+        );
+        assert_eq!(
+            release(host_context(&owner)).await.unwrap_err().code,
+            ErrorCode::Conflict,
+            "not hosted"
+        );
+        host_document(&service, &workspace, false, false);
+        assert_eq!(
+            release(host_context(&owner)).await.unwrap_err().code,
+            ErrorCode::Conflict,
+            "in scope"
+        );
+        assert_eq!(teardown(&service, &owner, &workspace, document), before);
+        host_document(&service, &workspace, true, false);
+        assert_eq!(
+            release(host_context(&owner)).await.unwrap().response.result,
+            json!({"status":"pending","reason":"parking"})
+        );
+        assert_eq!(
+            teardown(&service, &owner, &workspace, document),
+            (false, None, before.2.clone(), true),
+            "Phase A ended its runtime and kept its binding"
+        );
+        host_document(&service, &workspace, true, true);
+        shape(
+            &service,
+            &workspace,
+            &format!(
+                "INSERT INTO live_accepted_checkpoints VALUES ('unload-test','workspace','main','document','{0}',0,0,
+                    'null','{{}}','{0}','{0}','{1}',NULL,NULL)",
+                lineage(),
+                "e".repeat(64)
+            ),
+        );
+        let boundary: Value = serde_json::from_str(RELEASED_BOUNDARY).unwrap();
+        assert_eq!(
+            release(host_context(&owner)).await.unwrap().response.result,
+            json!({"status":"released","replayed":false,"boundary":boundary})
+        );
+        assert_eq!(bindings(&service, &workspace), 0, "its own binding goes");
+        assert_eq!(
+            release(host_context(&owner)).await.unwrap().response.result,
+            json!({"status":"released","replayed":true,"boundary":boundary})
+        );
+        let reconnected = dohc_engine_protocol::transport::ConnectionOwner::authenticated();
+        service
+            .provision_live_application(
+                reconnected.handle(),
+                LiveApplicationHostConfig {
+                    workspace: workspace.clone(),
+                    namespace: "unload-test".into(),
+                    coordinate: ApplicationHostCoordinate {
+                        host_id: "host".into(),
+                        host_epoch: 1,
+                        instance_id: "instance".into(),
+                        connection_id: "reconnected".into(),
+                    },
+                    max_registrations: 4,
+                },
+            )
+            .await
+            .unwrap();
+        // Only the configured connection names an activation; the collab
+        // tests cover a named registration after a restart.
+        host_document(&service, &workspace, true, false);
+        assert_eq!(
+            register_document(&service, &reconnected, &workspace, None)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Conflict
+        );
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    /// A never-adopted source releases once its document left the scope,
+    /// before parking, ending its named binding; it never registers again.
+    #[tokio::test]
+    async fn a_never_adopted_release_ends_its_binding_before_parking() {
+        let (_scratch, service, owner, workspace, document, _) = retirement_fixture(false).await;
+        host_document(&service, &workspace, true, false);
+        let released = service
+            .call(
+                host_context(&owner),
+                release_request(&workspace, "activation"),
+            )
+            .await
+            .unwrap()
+            .response
+            .result;
+        assert_eq!(
+            released,
+            json!({"status":"released","replayed":false,"boundary":null})
+        );
+        assert!(
+            service
+                .live_application_registration(&owner.handle(), Some(&workspace), document)
+                .is_err()
+        );
+        assert_eq!(bindings(&service, &workspace), 0);
+        assert_eq!(
+            register_document(&service, &owner, &workspace, Some("activation"))
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Conflict
+        );
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    /// The retirement form of settle names a retirement instead of a
+    /// registration, never both, only for the configured host. An invalid
+    /// key tears nothing down, and no form opens a session.
+    #[tokio::test]
+    async fn the_retirement_form_of_settle_needs_no_registration() {
+        let (_scratch, service, owner, workspace, document, _) = retirement_fixture(true).await;
+        let before = teardown(&service, &owner, &workspace, document);
+        let sessions = lock(&service.sessions).len();
+        let settle = |params: Value| Request {
+            id: 95,
+            method: "liveApplication.settle".into(),
+            workspace: Some(workspace.clone()),
+            deadline_ms: Some(30_000),
+            idempotency_key: None,
+            progress: false,
+            params,
+        };
+        let key = |activation: &str| {
+            json!({"objectId":"document","lineageClaimId":lineage(),"activationId":activation,
+                "restoreFenceGeneration":0,"acceptedThrough":5})
+        };
+        let stranger = dohc_engine_protocol::transport::ConnectionOwner::authenticated();
+        for (ctx, params, code) in [
+            (
+                host_context(&owner),
+                json!({"registrationId":document,"retirement":key("activation"),"terminalReceipt":null}),
+                ErrorCode::InvalidParams,
+            ),
+            (
+                host_context(&owner),
+                json!({"terminalReceipt":null}),
+                ErrorCode::InvalidParams,
+            ),
+            (
+                host_context(&stranger),
+                json!({"retirement":key("activation"),"terminalReceipt":null}),
+                ErrorCode::SessionExpired,
+            ),
+            (
+                host_context(&owner),
+                json!({"retirement":key("unknown"),"terminalReceipt":null}),
+                ErrorCode::Conflict,
+            ),
+        ] {
+            assert_eq!(
+                service
+                    .call(ctx, settle(params.clone()))
+                    .await
+                    .unwrap_err()
+                    .code,
+                code,
+                "{params}"
+            );
+            assert_eq!(
+                teardown(&service, &owner, &workspace, document),
+                before,
+                "{params}"
+            );
+        }
+        // A valid key runs Phase A first; this fixture has no Y.Doc to settle.
+        assert!(
+            service
+                .call(
+                    host_context(&owner),
+                    settle(json!({"retirement":key("activation"),"terminalReceipt":null}))
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            teardown(&service, &owner, &workspace, document),
+            (false, None, before.2, true)
+        );
+        assert!(
+            lock(&service.sessions).len() < sessions,
+            "it ended the activation's session and opened none"
+        );
         service.workspace_close(Some(workspace)).await.unwrap();
     }
 

@@ -149,10 +149,11 @@ fn entry_admission_bytes(author: &Value) -> usize {
     author.to_string().len() + reserved_bytes(author)
 }
 
-/// Whether a current activation holds this lineage. Its native log also holds
-/// the owner's private edits until the relay accepts them, so its interval
-/// names only authors admitted with accepted content, never a native row's
-/// author ahead of acceptance.
+/// Whether a current activation holds this lineage, or a released one left
+/// carried deliveries in it. Its native log also holds the owner's edits
+/// until the host applies them as accepted, so its interval names only
+/// authors admitted with accepted content, never a native row's author ahead
+/// of acceptance.
 pub fn accepted_only_in(conn: &Connection, key: &DocKey) -> Result<bool, CollabError> {
     conn.query_row(
         &format!(
@@ -160,7 +161,7 @@ pub fn accepted_only_in(conn: &Connection, key: &DocKey) -> Result<bool, CollabE
              ON a.workspace_id=d.workspace_id AND a.main_version_id=d.version_id \
              AND a.object_id=d.object_id AND a.lineage_claim_id=d.lineage_claim_id \
              WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3)",
-            crate::live_update_application::owner_activations::CURRENT_ACTIVATIONS
+            crate::live_update_application::owner_activations::RETAINED_ACTIVATIONS
         ),
         params![key.workspace_id, key.version_id, key.object_id],
         |row| row.get(0),

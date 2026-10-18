@@ -52,8 +52,9 @@ pub(crate) mod restore_fence;
 mod restore_resume;
 mod retirement;
 pub use retirement::{
-    check_retirement, reconcile_activation, JournalEvidence, Reconciliation, RetirementKey,
-    RetirementScope, RetirementTarget,
+    check_retirement, reconcile_activation, release_activation, CarriedDelivery, JournalEvidence,
+    Reconciliation, Release, ReleasePending, RetainedPrefix, RetirementKey, RetirementScope,
+    RetirementTarget,
 };
 mod settlement;
 pub use bootstrap::{
@@ -72,7 +73,8 @@ pub use restore_fence::{
 pub use restore_fence::{NativeRestoreFence, NativeRestoreFenceReceipt, RestoreDeliveryOrigin};
 pub use restore_resume::{NativeRestoreResume, NativeRestoreResumeReceipt};
 pub use settlement::{
-    with_settlement, LiveSettlementAudit, LiveSettlementPublicationState, LiveSettlementResult,
+    with_retirement_settlement, with_settlement, LiveSettlementAudit,
+    LiveSettlementPublicationState, LiveSettlementResult,
 };
 
 #[derive(Debug, thiserror::Error)]

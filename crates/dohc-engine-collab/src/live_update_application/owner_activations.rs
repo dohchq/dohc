@@ -9,6 +9,14 @@ use super::*;
 pub const CURRENT_ACTIVATIONS: &str =
     "(SELECT * FROM live_owner_activations WHERE released_at_ms IS NULL)";
 
+/// Each lineage's current activation, and each released tail that carried
+/// deliveries no successor applied yet: the relay accepted them, and its
+/// native log still holds them unapplied.
+pub const RETAINED_ACTIVATIONS: &str = "(SELECT * FROM live_owner_activations v
+    WHERE released_at_ms IS NULL OR (json_array_length(carried_manifest_json)>0
+      AND NOT EXISTS(SELECT 1 FROM live_owner_activations s
+        WHERE s.relay_database_namespace=v.relay_database_namespace AND s.predecessor_activation_id=v.activation_id)))";
+
 /// Makes the adoption `(?1, ?2)` its lineage's first current activation.
 pub const ACTIVATE_ADOPTION: &str = "INSERT INTO live_owner_activations (relay_database_namespace,
     activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,origin_adoption_id,binding_json,
@@ -96,6 +104,27 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OwnerActivation> {
         adoption,
         released: row.get(15)?,
     })
+}
+
+/// Whether a retained activation of one of the workspace's documents adopted
+/// outbox limits above these, which a configured host's budget must cover.
+pub fn retained_limits_exceed(
+    conn: &Connection,
+    workspace_id: &str,
+    max_pending_bytes: i64,
+    max_pending_age_ms: i64,
+) -> Result<bool, ApplicationError> {
+    conn.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM {RETAINED_ACTIVATIONS} a JOIN ydoc_docs d
+               ON d.workspace_id=a.workspace_id AND d.version_id=a.main_version_id AND d.object_id=a.object_id
+               AND d.lineage_claim_id=a.lineage_claim_id
+             WHERE a.workspace_id=?1 AND (a.max_pending_bytes>?2 OR a.max_pending_age_ms>?3))"
+        ),
+        params![workspace_id, max_pending_bytes, max_pending_age_ms],
+        |row| row.get(0),
+    )
+    .map_err(read_sql)
 }
 
 /// The lineage's immutable origin: the adoption that first activated it.
@@ -209,7 +238,9 @@ pub fn released_chain_tail(
 /// The activation a registration serves. A named one is the lineage's current
 /// activation, or a retained source no activation recorded yet while nothing
 /// holds the lineage, which its adoption will activate. Without a name, the
-/// registration serves the current activation, if any.
+/// registration serves the current activation, if any. A lineage this relay
+/// adopted whose activation is released takes no unnamed registration: only
+/// an activation gives it live authority again.
 pub(super) fn registration_activation(
     conn: &Connection,
     namespace: &str,
@@ -224,6 +255,11 @@ pub(super) fn registration_activation(
     let current = current_activation(conn, None, &key, &binding.lineage_claim_id)?
         .map(|(activation, _)| activation);
     let Some(requested) = requested else {
+        if current.is_none()
+            && lineage_origin_id(conn, Some(namespace), &key, &binding.lineage_claim_id)?.is_some()
+        {
+            return Err(ApplicationError::Conflict);
+        }
         return Ok(current
             .filter(|activation| activation.namespace == namespace)
             .map(|activation| activation.activation_id));

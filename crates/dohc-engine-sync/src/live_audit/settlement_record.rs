@@ -724,7 +724,9 @@ mod tests {
                     if let Some(predecessor) = predecessor {
                         tx.execute(
                             "UPDATE live_owner_activations SET released_at_ms=20,released_restore_generation=0,
-                                released_accepted_cursor=terminal_cursor,released_boundary_json='[]',carried_manifest_json='[]'
+                                released_accepted_cursor=terminal_cursor,carried_manifest_json='[]',
+                                released_boundary_json=json_object('terminalReceipt',json(terminal_receipt_json),
+                                  'eventCount',0,'historyEvidenceDigest',evidence_digest)
                              WHERE activation_id=?1",
                             [predecessor],
                         )

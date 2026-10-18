@@ -3,7 +3,7 @@
 //! one validation of the activation and one representation of an adoption
 //! seed it never delivered.
 use super::owner_activations::{
-    activation_by_id, current_activation, lineage_origin_id, OwnerActivation,
+    activation_by_id, current_activation, lineage_origin_id, ActivationAdoption, OwnerActivation,
 };
 use super::*;
 use crate::owner_outbox::{
@@ -69,17 +69,41 @@ pub struct RetirementTarget {
 }
 
 /// Validate a retirement's key, before the caller changes any runtime state.
+/// A release also needs its document to have left the replica's scope.
 pub fn check_retirement(
     store: &EngineStore,
     scope: &RetirementScope<'_>,
     key: &RetirementKey,
+    release: bool,
 ) -> Result<RetirementTarget, ApplicationError> {
     store.read_with(|conn| {
-        validate_retirement(conn, scope, key).map(|retiring| RetirementTarget {
+        let retiring = validate_retirement(conn, scope, key)?;
+        let released = retiring.released_through.is_some();
+        if release && !released {
+            departed_parked(conn, &retiring.doc)?;
+        }
+        Ok(RetirementTarget {
             doc: retiring.doc,
-            released: retiring.released_through.is_some(),
+            released,
         })
     })
+}
+
+/// Whether the document, which must have left the replica's scope, parked.
+fn departed_parked(conn: &Connection, doc: &DocKey) -> Result<bool, ApplicationError> {
+    let hosted: Option<(bool, bool)> = conn
+        .query_row(
+            "SELECT d.scope_generation<>h.scope_generation,d.state='parked' FROM hosted_documents d
+             JOIN hosted_replicas h ON h.workspace_id=d.workspace_id WHERE d.workspace_id=?1 AND d.object_id=?2",
+            params![doc.workspace_id, doc.object_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(read_sql)?;
+    match hosted {
+        Some((true, parked)) => Ok(parked),
+        _ => Err(ApplicationError::Conflict),
+    }
 }
 
 /// The exact activation, or retained native source, a retirement names.
@@ -293,12 +317,13 @@ pub(crate) struct RetainedEntry {
 /// A native source names one binding and its origin. A larger one is corrupt.
 const MAX_NATIVE_SOURCE_BYTES: i64 = 262_144;
 
-/// The activation's entries that still need proof: pending ones, ones
-/// without a receipt that no host refused, and ones whose receipt passes F.
-fn unproven_entries(
+/// The activation's retained native entries. With `unproven_through`, only
+/// those that still need proof: pending ones, ones without a receipt that no
+/// host refused, and ones whose receipt passes F.
+fn retained_entries(
     conn: &Connection,
     retiring: &Retiring,
-    through: i64,
+    unproven_through: Option<i64>,
 ) -> Result<Vec<RetainedEntry>, ApplicationError> {
     let doc = &retiring.doc;
     let mut query = conn
@@ -309,7 +334,7 @@ fn unproven_entries(
              FROM owner_ydoc_outbox_entries e JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id
              WHERE o.workspace_id=?1 AND o.main_version_id=?2 AND o.object_id=?3 AND o.lineage_claim_id=?4
                AND e.native_source_json IS NOT NULL AND json_extract(e.native_source_json,'$.adoptionId')=?5
-               AND (e.pending=1 OR json_extract(e.accepted_receipt_json,'$.journalCursor')>?6
+               AND (?6 IS NULL OR e.pending=1 OR json_extract(e.accepted_receipt_json,'$.journalCursor')>?6
                  OR (e.accepted_receipt_json IS NULL AND (e.terminal_reason IS NULL OR e.terminal_reason=?7)))
              ORDER BY e.outbox_id,e.sequence",
         )
@@ -321,7 +346,7 @@ fn unproven_entries(
             doc.object_id,
             retiring.lineage_claim_id,
             retiring.activation_id,
-            through,
+            unproven_through,
             ACTIVATION_RELEASED
         ])
         .map_err(read_sql)?;
@@ -480,7 +505,8 @@ enum Answer<'a> {
 
 /// Reconcile the activation's deliveries with what the relay accepted, in
 /// one transaction. A pending result keeps the receipt work it proved; an
-/// integrity failure writes nothing.
+/// integrity failure writes nothing. A released activation answers from its
+/// stored release and writes nothing.
 pub fn reconcile_activation(
     store: &mut EngineStore,
     scope: &RetirementScope<'_>,
@@ -489,10 +515,45 @@ pub fn reconcile_activation(
     journal: Option<&JournalEvidence>,
     faults: &dyn FaultInjector,
 ) -> Result<Reconciliation, ApplicationError> {
+    let replayed = store.read_with(|conn| {
+        let retiring = validate_retirement(conn, scope, key)?;
+        match retiring.released_through {
+            Some(_) => released_reconciliation(conn, scope, &retiring, after).map(Some),
+            None => Ok(None),
+        }
+    })?;
+    if let Some(replayed) = replayed {
+        return Ok(replayed);
+    }
     match store.write_with(faults, |tx| reconcile_in_tx(tx, scope, key, after, journal))? {
         TxnOutcome::Committed(result) => Ok(result),
         TxnOutcome::Crashed { .. } => Err(ApplicationError::Interrupted),
     }
+}
+
+/// A released activation's reconciliation, from the boundary its release
+/// stored: its adoption, then its applications through that boundary, which
+/// it settled before release. A successor's history cannot move it.
+fn released_reconciliation(
+    conn: &Connection,
+    scope: &RetirementScope<'_>,
+    retiring: &Retiring,
+    after: Option<&LiveUpdateReceipt>,
+) -> Result<Reconciliation, ApplicationError> {
+    let Some(adopted) = retiring
+        .activation
+        .as_ref()
+        .and_then(|activation| activation.adoption.as_ref())
+    else {
+        return applications(conn, scope, retiring, after, 0, None);
+    };
+    let boundary = stored_boundary(conn, scope.namespace, &retiring.activation_id)?
+        .ok_or(ApplicationError::Corrupt)?;
+    let through = boundary
+        .terminal_receipt
+        .as_ref()
+        .map_or(adopted.terminal_cursor, |receipt| receipt.journal_cursor);
+    applications(conn, scope, retiring, after, through, None)
 }
 
 fn reconcile_in_tx(
@@ -503,6 +564,9 @@ fn reconcile_in_tx(
     journal: Option<&JournalEvidence>,
 ) -> Result<Reconciliation, ApplicationError> {
     let retiring = validate_retirement(tx, scope, key)?;
+    if retiring.released_through.is_some() {
+        return released_reconciliation(tx, scope, &retiring, after);
+    }
     let through = key.accepted_through;
     let mut answers = HashMap::new();
     if let Some(journal) = journal {
@@ -533,7 +597,7 @@ fn reconcile_in_tx(
     // delivered: nothing after it can be acknowledged.
     let mut stalled = BTreeSet::new();
     let mut seed_quarantined = false;
-    for entry in unproven_entries(tx, &retiring, through)? {
+    for entry in retained_entries(tx, &retiring, Some(through))? {
         if let Some(saved) = &entry.receipt {
             let saved: OwnerDeliveryReceipt =
                 serde_json::from_str(saved).map_err(|_| ApplicationError::Corrupt)?;
@@ -628,7 +692,7 @@ fn reconcile_in_tx(
             Reconciliation::PendingDelivery(unresolved)
         });
     }
-    applications(tx, scope, &retiring, after, through)
+    applications(tx, scope, &retiring, after, through, Some(through))
 }
 
 /// The receipt the activation's accepted history kept for `entry`, if any.
@@ -678,13 +742,16 @@ fn accepted_history_receipt(
 }
 
 /// The stored adoption ACK, then a bounded contiguous page of application
-/// ACKs after `after`, through the activation's applied endpoint and F.
+/// ACKs after `after`, through `through`. `settle_through` asks whether the
+/// activation applied past its last settlement through that cursor; a
+/// released one settled before release.
 fn applications(
     conn: &Connection,
     scope: &RetirementScope<'_>,
     retiring: &Retiring,
     after: Option<&LiveUpdateReceipt>,
     through: i64,
+    settle_through: Option<i64>,
 ) -> Result<Reconciliation, ApplicationError> {
     let Some(adopted) = retiring
         .activation
@@ -786,6 +853,478 @@ fn applications(
         }),
         applications,
         has_more_applications,
-        settle: settlement_pending(conn, scope.namespace, doc, lineage, Some(through))?,
+        settle: match settle_through {
+            Some(through) => {
+                settlement_pending(conn, scope.namespace, doc, lineage, Some(through))?
+            }
+            None => false,
+        },
     })
+}
+
+/// The accepted prefix a release kept: the activation's applied endpoint in
+/// its lineage's accepted history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RetainedPrefix {
+    pub terminal_receipt: Option<LiveUpdateReceipt>,
+    pub event_count: i64,
+    pub history_evidence_digest: String,
+}
+
+/// A delivery the relay accepted from the activation after its boundary,
+/// through F, that it never applied. Its successor carries it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CarriedDelivery {
+    pub receipt: LiveUpdateReceipt,
+    pub native_sequence: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Release {
+    Released {
+        replayed: bool,
+        boundary: Option<RetainedPrefix>,
+    },
+    Pending(ReleasePending),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReleasePending {
+    /// The adopted document left the scope but has not parked.
+    Parking,
+    /// Delivery or settlement completed since reconciliation; reconcile again.
+    Reconciliation,
+}
+
+/// Release the activation a retirement names, in one transaction that proves
+/// its delivery, application and settlement again. A released activation
+/// answers from its stored release and writes nothing.
+pub fn release_activation(
+    store: &mut EngineStore,
+    scope: &RetirementScope<'_>,
+    key: &RetirementKey,
+    host: &ApplicationHostCoordinate,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<Release, ApplicationError> {
+    integer(now_ms, 0, SAFE)?;
+    let replayed = store.read_with(|conn| {
+        let retiring = validate_retirement(conn, scope, key)?;
+        match retiring.released_through {
+            Some(_) => released(conn, scope.namespace, &retiring).map(Some),
+            None => Ok(None),
+        }
+    })?;
+    if let Some(replayed) = replayed {
+        return Ok(replayed);
+    }
+    match store.write_with(faults, |tx| release_in_tx(tx, scope, key, host, now_ms))? {
+        TxnOutcome::Committed(result) => Ok(result),
+        TxnOutcome::Crashed { .. } => Err(ApplicationError::Interrupted),
+    }
+}
+
+fn released(
+    conn: &Connection,
+    namespace: &str,
+    retiring: &Retiring,
+) -> Result<Release, ApplicationError> {
+    Ok(Release::Released {
+        replayed: true,
+        boundary: stored_boundary(conn, namespace, &retiring.activation_id)?,
+    })
+}
+
+fn stored_boundary(
+    conn: &Connection,
+    namespace: &str,
+    activation_id: &str,
+) -> Result<Option<RetainedPrefix>, ApplicationError> {
+    let json: String = conn
+        .query_row(
+            "SELECT released_boundary_json FROM live_owner_activations
+             WHERE relay_database_namespace=?1 AND activation_id=?2 AND released_at_ms IS NOT NULL",
+            params![namespace, activation_id],
+            |row| row.get(0),
+        )
+        .map_err(read_sql)?;
+    serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)
+}
+
+fn release_in_tx(
+    tx: &Transaction<'_>,
+    scope: &RetirementScope<'_>,
+    key: &RetirementKey,
+    host: &ApplicationHostCoordinate,
+    now_ms: i64,
+) -> Result<Release, ApplicationError> {
+    let retiring = validate_retirement(tx, scope, key)?;
+    if retiring.released_through.is_some() {
+        return released(tx, scope.namespace, &retiring);
+    }
+    let parked = departed_parked(tx, &retiring.doc)?;
+    let Some(adopted) = retiring
+        .activation
+        .as_ref()
+        .and_then(|activation| activation.adoption.clone())
+    else {
+        // An unadopted source keeps its document from parking, so it
+        // releases first.
+        return release_unadopted(tx, scope, key, &retiring, host, now_ms);
+    };
+    if !parked {
+        return Ok(Release::Pending(ReleasePending::Parking));
+    }
+    if !matches!(
+        reconcile_in_tx(tx, scope, key, None, None)?,
+        Reconciliation::Reconciled { settle: false, .. }
+    ) {
+        return Ok(Release::Pending(ReleasePending::Reconciliation));
+    }
+    let boundary = applied_boundary(
+        tx,
+        scope.namespace,
+        &retiring,
+        &adopted,
+        key.accepted_through,
+    )?;
+    let carried = classify(
+        tx,
+        scope.namespace,
+        &retiring,
+        &boundary,
+        key.accepted_through,
+    )?;
+    let changed = tx
+        .execute(
+            "UPDATE live_owner_activations SET released_at_ms=?3,released_restore_generation=?4,
+                released_accepted_cursor=?5,released_boundary_json=?6,carried_manifest_json=?7
+             WHERE relay_database_namespace=?1 AND activation_id=?2 AND released_at_ms IS NULL",
+            params![
+                scope.namespace,
+                key.activation_id,
+                now_ms,
+                key.restore_fence_generation,
+                key.accepted_through,
+                serde_json::to_string(&boundary).map_err(|_| ApplicationError::Corrupt)?,
+                serde_json::to_string(&carried).map_err(|_| ApplicationError::Corrupt)?
+            ],
+        )
+        .map_err(write_sql)?;
+    if changed != 1 || delete_own_binding(tx, scope.namespace, &retiring, key)? != 1 {
+        return Err(ApplicationError::Corrupt);
+    }
+    Ok(Release::Released {
+        replayed: false,
+        boundary: Some(boundary),
+    })
+}
+
+/// Delete only the binding the retirement names: its activation, lineage
+/// and generation.
+fn delete_own_binding(
+    tx: &Transaction<'_>,
+    namespace: &str,
+    retiring: &Retiring,
+    key: &RetirementKey,
+) -> Result<usize, ApplicationError> {
+    let doc = &retiring.doc;
+    tx.execute(
+        "DELETE FROM live_device_application_bindings WHERE relay_database_namespace=?1 AND workspace_id=?2
+           AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND activation_id=?6
+           AND restore_fence_generation=?7",
+        params![
+            namespace,
+            doc.workspace_id,
+            doc.version_id,
+            doc.object_id,
+            retiring.lineage_claim_id,
+            key.activation_id,
+            key.restore_fence_generation
+        ],
+    )
+    .map_err(write_sql)
+}
+
+/// A never-adopted source's release: a released row with its retained source
+/// identity, following its lineage's released tail and keeping that tail's
+/// boundary and carried deliveries.
+fn release_unadopted(
+    tx: &Transaction<'_>,
+    scope: &RetirementScope<'_>,
+    key: &RetirementKey,
+    retiring: &Retiring,
+    host: &ApplicationHostCoordinate,
+    now_ms: i64,
+) -> Result<Release, ApplicationError> {
+    let doc = &retiring.doc;
+    let lineage = retiring.lineage_claim_id.as_str();
+    let descriptor: String = tx
+        .query_row(
+            "SELECT descriptor_json FROM ydoc_owner_activation_sources WHERE activation_id=?1
+               AND relay_database_namespace=?2 AND workspace_id=?3 AND version_id=?4 AND object_id=?5
+               AND lineage_claim_id=?6",
+            params![
+                key.activation_id,
+                scope.namespace,
+                doc.workspace_id,
+                doc.version_id,
+                doc.object_id,
+                lineage
+            ],
+            |row| row.get(0),
+        )
+        .map_err(read_sql)?;
+    let source: ImportedOwnerSource =
+        serde_json::from_str(&descriptor).map_err(|_| ApplicationError::Corrupt)?;
+    let binding = match read_bound_binding(tx, scope.namespace, doc)? {
+        Some((binding, Some(named))) if named == key.activation_id => binding,
+        _ => LiveObjectBinding {
+            workspace_id: doc.workspace_id.clone(),
+            main_version_id: doc.version_id.clone(),
+            object_id: doc.object_id.clone(),
+            lineage_claim_id: lineage.to_owned(),
+            current_path: source.current_path.clone(),
+            selector_paths: vec![source.current_path.clone()],
+            restore_fence_generation: key.restore_fence_generation,
+        },
+    };
+    let predecessor = owner_activations::released_chain_tail(tx, scope.namespace, doc, lineage)?;
+    let (boundary, carried): (String, String) = match &predecessor {
+        Some(id) => tx
+            .query_row(
+                "SELECT released_boundary_json,carried_manifest_json FROM live_owner_activations
+                 WHERE relay_database_namespace=?1 AND activation_id=?2",
+                params![scope.namespace, id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(read_sql)?,
+        None => ("null".into(), "[]".into()),
+    };
+    let inherited: Option<RetainedPrefix> =
+        serde_json::from_str(&boundary).map_err(|_| ApplicationError::Corrupt)?;
+    serde_json::from_str::<Vec<CarriedDelivery>>(&carried)
+        .map_err(|_| ApplicationError::Corrupt)?;
+    tx.execute(
+        "INSERT INTO live_owner_activations (relay_database_namespace,activation_id,workspace_id,main_version_id,
+            object_id,lineage_claim_id,predecessor_activation_id,binding_json,source_moment_id,source_digest,
+            source_byte_length,host_coordinate_json,released_at_ms,released_restore_generation,
+            released_accepted_cursor,released_boundary_json,carried_manifest_json)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+        params![
+            scope.namespace,
+            key.activation_id,
+            doc.workspace_id,
+            doc.version_id,
+            doc.object_id,
+            lineage,
+            predecessor,
+            serde_json::to_string(&binding).map_err(|_| ApplicationError::Corrupt)?,
+            source.source_moment_id,
+            source.source_digest,
+            source.source_byte_length,
+            serde_json::to_string(host).map_err(|_| ApplicationError::Corrupt)?,
+            now_ms,
+            key.restore_fence_generation,
+            key.accepted_through,
+            boundary,
+            carried
+        ],
+    )
+    .map_err(write_sql)?;
+    delete_own_binding(tx, scope.namespace, retiring, key)?;
+    Ok(Release::Released {
+        replayed: false,
+        boundary: inherited,
+    })
+}
+
+/// B: the activation's latest applied receipt through F, or its adopted
+/// origin when nothing newer applied. The lineage's accepted history must
+/// end exactly there.
+fn applied_boundary(
+    conn: &Connection,
+    namespace: &str,
+    retiring: &Retiring,
+    adopted: &ActivationAdoption,
+    through: i64,
+) -> Result<RetainedPrefix, ApplicationError> {
+    let doc = &retiring.doc;
+    let document = params![
+        namespace,
+        doc.workspace_id,
+        doc.version_id,
+        doc.object_id,
+        retiring.lineage_claim_id
+    ];
+    let latest: Option<LiveUpdateReceipt> = conn
+        .query_row(
+            "SELECT delivery_id,update_digest,journal_cursor,accepting_host_epoch FROM live_device_update_applications
+             WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4
+               AND lineage_claim_id=?5 ORDER BY journal_cursor DESC LIMIT 1",
+            document,
+            |row| {
+                Ok(LiveUpdateReceipt {
+                    delivery_id: row.get(0)?,
+                    update_digest: row.get(1)?,
+                    journal_cursor: row.get(2)?,
+                    accepting_host_epoch: row.get(3)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(read_sql)?;
+    let applied = match latest {
+        Some(latest) if latest.journal_cursor > adopted.terminal_cursor => {
+            if latest.journal_cursor > through {
+                return Err(ApplicationError::Conflict);
+            }
+            Some(latest)
+        }
+        _ => serde_json::from_str(&adopted.terminal_receipt_json)
+            .map_err(|_| ApplicationError::Corrupt)?,
+    };
+    let endpoint = |sql: &str| -> Result<Option<(i64, String, String)>, ApplicationError> {
+        conn.query_row(sql, document, |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .optional()
+        .map_err(read_sql)
+    };
+    let event = endpoint(
+        "SELECT event_count,json_extract(metadata_json,'$.accepted.receipt'),evidence_digest FROM live_accepted_updates
+         WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4
+           AND lineage_claim_id=?5 ORDER BY event_count DESC LIMIT 1",
+    )?;
+    let checkpoint = endpoint(
+        "SELECT event_count,terminal_json,evidence_digest FROM live_accepted_checkpoints
+         WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4
+           AND lineage_claim_id=?5 ORDER BY event_count DESC LIMIT 1",
+    )?;
+    let (event_count, terminal, evidence) = match (event, checkpoint) {
+        (Some(event), Some(checkpoint)) if checkpoint.0 > event.0 => checkpoint,
+        (Some(endpoint), _) | (None, Some(endpoint)) => endpoint,
+        (None, None) => return Err(ApplicationError::Corrupt),
+    };
+    let terminal: Option<LiveUpdateReceipt> =
+        serde_json::from_str(&terminal).map_err(|_| ApplicationError::Corrupt)?;
+    if terminal != applied {
+        return Err(ApplicationError::Conflict);
+    }
+    Ok(RetainedPrefix {
+        terminal_receipt: applied,
+        event_count,
+        history_evidence_digest: evidence,
+    })
+}
+
+/// Classify each of the activation's retained native entries against B and
+/// F. Covered: accepted history at or below B keeps its exact receipt.
+/// Carried: a saved receipt in (B, F] for its own delivery, never applied.
+/// Abandoned: the strict seed representation. An entry a host refused was
+/// never accepted and needs none. Anything else refuses the release.
+fn classify(
+    conn: &Connection,
+    namespace: &str,
+    retiring: &Retiring,
+    boundary: &RetainedPrefix,
+    through: i64,
+) -> Result<Vec<CarriedDelivery>, ApplicationError> {
+    let applied_through = boundary
+        .terminal_receipt
+        .as_ref()
+        .map_or(0, |receipt| receipt.journal_cursor);
+    let mut carried = Vec::new();
+    for entry in retained_entries(conn, retiring, None)? {
+        let Some(saved) = &entry.receipt else {
+            match entry.terminal_reason.as_deref() {
+                Some(ACTIVATION_RELEASED)
+                    if is_abandoned_seed(conn, namespace, retiring, &entry)? =>
+                {
+                    continue
+                }
+                Some(reason) if reason != ACTIVATION_RELEASED && !entry.pending => continue,
+                _ => return Err(ApplicationError::Conflict),
+            }
+        };
+        let saved: OwnerDeliveryReceipt =
+            serde_json::from_str(saved).map_err(|_| ApplicationError::Corrupt)?;
+        let receipt = LiveUpdateReceipt {
+            delivery_id: saved.delivery_id,
+            update_digest: saved.update_digest,
+            journal_cursor: saved.journal_cursor,
+            accepting_host_epoch: saved.accepting_host_epoch,
+        };
+        receipt.validate().map_err(|_| ApplicationError::Corrupt)?;
+        if entry.pending
+            || receipt.delivery_id != entry.delivery_id
+            || receipt.update_digest != entry.update_digest
+            || receipt.journal_cursor > through
+        {
+            return Err(ApplicationError::Conflict);
+        }
+        if receipt.journal_cursor <= applied_through {
+            if accepted_history_receipt(conn, namespace, retiring, &entry)?.as_ref()
+                != Some(&receipt)
+            {
+                return Err(ApplicationError::Conflict);
+            }
+            continue;
+        }
+        let applied: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM live_device_update_applications WHERE relay_database_namespace=?1
+                   AND delivery_id=?2)",
+                params![namespace, entry.delivery_id],
+                |row| row.get(0),
+            )
+            .map_err(read_sql)?;
+        if applied {
+            return Err(ApplicationError::Conflict);
+        }
+        carried.push(CarriedDelivery {
+            receipt,
+            native_sequence: entry.source.native_sequence,
+        });
+    }
+    Ok(carried)
+}
+
+/// The registration a retirement settles through: the activation's own
+/// durable binding on this host, with no live registration behind it.
+pub(super) fn retiring_registration(
+    conn: &Connection,
+    scope: &RetirementScope<'_>,
+    key: &RetirementKey,
+    host: &ApplicationHostCoordinate,
+) -> Result<Registration, ApplicationError> {
+    let retiring = validate_retirement(conn, scope, key)?;
+    if retiring.released_through.is_some()
+        || retiring
+            .activation
+            .as_ref()
+            .and_then(|activation| activation.adoption.as_ref())
+            .is_none()
+    {
+        return Err(ApplicationError::Conflict);
+    }
+    let (binding, _) = read_bound_binding(conn, scope.namespace, &retiring.doc)?
+        .ok_or(ApplicationError::Conflict)?;
+    let mut held = Registration {
+        workspace_id: scope.workspace_id.to_owned(),
+        namespace: scope.namespace.to_owned(),
+        coordinate: host.clone(),
+        binding,
+        activation_id: Some(key.activation_id.clone()),
+        live: true,
+    };
+    let (_, coordinate, available) =
+        read_binding(conn, &held)?.ok_or(ApplicationError::Conflict)?;
+    if coordinate.host_id != host.host_id || !available {
+        return Err(ApplicationError::Conflict);
+    }
+    held.coordinate = coordinate;
+    Ok(held)
 }

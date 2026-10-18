@@ -4397,3 +4397,113 @@ async fn host_application_and_settlement_queue_no_native_update() {
     assert_eq!(native, 0);
     supervisor.close_all().unwrap();
 }
+
+/// The retirement form of settlement (Sol's plan §3): once Phase A ended
+/// the activation's registration, the host settles what it applied through
+/// its durable binding alone, materializes it, answers a replay with the
+/// same settlement, and refuses a terminal past F.
+#[tokio::test]
+async fn a_retiring_activation_settles_through_its_durable_binding() {
+    let f = Fixture::new();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    let owner = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    let handle = f.adopt(&owner).await;
+    let remote = Ydoc::wire();
+    remote.apply(&f.bytes).unwrap();
+    let declaration = AgentDeclaration {
+        agent_id: "remote-agent".into(),
+        on_behalf_of: Some("owner".into()),
+        depth: 1,
+    };
+    let mut terminal = None;
+    for cursor in 1..=2 {
+        let bytes = remote.richdoc_append_paragraph(&format!("Remote paragraph {cursor}"));
+        let (receipt, result) =
+            deliver_declared(&handle, &f.binding, cursor, &bytes, declaration.clone()).await;
+        assert!(matches!(result, ApplicationResult::Applied(..)));
+        terminal = Some(receipt);
+    }
+    let scope = dohc_engine_runtime::actor::OwnedRetirementScope {
+        namespace: "relay".into(),
+        max_deliveries: 8,
+        max_applications: 8,
+    };
+    let coordinate = ApplicationHostCoordinate {
+        host_id: "host".into(),
+        host_epoch: 1,
+        instance_id: "instance".into(),
+        connection_id: "connection".into(),
+    };
+    let key = |through| RetirementKey {
+        object_id: "object".into(),
+        lineage_claim_id: f.binding.lineage_claim_id.clone(),
+        activation_id: "adoption".into(),
+        restore_fence_generation: 0,
+        accepted_through: through,
+    };
+    let reconstruction = || AdmittedNativeHistoryReconstruction {
+        policy: NativeHistoryReconstruction {
+            working_reserve_bytes: 8 * 1024 * 1024,
+        },
+        reservation: Arc::new(()),
+    };
+    owner
+        .begin_retirement(scope.clone(), coordinate.clone(), key(10), false)
+        .await
+        .unwrap();
+    assert!(
+        handle
+            .settle(
+                terminal.clone(),
+                100,
+                f.root.path().to_owned(),
+                30,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+                reconstruction(),
+            )
+            .await
+            .is_err(),
+        "Phase A ended its registration"
+    );
+    let settle = |terminal: Option<LiveUpdateReceipt>, through| {
+        owner.settle_retirement(
+            scope.clone(),
+            coordinate.clone(),
+            key(through),
+            terminal,
+            100,
+            f.root.path().to_owned(),
+            30,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            reconstruction(),
+        )
+    };
+    assert!(matches!(
+        settle(terminal.clone(), 1).await,
+        Err(dohc_engine_runtime::RuntimeError::LiveApplication(
+            ApplicationError::Conflict
+        ))
+    ));
+    let settled = settle(terminal.clone(), 10).await.unwrap();
+    assert_eq!((settled.terminal_cursor, settled.application_count), (2, 2));
+    assert!(settled.materialized);
+    assert!(f.file().contains("Remote paragraph 2"));
+    assert_eq!(
+        settle(terminal, 10).await.unwrap().settlement_id,
+        settled.settlement_id
+    );
+    assert!(matches!(
+        owner
+            .reconcile_activation(scope, key(10), None, None)
+            .await
+            .unwrap(),
+        Reconciliation::Reconciled { settle: false, .. }
+    ));
+    supervisor.close_all().unwrap();
+}

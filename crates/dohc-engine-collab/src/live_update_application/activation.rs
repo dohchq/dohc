@@ -223,6 +223,13 @@ pub fn capture_imported_owner_activation(
             return Err(ApplicationError::ConfiguredByteBudgetExceeded);
         }
         let activation_id = format!("ordinary-activation-{}",hex_sha256(descriptor.as_bytes()));
+        // Another activation holds the lineage, so this capture could never
+        // adopt. Retained, nothing would release it, and it would keep its
+        // document from parking.
+        if owner_activations::current_activation(tx, None, key, &source.lineage_claim_id)?
+            .is_some_and(|(current, _)| current.namespace != namespace || current.activation_id != activation_id) {
+            return Err(ApplicationError::Conflict);
+        }
         let retained = dohc_engine_storage::put_binary_blob(tx, &full_state)?;
         if retained != source.full_state_digest { return Err(ApplicationError::Corrupt); }
         tx.execute("INSERT INTO ydoc_owner_activation_sources(activation_id,relay_database_namespace,workspace_id,version_id,object_id,lineage_claim_id,source_moment_id,source_digest,full_state_digest,descriptor_json)

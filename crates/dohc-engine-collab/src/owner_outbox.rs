@@ -557,6 +557,17 @@ fn append_with_retained_base(
                     "append limits differ from persisted owner adoption",
                 ));
             }
+        } else {
+            // A released lineage takes no owner delivery, and no limits bound
+            // one, until a successor activation holds it.
+            let released: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM live_owner_activations WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4)",
+                params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id],
+                |row| row.get(0),
+            ).map_err(read_sql)?;
+            if released {
+                return Err(OwnerOutboxError::Frozen);
+            }
         }
     }
     validate_identifier(

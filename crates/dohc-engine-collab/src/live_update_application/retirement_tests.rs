@@ -996,3 +996,786 @@ fn a_never_adopted_source_reconciles_only_against_its_own_binding() {
     ));
     assert_eq!(never_adopted_inventory(&f), before);
 }
+
+fn retirement_host() -> ApplicationHostCoordinate {
+    ApplicationHostCoordinate {
+        host_id: "host".into(),
+        host_epoch: 1,
+        instance_id: "instance".into(),
+        connection_id: "connection".into(),
+    }
+}
+
+/// The document as a hosted replica holds it: in its scope or departed
+/// from it, and parked or not.
+fn host_document(f: &mut Fixture, departed: bool, parked: bool) {
+    let sql = format!(
+        "INSERT OR IGNORE INTO sync_identity(workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms)
+           VALUES ('workspace','origin','epoch','stream',0);
+         INSERT OR IGNORE INTO hosted_replicas(workspace_id,scope_generation,created_at_ms) VALUES ('workspace',1,0);
+         INSERT OR REPLACE INTO hosted_documents(workspace_id,object_id,path,state,scope_generation)
+           VALUES ('workspace','object','owner.md','{}',{})",
+        if parked { "parked" } else { "ready" },
+        if departed { 0 } else { 1 }
+    );
+    write(f, &sql);
+}
+
+fn release_through(f: &mut Fixture, through: i64) -> Result<Release, ApplicationError> {
+    let key = retirement_key(f, through);
+    release_activation(&mut f.store, &retirement_scope(), &key, &retirement_host(), 30, &NoFaults)
+}
+
+/// The retirement form of settlement, projecting the accepted prefix when
+/// the audit names one.
+fn retirement_settle(
+    f: &mut Fixture,
+    through: i64,
+    terminal: Option<LiveUpdateReceipt>,
+) -> Result<LiveSettlementResult, ApplicationError> {
+    let key = retirement_key(f, through);
+    let doc_key = f.key.clone();
+    with_retirement_settlement(
+        &mut f.store,
+        &retirement_scope(),
+        &key,
+        &retirement_host(),
+        terminal,
+        128,
+        NativeHistoryReconstruction {
+            working_reserve_bytes: 8 * 1024 * 1024,
+        },
+        |store, audit| {
+            let (text, vector) = match audit.accepted_prefix() {
+                Some(doc) => (
+                    doc.project(ContentKind::Richdoc)?.content,
+                    hex_sha256(&doc.encode_state_vector()),
+                ),
+                None => {
+                    let doc = store.read_with(|conn| durable::load_doc_in(conn, &doc_key))?;
+                    (
+                        doc.project(ContentKind::Richdoc)?.content,
+                        hex_sha256(&doc.encode_state_vector()),
+                    )
+                }
+            };
+            let result = store.write_with(&NoFaults, |tx| -> Result<_, ApplicationError> {
+                let written = dohc_engine_domain::write_projected_text_in_tx(
+                    tx,
+                    dohc_engine_domain::ProjectedWriteText {
+                        workspace_id: "workspace",
+                        version_id: "main",
+                        object_id: "object",
+                        path: std::borrow::Cow::Borrowed("owner.md"),
+                        text: std::borrow::Cow::Borrowed(&text),
+                        moment_id: "retired",
+                        metadata_origin: "ydoc",
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 30,
+                        request_id: None,
+                    },
+                )
+                .map_err(|_| ApplicationError::Corrupt)?;
+                tx.execute(
+                    "UPDATE ydoc_docs SET last_settled_sha=?1 WHERE object_id='object'",
+                    [&written.snapshot.blob_sha256],
+                )
+                .map_err(write_sql)?;
+                let id = audit.record_in_tx(tx, "retired", &written.snapshot.blob_sha256, &vector, 30)?;
+                Ok(audit.result(id, "retired".into(), written.snapshot.blob_sha256, false))
+            })?;
+            let TxnOutcome::Committed(result) = result else {
+                return Err(ApplicationError::Interrupted);
+            };
+            Ok(result)
+        },
+    )
+}
+
+/// Every row of `tables`, so a step that must write nothing can be checked.
+fn rows(f: &Fixture, tables: &[&str]) -> Vec<String> {
+    f.store
+        .read_with(|conn| {
+            let mut rows = Vec::new();
+            for table in tables {
+                let mut statement = conn.prepare(&format!("SELECT * FROM {table} ORDER BY 1"))?;
+                let columns = statement.column_count();
+                let mut query = statement.query([])?;
+                while let Some(row) = query.next()? {
+                    let values = (0..columns)
+                        .map(|column| row.get::<_, rusqlite::types::Value>(column))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    rows.push(format!("{table} {values:?}"));
+                }
+            }
+            Ok::<_, rusqlite::Error>(rows)
+        })
+        .unwrap()
+}
+
+/// What a release must leave as it found it.
+const RELEASE_KEEPS: [&str; 11] = [
+    "live_owner_adoptions",
+    "ydoc_owner_activation_sources",
+    "live_device_update_applications",
+    "live_accepted_updates",
+    "live_accepted_checkpoints",
+    "live_device_settlements",
+    "live_restore_fences",
+    "ydoc_deferred_updates",
+    "owner_ydoc_outboxes",
+    "owner_ydoc_outbox_entries",
+    "moments",
+];
+
+/// Everything a release could write.
+const RELEASE_WRITES: [&str; 13] = [
+    "live_owner_activations",
+    "live_device_application_bindings",
+    "live_owner_adoptions",
+    "ydoc_owner_activation_sources",
+    "live_device_update_applications",
+    "live_accepted_updates",
+    "live_accepted_checkpoints",
+    "live_device_settlements",
+    "live_restore_fences",
+    "ydoc_deferred_updates",
+    "owner_ydoc_outboxes",
+    "owner_ydoc_outbox_entries",
+    "moments",
+];
+
+/// The bytes of the native update `delivery` queued.
+fn entry_update(f: &Fixture, delivery: &str) -> Vec<u8> {
+    f.store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT b.bytes FROM owner_ydoc_outbox_entries e JOIN binary_blobs b
+                   ON b.sha256=COALESCE(e.update_blob_digest,e.terminal_blob_digest,e.update_digest)
+                 WHERE e.delivery_id=?1",
+                [delivery],
+                |r| r.get(0),
+            )
+        })
+        .unwrap()
+}
+
+/// An adopted activation whose native update `covered` the host applied at
+/// cursor 3 and whose `carried` update the relay accepted at 5, after it,
+/// without the host applying it. An unrecorded source and a deferred input
+/// sit beside them. Returns the receipts and the carried native sequence.
+fn covered_and_carried() -> (Fixture, LiveUpdateReceipt, LiveUpdateReceipt, i64) {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let covered = native_tail_edit(&mut f, "# Covered\n", 11);
+    native_tail_apply(&mut f, covered.update.clone(), covered.delivery_id.clone(), 3);
+    let covered = receipt_of(&covered.delivery_id, &covered.update_digest, 3);
+    acknowledge_entry(&mut f, &covered);
+    let carried_entry = native_tail_edit(&mut f, "# Carried\n", 12);
+    let carried = receipt_of(&carried_entry.delivery_id, &carried_entry.update_digest, 5);
+    acknowledge_entry(&mut f, &carried);
+    let sequence: i64 = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT json_extract(native_source_json,'$.nativeSequence') FROM owner_ydoc_outbox_entries WHERE delivery_id=?1",
+                [&carried.delivery_id],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    retain_captured(&mut f);
+    write(
+        &mut f,
+        "INSERT INTO ydoc_deferred_updates(workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms)
+           VALUES ('workspace','main','object','remote-origin',1,5)",
+    );
+    (f, covered, carried, sequence)
+}
+
+/// Release (Sol's plan §3): an adopted activation releases only after its
+/// document left the scope and parked, and only once its delivery and
+/// settlement are reconciled again in the release's own transaction. It
+/// stores B, F and the carried deliveries, deletes only its own binding, and
+/// keeps everything else. Settled through F, it holds back neither unload
+/// nor parking. A duplicate release and a reconciliation answer from what it
+/// stored and write nothing.
+#[test]
+fn an_adopted_activation_releases_once_parked_and_reconciled() {
+    let (mut f, covered, carried, sequence) = covered_and_carried();
+    host_document(&mut f, false, false);
+    let before = rows(&f, &RELEASE_WRITES);
+    assert!(matches!(release_through(&mut f, 10), Err(ApplicationError::Conflict)), "still in the scope");
+    host_document(&mut f, true, false);
+    assert_eq!(release_through(&mut f, 10).unwrap(), Release::Pending(ReleasePending::Parking));
+    assert_eq!(rows(&f, &RELEASE_WRITES), before);
+    host_document(&mut f, true, true);
+    assert_eq!(
+        release_through(&mut f, 10).unwrap(),
+        Release::Pending(ReleasePending::Reconciliation),
+        "its application at 3 is not settled"
+    );
+    // The retirement form settles through F: the accepted prefix at 3, with
+    // the carried update waiting like a private edit.
+    assert!(matches!(
+        retirement_settle(&mut f, 10, Some(carried.clone())),
+        Err(ApplicationError::InvalidInput(_))
+    ), "only the latest application is its terminal");
+    let settled = retirement_settle(&mut f, 10, Some(covered.clone())).unwrap();
+    assert_eq!((settled.previous_cursor, settled.terminal_cursor), (0, 3));
+    let text: String = f
+        .store
+        .read_with(|conn| conn.query_row("SELECT b.text FROM moments m JOIN blobs b ON b.sha256=m.after_blob_sha256 WHERE m.moment_id='retired'", [], |r| r.get(0)))
+        .unwrap();
+    assert!(text.contains("Covered") && !text.contains("Carried"), "{text}");
+    let kept = rows(&f, &RELEASE_KEEPS);
+    let Release::Released { replayed: false, boundary: Some(boundary) } = release_through(&mut f, 10).unwrap() else {
+        panic!("released");
+    };
+    assert_eq!(boundary.terminal_receipt.as_ref(), Some(&covered));
+    assert_eq!(boundary.event_count, 1);
+    let stored: (i64, i64, String, String) = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT released_restore_generation,released_accepted_cursor,released_boundary_json,carried_manifest_json
+                 FROM live_owner_activations WHERE activation_id='adoption' AND released_at_ms=30",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!((stored.0, stored.1), (0, 10));
+    assert_eq!(serde_json::from_str::<RetainedPrefix>(&stored.2).unwrap(), boundary);
+    assert_eq!(
+        serde_json::from_str::<Vec<CarriedDelivery>>(&stored.3).unwrap(),
+        vec![CarriedDelivery { receipt: carried, native_sequence: sequence }]
+    );
+    assert_eq!(f.store.table_row_count("live_device_application_bindings").unwrap(), 0);
+    assert_eq!(rows(&f, &RELEASE_KEEPS), kept, "sources, history, settlements and input stay");
+    // Opus's round 2 F3: the settlement through F leaves nothing pending.
+    assert!(!f
+        .store
+        .read_with(|conn| settlement_pending(conn, "namespace", &f.key, &f.binding.lineage_claim_id, None))
+        .unwrap());
+    assert_eq!(f.store.read_with(|conn| park_pending(conn, "workspace", "object")).unwrap(), None);
+    // Exact replay: the stored release, with no writes.
+    let released = rows(&f, &RELEASE_WRITES);
+    assert_eq!(
+        release_through(&mut f, 10).unwrap(),
+        Release::Released { replayed: true, boundary: Some(boundary) }
+    );
+    let Reconciliation::Reconciled { adoption, applications, has_more_applications: false, settle: false } =
+        reconcile(&mut f, 10, None, None).unwrap()
+    else {
+        panic!("a released reconciliation replays");
+    };
+    assert!(adoption.is_some());
+    assert_eq!(applications.iter().map(|ack| ack.journal_cursor).collect::<Vec<_>>(), [3]);
+    assert_eq!(rows(&f, &RELEASE_WRITES), released);
+}
+
+/// Work that legitimately completed since reconciliation asks for another
+/// reconciliation; evidence that cannot hold refuses with no writes.
+#[test]
+fn a_release_recomputes_and_refuses_invalid_evidence_without_writes() {
+    // An application after the last reconciliation needs settling first.
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    host_document(&mut f, true, true);
+    assert!(matches!(reconcile(&mut f, 10, None, None).unwrap(), Reconciliation::Reconciled { settle: false, .. }));
+    let event = remote_event(&mut f, 2);
+    apply_event(&mut f, event).unwrap();
+    assert_eq!(release_through(&mut f, 10).unwrap(), Release::Pending(ReleasePending::Reconciliation));
+    // So does a native update still waiting for the relay.
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    host_document(&mut f, true, true);
+    native_tail_edit(&mut f, "# Pending\n", 11);
+    assert_eq!(release_through(&mut f, 10).unwrap(), Release::Pending(ReleasePending::Reconciliation));
+    assert_eq!(f.store.table_row_count("live_device_application_bindings").unwrap(), 1);
+    // An application past F refuses: B must be its last.
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let event = remote_event(&mut f, 11);
+    apply_event(&mut f, event).unwrap();
+    host_document(&mut f, true, true);
+    let before = rows(&f, &RELEASE_WRITES);
+    assert!(matches!(release_through(&mut f, 10), Err(ApplicationError::Conflict)));
+    assert_eq!(rows(&f, &RELEASE_WRITES), before);
+    // So does accepted history that ends elsewhere, and a receipt past F.
+    for damage in ["history endpoint", "receipt past F"] {
+        let (mut f, covered, _, _) = covered_and_carried();
+        host_document(&mut f, true, true);
+        retirement_settle(&mut f, 10, Some(covered)).unwrap();
+        let through = if damage == "receipt past F" {
+            4
+        } else {
+            // Accepted history still ends at 3, but nothing applied past the
+            // origin any more, so B is the origin.
+            write(
+                &mut f,
+                "DELETE FROM live_device_application_first_seen; DELETE FROM live_device_update_applications",
+            );
+            10
+        };
+        let before = rows(&f, &RELEASE_WRITES);
+        assert!(matches!(release_through(&mut f, through), Err(ApplicationError::Conflict)), "{damage}");
+        assert_eq!(rows(&f, &RELEASE_WRITES), before, "{damage}");
+    }
+}
+
+/// Each class needs its own evidence. Covered: accepted history keeps the
+/// exact receipt. Carried: the receipt names the entry's own delivery.
+/// Abandoned: the strict seed representation. One failing condition each
+/// refuses the release with no writes; intact, an abandoned seed releases
+/// at its origin with no settlement.
+#[test]
+fn each_release_class_needs_its_own_evidence() {
+    for (class, damage) in [
+        (
+            "covered",
+            "UPDATE owner_ydoc_outbox_entries SET accepted_receipt_json=json_set(accepted_receipt_json,'$.acceptingHostEpoch',2)
+             WHERE json_extract(accepted_receipt_json,'$.journalCursor')=3",
+        ),
+        (
+            "carried",
+            "UPDATE owner_ydoc_outbox_entries SET accepted_receipt_json=json_set(accepted_receipt_json,'$.deliveryId','another')
+             WHERE json_extract(accepted_receipt_json,'$.journalCursor')=5",
+        ),
+    ] {
+        let (mut f, covered, _, _) = covered_and_carried();
+        host_document(&mut f, true, true);
+        retirement_settle(&mut f, 10, Some(covered)).unwrap();
+        write(&mut f, damage);
+        let before = rows(&f, &RELEASE_WRITES);
+        assert!(matches!(release_through(&mut f, 10), Err(ApplicationError::Conflict)), "{class}");
+        assert_eq!(rows(&f, &RELEASE_WRITES), before, "{class}");
+    }
+    for intact in [false, true] {
+        let (mut f, seed, _) = seeded();
+        let absent = JournalEvidence { receipts: vec![], absent: vec![seed] };
+        reconcile(&mut f, 10, None, Some(&absent)).unwrap();
+        host_document(&mut f, true, true);
+        if !intact {
+            write(&mut f, "UPDATE owner_ydoc_outbox_entries SET terminal_blob_digest=update_digest");
+        }
+        let before = rows(&f, &RELEASE_WRITES);
+        let released = release_through(&mut f, 10);
+        if intact {
+            let Release::Released { boundary: Some(boundary), .. } = released.unwrap() else {
+                panic!("an abandoned seed releases");
+            };
+            assert_eq!((boundary.terminal_receipt, boundary.event_count), (None, 0));
+            assert_eq!(f.store.table_row_count("live_device_settlements").unwrap(), 0);
+        } else {
+            assert!(released.is_err());
+            assert_eq!(rows(&f, &RELEASE_WRITES), before);
+        }
+    }
+}
+
+/// A never-adopted source releases before parking, which it would hold back,
+/// but only once its document left the scope. It follows its lineage's
+/// released tail and keeps that tail's boundary, and deletes only a binding
+/// that names it.
+#[test]
+fn a_never_adopted_source_releases_before_parking() {
+    for named in [false, true] {
+        let mut f = never_adopted();
+        if named {
+            write(&mut f, "UPDATE live_device_application_bindings SET activation_id='captured'");
+        }
+        host_document(&mut f, false, false);
+        assert!(matches!(release_through(&mut f, 10), Err(ApplicationError::Conflict)));
+        host_document(&mut f, true, false);
+        assert_eq!(
+            release_through(&mut f, 10).unwrap(),
+            Release::Released { replayed: false, boundary: None }
+        );
+        let row: (Option<String>, Option<String>, Option<i64>, i64, String) = f
+            .store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT origin_adoption_id,predecessor_activation_id,terminal_cursor,released_accepted_cursor,
+                        carried_manifest_json FROM live_owner_activations WHERE activation_id='captured'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(row, (None, None, None, 10, "[]".to_owned()));
+        assert_eq!(
+            f.store.table_row_count("live_device_application_bindings").unwrap(),
+            if named { 0 } else { 1 },
+            "named={named}"
+        );
+        assert_eq!(f.store.table_row_count("ydoc_owner_activation_sources").unwrap(), 1);
+        assert_eq!(
+            release_through(&mut f, 10).unwrap(),
+            Release::Released { replayed: true, boundary: None }
+        );
+    }
+    // After an adopted predecessor's release, it inherits that boundary.
+    let (mut f, covered, carried, sequence) = covered_and_carried();
+    host_document(&mut f, true, true);
+    retirement_settle(&mut f, 10, Some(covered)).unwrap();
+    let Release::Released { boundary, .. } = release_through(&mut f, 10).unwrap() else {
+        panic!("released");
+    };
+    f.cut.adoption_id = "captured".into();
+    assert_eq!(
+        release_through(&mut f, 12).unwrap(),
+        Release::Released { replayed: false, boundary }
+    );
+    let (predecessor, manifest): (String, String) = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT predecessor_activation_id,carried_manifest_json FROM live_owner_activations WHERE activation_id='captured'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(predecessor, "adoption");
+    assert_eq!(
+        serde_json::from_str::<Vec<CarriedDelivery>>(&manifest).unwrap(),
+        vec![CarriedDelivery { receipt: carried, native_sequence: sequence }]
+    );
+}
+
+/// Opus's round 2 F5: a released activation answers from its stored release
+/// once a successor holds the lineage and applied the carried delivery,
+/// which a recomputation would count. It writes nothing.
+#[test]
+fn a_released_replay_answers_from_its_release_after_a_successor() {
+    let (mut f, covered, carried, _) = covered_and_carried();
+    host_document(&mut f, true, true);
+    retirement_settle(&mut f, 10, Some(covered.clone())).unwrap();
+    let released = release_through(&mut f, 10).unwrap();
+    let reconciled = reconcile(&mut f, 10, None, None).unwrap();
+    add_activation(&mut f, "successor", "adoption", false, 3);
+    host_document(&mut f, true, false);
+    let successor = f
+        ._owner
+        .register_activation(&mut f.store, "namespace".into(), retirement_host(), f.binding.clone(), "successor".into())
+        .unwrap();
+    let entry = entry_update(&f, &carried.delivery_id);
+    let event = native_tail_event(&f, entry, carried.delivery_id.clone(), 5);
+    assert!(matches!(
+        apply_committed(&mut f.store, &mut WriterDocCache::new(), &successor, event, &NoFaults, 100_000_000, |_, _, _, _| Ok(())).unwrap(),
+        ApplicationResult::Applied(..)
+    ));
+    let before = rows(&f, &RELEASE_WRITES);
+    assert_eq!(
+        release_through(&mut f, 10).unwrap(),
+        match released {
+            Release::Released { boundary, .. } => Release::Released { replayed: true, boundary },
+            pending => panic!("{pending:?}"),
+        }
+    );
+    assert_eq!(reconcile(&mut f, 10, None, None).unwrap(), reconciled);
+    assert_eq!(reconcile(&mut f, 10, Some(&covered), None).unwrap(), Reconciliation::Reconciled {
+        adoption: match &reconciled { Reconciliation::Reconciled { adoption, .. } => adoption.clone(), _ => None },
+        applications: vec![],
+        has_more_applications: false,
+        settle: false,
+    });
+    assert_eq!(rows(&f, &RELEASE_WRITES), before);
+}
+
+/// Opus's round 3a note: only release ends an abandoned seed's hold, by
+/// retiring its activation. A successor's hold names only its own seed, so
+/// the predecessor's abandoned seed never holds it.
+#[test]
+fn only_release_ends_an_abandoned_seed_hold() {
+    let (mut f, seed, _) = seeded();
+    let absent = JournalEvidence { receipts: vec![], absent: vec![seed] };
+    reconcile(&mut f, 10, None, Some(&absent)).unwrap();
+    let hold = |f: &Fixture| {
+        f.store
+            .read_with(|conn| super::super::seed_hold(conn, "namespace", &f.binding))
+            .unwrap()
+    };
+    assert!(matches!(hold(&f), Some(SeedHold::Abandoned)));
+    host_document(&mut f, true, false);
+    assert_eq!(release_through(&mut f, 10).unwrap(), Release::Pending(ReleasePending::Parking));
+    assert!(matches!(hold(&f), Some(SeedHold::Abandoned)), "pending release keeps it");
+    host_document(&mut f, true, true);
+    assert!(matches!(release_through(&mut f, 10).unwrap(), Release::Released { .. }));
+    assert!(hold(&f).is_none());
+    // A successor with a retained source of its own, and no seed yet.
+    let predecessor = f.cut.adoption_id.clone();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO ydoc_owner_activation_sources SELECT 'successor',relay_database_namespace,workspace_id,
+                    version_id,object_id,lineage_claim_id,source_moment_id,source_digest,full_state_digest,descriptor_json
+                 FROM ydoc_owner_activation_sources WHERE activation_id=?1",
+                [&predecessor],
+            )
+            .map_err(write_sql)?;
+            tx.execute(
+                "INSERT INTO live_owner_activations (relay_database_namespace,activation_id,workspace_id,main_version_id,
+                    object_id,lineage_claim_id,origin_adoption_id,predecessor_activation_id,binding_json,source_moment_id,
+                    source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,
+                    host_coordinate_json,evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,
+                    terminal_cursor,terminal_receipt_json,max_pending_bytes,max_pending_age_ms)
+                 SELECT relay_database_namespace,'successor',workspace_id,main_version_id,object_id,lineage_claim_id,
+                    origin_adoption_id,activation_id,binding_json,source_moment_id,source_digest,source_byte_length,
+                    baseline_moment_relay_sequence,baseline_registered_at_ms,host_coordinate_json,evidence_digest,
+                    coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,
+                    max_pending_bytes,max_pending_age_ms
+                 FROM live_owner_activations WHERE activation_id=?1",
+                [&predecessor],
+            )
+            .map_err(write_sql)
+        })
+        .unwrap();
+    assert!(hold(&f).is_none(), "the successor's hold names only its own seed");
+}
+
+/// Opus's round 3a F5: a restore moves the generation a retirement's key
+/// names. While the activation retires, in memory after Phase A or durably
+/// once its seed was abandoned, a restore fence is refused and writes nothing.
+#[test]
+fn a_restore_waits_while_its_activation_retires() {
+    let fence = |f: &mut Fixture| {
+        let terminal = f.cut.terminal_receipt.clone();
+        let sequence = f.cut.expected_local_sequence;
+        let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
+        f._owner.fence_restore(
+            &mut f.store,
+            NativeRestoreFence {
+                operation_id: "restore".into(),
+                relay_database_namespace: "namespace".into(),
+                old_binding: f.binding.clone(),
+                host_id: "host".into(),
+                new_fence: 1,
+                origin: RestoreDeliveryOrigin::Owner { id: f.cut.adoption_id.clone() },
+                terminal,
+                applied_sequence: sequence,
+            },
+            coordinate,
+            40,
+            &NoFaults,
+        )
+    };
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let key = f.key.clone();
+    f._owner.retire_activation(&mut WriterDocCache::new(), "namespace", &retirement_host(), &key, "adoption");
+    assert!(matches!(fence(&mut f), Err(ApplicationError::Conflict)));
+    assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 0);
+    // An abandoned seed holds it after a restart forgot Phase A.
+    let (mut f, seed, _) = seeded();
+    let absent = JournalEvidence { receipts: vec![], absent: vec![seed] };
+    reconcile(&mut f, 10, None, Some(&absent)).unwrap();
+    assert!(matches!(fence(&mut f), Err(ApplicationError::Conflict)));
+    assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 0);
+    // Not retiring, the same fence lands.
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    fence(&mut f).unwrap();
+}
+
+/// Sol: a released activation never regains live authority, after a
+/// reconnect (a new owner, whose retired set is empty) or a restart (the
+/// store reopened), whether it adopted or not.
+#[test]
+fn a_released_activation_never_regains_live_authority() {
+    for adopted in [true, false] {
+        let mut f = if adopted {
+            let mut f = Fixture::new();
+            f.adopt().unwrap();
+            f
+        } else {
+            never_adopted()
+        };
+        host_document(&mut f, true, true);
+        assert!(matches!(release_through(&mut f, 10).unwrap(), Release::Released { .. }), "adopted={adopted}");
+        host_document(&mut f, true, false);
+        drop(f.store);
+        f.store = EngineStore::open(&f._scratch.join("engine.db"), 31).unwrap();
+        let mut owner = ApplicationOwner::new("workspace".into()).unwrap();
+        let id = f.cut.adoption_id.clone();
+        assert!(matches!(
+            owner.register_activation(&mut f.store, "namespace".into(), retirement_host(), f.binding.clone(), id),
+            Err(ApplicationError::Conflict)
+        ), "adopted={adopted}");
+        // Unnamed, an adopted lineage refuses; a lineage never adopted takes
+        // an ordinary registration that serves no activation.
+        let unnamed = owner.register(&mut f.store, "namespace".into(), retirement_host(), f.binding.clone());
+        if adopted {
+            assert!(matches!(unnamed, Err(ApplicationError::Conflict)));
+            assert_eq!(f.store.table_row_count("live_device_application_bindings").unwrap(), 0);
+        } else {
+            assert_eq!(unnamed.unwrap().activation_id(), None);
+        }
+    }
+}
+
+/// N-c: a capture on a lineage another activation holds could never adopt.
+/// It writes nothing, so no unrecorded source holds its document unparked.
+#[test]
+fn a_capture_on_a_held_lineage_retains_nothing() {
+    let mut f = imported_fixture();
+    let first = capture_imported(&mut f, 1_000_000).unwrap();
+    f.cut.adoption_id = first.activation_id.clone();
+    f.adopt().unwrap();
+    assert_eq!(
+        capture_imported(&mut f, 1_000_000).unwrap().activation_id,
+        first.activation_id,
+        "the holding activation's own capture replays"
+    );
+    write(&mut f, "UPDATE sync_relay_cursors SET cursor='10'");
+    let before = rows(&f, &["ydoc_owner_activation_sources", "binary_blobs"]);
+    assert!(matches!(capture_imported(&mut f, 1_000_000), Err(ApplicationError::Conflict)));
+    assert_eq!(rows(&f, &["ydoc_owner_activation_sources", "binary_blobs"]), before);
+}
+
+/// The readers that change once the current activation is released (round
+/// 3, "Gap after release"), each before and after the release.
+#[test]
+fn readers_after_a_release() {
+    let (mut f, covered, carried, _) = covered_and_carried();
+    host_document(&mut f, true, true);
+    retirement_settle(&mut f, 10, Some(covered)).unwrap();
+    let key = f.key.clone();
+    let binding = f.binding.clone();
+    let bootstrap_tip = |f: &Fixture| {
+        let held = f.handle.registration.lock().unwrap();
+        let input = NativeRestoreFence {
+            operation_id: "restore".into(),
+            relay_database_namespace: "namespace".into(),
+            old_binding: f.binding.clone(),
+            host_id: "host".into(),
+            new_fence: 1,
+            origin: RestoreDeliveryOrigin::Bootstrap { id: "bootstrap".into() },
+            terminal: None,
+            applied_sequence: 0,
+        };
+        f.store.read_with(|conn| super::super::restore_fence::applied_tip(conn, &held, &input))
+    };
+    let append = |f: &mut Fixture, max_pending_bytes: i64| {
+        owner_outbox::append(
+            &mut f.store,
+            "workspace",
+            owner_outbox::OwnerOutboxAppendInput {
+                binding: f.binding.clone(),
+                base_update: f.cut.baseline_bytes.clone(),
+                append_key: "after-release".into(),
+                update: f.doc.encode_full_state(),
+                limits: owner_outbox::OwnerOutboxLimits { max_pending_bytes, max_pending_age_ms: 100_000 },
+                created_at_ms: 40,
+            },
+        )
+    };
+    let refuse = |f: &mut Fixture| {
+        let outbox: String = f
+            .store
+            .read_with(|conn| conn.query_row("SELECT outbox_id FROM owner_ydoc_outbox_entries WHERE delivery_id=?1", [&carried.delivery_id], |r| r.get(0)))
+            .unwrap();
+        let input = owner_outbox::OwnerOutboxRefuseInput {
+            outbox_id: outbox,
+            delivery_id: carried.delivery_id.clone(),
+            update_digest: carried.update_digest.clone(),
+            reason: "refused".into(),
+        };
+        f.store.write_with(&NoFaults, |tx| owner_outbox::refuse_entry_in_tx(tx, "workspace", &input, 40).map(|_| ()))
+    };
+    let held = |f: &Fixture| {
+        f.store
+            .read_with(|conn| {
+                Ok::<_, ApplicationError>((
+                    crate::author_coverage::accepted_only_in(conn, &key).map_err(ApplicationError::Collab)?,
+                    owner_outbox::has_adopted_owner_in(conn, &key).map_err(ApplicationError::Collab)?,
+                    owner_outbox::enrollment::capture_in(conn, &binding).is_ok(),
+                    // A configured host whose budget is below the adopted one.
+                    owner_activations::retained_limits_exceed(conn, "workspace", 999_999, 100_000)?,
+                ))
+            })
+            .unwrap()
+    };
+    // Before: the current activation holds every one of them.
+    assert!(matches!(bootstrap_tip(&f), Err(ApplicationError::Conflict)));
+    assert_eq!(held(&f), (true, true, false, true));
+    assert!(matches!(append(&mut f, 1), Err(owner_outbox::OwnerOutboxError::InvalidInput(_))));
+    assert!(refuse(&mut f).is_err());
+    assert!(matches!(observe(&mut f), Err(owner_outbox::OwnerOutboxError::ParentMismatch)));
+    release_through(&mut f, 10).unwrap();
+    // The lineage's origin still refuses a bootstrap restore, even from a
+    // bootstrap the host kept.
+    let (binding_json, host) = (
+        serde_json::to_string(&f.binding).unwrap(),
+        serde_json::to_string(&retirement_host()).unwrap(),
+    );
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO live_device_bootstraps(relay_database_namespace,workspace_id,main_version_id,object_id,
+                    lineage_claim_id,bootstrap_id,bootstrap_moment_id,baseline_moment_relay_sequence,
+                    baseline_registered_at_ms,baseline_digest,baseline_byte_length,projected_markdown_digest,
+                    projected_markdown_byte_length,binding_json,host_coordinate_json,local_ydoc_sequence)
+                 VALUES ('namespace','workspace','main','object',?1,'bootstrap','original',1,3,?1,?2,?3,?4,?5,?6,0)",
+                params![
+                    f.binding.lineage_claim_id,
+                    f.cut.baseline_bytes.len() as i64,
+                    f.cut.source_digest,
+                    f.cut.source_byte_length,
+                    binding_json,
+                    host
+                ],
+            )
+            .map_err(write_sql)
+        })
+        .unwrap();
+    assert!(matches!(bootstrap_tip(&f), Err(ApplicationError::Conflict)));
+    write(&mut f, "DELETE FROM live_device_bootstraps");
+    // Its carried delivery keeps coverage accepted-only and its budget
+    // retained; ordinary ownership and enrollment see no current owner.
+    assert_eq!(held(&f), (true, false, true, true));
+    write(&mut f, "UPDATE live_owner_activations SET carried_manifest_json='[]'");
+    assert_eq!(held(&f), (false, false, true, false), "with nothing carried, nothing is retained");
+    // No owner delivery lands on the released lineage, under any limits.
+    let entries = f.store.table_row_count("owner_ydoc_outbox_entries").unwrap();
+    assert!(matches!(append(&mut f, 1_000_000), Err(owner_outbox::OwnerOutboxError::Frozen)));
+    // Its delivered entries stay accepted; none is refused afterwards.
+    assert!(refuse(&mut f).is_err());
+    assert_eq!(f.store.table_row_count("owner_ydoc_outbox_entries").unwrap(), entries);
+    // An observed binding installs only on the exact local state, which
+    // still holds the carried update.
+    assert!(observe(&mut f).is_ok());
+}
+
+/// Install an observed binding of the document at its exact local state.
+fn observe(f: &mut Fixture) -> Result<(), owner_outbox::OwnerOutboxError> {
+    let key = f.key.clone();
+    let (head, local) = f
+        .store
+        .read_with(|conn| {
+            let head: i64 = conn
+                .query_row("SELECT head_update_seq FROM ydoc_docs WHERE object_id='object'", [], |r| r.get(0))
+                .map_err(read_sql)?;
+            Ok::<_, ApplicationError>((head, durable::load_doc_in(conn, &key)?.encode_full_state()))
+        })
+        .unwrap();
+    let observed = owner_outbox::draft::ObservedOwnerBinding {
+        binding: f.binding.clone(),
+        relay_database_namespace: "namespace".into(),
+        revision: 1,
+        accepted_cursor: 0,
+        native_head_sequence: head,
+        checkpoint_digest: hex_sha256(&local),
+        limits: owner_outbox::OwnerOutboxLimits { max_pending_bytes: 1_000_000, max_pending_age_ms: 100_000 },
+    };
+    match f.store.write_with(&NoFaults, |tx| {
+        owner_outbox::draft::install_observed_binding_in_tx(tx, "workspace", &observed, &local)
+    })? {
+        TxnOutcome::Committed(()) => Ok(()),
+        TxnOutcome::Crashed { .. } => panic!("observed binding crash"),
+    }
+}

@@ -5132,7 +5132,7 @@ fn only_its_own_activation_keeps_a_captured_source() {
                    released_at_ms,released_restore_generation,released_accepted_cursor, \
                    released_boundary_json,carried_manifest_json) \
                  VALUES ('relay','released','ws','main','doc-b',?1,'{}','moment-owner-1',?2,8,'{}', \
-                   1,0,0,'[]','[]')",
+                   1,0,0,'null','[]')",
                 params![lineage, text_sha("hosted b")],
             )
             .map_err(SyncError::persist)?;
@@ -5166,6 +5166,47 @@ fn only_its_own_activation_keeps_a_captured_source() {
     sync_parking(&client, &mut store);
     assert!(is_parked(&store, "doc-b"));
     assert_eq!(sources(&store), 2, "recorded sources stay for the return");
+}
+
+/// A folder move is held only while the current activation holds the
+/// document. Its release ends that, though the lineage's origin stays; the
+/// conflict and binding-change checks read the same current activation.
+#[test]
+fn a_released_activation_no_longer_holds_a_folder_move() {
+    let (_scratch, _path, mut store, _client) = departing_b();
+    let lineage = activate(&mut store, "doc-b");
+    adopt_activation(&mut store, "doc-b", &lineage, "relay");
+    let update = |store: &mut EngineStore, sql: &str| {
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(sql, []).map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+    };
+    update(
+        &mut store,
+        "UPDATE live_owner_activations SET binding_json=json_object('currentPath','a.md')",
+    );
+    let move_held = |store: &EngineStore| {
+        store
+            .read_with(|conn| crate::ensure_no_adopted_owner_under_path(conn, "ws", "main", "a.md"))
+    };
+    assert!(matches!(
+        move_held(&store),
+        Err(SyncError::LiveDocumentBindingActive)
+    ));
+    update(
+        &mut store,
+        "UPDATE live_owner_activations SET released_at_ms=1,released_restore_generation=0, \
+           released_accepted_cursor=0,released_boundary_json='null',carried_manifest_json='[]'",
+    );
+    assert!(move_held(&store).is_ok());
+    assert_eq!(
+        count(&store, "SELECT COUNT(*) FROM live_owner_adoptions"),
+        1,
+        "the origin stays"
+    );
 }
 
 /// Parking keeps the existing restore check: a document whose restore has

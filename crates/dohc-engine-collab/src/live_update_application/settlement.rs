@@ -434,12 +434,6 @@ pub fn with_settlement<E, T>(
 where
     E: From<ApplicationError> + From<StorageError>,
 {
-    if max_applications == 0 || max_applications >= i64::MAX as usize {
-        return Err(E::from(invalid("invalid settlement application limit")));
-    }
-    if let Some(receipt) = &terminal {
-        receipt.validate().map_err(E::from)?;
-    }
     let held = handle
         .registration
         .lock()
@@ -447,26 +441,95 @@ where
     if !held.live {
         return Err(E::from(ApplicationError::Interrupted));
     }
+    settle_held(
+        store,
+        &held,
+        terminal,
+        max_applications,
+        reconstruction,
+        None,
+        settle,
+    )
+}
+
+/// The retirement form of [`with_settlement`]: settle the activation a
+/// retirement names through its own durable binding, with no live
+/// registration. Its terminal is its latest application through F, and the
+/// deliveries the relay accepted from it after that terminal, which it never
+/// applied, wait like its private edits.
+#[allow(clippy::too_many_arguments)]
+pub fn with_retirement_settlement<E, T>(
+    store: &mut EngineStore,
+    scope: &super::RetirementScope<'_>,
+    key: &super::RetirementKey,
+    host: &ApplicationHostCoordinate,
+    terminal: Option<LiveUpdateReceipt>,
+    max_applications: usize,
+    reconstruction: NativeHistoryReconstruction,
+    settle: impl FnOnce(&mut EngineStore, &LiveSettlementAudit) -> Result<T, E>,
+) -> Result<T, E>
+where
+    E: From<ApplicationError> + From<StorageError>,
+{
+    let held = store
+        .read_with(|conn| super::retirement::retiring_registration(conn, scope, key, host))
+        .map_err(E::from)?;
+    if terminal
+        .as_ref()
+        .is_some_and(|receipt| receipt.journal_cursor > key.accepted_through)
+    {
+        return Err(E::from(ApplicationError::Conflict));
+    }
+    settle_held(
+        store,
+        &held,
+        terminal,
+        max_applications,
+        reconstruction,
+        Some(key.accepted_through),
+        settle,
+    )
+}
+
+/// `carried_through` is F for a retirement's settlement.
+fn settle_held<E, T>(
+    store: &mut EngineStore,
+    held: &Registration,
+    terminal: Option<LiveUpdateReceipt>,
+    max_applications: usize,
+    reconstruction: NativeHistoryReconstruction,
+    carried_through: Option<i64>,
+    settle: impl FnOnce(&mut EngineStore, &LiveSettlementAudit) -> Result<T, E>,
+) -> Result<T, E>
+where
+    E: From<ApplicationError> + From<StorageError>,
+{
+    if max_applications == 0 || max_applications >= i64::MAX as usize {
+        return Err(E::from(invalid("invalid settlement application limit")));
+    }
+    if let Some(receipt) = &terminal {
+        receipt.validate().map_err(E::from)?;
+    }
     let audit = store.read_with(|conn| -> Result<LiveSettlementAudit, ApplicationError> {
-        require_workspace(conn, &held)?;
-        if !read_binding(conn,&held)?.is_some_and(|(binding,coordinate,available)| available && binding == held.binding && coordinate == held.coordinate) { return Err(ApplicationError::Interrupted); }
+        require_workspace(conn, held)?;
+        if !read_binding(conn,held)?.is_some_and(|(binding,coordinate,available)| available && binding == held.binding && coordinate == held.coordinate) { return Err(ApplicationError::Interrupted); }
         let b = &held.binding;
         validate_historical_binding(b,b)?;
         let key = DocKey::new(&b.workspace_id,&b.main_version_id,&b.object_id)?;
         let marker = durable::read_marker_in(conn,&key)?.ok_or(ApplicationError::Corrupt)?;
         if marker.regime != Regime::Replicated || marker.lineage_claim_status != durable::LineageClaimStatus::Exact || marker.content_kind != crate::ContentKind::Richdoc || marker.lineage_claim_id.as_deref()!=Some(b.lineage_claim_id.as_str()) || marker.path.as_deref()!=Some(b.current_path.as_str()) { return Err(ApplicationError::Conflict); }
-        let owner_origin = adoption::read_origin(conn,&held)?;
-        let restored_origin = restore::restored_origin(conn,&held)?;
+        let owner_origin = adoption::read_origin(conn,held)?;
+        let restored_origin = restore::restored_origin(conn,held)?;
         let (original_binding,origin_moment,origin_digest,origin_cursor,origin_sequence) = if let Some(origin) = &restored_origin {
             (origin.binding.clone(),origin.moment.clone(),origin.markdown.clone(),origin.cursor,origin.sequence)
         } else if let Some(origin) = &owner_origin {
             (origin.binding.clone(),origin.source_moment.clone(),origin.source_digest.clone(),origin.terminal.as_ref().map_or(0,|r|r.journal_cursor),origin.sequence)
         } else {
-            let (bootstrap,original_binding,_,_) = bootstrap::read_bootstrap(conn,&held)?.ok_or(ApplicationError::Corrupt)?;
+            let (bootstrap,original_binding,_,_) = bootstrap::read_bootstrap(conn,held)?.ok_or(ApplicationError::Corrupt)?;
             (original_binding,bootstrap.bootstrap_moment_id,bootstrap.projected_markdown_digest,0,0)
         };
         validate_historical_binding(&original_binding,b)?;
-        let latest = latest_receipt(conn,&held)?;
+        let latest = latest_receipt(conn,held)?;
         if latest != terminal { return Err(invalid("settlement terminal is not current")); }
         let terminal_cursor = terminal.as_ref().map_or(0,|r|r.journal_cursor);
         let previous: Option<(i64,i64,i64,i64,Option<i64>)> = conn.query_row(
@@ -496,14 +559,14 @@ where
             Some((_,end,_,end_sequence,_)) if end == terminal_cursor && restored_origin.as_ref().is_some_and(|anchor|anchor.cursor == end) => (end,end_sequence,None),
             Some((start,end,start_sequence,end_sequence,_)) if end == terminal_cursor => (start,start_sequence,Some(end_sequence)),
             Some((_,end,_,end_sequence,refused_start)) if end < terminal_cursor => {
-                let cursor = if let Some(start) = refused_start { verified_previous_cursor(conn,&held,start,origin_cursor,max_applications)? } else {end};
+                let cursor = if let Some(start) = refused_start { verified_previous_cursor(conn,held,start,origin_cursor,max_applications)? } else {end};
                 (cursor,end_sequence,None)
             },
             Some(_) => return Err(ApplicationError::Corrupt),
             None => (origin_cursor,origin_sequence,None),
         };
         if replayed.is_some_and(|sequence| sequence < previous_sequence || sequence > head) { return Err(ApplicationError::Corrupt); }
-        let receipts = read_interval(conn,&held,previous_cursor,terminal_cursor,max_applications)?;
+        let receipts = read_interval(conn,held,previous_cursor,terminal_cursor,max_applications)?;
         let mut sequences=HashSet::new();
         for (delivery,hash,cursor,epoch,sequence,_) in &receipts {
             LiveUpdateReceipt { delivery_id:delivery.clone(),update_digest:hash.clone(),journal_cursor:*cursor,accepting_host_epoch:*epoch }.validate()?;
@@ -514,14 +577,14 @@ where
         // Every native sequence since the last settlement is an accepted
         // application or one of this owner's own updates still waiting for
         // the relay. Its own later application counts by journal cursor.
-        let tail = private_tail(conn,&held,previous_sequence,head)?;
+        let tail = private_tail(conn,held,previous_sequence,head,carried_through.map(|through| (terminal_cursor,through)))?;
         sequences.extend(tail.sequences.iter().copied());
         if sequences.len() as i64 != head-previous_sequence { return Err(invalid("settlement application coverage is incomplete")); }
         let accepted = if tail.any {
             // Accepting the pending seed must not roll back the owner's file
             // to an accepted state that lacks its pre-adoption head.
             if tail.seed { return Err(invalid("the owner's adoption seed must be accepted before a settlement")); }
-            Some(accepted_history::read_state(conn,&held,terminal_cursor,reconstruction)?)
+            Some(accepted_history::read_state(conn,held,terminal_cursor,reconstruction)?)
         } else {
             None
         };
@@ -587,7 +650,8 @@ const MAX_NATIVE_SOURCE_BYTES: i64 = 262_144;
 
 /// This owner's own native updates that the relay has not accepted: pending
 /// adopted entries of the current outbox with no application of their
-/// delivery.
+/// delivery. A retirement's settlement also counts the ones the relay
+/// accepted after its terminal, through F, which it will never apply.
 #[derive(Default)]
 struct PrivateTail {
     /// Their native sequences after `previous_sequence`, each verified
@@ -600,11 +664,13 @@ struct PrivateTail {
     terminal: bool,
 }
 
+/// `carried` is a retirement's terminal cursor and F.
 fn private_tail(
     conn: &Connection,
     held: &Registration,
     previous_sequence: i64,
     head: i64,
+    carried: Option<(i64, i64)>,
 ) -> Result<PrivateTail, ApplicationError> {
     let b = &held.binding;
     let key = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)?;
@@ -618,38 +684,29 @@ fn private_tail(
     let Some(adoption) = adoption else {
         return Ok(PrivateTail::default());
     };
-    let tail = "FROM owner_ydoc_outbox_entries e JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE o.workspace_id=?1 AND o.main_version_id=?2 AND o.object_id=?3 AND o.lineage_claim_id=?4 AND o.restore_fence_generation=?5 AND o.current_path=?6 AND (e.pending=1 OR (e.pending=0 AND e.terminal_reason IS NOT NULL AND e.terminal_blob_digest=e.update_digest AND e.accepted_receipt_json IS NULL)) AND e.native_source_json IS NOT NULL AND NOT EXISTS(SELECT 1 FROM live_device_update_applications a WHERE a.relay_database_namespace=?7 AND a.delivery_id=e.delivery_id)";
-    let any: bool = conn
-        .query_row(
-            &format!("SELECT EXISTS(SELECT 1 {tail})"),
-            params![
-                b.workspace_id,
-                b.main_version_id,
-                b.object_id,
-                b.lineage_claim_id,
-                b.restore_fence_generation,
-                b.current_path,
-                held.namespace
-            ],
-            |row| row.get(0),
-        )
-        .map_err(read_sql)?;
-    let seed: bool = conn.query_row(&format!("SELECT EXISTS(SELECT 1 {tail} AND e.pending=1 AND json_extract(e.native_source_json,'$.origin.kind')='adoptionSeed')"),params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.restore_fence_generation,b.current_path,held.namespace],|row|row.get(0)).map_err(read_sql)?;
+    let tail = "FROM owner_ydoc_outbox_entries e JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE o.workspace_id=?1 AND o.main_version_id=?2 AND o.object_id=?3 AND o.lineage_claim_id=?4 AND o.restore_fence_generation=?5 AND o.current_path=?6 AND (e.pending=1 OR (e.pending=0 AND e.terminal_reason IS NOT NULL AND e.terminal_blob_digest=e.update_digest AND e.accepted_receipt_json IS NULL) OR (?11 IS NOT NULL AND e.pending=0 AND e.terminal_reason IS NULL AND json_extract(e.accepted_receipt_json,'$.journalCursor')>?10 AND json_extract(e.accepted_receipt_json,'$.journalCursor')<=?11)) AND e.native_source_json IS NOT NULL AND NOT EXISTS(SELECT 1 FROM live_device_update_applications a WHERE a.relay_database_namespace=?7 AND a.delivery_id=e.delivery_id)";
     let gap = head - previous_sequence;
-    let mut query = conn.prepare(&format!("SELECT e.append_key,e.update_digest,length(CAST(e.native_source_json AS BLOB)),e.native_source_json,e.pending {tail} AND (json_extract(e.native_source_json,'$.nativeSequence')>?8 OR (json_extract(e.native_source_json,'$.nativeSequence')=?8 AND json_extract(e.native_source_json,'$.origin.kind')='adoptionSeed')) ORDER BY e.outbox_id,e.sequence LIMIT ?9")).map_err(read_sql)?;
-    let mut rows = query
-        .query(params![
-            b.workspace_id,
-            b.main_version_id,
-            b.object_id,
-            b.lineage_claim_id,
-            b.restore_fence_generation,
-            b.current_path,
-            held.namespace,
-            previous_sequence,
-            gap + 2
-        ])
+    let bound = params![
+        b.workspace_id,
+        b.main_version_id,
+        b.object_id,
+        b.lineage_claim_id,
+        b.restore_fence_generation,
+        b.current_path,
+        held.namespace,
+        previous_sequence,
+        gap + 2,
+        carried.map(|(terminal, _)| terminal),
+        carried.map(|(_, through)| through)
+    ];
+    let any: bool = conn
+        .query_row(&format!("SELECT EXISTS(SELECT 1 {tail})"), bound, |row| {
+            row.get(0)
+        })
         .map_err(read_sql)?;
+    let seed: bool = conn.query_row(&format!("SELECT EXISTS(SELECT 1 {tail} AND e.pending=1 AND json_extract(e.native_source_json,'$.origin.kind')='adoptionSeed')"),bound,|row|row.get(0)).map_err(read_sql)?;
+    let mut query = conn.prepare(&format!("SELECT e.append_key,e.update_digest,length(CAST(e.native_source_json AS BLOB)),e.native_source_json,e.pending,e.accepted_receipt_json IS NOT NULL {tail} AND (json_extract(e.native_source_json,'$.nativeSequence')>?8 OR (json_extract(e.native_source_json,'$.nativeSequence')=?8 AND json_extract(e.native_source_json,'$.origin.kind')='adoptionSeed')) ORDER BY e.outbox_id,e.sequence LIMIT ?9")).map_err(read_sql)?;
+    let mut rows = query.query(bound).map_err(read_sql)?;
     let mut sequences = Vec::new();
     let mut terminal = false;
     while let Some(row) = rows.next().map_err(read_sql)? {
@@ -660,7 +717,9 @@ fn private_tail(
         let append_key: String = row.get(0).map_err(read_sql)?;
         let digest: String = row.get(1).map_err(read_sql)?;
         let json: String = row.get(3).map_err(read_sql)?;
-        let pending: bool = row.get(4).map_err(read_sql)?;
+        // A refused entry is terminal; a pending or carried one still waits.
+        let refused = !row.get::<_, bool>(4).map_err(read_sql)?
+            && !row.get::<_, bool>(5).map_err(read_sql)?;
         let source: crate::owner_outbox::OwnerOutboxNativeSource =
             serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)?;
         source
@@ -680,7 +739,7 @@ fn private_tail(
             source.origin,
             crate::owner_outbox::OwnerOutboxNativeOrigin::AdoptionSeed
         );
-        terminal |= !pending
+        terminal |= refused
             && (source.native_sequence > previous_sequence
                 || adoption_seed && previous_sequence == source.native_sequence);
         if source.native_sequence > previous_sequence {

@@ -80,7 +80,7 @@ fn add_activation(f: &mut Fixture, id: &str, predecessor: &str, released: bool, 
                  VALUES ('namespace',?1,'workspace','main','object',?2,iif(?8,NULL,'adoption'),?3,?4,?5,?6,?7,1,3,'{}',
                     iif(?8,NULL,'evidence'),iif(?8,NULL,'coverage'),iif(?8,NULL,0),iif(?8,NULL,?9),
                     iif(?8,NULL,0),iif(?8,NULL,'null'),iif(?8,NULL,1),iif(?8,NULL,1),
-                    iif(?8,20,NULL),iif(?8,0,NULL),iif(?8,0,NULL),iif(?8,'[]',NULL),iif(?8,'[]',NULL))",
+                    iif(?8,20,NULL),iif(?8,0,NULL),iif(?8,0,NULL),iif(?8,'null',NULL),iif(?8,'[]',NULL))",
                 params![id, f.binding.lineage_claim_id, predecessor, binding, moment, digest, length, released, sequence],
             )
             .map_err(write_sql)?;
@@ -111,7 +111,7 @@ fn release_unadopted(
                     main_version_id,object_id,lineage_claim_id,predecessor_activation_id,binding_json,
                     source_moment_id,source_digest,source_byte_length,host_coordinate_json,released_at_ms,
                     released_restore_generation,released_accepted_cursor,released_boundary_json,carried_manifest_json)
-                 VALUES (?1,?2,'workspace','main',?3,?4,?5,?6,?7,?8,?9,'{}',20,0,0,'[]','[]')",
+                 VALUES (?1,?2,'workspace','main',?3,?4,?5,?6,?7,?8,?9,'{}',20,0,0,'null','[]')",
                 params![namespace, id, object, f.binding.lineage_claim_id, predecessor, binding, moment, digest, length],
             )
             .map_err(write_sql)?;
@@ -131,7 +131,9 @@ fn release(f: &mut Fixture, id: &str) {
         .write_with(&NoFaults, |tx| {
             tx.execute(
                 "UPDATE live_owner_activations SET released_at_ms=20,released_restore_generation=0,
-                    released_accepted_cursor=0,released_boundary_json='[]',carried_manifest_json='[]'
+                    released_accepted_cursor=0,carried_manifest_json='[]',
+                    released_boundary_json=json_object('terminalReceipt',json(terminal_receipt_json),
+                      'eventCount',0,'historyEvidenceDigest',evidence_digest)
                  WHERE activation_id=?1",
                 [id],
             )
