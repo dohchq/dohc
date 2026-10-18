@@ -433,3 +433,22 @@ it("does not ask for another page after the document changes", async () => {
   expect(linksIn).toHaveBeenCalledTimes(2);
   expect(screen.queryByText("Stale")).toBeNull();
 });
+
+it("retries an incomplete walk even when a later page fails", async () => {
+  vi.useFakeTimers();
+  try {
+    const linksIn = vi.fn()
+      .mockResolvedValueOnce({ ...linkQueryPage(backlinksSource("Partial")), complete: false, nextCursor: "next" })
+      .mockRejectedValueOnce(new Error("page failed"))
+      .mockResolvedValueOnce(linkQueryPage(backlinksSource("Ready")));
+    vi.stubGlobal("dohcDesktop", { linksIn });
+    render(<BacklinksPanel workspaceId="ws" path="target.md" />);
+    await act(async () => {});
+    expect(screen.getByRole("status").textContent).toBe("Gathering linked mentions");
+    await act(async () => vi.advanceTimersByTimeAsync(250));
+    expect(linksIn).toHaveBeenCalledTimes(3);
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.getByTestId("backlink-source").textContent).toContain("Ready");
+    cleanup();
+  } finally { vi.useRealTimers(); }
+});

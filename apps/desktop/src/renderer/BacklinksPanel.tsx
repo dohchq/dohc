@@ -96,6 +96,7 @@ export function BacklinksPanel(props: {
   const chatMentionsAvailable = props.chatMentionsAvailable === true;
   const [focusNonce, setFocusNonce] = useState(0);
   const previousRequest = useRef<BacklinksLoadRequest | null>(null);
+  const completion = useRef<{ workspaceId: string; path: string; complete: boolean } | null>(null);
   const current =
     loaded?.workspaceId === workspaceId && loaded.path === path ? loaded : null;
   const sources = current?.sources ?? [];
@@ -115,6 +116,8 @@ export function BacklinksPanel(props: {
     let active = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let delay = 250;
+    let incomplete = completion.current?.workspaceId === workspaceId
+      && completion.current.path === path && !completion.current.complete;
     const identity = { chatMentionsAvailable, workspaceId, path, refreshKey, focusNonce };
     const prior = previousRequest.current;
     const focusOnly = prior && sameBacklinksLoadBase(prior.identity, identity)
@@ -131,7 +134,11 @@ export function BacklinksPanel(props: {
           entries.push(...(page?.entries ?? []));
           complete &&= page?.complete ?? true;
           cursor = page?.nextCursor ?? undefined;
-          if (active && !complete) setGathering({ workspaceId, path });
+          if (!complete) incomplete = true;
+          if (active && !complete) {
+            completion.current = { workspaceId, path, complete: false };
+            setGathering({ workspaceId, path });
+          }
           if (!active && cursor) return { ok: false };
         } while (cursor);
         return { ok: true, result: { sources: sourcesFor(entries), complete } };
@@ -140,10 +147,11 @@ export function BacklinksPanel(props: {
     const publish = (outcome: BacklinksLoadOutcome) => {
       if (!active) return;
       if (outcome.ok) {
+        completion.current = { workspaceId, path, complete: outcome.result.complete };
         setLoaded({ workspaceId, path, ...outcome.result });
         setGathering(outcome.result.complete ? null : { workspaceId, path });
       }
-      if ((outcome.ok && !outcome.result.complete) || (!outcome.ok && delay > 250)) {
+      if ((outcome.ok && !outcome.result.complete) || (!outcome.ok && incomplete)) {
         timer = setTimeout(() => {
           delay = Math.min(delay * 2, 8000);
           const response = walk();

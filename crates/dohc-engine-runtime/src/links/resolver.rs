@@ -94,7 +94,11 @@ pub(super) fn target(raw: &str) -> Option<String> {
 pub(super) fn creation_path(source: &str, raw: &str, kind: &str) -> Option<String> {
     let target = target(raw)?;
     let directory = source.rsplit_once('/').map_or("", |(dir, _)| dir);
-    let candidate = if target.starts_with('/') || directory.is_empty() {
+    let rooted_wikilink = kind == "wikilink"
+        && target.contains('/')
+        && !target.starts_with("./")
+        && !target.starts_with("../");
+    let candidate = if target.starts_with('/') || directory.is_empty() || rooted_wikilink {
         target.trim_start_matches('/').to_owned()
     } else {
         format!("{directory}/{target}")

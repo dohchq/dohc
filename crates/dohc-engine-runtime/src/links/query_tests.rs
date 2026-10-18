@@ -422,6 +422,11 @@ async fn resolve_uses_uncaptured_source_paths_and_returns_creation_paths() {
     let cases = [
         (
             "wikilink",
+            "folder/new",
+            json!({"path":null,"create":"folder/new.md","fragment":null}),
+        ),
+        (
+            "wikilink",
             "target",
             json!({"path":"target.md","fragment":null}),
         ),
