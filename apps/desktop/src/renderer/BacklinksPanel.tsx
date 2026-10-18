@@ -5,6 +5,7 @@ import type {
   GetBacklinksResult,
 } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
+import { Ref } from "./ui/Ref";
 import { useAsyncResponseEffect } from "./useAsyncResponseEffect";
 
 type BacklinkSource = GetBacklinksResult["sources"][number];
@@ -246,12 +247,7 @@ export function BacklinksPanel(props: {
                   data-path={source.sourcePath}
                   onClick={() => props.onOpenPath?.(source.sourcePath)}
                 >
-                  <span className="dohc-backlinks__source-title">
-                    {source.sourceTitle}
-                  </span>
-                  <span className="dohc-backlinks__source-path">
-                    {source.sourcePath}
-                  </span>
+                  <Ref path={source.sourcePath} title={source.sourceTitle} folder />
                 </button>
                 <ul className="dohc-backlinks__snippets">
                   {source.snippets.map((snippet, index) => {

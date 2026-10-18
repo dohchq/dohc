@@ -12,13 +12,12 @@ import type {
   ChatRunRecord,
 } from "../../ipc/bridgeContract";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
-import { basenameOf } from "../path";
+import { Ref } from "../ui/Ref";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { formatChatTime, formatClockDigits, formatShortTime } from "../time";
 import { CopyButton } from "../ui/CopyButton";
 import { ChatAvatar } from "./ChatAvatar";
 import {
-  ChatFileIcon,
   MentionText,
   MessageReactions,
   TOOLBAR_BUTTON,
@@ -29,11 +28,6 @@ import {
 import { SaveAsFileActions, titleRepeatsFirstLine } from "./PostCard";
 import { runnerProgram, type ChatsNav } from "./ChatsView";
 import { buildThreadCommentTree, type ThreadCommentNode } from "./threadCommentTree";
-
-function pathBasename(pathHint: string | undefined): string {
-  if (!pathHint) return "attachment";
-  return basenameOf(pathHint.replace(/\\/g, "/").replace(/\/+$/, "")) || "attachment";
-}
 
 // "4s", "1m 20s", "2h 5m".
 function formatRunDuration(ms: number): string {
@@ -189,50 +183,20 @@ function AttachmentChip(props: {
   attachment: ChatAttachmentRecord;
   onOpenPath?: (path: string, headingAnchor?: string) => void;
 }) {
-  const label = pathBasename(props.attachment.pathHint);
-  const title = `${props.attachment.pathHint ?? label}${
-    props.attachment.headingText ? `#${props.attachment.headingText}` : ""
-  }`;
-  const className =
-    "inline-flex items-center gap-1 rounded-full border border-line bg-panel-2 px-2 py-0.5 font-mono text-[10px] text-muted";
-  const content = (
-    <>
-      <ChatFileIcon path={props.attachment.pathHint ?? ""} className="shrink-0" />
-      <span className="max-w-56 truncate">{label}</span>
-      {props.attachment.headingText ? (
-        <span className="max-w-48 truncate text-subtle">
-          #{props.attachment.headingText}
-        </span>
-      ) : null}
-    </>
-  );
-  if (props.attachment.pathHint && props.onOpenPath) {
-    return (
-      <button
-        type="button"
-        data-testid="chats-attachment-chip"
-        title={title}
-        onClick={() => {
-          const path = props.attachment.pathHint ?? "";
-          if (props.attachment.headingAnchor) {
-            props.onOpenPath?.(path, props.attachment.headingAnchor);
-          } else {
-            props.onOpenPath?.(path);
-          }
-        }}
-        className={`${className} cursor-pointer hover:border-muted/50 hover:text-ink dohc-focus-visible`}
-      >
-        {content}
-      </button>
-    );
-  }
+  const { pathHint, headingAnchor, headingText } = props.attachment;
+  const onOpenPath = props.onOpenPath;
+  // A shared view can hold an attachment whose path it may not read: the
+  // chip names it only as an attachment and opens nothing.
+  if (!pathHint) return <Ref path="" title="attachment" testId="chats-attachment-chip" />;
   return (
-    <span
-      data-testid="chats-attachment-chip"
-      className={className}
-    >
-      {content}
-    </span>
+    <Ref
+      path={pathHint}
+      heading={headingText}
+      testId="chats-attachment-chip"
+      onOpen={onOpenPath
+        ? () => (headingAnchor ? onOpenPath(pathHint, headingAnchor) : onOpenPath(pathHint))
+        : undefined}
+    />
   );
 }
 

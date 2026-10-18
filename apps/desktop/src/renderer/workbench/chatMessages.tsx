@@ -5,10 +5,10 @@ import { LegendList, type LegendListRef, type OnViewableItemsChanged } from "@le
 import { formatChatDay, formatChatTime, formatClock, formatClockDigits, sameChatDay } from "../time";
 import { ChatAvatar } from "./ChatAvatar";
 import { ComposerSendButton } from "./ComposerSendButton";
-import { basenameOf } from "../path";
+import { Ref } from "../ui/Ref";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { isComposingKey, isSendKey } from "../ui/keys";
-import { Database, File, FileText, Image, SmilePlus } from "lucide-react";
+import { SmilePlus } from "lucide-react";
 import {
   memo,
   useCallback,
@@ -31,7 +31,7 @@ import {
   findMentions,
   type MentionCandidate,
 } from "@dohc/workspace-contracts/chat-mentions";
-import { chatFileKind, extractChatFileReferenceTokens } from "./chatFileMentions";
+import { extractChatFileReferenceTokens } from "./chatFileMentions";
 import type { ChatFileReferenceToken } from "./chatFileMentions";
 
 // Shared Chats rendering (PR 13, WS-E): the file-rail LinkedChats panel and
@@ -127,14 +127,6 @@ function resolveFileMentionNavigationTargets(
   return targets;
 }
 
-const FILE_KIND_ICONS = { text: FileText, data: Database, image: Image, file: File } as const;
-
-// The glyph on a file chip, shared by mentions and attachments.
-export function ChatFileIcon(props: { path: string; className?: string }) {
-  const Icon = FILE_KIND_ICONS[chatFileKind(props.path)];
-  return <Icon size={11} aria-hidden className={props.className} />;
-}
-
 // Renders a message body with @-mention chips. A mention that resolves to a
 // known candidate gets a calm inline chip; everything else is plain text, so
 // the message reads exactly as written. Whitespace/newlines are preserved by
@@ -172,45 +164,17 @@ export function MentionText(props: {
     const fileToken = fileTokens[fileIndex];
     if (fileToken && (!mention || fileToken.start < mention.start)) {
       if (fileToken.start > cursor) content.push(props.body.slice(cursor, fileToken.start));
-      const testId = props.testId ? `${props.testId}-file-mention` : undefined;
-      const chipContent = (
-        <>
-          <ChatFileIcon path={fileToken.path} />
-          {basenameOf(fileToken.path)}
-          {fileToken.headingAnchor ? `#${fileToken.headingAnchor}` : ""}
-        </>
-      );
-      const className = "inline-flex items-center gap-1 rounded bg-line/50 px-1 text-muted";
       const navigationTarget = fileTargets.get(fileReferenceKey(fileToken)) ?? fileToken;
-      content.push(props.onOpenPath ? (
-        <button
-          type="button"
+      const onOpenPath = props.onOpenPath;
+      content.push(
+        <Ref
           key={`file:${fileToken.start}`}
-          data-testid={testId}
-          aria-label={`Open ${fileToken.path}${
-            fileToken.headingAnchor ? ` at #${fileToken.headingAnchor}` : ""
-          }`}
-          className={`${className} cursor-pointer hover:bg-hover hover:text-ink`}
-          title={fileToken.text}
-          onClick={() =>
-            props.onOpenPath?.(
-              navigationTarget.path,
-              navigationTarget.headingAnchor,
-            )
-          }
-        >
-          {chipContent}
-        </button>
-      ) : (
-        <span
-          key={`file:${fileToken.start}`}
-          data-testid={testId}
-          className={className}
-          title={fileToken.text}
-        >
-          {chipContent}
-        </span>
-      ));
+          path={fileToken.path}
+          heading={fileToken.headingAnchor}
+          testId={props.testId ? `${props.testId}-file-mention` : undefined}
+          onOpen={onOpenPath ? () => onOpenPath(navigationTarget.path, navigationTarget.headingAnchor) : undefined}
+        />,
+      );
       cursor = fileToken.end;
       fileIndex += 1;
       continue;
