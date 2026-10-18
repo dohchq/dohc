@@ -19,6 +19,7 @@ export interface ReplicaChild {
 export interface ReplicaChildInput {
   readonly storeDir: string;
   readonly lease: ReplicaReadLease;
+  readonly relayHandler: (request: Request) => Promise<Response>;
 }
 export interface ReplicaSupervisorOptions {
   readonly storage: SyncRelayStorage;
@@ -163,7 +164,7 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
       for (let attempt = 0; ; attempt++) {
         try {
           if (!entry.child && !entry.stopping && principal.current(entry.lease)) {
-            entry.child = await options.startChild({ storeDir: entry.storeDir!, lease: entry.lease });
+            entry.child = await options.startChild({ storeDir: entry.storeDir!, lease: entry.lease, relayHandler: principal.handle });
             const child = entry.child;
             void child.exited?.then(() => {
               // A first-pull crash belongs to the one-time fresh-store rebuild below.
@@ -316,7 +317,6 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
   }
 
   return {
-    handle: principal.handle,
     activate,
     // Recipient reads apply their own selector and fences in the read transaction.
     currentReadView(workspaceId: string) {

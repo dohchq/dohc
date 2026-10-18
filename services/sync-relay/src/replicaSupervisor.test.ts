@@ -195,16 +195,17 @@ it("coalesces an append during pull and never starts two children for one worksp
 it("revokes a starting child, waits for it, and deletes its private directory", async () => {
   const { storage } = await fixture();
   const entered = deferred(), release = deferred();
-  let storeDir = "", bearer = "";
+  let storeDir = "", bearer = "", relayHandler!: (request: Request) => Promise<Response>;
   const pull = vi.fn(async () => {}), close = vi.fn(async () => {});
   const supervisor = createReplicaSupervisor({ storage, storeRoot: await tempRoot("startup"), startChild: async input => {
-    storeDir = input.storeDir; bearer = input.lease.bearer; entered.resolve(); await release.promise; return { currentView: emptyCurrentView(input), pull, close };
+    storeDir = input.storeDir; bearer = input.lease.bearer; relayHandler = input.relayHandler; entered.resolve(); await release.promise; return { currentView: emptyCurrentView(input), pull, close };
   } });
   const activation = supervisor.activate("w");
   const rejected = expect(activation).rejects.toThrow("standing ended");
   await entered.promise;
   storage.revokeShareGrant({ shareId: "w", grantId: "w", revokedAtMs: 2 });
-  expect((await supervisor.handle(new Request("https://relay.test/sync/w/bootstrap", { headers: { authorization: `Bearer ${bearer}` } }))).status).toBe(404);
+  expect((await relayHandler(new Request("https://relay.test/sync/w/bootstrap", { headers: { authorization: `Bearer ${bearer}` } }))).status).toBe(404);
+  expect(supervisor).not.toHaveProperty("handle");
   const shutdown = supervisor.close();
   expect(existsSync(storeDir)).toBe(true);
   release.resolve(); await rejected; await shutdown;
@@ -288,7 +289,7 @@ it("refuses unsupported production hosts and invalid limits before starting anyt
   const { storage } = await fixture();
   expect(() => createReplicaSupervisor({ storage, storeRoot: "relative", startChild: async input => { throw Error(); } })).toThrow("absolute");
   expect(() => createReplicaSupervisor({ storage, storeRoot: resolve("private"), maxRunning: 0, startChild: async input => { throw Error(); } })).toThrow("budget");
-  if (process.platform !== "linux") expect(() => createReplicaEngineStarter({ engineExecutable: "C:/daemon.exe", baseUrl: "https://relay.test" })).toThrow("Linux");
+  expect(() => createReplicaEngineStarter({ engineExecutable: "C:/daemon.exe" })).toThrow(/development/i);
 });
 
 it("sweeps stores from a prior process before admitting a child", async () => {

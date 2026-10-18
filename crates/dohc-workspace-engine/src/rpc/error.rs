@@ -991,6 +991,7 @@ mod tests {
                 .relay(
                     RelayConfiguration {
                         base_url: "https://relay.invalid".to_owned(),
+                        socket_path: None,
                         bearer_token: "token".to_owned(),
                         #[cfg(debug_assertions)]
                         allow_insecure_loopback_for_tests: false,

@@ -19,7 +19,7 @@ const engineBinary = requireEngineBinaryOrSkip();
 afterEach(closeTestStorages);
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
-it.skipIf(engineBinary.missing)("supervised passive child converges through the four owner scenarios", async () => {
+it.skipIf(engineBinary.missing || process.platform === "win32")("supervised replica child converges through its socket in the four owner scenarios", async () => {
   const executable = engineBinary.require();
   const root = await tempRoot("supervised-native"), storage = await testStorage();
   const owner = "replica-owner@dohc.test", workspaceId = "supervised", bearer = `user:${owner}`;
@@ -37,7 +37,7 @@ it.skipIf(engineBinary.missing)("supervised passive child converges through the 
       const request = new Request(`http://127.0.0.1${incoming.url}`, { method: incoming.method,
         headers: incoming.headers as Record<string, string>, ...(chunks.length ? { body: Buffer.concat(chunks) } : {}) });
       const before = replica ? digest() : undefined;
-      const response = await (replica ? supervisor.handle(request) : ownerHandler(request));
+      const response = await ownerHandler(request);
       if (replica) expect(digest()).toBe(before);
       const bytes = Buffer.from(await response.arrayBuffer());
       outgoing.writeHead(response.status, { ...Object.fromEntries(response.headers), "content-length": bytes.length }); outgoing.end(bytes);
@@ -47,8 +47,7 @@ it.skipIf(engineBinary.missing)("supervised passive child converges through the 
   const address = server.address(); if (!address || typeof address === "string") throw Error("Missing relay port.");
   const baseUrl = `http://127.0.0.1:${address.port}`;
   const stores = new Map<string, { dir: string }>();
-  const start = createReplicaEngineStarter({ engineExecutable: executable!, baseUrl,
-    allowUnisolatedDevelopment: true, allowInsecureLoopbackForTests: true });
+  const start = createReplicaEngineStarter({ engineExecutable: executable!, allowUnisolatedDevelopment: true });
   const failures: unknown[] = [];
   let attempts = 0, roleRefusals = 0;
   supervisor = createReplicaSupervisor({ storage, storeRoot: join(root, "replicas"), idleMs: 120_000,
@@ -63,7 +62,10 @@ it.skipIf(engineBinary.missing)("supervised passive child converges through the 
         engines.splice(engines.indexOf(poisoned), 1);
       } else expect(existsSync(join(input.storeDir, ".dohc"))).toBe(false);
       try {
-        const child = await start(input); stores.set(input.lease.workspaceId, { dir: input.storeDir });
+        const child = await start({...input, relayHandler: async request => {
+          requests.push({method: request.method, path: new URL(request.url).pathname, replica: true});
+          const before = digest(), response = await input.relayHandler(request); expect(digest()).toBe(before); return response;
+        }}); stores.set(input.lease.workspaceId, { dir: input.storeDir });
         return child;
       } catch (error) {
         expect(error).toMatchObject({ name: "EngineRequestError", message: "workspace operation failed" });
@@ -107,7 +109,7 @@ it.skipIf(engineBinary.missing)("supervised passive child converges through the 
   const stored = (path: string, id = workspaceId) => inspect(id, db => db.prepare(
     "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.version_id='main' AND s.path=?").get(path)?.text);
   const untouched = () => {
-    expect(readdirSync(stores.get(workspaceId)!.dir)).toEqual([".dohc"]);
+    expect(readdirSync(stores.get(workspaceId)!.dir).sort()).toEqual([".dohc", "relay.sock"]);
     inspect(workspaceId, db => {
       for (const table of ["materialization_jobs", "automation_claims", "link_pending", "link_index_state"]) expect(db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()!.n).toBe(0);
       expect(db.prepare("SELECT COUNT(*) AS n FROM replication_log WHERE imported=0").get()!.n).toBe(0);

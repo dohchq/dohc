@@ -53,7 +53,9 @@ pub(crate) struct PendingCursor {
 #[derive(Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct RelayOpenParams {
+    #[serde(default)]
     base_url: String,
+    socket_path: Option<std::path::PathBuf>,
     bearer_token: String,
     #[cfg(debug_assertions)]
     #[serde(default)]
@@ -64,6 +66,7 @@ impl RelayOpenParams {
     pub(super) fn configuration(&self) -> RelayConfiguration {
         RelayConfiguration {
             base_url: self.base_url.clone(),
+            socket_path: self.socket_path.clone(),
             bearer_token: self.bearer_token.clone(),
             #[cfg(debug_assertions)]
             allow_insecure_loopback_for_tests: self.allow_insecure_loopback_for_tests,

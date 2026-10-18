@@ -449,16 +449,16 @@ it("round4: persist refusals reach onError", async () => {
 });
 
 it("round4: retirement revokes the bearer before waiting for a drain", async () => {
-  const f=await fixture();let bearer="",pulls=0,release!:()=>void,entered!:()=>void;
+  const f=await fixture();let bearer="",pulls=0,release!:()=>void,entered!:()=>void,relayHandler!: (request: Request) => Promise<Response>;
   const blocked=new Promise<void>(resolve=>{release=resolve;}),started=new Promise<void>(resolve=>{entered=resolve;});
   const supervisor=createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("retire-bearer"),startChild:async input=>{
-    bearer=input.lease.bearer;
+    bearer=input.lease.bearer;relayHandler=input.relayHandler;
     return {pull:async()=>{if(++pulls===2){entered();await blocked;}},close:async()=>{},currentView:async()=>({...f.view(),moved:false,nextCursor:null,refusedFiles:[]})};
   }});
   try {
     await supervisor.activate("w");const draining=supervisor.activate("w");void draining.catch(()=>{});await started;
     const retiring=supervisor.evict("w");
-    try {expect((await supervisor.handle(new Request("https://relay.test/sync/w/bootstrap",{headers:{authorization:`Bearer ${bearer}`}}))).status).toBe(404);}
+    try {expect((await relayHandler(new Request("https://relay.test/sync/w/bootstrap",{headers:{authorization:`Bearer ${bearer}`}}))).status).toBe(404);}
     finally {release();await retiring;await draining.catch(()=>{});}
   }finally{release();await supervisor.close();}
 });

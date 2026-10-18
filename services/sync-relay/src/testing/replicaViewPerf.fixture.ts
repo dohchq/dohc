@@ -38,13 +38,13 @@ let collections=0;
 const server=createServer(async(incoming,outgoing)=>{try {
   const chunks:Buffer[]=[];for await(const chunk of incoming)chunks.push(Buffer.from(chunk));
   const request=new Request(`http://127.0.0.1${incoming.url}`,{method:incoming.method,headers:incoming.headers as Record<string,string>,...(chunks.length?{body:Buffer.concat(chunks)}:{})});
-  const response=await (incoming.headers.authorization?.includes("dohc-replica-read-v1")?supervisor.handle(request):owner(request));
+  const response=await owner(request);
   outgoing.writeHead(response.status,Object.fromEntries(response.headers));outgoing.end(Buffer.from(await response.arrayBuffer()));
 }catch(error){outgoing.writeHead(500);outgoing.end(String(error));}});
 await new Promise<void>(resolve=>server.listen(0,"127.0.0.1",resolve));
 const address=server.address();if(!address||typeof address==="string")throw Error("port");
 const baseUrl=`http://127.0.0.1:${address.port}`;
-const start=createReplicaEngineStarter({engineExecutable:binary,baseUrl,allowUnisolatedDevelopment:true,allowInsecureLoopbackForTests:true});
+const start=createReplicaEngineStarter({engineExecutable:binary,allowUnisolatedDevelopment:true});
 const supervisor=createReplicaSupervisor({storage,onError:(_workspace,error)=>failures.push(String(error)),storeRoot:join(root,"replicas"),startChild:async input=>{
   passiveDir=input.storeDir;const child=await start(input);enginePid=child.pid;if(enabled)return {...child,currentView:async(...args)=>{
     collections++;const start=performance.now(),page=await child.currentView(...args);
