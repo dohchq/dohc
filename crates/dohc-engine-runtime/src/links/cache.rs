@@ -61,7 +61,7 @@ pub(super) fn prepare(
            INSERT INTO link_resolver_revision VALUES(NEW.workspace_id,NEW.version_id,1) ON CONFLICT(workspace_id,version_id) DO UPDATE SET revision=revision+1; END;
          CREATE TEMP TRIGGER IF NOT EXISTS resolver_alias_delete AFTER DELETE ON main.path_aliases BEGIN
            INSERT INTO link_resolver_revision VALUES(OLD.workspace_id,OLD.version_id,1) ON CONFLICT(workspace_id,version_id) DO UPDATE SET revision=revision+1; END;
-         CREATE TEMP TRIGGER IF NOT EXISTS resolver_alias_update AFTER UPDATE ON main.path_aliases BEGIN
+         CREATE TEMP TRIGGER IF NOT EXISTS resolver_alias_update AFTER UPDATE ON main.path_aliases WHEN OLD.workspace_id IS NOT NEW.workspace_id OR OLD.version_id IS NOT NEW.version_id OR OLD.path IS NOT NEW.path OR OLD.object_id IS NOT NEW.object_id BEGIN
            INSERT INTO link_resolver_revision VALUES(OLD.workspace_id,OLD.version_id,1) ON CONFLICT(workspace_id,version_id) DO UPDATE SET revision=revision+1;
            INSERT INTO link_resolver_revision VALUES(NEW.workspace_id,NEW.version_id,1) ON CONFLICT(workspace_id,version_id) DO UPDATE SET revision=revision+1; END;"
     ).map_err(sql)?;
@@ -108,6 +108,7 @@ mod tests {
         let cache = Arc::default();
         let main = get(&c, &cache, "main");
         let fork = get(&c, &cache, "fork");
+        c.execute_batch("UPDATE path_aliases SET path=path;").unwrap();
         assert!(Arc::ptr_eq(&main, &get(&c, &cache, "main")));
         c.execute_batch("UPDATE path_aliases SET path='renamed.md' WHERE version_id='fork';")
             .unwrap();
