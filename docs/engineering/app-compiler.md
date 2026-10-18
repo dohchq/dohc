@@ -38,12 +38,23 @@ A peak shorter than one sample can pass unseen.
 
 The owner finds its tree through its process group and through parent pids.
 It keeps every descendant it has seen, with its start time, so a descendant that left the group is still killed.
+A failed inspection keeps a descendant tracked. Only a confirmed exit or a changed start time removes it.
+
 A worker that gains code execution can still hide a child from the owner.
 It can move the child out of the group with setsid or setpgid, then exit before the next sample sees the child.
-Seatbelt still confines that child.
-It cannot read the workspace or the home directory, write outside the build directory, use the network or run another program.
-RLIMIT_CPU still ends it.
-Nothing bounds its memory.
+Seatbelt is the only bound on that escaped process:
+
+- It cannot read file contents outside the compiler, the OS libraries and the build directory.
+- It cannot write outside the build directory, use the network, or reach Mach services.
+- It can run the installed Node, with any script it writes in the build directory, and esbuild. It cannot run other programs or load native code it writes.
+- Nothing bounds its memory, its process count, its disk use in the build directory or its lifetime.
+  RLIMIT_CPU counts each process alone, so a process that sleeps or forks outlives it.
+
+The owner removes the build directory with `remove_dir_all`, which opens each directory without following symlinks.
+The desktop then removes only an empty directory.
+A path-based recursive remove can follow a symlink that an escaped process swaps in, and delete files outside the build directory.
+In a standalone race, Node's recursive `rm` did so in 2 of 150 rounds.
+If an escaped process keeps writing, the build directory stays in the system's temporary folder.
 
 ## The Seatbelt profile
 
@@ -52,10 +63,16 @@ The owner itself stays outside the sandbox, so the worker cannot signal, stop or
 
 The profile denies by default. It allows:
 
-- exec of the installed Node and of files under the compiler root;
-- reads of those files, the OS libraries and the dyld cache;
-- reads and writes in one new build directory per compile;
-- signals and process information inside the same sandbox.
+- exec of the installed Node and the installed esbuild binary;
+- reads of the compiler root, the OS libraries and the dyld cache;
+- reads and writes in one new build directory per compile, but no executable mappings from it;
+- signals and process information inside the same sandbox;
+- the sysctls that Node and esbuild read at startup, listed by name.
+
+Seatbelt does not mediate `kern.procargs2`.
+A confined process with code execution can read the arguments and environment of every process the user runs, including the owner.
+It could place what it reads in the published bundle.
+This needs a memory-safety exploit in V8 or esbuild first.
 
 Path metadata stays readable everywhere, because Node aborts at startup without it.
 A confined worker can still learn whether a path it names exists, with its size and times.
