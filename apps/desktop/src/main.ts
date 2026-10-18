@@ -6262,6 +6262,11 @@ function registerIpcHandlers(): void {
       await openWorkspaceActivity(workspace);
       const capture = activity.engineCaptureFor(workspace.workspaceId, workspace.rootPath);
       if (!capture) throw new Error("dohc could not capture this app. Restart dohc and try again.");
+      // Flush covers only edits the watcher has reported. Reconcile scans the
+      // disk, so an edit saved just before Prepare is in the review.
+      if (!await withEngineAdapter(workspace, adapter => adapter.reconcileCapture())) {
+        throw new Error("dohc could not capture this app. Restart dohc and try again.");
+      }
       await capture.flush();
     },
     withAdapter: withEngineAdapter,
