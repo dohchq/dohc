@@ -1725,11 +1725,7 @@ fn hydrate_conflicts(
     for row in &mut rows {
         for side in [&mut row.base, &mut row.current, &mut row.incoming] {
             if let Some(snapshot) = &mut side.snapshot {
-                snapshot.text = bodies
-                    .get_mut(&snapshot.blob_sha256)
-                    .expect("requested body")
-                    .take_text()
-                    .expect("uncapped body");
+                snapshot.text = text::take(&mut bodies, &snapshot.blob_sha256);
             }
         }
     }
@@ -1834,9 +1830,10 @@ fn map_side(
                     .map_err(DomainError::sql_corrupt)?,
                 path: path.clone(),
                 text: {
-                    let _: String = row
-                        .get(format!("{prefix}_blob").as_str())
-                        .map_err(DomainError::sql_corrupt)?;
+                    row.get_ref(format!("{prefix}_blob").as_str())
+                        .map_err(DomainError::sql_corrupt)?
+                        .as_str()
+                        .map_err(|error| DomainError::sql_corrupt(error.into()))?;
                     String::new()
                 },
                 blob_sha256: text_blob_sha256.ok_or(DomainError::StateCorrupt {

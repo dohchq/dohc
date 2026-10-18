@@ -779,8 +779,8 @@ impl<'a> VersionedTextStore<'a> {
             .collect()
     }
 
-    /// One page of snapshot metadata, ordered by path. The gateway sizes text
-    /// without hydrating its body. Keyset: strictly after
+    /// One page of snapshot metadata, ordered by path, using recorded byte lengths
+    /// without reading bodies. Keyset: strictly after
     /// `after_path` (None = from the start).
     pub fn list_snapshot_metadata(
         &self,
@@ -2097,11 +2097,10 @@ fn hydrate_snapshots(
     .map_err(DomainError::sql_corrupt)?;
     for row in &mut rows {
         if row.content_kind == "text" {
-            row.text = bodies
-                .get_mut(row.blob_sha256.as_ref().expect("validated text key"))
-                .expect("requested body")
-                .take_text()
-                .expect("uncapped body");
+            row.text = text::take(
+                &mut bodies,
+                row.blob_sha256.as_deref().expect("validated text key"),
+            );
         }
     }
     Ok(rows)
@@ -2114,7 +2113,7 @@ fn map_snapshot_row(
 ) -> rusqlite::Result<Result<SnapshotRecord, DomainError>> {
     let object_id: String = row.get(0)?;
     let path: String = row.get(1)?;
-    let text: Option<String> = row.get(2)?;
+    let text_key: Option<String> = row.get(2)?;
     let blob_sha256: Option<String> = row.get(3)?;
     let updated_at_ms: i64 = row.get(4)?;
     let latest_moment_id: String = row.get(5)?;
@@ -2123,8 +2122,8 @@ fn map_snapshot_row(
     let metadata_correlation_id: Option<String> = row.get(8)?;
     let content_kind: String = row.get(9)?;
     let binary_sha256: Option<String> = row.get(10)?;
-    let text = match content_kind.as_str() {
-        "text" => text.ok_or(DomainError::StateCorrupt {
+    let text_key = match content_kind.as_str() {
+        "text" => text_key.ok_or(DomainError::StateCorrupt {
             reason: "text snapshot is missing its blob",
         }),
         "binary" if binary_sha256.is_some() => Ok(String::new()),
@@ -2135,7 +2134,7 @@ fn map_snapshot_row(
             reason: "snapshot has an unknown content kind",
         }),
     };
-    Ok(text.map(|_| SnapshotRecord {
+    Ok(text_key.map(|_| SnapshotRecord {
         workspace_id: workspace_id.to_owned(),
         version_id: version_id.to_owned(),
         object_id,
@@ -2173,16 +2172,15 @@ fn map_moment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<MomentRow,
     let after_binary_sha256: Option<String> = row.get(17)?;
     let before_content_kind: String = row.get(18)?;
     let before_binary_sha256: Option<String> = row.get(19)?;
-    let after_text: Option<String> = row.get(20)?;
+    let after_text_key: Option<String> = row.get(20)?;
     let after_byte_length: Option<i64> = row.get(21)?;
-    let before_text: Option<String> = row.get(22)?;
+    let before_text_key: Option<String> = row.get(22)?;
     let before_byte_length: Option<i64> = row.get(23)?;
     let after_actual_length: Option<i64> = row.get(24)?;
     let before_actual_length: Option<i64> = row.get(25)?;
     let before_path: Option<String> = row.get(26)?;
-    // Recorded and actual lengths must agree per side — a corrupted
-    // recorded length (lying small or large) fails closed for text and
-    // binary alike, matching the in-band reads.
+    // Check binary actual lengths here. Text lengths are recorded in both
+    // columns; hydrate_moments checks them against the body before returning.
     if after_byte_length != after_actual_length || before_byte_length != before_actual_length {
         return Ok(Err(DomainError::StateCorrupt {
             reason: "moment blob length does not match its content",
@@ -2276,8 +2274,8 @@ fn map_moment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<MomentRow,
                 before_byte_length,
                 before_path,
             },
-            after_text,
-            before_text,
+            after_text_key,
+            before_text_key,
         ))
     }))
 }

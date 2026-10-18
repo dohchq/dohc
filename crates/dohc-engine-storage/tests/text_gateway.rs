@@ -145,6 +145,24 @@ fn batch_missing_key_is_corruption_including_duplicate_requests() {
 }
 
 #[test]
+fn single_key_batch_preserves_caps_lengths_and_missing_corruption() {
+    let conn = database();
+    text::insert(&conn, "key", 1, "long", false).unwrap();
+    let mut bodies = text::read_batch(&conn, ["key"], None).unwrap();
+    assert_eq!((bodies["key"].recorded, bodies["key"].actual), (1, 4));
+    assert_eq!(text::take(&mut bodies, "key"), "long");
+    assert!(
+        text::read_batch(&conn, ["key"], Some(3)).unwrap()["key"]
+            .text
+            .is_none()
+    );
+    let result = text::read_batch(&conn, ["missing"], None);
+    assert!(
+        matches!(result, Err(rusqlite::Error::SqliteFailure(ref error, _)) if error.code == rusqlite::ErrorCode::DatabaseCorrupt)
+    );
+}
+
+#[test]
 fn batch_handles_long_lists_and_returns_each_body() {
     let conn = database();
     let keys: Vec<_> = (0..2_000).map(|i| format!("key-{i}")).collect();
@@ -236,5 +254,14 @@ fn snapshot_preserves_caller_transaction_and_releases_on_error() {
     let snapshot = text::ReadSnapshot::new(&conn).unwrap();
     let result = snapshot.finish::<(), _>(Err(rusqlite::Error::InvalidQuery), |error| error);
     assert!(matches!(result, Err(rusqlite::Error::InvalidQuery)));
+    assert!(conn.is_autocommit());
+}
+
+#[test]
+fn snapshot_drop_rolls_back_when_its_savepoint_is_missing() {
+    let conn = database();
+    let snapshot = text::ReadSnapshot::new(&conn).unwrap();
+    conn.execute_batch("RELEASE text_read; BEGIN").unwrap();
+    drop(snapshot);
     assert!(conn.is_autocommit());
 }

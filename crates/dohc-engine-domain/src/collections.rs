@@ -3776,27 +3776,34 @@ fn unindexed_or_conflicted_relation_targets_still_present(
     let mut present = HashSet::new();
     for (collection_path, wanted_ids) in targets_by_collection {
         let mut matched_count = 0_usize;
-        let rows = statement
+        let mut rows = statement
             .query_map(params![workspace_id, version_id, collection_path], |row| {
                 row.get::<_, String>(0)
             })
             .map_err(crate::DomainError::sql_corrupt)?;
-        let keys = rows
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(crate::DomainError::sql_corrupt)?;
-        let bodies = text::read_batch(conn, keys.iter().map(String::as_str), None)
-            .map_err(crate::DomainError::sql_corrupt)?;
-        for key in keys {
-            let text = bodies[&key].text.as_deref().expect("uncapped body");
-            let Some(record_id) = markdown_record_id(text).filter(|id| wanted_ids.contains(id))
-            else {
-                continue;
-            };
-            if present.insert((record_id, collection_path.clone())) {
-                matched_count += 1;
-            }
-            if matched_count == wanted_ids.len() {
+        while matched_count < wanted_ids.len() {
+            let keys = rows
+                .by_ref()
+                .take(256)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(crate::DomainError::sql_corrupt)?;
+            if keys.is_empty() {
                 break;
+            }
+            let bodies = text::read_batch(conn, keys.iter().map(String::as_str), None)
+                .map_err(crate::DomainError::sql_corrupt)?;
+            for key in keys {
+                let text = bodies[&key].text.as_deref().expect("uncapped body");
+                let Some(record_id) = markdown_record_id(text).filter(|id| wanted_ids.contains(id))
+                else {
+                    continue;
+                };
+                if present.insert((record_id, collection_path.clone())) {
+                    matched_count += 1;
+                }
+                if matched_count == wanted_ids.len() {
+                    break;
+                }
             }
         }
     }
@@ -3860,11 +3867,7 @@ fn load_collection_snapshots(
         Ok(rows
             .into_iter()
             .map(|(mut snapshot, key)| {
-                snapshot.text = bodies
-                    .get_mut(&key)
-                    .expect("requested body")
-                    .take_text()
-                    .expect("uncapped body");
+                snapshot.text = text::take(&mut bodies, &key);
                 snapshot
             })
             .collect()),
@@ -3962,7 +3965,6 @@ fn ensure_historical_record_owners_backfilled(
     workspace_id: &str,
     version_id: &str,
 ) -> Result<(), crate::DomainError> {
-    let snapshot = text::ReadSnapshot::new(tx).map_err(crate::DomainError::sql_corrupt)?;
     let complete = tx
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM collection_historical_record_owner_backfills \
@@ -4041,7 +4043,7 @@ fn ensure_historical_record_owners_backfilled(
         params![workspace_id, version_id],
     )
     .map_err(crate::DomainError::sql_persist)?;
-    snapshot.finish(Ok(()), crate::DomainError::sql_corrupt)
+    Ok(())
 }
 
 fn load_historical_record_owners(
@@ -6962,6 +6964,63 @@ mod tests {
     }
 
     #[test]
+    fn relation_witness_early_match_reads_only_first_chunk() {
+        use std::sync::{Arc, Mutex};
+        let connection = Connection::open_in_memory().unwrap();
+        let reads = Arc::new(Mutex::new(HashSet::new()));
+        let observed = reads.clone();
+        connection
+            .create_scalar_function(
+                "witness_body",
+                2,
+                rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+                move |ctx| {
+                    observed.lock().unwrap().insert(ctx.get::<String>(0)?);
+                    ctx.get::<String>(1)
+                },
+            )
+            .unwrap();
+        connection.execute_batch(
+            "CREATE TABLE bodies(sha256 TEXT PRIMARY KEY,byte_length INTEGER,text TEXT);\
+             CREATE VIEW blobs AS SELECT sha256,byte_length,witness_body(sha256,text) AS text FROM bodies;\
+             CREATE TABLE snapshots(workspace_id TEXT,version_id TEXT,path TEXT,object_id TEXT,blob_sha256 TEXT,content_kind TEXT);\
+             CREATE TABLE moments(workspace_id TEXT,version_id TEXT,object_id TEXT,after_blob_sha256 TEXT,after_content_kind TEXT,moment_order INTEGER);\
+             CREATE TABLE conflicts(workspace_id TEXT,target_version_id TEXT,status TEXT,current_object_id TEXT,incoming_object_id TEXT,path TEXT);"
+        ).unwrap();
+        for index in 0..600 {
+            let key = format!("key-{index:04}");
+            let body = format!("---\nid: record_{index}\n---\n");
+            connection
+                .execute(
+                    "INSERT INTO bodies VALUES(?1,?2,?3)",
+                    rusqlite::params![key, body.len() as i64, body],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO snapshots VALUES('workspace','version',?1,?2,?2,'text')",
+                    rusqlite::params![format!("records/{index:04}.md"), key],
+                )
+                .unwrap();
+        }
+        let targets = HashSet::from([("record_0".to_owned(), "records".to_owned())]);
+        assert_eq!(
+            unindexed_or_conflicted_relation_targets_still_present(
+                &connection,
+                "workspace",
+                "version",
+                targets.clone()
+            )
+            .unwrap(),
+            targets
+        );
+        let reads = reads.lock().unwrap();
+        assert_eq!(reads.len(), 256);
+        assert!((0..256).all(|index| reads.contains(&format!("key-{index:04}"))));
+        assert!(connection.is_autocommit());
+    }
+
+    #[test]
     fn historical_record_owner_backfill_runs_once_then_moments_append_incrementally() {
         const FIRST_ID: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
         const RAW_AFTER_MARKER_ID: &str = "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -7010,8 +7069,10 @@ mod tests {
             ).expect("seed an inert recovery moment");
         }
 
-        ensure_historical_record_owners_backfilled(&connection, "workspace", "version")
+        let transaction = connection.unchecked_transaction().unwrap();
+        ensure_historical_record_owners_backfilled(&transaction, "workspace", "version")
             .expect("backfill historical owners");
+        transaction.commit().unwrap();
         let first = load_historical_record_owners(&connection, "workspace", "version")
             .expect("read first backfill");
         assert!(first[FIRST_ID].contains("first-object"));
@@ -7034,8 +7095,10 @@ mod tests {
                 [],
             )
             .expect("seed an unindexed moment after the marker");
-        ensure_historical_record_owners_backfilled(&connection, "workspace", "version")
+        let transaction = connection.unchecked_transaction().unwrap();
+        ensure_historical_record_owners_backfilled(&transaction, "workspace", "version")
             .expect("observe completed backfill marker");
+        transaction.commit().unwrap();
         let after_marker = load_historical_record_owners(&connection, "workspace", "version")
             .expect("read marker-protected owners");
         assert!(

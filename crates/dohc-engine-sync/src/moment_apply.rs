@@ -2414,11 +2414,7 @@ fn hydrate_snapshots(
     .map_err(SyncError::corrupt)?;
     for row in &mut rows {
         if row.kind == ContentKind::Text {
-            row.text = bodies
-                .get_mut(&row.digest)
-                .expect("requested body")
-                .take_text()
-                .expect("uncapped body");
+            row.text = text::take(&mut bodies, &row.digest);
         }
     }
     Ok(rows)
