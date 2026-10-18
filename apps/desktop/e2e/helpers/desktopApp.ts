@@ -102,6 +102,8 @@ export async function launchDesktopApp(input: {
   env?: NodeJS.ProcessEnv;
   /** Extra Chromium switches for this launch. */
   switches?: string[];
+  /** A program that runs Electron with the arguments it receives. */
+  executablePath?: string;
 }): Promise<LaunchedDesktopApp> {
   const build = requireBuiltDesktopApp();
   const userDataDir = await createUserDataDir(input.workspace);
@@ -128,7 +130,7 @@ export async function launchDesktopApp(input: {
   let processHandle: ElectronProcess | null = null;
   try {
     app = await electron.launch({
-      executablePath: electronExecutable,
+      executablePath: input.executablePath ?? electronExecutable,
       args: electronLaunchArgs({ mainEntry, userDataDir, switches: input.switches }),
       cwd: desktopRoot,
       env: launchEnv(input),
