@@ -45,7 +45,7 @@ async function main() {
     options[name.slice(2)] = value;
   }
   if (!options.channel || !options.platforms || !options.releases) {
-    throw new Error("Usage: check-desktop-release-platforms.mjs --channel latest|nightly --platforms windows|linux|windows-linux|all --releases <GitHub release history JSONL>");
+    throw new Error("Usage: check-desktop-release-platforms.mjs --channel latest|nightly --platforms windows|linux|macos|windows-linux|all --releases <GitHub release history JSONL>");
   }
   const releases = (await readFile(options.releases, "utf8")).split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
   checkDesktopReleasePlatforms({ ...options, releases });

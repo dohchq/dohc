@@ -91,6 +91,11 @@ test("release platform selection defaults to Windows and keeps every native targ
   assert.equal(linux[0].target, "x86_64-unknown-linux-gnu");
   assert.equal(linux[0].require_signing, "0");
   assert.deepEqual(desktopReleaseTargets("windows-linux"), [windows[0], linux[0]]);
+  // macOS ships for Apple silicon only.
+  const macos = desktopReleaseTargets("macos");
+  assert.deepEqual(macos.map((target) => [target.label, target.target]), [["macOS arm64", "aarch64-apple-darwin"]]);
+  assert.deepEqual(macos[0].runner, ["self-hosted", "macos", "arm64"]);
+  assert.equal(macos[0].require_signing, "1");
   const all = desktopReleaseTargets("all");
   assert.deepEqual(all.map((target) => [target.arch, target.target]), [
     ["x64", "x86_64-pc-windows-msvc"],
@@ -101,8 +106,8 @@ test("release platform selection defaults to Windows and keeps every native targ
   assert.throws(() => desktopReleaseTargets("mac"), /Invalid release platforms/);
 });
 
-test("Linux nightly metadata keeps the version generator and selects only Linux", async () => {
-  for (const platforms of ["linux", "windows-linux"]) {
+test("Linux and macOS nightly metadata keep the version generator and select only their targets", async () => {
+  for (const platforms of ["linux", "macos", "windows-linux"]) {
     const release = await resolveDesktopRelease({
       packageVersion: "0.1.0", channel: "nightly", platforms,
       date: "20261007", runNumber: 2, runAttempt: 1, sha: "0123456789abcdef",
@@ -123,6 +128,8 @@ test("Linux and combined publication preserve previously shipped platform feeds"
     for (const platforms of ["linux", "windows-linux"]) {
       assert.throws(() => checkDesktopReleasePlatforms({ channel, platforms, releases: release([`${channel}-mac.yml`]) }), /mac update manifests/);
     }
+    assert.doesNotThrow(() => checkDesktopReleasePlatforms({ channel, platforms: "macos", releases: release([`${channel}-mac.yml`]) }));
+    assert.throws(() => checkDesktopReleasePlatforms({ channel, platforms: "macos", releases: windowsAndLinux }), /linux, win update manifests/);
   }
 });
 
@@ -418,7 +425,8 @@ test("desktop releases start only by dispatch, run on self-hosted runners, and p
 
   // Cloud runners stay off (AGENTS.md). Packaging runs on the matrix preflight
   // selects from the release targets. Every other job runs on the Linux runner
-  // for a Linux dispatch and on the Windows runner otherwise.
+  // for a Linux dispatch, on the Mac for a macOS dispatch, and on the Windows
+  // runner otherwise.
   assert.equal(jobs.build["runs-on"], "${{ matrix.runner }}");
   assert.equal(jobs.build.strategy.matrix.include, "${{ fromJSON(needs.preflight.outputs.matrix) }}");
   // Windows and WSL share one PC, so a combined dispatch packages one platform at a time.
@@ -430,8 +438,9 @@ test("desktop releases start only by dispatch, run on self-hosted runners, and p
       ? desktopReleaseTargets("all").map(target => target.runner)
       : dispatchPlatforms.map(platforms => releaseExpression(job["runs-on"], {}, {}, { platforms }));
     if (name !== "build") {
-      assert.deepEqual(runners, dispatchPlatforms.map(platforms => ["self-hosted", platforms === "linux" ? "linux" : "windows", "x64"]),
-        `${name} runs on the Linux runner only for a Linux dispatch`);
+      const coordinators = { linux: ["self-hosted", "linux", "x64"], macos: ["self-hosted", "macos", "arm64"] };
+      assert.deepEqual(runners, dispatchPlatforms.map(platforms => coordinators[platforms] ?? ["self-hosted", "windows", "x64"]),
+        `${name} runs on the Linux runner only for a Linux dispatch and on the Mac only for a macOS dispatch`);
     }
     assert.ok(runners.length > 0, `${name} has a runner`);
     for (const runner of runners) {
@@ -441,6 +450,12 @@ test("desktop releases start only by dispatch, run on self-hosted runners, and p
       assert.ok(runner.some(label => ["x64", "arm64"].includes(label)));
     }
   }
+
+  // The Mac's own bash 3.2 rejects the coordinator jobs' scripts, so a macOS
+  // dispatch stops before any work when the runner lacks a newer bash.
+  const [requireBash] = jobs.preflight.steps;
+  assert.equal(requireBash.if, "runner.os == 'macOS'");
+  assert.match(requireBash.run, /\(\( BASH_VERSINFO\[0\] < 4 \)\)/);
 
   // Desktop tests need the built runtime exports and the native engine.
   const preflightOrder = step => jobs.preflight.steps.indexOf(step);

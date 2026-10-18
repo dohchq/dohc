@@ -25,6 +25,7 @@ on:
         options:
           - windows
           - linux
+          - macos
           - windows-linux
           - all
       dry_run:
@@ -46,7 +47,7 @@ jobs:
   preflight:
     name: Preflight
     if: github.ref == 'refs/heads/main'
-    runs-on: ${{ fromJSON(inputs.platforms == 'linux' && '["self-hosted","linux","x64"]' || '["self-hosted","windows","x64"]') }}
+    runs-on: ${{ fromJSON(inputs.platforms == 'linux' && '["self-hosted","linux","x64"]' || inputs.platforms == 'macos' && '["self-hosted","macos","arm64"]' || '["self-hosted","windows","x64"]') }}
     timeout-minutes: 40
     outputs:
       release_channel: ${{ steps.release.outputs.release_channel }}
@@ -58,6 +59,17 @@ jobs:
       dry_run: ${{ inputs.dry_run }}
       matrix: ${{ steps.release.outputs.matrix }}
     steps:
+      # macOS ships bash 3.2, which rejects an empty array under set -u and
+      # globstar. The coordinator jobs share this runner.
+      - name: Require bash 4 or newer
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          if (( BASH_VERSINFO[0] < 4 )); then
+            echo "::error::bash ${BASH_VERSION} is too old. Install Homebrew bash and put /opt/homebrew/bin first on the runner's PATH."
+            exit 1
+          fi
+
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -138,7 +150,7 @@ jobs:
   unused-version:
     name: Check release publication
     needs: preflight
-    runs-on: ${{ fromJSON(inputs.platforms == 'linux' && '["self-hosted","linux","x64"]' || '["self-hosted","windows","x64"]') }}
+    runs-on: ${{ fromJSON(inputs.platforms == 'linux' && '["self-hosted","linux","x64"]' || inputs.platforms == 'macos' && '["self-hosted","macos","arm64"]' || '["self-hosted","windows","x64"]') }}
     timeout-minutes: 5
     permissions:
       contents: write
@@ -384,7 +396,7 @@ jobs:
       - preflight
       - build
     if: ${{ needs.preflight.outputs.dry_run != 'true' }}
-    runs-on: ${{ fromJSON(inputs.platforms == 'linux' && '["self-hosted","linux","x64"]' || '["self-hosted","windows","x64"]') }}
+    runs-on: ${{ fromJSON(inputs.platforms == 'linux' && '["self-hosted","linux","x64"]' || inputs.platforms == 'macos' && '["self-hosted","macos","arm64"]' || '["self-hosted","windows","x64"]') }}
     timeout-minutes: 20
     permissions:
       # Required for creating GitHub releases via softprops/action-gh-release.

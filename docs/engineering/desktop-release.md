@@ -39,6 +39,7 @@ Every release job runs on a self-hosted runner. Cloud runners stay off.
 | Jobs | Runner labels |
 | --- | --- |
 | Preflight, version check, and Publish for `linux` | `self-hosted`, `linux`, `x64` |
+| Preflight, version check, and Publish for `macos` | `self-hosted`, `macos`, `arm64` |
 | Preflight, version check, and Publish for other selections | `self-hosted`, `windows`, `x64` |
 | Windows x64 package | `self-hosted`, `windows`, `x64` |
 | Linux x64 package | `self-hosted`, `linux`, `x64` |
@@ -49,6 +50,7 @@ Each runner needs Git with bash, rustup, and the platform's native build tools.
 The coordinator runner also needs the GitHub CLI, `gh`, for the version check and publishing.
 Run the Windows and macOS runners in a signed-in desktop session for the packaged app check.
 The Linux runner also needs `xvfb-run` for the fuse smoke.
+The macOS runner needs bash 4 or newer first on its `PATH`, because the coordinator jobs do not run under the bash 3.2 that macOS ships.
 After packaging, that check verifies the actual executable's fuse values and starts it with an isolated profile.
 The smoke looks for `apps/desktop/release/linux-unpacked` on Linux, and on a Mac for `apps/desktop/release/mac-arm64/dohc.app`. Point `DOHC_SMOKE_PACKAGE_DIRECTORY` at any other unpacked directory or app bundle.
 The package and publish jobs receive the environment's secrets.
@@ -122,6 +124,16 @@ For publication, dispatch again with `dry_run=false`.
 The new dispatch generates a new nightly version.
 The published prerelease records the source commit and includes generated release notes.
 
+## Build a macOS nightly
+
+Dispatch `Desktop Release` from `main` with `channel=nightly`, `platforms=macos`, and `dry_run=true`.
+The Mac runner performs every job for this selection. A Windows runner is not required.
+Download the run's `desktop-macOS-arm64` artifact after every job passes.
+It contains the `.dmg`, the `.zip` update package, and the nightly macOS update manifest.
+Verify the files with `--platform mac`, `--arch arm64`, the generated version, and `--channel nightly`.
+A dry run builds without signing. A published nightly is signed and notarized when the `desktop-release` environment has the macOS credentials, and unsigned otherwise.
+A channel that already publishes Windows or Linux updates refuses a `macos` publication. Use `all` to publish there.
+
 ## Build a Linux nightly
 
 Dispatch `Desktop Release` from `main` with `channel=nightly`, `platforms=linux`, and `dry_run=true`.
@@ -139,7 +151,7 @@ Use `platforms=all` when Windows, macOS, and Linux runners are available.
 Only the selected platforms receive installers and update packages.
 Choose `all` when the release must update existing installations on every supported platform.
 Continue including every platform that previously shipped on the selected channel.
-For example, Windows and Linux history permits `windows-linux`; macOS history requires `all`.
+For example, Windows and Linux history permits `windows-linux`, and macOS-only history permits `macos`. History with macOS and another platform requires `all`.
 An updater cannot find its platform manifest in a release that omits it.
 Before packaging a published release, the workflow checks every previous published release on that channel.
 It rejects a selection that omits an existing platform manifest.
