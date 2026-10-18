@@ -26,11 +26,8 @@ A job can also reach what every account on the Mac shares:
 
 - **Other users' home folders.** macOS gives every standard user the `staff` group, and a new home folder lets that group read it. Setup closes Ice's home folder.
 - **Services on `127.0.0.1`.** Every account can connect to them. T3 Code listens on `127.0.0.1:3773` from the launch agent `com.icedevera.t3-desktop`, and it runs full-access agents as Ice. A caller that can drive it can act as Ice.
-- **`/tmp`.** It is shared by every account. The desktop tests put their scratch folders under `/tmp/dohc-test-scratch` whenever `/tmp` exists, whatever `TMPDIR` says.
-  That folder already exists, owned by `ice` with mode 755, so the nightly's desktop tests fail when `dohc-ci` cannot write into it.
-  After a restart clears `/tmp`, a job could create the folder first, and Ice's tests would then write into a folder that `dohc-ci` owns.
-  `DOHC_TEST_SCRATCH_ROOT` does not fix this: set for the whole suite, it fails the scratch module's own tests.
-  The nightly cannot run until the desktop tests use a scratch folder per user.
+- **`/tmp`.** It is shared by every account. Test scratch folders live in `/tmp/dohc-test-scratch-<uid>`, which only that user may enter. The tests refuse such a folder when another account owns it or can enter it, and they write nothing in it.
+  A job can still create Ice's folder before Ice's tests do. Those tests then stop with an error that names the folder; remove it with `sudo rm -rf` and run them again.
 
 For pull requests from forks:
 
@@ -41,6 +38,7 @@ For pull requests from forks:
 ## What it runs
 
 `macOS checks` runs every night at 03:37 UTC+8, and when a maintainer dispatches it.
+It runs only while the repository variable `MACOS_RUNNER_ENABLED` is `true`. Otherwise GitHub skips the job before it reaches a runner.
 It runs `pnpm verify:pr --base HEAD --full`, the canonical PR gate in full mode, then the whole desktop e2e suite with `pnpm test:desktop:e2e`.
 The PR gate runs only the desktop proofs, so macOS e2e failures otherwise go unnoticed.
 
@@ -74,10 +72,7 @@ Ice runs this setup once with administrator rights.
 It creates `dohc-ci`, gives it its own login session, and registers the runner inside that session.
 The session is necessary because the e2e suite opens Electron windows.
 
-Do not register the runner until both of these hold:
-
-- T3 Code refuses a caller without credentials, as step 6 below confirms.
-- The desktop tests use a scratch folder per user instead of the shared `/tmp/dohc-test-scratch`.
+Do not register the runner until T3 Code refuses a caller without credentials, as step 6 below confirms.
 
 ### Prepare the Mac as Ice
 
@@ -180,6 +175,14 @@ Switch to `dohc-ci` with fast user switching, sign in, and open Terminal.
 
 5. Switch back to your own account. Leave `dohc-ci` signed in.
 
+6. As Ice, turn on the nightly check. Do this only after the runner shows as idle in the repository's Actions runner settings:
+
+   ```sh
+   gh variable set MACOS_RUNNER_ENABLED --repo dohchq/dohc --body true
+   ```
+
+   To turn it off, set the variable to `false`. The schedule stays in the workflow, and each run is skipped.
+
 Each job downloads the Node version in `.node-version` and the pnpm version in `package.json`.
 The verifier installs the pinned Playwright Chromium for `dohc-ci`. Xcode Command Line Tools are installed for every user.
 
@@ -191,6 +194,7 @@ The runner starts when `dohc-ci` signs in.
 
 ## Reset the runner
 
+Set `MACOS_RUNNER_ENABLED` to `false` first, so no run waits for a runner that is gone.
 A job can copy the runner's `.credentials_rsaparams` and act as the runner after the account is gone.
 Remove the registration on GitHub first, then delete the account.
 

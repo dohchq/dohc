@@ -118,6 +118,7 @@ jobs:
               - '.dockerignore'
               # Release helper tests validate packaging workflow behavior.
               - '.github/workflows/desktop-release.yml'
+              - '.github/workflows/macos-checks.yml'
               # packages/mcp's reference test compares this page with its generator.
               - 'docs/reference/cli-mcp-sdk.md'
               # Source-backed example apps are compiled and staged by the desktop scripts.

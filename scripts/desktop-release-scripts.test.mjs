@@ -681,6 +681,28 @@ test("desktop release stages the Rust engine and Collection compiler for the pac
   assert.ok(order(releaseStep(build, "pnpm build:desktop")) < order(releaseStep(build, "electron-builder")), "packaging checks the staged compiler");
 });
 
+// Every repository writer can run code on the self-hosted Mac, so the nightly
+// check holds nothing worth taking and stays off until its runner exists.
+test("the macOS check runs only on its own Mac runner, once enabled, and never for a pull request", async () => {
+  const checksWorkflow = load(await readFile(new URL("../.github/workflows/macos-checks.yml", import.meta.url), "utf8"));
+  assert.deepEqual(Object.keys(checksWorkflow.on).sort(), ["schedule", "workflow_dispatch"], "no pull request starts the Mac check");
+  assert.equal(checksWorkflow.permissions.contents, "read");
+  assert.equal(checksWorkflow.concurrency["cancel-in-progress"], false);
+  const { checks } = checksWorkflow.jobs;
+  assert.deepEqual(Object.keys(checksWorkflow.jobs), ["checks"]);
+  assert.equal(checks.if, "vars.MACOS_RUNNER_ENABLED == 'true'", "the check waits for its runner, for a schedule and a dispatch alike");
+  assert.deepEqual(checks["runs-on"], ["self-hosted", "macOS", "ARM64", "dohc-ci"]);
+  assert.equal(checks.environment, undefined, "the Mac check uses no release environment");
+  assert.ok(!workflowValues(checksWorkflow).some(value => typeof value === "string" && value.includes("secrets.")), "the Mac check reads no secret");
+  // Only a branch of this repository is checked, from a clean checkout.
+  const [requireBranch, checkout, clean] = checks.steps;
+  assert.match(requireBranch.run, /"\$CHECK_REF" != refs\/heads\/\*/);
+  assert.equal(checks.env.CHECK_REF, "${{ inputs.ref && format('refs/heads/{0}', inputs.ref) || github.ref }}");
+  assert.equal(checkout.with.ref, "${{ env.CHECK_REF }}");
+  assert.equal(checkout.with.clean, undefined, "checkout keeps its default clean");
+  assert.equal(clean.run, "git clean -ffdx");
+});
+
 test("desktop release workflow uploads only distributable release assets", () => {
   const prepareReleaseUpload = releaseStep(releaseWorkflow.jobs.publish, "is_release_upload_file").run;
 

@@ -28,6 +28,10 @@ permissions:
 jobs:
   checks:
     name: full verification + desktop e2e
+    # Off until a maintainer sets the repository variable MACOS_RUNNER_ENABLED
+    # to true, after the runner is registered (docs/engineering/macos-runner.md).
+    # Evaluated before any runner is allocated.
+    if: vars.MACOS_RUNNER_ENABLED == 'true'
     runs-on: [self-hosted, macOS, ARM64, dohc-ci]
     timeout-minutes: 300
     env:
