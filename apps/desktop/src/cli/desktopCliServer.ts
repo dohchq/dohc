@@ -219,8 +219,8 @@ export function createDesktopCliServer<State>(
           });
         });
       } catch (error) {
-        // Preparation already changed disk and History, even if the lease retired.
-        await finish?.().catch(() => undefined);
+        // Once preparation returns, completion owns the disk and History result.
+        if (finish) return finish();
         throw error;
       }
       return finish!();

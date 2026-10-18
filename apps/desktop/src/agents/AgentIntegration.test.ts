@@ -538,7 +538,7 @@ describe("AgentIntegration", () => {
             state: heldState,
             assertCurrent: () => {
               if (currentState !== heldState) {
-                throw new Error("retired workspace authority");
+                throw new Error("This workspace was closed. Open it again.");
               }
             },
             setAgentRun: async () => {
@@ -555,7 +555,7 @@ describe("AgentIntegration", () => {
       currentState = successorState;
       allowSettle.resolve();
 
-      await expect(starting).rejects.toThrow("retired workspace authority");
+      await expect(starting).rejects.toThrow("This workspace was closed. Open it again.");
       expect(oldState.activeRun).toBeNull();
       expect(successorState.activeRun).toBeNull();
     });
@@ -576,7 +576,7 @@ describe("AgentIntegration", () => {
           rootPath: root,
           state,
           assertCurrent: () => {
-            throw new Error("retired workspace authority");
+            throw new Error("This workspace was closed. Open it again.");
           },
           setAgentRun,
           release,
@@ -584,7 +584,7 @@ describe("AgentIntegration", () => {
       });
 
       await expect(integration.startAgentRun("ws")).rejects.toThrow(
-        "retired workspace authority",
+        "This workspace was closed. Open it again.",
       );
       expect(setAgentRun).not.toHaveBeenCalled();
       expect(release).toHaveBeenCalledOnce();

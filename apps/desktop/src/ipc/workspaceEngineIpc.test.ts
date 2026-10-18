@@ -1047,7 +1047,7 @@ describe("workspace engine IPC registrations", () => {
 
     it.each([
       // The workspace authority retires an operation whose folder changed.
-      ["its folder moves", { rootPath: "C:/moved" }, "retired workspace authority"],
+      ["its folder moves", { rootPath: "C:/moved" }, "This workspace was closed. Open it again."],
       ["it becomes a shared view", { shareView: {} as NonNullable<RegistryEntry["shareView"]> }, "the workspace changed"],
     ])("stops a read when %s", async (_change, fields, message) => {
       const h = await harness();

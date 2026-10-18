@@ -72,7 +72,7 @@ describe("workspace authority owner", () => {
     const drained = test.owner.invalidate("workspace");
     test.replace({ ...workspace });
 
-    expect(() => first.assertCurrent()).toThrow("retired workspace authority");
+    expect(() => first.assertCurrent()).toThrow("This workspace was closed. Open it again.");
     expect(() => test.owner.acquire("workspace")).toThrow("retiring or blocked");
     first.release();
     await drained;
@@ -127,7 +127,7 @@ describe("workspace authority owner", () => {
       const identity = lease.binding.attachmentId;
       await held;
       expect(test.disposed).not.toContain(identity);
-      expect(() => lease.assertCurrent()).toThrow("retired workspace authority");
+      expect(() => lease.assertCurrent()).toThrow("This workspace was closed. Open it again.");
       return identity;
     });
 
@@ -167,7 +167,7 @@ describe("workspace authority owner", () => {
     const retiring = test.owner.invalidate("workspace");
     resume.resolve();
 
-    await expect(running).rejects.toThrow("retired workspace authority");
+    await expect(running).rejects.toThrow("This workspace was closed. Open it again.");
     await retiring;
     expect(test.disposed).toEqual([attachmentId]);
   });
@@ -262,7 +262,7 @@ describe("workspace authority owner", () => {
     const retiring = test.owner.invalidate("workspace");
 
     expect(killed).toEqual([attachmentId]);
-    await expect(running).rejects.toThrow("retired workspace authority");
+    await expect(running).rejects.toThrow("This workspace was closed. Open it again.");
     await retiring;
   });
 
@@ -289,7 +289,7 @@ describe("workspace authority owner", () => {
     );
 
     daemonReady.resolve();
-    await expect(opening).rejects.toThrow("retired workspace authority");
+    await expect(opening).rejects.toThrow("This workspace was closed. Open it again.");
     await retirement;
     const attachmentB = test.owner.acquire("workspace");
     expect(attachmentB.binding.attachmentId).not.toBe(attachmentA);
@@ -314,7 +314,7 @@ describe("workspace authority owner", () => {
 
     await expect(
       owner.withOperation("workspace", async () => undefined),
-    ).rejects.toThrow("retired workspace authority");
+    ).rejects.toThrow("This workspace was closed. Open it again.");
 
     await owner.invalidate("workspace");
     expect(disposeState).toHaveBeenCalledOnce();
@@ -340,7 +340,7 @@ describe("workspace authority owner", () => {
     await drained;
     await expect(
       Promise.resolve().then(() => test.owner.withBinding(binding, async () => undefined)),
-    ).rejects.toThrow("retired workspace authority");
+    ).rejects.toThrow("This workspace was closed. Open it again.");
   });
 
   it("deduplicates different registry spellings of one canonical root", async () => {

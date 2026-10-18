@@ -258,7 +258,7 @@ export function createWorkspaceAuthorityOwner<
       !workspace ||
       !bindingMatchesWorkspace(record.binding, workspace)
     ) {
-      throw new Error("This work belongs to a retired workspace authority.");
+      throw new Error("This workspace was closed. Open it again.");
     }
   }
 
@@ -291,7 +291,7 @@ export function createWorkspaceAuthorityOwner<
   ): AuthorityRecord<Workspace, State> {
     const record = slots.get(binding.workspaceId)?.current;
     if (!record || record.binding !== binding) {
-      throw new Error("This work belongs to a retired workspace authority.");
+      throw new Error("This workspace was closed. Open it again.");
     }
     return record;
   }
@@ -306,7 +306,7 @@ export function createWorkspaceAuthorityOwner<
         lease.assertCurrent();
         const workspace = options.findWorkspace(lease.binding.workspaceId);
         if (!workspace || !bindingMatchesWorkspace(lease.binding, workspace)) {
-          throw new Error("This work belongs to a retired workspace authority.");
+          throw new Error("This workspace was closed. Open it again.");
         }
         return Object.freeze({
           ...workspace,

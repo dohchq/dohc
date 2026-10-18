@@ -198,7 +198,7 @@ describe("desktop workspace callbacks", () => {
     const work = vi.fn();
     expect(test.callbacks.withWorkspaceAttachment({ ...workspace, attachmentId: Symbol("old") }, work)).toBeUndefined();
     await expect(test.callbacks.withWorkspaceAttachmentAsync({ ...workspace, attachmentId: Symbol("old") }, work))
-      .rejects.toThrow("This callback belongs to a retired workspace authority.");
+      .rejects.toThrow("This workspace was closed. Open it again.");
     expect(work).not.toHaveBeenCalled();
     await test.authorities.invalidate(workspace.workspaceId);
     expect(test.disposed).toEqual([workspace.attachmentId]);

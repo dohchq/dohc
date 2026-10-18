@@ -33,7 +33,7 @@ const assertCurrent = () => undefined;
 
 function retiringCaller() {
   let current = true;
-  const retired = new Error("retired workspace authority");
+  const retired = new Error("This workspace was closed. Open it again.");
   const assertCurrent = () => {
     if (!current) throw retired;
   };

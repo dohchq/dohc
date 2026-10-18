@@ -34,6 +34,7 @@ import { createWorkspaceAuthorityOwner } from "../workspaces/workspaceAuthorityO
 import { createWorkspaceFolder } from "../workspaces/createWorkspaceFolder";
 import { realpathSync } from "node:fs";
 import { readDeleteRecovery, waitForRecovery } from "../workspaces/workspaceDeleteRecovery";
+import { readMoveRecovery } from "../workspaces/workspaceMoveRecovery";
 
 function deferred() {
   let release!: () => void;
@@ -551,7 +552,7 @@ describe("desktop CLI workspace context", () => {
       drained = f.authorities.invalidate("workspace");
       f.rows.set("workspace", { ...f.workspace });
     } finally { held.release(); await result; await drained; }
-    expect(await result).toMatchObject({ message: expect.stringContaining("retired workspace authority") });
+    expect(await result).toMatchObject({ message: expect.stringContaining("This workspace was closed. Open it again.") });
     expect(opened).not.toHaveBeenCalled();
   });
 });
@@ -753,27 +754,60 @@ describe("raw fileMove and fileDelete socket requests", () => {
     return { ...f, root, invoke };
   }
 
-  it("finishes a prepared delete when the post-work authority check throws", async () => {
+  it.each(["fileDelete", "fileMove"] as const)("returns a completed %s with Undo when the post-work authority check throws", async verb => {
     let drained: Promise<void> | undefined;
     const f = await setup(f => {
       f.dependencies.withPhysicalWorkspaceOperation = (id, work) => f.authorities.withOperation(id, async operation => {
         const result = await work(operation);
         // Retire after preparation returns, before withOperation's assertCurrent.
-        if (vi.mocked(f.dependencies.markDeletedUnderPath).mock.calls.length) drained = f.authorities.invalidate(id);
+        if (vi.mocked(f.capture.changePathsAs).mock.calls.length) drained = f.authorities.invalidate(id);
         return result;
       });
     });
     await writeFile(join(f.root, "plain.txt"), "original");
-    expect(await f.invoke("fileDelete", { path: "plain.txt" }))
-      .toMatchObject({ ok: false, reason: expect.stringContaining("retired workspace authority") });
-    expect(f.dependencies.trashItem).toHaveBeenCalledOnce();
-    const { operationId } = vi.mocked(f.capture.changePathsAs).mock.calls[0]![1];
-    await waitForRecovery(operationId);
-    const record = await readDeleteRecovery(f.root, operationId);
-    expect(record?.staged).toBeDefined();
-    expect(await readFile(join(f.root, ".dohc/trash", record!.staged!), "utf8")).toBe("original");
-    await drained;
-    await f.authorities.close();
+    try {
+      const result = await f.invoke(verb, verb === "fileDelete"
+        ? { path: "plain.txt" } : { fromPath: "plain.txt", toPath: "moved.txt" });
+      const { operationId } = vi.mocked(f.capture.changePathsAs).mock.calls[0]![1];
+      expect(result).toMatchObject({ ok: true, operationId, undo: { available: true } });
+      await expect(lstat(join(f.root, "plain.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+      await waitForRecovery(operationId);
+      if (verb === "fileDelete") {
+        expect(f.dependencies.trashItem).toHaveBeenCalledOnce();
+        const record = await readDeleteRecovery(f.root, operationId);
+        expect(record).toMatchObject({ operationId, tracked: true, staged: expect.any(String) });
+        expect(await readFile(join(f.root, ".dohc/trash", record!.staged!), "utf8")).toBe("original");
+      } else {
+        expect(await readMoveRecovery(f.root, operationId)).toMatchObject({ operationId, tracked: true, from: "plain.txt", to: "moved.txt" });
+        expect(await readFile(join(f.root, "moved.txt"), "utf8")).toBe("original");
+      }
+    } finally {
+      await drained;
+      await f.authorities.close();
+    }
+  });
+
+  it.each(["fileDelete", "fileMove"] as const)("keeps a failed %s failed when the workspace closes after preparation", async verb => {
+    let drained: Promise<void> | undefined;
+    const f = await setup(f => {
+      f.dependencies.withPhysicalWorkspaceOperation = (id, work) => f.authorities.withOperation(id, async operation => {
+        const result = await work(operation);
+        if (vi.mocked(f.capture.changePathsAs).mock.calls.length) drained = f.authorities.invalidate(id);
+        return result;
+      });
+    });
+    await writeFile(join(f.root, "plain.txt"), "original");
+    vi.mocked(f.capture.changePathsAs).mockRejectedValueOnce(new Error("History could not record this change."));
+    try {
+      expect(await f.invoke(verb, verb === "fileDelete"
+        ? { path: "plain.txt" } : { fromPath: "plain.txt", toPath: "moved.txt" }))
+        .toMatchObject({ ok: false, reason: "History could not record this change." });
+      expect(await readFile(join(f.root, "plain.txt"), "utf8")).toBe("original");
+      expect(f.dependencies.trashItem).not.toHaveBeenCalled();
+    } finally {
+      await drained;
+      await f.authorities.close();
+    }
   });
 
   it("saves recovery and restores a delete retired between the trash move and markDeleted", async () => {
@@ -810,10 +844,11 @@ describe("raw fileMove and fileDelete socket requests", () => {
     };
     f.dependencies.withEngineAdapter = async (_workspace, work) => work(history as unknown as VersionedLiveAdapter);
     try {
-      // The authority's final check refuses the retired request.
-      expect(await f.invoke("fileDelete", { path: "folder" })).toMatchObject({ ok: false });
+      const result = await f.invoke("fileDelete", { path: "folder" });
+      expect(result).toMatchObject({ ok: true, operationId: expect.stringMatching(/^dohc-operation:/), undo: { available: true } });
+      if (!result.ok || !("operationId" in result) || typeof result.operationId !== "string") throw new Error("Delete returned no operation id");
+      const { operationId } = result;
       await drained;
-      const { operationId } = vi.mocked(f.capture.changePathsAs).mock.calls[0]![1];
       await waitForRecovery(operationId);
       const record = await readDeleteRecovery(f.root, operationId);
       expect(record).toMatchObject({ tracked: true, paths: ["folder/rowless.bin"], staged: expect.any(String) });

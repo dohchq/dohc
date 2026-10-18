@@ -449,7 +449,7 @@ describe("registered chat reads and reader-local state", () => {
     const entered = deferred();
     test.openWorkspaceActivity.mockImplementationOnce(() => { entered.resolve(); return opened.promise; });
     const read = test.invoke(chatOperations.listChatMessages.channel, { workspaceId: "workspace", threadId: "thread" });
-    const rejected = expect(read).rejects.toThrow("retired workspace authority");
+    const rejected = expect(read).rejects.toThrow("This workspace was closed. Open it again.");
     await entered.promise;
     const retired = test.authorities.invalidate("workspace");
     opened.resolve();
@@ -464,7 +464,7 @@ describe("registered chat reads and reader-local state", () => {
     await test.authorities.invalidate("workspace");
     const successor = test.authorities.acquire("workspace");
     successor.release();
-    await expect(test.chatScope.chatFileObjectId(scope, "notes/a.md")).rejects.toThrow("retired workspace authority");
+    await expect(test.chatScope.chatFileObjectId(scope, "notes/a.md")).rejects.toThrow("This workspace was closed. Open it again.");
     expect(test.resolveEngineFiles).not.toHaveBeenCalled();
   });
 });

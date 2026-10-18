@@ -3119,7 +3119,7 @@ async function syncWorkspaceForDispatch(
               activity.workspaceRootPath(workspaceId) !== workspace.rootPath
             ) {
               throw new Error(
-                "This sync belongs to a retired workspace authority.",
+                "This workspace was closed. Open it again.",
               );
             }
             activity.queueCloudSync(workspaceId);
