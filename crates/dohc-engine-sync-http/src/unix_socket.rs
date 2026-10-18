@@ -63,6 +63,21 @@ pub(super) struct UnixTransport {
     buffers: LazyBuffers,
 }
 
+/// macOS refuses socket options once the peer has closed, yet buffered bytes
+/// and EOF still read, and a write still reports the closed peer.
+fn set_timeout(result: std::io::Result<()>) -> Result<(), Error> {
+    match result {
+        Err(error)
+            if cfg!(target_vendor = "apple")
+                && error.kind() == std::io::ErrorKind::InvalidInput
+                && error.raw_os_error().is_some() =>
+        {
+            Ok(())
+        }
+        result => Ok(result?),
+    }
+}
+
 fn io_error(error: std::io::Error, timeout: NextTimeout) -> Error {
     if matches!(
         error.kind(),
@@ -80,16 +95,17 @@ impl Transport for UnixTransport {
     }
 
     fn transmit_output(&mut self, amount: usize, timeout: NextTimeout) -> Result<(), Error> {
-        self.stream
-            .set_write_timeout(timeout.not_zero().map(|t| *t))?;
+        set_timeout(
+            self.stream
+                .set_write_timeout(timeout.not_zero().map(|t| *t)),
+        )?;
         self.stream
             .write_all(&self.buffers.output()[..amount])
             .map_err(|e| io_error(e, timeout))
     }
 
     fn await_input(&mut self, timeout: NextTimeout) -> Result<bool, Error> {
-        self.stream
-            .set_read_timeout(timeout.not_zero().map(|t| *t))?;
+        set_timeout(self.stream.set_read_timeout(timeout.not_zero().map(|t| *t)))?;
         let amount = self
             .stream
             .read(self.buffers.input_append_buf())
@@ -100,5 +116,28 @@ impl Transport for UnixTransport {
 
     fn is_open(&mut self) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_a_response_the_peer_already_closed() {
+        let (stream, mut peer) = UnixStream::pair().unwrap();
+        peer.write_all(b"HTTP/1.1 200 OK\r\n\r\n").unwrap();
+        drop(peer);
+        let mut transport = UnixTransport {
+            stream,
+            buffers: LazyBuffers::new(1024, 1024),
+        };
+        let timeout = NextTimeout {
+            after: std::time::Duration::from_secs(5).into(),
+            reason: ureq::Timeout::RecvResponse,
+        };
+        assert!(transport.await_input(timeout).unwrap());
+        assert_eq!(transport.buffers.input(), b"HTTP/1.1 200 OK\r\n\r\n");
+        assert!(!transport.await_input(timeout).unwrap());
     }
 }
