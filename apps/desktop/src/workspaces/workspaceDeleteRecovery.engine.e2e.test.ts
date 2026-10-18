@@ -104,7 +104,7 @@ it.skipIf(engine.missing)("undoes a folder delete through the real engine and re
   }
 }, REAL_DAEMON_TEST_TIMEOUT_MS);
 
-it.skipIf(engine.missing)("undoes a person's file through IPC and an agent's rename and folder through the real socket", async () => {
+it.skipIf(engine.missing)("undoes a person's file through IPC and an agent's rename through the real socket, refusing folder Undo", async () => {
   const rootPath = await createTestScratch("dohc-move-undo-engine-");
   await mkdir(join(rootPath, "folder/node_modules/pkg"), { recursive: true });
   await writeFile(join(rootPath, "folder/tracked.txt"), "before\n");
@@ -189,11 +189,13 @@ it.skipIf(engine.missing)("undoes a person's file through IPC and an agent's ren
     expect(replay).toMatchObject({ deduped: true, momentCount: 1 });
     await agentUndo();
     const folder = await request("fileMove", { fromPath: "folder", toPath: "archive/folder", requestId: "real-agent-folder" });
-    expect(folder).toMatchObject({ ok: true, undo: { available: true } });
-    await expect.poll(() => request("historyUndo", { operationId: (folder as { operationId: string }).operationId }),
-      { timeout: REAL_DAEMON_DEADLINE_MS }).toMatchObject({ ok: true, tracked: { state: "restored", momentCount: 1 } });
-    expect(await capture.fileObjectIdForPath("folder/tracked.txt")).toBe(object);
-    await expect(stat(join(rootPath, "archive/folder"))).rejects.toMatchObject({ code: "ENOENT" });
+    const folderReason = "Undo for a folder move isn't available yet. Move it back yourself.";
+    expect(folder).toMatchObject({ ok: true, undo: { available: false, reason: folderReason, paths: [] } });
+    const folderId = (folder as { operationId: string }).operationId;
+    expect(await request("historyUndo", { operationId: folderId })).toEqual({ ok: false, reason: folderReason });
+    expect(await owner.undoHistoryOperation({}, { workspaceId: workspace.workspaceId, operationId: folderId })).toEqual({ ok: false, reason: folderReason });
+    expect(await capture.fileObjectIdForPath("archive/folder/tracked.txt")).toBe(object);
+    await expect(stat(join(rootPath, "folder"))).rejects.toMatchObject({ code: "ENOENT" });
   } finally {
     await server?.close(); await capture.stop(); await sessions.closeAll(); await lifecycle.stop();
   }

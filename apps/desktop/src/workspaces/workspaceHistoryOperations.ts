@@ -111,12 +111,12 @@ async function recoveryFloor(record: Readonly<RecoveryRecord>, staged: string | 
 async function moveRecoveryFloor(record: MoveRecoveryRecord, floor: Floor): Promise<void> {
   const invalid = () => new Error(`Cannot undo the ${moveWord(record.from, record.to)}. Its recovery paths are invalid.`);
   if (record.from === record.to || record.from.startsWith(record.to + "/") || record.to.startsWith(record.from + "/")) throw invalid();
-  const paths = [...record.entries, ...(record.pending ?? []), ...[record.progress, record.result].flatMap(result =>
+  const paths = "noUndo" in record ? [] : [...record.entries, ...(record.pending ?? []), ...[record.progress, record.result].flatMap(result =>
     [...(result?.restored ?? []), ...(result?.remaining.map(item => item.path) ?? [])])];
-  for (const path of paths) if (path !== record.from && !path.startsWith(record.from + "/")) throw invalid();
+  for (const path of paths) if (path !== record.from) throw invalid();
   await floor(record.from, undefined, true);
   await floor(record.to, undefined, true);
-  for (const path of paths) { await floor(path); await floor(moveEntryTarget(record, path)); }
+  for (const path of paths) { await floor(path); await floor(record.to); }
 }
 function decodeCursor(cursor: string, workspaceId: string, operationId: string): HistoryCursor {
   let parsed: HistoryCursor;
@@ -150,7 +150,7 @@ export async function readWorkspaceHistoryOperation(operation: Operation, input:
       operation.assertCurrent();
       return { ok: true as const, operationId: input.operationId,
         members: result.moments.map(member => ({ momentId: member.momentId, operation: member.operation, path: member.path, ...(member.beforePath ? { beforePath: member.beforePath } : {}) })),
-        ...(record ? { withoutHistory: record.paths } : move ? { withoutHistory: move.entries.map(path => moveEntryTarget(move, path)) } : {}), nextCursor: result.nextCursor ? Buffer.from(JSON.stringify(result.nextCursor)).toString("base64url") : null };
+        ...(record ? { withoutHistory: record.paths } : move && !("noUndo" in move) ? { withoutHistory: move.entries.map(path => moveEntryTarget(move, path)) } : {}), nextCursor: result.nextCursor ? Buffer.from(JSON.stringify(result.nextCursor)).toString("base64url") : null };
     });
   } catch (error) { return failure(error, "read"); }
 }
@@ -166,6 +166,7 @@ export async function undoWorkspaceHistoryOperation(operation: Operation & { sig
       writable(operation);
       const record = await readDeleteRecovery(rootPath, input.operationId);
       const move = record ? undefined : await readMoveRecovery(rootPath, input.operationId);
+      if (move && "noUndo" in move) throw new Error(move.noUndo);
       if (move && move.from !== move.to && move.from.toLowerCase() === move.to.toLowerCase()) throw new Error(caseOnlyMoveReason);
       const floor = options.agent ? await agentFloor(rootPath, move ? true : !record?.result)
         : record ? personFloor(rootPath) : move ? personFloor(rootPath, moveWord(move.from, move.to)) : undefined;
@@ -183,7 +184,7 @@ export async function undoWorkspaceHistoryOperation(operation: Operation & { sig
         }
         cursor = result.nextCursor ?? undefined;
       } while (cursor && (floor || !deleted));
-      if (move) return undoMoveRecovery(rootPath, move, members, author, options.history, workspaceId, () => writable(operation), markChanged, (root, from, to) => placeBack(root, from, to, "", true));
+      if (move) return undoMoveRecovery(rootPath, move, author, options.history, workspaceId, () => writable(operation), markChanged, (root, from, to) => placeBack(root, from, to, "", true));
       if (!record) {
         const rename = members.find(member => member.operation === "rename");
         throw new Error(deleted ? missingDeleteRecoveryReason : rename

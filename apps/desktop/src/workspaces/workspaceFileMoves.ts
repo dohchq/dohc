@@ -16,7 +16,7 @@ import { realRelativeInRoot } from "@dohc/workspace-core/realPath";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import { beginPendingRecovery, finishDeleteRecovery, stageDeleteRecovery, type OperationRecovery, type DeleteRecoveryPlan } from "./workspaceDeleteRecovery";
 
-import { finishMoveRecovery } from "./workspaceMoveRecovery";
+import { finishMoveRecovery, finishFolderMoveRecovery, folderMoveReason } from "./workspaceMoveRecovery";
 
 type PathChangeWorkspace = { rootPath: string; readOnly?: boolean; shareView?: unknown };
 
@@ -269,9 +269,8 @@ export async function moveWorkspacePathByHand(operation: PathChangeOperation, in
         await movePath(operation.workspace.rootPath, prepared.physicalFromPath, prepared.physicalToPath);
         markChanged();
         await finishRename?.(true);
-        const rename = dirname(prepared.physicalFromPath) === dirname(prepared.physicalToPath);
         return { path: prepared.visibleResultPath, undo: { available: false,
-          reason: `Undo for a folder ${rename ? "rename" : "move"} isn't available yet. ${rename ? "Rename" : "Move"} it back yourself.`, paths: [] } };
+          reason: folderMoveReason(prepared.physicalFromPath, prepared.physicalToPath), paths: [] } };
       } catch (error) {
         await finishRename?.(false);
         throw error;
@@ -302,7 +301,7 @@ async function prepareMoveWorkspacePath(operation: PathChangeOperation,
           `A rename cannot change a live document's kind from ${fromKind} to ${toKind ?? "a plain file"}. Create a new file and copy the content instead.`);
       }
       const endpoints = prepared ? [prepared.physicalFromPath, prepared.physicalToPath] : [(await admitPath(rootPath, input.fromPath)).physical, (await admitPath(rootPath, input.toPath)).physical];
-      const work = async (engine: AuthoredPathChanges | null): Promise<Changed<{ fromPath: string; toPath: string; withoutHistory: string[]; replacedWithoutHistory: string[]; recovery: DeleteRecoveryPlan; from: string; to: string; overwritten: boolean }, MoveFailure>> => {
+      const work = async (engine: AuthoredPathChanges | null): Promise<Changed<{ fromPath: string; toPath: string; withoutHistory: string[]; replacedWithoutHistory: string[]; recovery: DeleteRecoveryPlan | undefined; from: string; to: string; overwritten: boolean }, MoveFailure>> => {
           // Admission runs here, with capture held, right before the disk changes.
           assertWritable(operation);
           await options.admit?.();
@@ -352,7 +351,8 @@ async function prepareMoveWorkspacePath(operation: PathChangeOperation,
           const withoutHistory = fromFiles.filter(file => !recorded.has(file)).map(file => shownTo(rebase(file)));
           const replacedWithoutHistory = destFiles.filter(file => !destRecorded.has(file)).map(file => to.path + file.slice(destBase.length));
 
-          const recovery = await stageDeleteRecovery(operationId, source, from.relative, [...recorded]);
+          const recovery = (await lstat(source)).isDirectory() ? undefined
+            : await stageDeleteRecovery(operationId, source, from.relative, [...recorded]);
           const change: MoveProgress = { staged: undefined, sourceStaged: undefined, destDeleted: [], moved: false, renamed: [] };
           try {
             if (dest) {
@@ -436,6 +436,7 @@ async function prepareMoveWorkspacePath(operation: PathChangeOperation,
         : work(null));
       if ("failed" in changed) return changed;
       const { recovery, from, to, overwritten, ...done } = changed.done;
+      if (!recovery) return { ...changed, done: { ...done, ...await finishFolderMoveRecovery(rootPath, operationId, from, to) } };
       const release = recovery.record && !recovery.noUndo ? options.onRecorded?.(done.toPath, operationId) : undefined;
       try {
         const saved = await finishMoveRecovery(rootPath, recovery, from, to, overwritten);
