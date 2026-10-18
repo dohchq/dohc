@@ -307,6 +307,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "dohc-compiler-owner"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "dohc-engine-collab"
 version = "0.1.0"
 dependencies = [
