@@ -57,7 +57,7 @@ function harness() {
         trace.push(`authorize:${sender.senderId}:${workspaceId}`);
         subjects.push(subject);
         if (workspaceId !== workspace.workspaceId) {
-          throw new Error("This workspace was closed. Open it again.");
+          throw new Error("This workspace is not open. Open it again.");
         }
         if (activeWorkspaceId !== workspaceId) {
           throw new Error(
@@ -113,7 +113,7 @@ describe("sites IPC handlers", () => {
       unknown.handlers.listSites(trustedEvent, {
         workspaceId: "workspace-missing",
       }),
-    ).rejects.toThrow("This workspace was closed. Open it again.");
+    ).rejects.toThrow("This workspace is not open. Open it again.");
     expect(unknown.list).not.toHaveBeenCalled();
 
     const inactive = harness();

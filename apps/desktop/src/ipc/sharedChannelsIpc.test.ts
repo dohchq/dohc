@@ -140,7 +140,7 @@ describe("registered shared-channel handlers", () => {
     };
     registry.register(h.workspace);
     h.acknowledge.mockImplementation((workspaceId: string, shareId: string | undefined, generation: number) => {
-      // Forget wins just before the registry write, after IPC admission.
+      // The registry no longer holds the workspace when the write runs.
       registry.remove(workspaceId);
       registry.acknowledgeShareSkips(workspaceId, shareId, generation);
     });
