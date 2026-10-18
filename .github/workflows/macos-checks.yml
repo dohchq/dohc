@@ -1,9 +1,10 @@
 name: macOS checks
 
-# The Mac mini runner checks main every night. A maintainer can dispatch a
-# check of any branch of this repository, such as a pull request's head branch.
-# Pull requests never start this workflow, and it never uses Blacksmith.
-# docs/engineering/macos-runner.md describes the runner and its trust model.
+# The self-hosted Mac runs the full gate and the desktop e2e suite on main every
+# night. A maintainer can dispatch a check of any branch of this repository,
+# such as a pull request's head branch. Pull requests never start this
+# workflow, and it never uses Blacksmith. The runner is a dedicated macOS user
+# that holds no secrets; docs/engineering/macos-runner.md describes its trust model.
 on:
   schedule:
     # 03:37 in UTC+8, the Mac's time zone.
@@ -15,8 +16,8 @@ on:
         required: false
         type: string
 
-# The single Mac runs one check at a time. GitHub keeps one pending run and
-# cancels an older pending run, so nightly runs never queue behind each other.
+# The runner runs one check at a time. GitHub keeps one pending run and cancels
+# an older pending run, so nightly runs never queue behind each other.
 concurrency:
   group: macos-checks
   cancel-in-progress: false
@@ -27,21 +28,32 @@ permissions:
 jobs:
   checks:
     name: full verification + desktop e2e
-    runs-on: [self-hosted, macos, arm64]
-    timeout-minutes: 480
+    runs-on: [self-hosted, macOS, ARM64, dohc-ci]
+    timeout-minutes: 300
     env:
-      DISPLAY_LOCK: /tmp/dohc-display.lock
+      # Only a branch resolves under refs/heads/. A fork's branch, a
+      # pull/<n>/head ref, a tag, or a commit SHA does not.
+      CHECK_REF: ${{ inputs.ref && format('refs/heads/{0}', inputs.ref) || github.ref }}
     steps:
+      - name: Require a branch
+        run: |
+          if [[ "$CHECK_REF" != refs/heads/* ]]; then
+            echo "::error::$CHECK_REF is not a branch. Dispatch the check from a branch, or name one in the ref input."
+            exit 1
+          fi
+
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          # Only a branch of this repository resolves under refs/heads/.
-          # A fork's branch, a pull/<n>/head ref, or a commit SHA does not.
-          ref: ${{ inputs.ref && format('refs/heads/{0}', inputs.ref) || github.sha }}
+          ref: ${{ env.CHECK_REF }}
           fetch-depth: 0
           persist-credentials: false
-          # Keep ignored build output, such as target/ and node_modules/,
-          # so a nightly run does not rebuild the engine from nothing.
-          clean: false
+
+      # Checkout already cleans a reused workspace. Repeat it so nothing an
+      # earlier run left, including ignored build output, locks, and evidence,
+      # reaches this run.
+      - name: Remove earlier output
+        id: clean
+        run: git clean -ffdx
 
       - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4
 
@@ -55,60 +67,18 @@ jobs:
           rustup show active-toolchain || rustup toolchain install
           cargo --version
 
-      # The verifier refuses untracked files. Evidence from an earlier run
-      # would otherwise upload with this one.
       - name: Install dependencies
+        id: install
+        run: pnpm install --frozen-lockfile
+
+      # The runner user's own Colima VM serves Docker. It does not share
+      # another user's Docker socket.
+      - name: Start Docker
         run: |
           set -euo pipefail
-          git clean -ffd
-          rm -rf .agent-artifacts/verification
-          pnpm install --frozen-lockfile
-
-      - name: Check Docker
-        run: |
-          docker info --format 'Docker {{.ServerVersion}} on {{.OperatingSystem}}' || {
-            echo "::error::Docker does not respond. Start Colima on the Mac, then run the check again."
-            exit 1
-          }
-
-      # Electron windows open on the Mac's only display. Wait until nobody has
-      # used the keyboard or mouse for 15 minutes and no other process holds
-      # the display lock. The lock names this job's Runner.Worker, so it goes
-      # stale when the job ends however it ends.
-      - name: Wait for the display
-        id: display
-        timeout-minutes: 180
-        run: |
-          set -euo pipefail
-          worker=$PPID
-          until [[ "$(ps -o comm= -p "$worker" || true)" == *Runner.Worker ]]; do
-            worker=$(ps -o ppid= -p "$worker" | tr -d ' ' || true)
-            if [[ -z "$worker" || "$worker" -le 1 ]]; then
-              echo "::error::No Runner.Worker process owns this step."
-              exit 1
-            fi
-          done
-          echo "DISPLAY_LOCK_OWNER=$worker" >> "$GITHUB_ENV"
-          while :; do
-            idle=$(ioreg -c IOHIDSystem | awk '/HIDIdleTime/ && !seen { print int($NF / 1000000000); seen = 1 }')
-            if [[ -z "$idle" ]]; then
-              echo "::error::ioreg reported no keyboard or mouse idle time."
-              exit 1
-            fi
-            if (( idle >= 900 )) && mkdir "$DISPLAY_LOCK" 2>/dev/null; then
-              echo "$worker" > "$DISPLAY_LOCK/pid"
-              echo "GitHub Actions run $GITHUB_RUN_ID at $(git rev-parse HEAD)" > "$DISPLAY_LOCK/what"
-              echo "The Mac was idle for ${idle}s. This job holds the display."
-              break
-            fi
-            holder=$(cat "$DISPLAY_LOCK/pid" 2>/dev/null || true)
-            if [[ -n "$holder" ]] && ! kill -0 "$holder" 2>/dev/null; then
-              rm -rf "$DISPLAY_LOCK"
-              continue
-            fi
-            echo "Waiting for the display: idle ${idle}s, lock holder ${holder:-none}."
-            sleep 60
-          done
+          colima status >/dev/null 2>&1 || colima start
+          echo "DOCKER_HOST=unix://$HOME/.colima/default/docker.sock" >> "$GITHUB_ENV"
+          DOCKER_HOST="unix://$HOME/.colima/default/docker.sock" docker info --format 'Docker {{.ServerVersion}} on {{.OperatingSystem}}'
 
       # The same canonical gate as a pull request, in full mode: every gate,
       # package, repository test, and proof. It keeps going after a failure.
@@ -118,21 +88,15 @@ jobs:
 
       # The whole desktop suite. A pull request's gate runs only its proofs.
       - name: Desktop e2e
-        if: ${{ !cancelled() && steps.display.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         timeout-minutes: 75
         run: pnpm test:desktop:e2e
 
-      - name: Release the display
-        if: always()
-        run: |
-          if [[ -n "${DISPLAY_LOCK_OWNER:-}" && "$(cat "$DISPLAY_LOCK/pid" 2>/dev/null)" == "$DISPLAY_LOCK_OWNER" ]]; then
-            rm -rf "$DISPLAY_LOCK"
-          fi
-
-      # Traces, test workspaces, and profiles stay on the Mac until the next
-      # run. They can contain document text.
+      # Only this run's evidence: an earlier run's files exist until the clean
+      # step. Traces, test workspaces, and profiles stay on the Mac until the
+      # next run removes them. They can contain document text.
       - name: Verification evidence
-        if: always()
+        if: ${{ always() && steps.clean.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: macos-verification-${{ github.run_attempt }}

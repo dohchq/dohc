@@ -1,21 +1,51 @@
-# Operate the Mac runner
+# Operate the Mac check runner
 
-This procedure is for the maintainer who runs dohc's self-hosted macOS runner, a Mac mini with Apple silicon.
-The runner registers with the labels `self-hosted`, `macOS`, `ARM64`, and `desktop-release`.
+This procedure is for the maintainer who runs dohc's self-hosted macOS check runner on a Mac mini with Apple silicon.
+The runner registers with the labels `self-hosted`, `macOS`, `ARM64`, and `dohc-ci`.
+
+## Trust model
+
+Any repository writer can run any code on this runner, as its macOS user.
+A writer pushes a branch whose workflow names the runner's labels, and the job starts at once, with no review.
+A rule that a workflow runs only from `main` does not prevent this, because the branch carries its own workflow.
+The writers are Ice and every GitHub App with `contents` and `workflows` write access: today `chatgpt-codex-connector`, `blacksmith-sh`, and `macroscopeapp`.
+
+The runner therefore follows these rules:
+
+- It runs as `dohc-ci`, a dedicated standard macOS user. It never runs as a person's account or as an administrator.
+- The `dohc-ci` account holds no credentials or secrets. It has no `gh` login, SSH key, Git credential, cloud account, keychain item, or signing identity.
+- No release job runs on it. The macOS release jobs run on GitHub-hosted runners, and only they receive the macOS signing secrets.
+- No workflow gives it the `desktop-release` label.
+
+A job can still change anything `dohc-ci` can change: its home folder, its toolchains, its Colima VM, and the runner's own files.
+A later run, including the nightly check of `main`, inherits those changes.
+Treat a passing check as evidence from a machine that every writer controls, not as a release gate.
+To reset the runner, delete the `dohc-ci` user and repeat the setup below.
+
+Other local users' files must stay closed to `dohc-ci`.
+macOS gives every standard user the `staff` group, and a new home folder lets that group read it.
+Services on `127.0.0.1` are reachable from every account on the Mac. Each one must authenticate its callers.
+
+For pull requests from forks:
+
+- Keep fork pull request workflows disabled while the repository is private.
+- Before the repository becomes public, set "Require approval for all external contributors" in the repository's Actions settings.
+- No workflow may add a `pull_request` trigger that runs on this runner.
 
 ## What it runs
 
-| Workflow | Jobs on the Mac |
-| --- | --- |
-| `macOS checks` | Every night at 03:37 UTC+8, and on dispatch: `pnpm verify:pr --base HEAD --full`, then `pnpm test:desktop:e2e` |
-| `Desktop Release` | The macOS arm64 package for `macos` and `all`. Preflight, version check, and Publish for `macos` |
-
-`macOS checks` runs the same canonical gate as a pull request, in full mode, then the whole desktop e2e suite.
+`macOS checks` runs every night at 03:37 UTC+8, and when a maintainer dispatches it.
+It runs `pnpm verify:pr --base HEAD --full`, the canonical PR gate in full mode, then the whole desktop e2e suite with `pnpm test:desktop:e2e`.
 The PR gate runs only the desktop proofs, so macOS e2e failures otherwise go unnoticed.
+
+Each run starts from a clean checkout and removes every ignored file with `git clean -ffdx`.
+Nothing that an earlier run left in the checkout, such as build output, locks, or evidence, reaches the next run.
+Each run therefore builds the engine and desktop from the beginning.
+
 The run uploads `result.json`, step logs, and Playwright reports as the `macos-verification-<attempt>` artifact for 14 days.
 Traces, test workspaces, and profiles stay in the runner's checkout until the next run. They can contain document text.
 
-`PR checks` never uses the Mac. It is one machine and can be off, so no required check depends on it.
+`PR checks` never uses this runner. It is one machine and can be off, so no required check depends on it.
 
 ## Check a pull request on the Mac
 
@@ -26,85 +56,104 @@ gh workflow run macos-checks.yml --repo dohchq/dohc --ref main -f ref=<branch>
 ```
 
 The workflow file comes from `main`, and the checked-out code comes from `<branch>`.
-The `ref` input accepts only a branch of this repository.
-A fork's branch, a `pull/<n>/head` ref, or a commit SHA fails at checkout.
+The job fails unless the checked ref is a branch of this repository.
+A fork's branch, a `pull/<n>/head` ref, a tag, or a commit SHA does not resolve.
 To check a fork's change, review it, then push it to a branch of this repository.
-That push is the decision to run its code on the Mac.
 
 One check runs at a time. GitHub keeps one pending run and cancels an older pending run, including a dispatch.
-A release job also waits while a check holds the runner.
 
-## Share the Mac with a person
+## Set up the runner
 
-Electron windows open on the Mac's only display, take focus, and use the system clipboard.
-Before the first Electron window opens, the job waits until two conditions hold:
+Ice runs this setup once with administrator rights.
+It creates `dohc-ci`, gives it its own login session, and registers the runner inside that session.
+The session is necessary because the e2e suite opens Electron windows.
 
-- Nobody has used the keyboard or mouse for 15 minutes. The job reads `HIDIdleTime` from `ioreg`.
-- No other process holds the display lock, the directory `/tmp/dohc-display.lock`.
+### Prepare the Mac as Ice
 
-The job then holds the lock until it ends. It waits at most three hours, then fails.
-A dispatch made at the Mac starts its checks 15 minutes after its sender leaves the Mac.
+1. Remove the old runner registration. Its service is already unloaded.
 
-Agents and scripts that open Electron on the Mac must take the same lock:
+   ```sh
+   cd ~/dev/actions-runner
+   ./svc.sh uninstall
+   ./config.sh remove --token "$(gh api -X POST repos/dohchq/dohc/actions/runners/remove-token --jq .token)"
+   cd ~ && rm -rf ~/dev/actions-runner
+   ```
 
-1. Create the directory with `mkdir /tmp/dohc-display.lock`. If `mkdir` fails, another process holds the lock.
-2. Write the holder's process ID to `pid` in that directory, and a description to `what`.
-3. Remove the directory when the work ends.
+2. Close your home folder to other local users:
 
-A lock whose `pid` names no running process is stale, and the next process removes it.
-The job writes its `Runner.Worker` process ID, so the lock goes stale when the job ends for any reason.
+   ```sh
+   chmod 700 /Users/ice
+   ```
 
-If you need the Mac while a check runs, cancel the run from the Actions page or with `gh run cancel <run-id>`.
-Do not type into dohc windows that a run opened.
-After a run that was killed, list leftover Postgres containers with `docker ps --all --filter label=dohc.verification` and remove them.
+3. Create `dohc-ci` as a standard user. The command asks for its password.
 
-## Install the runner's tools
+   ```sh
+   sudo sysadminctl -addUser dohc-ci -fullName "dohc CI" -password -
+   ```
 
-The jobs run under the runner's noninteractive `PATH`, which the runner records in its `.path` file.
-Keep `/opt/homebrew/bin` before `/bin` in that file.
+4. Turn on fast user switching, and stop the Mac from sleeping. A sleeping Mac does not start the nightly run.
 
-- Sign in to the macOS account that owns the runner. FileVault prevents automatic login, so sign in again after each restart.
-- Turn off system sleep with `sudo pmset -a sleep 0`. A sleeping Mac does not start the nightly run.
-- Install Homebrew bash 4 or newer with `brew install bash`. The release coordinator jobs do not run under the bash 3.2 that macOS ships.
-- Install Xcode Command Line Tools with `xcode-select --install`.
-- Install `gh` with `brew install gh`. The release version check and publish job use it.
-- Install Docker through Colima with `brew install colima docker`. Start it at login with `brew services start colima`. The verifier starts its Postgres container through Docker.
-- Install rustup. The checkout's `rust-toolchain.toml` selects the Rust toolchain.
-- Install the cargo tools at the versions that `.github/workflows/pr-checks.yml` pins, with `cargo install --locked`: `cargo-deny`, `cargo-audit`, and `cargo-nextest`.
+   ```sh
+   sudo defaults write /Library/Preferences/.GlobalPreferences MultipleSessionEnabled -bool true
+   sudo pmset -a sleep 0
+   ```
+
+5. Confirm that Homebrew has Colima, Docker, and Git: `brew install colima docker git`.
+   `dohc-ci` runs these programs but cannot change them.
+
+6. Create a runner registration token. Keep it for the next part. It expires after one hour.
+
+   ```sh
+   gh api -X POST repos/dohchq/dohc/actions/runners/registration-token --jq .token
+   ```
+
+### Install the runner as dohc-ci
+
+Switch to `dohc-ci` with fast user switching, sign in, and open Terminal.
+
+1. Install rustup and the cargo tools that `.github/workflows/pr-checks.yml` pins:
+
+   ```sh
+   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+   source "$HOME/.cargo/env"
+   cargo install --locked cargo-deny --version 0.20.2
+   cargo install --locked cargo-audit --version 0.22.2
+   cargo install --locked cargo-nextest --version 0.9.143
+   ```
+
+2. Start this user's own Colima VM once: `colima start`.
+   Each job starts it again if it is not running.
+   Do not give `dohc-ci` another user's Docker socket. A Docker client controls the Colima VM, and Colima mounts its owner's home folder into that VM.
+
+3. Download the macOS ARM64 runner into `~/actions-runner`. Follow the download step on the repository's Settings > Actions > Runners > New self-hosted runner page.
+
+4. Register and start the runner with the token from Ice's step 6:
+
+   ```sh
+   cd ~/actions-runner
+   export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+   ./config.sh --url https://github.com/dohchq/dohc --token <token> --name dohc-ci-mac-mini --labels dohc-ci --unattended
+   ./svc.sh install
+   ./svc.sh start
+   ```
+
+   The runner records that `PATH` in `.path`. Jobs find `cargo`, `colima`, and `docker` through it.
+   `svc.sh` installs a launch agent for `dohc-ci`, so it starts each time `dohc-ci` signs in.
+
+5. Switch back to your own account. Leave `dohc-ci` signed in.
 
 Each job downloads the Node version in `.node-version` and the pnpm version in `package.json`.
-The verifier installs the pinned Playwright Chromium.
-Rosetta is not required. dohc does not build for Intel Macs.
+The verifier installs the pinned Playwright Chromium for `dohc-ci`. Xcode Command Line Tools are installed for every user.
 
-Confirm Docker from a shell with the runner's `PATH`:
+### After a restart
 
-```sh
-env -i HOME="$HOME" PATH="$(cat ~/dev/actions-runner/.path)" docker info
-```
+FileVault prevents automatic login.
+Sign in as Ice, switch to `dohc-ci` and sign in, then switch back.
+The runner starts when `dohc-ci` signs in.
 
-The check keeps ignored build output, such as `target/` and `node_modules/`, between runs.
-A release job in the same checkout removes that output, and the next check rebuilds it.
+## Unverified until the first run
 
-## Register the runner again
-
-Run these steps in the runner's directory, `~/dev/actions-runner`, as the account that owns the runner:
-
-1. Stop and remove the service with `./svc.sh stop`, then `./svc.sh uninstall`.
-2. Remove the registration with `./config.sh remove --token <token>`. Get the token from the repository's Actions runner settings.
-3. Register with `./config.sh --url https://github.com/dohchq/dohc --token <token> --labels desktop-release`. The runner adds `self-hosted`, `macOS`, and `ARM64`.
-4. Install and start the service with `./svc.sh install`, then `./svc.sh start`.
-
-The service is a launch agent for the signed-in account, so its jobs can open windows.
-The runner records `PATH` in `.path` when it is configured. Correct that file if the tools above move.
-
-## Trust model
-
-Every job runs as the macOS account that owns the runner.
-A job can read and change everything that account can: its home folder, SSH keys, keychains, Git credentials, and other checkouts.
-A job also receives the workflow's token, and release jobs receive the `desktop-release` environment's signing secrets.
-
-Only code that a repository writer put on a branch of this repository runs on the Mac.
-`macOS checks` has no pull request trigger, and its `ref` input resolves only this repository's branches.
-`Desktop Release` runs only from `main`.
-Do not add a `pull_request` trigger that targets this runner. Do not enable fork pull request workflows for the repository.
-Register the runner only on a Mac whose owner accepts this access, and keep personal secrets out of that account where possible.
+The e2e suite has not yet run in a background fast-user-switching session.
+The first nightly run must confirm that Electron windows open and render there, and that failure screenshots capture them.
+It must also confirm that the clipboard tests pass, because each session has its own clipboard.
+Until then, a failure in those areas can come from the session rather than from dohc.
