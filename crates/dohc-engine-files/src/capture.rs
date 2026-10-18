@@ -22,10 +22,12 @@
 
 use crate::CancellationToken;
 use crate::error::FilesError;
-use crate::reconcile::{CaptureOp, IngestReason, ReconcileController, ReconcilePlan};
+use crate::floor::path_collision_key;
+use crate::reconcile::{CaptureOp, IngestReason, ReconcileController, ReconcilePlan, Respelling};
 use dohc_engine_storage::FaultInjector;
 #[cfg(feature = "fault-injection")]
 use dohc_engine_storage::FaultPoint;
+use std::collections::BTreeSet;
 
 /// A contained per-path domain apply failure. It is deliberately content-free.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -106,6 +108,21 @@ pub trait CaptureSink {
 
     fn retire(&mut self, path: &str) -> Result<(), CaptureError>;
 
+    /// Retire `path`, a tracked spelling the reconcile proved respelled to
+    /// `to`: the old spelling still opens the file, which is stored under the
+    /// new one, and the plan ingests the new spelling. A head capture does not
+    /// own may retire when it still holds the bytes found at `to`.
+    /// [`RespelledRetire::Waits`] when it must wait, as while an editor has
+    /// the file open; the new spelling then waits too.
+    fn retire_respelled(
+        &mut self,
+        path: &str,
+        to: &Respelling,
+    ) -> Result<RespelledRetire, CaptureError> {
+        let _ = to;
+        self.retire(path).map(|()| RespelledRetire::Retired)
+    }
+
     /// Try one bounded all-ingest prefix. `None` asks the capture loop to use
     /// the ordinary per-operation contract for the whole plan. A committed
     /// result is one durability boundary; its non-empty outcomes must align
@@ -116,6 +133,18 @@ pub trait CaptureSink {
         None
     }
 }
+
+/// How a sink disposed of a respelled path's retire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RespelledRetire {
+    Retired,
+    /// Refused for now. The path stays dirty for a later pass.
+    Waits,
+}
+
+const RESPELLED_RETIRE_WAITS: CaptureError = CaptureError {
+    reason: "respelled-retire-waits",
+};
 
 /// Bounded receipt from the apply phase.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,6 +212,25 @@ pub fn apply_reconcile_plan_cancellable(
     cancel: &CancellationToken,
 ) -> CaptureApplyResult {
     let mut receipt = Receipt::with_capacity(plan.ops.len());
+    // Peers must receive a respelled path's retire before the new spelling's
+    // ingest: on a disk that ignores case, a later retire deletes the new
+    // file. When that retire has to wait, so does the ingest. Respelled
+    // retires come first in a plan, so the set is complete once they ran.
+    let mut unretired: BTreeSet<String> = BTreeSet::new();
+    let next_waiting = |from: usize, unretired: &BTreeSet<String>| {
+        if unretired.is_empty() {
+            return plan.ops.len();
+        }
+        plan.ops[from..]
+            .iter()
+            .position(|op| {
+                matches!(op, CaptureOp::Ingest { path, .. }
+                    if unretired.contains(&path_collision_key(path)))
+            })
+            .map_or(plan.ops.len(), |offset| from + offset)
+    };
+    let mut waiting = plan.ops.len();
+    let mut waits_known = true;
     let mut cursor = 0;
     let mut try_batch = true;
     while cursor < plan.ops.len() {
@@ -190,11 +238,23 @@ pub fn apply_reconcile_plan_cancellable(
             receipt.fail_all(&plan.ops[cursor..]);
             break;
         }
+        // Only ingests wait, so the boundary is found once the loop reaches
+        // one, after every respelled retire before it ran.
+        if !waits_known && matches!(&plan.ops[cursor], CaptureOp::Ingest { .. }) {
+            waiting = next_waiting(cursor, &unretired);
+            waits_known = true;
+        }
+        if cursor == waiting {
+            receipt.fail_all(&plan.ops[cursor..=cursor]);
+            cursor += 1;
+            waiting = next_waiting(cursor, &unretired);
+            continue;
+        }
         if try_batch {
-            match sink.ingest_batch(&plan.ops[cursor..]) {
+            match sink.ingest_batch(&plan.ops[cursor..waiting]) {
                 Some(BatchIngestResult::Committed(outcomes)) => {
                     let count = outcomes.len();
-                    if !valid_batch_prefix(&plan.ops[cursor..], count) {
+                    if !valid_batch_prefix(&plan.ops[cursor..waiting], count) {
                         receipt.fail_all(&plan.ops[cursor..]);
                         break;
                     }
@@ -209,7 +269,7 @@ pub fn apply_reconcile_plan_cancellable(
                     continue;
                 }
                 Some(BatchIngestResult::Uncertain { attempted }) => {
-                    if !valid_batch_prefix(&plan.ops[cursor..], attempted) {
+                    if !valid_batch_prefix(&plan.ops[cursor..waiting], attempted) {
                         receipt.fail_all(&plan.ops[cursor..]);
                         break;
                     }
@@ -235,7 +295,18 @@ pub fn apply_reconcile_plan_cancellable(
             } => sink
                 .ingest(path, *size, sha256, media_type, *reason)
                 .map(Applied::from),
-            CaptureOp::Retire { path } => sink.retire(path).map(|()| Applied::Retired),
+            CaptureOp::Retire { path } => match plan.respelled_retires.get(path) {
+                Some(to) => match sink.retire_respelled(path, to) {
+                    Ok(RespelledRetire::Retired) => Ok(Applied::Retired),
+                    Ok(RespelledRetire::Waits) => {
+                        unretired.insert(path_collision_key(path));
+                        waits_known = false;
+                        Err(RESPELLED_RETIRE_WAITS)
+                    }
+                    Err(error) => Err(error),
+                },
+                None => sink.retire(path).map(|()| Applied::Retired),
+            },
         };
         if outcome.is_ok() && should_crash(faults) {
             return receipt.crashed(op.path());
