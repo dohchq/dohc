@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { DOCUMENT_END } from "./helpers/keys";
+import { DOCUMENT_END, LINE_END } from "./helpers/keys";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   cleanupDesktopWorkspace,
@@ -125,7 +125,7 @@ test("@slash-menu slash menu neither remounts nor detaches while filtering", asy
     });
     expect(target).not.toBeNull();
     await page.mouse.click(target!.x, target!.y);
-    await page.keyboard.press("End");
+    await page.keyboard.press(LINE_END);
     await page.keyboard.type(" /", { delay: 40 });
     await expect(menu).toBeVisible();
     await expect(menu).toHaveAttribute("data-placement", "above");
@@ -175,7 +175,7 @@ test("@slash-menu Escape keeps the slash menu closed while the query is typed", 
     await expect(editor).toBeVisible({ timeout: 20_000 });
 
     await editor.getByText("Text.").click();
-    await page.keyboard.press("End");
+    await page.keyboard.press(LINE_END);
     await page.keyboard.press("Enter");
     const menu = page.getByRole("listbox", { name: "slash commands" });
     await page.keyboard.type("/he");
