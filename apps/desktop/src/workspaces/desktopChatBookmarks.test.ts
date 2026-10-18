@@ -252,7 +252,7 @@ describe("desktop chat bookmarks", () => {
     const queuedResult = expect(queued).rejects.toThrow("This workspace was closed. Open it again.");
     const retired = test.authorities.invalidate("workspace");
     expect(test.disposed).not.toHaveBeenCalled();
-    expect(() => test.authorities.acquire("workspace")).toThrow("retiring or blocked");
+    expect(() => test.authorities.acquire("workspace")).toThrow("This workspace was closed. Open it again.");
     write.reject(new Error("retired capture"));
     await Promise.all([projection, queuedResult, retired]);
     expect(test.disposed).toHaveBeenCalledOnce();

@@ -145,7 +145,7 @@ describe("desktop workspace callbacks", () => {
     const retired = test.authorities.invalidate(workspace.workspaceId);
     try {
       expect(test.disposed).toEqual([]);
-      expect(() => test.attach()).toThrow("retiring or blocked");
+      expect(() => test.attach()).toThrow("This workspace was closed. Open it again.");
       callback();
       test.callbacks.onWatcherBatch(workspace, events);
       expect(test.notifyRenderer).toHaveBeenCalledOnce();
@@ -182,7 +182,7 @@ describe("desktop workspace callbacks", () => {
     test.notifyRenderer.mockImplementation(() => {
       retired = test.authorities.invalidate(workspace.workspaceId);
     });
-    expect(() => test.callbacks.createRelayOnChange(workspace)()).toThrow("retiring or blocked");
+    expect(() => test.callbacks.createRelayOnChange(workspace)()).toThrow("This workspace was closed. Open it again.");
     expect(test.scanWorkspace).not.toHaveBeenCalled();
     await retired;
     expect(test.disposed).toEqual([workspace.attachmentId]);

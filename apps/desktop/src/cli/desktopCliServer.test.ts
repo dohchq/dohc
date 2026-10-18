@@ -171,7 +171,7 @@ describe("desktop CLI workspace context", () => {
     await expect(context.stopSync!()).resolves.toMatchObject({ ok: true, workspaceId: "workspace" });
     const retired = f.authorities.invalidate("workspace");
     await retired;
-    await expect(context.stopSync!()).rejects.toThrow();
+    await expect(context.stopSync!()).rejects.toThrow("This workspace changed while this ran. Try again.");
     expect(f.dependencies.stopWorkspaceSync).toHaveBeenCalledOnce();
   });
 
@@ -184,7 +184,7 @@ describe("desktop CLI workspace context", () => {
     expect(await context.appPublication!(request)).toEqual({ kind: "cancelled" });
     expect(publish).toHaveBeenCalledWith(request, null);
     await f.authorities.invalidate(f.workspace.workspaceId);
-    await expect(context.appPublication!(request)).rejects.toThrow("attachment changed");
+    await expect(context.appPublication!(request)).rejects.toThrow("This workspace changed while this ran. Try again.");
     expect(publish).toHaveBeenCalledOnce();
   });
   it.each(["missing", "different root"])("rejects a %s registry request before activity admission", async (reason) => {
@@ -1125,7 +1125,7 @@ describe.each(["cli", "mcp"] as const)("share copy through %s", door => {
   it("refuses a retired desktop attachment before reading credentials", async () => {
     const f = await shareCopyFixture(); const context = await f.create().openCliWorkspace(f.workspace);
     await f.authorities.invalidate("workspace");
-    await expect(context.shareCopy!({ shareId: "share", grantId: "grant" })).rejects.toThrow("attachment changed");
+    await expect(context.shareCopy!({ shareId: "share", grantId: "grant" })).rejects.toThrow("This workspace changed while this ran. Try again.");
     expect(f.remote).not.toHaveBeenCalled();
   });
 });

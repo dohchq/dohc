@@ -1080,7 +1080,7 @@ function createEngineDocSession(
             );
             if (!retained) {
               throw new Error(
-                `Artifact asset ${descriptor.id} does not belong to the retired document.`,
+                `Artifact asset ${descriptor.id} does not belong to this document. Open the document again.`,
               );
             }
             const loaded = await readSceneAsset(
@@ -1090,7 +1090,7 @@ function createEngineDocSession(
             );
             if (!loaded) {
               throw new Error(
-                `Artifact asset ${descriptor.id} is invalid for the retired document.`,
+                `Artifact asset ${descriptor.id} could not load for this document. Open the document again.`,
               );
             }
             return loaded;

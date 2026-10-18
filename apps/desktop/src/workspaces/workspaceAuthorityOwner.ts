@@ -226,23 +226,23 @@ export function createWorkspaceAuthorityOwner<
   function currentRecord(workspaceId: string): AuthorityRecord<Workspace, State> {
     assertOpen();
     const workspace = options.findWorkspace(workspaceId);
-    if (!workspace) throw new Error(`Unknown workspace: ${workspaceId}`);
+    if (!workspace) throw new Error("This workspace is not open. Open it again.");
     const slot = slotFor(workspaceId);
     if (slot.registrationBlocked) {
       throw new Error(
-        "This workspace attachment is retiring or blocked by failed cleanup.",
+        "This workspace was closed. Open it again.",
       );
     }
     const current = slot.current;
     if (current?.retired) {
-      throw new Error("This workspace attachment is retiring or blocked by failed cleanup.");
+      throw new Error("This workspace was closed. Open it again.");
     }
     if (current && !current.retired && bindingMatchesWorkspace(current.binding, workspace)) {
       return current;
     }
     if (current) {
       retire(current);
-      throw new Error("This workspace attachment changed before its old authority was cleaned up.");
+      throw new Error("This workspace changed while this ran. Try again.");
     }
     const created = createRecord(workspace);
     slot.current = created;
@@ -250,7 +250,6 @@ export function createWorkspaceAuthorityOwner<
   }
 
   function assertRecordCurrent(record: AuthorityRecord<Workspace, State>): void {
-    assertOpen();
     const slot = slots.get(record.binding.workspaceId);
     const workspace = options.findWorkspace(record.binding.workspaceId);
     if (workspace && !bindingMatchesWorkspace(record.binding, workspace)) {
@@ -261,7 +260,9 @@ export function createWorkspaceAuthorityOwner<
       slot?.current !== record ||
       !workspace
     ) {
-      throw new Error("This workspace was closed. Open it again.");
+      throw new Error(closing
+        ? "dohc is closing. Open dohc again to continue."
+        : "This workspace was closed. Open it again.");
     }
   }
 
@@ -276,7 +277,7 @@ export function createWorkspaceAuthorityOwner<
       state: record.state,
       assertCurrent(): void {
         if (released) {
-          throw new Error("This workspace authority lease was released.");
+          throw new Error("This operation ended. Try again.");
         }
         assertRecordCurrent(record);
       },
@@ -292,13 +293,14 @@ export function createWorkspaceAuthorityOwner<
   function recordForBinding(
     binding: WorkspaceAuthorityBinding<Workspace>,
   ): AuthorityRecord<Workspace, State> {
-    assertOpen();
     const record = slots.get(binding.workspaceId)?.current;
     if (record && record.binding !== binding) {
       throw new Error("This workspace changed while this ran. Try again.");
     }
     if (!record) {
-      throw new Error("This workspace was closed. Open it again.");
+      throw new Error(closing
+        ? "dohc is closing. Open dohc again to continue."
+        : "This workspace was closed. Open it again.");
     }
     return record;
   }
@@ -333,7 +335,7 @@ export function createWorkspaceAuthorityOwner<
     const slot = slotFor(workspace.workspaceId);
     if (slot.registrationBlocked || slot.current?.retired) {
       throw new Error(
-        "This workspace attachment is retiring or blocked by failed cleanup.",
+        "This workspace was closed. Open it again.",
       );
     }
     if (slot.current || options.findWorkspace(workspace.workspaceId)) {
@@ -567,7 +569,7 @@ export function createWorkspaceAuthorityOwner<
     attachmentRetirementSignal(workspaceId: string, attachmentId: symbol): AbortSignal {
       const record = slots.get(workspaceId)?.current;
       if (!record || record.retired || record.binding.attachmentId !== attachmentId) {
-        throw new Error("This workspace attachment has retired.");
+        throw new Error("This workspace was closed. Open it again.");
       }
       return record.retirement.signal;
     },

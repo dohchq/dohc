@@ -313,7 +313,7 @@ export function createDatasetAuthorityRouter(local: OwnerDatasetData | Pick<impo
   const target = async (datasetId: string) => {
     const marker = await route.status(datasetId);
     if (!marker) return local;
-    if (marker.state !== "imported" || !marker.receipt) throw new Error("This Collection is transferring. Wait for its shared authority to confirm, then retry.");
+    if (marker.state !== "imported" || !marker.receipt) throw new Error("This Collection is transferring. Wait for the transfer to finish, then retry.");
     return route.remote(marker.targetOrigin, datasetId);
   };
   return {

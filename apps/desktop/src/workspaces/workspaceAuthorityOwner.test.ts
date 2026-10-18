@@ -94,7 +94,7 @@ describe("workspace authority owner", () => {
     test.replace({ ...workspace });
 
     expect(() => first.assertCurrent()).toThrow("This workspace was closed. Open it again.");
-    expect(() => test.owner.acquire("workspace")).toThrow("retiring or blocked");
+    expect(() => test.owner.acquire("workspace")).toThrow("This workspace was closed. Open it again.");
     first.release();
     await drained;
     const replacement = test.owner.acquire("workspace");
@@ -306,7 +306,7 @@ describe("workspace authority owner", () => {
     test.replace({ workspaceId: "workspace", rootPath: "root-b", label: "B" });
     const retirement = test.owner.invalidate("workspace");
     expect(() => test.owner.acquire("workspace")).toThrow(
-      "retiring or blocked",
+      "This workspace was closed. Open it again.",
     );
 
     daemonReady.resolve();
@@ -414,7 +414,7 @@ describe("workspace authority owner", () => {
     expect(removeBinding).toHaveBeenCalledOnce();
     expect(test.disposed).toEqual([binding.attachmentId]);
     expect(test.owner.workspaceIds()).toEqual([]);
-    expect(() => test.owner.currentBinding("workspace")).toThrow("Unknown workspace");
+    expect(() => test.owner.currentBinding("workspace")).toThrow("This workspace is not open. Open it again.");
   });
 
   it("keeps the registry and tombstone until every finalizer finishes", async () => {
@@ -486,7 +486,7 @@ describe("workspace authority owner", () => {
     });
     expect(() =>
       owner.registerBinding(replacement, { persist, rollback }),
-    ).toThrow("retiring or blocked");
+    ).toThrow("This workspace was closed. Open it again.");
     expect(persist).not.toHaveBeenCalled();
     expect(rollback).not.toHaveBeenCalled();
     expect(workspace?.label).toBe("old");
@@ -497,7 +497,7 @@ describe("workspace authority owner", () => {
     expect(workspace?.label).toBe("old");
     expect(() =>
       owner.registerBinding(replacement, { persist, rollback }),
-    ).toThrow("retiring or blocked");
+    ).toThrow("This workspace was closed. Open it again.");
     expect(steps).toEqual(["relay-close", "folder-reset"]);
 
     finishFolderReset();
@@ -505,7 +505,7 @@ describe("workspace authority owner", () => {
     expect(workspace).toBeNull();
     expect(() =>
       owner.registerBinding(replacement, { persist, rollback }),
-    ).toThrow("retiring or blocked");
+    ).toThrow("This workspace was closed. Open it again.");
     expect(persist).not.toHaveBeenCalled();
     expect(steps).toEqual([
       "relay-close",
@@ -543,7 +543,7 @@ describe("workspace authority owner", () => {
         { workspaceId: "workspace", rootPath: "other", label: "duplicate" },
         { persist, rollback },
       ),
-    ).toThrow("retiring or blocked");
+    ).toThrow("This workspace was closed. Open it again.");
     expect(() =>
       owner.registerBinding(
         { workspaceId: "other", rootPath: "alias-b", label: "alias" },
@@ -572,7 +572,7 @@ describe("workspace authority owner", () => {
       rootPath: "alias-a",
       label: "same-id successor",
     });
-    expect(() => owner.acquire("workspace")).toThrow("retiring or blocked");
+    expect(() => owner.acquire("workspace")).toThrow("This workspace was closed. Open it again.");
     registry.delete("workspace");
     registry.set("other", {
       workspaceId: "other",
@@ -623,7 +623,7 @@ describe("workspace authority owner", () => {
       owner.releaseReservation(reservation, cleanup),
     ).rejects.toThrow("registry binding remains");
     expect(cleanup).not.toHaveBeenCalled();
-    expect(() => owner.acquire("workspace")).toThrow("retiring or blocked");
+    expect(() => owner.acquire("workspace")).toThrow("This workspace was closed. Open it again.");
     expect(workspace).toBe(attempted);
   });
 
@@ -884,7 +884,7 @@ describe("workspace authority owner", () => {
     ).rejects.toThrow("relay close failed");
     expect(() =>
       owner.reserveBinding({ workspaceId: "workspace", rootPath: "other" }),
-    ).toThrow("retiring or blocked");
+    ).toThrow("This workspace was closed. Open it again.");
     expect(() =>
       owner.reserveBinding({ workspaceId: "other", rootPath: "alias-b" }),
     ).toThrow("blocked by failed cleanup");
@@ -988,7 +988,7 @@ describe("workspace authority owner", () => {
       }),
     ).toThrow("could not be rolled back");
     expect(workspace).toEqual(registered);
-    expect(() => owner.acquire("workspace")).toThrow("retiring or blocked");
+    expect(() => owner.acquire("workspace")).toThrow("This workspace was closed. Open it again.");
   });
 
   it("preserves a successor row and blocks admission when rollback loses its compare-and-remove", () => {
@@ -1026,7 +1026,7 @@ describe("workspace authority owner", () => {
       }),
     ).toThrow("could not be rolled back");
     expect(workspace).toBe(successor);
-    expect(() => owner.acquire("workspace")).toThrow("retiring or blocked");
+    expect(() => owner.acquire("workspace")).toThrow("This workspace was closed. Open it again.");
   });
 
   it("detects a no-op registration rollback and keeps a tombstone", () => {
@@ -1053,7 +1053,7 @@ describe("workspace authority owner", () => {
       }),
     ).toThrow("could not be rolled back");
     expect(workspace).toBe(attempted);
-    expect(() => owner.acquire("workspace")).toThrow("retiring or blocked");
+    expect(() => owner.acquire("workspace")).toThrow("This workspace was closed. Open it again.");
   });
 
   it("refuses an existing workspace id before persistence", () => {
@@ -1151,7 +1151,7 @@ describe("workspace authority owner", () => {
 
     await expect(owner.invalidate("workspace")).rejects.toThrow("cleanup failed");
     registry.set("workspace", { ...registry.get("workspace")! });
-    expect(() => owner.acquire("workspace")).toThrow("retiring or blocked");
+    expect(() => owner.acquire("workspace")).toThrow("This workspace was closed. Open it again.");
     registry.delete("workspace");
     registry.set("other", {
       workspaceId: "other",
@@ -1172,13 +1172,13 @@ describe("workspace authority owner", () => {
     const lease = test.owner.acquire("workspace");
     lease.release();
 
-    expect(() => lease.assertCurrent()).toThrow("lease was released");
+    expect(() => lease.assertCurrent()).toThrow("This operation ended. Try again.");
     lease.release();
   });
 
   it("refuses an unknown workspace before creating state", () => {
     const test = testOwner(null);
-    expect(() => test.owner.acquire("missing")).toThrow("Unknown workspace: missing");
+    expect(() => test.owner.acquire("missing")).toThrow("This workspace is not open. Open it again.");
     expect(test.canonicalizeRoot).not.toHaveBeenCalled();
   });
 });

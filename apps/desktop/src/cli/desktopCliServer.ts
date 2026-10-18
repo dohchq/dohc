@@ -198,7 +198,7 @@ export function createDesktopCliServer<State>(
       );
     };
     const publicationAttachment = await withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
-        if (resolve(operation.workspace.rootPath) !== resolve(workspace.rootPath)) throw new Error("The workspace attachment changed.");
+        if (resolve(operation.workspace.rootPath) !== resolve(workspace.rootPath)) throw new Error("This workspace changed while this ran. Try again.");
         return operation.signal;
       });
     // A move or delete holds the workspace operation fileWrite holds.
@@ -208,7 +208,7 @@ export function createDesktopCliServer<State>(
       try {
         await withPhysicalWorkspaceOperation(workspace.workspaceId, async operation => {
           operation.assertCurrent();
-          if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("The workspace attachment changed.");
+          if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("This workspace changed while this ran. Try again.");
           if (sharedViewOf(workspace.workspaceId)) throw new Error("This workspace is read-only. Write in the owning workspace.");
           const current = activity.engineCaptureFor(workspace.workspaceId);
           if (!current) throw new Error("dohc could not start the engine for this workspace. Restart dohc to try again.");
@@ -229,7 +229,7 @@ export function createDesktopCliServer<State>(
     const withHistoryOperation = <T>(work: (operation: WorkspaceAuthorityOperation<RegistryEntry, State>) => Promise<T>) =>
       withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
         operation.assertCurrent();
-        if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("The workspace attachment changed.");
+        if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("This workspace changed while this ran. Try again.");
         return work(operation);
       });
     return {
@@ -240,7 +240,7 @@ export function createDesktopCliServer<State>(
         let saved: import("@dohc/cli/protocol").CliResultByVerb["stopSync"] | undefined;
         try {
           return await withPhysicalWorkspaceOperation(workspace.workspaceId, async operation => {
-            if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("This workspace was closed. Open it again.");
+            if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("This workspace changed while this ran. Try again.");
             saved = await dependencies.stopWorkspaceSync!(operation, author);
             return saved;
           });
@@ -251,24 +251,24 @@ export function createDesktopCliServer<State>(
       } } : {}),
       ...(dependencies.shareCopy ? { shareCopy: (input: import("@dohc/workspace-contracts/share-copy").ShareCopyInput) =>
         withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
-          if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("The workspace attachment changed.");
+          if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("This workspace changed while this ran. Try again.");
           return dependencies.shareCopy!(operation, input);
         }) } : {}),
       ...(dependencies.access ? { access: dependencies.access(workspace.workspaceId) } : {}),
       ...(dependencies.dataset ? { dataset: (request: import("@dohc/cli/dataset").DatasetRequest, agent: LocalDatasetAgent | null) =>
         withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
-          if (request.workspaceId !== workspace.workspaceId || operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("The Collection workspace attachment changed.");
+          if (request.workspaceId !== workspace.workspaceId || operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("This workspace changed while this ran. Try again.");
           if (request.action === "prepareRecovery" && !request.sourcePath) throw new Error("Collection recovery requires an explicit sourcePath.");
           return dependencies.dataset!(request, agent);
         }) } : {}),
       ...(dependencies.ownerAppResponses ? {ownerAppResponses:(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>
         withPhysicalWorkspaceOperation(workspace.workspaceId,operation=>{
-          if(request.workspaceId!==workspace.workspaceId || operation.signal!==publicationAttachment || publicationAttachment.aborted)throw new Error("The response workspace attachment changed.");
+          if(request.workspaceId!==workspace.workspaceId || operation.signal!==publicationAttachment || publicationAttachment.aborted)throw new Error("This workspace changed while this ran. Try again.");
           return dependencies.ownerAppResponses!(request);
         })}:{}),
       ...(dependencies.ownerAppPublication ? { appPublication: (request: OwnerAppPublicationRequest, agent: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null = null) =>
         withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
-          if (request.workspaceId !== workspace.workspaceId || operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("The app publication workspace attachment changed.");
+          if (request.workspaceId !== workspace.workspaceId || operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("This workspace changed while this ran. Try again.");
           return dependencies.ownerAppPublication!(request, agent);
         }) } : {}),
       rootPath: workspace.rootPath,
@@ -345,7 +345,7 @@ export function createDesktopCliServer<State>(
       },
       writeFiles: (files, origin, requestId) => withPhysicalWorkspaceOperation(workspace.workspaceId, async operation => {
         operation.assertCurrent();
-        if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("The workspace attachment changed.");
+        if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("This workspace changed while this ran. Try again.");
         if (sharedViewOf(workspace.workspaceId)) throw new Error("This workspace is read-only. Write in the owning workspace.");
         const current = activity.engineCaptureFor(workspace.workspaceId);
         if (!current) throw new Error("dohc could not start the engine for this workspace. Restart dohc to try again.");

@@ -151,7 +151,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         ownerDelivery = startServerOwnerDelivery({workspaceIds: () => server.workspaceIds(), ...profile,
           onError: error => console.error("[desktop] server owner delivery failed:", error),
           runPass: async (workspaceId, index, lifetime) => {
-            if (!workspaceAuthorities.withOperation) throw new Error("Owner delivery workspace authority is unavailable.");
+            if (!workspaceAuthorities.withOperation) throw new Error("Live editing is unavailable. Restart dohc and try again.");
             activeOwnerWorkspace = workspaceId;
             try {return await workspaceAuthorities.withOperation(workspaceId, async operation => {
               const session = await server.connect(operation.workspace, AbortSignal.any([lifetime, operation.signal]));
@@ -159,7 +159,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               const signal = AbortSignal.any([lifetime, operation.signal, session.signal]);
               const check = () => {
                 signal.throwIfAborted(); operation.assertCurrent(); session.assertCurrent();
-                if (generation !== ownerDeliveryGeneration || isQuitting()) throw new Error("Owner delivery session retired.");
+                if (generation !== ownerDeliveryGeneration || isQuitting()) throw new Error("This live editing session ended. Open the document again.");
               };
               check();
               try {
@@ -218,7 +218,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                 if (!(client instanceof EngineClient)) throw new Error("Owner delivery requires the desktop daemon client.");
                 const assertCurrent = () => {
                   check(); sessions.assertCurrentBinding(operation.workspace, binding);
-                  if (daemon.currentClient() !== client || binding.client !== source.currentClient()) throw new Error("Owner delivery daemon retired.");
+                  if (daemon.currentClient() !== client || binding.client !== source.currentClient()) throw new Error("This live editing session ended. Open the document again.");
                 };
                 assertCurrent();
                 return native.runNativeOwnerDeliveryPass({client, workspaceHandle: binding.workspace,
@@ -254,7 +254,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
           const credentials = dependencies.ownerDeliveryCredentials?.();
           const workspace = dependencies.findWorkspace(document.binding.workspaceId);
           if (!credentials || !relayUrlsMatch(credentials.relayUrl, config.relayUrl) || !workspace || workspace.pausedRemote) return "retry";
-          if (!workspaceAuthorities.withOperation) throw new Error("Owner delivery workspace authority is unavailable.");
+          if (!workspaceAuthorities.withOperation) throw new Error("Live editing is unavailable. Restart dohc and try again.");
           return workspaceAuthorities.withOperation(document.binding.workspaceId, operation =>
             sessions.run(operation.workspace, async binding => {
               const client = daemon.currentClient();
@@ -263,7 +263,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               const assertCurrent = () => {
                 signal.throwIfAborted(); operation.assertCurrent();
                 sessions.assertCurrentBinding(operation.workspace, binding);
-                if (generation !== ownerDeliveryGeneration || isQuitting() || daemon.currentClient() !== client || binding.client !== source.currentClient()) throw new Error("Owner delivery daemon retired.");
+                if (generation !== ownerDeliveryGeneration || isQuitting() || daemon.currentClient() !== client || binding.client !== source.currentClient()) throw new Error("This live editing session ended. Open the document again.");
               };
               assertCurrent();
               const result = await native.runNativeOwnerDeliveryPass({client, workspaceHandle: binding.workspace,
@@ -314,7 +314,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         }
         if (!workspaces.length) throw new Error("Owner host has no registered workspaces.");
         return {client,workspaces,assertCurrent: () => {
-          if (isQuitting() || ownerHostGeneration !== generation || daemon.currentClient() !== client) throw new Error("Owner host daemon retired.");
+          if (isQuitting() || ownerHostGeneration !== generation || daemon.currentClient() !== client) throw new Error("This live editing session ended. Open the document again.");
           for (const check of bindingChecks) check();
         }};
       },
@@ -410,18 +410,18 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     // to explain that the engine could not start.
     try {
       if (process.env.DOHC_DESKTOP_OWNER_HOST_CONFIG) {
-        if (!dependencies.existingOwnerFor) throw new Error("Owner session authority is unavailable.");
+        if (!dependencies.existingOwnerFor) throw new Error("Live editing is unavailable. Restart dohc and try again.");
         ownerHostModule = await import("./desktopOwnerHost");
         ownerHostConfig = ownerHostModule.readDesktopOwnerHostConfig(process.env.DOHC_DESKTOP_OWNER_HOST_CONFIG);
       }
       if (process.env.DOHC_DESKTOP_OWNER_DELIVERY_CONFIG) {
-        if (!dependencies.ownerDeliveryCredentials || !workspaceAuthorities.withOperation) throw new Error("Owner delivery authority is unavailable.");
+        if (!dependencies.ownerDeliveryCredentials || !workspaceAuthorities.withOperation) throw new Error("Live editing is unavailable. Restart dohc and try again.");
         ownerDeliveryModule = await import("./desktopOwnerDelivery");
         nativeOwnerDeliveryModule = await import("./nativeOwnerDelivery");
         ownerDeliveryConfig = ownerDeliveryModule.readDesktopOwnerDeliveryConfig(process.env.DOHC_DESKTOP_OWNER_DELIVERY_CONFIG);
       }
       if (!ownerHostConfig && !ownerDeliveryConfig && dependencies.serverOwnerDelivery) {
-        if (!workspaceAuthorities.withOperation) throw new Error("Owner delivery authority is unavailable.");
+        if (!workspaceAuthorities.withOperation) throw new Error("Live editing is unavailable. Restart dohc and try again.");
         try {
           serverOwnerConfig = await dependencies.serverOwnerDelivery.prepare();
           serverOwnerUnavailable = false;

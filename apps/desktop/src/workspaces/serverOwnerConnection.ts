@@ -103,10 +103,10 @@ export function createServerOwnerConnection(options: {
             body:JSON.stringify({path:binding.currentPath,objectId:binding.objectId,retire:true,restoreFenceGeneration:binding.restoreFenceGeneration}),signal:requestSignal,redirect:"error",
           });
           assertCurrent();requestSignal.throwIfAborted();
-          if (!response.ok && response.status!==409) {await response.body?.cancel();throw new Error("Owner live retirement failed.");}
+          if (!response.ok && response.status!==409) {await response.body?.cancel();throw new Error("dohc could not stop live editing. Try again.");}
           const value=await readBoundedJson(response,16*1024,requestSignal);
           if (response.status===409 && value && typeof value==="object" && "code" in value && ["restore-fenced","restore-in-progress"].includes(String(value.code))) return null;
-          if (!response.ok) throw new Error("Owner live retirement failed.");
+          if (!response.ok) throw new Error("dohc could not stop live editing. Try again.");
           const retired=z.object({ok:z.literal(true),path:z.string().min(1),objectId:z.literal(binding.objectId),status:z.literal("retired"),acceptedCursor:z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)}).parse(value);
           discovery.delete(workspace.workspaceId);return retired.acceptedCursor;
         },

@@ -2231,7 +2231,7 @@ function engineForWorkspace(
   if (!remote || !credentials) return null;
   if (!capture || !credentials.relayUrl) return null;
   if (!workspace.attachmentId) {
-    throw new Error("Cloud sync requires a registered workspace attachment.");
+    throw new Error("Open this workspace again to start cloud sync.");
   }
   // Only sync when the session belongs to the server this workspace is bound
   // to; a mismatch keeps it local-only (no token leak, no mass-delete).
@@ -2935,7 +2935,7 @@ async function withEngineAdapter<T>(
     registered.rootPath !== workspace.rootPath
   ) {
     throw new Error(
-      "The engine workspace belongs to a replaced physical attachment.",
+      "This workspace changed while this ran. Try again.",
     );
   }
   return await withWorkspaceAttachmentAsync(workspace, async (lease) =>
@@ -4560,7 +4560,7 @@ const datasetRuntimePath = () => join(app.isPackaged ? process.resourcesPath : j
 const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: string }, signal: AbortSignal) =>
   workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
     signal.throwIfAborted(); operation.assertCurrent();
-    if (operation.workspace.rootPath !== workspace.rootPath) throw new Error("The Collection workspace attachment changed.");
+    if (operation.workspace.rootPath !== workspace.rootPath) throw new Error("This workspace changed while this ran. Try again.");
     const slot = operation.state.datasetHost;
     let pending = slot.pending;
     if (!pending) {
@@ -4576,7 +4576,7 @@ const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: s
         // refuses the invocation rather than write as the owner at depth 0.
         agentRun: () => {
           const run = withWorkspaceAttachment(attachment, lease => workspaceActivity.agentRun(lease.state.activity));
-          if (run === undefined) throw new Error("The Collection workspace attachment changed.");
+          if (run === undefined) throw new Error("This workspace changed while this ran. Try again.");
           return run;
         },
         // A commit that made failed claims, as a chain stop does, sends their notices now.
@@ -4598,7 +4598,7 @@ const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: s
         },
         collectionAuthor: async () => {
           const run = withWorkspaceAttachment(attachment, lease => workspaceActivity.agentRun(lease.state.activity));
-          if (run === undefined) throw new Error("The Collection workspace attachment changed.");
+          if (run === undefined) throw new Error("This workspace changed while this ran. Try again.");
           return run ? { kind: "agent", agentId: run.agentId, onBehalfOf: run.onBehalfOf, agentRunId: run.agentRunId, ...(run.depth > 0 ? { depth: run.depth } : {}) } : await localPerson();
         },
       });
@@ -6315,7 +6315,7 @@ function registerIpcHandlers(): void {
           const ownerKey = datasetCopyOwnerKey(remote.credentials);
           const copy = await workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
             signal.throwIfAborted(); operation.assertCurrent();
-            if (operation.workspace.rootPath !== workspace.rootPath) throw new Error("The Collection workspace attachment changed.");
+            if (operation.workspace.rootPath !== workspace.rootPath) throw new Error("This workspace changed while this ran. Try again.");
             return ownerDatasetCopies.get({ workspaceId: workspace.workspaceId, rootPath: workspace.rootPath,
               datasetId, origin: targetOrigin, ownerKey, lifetime: operation.signal,
               assertOwner: () => {

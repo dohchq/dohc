@@ -69,7 +69,7 @@ export function createLocalDatasetTransfers(options: {
   function status(marker: StoredTransfer): DatasetTransferStatus { const { archive: _, ...value } = marker; return structuredClone(value); }
   function assertFence(marker: StoredTransfer) {
     const head = journal.head({ workspaceId, datasetId: marker.datasetId }, options.assertCurrent);
-    if (head.active || !sameCursor(head.cursor, marker.sourceCursor)) throw Error("Local Collection authority changed. Reopen the workspace before retrying.");
+    if (head.active || !sameCursor(head.cursor, marker.sourceCursor)) throw Error("This Collection changed. Reopen the workspace before retrying.");
   }
   async function checkedArchive(archive: NonNullable<StoredTransfer["archive"]>) {
     const expectedParent = await realpath(options.exportDirectory), actual = await realpath(archive.directory), info = await lstat(archive.directory);
@@ -112,7 +112,7 @@ export function createLocalDatasetTransfers(options: {
         marker = transaction(() => {
           authorize(input.signal);
           const head = journal.head({ workspaceId, datasetId: input.datasetId }, options.assertCurrent);
-          if (!head.active) throw Error("This Collection has no local write authority. Restore its transfer record before continuing.");
+          if (!head.active) throw Error("This computer cannot change this Collection. Restore its transfer record before continuing.");
           if (!sameCursor(head.cursor, prepared.manifest.cursor)) throw Error("The Collection changed while it was being exported. Retry this transfer.");
           prepared.assertUnchanged();
           assertDatasetAttemptsCommitted(db, { workspaceId, datasetId: input.datasetId });

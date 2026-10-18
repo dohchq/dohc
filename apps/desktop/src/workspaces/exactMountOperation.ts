@@ -18,7 +18,7 @@ export function createExactMountOperationRunner<
     const attachmentId = Reflect.get(input.workspace, "attachmentId");
     if (typeof attachmentId !== "symbol") {
       throw new Error(
-        "Share mount work requires an exact workspace attachment.",
+        "Open this workspace again before using this share.",
       );
     }
     return dependencies.withOperation(

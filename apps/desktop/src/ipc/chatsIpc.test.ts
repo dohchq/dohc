@@ -774,7 +774,7 @@ describe("registered chat channel and read-state boundaries", () => {
   it.each([
     { name: "untrusted sender", payload: { workspaceId: "workspace", threadId: "thread", upToSequence: 4 }, untrusted: true, error: "Untrusted sender" },
     { name: "invalid payload", payload: { workspaceId: "workspace" }, untrusted: false, error: /Invalid input/u },
-    { name: "missing workspace", payload: { workspaceId: "missing-workspace", threadId: "thread", upToSequence: 4 }, untrusted: false, error: "Unknown workspace: missing-workspace" },
+    { name: "missing workspace", payload: { workspaceId: "missing-workspace", threadId: "thread", upToSequence: 4 }, untrusted: false, error: "This workspace is not open. Open it again." },
   ])("refuses reader-local state for $name before accessing chat scope", async ({ payload, untrusted, error }) => {
     const test = fixture("view");
     const result = untrusted

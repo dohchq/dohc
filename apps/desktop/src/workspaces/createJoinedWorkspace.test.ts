@@ -203,6 +203,28 @@ describe("joined workspace creation", () => {
     expect(h.registry.size).toBe(0);
   });
 
+  it("removes a failed join's registry entry while dohc is quitting", async () => {
+    const h = harness();
+    let closing!: Promise<void>;
+    h.input.populate.mockImplementation(async () => {
+      const lease = h.authorities.acquire("joined");
+      closing = h.authorities.close();
+      try {
+        lease.assertCurrent();
+      } finally {
+        lease.release();
+      }
+    });
+
+    await expect(h.run(h.input)).rejects.toThrow("download failed");
+    await closing;
+
+    expect(h.registry.size).toBe(0);
+    expect(h.cleanup).toHaveBeenCalledWith("joined");
+    expect(h.rollbackComplete).toHaveBeenCalledOnce();
+    expect(h.events).toEqual(["create", "register", "cleanup", "remove", "notify"]);
+  });
+
   it("retains the registry and blocks reuse when cleanup fails", async () => {
     const h = harness();
     h.input.populate.mockRejectedValue(new Error("first pull failed"));
