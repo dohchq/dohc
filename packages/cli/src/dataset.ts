@@ -1,3 +1,4 @@
+import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import { PublicationAgent } from "./appPublication";
 import { z } from "zod";
 import { CreationPartial } from "./creation";
@@ -203,3 +204,41 @@ export const DatasetResult = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("migration-discarded") }).strict(),
 ]);
 export type DatasetResult = z.infer<typeof DatasetResult>;
+
+// Local metadata only. These ids never enter a request or its authorship.
+export const DATASET_CAPABILITIES = {
+  list: "dataset.list",
+  describe: "dataset.describe",
+  history: "dataset.history.list",
+  historyRevision: "dataset.history.revision",
+  prepareHistoryRestore: "dataset.history.restore.prepare",
+  lifecycle: "dataset.lifecycle.read",
+  deletePreview: "dataset.delete.preview",
+  delete: "dataset.delete",
+  archive: "dataset.archive",
+  restore: "dataset.restore",
+  pendingAttempts: "dataset.attempts.list",
+  reconcileAttempt: "dataset.attempt.reconcile",
+  cancelAttempt: "dataset.attempt.cancel",
+  permissions: "dataset.permissions.read",
+  setGrant: "dataset.grant.set",
+  removeGrant: "dataset.grant.remove",
+  export: "dataset.export",
+  prepareRecovery: "dataset.recovery.prepare",
+  claimRecovery: "dataset.recovery.claim",
+  discardRecovery: "dataset.recovery.discard",
+  upload: "dataset.file.upload",
+  file: "dataset.file.read",
+  createForm: "dataset.form.create",
+  prepareRelationChoices: "dataset.relation.choices.prepare",
+  create: "dataset.create",
+  prepare: "dataset.prepare",
+  approve: "dataset.approve",
+  discard: "dataset.discard",
+  prepareMigration: "dataset.migration.prepare",
+  migrationPreviewPage: "dataset.migration.preview",
+  prepareSchemaChange: "dataset.schema.change.prepare",
+  approveMigration: "dataset.migration.approve",
+  discardMigration: "dataset.migration.discard",
+  invoke: "dataset.operation.invoke",
+} as const satisfies Record<DatasetRequest["action"], CapabilityId>;

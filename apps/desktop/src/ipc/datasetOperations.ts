@@ -1,5 +1,4 @@
-import { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
-import { DATASET_CAPABILITIES } from "@dohc/cli/protocol";
+import { DATASET_CAPABILITIES, DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import type { OperationTable } from "./operationTable";
 
 export const datasetOperations = {

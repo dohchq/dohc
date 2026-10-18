@@ -65,7 +65,7 @@ import { createOwnerDatasetCopyRegistry, datasetCopyOwnerKey } from "./workspace
 import { createRemoteDatasetReplicaSource } from "./workspaces/remoteDatasetReplica";
 import { createDatasetHandler } from "./ipc/datasetIpc";
 import { datasetOperations } from "./ipc/datasetOperations";
-import { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
+import { type DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import { createHash } from "node:crypto";
 import { createDatasetSources, type SourceCreationProgress } from "./workspaces/datasetSourceCreation";
 import { flushDatasetSourceCapture } from "./workspaces/datasetSourceCapture";

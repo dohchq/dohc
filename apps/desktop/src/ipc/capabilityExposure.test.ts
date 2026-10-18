@@ -314,11 +314,7 @@ describe("capability identities and exposure", () => {
     const sorted = (values: readonly (readonly string[])[]) => values.map(value => value.join(":")).sort();
     const actualIpc = OPERATION_TABLES.flatMap(table => Object.entries<OperationDefinition>(table).flatMap(([name, row]) =>
       (row.capabilityId ? [row.capabilityId] : Object.values(row.capabilityIdsByAction)).map(id => [name, id])));
-    // The multiplexed dataset door keeps its per-action tags in the CLI protocol.
-    const expectedIpc = [
-      ...entries.flatMap(([id, meta]) => meta.ipc.operations.map(name => [name, id])),
-      ...Object.values(DATASET_CAPABILITIES).map(id => ["dataset", id]),
-    ];
+    const expectedIpc = entries.flatMap(([id, meta]) => meta.ipc.operations.map(name => [name, id]));
     expect(sorted(actualIpc)).toEqual(sorted(expectedIpc));
     for (const row of rows) assertAdmission(row);
     const offeredTools = new Set<string>();
