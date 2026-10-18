@@ -321,6 +321,7 @@ A PR run lets desktop unit test files share workers. A full run, the nightly inc
 `pnpm verify:queue status` shows the last passing nightly. Submit one by hand with `pnpm verify:queue nightly`.
 A failed nightly means a merged change broke main, or the selection of affected packages or repository tests missed something. Find the change that broke it and revert or fix it the same day.
 The [`verification-triage` skill](../../.agents/skills/verification-triage/SKILL.md) has the procedure.
+The Mac runner runs the same full gate and the whole desktop e2e suite every night on macOS. The [Mac runner guide](macos-runner.md) describes it.
 
 ### Affected packages
 

@@ -51,6 +51,7 @@ The coordinator runner also needs the GitHub CLI, `gh`, for the version check an
 Run the Windows and macOS runners in a signed-in desktop session for the packaged app check.
 The Linux runner also needs `xvfb-run` for the fuse smoke.
 The macOS runner needs bash 4 or newer first on its `PATH`, because the coordinator jobs do not run under the bash 3.2 that macOS ships.
+The [Mac runner guide](macos-runner.md) lists its other tools.
 After packaging, that check verifies the actual executable's fuse values and starts it with an isolated profile.
 The smoke looks for `apps/desktop/release/linux-unpacked` on Linux, and on a Mac for `apps/desktop/release/mac-arm64/dohc.app`. Point `DOHC_SMOKE_PACKAGE_DIRECTORY` at any other unpacked directory or app bundle.
 The package and publish jobs receive the environment's secrets.
