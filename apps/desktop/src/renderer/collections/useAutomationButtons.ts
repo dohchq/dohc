@@ -2,6 +2,7 @@ import { useEffect, useRef, useSyncExternalStore } from "react";
 import type { AutomationButtonState } from "@dohc/automation-executor/automation-buttons";
 import { PRESS_WAITING } from "@dohc/automation-executor/press-waiting";
 import type { AutomationRunSettledEvent } from "../../ipc/bridgeContract";
+import { isWorkspaceUpdatingError } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
 
 // Button fields for one Collection in one window: what each button shows,
@@ -189,6 +190,10 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
       everyChanged();
     } catch (error) {
       if (closed || request !== requests) return;
+      // The engine is still reading a new workspace's files. A document
+      // Collection's surfaces read again on the whole-workspace activity
+      // main sends when it finishes, so its buttons stay checking until then.
+      if ("collectionPath" in of && isWorkspaceUpdatingError(error)) return;
       setChecking(false);
       report().onError("dohc could not read this Collection's buttons.", error, () => void live()?.refresh());
     }

@@ -658,7 +658,7 @@ describe("desktop engine composed sessions and events", () => {
     } finally { held.resolve(); await closing; await f.close(); }
   });
 
-  it("routes automation events to the current workspace and Collection projections to the renderer", async () => {
+  it("routes automation events to the current workspace, and Collection projections and a finished first read to the renderer", async () => {
     const f = fixture(); await f.addWorkspace("workspace");
     try {
       await f.engine.start();
@@ -682,6 +682,12 @@ describe("desktop engine composed sessions and events", () => {
       f.client.emit("collections.projected", { workspaceId: "workspace", paths: ["Log/a.md"], projectedCount: 1 });
       await vi.advanceTimersByTimeAsync(100);
       expect(f.dependencies.notifyRenderer).toHaveBeenCalledWith({ workspaceId: "workspace", paths: ["Log/a.md"], pathSetChanged: false });
+      // The engine answers what it refused while it read a new workspace's
+      // files, so the whole workspace reads again.
+      vi.mocked(f.dependencies.notifyRenderer).mockClear();
+      f.client.emit("capture.initialSettled", { workspaceId: "workspace" });
+      await vi.advanceTimersByTimeAsync(100);
+      expect(f.dependencies.notifyRenderer).toHaveBeenCalledExactlyOnceWith({ workspaceId: "workspace", pathSetChanged: false });
     } finally { vi.useRealTimers(); await f.close(); }
   });
 });
