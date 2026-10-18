@@ -506,6 +506,11 @@
       "source": "source.md",
       "literal": "/x/.md",
       "kind": "wikilink",
+      "paths": [
+        "source.md",
+        "x/.md.md",
+        "x/.md.txt"
+      ],
       "target": "x/.md.md"
     },
     {
