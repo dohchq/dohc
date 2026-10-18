@@ -6343,7 +6343,7 @@ function registerIpcHandlers(): void {
       if (!captured) throw new Error("The workspace engine is unavailable. Reopen the workspace.");
       return captured;
     },
-    withAdapter: async <T>(workspace: DesktopRendererWorkspaceOperation["workspace"], work: (adapter: import("@dohc/workspace-engine-client").VersionedLiveAdapter) => Promise<T>) => {
+    withAdapter: async <T extends {}>(workspace: DesktopRendererWorkspaceOperation["workspace"], work: (adapter: import("@dohc/workspace-engine-client").VersionedLiveAdapter) => Promise<T>) => {
       const result = await withEngineAdapter(workspace, work);
       if (result === null) throw new Error("The workspace engine is unavailable. Reopen the workspace.");
       return result;
