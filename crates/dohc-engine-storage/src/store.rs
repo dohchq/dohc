@@ -211,7 +211,7 @@ impl EngineStore {
     ) -> Result<Self, StorageError> {
         let opened = open_engine_db_read_only(path, work)?;
         let passive = crate::schema::store_is_passive(&opened.conn)?;
-        let flushes = crate::flush::Flushes::for_database(&opened.conn);
+        let flushes = crate::flush::Flushes::read_only();
         Ok(EngineStore {
             conn: opened.conn,
             checkpoints: None,

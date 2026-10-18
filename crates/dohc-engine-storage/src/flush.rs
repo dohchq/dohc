@@ -13,7 +13,9 @@
 //! command projected are as durable at its reply as a drain per file made
 //! them. The drain runs on the database's folder, held open since the store
 //! opened, so a workspace renamed, moved or replaced meanwhile still drains
-//! the device its barriers ran on. The drain does not sync the WAL, so the
+//! the device its barriers ran on. The store drains that folder once when it
+//! opens; a folder that refuses, as on smbfs, turns barriers off. Read-only
+//! stores commit nothing and take no barriers. The drain does not sync the WAL, so the
 //! command's NORMAL commits are no more durable than before. A drain that
 //! fails stays owed until one succeeds, and the reply carries the error.
 //!
@@ -84,23 +86,88 @@ impl std::fmt::Debug for FlushObserver {
 /// The database's folder, opened now, and the device it shares with the
 /// database file. The path is the one SQLite resolved, links included, when it
 /// opened the database, so the barriers follow the file whose WAL it writes.
-/// `None` when the folder cannot be opened or sits on another device than the
-/// file; every file then drains at once.
+/// `None` when the folder cannot be opened, sits on another device than the
+/// file, or refuses a drain; every file then drains at once. smbfs drains a
+/// regular file but refuses `F_FULLFSYNC` on a folder, so one trial drain here
+/// keeps every later drain from failing.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn database_folder(conn: &rusqlite::Connection) -> Option<(u64, File)> {
     use std::os::unix::fs::MetadataExt;
     let database = std::path::Path::new(conn.path().filter(|path| !path.is_empty())?);
     let device = std::fs::metadata(database).ok()?.dev();
     let folder = File::open(database.parent()?).ok()?;
-    (folder.metadata().ok()?.dev() == device).then_some((device, folder))
+    if folder.metadata().ok()?.dev() != device {
+        return None;
+    }
+    drain_folder(&folder).ok()?;
+    Some((device, folder))
+}
+
+/// `F_FULLFSYNC` on the database's folder.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn drain_folder(folder: &File) -> std::io::Result<()> {
+    #[cfg(feature = "fault-injection")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = folder.metadata()?;
+        let identity = (metadata.dev(), metadata.ino());
+        if REFUSING_FOLDERS.lock().unwrap().contains(&identity) {
+            return Err(std::io::ErrorKind::Unsupported.into());
+        }
+    }
+    folder.sync_all()
+}
+
+#[cfg(all(
+    feature = "fault-injection",
+    target_os = "macos",
+    target_arch = "aarch64"
+))]
+static REFUSING_FOLDERS: std::sync::Mutex<Vec<(u64, u64)>> = std::sync::Mutex::new(Vec::new());
+
+/// Make `F_FULLFSYNC` on `folder` fail from now on, as smbfs does for
+/// anything but a regular file.
+#[cfg(all(
+    feature = "fault-injection",
+    target_os = "macos",
+    target_arch = "aarch64"
+))]
+pub fn refuse_folder_flushes(folder: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::metadata(folder)?;
+    REFUSING_FOLDERS
+        .lock()
+        .unwrap()
+        .push((metadata.dev(), metadata.ino()));
+    Ok(())
 }
 
 impl Flushes {
+    /// A store that can commit a materialization: barriers where its folder
+    /// allows them.
     pub(crate) fn for_database(conn: &rusqlite::Connection) -> Self {
-        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-        let _ = conn;
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        let (device, folder) = database_folder(conn).unzip();
+        let folder = database_folder(conn);
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        let folder = {
+            let _ = conn;
+            None
+        };
+        Self::ordered_by(folder)
+    }
+
+    /// A read-only store commits nothing, so it never owes a drain. It holds
+    /// no folder and runs no trial drain, because some callers open one per
+    /// request.
+    pub(crate) fn read_only() -> Self {
+        Self::ordered_by(None)
+    }
+
+    fn ordered_by(folder: Option<(u64, File)>) -> Self {
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        let _ = folder;
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        let (device, folder) = folder.unzip();
         Self {
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             device: Cell::new(device),
@@ -152,7 +219,7 @@ impl Flushes {
                 .folder
                 .as_ref()
                 .ok_or_else(|| std::io::Error::other("no database folder to drain"))?;
-            folder.sync_all()?;
+            drain_folder(folder)?;
             self.drain_owed.set(false);
             #[cfg(feature = "fault-injection")]
             self.record(FlushKind::Drain, folder);
@@ -414,5 +481,32 @@ mod tests {
             (mount.dev(), mount.ino())
         );
         drop(store);
+    }
+
+    /// A read-only store commits nothing, so it holds no folder: every flush
+    /// drains at once and no drain is owed.
+    #[cfg(all(
+        feature = "fault-injection",
+        target_os = "macos",
+        target_arch = "aarch64"
+    ))]
+    #[test]
+    fn a_read_only_store_drains_every_file_at_once() {
+        let scratch = ScratchDir::new_named("drain-read-only").unwrap();
+        let db = scratch.path().join("engine.db");
+        drop(EngineStore::open(&db, 1).unwrap());
+        let store = EngineStore::open_read_only(&db).unwrap();
+        let note = scratch.path().join("note.md");
+        std::fs::write(&note, b"ordered").unwrap();
+        store
+            .flush_before_commits(&std::fs::File::open(&note).unwrap())
+            .unwrap();
+        store.drain_flushes().unwrap();
+        let kinds: Vec<_> = store
+            .take_flush_trace()
+            .into_iter()
+            .map(|event| event.kind)
+            .collect();
+        assert_eq!(kinds, [crate::FlushKind::Full]);
     }
 }

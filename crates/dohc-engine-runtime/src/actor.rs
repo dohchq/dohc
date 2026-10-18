@@ -1358,6 +1358,46 @@ mod saturation_tests {
         }
     }
 
+    /// smbfs drains a regular file but refuses `F_FULLFSYNC` on a folder. A
+    /// store whose folder refuses the trial drain at open takes no barriers:
+    /// every file drains at once, no drain is owed, and replies keep
+    /// succeeding, reads included.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[tokio::test]
+    async fn a_folder_that_refuses_a_drain_turns_barriers_off() {
+        use dohc_engine_storage::FlushKind::Full;
+        let scratch = ScratchDir::new().unwrap();
+        let db = engine_db_path(&scratch).unwrap();
+        drop(EngineStore::open(&db, 1).unwrap());
+        dohc_engine_storage::refuse_folder_flushes(db.parent().unwrap()).unwrap();
+        let note = scratch.join("note.md");
+        std::fs::write(&note, b"projected").unwrap();
+        let supervisor = crate::WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 2).unwrap().actor;
+        for _ in 0..2 {
+            let file = note.clone();
+            let kinds = actor
+                .run(move |store, _| {
+                    store
+                        .flush_before_commits(&std::fs::File::open(&file).unwrap())
+                        .unwrap();
+                    Ok(store
+                        .take_flush_trace()
+                        .into_iter()
+                        .map(|event| event.kind)
+                        .collect::<Vec<_>>())
+                })
+                .await
+                .expect("a reply after a flush succeeds");
+            assert_eq!(kinds, [Full]);
+            actor
+                .run(|_, _| Ok(()))
+                .await
+                .expect("a reply that flushed nothing succeeds");
+        }
+        supervisor.close(&db).unwrap();
+    }
+
     #[tokio::test]
     async fn reopened_actor_publishes_before_link_work_and_resumes_while_idle() {
         use dohc_engine_domain::VersionedTextStore;

@@ -61,6 +61,12 @@ pub use blob::{
 pub use diagnostics::{CorruptionKind, DiagnosticBundle, classify};
 pub use error::StorageError;
 pub use faults::{FaultAction, FaultInjector, FaultPoint, NoFaults};
+#[cfg(all(
+    feature = "fault-injection",
+    target_os = "macos",
+    target_arch = "aarch64"
+))]
+pub use flush::refuse_folder_flushes;
 #[cfg(feature = "fault-injection")]
 pub use flush::{FlushEvent, FlushKind};
 pub use limits::{
