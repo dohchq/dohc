@@ -8,7 +8,6 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { freemem } from "node:os";
 import { join, resolve } from "node:path";
-import { setTimeout as sleep } from "node:timers/promises";
 import { acquireBuildSlot, acquireLinuxSlot, freeDiskGb, resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.mjs";
 import { clippy } from "../../tools/rust-engine-program/gate-commands.mjs";
 import { git, readJson, repoRoot, run } from "./process.mjs";
@@ -27,10 +26,14 @@ const scopeMaxGb = 11;
 const scopeMemory = `-p MemoryHigh=${scopeMaxGb - 2}G -p MemoryMax=${scopeMaxGb}G -p OOMPolicy=continue`;
 // The queue distrusts a check that failed after Windows free memory fell below this.
 const hostFloorGb = 3;
+// The queue fails an attempt that passes its two-hour limit, so the job stops waiting for its slots
+// and memory well before that, as a machine failure the queue retries.
+const admissionMs = 30 * 60_000;
 
 /** The WSL distro this host verifies Linux in, or null. */
 export function linuxDistro(env = process.env, platform = process.platform) {
-  if (platform !== "win32") return null;
+  const ci = env.CI && !["false", "0"].includes(env.CI.toLowerCase());
+  if (platform !== "win32" || ci) return null;
   const root = resolveBuildBudget(env)?.root;
   if (!root) return null;
   const path = join(root, "verification-linux");
@@ -50,10 +53,7 @@ export function wslPath(path) {
 
 const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
 
-/**
- * Prints the commits the Linux checkout keeps, then `head` and `base` if it has them, then the VM's page cache in kB.
- * Creates the checkout on first use.
- */
+/** Prints the commits the Linux checkout keeps, then `head` and `base` if it has them. Creates the checkout on first use. */
 export const tipsScript = ({ head, base }) => `set -euo pipefail
 repo="${home}/linux"
 mkdir -p "$repo"
@@ -61,10 +61,10 @@ mkdir -p "$repo"
 cd "$repo"
 git for-each-ref --format='tip %(objectname)' refs/dohc/
 for commit in ${quote(head)} ${quote(base)}; do git cat-file -e "$commit^{commit}" 2>/dev/null && echo "has $commit"; done
-awk '$1 == "Cached:" {print "cached", $2}' /proc/meminfo
+true
 `;
 
-/** What the tips script found: the checkout's commits, whether it has `head` and `base`, and the VM's page cache in GB. */
+/** What a script reported: the checkout's commits, whether it has `head` and `base`, and the VM's page cache in GB. */
 export function parseTips(stdout) {
   const lines = stdout.split(/\r?\n/u).map(line => line.trim().split(" "));
   const sha = value => /^[0-9a-f]{40}$/u.test(value ?? "");
@@ -81,14 +81,18 @@ export function parseTips(stdout) {
 export const neededMemoryGb = cachedGb => hostFloorGb + Math.max(0, scopeMaxGb - cachedGb);
 
 /**
- * Stops any earlier run's processes, then puts the checkout at `head`, fetching the bundle's `missing` commits first.
- * With `install`, it installs dependencies, as the queue prepares a Windows lane: the verifier reads them before its own install.
- * Only one run holds the Linux slot, so every scope with the prefix belongs to a run that is gone.
+ * Stops any earlier run's scope and refuses to go on while one still runs. Only one run holds the Linux slot,
+ * so every scope with the prefix belongs to a run that is gone. Then puts the checkout at `head`, fetching the
+ * bundle's `missing` commits first, and prints the VM's page cache in kB.
  */
-export function syncScript({ bundle, ref, missing, head, base, install }) {
+export function syncScript({ bundle, ref, missing, head, base }) {
   const fetch = missing.map(name => quote(`+${ref}/${name}:refs/dohc/${name === "head" ? head : base}`));
   return `set -euo pipefail
 systemctl --user stop ${quote(`${scopePrefix}*.scope`)} 2>/dev/null || true
+if systemctl --user list-units --no-legend --plain --state=active,activating,deactivating ${quote(`${scopePrefix}*.scope`)} | grep -q .; then
+  echo "An earlier Linux job's scope is still running." >&2
+  exit 1
+fi
 rm -rf "${home}/tmp"
 mkdir -p "${home}/tmp"
 cd "${home}/linux"
@@ -99,19 +103,20 @@ git clean -q -ffdx --exclude=node_modules --exclude=target
 test "$(git rev-parse HEAD)" = ${quote(head)}
 git cat-file -e ${quote(`${base}^{commit}`)}
 test -z "$(git status --porcelain)"
-${install ? "pnpm install --frozen-lockfile --config.confirm-modules-purge=false" : ""}
+awk '$1 == "Cached:" {print "cached", $2}' /proc/meminfo
 `;
 }
 
 /**
- * Runs the job in a user scope: with `full`, the verifier's Rust job; otherwise the gate's clippy command.
+ * Runs the job in a user scope: with `full`, it installs dependencies, as the queue prepares a Windows lane,
+ * then runs the verifier's Rust job; otherwise it runs the gate's clippy command.
  * A watchdog in the scope stops it when the launcher ends, so a run whose Windows side was killed leaves nothing behind.
  * Afterwards the scope's peak memory and out-of-memory kills go to `scope.json`.
  */
 export function runScript({ unit, base, grant, output, jobs, full }) {
   const verify = `launcher=$$
 setsid bash -c "while kill -0 $launcher 2>/dev/null; do sleep 5; done; systemctl --user stop ${unit}.scope" </dev/null >/dev/null 2>&1 &
-${full ? `node scripts/verification/verify.mjs pr --base ${base} --job rust` : `cargo ${clippy.join(" ")}`}
+${full ? `pnpm install --frozen-lockfile --config.confirm-modules-purge=false && node scripts/verification/verify.mjs pr --base ${base} --job rust` : `cargo ${clippy.join(" ")}`}
 status=$?
 cgroup=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)
 peak=$(cat "$cgroup/memory.peak" 2>/dev/null || true)
@@ -129,33 +134,38 @@ exec systemd-run --user --scope --quiet --collect --unit=${unit} -p RuntimeMaxSe
 /**
  * Check `head` against `base` in `distro`: with `full`, the whole Rust job; otherwise the gate's clippy command,
  * which builds every target. Returns a receipt, the Linux verifier's when `full`, and the scope's memory use.
- * `output` is a Windows folder for its evidence. A failure of the host, of the transfer, or one after an
- * out-of-memory kill carries `environment`, so the queue retries it instead of failing the change.
+ * `output` is a Windows folder for its evidence.
+ * A check's failure comes back as a FAIL receipt. Everything thrown is a stop, which keeps its reason,
+ * or a machine failure, which carries `environment` so the queue retries it instead of failing the change.
  */
-export async function linuxRustJob({ distro, head, base, output, full = false, signal, request = "inline", attempt = null, command = run, gitRead = git, budget = resolveBuildBudget(),
-  freeMemoryGb = () => freemem() / 1024 ** 3, memoryPollMs = 30_000 }) {
+export async function linuxRustJob({ distro, head, base, output, full = false, signal, request = "inline", attempt = null, command = run, gitRead = git,
+  budget = resolveBuildBudget(), freeMemoryGb = () => freemem() / 1024 ** 3, waitMs = admissionMs }) {
   const environment = cause => error => {
-    if (signal?.aborted || error?.interrupted) throw error;
-    throw Object.assign(error instanceof Error ? error : new Error(String(error)), { environment: cause });
+    if (signal?.aborted) throw signal.reason ?? error;
+    if (error?.interrupted) throw error;
+    throw Object.assign(error instanceof Error ? error : new Error(String(error)), { environment: error?.environment ?? cause });
   };
   const wsl = (name, script, options = {}) => {
     const path = join(output, `wsl-${name}.sh`);
     writeFileSync(path, script);
     return command("wsl.exe", ["-d", distro, "--exec", "bash", "-l", wslPath(path)], { log: join(output, `wsl-${name}.log`), signal, ...options });
   };
-  mkdirSync(output, { recursive: true });
+  const admitBy = Date.now() + waitMs;
+  const remaining = () => Math.max(1, admitBy - Date.now());
   const run = randomUUID().slice(0, 8);
   const unit = `${scopePrefix}${run}`;
   const ref = `refs/verification-linux/${run}`;
   const metadata = { purpose: full ? "Linux Rust gate" : "Linux clippy", checkout: repoRoot, commit: head, phase: request };
-  const slot = await acquireLinuxSlot({ root: budget.root, metadata, signal }).catch(environment("linux slot"));
+  mkdirSync(output, { recursive: true });
+  const slot = await acquireLinuxSlot({ root: budget.root, metadata, signal, waitMs: remaining() }).catch(environment("linux slot"));
   let cargo;
   try {
     // Refs left by a run killed before its cleanup. None belongs to a live run, because this one holds the slot.
     for (const stale of gitRead(["for-each-ref", "--format=%(refname)", "refs/verification-linux/"]).split(/\r?\n/u).filter(Boolean)) gitRead(["update-ref", "-d", stale]);
-    const { tips, has, cachedGb } = parseTips((await wsl("tips", tipsScript({ head, base }), { quietStdout: true }).catch(environment("linux host"))).stdout);
+    const { tips, has } = parseTips((await wsl("tips", tipsScript({ head, base }), { quietStdout: true }).catch(environment("linux host"))).stdout);
     const missing = ["head", "base"].filter(name => !has.has(name === "head" ? head : base));
     const bundle = missing.length ? join(output, "sync.bundle") : null;
+    let synced;
     try {
       if (bundle) {
         for (const name of missing) gitRead(["update-ref", `${ref}/${name}`, name === "head" ? head : base]);
@@ -163,44 +173,54 @@ export async function linuxRustJob({ distro, head, base, output, full = false, s
         await command("git", ["bundle", "create", bundle, ...missing.map(name => `${ref}/${name}`), ...known.map(sha => `^${sha}`)],
           { log: join(output, "wsl-bundle.log"), signal, quietStdout: true }).catch(environment("linux sync"));
       }
-      await wsl("sync", syncScript({ bundle: bundle && wslPath(bundle), ref, missing, head, base, install: full })).catch(environment("linux sync"));
+      synced = await wsl("sync", syncScript({ bundle: bundle && wslPath(bundle), ref, missing, head, base })).catch(environment("linux sync"));
     } finally {
       for (const name of missing) try { gitRead(["update-ref", "-d", `${ref}/${name}`]); } catch { /* Not created. */ }
       if (bundle) rmSync(bundle, { force: true });
     }
-    // The Linux build counts against the host's memory, disk floor, and cargo lanes, like a build in another lane.
-    const needed = neededMemoryGb(cachedGb);
-    if (freeMemoryGb() < needed) console.log(`[verification] The Linux job waits for ${needed.toFixed(1)} GB of free memory; ${freeMemoryGb().toFixed(1)} GB is free.`);
-    while (freeMemoryGb() < needed) await sleep(memoryPollMs, undefined, { signal }).catch(error => { throw signal?.aborted ? signal.reason : error; });
+    // The Linux build counts against the host's disk floor, memory, and cargo lanes, like a build in another lane.
     const free = freeDiskGb(repoRoot);
     if (free === null || free < budget.diskFloorGb) throw Object.assign(new Error(`The Linux build needs ${budget.diskFloorGb} GB free; observed ${free ?? "unknown"}.`), { environment: "disk space" });
-    cargo = await acquireBuildSlot({ ...budget, cooperativeCancellation: true, signal, metadata }).catch(environment("linux slot"));
+    const needed = neededMemoryGb(parseTips(synced.stdout).cachedGb);
+    // The cargo lane waits while memory is short, so the job starts only on memory measured at its admission.
+    // A wait for a lane restarts its own limit after a hold, so the hold ends the whole wait at the deadline.
+    const hold = () => {
+      if (Date.now() >= admitBy) throw Object.assign(new Error(`The Linux job waited ${Math.round(waitMs / 60_000)} minutes for a cargo lane and ${needed.toFixed(1)} GB of free memory.`), { environment: "linux admission" });
+      const available = freeMemoryGb();
+      return available >= needed ? null : `The Linux job waits for ${needed.toFixed(1)} GB of free memory; ${available.toFixed(1)} GB is free.`;
+    };
+    cargo = await acquireBuildSlot({ ...budget, cooperativeCancellation: true, signal, metadata, waitMs: remaining(), hold }).catch(environment("linux slot"));
     const grant = { request, attempt, head, base };
     const failure = await wsl("run", runScript({ unit, base, grant, output: wslPath(output), jobs: budget.jobs, full })).then(() => null, error => error);
     if (failure && (signal?.aborted || failure.interrupted)) throw failure;
     // The scope writes this after its command, so without it the command never ran.
     const scope = readJson(join(output, "scope.json"));
-    if (!scope) environment("linux host")(failure ?? new Error("The Linux scope recorded nothing."));
+    if (!scope) throw failure ?? new Error("The Linux scope recorded nothing.");
     let receipt;
     if (full) {
       receipt = readJson(join(output, "result.json"));
-      if (!receipt?.final) environment("linux host")(failure ?? new Error("The Linux verifier wrote no final receipt."));
-      if (receipt.failure?.kind === "environment") environment(`linux ${receipt.failure.cause}`)(new Error(receipt.error ?? "The Linux host failed."));
-      if (receipt.commit !== head) environment("linux host")(new Error(`The Linux verifier checked ${receipt.commit ?? "no commit"}, not ${head}.`));
+      if (!receipt?.final) throw failure ?? new Error("The Linux verifier wrote no final receipt.");
+      if (receipt.failure?.kind === "environment") throw Object.assign(new Error(receipt.error ?? "The Linux host failed."), { environment: `linux ${receipt.failure.cause}` });
+      if (receipt.commit !== head || receipt.baseCommit !== base) throw new Error(`The Linux verifier checked ${receipt.commit ?? "no commit"} against ${receipt.baseCommit ?? "no base"}, not ${head} against ${base}.`);
     } else {
       // cargo exits 101 on a build error or warning. 126 and 127, or wsl.exe's own failure, mean the shell could not run it.
-      if (failure && !(failure.exitCode >= 1 && failure.exitCode <= 125)) environment("linux host")(failure);
-      receipt = { version: 1, mode: "clippy", final: true, commit: head, verdict: failure ? "FAIL" : "PASS",
+      if (failure && !(failure.exitCode >= 1 && failure.exitCode <= 125)) throw failure;
+      receipt = { version: 1, mode: "clippy", final: true, commit: head, baseCommit: base, verdict: failure ? "FAIL" : "PASS",
         ...(failure ? { error: `cargo clippy failed on Linux. Read ${join(output, "wsl-run.log")}.` } : {}), failed: [], flaky: [] };
       writeFileSync(join(output, "result.json"), JSON.stringify(receipt, null, 2) + "\n");
     }
     // A compiler or test killed at the run's memory limit says nothing about the change.
-    if (receipt.verdict !== "PASS" && scope?.oomKills > 0) environment("linux memory")(new Error(`The Linux job failed after ${scope.oomKills} out-of-memory kills at its limit.`));
+    if (receipt.verdict !== "PASS" && scope.oomKills > 0) throw Object.assign(new Error(`The Linux job failed after ${scope.oomKills} out-of-memory kills at its limit.`), { environment: "linux memory" });
     return { receipt, scope };
+  } catch (error) {
+    // Only a stop or the host reaches here: a check's failure is a receipt.
+    return environment("linux host")(error);
   } finally {
+    // The scope stops before the slots go, so no other build starts beside its last processes.
+    // A scope that would not stop is stopped by the next job, which refuses to start beside it.
+    await command("wsl.exe", ["-d", distro, "--exec", "systemctl", "--user", "stop", `${unit}.scope`], { quietStdout: true, timeoutMs: 60_000 })
+      .catch(error => console.log(`[verification] Could not stop ${unit}.scope: ${error.message}`));
     cargo?.release();
-    // Belt and braces with the scope's watchdog: nothing this run started outlives it.
-    await command("wsl.exe", ["-d", distro, "--exec", "systemctl", "--user", "stop", `${unit}.scope`], { quietStdout: true, timeoutMs: 60_000 }).catch(() => {});
     slot.release();
   }
 }
