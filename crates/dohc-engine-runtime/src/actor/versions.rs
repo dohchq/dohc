@@ -12,6 +12,7 @@ use dohc_engine_domain::{
     SecretFileStore, SnapshotContent, SnapshotMetadata, VersionFileChangePage, VersionRecord,
     VersionedTextStore, list_secret_files_keyless,
 };
+use dohc_engine_files::floor::path_collision_key;
 use dohc_engine_files::{
     PlacementHolds, ProjectionTargetKind, ProjectionTargetState, probe_projection_target,
     remove_empty_directory_target,
@@ -376,12 +377,12 @@ fn run_relay_batch(
     } else {
         batch
             .iter()
-            .map(|projection| projection.spec.target_path.to_lowercase())
+            .map(|projection| path_collision_key(&projection.spec.target_path))
             .collect()
     };
     let outcome = store.write_with(&dohc_engine_storage::NoFaults, |tx| {
         complete_held_switch_jobs(tx, workspace_id, holds, now_ms, |_, path| {
-            targets.contains(&path.to_lowercase())
+            targets.contains(&path_collision_key(path))
         })?;
         for projection in &batch {
             if let Some(bytes) = projection.inline_content.as_deref()
@@ -502,13 +503,13 @@ fn projection_target_contains<'a>(
         let mut aliases: HashMap<String, Vec<&str>> = HashMap::new();
         for target in targets {
             aliases
-                .entry(target.to_lowercase())
+                .entry(path_collision_key(target))
                 .or_default()
                 .push(target);
         }
         aliases
     });
-    let Some(candidates) = aliases.get(&path.to_lowercase()) else {
+    let Some(candidates) = aliases.get(&path_collision_key(path)) else {
         return false;
     };
     let Ok(previous) = std::fs::canonicalize(root.join(path)) else {
@@ -878,10 +879,9 @@ pub(super) fn reconcile_active_plaintext_projection_on_store(
         return Ok(());
     }
     for projection in &mut projections {
-        if rollback_paths
-            .iter()
-            .any(|(path, _)| path.to_lowercase() == projection.spec.target_path.to_lowercase())
-            && let Some(job) = store.load_materialization_job(&projection.spec.job_id)?
+        if rollback_paths.iter().any(|(path, _)| {
+            path_collision_key(path) == path_collision_key(&projection.spec.target_path)
+        }) && let Some(job) = store.load_materialization_job(&projection.spec.job_id)?
             && job.status == dohc_engine_storage::JobStatus::Pending
         {
             projection.spec.preimage = job.preimage;

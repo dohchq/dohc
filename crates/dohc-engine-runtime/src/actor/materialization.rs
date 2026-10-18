@@ -444,6 +444,7 @@ pub(super) struct MaterializationReplayScope<'a> {
     /// Capture drains settle file conflicts without failing the workspace.
     pub(super) file_outcomes_settled: bool,
     /// Preserve unseen stale relay writes only when this capture released a hold.
+    /// Paths are keyed by `dohc_engine_files::floor::path_collision_key`.
     pub(super) released_hold_paths: Option<&'a std::collections::HashSet<String>>,
 }
 
@@ -598,7 +599,7 @@ fn switch_parent_deletes_first(jobs: Vec<MaterializationJob>) -> Vec<Materializa
         if job.operation == MaterializationOperation::Write
             && job.job_id.starts_with("version-switch-")
         {
-            let path = job.target_path.to_lowercase();
+            let path = dohc_engine_files::floor::path_collision_key(&job.target_path);
             let mut path = path.as_str();
             while let Some((parent, _)) = path.rsplit_once('/') {
                 ancestors.insert(parent.to_owned());
@@ -612,7 +613,9 @@ fn switch_parent_deletes_first(jobs: Vec<MaterializationJob>) -> Vec<Materializa
     let (mut parents, others): (Vec<_>, Vec<_>) = jobs.into_iter().partition(|job| {
         job.operation == MaterializationOperation::Delete
             && job.job_id.starts_with("version-switch-")
-            && ancestors.contains(&job.target_path.to_lowercase())
+            && ancestors.contains(&dohc_engine_files::floor::path_collision_key(
+                &job.target_path,
+            ))
     });
     parents.extend(others);
     parents
@@ -851,10 +854,11 @@ pub(super) fn replay_pending_materializations(
             if job.job_id.starts_with("version-switch-mat_")
                 && switch_projection_matches_active(store, &job, false)?.is_none()
             {
-                if scope
-                    .released_hold_paths
-                    .is_some_and(|paths| paths.contains(&job.target_path.to_lowercase()))
-                    && job.operation == MaterializationOperation::Write
+                if scope.released_hold_paths.is_some_and(|paths| {
+                    paths.contains(&dohc_engine_files::floor::path_collision_key(
+                        &job.target_path,
+                    ))
+                }) && job.operation == MaterializationOperation::Write
                 {
                     match dohc_engine_files::materialize_write_conflict(
                         store,
@@ -1201,6 +1205,48 @@ fn reconcile_settlement_attempts(
         return Err(RuntimeError::OperationCrashed);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod switch_order_tests {
+    use super::*;
+    use dohc_engine_storage::Preimage;
+
+    fn switch_job(id: &str, path: &str, operation: MaterializationOperation) -> MaterializationJob {
+        MaterializationJob {
+            job_id: format!("version-switch-mat_{id}"),
+            workspace_id: "ws".to_owned(),
+            target_path: path.to_owned(),
+            content_sha256: hex_sha256(b""),
+            operation,
+            preimage: Preimage::Absent,
+            target_generation: 1,
+            status: JobStatus::Pending,
+            created_at_ms: 1,
+        }
+    }
+
+    /// A switch that turns the file `café` into a folder deletes the file
+    /// first, though the folder is spelled in the other Unicode
+    /// normalization: a disk that ignores normalization holds one name.
+    #[test]
+    fn a_parent_delete_in_another_normalization_runs_first() {
+        let ordered = switch_parent_deletes_first(vec![
+            switch_job(
+                "write",
+                "caf\u{e9}/plan.md",
+                MaterializationOperation::Write,
+            ),
+            switch_job("delete", "cafe\u{301}", MaterializationOperation::Delete),
+        ]);
+        assert_eq!(
+            ordered
+                .iter()
+                .map(|job| job.job_id.as_str())
+                .collect::<Vec<_>>(),
+            ["version-switch-mat_delete", "version-switch-mat_write"]
+        );
+    }
 }
 
 #[cfg(test)]

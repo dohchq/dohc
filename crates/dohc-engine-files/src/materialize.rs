@@ -105,7 +105,7 @@
 //! ancestor-redirection race is closed.
 
 use crate::bounds::{MAX_CAPTURE_BINARY_BYTES, MAX_CAPTURE_TEXT_BYTES};
-use crate::floor::is_excluded_file;
+use crate::floor::{is_excluded_file, path_collision_key};
 use crate::media::{is_text_media_type, media_type_for_path};
 use crate::policy::{
     MAX_CANONICAL_WORKSPACE_PATH_BYTES, PathClassification, classify_engine_file_path,
@@ -940,7 +940,7 @@ impl PlacementHolds {
     ) -> Self {
         let case_aliases = paths
             .keys()
-            .map(|path| (path.to_lowercase(), path.clone()))
+            .map(|path| (path_collision_key(path), path.clone()))
             .collect();
         Self {
             workspace_id: workspace_id.to_owned(),
@@ -956,8 +956,9 @@ impl PlacementHolds {
         self.paths.iter().map(|(path, hold)| (path.as_str(), hold))
     }
 
-    /// Lexical checks never resolve or read the outside file. Lowercase aliases
-    /// deliberately over-park distinct paths on case-sensitive volumes.
+    /// Lexical checks never resolve or read the outside file. Case and
+    /// normalization aliases deliberately over-park distinct paths on
+    /// case-sensitive volumes.
     pub fn get(&self, path: &str) -> Option<(&str, &PlacementHold)> {
         if let Some((path, hold)) = self.paths.get_key_value(path) {
             return Some((path, hold));
@@ -965,7 +966,7 @@ impl PlacementHolds {
         if self.is_empty() {
             return None;
         }
-        let stored = self.case_aliases.get(&path.to_lowercase())?;
+        let stored = self.case_aliases.get(&path_collision_key(path))?;
         self.paths
             .get_key_value(stored)
             .map(|(path, hold)| (path.as_str(), hold))
@@ -4195,6 +4196,29 @@ fn preimage_matches(preimage: &Preimage, current: &CurrentTarget) -> bool {
     }
 }
 
+/// Whether a hold on `held` covers `path`: the same path in any case or
+/// Unicode normalization, or a path beneath it. Aliases deliberately over-hold
+/// distinct paths on case-sensitive volumes.
+pub fn path_is_held(held: &str, path: &str) -> bool {
+    let (held, path) = (path_collision_key(held), path_collision_key(path));
+    path == held
+        || path
+            .strip_prefix(&held)
+            .is_some_and(|tail| tail.starts_with('/'))
+}
+
+/// Whether a durable capture hold in `workspace` covers `path`.
+pub fn placement_is_held_in(
+    store: &EngineStore,
+    workspace: &str,
+    path: &str,
+) -> Result<bool, StorageError> {
+    Ok(store
+        .held_paths(workspace)?
+        .iter()
+        .any(|held| path_is_held(held, path)))
+}
+
 /// Protect lexical aliases and held ancestors on every platform. Filesystem
 /// aliases are checked only here, after the placement boundary resolves them.
 fn placement_is_held(
@@ -4225,7 +4249,7 @@ fn placement_is_held(
         #[cfg(not(windows))]
         return Ok(false);
     }
-    if store.placement_is_held(workspace, path)? {
+    if placement_is_held_in(store, workspace, path)? {
         return Ok(true);
     }
     #[cfg(windows)]
@@ -4243,7 +4267,7 @@ fn placement_is_held(
             .to_string_lossy()
             .replace('\\', "/");
         if resolved != path {
-            return Ok(store.placement_is_held(workspace, &resolved)?);
+            return Ok(placement_is_held_in(store, workspace, &resolved)?);
         }
     }
     #[cfg(not(windows))]
@@ -5634,14 +5658,37 @@ mod tests {
                 )
             })
             .unwrap();
-        assert!(
-            store
-                .placement_is_held("workspace", "plans/trip.md")
-                .unwrap()
-        );
-        assert!(store.placement_is_held("workspace", "PLANS").unwrap());
-        assert!(!store.placement_is_held("other", "PLANS").unwrap());
-        assert!(!store.placement_is_held("workspace", "planets.md").unwrap());
+        assert!(placement_is_held_in(&store, "workspace", "plans/trip.md").unwrap());
+        assert!(placement_is_held_in(&store, "workspace", "PLANS").unwrap());
+        assert!(!placement_is_held_in(&store, "other", "PLANS").unwrap());
+        assert!(!placement_is_held_in(&store, "workspace", "planets.md").unwrap());
+    }
+
+    /// APFS stores `café` in whichever normalization it was written in and
+    /// opens it under either, so a write to one must not replace a held other.
+    #[test]
+    fn holds_cover_every_spelling_a_disk_may_alias() {
+        for (held, path) in [
+            ("caf\u{e9}.md", "cafe\u{301}.md"),
+            ("cafe\u{301}/plan.md", "CAF\u{c9}/plan.md"),
+            ("Stra\u{df}e.md", "STRASSE.md"),
+            ("notes", "Notes/a.md"),
+        ] {
+            assert!(path_is_held(held, path), "{held} {path}");
+            let holds = PlacementHolds::from_paths(
+                "workspace",
+                std::collections::HashMap::from([(
+                    held.to_owned(),
+                    PlacementHold {
+                        source_version_id: "main".into(),
+                        preimage: Preimage::Absent,
+                    },
+                )]),
+            );
+            assert!(holds.blocks(path), "{held} {path}");
+        }
+        assert!(!path_is_held("caf\u{e9}.md", "cafe.md"));
+        assert!(!path_is_held("notes", "notes.md"));
     }
 
     fn options_with(replacer: &dyn AtomicReplacer) -> MaterializeOptions<'_> {

@@ -1620,7 +1620,7 @@ pub(super) fn ydoc_open_state_on_store(
         return Err(RuntimeError::Cancelled);
     }
     let canonical_path = validate_addressable_plaintext_path(path)?;
-    if store.placement_is_held(workspace_id, &canonical_path)? {
+    if dohc_engine_files::placement_is_held_in(store, workspace_id, &canonical_path)? {
         return Err(RuntimeError::CaptureFileHeld {
             path: canonical_path,
         });

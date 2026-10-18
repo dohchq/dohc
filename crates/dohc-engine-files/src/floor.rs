@@ -142,6 +142,15 @@ pub fn collision_key(segment: &str) -> String {
     reserved_key(&compatible)
 }
 
+/// `path` as a disk that ignores case or Unicode normalization names it: the
+/// [`collision_key`] of each segment.
+pub fn path_collision_key(path: &str) -> String {
+    path.split('/')
+        .map(collision_key)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// Normalize an on-disk name for the capture floor.
 pub fn normalize_segment(segment: &str) -> String {
     #[cfg(windows)]

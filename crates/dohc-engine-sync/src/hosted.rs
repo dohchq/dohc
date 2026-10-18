@@ -409,7 +409,7 @@ fn held_by_departed(
         .map_err(SyncError::corrupt)?;
     for held in held {
         let held = held.map_err(SyncError::corrupt)?;
-        use dohc_engine_storage::capture_file_holds::path_is_held;
+        use dohc_engine_files::path_is_held;
         if path_is_held(&held, path) || path_is_held(path, &held) {
             return Ok(true);
         }
@@ -1137,7 +1137,7 @@ pub(crate) fn redelivered_unready(
     object_id: &str,
     stored: impl IntoIterator<Item = crate::MomentMaterializationChange>,
 ) -> Result<Vec<crate::MomentMaterializationChange>, SyncError> {
-    use dohc_engine_storage::capture_file_holds::path_is_held;
+    use dohc_engine_files::path_is_held;
     let (conn, workspace_id) = (occupancy.conn, occupancy.workspace_id);
     let parked = park::parked_paths(conn, workspace_id, object_id)?;
     let heads = head_writes(conn, workspace_id, object_id)?;
