@@ -508,6 +508,7 @@ export function createRelaySharesIpcHandlers<
         }
         return ListRelayShareLinksResult.parse(parsed.data);
       },
+      assertOriginalWorkspace,
     );
   };
 
@@ -606,6 +607,7 @@ export function createRelaySharesIpcHandlers<
           url: rotated.data.url,
         });
       },
+      assertOriginalWorkspace,
     );
   };
 

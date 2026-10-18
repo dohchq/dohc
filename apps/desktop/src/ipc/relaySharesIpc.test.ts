@@ -1060,15 +1060,29 @@ describe("owner operation admission", () => {
     expect(h.accountRequest).not.toHaveBeenCalled();
   });
 
-  it.each(workspaceRows)("preserves $name shared-view admission", async ({name, row, input}) => {
+  it.each(workspaceRows)("refuses $name in a shared view before remote access", async ({row, input}) => {
     const h = harness();
     h.workspace.shareView = {};
     h.remote.mockRejectedValue(new Error("remote reached"));
-    const permitsSharedView = name === "listRelayShareLinks" || name === "rotateRelayShareLink";
-    await expect(h.invoke(row.channel, input)).rejects.toThrow(permitsSharedView ? "remote reached" : "original workspace");
-    expect(h.remote).toHaveBeenCalledTimes(permitsSharedView ? 1 : 0);
+    await expect(h.invoke(row.channel, input)).rejects.toThrow("original workspace");
+    expect(h.remote).not.toHaveBeenCalled();
     expect(h.request).not.toHaveBeenCalled();
   });
+
+  it.each(["listRelayShareLinks", "rotateRelayShareLink"] as const)(
+    "refuses %s in a received share view with the owner refusal before remote access",
+    async (name) => {
+      const h = harness();
+      h.workspace.shareView = {};
+      h.remote.mockRejectedValue(new Error("Sync this workspace before sharing."));
+      await expect(h.invoke(relayShareOperations[name].channel, ownerInputs[name])).rejects.toThrow(
+        "This is a shared view — only the original workspace can be shared.",
+      );
+      expect(h.remote).not.toHaveBeenCalled();
+      expect(h.request).not.toHaveBeenCalled();
+      expect(h.accountRequest).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([
     [{}, "Pick a file, folder, or version to share."],
