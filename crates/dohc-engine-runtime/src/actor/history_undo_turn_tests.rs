@@ -1,6 +1,7 @@
 use super::super::tests::{OP, WS, fixture, remove, rename, seed};
 use super::*;
 use dohc_engine_storage::{FaultAction, FaultPoint, NoFaults};
+use dohc_engine_testkit::engine_db_path;
 use std::sync::{
     Barrier, Mutex, OnceLock,
     atomic::{AtomicUsize, Ordering},
@@ -77,7 +78,7 @@ fn setup(
     drop(store);
     let supervisor = crate::WorkspaceSupervisor::new();
     let actor = supervisor
-        .open(&crate::engine_db_path(&root).unwrap(), 4)
+        .open(&engine_db_path(&root).unwrap(), 4)
         .unwrap()
         .actor;
     (root, supervisor, actor)
@@ -182,7 +183,7 @@ async fn crash_resumes_the_remaining_members_and_replay_writes_nothing() {
     close(supervisor).await;
     let supervisor = crate::WorkspaceSupervisor::new();
     let actor = supervisor
-        .open(&crate::engine_db_path(&root).unwrap(), 20)
+        .open(&engine_db_path(&root).unwrap(), 20)
         .unwrap()
         .actor;
     let result = run(&actor, &root, "turn-crash", Arc::new(NoFaults))
@@ -267,7 +268,7 @@ async fn an_alias_claimed_after_check_is_not_restored_before_it_reaches_disk() {
         .entry("turn-alias".into())
         .or_default()
         .hook = Some((send, barrier.clone()));
-    let db = crate::engine_db_path(&root).unwrap();
+    let db = engine_db_path(&root).unwrap();
     let edit = tokio::task::spawn_blocking(move || {
         receive.recv().unwrap();
         let mut store = EngineStore::open(&db, 21).unwrap();
