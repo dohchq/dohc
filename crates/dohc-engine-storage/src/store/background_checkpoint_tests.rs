@@ -48,7 +48,7 @@ fn finish_checkpoint(store: &EngineStore) {
 }
 #[test]
 fn background_writes_finish_full_tails_without_writer_backfill() {
-    let root = ScratchDir::new("undo-background-checkpoint").unwrap();
+    let root = ScratchDir::new_named("undo-background-checkpoint").unwrap();
     let db = root.join("engine.db");
     let mut store = store(&db);
     let before = store.checkpoint_work_for_test().1;
@@ -79,7 +79,7 @@ fn background_writes_finish_full_tails_without_writer_backfill() {
 }
 #[test]
 fn a_pinned_wal_refuses_before_the_callback_then_resumes() {
-    let root = ScratchDir::new("undo-background-pin").unwrap();
+    let root = ScratchDir::new_named("undo-background-pin").unwrap();
     let db = root.join("engine.db");
     let mut store = store(&db);
     write(&mut store, 0).unwrap();
@@ -136,7 +136,7 @@ fn background_writes_preserve_both_crash_boundaries() {
         (FaultPoint::StorageBeforePersist, false),
         (FaultPoint::StorageAfterCommitBeforeAck, true),
     ] {
-        let root = ScratchDir::new("undo-background-crash").unwrap();
+        let root = ScratchDir::new_named("undo-background-crash").unwrap();
         let db = root.join("engine.db");
         let mut store = store(&db);
         let outcome = store
