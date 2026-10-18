@@ -99,6 +99,8 @@ services:
       DOHC_RELAY_APP_PUBLICATIONS: ${DOHC_RELAY_APP_PUBLICATIONS:-0}
       DOHC_RELAY_APP_BACKEND_MAX_PARTICIPANTS_PER_GRANT: ${DOHC_RELAY_APP_BACKEND_MAX_PARTICIPANTS_PER_GRANT:-1000}
       DOHC_RELAY_APP_COLLECTION_MAX_CREATES_PER_GRANT: ${DOHC_RELAY_APP_COLLECTION_MAX_CREATES_PER_GRANT:-0}
+      # No value: Compose passes the setting through only when it is set.
+      DOHC_RELAY_HOST_MEMORY_BUDGET_MIB:
     depends_on:
       postgres-migrate: {condition: service_completed_successfully}
       relay-initialize: {condition: service_completed_successfully}

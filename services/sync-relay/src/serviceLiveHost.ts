@@ -30,6 +30,7 @@ import type {StopRestoreLookup} from "./storage/liveRestoreOperation.js";
 import {parseLiveRestoreConfig, LiveRestorePreparation, type LiveRestoreConfig} from "./liveRestorePreparation.js";
 import {parseServiceHostedReplicationConfig, ServiceHostedReplication} from "./serviceHostedReplication.js";
 import type {ServiceActivationReplica} from "./serviceActivationDriver";
+import type {HostMemoryBudget} from "./hostMemoryBudget";
 interface ServiceLiveHostConfig {
   readonly version: 1;
   readonly engineExecutable: string;
@@ -169,6 +170,8 @@ export async function startServiceLiveHost(options: {
   history: LiveJournalHistoryAuthority;
   signal?: AbortSignal;
   frameChanges?: LiveHostChanges;
+  /** The relay's one host memory budget. Nothing charges it yet. */
+  memoryBudget?: HostMemoryBudget;
 }) {
   const { storage, history } = options;
   const config = readServiceLiveHostConfig(options.configPath, id => !workspaceIsDeleted(options.storage,id));

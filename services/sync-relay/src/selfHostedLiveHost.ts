@@ -18,6 +18,7 @@ import {observeRelayWrites, type LiveHostChanges} from "./relayWriteChanges";
 import {startServiceLiveHost, type ServiceHostedSet} from "./serviceLiveHost";
 import {selfHostLiveProfile} from "./selfHostLiveProfile";
 import {discoverServiceHostDocuments} from "./serviceHostEnrollmentRoutes";
+import type {HostMemoryBudget} from "./hostMemoryBudget";
 
 type WorkspaceIdentity = {workspaceId: string; replicationEpoch: string | null; streamIdentity: string | null};
 // A workspace identity's hosted replica. The label keeps a store of any other kind from opening as one.
@@ -52,6 +53,8 @@ export async function startSelfHostedLiveHost(options: {
   trustedAccount: OwnerOutboxAdmission["trustedAccount"];
   storage: SyncRelayStorage; history: LiveJournalHistoryAuthority; root: string; engineExecutable: string;
   relayOrigin: string; key: Uint8Array; frameChanges: LiveHostChanges;
+  /** The relay's one host memory budget, shared by every daemon this host starts. Nothing charges it yet. */
+  memoryBudget?: HostMemoryBudget;
   startHost?: typeof startServiceLiveHost;
   onError?(error: unknown): void;
 }) {
@@ -164,7 +167,8 @@ export async function startSelfHostedLiveHost(options: {
       await writeFile(configPath, JSON.stringify({version: 1, engineExecutable, hostId, instanceId, workspaces: [],
         ...profile.service, activation: {...profile.service.activation, targets: []}}), {flag: "wx", mode: 0o600});
       signal.throwIfAborted();
-      const host = await (options.startHost ?? startServiceLiveHost)({trustedAccount: options.trustedAccount,configPath, storage, history, frameChanges: options.frameChanges, signal});
+      const host = await (options.startHost ?? startServiceLiveHost)({trustedAccount: options.trustedAccount,configPath, storage, history, frameChanges: options.frameChanges,
+        memoryBudget: options.memoryBudget, signal});
       host.onEvent((event) => { for (const handler of eventHandlers) handler(event); });
       host.invalidated.addEventListener("abort", schedule, {once: true});
       return host;

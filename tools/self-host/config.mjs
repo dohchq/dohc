@@ -22,6 +22,11 @@ export function validateSettings(settings) {
   if (participants !== undefined && (!/^[1-9]\d*$/.test(participants) || !Number.isSafeInteger(Number(participants)))) {
     errors.push('Set DOHC_RELAY_APP_BACKEND_MAX_PARTICIPANTS_PER_GRANT to a positive safe integer.');
   }
+  // The relay refuses the same values. Its memory figures are bytes, so the MiB value must stay a safe integer once multiplied.
+  const memory = settings.DOHC_RELAY_HOST_MEMORY_BUDGET_MIB;
+  if (memory !== undefined && (!/^[1-9]\d*$/.test(memory) || Number(memory) < 512 || !Number.isSafeInteger(Number(memory) * 1024 * 1024))) {
+    errors.push('Set DOHC_RELAY_HOST_MEMORY_BUDGET_MIB to a whole number of MiB, at least 512, or remove it to use the container\'s memory limit.');
+  }
   for (const name of ['DOHC_IMAGE', 'POSTGRES_PASSWORD', 'BETTER_AUTH_SECRET', 'DOHC_RELAY_LINK_KEY',
     'DOHC_RELAY_EXCHANGE_KEY', 'DOHC_SMTP_HOST', 'DOHC_SMTP_FROM']) {
     if (!settings[name] || /change-me|example\.(com|net|org)/i.test(settings[name])) errors.push(`Set ${name}.`);

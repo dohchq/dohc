@@ -63,6 +63,8 @@ import {createAutomationRecordHost} from "./automationRecordHost";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import {selfHostLiveProfile} from "./selfHostLiveProfile";
 import {startSelfHostedLiveHost, deleteSelfHostedWorkspaceRoots} from "./selfHostedLiveHost";
+import {createHostMemoryBudget, HOST_MEMORY_DEFAULTS, readHostMemoryBudgetSetting, resolveHostMemoryBudget} from "./hostMemoryBudget";
+import {discoverHostCgroup, readCgroupMemoryLimit, startHostMemoryMeasurement} from "./hostMemoryMeasurement";
 import {createServiceHostEnrollmentRoutes} from "./serviceHostEnrollmentRoutes";
 import {createServiceHostReplication} from "./serviceHostReplication";
 import {authorizeServiceHostReplication} from "./serviceHostCredential";
@@ -220,6 +222,10 @@ const appBackendMaxParticipantsPerGrant = (() => {
 const appCollectionPolicy = (() => {
   try { return readAppCollectionPolicy(process.env.DOHC_RELAY_APP_COLLECTION_MAX_CREATES_PER_GRANT); }
   catch (error) { fatal(`FATAL: ${error instanceof Error ? error.message : "invalid app collection policy"}`); }
+})();
+const hostMemoryBudgetSetting = (() => {
+  try { return readHostMemoryBudgetSetting(process.env.DOHC_RELAY_HOST_MEMORY_BUDGET_MIB); }
+  catch (error) { fatal(`FATAL: ${error instanceof Error ? error.message : "invalid host memory budget"}`); }
 })();
 if (appCollectionPolicy && !appPublicationLimits) {
   fatal("FATAL: App collections require DOHC_RELAY_APP_PUBLICATIONS=1.");
@@ -612,15 +618,25 @@ process.once("SIGINT",stopOwnerAdmission);
 process.once("SIGTERM",stopOwnerAdmission);
 const serviceHostConfig = process.env.DOHC_RELAY_SERVICE_HOST_CONFIG;
 if (serviceHostConfig && !deployment) fatal("FATAL: A service host requires an initialized relay deployment.");
+// One budget for whichever session service this relay runs. Nothing charges it yet.
+const hostMemory = selfHostedLive || serviceHostConfig ? await (async () => {
+  const cgroup = await discoverHostCgroup();
+  const effective = resolveHostMemoryBudget(hostMemoryBudgetSetting, cgroup && await readCgroupMemoryLimit(cgroup));
+  const budget = createHostMemoryBudget({effectiveBytes: effective.bytes, baselineBytes: HOST_MEMORY_DEFAULTS.baselineBytes});
+  const measurement = startHostMemoryMeasurement({cgroup});
+  console.log(`[sync-relay] host memory budget ${JSON.stringify({effectiveBytes: budget.effectiveBytes, source: effective.source,
+    baselineBytes: budget.baselineBytes, headroomBytes: budget.headroomBytes, measurement: measurement.source})}`);
+  return {budget, measurement};
+})() : undefined;
 const configuredServiceHost = serviceHostConfig && deployment
-  ? await startServiceLiveHost({ trustedAccount: trustedOwnerAccount, configPath: serviceHostConfig, storage, history: deployment.history, frameChanges })
+  ? await startServiceLiveHost({ trustedAccount: trustedOwnerAccount, configPath: serviceHostConfig, storage, history: deployment.history, frameChanges, memoryBudget: hostMemory!.budget })
   : undefined;
 if (selfHostedLive && (!deployment || !frameChanges || !linkKey || !process.env.DOHC_RELAY_SERVICE_HOST_ROOT || !process.env.DOHC_RELAY_ENGINE_EXECUTABLE || !process.env.DOHC_RELAY_PUBLIC_ORIGIN)) {
   fatal("FATAL: Self-host live editing requires a deployment, a persistent host root, the native engine executable, and the public HTTPS relay origin.");
 }
 const selfHost = selfHostedLive ? await startSelfHostedLiveHost({trustedAccount: trustedOwnerAccount,storage, history: deployment!.history, frameChanges: frameChanges!,
   root: process.env.DOHC_RELAY_SERVICE_HOST_ROOT!, engineExecutable: process.env.DOHC_RELAY_ENGINE_EXECUTABLE!,
-  relayOrigin: process.env.DOHC_RELAY_PUBLIC_ORIGIN!, key: Buffer.from(linkKey!),
+  relayOrigin: process.env.DOHC_RELAY_PUBLIC_ORIGIN!, key: Buffer.from(linkKey!), memoryBudget: hostMemory!.budget,
   onError: error => console.error("[sync-relay] self-host live service:", error)}) : undefined;
 const serviceHost = () => selfHost?.current() ?? configuredServiceHost;
 // Browsers are told live editing is unavailable while the self-hosted session host cannot continue the document.
@@ -728,6 +744,7 @@ installShutdown(server, {
     await automations?.close();
     await selfHost?.close();
     await configuredServiceHost?.close();
+    await hostMemory?.measurement.close();
     await liveValidation.close();
     await datasetHost?.close();
     if (!deployment) await rm(datasetDirectory, {recursive: true, force: true, maxRetries: 8, retryDelay: 25});

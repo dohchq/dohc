@@ -113,6 +113,21 @@ test('app participant limit reaches the relay and validates positive safe intege
   }
 });
 
+test('host memory budget reaches the relay only when set and validates whole MiB of at least 512', () => {
+  assert.equal(settings().DOHC_RELAY_HOST_MEMORY_BUDGET_MIB, undefined);
+  assert.match(readFileSync('.env.self-host.example', 'utf8'), /^# DOHC_RELAY_HOST_MEMORY_BUDGET_MIB=$/m);
+  // A value-less entry passes the setting through only when it is set, so an unset budget never reaches the relay as blank.
+  const relay = compose.services['sync-relay'].environment;
+  assert.ok(Object.hasOwn(relay, 'DOHC_RELAY_HOST_MEMORY_BUDGET_MIB'));
+  assert.equal(relay.DOHC_RELAY_HOST_MEMORY_BUDGET_MIB, null);
+  for (const value of [undefined, '512', '2048', '8589934591']) {
+    assert.deepEqual(validateSettings({...settings(), DOHC_RELAY_HOST_MEMORY_BUDGET_MIB: value}), [], String(value));
+  }
+  for (const value of ['', ' 512', '512 ', '0', '-512', '511', '512.5', '1e3', '0512', 'abc', '8589934592']) {
+    assert.ok(validateSettings({...settings(), DOHC_RELAY_HOST_MEMORY_BUDGET_MIB: value}).some(error => error.includes('DOHC_RELAY_HOST_MEMORY_BUDGET_MIB')), value);
+  }
+});
+
 test('sign-up stays open by default and asks the relay about invites on the internal network', () => {
   assert.equal(settings().DOHC_SIGN_UP_EMAILS, '');
   const api = compose.services['workspace-api'].environment;
