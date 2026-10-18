@@ -283,14 +283,26 @@ pub fn create_key_file(root: &std::path::Path) -> Result<SecretDataKey, CryptoEr
     let seq = MINT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let temp = path.with_extension(format!("tmp-{}-{seq}", std::process::id()));
     let written = (|| -> std::io::Result<()> {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&temp)?;
+        // On macOS a 0600 mode does not limit an ACL entry the workspace
+        // folder gives every new file, so the key takes none of them.
+        #[cfg(target_vendor = "apple")]
+        let mut file = {
+            let invalid = || std::io::Error::from(std::io::ErrorKind::InvalidInput);
+            let folder = std::fs::File::open(temp.parent().ok_or_else(invalid)?)?;
+            let name = temp.file_name().ok_or_else(invalid)?;
+            std::fs::File::from(dohc_macos_files::create_uninherited(folder, name, 0o600)?)
+        };
+        #[cfg(not(target_vendor = "apple"))]
+        let mut file = {
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            options.open(&temp)?
+        };
         use std::io::Write;
         // The serialized payload carries the key; it must zeroize on drop
         // like every other buffer holding key material.
@@ -341,6 +353,31 @@ fn finish_key_publication(
 mod tests {
     use super::*;
     use zeroize::Zeroize;
+
+    /// A workspace folder whose ACL gives every new file read access for
+    /// everyone must not pass that grant to the data key.
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn a_folders_inherited_grant_never_reaches_the_key_file() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("key-acl").unwrap();
+        let added = std::process::Command::new("/bin/chmod")
+            .args([
+                "+a",
+                "group:everyone allow read,file_inherit,directory_inherit",
+            ])
+            .arg(scratch.path())
+            .status()
+            .unwrap();
+        assert!(added.success());
+        create_key_file(scratch.path()).unwrap();
+        let listing = std::process::Command::new("/bin/ls")
+            .arg("-le")
+            .arg(scratch.path().join(SECRET_KEY_FILE_RELATIVE))
+            .output()
+            .unwrap();
+        let listing = String::from_utf8(listing.stdout).unwrap();
+        assert_eq!(listing.lines().count(), 1, "{listing}");
+    }
 
     #[test]
     fn key_file_round_trips_byte_exact() {

@@ -1,10 +1,12 @@
-//! Copy a file's macOS ACL and extended attributes between open descriptors,
-//! flush a descriptor behind a drive write barrier, keep a folder out of
-//! iCloud Drive, and unlink a file only when no process has it open.
+//! Create a file without the ACL entries its folder gives new files, copy a
+//! file's macOS ACL and extended attributes between open descriptors, flush a
+//! descriptor behind a drive write barrier, keep a folder out of iCloud Drive,
+//! and unlink a file only when no process has it open.
 #![cfg(target_vendor = "apple")]
-use std::ffi::{CStr, c_char, c_int, c_uint, c_void};
+use std::ffi::{CStr, CString, OsStr, c_char, c_int, c_uint, c_void};
 use std::io;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 /// The attribute that tells macOS file providers, iCloud Drive among them,
@@ -17,72 +19,151 @@ const MAX_XATTR_BYTES: usize = 1 << 20;
 /// `XATTR_OPERATION_INTENT_SAVE` in `<xattr_flags.h>`.
 const XATTR_OPERATION_INTENT_SAVE: c_uint = 2;
 
-/// `ACL_TYPE_EXTENDED` in `<sys/acl.h>`.
+/// `ACL_TYPE_EXTENDED` and `ACL_FLAG_NO_INHERIT` in `<sys/acl.h>`.
 const ACL_TYPE_EXTENDED: c_int = 0x100;
+const ACL_FLAG_NO_INHERIT: c_int = 1 << 17;
+
+/// `FILESEC_MODE` and `FILESEC_ACL` in `<sys/fcntl.h>`.
+const FILESEC_MODE: c_int = 4;
+const FILESEC_ACL: c_int = 5;
 
 // SAFETY: These match `<xattr_flags.h>`, macOS 10.10 and later, where
-// `xattr_operation_intent_t` is `unsigned int`, and `<sys/acl.h>`, where
-// `acl_type_t` is a C enum and `acl_t` is a pointer.
+// `xattr_operation_intent_t` is `unsigned int`, `<sys/acl.h>`, where
+// `acl_type_t` and `acl_flag_t` are C enums and `acl_t` and `acl_flagset_t`
+// are pointers, and `<sys/fcntl.h>`, where `filesec_property_t` is a C enum
+// and `filesec_t` is a pointer.
 #[allow(unsafe_code)]
 unsafe extern "C" {
     fn xattr_preserve_for_intent(name: *const c_char, intent: c_uint) -> c_int;
+    fn acl_init(count: c_int) -> *mut c_void;
+    fn acl_get_flagset_np(acl: *mut c_void, flags: *mut *mut c_void) -> c_int;
+    fn acl_add_flag_np(flags: *mut c_void, flag: c_int) -> c_int;
+    fn acl_set_flagset_np(acl: *mut c_void, flags: *mut c_void) -> c_int;
     fn acl_get_fd_np(fd: c_int, kind: c_int) -> *mut c_void;
+    fn acl_set_fd_np(fd: c_int, acl: *mut c_void, kind: c_int) -> c_int;
     fn acl_free(acl: *mut c_void) -> c_int;
+    fn filesec_init() -> *mut c_void;
+    fn filesec_set_property(fsec: *mut c_void, property: c_int, value: *const c_void) -> c_int;
+    fn filesec_free(fsec: *mut c_void);
+    fn openx_np(path: *const c_char, flags: c_int, fsec: *mut c_void) -> c_int;
 }
 
-/// Copy `from`'s access control list to `to`, merged with the entries `to`
-/// inherited from its folder. Permission bits, flags, ownership and times
-/// are not copied, but fcopyfile always carries over a quarantine. An error
-/// means `from`'s ACL may not have reached `to`. Success means only that `to`
-/// has some ACL when `from` has one, not that `from`'s entries reached it.
-pub fn copy_acl(from: impl AsFd, to: impl AsFd) -> io::Result<()> {
-    let (from, to) = (from.as_fd(), to.as_fd());
-    // SAFETY: Both descriptors stay open for the call and fcopyfile retains
-    // neither. A null state asks fcopyfile to allocate and free its own.
-    #[allow(unsafe_code)]
-    let copied = unsafe {
-        libc::fcopyfile(
-            from.as_raw_fd(),
-            to.as_raw_fd(),
-            std::ptr::null_mut(),
-            libc::COPYFILE_ACL,
-        )
+/// Create `name` in `dir` for writing, exclusively and without following a
+/// link, with `mode` less the umask and none of the entries `dir`'s ACL gives
+/// every new file. The kernel applies the empty ACL as it creates the file,
+/// so nobody but the owner and root can open it before it gets another.
+pub fn create_uninherited(dir: impl AsFd, name: &OsStr, mode: u16) -> io::Result<OwnedFd> {
+    let dir = dir.as_fd();
+    // openx_np takes a path. It refuses a link anywhere in the folder's own
+    // path, and the identity check below refuses a folder moved meanwhile.
+    let mut path = rustix::fs::getpath(dir)?.into_bytes();
+    path.push(b'/');
+    path.extend_from_slice(name.as_bytes());
+    let file = match open_uninherited(&CString::new(path)?, mode) {
+        // A file system without ACLs, such as FAT, refuses one at creation,
+        // and has none for the file to inherit.
+        Err(err) if err.raw_os_error() == Some(libc::EINVAL) && !has_acls(dir) => {
+            use rustix::fs::{Mode, OFlags};
+            let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW;
+            let mode = Mode::from_raw_mode(mode);
+            return Ok(rustix::fs::openat(
+                dir,
+                name,
+                flags | OFlags::CLOEXEC,
+                mode,
+            )?);
+        }
+        file => file?,
     };
-    if copied < 0 {
-        return Err(io::Error::last_os_error());
+    let created = rustix::fs::fstat(&file)?;
+    let named = rustix::fs::statat(dir, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)?;
+    if (created.st_dev, created.st_ino) != (named.st_dev, named.st_ino) {
+        return Err(io::Error::other("the new file is not in its folder"));
     }
-    // fcopyfile reports success when it could not set the ACL. This check
-    // catches a copy left with no ACL at all. It cannot tell inherited
-    // entries from `from`'s.
-    if has_acl(from)? && !has_acl(to)? {
-        return Err(io::Error::other("the copy has no ACL"));
+    Ok(file)
+}
+
+/// Whether the folder's file system supports ACLs. An error counts as
+/// support, so the caller keeps its refusal.
+fn has_acls(dir: BorrowedFd<'_>) -> bool {
+    // SAFETY: The descriptor stays open for the call, which retains nothing.
+    #[allow(unsafe_code)]
+    let supported = unsafe { libc::fpathconf(dir.as_raw_fd(), libc::_PC_EXTENDED_SECURITY_NP) };
+    supported != 0
+}
+
+fn open_uninherited(path: &CStr, mode: u16) -> io::Result<OwnedFd> {
+    let flags =
+        libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW_ANY | libc::O_CLOEXEC;
+    // SAFETY: Each object is checked for null before use and freed once.
+    // filesec_set_property copies the ACL and the mode it is given, and
+    // openx_np retains neither the path nor the filesec.
+    #[allow(unsafe_code)]
+    unsafe {
+        let acl = acl_init(0);
+        if acl.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let fsec = filesec_init();
+        let mut acl_flags = std::ptr::null_mut();
+        let fd = if !fsec.is_null()
+            && acl_get_flagset_np(acl, &mut acl_flags) == 0
+            && acl_add_flag_np(acl_flags, ACL_FLAG_NO_INHERIT) == 0
+            && acl_set_flagset_np(acl, acl_flags) == 0
+            && filesec_set_property(fsec, FILESEC_ACL, (&raw const acl).cast()) == 0
+            && filesec_set_property(fsec, FILESEC_MODE, (&raw const mode).cast()) == 0
+        {
+            openx_np(path.as_ptr(), flags, fsec)
+        } else {
+            -1
+        };
+        let err = io::Error::last_os_error();
+        if !fsec.is_null() {
+            filesec_free(fsec);
+        }
+        acl_free(acl);
+        if fd < 0 {
+            return Err(err);
+        }
+        Ok(OwnedFd::from_raw_fd(fd))
+    }
+}
+
+/// Give `to`, which has no ACL entries, exactly `from`'s access control
+/// list, inherited entries included. Nothing else is copied. A file system
+/// without ACLs has none to copy. An error means `from`'s ACL did not reach
+/// `to`.
+pub fn copy_acl(from: impl AsFd, to: impl AsFd) -> io::Result<()> {
+    // SAFETY: The descriptor stays open for the call, which retains nothing.
+    #[allow(unsafe_code)]
+    let acl = unsafe { acl_get_fd_np(from.as_fd().as_raw_fd(), ACL_TYPE_EXTENDED) };
+    if acl.is_null() {
+        let err = io::Error::last_os_error();
+        return match err.raw_os_error() {
+            Some(libc::ENOENT | libc::ENOTSUP | libc::EOPNOTSUPP) => Ok(()),
+            _ => Err(err),
+        };
+    }
+    // SAFETY: `acl` came from acl_get_fd_np, the descriptor stays open for
+    // the call, which copies the ACL, and `acl` is freed once, here.
+    #[allow(unsafe_code)]
+    let (set, err) = unsafe {
+        let set = acl_set_fd_np(to.as_fd().as_raw_fd(), acl, ACL_TYPE_EXTENDED);
+        let err = io::Error::last_os_error();
+        acl_free(acl);
+        (set, err)
+    };
+    if set != 0 {
+        return Err(err);
     }
     Ok(())
 }
 
-/// Whether the file has an access control list. A file system without ACLs
-/// has none.
-fn has_acl(fd: BorrowedFd<'_>) -> io::Result<bool> {
-    // SAFETY: The descriptor stays open for the call, which retains nothing.
-    #[allow(unsafe_code)]
-    let acl = unsafe { acl_get_fd_np(fd.as_raw_fd(), ACL_TYPE_EXTENDED) };
-    if acl.is_null() {
-        let err = io::Error::last_os_error();
-        return match err.raw_os_error() {
-            Some(libc::ENOENT | libc::ENOTSUP | libc::EOPNOTSUPP) => Ok(false),
-            _ => Err(err),
-        };
-    }
-    // SAFETY: `acl` came from acl_get_fd_np and is freed once, here.
-    #[allow(unsafe_code)]
-    let _ = unsafe { acl_free(acl) };
-    Ok(true)
-}
-
 /// Copy the extended attributes macOS keeps when an app saves a new version
-/// of a file, such as Finder tags. Attributes tied to the old content, such
-/// as `com.apple.TextEncoding`, are left out, and so are the resource fork
-/// and any value over 1 MiB. An attribute that cannot be copied is skipped.
+/// of a file, such as Finder tags, and a quarantine, which a save does not
+/// keep but a download must. Attributes tied to the old content, such as
+/// `com.apple.TextEncoding`, are left out, and so are the resource fork and
+/// any value over 1 MiB. An attribute that cannot be copied is skipped.
 pub fn copy_saved_xattrs(from: impl AsFd, to: impl AsFd) {
     let (from, to) = (from.as_fd(), to.as_fd());
     let Some(names) = read_bounded(|list| rustix::fs::flistxattr(from, list)) else {
@@ -92,7 +173,9 @@ pub fn copy_saved_xattrs(from: impl AsFd, to: impl AsFd) {
         let Ok(name) = CStr::from_bytes_with_nul(name) else {
             continue;
         };
-        if name == c"com.apple.ResourceFork" || !kept_on_save(name) {
+        if name == c"com.apple.ResourceFork"
+            || !(name == c"com.apple.quarantine" || kept_on_save(name))
+        {
             continue;
         }
         if let Some(value) = read_bounded(|value| rustix::fs::fgetxattr(from, name, value)) {
@@ -276,5 +359,41 @@ mod tests {
         ] {
             assert!(!name(kind), "{kind}");
         }
+    }
+
+    /// Whether `ls -le` lists any ACL entry for `path`.
+    fn has_entries(path: &std::path::Path) -> bool {
+        let listing = std::process::Command::new("/bin/ls")
+            .arg("-led")
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(listing.status.success());
+        String::from_utf8(listing.stdout).unwrap().lines().count() > 1
+    }
+
+    #[test]
+    fn a_created_file_takes_none_of_its_folders_acl() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = dohc_test_scratch::ScratchDir::new_named("create-uninherited").unwrap();
+        let dir = scratch.path().join("shared");
+        std::fs::create_dir(&dir).unwrap();
+        let added = std::process::Command::new("/bin/chmod")
+            .args(["+a", "group:everyone allow read,file_inherit"])
+            .arg(&dir)
+            .status()
+            .unwrap();
+        assert!(added.success());
+        let folder = std::fs::File::open(&dir).unwrap();
+        std::fs::write(dir.join("inheriting"), b"").unwrap();
+        assert!(has_entries(&dir.join("inheriting")));
+
+        let name = std::ffi::OsStr::new("temp");
+        let file = super::create_uninherited(&folder, name, 0o600).unwrap();
+        assert!(!has_entries(&dir.join("temp")));
+        let meta = std::fs::File::from(file).metadata().unwrap();
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        let again = super::create_uninherited(&folder, name, 0o600).unwrap_err();
+        assert_eq!(again.kind(), std::io::ErrorKind::AlreadyExists);
     }
 }

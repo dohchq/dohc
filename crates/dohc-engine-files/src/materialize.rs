@@ -5037,9 +5037,10 @@ fn read_current_at_unix(
     read_current_file(std::fs::File::from(fd), display_path)
 }
 
-/// Who may open a temp. Apart from what the folder's ACL grants every new
-/// file, a temp gives nobody but the owner more access than the file it
-/// replaces.
+/// Who may open a temp. A temp gives nobody but the owner more access than
+/// the file it replaces. Only a new ordinary file takes what the folder's
+/// ACL grants every new file: on macOS the other temps never take it, and
+/// on Linux their 0600 mode empties a default ACL's mask.
 #[cfg(unix)]
 enum TempAccess {
     /// Only the owner: secret plaintext, or a target the engine cannot read.
@@ -5117,10 +5118,12 @@ impl Replaced {
         // can give the temp an ACL the file never had.
         #[cfg(target_os = "linux")]
         let acl_kept = !self.has_acl && !has_posix_acl(temp);
-        #[cfg(target_vendor = "apple")]
-        let acl_kept = dohc_macos_files::copy_acl(&self.file, temp).is_ok();
+        // The temp has no ACL yet, so none of the file's entries can block
+        // the attribute copy.
         #[cfg(target_vendor = "apple")]
         dohc_macos_files::copy_saved_xattrs(&self.file, temp);
+        #[cfg(target_vendor = "apple")]
+        let acl_kept = dohc_macos_files::copy_acl(&self.file, temp).is_ok();
         // No check exists for another Unix's ACLs.
         #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
         let acl_kept = false;
@@ -5216,7 +5219,17 @@ fn write_temp_at_unix(
         TempAccess::New => 0o666,
         TempAccess::Owner | TempAccess::Like(_) => 0o600,
     });
-    let create = || rustix::fs::openat(parent_fd, name, flags, mode).map(std::fs::File::from);
+    let create = || {
+        #[cfg(target_vendor = "apple")]
+        if !matches!(access, TempAccess::New) {
+            return dohc_macos_files::create_uninherited(parent_fd, name, mode.bits())
+                .map(std::fs::File::from)
+                .map_err(|err| {
+                    rustix::io::Errno::from_io_error(&err).unwrap_or(rustix::io::Errno::IO)
+                });
+        }
+        rustix::fs::openat(parent_fd, name, flags, mode).map(std::fs::File::from)
+    };
     let mut file = match create() {
         Ok(file) => file,
         Err(err) if err == rustix::io::Errno::EXIST => {
