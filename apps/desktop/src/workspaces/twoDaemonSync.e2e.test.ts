@@ -6,7 +6,7 @@ import { getCACertificates, setDefaultCACertificates } from "node:tls";
 import { mintLocalhostCa } from "../../../../services/share-web/src/testing/localhostCa";
 import { startServerProxy } from "../../e2e/helpers/selfHostOnboarding";
 import { DatabaseSync } from "node:sqlite";
-import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
@@ -1452,6 +1452,58 @@ it.skipIf(engine.missing)(
       contentKind: "text",
       bootstrapRelayBeforeCapture: false,
     }),
+  60_000,
+);
+
+// A rename that changes only case reaches a peer as a delete of the old
+// spelling and a write of the new one. On a disk that ignores case, as macOS
+// and Windows do by default, writing `Notes.md` rewrites the existing
+// `notes.md`, so the page must delete first or the file is lost.
+it.skipIf(engine.missing)(
+  "keeps a file another daemon renamed only by case on a disk that ignores case",
+  async (context) => {
+    const workspaceId = "two-daemon-case-rename";
+    const token = `test:${workspaceId}`;
+    const rootA = await createTestScratch("dohc-case-rename-a-");
+    const rootB = await createTestScratch("dohc-case-rename-b-");
+    await writeFile(join(rootB, "probe.md"), "");
+    const ignoresCase = await readFile(join(rootB, "PROBE.md")).then(() => true, () => false);
+    await rm(join(rootB, "probe.md"));
+    if (!ignoresCase) context.skip("this disk keeps case apart");
+    const relayRoot = await createTestScratch("dohc-case-rename-relay-");
+    const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain });
+    let daemonA: LiveDaemonCapture | null = null;
+    let daemonB: LiveDaemonCapture | null = null;
+    try {
+      daemonA = await openLiveDaemonCapture({ workspaceId, rootPath: rootA, relay: { baseUrl: relay.baseUrl, token } });
+      await daemonA.relay.claim();
+      await daemonA.chats.ensureGeneralChannel({ workspaceId });
+      await pushUntilDrained(daemonA.relay);
+      await writeAndCapture(daemonA, rootA, "notes.md", "body\n");
+      expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
+      daemonB = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay: { baseUrl: relay.baseUrl, token } });
+      await pullAndExpect(daemonB, rootB, "notes.md", "body\n");
+
+      const finish = await daemonA.capture.beginFileRename("notes.md", "Notes.md");
+      await rename(join(rootA, "notes.md"), join(rootA, "Notes.md"));
+      await finish(true);
+      expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
+      const receiver = daemonB;
+      const pull = await receiver.capture.runRelaySync((materializePage) =>
+        receiver.relay.pull(materializePage),
+      );
+
+      expect((await readdir(rootB)).filter((name) => !name.startsWith("."))).toEqual(["Notes.md"]);
+      expect(await readFile(join(rootB, "Notes.md"), "utf8")).toBe("body\n");
+      expect(pull.fastForwardedPaths.map(({ operation, path }) => [operation, path])).toEqual([
+        ["delete", "notes.md"],
+        ["write", "Notes.md"],
+      ]);
+    } finally {
+      await Promise.allSettled([daemonB?.close(), daemonA?.close()]);
+      await relay.stop();
+    }
+  },
   60_000,
 );
 

@@ -2006,7 +2006,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 skipped,
                 conflicts_opened,
                 pending_cursor,
-                changed_paths: changed_paths.into_values().collect(),
+                changed_paths: page_order(changed_paths.into_values(), |change| change.operation),
                 refusals,
                 sharing_declined,
                 record_facts,
@@ -2022,7 +2022,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             skipped,
             conflicts_opened,
             pending_cursor: Some(pending_cursor),
-            changed_paths: changed_paths.into_values().collect(),
+            changed_paths: page_order(changed_paths.into_values(), |change| change.operation),
             refusals,
             sharing_declined,
             record_facts,
@@ -2359,7 +2359,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 reads,
                 settlement_report_id: pass.settlement_report_id,
             }),
-            changed_paths: pass.changed_paths.into_values().collect(),
+            changed_paths: page_order(pass.changed_paths.into_values(), |change| change.operation),
             refusals: pass.refusals,
             sharing_declined: pass.sharing_declined,
             record_facts: pass.record_facts,
@@ -3597,7 +3597,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             applied,
             skipped,
             refusals,
-            changed_paths: changed.into_values().collect(),
+            changed_paths: page_order(changed.into_values(), |change| change.operation),
             pending_cursor: crate::ShareCursor {
                 kind: crate::CursorKind::ShareView,
                 share_id: share_id.to_owned(),
@@ -6424,6 +6424,21 @@ fn accumulate_pull_outcome(
 
 /// A pass's materialization decisions, by version and path.
 pub(crate) type ChangedPaths = BTreeMap<(String, String), crate::MomentMaterializationChange>;
+
+/// A page's changes in the order they apply: every delete, then every write,
+/// each in path order. A disk that ignores case or Unicode normalization
+/// opens `Notes.md` as the `notes.md` that a rename deletes, so a write that
+/// ran first would go with that delete.
+pub(crate) fn page_order<T>(
+    changes: impl IntoIterator<Item = T>,
+    operation: impl Fn(&T) -> &str,
+) -> Vec<T> {
+    let (mut page, writes): (Vec<T>, Vec<T>) = changes
+        .into_iter()
+        .partition(|change| operation(change) == "delete");
+    page.extend(writes);
+    page
+}
 
 pub(crate) fn insert_changed_path(
     changed_paths: &mut ChangedPaths,

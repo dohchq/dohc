@@ -554,6 +554,32 @@ class FakeShareRelay {
     });
   }
 
+  addRename(from: string, to: string, content: string): void {
+    const relaySeq = this.nextSeq++;
+    this.blobs.set(sha256(content), Buffer.from(content, "utf8"));
+    this.ops.push({
+      relaySeq,
+      originId: "origin-granter",
+      originSeq: relaySeq,
+      opKind: "moment.append",
+      payload: {
+        momentId: `moment-${relaySeq}`,
+        versionId: "main",
+        objectId: "object-renamed",
+        path: to,
+        recordedAtMs: 1000 + relaySeq,
+        operation: "rename",
+        payloadBeforeBlobSha256: sha256(content),
+        payloadBeforePath: from,
+        payloadAfterBlobSha256: sha256(content),
+        payloadAfterPath: to,
+        metadata: { origin: "local-file" },
+        beforePresent: "present",
+      },
+      recordedAtMs: 1000 + relaySeq,
+    });
+  }
+
   addDelete(path: string): void {
     const relaySeq = this.nextSeq++;
     this.ops.push({
@@ -1696,6 +1722,33 @@ describe("shared view refresh", () => {
         ),
       }),
     );
+  });
+
+  // A refresh merges its pull's pages, and a merged path keeps the place it
+  // first had. Here page one writes `notes.md` and renames it `Notes.md`, and
+  // page two renames it back, so the merge lists the write of `notes.md`
+  // before the delete of `Notes.md`. On a disk that ignores case that delete
+  // would remove the file just written.
+  it("keeps a file renamed by case and back across pages", async (context) => {
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+    await writeFile(join(rootDir, "probe.md"), "");
+    const ignoresCase = await stat(join(rootDir, "PROBE.md")).then(() => true, () => false);
+    await rm(join(rootDir, "probe.md"));
+    if (!ignoresCase) context.skip("this disk keeps case apart");
+    const relay = new FakeShareRelay();
+    relay.pageSize = 2;
+    relay.addWrite("notes.md", "body\n");
+    relay.addRename("notes.md", "Notes.md", "body\n");
+    relay.addRename("Notes.md", "notes.md", "body\n");
+
+    await refreshSharedViewOnce(daemonHarness(relay), {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+
+    expect((await readdir(rootDir)).filter((name) => !name.startsWith("."))).toEqual(["notes.md"]);
+    expect(await readFile(join(rootDir, "notes.md"), "utf8")).toBe("body\n");
   });
 
   it("leaves a directory that replaced a tracked file untouched during refresh", async () => {
