@@ -47,9 +47,11 @@ The fixed compiler reads declared inputs and bundles approved dependencies.
 It does not run app-provided configuration, plugins, build hooks, or source.
 Remote scripts stay blocked. On Windows, the compiler's process limits and
 minimal environment do not provide OS network denial. On macOS, Seatbelt also
-denies the network, file contents outside the compiler, the OS libraries and the
-build directory, and writes outside the build directory. [App compiler containment](app-compiler.md) states what each platform
-bounds. Arbitrary build scripts need a separate, credential-free sandbox before
+denies the network, reads of file contents other than the compiler's, the OS
+libraries' and the build directory's, and writes outside the build directory.
+It does not stop a compromised worker reading other processes' arguments and
+environment. [App compiler containment](app-compiler.md) states what each
+platform bounds. Arbitrary build scripts need a separate, credential-free sandbox before
 they can run.
 
 ## Dataset hosts commit authority

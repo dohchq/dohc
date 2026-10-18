@@ -5,8 +5,10 @@
 //! own build directory. It has no network and no Mach services, and may
 //! signal or inspect only processes inside the same sandbox, so never the
 //! owner. It may read only the sysctls Node and esbuild read at startup, so
-//! not another process's arguments or environment. Path metadata stays
-//! readable everywhere: Node aborts at startup without it.
+//! it is refused process listings and machine identifiers. Seatbelt does not
+//! mediate `kern.procargs2`, so a compromised worker can still read other
+//! processes' arguments and environment; see docs/engineering/app-compiler.md.
+//! Path metadata stays readable everywhere: Node aborts at startup without it.
 use std::ffi::CString;
 use std::path::Path;
 
