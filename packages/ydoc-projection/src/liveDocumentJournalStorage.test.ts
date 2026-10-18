@@ -734,6 +734,7 @@ it('cold check reports a hidden overlapping database row once per relay run', as
     expect(report).toHaveBeenCalledExactlyOnceWith('[sync-relay] live journal damaged', {
       document: f.input.evidence.document,
       firstBadRow: {source: 'provenance', clientId: 91, startClock: 1, endClock: 2, journalCursor: 1},
+      previousRow: {source: 'provenance', clientId: 91, startClock: 0, endClock: 100, journalCursor: 1},
     })
     await vi.advanceTimersByTimeAsync(86_400_100)
     expect(report).toHaveBeenCalledTimes(1)

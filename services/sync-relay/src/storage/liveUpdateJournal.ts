@@ -1081,7 +1081,7 @@ export function journalCoverageRange(document: LiveDocumentKey, row: Record<stri
     journalIntegrity(row.parent_workspace === document.workspaceId && row.parent_version === document.mainVersionId &&
       row.parent_object === document.objectId && row.parent_lineage === document.lineageClaimId);
     return {...parseLiveUpdateStructRange({clientId: row.client_id, startClock: row.start_clock, endClock: row.end_clock}),
-      cursor: row.source === 0 ? null : authorityInteger(row.journal_cursor, 1)};
+      cursor: authorityInteger(row.journal_cursor, 1)};
 }
 
 export function assertJournalCoveragePair(a: JournalCoverageRange, b: JournalCoverageRange): void {
@@ -1091,7 +1091,7 @@ export function assertJournalCoveragePair(a: JournalCoverageRange, b: JournalCov
 export function liveJournalCoverageWithin(storage: StorageContext, document: LiveDocumentKey, windows: readonly LiveUpdateStructRange[]): LiveUpdateStructRange[] {
     if (windows.length === 0) return [];
     const {provenance, baseline} = prepareCoverageStatements(storage.db);
-    const ranges = new Map<string, LiveUpdateStructRange & {cursor: number | null}>();
+    const ranges = new Map<string, JournalCoverageRange>();
     for (const window of windows) {
       const params = [...documentParams(document), window.clientId, window.endClock,
         ...documentParams(document), window.clientId, window.startClock, window.startClock];

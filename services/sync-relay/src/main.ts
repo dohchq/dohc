@@ -711,8 +711,8 @@ automations = automationServer && automationReplicaKey && automationRoot ? await
 
 let journalCheck: ReturnType<typeof startLiveJournalCheck> | undefined;
 const stopJournalCheck = () => journalCheck?.close();
-process.once('SIGINT', stopJournalCheck); process.once('SIGTERM', stopJournalCheck);
-server.once('close', stopJournalCheck);
+process.once("SIGINT", stopJournalCheck); process.once("SIGTERM", stopJournalCheck);
+server.once("close", stopJournalCheck);
 server.listen(requestedPort, host, () => {
   journalCheck = startLiveJournalCheck((storage as StorageContext).db);
   void (async () => {

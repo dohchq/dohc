@@ -1,6 +1,7 @@
 import {DatabaseSync} from 'node:sqlite';
 import {afterEach, expect, it, vi} from 'vitest';
 import {startLiveJournalCheck} from './liveJournalCheck';
+import {initializeSyncRelaySchema} from './schema';
 import type {SqliteDb} from './types';
 
 const key = ['workspace', 'main', 'object', 'a'.repeat(64)];
@@ -33,9 +34,9 @@ it('reports clean journals silently, yields between bounded pages and documents,
   const originalPrepare = db.prepare.bind(db), counts: number[] = [];
   const prepare = vi.spyOn(db, 'prepare').mockImplementation(sql => {
     const statement = originalPrepare(sql);
-    if (sql.includes('UNION ALL')) {
+    if (sql.includes('SELECT') && /FROM sync_relay_live_(?:document_baseline_ranges|update_struct_provenance)/.test(sql)) {
       const all = statement.all.bind(statement);
-      statement.all = (...args) => {const rows = all(...args); counts.push(rows.length); return rows;};
+      statement.all = (...args) => {const rows = all(...args); if (rows.length) counts.push(rows.length); return rows;};
     }
     return statement;
   });
@@ -46,12 +47,6 @@ it('reports clean journals silently, yields between bounded pages and documents,
   const reads = prepare.mock.calls.length;
   expect(reads).toBeGreaterThan(0);
   expect(counts).toEqual([128]);
-  const sql = prepare.mock.calls.find(([sql]) => sql.includes('UNION ALL'))![0];
-  const args = [...key, -1, -1, -1, -1, -1];
-  const plan = originalPrepare(`EXPLAIN QUERY PLAN ${sql}`).all(...args, ...args).map(row => row.detail).join('; ');
-  expect(plan).toMatch(/SEARCH b /);
-  expect(plan).toMatch(/SEARCH p /);
-  expect(plan).not.toMatch(/SCAN (?:b|p) /);
   expect(vi.getTimerCount()).toBe(1); // More slices are pending after the first turn.
   let requestRan = false;
   setTimeout(() => {requestRan = true;}, 0);
@@ -92,6 +87,10 @@ it.each(['overlap', 'adjacency', 'parent', 'baseline', 'boundary'])(
         document, firstBadRow: {source: 'provenance', clientId: 91, startClock: kind === 'boundary' ? 128 : 1,
           endClock: kind === 'boundary' ? 129 : 2,
           journalCursor: kind === 'adjacency' ? 1 : kind === 'boundary' ? 129 : 2},
+        previousRow: {source: kind === 'baseline' ? 'baseline' : 'provenance', clientId: 91,
+          startClock: kind === 'boundary' ? 127 : kind === 'baseline' ? 1 : 0,
+          endClock: kind === 'boundary' ? 129 : kind === 'baseline' ? 2 : kind === 'overlap' ? 3 : 1,
+          journalCursor: kind === 'baseline' ? null : kind === 'boundary' ? 128 : 1},
       }]);
       await vi.advanceTimersByTimeAsync(86_400_100);
       expect(report).toHaveBeenCalledTimes(1);
@@ -104,6 +103,93 @@ it.each(['overlap', 'adjacency', 'parent', 'baseline', 'boundary'])(
     } finally {check.close();}
   },
 );
+
+it.each(['ERR_OUT_OF_RANGE', undefined])('continues past an unreadable document and logs only its code or name (%s)', async code => {
+  const db = fixture(1), report = vi.fn(), originalPrepare = db.prepare.bind(db);
+  db.exec('UPDATE sync_relay_live_update_struct_provenance SET end_clock=3 WHERE start_clock=0');
+  const second = [...key.slice(0, 2), 'second', key[3]];
+  db.prepare('INSERT INTO sync_relay_live_documents VALUES(?,?,?,?)').run(...second);
+  db.prepare('INSERT INTO sync_relay_live_document_baseline_ranges VALUES(?,?,?,?,?,?,?)').run(...second, -2, 0, 1);
+  vi.spyOn(db, 'prepare').mockImplementation(sql => {
+    const statement = originalPrepare(sql), all = statement.all.bind(statement);
+    if (sql.includes('SELECT') && sql.includes('FROM sync_relay_live_update_struct_provenance')) {
+      statement.all = (...args) => {
+        if (args[2] === key[2]) throw Object.assign(new RangeError('private document content'), {code});
+        return all(...args);
+      };
+    }
+    return statement;
+  });
+  vi.useFakeTimers();
+  const check = startLiveJournalCheck(db, report);
+  try {
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(report.mock.calls[0]).toEqual(['[sync-relay] live journal unreadable', {document, errorCode: code ?? 'RangeError'}]);
+    expect(report.mock.calls[1]?.[0]).toBe('[sync-relay] live journal damaged');
+    expect(report.mock.calls[1]?.[1].document.objectId).toBe('second');
+    expect(JSON.stringify(report.mock.calls)).not.toContain('private document content');
+    await vi.advanceTimersByTimeAsync(86_400_100);
+    expect(report).toHaveBeenCalledTimes(2);
+  } finally {check.close();}
+});
+
+it('reports the code of a document-list failure without its message', async () => {
+  const db = fixture(), report = vi.fn();
+  vi.spyOn(db, 'prepare').mockImplementation(() => {throw Object.assign(new Error('private content'), {code: 'SQLITE_CORRUPT'});});
+  vi.useFakeTimers();
+  const check = startLiveJournalCheck(db, report);
+  try {
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(report).toHaveBeenCalledExactlyOnceWith('[sync-relay] live journal check failed', {errorCode: 'SQLITE_CORRUPT'});
+  } finally {check.close();}
+});
+
+it.each(['baseline', 'provenance'])('reads invalid values below the old first-page sentinel (%s)', async source => {
+  const db = fixture(1), report = vi.fn();
+  if (source === 'baseline') db.prepare('INSERT INTO sync_relay_live_document_baseline_ranges VALUES(?,?,?,?,?,?,?)').run(...key, -2, 0, 1);
+  else db.exec('UPDATE sync_relay_live_update_struct_provenance SET client_id=-2');
+  vi.useFakeTimers();
+  const check = startLiveJournalCheck(db, report);
+  try {
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(report).toHaveBeenCalledExactlyOnceWith('[sync-relay] live journal damaged', {document,
+      firstBadRow: {source, clientId: -2, startClock: 0, endClock: 1, journalCursor: source === 'baseline' ? null : 1},
+      previousRow: undefined});
+  } finally {check.close();}
+});
+
+it('seeks late pages on both real coverage indexes without a temporary order-by tree', async () => {
+  const db = fixture(1024), originalPrepare = db.prepare.bind(db);
+  const real = new DatabaseSync(':memory:'); databases.push(real);
+  initializeSyncRelaySchema(real as unknown as SqliteDb);
+  const plans = new Map<string, string[]>();
+  vi.spyOn(db, 'prepare').mockImplementation(sql => {
+    const statement = originalPrepare(sql), all = statement.all.bind(statement);
+    if (sql.includes('SELECT') && /FROM sync_relay_live_(?:document_baseline_ranges|update_struct_provenance)/.test(sql)) {
+      statement.all = (...args) => {
+        const details = real.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...args as never[]).map(row => String(row.detail));
+        expect(details.join('; ')).not.toContain('USE TEMP B-TREE FOR');
+        if (args.length > key.length * 2) plans.set(sql, details);
+        return all(...args);
+      };
+    }
+    return statement;
+  });
+  vi.useFakeTimers();
+  const report = vi.fn(), check = startLiveJournalCheck(db, report);
+  try {
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(report).not.toHaveBeenCalled();
+    for (const alias of ['b', 'p']) {
+      const matching = [...plans.values()].filter(details => details.some(detail => detail.includes(`SEARCH ${alias} `)));
+      expect(matching.length).toBeGreaterThan(0);
+      for (const details of matching) {
+        expect(details.find(detail => detail.startsWith(`SEARCH ${alias} `))).toMatch(/\(client_id,start_clock\)>\(\?,\?\)/);
+        expect(details.join('; ')).not.toContain('USE TEMP B-TREE FOR');
+      }
+    }
+  } finally {check.close();}
+});
 
 it('cancels before the delayed first pass', async () => {
   const db = fixture(256), prepare = vi.spyOn(db, 'prepare');
