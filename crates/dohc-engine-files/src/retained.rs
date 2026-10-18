@@ -91,7 +91,8 @@ pub enum Inspection {
     },
     Release(Release),
 }
-/// Owns the descriptor until the last identity check and unlink.
+/// Owns the descriptor until the last identity check and unlink. On macOS it
+/// closes the descriptor just before the unlink, which an open file refuses.
 pub struct Release {
     path: PathBuf,
     file: std::fs::File,
@@ -114,8 +115,19 @@ impl Release {
         {
             return Ok(false);
         }
-        std::fs::remove_file(&self.path).map_err(|e| MaterializeError::io(&self.path, &e))?;
-        Ok(true)
+        // macOS cannot list another process's writers. Its file systems can
+        // refuse to unlink a file any process has open, so close ours first.
+        #[cfg(target_vendor = "apple")]
+        {
+            drop(self.file);
+            dohc_macos_files::remove_unless_open(&self.path)
+                .map_err(|e| MaterializeError::io(&self.path, &e))
+        }
+        #[cfg(not(target_vendor = "apple"))]
+        {
+            std::fs::remove_file(&self.path).map_err(|e| MaterializeError::io(&self.path, &e))?;
+            Ok(true)
+        }
     }
 }
 

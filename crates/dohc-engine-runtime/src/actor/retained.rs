@@ -136,9 +136,9 @@ impl Worker {
                                     Ok(s.keep_oversized_retained(&row, now)?)
                                 }),
                                 Ok(Inspection::Release(source)) => {
-                                    release(&handle, &path, row, Some(source))
+                                    release(&handle, &path, row, Some(source), now)
                                 }
-                                Ok(Inspection::Missing) => release(&handle, &path, row, None),
+                                Ok(Inspection::Missing) => release(&handle, &path, row, None, now),
                                 Ok(Inspection::Keep) => Ok(()),
                                 Err(e) => Err(RuntimeError::Materialize(e)),
                             };
@@ -182,6 +182,7 @@ fn release(
     root: &std::path::Path,
     row: dohc_engine_storage::RetainedDisplacement,
     source: Option<dohc_engine_files::retained::Release>,
+    now: i64,
 ) -> Result<(), RuntimeError> {
     let root = root.to_path_buf();
     let directory = root
@@ -197,6 +198,7 @@ fn release(
         if let Some(source) = source
             && !source.remove().map_err(RuntimeError::Materialize)?
         {
+            s.restart_retained_quiet(row.displacement_id, now)?;
             return Ok(());
         }
         s.release_retained(row.displacement_id)?;

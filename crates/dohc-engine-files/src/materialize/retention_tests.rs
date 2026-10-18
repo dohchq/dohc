@@ -68,7 +68,12 @@ fn sweep(store: &EngineStore, root: &Path, now: i64) {
                     {
                         continue;
                     }
-                    assert!(token.remove().unwrap());
+                    if !token.remove().unwrap() {
+                        store
+                            .restart_retained_quiet(row.displacement_id, now)
+                            .unwrap();
+                        continue;
+                    }
                     store.release_retained(row.displacement_id).unwrap();
                     cleanup_staging_directory(
                         store,
@@ -219,6 +224,49 @@ fn p0_linux_held_writable_descriptor_blocks_release() {
     drop(writer);
     sweep(&store, root, 90_001);
     assert!(!root.join(&row.source_path).exists());
+}
+#[cfg(target_vendor = "apple")]
+#[test]
+fn macos_open_descriptor_keeps_the_original_until_it_closes() {
+    use std::io::Write;
+    use std::os::unix::fs::MetadataExt;
+    let scratch = ScratchDir::new_named("macos-held-descriptor").unwrap();
+    let root = scratch.path();
+    let mut store = EngineStore::open(&root.join("engine.db"), 0).unwrap();
+    let target = root.join("notes.md");
+    std::fs::write(&target, b"before").unwrap();
+    let mut writer = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&target)
+        .unwrap();
+    let j = job(&mut store, "settle", "notes.md", b"before", b"after", 1);
+    materialize_one(&store, root, &j, &options(0, &StdReplacer)).unwrap();
+    let row = store.retained_displacements_after(0).unwrap().remove(0);
+    let source = root.join(&row.source_path);
+    sweep(&store, root, 90_000);
+    writer.write_all(b" appended after Q").unwrap();
+    assert!(
+        writer.metadata().unwrap().nlink() > 0,
+        "the original was unlinked while a writer still held it"
+    );
+    drop(writer);
+    sweep(&store, root, 90_001);
+    let row = store.retained_displacements_after(0).unwrap().remove(0);
+    assert_eq!(row.digest, hex_sha256(b"before appended after Q"));
+    let reader = std::fs::File::open(&source).unwrap();
+    sweep(&store, root, 200_000);
+    assert!(source.exists(), "a reader also keeps the original");
+    drop(reader);
+    let row = store.retained_displacements_after(0).unwrap().remove(0);
+    assert_eq!(row.changed_at_ms, 200_000, "a refused unlink restarts Q");
+    assert!(matches!(
+        crate::retained::inspect(root, &row, 229_999, false).unwrap(),
+        crate::retained::Inspection::Keep
+    ));
+    sweep(&store, root, 230_000);
+    assert!(!source.exists());
+    assert!(store.retained_displacements_after(0).unwrap().is_empty());
+    assert_eq!(std::fs::read(&target).unwrap(), b"after");
 }
 #[cfg(unix)]
 #[test]
