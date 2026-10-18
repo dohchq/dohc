@@ -33,6 +33,13 @@ describe("Ref", () => {
     expect(chip.getAttribute("title")).toBe("notes/alpha.md");
   });
 
+  it("keeps the full path after a title that repeats the basename, in a folder or at the root", () => {
+    const { rerender } = render(<Ref path="notes/alpha.md" title="alpha.md" folder testId="ref" />);
+    expect(screen.getByTestId("ref").querySelector(".sr-only")?.textContent).toBe("notes/alpha.md");
+    rerender(<Ref path="alpha.md" title="alpha.md" testId="ref" />);
+    expect(screen.getByTestId("ref").querySelector(".sr-only")?.textContent).toBe("alpha.md");
+  });
+
   it("draws each kind's registry glyph", () => {
     for (const kind of Object.values(FILE_KIND_RECORDS)) {
       const { container, unmount } = render(<Ref path="any.bin" kind={kind} />);

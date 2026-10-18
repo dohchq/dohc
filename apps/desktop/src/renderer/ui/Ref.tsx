@@ -38,10 +38,11 @@ export function Ref(props: {
   const dir = dirnameOf(props.path);
   const heading = props.heading ? `#${props.heading}` : "";
   const target = `${props.path}${heading}`;
-  // A span has no name of its own: the row holding it reads its text. When
-  // the visible text does not already spell the path, the path stands in for
-  // the folder there, so a title or a truncated name loses nothing.
-  const spelled = props.onOpen !== undefined || !props.path || (name === base && (dir === "" || props.folder));
+  // A span has no name of its own: the row holding it reads its text. Only a
+  // basename with its folder spells the path; after a title, whatever its
+  // words, the path stands in for the folder, so a title or a truncated name
+  // loses nothing.
+  const spelled = props.onOpen !== undefined || !props.path || (props.title === undefined && (dir === "" || props.folder));
   const className = `${CHIP} ${props.missing ? "border-dashed border-subtle/50" : "border-line"} ${
     props.selected ? SELECTED : ""
   }`;

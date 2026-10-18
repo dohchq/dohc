@@ -245,6 +245,7 @@ export function BacklinksPanel(props: {
                   className="dohc-backlinks__source-link"
                   data-testid="backlink-source"
                   data-path={source.sourcePath}
+                  aria-label={`${source.sourceTitle} ${source.sourcePath}`}
                   onClick={() => props.onOpenPath?.(source.sourcePath)}
                 >
                   <Ref path={source.sourcePath} title={source.sourceTitle} folder />

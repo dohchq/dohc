@@ -12,6 +12,7 @@ import type {
   ChatRunRecord,
 } from "../../ipc/bridgeContract";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
+import { basenameOf } from "../path";
 import { Ref } from "../ui/Ref";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { formatChatTime, formatClockDigits, formatShortTime } from "../time";
@@ -192,6 +193,10 @@ function AttachmentChip(props: {
     <Ref
       path={pathHint}
       heading={headingText}
+      // An attachment is named by what it shows, the file and its heading.
+      label={`${basenameOf(pathHint.replace(/\\/g, "/").replace(/\/+$/, "")) || "attachment"}${
+        headingText ? `#${headingText}` : ""
+      }`}
       testId="chats-attachment-chip"
       onOpen={onOpenPath
         ? () => (headingAnchor ? onOpenPath(pathHint, headingAnchor) : onOpenPath(pathHint))

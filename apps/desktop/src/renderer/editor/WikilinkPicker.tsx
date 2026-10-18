@@ -51,8 +51,16 @@ type Props = {
 function defaultDisplayName(file: WikilinkFile): string {
   return (
     (file.title ?? "").trim() ||
-    (file.path.replace(/\.md$/i, "").split("/").pop() ?? file.path)
+    (file.path.replace(/\.(md|markdown)$/i, "").split("/").pop() ?? file.path)
   );
+}
+
+/** An option's accessible name: its display name, then its path without
+ *  `.md` unless that is the same words. */
+function optionName(file: WikilinkFile): string {
+  const display = defaultDisplayName(file);
+  const subpath = file.path.replace(/\.md$/i, "");
+  return subpath === display ? display : `${display} ${subpath}`;
 }
 
 /** Replace the `from..cursor` range with the picked file, either as
@@ -229,6 +237,7 @@ export function WikilinkPicker({
               tabIndex={-1}
               aria-selected={i === activeIdx}
               data-active={i === activeIdx || undefined}
+              aria-label={optionName(f)}
               className={`${MENU_ROW} ${MENU_ACTIVE_OPTION} ${MENU_ROW_TONE.rest}`}
               // Only a pointer that moves picks the active option, so a
               // list that opens or scrolls under a still pointer keeps the
