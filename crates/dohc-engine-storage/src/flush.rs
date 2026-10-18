@@ -8,14 +8,14 @@
 //! On Apple silicon, a barrier (`F_BARRIERFSYNC`) orders the file before every
 //! later write on the same device, including the WAL frame that holds the
 //! status, without the drain. Only a file whose `st_dev` matches the database
-//! file's takes a barrier; any other file is still drained at once. A
-//! symlinked database counts where its link points, and its drain runs there.
-//! A barrier
+//! file's takes a barrier; any other file is still drained at once. A barrier
 //! leaves a drain owed. The actor pays it before each reply, so the files a
 //! command projected are as durable at its reply as a drain per file made
-//! them. The drain does not sync the WAL, so the command's NORMAL commits are
-//! no more durable than before. A drain that fails stays owed until one
-//! succeeds, and the reply carries the error.
+//! them. The drain runs on the database's folder, held open since the store
+//! opened, so a workspace renamed, moved or replaced meanwhile still drains
+//! the device its barriers ran on. The drain does not sync the WAL, so the
+//! command's NORMAL commits are no more durable than before. A drain that
+//! fails stays owed until one succeeds, and the reply carries the error.
 //!
 //! Intel Macs keep a drain per file: a Fusion Drive spans two devices under
 //! one `st_dev`, and a barrier orders only one of them. An AppleRAID set on
@@ -26,7 +26,6 @@
 
 use std::cell::Cell;
 use std::fs::File;
-use std::path::Path;
 
 /// What a flush did, as the harness records it.
 #[cfg(feature = "fault-injection")]
@@ -53,14 +52,14 @@ pub struct FlushEvent {
 
 #[derive(Debug)]
 pub(crate) struct Flushes {
-    /// The `st_dev` that the database file and its real folder share. `None`
+    /// The `st_dev` that the database file and its folder share. `None`
     /// drains every file.
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     device: Cell<Option<u64>>,
-    /// The database file's folder with every link resolved, where the drain
-    /// runs.
+    /// The database's folder, held open for the drain. It holds none of the
+    /// POSIX locks SQLite takes on the database file.
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    folder: Option<std::path::PathBuf>,
+    folder: Option<File>,
     /// A barrier ran since the last successful drain.
     drain_owed: Cell<bool>,
     #[cfg(feature = "fault-injection")]
@@ -82,25 +81,26 @@ impl std::fmt::Debug for FlushObserver {
     }
 }
 
-/// The database file's real folder and the device it shares with the file. A
-/// symlinked database lives where its link points, so the lexical folder may
-/// sit on another device. `None` when the path does not resolve or the two
-/// devices differ; every file then drains at once.
+/// The database's folder, opened now, and the device it shares with the
+/// database file. The path is the one SQLite resolved, links included, when it
+/// opened the database, so the barriers follow the file whose WAL it writes.
+/// `None` when the folder cannot be opened or sits on another device than the
+/// file; every file then drains at once.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn real_folder(database: &Path) -> Option<(u64, std::path::PathBuf)> {
+fn database_folder(conn: &rusqlite::Connection) -> Option<(u64, File)> {
     use std::os::unix::fs::MetadataExt;
-    let real = std::fs::canonicalize(database).ok()?;
-    let folder = real.parent()?.to_path_buf();
-    let device = std::fs::metadata(&real).ok()?.dev();
-    (std::fs::metadata(&folder).ok()?.dev() == device).then_some((device, folder))
+    let database = std::path::Path::new(conn.path().filter(|path| !path.is_empty())?);
+    let device = std::fs::metadata(database).ok()?.dev();
+    let folder = File::open(database.parent()?).ok()?;
+    (folder.metadata().ok()?.dev() == device).then_some((device, folder))
 }
 
 impl Flushes {
-    pub(crate) fn for_database(path: &Path) -> Self {
+    pub(crate) fn for_database(conn: &rusqlite::Connection) -> Self {
         #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-        let _ = path;
+        let _ = conn;
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        let (device, folder) = real_folder(path).unzip();
+        let (device, folder) = database_folder(conn).unzip();
         Self {
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             device: Cell::new(device),
@@ -135,10 +135,9 @@ impl Flushes {
     }
 
     /// Drain the drive cache when a barrier ran since the last successful
-    /// drain. `F_FULLFSYNC` drains the whole device, so it runs on the
-    /// database's real folder: closing a descriptor on the database file would
-    /// drop every POSIX lock SQLite holds on it. A folder that has left the
-    /// barriers' device fails the drain, which stays owed.
+    /// drain. `F_FULLFSYNC` drains the whole device, so it runs on the held
+    /// folder: closing a descriptor on the database file would drop every
+    /// POSIX lock SQLite holds on it.
     pub(crate) fn drain(&self) -> std::io::Result<()> {
         if !self.drain_owed.get() {
             return Ok(());
@@ -149,21 +148,14 @@ impl Flushes {
         }
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         {
-            use std::os::unix::fs::MetadataExt;
             let folder = self
                 .folder
-                .as_deref()
+                .as_ref()
                 .ok_or_else(|| std::io::Error::other("no database folder to drain"))?;
-            let folder = File::open(folder)?;
-            if Some(folder.metadata()?.dev()) != self.device.get() {
-                return Err(std::io::Error::other(
-                    "the database folder is not on the device its barriers ran on",
-                ));
-            }
             folder.sync_all()?;
             self.drain_owed.set(false);
             #[cfg(feature = "fault-injection")]
-            self.record(FlushKind::Drain, &folder);
+            self.record(FlushKind::Drain, folder);
         }
         Ok(())
     }

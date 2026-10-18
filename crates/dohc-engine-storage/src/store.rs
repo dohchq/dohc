@@ -96,6 +96,7 @@ impl EngineStore {
     ) -> Result<Self, StorageError> {
         let opened =
             crate::schema::open_engine_db_with_store_role(path, now_ms, root_token, work, true)?;
+        let flushes = crate::flush::Flushes::for_database(&opened.conn);
         Ok(Self {
             conn: opened.conn,
             checkpoints: None,
@@ -106,7 +107,7 @@ impl EngineStore {
             database_path: path.to_path_buf(),
             passive: true,
             completed_batch: Arc::default(),
-            flushes: crate::flush::Flushes::for_database(path),
+            flushes,
         })
     }
 
@@ -131,6 +132,7 @@ impl EngineStore {
         work: Option<Arc<AtomicU64>>,
     ) -> Result<Self, StorageError> {
         let opened = open_engine_db(path, now_ms, work)?;
+        let flushes = crate::flush::Flushes::for_database(&opened.conn);
         Ok(EngineStore {
             conn: opened.conn,
             checkpoints: None,
@@ -141,7 +143,7 @@ impl EngineStore {
             #[cfg(feature = "fault-injection")]
             harness_commits: 0,
             completed_batch: Arc::default(),
-            flushes: crate::flush::Flushes::for_database(path),
+            flushes,
         })
     }
 
@@ -154,6 +156,7 @@ impl EngineStore {
         work: Option<Arc<AtomicU64>>,
     ) -> Result<Self, StorageError> {
         let opened = crate::schema::open_engine_db_for_actor(path, now_ms, root_token, work)?;
+        let flushes = crate::flush::Flushes::for_database(&opened.conn);
         Ok(EngineStore {
             checkpoint_changes: opened.conn.total_changes(),
             conn: opened.conn,
@@ -164,7 +167,7 @@ impl EngineStore {
             harness_commits: 0,
             passive: false,
             completed_batch: Arc::default(),
-            flushes: crate::flush::Flushes::for_database(path),
+            flushes,
         })
     }
 
@@ -179,6 +182,7 @@ impl EngineStore {
     ) -> Result<Self, StorageError> {
         let opened =
             crate::schema::open_engine_db_with_root_token(path, now_ms, Some(token), work)?;
+        let flushes = crate::flush::Flushes::for_database(&opened.conn);
         Ok(EngineStore {
             conn: opened.conn,
             checkpoints: None,
@@ -189,7 +193,7 @@ impl EngineStore {
             harness_commits: 0,
             passive: false,
             completed_batch: Arc::default(),
-            flushes: crate::flush::Flushes::for_database(path),
+            flushes,
         })
     }
 
@@ -207,6 +211,7 @@ impl EngineStore {
     ) -> Result<Self, StorageError> {
         let opened = open_engine_db_read_only(path, work)?;
         let passive = crate::schema::store_is_passive(&opened.conn)?;
+        let flushes = crate::flush::Flushes::for_database(&opened.conn);
         Ok(EngineStore {
             conn: opened.conn,
             checkpoints: None,
@@ -217,7 +222,7 @@ impl EngineStore {
             harness_commits: 0,
             passive,
             completed_batch: Arc::default(),
-            flushes: crate::flush::Flushes::for_database(path),
+            flushes,
         })
     }
 

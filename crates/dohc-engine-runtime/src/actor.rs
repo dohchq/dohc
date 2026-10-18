@@ -1293,6 +1293,71 @@ mod saturation_tests {
         supervisor.close(&db).unwrap();
     }
 
+    /// The drain runs on the database's folder as the store opened it. A
+    /// workspace renamed, or renamed and replaced by a new folder, while a
+    /// drain is owed still drains the original folder, and later replies keep
+    /// working.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[tokio::test]
+    async fn a_moved_workspace_still_drains_the_folder_its_store_opened() {
+        use dohc_engine_storage::FlushKind::{Barrier, Drain};
+        use std::os::unix::fs::MetadataExt;
+        for replace in [false, true] {
+            let scratch = ScratchDir::new().unwrap();
+            let root = scratch.join("workspace");
+            let moved = scratch.join("moved");
+            std::fs::create_dir_all(root.join(".dohc/engine")).unwrap();
+            let db = root.join(".dohc/engine/engine.db");
+            drop(EngineStore::open(&db, 1).unwrap());
+            std::fs::write(root.join("note.md"), b"projected").unwrap();
+            let engine = std::fs::metadata(root.join(".dohc/engine")).unwrap();
+            let supervisor = crate::WorkspaceSupervisor::new();
+            let actor = supervisor.open(&db, 2).unwrap().actor;
+            let trace = || {
+                actor.run(|store, _| {
+                    Ok(store
+                        .take_flush_trace()
+                        .into_iter()
+                        .map(|event| (event.kind, event.device, event.inode))
+                        .collect::<Vec<_>>())
+                })
+            };
+            let original = (Drain, engine.dev(), engine.ino());
+
+            let (from, to) = (root.clone(), moved.clone());
+            actor
+                .run(move |store, _| {
+                    let note = std::fs::File::open(from.join("note.md")).unwrap();
+                    store.flush_before_commits(&note).unwrap();
+                    std::fs::rename(&from, &to).unwrap();
+                    if replace {
+                        std::fs::create_dir_all(from.join(".dohc/engine")).unwrap();
+                    }
+                    Ok(())
+                })
+                .await
+                .expect("the reply drains the folder the store opened");
+            let drained = trace().await.unwrap();
+            assert_eq!(drained.len(), 2, "{drained:?}");
+            assert_eq!(drained[0].0, Barrier);
+            assert_eq!(drained[1], original, "replace={replace}");
+
+            let note = moved.join("note.md");
+            actor
+                .run(move |store, _| {
+                    let note = std::fs::File::open(&note).unwrap();
+                    store.flush_before_commits(&note).unwrap();
+                    Ok(())
+                })
+                .await
+                .expect("later replies still drain");
+            assert_eq!(trace().await.unwrap()[1], original);
+            supervisor
+                .close(&moved.join(".dohc/engine/engine.db"))
+                .unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn reopened_actor_publishes_before_link_work_and_resumes_while_idle() {
         use dohc_engine_domain::VersionedTextStore;
