@@ -35,6 +35,7 @@ pub mod diagnostics;
 mod durability;
 pub mod error;
 pub mod faults;
+mod flush;
 pub mod limits;
 pub mod links;
 pub mod materialize;
@@ -60,6 +61,8 @@ pub use blob::{
 pub use diagnostics::{CorruptionKind, DiagnosticBundle, classify};
 pub use error::StorageError;
 pub use faults::{FaultAction, FaultInjector, FaultPoint, NoFaults};
+#[cfg(feature = "fault-injection")]
+pub use flush::{FlushEvent, FlushKind};
 pub use limits::{
     ENGINE_BUILD, ENGINE_SCHEMA_VERSION, ENGINE_SQLITE_BUSY_TIMEOUT_MS,
     ENGINE_STORAGE_PROTOCOL_VERSION, MAX_BLOB_BYTES, MAX_IDENTIFIER_BYTES, MAX_MATERIALIZE_BYTES,
