@@ -83,14 +83,8 @@ impl Worker {
             "SystemRoot",
             std::env::var_os("SystemRoot").ok_or(Failure::Unavailable)?,
         );
-        // Serialize shutdown with spawn: a closed supervisor cannot create a child.
-        let state = shared.state.lock().unwrap();
-        if state.closed {
-            return Err(Failure::Unavailable);
-        }
         let (child, stdout, stdin, mut stderr) =
             crate::platform::spawn(&mut command).map_err(unavailable)?;
-        drop(state);
         let (input, requests) = mpsc::channel::<Request>();
         let (events, output) = mpsc::channel();
         let mut w = Self {

@@ -190,7 +190,6 @@ impl Reader {
             Some(Failure::Unavailable)
         } else if request.source.len() > 2 * 1024 * 1024
             || request.checkpoint.len() > wire::UPDATE
-            || metadata.iter().any(|s| s.len() > 4096)
             // Even worst-case JSON escaping must fit the 64 KiB control frame.
             || metadata.iter().map(|s| s.len()).sum::<usize>() > 8192
             || bytes > 64 * 1024 * 1024

@@ -155,7 +155,7 @@ fn oversized_metadata_is_refused_before_starting_a_child() {
     let mut reader = Reader::new(Some(c));
     for field in 0..5 {
         let mut r = request("ok");
-        let value = "x".repeat(4097);
+        let value = "x".repeat(8193);
         match field {
             0 => r.current_path = value,
             1 => r.document.workspace_id = value,
@@ -172,6 +172,17 @@ fn oversized_metadata_is_refused_before_starting_a_child() {
     fail(run(reader.request(r)), Failure::TooLarge);
     let starts = reader.shared.state.lock().unwrap().lifecycle.0;
     assert_eq!(starts, 0);
+    finish(&mut reader);
+}
+
+#[test]
+fn metadata_at_the_combined_limit_is_admitted() {
+    let (_dir, c) = fixture("ok");
+    let mut reader = Reader::new(Some(c));
+    let mut r = request("ok");
+    // Four document fields consume five bytes; exercise worst-case JSON escaping.
+    r.current_path = "\0".repeat(8192 - 5);
+    assert!(run(reader.request(r)).is_ok());
     finish(&mut reader);
 }
 

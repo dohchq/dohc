@@ -69,6 +69,14 @@ fn helper() {
                 thread::park();
             }
         }
+        #[cfg(unix)]
+        "leave-group" => {
+            crate::platform::leave_test_group();
+            publish(json!({"pid":std::process::id()}));
+            loop {
+                thread::park();
+            }
+        }
         "grandchild" => {
             let result = helper_command("park")
                 .stdin(Stdio::null())
@@ -169,7 +177,7 @@ fn unrelated_inheritable_handle_or_descriptor_is_not_inherited() {
     drop(extra);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[test]
 fn termination_kills_the_whole_process_group() {
     let (process, out, input, _err) = crate::platform::spawn(&mut helper_command("tree")).unwrap();
@@ -189,6 +197,7 @@ fn termination_kills_the_whole_process_group() {
     assert!(!survived, "grandchild {pid} survived group termination");
 }
 
+#[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn killing_the_supervisor_also_kills_its_reader() {
     let mut command = helper_command("supervisor");
@@ -214,6 +223,45 @@ fn killing_the_supervisor_also_kills_its_reader() {
         fs::remove_dir_all(path).unwrap();
     }
     assert!(!survived, "reader {pid} outlived its supervisor");
+}
+
+#[cfg(unix)]
+#[test]
+fn termination_reaps_a_reader_that_left_its_group() {
+    let (process, out, _input, _err) =
+        crate::platform::spawn(&mut helper_command("leave-group")).unwrap();
+    let pid = receipt(&mut BufReader::new(out))["pid"].as_u64().unwrap() as u32;
+    let (done, completion) = std::sync::mpsc::channel();
+    let owner = thread::spawn(move || {
+        let mut owned = OwnedProcess(process);
+        owned.0.terminate();
+        done.send(()).unwrap();
+    });
+    let terminated = completion.recv_timeout(Duration::from_secs(3)).is_ok();
+    if !terminated {
+        crate::platform::kill_test_child(pid);
+    }
+    owner.join().unwrap();
+    wait_dead(pid);
+    assert!(terminated, "termination waited on an escaped reader");
+}
+
+#[test]
+fn native_spawn_reports_a_missing_executable() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut command = Command::new(dir.path().join("absent.exe"));
+    command.current_dir(dir.path());
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    match crate::platform::spawn(&mut command) {
+        Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::NotFound),
+        Ok((process, _, _, _)) => {
+            drop(OwnedProcess(process));
+            panic!("spawn hid the exec error");
+        }
+    }
 }
 
 #[cfg(windows)]

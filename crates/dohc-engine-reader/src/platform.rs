@@ -6,7 +6,10 @@ mod os {
         os::unix::process::CommandExt,
         process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
     };
-    pub struct Process(Child, bool);
+    pub struct Process {
+        child: Child,
+        reaped: bool,
+    }
     pub type Pipes = (Process, ChildStdout, ChildStdin, ChildStderr);
     pub fn spawn(command: &mut Command) -> io::Result<Pipes> {
         #[cfg(target_os = "linux")]
@@ -14,13 +17,11 @@ mod os {
         let mut limit: libc::rlimit = unsafe { std::mem::zeroed() };
         #[cfg(target_os = "linux")]
         // SAFETY: The writable limit pointer is valid for this synchronous call.
-        if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0
-            || limit.rlim_max > i32::MAX as libc::rlim_t
-        {
+        if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
             return Err(io::Error::last_os_error());
         }
         #[cfg(target_os = "linux")]
-        let limit = limit.rlim_max as i32;
+        let limit = limit.rlim_max.min(i32::MAX as libc::rlim_t) as i32;
         #[cfg(target_os = "macos")]
         let limit = {
             let mut limit: i32 = 0;
@@ -48,15 +49,14 @@ mod os {
         #[cfg(target_os = "linux")]
         // SAFETY: getpid has no pointer arguments or side effects.
         let parent = unsafe { libc::getpid() };
+        command.process_group(0);
         // SAFETY: The callback only calls async-signal-safe OS operations, allocates
         // nothing and takes no locks. Captured values were obtained before fork.
         unsafe {
             command.pre_exec(move || {
-                if libc::setpgid(0, 0) != 0 {
-                    return Err(io::Error::last_os_error());
-                }
                 #[cfg(target_os = "linux")]
                 {
+                    // Linux ties this signal to the spawning owner thread's lifetime.
                     if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
                         return Err(io::Error::last_os_error());
                     }
@@ -70,20 +70,18 @@ mod os {
                         3u32,
                         u32::MAX,
                         libc::CLOSE_RANGE_CLOEXEC,
-                    ) != 0
+                    ) == 0
                     {
-                        let error = io::Error::last_os_error();
-                        if error.raw_os_error() != Some(libc::ENOSYS) {
-                            return Err(error);
-                        }
-                        for fd in 3..limit {
-                            libc::close(fd);
-                        }
+                        return Ok(());
                     }
                 }
-                #[cfg(target_os = "macos")]
                 for fd in 3..limit {
-                    libc::close(fd);
+                    if libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) == -1 {
+                        let error = io::Error::last_os_error();
+                        if error.raw_os_error() != Some(libc::EBADF) {
+                            return Err(error);
+                        }
+                    }
                 }
                 Ok(())
             });
@@ -94,14 +92,22 @@ mod os {
             child.stdin.take().unwrap(),
             child.stderr.take().unwrap(),
         );
-        Ok((Process(child, false), pipes.0, pipes.1, pipes.2))
+        Ok((
+            Process {
+                child,
+                reaped: false,
+            },
+            pipes.0,
+            pipes.1,
+            pipes.2,
+        ))
     }
     impl Process {
         pub fn id(&self) -> u32 {
-            self.0.id()
+            self.child.id()
         }
         pub fn terminate(&mut self) {
-            if self.1 {
+            if self.reaped {
                 return;
             }
             // SAFETY: The child is unreaped, so its PID cannot be reused. A negative
@@ -109,14 +115,15 @@ mod os {
             unsafe {
                 libc::kill(-(self.id() as i32), libc::SIGKILL);
             }
-            let _ = self.0.wait();
-            self.1 = true;
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            self.reaped = true;
         }
     }
     #[cfg(test)]
     pub fn exit_code(process: &mut Process) -> Option<u32> {
-        let code = process.0.wait().unwrap().code().map(|c| c as u32);
-        process.1 = true;
+        let code = process.child.wait().unwrap().code().map(|c| c as u32);
+        process.reaped = true;
         code
     }
 }
@@ -134,15 +141,15 @@ mod os {
         },
         process::Command,
         ptr::{null, null_mut},
+        sync::Mutex,
     };
     use windows_sys::Win32::{
         Foundation::*,
-        Security::SECURITY_ATTRIBUTES,
         System::{JobObjects::*, Pipes::CreatePipe, Threading::*},
     };
     pub struct Process {
         process: OwnedHandle,
-        _job: OwnedHandle,
+        job: OwnedHandle,
         #[cfg(test)]
         pid: u32,
     }
@@ -161,18 +168,22 @@ mod os {
         // SAFETY: Callers pass a newly created handle, transferring its sole ownership.
         Ok(unsafe { OwnedHandle::from_raw_handle(handle) })
     }
-    fn wide(value: &OsStr) -> io::Result<Vec<u16>> {
-        let mut bytes: Vec<_> = value.encode_wide().collect();
+    fn encoded(value: &OsStr) -> io::Result<Vec<u16>> {
+        let bytes: Vec<_> = value.encode_wide().collect();
         if bytes.contains(&0) {
             return Err(io::Error::from(io::ErrorKind::InvalidInput));
         }
+        Ok(bytes)
+    }
+    fn wide(value: &OsStr) -> io::Result<Vec<u16>> {
+        let mut bytes = encoded(value)?;
         bytes.push(0);
         Ok(bytes)
     }
     fn quoted(value: &OsStr, out: &mut Vec<u16>) -> io::Result<()> {
         out.push(34);
         let mut slashes = 0;
-        for ch in wide(value)?.into_iter().take(value.encode_wide().count()) {
+        for ch in encoded(value)? {
             if ch == 92 {
                 slashes += 1;
                 continue;
@@ -193,14 +204,9 @@ mod os {
     }
     fn pipe(child_reads: bool) -> io::Result<(File, OwnedHandle)> {
         let (mut read, mut write) = (null_mut(), null_mut());
-        let attributes = SECURITY_ATTRIBUTES {
-            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
-            lpSecurityDescriptor: null_mut(),
-            bInheritHandle: 1,
-        };
-        // SAFETY: Writable handle slots and a valid attributes struct live through the call.
+        // SAFETY: Writable handle slots live through the call; null attributes disable inheritance.
         unsafe {
-            check(CreatePipe(&mut read, &mut write, &attributes, 0))?;
+            check(CreatePipe(&mut read, &mut write, null(), 0))?;
         }
         let (read, write) = (owned(read)?, owned(write)?);
         let (parent, child) = if child_reads {
@@ -208,14 +214,6 @@ mod os {
         } else {
             (read, write)
         };
-        // SAFETY: The parent handle is live and exclusively owned here.
-        unsafe {
-            check(SetHandleInformation(
-                parent.as_raw_handle(),
-                HANDLE_FLAG_INHERIT,
-                0,
-            ))?;
-        }
         Ok((File::from(parent), child))
     }
     struct Attributes(Vec<usize>);
@@ -228,6 +226,7 @@ mod os {
         }
     }
     pub fn spawn(command: &mut Command) -> io::Result<Pipes> {
+        // Command holds arguments, cwd and an explicit environment; CreateProcessW owns launch.
         let program = wide(command.get_program())?;
         let cwd = wide(
             command
@@ -245,7 +244,7 @@ mod os {
         let mut environment = Vec::new();
         for (key, value) in command.get_envs() {
             if let Some(value) = value {
-                environment.extend(wide(key)?.into_iter().take(key.encode_wide().count()));
+                environment.extend(encoded(key)?);
                 environment.push(61);
                 environment.extend(wide(value)?);
             }
@@ -254,6 +253,9 @@ mod os {
         if environment.len() == 1 {
             environment.push(0);
         }
+        // Any other engine spawn must use platform::spawn or share this lock; std's spawn lock does not cover this path.
+        static SPAWN: Mutex<()> = Mutex::new(());
+        let _spawn = SPAWN.lock().map_err(|_| io::ErrorKind::Other)?;
         let (stdin, input) = pipe(true)?;
         let (stdout, output) = pipe(false)?;
         let (stderr, error) = pipe(false)?;
@@ -262,6 +264,7 @@ mod os {
         // SAFETY: These Win32 plain-data structs accept all-zero initialization.
         let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
         limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION
             | JOB_OBJECT_LIMIT_ACTIVE_PROCESS
             | JOB_OBJECT_LIMIT_PROCESS_MEMORY;
         limits.BasicLimitInformation.ActiveProcessLimit = 1;
@@ -331,6 +334,13 @@ mod os {
         // SAFETY: All null-terminated buffers and attributes remain live. Atomic Job
         // assignment prevents any user code running outside the configured limits.
         unsafe {
+            for handle in handles {
+                check(SetHandleInformation(
+                    handle,
+                    HANDLE_FLAG_INHERIT,
+                    HANDLE_FLAG_INHERIT,
+                ))?;
+            }
             check(CreateProcessW(
                 program.as_ptr(),
                 line.as_mut_ptr(),
@@ -340,7 +350,7 @@ mod os {
                 CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
                 environment.as_ptr().cast(),
                 cwd.as_ptr(),
-                &startup.StartupInfo,
+                (&startup as *const STARTUPINFOEXW).cast(),
                 &mut info,
             ))?;
         }
@@ -349,7 +359,7 @@ mod os {
         Ok((
             Process {
                 process,
-                _job: job,
+                job,
                 #[cfg(test)]
                 pid: info.dwProcessId,
             },
@@ -367,7 +377,7 @@ mod os {
             // SAFETY: Both handles remain owned. Termination also ends any process
             // in the Job; waiting on our process does not reap an unrelated PID.
             unsafe {
-                TerminateJobObject(self._job.as_raw_handle(), 1);
+                TerminateJobObject(self.job.as_raw_handle(), 1);
                 WaitForSingleObject(self.process.as_raw_handle(), INFINITE);
             }
         }
@@ -391,6 +401,14 @@ mod os {
 }
 #[cfg(test)]
 pub(super) use os::exit_code;
+#[cfg(all(test, unix))]
+pub(super) fn leave_test_group() {
+    // SAFETY: The helper joins its parent's group in the same session before its receipt.
+    assert_eq!(
+        unsafe { libc::setpgid(0, libc::getpgid(libc::getppid())) },
+        0
+    );
+}
 pub(super) use os::{Process, spawn};
 
 #[cfg(test)]
