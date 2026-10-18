@@ -22,22 +22,22 @@ export function replicaHistoryAuthors(storage: StorageContext, workspace: string
       else if (!prior) authors.set(key,author);
     }
   };
-  const logs = statement(storage,`SELECT op_kind,relay_admission,settlement_admission_json,admitted_author_snapshot_json,
-    json_extract(payload_json,'$.objectId') AS object_id,json_extract(payload_json,'$.versionId') AS version_id
-    FROM sync_relay_log WHERE workspace_id=? AND relay_seq>? AND relay_seq<=? ORDER BY relay_seq LIMIT ?`)
-    .all(workspace,fromLog,toLog,SCAN_LIMIT+1);
+  const logs = statement(storage,`SELECT op_kind,relay_admission,settlement_admission_json,admitted_author_snapshot_json
+    FROM sync_relay_log WHERE workspace_id=? AND json_extract(payload_json,'$.versionId')=?
+      AND json_extract(payload_json,'$.objectId')=? AND relay_seq>? AND relay_seq<=? ORDER BY relay_seq LIMIT ?`)
+    .all(workspace,version,object,fromLog,toLog,SCAN_LIMIT+1);
   for (const row of logs.slice(0,SCAN_LIMIT)) {
-    if (row.object_id !== object || row.version_id !== version || row.relay_admission != null ||
+    if (row.relay_admission != null ||
         !["ydoc.update","moment.append"].includes(String(row.op_kind)) ||
         row.settlement_admission_json != null && JSON.parse(String(row.settlement_admission_json)).status === "refused") continue;
     add(row.admitted_author_snapshot_json);
   }
   const remaining = SCAN_LIMIT-Math.min(logs.length,SCAN_LIMIT);
-  const journal = statement(storage,`SELECT journal_cursor,main_version_id,object_id,author_snapshot_json,first_seen_deletes_json,seed_first_seen_json
-    FROM sync_relay_live_update_journal WHERE workspace_id=? AND journal_cursor>? AND journal_cursor<=? ORDER BY journal_cursor LIMIT ?`)
-    .all(workspace,fromJournal,toJournal,remaining+1);
+  const journal = statement(storage,`SELECT journal_cursor,author_snapshot_json,first_seen_deletes_json,seed_first_seen_json
+    FROM sync_relay_live_update_journal WHERE workspace_id=? AND main_version_id=? AND object_id=?
+      AND journal_cursor>? AND journal_cursor<=? ORDER BY journal_cursor LIMIT ?`)
+    .all(workspace,version,object,fromJournal,toJournal,remaining+1);
   for (const row of journal.slice(0,remaining)) {
-    if (row.object_id !== object || row.main_version_id !== version) continue;
     const ranges = statement(storage,"SELECT client_id AS clientId,start_clock AS startClock,end_clock AS endClock FROM sync_relay_live_update_struct_provenance WHERE journal_cursor=? ORDER BY client_id,start_clock").all(row.journal_cursor);
     const seed = JSON.parse(String(row.seed_first_seen_json));
     const firstSeen: LiveUpdateStructRange[] = ranges.map(r=>({clientId:Number(r.clientId),startClock:Number(r.startClock),endClock:Number(r.endClock)}));

@@ -4,7 +4,7 @@ import type {StorageContext} from "./context";
 import {replicaHistoryAuthors} from "./replicaHistoryAuthors";
 import {replicaHistoryReplacement} from "./replicaHistoryPositions";
 import {replicaStatement as statement} from "./replicaStatements";
-import {deleteUnreferencedReplicaTexts, readReplicaText} from "./replicaTextStorage";
+import {deleteUnreferencedReplicaTexts} from "./replicaTextStorage";
 
 type File = ReplicaCurrentView["files"][number];
 export interface ReplicaHistoryObservation {versionId: string; objectId: string; firstChangedAtMs: number; changedAtMs: number; beforeStructuralChange?: boolean}
@@ -30,12 +30,20 @@ export function pinReplicaHistory(storage: StorageContext, view: ReplicaCurrentV
   const omitted = new Map(view.omitted.map(f=>[historyObjectKey(f),f]));
   const observed = new Map(observations.map(o=>[historyObjectKey(o),o]));
   const clocks = new Map(statement(storage,"SELECT * FROM sync_relay_history_clocks WHERE workspace_id=?").all(workspace).map(c=>[JSON.stringify([c.version_id,c.object_id]),c]));
+  const currentPins = new Map(statement(storage,"SELECT * FROM sync_relay_history_pins WHERE workspace_id=? AND superseded_at_ms IS NULL")
+    .all(workspace).map(row=>[historyObjectKey(fromRow(row)),row]));
   const saveClock = statement(storage,`INSERT INTO sync_relay_history_clocks VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(workspace_id,version_id,object_id)
     DO UPDATE SET changed_at_ms=excluded.changed_at_ms,dirty_since_ms=excluded.dirty_since_ms,last_nonstructural_at_ms=excluded.last_nonstructural_at_ms,
     pin_log_cursor=excluded.pin_log_cursor,pin_journal_cursor=excluded.pin_journal_cursor,state_key=excluded.state_key`);
   const replacement = (file: File, log: number, journal: number) => replicaHistoryReplacement(storage,workspace,file.versionId,file.objectId,
     log,view.logCursor,journal,view.journalCursor);
   const pin = (file: File, reason: string, clock: Record<string,unknown>, log: number, journal: number, superseded: number | null) => {
+    const existing = currentPins.get(historyObjectKey(file));
+    if (superseded !== null && existing && historyStateKey(fromRow(existing)) === historyStateKey(file)) {
+      statement(storage,"UPDATE sync_relay_history_pins SET reason=? WHERE pin_id=?").run(reason,existing.pin_id);
+      clock.dirty_since_ms=null;
+      return;
+    }
     const authors = replicaHistoryAuthors(storage,workspace,file.versionId,file.objectId,Number(clock.pin_log_cursor),log,Number(clock.pin_journal_cursor),journal);
     statement(storage,"INSERT INTO sync_relay_history_pins VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
       .run(randomUUID(),workspace,file.versionId,file.objectId,file.path,file.contentKind,file.sha256,file.byteLength,file.lineageClaimId,
@@ -47,12 +55,12 @@ export function pinReplicaHistory(storage: StorageContext, view: ReplicaCurrentV
   };
   const previous = new Map(before.map(f=>[historyObjectKey(f),f]));
   // Clocks control sampling and display. Only relay positions authorize History.
-  for (const row of statement(storage,"SELECT * FROM sync_relay_history_pins WHERE workspace_id=? AND superseded_at_ms IS NULL").all(workspace)) {
+  for (const row of currentPins.values()) {
     const file = fromRow(row), after = next.get(historyObjectKey(file));
     const unavailable = omitted.get(historyObjectKey(file));
     if (unavailable?.path === file.path && unavailable.sha256 === file.sha256) continue;
     if (!after || historyStateKey(file) !== historyStateKey(after)) statement(storage,`UPDATE sync_relay_history_pins
-      SET superseded_at_ms=?,replaced_stream=?,replaced_position=? WHERE pin_id=?`)
+      SET superseded_at_ms=?,replaced_log_position=?,replaced_journal_position=? WHERE pin_id=?`)
       .run(observed.get(historyObjectKey(file))?.firstChangedAtMs ?? now,...replacement(file,Number(row.log_cursor),Number(row.journal_cursor)),row.pin_id);
   }
   for (const key of new Set([...previous.keys(),...next.keys()])) {
@@ -60,16 +68,13 @@ export function pinReplicaHistory(storage: StorageContext, view: ReplicaCurrentV
     const old = previous.get(key), file = next.get(key), times = observed.get(key);
     const savedClock = clocks.get(key);
     const clock = {...(savedClock ?? {changed_at_ms:times?.changedAtMs ?? now,dirty_since_ms:null,
-      last_nonstructural_at_ms:null,pin_log_cursor:0,pin_journal_cursor:0,state_key:file ? historyStateKey(file) : null})};
+      last_nonstructural_at_ms:null,pin_log_cursor:header?.log_cursor ?? view.logCursor,pin_journal_cursor:header?.journal_cursor ?? view.journalCursor,
+      state_key:old ? historyStateKey(old) : !header && file ? historyStateKey(file) : null})};
     const structural = old && historyStructuralReason(old,file);
     if (structural) pin(old,structural,clock,Number(header!.log_cursor),Number(header!.journal_cursor),times?.firstChangedAtMs ?? now);
     const state = file ? historyStateKey(file) : null;
     if (clock.state_key !== state) {
-      if (clock.dirty_since_ms === null) {
-        const first=times?.firstChangedAtMs ?? now;
-        clock.dirty_since_ms=!structural && old && clock.last_nonstructural_at_ms !== null && first-Number(clock.changed_at_ms) < 30_000
-          ? Math.min(first,Number(clock.last_nonstructural_at_ms)) : first;
-      }
+      if (clock.dirty_since_ms === null) clock.dirty_since_ms=times?.firstChangedAtMs ?? now;
       clock.changed_at_ms=times?.changedAtMs ?? now;
       clock.state_key=state;
     }
@@ -97,15 +102,15 @@ export function nextReplicaHistoryPinAt(storage: StorageContext, workspace: stri
 
 export function thinReplicaHistoryPins(storage: StorageContext, workspace: string, budget = {maxBytes:64*1024*1024,maxCount:1024}) {
   const rows = statement(storage,`SELECT pin_id,pinned_at_ms,reason,superseded_at_ms,
-    byte_length+length(CAST(authors_json AS BLOB))+length(CAST(path AS BLOB))+256 AS bytes FROM sync_relay_history_pins WHERE workspace_id=? ORDER BY pinned_at_ms,pin_id`).all(workspace);
+    byte_length+length(CAST(authors_json AS BLOB))+length(CAST(path AS BLOB))+256 AS bytes
+    FROM sync_relay_history_pins WHERE workspace_id=? AND superseded_at_ms IS NOT NULL ORDER BY pinned_at_ms,pin_id`).all(workspace);
   const bytes = rows.reduce((n,r)=>n+Number(r.bytes),0);
   if (bytes <= budget.maxBytes && rows.length <= budget.maxCount) return;
-  const kept = rows.filter(r=>r.superseded_at_ms === null), optional = rows.filter(r=>r.superseded_at_ms !== null);
   // Keep structural states first, then bisect time intervals within each class.
-  const retained = new Set(kept.map(r=>r.pin_id));
-  let availableBytes = budget.maxBytes-kept.reduce((n,r)=>n+Number(r.bytes),0), availableCount = budget.maxCount-kept.length;
+  const retained = new Set<unknown>();
+  let availableBytes = budget.maxBytes, availableCount = budget.maxCount;
   for (const structural of [true,false]) {
-    const candidates = optional.filter(r=>(!["quiet","ceiling"].includes(String(r.reason))) === structural);
+    const candidates = rows.filter(r=>(!["quiet","ceiling"].includes(String(r.reason))) === structural);
     const keep = (index: number) => {
       const row=candidates[index];
       if (!row || availableCount <= 0 || Number(row.bytes) > availableBytes) return;
@@ -126,11 +131,6 @@ export function thinReplicaHistoryPins(storage: StorageContext, workspace: strin
     }
   }
   const remove = statement(storage,"DELETE FROM sync_relay_history_pins WHERE workspace_id=? AND pin_id=?");
-  for (const row of optional) if (!retained.has(row.pin_id)) remove.run(workspace,row.pin_id);
+  for (const row of rows) if (!retained.has(row.pin_id)) remove.run(workspace,row.pin_id);
   deleteUnreferencedReplicaTexts(storage,workspace);
-}
-
-/** Full text seam shared by pin reads; encoding changes stay here. Caller authorized the pin in this transaction. */
-export function readReplicaHistoryText(storage: StorageContext, workspace: string, sha: string): string | null {
-  return readReplicaText(storage,workspace,sha);
 }

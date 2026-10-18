@@ -1,6 +1,7 @@
 import {withReplicaCurrentView, type ReplicaCurrentViewReadInput, type ReplicaCurrentViewSource} from "./replicaCurrentViewReads";
 import type {StorageContext} from "./storage/context";
-import {readReplicaHistoryText} from "./storage/replicaHistoryPins";
+import {readReplicaText} from "./storage/replicaTextStorage";
+import {replicaViewReachesFloor} from "./storage/replicaGrantFloors";
 import {replicaStatement as statement} from "./storage/replicaStatements";
 
 export interface ReplicaHistoryPin {
@@ -13,21 +14,19 @@ export type ReplicaHistoryRead = Unavailable | {status:"not-found" | "not-text"}
 
 function readHistory<T>(storage: StorageContext, input: ReplicaCurrentViewReadInput, source: ReplicaCurrentViewSource | undefined,
   read: (rows: Array<{pin: ReplicaHistoryPin; sha: string}>, workspace: string) => T, pinId?: string): T | Unavailable {
-  return withReplicaCurrentView(storage,input,source,({rows,workspace,visiblePath})=>{
-    const floor = statement(storage,`SELECT f.log_floor,f.journal_floor,c.log_cursor,c.journal_cursor
-      FROM sync_relay_history_grant_floors f JOIN sync_relay_workspaces w ON w.workspace_id=f.workspace_id
-        AND w.replication_epoch=f.replication_epoch AND w.stream_identity=f.stream_identity
-      LEFT JOIN sync_relay_replica_cuts c ON c.workspace_id=w.workspace_id WHERE f.grant_id=? AND f.workspace_id=?`).get(input.grantId,workspace);
+  return withReplicaCurrentView(storage,input,source,({rows,workspace,visiblePath,floor})=>{
     if (!floor) return read([],workspace);
     // An uncollected replacement must not pass as an unsuperseded pin.
-    if (floor.log_cursor == null || Number(floor.log_cursor) < Number(floor.log_floor) ||
-        Number(floor.journal_cursor) < Number(floor.journal_floor)) return {status:"updating" as const};
+    const cut = statement(storage,"SELECT log_cursor,journal_cursor FROM sync_relay_replica_cuts WHERE workspace_id=?").get(workspace);
+    if (!replicaViewReachesFloor(cut ? {logCursor:Number(cut.log_cursor),journalCursor:Number(cut.journal_cursor)} : null,floor))
+      return {status:"updating" as const};
     const currentObjects = new Set([...rows.values()].map(f=>JSON.stringify([f.versionId,f.objectId])));
     const pins = statement(storage,`SELECT * FROM sync_relay_history_pins WHERE workspace_id=? AND (superseded_at_ms IS NULL
-        OR replaced_stream='log' AND replaced_position>?
-        OR replaced_stream='journal' AND replaced_position>?)
+        OR (replaced_log_position IS NOT NULL OR replaced_journal_position IS NOT NULL)
+          AND (replaced_log_position IS NULL OR replaced_log_position>?)
+          AND (replaced_journal_position IS NULL OR replaced_journal_position>?))
       ${pinId === undefined ? "" : "AND pin_id=?"} ORDER BY pinned_at_ms DESC,pin_id`)
-      .all(workspace,floor.log_floor,floor.journal_floor,...(pinId === undefined ? [] : [pinId]));
+      .all(workspace,floor.logCursor,floor.journalCursor,...(pinId === undefined ? [] : [pinId]));
     const visible = pins.flatMap(row=>{
       if (!currentObjects.has(JSON.stringify([row.version_id,row.object_id]))) return [];
       const path = visiblePath(String(row.version_id),String(row.path));
@@ -47,7 +46,7 @@ export function readReplicaHistoryPin(storage: StorageContext, input: ReplicaCur
     const row = pins[0];
     if (!row) return {status:"not-found"};
     if (row.pin.kind !== "text") return {status:"not-text"};
-    const text = readReplicaHistoryText(storage,workspace,row.sha);
+    const text = readReplicaText(storage,workspace,row.sha);
     return text === null ? {status:"updating"} : {status:"ready",pin:row.pin,text};
   },input.pinId);
 }

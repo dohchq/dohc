@@ -6,6 +6,7 @@ import {authorizeShareGrantAction} from "./shareAuthorization";
 import {fileSideOf, targetVersionId} from "./shareFilter";
 import type {StorageContext} from "./storage/context";
 import type {CurrentShareGrantPrincipal} from "./storage/currentShareGrant";
+import {replicaGrantFloor, replicaViewReachesFloor} from "./storage/replicaGrantFloors";
 import {currentViewFileAtFence, forgetReplicaCurrentViewStoredCache, readReplicaCurrentViewRowText} from "./storage/replicaCurrentViews";
 
 export interface ReplicaCurrentViewReadInput {
@@ -157,6 +158,7 @@ export function withReplicaCurrentView<T>(storage: StorageContext, input: Replic
     files: ReplicaCurrentViewFile[];
     rows: Map<string, ViewFile>;
     workspace: string;
+    floor: ReturnType<typeof replicaGrantFloor>;
     visiblePath: (version: string, path: string) => string | null;
     readText: (row: ViewFile) => string | null;
     inventoryEtag: () => string;
@@ -178,6 +180,8 @@ export function withReplicaCurrentView<T>(storage: StorageContext, input: Replic
     const snapshot = source ? source.currentReadView(workspace) : stored && {view:stored,previous:stored};
     if (!snapshot) { forgetReplicaCurrentViewCaches(storage,workspace); return {status:"not-ready"}; }
     const {view} = snapshot;
+    const floor = replicaGrantFloor(storage,input.grantId,workspace);
+    if (floor && !replicaViewReachesFloor(view,floor)) return {status:"updating"};
     if (view.workspaceId !== workspace || [view.revision, view.logCursor, view.journalCursor].some(n => !Number.isSafeInteger(n) || n < 0) ||
       view.logCursor > standing.logSeq || view.journalCursor > standing.journalCursor) return {status:"updating"};
     const latest = touchLatestIndex(storage,workspace);
@@ -252,7 +256,7 @@ export function withReplicaCurrentView<T>(storage: StorageContext, input: Replic
       if (requestedPath === undefined || path === requestedPath) files.set(path, {path, status:"updating"});
     }
     const sorted = [...files.values()].sort((a,b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
-    return read({files:sorted, rows, workspace,
+    return read({files:sorted, rows, workspace, floor,
       visiblePath:(v,path)=>visible(v,path) ? project(path) : null, inventoryEtag:()=>inventoryEtag(index,sorted), readText:row => {
       const textKey = JSON.stringify([row.sha256,row.byteLength]);
       const text = index.texts.get(row.sha256);

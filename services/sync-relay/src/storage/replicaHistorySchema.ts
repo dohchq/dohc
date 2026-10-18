@@ -3,6 +3,10 @@ import {currentShareGrantSql} from "./currentShareGrant";
 import {replicaTextCleanupSql} from "./replicaTextStorage";
 
 const migration = "replica-history-pins-v1";
+const captureFloor = `INSERT OR REPLACE INTO sync_relay_history_grant_floors SELECT NEW.grant_id,w.workspace_id,w.replication_epoch,w.stream_identity,
+  coalesce((SELECT max(relay_seq) FROM sync_relay_log WHERE workspace_id=w.workspace_id),0),
+  coalesce((SELECT max(journal_cursor) FROM sync_relay_live_update_journal WHERE workspace_id=w.workspace_id),0)
+  FROM sync_relay_workspaces w JOIN sync_relay_shares s ON s.workspace_id=w.workspace_id WHERE s.share_id=NEW.share_id;`;
 export const HISTORY_JOURNAL_POSITION_INDEX = "replica_history_journal_position";
 const standing = (workspace: string) => `EXISTS (SELECT 1 FROM sync_relay_shares s JOIN sync_relay_share_grants g ON g.share_id=s.share_id
   WHERE s.workspace_id=${workspace} AND ${currentShareGrantSql("g","s")})`;
@@ -26,7 +30,7 @@ export function initializeReplicaHistorySchema(db: SqliteDb) {
       reason TEXT NOT NULL CHECK(reason IN ('quiet','ceiling','rename','delete','restore','lineage')),
       pinned_at_ms INTEGER NOT NULL, superseded_at_ms INTEGER,
       log_cursor INTEGER NOT NULL, journal_cursor INTEGER NOT NULL, authors_json TEXT NOT NULL CHECK(json_valid(authors_json)),
-      replaced_stream TEXT CHECK(replaced_stream IN ('log','journal')), replaced_position INTEGER
+      replaced_log_position INTEGER, replaced_journal_position INTEGER
     ) STRICT;
     CREATE INDEX replica_history_object ON sync_relay_history_pins(workspace_id,version_id,object_id,pinned_at_ms);
     CREATE INDEX ${HISTORY_JOURNAL_POSITION_INDEX} ON sync_relay_live_update_journal(workspace_id,main_version_id,object_id,journal_cursor);
@@ -34,12 +38,10 @@ export function initializeReplicaHistorySchema(db: SqliteDb) {
       grant_id TEXT PRIMARY KEY REFERENCES sync_relay_share_grants(grant_id) ON DELETE CASCADE,
       workspace_id TEXT NOT NULL, replication_epoch TEXT, stream_identity TEXT, log_floor INTEGER NOT NULL, journal_floor INTEGER NOT NULL
     ) STRICT;
-    CREATE TRIGGER replica_history_grant_floor AFTER INSERT ON sync_relay_share_grants BEGIN
-      INSERT INTO sync_relay_history_grant_floors SELECT NEW.grant_id,w.workspace_id,w.replication_epoch,w.stream_identity,
-        coalesce((SELECT max(relay_seq) FROM sync_relay_log WHERE workspace_id=w.workspace_id),0),
-        coalesce((SELECT max(journal_cursor) FROM sync_relay_live_update_journal WHERE workspace_id=w.workspace_id),0)
-        FROM sync_relay_workspaces w JOIN sync_relay_shares s ON s.workspace_id=w.workspace_id WHERE s.share_id=NEW.share_id;
-    END;
+    CREATE TRIGGER replica_history_grant_floor AFTER INSERT ON sync_relay_share_grants BEGIN ${captureFloor} END;
+    CREATE TRIGGER replica_history_grant_restore AFTER UPDATE OF status,revoked_at_ms ON sync_relay_share_grants
+      WHEN NEW.status='active' AND NEW.revoked_at_ms IS NULL AND (OLD.status<>'active' OR OLD.revoked_at_ms IS NOT NULL)
+      BEGIN ${captureFloor} END;
     CREATE TABLE sync_relay_history_clocks (
       workspace_id TEXT NOT NULL REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
       version_id TEXT NOT NULL, object_id TEXT NOT NULL,

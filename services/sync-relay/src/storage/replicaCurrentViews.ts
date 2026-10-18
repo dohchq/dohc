@@ -189,7 +189,7 @@ export function flipReplicaCurrentView(storage: StorageContext, lease: ReplicaRe
         const row = chunks.get(lease.workspaceId, file.sha256)!;
         if (!row.n || row.first !== 0 || Number(row.last) !== Number(row.n) - 1 || row.bytes !== file.byteLength) fail();
       }
-      const references=pinReplicaHistory(storage,view,state.observations) ?? new Map<string,number>();
+      const references=pinReplicaHistory(storage,view,state.observations);
       for (const row of statement(storage,"SELECT sha256,count(*) AS n FROM sync_relay_replica_cut_files WHERE workspace_id=? AND content_kind='text' GROUP BY sha256").all(lease.workspaceId))
         references.set(String(row.sha256),(references.get(String(row.sha256)) ?? 0)-Number(row.n));
       for (const file of view.files) if (file.contentKind === "text") references.set(file.sha256,(references.get(file.sha256) ?? 0)+1);
