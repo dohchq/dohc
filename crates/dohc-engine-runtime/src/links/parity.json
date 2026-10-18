@@ -233,6 +233,224 @@
       "literal": "report%23v2",
       "kind": "wikilink",
       "target": "report#v2.md"
+    },
+    {
+      "name": "local stem wins ambiguity",
+      "source": "notes/source.md",
+      "literal": "report",
+      "kind": "wikilink",
+      "target": "notes/report.md",
+      "paths": [
+        "notes/source.md",
+        "notes/report.md",
+        "other/report.md"
+      ]
+    },
+    {
+      "name": "ambiguous global stem",
+      "source": "source.md",
+      "literal": "report",
+      "kind": "wikilink",
+      "target": null,
+      "paths": [
+        "source.md",
+        "notes/report.md",
+        "other/report.md"
+      ]
+    },
+    {
+      "name": "exact case wins folded ambiguity",
+      "source": "source.md",
+      "literal": "/Report.md",
+      "kind": "wikilink",
+      "target": "Report.md",
+      "paths": [
+        "source.md",
+        "report.md",
+        "Report.md"
+      ]
+    },
+    {
+      "name": "folded case ambiguity",
+      "source": "source.md",
+      "literal": "/REPORT.MD",
+      "kind": "wikilink",
+      "target": null,
+      "paths": [
+        "source.md",
+        "report.md",
+        "Report.md"
+      ]
+    },
+    {
+      "name": "workspace path before source relative",
+      "source": "notes/source.md",
+      "literal": "other/report",
+      "kind": "wikilink",
+      "target": "other/report.md",
+      "paths": [
+        "notes/source.md",
+        "other/report.md",
+        "notes/other/report.md"
+      ]
+    },
+    {
+      "name": "explicit relative path",
+      "source": "notes/source.md",
+      "literal": "../other/report#part",
+      "kind": "wikilink",
+      "target": "other/report.md",
+      "paths": [
+        "notes/source.md",
+        "other/report.md"
+      ]
+    },
+    {
+      "name": "malformed percent stays literal",
+      "source": "source.md",
+      "literal": "report%20%zz",
+      "kind": "wikilink",
+      "target": "report%20%zz.md"
+    },
+    {
+      "name": "non-markdown extensionless",
+      "source": "source.md",
+      "literal": "/assets/photo",
+      "kind": "wikilink",
+      "target": "assets/photo.png"
+    },
+    {
+      "name": "fragment only unresolved",
+      "source": "source.md",
+      "literal": "#part",
+      "kind": "wikilink",
+      "target": null,
+      "paths": [
+        "source.md"
+      ]
+    },
+    {
+      "source": "source.md",
+      "kind": "wikilink",
+      "name": "markdown extension precedence",
+      "literal": "/report",
+      "target": "report.md",
+      "paths": [
+        "source.md",
+        "report.mdx",
+        "report.markdown",
+        "report.md"
+      ]
+    },
+    {
+      "source": "source.md",
+      "kind": "wikilink",
+      "name": "query and fragment",
+      "literal": "report?mode=1#part",
+      "target": "report.md"
+    },
+    {
+      "source": "source.md",
+      "kind": "wikilink",
+      "name": "leading question mark is filename",
+      "literal": "?report",
+      "target": "?report.md"
+    },
+    {
+      "source": "source.md",
+      "kind": "wikilink",
+      "name": "trailing slash stays directory",
+      "literal": "/report/",
+      "target": null,
+      "paths": [
+        "source.md",
+        "report.md",
+        "report"
+      ]
+    },
+    {
+      "source": "source.md",
+      "kind": "wikilink",
+      "name": "relative path cannot escape workspace",
+      "literal": "../report",
+      "target": null,
+      "paths": [
+        "source.md",
+        "report.md"
+      ]
+    },
+    {
+      "source": "source.md",
+      "kind": "wikilink",
+      "name": "external scheme refused",
+      "literal": "https:report",
+      "target": null,
+      "paths": [
+        "source.md",
+        "https:report.md"
+      ]
+    },
+    {
+      "source": "source.md",
+      "kind": "wikilink",
+      "name": "network path refused",
+      "literal": "//report",
+      "target": null,
+      "paths": [
+        "source.md",
+        "report.md"
+      ]
+    },
+    {
+      "source": "source.md",
+      "kind": "wikilink",
+      "name": "invalid utf8 escapes stay literal",
+      "literal": "report%FF",
+      "target": "report%FF.md"
+    },
+    {
+      "source": "source.md",
+      "kind": "wikilink",
+      "name": "encoded slash",
+      "literal": "notes%2Freport",
+      "target": "notes/report.md"
+    },
+    {
+      "source": "source.md",
+      "kind": "wikilink",
+      "name": "hidden filename stem",
+      "literal": ".report",
+      "target": ".report"
+    },
+    {
+      "name": "local non-markdown extensionless wins stem ambiguity",
+      "source": "source.md",
+      "kind": "wikilink",
+      "literal": "photo",
+      "target": "photo.png",
+      "paths": [
+        "source.md",
+        "photo.png",
+        "other/photo.png"
+      ]
+    },
+    {
+      "name": "explicit relative trailing slash stays directory",
+      "source": "source.md",
+      "kind": "wikilink",
+      "literal": "./report/",
+      "target": null,
+      "paths": [
+        "source.md",
+        "report.md"
+      ]
+    },
+    {
+      "name": "signed percent hex is malformed",
+      "source": "source.md",
+      "kind": "wikilink",
+      "literal": "report%+2",
+      "target": "report%+2.md"
     }
   ]
 }
