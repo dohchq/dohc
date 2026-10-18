@@ -104,7 +104,7 @@ export function BacklinksPanel(props: {
   const current =
     loaded?.workspaceId === workspaceId && loaded.path === path ? loaded : null;
   const sources = current?.sources ?? [];
-  const chatMentions = loadedChats?.workspaceId === workspaceId && loadedChats.path === path ? loadedChats.mentions : [];
+  const chatMentions = chatMentionsAvailable && loadedChats?.workspaceId === workspaceId && loadedChats.path === path ? loadedChats.mentions : [];
 
   // Recompute when the window regains focus. This catches edits made in
   // another app without polling. The focus nonce joins the same request
@@ -176,7 +176,7 @@ export function BacklinksPanel(props: {
 
   useAsyncResponseEffect(() => {
     const read = chatMentionsAvailable ? bridge().listChatFileMentions : undefined;
-    return typeof read === "function" ? read({ workspaceId, path }) : null;
+    return typeof read === "function" ? read({ workspaceId, path }) : Promise.resolve({ mentions: [] });
   }, {
     onSuccess: result => setLoadedChats({ workspaceId, path, mentions: result.mentions }),
     onError: () => setLoadedChats({ workspaceId, path, mentions: [] }),

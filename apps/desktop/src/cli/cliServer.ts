@@ -3451,7 +3451,7 @@ async function dispatchLinks(
   if (!workspace) throw new CliCommandError("not inside a dohc workspace");
   if (!options.links) throw new CliCommandError("Workspace links are unavailable.");
   return request.verb === "linksIn"
-    ? { page: await options.links.incoming(workspace, { subject: request.args.subject, cursor: request.args.cursor }) }
+    ? options.links.incoming(workspace, { subject: request.args.subject, cursor: request.args.cursor })
     : options.links.resolve(workspace, { source: request.args.source, literals: request.args.literals });
 }
 

@@ -11,7 +11,11 @@ export function createWorkspaceLinksReader(
     async incoming(workspace: RegistryEntry, input: LinksInInput): Promise<LinksInResult> {
       const page = shareViewIsPresent(workspace.shareView)
         ? await files().linksIn({ kind: "standalone", workspaceId: workspace.workspaceId }, input)
-        : await withAdapter(workspace, adapter => adapter.incomingLinks(input));
+        : await withAdapter(workspace, async adapter => ({ page: await adapter.incomingLinks(input) }))
+          .then(answer => {
+            if (!answer) throw new Error("Workspace engine is unavailable.");
+            return answer.page;
+          });
       return page && workspace.shareMounts?.length ? { ...page, mountsCovered: false, complete: false } : page;
     },
     async resolve(workspace: RegistryEntry, input: LinksResolveInput): Promise<LinksResolveResult> {

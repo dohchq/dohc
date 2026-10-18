@@ -1183,13 +1183,6 @@ export const WorkspaceGraphResult = z.object({
 });
 export type WorkspaceGraphResult = z.infer<typeof WorkspaceGraphResult>;
 
-// Backlinks ("Linked mentions"): the open document's inbound links, derived
-// read-only in main from the same source graph. `path` is the open file; the
-// result lists every other file that links to it with a highlighted snippet per
-// mention. Bounds mirror workspaceGraph's MAX_BACKLINK_* caps (kept as literals
-// here so this shared contract never imports the main-only fs module).
-
-
 export const ListWorkspaceHeadingsPayload = z.object({
   workspaceId: WORKSPACE_ID,
   path: PATH_STRING,

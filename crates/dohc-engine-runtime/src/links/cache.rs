@@ -48,6 +48,7 @@ impl Prepared {
         resolver
     }
 }
+// Never call inside write_with: rollback could reuse a revision with uncommitted aliases.
 pub(super) fn prepare(
     conn: &Connection,
     cache: &Arc<Mutex<Cache>>,

@@ -97,7 +97,7 @@ Read a bounded page of documents linking to a file. Cursors continue the same su
 - `subject`: `{ path: string } | { objectId: string }`. Required.
 - `cursor`: `string`
 
-Returns `{ page: { versionId, subject, entries, unchecked, complete, mountsCovered, nextCursor } | null }`.
+Returns `{ versionId, subject: { path, objectId }, entries: { source, title, ordinal, span, line, highlightStart, highlightEnd, snippet }[], unchecked, complete, mountsCovered, nextCursor } | null`.
 
 ### `dohc_links_resolve`
 
@@ -559,7 +559,7 @@ Read documents that link to a file.
 
 - `--cursor <cursor>`: Continue the previous page.
 
-With `--json`, prints `{ schemaVersion, page: { versionId, subject, entries, unchecked, complete, mountsCovered, nextCursor } | null }`.
+With `--json`, prints `{ schemaVersion, versionId, subject: { path, objectId }, entries: { source, title, ordinal, span, line, highlightStart, highlightEnd, snippet }[], unchecked, complete, mountsCovered, nextCursor }` or `null`.
 
 #### `dohc links resolve`
 

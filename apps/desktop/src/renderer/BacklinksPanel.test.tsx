@@ -349,3 +349,17 @@ it("paints engine pages without waiting for chat refresh, including sources beyo
   expect(linksIn).toHaveBeenCalledWith({ workspaceId: "ws", subject: { path: "target.md" }, cursor: "next" });
   await act(async () => chats.resolve({ mentions: [] }));
 });
+
+it("clears displayed chat mentions when Chats becomes unavailable", async () => {
+  const linksIn = vi.fn(async () => linkQueryPage({ sources: [] }));
+  const listChatFileMentions = vi.fn(async () => ({ mentions: [{
+    attachment: { attachmentId: "mention" }, thread: { title: "Planning" },
+    message: { authorDisplayName: "Alice", createdAtMs: 0, body: "A chat mention" },
+  }] }));
+  vi.stubGlobal("dohcDesktop", { linksIn, listChatFileMentions });
+  const view = render(<BacklinksPanel workspaceId="ws" path="a.md" chatMentionsAvailable />);
+  await screen.findByTestId("chat-file-mentions");
+  view.rerender(<BacklinksPanel workspaceId="ws" path="a.md" chatMentionsAvailable={false} />);
+  expect(screen.queryByTestId("chat-file-mentions")).toBeNull();
+  expect(listChatFileMentions).toHaveBeenCalledOnce();
+});

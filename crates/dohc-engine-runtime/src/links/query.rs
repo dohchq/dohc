@@ -271,3 +271,14 @@ impl ActorHandle {
         .map_err(|_| invalid())?
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_decryption_is_bound_to_the_workspace() {
+        let cursor = encode_cursor("ws", "main", "target", &("a.md".into(), 3)).unwrap();
+        assert!(decode_cursor("other", "main", "target", Some(cursor)).is_err());
+    }
+}

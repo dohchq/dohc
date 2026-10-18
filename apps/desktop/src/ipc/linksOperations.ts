@@ -2,7 +2,7 @@ import { z } from "zod";
 import { LinksInInput, LinksResolveInput, LinksInResult, LinksResolveResult } from "@dohc/workspace-contracts/links";
 import type { OperationTable } from "./operationTable";
 
-const workspace = { workspaceId: z.string().min(1) };
+const workspace = { workspaceId: z.string().min(1).max(256) };
 export const linksOperations = {
   linksIn: {
     capabilityId: "links.in",

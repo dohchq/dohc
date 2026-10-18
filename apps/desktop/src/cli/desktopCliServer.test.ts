@@ -1068,3 +1068,22 @@ it("gives CLI and MCP the IPC link answer in a share without Chats capture", asy
   await expect(pending).rejects.toThrow();
   await retired;
 });
+
+it("returns an incoming page directly through CLI and MCP", async () => {
+  const f = fixture(await createTestScratch("links-in-cli-"));
+  const page = { versionId: "main", subject: { path: "a.md", objectId: "a" }, entries: [], unchecked: [], complete: true, mountsCovered: true, nextCursor: null };
+  f.dependencies.links.incoming = vi.fn(async () => page);
+  await f.create().startDesktopCliServer();
+  const token = "a".repeat(64);
+  const send = async (request: CliRequestWithoutToken) => {
+    const response = cliTransportResponseSchema.parse(JSON.parse(await handleCliRequestLine(JSON.stringify({ ...request, token }), token, f.options())));
+    if (!response.ok) throw new Error(response.error);
+    return response.result;
+  };
+  const subject = { path: "a.md" };
+  const cli = await executeCli({ argv: ["links", "in", JSON.stringify(subject), "--json"], cwd: f.workspace.rootPath, env: {}, request: send });
+  expect(cli.exitCode).toBe(0);
+  expect(JSON.parse(cli.stdout)).toEqual(page);
+  const { linksIn } = await import("@dohc/mcp/tools");
+  expect(await linksIn({ root: f.workspace.rootPath, home: "state", request: send }, { subject })).toEqual(page);
+});

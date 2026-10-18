@@ -102,7 +102,6 @@ async fn incoming_pages_share_resolution_and_survive_settles_without_writing() {
     invalid_cursor(&actor, "ws", "near/target.md", cursor.clone()).await;
     invalid_cursor(&actor, "ws", "target.md", format!("{cursor}x")).await;
     assert_eq!(page(&actor, "missing.md", None).await, Value::Null);
-    invalid_cursor(&actor, "other", "target.md", cursor).await;
     actor
         .run(|store, _| {
             drain(store);
@@ -365,4 +364,42 @@ async fn incoming_and_resolve_share_alias_invalidation_and_close_releases_maps()
     );
     supervisor.close(&db).unwrap();
     assert_eq!(std::sync::Arc::strong_count(&actor.link_resolvers), 1);
+}
+
+#[tokio::test]
+async fn secret_floor_writes_never_become_incoming_sources() {
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    let mut store = open(&db);
+    write(&mut store, "target", "target.md", "", 1);
+    write(&mut store, "public", "public.md", "[[target]]", 2);
+    let input = WriteText {
+        workspace_id: "ws".into(),
+        version_id: "main".into(),
+        object_id: "secret".into(),
+        path: "secrets/.env.local".into(),
+        text: "TOKEN=private [[target]]".into(),
+        moment_id: "secret-write".into(),
+        metadata_origin: "test".into(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        author_json: None,
+        now_ms: 3,
+        request_id: None,
+    };
+    assert!(
+        VersionedTextStore::new(&mut store)
+            .write_text(&input, &NoFaults)
+            .is_err()
+    );
+    drain(&mut store);
+    drop(store);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).unwrap().actor;
+    let result = page(&actor, "target.md", None).await;
+    assert_eq!(result["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(result["entries"][0]["source"], "public.md");
+    assert!(!result.to_string().contains("private"));
+    assert!(!result.to_string().contains(".env"));
+    assert_eq!(result["unchecked"], json!([]));
 }

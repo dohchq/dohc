@@ -19,3 +19,10 @@ it("uses share authority and marks separate mount engines uncovered", async () =
   await reader.incoming(shared, { subject: { path: "a.md" } });
   expect(share.linksIn).toHaveBeenCalledWith({ kind: "standalone", workspaceId: "ws" }, { subject: { path: "a.md" } });
 });
+
+it("throws when the owner engine session is unavailable, without confusing an absent subject", async () => {
+  const reader = createWorkspaceLinksReader(async () => null, () => ({} as ShareViewFiles));
+  const workspace = { workspaceId: "ws", rootPath: "root" } as RegistryEntry;
+  await expect(reader.incoming(workspace, { subject: { path: "a.md" } })).rejects.toThrow("unavailable");
+  await expect(reader.resolve(workspace, { source: "a.md", literals: [] })).rejects.toThrow("unavailable");
+});

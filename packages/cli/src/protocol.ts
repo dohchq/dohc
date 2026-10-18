@@ -1345,7 +1345,7 @@ export const cliResultSchemas = {
       syncPause: WorkspaceSyncPauseStatus.optional() }).strict(),
     rawFailureSchema,
   ]),
-  linksIn: z.object({ page: LinksInResult }).strict(),
+  linksIn: LinksInResult,
   linksResolve: LinksResolveResult,
   shareCopy: ShareCopyResult,
   accountDeletePreview: ServerAccountDeletionPreview,

@@ -198,50 +198,17 @@
     "top": {
       "prefix": "Usage: dohc <command> <verb> [arguments] [options]\n\nRun dohc inside a workspace folder while the dohc app is open.\n\nCommands:\n",
       "commands": [
-        {
-          "group": "links",
-          "block": "  links        Read and resolve document links.\n               in, resolve\n"
-        },
-        {
-          "group": "sync",
-          "block": "  sync         Stop syncing this workspace on this computer.\n               stop\n"
-        },
-        {
-          "group": "access",
-          "block": "  access       Read observed object grants and Sharing inventories.\n               object, sharing\n"
-        },
-        {
-          "group": "share",
-          "block": "  share        Read copy details for an owned share grant.\n               copy\n"
-        },
-        {
-          "group": "document",
-          "block": "  document     Read, edit, and create live Markdown documents. List and start\n               chats on tracked files.\n               read, edit, create, chats, comment\n"
-        },
-        {
-          "group": "chat",
-          "block": "  chat         Read and post in Groups and threads.\n               groups, threads, inbox, show, post, reply, react, grep, export\n"
-        },
-        {
-          "group": "dataset",
-          "block": "  dataset      Create, change, and use transactional Collections.\n               list, describe, history, historyRevision, prepareHistoryRestore,\n               permissions, setGrant, removeGrant, lifecycle, archive, restore,\n               deletePreview, delete, pendingAttempts, reconcileAttempt,\n               cancelAttempt, export, prepareRecovery, claimRecovery,\n               discardRecovery, upload, file, createForm,\n               prepareRelationChoices, create, prepare, approve, discard,\n               prepareMigration, migrationPreviewPage, prepareSchemaChange,\n               approveMigration, discardMigration, invoke\n"
-        },
-        {
-          "group": "app",
-          "block": "  app          Approve, open, and share apps.\n               createLink, listLocal, prepareLocal, launchLocal, list, prepare,\n               approve, cancel, withdraw, revokeCollection, reviewReactivation,\n               responses, undo-responses\n"
-        },
-        {
-          "group": "history",
-          "block": "  history      Read History changes and undo deletes, moves, and renames.\n               operation, undo, list, show\n"
-        },
-        {
-          "group": "automation",
-          "block": "  automation   Press Button fields, read an automation's runs, and try a failed\n               run again.\n               list, switch, buttons, runs, run, retry, press\n"
-        },
-        {
-          "group": "account",
-          "block": "  account      Review and delete the server account the dohc app is connected\n               to.\n               deletePreview, delete\n"
-        }
+        {"group":"links","block":"  links        Read and resolve document links.\n               in, resolve\n"},
+        {"group":"sync","block":"  sync         Stop syncing this workspace on this computer.\n               stop\n"},
+        {"group":"access","block":"  access       Read observed object grants and Sharing inventories.\n               object, sharing\n"},
+        {"group":"share","block":"  share        Read copy details for an owned share grant.\n               copy\n"},
+        {"group":"document","block":"  document     Read, edit, and create live Markdown documents. List and start\n               chats on tracked files.\n               read, edit, create, chats, comment\n"},
+        {"group":"chat","block":"  chat         Read and post in Groups and threads.\n               groups, threads, inbox, show, post, reply, react, grep, export\n"},
+        {"group":"dataset","block":"  dataset      Create, change, and use transactional Collections.\n               list, describe, history, historyRevision, prepareHistoryRestore,\n               permissions, setGrant, removeGrant, lifecycle, archive, restore,\n               deletePreview, delete, pendingAttempts, reconcileAttempt,\n               cancelAttempt, export, prepareRecovery, claimRecovery,\n               discardRecovery, upload, file, createForm,\n               prepareRelationChoices, create, prepare, approve, discard,\n               prepareMigration, migrationPreviewPage, prepareSchemaChange,\n               approveMigration, discardMigration, invoke\n"},
+        {"group":"app","block":"  app          Approve, open, and share apps.\n               createLink, listLocal, prepareLocal, launchLocal, list, prepare,\n               approve, cancel, withdraw, revokeCollection, reviewReactivation,\n               responses, undo-responses\n"},
+        {"group":"history","block":"  history      Read History changes and undo deletes, moves, and renames.\n               operation, undo, list, show\n"},
+        {"group":"automation","block":"  automation   Press Button fields, read an automation's runs, and try a failed\n               run again.\n               list, switch, buttons, runs, run, retry, press\n"},
+        {"group":"account","block":"  account      Review and delete the server account the dohc app is connected\n               to.\n               deletePreview, delete\n"}
       ],
       "suffix": "\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n\nRun dohc <command> --help to see what each verb does.\n"
     },
