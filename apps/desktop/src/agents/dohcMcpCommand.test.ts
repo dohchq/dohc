@@ -95,7 +95,7 @@ describe("resolveDohcMcpCommand", () => {
     expect(isTemporaryMacAppPath("/Volumes/dohc 1.2.3/Stuff/Applications/dohc.app/Contents/Resources")).toBe(true);
     expect(isTemporaryMacAppPath("/Users/sam/Applications/dohc.app/Contents/Resources")).toBe(false);
     expect(resolveDohcMcpCommand({ isPackaged: true, resourcesPath: installed, platform: "darwin", env: {} }))
-      .toBe(join(installed, "cli-bin", "dohc-mcp"));
+      .toBe(join(resolve(installed), "cli-bin", "dohc-mcp"));
   });
 
   it("keeps the workspace bin in dev and the DOHC_MCP_COMMAND override everywhere", () => {
