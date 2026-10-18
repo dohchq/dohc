@@ -10,10 +10,10 @@ import { createReplicaReadPrincipal, type ReplicaReadLease } from "./replicaRead
 
 export const REPLICA_SUPERVISOR_LIMITS = Object.freeze({ maxRunning: 4, idleMs: 5 * 60_000, maxViewTextBytes: 64*1024*1024,
   maxStoreBytes: 512*1024*1024, minFreeBytes: 1024*1024*1024, lifetimeMs: 15*60_000, diskCheckMs: 1000 });
-class ReplicaBudgetError extends Error {}
+export class ReplicaBudgetError extends Error {}
 export interface ReplicaChild {
   readonly pid?: number;
-  readonly exited?: Promise<void>;
+  readonly exited?: Promise<void | Error>;
   pull(): Promise<void>;
   currentView(selectors: ReplicaCurrentViewSelector[], knownTextShas: string[], position?: ReplicaCurrentViewPosition, cursor?: ReplicaCurrentViewCursor): Promise<ReplicaCurrentViewPage>;
   close(): Promise<void>;
@@ -238,20 +238,23 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
 
   function exhaust(entry: Entry, error: unknown) {
     if (entry.stopping) return;
-    report(entry, error);
+    if (error !== undefined) report(entry, error);
     // Close before waiting for an in-flight pull, which can otherwise wait on the child forever.
     entry.closing ??= entry.child?.close();
     void entry.closing?.catch(failure => report(entry, failure));
     void retire(entry).catch(failure => report(entry, failure));
   }
   async function checkDisk(entry: Entry) {
+    const free = await statfs(options.storeRoot);
+    if (free.bavail * free.bsize < limits.minFreeBytes) throw new ReplicaBudgetError("Replica storage is low on free space. Free space on the replicas volume before retrying.");
     let bytes = 0;
     const visit = async (path: string): Promise<void> => {
-      const info = await lstat(path);
+      const info = await lstat(path).catch(error => {if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error;});
+      if (!info) return;
       bytes += Math.max(info.size, (info.blocks ?? 0) * 512);
       if (bytes > limits.maxStoreBytes) throw new ReplicaBudgetError("Replica store exceeded its disk budget.");
       if (info.isDirectory() && !info.isSymbolicLink()) {
-        for (const item of await readdir(path)) await visit(join(path, item));
+        for (const item of await readdir(path).catch(error => {if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error;})) await visit(join(path, item));
       }
     };
     await visit(entry.storeDir!);
@@ -259,7 +262,7 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
   function monitorDisk(entry: Entry) {
     entry.disk = setTimeout(() => {
       if (entry.stopping) return;
-      entry.diskCheck = (entry.child ? checkDisk(entry) : Promise.resolve()).then(() => {if (!entry.stopping) monitorDisk(entry);}, error => exhaust(entry, error));
+      entry.diskCheck = checkDisk(entry).then(() => {if (!entry.stopping) monitorDisk(entry);}, error => exhaust(entry, error));
     }, limits.diskCheckMs);
     entry.disk.unref();
   }
@@ -275,7 +278,7 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
         const free = await statfs(options.storeRoot);
         if (free.bavail * free.bsize < limits.minFreeBytes) throw new ReplicaBudgetError("Replica storage is low on free space. Free space on the replicas volume before retrying.");
         entry.storeDir = await mkdtemp(join(options.storeRoot, "replica-"));
-        entry.lifetime = setTimeout(() => exhaust(entry, new ReplicaBudgetError("Replica maximum lifetime reached.")), limits.lifetimeMs);
+        entry.lifetime = setTimeout(() => exhaust(entry, undefined), limits.lifetimeMs);
         entry.lifetime.unref();
         monitorDisk(entry);
       }
@@ -285,10 +288,10 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
             entry.child = await options.startChild({ storeDir: entry.storeDir!, lease: entry.lease, relayHandler: principal.handle });
             if (entry.stopping) {await (entry.closing ??= entry.child.close()); return;}
             const child = entry.child;
-            void child.exited?.then(() => {
+            void child.exited?.then(error => {
               // A first-pull crash belongs to the one-time fresh-store rebuild below.
               if (entry.child === child && !entry.stopping && entry.frontier >= 0) {
-                report(entry, new Error("Replica child exited."));
+                report(entry, error ?? new Error("Replica child exited."));
                 void retire(entry).catch(error => report(entry, error));
               }
             });

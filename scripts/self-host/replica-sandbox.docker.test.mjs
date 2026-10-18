@@ -36,7 +36,7 @@ test("replica sandbox under compose security options and a 64 MiB replicas tmpfs
     await pollDelay(100); // Poll readiness, never use a fixed startup sleep.
   }
   const child = spawn("docker", ["run", "--rm", "--pull=never", "--name", name, "--label", label, "--network", name, "--init", "--security-opt", "no-new-privileges:true",
-    "--cap-drop", "ALL", "--read-only", "--tmpfs", "/tmp", "--tmpfs", "/data:uid=1000,gid=1000",
+    "--cap-drop", "ALL", "--read-only", "--tmpfs", "/tmp", "--tmpfs", "/data:uid=1000,gid=1000", "--tmpfs", "/continuity:uid=1000,gid=1000,mode=700",
     "--tmpfs", "/replicas:size=64m,uid=1000,gid=1000,mode=700", process.env.DOHC_REPLICA_SANDBOX_TEST_IMAGE, "--probes", "--measure"],
   {windowsHide: true, stdio: ["ignore", "pipe", "pipe"]});
   child.stdout.pipe(process.stdout); child.stderr.pipe(process.stderr);
@@ -48,5 +48,24 @@ test("replica sandbox under compose security options and a 64 MiB replicas tmpfs
       if (inspect.code === 0) {assert.equal(inspect.stdout.trim(), name); await docker(["rm", "-f", container]);}
     }
     await docker(["network", "rm", name]);
+  }
+});
+
+// The engine's own policy must deny these calls even without Docker's seccomp filter.
+test("replica kernel-surface filter without an outer seccomp profile", {
+  skip: !process.env.DOHC_REPLICA_SANDBOX_TEST_IMAGE, timeout: 60_000,
+}, async () => {
+  const name = `replica4b-kernel-${randomUUID()}`;
+  try {
+    for (const mode of ["control", "sandbox"]) {
+      const result = await docker(["run", "--rm", "--pull=never", "--name", name, "--network", "none", "--init",
+        "--security-opt", "no-new-privileges:true", "--security-opt", "seccomp=unconfined", "--cap-drop", "ALL", "--read-only",
+        "--tmpfs", "/replicas:uid=1000,gid=1000,mode=700", "--workdir", "/replicas", "--entrypoint", "/app/probe",
+        process.env.DOHC_REPLICA_SANDBOX_TEST_IMAGE, "kernel-surface", mode, "1"]);
+      console.log(mode, result.stdout);
+    }
+  } finally {
+    // This test exclusively owns the unpredictable name.
+    await docker(["rm", "-f", name], false);
   }
 });

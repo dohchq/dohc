@@ -5,20 +5,28 @@ import { join, resolve } from "node:path";
 import { hasRelayWriteObservers, notifyRelayWrite } from "./relayWriteChanges";
 import { closeTestStorages, inspectDatabase, storagePath, tempRoot, testStorage } from "./testing";
 import { createReplicaReadPrincipal } from "./replicaReadPrincipal";
-import { createReplicaSupervisor, type ReplicaChild, type ReplicaChildInput } from "./replicaSupervisor";
+import { createReplicaSupervisor, ReplicaBudgetError, type ReplicaChild, type ReplicaChildInput } from "./replicaSupervisor";
 import { createReplicaEngineStarter } from "./replicaEngine";
 import {ReplicaCurrentViewRefused} from "./storage/replicaCurrentViews";
 import {registered, cleanupLiveDeliveryFixtures} from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport";
 
-const fsFailure = vi.hoisted(() => ({ path: "", free: undefined as number | undefined }));
+const fsFailure = vi.hoisted(() => ({ path: "", vanished: "", operation: "lstat", free: undefined as number | undefined }));
 vi.mock("node:fs/promises", async original => {
   const fs = await original<typeof import("node:fs/promises")>();
-  return { ...fs, statfs: (...args: Parameters<typeof fs.statfs>) => fsFailure.free === undefined ? fs.statfs(...args) : Promise.resolve({bavail: fsFailure.free, bsize: 1}), rm: (...args: Parameters<typeof fs.rm>) => {
+  return { ...fs,
+    lstat: (...args: Parameters<typeof fs.lstat>) => {
+      if (fsFailure.operation === "lstat" && args[0] === fsFailure.vanished) {fsFailure.vanished = ""; return Promise.reject(Object.assign(Error("vanished"), {code: "ENOENT"}));}
+      return fs.lstat(...args);
+    },
+    readdir: (...args: Parameters<typeof fs.readdir>) => {
+      if (fsFailure.operation === "readdir" && args[0] === fsFailure.vanished) {fsFailure.vanished = ""; return Promise.reject(Object.assign(Error("vanished"), {code: "ENOENT"}));}
+      return fs.readdir(...args);
+    }, statfs: (...args: Parameters<typeof fs.statfs>) => fsFailure.free === undefined ? fs.statfs(...args) : Promise.resolve({bavail: fsFailure.free, bsize: 1}), rm: (...args: Parameters<typeof fs.rm>) => {
     if (args[0] === fsFailure.path) return Promise.reject(new Error("EPERM private store"));
     return fs.rm(...args);
   } };
 });
-afterEach(async () => { fsFailure.path = ""; fsFailure.free = undefined; vi.restoreAllMocks(); vi.useRealTimers(); await closeTestStorages(); });
+afterEach(async () => { fsFailure.path = ""; fsFailure.vanished = ""; fsFailure.free = undefined; vi.restoreAllMocks(); vi.useRealTimers(); await closeTestStorages(); });
 
 it("refuses low free space before creating a child", async () => {
   const {storage} = await fixture(), startChild = vi.fn();
@@ -54,14 +62,14 @@ it("closes a busy child at its maximum lifetime", async () => {
   const {storage} = await fixture(), entered = deferred(), stopped = deferred();
   vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
   const close = vi.fn(async () => {stopped.resolve();});
-  let store = "";
-  const supervisor = createReplicaSupervisor({storage, storeRoot: await tempRoot("lifetime"), lifetimeMs: 100,
+  let store = ""; const onError = vi.fn();
+  const supervisor = createReplicaSupervisor({storage, onError, storeRoot: await tempRoot("lifetime"), lifetimeMs: 100,
     startChild: async input => {store = input.storeDir; return {close, currentView: emptyCurrentView(input),
       pull: async () => {entered.resolve(); await stopped.promise;}};}});
   try {
     const activation = supervisor.activate("w"), failure = expect(activation).rejects.toThrow("standing ended");
     await entered.promise; await vi.advanceTimersByTimeAsync(100); await failure; await supervisor.settled("w");
-    expect(close).toHaveBeenCalledOnce(); expect(existsSync(store)).toBe(false);
+    expect(close).toHaveBeenCalledOnce(); expect(existsSync(store)).toBe(false); expect(onError).not.toHaveBeenCalled();
   } finally {stopped.resolve(); await supervisor.close();}
 });
 
@@ -524,4 +532,39 @@ it("does not transfer served blob authority to a replacement incarnation", async
   await read("log?replicationEpoch=epoch&streamIdentity=stream");
   const replacement = principal.issue("w", "replacement");
   expect((await read(`blobs/${shas[0]}`, replacement.bearer)).status).toBe(404);
+});
+
+it.each(["lstat", "readdir"])("skips ENOENT from %s during a store scan", async operation => {
+  const {storage} = await fixture(); const errors: unknown[] = []; let starts = 0;
+  const supervisor = createReplicaSupervisor({storage, storeRoot: await tempRoot("vanishing"), onError: (_, e) => errors.push(e),
+    startChild: async input => {starts++; return {close: async () => {}, currentView: emptyCurrentView(input), pull: async () => {
+      const path = join(input.storeDir, "pending"); mkdirSync(path, {recursive: true});
+      fsFailure.operation = operation; fsFailure.vanished = path;
+    }};}});
+  try {await supervisor.activate("w"); expect(starts).toBe(1); expect(errors).toEqual([]); expect(fsFailure.vanished).toBe("");}
+  finally {await supervisor.close();}
+});
+
+it("checks the free-space floor while a child is busy", async () => {
+  const {storage} = await fixture(), entered = deferred(), stopped = deferred(); let starts = 0, store = "";
+  const errors: unknown[] = [];
+  const supervisor = createReplicaSupervisor({storage, storeRoot: await tempRoot("free-tick"), diskCheckMs: 1,
+    onError: (_, e) => errors.push(e), startChild: async input => {starts++; store = input.storeDir;
+      return {close: async () => {stopped.resolve();}, currentView: emptyCurrentView(input), pull: async () => {
+        fsFailure.free = 0; entered.resolve(); await stopped.promise;
+      }};}});
+  try {
+    const activation = supervisor.activate("w"), failure = expect(activation).rejects.toThrow(/standing ended|free space/);
+    await entered.promise; await failure; await supervisor.settled("w");
+    expect(starts).toBe(1); expect(existsSync(store)).toBe(false); expect(errors.some(e => String(e).includes("free space"))).toBe(true);
+  } finally {stopped.resolve(); await supervisor.close();}
+});
+
+it("does not rebuild a child after a resource-limit failure", async () => {
+  const {storage} = await fixture(); let starts = 0;
+  const supervisor = createReplicaSupervisor({storage, storeRoot: await tempRoot("resource"), startChild: async input => {
+    starts++; return {close: async () => {}, currentView: emptyCurrentView(input), pull: async () => {throw new ReplicaBudgetError("RLIMIT_CPU");}};
+  }});
+  try {await expect(supervisor.activate("w")).rejects.toThrow("RLIMIT_CPU"); await supervisor.settled("w"); expect(starts).toBe(1);}
+  finally {await supervisor.close();}
 });

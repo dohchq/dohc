@@ -13,6 +13,7 @@ import {openSyncRelayStorage} from "../../services/sync-relay/src/storage";
 import {createReplicaReadPrincipal} from "../../services/sync-relay/src/replicaReadPrincipal";
 import {createReplicaEngineStarter} from "../../services/sync-relay/src/replicaEngine";
 import {createReplicaSupervisor} from "../../services/sync-relay/src/replicaSupervisor";
+import {startPublicationOperator} from "../../services/sync-relay/src/appPublicationOperator";
 import {serveReplicaRelay} from "../../services/sync-relay/src/replicaRelaySocket";
 
 const engineExecutable = "/app/engine";
@@ -49,12 +50,42 @@ async function probes() {
     async () => new Response("another lease"));
   const tcp = createServer((_, response) => response.end("relay"));
   tcp.listen(1788, "0.0.0.0"); await once(tcp, "listening");
+  let signals = 0, takedowns = 0;
+  const onSignal = () => {signals++;}; process.on("SIGUSR2", onSignal);
+  const secretPath = "/continuity/publication-operator.secret", operatorPath = "/tmp/proof-operator/control.sock";
+  const operator = await startPublicationOperator({disableAppPublication: input => {
+    takedowns++; return {publicationId: input.publicationId, authorityRevision: 2,
+      operatorTakedown: {actor: "operator" as const, disabledAtMs: input.nowMs, reason: input.reason}};
+  }}, operatorPath, secretPath);
   try {
+    for (const action of ["async-fcntl", "async-ioctl", "setown-ex", "setsig", "siocspgrp"]) {
+      const before = signals;
+      const baselineSignal = action.startsWith("async-") ? once(process, "SIGUSR2", {signal: AbortSignal.timeout(5000)}) : undefined;
+      const baseline = await command("/app/probe-baseline", [action, "sandbox", String(process.pid)], store);
+      assert.equal(baseline.code, 0, JSON.stringify(baseline)); await baselineSignal;
+      if (action.startsWith("async-")) assert(signals > before, `${action}: baseline did not signal`);
+      samples.push({action: `${action}-baseline`, baseline});
+      const controlBefore = signals;
+      const controlSignal = action.startsWith("async-") ? once(process, "SIGUSR2", {signal: AbortSignal.timeout(5000)}) : undefined;
+      const control = await command("/app/probe", [action, "control", String(process.pid)], store);
+      assert.equal(control.code, 0, JSON.stringify(control)); await controlSignal;
+      if (action.startsWith("async-")) assert(signals > controlBefore, `${action}: no signal delivered`);
+      const count = signals;
+      const sandbox = await command("/app/probe", [action, "sandbox", String(process.pid)], store);
+      assert.equal(sandbox.code, 13, JSON.stringify(sandbox)); assert.equal(signals, count);
+      samples.push({action, control, sandbox});
+    }
+    const control = await command("/app/probe", ["operator", "control", String(process.pid), operatorPath, secretPath], store);
+    assert.equal(control.code, 0, JSON.stringify(control)); assert.equal(takedowns, 1);
+    const sandbox = await command("/app/probe", ["operator", "sandbox", String(process.pid), operatorPath], store);
+    assert.equal(sandbox.code, 13, JSON.stringify(sandbox)); assert.match(sandbox.stdout, /authentication failed/); assert.equal(takedowns, 1);
+    const secret = await command("/app/probe", ["operator-secret", "sandbox", String(process.pid), secretPath], store);
+    assert.equal(secret.code, 13); samples.push({action: "operator", control, sandbox, secret});
     // Read before restriction. A confined child cannot read this table at all.
     const table = readFileSync("/proc/net/unix", "utf8");
     for (const line of table.trim().split("\n").slice(1)) {
       const path = line.trim().split(/\s+/)[7];
-      if (path) assert(path.startsWith("/replicas/"), `unexpected Unix listener: ${line}`);
+      if (path) assert(path.startsWith("/replicas/") || path === operatorPath, `unexpected Unix listener: ${line}`);
     }
     const denied = ["data", "environ", "sibling", "proc-unix", "tcp", "postgres", "dns", "udp", "internet", "chmod", "xattr", "truncate", "kill", "kill-group", "tgkill",
       "prlimit", "priority", "scheduler", "ptrace", "io-uring", "bpf", "fork", "exec", "as", "fsize", "nofile"];
@@ -86,7 +117,7 @@ async function probes() {
       samples.push({action: "cpu", mode, result});
     }
     process.kill(process.pid, 0);
-  } finally {await socket.close(); await sibling.close(); tcp.closeAllConnections(); await new Promise<void>(resolve => tcp.close(() => resolve())); await rm(store, {recursive: true, force: true});}
+  } finally {process.off("SIGUSR2", onSignal); await operator.close(); await socket.close(); await sibling.close(); tcp.closeAllConnections(); await new Promise<void>(resolve => tcp.close(() => resolve())); await rm(store, {recursive: true, force: true});}
 }
 
 async function seedOwner() {
@@ -143,12 +174,19 @@ async function ordinaryFixture() {
 }
 
 async function hostile() {
-  for (const mode of ["endless", "corrupt", "frame", "disk"] as const) {
+  for (const mode of ["endless", "corrupt", "frame", "disk", "unlinked"] as const) {
     let store = "", childPid: number | undefined;
     const errors: string[] = [];
-    const supervisor = createReplicaSupervisor({storage, storeRoot: "/replicas", minFreeBytes: 1024, maxStoreBytes: mode === "disk" ? 1024*1024 : 32*1024*1024,
+    const supervisor = createReplicaSupervisor({storage, storeRoot: "/replicas", minFreeBytes: mode === "unlinked" ? 48*1024*1024 : 1024, maxStoreBytes: mode === "disk" ? 1024*1024 : 32*1024*1024,
       diskCheckMs: 10, onError: (_, error) => errors.push(String(error)), startChild: async input => {
         store = input.storeDir;
+        if (mode === "unlinked") {
+          const processChild = spawn("/app/probe", ["unlinked", "sandbox", String(process.pid)], {cwd: store, env: {}, stdio: ["ignore", "pipe", "pipe"]});
+          childPid = processChild.pid; const exited = once(processChild, "close").then(() => {});
+          processChild.stdout.resume(); processChild.stderr.resume();
+          return {exited, close: async () => {processChild.kill("SIGKILL"); await exited;}, currentView: async () => {throw Error("no view");},
+            pull: async () => {await exited; throw Error("unlinked writer stopped");}};
+        }
         if (mode === "frame") {
           const processChild = spawn(engineExecutable, ["--replica"], {cwd: store, env: {DOHC_ENGINE_AUTH_TOKEN: "probe"}, stdio: ["pipe", "pipe", "pipe"]});
           childPid = processChild.pid;
@@ -175,12 +213,12 @@ async function hostile() {
       await assert.rejects(supervisor.activate("w")); await supervisor.settled("w");
       assert(!existsSync(store), `${mode}: retired store remains`); assert(childPid);
       assert.throws(() => process.kill(childPid!, 0), /ESRCH/); process.kill(process.pid, 0);
-      assert(errors.length, `${mode}: no reported failure`); samples.push({action: mode, errors});
+      assert(errors.length, `${mode}: no reported failure`); if (mode === "unlinked") assert(errors.some(e => e.includes("free space")), errors.join("\n")); samples.push({action: mode, errors});
     } finally {await supervisor.close();}
   }
 }
 
-// Both binaries use identical runtime settings. The test-only control omits only apply().
+// Control is the sandbox policy at 49a3b174a; both binaries use identical runtime settings.
 async function measure() {
   const results: {sandbox: boolean; pull: number; cut: number}[] = [];
   for (let pair = -1; pair < 31; pair++) {
@@ -213,7 +251,7 @@ async function measure() {
     const sorted = results.filter(r => r.sandbox === sandbox).map(r => r[key as "pull" | "cut"]).sort((a, b) => a-b);
     return [key, {median: sorted[15], p95: sorted[29]}];
   }))}));
-  samples.push({action: "measure", pairs: 31, fixture: "four 38 KiB text files; fresh store; complete pull and cut", summary, results});
+  samples.push({action: "measure", comparison: "49a3b174a policy versus fixed policy", pairs: 31, fixture: "four 38 KiB text files; fresh store; complete pull and cut", summary, results});
 }
 
 try {

@@ -40,7 +40,7 @@ import {liveValidation} from "./liveValidation.js";
 import {readRelayDeviceDeliveryConfig} from "./deviceLiveHostConfig";
 import {parseDeviceControlLimits} from "@dohc/live-session-contract/device-control";
 import { startPublicationOperator } from "./appPublicationOperator";
-import { operatorSocketPath } from "./appPublicationOperatorProtocol";
+import { operatorSecretPath, operatorSocketPath } from "./appPublicationOperatorProtocol";
 import { openRelayDeployment } from "./relayDeployment";
 import { guardRelayResponses } from "./relayResponseStanding";
 import { startServiceLiveHost, deleteConfiguredServiceWorkspaceRoots } from "./serviceLiveHost";
@@ -688,7 +688,7 @@ if (namedLiveConfig) {
   server.once("close", namedLive.close);
   process.once("SIGINT", namedLive.close); process.once("SIGTERM", namedLive.close);
 }
-const publicationOperator = await startPublicationOperator(storage, operatorSocketPath());
+const publicationOperator = await startPublicationOperator(storage, operatorSocketPath(), operatorSecretPath());
 
 // A server that does not run automations keeps no copies of workspaces.
 const automationRoot = process.env.DOHC_RELAY_SERVICE_HOST_ROOT ? join(process.env.DOHC_RELAY_SERVICE_HOST_ROOT, "automations") : undefined;

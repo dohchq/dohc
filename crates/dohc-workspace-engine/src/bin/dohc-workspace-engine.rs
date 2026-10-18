@@ -76,9 +76,27 @@ impl From<Envelope> for OutputItem {
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args == ["--replica-sandbox-check"] {
+        let mut random = [0u8; 16];
+        getrandom::fill(&mut random)?;
+        let store = std::env::temp_dir().join(format!(
+            "dohc-sandbox-check-{:032x}",
+            u128::from_le_bytes(random)
+        ));
+        std::fs::create_dir(&store)?;
+        let result = std::process::Command::new(std::env::current_exe()?)
+            .arg("--replica-sandbox-check-store")
+            .arg(&store)
+            .status();
+        std::fs::remove_dir(&store)?;
+        if !result?.success() {
+            return Err(io::Error::other("replica sandbox check failed").into());
+        }
+        return Ok(());
+    }
+    if args.len() == 2 && args[0] == "--replica-sandbox-check-store" {
         println!(
-            "Landlock ABI {}",
-            dohc_workspace_engine::replica_sandbox::apply(&std::env::current_dir()?)?
+            "Landlock policy ABI {}",
+            dohc_workspace_engine::replica_sandbox::apply(std::path::Path::new(&args[1]))?
         );
         return Ok(());
     }

@@ -1,4 +1,4 @@
-# Test-only image. Build the three binaries in WSL before building this stage.
+# Test-only image. Build the four binaries in WSL before building this stage.
 FROM node:24.16.0-bookworm-slim AS replica-sandbox-test
 WORKDIR /app
 COPY . /app/

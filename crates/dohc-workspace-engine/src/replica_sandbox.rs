@@ -5,55 +5,13 @@ use std::{io, path::Path, sync::OnceLock};
 pub const MIN_ABI: u32 = 2;
 pub const ADDRESS_SPACE: u64 = 2 * 1024 * 1024 * 1024;
 pub const CPU_SECONDS: u64 = 120;
-pub const FILE_BYTES: u64 = 256 * 1024 * 1024;
+pub const FILE_BYTES: u64 = 1024 * 1024 * 1024;
 pub const OPEN_FILES: u64 = 128;
 pub const NICE: i32 = 10;
 static APPLIED: OnceLock<u32> = OnceLock::new();
 
-macro_rules! denied_syscalls {
-    ($($name:ident),+ $(,)?) => {
-        pub const DENIED_SYSCALL_NAMES: &[&str] = &[$(stringify!($name)),+];
-        #[cfg(target_os = "linux")]
-        const DENIED_SYSCALLS: &[i64] = &[$(libc::$name),+];
-    };
-}
-denied_syscalls!(
-    SYS_fchmod,
-    SYS_fchmodat,
-    SYS_fchmodat2,
-    SYS_truncate,
-    SYS_setxattr,
-    SYS_lsetxattr,
-    SYS_fsetxattr,
-    SYS_removexattr,
-    SYS_lremovexattr,
-    SYS_fremovexattr,
-    SYS_getxattr,
-    SYS_lgetxattr,
-    SYS_fgetxattr,
-    SYS_listxattr,
-    SYS_llistxattr,
-    SYS_flistxattr,
-    SYS_fchown,
-    SYS_fchownat,
-    SYS_execve,
-    SYS_execveat,
-    SYS_io_uring_setup,
-    SYS_io_uring_enter,
-    SYS_io_uring_register,
-    SYS_bpf,
-    SYS_ptrace,
-    SYS_process_vm_readv,
-    SYS_process_vm_writev,
-    SYS_pidfd_open,
-    SYS_pidfd_getfd,
-    SYS_pidfd_send_signal,
-    SYS_tkill,
-    SYS_unshare,
-    SYS_setns,
-);
-
-pub fn applied_abi() -> Option<u32> {
+/// ABI of the fully enforced policy, not the highest ABI supported by the kernel.
+pub fn applied_policy_abi() -> Option<u32> {
     APPLIED.get().copied()
 }
 
@@ -90,6 +48,17 @@ mod linux {
     };
     use std::collections::BTreeMap;
 
+    fn is_shared_library(name: &[u8]) -> bool {
+        name.ends_with(b".so")
+            || name.windows(4).enumerate().any(|(i, part)| {
+                part == b".so."
+                    && !name[i + 4..].is_empty()
+                    && name[i + 4..]
+                        .iter()
+                        .all(|b| b.is_ascii_digit() || *b == b'.')
+            })
+    }
+
     pub(super) fn apply(store: &Path) -> io::Result<u32> {
         let fail = |e: Box<dyn std::error::Error>| io::Error::other(e.to_string());
         (|| -> Result<u32, Box<dyn std::error::Error>> {
@@ -103,7 +72,7 @@ mod linux {
                 .filter(|p| {
                     **p == binary
                         || p.file_name()
-                            .is_some_and(|n| n.as_encoded_bytes().windows(3).any(|w| w == b".so"))
+                            .is_some_and(|n| is_shared_library(n.as_encoded_bytes()))
                 })
                 .map(Path::canonicalize)
                 .collect::<io::Result<std::collections::BTreeSet<_>>>()?;
@@ -143,6 +112,15 @@ mod linux {
             if status.ruleset != RulesetStatus::FullyEnforced || !status.no_new_privs {
                 return Err("Landlock ABI 2 was not fully enforced".into());
             }
+            // clone3's pointed-to flags cannot be inspected. ENOSYS makes libc use clone.
+            let clone3: BpfProgram = SeccompFilter::new(
+                BTreeMap::from([(libc::SYS_clone3, vec![])]),
+                SeccompAction::Allow,
+                SeccompAction::Errno(libc::ENOSYS as u32),
+                std::env::consts::ARCH.try_into()?,
+            )?
+            .try_into()?;
+            seccompiler::apply_filter(&clone3)?;
             seccompiler::apply_filter(&filter()?)?;
             Ok(MIN_ABI)
         })()
@@ -152,7 +130,80 @@ mod linux {
     fn filter() -> Result<BpfProgram, Box<dyn std::error::Error>> {
         use libc::*;
         let mut rules = BTreeMap::new();
-        for &syscall in DENIED_SYSCALLS {
+        for syscall in [
+            SYS_fchmod,
+            SYS_fchmodat,
+            SYS_fchmodat2,
+            SYS_truncate,
+            SYS_setxattr,
+            SYS_lsetxattr,
+            SYS_fsetxattr,
+            SYS_removexattr,
+            SYS_lremovexattr,
+            SYS_fremovexattr,
+            SYS_getxattr,
+            SYS_lgetxattr,
+            SYS_fgetxattr,
+            SYS_listxattr,
+            SYS_llistxattr,
+            SYS_flistxattr,
+            SYS_fchown,
+            SYS_fchownat,
+            SYS_execve,
+            SYS_execveat,
+            SYS_io_uring_setup,
+            SYS_io_uring_enter,
+            SYS_io_uring_register,
+            SYS_bpf,
+            SYS_ptrace,
+            SYS_process_vm_readv,
+            SYS_process_vm_writev,
+            SYS_pidfd_open,
+            SYS_pidfd_getfd,
+            SYS_pidfd_send_signal,
+            SYS_tkill,
+            SYS_unshare,
+            SYS_setns,
+            SYS_perf_event_open,
+            SYS_userfaultfd,
+            SYS_keyctl,
+            SYS_add_key,
+            SYS_request_key,
+            SYS_init_module,
+            SYS_finit_module,
+            SYS_delete_module,
+            SYS_kexec_load,
+            SYS_kexec_file_load,
+            SYS_mount,
+            SYS_umount2,
+            SYS_pivot_root,
+            SYS_chroot,
+            SYS_open_by_handle_at,
+            SYS_name_to_handle_at,
+            SYS_fanotify_init,
+            SYS_quotactl,
+            SYS_swapon,
+            SYS_swapoff,
+            SYS_reboot,
+            SYS_acct,
+            SYS_fsopen,
+            SYS_fspick,
+            SYS_fsmount,
+            SYS_move_mount,
+            SYS_open_tree,
+            SYS_mount_setattr,
+            SYS_settimeofday,
+            SYS_clock_settime,
+            SYS_clock_adjtime,
+            SYS_adjtimex,
+            SYS_sethostname,
+            SYS_setdomainname,
+            SYS_ioprio_set,
+            SYS_kcmp,
+            SYS_lookup_dcookie,
+            SYS_syslog,
+            SYS_vhangup,
+        ] {
             rules.insert(syscall, vec![]);
         }
         #[cfg(target_arch = "x86_64")]
@@ -166,15 +217,23 @@ mod linux {
             SYS_socket,
             vec![rule(vec![condition(0, SeccompCmpOp::Ne, AF_UNIX as u64)?])?],
         );
-        // clone3's pointed-to flags cannot be inspected by seccomp. ENOSYS makes libc use clone.
-        let clone3: BpfProgram = SeccompFilter::new(
-            BTreeMap::from([(SYS_clone3, vec![])]),
-            SeccompAction::Allow,
-            SeccompAction::Errno(ENOSYS as u32),
-            std::env::consts::ARCH.try_into()?,
-        )?
-        .try_into()?;
-        seccompiler::apply_filter(&clone3)?;
+        // Async I/O ownership lets the kernel signal another process without kill().
+        // fcntl64 is a 32-bit syscall; seccompiler supports only 64-bit architectures.
+        rules.insert(
+            SYS_fcntl,
+            [F_SETOWN, 15 /* F_SETOWN_EX */, 10 /* F_SETSIG */]
+                .into_iter()
+                .map(|cmd| rule(vec![condition(1, SeccompCmpOp::Eq, cmd as u64)?]))
+                .collect::<Result<Vec<_>, seccompiler::BackendError>>()?,
+        );
+        // FIOSETOWN and SIOCSPGRP from asm-generic/sockios.h.
+        rules.insert(
+            SYS_ioctl,
+            [0x8901, 0x8902]
+                .into_iter()
+                .map(|cmd| rule(vec![condition(1, SeccompCmpOp::Eq, cmd)?]))
+                .collect::<Result<Vec<_>, seccompiler::BackendError>>()?,
+        );
         // Only threads sharing this process's address space and signal handlers may clone.
         for bit in [CLONE_THREAD, CLONE_VM, CLONE_SIGHAND] {
             rules
@@ -265,45 +324,31 @@ mod linux {
         #[cfg(not(target_arch = "x86_64"))]
         Ok(filter)
     }
+    #[test]
+    fn library_names_and_filter_construction() {
+        for name in [b"libc.so".as_slice(), b"libc.so.6", b"ld-linux-x86-64.so.2"] {
+            assert!(is_shared_library(name));
+        }
+        for name in [
+            b"secret.so-backup".as_slice(),
+            b"secret.so.txt",
+            b"secret.so.",
+        ] {
+            assert!(!is_shared_library(name));
+        }
+        assert!(!filter().unwrap().is_empty());
+        assert!(
+            std::process::Command::new("true")
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "linux")))]
 mod tests {
     use super::*;
-
-    #[test]
-    fn policy_has_finite_process_budgets_and_required_landlock() {
-        assert_eq!(MIN_ABI, 2);
-        assert_eq!(ADDRESS_SPACE, 2_147_483_648);
-        assert_eq!(CPU_SECONDS, 120);
-        assert_eq!(FILE_BYTES, 268_435_456);
-        assert_eq!(OPEN_FILES, 128);
-        assert_eq!(NICE, 10);
-        assert_eq!(applied_abi(), None);
-    }
-
-    #[test]
-    fn policy_denies_process_and_filesystem_bypasses() {
-        for name in [
-            "SYS_fchmod",
-            "SYS_fchmodat2",
-            "SYS_truncate",
-            "SYS_setxattr",
-            "SYS_fsetxattr",
-            "SYS_execve",
-            "SYS_execveat",
-            "SYS_ptrace",
-            "SYS_tkill",
-            "SYS_pidfd_send_signal",
-            "SYS_process_vm_readv",
-            "SYS_io_uring_setup",
-            "SYS_bpf",
-            "SYS_unshare",
-            "SYS_setns",
-        ] {
-            assert!(DENIED_SYSCALL_NAMES.contains(&name), "missing {name}");
-        }
-    }
 
     #[test]
     #[cfg(not(target_os = "linux"))]

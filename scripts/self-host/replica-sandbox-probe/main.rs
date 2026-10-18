@@ -15,7 +15,7 @@ fn main() {
         ffi::CString,
         fs::File,
         io::{Read, Write},
-        os::unix::{net::UnixStream, process::CommandExt},
+        os::unix::{io::AsRawFd, net::UnixStream, process::CommandExt},
     };
     let args: Vec<_> = std::env::args().collect();
     let action = args[1].as_str();
@@ -44,6 +44,116 @@ fn main() {
         // Every unsafe call below uses initialized arguments. Targets belong to this test container.
         let result = unsafe {
             match action {
+                "async-fcntl" | "async-ioctl" | "setown-ex" | "setsig" | "siocspgrp" => {
+                    let (mut reader, mut writer) = UnixStream::pair()?;
+                    let fd = reader.as_raw_fd();
+                    let owner = if action == "async-ioctl" {
+                        libc::ioctl(fd, 0x8901, &parent)
+                    } else if action == "siocspgrp" {
+                        let group = libc::getpgid(parent);
+                        libc::ioctl(fd, 0x8902, &group)
+                    } else if action == "setown-ex" {
+                        let owner = [1i32, parent]; // F_OWNER_PID
+                        libc::fcntl(fd, 15 /* F_SETOWN_EX */, owner.as_ptr())
+                    } else if action == "setsig" {
+                        libc::fcntl(fd, 10 /* F_SETSIG */, libc::SIGUSR2)
+                    } else {
+                        libc::fcntl(fd, libc::F_SETOWN, parent)
+                    };
+                    if owner < 0 {
+                        return Err(std::io::Error::last_os_error().into());
+                    }
+                    if action.starts_with("async-") {
+                        if libc::fcntl(fd, 10 /* F_SETSIG */, libc::SIGUSR2) < 0 {
+                            return Err(std::io::Error::last_os_error().into());
+                        }
+                        let flags = libc::fcntl(fd, libc::F_GETFL);
+                        if libc::fcntl(fd, libc::F_SETFL, flags | libc::O_ASYNC | libc::O_NONBLOCK)
+                            < 0
+                        {
+                            return Err(std::io::Error::last_os_error().into());
+                        }
+                        writer.write_all(b"signal relay")?;
+                        let mut byte = [0u8; 1];
+                        reader.read_exact(&mut byte)?;
+                    }
+                    0
+                }
+                "operator" => {
+                    let secret = if confined {
+                        String::new()
+                    } else {
+                        std::fs::read_to_string(&args[5])?
+                    };
+                    let mut socket = UnixStream::connect(&args[4])?;
+                    writeln!(
+                        socket,
+                        "{{\"type\":\"disable-publication\",\"publicationId\":\"{}\",\"reason\":\"local proof\",\"secret\":\"{secret}\"}}",
+                        "a".repeat(64)
+                    )?;
+                    let mut response = String::new();
+                    socket.read_to_string(&mut response)?;
+                    println!("{response}");
+                    if !response.contains("\"code\":0") {
+                        return Err("operator refused".into());
+                    }
+                    0
+                }
+                "operator-secret" => {
+                    std::fs::read(&args[4])?;
+                    0
+                }
+                "unlinked" => {
+                    let mut file = File::create("unlinked")?;
+                    std::fs::remove_file("unlinked")?;
+                    for _ in 0..24 {
+                        file.write_all(&vec![1u8; 1024 * 1024])?;
+                    }
+                    println!("unlinked-ready");
+                    std::io::stdout().flush()?;
+                    loop {
+                        std::thread::park();
+                    }
+                }
+                "kernel-surface" => {
+                    for syscall in [
+                        libc::SYS_perf_event_open,
+                        libc::SYS_userfaultfd,
+                        libc::SYS_keyctl,
+                        libc::SYS_add_key,
+                        libc::SYS_request_key,
+                        libc::SYS_init_module,
+                        libc::SYS_finit_module,
+                        libc::SYS_delete_module,
+                        libc::SYS_kexec_load,
+                        libc::SYS_kexec_file_load,
+                        libc::SYS_mount,
+                        libc::SYS_umount2,
+                        libc::SYS_pivot_root,
+                        libc::SYS_chroot,
+                        libc::SYS_open_by_handle_at,
+                        libc::SYS_name_to_handle_at,
+                        libc::SYS_fanotify_init,
+                        libc::SYS_quotactl,
+                        libc::SYS_swapon,
+                        libc::SYS_swapoff,
+                        libc::SYS_reboot,
+                        libc::SYS_acct,
+                    ] {
+                        // Invalid null/zero arguments cannot change host state in the control.
+                        let result = libc::syscall(syscall, 0, 0, 0, 0, 0, 0);
+                        let errno = std::io::Error::last_os_error().raw_os_error();
+                        if confined {
+                            assert_eq!(
+                                (result, errno),
+                                (-1, Some(libc::EPERM)),
+                                "syscall {syscall}"
+                            );
+                        }
+                        println!("syscall={syscall} result={result} errno={errno:?}");
+                    }
+                    0
+                }
                 "data" => {
                     std::fs::read("/data/secret")?;
                     0
@@ -177,13 +287,18 @@ fn main() {
                         assert_eq!((limit.rlim_cur, limit.rlim_max), (seconds, seconds));
                     }
                     let mut time: libc::timespec = std::mem::zeroed();
+                    let mut next_report = seconds as i64;
                     loop {
                         for i in 0..100_000 {
                             std::hint::black_box(i * 2);
                         }
                         libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut time);
-                        // Give the kernel's CPU accounting timer time to deliver the hard-limit signal.
-                        if time.tv_sec > seconds as i64 + 5 {
+                        if confined && time.tv_sec >= next_report {
+                            println!("cpu clock={}", time.tv_sec);
+                            next_report += 10;
+                        }
+                        // Only the unsandboxed control exits voluntarily. The outer test bounds wall time.
+                        if !confined && time.tv_sec > seconds as i64 + 5 {
                             break;
                         }
                     }

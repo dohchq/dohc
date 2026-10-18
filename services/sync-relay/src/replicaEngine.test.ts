@@ -3,10 +3,11 @@ import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createReplicaEngineStarter } from "./replicaEngine";
 
-const mocks = vi.hoisted(() => ({ spawn: vi.fn(), closeSocket: vi.fn(async () => {}) }));
+const mocks = vi.hoisted(() => ({ spawn: vi.fn(), closeSocket: vi.fn(async () => {}), status: "Seccomp:\t2\n" }));
 vi.mock("node:child_process", () => ({ spawn: mocks.spawn }));
+vi.mock("node:fs", () => ({readFileSync: () => mocks.status}));
 vi.mock("node:os", () => ({release: () => "6.18.54"}));
-beforeEach(() => vi.stubGlobal("process", {...process, platform: "linux"}));
+beforeEach(() => {mocks.status = "Seccomp:\t2\n"; vi.stubGlobal("process", {...process, platform: "linux"});});
 vi.mock("./replicaRelaySocket", () => ({
   serveReplicaRelay: async (dir: string) => ({socketPath: `${dir}/relay.sock`, close: mocks.closeSocket}),
 }));
@@ -21,6 +22,7 @@ class Child extends EventEmitter {
   manualClose = false;
   mode = "replica";
   abi: unknown = 2;
+  limitOnPull?: string;
   requests: Array<{ method: string; workspace?: string; params: Record<string, unknown> }> = [];
   pages = [{ status: "complete", nextCursor: 2, pendingCursor: { kind: "relay", token: "issued-2" }, hasMore: true },
     { status: "complete", nextCursor: 3, pendingCursor: { kind: "relay", token: "issued-3" }, hasMore: false }];
@@ -37,6 +39,7 @@ class Child extends EventEmitter {
             maxCollectionLen: 16_384, maxJsonDepth: 32, maxBatchLen: 64, maxBlobChunkBytes: 262_144 } }));
         else {
           this.requests.push(row);
+          if (row.method === "sync.pull" && this.limitOnPull) {this.finish(this.limitOnPull); return;}
           const result = row.method === "engine.ping" ? {ok: true, mode: this.mode, landlockAbi: this.abi} : row.method === "workspace.open" ? { workspace: "private-handle" } :
             row.method === "replica.frontiers" ? {revision: 1, logCursor: 3, journalCursor: 0} :
             row.method === "sync.pull" ? this.pages.shift() : { adopted: true, committed: true };
@@ -45,7 +48,7 @@ class Child extends EventEmitter {
       }
     });
   }
-  finish() { this.stdout.end(); this.stderr.end(); this.emit("close", 0, "SIGKILL"); }
+  finish(signal: string = "SIGKILL") { this.stdout.end(); this.stderr.end(); this.emit("close", 0, signal); }
 }
 const input = () => ({ storeDir: process.cwd(), relayHandler: vi.fn(async (_request: Request) => Response.json({rows: [], nextCursor: 0, hasMore: false})), lease: { workspaceId: "w", ownerUserId: "owner", replicationEpoch: "epoch",
   streamIdentity: "stream", epochLogFloor: 0, logSeq: 3, journalCursor: 0, shareGrantBindings: '[["grant",1]]', incarnation: "private", bearer: "dohc-replica-read-v1.test" } });
@@ -137,4 +140,24 @@ it("exposes child exit while idle so the supervisor can retire it", async () => 
     expect(exited).toBeInstanceOf(Promise);
     child.finish(); await exited;
   } finally { await replica.close(); }
+});
+
+it("refuses an unfiltered relay before spawn", () => {
+  mocks.status = "Seccomp:\t0\n";
+  expect(() => createReplicaEngineStarter({engineExecutable: process.execPath, allowDevelopment: true})).toThrow(/outer seccomp filter/);
+  expect(mocks.spawn).not.toHaveBeenCalled();
+});
+
+it.each([["SIGXFSZ", "RLIMIT_FSIZE"], ["SIGXCPU", "RLIMIT_CPU"], ["SIGKILL", "RLIMIT_CPU"], ["SIGABRT", "RLIMIT_AS"]])("preserves a resource-limit diagnosis for %s", async (signal, limit) => {
+  const {child, replica} = await fixture();
+  child.finish(signal);
+  expect(String(await replica.exited)).toContain(limit);
+  await replica.close();
+});
+
+it.each([["SIGXFSZ", "RLIMIT_FSIZE"], ["SIGXCPU", "RLIMIT_CPU"]])("reports %s during the first pull as a budget failure", async (signal, limit) => {
+  const child = new Child(); child.limitOnPull = signal;
+  const {replica} = await fixture(child);
+  try {await expect(replica.pull()).rejects.toMatchObject({message: expect.stringContaining(limit), constructor: expect.objectContaining({name: "ReplicaBudgetError"})});}
+  finally {await replica.close();}
 });
