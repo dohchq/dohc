@@ -53,11 +53,18 @@ const AGENT_CLASSES: Record<IdentityHue, string> = {
   indigo: "border-hue-indigo bg-bg text-hue-indigo", plum: "border-hue-plum bg-bg text-hue-plum",
   rose: "border-hue-rose bg-bg text-hue-rose",
 };
+/** The color chosen for this agent itself; null is the default. */
+export function agentChoice(token: ActorPresentation): IdentityHue | null {
+  return agentOverrides.has(token.group) ? agentOverrides.get(token.group)?.hue ?? null : token.hue;
+}
+// The renderer's own tokens and an unknown author's group name no agent main can color.
+const UNCHOOSABLE_GROUPS = new Set([neutralPresentation.group, ownPresentation.group, ownAgentPresentation.group]);
+/** Whether main issued this agent's group, so a color can be chosen for it. */
+export function canChooseAgentColor(token: ActorPresentation): boolean {
+  return !UNCHOOSABLE_GROUPS.has(token.group) && !token.group.startsWith("unknown:");
+}
 function hueFor(token: ActorPresentation, kind: "human" | "agent"): IdentityHue | null {
-  if (kind === "agent") {
-    const hue = agentOverrides.has(token.group) ? agentOverrides.get(token.group)?.hue ?? null : token.hue;
-    return hue ?? (token.self ? chosenHue("agent") : null);
-  }
+  if (kind === "agent") return agentChoice(token) ?? (token.self ? chosenHue("agent") : null);
   return (token.self ? chosenHue("human") : null) ?? token.hue;
 }
 export function presentationClasses(token: ActorPresentation, kind: "human" | "agent" = "human"): string {

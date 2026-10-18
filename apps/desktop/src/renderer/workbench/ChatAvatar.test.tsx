@@ -48,6 +48,16 @@ describe("ChatAvatar presentation", () => {
     expect(screen.getByTitle("Ada").className).toContain("text-muted");
     expect(screen.getByTitle("Agent").className).toContain("text-agent");
   });
+  it.each(["post", "row", "comment", "strip"] as const)("draws an agent square and a person round at %s size, whatever the color", (size) => {
+    render(<ChatAvatar name="Ada" kind="human" size={size} presentation={{ ...neutralPresentation, hue: "teal" }} />);
+    render(<ChatAvatar name="Nova" kind="agent" size={size} presentation={neutralPresentation} />);
+    render(<ChatAvatar name="Orbit" kind="agent" size={size} presentation={{ group: "orbit", hue: "plum", self: false }} />);
+    expect(screen.getByTitle("Ada").className).toMatch(/\brounded-full\b/u);
+    for (const agent of ["Nova", "Orbit"]) {
+      expect(screen.getByTitle(agent).className).not.toContain("rounded-full");
+      expect(screen.getByTitle(agent).className).toMatch(/\brounded(-lg)?\b/u);
+    }
+  });
   it("keeps automation marks bare", () => {
     render(<ChatAvatar name="Job" kind="automation" presentation={neutralPresentation} />);
     expect(screen.getByTitle("Job").className).not.toMatch(/\b(border|hue|agent|rounded)/u);

@@ -18,6 +18,10 @@ const SIZES = {
 
 const ICON = { post: 16, row: 14, comment: 12, strip: 10 } as const;
 
+// An agent is a rounded square and a person is round, whatever their colors.
+// The drawing rounds a 28px square by 8px; an 18px strip takes 4px.
+const AGENT_RADIUS = { post: "rounded-lg", row: "rounded-lg", comment: "rounded-lg", strip: "rounded" } as const;
+
 const segmenter = typeof Intl.Segmenter === "function"
   ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
   : undefined;
@@ -62,12 +66,12 @@ export function ChatAvatar(props: {
     <span
       aria-hidden
       title={props.name}
-      className={`inline-grid shrink-0 place-items-center rounded-full border font-mono font-semibold ${
+      className={`inline-grid shrink-0 place-items-center border font-mono font-semibold ${
         SIZES[size]
       } ${
         agent
-          ? classes
-          : `border-line ${classes}`
+          ? `${AGENT_RADIUS[size]} ${classes}`
+          : `rounded-full border-line ${classes}`
       } ${props.className ?? ""}`}
     >
       {agent ? <Sparkles size={ICON[size]} strokeWidth={1.9} aria-hidden /> : initials(props.name)}

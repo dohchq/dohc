@@ -4,6 +4,7 @@ import { AutomationBadge } from "./AutomationBadge";
 import { LegendList, type LegendListRef, type OnViewableItemsChanged } from "@legendapp/list/react";
 import { formatChatDay, formatChatTime, formatClock, formatClockDigits, sameChatDay } from "../time";
 import { ChatAvatar } from "./ChatAvatar";
+import { AgentColorAvatar, AgentColorName, AgentColorScope } from "./AgentColorPicker";
 import { ComposerSendButton } from "./ComposerSendButton";
 import { Ref } from "../ui/Ref";
 import { SkeletonRows } from "../ui/SkeletonRows";
@@ -734,6 +735,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
             New
           </span>
         ) : null}
+        <AgentColorScope name={chatAuthorLabel(message)} kind={message.authorKind} presentation={message.presentation}>
         <div className="group -mx-2 flex gap-2.5 rounded-lg px-2 hover:bg-hover">
           {/* A continued message's time sits in the avatar's column, ending at
               its edge, so "12:45" fits at every hour. The full time is its
@@ -752,11 +754,13 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
                 <span className="sr-only">{formatClock(message.createdAtMs)}</span>
               </>
             ) : (
-              <ChatAvatar presentation={message.presentation}
-                name={message.authorDisplayName}
-                kind={message.authorKind}
-                size="comment"
-              />
+              <AgentColorAvatar>
+                <ChatAvatar presentation={message.presentation}
+                  name={message.authorDisplayName}
+                  kind={message.authorKind}
+                  size="comment"
+                />
+              </AgentColorAvatar>
             )}
           </span>
           <div className="relative min-w-0 flex-1 pr-6">
@@ -769,7 +773,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
                     isAgent ? "text-agent" : "text-ink"
                   }`}
                 >
-                  {chatAuthorLabel(message)}
+                  <AgentColorName>{chatAuthorLabel(message)}</AgentColorName>
                 </span>
                 {isAgent ? <AgentBadge testIdPrefix={props.testIdPrefix} author={message} viewerAuthorId={props.reactionControls?.viewerAuthorId} /> : null}
                 {message.authorKind === "automation" ? (
@@ -813,6 +817,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
             ) : null}
           </div>
         </div>
+        </AgentColorScope>
       </li>
     );
   }, [props, candidates, reactionsByMessage]);
