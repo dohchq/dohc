@@ -13,7 +13,7 @@ fn plan_with(op: CaptureOp) -> ReconcilePlan {
         from_generation: ScanGeneration(0),
         to_generation: ScanGeneration(1),
         ops: vec![op],
-        retained_over_cap: Vec::new(),
+        retained_unread: Vec::new(),
         unconfirmed_removed: Vec::new(),
         respelled_retires: Default::default(),
         degraded: false,

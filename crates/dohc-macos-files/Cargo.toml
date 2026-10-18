@@ -5,7 +5,7 @@ edition = "2024"
 license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "Safe wrappers that copy a file's macOS ACL and extended attributes, and flush behind a drive barrier."
+description = "Safe wrappers that copy a file's macOS ACL and extended attributes, flush behind a drive barrier, and keep a folder out of iCloud Drive."
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
 libc = "0.2"
