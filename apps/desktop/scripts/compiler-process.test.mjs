@@ -279,12 +279,15 @@ spawn(process.execPath,['-e',launcher,swapper,process.argv[2]],{stdio:'ignore'})
     t.after(()=>{try{process.kill(escaped,'SIGKILL');}catch{}});
     controller.abort();await running;
     assert.equal(await readFile(join(canary,'keep.txt'),'utf8'),'user data');
-    if(!alive(escaped)){
+    // A swapper the owner killed answers kill(pid, 0) until launchd reaps it.
+    let escapedAlive=alive(escaped)&&!zombie(escaped);
+    // Stop the swapper before the fixture's own recursive cleanup runs.
+    if(escapedAlive)try{process.kill(escaped,'SIGKILL');}catch(error){if(error.code!=='ESRCH')throw error;escapedAlive=false;}
+    if(!escapedAlive){
       for(const name of await readdir(context.scratch))await rm(join(context.scratch,name),{recursive:true,force:true});
       continue;
     }
-    // Stop the swapper before the fixture's own recursive cleanup runs.
-    process.kill(escaped,'SIGKILL');assert.equal(await exited(escaped),true);
+    assert.equal(await exited(escaped),true);
     return;
   }
   t.skip('The owner caught the swapper in every round, so no escaped process raced the cleanup.');
