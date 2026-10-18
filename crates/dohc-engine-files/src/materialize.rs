@@ -1104,6 +1104,13 @@ fn materialize_one_inner(
     let MaterializeOptions { now_ms, faults, .. } = *options;
     // Canonicalizing the root deliberately accepts aliases above (or at) the
     // workspace boundary. The component walk below owns only descendants.
+    // A job an older build queued for OS metadata the floor now excludes (an
+    // old `.DS_Store`) has nothing to place. It ends as cancelled and reports no
+    // further work, so no replay counts it as failed.
+    if crate::floor::names_os_metadata(&job.target_path) {
+        store.mark_materialization_cancelled(&job.job_id, now_ms)?;
+        return Ok(JobOutcome::AlreadyMaterialized);
+    }
     let canonical_root =
         std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
     let target = resolve_target(&canonical_root, &job.target_path)?;

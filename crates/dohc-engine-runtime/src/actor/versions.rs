@@ -1166,7 +1166,10 @@ pub(super) fn materialize_relay_page_on_store(
     let hosted = dohc_engine_sync::is_hosted_replica(store, workspace_id)?;
     let mut page = Vec::new();
     for change in changes {
-        if change.version_id != active {
+        // An older build's change at a path the floor now ignores (an old
+        // `.DS_Store`) has no file here.
+        if change.version_id != active || dohc_engine_files::floor::names_os_metadata(&change.path)
+        {
             continue;
         }
         if !matches!(change.operation, "write" | "delete") {
@@ -1543,6 +1546,127 @@ pub(super) mod tests {
         )
         .unwrap();
         assert_eq!(HEADS_HELD.with(Cell::get), (0, 1));
+    }
+
+    /// An older build's page can carry a change for Finder's `.DS_Store`. The
+    /// page skips it and still places the rest.
+    #[test]
+    fn a_page_skips_a_change_at_an_ignored_path() {
+        let (scratch, _, mut store) = dohc_engine_testkit::open_store();
+        ensure_mutation_version_on_store(&mut store, "ws", "main", 1, &NoFaults).unwrap();
+        VersionedTextStore::new(&mut store)
+            .write_text(
+                &WriteText {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "notes".to_owned(),
+                    path: "notes.md".to_owned(),
+                    text: "body\n".to_owned(),
+                    moment_id: "moment-notes".to_owned(),
+                    metadata_origin: "test".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 2,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        let change = |path: &str| MomentMaterializationChange {
+            version_id: "main".to_owned(),
+            path: path.to_owned(),
+            operation: "write",
+            content_kind: "text",
+        };
+        materialize_relay_page_on_store(
+            &mut store,
+            "ws",
+            &scratch,
+            vec![change(".DS_Store"), change("notes.md")],
+            &(),
+            20,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(scratch.join("notes.md")).unwrap(),
+            "body\n"
+        );
+        assert!(!scratch.join(".DS_Store").exists());
+    }
+
+    /// Finder leaves `.DS_Store` in a folder it showed. When a page deletes the
+    /// folder's last file and writes a file at the folder's name, that folder
+    /// still gives way.
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn a_folder_holding_only_finder_files_gives_way_to_a_file() {
+        let (scratch, _, mut store) = dohc_engine_testkit::open_store();
+        ensure_mutation_version_on_store(&mut store, "ws", "main", 1, &NoFaults).unwrap();
+        let write = |store: &mut dohc_engine_storage::EngineStore, object: &str, path: &str| {
+            VersionedTextStore::new(store)
+                .write_text(
+                    &WriteText {
+                        workspace_id: "ws".to_owned(),
+                        version_id: "main".to_owned(),
+                        object_id: object.to_owned(),
+                        path: path.to_owned(),
+                        text: format!("{object}\n"),
+                        moment_id: format!("moment-{object}"),
+                        metadata_origin: "test".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 2,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+        };
+        write(&mut store, "inner", "d/a.md");
+        std::fs::create_dir_all(scratch.join("d")).unwrap();
+        std::fs::write(scratch.join("d/a.md"), "inner\n").unwrap();
+        std::fs::write(scratch.join("d/.DS_Store"), "finder").unwrap();
+        VersionedTextStore::new(&mut store)
+            .delete_text_file(
+                &dohc_engine_domain::DeleteTextFile {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    path: "d/a.md".to_owned(),
+                    moment_id: "moment-delete".to_owned(),
+                    request_id: None,
+                    metadata_origin: "test".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 3,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        write(&mut store, "file", "d");
+        let change = |path: &str, operation| MomentMaterializationChange {
+            version_id: "main".to_owned(),
+            path: path.to_owned(),
+            operation,
+            content_kind: "text",
+        };
+        materialize_relay_page_on_store(
+            &mut store,
+            "ws",
+            &scratch,
+            vec![change("d/a.md", "delete"), change("d", "write")],
+            &(),
+            20,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(scratch.join("d")).unwrap(),
+            "file\n"
+        );
     }
 
     #[test]

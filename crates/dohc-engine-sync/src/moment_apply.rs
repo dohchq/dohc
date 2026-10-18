@@ -241,7 +241,7 @@ pub struct MomentMaterializationChange {
     pub content_kind: &'static str,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MomentApplyResult {
     pub conflicts_opened: i64,
     pub materialization_changes: Vec<MomentMaterializationChange>,
@@ -377,6 +377,14 @@ pub fn apply_moment_envelope_detailed(
     let search_policy = search_policy_for_store(store);
     apply_envelope_with(store, envelope, faults, |tx, envelope| {
         let (mut payload, withheld) = applied_payload(tx, envelope)?;
+        // An older build captured `.DS_Store` and other paths the floor now
+        // ignores. Its moments there apply as nothing, so they never stop
+        // sync or file a refusal.
+        if crate::path_policy::floor_ignores(&payload.path)
+            && crate::path_policy::floor_ignores(&payload.payload_after_path)
+        {
+            return Ok(MomentApplyResult::default());
+        }
         if matches!(
             envelope.settlement_admission,
             Some(crate::SettlementAdmission::Accepted { .. })

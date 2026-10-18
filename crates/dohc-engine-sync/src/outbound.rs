@@ -638,7 +638,7 @@ pub fn journal_version_create_in_tx(
              WHERE s.workspace_id=?1 AND s.version_id=?2 ORDER BY s.path",
         )
         .map_err(SyncError::corrupt)?;
-    let fork_snapshots = statement
+    let mut fork_snapshots = statement
         .query_map(params![record.workspace_id, record.version_id], |row| {
             Ok(serde_json::json!({
                 "objectId": row.get::<_, String>(0)?,
@@ -658,6 +658,13 @@ pub fn journal_version_create_in_tx(
         .map_err(SyncError::corrupt)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(SyncError::corrupt)?;
+    // A head an older build captured at a path the floor now ignores (an old
+    // `.DS_Store`) stays local; a receiver would skip it anyway.
+    fork_snapshots.retain(|row| {
+        !row["path"]
+            .as_str()
+            .is_some_and(crate::path_policy::floor_ignores)
+    });
     let header = serde_json::json!({
         "versionId": record.version_id,
         "name": record.name,

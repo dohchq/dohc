@@ -808,6 +808,59 @@ fn version_create_shipped_snapshot_rejects_unsafe_and_secret_paths() {
     }
 }
 
+/// An older build shipped Finder's `.DS_Store` in a fork. The version applies
+/// without it, so a newer peer's sync never stops on it.
+#[test]
+fn version_create_skips_a_fork_snapshot_at_an_ignored_path() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_replication_version(&mut engine, "main", "main");
+    let sha = dohc_engine_storage::hex_sha256(b"content");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,7,'content')",
+                [&sha],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed blob");
+    let operation = version_create_with_shipped_snapshots(
+        "older-peer",
+        "feature",
+        vec![
+            shipped_text_snapshot("finder-object", ".DS_Store", &sha),
+            shipped_text_snapshot("notes-object", "notes.md", &sha),
+        ],
+    );
+
+    assert!(matches!(
+        apply_replication_envelope(&mut engine, &mut dohc_engine_collab::WriterDocCache::new(), &operation, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            ..
+        }) if outcome_refusals.is_empty()
+    ));
+    assert!(
+        VersionedTextStore::new(&mut engine)
+            .read_text("ws", "feature", "notes.md")
+            .expect("read")
+            .is_some()
+    );
+    let ignored_rows: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT (SELECT COUNT(*) FROM path_aliases WHERE path='.DS_Store') \
+                 + (SELECT COUNT(*) FROM fork_base_snapshots WHERE path='.DS_Store')",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("ignored rows");
+    assert_eq!(ignored_rows, 0);
+}
+
 /// A `version.create` shipping a TEXT fork snapshot at a secret-classified path
 /// is a disclosure op: `blobs`/`snapshots`/`path_aliases` are the ordinary
 /// plaintext surface, and `read_text` deliberately admits secret paths so an
