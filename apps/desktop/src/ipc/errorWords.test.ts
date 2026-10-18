@@ -157,9 +157,9 @@ describe("error words", () => {
     expect(isPrivacyDenied(engine)).toBe(true);
     expect(withErrorWords("Could not refresh workspace files.", engine))
       .toBe(`Could not refresh workspace files. ${PRIVACY_DENIED_WORDS}`);
-    for (const sentence of PRIVACY_DENIED_WORDS.split(/(?<=\.) /)) {
-      expect(sentence.split(" ").length, sentence).toBeLessThanOrEqual(20);
-    }
+    expect(PRIVACY_DENIED_WORDS).toBe(
+      "macOS blocked dohc from this folder. Allow dohc in System Settings › Privacy & Security › Files & Folders.",
+    );
   });
 
   it("keeps an EPERM main did not name a privacy refusal as a permission problem", () => {

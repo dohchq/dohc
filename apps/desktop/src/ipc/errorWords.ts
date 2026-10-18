@@ -27,7 +27,7 @@ const NEWER_DOHC = "It needs a newer version of dohc. Update dohc to open it.";
  */
 export const PRIVACY_DENIED = "privacy-denied";
 export const PRIVACY_DENIED_WORDS =
-  "macOS blocked dohc from this folder. Allow dohc in System Settings › Privacy & Security › Files & Folders. For a whole volume, turn on Full Disk Access.";
+  "macOS blocked dohc from this folder. Allow dohc in System Settings › Privacy & Security › Files & Folders.";
 
 // Every code the engine refuses with: `ErrorCode` in dohc-engine-protocol.
 const ENGINE_CODE_WORDS = {

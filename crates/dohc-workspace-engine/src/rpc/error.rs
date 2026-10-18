@@ -592,6 +592,7 @@ mod tests {
                 path: "record.md".into(),
                 kind: std::io::ErrorKind::PermissionDenied,
                 raw_os_error: None,
+                privacy_denied: false,
             },
         ] {
             let code = error.code();
@@ -611,16 +612,12 @@ mod tests {
                 path: "notes.md".into(),
                 kind: std::io::ErrorKind::PermissionDenied,
                 raw_os_error: Some(1),
+                privacy_denied: true,
             },
         ));
         let root = super::map_root_binding(crate::root_binding::RootBindingError::PrivacyDenied);
         assert_eq!(root.message, "privacy-denied");
-        let eperm = if cfg!(target_vendor = "apple") {
-            "privacy-denied"
-        } else {
-            "materialize-io"
-        };
-        assert_eq!(write.message, eperm);
+        assert_eq!(write.message, "privacy-denied");
     }
 
     #[test]

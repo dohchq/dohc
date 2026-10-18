@@ -391,7 +391,7 @@ fn an_eperm_root_is_a_privacy_denial_on_macos() {
         ));
         err.code()
     };
-    let eperm = if cfg!(target_vendor = "apple") {
+    let eperm = if cfg!(target_os = "macos") {
         "privacy-denied"
     } else {
         "scan-io"

@@ -2,7 +2,6 @@ import { expect, test } from "@playwright/test";
 import { chmod, realpath, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
-import { PRIVACY_DENIED_WORDS } from "../src/ipc/errorWords";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   cleanupDesktopWorkspace,
@@ -50,7 +49,9 @@ for (const refusal of [
 
       const stopped = page.getByTestId("workspace-open-failed");
       await expect(stopped).toContainText("Couldn’t open this workspace");
-      await expect(stopped).toContainText(PRIVACY_DENIED_WORDS);
+      await expect(stopped).toContainText(
+        "macOS blocked dohc from this folder. Allow dohc in System Settings › Privacy & Security › Files & Folders.",
+      );
       await expect(page.getByTestId("workspace-shell-error")).toHaveCount(0);
       await page.screenshot({ path: test.info().outputPath(`privacy-denied-${refusal.name}.png`) });
 

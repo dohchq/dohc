@@ -800,8 +800,10 @@ pub enum MaterializeError {
         path: String,
         kind: ErrorKind,
         /// The OS error number, which tells EPERM from EACCES where `kind`
-        /// cannot. See [`crate::privacy_denied`].
+        /// cannot.
         raw_os_error: Option<i32>,
+        /// See [`crate::privacy_denied`].
+        privacy_denied: bool,
     },
     /// The job references a content blob that is not in the store — a corrupt
     /// job (the enqueue should have committed the blob in the same txn).
@@ -837,6 +839,7 @@ impl MaterializeError {
             path: path.to_string_lossy().into_owned(),
             kind: err.kind(),
             raw_os_error: err.raw_os_error(),
+            privacy_denied: crate::privacy_denied(err, path),
         }
     }
 
@@ -844,9 +847,10 @@ impl MaterializeError {
     pub fn code(&self) -> &'static str {
         match self {
             MaterializeError::Storage(e) => e.code(),
-            MaterializeError::Io { raw_os_error, .. } if crate::privacy_denied(*raw_os_error) => {
-                crate::PRIVACY_DENIED
-            }
+            MaterializeError::Io {
+                privacy_denied: true,
+                ..
+            } => crate::PRIVACY_DENIED,
             MaterializeError::Io { .. } => "materialize-io",
             MaterializeError::MissingBlob { .. } => "missing-blob",
             MaterializeError::UnsafeTargetPath => "unsafe-target-path",
@@ -6108,7 +6112,7 @@ mod tests {
                 ..
             }
         ));
-        let eperm = if cfg!(target_vendor = "apple") {
+        let eperm = if cfg!(target_os = "macos") {
             "privacy-denied"
         } else {
             "materialize-io"
@@ -6118,6 +6122,52 @@ mod tests {
         let (attempts, result) = attempt(|| std::io::Error::from_raw_os_error(13));
         assert_eq!(attempts, MAX_REPLACE_ATTEMPTS as usize);
         assert_eq!(result.expect_err("EACCES").code(), "materialize-io");
+    }
+
+    /// A file locked in Finder, or a locked folder a new file goes into, also
+    /// fails a write with EPERM. That is the file's own state, so it keeps
+    /// the ordinary io code and is still not retried as a lock.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_finder_lock_is_not_a_privacy_denial() {
+        let chflags = |flag: &str, path: &Path| {
+            let status = std::process::Command::new("chflags")
+                .arg(flag)
+                .arg(path)
+                .status()
+                .expect("chflags");
+            assert!(status.success());
+        };
+        let scratch = Scratch::new("replace-finder-lock");
+        let tmp = scratch.root.join("tmp-file");
+        std::fs::write(&tmp, b"pending bytes").expect("write tmp");
+        let locked_file = scratch.root.join("locked.md");
+        std::fs::write(&locked_file, b"locked").expect("write locked file");
+        let locked_dir = scratch.root.join("locked");
+        std::fs::create_dir(&locked_dir).expect("create locked folder");
+        chflags("uchg", &locked_file);
+        chflags("uchg", &locked_dir);
+
+        let replaced = std::fs::rename(&tmp, &locked_file).expect_err("a locked file refuses");
+        let replaced = MaterializeError::io(&locked_file, &replaced);
+        let replacer = AlwaysFailReplacer {
+            error: || std::io::Error::from_raw_os_error(1),
+            attempts: AtomicUsize::new(0),
+        };
+        let created = create_from_temp(&locked_dir.join("new.md"), &tmp, &options_with(&replacer));
+        chflags("nouchg", &locked_file);
+        chflags("nouchg", &locked_dir);
+
+        assert!(matches!(
+            replaced,
+            MaterializeError::Io {
+                raw_os_error: Some(1),
+                ..
+            }
+        ));
+        assert_eq!(replaced.code(), "materialize-io");
+        assert_eq!(replacer.attempts.load(Ordering::Relaxed), 1);
+        assert_eq!(created.expect_err("EPERM").code(), "materialize-io");
     }
 
     /// The replace boundary's meanings of ERROR_ACCESS_DENIED (#554, #595

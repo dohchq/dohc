@@ -387,7 +387,7 @@ impl Scanner {
             let injected_read_dir = self.injected(&dir_rel, ScanIoOperation::ReadDir);
             let read_dir = match injected_read_dir {
                 Some(err) if dir == root => {
-                    return Err(FilesError::scan_io(display(&dir), &err));
+                    return Err(FilesError::scan_io(&dir, display(&dir), &err));
                 }
                 Some(err) => {
                     failed.push(FailedPath {
@@ -401,7 +401,7 @@ impl Scanner {
                     Ok(rd) => rd,
                     Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
                     Err(err) if dir == root => {
-                        return Err(FilesError::scan_io(display(&dir), &err));
+                        return Err(FilesError::scan_io(&dir, display(&dir), &err));
                     }
                     Err(err) => {
                         failed.push(FailedPath {
