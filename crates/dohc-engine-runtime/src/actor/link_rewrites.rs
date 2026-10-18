@@ -408,6 +408,8 @@ impl ActorHandle {
         result["unchecked"] = json!(unchecked.into_iter().take(50).collect::<Vec<_>>());
         let reply = result.clone();
         self.run(move |store, _| {
+            #[cfg(test)]
+            let _turn = tests::Turn::start(&workspace, "reply");
             save(store, &receipt, true, &result, faults.as_ref())?;
             Ok(())
         })

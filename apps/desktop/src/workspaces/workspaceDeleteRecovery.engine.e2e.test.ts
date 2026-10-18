@@ -57,15 +57,21 @@ it.skipIf(engine.missing)("workspace-engine-history rewrites closed links and un
         capture, assertCurrent: operation.assertCurrent, yDocSessions: {withDocumentUnowned: async (_id, _path, work) => work(), markDeletedUnderPath: () => undefined}}),
       shareViewFiles: {change: async () => {throw new Error("No shares");}}, trashItem: async () => {throw new Error("No trash");}, localPerson: async () => person,
       notifyRenderer: () => undefined, shareViewEdited: () => undefined, logError: () => undefined});
+    const renameStart = performance.now();
     const moved = await owner.movePath({}, {workspaceId: workspace.workspaceId, fromPath: "old.md", toPath: "new.md"});
+    const renameMs = performance.now() - renameStart;
     expect(moved).toMatchObject({undo: {available: true}});
     const operationId = moved.operationId!;
+    const passStart = performance.now();
     const result = await history.rewriteHistoryLinks({workspaceId: workspace.workspaceId, operationId, requestId: "closed-rewrite", author: person});
+    const passMs = performance.now() - passStart;
     expect(result).toEqual({documents: 2, links: 2, unchecked: ["open.md"], uncheckedCount: 1, complete: false});
     expect(await history.rewriteHistoryLinks({workspaceId: workspace.workspaceId, operationId, requestId: "closed-rewrite", author: person})).toEqual(result);
     // Undo starts while forward materialization still has queued work.
     const undo = () => owner.undoHistoryOperation({}, {workspaceId: workspace.workspaceId, operationId});
+    const undoStart = performance.now();
     await expect.poll(undo, {timeout: REAL_DAEMON_DEADLINE_MS}).toMatchObject({ok: true, tracked: {state: "restored", momentCount: 3}});
+    console.info("link-rewrite-ipc-timing", JSON.stringify({renameMs, passMs, undoMs: performance.now() - undoStart}));
     for (const name of ["one.md", "two.md", "open.md"]) {
       await expect.poll(() => readFile(join(rootPath, name), "utf8"), {timeout: REAL_DAEMON_DEADLINE_MS}).toBe("[[old#part|label]]\n");
     }
@@ -217,16 +223,26 @@ it.skipIf(engine.missing)("undoes a person's file through IPC and an agent's ren
       } finally { socket.destroy(); }
     };
     await rm(join(rootPath, "folder/node_modules"), { recursive: true });
+    for (const name of ["one.md", "two.md"]) {
+      await writeFile(join(rootPath, name), "[[folder/tracked.txt#part|label]]\n");
+      await waitForPathMoments(capture, name, 1);
+    }
     const renamed = await request("fileMove", { fromPath: "folder/tracked.txt", toPath: "folder/renamed.txt", requestId: "real-agent-rename" });
     expect(renamed).toMatchObject({ ok: true, undo: { available: true } });
     const operationId = (renamed as { operationId: string }).operationId;
+    expect(await history.rewriteHistoryLinks({workspaceId: workspace.workspaceId, operationId,
+      requestId: "socket-rewrite", author: {kind: "agent", agentId: "dohc-mcp", onBehalfOf: person.humanId}}))
+      .toEqual({documents: 2, links: 2, unchecked: [], uncheckedCount: 0, complete: true});
     const agentUndo = () => request("historyUndo", { operationId });
-    await expect.poll(agentUndo, { timeout: REAL_DAEMON_DEADLINE_MS }).toMatchObject({ ok: true, tracked: { state: "restored", momentCount: 1 } });
+    await expect.poll(agentUndo, { timeout: REAL_DAEMON_DEADLINE_MS }).toMatchObject({ ok: true, tracked: { state: "restored", momentCount: 3 } });
+    for (const name of ["one.md", "two.md"]) {
+      await expect.poll(() => readFile(join(rootPath, name), "utf8"), {timeout: REAL_DAEMON_DEADLINE_MS}).toBe("[[folder/tracked.txt#part|label]]\n");
+    }
     expect(await capture.fileObjectIdForPath("folder/tracked.txt")).toBe(object);
     expect(await readFile(join(rootPath, "folder/tracked.txt"), "utf8")).toBe("typed after move\n");
     const replay = await history.undoHistoryOperation({ workspaceId: workspace.workspaceId, operationId, requestId: `move-undo:${operationId}`,
       author: { kind: "agent", agentId: "dohc-mcp", onBehalfOf: person.humanId } });
-    expect(replay).toMatchObject({ deduped: true, momentCount: 1 });
+    expect(replay).toMatchObject({ deduped: true, momentCount: 3 });
     await agentUndo();
     const folder = await request("fileMove", { fromPath: "folder", toPath: "archive/folder", requestId: "real-agent-folder" });
     const folderReason = "Undo for a folder move isn't available yet. Move it back yourself.";

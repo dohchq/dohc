@@ -332,6 +332,52 @@ async fn disk_mismatch_is_unchecked_and_the_reply_is_bounded() {
     f.close().await;
 }
 
+#[tokio::test]
+async fn a_passive_handle_cannot_originate_link_rewrites() {
+    let root = ScratchDir::new().unwrap();
+    let supervisor = crate::WorkspaceSupervisor::new();
+    let actor = supervisor
+        .open_passive_root_bound(&engine_db_path(&root).unwrap(), 1, "passive-root", None)
+        .unwrap()
+        .actor;
+    let result = actor
+        .history_rewrite_links(
+            "passive".into(),
+            OP.into(),
+            "refused".into(),
+            None,
+            root.to_path_buf(),
+            LeaseRegistry::new().scoped(&root),
+            Arc::default(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(RuntimeError::Domain(DomainError::InvalidInput {
+            reason: "link rewrites need the owner"
+        }))
+    ));
+    supervisor.close_all().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_capture_hold_acquired_during_parse_makes_the_source_unchecked() {
+    let f = Fixture::new(1, 1);
+    let ws = f.ws.clone();
+    probes().lock().unwrap().get_mut(&f.ws).unwrap().hook = Some(Arc::new(move |conn, object| {
+        conn.execute("INSERT INTO capture_file_holds(workspace_id,source_version_id,object_id,path,observed_sha256,observed_size,reason,observed_at_ms,attempt_count,retry_requested)
+            VALUES(?1,'main',?2,'source-0000.md',?3,1,'ydoc-resolution-not-representable',1,1,0)",
+            params![ws,object,hex_sha256(BODY.as_bytes())]).unwrap();
+    }));
+    let result = f.pass("held-source", Arc::new(NoFaults)).await.unwrap();
+    assert_eq!(result["documents"], 0);
+    assert_eq!(result["unchecked"], json!(["source-0000.md"]));
+    assert_eq!(f.text("source-0000.md").await, BODY);
+    f.close().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn inverse_keeps_later_typing_label_edits_and_new_matching_links() {
     let f = Fixture::new(1, 1);
@@ -349,6 +395,42 @@ async fn inverse_keeps_later_typing_label_edits_and_new_matching_links() {
         "typing [[old#part|changed label]] [[./old.md]] [old](old.md) [[new]]"
     );
     assert!(f.undo().await.unwrap().deduped);
+    f.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn history_excluded_sources_and_received_mounts_are_never_written() {
+    let f = Fixture::new(1, 1);
+    std::fs::write(
+        f.root.join(".dohc/files.toml"),
+        "version = 1\n[[rule]]\npath = \"source-0000.md\"\ntracked = false\n",
+    )
+    .unwrap();
+    let result = f.pass("excluded", Arc::new(NoFaults)).await.unwrap();
+    assert_eq!(result["unchecked"], json!(["source-0000.md"]));
+    assert_eq!(f.text("source-0000.md").await, BODY);
+    let ws = f.ws.clone();
+    let refused = f
+        .actor
+        .run(move |store, _| {
+            store.read_with(|conn| {
+                super::super::history_operations::check_path_ownership(
+                    conn,
+                    &ws,
+                    "main",
+                    "source-0000",
+                    "shared-with-me/note.md",
+                )
+            })
+        })
+        .await;
+    assert!(matches!(
+        refused,
+        Err(RuntimeError::Domain(DomainError::UndoRefused {
+            reason: "received share path",
+            ..
+        }))
+    ));
     f.close().await;
 }
 
@@ -658,6 +740,41 @@ async fn crash_after_k_commits_undoes_only_committed_members_and_replays_one_com
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_lost_completed_reply_replays_the_exact_result_without_more_writes() {
+    let mut f = Fixture::new(3, 3);
+    let key = DocKey::new(&f.ws, "main", "source-0002").unwrap();
+    let lease = f.leases.acquire(&key).unwrap();
+    // Reservation, two document commits, then the final bounded reply.
+    let faults = Arc::new(CrashNth {
+        point: FaultPoint::StorageAfterCommitBeforeAck,
+        nth: 4,
+        seen: AtomicUsize::new(0),
+    });
+    assert!(matches!(
+        f.pass("lost-reply", faults).await,
+        Err(RuntimeError::OperationCrashed)
+    ));
+    drop(lease);
+    f.restart().await;
+    let replay = f.pass("lost-reply", Arc::new(NoFaults)).await.unwrap();
+    assert_eq!(
+        replay,
+        json!({"documents":2,"links":4,"unchecked":["source-0002.md"],"uncheckedCount":1,"complete":false})
+    );
+    assert_eq!(f.text("source-0002.md").await, BODY);
+    assert_eq!(
+        f.actor
+            .history_operation(f.ws.clone(), OP.into())
+            .await
+            .unwrap()
+            .moments
+            .len(),
+        3
+    );
+    f.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn case_only_and_delete_only_operations_refuse() {
     for delete in [false, true] {
         let f = Fixture::new(1, 1);
@@ -727,6 +844,7 @@ async fn two_thousand_sources_yield_between_turns_and_measure_undo_hold() {
     let f = Fixture::new(2000, 4999);
     let actor = f.actor.clone();
     let serial = f.serial.clone();
+    let typing_ws = f.ws.clone();
     let typing = DocKey::new(&f.ws, "main", "source-4998").unwrap();
     let _lease = f.leases.acquire(&typing).unwrap();
     let payloads = {
@@ -737,6 +855,7 @@ async fn two_thousand_sources_yield_between_turns_and_measure_undo_hold() {
     };
     let updates = tokio::spawn(async move {
         let mut waits = Vec::new();
+        let mut positions = Vec::new();
         let mut claim = None;
         for (i, payload) in payloads.into_iter().enumerate() {
             let start = Instant::now();
@@ -763,15 +882,26 @@ async fn two_thousand_sources_yield_between_turns_and_measure_undo_hold() {
                 .unwrap();
             claim = update.lineage_claim_id;
             waits.push(start.elapsed().as_nanos());
+            positions.push(
+                probes().lock().unwrap()[&typing_ws]
+                    .turns
+                    .iter()
+                    .filter(|(phase, _)| *phase == "commit")
+                    .count(),
+            );
             tokio::task::yield_now().await;
         }
-        waits
+        (waits, positions)
     });
     let start = Instant::now();
     let result = f.pass("performance", Arc::new(NoFaults)).await.unwrap();
     let pass_ns = start.elapsed().as_nanos();
     assert_eq!(result["documents"], 2000);
-    let waits = updates.await.unwrap();
+    let (waits, positions) = updates.await.unwrap();
+    assert!(
+        positions.iter().any(|&n| n > 0 && n < 2000),
+        "a Y.Doc update must commit between rewrite batches"
+    );
     for i in 0..2000 {
         std::fs::write(
             f.root.join(format!("source-{i:04}.md")),
@@ -801,7 +931,7 @@ async fn two_thousand_sources_yield_between_turns_and_measure_undo_hold() {
     let turns = probes().lock().unwrap().get(&f.ws).unwrap().turns.clone();
     if let Ok(directory) = std::env::var("DOHC_LINK_REWRITE_EVIDENCE_DIR") {
         std::fs::create_dir_all(&directory).unwrap();
-        std::fs::write(std::path::Path::new(&directory).join("actor-turns.json"), json!({"passNs":pass_ns,"turns":turns,"admissionProbeWaitNs":waits,"undoHoldNs":undo_hold.as_nanos()}).to_string()).unwrap();
+        std::fs::write(std::path::Path::new(&directory).join("actor-turns.json"), json!({"passNs":pass_ns,"turns":turns,"admissionProbeWaitNs":waits,"updateCommitPositions":positions,"undoHoldNs":undo_hold.as_nanos()}).to_string()).unwrap();
     }
     f.close().await;
     assert!(
