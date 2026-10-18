@@ -5,6 +5,7 @@ import {
   CreateWorkspaceFileResult,
   CreateWorkspaceFolderPayload,
   MoveWorkspacePathPayload,
+  MoveWorkspacePathResult,
   DeleteWorkspacePathPayload,
   DeleteWorkspacePathResult,
   UndoHistoryOperationPayload,
@@ -55,10 +56,10 @@ export const workspaceFileOperations = {
     capabilityId: "file.move", channel: "desktop:move-workspace-path",
     scope: "workspace", guard: "trusted-sender",
     handlerCheck: {
-      check: "workspaceFileMutationOwner.runAdmittedMutation + withExclusiveWorkspaceOperation",
+      check: "workspaceFileMutationOwner.runAdmittedMutation + moveWorkspacePathByHand/withExclusiveWorkspaceOperation",
       reason: "The mutation owner retains renderer admission, writable/share checks, and its mutation lease.",
     },
-    payload: MoveWorkspacePathPayload, result: CreateWorkspaceFileResult,
+    payload: MoveWorkspacePathPayload, result: MoveWorkspacePathResult,
   },
   deleteWorkspacePath: {
     capabilityId: "file.delete", channel: "desktop:delete-workspace-path",

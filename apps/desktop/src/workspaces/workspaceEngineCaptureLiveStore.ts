@@ -159,6 +159,7 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
   listTextFileMetadata(input: {
     workspaceId: string;
     versionId: string;
+    under?: string;
   }): Promise<CaptureTextFileMetadata[]>;
   listHistoryPage(input: {
     workspaceId: string; versionId?: string; objectId?: string; limit?: number; cursor?: HistoryCursor;
@@ -962,6 +963,7 @@ export function createCaptureLiveStores(
     async listTextFileMetadata(input: {
       workspaceId: string;
       versionId: string;
+      under?: string;
     }): Promise<CaptureTextFileMetadata[]> {
       const rows = await runRead(
         async (adapter) => await adapter.listTextFileMetadata(input),

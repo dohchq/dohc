@@ -519,7 +519,7 @@ const HISTORY_VERBS = {
     },
   },
   undo: {
-    capabilityId: "history.operation.undo", summary: "Undo a delete recorded in History.", operands: "<operation>",
+    capabilityId: "history.operation.undo", summary: "Undo a delete, move, or rename recorded in History.", operands: "<operation>",
     parse: input => {
       const [id, ...extra] = input.operands; noExtraArgs(extra, "history undo");
       return { verb: "historyUndo", operationId: operationId(id) };
@@ -1113,7 +1113,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
     verbs: APP_VERBS,
   },
   history: {
-    summary: "Read History changes and undo deletes.",
+    summary: "Read History changes and undo deletes, moves, and renames.",
     notes: ["Changes come from the active version of the workspace."],
     verbs: HISTORY_VERBS,
   },

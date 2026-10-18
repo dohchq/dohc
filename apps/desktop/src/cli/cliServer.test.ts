@@ -1,8 +1,10 @@
+import { stageDeleteRecovery } from "../workspaces/workspaceDeleteRecovery";
+import { finishMoveRecovery } from "../workspaces/workspaceMoveRecovery";
 import { readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation } from "../workspaces/workspaceHistoryOperations";
 import { listChanges, readChange, readOperation, undoOperation } from "@dohc/mcp/tools";
 import { deleteWorkspacePathByHand } from "../workspaces/workspaceFileMoves";
 import { readWorkspaceEnginePolicy } from "../workspaces/workspaceEnginePolicyFile";
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
 import { createApp, deleteWorkspacePath, importData, listFileChats, moveWorkspacePath, replyToChat, startFileChat, writeWorkspaceFile, type ToolContext } from "../../../../packages/mcp/src/tools";
@@ -785,21 +787,28 @@ describe("CLI socket server", () => {
     expect(history.undoHistoryOperation).toHaveBeenCalledOnce();
   });
 
-  it("refuses non-delete Undo through socket, CLI and MCP without an engine Undo", async () => {
+  it("undoes a move through socket, CLI and MCP with one compensation", async () => {
     const operationId = "dohc-operation:11111111-1111-4111-8111-111111111111";
-    const history = { readHistoryPage: vi.fn(async () => ({ moments: [{ momentId: "move", operation: "rename", path: "b.txt", beforePath: "a.txt" }], nextCursor: null }) as never), undoHistoryOperation: vi.fn() };
+    await writeFile(join(workspaceRoot, "a.txt"), "move body");
+    const plan = await stageDeleteRecovery(operationId, join(workspaceRoot, "a.txt"), "a.txt", ["a.txt"]);
+    await rename(join(workspaceRoot, "a.txt"), join(workspaceRoot, "b.txt"));
+    await finishMoveRecovery(workspaceRoot, plan, "a.txt", "b.txt", false);
+    const history = { readHistoryPage: vi.fn(async () => ({ moments: [{ momentId: "move", operation: "rename", path: "b.txt", beforePath: "a.txt" }], nextCursor: null }) as never),
+      undoHistoryOperation: vi.fn(async () => { await rename(join(workspaceRoot, "b.txt"), join(workspaceRoot, "a.txt"));
+        return { operationId, versionId: "main", deduped: false, materialized: true, momentCount: 1, compensationOperationId: operationId }; }) };
     const operation = { workspace: { workspaceId: WORKSPACE_ID, rootPath: workspaceRoot, get readOnly() { return context.readOnly; }, shareView: undefined as unknown }, signal: new AbortController().signal, assertCurrent: vi.fn() };
     context.historyOperation = input => readWorkspaceHistoryOperation(operation, input, history);
     context.historyUndo = (input, origin) => undoWorkspaceHistoryOperation(operation, input, agentWriteAuthor(origin), { history, agent: true });
     const args = { cwd: workspaceRoot, actor: "agent" as const, operationId };
-    const unsupported = { ok: false as const, reason: "Cannot undo this change yet. Only a delete can be undone." };
-    expect(await invoke("historyUndo", args)).toEqual(unsupported);
+    const restored = { ok: true, tracked: { state: "restored", momentCount: 1 }, restored: [], remaining: [] };
+    expect(await invoke("historyUndo", args)).toEqual(restored);
     const ctx: ToolContext = { root: workspaceRoot, home: stateDir, request: request => invoke(request.verb, request.args) };
-    expect(await undoOperation(ctx, { operationId })).toEqual(unsupported);
+    expect(await undoOperation(ctx, { operationId })).toEqual(restored);
     expect(await readOperation(ctx, { operationId })).toMatchObject({ ok: true, members: [{ operation: "rename" }] });
     expect(await executeCli({ argv: ["history", "undo", operationId], cwd: workspaceRoot, request: request => invoke(request.verb, request.args) }))
-      .toEqual({ exitCode: 1, stdout: "", stderr: "dohc: " + unsupported.reason + "\n" });
-    expect(history.undoHistoryOperation).not.toHaveBeenCalled();
+      .toEqual({ exitCode: 0, stdout: "History: restored\n", stderr: "" });
+    expect(await readFile(join(workspaceRoot, "a.txt"), "utf8")).toBe("move body");
+    expect(history.undoHistoryOperation).toHaveBeenCalledOnce();
     context.historyUndo = vi.fn(context.historyUndo);
     expect(await invoke("historyUndo", { ...args, actor: "human" })).toMatchObject({ ok: false, reason: 'An Undo through the CLI socket is recorded as an agent\'s; send actor "agent".' });
     expect(context.historyUndo).not.toHaveBeenCalled();
@@ -832,14 +841,14 @@ describe("CLI socket server", () => {
   it("keeps MCP moves and deletes relative to a subfolder cwd under the agent's name", async () => {
     const cwd = join(workspaceRoot, "app");
     await mkdir(cwd);
-    const movePath = vi.fn<NonNullable<CliWorkspaceContext["movePath"]>>(async input => ({ ok: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", fromPath: input.fromPath, toPath: input.toPath }));
+    const movePath = vi.fn<NonNullable<CliWorkspaceContext["movePath"]>>(async input => ({ ok: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", undo: { available: true }, fromPath: input.fromPath, toPath: input.toPath }));
     const deletePath = vi.fn<NonNullable<CliWorkspaceContext["deletePath"]>>(async path => ({
       ok: false, deleted: [`${path}/a.txt`], path: `${path}/b.txt`, reason: `History could not record the delete of ${path}/b.txt.`,
     }));
     context.movePath = movePath;
     context.deletePath = deletePath;
     const ctx: ToolContext = { root: cwd, home: stateDir, request: request => invoke(request.verb, request.args) };
-    expect(await moveWorkspacePath(ctx, { fromPath: "a.txt", toPath: "b.txt" }, "Client")).toEqual({ ok: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", fromPath: "a.txt", toPath: "b.txt" });
+    expect(await moveWorkspacePath(ctx, { fromPath: "a.txt", toPath: "b.txt" }, "Client")).toEqual({ ok: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", undo: { available: true }, fromPath: "a.txt", toPath: "b.txt" });
     expect(await deleteWorkspacePath(ctx, { path: "notes" })).toEqual({
       ok: false, deleted: ["notes/a.txt"], path: "notes/b.txt", reason: "History could not record the delete of notes/b.txt.",
     });
@@ -867,7 +876,7 @@ describe("CLI socket server", () => {
 
   it.each(["fileMove", "fileDelete"] as const)("hides realpath host errors before %s dispatch", async verb => {
     context.rootPath = join(workspaceRoot, "missing-root");
-    context.movePath = async input => ({ ok: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", ...input });
+    context.movePath = async input => ({ ok: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", undo: { available: true }, ...input });
     context.deletePath = async path => ({ ok: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", undo: { available: true }, path, trashed: true });
     const args = { cwd: workspaceRoot, actor: "agent" as const, requestId: "realpath" };
     const result = verb === "fileMove" ? await invoke(verb, { ...args, fromPath: "a", toPath: "b" })

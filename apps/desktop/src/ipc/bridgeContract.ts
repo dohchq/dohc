@@ -13,7 +13,7 @@ import { PublicationAgent } from "@dohc/cli/app-publication";
 import { ServerAccountDeletionPreview, ServerAccountDeleteRequest, ServerAccountDeleteResult } from "@dohc/cli/account";
 import type {OwnerAppPublicationRequest, OwnerAppPublicationResult} from "./ownerAppPublicationContract";
 import type { WorkspaceRefTarget } from "@dohc/workspace-contracts/workspace-ref";
-import { DeleteRecovery, HistoryOperationId, HistoryOperationUndoResult } from "@dohc/workspace-contracts/history-operation";
+import { OperationRecovery, HistoryOperationId, HistoryOperationUndoResult } from "@dohc/workspace-contracts/history-operation";
 import { DatasetHistoryPage } from "@dohc/cli/dataset";
 import type { datasetOperations } from "./datasetOperations";
 import type {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "@dohc/cli/app-responses";
@@ -780,6 +780,8 @@ export type CreateWorkspaceFilePayload = z.infer<
 export const CreateWorkspaceFileResult = z.object({
   path: PATH_STRING,
 });
+export const MoveWorkspacePathResult = CreateWorkspaceFileResult.extend(OperationRecovery.partial().shape);
+export type MoveWorkspacePathResult = z.infer<typeof MoveWorkspacePathResult>;
 export type CreateWorkspaceFileResult = z.infer<
   typeof CreateWorkspaceFileResult
 >;
@@ -821,7 +823,7 @@ export type DeleteWorkspacePathPayload = z.infer<
 // a share view, whose delete removes the projection of a moment rather than a
 // file the workspace owns. There the change is what can be taken back: the
 // granter's copy is untouched until they accept it.
-export const DeleteWorkspacePathResult = z.object({ trashed: z.boolean() }).extend(DeleteRecovery.partial().shape);
+export const DeleteWorkspacePathResult = z.object({ trashed: z.boolean() }).extend(OperationRecovery.partial().shape);
 export const UndoHistoryOperationPayload = z.object({ workspaceId: WORKSPACE_ID, operationId: HistoryOperationId }).strict();
 export { HistoryOperationUndoResult as UndoHistoryOperationResult };
 export type DeleteWorkspacePathResult = z.infer<typeof DeleteWorkspacePathResult>;

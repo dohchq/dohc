@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 export const HistoryOperationId = z.string().regex(/^dohc-operation:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u);
-export const DeleteRecovery = z.object({
+export const OperationRecovery = z.object({
   operationId: HistoryOperationId,
   undo: z.union([z.object({ available: z.literal(true) }), z.object({ available: z.literal(false), reason: z.string(), paths: z.array(z.string()) })]),
 });

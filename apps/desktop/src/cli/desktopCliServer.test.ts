@@ -33,7 +33,7 @@ import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import { createWorkspaceAuthorityOwner } from "../workspaces/workspaceAuthorityOwner";
 import { createWorkspaceFolder } from "../workspaces/createWorkspaceFolder";
 import { realpathSync } from "node:fs";
-import { readDeleteRecovery, waitForDeleteRecovery } from "../workspaces/workspaceDeleteRecovery";
+import { readDeleteRecovery, waitForRecovery } from "../workspaces/workspaceDeleteRecovery";
 
 function deferred() {
   let release!: () => void;
@@ -768,7 +768,7 @@ describe("raw fileMove and fileDelete socket requests", () => {
       .toMatchObject({ ok: false, reason: expect.stringContaining("retired workspace authority") });
     expect(f.dependencies.trashItem).toHaveBeenCalledOnce();
     const { operationId } = vi.mocked(f.capture.changePathsAs).mock.calls[0]![1];
-    await waitForDeleteRecovery(operationId);
+    await waitForRecovery(operationId);
     const record = await readDeleteRecovery(f.root, operationId);
     expect(record?.staged).toBeDefined();
     expect(await readFile(join(f.root, ".dohc/trash", record!.staged!), "utf8")).toBe("original");
@@ -814,7 +814,7 @@ describe("raw fileMove and fileDelete socket requests", () => {
       expect(await f.invoke("fileDelete", { path: "folder" })).toMatchObject({ ok: false });
       await drained;
       const { operationId } = vi.mocked(f.capture.changePathsAs).mock.calls[0]![1];
-      await waitForDeleteRecovery(operationId);
+      await waitForRecovery(operationId);
       const record = await readDeleteRecovery(f.root, operationId);
       expect(record).toMatchObject({ tracked: true, paths: ["folder/rowless.bin"], staged: expect.any(String) });
       expect(await readFile(join(f.root, ".dohc/trash", record!.staged!, "rowless.bin"))).toEqual(rowless);
@@ -898,7 +898,7 @@ describe("raw fileMove and fileDelete socket requests", () => {
     vi.mocked(f.dependencies.activity.agentRunDepth).mockReturnValue(4);
     await writeFile(join(f.root, "plain.txt"), "original");
     expect(await f.invoke("fileMove", { fromPath: "plain.txt", toPath: "moved.txt", ...(agent ? { agent } : {}) }))
-      .toEqual({ ok: true, operationId: expect.stringMatching(/^dohc-operation:[0-9a-f-]{36}$/), fromPath: "plain.txt", toPath: "moved.txt" });
+      .toEqual({ ok: true, operationId: expect.stringMatching(/^dohc-operation:[0-9a-f-]{36}$/), fromPath: "plain.txt", toPath: "moved.txt", undo: { available: true } });
     expect(await f.invoke("fileDelete", { path: "moved.txt", ...(agent ? { agent } : {}) })).toMatchObject({ ok: true, path: "moved.txt", trashed: false, trashPath: expect.stringMatching(/^\.dohc\/trash\//) });
     const author = { kind: "agent", agentId: agent ?? "dohc-mcp", onBehalfOf: "person-local", depth: 4 };
     expect(vi.mocked(f.capture.changePathsAs).mock.calls.map(call => call[1])).toEqual([
