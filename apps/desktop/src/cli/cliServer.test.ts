@@ -755,7 +755,7 @@ describe("CLI socket server", () => {
         details = [compensation.detail, ...details, malformed.detail];
         await mkdir(join(workspaceRoot, "folder"), { recursive: true });
         await writeFile(join(workspaceRoot, "folder/tracked.txt"), "original");
-        return { operationId: input.operationId, versionId: "main", momentCount: 1, compensationOperationId: "dohc-operation:undo:hash", materialized: true, deduped: false };
+        return { operationId: input.operationId, versionId: "main", momentCount: 1, notRestored: [], compensationOperationId: "dohc-operation:undo:hash", materialized: true, deduped: false };
       }),
     };
     const removed = await deleteWorkspacePathByHand(operation, "folder", { kind: "human", humanId: "local:owner" }, {
@@ -795,7 +795,7 @@ describe("CLI socket server", () => {
     await finishMoveRecovery(workspaceRoot, plan, "a.txt", "b.txt", false);
     const history = { readHistoryPage: vi.fn(async () => ({ moments: [{ momentId: "move", operation: "rename", path: "b.txt", beforePath: "a.txt" }], nextCursor: null }) as never),
       undoHistoryOperation: vi.fn(async () => { await rename(join(workspaceRoot, "b.txt"), join(workspaceRoot, "a.txt"));
-        return { operationId, versionId: "main", deduped: false, materialized: true, momentCount: 1, compensationOperationId: operationId }; }) };
+        return { operationId, versionId: "main", deduped: false, materialized: true, momentCount: 1, notRestored: [], compensationOperationId: operationId }; }) };
     const operation = { workspace: { workspaceId: WORKSPACE_ID, rootPath: workspaceRoot, get readOnly() { return context.readOnly; }, shareView: undefined as unknown }, signal: new AbortController().signal, assertCurrent: vi.fn() };
     context.historyOperation = input => readWorkspaceHistoryOperation(operation, input, history);
     context.historyUndo = (input, origin) => undoWorkspaceHistoryOperation(operation, input, agentWriteAuthor(origin), { history, agent: true });

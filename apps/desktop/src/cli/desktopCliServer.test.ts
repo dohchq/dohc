@@ -897,7 +897,7 @@ describe("raw fileMove and fileDelete socket requests", () => {
         await mkdir(join(f.root, "folder"), { recursive: true });
         await writeFile(join(f.root, "folder/tracked.txt"), "tracked original");
         return { operationId: input.operationId, versionId: "main", momentCount: 1,
-          compensationOperationId: "dohc-operation:11111111-1111-4111-8111-111111111111",
+          notRestored: [], compensationOperationId: "dohc-operation:11111111-1111-4111-8111-111111111111",
           deduped: false, materialized: true };
       }),
     };

@@ -40,7 +40,7 @@ async function fixture(trackedPaths = ["folder/tracked.txt"]) {
   });
   const undoHistoryOperation = vi.fn<OperationHistory["undoHistoryOperation"]>(async input => {
     for (let start = 0; start < trackedPaths.length; start += 100) await Promise.all(trackedPaths.slice(start, start + 100).map(path => write(path)));
-    return { operationId: input.operationId, versionId: "main", momentCount: 1, compensationOperationId: otherId, deduped: false, materialized: true };
+    return { operationId: input.operationId, versionId: "main", momentCount: 1, notRestored: [], compensationOperationId: otherId, deduped: false, materialized: true };
   });
   const history = { readHistoryPage, undoHistoryOperation };
   const remove = async () => {

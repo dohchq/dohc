@@ -49,7 +49,7 @@ fn history_undo_result_json(result: &dohc_engine_runtime::HistoryUndoResult) -> 
     json!({
         "operationId": result.operation_id, "versionId": result.version_id,
         "momentCount": result.moments.len(), "compensationOperationId": result.compensation_operation_id,
-        "deduped": result.deduped, "materialized": result.materialized,
+        "deduped": result.deduped, "materialized": result.materialized, "notRestored": result.not_restored,
     })
 }
 
@@ -526,6 +526,33 @@ impl EngineService {
         let request_id = crate::rpc::request::required_idempotency_key(request.idempotency_key)?;
         let author_json = crate::rpc::request::validated_author(params.author.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
+        if open
+            .actor
+            .pending_history_undos(open.workspace_id.clone())
+            .await
+            .map_err(map_runtime)?
+            .iter()
+            .any(|(_, key, _)| key == &request_id)
+        {
+            let result = open
+                .actor
+                .history_undo_in_turns(
+                    open.workspace_id.clone(),
+                    params.operation_id,
+                    request_id,
+                    author_json,
+                    open.root.clone(),
+                    Arc::new(NoFaults),
+                    now_ms()?,
+                    [open.capture_apply_gate.clone(), open.session_ops.clone()],
+                )
+                .await
+                .map_err(map_runtime)?;
+            return Ok(history_undo_result_json(
+                &self.resume_history_undo(&open, result).await,
+            ));
+        }
+
         if let Some(replay) = Self::read_under_ctx(
             &cancellation,
             "history.undo (availability)",
@@ -933,9 +960,10 @@ impl EngineService {
                         })
                         .collect::<Result<std::collections::HashMap<_, _>, WireError>>()?;
                     let placement_now = now_ms()?;
+                    drop(_barriers);
                     let result = open
                         .actor
-                        .history_undo_commit(
+                        .history_undo_in_turns(
                             open.workspace_id.clone(),
                             operation_id,
                             request_id,
@@ -943,10 +971,10 @@ impl EngineService {
                             open.root.clone(),
                             Arc::new(NoFaults),
                             placement_now,
+                            [open.capture_apply_gate.clone(), open.session_ops.clone()],
                         )
                         .await
                         .map_err(map_runtime)?;
-                    drop(_barriers);
                     let pending = result.clone();
                     tokio::spawn(async move {
                         if let Some(probe) = &probe {

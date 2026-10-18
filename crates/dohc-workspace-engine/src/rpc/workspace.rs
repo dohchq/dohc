@@ -80,6 +80,7 @@ pub(crate) struct OpenWorkspace {
     collection_projection:
         Arc<Mutex<Option<crate::collection_projection::CollectionProjectionWorker>>>,
     automation_recovery: Arc<Mutex<Option<automation_recovery::AutomationRecovery>>>,
+    undo_recovery: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// Held by every capture reconcile+apply and by versions.setActive across
     /// its forced full scan plus switch transaction. This drains an in-flight
     /// apply and prevents a new one from resolving the destination version
@@ -156,6 +157,7 @@ impl OpenWorkspace {
             projects_collections: self.projects_collections,
             collection_projection: Arc::clone(&self.collection_projection),
             automation_recovery: Arc::clone(&self.automation_recovery),
+            undo_recovery: Arc::clone(&self.undo_recovery),
             capture_apply_gate: Arc::clone(&self.capture_apply_gate),
             capture_holds: Arc::clone(&self.capture_holds),
             session_ops: Arc::clone(&self.session_ops),
@@ -201,7 +203,7 @@ impl OpenWorkspace {
     /// Take and cancel the background tasks without an await point, so an
     /// aborted RPC future cannot leave them running. Return
     /// the join handles for callers that must await the full drain.
-    fn begin_capture_shutdown(&self) -> [Option<tokio::task::JoinHandle<()>>; 4] {
+    fn begin_capture_shutdown(&self) -> [Option<tokio::task::JoinHandle<()>>; 5] {
         self.observation.request_shutdown();
         let projection = lock(&self.collection_projection)
             .take()
@@ -212,7 +214,11 @@ impl OpenWorkspace {
         let recovery = lock(&self.automation_recovery)
             .take()
             .and_then(automation_recovery::AutomationRecovery::begin_shutdown);
+        let undo = lock(&self.undo_recovery)
+            .take()
+            .inspect(|task| task.abort());
         [
+            undo,
             capture,
             recovery,
             projection,
@@ -1232,6 +1238,56 @@ impl EngineService {
         } else {
             None
         };
+        let session_ops = Arc::new(tokio::sync::Mutex::new(()));
+        let undo_recovery = if requested_mode == WorkspaceOpenMode::Full {
+            let (actor, ws, root, gates, recorder) = (
+                actor.clone(),
+                params.workspace_id.clone(),
+                root.clone(),
+                [capture_apply_gate.clone(), session_ops.clone()],
+                Arc::new(self.self_writes.scoped(&root)),
+            );
+            Some(tokio::spawn(async move {
+                match actor.pending_history_undos(ws.clone()).await {
+                    Ok(requests) => {
+                        for (operation, request, author) in requests {
+                            match actor
+                                .history_undo_in_turns(
+                                    ws.clone(),
+                                    operation,
+                                    request,
+                                    author,
+                                    root.clone(),
+                                    Arc::new(NoFaults),
+                                    now_ms,
+                                    gates.clone(),
+                                )
+                                .await
+                            {
+                                Ok(result) => {
+                                    actor
+                                        .history_undo_place(
+                                            ws.clone(),
+                                            result,
+                                            root.clone(),
+                                            recorder.clone(),
+                                            now_ms,
+                                            |_| {},
+                                        )
+                                        .await;
+                                }
+                                Err(error) => {
+                                    eprintln!("engine: Undo recovery will retry on open: {error}")
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => eprintln!("engine: Undo recovery unavailable: {error}"),
+                }
+            }))
+        } else {
+            None
+        };
         lock(&self.handles).insert(
             handle.clone(),
             Arc::new(OpenWorkspace {
@@ -1252,9 +1308,10 @@ impl EngineService {
                 projects_collections: params.project_collections,
                 collection_projection: Arc::new(Mutex::new(collection_projection)),
                 automation_recovery: Arc::new(Mutex::new(automation_recovery)),
+                undo_recovery: Arc::new(Mutex::new(undo_recovery)),
                 capture_apply_gate,
                 capture_holds: CaptureHolds::default(),
-                session_ops: Arc::new(tokio::sync::Mutex::new(())),
+                session_ops,
                 cursors_issued: Default::default(),
                 collections_owed: Default::default(),
                 pull_between_pages: Default::default(),
@@ -1420,6 +1477,10 @@ impl EngineService {
         release
     }
 }
+
+#[cfg(test)]
+#[path = "history_undo_recovery_tests.rs"]
+mod history_undo_recovery_tests;
 
 #[cfg(test)]
 mod tests {
