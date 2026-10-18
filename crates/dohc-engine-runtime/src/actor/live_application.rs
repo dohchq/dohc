@@ -41,12 +41,13 @@ pub(super) struct Reserved<T> {
 type ReservedReply<T> = oneshot::Sender<Reserved<T>>;
 
 fn reply_reserved<T>(
+    store: &EngineStore,
     reply: ReservedReply<T>,
     reservation: impl Into<Option<Arc<dyn Send + Sync>>>,
     result: Result<T, RuntimeError>,
 ) {
     let _ = reply.send(Reserved {
-        result,
+        result: super::drained(store, result),
         reservation: reservation.into(),
     });
 }
@@ -961,7 +962,7 @@ impl Request {
                     )
                     .map_err(Into::into)
                 });
-                reply_reserved(reply, reservation, result);
+                reply_reserved(store, reply, reservation, result);
             }
             Self::ReadNextApplied {
                 workspace_id,
@@ -987,7 +988,7 @@ impl Request {
                     )
                     .map_err(Into::into)
                 });
-                reply_reserved(reply, reservation, result);
+                reply_reserved(store, reply, reservation, result);
             }
             Self::ReadAck {
                 workspace_id,
@@ -999,7 +1000,7 @@ impl Request {
                 let result = registry.owner(&workspace_id, &token).and_then(|_| {
                     read_application_ack(store, &application, &identity).map_err(Into::into)
                 });
-                let _ = reply.send(result);
+                let _ = reply.send(super::drained(store, result));
             }
             Self::ResumeRestore {
                 workspace_id,
@@ -1037,7 +1038,7 @@ impl Request {
                             Ok(())
                         }).map_err(Into::into)
                 });
-                reply_reserved(reply, reservation, result);
+                reply_reserved(store, reply, reservation, result);
             }
             Self::SettleRestore {
                 workspace_id,
@@ -1065,10 +1066,11 @@ impl Request {
                         Ok(result)
                     })
                 });
+                let result = super::drained(store, result);
                 if let (Some(observer), Ok(result)) = (&observer, &result) {
                     observer(result);
                 }
-                reply_reserved(reply, reservation, result);
+                reply_reserved(store, reply, reservation, result);
             }
             Self::ApplyRestore {
                 workspace_id,
@@ -1114,7 +1116,7 @@ impl Request {
                         })
                         .map_err(Into::into)
                 });
-                reply_reserved(reply, reservation, result);
+                reply_reserved(store, reply, reservation, result);
             }
             Self::PrepareRestore {
                 workspace_id,
@@ -1139,7 +1141,7 @@ impl Request {
                         )
                         .map_err(Into::into)
                 });
-                reply_reserved(reply, reservation, result);
+                reply_reserved(store, reply, reservation, result);
             }
             Self::FenceRestore {
                 workspace_id,
@@ -1165,7 +1167,7 @@ impl Request {
                     }
                     .map_err(Into::into)
                 });
-                let _ = reply.send(result);
+                let _ = reply.send(super::drained(store, result));
             }
             Self::AdoptOwner {
                 workspace_id,
@@ -1206,7 +1208,7 @@ impl Request {
                     )
                     .map_err(Into::into)
                 });
-                reply_reserved(reply, reservation, result);
+                reply_reserved(store, reply, reservation, result);
             }
             Self::Settle {
                 workspace_id,
@@ -1244,7 +1246,7 @@ impl Request {
                         },
                     )
                 });
-                reply_reserved(reply, reconstruction.reservation, result);
+                reply_reserved(store, reply, reconstruction.reservation, result);
             }
             Self::Bootstrap {
                 workspace_id,
@@ -1283,7 +1285,7 @@ impl Request {
                         },
                     )
                 });
-                reply_reserved(reply, reservation, result);
+                reply_reserved(store, reply, reservation, result);
             }
             Self::Open {
                 workspace_id,
@@ -1304,7 +1306,7 @@ impl Request {
                         .insert(workspace_id, OwnedRegistration { token, application });
                     Ok(())
                 })();
-                let _ = reply.send(result);
+                let _ = reply.send(super::drained(store, result));
             }
             Self::Register {
                 workspace_id,
@@ -1319,7 +1321,7 @@ impl Request {
                         .register(store, namespace, coordinate, binding)
                         .map_err(Into::into)
                 });
-                let _ = reply.send(result);
+                let _ = reply.send(super::drained(store, result));
             }
             Self::Apply {
                 workspace_id,
@@ -1348,7 +1350,7 @@ impl Request {
                     )
                     .map_err(Into::into)
                 });
-                reply_reserved(reply, reservation, result);
+                reply_reserved(store, reply, reservation, result);
             }
             Self::Unload {
                 workspace_id,
@@ -1378,7 +1380,7 @@ impl Request {
                     }
                     Ok(None)
                 });
-                let _ = reply.send(result);
+                let _ = reply.send(super::drained(store, result));
             }
             Self::Close {
                 workspace_id,
@@ -1397,7 +1399,7 @@ impl Request {
                 if result.is_ok() {
                     registry.0.remove(&workspace_id);
                 }
-                let _ = reply.send(result);
+                let _ = reply.send(super::drained(store, result));
             }
         }
     }
@@ -1550,8 +1552,46 @@ mod tests {
     }
 
     fn send(reply: ReservedReply<Dropped>, order: &Order) {
+        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let store =
+            EngineStore::open(&dohc_engine_testkit::engine_db_path(&scratch).unwrap(), 1).unwrap();
         let reservation: Arc<dyn Send + Sync> = Arc::new(Dropped("reservation", order.clone()));
-        reply_reserved(reply, reservation, Ok(Dropped("result", order.clone())));
+        reply_reserved(
+            &store,
+            reply,
+            reservation,
+            Ok(Dropped("result", order.clone())),
+        );
+    }
+
+    /// Live document replies leave the actor without passing `run`, so they
+    /// pay the owed drain themselves.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn a_live_application_reply_pays_the_owed_drain() {
+        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let store =
+            EngineStore::open(&dohc_engine_testkit::engine_db_path(&scratch).unwrap(), 1).unwrap();
+        let note = scratch.join("note.md");
+        std::fs::write(&note, b"settled").unwrap();
+        store
+            .flush_before_commits(&std::fs::File::open(&note).unwrap())
+            .unwrap();
+        let (reply, receive) = oneshot::channel();
+        reply_reserved(&store, reply, None, Ok(()));
+        assert!(receive.blocking_recv().unwrap().result.is_ok());
+        let kinds: Vec<_> = store
+            .take_flush_trace()
+            .into_iter()
+            .map(|event| event.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                dohc_engine_storage::FlushKind::Barrier,
+                dohc_engine_storage::FlushKind::Drain
+            ]
+        );
     }
 
     #[test]
