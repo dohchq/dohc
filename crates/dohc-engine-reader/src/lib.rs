@@ -2,9 +2,10 @@
 mod process;
 mod session;
 mod wire;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
+    fmt,
     future::Future,
     path::PathBuf,
     sync::{Arc, Condvar, Mutex},
@@ -25,6 +26,8 @@ pub enum Failure {
     Unavailable,
     TimedOut,
     Overloaded,
+    Superseded,
+    TooLarge,
     Crashed,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -35,7 +38,7 @@ pub struct Document {
     pub object_id: String,
     pub lineage_claim_id: String,
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Method {
     Construct,
     Prove,
@@ -67,15 +70,48 @@ pub struct Proof {
     pub projection_sha256: String,
     pub state_sha256: String,
 }
-#[derive(Debug)]
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RefusalReason {
+    InvalidSource,
+    InvalidUpdate,
+    InvalidSchema,
+    WitnessMismatch,
+    ReadingMismatch,
+    CapacityRefused,
+    JournalRefused,
+}
 pub enum Outcome {
-    Constructed { proof: Proof, delta: Vec<u8> },
-    Proved(Proof),
-    Refused(String),
+    Constructed {
+        proof: Proof,
+        delta: Vec<u8>,
+        checkpoint_sha256: String,
+    },
+    Proved {
+        proof: Proof,
+        checkpoint_sha256: String,
+    },
+    Refused {
+        reason: RefusalReason,
+        checkpoint_sha256: String,
+    },
+}
+impl fmt::Debug for Outcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Constructed { delta, .. } => f
+                .debug_struct("Constructed")
+                .field("delta_bytes", &delta.len())
+                .finish(),
+            Self::Proved { .. } => f.write_str("Proved"),
+            Self::Refused { reason, .. } => f.debug_tuple("Refused").field(reason).finish(),
+        }
+    }
 }
 pub type Result = std::result::Result<Outcome, Failure>;
 struct Pending {
-    request: Arc<Request>,
+    request: Request,
+    retained: usize,
     deadline: Instant,
     reply: oneshot::Sender<Result>,
 }
@@ -115,17 +151,19 @@ pub struct Reader {
     deadlines: Deadlines,
 }
 impl Reader {
-    /// Creates an idle owner thread; the child starts with the first request.
+    /// Configured readers own an idle thread; the child starts with the first request.
     pub fn new(config: Option<Config>) -> Self {
         Self::with_deadlines(config, Deadlines::default())
     }
     fn with_deadlines(config: Option<Config>, deadlines: Deadlines) -> Self {
         let shared = Arc::new(Shared::default());
         let owned = shared.clone();
-        let owner = thread::Builder::new()
-            .name("markdown-reader".into())
-            .spawn(move || drive(owned, config, deadlines))
-            .ok();
+        let owner = config.and_then(|config| {
+            thread::Builder::new()
+                .name("markdown-reader".into())
+                .spawn(move || drive(owned, config, deadlines))
+                .ok()
+        });
         shared.state.lock().unwrap().closed = owner.is_none();
         Self {
             shared,
@@ -145,28 +183,31 @@ impl Reader {
             || request.checkpoint.len() > wire::UPDATE
             || bytes > 64 * 1024 * 1024
         {
-            Some(Failure::Overloaded)
+            Some(Failure::TooLarge)
         } else {
             None
         };
         if let Some(failure) = failure {
             let _ = reply.send(Err(failure));
         } else {
-            if let Some(i) = s
-                .queue
-                .iter()
-                .position(|p| p.request.document == request.document)
+            let replaced = s.queue.iter().position(|p| {
+                p.request.document == request.document && p.request.method == request.method
+            });
+            let previous = replaced.map_or(0, |i| s.queue[i].retained);
+            if (replaced.is_none() && s.queue.len() >= 4)
+                || s.retained - previous + bytes > 64 * 1024 * 1024
             {
-                let old = s.queue.remove(i).unwrap();
-                s.retained -= old.request.retained();
-                let _ = old.reply.send(Err(Failure::Overloaded));
-            }
-            if s.queue.len() >= 4 || s.retained + bytes > 64 * 1024 * 1024 {
                 let _ = reply.send(Err(Failure::Overloaded));
             } else {
+                if let Some(i) = replaced {
+                    let old = s.queue.remove(i).unwrap();
+                    s.retained -= old.retained;
+                    let _ = old.reply.send(Err(Failure::Superseded));
+                }
                 s.retained += bytes;
                 s.queue.push_back(Pending {
-                    request: Arc::new(request),
+                    request,
+                    retained: bytes,
                     deadline: Instant::now() + self.deadlines.queue,
                     reply,
                 });
@@ -194,7 +235,7 @@ fn expire(s: &mut State) {
     while i < s.queue.len() {
         if s.closed || s.queue[i].reply.is_closed() || s.queue[i].deadline <= Instant::now() {
             let p = s.queue.remove(i).unwrap();
-            s.retained -= p.request.retained();
+            s.retained -= p.retained;
             let _ = p.reply.send(Err(if s.closed {
                 Failure::Unavailable
             } else {
@@ -205,7 +246,7 @@ fn expire(s: &mut State) {
         }
     }
 }
-fn drive(shared: Arc<Shared>, config: Option<Config>, d: Deadlines) {
+fn drive(shared: Arc<Shared>, config: Config, d: Deadlines) {
     let mut worker: Option<process::Worker> = None;
     loop {
         let p = {
@@ -234,25 +275,55 @@ fn drive(shared: Arc<Shared>, config: Option<Config>, d: Deadlines) {
         let result = (|| {
             if worker.is_none() {
                 let deadline = Instant::now() + d.startup;
-                worker = Some(process::Worker::start(
-                    config.as_ref().ok_or(Failure::Unavailable)?,
-                    shared.clone(),
-                    deadline,
-                )?);
-                worker.as_ref().unwrap().wait(deadline)?;
+                worker = Some(
+                    process::Worker::start(&config, shared.clone(), deadline)
+                        .map_err(|_| Failure::Unavailable)?,
+                );
+                wait_event(worker.as_ref().unwrap(), &shared, deadline)
+                    .map_err(|_| Failure::Unavailable)?;
             }
             let w = worker.as_ref().unwrap();
-            w.send(p.request.clone())?;
-            w.wait(Instant::now() + d.request)?.ok_or(Failure::Crashed)
+            w.send(p.request)?;
+            wait_event(w, &shared, Instant::now() + d.request)?.ok_or(Failure::Crashed)
         })();
         if result.is_err() {
             drop(worker.take());
         }
         // Release accounting only after failed I/O has stopped retaining the active request.
-        shared.state.lock().unwrap().retained -= p.request.retained();
+        shared.state.lock().unwrap().retained -= p.retained;
         let _ = p.reply.send(result);
     }
     drop(worker);
+}
+
+fn wait_event(w: &process::Worker, shared: &Shared, deadline: Instant) -> process::Event {
+    let mut s = shared.state.lock().unwrap();
+    loop {
+        expire(&mut s);
+        if s.closed {
+            return Err(Failure::Unavailable);
+        }
+        if Instant::now() >= deadline {
+            return Err(Failure::TimedOut);
+        }
+        match w.output.try_recv() {
+            Ok(event) => return event,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => return Err(Failure::Crashed),
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+        let until = s
+            .queue
+            .iter()
+            .map(|p| p.deadline)
+            .min()
+            .unwrap_or(deadline)
+            .min(deadline);
+        s = shared
+            .wake
+            .wait_timeout(s, until.saturating_duration_since(Instant::now()))
+            .unwrap()
+            .0;
+    }
 }
 
 #[cfg(test)]

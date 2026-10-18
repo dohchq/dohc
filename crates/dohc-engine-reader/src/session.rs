@@ -1,17 +1,35 @@
 use crate::{
-    Failure, Method, Outcome, Proof, Request, Result,
-    wire::{Blob, Pipe, sha},
+    Failure, Method, Outcome, Proof, RefusalReason, Request, Result,
+    wire::{Blob, Pipe, valid_sha},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::process::{ChildStdin, ChildStdout};
-pub(super) struct Session {
-    pipe: Pipe<ChildStdout, ChildStdin>,
+use std::io::{Read, Write};
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
+enum Response {
+    Refused { id: u64, reason: RefusalReason },
+    Constructed(Reply),
+    Proved(Reply),
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Reply {
+    id: u64,
+    source_sha256: String,
+    source_byte_length: usize,
+    projection_sha256: String,
+    state_sha256: String,
+    delta: Blob,
+}
+pub(super) struct Session<R, W> {
+    pipe: Pipe<R, W>,
     manifest: Value,
     id: u64,
 }
-impl Session {
-    pub fn new(reader: ChildStdout, writer: ChildStdin, manifest: Value) -> Self {
+impl<R: Read, W: Write> Session<R, W> {
+    pub fn new(reader: R, writer: W, manifest: Value) -> Self {
         Self {
             pipe: Pipe::new(reader, writer),
             manifest,
@@ -47,59 +65,35 @@ impl Session {
     }
     pub fn execute(&mut self, r: &Request) -> Result {
         self.id += 1;
-        let method = match r.method {
-            Method::Construct => "construct",
-            Method::Prove => "prove",
-        };
-        self.pipe.control(&json!({"id": self.id, "method": method, "document": r.document, "currentPath": r.current_path, "source": Blob::of(&r.source), "checkpoint": Blob::of(&r.checkpoint)}))?;
+        let constructed = r.method == Method::Construct;
+        let method = if constructed { "construct" } else { "prove" };
+        let source = Blob::of(&r.source);
+        let checkpoint = Blob::of(&r.checkpoint);
+        self.pipe.control(&json!({"id": self.id, "method": method, "document": r.document, "currentPath": r.current_path, "source": source, "checkpoint": checkpoint}))?;
         self.pipe.blob(1, &r.source)?;
         self.pipe.blob(2, &r.checkpoint)?;
         self.pipe.control(&json!({"id": self.id, "end": true}))?;
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase", deny_unknown_fields)]
-        struct Success {
-            id: u64,
-            kind: String,
-            source_sha256: String,
-            source_byte_length: usize,
-            projection_sha256: String,
-            state_sha256: String,
-            delta: Blob,
-        }
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Refusal {
-            id: u64,
-            kind: String,
-            reason: String,
-        }
-        let response: Value = self.pipe.json()?;
-        if response["kind"] == "refused" {
-            let refused: Refusal =
-                serde_json::from_value(response).map_err(|_| Failure::Crashed)?;
-            if refused.id != self.id || refused.kind != "refused" || refused.reason.len() > 128 {
-                return Err(Failure::Crashed);
+        let checkpoint_sha256 = checkpoint.sha256;
+        let reply = match (self.pipe.json()?, r.method) {
+            (Response::Refused { id, reason }, _) if id == self.id => {
+                return Ok(Outcome::Refused {
+                    reason,
+                    checkpoint_sha256,
+                });
             }
-            return Ok(Outcome::Refused(refused.reason));
-        }
-        let Success {
-            id,
-            kind,
-            source_sha256,
-            source_byte_length,
-            projection_sha256,
-            state_sha256,
-            delta,
-        } = serde_json::from_value(response).map_err(|_| Failure::Crashed)?;
-        let constructed = matches!(r.method, Method::Construct);
-        if kind != if constructed { "constructed" } else { "proved" } {
-            return Err(Failure::Crashed);
-        }
-        if id != self.id || source_byte_length != r.source.len() || source_sha256 != sha(&r.source)
+            (Response::Constructed(reply), Method::Construct)
+            | (Response::Proved(reply), Method::Prove) => reply,
+            _ => return Err(Failure::Crashed),
+        };
+        if reply.id != self.id
+            || reply.source_byte_length != source.length
+            || reply.source_sha256 != source.sha256
+            || !valid_sha(&reply.projection_sha256)
+            || !valid_sha(&reply.state_sha256)
         {
             return Err(Failure::Crashed);
         }
-        let delta = self.pipe.receive(3, delta)?;
+        let delta = self.pipe.receive(3, reply.delta)?;
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct End {
@@ -107,19 +101,26 @@ impl Session {
             end: bool,
         }
         let end: End = self.pipe.json()?;
-        if end.id != id || !end.end || (!constructed && !delta.is_empty()) {
+        if end.id != self.id || !end.end || (!constructed && !delta.is_empty()) {
             return Err(Failure::Crashed);
         }
         let proof = Proof {
-            source_sha256,
-            source_byte_length,
-            projection_sha256,
-            state_sha256,
+            source_sha256: reply.source_sha256,
+            source_byte_length: reply.source_byte_length,
+            projection_sha256: reply.projection_sha256,
+            state_sha256: reply.state_sha256,
         };
         Ok(if constructed {
-            Outcome::Constructed { proof, delta }
+            Outcome::Constructed {
+                proof,
+                delta,
+                checkpoint_sha256,
+            }
         } else {
-            Outcome::Proved(proof)
+            Outcome::Proved {
+                proof,
+                checkpoint_sha256,
+            }
         })
     }
 }

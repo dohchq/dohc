@@ -1,18 +1,22 @@
-use crate::{Config, Failure, Outcome, Request, Shared, expire, session::Session, wire::sha};
+use crate::{Config, Failure, Outcome, Request, Shared, session::Session, wire::CHUNK};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{
+    ffi::OsString,
     fs::File,
-    io::Read,
+    io::{self, Read},
+    path::Path,
     process::{Child, Command, Stdio},
     sync::{Arc, mpsc},
     thread::{self, JoinHandle},
     time::Instant,
 };
-type Event = std::result::Result<Option<Outcome>, Failure>;
+pub(super) type Event = std::result::Result<Option<Outcome>, Failure>;
 pub(super) struct Worker {
     child: Child,
-    input: Option<mpsc::Sender<Arc<Request>>>,
-    output: mpsc::Receiver<Event>,
+    input: Option<mpsc::Sender<Request>>,
+    pub output: mpsc::Receiver<Event>,
+    #[cfg(test)]
     shared: Arc<Shared>,
     threads: Vec<JoinHandle<()>>,
     cwd: Option<tempfile::TempDir>,
@@ -30,6 +34,14 @@ impl Worker {
         {
             return Err(Failure::Unavailable);
         }
+        #[cfg(windows)]
+        if c.node
+            .extension()
+            .and_then(|s| s.to_str())
+            .is_none_or(|s| !s.eq_ignore_ascii_case("exe"))
+        {
+            return Err(Failure::Unavailable);
+        }
         let mut bytes = Vec::new();
         File::open(&c.manifest)
             .map_err(unavailable)?
@@ -44,27 +56,20 @@ impl Worker {
             (&c.node, &manifest["runtime"]["sha256"], 256 * 1024 * 1024),
             (&c.bundle, &manifest["bundleSha256"], 16 * 1024 * 1024),
         ] {
-            bytes.clear();
-            File::open(path)
-                .map_err(unavailable)?
-                .take(cap + 1)
-                .read_to_end(&mut bytes)
-                .map_err(unavailable)?;
-            if bytes.len() as u64 > cap || Some(sha(&bytes).as_str()) != expected.as_str() {
+            if Some(file_sha(path, cap, deadline)?.as_str()) != expected.as_str() {
                 return Err(Failure::Unavailable);
-            }
-            if Instant::now() >= deadline {
-                return Err(Failure::TimedOut);
             }
         }
         let cwd = tempfile::tempdir().map_err(unavailable)?;
         let mut command = Command::new(&c.node);
+        let mut read_grant = OsString::from("--allow-fs-read=");
+        read_grant.push(&c.bundle);
         // Windows OpenSSL needs SystemRoot to initialize its OS entropy provider.
         command
             .env_clear()
             .current_dir(cwd.path())
             .arg("--permission")
-            .arg(format!("--allow-fs-read={}", c.bundle.display()))
+            .arg(read_grant)
             .arg("--max-old-space-size=256")
             .arg(&c.bundle)
             .stdin(Stdio::piped())
@@ -77,36 +82,25 @@ impl Worker {
         );
         prepare(&mut command);
         let child = command.spawn().map_err(unavailable)?;
-        let (input, requests) = mpsc::channel::<Arc<Request>>();
+        let (input, requests) = mpsc::channel::<Request>();
         let (events, output) = mpsc::channel();
         let mut w = Self {
             child,
             input: Some(input),
             output,
+            #[cfg(test)]
             shared: shared.clone(),
             threads: Vec::new(),
             cwd: Some(cwd),
         };
         #[cfg(test)]
-        {
-            let mut s = shared.state.lock().unwrap();
-            s.lifecycle.0 += 1;
-            s.lifecycle.2 = Some((w.child.id(), w.cwd.as_ref().unwrap().path().into()));
-            shared.wake.notify_all();
-        }
+        crate::tests::started(&shared, w.child.id(), w.cwd.as_ref().unwrap().path());
         let mut stderr = w.child.stderr.take().unwrap();
         w.threads.push(
             thread::Builder::new()
                 .name("reader-stderr".into())
                 .spawn(move || {
-                    let mut captured = Vec::new();
-                    let mut buffer = [0; 4096];
-                    while let Ok(n) = stderr.read(&mut buffer) {
-                        if n == 0 {
-                            break;
-                        }
-                        captured.extend_from_slice(&buffer[..n.min(16384 - captured.len())]);
-                    }
+                    let _ = io::copy(&mut stderr, &mut io::sink());
                 })
                 .map_err(unavailable)?,
         );
@@ -145,42 +139,35 @@ impl Worker {
         );
         Ok(w)
     }
-    pub fn send(&self, r: Arc<Request>) -> std::result::Result<(), Failure> {
+    pub fn send(&self, r: Request) -> std::result::Result<(), Failure> {
         self.input
             .as_ref()
             .unwrap()
             .send(r)
             .map_err(|_| Failure::Crashed)
     }
-    pub fn wait(&self, deadline: Instant) -> Event {
-        let mut s = self.shared.state.lock().unwrap();
-        loop {
-            expire(&mut s);
-            if s.closed {
-                return Err(Failure::Unavailable);
-            }
-            if Instant::now() >= deadline {
-                return Err(Failure::TimedOut);
-            }
-            match self.output.try_recv() {
-                Ok(event) => return event,
-                Err(mpsc::TryRecvError::Disconnected) => return Err(Failure::Crashed),
-                Err(mpsc::TryRecvError::Empty) => {}
-            }
-            let until = s
-                .queue
+}
+fn file_sha(path: &Path, cap: u64, deadline: Instant) -> std::result::Result<String, Failure> {
+    let mut file = File::open(path)
+        .map_err(|_| Failure::Unavailable)?
+        .take(cap + 1);
+    let mut hasher = Sha256::new();
+    let mut buffer = [0; CHUNK];
+    let mut length = 0;
+    loop {
+        let n = file.read(&mut buffer).map_err(|_| Failure::Unavailable)?;
+        if n == 0 {
+            return Ok(hasher
+                .finalize()
                 .iter()
-                .map(|p| p.deadline)
-                .min()
-                .unwrap_or(deadline)
-                .min(deadline);
-            s = self
-                .shared
-                .wake
-                .wait_timeout(s, until.saturating_duration_since(Instant::now()))
-                .unwrap()
-                .0;
+                .map(|b| format!("{b:02x}"))
+                .collect());
         }
+        length += n as u64;
+        if length > cap || Instant::now() >= deadline {
+            return Err(Failure::Unavailable);
+        }
+        hasher.update(&buffer[..n]);
     }
 }
 impl Drop for Worker {
@@ -194,13 +181,7 @@ impl Drop for Worker {
         }
         drop(self.cwd.take());
         #[cfg(test)]
-        {
-            assert!(self.child.try_wait().unwrap().is_some());
-            let mut s = self.shared.state.lock().unwrap();
-            s.lifecycle.1 += 1;
-            s.lifecycle.2 = None;
-            self.shared.wake.notify_all();
-        }
+        crate::tests::reaped(&self.shared, &mut self.child);
     }
 }
 fn prepare(command: &mut Command) {

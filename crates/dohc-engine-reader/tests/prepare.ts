@@ -1,9 +1,8 @@
-import {readFileSync, writeFileSync} from 'node:fs'
+import {writeFileSync} from 'node:fs'
 import {join} from 'node:path'
-import * as Y from '../../../packages/ydoc-projection/node_modules/yjs/dist/yjs.mjs'
+import * as Y from 'yjs'
 import {markdownToYDoc} from '../../../packages/ydoc-projection/src/import-export'
 import {createEngineMarkdownReader} from '../../../packages/ydoc-projection/src/engine-markdown-reader'
-import rows from '../../../packages/ydoc-projection/src/engine-markdown-reader.fixture.json'
 const directory = process.argv[2]!
 const reader = createEngineMarkdownReader({maxStructVisits:1e6,maxValueNodeVisits:5e6,maxDecodedPayloadByteVisits:1e8,
   maxStructClientGroupVisits:1e6,maxDeleteClientGroupVisits:1e6,maxDeleteIntervalVisits:1e6,maxIndexOperations:1e7})
@@ -20,14 +19,13 @@ function save(name:string, source:string, earlier:string) {
   writeFileSync(join(directory,`${name}.forged`),Y.encodeStateAsUpdate(base))
   base.destroy();return {kind:'accepted',bytes:bytes.length}
 }
-const row=rows.find(r=>r.accepted)!
-const results:any={note:save('note',row.source,row.earlier),bom:save('bom','\ufeff'+row.source,row.earlier)}
-// Reproduce PR 2's 50 KB workload when its task evidence is supplied.
-const original=readFileSync(process.argv[3]!,'utf8')
-const nested='\n- **parent** and [notes](https://example.com)\n  - _child_ with `Vec<T>` and & text\n  - sibling\n\n'
-let source=original.replaceAll('- third item with a little detail\n','- third item with a little detail\n'+nested).slice(0,49996)+'\n'.repeat(4)
-if(source.length<50000)source+='x'.repeat(50000-source.length)
-results.warm=save('warm',source,source.replaceAll('**parent**','**earlier**'))
+const note='# Reader fixture\n\nA **bold** paragraph with [a link](https://example.com).\n\n- First item\n- Second item\n'
+const results:any={note:save('note',note,note.replace('bold','earlier')),bom:save('bom','\ufeff'+note,note)}
+const paragraph='A **bold** paragraph with _emphasis_, `code`, and [a link](https://example.com).\n\n'
+const nested='- **parent** and notes\n  - _child_ with `Vec<T>` and & text\n  - sibling\n\n'
+const blocks='# Workload\n\n'+(paragraph+nested).repeat(40)
+const source=blocks+'x'.repeat(49999-blocks.length)+'\n'
+results.warm=save('warm',source,source.replace('**parent**','**earlier**'))
 // Maximum public source bound, with one short changed paragraph and an unchanged long block.
 const largest='# Maximum\n\n'+'x'.repeat(2*1024*1024-12)+'\n'
 results.largest=save('largest',largest,largest.replace('Maximum','Earlier'))

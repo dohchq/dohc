@@ -15,6 +15,12 @@ pub(crate) fn sha(bytes: &[u8]) -> String {
         .map(|b| format!("{b:02x}"))
         .collect()
 }
+pub(crate) fn valid_sha(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+}
 fn limits() -> WireLimits {
     WireLimits {
         max_frame_bytes: CHUNK as u32,
@@ -36,12 +42,7 @@ impl Blob {
         }
     }
     pub fn valid(&self, max: usize) -> bool {
-        self.length <= max
-            && self.sha256.len() == 64
-            && self
-                .sha256
-                .bytes()
-                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+        self.length <= max && valid_sha(&self.sha256)
     }
 }
 pub(crate) struct Pipe<R, W> {

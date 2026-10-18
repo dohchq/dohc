@@ -3,6 +3,19 @@ use serde_json::{Value, json};
 use std::{fs, process::Command, sync::OnceLock};
 #[path = "../tests/real.rs"]
 mod real;
+pub(super) fn started(shared: &Shared, pid: u32, cwd: &std::path::Path) {
+    let mut s = shared.state.lock().unwrap();
+    s.lifecycle.0 += 1;
+    s.lifecycle.2 = Some((pid, cwd.into()));
+    shared.wake.notify_all();
+}
+pub(super) fn reaped(shared: &Shared, child: &mut std::process::Child) {
+    assert!(child.try_wait().unwrap().is_some());
+    let mut s = shared.state.lock().unwrap();
+    s.lifecycle.1 += 1;
+    s.lifecycle.2 = None;
+    shared.wake.notify_all();
+}
 
 fn runtime() -> (PathBuf, Value) {
     static RUNTIME: OnceLock<(PathBuf, Value)> = OnceLock::new();
@@ -16,9 +29,14 @@ fn runtime() -> (PathBuf, Value) {
     }).clone()
 }
 fn fixture(mode: &str) -> (tempfile::TempDir, Config) {
-    let dir = tempfile::tempdir().unwrap();
+    let parent = std::env::current_dir().unwrap();
+    let dir = if mode == "relative" {
+        tempfile::tempdir_in(&parent).unwrap()
+    } else {
+        tempfile::tempdir().unwrap()
+    };
     let (node, runtime) = runtime();
-    let identity = json!({"version":1,"runtime":runtime,"buildSha256":"test"});
+    let identity = json!({"version":1,"runtime":runtime,"buildSha256":"test","parentCwd":parent});
     let script = include_str!("fake.cjs")
         .replace("MANIFEST", &identity.to_string())
         .replace("MODE", &json!(mode).to_string());
@@ -126,6 +144,13 @@ fn fail(result: Result, expected: Failure) {
         "expected {expected:?}, got {result:?}"
     );
 }
+fn assert_pending(future: std::pin::Pin<&mut impl Future<Output = Result>>) {
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    assert!(
+        future.poll(&mut cx).is_pending(),
+        "active request completed before queued deadline"
+    );
+}
 
 #[test]
 fn missing_and_identity() {
@@ -151,7 +176,13 @@ fn missing_and_identity() {
     ] {
         let (_dir, mut c) = fixture(fault);
         match fault {
-            "relative" => c.bundle = "reader.cjs".into(),
+            "relative" => {
+                c.manifest = c
+                    .manifest
+                    .strip_prefix(std::env::current_dir().unwrap())
+                    .unwrap()
+                    .into()
+            }
             "runtime" => c.node = c.node.with_extension("absent"),
             "bundle" => fs::remove_file(&c.bundle).unwrap(),
             "manifest" => fs::remove_file(&c.manifest).unwrap(),
@@ -235,6 +266,154 @@ reply_fault!(delta_digest, "delta");
 reply_fault!(delta_limit, "declaration");
 reply_fault!(malformed_frame, "malformed");
 reply_fault!(oversize_frame, "oversize");
+reply_fault!(fix1_refusal_reason, "refused-reason");
+reply_fault!(fix1_refusal_id, "refused-id");
+reply_fault!(fix1_projection_sha, "projection-sha");
+reply_fault!(fix1_state_sha, "state-sha");
+
+#[test]
+fn fix1_spawn_boundary() {
+    let (_dir, c) = fixture("ok");
+    let mut reader = Reader::new(Some(c));
+    assert!(run(reader.request(request("ok"))).is_ok());
+    let cwd = reader
+        .shared
+        .state
+        .lock()
+        .unwrap()
+        .lifecycle
+        .2
+        .as_ref()
+        .unwrap()
+        .1
+        .clone();
+    assert_ne!(cwd, std::env::current_dir().unwrap());
+    assert_eq!(fs::read_dir(cwd).unwrap().count(), 0);
+    finish(&mut reader);
+}
+#[test]
+fn fix1_no_configuration_thread() {
+    let mut reader = Reader::new(None);
+    assert!(reader.owner.is_none());
+    fail(run(reader.request(request("ok"))), Failure::Unavailable);
+    finish(&mut reader);
+}
+#[test]
+fn fix1_prove_delta() {
+    let (_dir, c) = fixture("ok");
+    let mut reader = Reader::new(Some(c));
+    let mut r = request("prove-delta");
+    r.method = Method::Prove;
+    fail(run(reader.request(r)), Failure::Crashed);
+    finish(&mut reader);
+}
+#[test]
+fn fix1_debug_redacts_delta() {
+    let (_dir, c) = fixture("ok");
+    let mut reader = Reader::new(Some(c));
+    let result = run(reader.request(request("ok"))).unwrap();
+    assert!(!format!("{result:?}").contains("[0, 0]"));
+    finish(&mut reader);
+}
+#[test]
+fn fix1_method_replacement() {
+    let (_dir, c) = fixture("ok");
+    let mut reader = Reader::new(Some(c));
+    assert!(run(reader.request(request("ok"))).is_ok());
+    let active = reader.request(request("hang"));
+    wait(&reader, |s| s.queue.is_empty());
+    let old = reader.request(request("same"));
+    let mut r = request("same");
+    r.method = Method::Prove;
+    let prove = reader.request(r);
+    let queued = reader.shared.state.lock().unwrap().queue.len();
+    assert_eq!(queued, 2);
+    finish(&mut reader);
+    for f in [active, old, prove] {
+        fail(run(f), Failure::Unavailable);
+    }
+}
+#[test]
+fn fix1_checkpoint_and_refusal() {
+    let (_dir, c) = fixture("ok");
+    let mut reader = Reader::new(Some(c));
+    for bytes in [vec![0, 0], vec![1, 2, 3]] {
+        let digest = wire::sha(&bytes);
+        for (path, method) in [
+            ("ok", Method::Construct),
+            ("ok", Method::Prove),
+            ("refused", Method::Construct),
+        ] {
+            let mut r = request(path);
+            r.method = method;
+            r.checkpoint = bytes.clone();
+            let result = run(reader.request(r)).unwrap();
+            let actual = match result {
+                Outcome::Constructed {
+                    checkpoint_sha256, ..
+                } if method == Method::Construct && path == "ok" => checkpoint_sha256,
+                Outcome::Proved {
+                    checkpoint_sha256, ..
+                } if method == Method::Prove => checkpoint_sha256,
+                Outcome::Refused {
+                    reason: RefusalReason::InvalidSource,
+                    checkpoint_sha256,
+                } if path == "refused" => checkpoint_sha256,
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(actual, digest);
+        }
+    }
+    finish(&mut reader);
+}
+#[test]
+fn fix1_rejected_replacement_keeps_old() {
+    let (_dir, c) = fixture("ok");
+    let mut reader = Reader::new(Some(c));
+    assert!(run(reader.request(request("ok"))).is_ok());
+    let mut large = request("hang");
+    large.source = vec![0; 2 * 1024 * 1024];
+    large.checkpoint = vec![0; wire::UPDATE];
+    let active = reader.request(large);
+    wait(&reader, |s| s.queue.is_empty());
+    let mut other = request("other");
+    other.source = vec![0; 2 * 1024 * 1024];
+    other.checkpoint = vec![0; wire::UPDATE];
+    let queued = reader.request(other);
+    let mut old = Box::pin(reader.request(request("same")));
+    let mut newer = request("same");
+    newer.source = vec![0; 2 * 1024 * 1024];
+    newer.checkpoint = vec![0; wire::UPDATE];
+    fail(run(reader.request(newer)), Failure::Overloaded);
+    assert_pending(old.as_mut());
+    let queued_count = reader.shared.state.lock().unwrap().queue.len();
+    assert_eq!(queued_count, 2);
+    finish(&mut reader);
+    for f in [Box::pin(active), Box::pin(queued), old] {
+        fail(run(f), Failure::Unavailable);
+    }
+}
+#[cfg(windows)]
+#[test]
+fn fix1_executable_extension() {
+    let (dir, mut c) = fixture("ok");
+    let bare = dir.path().join("node");
+    fs::copy(&c.node, &bare).unwrap();
+    fs::copy(&c.node, bare.with_extension("exe")).unwrap();
+    c.node = bare.with_extension("exe");
+    let mut allowed = Reader::new(Some(c.clone()));
+    assert!(run(allowed.request(request("ok"))).is_ok());
+    finish(&mut allowed);
+    c.node = bare;
+    let mut reader = Reader::new(Some(c));
+    fail(run(reader.request(request("ok"))), Failure::Unavailable);
+    let starts = reader.shared.state.lock().unwrap().lifecycle.0;
+    assert_eq!(
+        starts, 0,
+        "invalid executable paths must be rejected before spawn"
+    );
+    finish(&mut reader);
+}
 
 #[test]
 fn reviewed_protocol_success() {
@@ -246,7 +425,10 @@ fn reviewed_protocol_success() {
     ));
     let mut prove = request("ok");
     prove.method = Method::Prove;
-    assert!(matches!(run(reader.request(prove)), Ok(Outcome::Proved(_))));
+    assert!(matches!(
+        run(reader.request(prove)),
+        Ok(Outcome::Proved { .. })
+    ));
     finish(&mut reader);
 }
 
@@ -286,11 +468,11 @@ fn timeouts_queue_replacement_and_shutdown() {
     let mut reader = Reader::with_deadlines(Some(c), d);
     // Warm hello so queue deadlines test queueing rather than hash/startup load.
     assert!(run(reader.request(request("ok"))).is_ok());
-    let active = reader.request(request("hang"));
+    let mut active = Box::pin(reader.request(request("hang")));
     wait(&reader, |s| s.queue.is_empty());
     let old = reader.request(request("same"));
     let newer = reader.request(request("same"));
-    fail(run(old), Failure::Overloaded);
+    fail(run(old), Failure::Superseded);
     let q2 = reader.request(request("q2"));
     let q3 = reader.request(request("q3"));
     let q4 = reader.request(request("q4"));
@@ -298,6 +480,7 @@ fn timeouts_queue_replacement_and_shutdown() {
     for q in [newer, q2, q3, q4] {
         fail(run(q), Failure::TimedOut);
     }
+    assert_pending(active.as_mut());
     fail(run(active), Failure::TimedOut);
     assert!(run(reader.request(request("ok"))).is_ok());
     let active = reader.request(request("hang"));
@@ -316,7 +499,7 @@ fn startup_timeout_idle_and_cancel() {
         ..Deadlines::default()
     };
     let mut reader = Reader::with_deadlines(Some(c), d);
-    fail(run(reader.request(request("ok"))), Failure::TimedOut);
+    fail(run(reader.request(request("ok"))), Failure::Unavailable);
     finish(&mut reader);
     let (_dir, c) = fixture("ok");
     let mut reader = Reader::with_deadlines(Some(c), d);
@@ -340,22 +523,21 @@ fn aggregate_retained_limit() {
     let (_dir, c) = fixture("ok");
     let mut reader = Reader::new(Some(c));
     assert!(run(reader.request(request("ok"))).is_ok());
-    let active = reader.request(request("hang"));
-    wait(&reader, |s| s.queue.is_empty());
     let large = |key| {
         let mut r = request(key);
         r.checkpoint = vec![0; wire::UPDATE];
         r.source = vec![0; 2 * 1024 * 1024];
         r
     };
+    let active = reader.request(large("hang"));
+    wait(&reader, |s| s.queue.is_empty());
     let q1 = reader.request(large("q1"));
-    let q2 = reader.request(large("q2"));
-    fail(run(reader.request(large("q3"))), Failure::Overloaded);
+    fail(run(reader.request(large("q2"))), Failure::Overloaded);
     let mut oversized = request("too-large");
     oversized.source = vec![0; 2 * 1024 * 1024 + 1];
-    fail(run(reader.request(oversized)), Failure::Overloaded);
+    fail(run(reader.request(oversized)), Failure::TooLarge);
     finish(&mut reader);
-    for q in [active, q1, q2] {
+    for q in [active, q1] {
         fail(run(q), Failure::Unavailable);
     }
 }
@@ -397,7 +579,7 @@ fn startup_deadline() {
         },
     );
     let future = reader.request(request("ok"));
-    fail(deadline_result(&mut reader, future), Failure::TimedOut);
+    fail(deadline_result(&mut reader, future), Failure::Unavailable);
     finish(&mut reader);
 }
 #[test]
