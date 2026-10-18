@@ -321,6 +321,7 @@ test("owner + participant chat and co-presence converge in the real app", async 
     // engine each iteration with a throwaway file write — the same wake pattern
     // the offline-rejoin spec uses — then re-open the thread to refetch.
     let nudge = 0;
+    const threadBodies = page.getByTestId("chats-thread-view").getByTestId("chats-message-body");
     await expect
       .poll(
         async () => {
@@ -328,10 +329,11 @@ test("owner + participant chat and co-presence converge in the real app", async 
           await writeFile(join(temp.rootPath, `sync-nudge-${nudge}.md`), `nudge ${nudge}\n`);
           await page.getByTestId("chats-thread-back").click().catch(() => undefined);
           await page.getByTestId("chats-thread").first().click().catch(() => undefined);
-          return await page
-            .getByTestId("chats-message-body")
-            .filter({ hasText: "count me in" })
-            .count();
+          // The reopened thread paints its messages after the click returns.
+          // Count once the owner's message is back, so the count reads a loaded thread.
+          await threadBodies.filter({ hasText: "Kickoff the launch plan." })
+            .waitFor({ timeout: 10_000 }).catch(() => undefined);
+          return await threadBodies.filter({ hasText: "count me in" }).count();
         },
         { timeout: 90_000, intervals: [2000] },
       )
