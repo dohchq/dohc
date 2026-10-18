@@ -528,7 +528,7 @@ it("keeps the retired editor frozen while storage refuses its edits, and Try aga
   expect(harness.applied).toHaveLength(2);
 });
 
-it("keeps the newest retired text when an earlier attempt's projection finishes last", async () => {
+it.each(["newest text first", "recovery refresh last"] as const)("keeps the newest retired text whichever projection finishes last (%s)", async (order) => {
   await retainBound();
   const losingDoc = retained.boundDoc();
   act(() => editDocument());
@@ -550,17 +550,34 @@ it("keeps the newest retired text when an earlier attempt's projection finishes 
     text.insert(text.length, "!");
   });
 
-  // Each attempt and edit projects once, and so does the recovery slot's own
-  // refresh. Release the newest text first, so an older projection that is
-  // still pending finishes last.
+  // Each attempt and edit projects once, one at a time, and so does the
+  // recovery slot's own refresh of the frozen edit beside them. Either the
+  // newest text finishes first, so an older projection that is still pending
+  // finishes last, or the refresh finishes after every retired projection.
   const held = projectionGate.held;
-  for (let released = 0; released < 5; released += 1) {
-    await waitFor(() => expect(held.length).toBeGreaterThan(0));
-    const newest = held.reduce((best, entry) => entry.markdown.length > best.markdown.length ? entry : best);
-    held.splice(held.indexOf(newest), 1);
-    newest.release();
+  const release = (entry: (typeof held)[number]) => {
+    held.splice(held.indexOf(entry), 1);
+    entry.release();
+  };
+  await waitFor(() => expect(held.map((entry) => entry.markdown).sort()).toEqual(["seed!", "seed!!"]));
+  const refresh = held.find((entry) => entry.markdown === "seed!!")!;
+  if (order === "newest text first") {
+    for (let released = 0; released < 5; released += 1) {
+      await waitFor(() => expect(held.length).toBeGreaterThan(0));
+      release(held.reduce((best, entry) => entry.markdown.length > best.markdown.length ? entry : best));
+    }
+  } else {
+    for (let released = 0; released < 4; released += 1) {
+      await waitFor(() => expect(held.some((entry) => entry !== refresh)).toBe(true));
+      release(held.find((entry) => entry !== refresh)!);
+    }
+    await waitFor(() => expect(projectionGate.completed).toBe(4));
+    await waitFor(() => expect(storedDraftTexts()).toEqual(["seed!!! [projected]"]));
+    release(refresh);
   }
   await waitFor(() => expect(projectionGate.completed).toBe(5));
+  // Disposal waits for the recovery slot's queue, so its write has landed.
+  await act(async () => { await retained.lease.dispose(); });
   const newestText = `${losingDoc.getText("plainText").toString()} [projected]`;
   expect(losingDoc.getText("plainText").toString()).toBe("seed!!!");
   await waitFor(() => expect(drafts.result.current.map((draft) => draft.text)).toEqual([newestText]));

@@ -451,16 +451,26 @@ function createEngineDocSession(
   const replacedDraftUnstored = (): boolean =>
     replacedDraftId !== null && orphanedDraftStorageRefused(path, replacedDraftId);
   let pendingSavedState: SaveState = SAVED_HERE;
-  // One draft per retired mirror, kept across Try again. Its revision orders
-  // the async refinements of every attempt, so an older one cannot overwrite
-  // newer text.
+  // One draft per retired mirror, kept across Try again. Its queue serializes
+  // the projections of every attempt.
   type RetiredDraft = {
     draftId: number | null;
-    revision: number;
     projection: Promise<void>;
     detach: () => void;
   };
   const retiredDrafts = new Map<Y.Doc, RetiredDraft>();
+  // Every write to a set-aside draft takes the next revision of its draft ID,
+  // from the recovery slot or a retired mirror. An async refinement writes
+  // only while its revision is the newest, so an older one cannot overwrite
+  // newer text, whichever path produced it.
+  const draftRevisions = new Map<number, number>();
+  const claimDraftRevision = (draftId: number): number => {
+    const revision = (draftRevisions.get(draftId) ?? 0) + 1;
+    draftRevisions.set(draftId, revision);
+    return revision;
+  };
+  const isNewestDraftRevision = (draftId: number, revision: number): boolean =>
+    (draftRevisions.get(draftId) ?? 0) === revision;
   let lifecycle: Promise<void> = Promise.resolve();
   let disposePromise: Promise<void> | null = null;
   let closeBarrierPromise: Promise<void> | null = null;
@@ -472,13 +482,11 @@ function createEngineDocSession(
     snapshotBytes: Uint8Array | null;
     draftId: number | null;
     transition: "deletion" | "read-only" | "permanent-failure" | null;
-    revision: number;
   };
   const newRecoverySlot = (): RecoverySlot => ({
     snapshotBytes: null,
     draftId: null,
     transition: null,
-    revision: 0,
   });
   let recovery = newRecoverySlot();
   // Serializes recovery snapshots in the order they were taken: a later
@@ -661,7 +669,8 @@ function createEngineDocSession(
   ): void => {
     const slot = recovery;
     const snapshotObjectId = binding?.objectId ?? null;
-    const revision = ++slot.revision;
+    const draftId = slot.draftId;
+    const revision = draftId === null ? 0 : claimDraftRevision(draftId);
     const statusRevision = transition && sceneRecovery
       ? ++recoveryStatusRevision
       : null;
@@ -692,11 +701,15 @@ function createEngineDocSession(
           // durable text back past an edit that exists nowhere else.
           return;
         }
-        if (slot.draftId === null) {
-          if (!forceCreate) return;
-          slot.draftId = captureOrphanedDraft(workspaceId, path, text, recoveryIdentity(newest, snapshotObjectId));
+        let written: number;
+        if (draftId === null) {
+          if (!forceCreate || slot.draftId !== null) return;
+          written = slot.draftId = captureOrphanedDraft(workspaceId, path, text, recoveryIdentity(newest, snapshotObjectId));
         } else {
-          replaceOrphanedDraft(workspaceId, path, slot.draftId, text, recoveryIdentity(newest, snapshotObjectId));
+          // A later write to this draft, from either path, holds newer text.
+          if (!isNewestDraftRevision(draftId, revision)) return;
+          written = draftId;
+          replaceOrphanedDraft(workspaceId, path, draftId, text, recoveryIdentity(newest, snapshotObjectId));
         }
         // Only the published render state dies with the session — the draft
         // itself is already durable in the module-level store, unmount or not.
@@ -726,13 +739,11 @@ function createEngineDocSession(
         // must replace the immediate draft now, even if this older image
         // read is slow. Only the newest snapshot may apply its async result.
         void sceneRecovery.completed.then((recovered) => {
-          if (revision !== slot.revision || slot.draftId === null) {
-            return;
-          }
+          if (!isNewestDraftRevision(written, revision)) return;
           replaceOrphanedDraft(
             workspaceId,
             path,
-            slot.draftId,
+            written,
             recovered.text,
           );
           if (transition && statusRevision === recoveryStatusRevision) {
@@ -1107,7 +1118,6 @@ function createEngineDocSession(
     earlier?.detach();
     const retiredDraft: RetiredDraft = earlier ?? {
       draftId: retiredRecoverySlot.draftId,
-      revision: 0,
       projection: Promise.resolve(),
       detach: () => undefined,
     };
@@ -1150,7 +1160,6 @@ function createEngineDocSession(
     }
     const persist = (): void => {
       const bytes = Y.encodeStateAsUpdate(retired);
-      const revision = ++retiredDraft.revision;
       if (documentKind === "scene") {
         const publishesRecoveryStatus = retiredRecoverySlot === recovery;
         const statusRevision = ++recoveryStatusRevision;
@@ -1172,6 +1181,7 @@ function createEngineDocSession(
           );
         }
         const draftId = retiredDraft.draftId;
+        const revision = claimDraftRevision(draftId);
         if (replacedDoc === retired) replacedDraftId = draftId;
         if (publishesRecoveryStatus) {
           setSceneRecoveryAssets(
@@ -1193,7 +1203,7 @@ function createEngineDocSession(
         }
         void sceneRecovery.completed
           .then((recovered) => {
-            if (revision !== retiredDraft.revision) return;
+            if (!isNewestDraftRevision(draftId, revision)) return;
             replaceOrphanedDraft(
               workspaceId,
               path,
@@ -1230,6 +1240,7 @@ function createEngineDocSession(
         replaceOrphanedDraft(workspaceId, path, retiredDraft.draftId, crude, recoveryIdentity(bytes, retiredAuthority?.objectId ?? null));
       }
       const draftId = retiredDraft.draftId;
+      const revision = claimDraftRevision(draftId);
       if (replacedDoc === retired) replacedDraftId = draftId;
       if (retiredRecoverySlot === recovery) {
         // The slot must know about this draft and snapshot: a deletion or
@@ -1241,7 +1252,7 @@ function createEngineDocSession(
       retiredDraft.projection = retiredDraft.projection
         .then(async () => {
           const markdown = await markdownFromSnapshot(bytes);
-          if (revision !== retiredDraft.revision) return;
+          if (!isNewestDraftRevision(draftId, revision)) return;
           replaceOrphanedDraft(
             workspaceId,
             path,
