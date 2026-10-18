@@ -85,7 +85,8 @@ export class ServiceActivationDriver {
   // Each target's document, once known, so a hold applies before the target has an owner, as after a restart.
   readonly #objects=new Map<string,string>();
   constructor(readonly options:{trustedAccount: OwnerOutboxAdmission["trustedAccount"];storage:SyncRelayStorage;history:LiveJournalHistoryAuthority;client:EngineClient;host:LiveHostConnectionCoordinate;
-    workspaces:ReadonlyMap<string,{handle:string;replica:ServiceActivationReplica}>;config:ServiceActivationConfig;
+    /** An attached workspace whose replica checked its origin. Activation, restore and departures reach no other. */
+    workspace(workspaceId:string):{handle:string;replica:ServiceActivationReplica}|undefined;config:ServiceActivationConfig;
     adoption:{maxBytes:number;maxEvents:number};restore?:LiveRestorePreparation;nextRequestId():number;deadlineMs:number;
     assertCurrent():void;registered():void;
     runDocument<T>(document:LiveDocumentKey,signal:AbortSignal,operation:()=>Promise<T>):Promise<T>;}){
@@ -187,7 +188,7 @@ export class ServiceActivationDriver {
         target=row;saved=read;break;
       }
     }
-    const workspace=o.workspaces.get(document.workspaceId);
+    const workspace=o.workspace(document.workspaceId);
     if(!target || !saved || !workspace)throw new Error("Service restore source is unavailable.");
     // Stopping access re-registers the retained owner. Only the activated session's
     // verified transport can check that adoption; native registration takes the binding alone.
@@ -256,7 +257,7 @@ export class ServiceActivationDriver {
    * was adopted here.
    */
   async settleDeparted(target:ServiceActivationTarget,value:LiveDocumentKey,signal:AbortSignal):Promise<DepartedSettlement|null>{
-    const o=this.options,workspace=o.workspaces.get(target.workspaceId);
+    const o=this.options,workspace=o.workspace(target.workspaceId);
     if(!workspace)throw new Error("Service activation workspace is not attached.");
     const check=()=>{signal.throwIfAborted();o.assertCurrent();};
     const request=()=>({id:o.nextRequestId(),workspace:workspace.handle,deadlineMs:o.deadlineMs});
@@ -306,7 +307,7 @@ export class ServiceActivationDriver {
    */
   async activate(target:ServiceActivationTarget,signal:AbortSignal,
     settle?:(consumer:OwnerCommittedDelivery,document:LiveDocumentKey,signal:AbortSignal)=>Promise<unknown>,catchUp=true){
-    const o=this.options,c=o.config,workspace=o.workspaces.get(target.workspaceId);
+    const o=this.options,c=o.config,workspace=o.workspace(target.workspaceId);
     if(!workspace)throw new Error("Service activation workspace is not attached.");
     const check=()=>{signal.throwIfAborted();o.assertCurrent();};
     const request=()=>({id:o.nextRequestId(),workspace:workspace.handle,deadlineMs:o.deadlineMs});
@@ -404,7 +405,7 @@ export class ServiceActivationDriver {
   }
   // Owner delivery through the native session's verified transport.
   #owner(target:ServiceActivationTarget,capture:(signal?:AbortSignal)=>Promise<NativeOwnerActivation>,state:Pick<Owner,"binding"|"actor"|"activationPending">,access?:ServiceActivationAccess):Owner{
-    const o=this.options,c=o.config,workspace=o.workspaces.get(target.workspaceId)!;
+    const o=this.options,c=o.config,workspace=o.workspace(target.workspaceId)!;
     const transport=serviceOwnerTransport({client:o.client,workspace:workspace.handle,capture,binding:state.binding,
       nextRequestId:o.nextRequestId,assertCurrent:o.assertCurrent});
     const consumer=new OwnerCommittedDelivery(o.storage,o.history,{client:transport.client,workspace:workspace.handle,

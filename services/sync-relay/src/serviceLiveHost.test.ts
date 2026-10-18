@@ -53,8 +53,10 @@ async function fixture() {
 function clientFrom(options: { env: Record<string, string> }) {
   const nativePath = options.env.DOHC_ENGINE_LIVE_HOST_CONFIG!;
   const config = JSON.parse(readFileSync(nativePath, "utf8"));
-  const client = { sendRequest: vi.fn(async () => ({ result: { relayNamespace: config.relayNamespace, host: config.host,
-    workspaces: config.workspaces.map((row: { workspaceId: string }) => ({ workspaceId: row.workspaceId, workspaceHandle: "actual-open-handle" })) } })),
+  // It creates each hosted replica it is asked to, and answers anything else with its discovery.
+  const client = { sendRequest: vi.fn(async (request?: {method: string}) => request?.method === "sync.createHostedReplica" ? {result: {hosted: true}} : ({
+    result: { relayNamespace: config.relayNamespace, host: config.host,
+      workspaces: config.workspaces.map((row: { workspaceId: string }) => ({ workspaceId: row.workspaceId, workspaceHandle: "actual-open-handle" })) } })),
     close: vi.fn(), waitForExit: vi.fn(async () => {}) };
   return { client, config, nativePath };
 }
@@ -441,7 +443,7 @@ const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest(
 // A service owner whose activation completed under an earlier connection, as
 // after a restart. The started host resumes it from real relay storage; only
 // the engine is mocked. `park` holds the next engine request for one method.
-async function completedServiceOwner(options: {empty?: boolean; frameChanges?: boolean} = {}) {
+async function completedServiceOwner(options: {empty?: boolean; frameChanges?: boolean; polling?: boolean} = {}) {
   const f = await fixture(), raw = new DatabaseSync(join(f.root, "relay", "relay.sqlite"));
   cleanup.push(async () => raw.close());
   const policy = {maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000_000, maxDecodedPayloadByteVisits: 100_000_000,
@@ -499,8 +501,9 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
 
   Object.assign(f.config, {settlement: {maxApplicationsPerSettlement: 8}});
   const target = {workspaceId: "workspace", path: "docs/a.md", shareId: "share"};
-  // An empty host activates documents it gains on its next pass.
-  await configureActivation(f, {targets: options.empty ? [] : [target], passDeadlineMs: 10_000, validation: policy, ...(options.empty ? {pollIntervalMs: 20} : {})});
+  // An empty host activates documents it gains on its next pass. It and a polling host pass every 20 ms.
+  await configureActivation(f, {targets: options.empty ? [] : [target], passDeadlineMs: 10_000, validation: policy,
+    ...(options.empty || options.polling ? {pollIntervalMs: 20} : {})});
   // An empty host receives this workspace and document through `update`.
   const workspace = f.config.workspaces[0]! as ServiceWorkspace;
   if (options.empty) {f.config.workspaces = []; await f.save();}
@@ -752,6 +755,54 @@ it("reloads the retained activation after a restart only for a stop that registe
     ["liveApplication.fenceRestore", expect.anything()],
     ["liveApplication.fenceRestore", expect.anything()],
   ]);
+});
+
+const engineMethods = (client: {sendRequest: {mock: {calls: unknown[][]}}}) => client.sendRequest.mock.calls.map(call => (call[0] as {method: string}).method);
+
+// Proves: a configured host that restarts checks its replica's origin before a
+// restore reaches its store. While the check fails, startup and each pass
+// retry it, and a restore is refused with no capture, application or
+// settlement. Once a pass's check succeeds, the restore proceeds.
+it("refuses a restore after a configured restart until its replica checked its origin", async () => {
+  const o = await completedServiceOwner({polling: true});
+  await o.host.close();
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  cleanup.push(async () => log.mockRestore());
+  o.replies.create = new Error("Relay unreachable.");
+  const restarted = await startServiceLiveHost(o.f);
+  cleanup.push(() => restarted.close());
+  const creates = () => engineMethods(o.client()).filter(method => method === "sync.createHostedReplica").length;
+  await vi.waitFor(() => expect(creates()).toBeGreaterThan(2));
+  o.restore();
+  await expect(restarted.stopRestore(stopLookup)).rejects.toThrow("Service restore source is unavailable.");
+  expect(new Set(engineMethods(o.client()))).toEqual(new Set(["liveApplication.hosts", "sync.createHostedReplica"]));
+  expect(o.client().captureOwnerActivation).not.toHaveBeenCalled();
+  expect(o.client().sendLiveApplication).not.toHaveBeenCalled();
+  o.replies.create = undefined;
+  await vi.waitFor(() => expect(o.client().captureOwnerActivation).toHaveBeenCalled());
+  const methods = engineMethods(o.client()), checked = methods.lastIndexOf("sync.createHostedReplica");
+  expect(methods.slice(0, checked).every(method => method === "liveApplication.hosts" || method === "sync.createHostedReplica")).toBe(true);
+  expect(o.client().sendRequest.mock.invocationCallOrder[checked]).toBeLessThan(o.client().captureOwnerActivation.mock.invocationCallOrder[0]!);
+  await expect(restarted.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
+});
+
+// Proves: a configured host that restarts against a relay ahead at its
+// replica's origin detaches the workspace as diverged before startup returns,
+// so a restore finds no workspace and nothing reaches its store.
+it("detaches a configured workspace as diverged at restart before a restore reaches its store", async () => {
+  const o = await completedServiceOwner();
+  await o.host.close();
+  o.replies.create = "diverged";
+  const restarted = await startServiceLiveHost(o.f);
+  cleanup.push(() => restarted.close());
+  const sent = ["liveApplication.hosts", "sync.createHostedReplica", "liveApplication.detachWorkspace"];
+  expect(restarted.diverged()).toEqual([{workspaceId: "workspace", root: o.workspace.root}]);
+  expect(engineMethods(o.client())).toEqual(sent);
+  o.restore();
+  await expect(restarted.stopRestore(stopLookup)).rejects.toThrow("Workspace is not configured on this service host.");
+  expect(engineMethods(o.client())).toEqual(sent);
+  expect(o.client().captureOwnerActivation).not.toHaveBeenCalled();
+  expect(o.client().sendLiveApplication).not.toHaveBeenCalled();
 });
 
 // An empty host whose sibling document activates for real. The other document
@@ -1262,7 +1313,7 @@ it("resumes a departing document after a restart before any pull, then settles, 
   const activate = vi.mocked(ServiceActivationDriver.prototype.activate), through = activate.getMockImplementation()!;
   activate.mockImplementation(function (this: ServiceActivationDriver, ...args) {
     if (args[0].path !== o.other.path) return through.apply(this, args);
-    return this.options.workspaces.get("workspace")!.replica.pull(args[1]).then(() => ({kind: "pending" as const, reason: "held"}));
+    return this.options.workspace("workspace")!.replica.pull(args[1]).then(() => ({kind: "pending" as const, reason: "held"}));
   });
   const {restarted, requests} = await restartEmpty(o);
   await restarted.update({workspaces, documents: [o.other], departing: [o.sibling]});

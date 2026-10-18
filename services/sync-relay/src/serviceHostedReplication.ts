@@ -62,6 +62,8 @@ export class ServiceHostedReplication {
   }
   /** Whether the replica's origin diverged from the relay's. Its workspace stays detached, and its store is kept. */
   get diverged(): boolean { return this.#diverged; }
+  /** Whether the replica checked its origin: a create on this instance succeeded. */
+  get checked(): boolean { return this.#created; }
   /**
    * The documents that left the scope and are not gone from the replica, as
    * the last reply that read them said; null before one did. A document
