@@ -115,9 +115,9 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
       entry.historyObservations?.clear();
       armHistory(entry);
     } catch (error) {
+      entry.newest = undefined; entry.pendingView = false;
       if (!(error instanceof ReplicaCurrentViewRefused)) throw error;
       report(entry, error);
-      entry.newest = undefined; entry.pendingView = false;
     }
   }
   async function flush(entry: Entry, sampleHistory = false) {

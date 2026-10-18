@@ -1,5 +1,7 @@
 import {afterEach, expect, it, vi} from "vitest";
 import {DatabaseSync} from "node:sqlite";
+import * as Y from "yjs";
+import {markdownToYDoc, yDocToArtifactMarkdown} from "@dohc/ydoc-projection";
 import {writeFileSync} from "node:fs";
 import type {ReplicaCurrentView} from "@dohc/workspace-engine-client/daemon";
 import {createReplicaReadPrincipal} from "./replicaReadPrincipal";
@@ -9,6 +11,182 @@ import type {SqliteDb} from "./storage/types";
 import {closeTestStorage, closeTestStorages, inspectDatabase, reopenTestStorage, seedLinkGrant, sha256, storagePath, tempRoot, testStorage} from "./testing";
 
 afterEach(async () => {vi.useRealTimers(); await closeTestStorages();});
+
+it.each(["log","journal"])("relabelled structural pins advance the %s author window",async stream=>{
+  const f=await fixture();f.save();f.at(130_000);f.save();
+  const first=replacementEvidence(f.db,stream);
+  const table=stream==="log"?"sync_relay_log":"sync_relay_live_update_journal";
+  const column=stream==="log"?"admitted_author_snapshot_json":"author_snapshot_json";
+  f.db.prepare(`UPDATE ${table} SET ${column}=?`).run('[{"kind":"human","humanId":"old","humanName":"Old"}]');
+  f.save(f.view());
+  replacementEvidence(f.db,stream);
+  f.db.prepare(`UPDATE ${table} SET ${column}=? WHERE ${stream==="log"?"relay_seq":"journal_cursor"}>?`)
+    .run('[{"kind":"human","humanId":"new","humanName":"New"}]',first);
+  f.at(140_000);f.save(f.view("next",{path:"docs/b.md"}));
+  f.at(170_000);f.save();
+  expect(JSON.parse(String(f.pins().find(p=>p.sha256===sha256("next"))!.authors_json)))
+    .toEqual([{kind:"human",humanId:"new",humanName:"New"}]);
+});
+
+function projectedEvidence(f: Awaited<ReturnType<typeof fixture>>,stream:string,text:string) {
+  const position=replacementEvidence(f.db,stream);
+  if(stream==="log") f.db.prepare("UPDATE sync_relay_log SET payload_json=? WHERE relay_seq=?").run(JSON.stringify({
+    versionId:"main",objectId:"object",momentId:`moment-${position}`,recordedAtMs:1,operation:"write",path:"docs/a.md",payloadAfterPath:"docs/a.md",
+    payloadAfterBlobSha256:sha256(text),payloadAfterContentKind:"text",payloadAfterByteLength:Buffer.byteLength(text)}),position);
+  else f.db.prepare("INSERT INTO sync_relay_live_settlement_cuts VALUES (?,?,?,?,?)")
+    .run(position,sha256("state"),sha256(text),1,Buffer.byteLength(text));
+  return position;
+}
+
+it.each([["log","return"],["journal","return"],["log","no-op"],["journal","no-op"]])
+  ("uses the last state lifetime after a %s %s",async(stream,kind)=>{
+    const f=await fixture(false),patch=stream==="journal"?{lineageClaimId:sha256("lineage"),restoreGeneration:1}:{};
+    f.save(f.view("baseline",patch));f.save(f.view("initial",patch));f.at(130_000);f.save();const id=String(f.pins()[0]!.pin_id);
+    projectedEvidence(f,stream,kind==="return"?"intermediate":"initial");f.grant("between");
+    if(kind==="return")projectedEvidence(f,stream,"initial");
+    const replaced=projectedEvidence(f,stream,"final");f.at(140_000);f.save(f.view("final",patch));
+    expect(f.read(id,{grantId:"between"})).toMatchObject({text:"initial"});
+    expect(f.pins()[0]).toMatchObject(stream==="log"?{replaced_log_position:replaced}:{replaced_journal_position:replaced});
+  });
+
+it.each(["current_path","lineage_claim_id","restore_fence_generation"])
+  ("a matching journal projection cannot erase a different %s replacement",async column=>{
+    const f=await fixture(false),patch={lineageClaimId:sha256("lineage"),restoreGeneration:1};
+    f.save(f.view("baseline",patch));f.save(f.view("initial",patch));f.at(130_000);f.save();
+    const id=String(f.pins()[0]!.pin_id),position=projectedEvidence(f,"journal","initial");
+    f.db.prepare(`UPDATE sync_relay_live_update_journal SET ${column}=? WHERE journal_cursor=?`)
+      .run(column==="current_path"?"docs/else.md":column==="lineage_claim_id"?sha256("other-lineage"):2,position);
+    f.grant("late");projectedEvidence(f,"journal","final");f.at(140_000);f.save(f.view("final",patch));
+    expect(f.read(id,{grantId:"late"})).toEqual({status:"not-found"});
+  });
+
+it.each(["log","journal"])("History-only sampling keeps the carried state's %s entry after restart",async stream=>{
+  const f=await fixture(false),lineage=sha256("lineage"),patch={lineageClaimId:lineage,restoreGeneration:1};
+  f.db.exec(`INSERT INTO sync_relay_live_documents
+    (workspace_id,main_version_id,object_id,lineage_claim_id,current_path,lineage_state,admission_state,restore_fence_generation,registered_at_ms,
+    baseline_moment_relay_seq,baseline_projected_sha256,baseline_projected_byte_length,baseline_digest,baseline_bytes)
+    VALUES ('w','main','object','${lineage}','docs/a.md','current','open',1,1,1,'${lineage}',0,'${lineage}',x'01')`);
+  f.save(f.view("public",patch));
+  const entered=replacementEvidence(f.db,stream);f.at(101_000);f.save(f.view("private paragraph",patch));
+  const deleted=replacementEvidence(f.db,stream);f.db.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=2");
+  f.at(102_000);f.save(f.view("public",patch));f.grant("late");f.restart();
+  const header=f.db.prepare("SELECT * FROM sync_relay_replica_cuts").get();
+  f.at(131_000);f.storage.sampleReplicaHistory(f.lease);
+  expect(f.db.prepare("SELECT * FROM sync_relay_replica_cuts").get()).toEqual(header);
+  expect(f.db.prepare("SELECT state_log_cursor,state_journal_cursor FROM sync_relay_history_clocks").get())
+    .toEqual({state_log_cursor:stream==="log"?entered:0,state_journal_cursor:stream==="journal"?entered:0});
+  const pin=f.pins()[0]!;expect(pin.reason).toBe("quiet");f.restart();
+  replacementEvidence(f.db,stream);f.at(132_000);f.save(f.view("public",{...patch,restoreGeneration:2}));
+  expect(f.read(String(pin.pin_id),{grantId:"late"})).toEqual({status:"not-found"});
+  expect(f.read(String(pin.pin_id))).toMatchObject({text:"private paragraph"});
+  expect(f.pins().find(p=>p.pin_id===pin.pin_id)).toMatchObject(stream==="log"?
+    {replaced_log_position:deleted}:{replaced_journal_position:deleted});
+});
+
+it.each(["return","no-op"])("ordinary Y.Doc %s evidence keeps the conservative replacement boundary",async kind=>{
+  const f=await fixture(false),doc=markdownToYDoc("initial");
+  const append=(base=false)=>{
+    const bytes=Buffer.from(Y.encodeStateAsUpdate(doc)),digest=sha256(bytes);
+    f.db.prepare("INSERT OR IGNORE INTO sync_relay_blobs(workspace_id,sha256,byte_length,content) VALUES ('w',?,?,?)").run(digest,bytes.length,bytes);
+    const seq=replacementEvidence(f.db,"log");
+    f.db.prepare("UPDATE sync_relay_log SET op_kind='ydoc.update',payload_json=? WHERE relay_seq=?")
+      .run(JSON.stringify({versionId:"main",objectId:"object",path:"docs/a.md",contentKind:"richdoc",
+        lineageClaimId:lineage,isBaseState:base,updateBlobSha256:digest}),seq);
+    return seq;
+  };
+  const lineage=sha256(Buffer.from(Y.encodeStateAsUpdate(doc))),patch={lineageClaimId:lineage,restoreGeneration:1};
+  try {
+    append(true);f.save(f.view("baseline",patch));f.save(f.view("initial",patch));f.at(130_000);f.save();
+    const id=String(f.pins()[0]!.pin_id);
+    if(kind==="return")doc.getMap("frontmatter").set("title","intermediate");
+    const replaced=append();f.grant("between");
+    if(kind==="return"){doc.getMap("frontmatter").delete("title");append();}
+    doc.getMap("frontmatter").set("title","final");append();
+    f.at(140_000);f.save(f.view(yDocToArtifactMarkdown(doc),patch));
+    expect(f.read(id,{grantId:"between"})).toEqual({status:"not-found"});
+    expect(f.pins()[0]).toMatchObject({replaced_log_position:replaced});
+  } finally {doc.destroy();}
+});
+
+it.each(["log","journal"])("a missing clock cannot authorize a carried state's %s structural pin",async stream=>{
+  const f=await fixture(false),lineage=sha256("lineage"),patch={lineageClaimId:lineage,restoreGeneration:1};
+  f.db.exec(`INSERT INTO sync_relay_live_documents
+    (workspace_id,main_version_id,object_id,lineage_claim_id,current_path,lineage_state,admission_state,restore_fence_generation,registered_at_ms,
+    baseline_moment_relay_seq,baseline_projected_sha256,baseline_projected_byte_length,baseline_digest,baseline_bytes)
+    VALUES ('w','main','object','${lineage}','docs/a.md','current','open',1,1,1,'${lineage}',0,'${lineage}',x'01')`);
+  f.save(f.view("public",patch));replacementEvidence(f.db,stream);f.at(101_000);f.save(f.view("private paragraph",patch));
+  replacementEvidence(f.db,stream);f.db.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=2");
+  f.at(102_000);f.save(f.view("public",patch));
+  // A pre-migration cut can have advanced past its carried state's deletion without a clock.
+  f.db.exec("DELETE FROM sync_relay_history_clocks");f.grant("late");
+  replacementEvidence(f.db,stream);f.at(103_000);f.save(f.view("public",{...patch,restoreGeneration:2}));
+  const pin=f.pins().find(p=>p.sha256===sha256("private paragraph"))!;
+  expect(f.read(String(pin.pin_id),{grantId:"late"})).toEqual({status:"not-found"});
+  expect(f.read(String(pin.pin_id))).toMatchObject({text:"private paragraph"});
+});
+
+it("a persist error clears the pending view before reporting a failed restore flip",async()=>{
+  const f=await fixture(false),lineage=sha256("lineage"),patch={lineageClaimId:lineage,restoreGeneration:1};
+  f.db.exec(`INSERT INTO sync_relay_live_documents
+    (workspace_id,main_version_id,object_id,lineage_claim_id,current_path,lineage_state,admission_state,restore_fence_generation,registered_at_ms,
+    baseline_moment_relay_seq,baseline_projected_sha256,baseline_projected_byte_length,baseline_digest,baseline_bytes)
+    VALUES ('w','main','object','${lineage}','docs/a.md','current','open',1,1,1,'${lineage}',0,'${lineage}',x'01')`);
+  f.save(f.view("public",patch));replacementEvidence(f.db,"log");f.at(101_000);f.save(f.view("private paragraph",patch));
+  f.at(131_000);f.storage.sampleReplicaHistory(f.lease);const pin=String(f.pins()[0]!.pin_id);
+  replacementEvidence(f.db,"log");f.db.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=2");
+  f.at(132_000);f.save(f.view("public",patch));f.grant("late");
+  replacementEvidence(f.db,"log");const incoming=f.view("public",{...patch,restoreGeneration:2});
+  const failure=new Error("injected flip failure"),observed:Array<{error:unknown;read:unknown;view:unknown}>=[];
+  vi.spyOn(f.storage,"flipReplicaCurrentView").mockImplementation(()=>{throw failure;});
+  const supervisor=createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("history-persist-failure"),
+    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...incoming,moved:false,nextCursor:null,refusedFiles:[]})}),
+    onError:(_workspace,error)=>observed.push({error,view:supervisor.currentReadView("w")?.view,
+      read:f.storage.readReplicaHistoryPin({...f.input,grantId:"late",pinId:pin},supervisor)})});
+  try {
+    await expect(supervisor.activate("w")).rejects.toThrow(failure);
+    expect(observed[0]?.error).toBe(failure);
+    expect(observed[0]?.read).toEqual({status:"not-found"});
+    expect(observed[0]?.view).toMatchObject({logCursor:2,files:[{sha256:sha256("private paragraph"),restoreGeneration:1}]});
+    expect(f.db.prepare("SELECT superseded_at_ms FROM sync_relay_history_pins WHERE pin_id=?").get(pin))
+      .toEqual({superseded_at_ms:null});
+  } finally {await supervisor.close();vi.restoreAllMocks();}
+});
+
+it.each(["op-kind","echo","refused"])("author scan excludes %s rows before charging its cap",async noise=>{
+  const f=await fixture();
+  f.db.prepare(`INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,
+    relay_admission,settlement_admission_json) WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<10001)
+    SELECT 'w','noise',i,?,'{"objectId":"object","versionId":"main"}',1,?,? FROM n`)
+    .run(noise==="op-kind"?"live.audit.update":"moment.append",noise==="echo"?"departed":null,
+      noise==="refused"?' {"status":"refused"}':null);
+  const seq=replacementEvidence(f.db,"log");
+  f.db.prepare("UPDATE sync_relay_log SET admitted_author_snapshot_json=? WHERE relay_seq=?")
+    .run('[{"kind":"human","humanId":"writer","humanName":"Writer"}]',seq);
+  f.save(f.view());f.at(130_000);f.save();
+  expect(JSON.parse(String(f.pins()[0]!.authors_json))).toEqual([{kind:"human",humanId:"writer",humanName:"Writer"}]);
+});
+
+it.each(["replication_epoch","stream_identity"])("current reads fail closed on a mismatched floor %s",async column=>{
+  const f=await fixture();f.save();const source={currentReadView:()=>({view:f.latest})};
+  f.db.exec(`UPDATE sync_relay_history_grant_floors SET ${column}='previous' WHERE grant_id='g'`);
+  for(const current of [undefined,source]) {
+    expect(f.storage.readReplicaCurrentViewFile({...f.input,path:"docs/a.md"},current)).toEqual({status:"updating"});
+    expect(f.storage.listReplicaCurrentViewFiles(f.input,current)).toEqual({status:"updating"});
+    expect(f.storage.listReplicaHistoryPins(f.input,current)).toEqual({status:"updating"});
+  }
+});
+
+it("position-only views let a floor-ahead grant finish updating",async()=>{
+  const f=await fixture();f.save();replacementEvidence(f.db,"log");f.grant("late");
+  expect(f.list({grantId:"late"})).toEqual({status:"updating"});
+  const supervisor=createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("history-positions"),
+    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...f.view(),moved:false,nextCursor:null,refusedFiles:[]})})});
+  try {
+    await supervisor.activate("w");
+    expect(f.list({grantId:"late"})).toMatchObject({status:"ready"});
+    expect(f.db.prepare("SELECT log_cursor FROM sync_relay_replica_cuts").get()).toEqual({log_cursor:1});
+  } finally {await supervisor.close();}
+});
 
 it.each(["log","journal"])("current view floor refuses stale stored and live text after a %s replacement",async stream=>{
   const f=await fixture();f.save(f.view("secret"));const stale=f.latest;
@@ -42,6 +220,43 @@ vi.mock("./storage/replicaHistoryPins",async original=>{
     try{return real.pinReplicaHistory(...args);}finally{work.sampling=false;if(work.active)work.ms+=performance.now()-start;}
   }};
 });
+
+it("measures a 1 MB replacement flip with a superseded pin per update",async()=>{
+  const f=await fixture(false),initial="x".repeat(1_000_000),doc=markdownToYDoc(initial);
+  const baseline=Buffer.from(Y.encodeStateAsUpdate(doc)),lineage=sha256(baseline),patch={lineageClaimId:lineage,restoreGeneration:1};
+  const append=(bytes:Buffer,base=false)=>{
+    const digest=sha256(bytes);
+    f.db.prepare("INSERT OR IGNORE INTO sync_relay_blobs(workspace_id,sha256,byte_length,content) VALUES ('w',?,?,?)").run(digest,bytes.length,bytes);
+    const seq=replacementEvidence(f.db,"log");
+    f.db.prepare("UPDATE sync_relay_log SET op_kind='ydoc.update',payload_json=? WHERE relay_seq=?")
+      .run(JSON.stringify({versionId:"main",objectId:"object",path:"docs/a.md",contentKind:"richdoc",lineageClaimId:lineage,
+        isBaseState:base,updateBlobSha256:digest}),seq);
+    return seq;
+  };
+  const samples:Array<{flipMs:number;samplingMs:number;blobReads:number;blobBytes:number;replacement:number;pinId:string}>=[];
+  let blobReads=0,blobBytes=0;
+  const getBlob=f.storage.getBlob.bind(f.storage);
+  vi.spyOn(f.storage,"getBlob").mockImplementation((...args)=>{
+    const blob=getBlob(...args);if(work.active && work.sampling){blobReads++;blobBytes+=blob?.length ?? 0;}return blob;
+  });
+  try {
+    append(baseline,true);f.save(f.view("baseline",patch));f.save(f.view(initial,patch));f.at(130_000);f.storage.sampleReplicaHistory(f.lease);
+    for(let i=0;i<5;i++){
+      const previous=f.pins().find(p=>p.superseded_at_ms===null)!;
+      const vector=Y.encodeStateVector(doc);doc.getMap("frontmatter").set("revision",i);
+      const replacement=append(Buffer.from(Y.encodeStateAsUpdate(doc,vector)));
+      const text=yDocToArtifactMarkdown(doc);f.at(140_000+i*40_000);
+      const staged=f.storage.stageReplicaCurrentView(f.lease,f.view(text,patch));
+      work.ms=0;blobReads=blobBytes=0;work.active=true;
+      const start=performance.now();f.storage.flipReplicaCurrentView(f.lease,staged);const flipMs=performance.now()-start;work.active=false;
+      samples.push({flipMs,samplingMs:work.ms,blobReads,blobBytes,replacement,pinId:String(previous.pin_id)});
+      expect(f.pins().find(p=>p.pin_id===previous.pin_id)).toMatchObject({superseded_at_ms:140_000+i*40_000,replaced_log_position:replacement});
+      f.at(170_000+i*40_000);f.storage.sampleReplicaHistory(f.lease);
+    }
+    if(process.env.DOHC_REPLACEMENT_OUT)writeFileSync(process.env.DOHC_REPLACEMENT_OUT,JSON.stringify({bodyBytes:Buffer.byteLength(initial),updates:samples.length,samples},null,2)+"\n");
+    expect(f.pins().filter(p=>p.superseded_at_ms!==null)).toHaveLength(5);
+  } finally {work.active=false;doc.destroy();vi.restoreAllMocks();}
+},120_000);
 
 it("incremental sampling visits only one changed object among 20,000 files",async()=>{
   const prepare=DatabaseSync.prototype.prepare;

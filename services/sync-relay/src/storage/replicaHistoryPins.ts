@@ -57,11 +57,12 @@ export function pinReplicaHistory(storage: StorageContext, view: Pick<ReplicaCur
     pin_log_cursor=excluded.pin_log_cursor,pin_journal_cursor=excluded.pin_journal_cursor,state_key=excluded.state_key,
     state_log_cursor=excluded.state_log_cursor,state_journal_cursor=excluded.state_journal_cursor`);
   const replacement = (file: File, clock: Record<string,unknown> | undefined) => clock ? replicaHistoryReplacement(storage,workspace,file.versionId,file.objectId,
-    Number(clock.state_log_cursor),view.logCursor,Number(clock.state_journal_cursor),view.journalCursor) : [null,null];
+    Number(clock.state_log_cursor),view.logCursor,Number(clock.state_journal_cursor),view.journalCursor,file) : [null,null];
   const pin = (file: File, reason: string, clock: Record<string,unknown>, log: number, journal: number, superseded: number | null) => {
     const existing = currentPins.get(historyObjectKey(file));
     if (superseded !== null && existing && sameHistoryState(fromRow(existing),file)) {
       statement(storage,"UPDATE sync_relay_history_pins SET reason=? WHERE pin_id=?").run(reason,existing.pin_id);
+      clock.pin_log_cursor=log; clock.pin_journal_cursor=journal;
       clock.dirty_since_ms=null;
       return;
     }
@@ -89,7 +90,7 @@ export function pinReplicaHistory(storage: StorageContext, view: Pick<ReplicaCur
     const savedClock = clocks.get(key);
     const clock = {...(savedClock ?? {changed_at_ms:times?.changedAtMs ?? now,dirty_since_ms:null,
       last_nonstructural_at_ms:null,pin_log_cursor:header?.log_cursor ?? view.logCursor,pin_journal_cursor:header?.journal_cursor ?? view.journalCursor,
-      state_log_cursor:header?.log_cursor ?? view.logCursor,state_journal_cursor:header?.journal_cursor ?? view.journalCursor,
+      state_log_cursor:old ? 0 : header?.log_cursor ?? view.logCursor,state_journal_cursor:old ? 0 : header?.journal_cursor ?? view.journalCursor,
       state_key:old ? historyStateKey(old) : !header && file ? historyStateKey(file) : null})};
     const structural = old && historyStructuralReason(old,file);
     if (structural) pin(old,structural,clock,Number(header!.log_cursor),Number(header!.journal_cursor),times?.firstChangedAtMs ?? now);
