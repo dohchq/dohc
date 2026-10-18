@@ -202,10 +202,9 @@ export type StoredUserSettingsResult = z.infer<typeof StoredUserSettingsResult>;
 
 export function rendererUserSettingsResult(result: StoredUserSettingsResult): DesktopUserSettingsResult {
   const { agentColors: _private, ...appearance } = result.settings.appearance;
-  const ignored = result.ignored?.filter(item => !item.key.startsWith("appearance.agentColors"));
   return DesktopUserSettingsResult.parse({
     ...result, settings: { ...result.settings, appearance },
-    ignored: ignored?.length ? ignored : undefined,
+    ignored: result.ignored?.length ? result.ignored : undefined,
   });
 }
 
