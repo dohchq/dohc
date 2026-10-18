@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./artifact-markdown-guard": "./src/artifact-markdown-guard.ts",
     "./body-fragment": "./src/body-fragment.ts",
     "./browser-editor": "./src/browser-editor.ts",
     "./frontmatter": "./src/frontmatter.ts",

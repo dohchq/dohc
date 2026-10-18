@@ -25,12 +25,12 @@ vi.mock("@dohc/ydoc-projection", async (importOriginal) => {
     await importOriginal<typeof import("@dohc/ydoc-projection")>();
   return {
     ...original,
-    yDocToMarkdown: (doc: Y.Doc) => {
+    yDocToArtifactMarkdown: (doc: Y.Doc) => {
       projectionCalls += 1;
       if (projectionCalls === failProjectionCall) {
         throw new Error("projection failed");
       }
-      return original.yDocToMarkdown(doc);
+      return original.yDocToArtifactMarkdown(doc);
     },
   };
 });

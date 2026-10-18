@@ -1,6 +1,5 @@
 import {
   exceedsLiveMarkdownLimit,
-  exceedsUtf8Bytes,
   parseLiveDocumentKey,
   type LiveDocumentKey,
   type LiveUpdateStructRange,
@@ -13,6 +12,7 @@ import {
   yXmlFragmentToProseMirrorRootNode,
 } from 'y-prosemirror'
 import * as Y from 'yjs'
+import {SOURCE_META_KEYS, readMarkdownSourceWitness, resolveMarkdownSource} from './artifact-markdown.js'
 import {
   getDohcProseMirrorSchema,
   getDohcYDocFrontmatter,
@@ -52,7 +52,6 @@ const META_KEYS = new Set([
   'schemaVersion', 'dohcMarkdownCrlf', 'dohcFrontmatterSource',
   'dohcMarkdownSource', 'dohcMarkdownSourceSha256', 'dohcMarkdownSourceProjectionSha256',
 ])
-const SOURCE_META_KEYS = ['dohcMarkdownSource', 'dohcMarkdownSourceSha256', 'dohcMarkdownSourceProjectionSha256'] as const
 // Exact text the projection keeps only while it reads as the current state.
 // A frontmatter edit leaves it behind, so it need not match a reimport.
 const PROJECTION_SOURCE_META_KEYS = [...SOURCE_META_KEYS, 'dohcFrontmatterSource'] as const
@@ -673,7 +672,7 @@ function semanticEqual(left: unknown, right: unknown): boolean {
     ))
 }
 
-function validateMetadata(meta: Y.Map<unknown>, zeroStructSeed: boolean): Record<string, unknown> {
+function validateMetadata(meta: Y.Map<unknown>, zeroStructSeed: boolean): {metadata: Record<string, unknown>; witness: ReturnType<typeof readMarkdownSourceWitness>} {
   const snapshot: Record<string, unknown> = Object.create(null)
   for (const [key, value] of meta.entries()) {
     if (!META_KEYS.has(key) && !key.startsWith(FRONTMATTER_SOURCE_ITEM_META_PREFIX)) refuse('invalid-schema')
@@ -698,16 +697,9 @@ function validateMetadata(meta: Y.Map<unknown>, zeroStructSeed: boolean): Record
     itemBytes += utf8.encode(key).length + utf8.encode(item).length
     if (itemBytes > 2 * 1024 * 1024) refuse('invalid-schema')
   }
-  const sourceFields = SOURCE_META_KEYS.filter(key => Object.hasOwn(snapshot, key)).length
-  if (sourceFields !== 0) {
-    if (sourceFields !== 3 || typeof snapshot.dohcMarkdownSource !== 'string'
-      || typeof snapshot.dohcMarkdownSourceSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(snapshot.dohcMarkdownSourceSha256)
-      || typeof snapshot.dohcMarkdownSourceProjectionSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(snapshot.dohcMarkdownSourceProjectionSha256)
-      // The existing native text store bounds retained source at 10 MiB.
-      || exceedsUtf8Bytes(snapshot.dohcMarkdownSource, 10 * 1024 * 1024)
-      || sha256Hex(utf8.encode(snapshot.dohcMarkdownSource)) !== snapshot.dohcMarkdownSourceSha256) refuse('invalid-schema')
-  }
-  return snapshot
+  const witness = readMarkdownSourceWitness(snapshot)
+  if (witness === 'invalid') refuse('invalid-schema')
+  return {metadata: snapshot, witness}
 }
 
 function validatePublicState(
@@ -726,7 +718,7 @@ function validatePublicState(
   const meta = scratch.getMap('meta')
   const zeroStructSeed = topology.canonicalZeroStructSeed
     && !topology.bodyHasActiveItem && body.length === 0 && frontmatter.size === 0 && meta.size === 0
-  const metadata = validateMetadata(meta, zeroStructSeed)
+  const {metadata, witness} = validateMetadata(meta, zeroStructSeed)
   const budget = new ProjectionBudget()
   for (const value of frontmatter.values()) visitPublicValue(value, 0, budget, new Set())
   const originalFingerprint = bodyFingerprint(body, budget)
@@ -756,19 +748,12 @@ function validatePublicState(
   }
 
   const projectedMarkdown = yDocToMarkdown(scratch)
-  let preservedSource: string | undefined
   if (exceedsLiveMarkdownLimit(projectedMarkdown)) refuse('capacity-refused')
   if (metadata.dohcMarkdownCrlf === true && !projectedMarkdown.includes('\r\n')) refuse('invalid-schema')
-  if (typeof metadata.dohcMarkdownSourceProjectionSha256 === 'string'
-    && metadata.dohcMarkdownSourceProjectionSha256 === sha256Hex(utf8.encode(projectedMarkdown))) {
-    if (exceedsLiveMarkdownLimit(metadata.dohcMarkdownSource as string)) refuse('capacity-refused')
-    const source = markdownToYDoc(metadata.dohcMarkdownSource as string)
-    try {
-      if (yDocToMarkdown(source) === projectedMarkdown) preservedSource = metadata.dohcMarkdownSource as string
-      else if (unverifiedSource === 'refuse') refuse('invalid-schema')
-    }
-    finally { source.destroy() }
-  }
+  const source = resolveMarkdownSource(scratch, projectedMarkdown, witness)
+  if (source.kind === 'capacity-refused') refuse('capacity-refused')
+  if (source.kind === 'invalid' || source.kind === 'import-failed'
+    || (source.kind === 'unverified' && unverifiedSource === 'refuse')) refuse('invalid-schema')
   if (!zeroStructSeed) {
     const reimported = markdownToYDoc(projectedMarkdown)
     try {
@@ -782,5 +767,5 @@ function validatePublicState(
       if (!semanticEqual(withoutSources(metadata), withoutSources(Object.fromEntries(reimported.getMap('meta').entries())))) refuse('invalid-schema')
     } finally { reimported.destroy() }
   }
-  return preservedSource ?? projectedMarkdown
+  return source.kind === 'verified' ? source.markdown : projectedMarkdown
 }
