@@ -94,7 +94,7 @@ async fn seeded_deletes_survive_an_over_cap_policy_hold_and_recovery() {
         let ReconcileRun::Completed(plan) = &run else {
             panic!("a seeded scan must produce a plan");
         };
-        assert_eq!(plan.retained_over_cap, ["big.md"]);
+        assert_eq!(plan.retained_unread, ["big.md"]);
         assert!(!plan.ops.iter().any(|op| op.path() == "big.md"));
         assert!(
             plan.ops.iter().any(|op| matches!(op,

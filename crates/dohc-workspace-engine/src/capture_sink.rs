@@ -1366,7 +1366,7 @@ impl StoreCaptureSink {
 
     /// Retire a path the current policy excludes, without the absence check.
     ///
-    /// The driver calls this for `retained_over_cap` paths: they are still on
+    /// The driver calls this for `retained_unread` paths: they are still on
     /// disk by definition (that is why the scanner retained them), so the
     /// public [`CaptureSink::retire`] would refuse with a reappearance
     /// guard and the narrowed head would survive forever. Policy exclusion is
@@ -1781,7 +1781,7 @@ fn read_contained_current(
     }
     // Between the capture cap and the SCAN cap (64 MiB) the scanner still
     // lists the file, so a grow-past-capture-cap lands here and retires.
-    // Past the scan cap the plan classifies it `retained_over_cap` and the
+    // Past the scan cap the plan classifies it `retained_unread` and the
     // sink is never called — deliberately not a retire: the ratified CAL-3
     // delta keeps last-known-good rather than
     // false-deleting live user data behind an operational scan bound.

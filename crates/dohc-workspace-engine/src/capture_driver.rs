@@ -1381,7 +1381,7 @@ fn is_safe_fresh_import_plan(run: &ReconcileRun) -> bool {
         && !plan.degraded
         && plan.degraded_paths.is_empty()
         && plan.unconfirmed_removed.is_empty()
-        && plan.retained_over_cap.is_empty()
+        && plan.retained_unread.is_empty()
         && plan.ops.iter().all(|op| {
             matches!(
                 op,
@@ -2591,7 +2591,7 @@ pub(crate) async fn reconcile_full_for_switch(
             let manifest_changed = matches!(
                 &run,
                 ReconcileRun::Completed(plan)
-                    if !plan.ops.is_empty() || !plan.retained_over_cap.is_empty()
+                    if !plan.ops.is_empty() || !plan.retained_unread.is_empty()
             );
             let context = ApplyRunContext {
                 root,
@@ -2976,7 +2976,7 @@ async fn apply_bound_run_with_handle(
     let apply_cancel = cancel.clone();
     let apply_events = events.clone();
     let apply_captured_root = Arc::clone(&captured_root);
-    // The retained-over-cap loop below retires through its own sink; it must
+    // The retained-unread loop below retires through its own sink; it must
     // carry the same pass provenance or its deletes split the reconcile/fence
     // history group with NULL correlation ids.
     let retire_provenance = provenance.clone();
@@ -3119,7 +3119,8 @@ async fn apply_bound_run_with_handle(
             }
         }
     }
-    // OVER-CAP + narrowed: a path in the scanner's retained-over-cap set
+    // UNREAD + narrowed: a path in the scanner's retained-unread set, over
+    // the size cap or evicted by a cloud provider,
     // never appears in the diff (CAL-3 keeps it last-known-good, never
     // Retire), so a policy narrow could never reach it through an op. Retire
     // those directly — policy exclusion is an OWNERSHIP decision, distinct
@@ -3128,12 +3129,12 @@ async fn apply_bound_run_with_handle(
     // One policy read for the whole loop — a per-path re-read was N disk
     // round-trips for one answer, and could even give different paths a
     // different policy if an edit raced the loop.
-    let capture_policy = if plan.retained_over_cap.is_empty() {
+    let capture_policy = if plan.retained_unread.is_empty() {
         PolicyState::Known(None)
     } else {
         read_capture_policy(root)
     };
-    for path in &plan.retained_over_cap {
+    for path in &plan.retained_unread {
         let excluded = match &capture_policy {
             PolicyState::Known(policy) => policy_excludes(policy, path),
             // Unknown policy: hold LOUDLY. This loop is the only mechanism

@@ -465,7 +465,7 @@ fn size_cap_grow_retains_never_retires_the_false_delete_regression() {
     assert!(ingest_paths(&grown, IngestReason::Added).is_empty());
     assert!(ingest_paths(&grown, IngestReason::Changed).is_empty());
     assert_eq!(
-        grown.retained_over_cap,
+        grown.retained_unread,
         ["doc.md"],
         "distinct retain disposition"
     );
@@ -477,7 +477,7 @@ fn size_cap_grow_retains_never_retires_the_false_delete_regression() {
     let shrunk = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
     assert_eq!(ingest_paths(&shrunk, IngestReason::Changed), ["doc.md"]);
     assert!(retire_paths(&shrunk).is_empty());
-    assert!(shrunk.retained_over_cap.is_empty());
+    assert!(shrunk.retained_unread.is_empty());
 }
 
 #[test]
@@ -494,7 +494,7 @@ fn genuinely_deleted_over_cap_absent_file_is_still_removed() {
     ws.remove("gone.md");
     let p = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
     assert_eq!(retire_paths(&p), ["gone.md"]);
-    assert!(p.retained_over_cap.is_empty());
+    assert!(p.retained_unread.is_empty());
     assert_eq!(ctrl.tracked_len(), 0);
 }
 
@@ -963,4 +963,142 @@ fn mtime_inside_the_granularity_margin_is_not_recorded() {
         baseline_hashed + 1,
         "an mtime within the coarse-timestamp granule below scan start must not pair, so the rescan re-hashes"
     );
+}
+
+/// Treats the named paths as evicted by a cloud provider such as iCloud
+/// Drive. Only a file provider can make a real dataless file.
+struct EvictedAt(&'static [&'static str]);
+
+impl ScanIoFaultInjector for EvictedAt {
+    fn error(&self, _path: &str, _operation: ScanIoOperation) -> Option<std::io::Error> {
+        None
+    }
+
+    fn evicted(&self, path: &str) -> bool {
+        self.0.contains(&path)
+    }
+}
+
+fn evicted_scanner(paths: &'static [&'static str]) -> Scanner {
+    Scanner::new_with_io_faults(ScanBounds::default(), Arc::new(EvictedAt(paths)))
+        .expect("evicted scanner")
+}
+
+#[test]
+fn a_tracked_evicted_file_is_retained_unread_even_when_its_seed_hash_forces_a_reoffer() {
+    let ws = Scratch::new();
+    ws.write("photo.bin", b"cloud only");
+    ws.write("narrowed.md", b"opted out");
+    // Any read would now fail the scan, so a clean plan proves neither file
+    // was read.
+    #[cfg(unix)]
+    for rel in ["photo.bin", "narrowed.md"] {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(ws.path().join(rel), std::fs::Permissions::from_mode(0o000))
+            .expect("chmod");
+    }
+    // A restart's seed records no mtimes. The engine seeds a path the policy
+    // narrowed with a hash that can never match, so capture re-offers it.
+    let manifest = ScanManifest::from_entries([
+        (
+            "photo.bin".to_owned(),
+            ManifestEntry {
+                size: 10,
+                sha256: dohc_engine_storage::hex_sha256(b"cloud only"),
+                mtime_ms: 0,
+            },
+        ),
+        (
+            "narrowed.md".to_owned(),
+            ManifestEntry {
+                size: 9,
+                sha256: "policy-narrowed-reoffer".to_owned(),
+                mtime_ms: 0,
+            },
+        ),
+    ]);
+    let mut ctrl = ReconcileController::rehydrated(manifest, dohc_engine_files::ScanGeneration(1));
+    let prepared = plan(
+        ctrl.reconcile(
+            &evicted_scanner(&["photo.bin", "narrowed.md"]),
+            ws.path(),
+            &CancellationToken::new(),
+        )
+        .expect("reconcile"),
+    );
+    assert!(!prepared.degraded, "{prepared:?}");
+    assert!(prepared.ops.is_empty(), "{prepared:?}");
+    // Retained paths reach the driver's policy pass, which retires a narrowed
+    // one without reading it.
+    assert_eq!(prepared.retained_unread, ["narrowed.md", "photo.bin"]);
+}
+
+#[test]
+fn renaming_an_evicted_file_reads_it_under_its_new_name() {
+    let ws = Scratch::new();
+    ws.write("a.md", b"note");
+    let mut ctrl = ReconcileController::new();
+    let normal = Scanner::new(ScanBounds::default()).expect("scanner");
+    reconcile_and_apply(&mut ctrl, &normal, ws.path(), &CancellationToken::new());
+
+    ws.rename("a.md", "b.md");
+    ctrl.mark_dirty();
+    let prepared = plan(
+        ctrl.reconcile_if_dirty(
+            &evicted_scanner(&["b.md"]),
+            ws.path(),
+            &CancellationToken::new(),
+        )
+        .expect("reconcile"),
+    );
+    assert_eq!(ingest_paths(&prepared, IngestReason::Added), ["b.md"]);
+    assert_eq!(retire_paths(&prepared), ["a.md"]);
+    assert!(prepared.retained_unread.is_empty());
+}
+
+#[test]
+fn an_evicted_file_the_manifest_never_tracked_is_read() {
+    let ws = Scratch::new();
+    ws.write("late.md", b"arrived from another Mac");
+    let mut ctrl = ReconcileController::new();
+    let prepared = plan(
+        ctrl.reconcile(
+            &evicted_scanner(&["late.md"]),
+            ws.path(),
+            &CancellationToken::new(),
+        )
+        .expect("reconcile"),
+    );
+    assert_eq!(ingest_paths(&prepared, IngestReason::Added), ["late.md"]);
+    assert!(prepared.retained_unread.is_empty());
+}
+
+#[test]
+fn an_untracked_evicted_file_the_policy_narrows_is_never_read() {
+    let ws = Scratch::new();
+    ws.write(
+        ".dohc/files.toml",
+        b"version = 1\n[[rule]]\npath = \"private/**\"\ntracked = false\n",
+    );
+    ws.write("private/photo.bin", b"cloud only");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            ws.path().join("private/photo.bin"),
+            std::fs::Permissions::from_mode(0o000),
+        )
+        .expect("chmod");
+    }
+    let mut ctrl = ReconcileController::new();
+    let prepared = plan(
+        ctrl.reconcile(
+            &evicted_scanner(&["private/photo.bin"]),
+            ws.path(),
+            &CancellationToken::new(),
+        )
+        .expect("reconcile"),
+    );
+    assert!(!prepared.degraded, "{prepared:?}");
+    assert!(prepared.ops.is_empty(), "{prepared:?}");
 }

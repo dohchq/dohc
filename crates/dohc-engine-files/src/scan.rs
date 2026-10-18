@@ -13,13 +13,17 @@
 //! structural/resource bounds remain fail-closed.
 
 use crate::bounds::{OverCapPolicy, ScanBounds};
-use crate::diff::{ManifestEntry, ScanManifest};
+use crate::diff::ScanManifest;
 use crate::error::FilesError;
 use crate::floor;
 use crate::hash::{
     HashInput, HashOutcome, HashPool, HashRun, PostHashExpectation, PostHashProbe, mtime_ms,
 };
 use crate::media::media_type_for_path;
+use crate::search_policy::{
+    PathFloor, SearchPolicySnapshot, classify_engine_file_path, read_engine_search_policy,
+    resolve_effective_policy,
+};
 use std::borrow::Cow;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -53,6 +57,9 @@ pub struct FileEntry {
 pub enum SkipReason {
     /// The file exceeded `max_file_bytes` under [`OverCapPolicy::Skip`].
     OverCap,
+    /// A cloud provider such as iCloud Drive evicted the content of a file
+    /// the prior manifest tracks. Reading it would download it again.
+    Evicted,
 }
 
 /// A file that was seen but not tracked.
@@ -84,6 +91,12 @@ pub enum ScanIoOperation {
 /// Supplies a synthetic io error for a specific bounded scan unit.
 pub trait ScanIoFaultInjector: Send + Sync {
     fn error(&self, path: &str, operation: ScanIoOperation) -> Option<std::io::Error>;
+
+    /// Whether to treat `path` as evicted. Only a file provider can make a
+    /// real one.
+    fn evicted(&self, _path: &str) -> bool {
+        false
+    }
 }
 
 /// A completed scan: the tracked files (sorted by path) plus the seen-but-
@@ -178,8 +191,14 @@ impl Scanner {
     /// always hashes (no recorded pairing exists — see the amended N8 rule on
     /// [`FileEntry`]). A reused file cannot surface a read failure, so a file
     /// that became unreadable without changing size or mtime stays tracked at
-    /// its last-known-good content instead of degrading the scan. A file whose
-    /// content a cloud provider evicted is never read either.
+    /// its last-known-good content instead of degrading the scan.
+    ///
+    /// A tracked file whose content a cloud provider evicted is not read
+    /// either, since reading it downloads it: it is skipped as
+    /// [`SkipReason::Evicted`], so the reconcile retains its last-known
+    /// content and a policy narrowing still retires it. An untracked evicted
+    /// file is hashed, which downloads it, so a rename or a rebuilt store
+    /// still sees its content, unless `.dohc/files.toml` narrows it.
     pub fn scan_with_prior(
         &self,
         root: &Path,
@@ -197,10 +216,21 @@ impl Scanner {
                 // Deterministic order: sort by path before hashing so result
                 // indices are stable regardless of readdir order.
                 files.sort_by(|a, b| a.rel.cmp(&b.rel));
-                // An evicted file the manifest never tracked waits until it
-                // downloads: hashing it would download it.
-                files.retain(|file| !file.evicted || prior.get(&file.rel).is_some());
+                let mut policy = None;
+                let (evicted, files): (Vec<_>, Vec<_>) = files.into_iter().partition(|file| {
+                    file.evicted
+                        && (prior.get(&file.rel).is_some() || {
+                            let policy =
+                                policy.get_or_insert_with(|| read_engine_search_policy(&root));
+                            policy_narrows(policy, &file.rel)
+                        })
+                });
                 let mut skipped = skipped;
+                skipped.extend(evicted.into_iter().map(|file| SkippedPath {
+                    path: file.rel,
+                    size: file.size,
+                    reason: SkipReason::Evicted,
+                }));
                 skipped.sort_by(|a, b| a.path.cmp(&b.path));
                 let mut failed = failed;
                 failed.sort_by(|a, b| a.path.cmp(&b.path));
@@ -217,11 +247,16 @@ impl Scanner {
         // other candidate becomes a hash input. Inputs stay in candidate
         // order, so `outcomes` (indexed by input) can be consumed sequentially
         // against the non-reused candidates below.
-        let mut reused: Vec<Option<UnreadEntry>> = Vec::with_capacity(candidates.files.len());
+        let mut reused: Vec<Option<String>> = Vec::with_capacity(candidates.files.len());
         let mut inputs: Vec<HashInput> = Vec::new();
         let mut post_hash: Vec<PostHashExpectation> = Vec::new();
         for candidate in &candidates.files {
-            let hash = unread_entry(candidate, prior.get(&candidate.rel));
+            let hash = prior.get(&candidate.rel).and_then(|entry| {
+                (candidate.mtime_ms != 0
+                    && entry.mtime_ms == candidate.mtime_ms
+                    && entry.size == candidate.size)
+                    .then(|| entry.sha256.clone())
+            });
             if hash.is_none() {
                 inputs.push(HashInput {
                     index: inputs.len(),
@@ -262,17 +297,12 @@ impl Scanner {
         let mut files = Vec::with_capacity(candidate_files.len());
         let mut outcomes = outcomes.into_iter();
         for (index, candidate) in candidate_files.into_iter().enumerate() {
-            if let Some(UnreadEntry {
-                size,
-                mtime_ms,
-                sha256,
-            }) = reused[index].take()
-            {
+            if let Some(sha256) = reused[index].take() {
                 files.push(FileEntry {
                     media_type: media_type_for_path(&candidate.rel),
                     path: candidate.rel,
-                    size,
-                    mtime_ms,
+                    size: candidate.size,
+                    mtime_ms: candidate.mtime_ms,
                     sha256,
                 });
                 continue;
@@ -544,11 +574,11 @@ impl Scanner {
                     }
                 }
                 files.push(Candidate {
+                    evicted: self.evicted(&rel, &metadata),
                     rel,
                     abs: path,
                     size,
                     mtime_ms: mtime_ms(&metadata),
-                    evicted: evicted(&metadata),
                 });
                 // Fail closed on the max-files bound — never truncate.
                 self.check_file_bound(files.len(), skipped.len(), failed.len())?;
@@ -636,7 +666,7 @@ impl Scanner {
                         abs,
                         size,
                         mtime_ms: mtime_ms(&m),
-                        evicted: evicted(&m),
+                        evicted: self.evicted(rel, &m),
                     });
                 }
             }
@@ -647,6 +677,27 @@ impl Scanner {
             skipped,
             failed,
         })
+    }
+
+    /// Whether macOS marks the file dataless: its content lives only with a
+    /// cloud provider. Reading `st_flags` does not download it.
+    fn evicted(&self, path: &str, metadata: &std::fs::Metadata) -> bool {
+        #[cfg(target_os = "macos")]
+        let dataless = {
+            use std::os::macos::fs::MetadataExt;
+            const SF_DATALESS: u32 = 0x4000_0000;
+            metadata.st_flags() & SF_DATALESS != 0
+        };
+        #[cfg(not(target_os = "macos"))]
+        let dataless = {
+            let _ = metadata;
+            false
+        };
+        dataless
+            || self
+                .io_faults
+                .as_ref()
+                .is_some_and(|faults| faults.evicted(path))
     }
 
     fn injected(&self, path: &str, operation: ScanIoOperation) -> Option<std::io::Error> {
@@ -670,60 +721,27 @@ impl Scanner {
     }
 }
 
+/// Whether `.dohc/files.toml` stops the engine tracking `path`. A policy
+/// capture cannot read counts as narrowing, since capture holds until it can.
+/// The secret floor is never narrowed.
+fn policy_narrows(policy: &SearchPolicySnapshot, path: &str) -> bool {
+    if policy.holds_file_capture() {
+        return true;
+    }
+    let Some(rules) = &policy.files_policy else {
+        return false;
+    };
+    classify_engine_file_path(path) == PathFloor::Tracked
+        && !resolve_effective_policy(path, Some(rules), None).tracked
+}
+
 struct Candidate {
     rel: String,
     abs: PathBuf,
     size: u64,
     mtime_ms: i64,
-    /// A cloud provider such as iCloud Drive evicted the content to free
-    /// space. Reading the file downloads it again.
+    /// A cloud provider such as iCloud Drive evicted the content.
     evicted: bool,
-}
-
-/// What a file the scan does not read is recorded with.
-#[derive(Debug, PartialEq, Eq)]
-struct UnreadEntry {
-    size: u64,
-    mtime_ms: i64,
-    sha256: String,
-}
-
-/// The entry `candidate` keeps without being read, if any. An unchanged size
-/// and nonzero mtime reuse the prior hash. An evicted file keeps its whole
-/// prior entry, since reading it would download it. It records no mtime, so
-/// the first scan after it downloads hashes it, and catches an edit made
-/// elsewhere while it was evicted.
-fn unread_entry(candidate: &Candidate, prior: Option<&ManifestEntry>) -> Option<UnreadEntry> {
-    let entry = prior?;
-    if candidate.evicted {
-        return Some(UnreadEntry {
-            size: entry.size,
-            mtime_ms: 0,
-            sha256: entry.sha256.clone(),
-        });
-    }
-    (candidate.mtime_ms != 0
-        && entry.mtime_ms == candidate.mtime_ms
-        && entry.size == candidate.size)
-        .then(|| UnreadEntry {
-            size: candidate.size,
-            mtime_ms: candidate.mtime_ms,
-            sha256: entry.sha256.clone(),
-        })
-}
-
-/// Whether macOS marks the file dataless: its content lives only with a
-/// cloud provider. Reading `st_flags` does not download it.
-#[cfg(target_os = "macos")]
-fn evicted(metadata: &std::fs::Metadata) -> bool {
-    use std::os::macos::fs::MetadataExt;
-    const SF_DATALESS: u32 = 0x4000_0000;
-    metadata.st_flags() & SF_DATALESS != 0
-}
-
-#[cfg(not(target_os = "macos"))]
-fn evicted(_metadata: &std::fs::Metadata) -> bool {
-    false
 }
 
 struct Enumerated {
@@ -817,40 +835,6 @@ mod traversal_tests {
             1,
             "a new sibling must normalize its own name without repeating its ancestors"
         );
-    }
-
-    #[test]
-    fn an_evicted_file_keeps_its_prior_entry_without_being_read() {
-        let candidate = |evicted, size| Candidate {
-            rel: "photo.bin".to_owned(),
-            abs: PathBuf::from("photo.bin"),
-            size,
-            mtime_ms: 1_700_000_000_000,
-            evicted,
-        };
-        // A manifest rehydrated after a restart records no mtimes.
-        let prior = crate::diff::ManifestEntry {
-            size: 3,
-            sha256: "known".to_owned(),
-            mtime_ms: 0,
-        };
-        assert_eq!(unread_entry(&candidate(false, 3), Some(&prior)), None);
-        // An edit elsewhere may change an evicted file's size. Its last-known
-        // content stands until it downloads.
-        assert_eq!(
-            unread_entry(&candidate(true, 9), Some(&prior)),
-            Some(UnreadEntry {
-                size: 3,
-                mtime_ms: 0,
-                sha256: "known".to_owned(),
-            })
-        );
-        assert_eq!(unread_entry(&candidate(true, 3), None), None);
-
-        let scratch = ScratchDir::new_named("scan-not-evicted").unwrap();
-        let path = scratch.path().join("note.md");
-        std::fs::write(&path, "local").unwrap();
-        assert!(!evicted(&std::fs::symlink_metadata(&path).unwrap()));
     }
 
     #[test]

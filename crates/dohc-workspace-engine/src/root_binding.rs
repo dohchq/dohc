@@ -160,12 +160,26 @@ fn create_binding_dir(marker: &Path) -> Result<(), RootBindingError> {
     builder
         .create(parent)
         .map_err(io_failure(parent, RootBindingError::Unwritable))?;
-    // The engine's state belongs to this Mac. Keep it out of iCloud Drive
-    // before any of it exists, and on each open of an older workspace. A
-    // volume without extended attributes has no file provider to sync it.
     #[cfg(target_os = "macos")]
-    let _ = dohc_macos_files::exclude_from_sync(parent);
+    exclude_from_icloud(parent);
     Ok(())
+}
+
+/// The engine's state belongs to this Mac. Keep the folder that holds it out
+/// of iCloud Drive before any of it exists, and on each open of an older
+/// workspace. A volume without extended attributes has no file provider to
+/// sync it. Any other failure leaves the store syncing, so it is logged, but
+/// the workspace still opens.
+#[cfg(target_os = "macos")]
+fn exclude_from_icloud(engine_dir: &Path) {
+    let excluded = std::fs::canonicalize(engine_dir)
+        .and_then(|resolved| dohc_macos_files::exclude_from_sync(&resolved));
+    match excluded {
+        Err(error) if error.raw_os_error() != Some(libc::ENOTSUP) => {
+            eprintln!("engine: could not keep the engine folder out of iCloud Drive: {error}");
+        }
+        _ => {}
+    }
 }
 
 fn valid_token(token: &[u8]) -> bool {
@@ -336,15 +350,16 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn opening_a_root_keeps_its_engine_folder_out_of_icloud() {
-        let excluded = |root: &Path| {
+        let excluded_at = |dir: &Path| {
             std::process::Command::new("xattr")
-                .args(["-p", "com.apple.fileprovider.ignore#P"])
-                .arg(root.join(".dohc/engine"))
+                .args(["-s", "-p", "com.apple.fileprovider.ignore#P"])
+                .arg(dir)
                 .output()
                 .expect("xattr")
                 .status
                 .success()
         };
+        let excluded = |root: &Path| excluded_at(&root.join(".dohc/engine"));
         let fresh = ScratchDir::new().expect("scratch");
         write_new_root_binding(fresh.path()).expect("mint");
         assert!(excluded(fresh.path()));
@@ -359,6 +374,16 @@ mod tests {
             "a".repeat(TOKEN_HEX_LEN)
         );
         assert!(excluded(older.path()));
+
+        // SQLite writes through a symlinked engine folder, so the folder it
+        // resolves to is the one to exclude.
+        let linked = ScratchDir::new().expect("scratch");
+        let target = linked.join("elsewhere");
+        std::fs::create_dir_all(&target).expect("target");
+        std::fs::create_dir_all(linked.join(".dohc")).expect("dohc");
+        std::os::unix::fs::symlink(&target, linked.join(".dohc/engine")).expect("symlink");
+        write_new_root_binding(linked.path()).expect("mint");
+        assert!(excluded_at(&target));
     }
 
     #[test]
