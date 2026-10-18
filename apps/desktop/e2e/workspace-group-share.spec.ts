@@ -200,6 +200,9 @@ test("@two-client a group shares its channel and folder together, and both sides
           await writeFile(join(ownerTemp.rootPath, `sync-nudge-${nudge}.md`), `nudge ${nudge}\n`);
           await owner!.page.getByTestId("chats-group-lane-posts").click().catch(() => undefined);
           await owner!.page.getByTestId("chats-group-lane-chat").click().catch(() => undefined);
+          // The lane paints its messages after the click returns, and its
+          // composer stays disabled until then. Count once it is enabled.
+          await expect(owner!.page.getByTestId("chats-lane-composer")).toBeEnabled({ timeout: 10_000 }).catch(() => undefined);
           return await owner!.page
             .getByTestId("chats-lane-message-body")
             .filter({ hasText: "Count me in" })

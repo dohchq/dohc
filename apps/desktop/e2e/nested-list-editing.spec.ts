@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parseRichdocMarkdown } from "@dohc/ydoc-projection";
 import { launchDesktopApp } from "./helpers/desktopApp";
+import { DOCUMENT_END, LINE_START } from "./helpers/keys";
 import {
   cleanupDesktopWorkspace, createTempWorkspace, explorerRow,
   openWorkspaceFromFirstRun, waitForWorkspaceFile, writeWorkspaceFiles,
@@ -67,13 +68,13 @@ test("@nested-list-editing typed nested lists survive reopen and restart", async
 
     // Convert the typed child through the slash menu.
     await editor.locator("p").filter({ hasText: /^child$/ }).click();
-    await page.keyboard.press("Home");
+    await page.keyboard.press(LINE_START);
     await page.keyboard.type("/todo");
     await page.getByRole("option", { name: /Todo list/ }).click();
     await expect(editor.locator('li li input[type="checkbox"]')).toHaveCount(1);
 
     // Paste at a new textblock, then convert beside an existing checklist.
-    await page.keyboard.press("ControlOrMeta+End");
+    await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.press("Enter");
     const inList = () => page.evaluate(() => {
       const anchor = window.getSelection()?.anchorNode;
@@ -89,7 +90,7 @@ test("@nested-list-editing typed nested lists survive reopen and restart", async
     await page.keyboard.press("ControlOrMeta+V");
     await expect(editor.locator("li").filter({ hasText: /^pasted grandchild$/ })).toHaveCount(1);
     await editor.locator("p").filter({ hasText: /^pasted child$/ }).click();
-    await page.keyboard.press("Home");
+    await page.keyboard.press(LINE_START);
     await page.keyboard.type("/todo");
     await page.getByRole("option", { name: /Todo list/ }).click();
     const pastedParent = editor.locator("li").filter({ has: page.locator("p", { hasText: /^pasted parent$/ }) }).first();

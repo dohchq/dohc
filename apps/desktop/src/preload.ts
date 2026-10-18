@@ -6,6 +6,7 @@ import { accessOperations } from "./ipc/accessOperations";
 import { settingsOperations } from "./ipc/settingsOperations";
 import { workspaceFileOperations } from "./ipc/workspaceFileOperations";
 import { devToolsGranted } from "./ipc/devToolsIpc";
+import { insecureLoopbackServersForTests } from "./workspaces/cloudConfiguration";
 import {OwnerAppPublicationRequest, OwnerAppPublicationResult} from "./ipc/ownerAppPublicationContract";
 import { datasetOperations } from "./ipc/datasetOperations";
 import {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "@dohc/cli/app-responses";
@@ -23,6 +24,7 @@ import {
   workspaceSyncOperations,
   CaptureHoldsEvent,
   systemMotionOperations,
+  systemPrivacySettingsOperations,
   serverAccountOperations,
   SitePreviewReplacedEvent,
   DesktopUserSettingsResult,
@@ -138,6 +140,7 @@ const bridge: DohcDesktopBridge = {
   ...relay,
   ownerRestore: relay.ownerRestore as DohcDesktopBridge["ownerRestore"],
   ...operationBridge(systemMotionOperations, invoke),
+  ...operationBridge(systemPrivacySettingsOperations, invoke),
   ...operationBridge(serverAccountOperations, invoke),
   ...operationBridge(historyOperations, invoke),
   ...operationBridge(shareDirectWriteDeliveryOperations, invoke),
@@ -145,6 +148,7 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(accessOperations, invoke),
   platform: process.platform,
   devTools: devToolsGranted(process.argv),
+  insecureLoopbackServersForTests: insecureLoopbackServersForTests(process.env),
   windowRole:
     new URLSearchParams(window.location.search).get("view") === "manager"
       ? "manager"

@@ -1027,7 +1027,7 @@ describe("computeBacklinks", () => {
   });
 });
 
-// Rust uses the same fixtures to check extraction and candidate-key coverage.
+// Rust uses the same fixtures for extraction, resolution and candidate keys.
 const linkParity = JSON.parse(
   readFileSync(
     new URL(
@@ -1046,7 +1046,8 @@ const linkParity = JSON.parse(
     source: string;
     literal: string;
     kind: "wikilink" | "markdown";
-    target: string;
+    target: string | null;
+    paths?: string[];
   }[];
 };
 
@@ -1066,13 +1067,12 @@ describe("persisted links parser parity", () => {
         fixture.kind === "wikilink"
           ? `[[${fixture.literal}]]`
           : `[go](${fixture.literal})`;
-      const graph = buildMarkdownGraph([
-        { path: fixture.source, text },
-        { path: fixture.target, text: "" },
-      ]);
-      expect(graph.edges).toEqual([
+      const graph = buildMarkdownGraph([{ path: fixture.source, text }], {
+        allPaths: fixture.paths ?? [fixture.source, ...(fixture.target ? [fixture.target] : [])],
+      });
+      expect(graph.edges).toEqual(fixture.target ? [
         { source: fixture.source, target: fixture.target, kind: fixture.kind },
-      ]);
+      ] : []);
     });
   }
 });

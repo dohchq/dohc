@@ -773,7 +773,10 @@ fn resolution_keys_cover_renderer_resolved_targets() {
             fixture["literal"].as_str().unwrap(),
             fixture["kind"].as_str().unwrap(),
         );
-        let target = path_keys(fixture["target"].as_str().unwrap());
+        let Some(path) = fixture["target"].as_str() else {
+            continue;
+        };
+        let target = path_keys(path);
         assert!(
             occurrence.iter().any(|k| target.contains(k)),
             "no candidate for {fixture}"
@@ -1614,3 +1617,6 @@ fn passive_links_never_queue_seed_or_drain_even_with_leftover_work() {
     assert_eq!(count(&store, "link_index_state"), 1);
     assert_eq!(count(&store, "link_gc"), 1);
 }
+
+#[path = "incoming_tests.rs"]
+mod incoming_tests;

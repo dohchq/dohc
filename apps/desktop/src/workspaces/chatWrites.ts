@@ -103,7 +103,7 @@ export function createChatWrites(dependencies: {
   // capability: there is no durable per-row relay receipt yet.
   function ownedWorkspace(workspaceId: string): ChatWorkspace {
     const workspace = findWorkspace(workspaceId);
-    if (!workspace) throw new Error(`Unknown workspace: ${workspaceId}`);
+    if (!workspace) throw new Error("This workspace is not open. Open it again.");
     if (shareViewIsPresent(workspace.shareView)) {
       throw new SharedFileReadOnlyError("Chats are read-only in this shared view.");
     }

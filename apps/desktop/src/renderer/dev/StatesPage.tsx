@@ -49,6 +49,7 @@ import { DangerButton, EmptyState, IconButton, Pill, PrimaryButton, RetryRow, Se
 import { ObjectGlyph, type ObjectKind } from "../ui/KindGlyph";
 import { MENU_FRAME, MENU_SEPARATOR, Menu, type MenuEntry } from "../ui/Menu";
 import { MoreMenu } from "../ui/MoreMenu";
+import { Ref } from "../ui/Ref";
 import { SegmentedControl } from "../ui/SegmentedControl";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { SAVE_STATE, StateMark, type SaveStateKey } from "../ui/StateMark";
@@ -2736,10 +2737,41 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Last, so the parts above keep their places. */}
+      {/* Last, so the parts above keep their places. A new part goes after. */}
       <Section part="chat-messages" title="Chat messages">
         <Specimen label="a file's chats in About: a run, its second message hovered at 12:45 PM">
           <ChatRunSpecimen />
+        </Specimen>
+      </Section>
+
+      <Section part="ref" title="Reference">
+        <Specimen label="rest, hover, keyboard focus, selected, missing">
+          <Ref path="data/funnel.csv" onOpen={noop} />
+          <span data-force-state="hover" data-force-target="button"><Ref path="data/funnel.csv" onOpen={noop} /></span>
+          <span data-force-state="focus-visible" data-force-target="button"><Ref path="data/funnel.csv" onOpen={noop} /></span>
+          <Ref path="data/funnel.csv" selected onOpen={noop} />
+          <Ref path="research/competitors.md" missing onOpen={noop} />
+        </Specimen>
+        <Specimen label="a title, with and without its folder; a heading">
+          <Ref path="research/competitors.md" title="Competitor landscape" />
+          <Ref path="research/competitors.md" title="Competitor landscape" folder />
+          <Ref path="research/competitors.md" heading="pricing" />
+        </Specimen>
+        <Specimen label="a long name in a narrow row" className="w-56">
+          <Ref path={STRIP_LONG} folder />
+        </Specimen>
+        <Specimen label="in a sentence">
+          <p className="m-0 w-[420px] text-[14px] leading-[22px] text-ink">
+            Numbers are in <Ref path="data/funnel.csv" onOpen={noop} /> and the flow is sketched in{" "}
+            <Ref path="sketches/flow.excalidraw" onOpen={noop} />.
+          </p>
+        </Specimen>
+        <Specimen label="kind">
+          <div className="flex w-[420px] flex-wrap gap-1.5">
+            {KINDS.map((kind) => (
+              <Ref key={kind.displayKind} path={KIND_SAMPLES[kind.displayKind]} kind={kind} />
+            ))}
+          </div>
         </Specimen>
       </Section>
     </section>

@@ -178,6 +178,7 @@
     "desktop:open-external-url",
     "desktop:open-file-externally",
     "desktop:open-shared-view",
+    "desktop:open-system-privacy-settings",
     "desktop:open-user-settings-file",
     "desktop:open-workspace",
     "desktop:open-workspace-manager",

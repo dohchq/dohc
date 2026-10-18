@@ -362,8 +362,9 @@ jobs:
           DOHC_E2E_NO_CHROMIUM_SANDBOX: "1"
         run: xvfb-run -a pnpm smoke:fuses:desktop
 
-      # Checks the bundle's signature and fuses, then boots it. The x64 package
-      # boots under Rosetta on the Apple silicon runner.
+      # Checks the bundle's signature and fuses, builds one app through the
+      # arm64 package's signed compiler, then boots it. The x64 package boots
+      # under Rosetta on the Apple silicon runner.
       - name: macOS packaged smoke
         if: runner.os == 'macOS'
         env:

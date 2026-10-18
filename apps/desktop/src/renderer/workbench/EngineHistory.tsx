@@ -2,6 +2,7 @@ import { formatChatTime } from "../time";
 import { basenameOf } from "../path";
 import { ChevronDown, ChevronRight, Database, FileArchive, FileText, History, Info, Layers, Lock, RotateCcw, Search, TriangleAlert, X, Zap } from "lucide-react";
 import { EmptyState } from "../ui/controls";
+import { Ref } from "../ui/Ref";
 import { useCallback, useId, useMemo, useState } from "react";
 import { LegendList } from "@legendapp/list/react";
 import { HISTORY_MAX_SOURCES, type EngineMomentRecord, type TimelineEntry } from "../../ipc/bridgeContract";
@@ -313,6 +314,9 @@ export function MomentRow(props: {
   // change is its description.
   const sourceId = useId();
   const describedBySource = moment.automationAuthor !== undefined && !props.nested;
+  // A state mark sits on the first line's center: the 22px chip in a nested
+  // row, the 13px summary otherwise.
+  const mark = props.nested ? "mt-[5px]" : "mt-0.5";
   return (
     <button
       type="button"
@@ -335,28 +339,33 @@ export function MomentRow(props: {
             size={12}
             aria-hidden
             data-testid="engine-moment-lock"
-            className="mt-0.5 shrink-0 text-subtle"
+            className={`${mark} shrink-0 text-subtle`}
           />
         ) : moment.contentKind === "binary" ? (
           <FileArchive
             size={12}
             aria-hidden
             data-testid="engine-moment-binary"
-            className="mt-0.5 shrink-0 text-subtle"
+            className={`${mark} shrink-0 text-subtle`}
           />
         ) : moment.origin === "restore" ? (
-          <RotateCcw size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
+          <RotateCcw size={12} aria-hidden className={`${mark} shrink-0 text-subtle`} />
+        ) : props.nested ? (
+          // The file's own chip carries its kind.
+          <span aria-hidden className="size-3 shrink-0" />
         ) : (
           <FileText size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
         )}
         <span className="min-w-0 flex-1">
-          <span
-            className={`block truncate text-[13px] text-ink ${
-              props.nested ? "font-mono" : "font-medium"
-            }`}
-          >
-            {props.nested ? moment.path : engineMomentSummary(moment)}
-          </span>
+          {props.nested ? (
+            <span className="flex min-w-0">
+              <Ref path={moment.path} folder />
+            </span>
+          ) : (
+            <span className="block truncate text-[13px] font-medium text-ink">
+              {engineMomentSummary(moment)}
+            </span>
+          )}
           <span className="mt-0.5 block truncate text-[11px] text-subtle">
             {props.nested ? (
               engineOperationLabel(moment)

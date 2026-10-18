@@ -17,7 +17,7 @@ describe("indexFileListing", () => {
     const indexed = indexFileListing(files);
 
     expect(indexed.markdownWikilinkFiles).toEqual([
-      { path: "docs/Guide.MD", title: "Guide", fileId: null },
+      { path: "docs/Guide.MD", fileId: null },
     ]);
     expect(indexed.conflictSummaries).toEqual(
       Array.from(

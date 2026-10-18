@@ -83,7 +83,7 @@ pub enum ScanIoOperation {
 
 /// Supplies a synthetic io error for a specific bounded scan unit.
 pub trait ScanIoFaultInjector: Send + Sync {
-    fn error_kind(&self, path: &str, operation: ScanIoOperation) -> Option<ErrorKind>;
+    fn error(&self, path: &str, operation: ScanIoOperation) -> Option<std::io::Error>;
 }
 
 /// A completed scan: the tracked files (sorted by path) plus the seen-but-
@@ -239,8 +239,11 @@ impl Scanner {
 
         let post_hash_probe = self.io_faults.as_ref().map(|faults| {
             let faults = Arc::clone(faults);
-            Arc::new(move |path: &str| faults.error_kind(path, ScanIoOperation::Hash))
-                as PostHashProbe
+            Arc::new(move |path: &str| {
+                faults
+                    .error(path, ScanIoOperation::Hash)
+                    .map(|err| err.kind())
+            }) as PostHashProbe
         });
         let outcomes = match self.pool.hash_batched_with_post_stat(
             &inputs,
@@ -383,16 +386,13 @@ impl Scanner {
                     .into_owned();
             let injected_read_dir = self.injected(&dir_rel, ScanIoOperation::ReadDir);
             let read_dir = match injected_read_dir {
-                Some(kind) if dir == root => {
-                    return Err(FilesError::ScanIo {
-                        path: display(&dir),
-                        kind,
-                    });
+                Some(err) if dir == root => {
+                    return Err(FilesError::scan_io(&dir, display(&dir), &err));
                 }
-                Some(kind) => {
+                Some(err) => {
                     failed.push(FailedPath {
                         path: dir_rel,
-                        kind,
+                        kind: err.kind(),
                     });
                     self.check_file_bound(files.len(), skipped.len(), failed.len())?;
                     continue;
@@ -401,7 +401,7 @@ impl Scanner {
                     Ok(rd) => rd,
                     Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
                     Err(err) if dir == root => {
-                        return Err(FilesError::scan_io(display(&dir), &err));
+                        return Err(FilesError::scan_io(&dir, display(&dir), &err));
                     }
                     Err(err) => {
                         failed.push(FailedPath {
@@ -449,8 +449,11 @@ impl Scanner {
                 }
                 rel.push_str(&normalized_name);
                 let file_type = match self.injected(&rel, ScanIoOperation::FileType) {
-                    Some(kind) => {
-                        failed.push(FailedPath { path: rel, kind });
+                    Some(err) => {
+                        failed.push(FailedPath {
+                            path: rel,
+                            kind: err.kind(),
+                        });
                         self.check_file_bound(files.len(), skipped.len(), failed.len())?;
                         continue;
                     }
@@ -487,8 +490,11 @@ impl Scanner {
                     continue;
                 }
                 let metadata = match self.injected(&rel, ScanIoOperation::Metadata) {
-                    Some(kind) => {
-                        failed.push(FailedPath { path: rel, kind });
+                    Some(err) => {
+                        failed.push(FailedPath {
+                            path: rel,
+                            kind: err.kind(),
+                        });
                         self.check_file_bound(files.len(), skipped.len(), failed.len())?;
                         continue;
                     }
@@ -637,10 +643,10 @@ impl Scanner {
         })
     }
 
-    fn injected(&self, path: &str, operation: ScanIoOperation) -> Option<ErrorKind> {
+    fn injected(&self, path: &str, operation: ScanIoOperation) -> Option<std::io::Error> {
         self.io_faults
             .as_ref()
-            .and_then(|faults| faults.error_kind(path, operation))
+            .and_then(|faults| faults.error(path, operation))
     }
 
     fn check_file_bound(

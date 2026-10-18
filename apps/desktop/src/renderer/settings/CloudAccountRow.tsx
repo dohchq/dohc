@@ -80,7 +80,8 @@ export function CloudAccountRow(props: {
   const requests = useRequestSequence();
   const latest = useRef(props);
   latest.current = props;
-  const server = canonicalCloudOrigin(props.serverUrl) ?? props.serverUrl.trim();
+  const server =
+    canonicalCloudOrigin(props.serverUrl, bridge().insecureLoopbackServersForTests) ?? props.serverUrl.trim();
 
   async function disconnect() {
     const request = requests.next();

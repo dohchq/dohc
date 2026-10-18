@@ -448,6 +448,7 @@ export const RetryOwnerLiveSharePayload = WorkspaceIdPayload.extend({shareId: OW
 export type RetryOwnerLiveSharePayload = z.infer<typeof RetryOwnerLiveSharePayload>;
 
 export const ListWorkspaceFilesPayload = WorkspaceIdPayload.extend({
+  filePath: PATH_STRING.optional(),
   // Activity refreshes may reuse main's last complete listing. Every other
   // caller omits this and forces a disk/share walk, so direct mutations and
   // the Explorer's explicit refresh cannot observe a pre-watcher cache.
@@ -3302,7 +3303,7 @@ const SitePackageInfo = z
     ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "shared site roots must stay inside their authority mount root",
+        message: "Shared app folders must stay inside the shared folder.",
         path: ["root"],
       });
     }
@@ -6890,6 +6891,9 @@ export type EngineYDocLineageReplacementEvent = z.infer<
 export const ReadOnlyTransitionCause = z.enum(["access-ended", "reconnecting", "lineage-failure"]);
 export type ReadOnlyTransitionCause = z.infer<typeof ReadOnlyTransitionCause>;
 
+export const SaveFailureReason = z.enum(["read-only", "privacy-denied"]).nullable();
+export type SaveFailureReason = z.infer<typeof SaveFailureReason>;
+
 export const EngineYDocSaveStateEvent = z.object({
   typingUnresolved: z.boolean().optional(),
   readOnlyCause: ReadOnlyTransitionCause.optional(),
@@ -6907,9 +6911,10 @@ export const EngineYDocSaveStateEvent = z.object({
   path: z.string(),
   state: SaveStateSchema,
   access: z.enum(["read-only", "deleted", "object-changed"]).optional(),
-  // A settle failed to write the file. Absent for an edit refusal, an
-  // author-capacity refusal, and an error no settle reported.
-  saveFailure: z.object({ readOnly: z.boolean() }).optional(),
+  // A settle failed to write the file, and why when a check can tell. Absent
+  // for an edit refusal, an author-capacity refusal, and an error no settle
+  // reported.
+  saveFailure: z.object({ reason: SaveFailureReason }).optional(),
   // Sent while the session closes, after its editor has gone.
   closing: z.literal(true).optional(),
   seq: z.number().int().nonnegative(),
@@ -6952,6 +6957,18 @@ export const systemMotionOperations = {
     channel: "desktop:get-system-reduced-motion",
     payload: z.object({}),
     result: SystemReducedMotionResult,
+    guard: "trusted-sender",
+  },
+} as const satisfies OperationTable;
+
+// macOS only. Main opens Privacy & Security at Files & Folders; the window
+// names no URL.
+export const systemPrivacySettingsOperations = {
+  openSystemPrivacySettings: {
+    capabilityId: "device.privacy.open",
+    scope: "device",
+    channel: "desktop:open-system-privacy-settings",
+    payload: z.object({}),
     guard: "trusted-sender",
   },
 } as const satisfies OperationTable;
@@ -6999,6 +7016,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof relayShareOperations>,
     OperationBridge<typeof shareCopyOperations>,
     OperationBridge<typeof systemMotionOperations>,
+    OperationBridge<typeof systemPrivacySettingsOperations>,
     OperationBridge<typeof serverAccountOperations>,
     OperationBridge<typeof accessOperations>,
     OperationBridge<typeof workspaceVersionOperations>,
@@ -7035,6 +7053,9 @@ export interface DohcDesktopBridge
   // renderer shows the debug panel on it; every dev channel is separately
   // gated in main, so this is a hint, not authority.
   devTools: boolean;
+  // Constant: the e2e switch that lets sign-in use a plain http server on
+  // this machine. The address field checks with it; main decides again.
+  insecureLoopbackServersForTests: boolean;
   reloadRenderer(): Promise<void>;
   devForgetWorkspaces(): Promise<DevForgetWorkspacesResult>;
   devRevealPath(payload: DevRevealPathPayload): Promise<void>;

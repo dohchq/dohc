@@ -53,7 +53,7 @@ import {
   engineStoreRefusalSentence,
 } from "../ipc/bridgeContract";
 import { DROP_IMPORT_LIMITS, DROP_IMPORT_REFUSALS } from "../ipc/channels";
-import { readError, shouldRecheckShareAccess } from "../ipc/errorWords";
+import { isPrivacyDenied, readError, shouldRecheckShareAccess } from "../ipc/errorWords";
 import {
   formatSize,
   MAX_ENGINE_CAPTURE_BINARY_BYTES,
@@ -763,6 +763,10 @@ export function DesktopWorkspaceShell(props: {
     workspaceOpenFailedFor.selectionGeneration === workspaceSelectionGeneration
       ? workspaceOpenFailedFor
       : null;
+  const retryWorkspaceOpen = () => {
+    setWorkspaceOpenFailedFor(null);
+    setWorkspaceOpenAttempt((attempt) => attempt + 1);
+  };
   // Admission must wait for ANOTHER workspace's accepted writes: they still
   // need that workspace's renderer session, which `openWorkspace` revokes.
   // This workspace's own failures never block its admission.
@@ -831,6 +835,7 @@ export function DesktopWorkspaceShell(props: {
     retryShellError,
     runShellErrorAction,
     clearIdentity,
+    privacySettingsAction,
   } = useShellError(workspaceId);
   const stopAndRestore = useStopAndRestore(workspaceId, {ready: workspaceIsReady && !props.workspace.shareView,
     onError: (fallback, error, retry, identity) => reportShellError(fallback, error, retry, undefined, identity)});
@@ -5891,14 +5896,16 @@ export function DesktopWorkspaceShell(props: {
             <p className="text-xs text-muted">Choose another workspace from the title bar.</p>
           </div>
           <div className="flex items-center gap-2">
-            <PrimaryButton
-              onClick={() => {
-                setWorkspaceOpenFailedFor(null);
-                setWorkspaceOpenAttempt((attempt) => attempt + 1);
-              }}
-            >
-              Try again
-            </PrimaryButton>
+            {isPrivacyDenied(workspaceOpenFailure.message) ? (
+              <>
+                <PrimaryButton onClick={privacySettingsAction.run}>
+                  {privacySettingsAction.label}
+                </PrimaryButton>
+                <SecondaryButton onClick={retryWorkspaceOpen}>Try again</SecondaryButton>
+              </>
+            ) : (
+              <PrimaryButton onClick={retryWorkspaceOpen}>Try again</PrimaryButton>
+            )}
             <CopyButton
               label="Copy details"
               pinName

@@ -87,7 +87,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         )?;
         return Ok(());
     }
-    let passive = args == ["--store-role", "passive"];
+    let replica = args == ["--replica"];
+    let passive = replica || args == ["--store-role", "passive"];
     if !args.is_empty() && !passive {
         return Err(io::Error::other("unknown engine arguments").into());
     }
@@ -97,7 +98,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .ok_or_else(|| {
             io::Error::new(io::ErrorKind::PermissionDenied, "engine auth token missing")
         })?;
-    tokio::runtime::Runtime::new()?.block_on(run_stdio(auth_token, passive))
+    tokio::runtime::Runtime::new()?.block_on(run_stdio(auth_token, passive, replica))
 }
 
 fn passive_ingress(
@@ -119,7 +120,7 @@ fn passive_ingress(
     Ok(Some((ConnectionOwner::authenticated(), ingress)))
 }
 
-async fn run_stdio(auth_token: String, passive: bool) -> Result<(), Box<dyn Error>> {
+async fn run_stdio(auth_token: String, passive: bool, replica: bool) -> Result<(), Box<dyn Error>> {
     if passive
         && (std::env::var_os("DOHC_ENGINE_LIVE_HOST_CONFIG").is_some()
             || std::env::var_os("DOHC_ENGINE_OWNER_HOST_CONFIG").is_some())
@@ -150,7 +151,11 @@ async fn run_stdio(auth_token: String, passive: bool) -> Result<(), Box<dyn Erro
                 (service, Some((owner, ingress)))
             }
             None => {
-                let service = Arc::new(EngineService::new());
+                let service = Arc::new(if replica {
+                    EngineService::replica(&std::env::current_dir()?)?
+                } else {
+                    EngineService::new()
+                });
                 let live = passive_ingress(service.clone(), passive)?;
                 (service, live)
             }

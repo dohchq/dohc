@@ -45,9 +45,15 @@ describe("server discovery", () => {
     await expect(discoverServer("https://server.test", async () => Response.json({ ...descriptor, relayUrl: "http://localhost:1788" }))).rejects.toThrow("unsupported connection description");
   });
 
-  it("allows an explicit loopback deployment", async () => {
+  it("refuses a plain http server on this machine before contacting it", async () => {
+    const fetcher = vi.fn<typeof fetch>();
+    await expect(discoverServer("http://localhost:1786", fetcher)).rejects.toThrow("Enter the server's https address");
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("allows a loopback deployment under the e2e switch", async () => {
     const local = { version: 1, authUrl: "http://localhost:1786", relayUrl: "http://localhost:1786", shareUrl: "http://localhost:1786" };
-    await expect(discoverServer(local.authUrl, async () => Response.json(local))).resolves.toEqual(local);
+    await expect(discoverServer(local.authUrl, async () => Response.json(local), true)).resolves.toEqual(local);
   });
 
   it.each([

@@ -1026,6 +1026,149 @@ fn fresh_coordinate_does_not_canonicalize_payload_for_a_comparison_that_cannot_e
 }
 
 #[test]
+fn ordinary_recording_claim_is_consumed_on_owner_echo_and_redelivery() {
+    for (kind, authors) in [
+        ("moment.append", None),
+        (
+            "moment.append",
+            Some(json!([{"kind":"agent", "agentId":"writer"}])),
+        ),
+        ("ydoc.update", None),
+    ] {
+        let (_scratch, _path, mut engine) = open_store();
+        let mut payload = json!({"content": "original", "isBaseState": false,
+            "actorOriginId": "owner", "attribution": {"actorKind": "human", "depth": 0},
+            "authorContext": {"kind": "account", "accountId": "owner"}});
+        if let Some(authors) = authors {
+            payload["authors"] = authors;
+        }
+        journal_local_replication_op(
+            &mut engine,
+            "ws",
+            "local",
+            "epoch-1",
+            "stream-1",
+            kind,
+            &payload,
+            2_000,
+            &NoFaults,
+        )
+        .expect("journal recording claim");
+        let mut stored = payload.clone();
+        stored.as_object_mut().unwrap().remove("authorContext");
+        let mut echo = envelope("local", 0, kind, stored);
+        for _ in 0..2 {
+            assert!(matches!(
+                apply_envelope_with(
+                    &mut engine,
+                    &echo,
+                    &NoFaults,
+                    |_, _| -> Result<(), SyncError> { panic!("owner echo must not apply twice") }
+                ),
+                Ok(ApplyOutcome {
+                    primary: ApplyDisposition::Skipped,
+                    ..
+                })
+            ));
+            assert!(
+                crate::apply::is_acknowledged_envelope(&engine, &echo).expect("acknowledged echo")
+            );
+        }
+        echo.payload["content"] = json!("changed");
+        assert!(matches!(
+            apply_envelope_with(&mut engine, &echo, &NoFaults, |_, _| Ok(())),
+            Err(SyncError::CoordinateDiverged)
+        ));
+        let journal = list_replication_ops(&engine, "ws", "local", -1, 10).unwrap();
+        assert_eq!(
+            journal[0].payload, payload,
+            "comparison does not rewrite the journal"
+        );
+        let mut changed_claim = envelope("local", 0, kind, payload.clone());
+        changed_claim.payload["authorContext"]["accountId"] = json!("someone-else");
+        assert!(matches!(
+            apply_envelope_with(&mut engine, &changed_claim, &NoFaults, |_, _| Ok(())),
+            Err(SyncError::CoordinateDiverged)
+        ));
+        crate::cursor::write_pushed_seq_with_refusals(
+            &mut engine,
+            "ws",
+            "local",
+            0,
+            &[],
+            &[],
+            &[envelope("local", 0, kind, payload)],
+            &NoFaults,
+            &NoLiveLeases,
+            2_001,
+        )
+        .expect("commit successful push");
+        let stored = list_replication_ops(&engine, "ws", "local", -1, 10).unwrap();
+        assert!(stored[0].payload.get("authorContext").is_none());
+    }
+}
+
+#[test]
+fn ordinary_recording_claim_preserves_live_agent_settlement_and_base_contexts() {
+    for (kind, fields, context) in [
+        (
+            "ydoc.update",
+            json!({}),
+            json!({"kind":"account", "accountId":"owner"}),
+        ),
+        (
+            "ydoc.update",
+            json!({"isBaseState":true}),
+            json!({"kind":"account", "accountId":"owner"}),
+        ),
+        (
+            "ydoc.update",
+            json!({"isBaseState":false, "actorOriginId":"owner", "attribution":{"actorKind":"human"}}),
+            json!({"kind":"account", "accountId":"owner", "agent":{"agentId":"writer"}}),
+        ),
+        (
+            "moment.append",
+            json!({"settlementReference":{}}),
+            json!({"kind":"account", "accountId":"owner"}),
+        ),
+        (
+            "moment.append",
+            json!({"authors":[{"kind":"agent", "agentId":"writer"}]}),
+            json!({"kind":"account", "accountId":"owner", "agent":{"agentId":"writer"}}),
+        ),
+        (
+            "moment.append",
+            json!({"momentId":"unavailable-moment", "attributionUnavailable":{"settlementId":"unavailable", "reason":"unproven-hosted-authors"}}),
+            json!({"kind":"account", "accountId":"owner"}),
+        ),
+        (
+            "other",
+            json!({}),
+            json!({"kind":"account", "accountId":"owner"}),
+        ),
+    ] {
+        let (_scratch, _path, mut engine) = open_store();
+        let mut original = envelope("peer", 0, kind, fields);
+        original.payload["authorContext"] = context;
+        apply_envelope_with(&mut engine, &original, &NoFaults, |_, _| Ok(())).unwrap();
+        let mut changed = original.clone();
+        changed
+            .payload
+            .as_object_mut()
+            .unwrap()
+            .remove("authorContext");
+        assert!(
+            matches!(
+                apply_envelope_with(&mut engine, &changed, &NoFaults, |_, _| Ok(())),
+                Err(SyncError::CoordinateDiverged)
+            ),
+            "{kind}: {}",
+            original.payload
+        );
+    }
+}
+
+#[test]
 fn pull_repairs_legacy_null_base_coordinates_only_from_exact_relay_answers() {
     for (label, content_kind, below_floor, mismatch, expected) in [
         (

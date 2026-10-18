@@ -378,6 +378,7 @@ fn map_relay_code(error: RelayError) -> ErrorCode {
             ErrorCode::ProtocolVersionUnsupported
         }
         RelayError::MethodNotAllowed => ErrorCode::RelayMethodNotAllowed,
+        RelayError::HttpsRequired => ErrorCode::RelayHttpsRequired,
         // A served share op the engine cannot replay is the relay's response
         // failing validation, which is the code that already says so. The
         // share-view pull never returns this — it records it as a skipped op
@@ -591,6 +592,8 @@ mod tests {
             dohc_engine_files::MaterializeError::Io {
                 path: "record.md".into(),
                 kind: std::io::ErrorKind::PermissionDenied,
+                raw_os_error: None,
+                privacy_denied: false,
             },
         ] {
             let code = error.code();
@@ -599,6 +602,23 @@ mod tests {
             assert_eq!(wire.message, code);
             assert!(!wire.message.contains("record.md"));
         }
+    }
+
+    /// The desktop explains a macOS privacy refusal by this code, so it
+    /// reaches the wire from a file write and from the workspace root.
+    #[test]
+    fn a_macos_privacy_denial_reaches_rpc_by_its_code() {
+        let write = super::map_runtime(dohc_engine_runtime::RuntimeError::Materialize(
+            dohc_engine_files::MaterializeError::Io {
+                path: "notes.md".into(),
+                kind: std::io::ErrorKind::PermissionDenied,
+                raw_os_error: Some(1),
+                privacy_denied: true,
+            },
+        ));
+        let root = super::map_root_binding(crate::root_binding::RootBindingError::PrivacyDenied);
+        assert_eq!(root.message, "privacy-denied");
+        assert_eq!(write.message, "privacy-denied");
     }
 
     #[test]
@@ -991,6 +1011,7 @@ mod tests {
                 .relay(
                     RelayConfiguration {
                         base_url: "https://relay.invalid".to_owned(),
+                        socket_path: None,
                         bearer_token: "token".to_owned(),
                         #[cfg(debug_assertions)]
                         allow_insecure_loopback_for_tests: false,
@@ -1248,6 +1269,7 @@ mod tests {
                 ErrorCode::RelayMethodNotAllowed,
             ),
             (RelayError::InvalidResponse, ErrorCode::RelayInvalidResponse),
+            (RelayError::HttpsRequired, ErrorCode::RelayHttpsRequired),
         ];
         for (relay, expected) in cases {
             assert_eq!(

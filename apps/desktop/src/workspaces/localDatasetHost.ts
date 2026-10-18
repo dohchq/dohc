@@ -500,7 +500,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
           const now = Date.now();
           return transaction(() => {
             const head = journal.head({workspaceId, datasetId:input.datasetId}, () => { authorize(); });
-            if (!head.active || head.cursor.approvedRevisionHash !== checkRevision(input).revisionSha256) throw new Error("Collection authority changed. Reload the Collection.");
+            if (!head.active || head.cursor.approvedRevisionHash !== checkRevision(input).revisionSha256) throw new Error("This Collection changed. Reload the Collection.");
             const stale = db.prepare("SELECT file_id, storage_bytes FROM local_dataset_files WHERE workspace_id=? AND dataset_id=? AND attached_revision IS NULL AND expires_at_ms<=?").all(workspaceId, input.datasetId, now);
             for (const row of stale) { db.prepare("DELETE FROM local_dataset_files WHERE workspace_id=? AND dataset_id=? AND file_id=? AND attached_revision IS NULL").run(workspaceId, input.datasetId, String(row.file_id)); charge(input.datasetId,-Number(row.storage_bytes)); }
             const key = JSON.stringify([workspaceId, input.datasetId, principal, parsed.idempotencyKey]);

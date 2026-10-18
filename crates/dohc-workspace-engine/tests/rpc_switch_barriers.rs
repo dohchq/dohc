@@ -286,7 +286,7 @@ async fn set_active_settles_live_ydoc_into_old_version_and_closes_session() {
         &handle,
         5,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": update }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": update }),
     )
     .await;
 
@@ -354,7 +354,7 @@ async fn version_fence_uses_the_latest_plaintext_settlement_as_its_preimage() {
         &handle,
         3,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": first }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": first }),
     )
     .await;
     let first_settle = call(
@@ -373,7 +373,7 @@ async fn version_fence_uses_the_latest_plaintext_settlement_as_its_preimage() {
         &handle,
         5,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": second }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": second }),
     )
     .await;
     let fork = call(
@@ -1065,7 +1065,7 @@ async fn create_named_fences_live_ydoc_and_unannounced_disk_edits_into_fork() {
         &handle,
         3,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": update }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": update }),
     )
     .await;
 
@@ -1238,7 +1238,7 @@ async fn set_active_leaves_sessions_for_unrelated_versions_open_and_unprojected(
         &handle,
         5,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": first }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": first }),
     )
     .await;
 
@@ -1262,7 +1262,7 @@ async fn set_active_leaves_sessions_for_unrelated_versions_open_and_unprojected(
         &handle,
         8,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": second }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": second }),
     )
     .await;
 }
@@ -1293,7 +1293,7 @@ async fn create_named_ignores_and_preserves_an_unrelated_richdoc_session() {
         &handle,
         4,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": first }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": first }),
     )
     .await;
 
@@ -1316,7 +1316,7 @@ async fn create_named_ignores_and_preserves_an_unrelated_richdoc_session() {
         &handle,
         6,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": second }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": second }),
     )
     .await;
 }
@@ -1365,7 +1365,7 @@ async fn create_named_from_an_inactive_version_leaves_its_live_session_open() {
         &handle,
         5,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": update }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": update }),
     )
     .await;
 }
@@ -1754,7 +1754,7 @@ async fn create_named_preflight_keeps_live_session_for_invalid_and_replayed_requ
         &handle,
         8,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": update }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": update }),
     )
     .await;
 }
@@ -1853,7 +1853,7 @@ async fn queued_create_named_revalidates_before_sweeping_sessions() {
         &handle,
         5,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": first_update }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": first_update }),
     )
     .await;
     let scans_after_winner = probe.version_scan_count();
@@ -1878,7 +1878,7 @@ async fn queued_create_named_revalidates_before_sweeping_sessions() {
         &handle,
         6,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": second_update }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": second_update }),
     )
     .await;
 }
@@ -1913,7 +1913,7 @@ async fn create_named_fences_a_live_richdoc_session_into_the_fork() {
         &handle,
         3,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": first }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": first }),
     )
     .await;
     let created = call(
@@ -1948,7 +1948,7 @@ async fn create_named_fences_a_live_richdoc_session_into_the_fork() {
         &handle,
         6,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": second }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": second }),
     )
     .await;
     assert_eq!(closed.message, "ydoc-session-not-found");
@@ -1983,7 +1983,7 @@ async fn create_named_succeeds_after_a_normally_closed_richdoc_settled() {
         &handle,
         3,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": update }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": update }),
     )
     .await;
     call(
@@ -2044,7 +2044,7 @@ async fn create_named_fails_closed_for_a_persisted_unsettled_plaintext_lineage()
         &handle,
         3,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": update }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": update }),
     )
     .await;
     call(&transport, &handle, 4, "workspace.close", json!({})).await;
@@ -2110,7 +2110,7 @@ async fn create_named_fails_closed_for_a_persisted_unsettled_plaintext_lineage()
         &handle,
         9,
         "ydoc.recordUpdate",
-        json!({ "sessionId": healthy_session, "updateBase64": update }),
+        json!({ "expectedLineageClaimId": null, "sessionId": healthy_session, "updateBase64": update }),
     )
     .await;
 }
@@ -2198,7 +2198,7 @@ async fn queued_same_target_set_active_rechecks_before_sweep_or_scan() {
         &handle,
         6,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": first_update }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": first_update }),
     )
     .await;
     let scans_after_first = probe.version_scan_count();
@@ -2222,7 +2222,7 @@ async fn queued_same_target_set_active_rechecks_before_sweep_or_scan() {
         &handle,
         7,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": second_update }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": second_update }),
     )
     .await;
 }

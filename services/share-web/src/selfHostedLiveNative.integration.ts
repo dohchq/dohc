@@ -283,9 +283,9 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     const editor = await rpc("ydoc.open", {versionId: mainVersionId, path: "docs/a.md", expectedObjectId: objectId, contentKind: "richdoc"});
     expect(editor.seedContent).toBe("Hello");
     const baseline = Y.encodeStateAsUpdate(ownerDoc), lineageClaimId = hash(baseline), document = {workspaceId: "workspace", mainVersionId, objectId, lineageClaimId};
-    await rpc("ydoc.recordUpdate", {sessionId: editor.sessionId, updateBase64: Buffer.from(baseline).toString("base64"), seed: true});
+    const seeded = await rpc("ydoc.recordUpdate", {sessionId: editor.sessionId, updateBase64: Buffer.from(baseline).toString("base64"), seed: true, expectedLineageClaimId: editor.lineageClaimId});
     const vector = Y.encodeStateVector(ownerDoc); ownerDoc.getMap("frontmatter").set("beforeActivation", "ordinary-owner");
-    await rpc("ydoc.recordUpdate", {sessionId: editor.sessionId, updateBase64: Buffer.from(Y.encodeStateAsUpdate(ownerDoc, vector)).toString("base64")});
+    await rpc("ydoc.recordUpdate", {sessionId: editor.sessionId, updateBase64: Buffer.from(Y.encodeStateAsUpdate(ownerDoc, vector)).toString("base64"), expectedLineageClaimId: seeded.lineageClaimId});
     await rpc("ydoc.settle", {sessionId: editor.sessionId}); await rpc("ydoc.close", {sessionId: editor.sessionId});
     results.initialPush = await push();
     expect(storage.workspaceIsOwnedBy("workspace", ownerUser.id)).toBe(true);
@@ -745,9 +745,11 @@ async function openSelfHostProof(name: string) {
       closes.push(async () => doc.destroy());
       const edit = async (change: (doc: Y.Doc) => void, seed?: Uint8Array) => {
         const editor = await rpc("ydoc.open", {versionId: mainVersionId, path, expectedObjectId: objectId, contentKind: "richdoc"});
-        if (seed) await rpc("ydoc.recordUpdate", {sessionId: editor.sessionId, updateBase64: Buffer.from(seed).toString("base64"), seed: true});
+        const claim = seed
+          ? (await rpc("ydoc.recordUpdate", {sessionId: editor.sessionId, updateBase64: Buffer.from(seed).toString("base64"), seed: true, expectedLineageClaimId: editor.lineageClaimId})).lineageClaimId
+          : editor.lineageClaimId;
         const vector = Y.encodeStateVector(doc); change(doc);
-        await rpc("ydoc.recordUpdate", {sessionId: editor.sessionId, updateBase64: Buffer.from(Y.encodeStateAsUpdate(doc, vector)).toString("base64")});
+        await rpc("ydoc.recordUpdate", {sessionId: editor.sessionId, updateBase64: Buffer.from(Y.encodeStateAsUpdate(doc, vector)).toString("base64"), expectedLineageClaimId: claim});
         await rpc("ydoc.settle", {sessionId: editor.sessionId}); await rpc("ydoc.close", {sessionId: editor.sessionId});
         await push();
       };

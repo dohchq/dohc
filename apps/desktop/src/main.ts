@@ -30,8 +30,10 @@ import { createWorkspaceFileProtocolHandler } from "./security/workspaceFileProt
 import {readOwnerRestoreResponse} from "./ipc/readOwnerRestoreResponse";
 import { readDatasetResponse } from "./ipc/readDatasetResponse";
 import { ipcWireError } from "./ipc/errorWords";
+import { assertRootNotPrivacyDenied, withPrivacyDenial } from "./workspaces/privacyDenial";
 import { createUpdateInstall, registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
 import { registerSystemMotionIpc } from "./ipc/systemMotionIpc";
+import { registerSystemPrivacySettingsIpc } from "./ipc/systemPrivacySettingsIpc";
 import { createWindowIpc } from "./ipc/windowIpc";
 import {
   devToolsEnabled,
@@ -364,6 +366,7 @@ import {
 } from "./workspaces/cloudLogin";
 import { createServerAccountDeletion } from "./workspaces/serverAccountDeletion";
 import { registerServerAccountIpc } from "./ipc/serverAccountIpc";
+import { insecureLoopbackServersForTests } from "./workspaces/cloudConfiguration";
 import { createJoinedWorkspaceRunner } from "./workspaces/createJoinedWorkspace";
 import { createRelaySharesIpcHandlers } from "./ipc/relaySharesIpc";
 import { requireCredentials } from "./workspaces/credentialScopedOperation";
@@ -660,6 +663,7 @@ const {
   readOwnedWorkspaceAsset,
   readOwnedWorkspaceAssetFor,
   listOwnedWorkspaceFilesFor,
+  lookupOwnedWorkspaceFilesFor,
   ownedWorkspaceReadsFor,
 } = createDesktopWorkspaceReads({
   listDiskFiles: (rootPath, scope) => workspaceFilesWorker.list(rootPath, scope),
@@ -684,7 +688,7 @@ protocol.registerSchemesAsPrivileged([
 
 function requireWorkspace(workspaceId: string) {
   const workspace = findWorkspace(workspaceId);
-  if (!workspace) throw new Error(`Unknown workspace: ${workspaceId}`);
+  if (!workspace) throw new Error("This workspace is not open. Open it again.");
   return workspace;
 }
 
@@ -840,6 +844,7 @@ let cachedCloudLogin: CloudLogin | null = null;
 function cloudLogin(): CloudLogin {
   if (!cachedCloudLogin) {
     cachedCloudLogin = createCloudLogin({
+      allowInsecureLoopbackForTests: !app.isPackaged && insecureLoopbackServersForTests(process.env),
       store: createCloudCredentialStore({
         dir: stateDir(),
         cipher: {
@@ -1369,7 +1374,7 @@ async function labelsForOwnerShare(workspace: EngineWorkspace, credentials: Clou
   try {
     lease.assertCurrent();
     if (cachedCredentials?.token !== credentials.token || cachedCredentials.userId !== credentials.userId) throw new Error("Your server session changed. Try again.");
-    if (workspace.attachmentId !== undefined && workspace.attachmentId !== lease.binding.attachmentId) throw new Error("This share belongs to a retired workspace.");
+    if (workspace.attachmentId !== undefined && workspace.attachmentId !== lease.binding.attachmentId) throw new Error("This workspace was closed. Open it again.");
     const lookup = async <T>(read: () => Promise<T>): Promise<T | null> => {
       try {return await read();} catch (error) {if (options.refresh) throw error; return null;}
     };
@@ -2231,7 +2236,7 @@ function engineForWorkspace(
   if (!remote || !credentials) return null;
   if (!capture || !credentials.relayUrl) return null;
   if (!workspace.attachmentId) {
-    throw new Error("Cloud sync requires a registered workspace attachment.");
+    throw new Error("Open this workspace again to start cloud sync.");
   }
   // Only sync when the session belongs to the server this workspace is bound
   // to; a mismatch keeps it local-only (no token leak, no mass-delete).
@@ -2840,7 +2845,7 @@ function linkedChatStoreFor(
       workspaceOrLease.attachmentId !== undefined &&
       workspaceOrLease.attachmentId !== lease.binding.attachmentId
     ) {
-      throw new Error("This chat store request belongs to a retired workspace.");
+      throw new Error("This workspace was closed. Open it again.");
     }
   const existing = lease.state.linkedChatStore;
   if (existing) return existing;
@@ -2849,7 +2854,7 @@ function linkedChatStoreFor(
   }
   const current = findWorkspace(lease.binding.workspaceId);
     if (!current) {
-      throw new Error(`Unknown workspace: ${lease.binding.workspaceId}`);
+      throw new Error("This workspace is not open. Open it again.");
     }
     const binding = lease.binding;
     const engineWorkspace = receivedShareEngine.workspaceForRegistered({
@@ -2881,7 +2886,7 @@ function agentDispatchStoreHandleFor(workspace: {
       workspace.attachmentId !== undefined &&
       workspace.attachmentId !== lease.binding.attachmentId
     ) {
-      throw new Error("This dispatch store request belongs to a retired workspace.");
+      throw new Error("This workspace was closed. Open it again.");
     }
     const existing = lease.state.agentDispatchStoreHandle;
   if (existing) return existing;
@@ -2935,7 +2940,7 @@ async function withEngineAdapter<T>(
     registered.rootPath !== workspace.rootPath
   ) {
     throw new Error(
-      "The engine workspace belongs to a replaced physical attachment.",
+      "This workspace changed while this ran. Try again.",
     );
   }
   return await withWorkspaceAttachmentAsync(workspace, async (lease) =>
@@ -3064,7 +3069,7 @@ function canonicalWorkspaceFor(
   lease.assertCurrent();
 const workspace = findWorkspace(lease.binding.workspaceId);
   if (!workspace) {
-    throw new Error(`Unknown workspace: ${lease.binding.workspaceId}`);
+    throw new Error("This workspace is not open. Open it again.");
   }
   return {
     ...workspace,
@@ -3119,7 +3124,7 @@ async function syncWorkspaceForDispatch(
               activity.workspaceRootPath(workspaceId) !== workspace.rootPath
             ) {
               throw new Error(
-                "This sync belongs to a retired workspace authority.",
+                "This workspace was closed. Open it again.",
               );
             }
             activity.queueCloudSync(workspaceId);
@@ -4337,7 +4342,7 @@ function createRelayedPressHostFor(workspaceId: string): RelayedPressHost {
     },
     heldClaim: async (press) => {
       const executor = collectionAutomationsOf(workspaceId);
-      if (!executor) throw new Error("This workspace was closed.");
+      if (!executor) throw new Error("This workspace was closed. Open it again.");
       return await executor.relayedClaim({ automationId: press.automationId, collectionPath: press.collectionPath, definitionHash: press.definitionHash, pressId: press.hostPressId });
     },
     inspect: async (inspectionIds, signal) => {
@@ -4346,7 +4351,7 @@ function createRelayedPressHostFor(workspaceId: string): RelayedPressHost {
     },
     press: async (input, watch) => {
       const executor = collectionAutomationsOf(workspaceId);
-      if (!executor) throw new Error("This workspace was closed.");
+      if (!executor) throw new Error("This workspace was closed. Open it again.");
       return await executor.pressRelayed(input, (claimId) => watch(claimId));
     },
     notifyFailure: async (failure) => {
@@ -4379,7 +4384,7 @@ function createCollectionAutomationsFor(
     const person = await localPerson();
     return await withPhysicalWorkspaceOperation(workspaceId, async (operation) => {
       if (operation.workspace.attachmentId !== attachmentId) {
-        throw new Error("This workspace was closed.");
+        throw new Error("This workspace was closed. Open it again.");
       }
       const capture = activity.engineCaptureFor(workspaceId);
       if (!capture) throw new Error(captureRefusal("Automations"));
@@ -4394,7 +4399,7 @@ function createCollectionAutomationsFor(
     readText: (path) => readWorkspaceTextIfPresent(rootPath, path),
     writeText: async (path, text, expectedContentHash, automationId) => {
       return withPhysicalWorkspaceOperation(workspaceId, async operation => {
-        if (operation.workspace.attachmentId !== attachmentId) throw new Error("This workspace was closed.");
+        if (operation.workspace.attachmentId !== attachmentId) throw new Error("This workspace was closed. Open it again.");
         const capture = activity.engineCaptureFor(workspaceId);
         if (!capture || operation.workspace.shareView !== undefined) return writeWorkspaceText(rootPath, path, text, expectedContentHash);
         const result = await writeWorkspaceFilesAs(operation, [{ path, contentBase64: Buffer.from(text).toString("base64"), expectedSha256: expectedContentHash }],
@@ -4411,7 +4416,7 @@ function createCollectionAutomationsFor(
     cachedRoster: () => shareRosters.cached(workspaceId),
     evaluator: automationEvaluator.forWorkspace(workspaceId),
     store: createAutomationRunStore(rootPath, resolveWorkspaceMetadataDir, () => {
-      if (!workspaceAuthorities.isCurrentAttachment(workspaceId, attachmentId)) throw new Error("This workspace was closed.");
+      if (!workspaceAuthorities.isCurrentAttachment(workspaceId, attachmentId)) throw new Error("This workspace was closed. Open it again.");
     }),
     onRunsChanged: () => notifyAutomationRunsChanged(workspaceId),
     onUsageSuccess: invocation => { usageStore?.recordSuccess(invocation); },
@@ -4504,7 +4509,7 @@ function createCollectionAutomationsFor(
       if (opened) return await work((await opened).automations);
       if (!open) return null;
       return await withPhysicalWorkspaceOperation(workspaceId, async (operation) => {
-        if (operation.workspace.attachmentId !== attachmentId) throw new Error("This workspace was closed.");
+        if (operation.workspace.attachmentId !== attachmentId) throw new Error("This workspace was closed. Open it again.");
         // A workspace that never approved a dataset has no dataset store to open.
         if (!(await localDatasetStoreExists(rootPath))) return null;
         const host = await localDatasetHostFor(operation.workspace, operation.signal);
@@ -4560,7 +4565,7 @@ const datasetRuntimePath = () => join(app.isPackaged ? process.resourcesPath : j
 const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: string }, signal: AbortSignal) =>
   workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
     signal.throwIfAborted(); operation.assertCurrent();
-    if (operation.workspace.rootPath !== workspace.rootPath) throw new Error("The Collection workspace attachment changed.");
+    if (operation.workspace.rootPath !== workspace.rootPath) throw new Error("This workspace changed while this ran. Try again.");
     const slot = operation.state.datasetHost;
     let pending = slot.pending;
     if (!pending) {
@@ -4576,7 +4581,7 @@ const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: s
         // refuses the invocation rather than write as the owner at depth 0.
         agentRun: () => {
           const run = withWorkspaceAttachment(attachment, lease => workspaceActivity.agentRun(lease.state.activity));
-          if (run === undefined) throw new Error("The Collection workspace attachment changed.");
+          if (run === undefined) throw new Error("This workspace is no longer available for this Collection operation.");
           return run;
         },
         // A commit that made failed claims, as a chain stop does, sends their notices now.
@@ -4598,7 +4603,7 @@ const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: s
         },
         collectionAuthor: async () => {
           const run = withWorkspaceAttachment(attachment, lease => workspaceActivity.agentRun(lease.state.activity));
-          if (run === undefined) throw new Error("The Collection workspace attachment changed.");
+          if (run === undefined) throw new Error("This workspace is no longer available for this Collection operation.");
           return run ? { kind: "agent", agentId: run.agentId, onBehalfOf: run.onBehalfOf, agentRunId: run.agentRunId, ...(run.depth > 0 ? { depth: run.depth } : {}) } : await localPerson();
         },
       });
@@ -4684,7 +4689,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
   automations: (workspace) => {
     const opened = async () => {
       const automations = collectionAutomationsOf(workspace.workspaceId);
-      if (!automations) throw new Error("This workspace was closed.");
+      if (!automations) throw new Error("This workspace was closed. Open it again.");
       await automations.open();
       return automations;
     };
@@ -5081,7 +5086,7 @@ function createShareViewFilesForOperation(
         target.schedulingRootPath !== operation.workspace.rootPath
       ) {
         throw new Error(
-          "Share file cache request belongs to a retired workspace.",
+          "This workspace was closed. Open it again.",
         );
       }
       return operation.state.shareViewFiles;
@@ -5237,8 +5242,10 @@ shareViewFiles = {
     ),
   read: (target, request) =>
     withShareViewFilesOperation(target, (files) => files.read(target, request)),
-  list: (target) =>
-    withShareViewFilesOperation(target, (files) => files.list(target)),
+  lookup: (target, paths) =>
+    withShareViewFilesOperation(target, files => files.lookup(target, paths)),
+  list: (target, options) =>
+    withShareViewFilesOperation(target, (files) => files.list(target, options)),
   projectionStatus: (target) =>
     withShareViewFilesOperation(target, (files) =>
       files.projectionStatus(target),
@@ -5805,7 +5812,7 @@ function handleIpc(channel: string, listener: Parameters<typeof ipcMain.handle>[
       if (counted) telemetry.track(counted);
       return result;
     } catch (error) {
-      throw ipcWireError(error);
+      throw ipcWireError(withPrivacyDenial(error));
     }
   });
 }
@@ -5979,6 +5986,7 @@ const stopWorkspaceSync = createWorkspaceSyncStop({
 
 function registerIpcHandlers(): void {
   registerSystemMotionIpc(operationBoundary, () => systemPreferences.getAnimationSettings());
+  registerSystemPrivacySettingsIpc(operationBoundary, process.platform, (url) => shell.openExternal(url));
   registerServerAccountIpc(operationBoundary, serverAccountDeletion);
   shareDirectWriteDelivery.register(operationBoundary);
   const shareCopyHandler = createShareCopyHandler<WebContents, RegistryEntry, DesktopRendererWorkspaceOperation>({
@@ -6053,6 +6061,7 @@ function registerIpcHandlers(): void {
     withRendererWorkspaceOperation,
     exactRendererWorkspaceReferences,
     workspaceFileListings,
+    lookupOwnedWorkspaceFilesFor,
     workspaceFileMutations,
     listOwnedWorkspaceFilesFor,
     readOwnedWorkspaceTextFor,
@@ -6260,11 +6269,16 @@ function registerIpcHandlers(): void {
       await openWorkspaceActivity(workspace);
       const capture = activity.engineCaptureFor(workspace.workspaceId, workspace.rootPath);
       if (!capture) throw new Error("dohc could not capture this app. Restart dohc and try again.");
+      // Flush covers only edits the watcher has reported. Reconcile scans the
+      // disk, so an edit saved just before Prepare is in the review.
+      if (!await withEngineAdapter(workspace, adapter => adapter.reconcileCapture())) {
+        throw new Error("dohc could not capture this app. Restart dohc and try again.");
+      }
       await capture.flush();
     },
     withAdapter: withEngineAdapter,
     compile: async (request, signal) => {
-      installedAppCompiler ??= createInstalledAppCompiler(resourcesBasePath());
+      installedAppCompiler ??= createInstalledAppCompiler(resourcesBasePath(), app.runningUnderARM64Translation);
       const compile = await installedAppCompiler;
       signal.throwIfAborted();
       return compile(request, { timeoutMs: 60_000, maxMemoryBytes: 1024 * 1024 * 1024, maxProcesses: 8,
@@ -6316,7 +6330,7 @@ function registerIpcHandlers(): void {
           const ownerKey = datasetCopyOwnerKey(remote.credentials);
           const copy = await workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
             signal.throwIfAborted(); operation.assertCurrent();
-            if (operation.workspace.rootPath !== workspace.rootPath) throw new Error("The Collection workspace attachment changed.");
+            if (operation.workspace.rootPath !== workspace.rootPath) throw new Error("This workspace changed while this ran. Try again.");
             return ownerDatasetCopies.get({ workspaceId: workspace.workspaceId, rootPath: workspace.rootPath,
               datasetId, origin: targetOrigin, ownerKey, lifetime: operation.signal,
               assertOwner: () => {
@@ -6341,7 +6355,7 @@ function registerIpcHandlers(): void {
       if (!captured) throw new Error("The workspace engine is unavailable. Reopen the workspace.");
       return captured;
     },
-    withAdapter: async <T>(workspace: DesktopRendererWorkspaceOperation["workspace"], work: (adapter: import("@dohc/workspace-engine-client").VersionedLiveAdapter) => Promise<T>) => {
+    withAdapter: async <T extends {}>(workspace: DesktopRendererWorkspaceOperation["workspace"], work: (adapter: import("@dohc/workspace-engine-client").VersionedLiveAdapter) => Promise<T>) => {
       const result = await withEngineAdapter(workspace, work);
       if (result === null) throw new Error("The workspace engine is unavailable. Reopen the workspace.");
       return result;
@@ -6859,8 +6873,11 @@ function registerIpcHandlers(): void {
     markWorkspaceOpened,
     workspaceShown: (workspaceId, sender) => workspaceFileOpens.shown(sender, workspaceId),
     syncStatusWithOwnedProjection,
-    openWorkspaceActivity: (operation) =>
-      openWorkspaceActivityForOperation(operation, {}, ensureWorkspaceActivityOpen),
+    openWorkspaceActivity: async (operation) => {
+      // A root macOS refuses would open with every file and engine call failing.
+      await assertRootNotPrivacyDenied(operation.workspace.rootPath);
+      return openWorkspaceActivityForOperation(operation, {}, ensureWorkspaceActivityOpen);
+    },
   });
 
   // Named versions. Every handler resolves the workspace through

@@ -669,7 +669,8 @@ async fn first_push_backfills_an_api_text_write_from_the_rpc_surface() {
 async fn bounded_push_publishes_an_idle_open_document_and_its_next_edit_succeeds() {
     let relay = FakeRelay::start(RelayState::default());
     let scratch = ScratchDir::new().expect("scratch");
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(Arc::clone(&service));
     let workspace_id = "rpc-relay-unsettled-ydoc-enrolment";
     let handle = open_workspace(&transport, &scratch, &relay, 1, workspace_id).await;
     let mut id = 1;
@@ -696,7 +697,7 @@ async fn bounded_push_publishes_an_idle_open_document_and_its_next_edit_succeeds
         &handle,
         &mut id,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": update }),
+        json!({ "expectedLineageClaimId": opened["lineageClaimId"], "sessionId": session_id, "updateBase64": update }),
     )
     .await;
     seed_sync_identity(&transport, &handle, &mut id, workspace_id).await;
@@ -729,18 +730,60 @@ async fn bounded_push_publishes_an_idle_open_document_and_its_next_edit_succeeds
         "the continuation must send the open document without another edit: {continued}"
     );
 
-    // The open session writes and saves again, with nothing refused as stale.
+    // The push claimed the lineage under the session. An edit that still
+    // expects the unclaimed lineage is refused; the engine does not infer
+    // that the claim continues the editor's document.
     let next =
         base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(24, " and after"));
+    id += 1;
+    let stale = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                id,
+                "ydoc.recordUpdate",
+                Some(handle.clone()),
+                json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": next }),
+            ),
+        )
+        .await
+        .expect_err("an unclaimed expectation must not write into the claimed lineage");
+    assert_eq!(stale.message, "ydoc-lineage-stale");
+
+    // The resync shows the editor the claim this device made from its own
+    // history, so the editor keeps its document and writes under that claim.
+    id += 1;
+    let resynced = ProtocolEngineService::call(
+        service.as_ref(),
+        RequestContext::unbounded().with_capability("blobs"),
+        request(
+            id,
+            "ydoc.resync",
+            Some(handle.clone()),
+            json!({ "sessionId": session_id }),
+        ),
+    )
+    .await
+    .expect("resync the editor");
+    let claim = resynced.response.result["lineageClaimId"].clone();
+    assert!(claim.is_string());
+    assert_eq!(
+        resynced.response.result["lineageOriginatedHere"],
+        json!(true)
+    );
+    drop(resynced);
+
+    // The open session writes and saves again, with nothing refused as stale.
     let recorded = call(
         &transport,
         &handle,
         &mut id,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": next }),
+        json!({ "expectedLineageClaimId": claim, "sessionId": session_id, "updateBase64": next }),
     )
     .await;
-    assert!(recorded["lineageClaimId"].is_string());
+    assert_eq!(recorded["lineageClaimId"], claim);
+    assert_eq!(recorded["lineageOriginatedHere"], json!(true));
     let settled = call(
         &transport,
         &handle,
@@ -1032,19 +1075,17 @@ async fn assert_open_document_artifact_recovery_inner(
         json!({"workspaceId":workspace}),
     )
     .await;
-    let session = call(
+    let opened_b = call(
         &b_transport,
         &b,
         &mut b_id,
         "ydoc.open",
         json!({"versionId":"main","path":path,"contentKind":"plaintext"}),
     )
-    .await["sessionId"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    .await;
+    let session = opened_b["sessionId"].as_str().unwrap().to_owned();
     let doc = Ydoc::wire();
-    call(&b_transport, &b, &mut b_id, "ydoc.recordUpdate", json!({"sessionId":session,"updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0,"Before"))})).await;
+    let b_claim = call(&b_transport, &b, &mut b_id, "ydoc.recordUpdate", json!({ "expectedLineageClaimId": opened_b["lineageClaimId"], "sessionId":session,"updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0,"Before"))})).await["lineageClaimId"].clone();
     let settled = call(
         &b_transport,
         &b,
@@ -1107,9 +1148,9 @@ async fn assert_open_document_artifact_recovery_inner(
         .unwrap();
         let local = Ydoc::wire();
         local.apply(&resync.blob_egress.unwrap().bytes).unwrap();
-        call(&a_transport, &a, &mut a_id, "ydoc.recordUpdate", json!({"sessionId":session_a,"updateBase64":base64::engine::general_purpose::STANDARD.encode(local.plaintext_insert(0,"Local: "))})).await;
+        call(&a_transport, &a, &mut a_id, "ydoc.recordUpdate", json!({ "expectedLineageClaimId": resync.response.result["lineageClaimId"], "sessionId":session_a,"updateBase64":base64::engine::general_purpose::STANDARD.encode(local.plaintext_insert(0,"Local: "))})).await;
     }
-    call(&b_transport, &b, &mut b_id, "ydoc.recordUpdate", json!({"sessionId":session,"updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(6," remote"))})).await;
+    let b_claim = call(&b_transport, &b, &mut b_id, "ydoc.recordUpdate", json!({ "expectedLineageClaimId": b_claim, "sessionId":session,"updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(6," remote"))})).await["lineageClaimId"].clone();
     let settled = call(
         &b_transport,
         &b,
@@ -1122,7 +1163,7 @@ async fn assert_open_document_artifact_recovery_inner(
         journal_editor_settlement(&b_scratch, workspace, settled["momentId"].as_str().unwrap());
     }
     if tail {
-        call(&b_transport, &b, &mut b_id, "ydoc.recordUpdate", json!({"sessionId":session,"updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(13," tail"))})).await;
+        call(&b_transport, &b, &mut b_id, "ydoc.recordUpdate", json!({ "expectedLineageClaimId": b_claim, "sessionId":session,"updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(13," tail"))})).await;
     }
     call(
         &b_transport,
@@ -1613,32 +1654,38 @@ async fn open_document_settlement_does_not_park_other_device_work() {
         json!({ "workspaceId": workspace_id }),
     )
     .await;
-    let b_session = call(
+    let b_opened = call(
         &b_transport,
         &b,
         &mut b_id,
         "ydoc.open",
         json!({ "versionId": "main", "path": path, "contentKind": "plaintext" }),
     )
-    .await["sessionId"]
+    .await;
+    let b_session = b_opened["sessionId"]
         .as_str()
         .expect("device B session id")
         .to_owned();
     let b_doc = Ydoc::wire();
-    let record = |update: Vec<u8>| {
+    let record = |claim: &Value, update: Vec<u8>| {
         json!({
             "sessionId": b_session,
             "updateBase64": base64::engine::general_purpose::STANDARD.encode(update),
+            "expectedLineageClaimId": claim,
         })
     };
-    call(
+    let b_claim = call(
         &b_transport,
         &b,
         &mut b_id,
         "ydoc.recordUpdate",
-        record(b_doc.plaintext_insert(0, "Starting together.")),
+        record(
+            &b_opened["lineageClaimId"],
+            b_doc.plaintext_insert(0, "Starting together."),
+        ),
     )
-    .await;
+    .await["lineageClaimId"]
+        .clone();
     call(
         &b_transport,
         &b,
@@ -1755,14 +1802,15 @@ async fn open_document_settlement_does_not_park_other_device_work() {
     )
     .await
     .unwrap();
+    let a_claim = initial.response.result["lineageClaimId"].clone();
     a_doc.apply(&initial.blob_egress.unwrap().bytes).unwrap();
-    call(&a_transport, &a, &mut a_id, "ydoc.recordUpdate", json!({"sessionId":a_session,"updateBase64":base64::engine::general_purpose::STANDARD.encode(a_doc.plaintext_insert(0, "A: "))})).await;
+    call(&a_transport, &a, &mut a_id, "ydoc.recordUpdate", json!({ "expectedLineageClaimId": a_claim, "sessionId":a_session,"updateBase64":base64::engine::general_purpose::STANDARD.encode(a_doc.plaintext_insert(0, "A: "))})).await;
     call(
         &b_transport,
         &b,
         &mut b_id,
         "ydoc.recordUpdate",
-        record(b_doc.plaintext_insert(18, " Typed on B.")),
+        record(&b_claim, b_doc.plaintext_insert(18, " Typed on B.")),
     )
     .await;
     let settlement = call(
@@ -2006,32 +2054,38 @@ async fn a_pull_asks_an_idle_open_editor_to_resync_and_the_resync_shows_the_othe
         json!({ "workspaceId": workspace_id }),
     )
     .await;
-    let b_session = call(
+    let b_opened = call(
         &b_transport,
         &b,
         &mut b_id,
         "ydoc.open",
         json!({ "versionId": "main", "path": path, "contentKind": "plaintext" }),
     )
-    .await["sessionId"]
+    .await;
+    let b_session = b_opened["sessionId"]
         .as_str()
         .expect("device B session id")
         .to_owned();
     let b_doc = Ydoc::wire();
-    let record = |update: Vec<u8>| {
+    let record = |claim: &Value, update: Vec<u8>| {
         json!({
             "sessionId": b_session,
             "updateBase64": base64::engine::general_purpose::STANDARD.encode(update),
+            "expectedLineageClaimId": claim,
         })
     };
-    call(
+    let b_claim = call(
         &b_transport,
         &b,
         &mut b_id,
         "ydoc.recordUpdate",
-        record(b_doc.plaintext_insert(0, "Starting together.")),
+        record(
+            &b_opened["lineageClaimId"],
+            b_doc.plaintext_insert(0, "Starting together."),
+        ),
     )
-    .await;
+    .await["lineageClaimId"]
+        .clone();
     call(
         &b_transport,
         &b,
@@ -2097,7 +2151,7 @@ async fn a_pull_asks_an_idle_open_editor_to_resync_and_the_resync_shows_the_othe
         &b,
         &mut b_id,
         "ydoc.recordUpdate",
-        record(b_doc.plaintext_insert(18, " Typed on B.")),
+        record(&b_claim, b_doc.plaintext_insert(18, " Typed on B.")),
     )
     .await;
     call(
@@ -2185,7 +2239,8 @@ async fn push_unrelated_change(
 // The push that claims an idle open document can be dropped at any point:
 // the supervisor drops a request on cancellation or deadline. Wherever the
 // drop lands, the claim and its handover to the session happen together or
-// not at all, so the session's next write and settle still succeed.
+// not at all, so the session's next write, under the claim its resync shows,
+// and its settle still succeed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_push_dropped_while_claiming_an_open_document_leaves_its_next_edit_working() {
     let relay = FakeRelay::start(RelayState::default());
@@ -2196,7 +2251,8 @@ async fn a_push_dropped_while_claiming_an_open_document_leaves_its_next_edit_wor
         .collect();
     for (round, (yields, sleep_ms)) in drop_points.into_iter().enumerate() {
         let scratch = ScratchDir::new().expect("scratch");
-        let transport = Arc::new(InProcessTransport::new(Arc::new(EngineService::new())));
+        let service = Arc::new(EngineService::new());
+        let transport = Arc::new(InProcessTransport::new(Arc::clone(&service)));
         let workspace_id = format!("rpc-relay-dropped-live-claim-{round}");
         let handle = open_workspace(&transport, &scratch, &relay, 1, &workspace_id).await;
         let mut id = 1;
@@ -2222,7 +2278,7 @@ async fn a_push_dropped_while_claiming_an_open_document_leaves_its_next_edit_wor
             &handle,
             &mut id,
             "ydoc.recordUpdate",
-            json!({ "sessionId": session_id, "updateBase64": first_edit }),
+            json!({ "expectedLineageClaimId": opened["lineageClaimId"], "sessionId": session_id, "updateBase64": first_edit }),
         )
         .await;
         seed_sync_identity(&transport, &handle, &mut id, &workspace_id).await;
@@ -2249,6 +2305,21 @@ async fn a_push_dropped_while_claiming_an_open_document_leaves_its_next_edit_wor
         push.abort();
         let _ = push.await;
 
+        id += 1;
+        let resynced = ProtocolEngineService::call(
+            service.as_ref(),
+            RequestContext::unbounded().with_capability("blobs"),
+            request(
+                id,
+                "ydoc.resync",
+                Some(handle.clone()),
+                json!({ "sessionId": session_id }),
+            ),
+        )
+        .await
+        .expect("resync the editor");
+        let claim = resynced.response.result["lineageClaimId"].clone();
+        drop(resynced);
         let next_edit =
             base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(4, " then"));
         call(
@@ -2256,7 +2327,7 @@ async fn a_push_dropped_while_claiming_an_open_document_leaves_its_next_edit_wor
             &handle,
             &mut id,
             "ydoc.recordUpdate",
-            json!({ "sessionId": session_id, "updateBase64": next_edit }),
+            json!({ "expectedLineageClaimId": claim, "sessionId": session_id, "updateBase64": next_edit }),
         )
         .await;
         let settled = call(

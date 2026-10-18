@@ -1715,6 +1715,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         response.current_max_origin_seq,
                         &response.settlement_refusals,
                         &response.hosted_refusals,
+                        batch,
                         faults,
                         leases,
                         now_ms,
@@ -2826,8 +2827,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 if local_op.origin_seq != shared_prefix_length
                     || local_op.op_kind != op.op_kind
                     || local_op.recorded_at_ms != op.recorded_at_ms
-                    || canonical_json_bytes(&local_op.payload).map_err(local)?
-                        != canonical_json_bytes(&op.payload).map_err(local)?
+                    || !replication_payloads_match(&op.op_kind, &local_op.payload, &op.payload)
+                        .map_err(local)?
                 {
                     break 'pages;
                 }
@@ -4446,7 +4447,7 @@ fn preflight_collisions(
                 };
                 if op_kind != op.op_kind
                     || recorded_at_ms != op.recorded_at_ms
-                    || canonical_json_bytes(&local_payload)? != canonical_json_bytes(&op.payload)?
+                    || !replication_payloads_match(&op.op_kind, &local_payload, &op.payload)?
                 {
                     return Ok(Some(op.origin_id == local_origin_id));
                 }
@@ -4461,6 +4462,58 @@ fn preflight_collisions(
         Some(false) => Err(RelayError::InvalidResponse),
         None => Ok(()),
     }
+}
+
+/// The relay consumes ordinary recording claims, while main's live, agent,
+/// settlement and full-state payloads retain their exact context.
+pub(crate) fn without_recording_claim(
+    kind: &str,
+    payload: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let context = payload.get("authorContext")?;
+    let account = context.get("accountId")?.as_str()?;
+    if crate::outbound::ordinary_account_context(account).as_ref() != Some(context) {
+        return None;
+    }
+    match kind {
+        "moment.append"
+            if payload.get("settlementReference").is_none()
+                && payload.get("attributionUnavailable").is_none() => {}
+        "ydoc.update"
+            if payload.get("isBaseState") == Some(&serde_json::Value::Bool(false))
+                && payload
+                    .get("actorOriginId")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(account)
+                && payload["attribution"]["actorKind"] == "human" => {}
+        _ => return None,
+    }
+    let mut stored = payload.clone();
+    stored.as_object_mut()?.remove("authorContext");
+    Some(stored)
+}
+
+pub(crate) fn replication_payloads_match(
+    kind: &str,
+    left: &serde_json::Value,
+    right: &serde_json::Value,
+) -> Result<bool, SyncError> {
+    // A lost push acknowledgement can leave the claim only in the local journal.
+    // Two claims, or any other content difference, still compare exactly.
+    let stripped_left = right
+        .get("authorContext")
+        .is_none()
+        .then(|| without_recording_claim(kind, left))
+        .flatten();
+    let stripped_right = left
+        .get("authorContext")
+        .is_none()
+        .then(|| without_recording_claim(kind, right))
+        .flatten();
+    Ok(
+        canonical_json_bytes(stripped_left.as_ref().unwrap_or(left))?
+            == canonical_json_bytes(stripped_right.as_ref().unwrap_or(right))?,
+    )
 }
 
 pub(crate) fn canonical_json_bytes(value: &serde_json::Value) -> Result<Vec<u8>, SyncError> {

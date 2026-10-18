@@ -2,6 +2,165 @@ use super::*;
 use dohc_engine_domain::WriteText;
 
 #[test]
+fn solo_typing_credits_deltas_but_not_full_state_bases() {
+    use dohc_engine_domain::{ChangeActorKind, ChangeAttribution};
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "doc").unwrap();
+    for is_base in [true, false] {
+        let payload = crate::ydoc_update_payload(
+            &key,
+            "doc.md",
+            dohc_engine_collab::ContentKind::Richdoc,
+            &"a".repeat(64),
+            &"b".repeat(64),
+            Some("owner-account"),
+            Some(&ChangeAttribution {
+                actor_kind: ChangeActorKind::Human,
+                on_behalf_of: Some("owner-account".into()),
+                depth: 0,
+                run: None,
+            }),
+            is_base,
+        );
+        engine
+            .write_with(&NoFaults, |tx| {
+                journal_local_op_in_tx(tx, "ws", "ydoc.update", &payload, 2000)
+            })
+            .unwrap();
+    }
+    let rows = list_replication_ops(&engine, "ws", "local", 0, 10).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows[0].payload.get("authorContext").is_none());
+    assert_eq!(
+        rows[1].payload["authorContext"],
+        json!({"kind":"account","accountId":"owner-account"})
+    );
+}
+
+#[test]
+fn solo_file_moment_carries_only_its_recorded_local_person() {
+    for (authors, expected) in [
+        (
+            json!([{"kind":"human","humanId":"owner-account"}]),
+            json!({"kind":"account","accountId":"owner-account"}),
+        ),
+        (
+            json!([{"kind":"human","humanId":"local:installation"}]),
+            serde_json::Value::Null,
+        ),
+        (
+            json!([{"kind":"human","humanId":"recipient","humanName":"Recipient","relayConfirmed":true}]),
+            serde_json::Value::Null,
+        ),
+        (
+            json!([{"kind":"human","humanId":"owner-account"},{"kind":"unattributed"}]),
+            serde_json::Value::Null,
+        ),
+        (
+            json!([{"kind":"agent","agentId":"writer","onBehalfOf":"owner-account"}]),
+            serde_json::Value::Null,
+        ),
+    ] {
+        let (_scratch, _path, mut engine) = open_store();
+        queue_fresh_moment_as(&mut engine, "solo-moment", &authors);
+        let rows = list_replication_ops(&engine, "ws", "local", 0, 10).unwrap();
+        let row = rows
+            .iter()
+            .find(|row| row.op_kind == "moment.append")
+            .unwrap();
+        assert_eq!(row.payload["authorContext"], expected, "{authors}");
+    }
+}
+
+#[test]
+fn ordinary_update_context_does_not_infer_a_person_for_declared_work() {
+    use dohc_engine_domain::{ChangeActorKind, ChangeAttribution};
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "doc").unwrap();
+    for (actor, kind) in [
+        (Some("local:installation"), ChangeActorKind::Human),
+        (None, ChangeActorKind::Human),
+        (Some("agent"), ChangeActorKind::Agent),
+        (Some("automation"), ChangeActorKind::Automation),
+    ] {
+        let attribution = ChangeAttribution {
+            actor_kind: kind,
+            on_behalf_of: Some("owner-account".into()),
+            depth: 0,
+            run: None,
+        };
+        let payload = crate::ydoc_update_payload(
+            &key,
+            "doc.md",
+            dohc_engine_collab::ContentKind::Richdoc,
+            &"a".repeat(64),
+            &"b".repeat(64),
+            actor,
+            Some(&attribution),
+            false,
+        );
+        assert!(payload.get("authorContext").is_none());
+        assert_eq!(
+            payload["attribution"],
+            serde_json::to_value(attribution).unwrap()
+        );
+    }
+}
+
+#[test]
+fn ordinary_push_preserves_imported_device_and_recipient_credit() {
+    for (peer, account) in [
+        ("another-device", "owner-account"),
+        ("recipient-device", "recipient"),
+    ] {
+        let (_scratch, _path, mut engine) = open_store();
+        seed_identity(&mut engine);
+        seed_replication_version(&mut engine, "main", "main");
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.plaintext_insert(0, "Peer typing");
+        let sha = engine.put_binary_blob(&doc.encode_full_state()).unwrap();
+        let mut op = envelope(
+            peer,
+            0,
+            "ydoc.update",
+            json!({
+                "versionId":"main", "objectId":"peer-doc", "path":"doc.txt", "contentKind":"plaintext",
+                "updateBlobSha256":sha, "lineageClaimId":sha, "isBaseState":true,
+                "authorContext":{"kind":"account","accountId":account}
+            }),
+        );
+        op.admitted_author_snapshot =
+            Some(json!([{"kind":"human","humanId":account,"humanName":"Peer"}]));
+        let applied = apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+        assert!(applied.refusals.is_empty());
+        let client = RelaySyncClient::new(FakeRelay::default());
+        client
+            .push_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 3000, 0)
+            .unwrap();
+        let sent: Vec<_> = client
+            .transport()
+            .pushed_requests()
+            .into_iter()
+            .flat_map(|request| request.ops)
+            .collect();
+        let stored = list_replication_ops(&engine, "ws", peer, -1, 10).unwrap();
+        let replay = stored
+            .iter()
+            .find(|row| row.op_kind == "ydoc.update")
+            .unwrap();
+        assert_eq!(replay.payload, op.payload);
+        assert!(!sent.iter().any(|sent| sent.op_kind == "ydoc.update"));
+    }
+}
+
+#[test]
 fn client_author_repair_preserves_work_authors_and_one_exact_marker() {
     let human =
         json!({"kind":"human","humanId":"person","humanName":"Person","onBehalfOf":"owner"});

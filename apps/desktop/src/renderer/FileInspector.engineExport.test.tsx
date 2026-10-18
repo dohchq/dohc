@@ -47,6 +47,8 @@ const engineDocState: UseEngineDoc = {
   readOnlyWhileEditing: false,
   readOnlyDraftId: null,
   readOnlyCause: null,
+  retryReplacement: null,
+  replacedDraftIds: [],
   removalInProgress: null,
   artifactAssets: [],
   readArtifactAsset: async () => {

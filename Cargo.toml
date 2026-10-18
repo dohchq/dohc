@@ -1,6 +1,6 @@
 # The dohc Rust workspace. `dohc-workspace-engine` builds the daemon the
-# desktop app runs; the other crates are its parts, test support, and property
-# targets.
+# desktop app runs; `dohc-compiler-owner` bounds macOS app compiles; the other
+# crates are the engine's parts, test support, and property targets.
 [workspace]
 resolver = "3"
 members = [
@@ -11,6 +11,7 @@ members = [
     "crates/dohc-windows-files",
     "crates/dohc-linux-files",
     "crates/dohc-macos-files",
+    "crates/dohc-compiler-owner",
     "crates/dohc-engine-runtime",
     "crates/dohc-engine-testkit",
     "crates/dohc-test-scratch",

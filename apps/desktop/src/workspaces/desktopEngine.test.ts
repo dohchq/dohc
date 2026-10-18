@@ -283,7 +283,7 @@ describe("desktop engine construction", () => {
       const priorStop = stops.at(-1)!;
       request = relay.probe();
       await closeEntered.promise;
-      expect(() => discovered.assertCurrent()).toThrow("Owner host daemon retired.");
+      expect(() => discovered.assertCurrent()).toThrow("This live editing session ended.");
       expect(priorStop).toHaveBeenCalledOnce();
       const startsBeforeClose = ownerHostMock.start.mock.calls.length;
       if (mode === "quitting") f.setQuitting(true);
@@ -337,7 +337,7 @@ describe("desktop engine construction", () => {
       const close = mode === "cloud" ? f.engine.closeAllRelayTransportWorkspaces() : f.engine.closeRelayTransportWorkspace(workspace);
       await closeEntered.promise;
       expect(stopped[0]).toHaveBeenCalledOnce();
-      expect(() => first.assertCurrent()).toThrow("Owner host daemon retired.");
+      expect(() => first.assertCurrent()).toThrow("This live editing session ended.");
       if (mode === "shutdown") f.setQuitting(true);
       const shutdownDone = mode === "shutdown" || mode === "overlapping-cloud" ? f.engine.closeAllRelayTransportWorkspaces() : Promise.resolve();
       f.options().onLaunch?.();
@@ -355,7 +355,7 @@ describe("desktop engine construction", () => {
       expect(() => next.assertCurrent()).not.toThrow();
       expect(next.client).toBe(first.client);
       await f.engine.closeAllRelayTransportWorkspaces();
-      expect(() => next.assertCurrent()).toThrow("Owner host daemon retired.");
+      expect(() => next.assertCurrent()).toThrow("This live editing session ended.");
       const reopened = await ownerHostMock.start.mock.calls.at(-1)![0].bindings();
       expect(reopened.workspaces).toEqual([{ workspaceId: "owner", workspaceHandle: "owner-3" }]);
       expect(() => reopened.assertCurrent()).not.toThrow();

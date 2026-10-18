@@ -41,7 +41,8 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
   exportArchive?(workspace: W, request: Extract<ResolvedDatasetRequest, { action: "export" }>, signal: AbortSignal, authorize: () => void): Promise<string | null>;
   /** Reconciles disk edits before capturing immutable source for review. */
   flushSourceCapture(workspace: W, signal: AbortSignal): Promise<readonly { path: string }[]>;
-  withAdapter<T>(workspace: W, work: (adapter: SourceAdapter) => Promise<T>): Promise<T>;
+  /** Rejects when the workspace engine is unavailable, so work returns a value, never null. */
+  withAdapter<T extends {}>(workspace: W, work: (adapter: SourceAdapter) => Promise<T>): Promise<T>;
   /** Creates absent files through the workspace engine and settles their source capture. */
   createSources(workspace: W, files: Record<string, string>, signal: AbortSignal, progress?: SourceCreationProgress): Promise<void>;
   /** An automation's name in its Collection's automations.yaml now, or null. */
@@ -70,7 +71,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         heldFiles = await dependencies.flushSourceCapture(operation.workspace, operation.signal);
         current();
       };
-      const withSourceAdapter = <T,>(work: (adapter: SourceAdapter) => Promise<T>) => dependencies.withAdapter(operation.workspace, adapter => work({
+      const withSourceAdapter = <T extends {}>(work: (adapter: SourceAdapter) => Promise<T>) => dependencies.withAdapter(operation.workspace, adapter => work({
         workspace: adapter.workspace,
         listTextFileMetadata: adapter.listTextFileMetadata.bind(adapter),
         resolveFiles: adapter.resolveFiles.bind(adapter),
@@ -158,12 +159,9 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
           const approved = await host.approvedArtifacts(receipt.targetCursor.datasetId); current();
           const description = { datasetId: approved.revision.datasetId, name: approved.revision.definition.name,
             revision: approved.revision.revision, revisionSha256: approved.revision.revisionSha256, tables: [], operations: [] };
-          datasetPath = await withSourceAdapter(async adapter => {
-            const [address] = await addressDatasets(adapter, input.workspaceId, [description], operation.signal);
-            current();
-            return address?.datasetPath ?? null;
-          });
+          const [address] = await withSourceAdapter(adapter => addressDatasets(adapter, input.workspaceId, [description], operation.signal));
           current();
+          datasetPath = address?.datasetPath ?? null;
           if (!datasetPath) {
             const definition = approved.revision.definition;
             const folder = datasetBaseFolder(definition);

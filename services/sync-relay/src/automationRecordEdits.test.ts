@@ -132,7 +132,7 @@ describe("an automation's record writes on this server's replica", () => {
       await provider.applyLocalUpdate(Y.encodeStateAsUpdate(provider.doc, vector), {actorOriginId: AUTOMATION.automationId,
         attribution: {actorKind: "automation", onBehalfOf: "owner", depth: 1, run: AUTOMATION.run}, armSettle: false});
       const recorded = daemon.requests.filter(request => request.method === "ydoc.recordUpdate").at(-1);
-      expect(recorded?.params).toMatchObject({trustedAutomationDraft: true, actorOriginId: AUTOMATION.automationId,
+      expect(recorded?.params).toMatchObject({expectedLineageClaimId: null, trustedAutomationDraft: true, actorOriginId: AUTOMATION.automationId,
         attribution: {actorKind: "automation", onBehalfOf: "owner", run: AUTOMATION.run}});
     } finally {await provider.evict();}
   });

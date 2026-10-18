@@ -12,10 +12,12 @@ import type { WorkspacePolicyPath } from "./bridgeContract";
 import {
   ERROR_WORDS,
   ipcWireError,
+  isPrivacyDenied,
   isShareReadOnlyRefusal,
   isSharedLiveFileRefusal,
   isWorkspaceUpdatingError,
   needsNewerDohc,
+  PRIVACY_DENIED_WORDS,
   readCollectionReopenWait,
   readError,
   shouldRecheckShareAccess,
@@ -145,6 +147,27 @@ describe("error words", () => {
     expect(needsNewerDohc(new ReservedWorkspaceIdError("link"))).toBe(false);
   });
 
+  it("names a macOS privacy refusal the engine sends, after the caller's sentence", () => {
+    const engine = acrossIpc(refusal("INTERNAL", "privacy-denied"), "desktop:list-workspace-files");
+    expect(readError(engine)).toEqual({
+      words: PRIVACY_DENIED_WORDS,
+      mapped: true,
+      cause: "DaemonRefusalError [INTERNAL]: privacy-denied",
+    });
+    expect(isPrivacyDenied(engine)).toBe(true);
+    expect(withErrorWords("Could not refresh workspace files.", engine))
+      .toBe(`Could not refresh workspace files. ${PRIVACY_DENIED_WORDS}`);
+    expect(PRIVACY_DENIED_WORDS).toBe(
+      "macOS blocked dohc from this folder. Allow dohc in System Settings › Privacy & Security › Files & Folders.",
+    );
+  });
+
+  it("keeps an EPERM main did not name a privacy refusal as a permission problem", () => {
+    const eperm = acrossIpc(Object.assign(new Error("EPERM: operation not permitted, rename 'a' -> 'b'"), { code: "EPERM" }));
+    expect(isPrivacyDenied(eperm)).toBe(false);
+    expect(readError(eperm).words).toBe("dohc does not have permission to use this file or folder.");
+  });
+
   it("has words, or the caller's words by decision, for every code the engine refuses with", () => {
     expect(engineCodes.length).toBeGreaterThan(30);
     const refusals = ERROR_WORDS.DaemonRefusalError!;
@@ -198,6 +221,11 @@ describe("error words", () => {
     });
     expect(readError(acrossIpc(refusal("SHARE_READ_ONLY", "workspace operation failed"))).words)
       .toBe("This share is read-only.");
+  });
+
+  it("names https when the engine refuses a server address", () => {
+    expect(readError(acrossIpc(refusal("RELAY_HTTPS_REQUIRED", "workspace operation failed"))).words)
+      .toBe("Your server's address does not use https. Disconnect, then connect your server again with its https address.");
   });
 
   it("reads the app compiler and the Collection worker by their codes", () => {

@@ -1,9 +1,11 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { createInstalledAppCompiler } from "../src/workspaces/installedAppCompiler.ts";
 
 const desktopDir = join(dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(import.meta.url);
@@ -31,6 +33,21 @@ export function assertReleaseFuses(actual, configured) {
       throw new Error(`Packaged release fuse does not match electron-builder.yml: ${name}`);
     }
   }
+}
+
+/**
+ * Builds one small app through the package's own signed owner, Node and
+ * esbuild, which proves signing, entitlements and the sandbox in the bundle.
+ */
+export async function compilePackagedApp(resourcesRoot) {
+  const compile = await createInstalledAppCompiler(resourcesRoot, false);
+  const bytes = Buffer.from('document.body.textContent = "packaged compile";');
+  const request = { entryPath: "main.js", inputs: [{ path: "main.js", bytes, sha256: createHash("sha256").update(bytes).digest("hex") }],
+    bounds: { maxInputFiles: 8, maxInputBytes: 8192, maxOutputBytes: 16384 } };
+  const bounds = { timeoutMs: 60_000, maxMemoryBytes: 1024 * 1024 * 1024, maxProcesses: 8, maxInputBytes: 16384, maxOutputBytes: 32768, maxErrorBytes: 65536 };
+  const result = await compile(request, bounds).catch(error => { throw new Error(`The packaged app compiler failed: ${error.message}`); });
+  const bundle = result.files.find(file => file.path === "bundle.js");
+  if (!bundle || !Buffer.from(bundle.bytes).toString("utf8").includes("packaged compile")) throw new Error("The packaged app compiler built the wrong bundle.");
 }
 
 // electron-builder's unpacked output for each platform the smoke boots. A Mac
@@ -61,6 +78,14 @@ async function smoke() {
   if (process.platform === "darwin") {
     const signature = spawnSync("codesign", ["--verify", "--deep", "--strict", packageDir], { encoding: "utf8" });
     if (signature.status !== 0) throw new Error(`The macOS package's signature does not verify:\n${signature.stderr}`);
+    // An x64 package would run its compiler through Rosetta on this Apple
+    // silicon runner, where dohc refuses to build apps.
+    const resources = join(packageDir, "Contents/Resources");
+    const compiler = JSON.parse(readFileSync(join(resources, "app-compiler/manifest.json"), "utf8"));
+    if (compiler.arch === "arm64" && process.arch === "arm64") {
+      await compilePackagedApp(resources);
+      console.log("Packaged app compile passed through the signed arm64 owner.");
+    }
   }
 
   const profile = mkdtempSync(join(tmpdir(), "dohc-fuse-smoke-"));

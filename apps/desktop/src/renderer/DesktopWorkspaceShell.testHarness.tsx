@@ -329,6 +329,7 @@ function makeBaseBridge(
     workspaceActivitySubscriberCount: () => activityCallbacks.size,
     emitSearchResults: (batch: SearchResultsEvent) => searchCallback?.(batch),
     getWorkspaceUiState: vi.fn(() => uiStatePromise),
+    openSystemPrivacySettings: vi.fn(async () => undefined),
     // The shell re-reads the registry to pick up a share's durable skip
     // record. Default: a workspace with nothing skipped.
     getWorkspaceRegistry: vi.fn(

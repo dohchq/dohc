@@ -2,7 +2,7 @@ import type { SaveState } from "@dohc/workspace-contracts/save-state";
 import { createPortal } from "react-dom";
 import { CopyButton } from "./ui/CopyButton";
 import { restoreRecoveryDraftText } from "./collab/recoverySnapshot";
-import { dismissOrphanedDraft, useOrphanedDrafts } from "./orphanedDrafts";
+import { dismissOrphanedDraft, isOrphanedDraftStored, useOrphanedDrafts } from "./orphanedDrafts";
 import { DismissDraftControls } from "./RecoveryList";
 import { Play, Share2 } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
@@ -39,13 +39,14 @@ export function ViewActions(props: {
   const content = (
     <>
       {/* 25px: the widest mark (12px), its gap and an ellipsis. A grid of
-          minmax(0, max-content) columns, so its words set how wide it can
-          grow but not how narrow it can get: the row shrinks it to 25px
-          before any tab name gives way. */}
+          minmax(auto, max-content) columns, so its words set how wide it can
+          grow and each item's own minimum how narrow: a label (min-w-0)
+          shrinks, and the row shrinks it to 25px before any tab name gives
+          way, while Try again keeps its natural width. */}
       {props.status ? (
         <div
           data-view-status=""
-          className="contents [&:has(>:not(.sr-only))]:grid [&:has(>:not(.sr-only))]:min-w-[25px] auto-cols-[minmax(0,max-content)] grid-flow-col items-center justify-end gap-2"
+          className="contents [&:has(>:not(.sr-only))]:grid [&:has(>:not(.sr-only))]:min-w-[25px] auto-cols-[minmax(auto,max-content)] grid-flow-col items-center justify-end gap-2"
         >
           {props.status}
         </div>
@@ -233,12 +234,19 @@ export function OpenExternallyButton(props: { workspaceId: string; path: string 
   );
 }
 
+// The toast for a finished history replacement says the same first sentence.
+export const REPLACED_HISTORY_DRAFT_NOTICE =
+  "This document changed while you were editing. Your earlier edits are set aside here.";
+
 export function OrphanedDraftNotices(props: {
   workspaceId: string;
   path: string;
   message?: string;
   // When set, the message explains only this draft; older drafts keep theirs.
   messageDraftId?: number | null;
+  // Drafts a finished history replacement set aside, where `message` does not
+  // explain them.
+  replacedDraftIds?: readonly number[];
 }) {
   const drafts = useOrphanedDrafts(props.workspaceId, props.path);
   if (drafts.length === 0) return null;
@@ -252,7 +260,10 @@ export function OrphanedDraftNotices(props: {
         >
           <span className="text-danger">
             {(props.messageDraftId === undefined || props.messageDraftId === draft.id ? props.message : undefined) ??
-              "This document reopened before your last edit saved. Copy your text to keep it."}
+              // Until storage keeps the draft, a copy is still the way to keep it.
+              (props.replacedDraftIds?.includes(draft.id) && isOrphanedDraftStored(draft.id)
+                ? REPLACED_HISTORY_DRAFT_NOTICE
+                : "This document reopened before your last edit saved. Copy your text to keep it.")}
           </span>
           <div className="flex items-center gap-2">
             {/* Same rule as the recovery list's Copy: a draft the projection

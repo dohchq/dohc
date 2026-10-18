@@ -37,7 +37,12 @@ function fixture(remote?: OwnerDatasetData, named?: Pick<OwnerDatasetData, "list
   const sources = new Map([["data/dataset.json", JSON.stringify(definition)]]);
   const sourceRequests: Array<{ method: string; params: Record<string, unknown> }> = [];
   const adapter = sourceCaptureAdapter(sources, { workspaceId: "workspace", onRequest(method, params) { sourceRequests.push({ method, params }); } });
-  const withAdapter = vi.fn(async (_workspace, work) => work(adapter));
+  // Production reads null as an unavailable engine.
+  const withAdapter = vi.fn(async (_workspace, work) => {
+    const result = await work(adapter);
+    if (result === null) throw Error("The workspace engine is unavailable. Reopen the workspace.");
+    return result;
+  });
   const handler = createDatasetHandler({ flushSourceCapture,
     async withWorkspaceOperation(_caller: string, workspaceId, work) {
       if (workspaceId !== workspace.workspaceId) throw Error("wrong workspace");

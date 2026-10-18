@@ -1040,7 +1040,7 @@ export class EngineWorkspaceSessions {
       entry.rootPath !== workspace.rootPath
     ) {
       throw new Error(
-        `Rust engine workspace authority changed for ${workspace.workspaceId}.`,
+        "This workspace no longer matches the open session. Open the workspace again.",
       );
     }
     return entry;
