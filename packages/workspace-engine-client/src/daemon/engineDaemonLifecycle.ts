@@ -146,6 +146,7 @@ export interface EngineDaemonClient extends MinimalDaemonClient {
 }
 
 export interface EngineDaemonLifecycleOptions {
+  readerConfig?: string;
   privateOwnerHost?: {configPath: string; client: NonNullable<EngineClientSpawnOptions["privateLiveApplication"]>};
   command: string;
   launch?: (options: EngineClientSpawnOptions) => Promise<EngineDaemonClient>;
@@ -885,9 +886,10 @@ export class EngineDaemonLifecycle {
     try {
       client = await this.launch({
         ...(this.options.privateOwnerHost ? {
-          env: {...process.env,DOHC_ENGINE_OWNER_HOST_CONFIG: this.options.privateOwnerHost.configPath},
           privateLiveApplication: this.options.privateOwnerHost.client,
         } : {}),
+        env: { ...(this.options.privateOwnerHost ? { DOHC_ENGINE_OWNER_HOST_CONFIG: this.options.privateOwnerHost.configPath } : {}),
+          DOHC_ENGINE_READER_CONFIG: this.options.readerConfig },
         command: this.options.command,
         cwd: dirname(this.options.command),
         authToken,

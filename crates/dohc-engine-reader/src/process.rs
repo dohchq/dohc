@@ -5,7 +5,6 @@ use std::{
     ffi::OsString,
     fs::File,
     io::{self, Read},
-    path::Path,
     process::{Command, Stdio},
     sync::{Arc, mpsc},
     thread::{self, JoinHandle},
@@ -20,6 +19,7 @@ pub(super) struct Worker {
     shared: Arc<Shared>,
     threads: Vec<JoinHandle<()>>,
     cwd: Option<tempfile::TempDir>,
+    _assets: Arc<Vec<(std::path::PathBuf, File, std::fs::Metadata)>>,
 }
 impl Worker {
     pub fn start(
@@ -45,9 +45,17 @@ impl Worker {
         {
             return Err(Failure::Unavailable);
         }
+        let mut assets = [&c.node, &c.bundle, &c.manifest]
+            .into_iter()
+            .map(|path| {
+                let file = crate::platform::open_asset(path)?;
+                let identity = file.metadata()?;
+                Ok((path.clone(), file, identity))
+            })
+            .collect::<io::Result<Vec<_>>>()
+            .map_err(unavailable)?;
         let mut bytes = Vec::new();
-        File::open(&c.manifest)
-            .map_err(unavailable)?
+        (&assets[2].1)
             .take(256 * 1024 + 1)
             .read_to_end(&mut bytes)
             .map_err(unavailable)?;
@@ -55,14 +63,19 @@ impl Worker {
             return Err(Failure::Unavailable);
         }
         let manifest: Value = serde_json::from_slice(&bytes).map_err(|_| Failure::Unavailable)?;
-        for (path, expected, cap) in [
-            (&c.node, &manifest["runtime"]["sha256"], 256 * 1024 * 1024),
-            (&c.bundle, &manifest["bundleSha256"], 16 * 1024 * 1024),
+        for (index, expected, cap) in [
+            (0, &manifest["runtime"]["sha256"], 256 * 1024 * 1024),
+            (1, &manifest["bundleSha256"], 16 * 1024 * 1024),
         ] {
-            if Some(file_sha(path, cap, deadline)?.as_str()) != expected.as_str() {
+            if Some(file_sha(&mut assets[index].1, cap, deadline)?.as_str()) != expected.as_str() {
                 return Err(Failure::Unavailable);
             }
         }
+        #[cfg(test)]
+        crate::tests::after_hash(c);
+        check_assets(&assets)?;
+        let assets = Arc::new(assets);
+        let checked_assets = assets.clone();
         let cwd = tempfile::tempdir().map_err(unavailable)?;
         let mut command = Command::new(&c.node);
         let mut read_grant = OsString::from("--allow-fs-read=");
@@ -95,6 +108,7 @@ impl Worker {
             shared: shared.clone(),
             threads: Vec::new(),
             cwd: Some(cwd),
+            _assets: assets,
         };
         #[cfg(test)]
         crate::tests::started(&shared, w.child.id(), w.cwd.as_ref().unwrap().path());
@@ -116,7 +130,7 @@ impl Worker {
                         let _ = events.send(event);
                         shared.wake.notify_all();
                     };
-                    match session.hello() {
+                    match session.hello().and_then(|()| check_assets(&checked_assets)) {
                         Ok(()) => send(Ok(None)),
                         Err(_) => {
                             send(Err(Failure::Unavailable));
@@ -145,10 +159,8 @@ impl Worker {
             .map_err(|_| Failure::Crashed)
     }
 }
-fn file_sha(path: &Path, cap: u64, deadline: Instant) -> std::result::Result<String, Failure> {
-    let mut file = File::open(path)
-        .map_err(|_| Failure::Unavailable)?
-        .take(cap + 1);
+fn file_sha(file: &mut File, cap: u64, deadline: Instant) -> std::result::Result<String, Failure> {
+    let mut file = file.take(cap + 1);
     let mut hasher = Sha256::new();
     let mut buffer = [0; CHUNK];
     let mut length = 0;
@@ -167,6 +179,33 @@ fn file_sha(path: &Path, cap: u64, deadline: Instant) -> std::result::Result<Str
         }
         hasher.update(&buffer[..n]);
     }
+}
+fn check_assets(
+    assets: &[(std::path::PathBuf, File, std::fs::Metadata)],
+) -> std::result::Result<(), Failure> {
+    for (path, _file, held) in assets {
+        let current = crate::platform::open_asset(path)
+            .and_then(|f| f.metadata())
+            .map_err(|_| Failure::Unavailable)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if (held.dev(), held.ino(), held.ctime(), held.ctime_nsec())
+                != (
+                    current.dev(),
+                    current.ino(),
+                    current.ctime(),
+                    current.ctime_nsec(),
+                )
+            {
+                return Err(Failure::Unavailable);
+            }
+        }
+        if held.len() != current.len() || held.modified().ok() != current.modified().ok() {
+            return Err(Failure::Unavailable);
+        }
+    }
+    Ok(())
 }
 impl Drop for Worker {
     fn drop(&mut self) {

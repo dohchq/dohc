@@ -1,5 +1,5 @@
 FROM rust:1.96.1-bookworm AS native
-ENV CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0
+ENV CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0
 WORKDIR /source
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
@@ -12,8 +12,9 @@ ENV PATH=$PNPM_HOME:$PATH
 RUN corepack enable && corepack prepare pnpm@11.20.0 --activate
 WORKDIR /source
 COPY . .
-RUN pnpm --filter @dohc/workspace-api... --filter @dohc/sync-relay... --filter @dohc/share-web... install --frozen-lockfile
+RUN pnpm --filter @dohc/workspace-api... --filter @dohc/sync-relay... --filter @dohc/share-web... --filter @dohc/ydoc-projection... install --frozen-lockfile
 RUN pnpm --filter @dohc/app-backend-runtime build && pnpm --filter @dohc/workspace-api build && pnpm --filter @dohc/sync-relay build && pnpm --filter @dohc/share-web build
+RUN DOHC_READER_STAGE_RESOURCES=/opt/dohc-reader node apps/desktop/scripts/stage-engine-reader.mjs --self-host && chmod -R a+rX /opt/dohc-reader
 RUN mkdir -p /release/services/workspace-api/dist /release/services/sync-relay/dist /release/services/share-web/dist /release/services/share-web/viewer/dist /release/scripts/lib /release/packages/workspace-postgres/src/db /release/tools/self-host && \
     cp -a node_modules /release/node_modules && \
     cp -a packages/. /release/packages/ && \
@@ -37,6 +38,7 @@ ARG DOHC_REVISION=unknown
 LABEL org.opencontainers.image.title="dohc collaboration services" org.opencontainers.image.revision=$DOHC_REVISION
 ENV NODE_ENV=production DOHC_REVISION=$DOHC_REVISION
 WORKDIR /app
+COPY --from=build /opt/dohc-reader/ /opt/dohc-reader/
 COPY --from=build --chown=node:node /release/ /app/
 COPY --from=native --chown=node:node /source/target/release/dohc-workspace-engine /app/bin/dohc-workspace-engine
 RUN mkdir /data /continuity /host-data /snapshots && chown node:node /data /continuity /host-data /snapshots

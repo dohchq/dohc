@@ -11,7 +11,9 @@ import { build } from "esbuild";
 import { load } from "js-yaml";
 import { createInstalledAppCompiler } from "../src/workspaces/installedAppCompiler.ts";
 import { createInstalledDatasetCompiler } from "../src/workspaces/installedDatasetCompiler.ts";
-import { stageAppCompiler, requireAppCompiler, readPinnedCompilerNode, archiveMember, PINNED_NODE } from "./stage-app-compiler.mjs";
+import { stageAppCompiler, requireAppCompiler, readPinnedCompilerNode, archiveMember } from "./stage-app-compiler.mjs";
+
+import { PINNED_NODE } from "./pinned-node.mjs";
 
 const require = createRequire(import.meta.url);
 const builderRequire = createRequire(require.resolve("electron-builder/package.json"));
@@ -81,7 +83,7 @@ test("installed macOS and Linux Collection compiler runs electron-builder resour
   await assert.rejects(requireAppCompiler(destination), /asset changed/);
 });
 
-const appTarget = PINNED_NODE[`${process.platform}-${process.arch}`];
+const appTarget = process.platform !== "linux" && PINNED_NODE[`${process.platform}-${process.arch}`];
 // Three compiles, each allowed bounds.timeoutMs, follow staging and packaging.
 test("installed compiler runs electron-builder resources after relocation and checks packaging identities", { skip: !appTarget, timeout: 120000 }, async t => {
   const root = await mkdtemp(join(tmpdir(), "dohc-installed-compiler-"));

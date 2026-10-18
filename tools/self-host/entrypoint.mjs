@@ -1,4 +1,4 @@
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
@@ -48,6 +48,10 @@ async function checkAccounts() {
 }
 
 async function main(action) {
+  if (process.env.DOHC_ENGINE_READER_CONFIG === undefined) {
+    try { process.env.DOHC_ENGINE_READER_CONFIG = readFileSync("/opt/dohc-reader/engine-reader/startup.json", "utf8"); }
+    catch { /* Missing preparation leaves only the reader unavailable. */ }
+  }
   if (process.env.POSTGRES_PASSWORD !== undefined) process.env.POSTGRES_URL = postgresUrl(process.env);
   if (action === 'check-accounts') return checkAccounts();
   const entrypoints = {

@@ -161,6 +161,14 @@ async fn run_stdio(auth_token: String, passive: bool, replica: bool) -> Result<(
             }
         },
     };
+    if !replica {
+    if let Some(config) = std::env::var("DOHC_ENGINE_READER_CONFIG")
+        .ok()
+        .and_then(|value| serde_json::from_str::<dohc_engine_reader::Config>(&value).ok())
+    {
+        service.configure_reader(config);
+    }
+    }
     let supervisor = Arc::new(Supervisor::new(
         SupervisorConfig::default(),
         service.clone(),

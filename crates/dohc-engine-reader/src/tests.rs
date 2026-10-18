@@ -1,10 +1,15 @@
 use super::*;
 use serde_json::{Value, json};
 use std::{fs, process::Command, sync::OnceLock};
+#[path = "../tests/assets.rs"]
+mod assets;
 #[path = "../tests/containment.rs"]
 mod containment;
 #[path = "../tests/real.rs"]
 mod real;
+pub(super) fn after_hash(config: &Config) {
+    assets::after_hash(config);
+}
 pub(super) fn started(shared: &Shared, pid: u32, cwd: &std::path::Path) {
     let mut s = shared.state.lock().unwrap();
     s.lifecycle.0 += 1;

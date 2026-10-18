@@ -8,10 +8,10 @@
   "main": "dist/main/main.js",
   "scripts": {
     "dev": "node scripts/dev.mjs",
-    "build": "node scripts/ensure-electron-installed.mjs && node scripts/stage-app-compiler.mjs && node scripts/stage-agent-probe.mjs && node scripts/stage-app-backend-runtime.mjs && node scripts/build-cli-bin.mjs && electron-vite build",
+    "build": "node scripts/ensure-electron-installed.mjs && node scripts/stage-app-compiler.mjs && node scripts/stage-engine-reader.mjs && node scripts/stage-agent-probe.mjs && node scripts/stage-app-backend-runtime.mjs && node scripts/build-cli-bin.mjs && electron-vite build",
     "build:cli": "node scripts/build-cli-bin.mjs",
     "build:engine": "node scripts/build-workspace-engine.mjs",
-    "package": "node scripts/ensure-electron-installed.mjs && pnpm run build:engine && node scripts/stage-app-compiler.mjs && node scripts/stage-agent-probe.mjs && node scripts/stage-app-backend-runtime.mjs && node scripts/build-cli-bin.mjs && electron-vite build && electron-builder --publish never",
+    "package": "node scripts/ensure-electron-installed.mjs && pnpm run build:engine && node scripts/stage-app-compiler.mjs && node scripts/stage-engine-reader.mjs && node scripts/stage-agent-probe.mjs && node scripts/stage-app-backend-runtime.mjs && node scripts/build-cli-bin.mjs && electron-vite build && electron-builder --publish never",
     "smoke:package": "node scripts/package-smoke.mjs",
     "smoke:app-backend": "node scripts/smoke-app-backend-runtime.mjs",
     "smoke:settings": "node ../../scripts/verification/verify.mjs e2e --grep @settings-smoke",
@@ -23,7 +23,7 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.trip-poll.json && tsc --noEmit -p tsconfig.fundraiser.json && tsc --noEmit -p tsconfig.stock-orders.json",
     "test:unit": "vitest run",
     "test:scripts": "pnpm run test:scripts:isolated && pnpm run test:scripts:runtime",
-    "test:scripts:isolated": "node --experimental-transform-types --test ../../examples/fundraiser/recovery.test.ts && node --test --test-concurrency=1 scripts/dev.test.mjs scripts/build-cli-bin.test.mjs scripts/validate-ui-audit.test.mjs scripts/compiler-process.test.mjs scripts/agent-probe-owner.test.mjs scripts/agent-probe-process.test.mjs scripts/stage-trip-poll.test.mjs scripts/stage-app-compiler.test.mjs scripts/appimage-apprun.test.mjs scripts/stage-agent-probe.test.mjs scripts/fuse-smoke.test.mjs scripts/check-error-symbolication.test.mjs",
+    "test:scripts:isolated": "node --experimental-transform-types --test ../../examples/fundraiser/recovery.test.ts && node --test --test-concurrency=1 scripts/dev.test.mjs scripts/build-cli-bin.test.mjs scripts/validate-ui-audit.test.mjs scripts/compiler-process.test.mjs scripts/agent-probe-owner.test.mjs scripts/agent-probe-process.test.mjs scripts/stage-trip-poll.test.mjs scripts/stage-app-compiler.test.mjs scripts/stage-engine-reader.test.mjs scripts/appimage-apprun.test.mjs scripts/stage-agent-probe.test.mjs scripts/fuse-smoke.test.mjs scripts/check-error-symbolication.test.mjs",
     "test:scripts:runtime": "node --test scripts/stage-app-backend-runtime.test.mjs"
   },
   "devDependencies": {

@@ -6,6 +6,8 @@ import { requireAppCompiler } from "./stage-app-compiler.mjs";
 import { requireAppBackendRuntime } from "./stage-app-backend-runtime.mjs";
 import { requireAgentProbe } from "./stage-agent-probe.mjs";
 
+import { requireEngineReader } from "./stage-engine-reader.mjs";
+
 const scriptPath = fileURLToPath(import.meta.url);
 const desktopDir = resolve(dirname(scriptPath), "..");
 
@@ -41,6 +43,7 @@ export default async function requireWorkspaceEngineBeforePack(context) {
   const platform = context?.electronPlatformName ?? process.platform;
   const arch = context?.arch === undefined ? process.arch : context.arch === 1 ? "x64" : context.arch === 3 ? "arm64" : "unsupported";
   await requireAppCompiler(undefined, platform, arch);
+  await requireEngineReader(undefined, platform, arch);
   await requireAgentProbe(undefined, undefined, platform, arch);
 }
 

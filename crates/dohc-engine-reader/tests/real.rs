@@ -6,11 +6,31 @@ fn directory() -> PathBuf {
         .into()
 }
 fn config() -> Config {
+    if let Ok(value) = std::env::var("DOHC_ENGINE_READER_CONFIG") {
+        return serde_json::from_str(&value).unwrap();
+    }
     Config {
         node: runtime().0,
         bundle: directory().join("bundle/reader.cjs"),
         manifest: directory().join("bundle/manifest.json"),
     }
+}
+
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG from staging"]
+fn staged_closure_cold_start() {
+    let config = config();
+    let mut samples = Vec::new();
+    for _ in 0..31 {
+        let shared = Arc::new(Shared::default());
+        let start = Instant::now();
+        let deadline = start + Duration::from_secs(5);
+        let worker = process::Worker::start(&config, shared.clone(), deadline).unwrap();
+        assert!(wait_event(&worker, &shared, deadline).unwrap().is_none());
+        samples.push(start.elapsed().as_secs_f64() * 1000.0);
+        drop(worker);
+    }
+    println!("COLD_SAMPLES {}", serde_json::to_string(&samples).unwrap());
 }
 fn input(name: &str, proof: bool) -> Request {
     let mut r = request("note.md");

@@ -1,3 +1,4 @@
+import { installedReaderConfig } from "./installedReaderConfig";
 import {reconcileOwnerLiveStops, type OwnerStopRetirementTarget} from "./ownerLiveStop";
 import { waitForEnginePublicationGate } from "./testEnginePublicationGate";
 import type { App, Dialog } from "electron";
@@ -443,6 +444,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       const ingress = hostIngress ?? peerIngress ?? (serverOwnerConfig && {configPath: serverOwnerConfig.nativeConfigPath, client: serverOwnerConfig.nativeClient});
       let publications = 0;
       rustEngineDaemon = createRustEngineDaemon({
+        readerConfig: installedReaderConfig(app.isPackaged ? process.resourcesPath : `${app.getAppPath()}/resources`),
         ...(ingress ? {privateOwnerHost: ingress} : {}),
         startupSmoke: startupSmoke.promise,
         ...testEngineRestartOverrides(),

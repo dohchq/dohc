@@ -1,4 +1,67 @@
 //! OS containment, not a security sandbox. All reader FFI stays here.
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+};
+/// Refuse links and special files before any blocking read. Keep this handle
+/// alive until the child exits; Windows excludes writers and replacement.
+pub(super) fn open_asset(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::{fs::OpenOptions, io};
+    for parent in path.ancestors().skip(1) {
+        let metadata = std::fs::symlink_metadata(parent)?;
+        if metadata.file_type().is_symlink() {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err(io::ErrorKind::InvalidInput.into());
+            }
+        }
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: geteuid has no pointer arguments or side effects.
+        let owner = unsafe { libc::geteuid() };
+        for metadata in [
+            &metadata,
+            &std::fs::metadata(path.parent().ok_or(io::ErrorKind::InvalidInput)?)?,
+        ] {
+            if metadata.mode() & 0o022 != 0 || (metadata.uid() != 0 && metadata.uid() != owner) {
+                return Err(io::ErrorKind::PermissionDenied.into());
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+    }
+    if !metadata.is_file() {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    Ok(file)
+}
 #[cfg(unix)]
 mod os {
     use std::{
