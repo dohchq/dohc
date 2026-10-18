@@ -262,8 +262,9 @@ test(
       expect(convergedBlob.status).toBe(200);
       expect(convergedBlob.body).toBe(RECORD_V2);
 
-      // Revocation stops every collection operation over the share: the link
-      // and the named grant become byte-identical to never-valid.
+      // Revocation stops every collection operation over the share. The link
+      // becomes byte-identical to never-valid; the named grant tells its
+      // former recipient that access was removed.
       const revoke = await relayJson(
         relay.baseUrl,
         GRANTER_TOKEN,
