@@ -63,7 +63,7 @@ export function checkReaderBundle(code) {
 /** Fixed entry point; destination belongs to preparation/tests, never to a document. */
 export async function buildEngineReader(destination = join(packageRoot, 'dist/engine-reader')) {
   const result = await build({
-    absWorkingDir: repoRoot, entryPoints: [join(packageRoot, 'src/engine-markdown-reader.ts')],
+    absWorkingDir: repoRoot, entryPoints: [join(packageRoot, 'src/engine-markdown-host-entry.ts')],
     outfile: 'reader.cjs', bundle: true, platform: 'node', target: 'node24', format: 'cjs',
     write: false, metafile: true, logLevel: 'silent',
     plugins: [{name: 'fixed-reader-imports', setup(build) {
@@ -81,16 +81,21 @@ export async function buildEngineReader(destination = join(packageRoot, 'dist/en
   }
   const sourceHash = name => sources.find(source => source.path === `packages/ydoc-projection/src/${name}`)?.sha256;
   const identity = {
-    version: 1, bundleSha256: hash(output.contents), sourcesSha256: hash(JSON.stringify(sources)),
+    version: 1, sourcesSha256: hash(JSON.stringify(sources)),
     importerSha256: sourceHash('import-export.ts'), schemaSha256: sourceHash('dohc-markdown-extensions.ts'),
     lockSha256: hash(await readFile(join(repoRoot, 'pnpm-lock.yaml'))),
     runtime: {version: process.versions.node, platform: process.platform, arch: process.arch,
       unicode: process.versions.unicode, icu: process.versions.icu,
       sha256: hash(await readFile(process.execPath))},
   };
-  const manifest = {...identity, buildSha256: hash(JSON.stringify(identity)), sources};
+  // Build identity binds inputs/runtime; bundle identity separately binds the executable bytes.
+  // Keeping them separate lets hello embed its identity without a self-referential bundle hash.
+  const embedded = {...identity, buildSha256: hash(JSON.stringify(identity))};
+  const code = Buffer.concat([Buffer.from(`const __READER_IDENTITY__ = ${JSON.stringify(embedded)};\n`), output.contents]);
+  checkReaderBundle(code.toString());
+  const manifest = {...embedded, bundleSha256: hash(code), sources};
   await mkdir(destination, {recursive: true});
-  await writeFile(join(destination, 'reader.cjs'), output.contents);
+  await writeFile(join(destination, 'reader.cjs'), code);
   await writeFile(join(destination, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
   return manifest;
 }

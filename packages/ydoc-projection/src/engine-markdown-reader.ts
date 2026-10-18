@@ -36,14 +36,15 @@ class Refusal extends Error {constructor(readonly reason: Reason) {super(reason)
 function requireReading(condition: boolean, reason: Reason): asserts condition {
   if (!condition) throw new Refusal(reason)
 }
-function checkInput(input: EngineMarkdownInput): string {
+function checkInput(input: EngineMarkdownInput): {source: string; input: EngineMarkdownInput} {
   requireReading(input.source instanceof Uint8Array && input.source.length <= MAX_SOURCE_BYTES, 'invalid-source')
+  const bytes = Uint8Array.from(input.source)
   let source: string
-  try {source = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(input.source)}
+  try {source = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(bytes)}
   catch {throw new Refusal('invalid-source')}
   requireReading(input.checkpoint instanceof Uint8Array && input.checkpoint.length > 0
     && input.checkpoint.length <= MAX_UPDATE_BYTES, 'invalid-update')
-  return source
+  return {source, input: {...input, source: bytes}}
 }
 // ProseMirror drops hidden Yjs state; this comparison is sound only with the strict journal check afterward.
 function compareReadings(actual: Y.Doc, imported: Y.Doc): void {
@@ -59,7 +60,7 @@ function setIfChanged(meta: Y.Map<unknown>, key: string, value: unknown): void {
   if (meta.get(key) !== value) meta.set(key, value)
 }
 
-/** Pure construction/reading proofs. Snapshot authority and the 50 KB admission cap belong to the engine. */
+/** Construction requires version-1 checkpoints. Snapshot authority and the 50 KB admission cap belong to the engine. */
 export function createEngineMarkdownReader(policy: OrderedLiveUpdateCutPolicy) {
   const journal = createLiveMarkdownJournalValidator(policy)
   function validate(input: EngineMarkdownInput, delta: Uint8Array, doc: Y.Doc, canonical: string): Proof {
@@ -77,7 +78,8 @@ export function createEngineMarkdownReader(policy: OrderedLiveUpdateCutPolicy) {
     construct(input: EngineMarkdownInput): EngineMarkdownConstruction {
       let doc: Y.Doc | undefined, imported: Y.Doc | undefined
       try {
-        const source = checkInput(input)
+        const checked = checkInput(input), source = checked.source
+        input = checked.input
         doc = new Y.Doc({gc: false})
         Y.applyUpdate(doc, input.checkpoint)
         requireReading(doc.getMap('meta').get('schemaVersion') === DOHC_SCHEMA_VERSION, 'invalid-schema')
@@ -127,7 +129,8 @@ export function createEngineMarkdownReader(policy: OrderedLiveUpdateCutPolicy) {
     prove(input: EngineMarkdownInput): EngineMarkdownProof {
       let doc: Y.Doc | undefined, imported: Y.Doc | undefined
       try {
-        const source = checkInput(input)
+        const checked = checkInput(input), source = checked.source
+        input = checked.input
         doc = new Y.Doc({gc: false}); Y.applyUpdate(doc, input.checkpoint)
         const witness = readMarkdownSourceWitness(Object.fromEntries(doc.getMap('meta').entries()))
         requireReading(witness !== 'absent' && witness !== 'invalid', 'witness-mismatch')

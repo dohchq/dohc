@@ -31,6 +31,26 @@ function bind(doc: Y.Doc, source: string) {
 }
 function tree(doc: Y.Doc) {return yXmlFragmentToProseMirrorRootNode(doc.getXmlFragment('body'), getDohcProseMirrorSchema())}
 
+it('owns source bytes before inspecting the checkpoint', () => {
+  const base = markdownToYDoc('Earlier'), source = new TextEncoder().encode('- parent\n  - child\n')
+  const expected = source.slice(), checkpoint = Y.encodeStateAsUpdate(base)
+  try {
+    const result = bytesReader.construct({...context, source, get checkpoint() {source.fill(120); return checkpoint}})
+    expect(result.kind).toBe('accepted')
+    if (result.kind === 'accepted') expect(result.sourceSha256).toBe(createHash('sha256').update(expected).digest('hex'))
+  } finally {base.destroy()}
+})
+
+it('refuses a stale projection hash when source differs from canonical output', () => {
+  const source = '* parent\n  * child\n', doc = markdownToYDoc(source)
+  try {
+    expect(source).not.toBe(yDocToMarkdown(doc))
+    bind(doc, source)
+    doc.getMap('meta').set('dohcMarkdownSourceProjectionSha256', sha('stale'))
+    expect(reader.prove({...context, source, checkpoint: Y.encodeStateAsUpdate(doc)}).kind).toBe('refused')
+  } finally {doc.destroy()}
+})
+
 it.each(rows)('constructs and replays the desktop reading: $name', row => {
   const base = markdownToYDoc(row.earlier, {clientID: 1234})
   const checkpoint = Y.encodeStateAsUpdate(base)
