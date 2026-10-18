@@ -502,7 +502,7 @@ describe("workspace manager with registered workspaces", () => {
     await user.keyboard("{ArrowDown}");
     expect(screen.getByRole("menu", { name: "More for team" })).toBeTruthy();
     expect(trigger.getAttribute("aria-expanded")).toBe("true");
-    const reveal = screen.getByRole("menuitem", { name: "Reveal in folder" });
+    const reveal = screen.getByRole("menuitem", { name: "Show in file manager" });
     await waitFor(() => expect(document.activeElement).toBe(reveal));
 
     await user.keyboard("{ArrowDown}");
@@ -540,14 +540,23 @@ describe("workspace manager with registered workspaces", () => {
     expect(Number.parseFloat(menu.style.left)).toBe(304 - 176);
   });
 
-  it("reveals a workspace folder from the row menu", async () => {
-    const user = userEvent.setup();
-    render(
-      <WorkspaceManager workspaces={KNOWN} current={null} onForgot={async () => KNOWN} onOpenWorkspace={() => {}} />,
-    );
-    await user.click(await screen.findByRole("button", { name: "More for personal" }));
-    await user.click(screen.getByRole("menuitem", { name: "Reveal in folder" }));
-    expect(bridge.revealWorkspaceFolder).toHaveBeenCalledWith({ workspaceId: "ws-a" });
+  it.each([
+    ["darwin", "Show in Finder"],
+    ["win32", "Show in File Explorer"],
+    ["linux", "Show in file manager"],
+  ] as const)("reveals a workspace folder from the row menu, named for the %s file manager", async (platform, label) => {
+    bridge.platform = platform;
+    try {
+      const user = userEvent.setup();
+      render(
+        <WorkspaceManager workspaces={KNOWN} current={null} onForgot={async () => KNOWN} onOpenWorkspace={() => {}} />,
+      );
+      await user.click(await screen.findByRole("button", { name: "More for personal" }));
+      await user.click(screen.getByRole("menuitem", { name: label }));
+      expect(bridge.revealWorkspaceFolder).toHaveBeenCalledWith({ workspaceId: "ws-a" });
+    } finally {
+      bridge.platform = "linux";
+    }
   });
 
   it("shows no list on first run", async () => {

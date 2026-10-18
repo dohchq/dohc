@@ -16,6 +16,7 @@ import {
   buildReplaceAllTransaction,
   CLOSED_FIND_REPLACE_STATE,
   findReplaceKey,
+  findStepForKey,
   type FindReplaceAction,
   type FindReplaceState,
 } from "./findReplace";
@@ -73,7 +74,11 @@ export function FindReplaceBar({ editor }: { editor: Editor | null }) {
           onChange={(event) => dispatch({ type: "setQuery", query: event.target.value })}
           onKeyDown={(event) => {
             if (isComposingKey(event)) return;
-            if (event.key === "Enter") {
+            const step = findStepForKey(event);
+            if (step) {
+              event.preventDefault();
+              dispatch({ type: step });
+            } else if (event.key === "Enter") {
               event.preventDefault();
               dispatch({ type: event.shiftKey ? "prev" : "next" });
             } else if (event.key === "Escape") {
@@ -149,7 +154,11 @@ export function FindReplaceBar({ editor }: { editor: Editor | null }) {
             }
             onKeyDown={(event) => {
               if (isComposingKey(event)) return;
-              if (event.key === "Escape") {
+              const step = findStepForKey(event);
+              if (step) {
+                event.preventDefault();
+                dispatch({ type: step });
+              } else if (event.key === "Escape") {
                 event.preventDefault();
                 close();
               } else if (event.key === "Enter") {

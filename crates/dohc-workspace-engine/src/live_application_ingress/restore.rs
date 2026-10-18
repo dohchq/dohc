@@ -890,7 +890,9 @@ mod tests {
         let mut f = Fixture::new().await;
         let db = f._scratch.path().join(".dohc/engine/engine.db");
         let mut raw = rusqlite::Connection::open(&db).unwrap();
-        let tx = raw.transaction().unwrap();
+        let tx = raw
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
         dohc_engine_domain::write_projected_text_in_tx(
             &tx,
             dohc_engine_domain::ProjectedWriteText {
@@ -1488,7 +1490,9 @@ mod tests {
         let mut f = Fixture::new().await;
         let mut raw =
             rusqlite::Connection::open(f._scratch.path().join(".dohc/engine/engine.db")).unwrap();
-        let tx = raw.transaction().unwrap();
+        let tx = raw
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
         dohc_engine_domain::write_projected_text_in_tx(
             &tx,
             dohc_engine_domain::ProjectedWriteText {
@@ -1571,7 +1575,9 @@ mod tests {
         std::fs::write(f._scratch.path().join("tasks/sibling.md"), "# Sibling\n").unwrap();
         let db = f._scratch.path().join(".dohc/engine/engine.db");
         let mut raw = rusqlite::Connection::open(&db).unwrap();
-        let tx = raw.transaction().unwrap();
+        let tx = raw
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
         for (object, path, text) in [
             (
                 "schema",

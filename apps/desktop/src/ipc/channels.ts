@@ -22,6 +22,8 @@ export const MENU_COMMANDS = [
   "install-update",
   "new-editor-group-right",
   "close-tab",
+  "next-tab",
+  "previous-tab",
 ] as const satisfies readonly (CommandId | "command-palette")[];
 
 // Explorer context menu: the renderer names what was right-clicked, main pops
@@ -59,6 +61,17 @@ export const WORKBENCH_MENU_COMMANDS = [
   "toggle-theme",
   "unpin-app",
 ] as const;
+
+// How much one OS drag-in imports: up to 100 dropped items, up to 1,000
+// files and folders in all once dropped folders are opened, and up to 10,000
+// entries those folders hold that dohc leaves out, such as .DS_Store. The
+// bridge contract and the shell hold the first; the drag-in screen holds all.
+export const DROP_IMPORT_LIMITS = { items: 100, entries: 1000, skipped: 10_000 } as const;
+export const DROP_IMPORT_REFUSALS = {
+  items: `dohc imports up to ${DROP_IMPORT_LIMITS.items} dropped items at once. Drop fewer at a time.`,
+  entries: `dohc imports up to ${DROP_IMPORT_LIMITS.entries.toLocaleString("en-US")} files and folders from one drop. Drop fewer folders at a time.`,
+  skipped: `dohc reads up to ${DROP_IMPORT_LIMITS.skipped.toLocaleString("en-US")} files it leaves out, such as .DS_Store, in one drop. Drop fewer folders at a time.`,
+} as const;
 
 // Workspace content search streams batches main→renderer. The bounds mirror
 // workspaceSearch.ts (the producer); bridgeContract's SearchResultsEvent

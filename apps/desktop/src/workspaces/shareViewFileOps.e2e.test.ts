@@ -1659,20 +1659,24 @@ describe("share-view file operations through the real store", () => {
       await writeFile(file, "dropped\n", "utf8");
       const directory = join(sourceDir, "folder");
       await mkdir(directory);
+      const link = join(sourceDir, "link.md");
+      await symlink(file, link);
 
       const outcome = await applyShareViewFileImport({
         ...scope(view),
-        absolutePaths: [file, directory],
+        absolutePaths: [file, directory, link],
         screenAgainstRoots: [view.rootPath],
         targetDir: "docs",
       });
 
+      // The store holds files only, so a folder with no file in it is
+      // skipped, and the screen refuses the link before following it.
       expect(
         outcome,
-        "an unscreened drag-in writes a directory into the share view's store",
+        "an unscreened drag-in writes a directory or a link's target into the share view's store",
       ).toEqual({
         imported: ["docs/dropped.md"],
-        skipped: 1,
+        skipped: 2,
       });
       expect(await storePaths(view)).toEqual([
         "docs/dropped.md",

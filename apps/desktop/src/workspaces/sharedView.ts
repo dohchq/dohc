@@ -275,7 +275,15 @@ async function materializeSharedViewPaths(
     return target;
   }
   const main = await store.ensureMainVersion({ workspaceId });
-  for (const change of changedPaths) {
+  // Every delete before every write. On a disk that ignores case or Unicode
+  // normalization, writing `notes.md` opens the `Notes.md` that a delete then
+  // removes. A refresh merges its pull's pages, so the changes can arrive in
+  // either order.
+  const ordered = [
+    ...changedPaths.filter((change) => change.operation === "delete"),
+    ...changedPaths.filter((change) => change.operation !== "delete"),
+  ];
+  for (const change of ordered) {
     const target = containedTarget(rootDir, change.path);
     // A mount keeps its own engine store at <mount>/.dohc. Containment cannot
     // see that: an alias planted inside the projection (`docs -> .dohc`)

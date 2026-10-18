@@ -52,6 +52,7 @@ import {
   engineStoreRefusalRecovery,
   engineStoreRefusalSentence,
 } from "../ipc/bridgeContract";
+import { DROP_IMPORT_LIMITS, DROP_IMPORT_REFUSALS } from "../ipc/channels";
 import { readError, shouldRecheckShareAccess } from "../ipc/errorWords";
 import {
   formatSize,
@@ -231,6 +232,7 @@ import {
   activeGroup,
   activeTabPath,
   activateTab,
+  adjacentTabPath,
   allTabs,
   closeTab,
   closeEditorGroup,
@@ -2075,6 +2077,11 @@ export function DesktopWorkspaceShell(props: {
           });
         });
       };
+      // The contract refuses more dropped items, so say why before asking.
+      if (droppedPaths && droppedPaths.length > DROP_IMPORT_LIMITS.items) {
+        reportShellFailure({ message: `Could not import files. ${DROP_IMPORT_REFUSALS.items}`, kind: "import-files" });
+        return;
+      }
       let outcome: ImportWorkspaceFilesResult;
       try {
         outcome = await bridge().importWorkspaceFiles({
@@ -2087,6 +2094,7 @@ export function DesktopWorkspaceShell(props: {
         return;
       }
       const count = outcome.imported.length;
+      const folders = outcome.folders ?? 0;
       const skippedSuffix =
         outcome.skipped > 0 ? ` (${outcome.skipped} skipped)` : "";
       // The first copy failed, so nothing landed.
@@ -2101,16 +2109,24 @@ export function DesktopWorkspaceShell(props: {
       }
       if (outcome.interrupted) {
         // Importing the same files again would land second copies under
-        // collision names, so name what already landed.
+        // collision names, so name what already landed. Folders that landed
+        // with no file in them would take a second name too.
+        const stopSentence = outcome.stop ? ` ${importStopSentence(outcome.stop)}` : "";
         reportShellFailure({
           message:
-            count === 0
-              ? "The import stopped before dohc could confirm any files. Refresh the shared view before you try again."
-              : fitImportMessage(
+            count > 0
+              ? fitImportMessage(
                   `Imported ${namedPaths(outcome.imported)} before the import stopped.`,
-                  outcome.stop ? ` ${importStopSentence(outcome.stop)}` : "",
+                  stopSentence,
                   " Import only the files that are still missing.",
-                ),
+                )
+              : folders > 0
+                ? fitImportMessage(
+                    `Created ${folders} ${folders === 1 ? "folder" : "folders"} before the import stopped.`,
+                    stopSentence,
+                    " Delete the empty folders before you import again.",
+                  )
+                : "The import stopped before dohc could confirm any files. Refresh the shared view before you try again.",
           // The message names at most two files; the report names them all.
           details: [
             ...(outcome.stop?.detail ? [["Cause", outcome.stop.detail] as const] : []),
@@ -2129,17 +2145,18 @@ export function DesktopWorkspaceShell(props: {
         }
         return;
       }
-      if (count === 0 && outcome.skipped === 0) return; // cancelled dialog
+      if (count === 0 && folders === 0 && outcome.skipped === 0) return; // cancelled dialog
       // Every file was skipped for its name or kind; the same files would be
       // skipped again, so there is nothing to try again.
-      if (count === 0) {
+      if (count === 0 && folders === 0) {
         reportShellFailure({ message: `Nothing imported${skippedSuffix}.`, kind: "import-files" });
         return;
       }
+      // A drop of empty folders lands folders and no file.
       showSuccessNotice(
-        `Imported ${count} ${count === 1 ? "file" : "files"}${
-          targetDir ? ` into ${targetDir}` : ""
-        }${skippedSuffix}.`,
+        count > 0
+          ? `Imported ${count} ${count === 1 ? "file" : "files"}${targetDir ? ` into ${targetDir}` : ""}${skippedSuffix}.`
+          : `Created ${folders} ${folders === 1 ? "folder" : "folders"}${targetDir ? ` in ${targetDir}` : ""}${skippedSuffix}.`,
         undefined,
         "import-files",
       );
@@ -3002,6 +3019,16 @@ export function DesktopWorkspaceShell(props: {
     }
   }, [closeTabsAfterFlush, mutateWb, reportShellError]);
 
+  // ⌃Tab and its alternates cycle through the focused group's tabs.
+  const showAdjacentTab = useCallback(
+    (step: 1 | -1) => {
+      const group = activeGroup(wbRef.current);
+      const path = adjacentTabPath(group, step);
+      if (path !== null) activateEditorTab(group.id, path);
+    },
+    [activateEditorTab],
+  );
+
   const closeAllTabs = useCallback(() => {
     void closeTabsAfterFlush(
       wbRef.current.editorGroups.flatMap((group) =>
@@ -3854,6 +3881,8 @@ export function DesktopWorkspaceShell(props: {
         ),
       "toggle-sidebar": toggleSidePanel,
       "close-tab": closeActiveTab,
+      "next-tab": () => showAdjacentTab(1),
+      "previous-tab": () => showAdjacentTab(-1),
       "new-editor-group-right": () => openEditorGroupRight(),
       "toggle-markdown-source": () => toggleSource(wbRef.current.activeEditorGroup),
       "toggle-about": () => mutateWb(toggleAbout),
@@ -3893,6 +3922,7 @@ export function DesktopWorkspaceShell(props: {
       createUntitledDrawing,
       openWorkspaceFolder,
       closeActiveTab,
+      showAdjacentTab,
       importFiles,
       mutateWb,
       requestExplorerCreate,
