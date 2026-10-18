@@ -199,6 +199,14 @@ export function isFileLockedRefusal(error: unknown): boolean {
   return refusalMessageOf(error, "OVERLOADED") === "file-locked";
 }
 
+// The volume gave a file the engine created sharing permissions it was
+// created without, so the engine refused to write a secret or a file's own
+// access there (`MaterializeError::VolumeSharesNewFiles`). Moving the
+// workspace fixes it; a retry alone does not.
+export function isVolumeSharesNewFilesRefusal(error: unknown): boolean {
+  return refusalMessageOf(error, "INTERNAL") === "volume-shares-new-files";
+}
+
 // The engine's own database was busy and its bounded retry budget ran out
 // (`StorageError::FileLocked`, which the store documents as intact and the
 // operation as retryable). Not the artifact lock above and not the user's

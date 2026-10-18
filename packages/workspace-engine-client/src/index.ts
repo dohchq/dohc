@@ -12,6 +12,7 @@ export {
   isInvalidInputRefusal,
   isEngineStoreBusyRefusal,
   isFileLockedRefusal,
+  isVolumeSharesNewFilesRefusal,
   isIdempotencyKeyReuseRefusal,
   isYdocUpdateAdmissionRefusal,
   isTransientEngineRefusal,
