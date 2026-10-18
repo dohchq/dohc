@@ -91,7 +91,7 @@ test("installed compiler runs electron-builder resources after relocation and ch
   const destination = join(resourcesRoot, "app-compiler");
   assert.equal(createHash("sha256").update(await readFile(join(destination, appTarget.file))).digest("hex"), appTarget.sha256);
   await requireAppCompiler(destination);
-  const compile = await createInstalledAppCompiler(resourcesRoot);
+  const compile = await createInstalledAppCompiler(resourcesRoot, false);
   const bytes = Buffer.from("import './style.css'; document.body.textContent = 'installed';");
   const style = Buffer.from("body { color: green }");
   const file = (path, bytes) => ({ path, bytes, sha256: createHash("sha256").update(bytes).digest("hex") });

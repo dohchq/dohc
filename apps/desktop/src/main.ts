@@ -6266,7 +6266,7 @@ function registerIpcHandlers(): void {
     },
     withAdapter: withEngineAdapter,
     compile: async (request, signal) => {
-      installedAppCompiler ??= createInstalledAppCompiler(resourcesBasePath());
+      installedAppCompiler ??= createInstalledAppCompiler(resourcesBasePath(), app.runningUnderARM64Translation);
       const compile = await installedAppCompiler;
       signal.throwIfAborted();
       return compile(request, { timeoutMs: 60_000, maxMemoryBytes: 1024 * 1024 * 1024, maxProcesses: 8,

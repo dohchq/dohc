@@ -58,6 +58,8 @@ The profile denies by default. It allows:
 - signals and process information inside the same sandbox.
 
 Path metadata stays readable everywhere, because Node aborts at startup without it.
+A confined worker can still learn whether a path it names exists, with its size and times.
+It cannot list a directory or read a file outside the profile. dohc accepts that exposure.
 The owner canonicalizes every path in the profile, because Seatbelt matches resolved paths.
 It refuses paths that are not UTF-8 or that hold control characters.
 If `sandbox_init`, a resource limit or the exec fails, the worker never runs and the build fails.
@@ -69,6 +71,9 @@ Both platforms run the official Node 24.16.0, pinned by sha256 in `stage-app-com
 Staging checks a macOS release archive against `SHASUMS256.txt`, then checks the `node` binary inside it against its own pin.
 Node 24 needs macOS 13.5, so publishing and local launch refuse older macOS.
 The rest of dohc keeps Electron's minimum.
+An x64 dohc that Rosetta runs on an Apple silicon Mac also refuses, and names the Apple silicon download.
+Main reads `app.runningUnderARM64Translation`, which reports `sysctl.proc_translated`.
+The sandbox is unverified under Rosetta. A native Intel Mac builds apps.
 
 electron-builder signs `node` and `compiler-owner` with the hardened runtime and its default inherited entitlements.
 It can name entitlements only for the main app, login items and one plist shared by every other binary, Electron's helpers included.
@@ -85,3 +90,4 @@ Linux has no app compiler yet.
   Each macOS case fails without its mechanism.
 - `node --test scripts/stage-app-compiler.test.mjs` checks staging, the pins and a relocated packaged compile.
 - `cargo nextest run -p dohc-compiler-owner` checks path encoding, argument parsing and the libproc and Seatbelt calls.
+- The release workflow's macOS packaged smoke builds one app through the signed arm64 package's compiler.

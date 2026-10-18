@@ -25,7 +25,8 @@ The server preserves its accepted state; it does not silently bind that state to
 The release workflow builds Windows x64, macOS x64, macOS arm64, and Linux x64.
 Every release target compiles Collection actions. App publishing and local app
 launch need the installed app compiler, which ships for Windows x64 and macOS.
-On macOS it needs 13.5 or later, the oldest release its pinned Node runs on.
+On macOS it needs 13.5 or later, the oldest release its pinned Node runs on,
+and an Apple silicon Mac needs the Apple silicon build of dohc.
 Linux does not ship it yet. Reading a shared app in a browser does not require
 that compiler.
 
