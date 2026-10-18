@@ -26,6 +26,7 @@ it('builds a complete fixed bundle with reproducible source/runtime identity', a
   try {
     const manifest = await buildEngineReader(destination)
     const code = await readFile(join(destination, 'reader.cjs'))
+    expect(code.toString().split('\n')[0]).toBe('"use strict";')
     expect(checkReaderBundle(code.toString())).toEqual(['node:crypto'])
     expect(manifest.bundleSha256).toBe(createHash('sha256').update(code).digest('hex'))
     expect(manifest.importerSha256).toMatch(/^[a-f0-9]{64}$/)

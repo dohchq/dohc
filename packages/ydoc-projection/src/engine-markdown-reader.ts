@@ -37,14 +37,18 @@ function requireReading(condition: boolean, reason: Reason): asserts condition {
   if (!condition) throw new Refusal(reason)
 }
 function checkInput(input: EngineMarkdownInput): {source: string; input: EngineMarkdownInput} {
-  requireReading(input.source instanceof Uint8Array && input.source.length <= MAX_SOURCE_BYTES, 'invalid-source')
-  const bytes = Uint8Array.from(input.source)
+  const raw = input.source
+  requireReading(raw instanceof Uint8Array, 'invalid-source')
+  const bytes = new Uint8Array(raw)
+  requireReading(bytes.length <= MAX_SOURCE_BYTES, 'invalid-source')
   let source: string
   try {source = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(bytes)}
   catch {throw new Refusal('invalid-source')}
-  requireReading(input.checkpoint instanceof Uint8Array && input.checkpoint.length > 0
-    && input.checkpoint.length <= MAX_UPDATE_BYTES, 'invalid-update')
-  return {source, input: {...input, source: bytes}}
+  const rawCheckpoint = input.checkpoint
+  requireReading(rawCheckpoint instanceof Uint8Array, 'invalid-update')
+  const checkpoint = new Uint8Array(rawCheckpoint)
+  requireReading(checkpoint.length > 0 && checkpoint.length <= MAX_UPDATE_BYTES, 'invalid-update')
+  return {source, input: {source: bytes, checkpoint, document: input.document, currentPath: input.currentPath}}
 }
 // ProseMirror drops hidden Yjs state; this comparison is sound only with the strict journal check afterward.
 function compareReadings(actual: Y.Doc, imported: Y.Doc): void {

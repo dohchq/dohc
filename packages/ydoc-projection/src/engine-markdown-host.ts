@@ -1,17 +1,16 @@
 import {createHash} from 'node:crypto'
-import {createEngineMarkdownReader} from './engine-markdown-reader.js'
+import {createEngineMarkdownReader, type EngineMarkdownProof} from './engine-markdown-reader.js'
 import type {LiveMarkdownRegistrationInput} from './liveDocumentValidation.js'
 
-declare const __READER_IDENTITY__: unknown
 const CHUNK = 65536, UPDATE = 20 * 1024 * 1024
 const sha = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex')
 const reader = createEngineMarkdownReader({maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000_000,
   maxDecodedPayloadByteVisits: 100_000_000, maxStructClientGroupVisits: 1_000_000,
   maxDeleteClientGroupVisits: 1_000_000, maxDeleteIntervalVisits: 1_000_000, maxIndexOperations: 10_000_000})
 function requireWire(ok: unknown): asserts ok {if (!ok) throw new Error('invalid-frame')}
-function keys(value: unknown, names: string[]): asserts value is Record<string, unknown> {
+function keys(value: unknown, names: readonly string[]): asserts value is Record<string, unknown> {
   requireWire(value && typeof value === 'object' && !Array.isArray(value)
-    && Object.keys(value).sort().join() === names.sort().join())
+    && Object.keys(value).length === names.length && names.every(name => Object.hasOwn(value, name)))
 }
 function declaration(value: unknown, limit: number): {length: number; sha256: string} {
   keys(value, ['length', 'sha256'])
@@ -41,14 +40,19 @@ async function blob(id: number, bytes: Uint8Array) {
 
 /** Only the fixed executable entry runs the pipe host; importing the adapter has no process side effects. */
 export async function runEngineMarkdownHost() {
+  for (const name of Object.getOwnPropertyNames(console)) {
+    if (typeof Reflect.get(console, name) === 'function') Reflect.set(console, name, () => {})
+  }
   const iterator = process.stdin[Symbol.asyncIterator]()
+  const cleanEof = Symbol()
   let pending = Buffer.alloc(0), cursor = 0, previous = 0
-  async function exact(length: number): Promise<Buffer> {
+  async function exact(length: number, allowEof = false): Promise<Buffer> {
     const output = Buffer.alloc(length)
     let offset = 0
     while (offset < length) {
       if (cursor === pending.length) {
         const next = await iterator.next()
+        if (next.done && allowEof && offset === 0) throw cleanEof
         requireWire(!next.done)
         pending = next.value; cursor = 0
       }
@@ -57,12 +61,19 @@ export async function runEngineMarkdownHost() {
     }
     return output
   }
-  async function readFrame() {
-    const h = await exact(12), type = h[4], flags = h[5]!, length = h.readUInt32LE(8)
+  async function readFrame(allowEof = false) {
+    const h = await exact(12, allowEof), type = h[4], flags = h[5]!, length = h.readUInt32LE(8)
     requireWire(h.subarray(0, 4).toString() === 'DOP1' && h.readUInt16LE(6) === 0
       && ((type === 1 && flags === 0 && length <= CHUNK)
         || (type === 2 && flags <= 1 && length >= 8 && length <= CHUNK + 8)))
     return {type, flags, data: await exact(length)}
+  }
+  async function readControl(allowEof = false): Promise<Record<string, unknown>> {
+    const f = await readFrame(allowEof); requireWire(f.type === 1)
+    const text = new TextDecoder('utf-8', {fatal: true}).decode(f.data)
+    const value: unknown = JSON.parse(text)
+    requireWire(value && typeof value === 'object' && !Array.isArray(value))
+    return value as Record<string, unknown>
   }
   async function readBlob(id: number, declared: ReturnType<typeof declaration>) {
     // The length and digest syntax were bounded before this allocation.
@@ -81,42 +92,45 @@ export async function runEngineMarkdownHost() {
   }
   try {
     for (;;) {
-      const f = await readFrame(); requireWire(f.type === 1)
-      const request: unknown = JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(f.data))
-      requireWire(request && typeof request === 'object')
-      const r = request as Record<string, unknown>, id = r.id
+      const r = await readControl(true), id = r.id
+      requireWire(previous !== 0 || r.method === 'hello')
       requireWire(Number.isSafeInteger(id) && Number(id) === previous + 1); previous = Number(id)
       if (r.method === 'hello') {
         keys(r, ['id', 'method']); requireWire(id === 1)
-        await control({id, kind: 'hello', protocolVersion: 1, schemaVersion: 1, identity: __READER_IDENTITY__,
+        await control({id, kind: 'hello', protocolVersion: 1, schemaVersion: 1,
           runtime: {version: process.versions.node, platform: process.platform, arch: process.arch,
             unicode: process.versions.unicode, icu: process.versions.icu}})
         continue
       }
       keys(r, ['id', 'method', 'document', 'currentPath', 'source', 'checkpoint'])
-      requireWire(previous > 1 && (r.method === 'construct' || r.method === 'prove'))
+      requireWire(r.method === 'construct' || r.method === 'prove')
       keys(r.document, ['workspaceId', 'mainVersionId', 'objectId', 'lineageClaimId'])
       requireWire(Object.values(r.document).every(v => typeof v === 'string' && v.length > 0)
         && typeof r.currentPath === 'string')
       const sourceDeclaration = declaration(r.source, 2 * 1024 * 1024), checkpointDeclaration = declaration(r.checkpoint, UPDATE)
       const source = await readBlob(1, sourceDeclaration), checkpoint = await readBlob(2, checkpointDeclaration)
       // An explicit end control catches surplus chunks before running the parser.
-      const end = await readFrame(); requireWire(end.type === 1)
-      const finish = JSON.parse(end.data.toString('utf8')); keys(finish, ['id', 'end'])
+      const finish = await readControl(); keys(finish, ['id', 'end'])
       requireWire(finish.id === id && finish.end === true)
-      const result = reader[r.method]({document: r.document as unknown as LiveMarkdownRegistrationInput['document'],
-        currentPath: r.currentPath, source, checkpoint})
-      if (result.kind === 'refused') await control({id, ...result})
-      else {
-        const delta = 'delta' in result && result.delta instanceof Uint8Array ? result.delta : new Uint8Array()
+      const input = {document: r.document as unknown as LiveMarkdownRegistrationInput['document'],
+        currentPath: r.currentPath, source, checkpoint}
+      async function respond(result: EngineMarkdownProof, delta: Uint8Array) {
+        if (result.kind === 'refused') return control({id, ...result})
+        requireWire(result.sourceSha256 === sourceDeclaration.sha256 && result.sourceByteLength === sourceDeclaration.length)
         await control({id, kind: r.method === 'construct' ? 'constructed' : 'proved', sourceSha256: result.sourceSha256,
           sourceByteLength: result.sourceByteLength, projectionSha256: result.projectionSha256,
-          stateSha256: result.stateSha256, strictJournal: true,
+          stateSha256: result.stateSha256,
           delta: {length: delta.length, sha256: sha(delta)}})
         await blob(3, delta); await control({id, end: true})
       }
+      if (r.method === 'construct') {
+        const result = reader.construct(input)
+        if (result.kind === 'accepted') requireWire(result.delta instanceof Uint8Array)
+        await respond(result, result.kind === 'accepted' ? result.delta : new Uint8Array())
+      } else await respond(reader.prove(input), new Uint8Array())
     }
-  } catch {
+  } catch (error) {
+    if (error === cleanEof) return
     // Never print parser errors, source, paths, or Yjs values.
     process.exitCode = 1
     process.stdin.destroy()

@@ -1,20 +1,20 @@
 import {spawn, type ChildProcessWithoutNullStreams} from 'node:child_process'
 import {once} from 'node:events'
 import {createHash} from 'node:crypto'
-import {mkdtemp, rm} from 'node:fs/promises'
+import {mkdtemp, rm, symlink, unlink, writeFile} from 'node:fs/promises'
 import {tmpdir} from 'node:os'
-import {join} from 'node:path'
+import {dirname, join} from 'node:path'
 import {afterAll, beforeAll, expect, it} from 'vitest'
 import * as Y from 'yjs'
 import {buildEngineReader} from '../scripts/build-engine-reader.mjs'
 import {markdownToYDoc} from './import-export.js'
 import rows from './engine-markdown-reader.fixture.json'
 
-let directory: string, bundle: string, manifest: Awaited<ReturnType<typeof buildEngineReader>>
+let directory: string, bundle: string
 beforeAll(async () => {
   directory = await mkdtemp(join(tmpdir(), 'dohc-reader-host-'))
   bundle = join(directory, 'reader.cjs')
-  manifest = await buildEngineReader(directory)
+  await buildEngineReader(directory)
 }, 30000)
 afterAll(async () => {await rm(directory, {recursive: true, force: true})})
 const hash = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex')
@@ -29,20 +29,24 @@ function blob(stream: number, bytes: Uint8Array, fin = true) {
   const prefix = Buffer.alloc(8); prefix.writeBigUInt64LE(BigInt(stream))
   return frame(2, Number(fin), Buffer.concat([prefix, bytes]))
 }
-async function start() {
+async function start(entry = bundle, preload?: string) {
   const cwd = await mkdtemp(join(tmpdir(), 'dohc-reader-empty-'))
-  const child = spawn(process.execPath, ['--permission', `--allow-fs-read=${bundle}`, '--max-old-space-size=256', bundle],
+  const args = ['--permission', `--allow-fs-read=${bundle}`, '--max-old-space-size=256']
+  if (entry !== bundle) args.push('--allow-fs-read=' + dirname(entry))
+  if (preload) args.push(`--allow-fs-read=${preload}`, '--require', preload)
+  const child = spawn(process.execPath, [...args, entry],
     {cwd, env: {}, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe']})
   const closed = once(child, 'close')
-  const diagnostics: Buffer[] = []
+  const diagnostics: Buffer[] = [], output: Buffer[] = []
   child.stderr.on('data', bytes => diagnostics.push(bytes))
+  child.stdout.on('data', bytes => output.push(bytes))
   child.stdin.on('error', () => {})
   const iterator = child.stdout[Symbol.asyncIterator]()
   let pending = Buffer.alloc(0)
   async function exact(length: number) {
     while (pending.length < length) {
       const next = await iterator.next()
-      if (next.done) throw new Error('Reader EOF')
+      if (next.done) throw new Error('Reader EOF: ' + Buffer.concat(diagnostics).toString())
       pending = Buffer.concat([pending, next.value])
     }
     const result = pending.subarray(0, length); pending = pending.subarray(length); return result
@@ -52,43 +56,51 @@ async function start() {
     expect(header.subarray(0, 4).toString()).toBe('DOP1')
     return {type: header[4], flags: header[5], bytes: await exact(header.readUInt32LE(8))}
   }
-  return {child, closed, read, diagnostics,
+  return {child, closed, read, diagnostics, output,
     async json() {const f = await read(); expect(f.type).toBe(1); return JSON.parse(f.bytes.toString())},
-    async close() {child.kill(); await closed; await rm(cwd, {recursive: true, force: true})}}
+    async close() {
+      child.stdout.destroy(); child.stderr.destroy(); child.stdin.destroy(); child.kill()
+      await closed; await rm(cwd, {recursive: true, force: true})
+    }}
 }
 async function hello(host: Awaited<ReturnType<typeof start>>) {
   host.child.stdin.write(control({id: 1, method: 'hello'}))
   return host.json()
 }
 const document = {workspaceId: 'workspace', mainVersionId: 'main', objectId: 'object', lineageClaimId: 'lineage'}
-function request(child: ChildProcessWithoutNullStreams, id: number, method: 'construct' | 'prove', source: Uint8Array, checkpoint: Uint8Array) {
-  child.stdin.write(control({id, method, document, currentPath: 'note.md', source: declared(source), checkpoint: declared(checkpoint)}))
+function requestFrames(id: number, method: 'construct' | 'prove', source: Uint8Array, checkpoint: Uint8Array) {
+  const frames = [control({id, method, document, currentPath: 'note.md', source: declared(source), checkpoint: declared(checkpoint)})]
   for (const [stream, bytes] of [[1, source], [2, checkpoint]] as const) {
     for (let offset = 0; offset < Math.max(1, bytes.length); offset += 65536) {
-      child.stdin.write(blob(stream, bytes.subarray(offset, offset + 65536), offset + 65536 >= bytes.length))
+      frames.push(blob(stream, bytes.subarray(offset, offset + 65536), offset + 65536 >= bytes.length))
     }
   }
-  child.stdin.write(control({id, end: true}))
+  frames.push(control({id, end: true}))
+  return frames
+}
+function request(child: ChildProcessWithoutNullStreams, id: number, method: 'construct' | 'prove', source: Uint8Array, checkpoint: Uint8Array) {
+  child.stdin.write(Buffer.concat(requestFrames(id, method, source, checkpoint)))
 }
 async function success(host: Awaited<ReturnType<typeof start>>, id: number) {
   const result = await host.json(), chunks: Buffer[] = []
-  expect(result.id).toBe(id); expect(result.strictJournal).toBe(true)
+  expect(['constructed', 'proved'], JSON.stringify(result)).toContain(result.kind)
+  expect(result.id).toBe(id); expect(result).not.toHaveProperty('strictJournal')
   for (;;) {
     const f = await host.read()
     expect(f.type).toBe(2); expect(f.bytes.readBigUInt64LE()).toBe(3n)
+    expect(f.bytes.length - 8).toBeLessThanOrEqual(65536)
     chunks.push(f.bytes.subarray(8)); if (f.flags === 1) break
   }
   const delta = Buffer.concat(chunks)
   expect(declared(delta)).toEqual(result.delta)
   expect(await host.json()).toEqual({id, end: true})
-  return {result, delta}
+  return {result, delta, chunkCount: chunks.length}
 }
 
-it('hello binds the embedded build and actual Node, Unicode and ICU', async () => {
+it('hello reports protocol, schema and actual runtime only', async () => {
   const host = await start()
   try {
-    const {bundleSha256: _, sources: __, ...identity} = manifest
-    expect(await hello(host)).toEqual({id: 1, kind: 'hello', protocolVersion: 1, schemaVersion: 1, identity,
+    expect(await hello(host)).toEqual({id: 1, kind: 'hello', protocolVersion: 1, schemaVersion: 1,
       runtime: {version: process.versions.node, platform: process.platform, arch: process.arch,
         unicode: process.versions.unicode, icu: process.versions.icu}})
   } finally {await host.close()}
@@ -115,48 +127,131 @@ it.each([false, true])('constructs and proves a saved fixture; BOM=%s', async bo
   } finally {base.destroy(); await host.close()}
 }, 30000)
 
-it.each(['unknown-field', 'wrong-id', 'method', 'oversize', 'bad-magic', 'truncated-control', 'surplus', 'truncated-blob', 'digest', 'length', 'blob-id', 'blob-size'])(
-  'fails closed on %s without diagnostics', async mode => {
-    const host = await start()
-    try {
-      if (mode === 'unknown-field') host.child.stdin.end(control({id: 1, method: 'hello', source: 'secret'}))
-      else if (mode === 'wrong-id') host.child.stdin.end(control({id: 2, method: 'hello'}))
-      else if (mode === 'method') host.child.stdin.end(control({id: 1, method: 'eval'}))
-      else if (mode === 'oversize') {
-        const f = control({}); f.writeUInt32LE(65537, 8); host.child.stdin.end(f.subarray(0, 12))
-      } else if (mode === 'bad-magic') {const f = control({}); f[0] = 0; host.child.stdin.end(f)}
-      else if (mode === 'truncated-control') host.child.stdin.end(control({id: 1, method: 'hello'}).subarray(0, 16))
-      else {
-        await hello(host)
-        const source = Buffer.from('secret'), checkpoint = Buffer.from([0, 0])
-        const declaration = mode === 'length' ? {length: 2 ** 32, sha256: hash(source)} : declared(source)
-        host.child.stdin.write(control({id: 2, method: 'prove', document, currentPath: 'secret', source: declaration, checkpoint: declared(checkpoint)}))
-        if (mode === 'truncated-blob') host.child.stdin.end(blob(1, source.subarray(0, 2), false))
-        else if (mode === 'digest') host.child.stdin.end(blob(1, Buffer.from('SECRET')))
-        else if (mode === 'blob-id') host.child.stdin.end(blob(9, source))
-        else if (mode === 'blob-size') host.child.stdin.end(blob(1, Buffer.alloc(65537)))
-        else {
-          host.child.stdin.write(blob(1, source)); host.child.stdin.write(blob(2, checkpoint))
-          host.child.stdin.end(blob(2, checkpoint))
-        }
-      }
-      const [code] = await host.closed
-      expect(code).toBe(1); expect(Buffer.concat(host.diagnostics).toString()).toBe('')
-    } finally {await host.close()}
-  }, 10000,
-)
-it('exits when stdin closes after hello', async () => {
-  const host = await start()
-  try {await hello(host); host.child.stdin.end(); await host.closed}
-  finally {await host.close()}
-})
+type Host = Awaited<ReturnType<typeof start>>
+async function rejection(host: Host, bytes: Buffer) {
+  host.output.length = 0
+  let rejectOutput!: (error: Error) => void
+  const output = new Promise<never>((_, reject) => {rejectOutput = reject})
+  const onOutput = () => rejectOutput(new Error('Response after invalid input'))
+  host.child.stdout.once('data', onOutput)
+  const deadline = AbortSignal.timeout(3000)
+  const onTimeout = () => rejectOutput(new Error('Host did not reject invalid input with stdin open'))
+  deadline.addEventListener('abort', onTimeout, {once: true})
+  try {
+    host.child.stdin.write(bytes)
+    expect((await Promise.race([host.closed, output]))[0]).toBe(1)
+    expect(Buffer.concat(host.output).length).toBe(0)
+    expect(Buffer.concat(host.diagnostics).toString()).toBe('')
+  } finally {host.child.stdout.off('data', onOutput); deadline.removeEventListener('abort', onTimeout)}
+}
 
-it('Windows permission flags deny outside reads and child processes', async () => {
-  if (process.platform !== 'win32') return
-  const code = `const fs=require('node:fs'), cp=require('node:child_process');
-    for(const f of [()=>fs.readFileSync(process.execPath),()=>cp.spawnSync(process.execPath,['-e','0'])]) {
-      try {f(); process.exit(42)} catch(e) {if(e.code!=='ERR_ACCESS_DENIED') process.exit(43)}
-    }`
-  const child = spawn(process.execPath, ['--permission', `--allow-fs-read=${bundle}`, '-e', code], {env: {}, windowsHide: true, stdio: 'pipe'})
+it.each(['unknown-field', 'comma-key', 'wrong-id', 'method', 'oversize', 'bad-magic', 'truncated-control',
+  'surplus', 'truncated-blob', 'digest', 'length', 'blob-id', 'blob-size', 'end-id', 'end-field', 'hello-first'])(
+  'rejects %s with stdin open and no response', async mode => {
+    const host = await start(), base = markdownToYDoc('Earlier')
+    try {
+      if (mode === 'hello-first') {
+        await rejection(host, Buffer.concat(requestFrames(1, 'construct', Buffer.from('Body'), Y.encodeStateAsUpdate(base))))
+        return
+      }
+      await hello(host)
+      const source = mode === 'truncated-blob' ? Buffer.alloc(2) : Buffer.from('Body')
+      const checkpoint = Y.encodeStateAsUpdate(base), frames = requestFrames(2, 'construct', source, checkpoint)
+      const r = JSON.parse(frames[0]!.subarray(12).toString())
+      if (mode === 'unknown-field') {r.extra = 'secret'; frames[0] = control(r)}
+      if (mode === 'comma-key') {delete r.currentPath; delete r.document; r['currentPath,document'] = 'secret'; frames[0] = control(r)}
+      if (mode === 'wrong-id') {r.id = 3; frames[0] = control(r)}
+      if (mode === 'method') {r.method = 'eval'; frames[0] = control(r)}
+      if (mode === 'oversize') {frames[0]!.writeUInt32LE(65537, 8); frames.splice(1); frames[0] = frames[0]!.subarray(0, 12)}
+      if (mode === 'bad-magic') frames[0]![0] = 0
+      if (mode === 'truncated-control') frames[0] = frame(1, 0, frames[0]!.subarray(12, frames[0]!.length - 1))
+      if (mode === 'surplus') frames.splice(-1, 0, blob(2, checkpoint))
+      if (mode === 'truncated-blob') frames[1] = blob(1, source.subarray(0, 1))
+      if (mode === 'digest') {r.checkpoint.sha256 = '0'.repeat(64); frames[0] = control(r)}
+      if (mode === 'length') {r.source.length = 2 ** 32; frames[0] = control(r)}
+      if (mode === 'blob-id') frames[1] = blob(9, source)
+      if (mode === 'blob-size') frames[1] = blob(1, Buffer.alloc(65537))
+      if (mode === 'end-id') frames[frames.length - 1] = control({id: 3, end: true})
+      if (mode === 'end-field') frames[frames.length - 1] = control({id: 2, end: true, extra: 'secret'})
+      await rejection(host, Buffer.concat(frames))
+    } finally {base.destroy(); await host.close()}
+  },
+)
+
+it.each(['before-hello', 'after-hello', 'after-request'])('clean EOF exits zero: %s', async stage => {
+  const host = await start(), base = markdownToYDoc('Earlier')
+  try {
+    if (stage !== 'before-hello') await hello(host)
+    if (stage === 'after-request') {
+      request(host.child, 2, 'construct', Buffer.from('Body'), Y.encodeStateAsUpdate(base)); await success(host, 2)
+    }
+    host.child.stdin.end(); expect((await host.closed)[0]).toBe(0)
+    expect(Buffer.concat(host.diagnostics).length).toBe(0)
+  } finally {base.destroy(); await host.close()}
+})
+it.each(['header', 'control', 'blob', 'request'])('EOF inside %s exits one', async stage => {
+  const host = await start(), base = markdownToYDoc('Earlier')
+  try {
+    await hello(host); host.output.length = 0
+    const frames = requestFrames(2, 'construct', Buffer.from('Body'), Y.encodeStateAsUpdate(base))
+    const bytes = stage === 'header' ? frames[0]!.subarray(0, 6)
+      : stage === 'control' ? frames[0]!.subarray(0, 16)
+        : stage === 'blob' ? Buffer.concat([frames[0]!, frames[1]!.subarray(0, 22)]) : Buffer.concat(frames.slice(0, -1))
+    host.child.stdin.end(bytes); expect((await host.closed)[0]).toBe(1)
+    expect(Buffer.concat(host.output).length).toBe(0)
+    expect(Buffer.concat(host.diagnostics).length).toBe(0)
+  } finally {base.destroy(); await host.close()}
+})
+it('handles zero-length source and checkpoint blobs', async () => {
+  const host = await start(), base = markdownToYDoc('Earlier'), source = Buffer.alloc(0)
+  try {
+    await hello(host)
+    request(host.child, 2, 'construct', source, Y.encodeStateAsUpdate(base))
+    expect(await host.json()).toEqual({id: 2, kind: 'refused', reason: 'invalid-schema'})
+    request(host.child, 3, 'construct', source, Buffer.alloc(0))
+    expect(await host.json()).toEqual({id: 3, kind: 'refused', reason: 'invalid-update'})
+    request(host.child, 4, 'construct', Buffer.from('Body'), Y.encodeStateAsUpdate(base))
+    expect((await success(host, 4)).result.kind).toBe('constructed')
+  } finally {base.destroy(); await host.close()}
+})
+it('chunks source and returned delta above 64 KiB', async () => {
+  const host = await start(), base = markdownToYDoc('Earlier'), source = Buffer.from('a'.repeat(70000) + '\n')
+  try {
+    await hello(host); request(host.child, 2, 'construct', source, Y.encodeStateAsUpdate(base))
+    const result = await success(host, 2)
+    expect(result.delta.length).toBeGreaterThan(65536); expect(result.chunkCount).toBeGreaterThan(1)
+    expect(result.result).toMatchObject({kind: 'constructed', sourceByteLength: source.length, sourceSha256: hash(source)})
+    Y.applyUpdate(base, result.delta)
+    request(host.child, 3, 'prove', source, Y.encodeStateAsUpdate(base))
+    expect((await success(host, 3)).result.kind).toBe('proved')
+  } finally {base.destroy(); await host.close()}
+})
+it.each([false, true])('suppresses Yjs collision warnings; other console methods=%s', async emitConsole => {
+  const preload = join(directory, 'collision-' + emitConsole + '.cjs')
+  await writeFile(preload, "require('node:crypto').webcrypto.getRandomValues = array => array.fill(1234);\n"
+    + (emitConsole ? "setImmediate(() => {for (const name of ['log','info','warn','error','debug','trace','dir','table','assert']) console[name]('secret');});" : ''))
+  const host = await start(bundle, preload), base = markdownToYDoc('Earlier', {clientID: 1234})
+  try {
+    await hello(host)
+    request(host.child, 2, 'construct', Buffer.from('Body'), Y.encodeStateAsUpdate(base))
+    expect((await success(host, 2)).result.kind).toBe('constructed')
+    host.child.stdin.end(); expect((await host.closed)[0]).toBe(0)
+    expect(Buffer.concat(host.diagnostics).length).toBe(0)
+  } finally {base.destroy(); await host.close()}
+})
+it.runIf(process.platform === 'win32')('starts the bundle through a directory junction', async () => {
+  const parent = await mkdtemp(join(tmpdir(), 'dohc-reader-junction-')), alias = join(parent, 'alias')
+  try {
+    await symlink(directory, alias, 'junction')
+    const host = await start(join(alias, 'reader.cjs'))
+    try {expect((await hello(host)).kind).toBe('hello')}
+    finally {await host.close()}
+  } finally {await unlink(alias); await rm(parent, {recursive: true, force: true})}
+})
+it.runIf(process.platform === 'win32')('Windows permission flags deny outside reads and child processes', async () => {
+  const code = "const fs=require('node:fs'),cp=require('node:child_process');"
+    + "for(const f of [()=>fs.readFileSync(process.execPath),()=>cp.spawnSync(process.execPath,['-e','0'])]){"
+    + "try{f();process.exit(42)}catch(e){if(e.code!=='ERR_ACCESS_DENIED')process.exit(43)}}"
+  const child = spawn(process.execPath, ['--permission', '--allow-fs-read=' + bundle, '-e', code], {env: {}, windowsHide: true, stdio: 'pipe'})
   expect((await once(child, 'close'))[0]).toBe(0)
 })
