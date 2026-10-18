@@ -19,7 +19,8 @@
     "retries": [
       "admission-unavailable",
       "host-unavailable",
-      "application-pending"
+      "application-pending",
+      "host-memory-full"
     ]
   },
   "accepted": [
@@ -325,6 +326,18 @@
           "acceptingHostEpoch": 2
         },
         "replayed": true
+      }
+    },
+    {
+      "parser": "parseLiveUpdateAcceptResult",
+      "case": "host memory full retry",
+      "input": {
+        "kind": "retry",
+        "reason": "host-memory-full"
+      },
+      "expected": {
+        "kind": "retry",
+        "reason": "host-memory-full"
       }
     },
     {

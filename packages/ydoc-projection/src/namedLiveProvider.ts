@@ -243,14 +243,15 @@ export function createNamedLiveProvider(input: NamedLiveProviderLimits,
             notify();
           } else if (frame.result === "retry") {
             // Drop only this send's uncommitted attempt; earlier application evidence still matters.
-            if (frame.reason === "admission-unavailable") update.epochs.pop();
+            if (frame.reason === "admission-unavailable" || frame.reason === "host-memory-full") update.epochs.pop();
             held.awaitingAck = false;
             reason = frame.reason;
+            const backoff = frame.reason === "application-pending" || frame.reason === "host-memory-full";
             held.retryTimer = setTimeout(() => {
               held.retryTimer = undefined;
               void pump(held);
-            }, frame.reason === "application-pending" ? held.retryDelayMs : 250);
-            if (frame.reason === "application-pending") held.retryDelayMs = Math.min(10_000, held.retryDelayMs * 2);
+            }, backoff ? held.retryDelayMs : 250);
+            if (backoff) held.retryDelayMs = Math.min(10_000, held.retryDelayMs * 2);
             notify();
           }
           else quarantine(frame.reason);

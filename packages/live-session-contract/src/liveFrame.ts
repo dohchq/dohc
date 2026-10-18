@@ -138,7 +138,7 @@ const refusalCodes: Record<LiveUpdateRefusal, number> = {
   "baseline-missing": 7, "delivery-conflict": 8, "capacity-refused": 9,
 };
 const retryCodes: Record<LiveUpdateRetry, number> = {
-  "admission-unavailable": 1, "host-unavailable": 2, "application-pending": 3,
+  "admission-unavailable": 1, "host-unavailable": 2, "application-pending": 3, "host-memory-full": 4,
 };
 const closeCodes = { normal: 0, "protocol-invalid": 1, "route-fenced": 2, "resource-unavailable": 3, idle: 4, shutdown: 5 } as const;
 const purposeCodes = { "client-vector": 1, "initial-sync": 2, "submit-update": 3, "applied-update": 4 } as const;

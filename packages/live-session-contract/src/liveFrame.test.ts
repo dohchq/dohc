@@ -111,6 +111,16 @@ describe("live frame codec", () => {
     for (let index = 0; index < literal.length; index++) expect(() => decodeLiveFrame(literal.slice(0, index), 586)).toThrow();
     expect(() => decodeLiveFrame(new Uint8Array([...literal, 0]), 586)).toThrow();
   });
+  it("keeps host-memory-full as retry code 4, apart from the capacity refusal", () => {
+    const retry = vectors.frames.find(v => v.name === "retry-host-memory-full")!.hex;
+    expect(retry.slice(-4)).toBe("0304");
+    expect(decodeLiveFrame(bytes(retry), 586)).toMatchObject({ result: "retry", reason: "host-memory-full" });
+    expect(() => decodeLiveFrame(bytes(`${retry.slice(0, -2)}05`), 586)).toThrow(LiveFrameError);
+    expect(() => decodeLiveFrame(bytes(`${retry.slice(0, -2)}09`), 586)).toThrow(LiveFrameError);
+    const refused = vectors.frames.find(v => v.name === "refused")!.hex;
+    expect(refused.slice(-4)).toBe("0209");
+    expect(decodeLiveFrame(bytes(refused), 586)).toMatchObject({ result: "refused", reason: "capacity-refused" });
+  });
   it("derives the mandatory maximum from the largest canonical identifier", () => {
     // Independent byte count: 12 header, 4 string length, 512 identifier, 32 digest,
     // 1 result tag, three 8-byte fields, 1 boolean. BEGIN submit is 577 bytes.
@@ -557,11 +567,11 @@ it("refuses a shared assembly before allocating it", () => {
   release(); expect(budget.usage()).toBe(0); client.close(); server.close();
 });
 
-it("keeps admission-unavailable retry live and accepts the next correlated attempt", () => {
+it.each(["admission-unavailable", "host-memory-full"] as const)("keeps %s retry live and accepts the next correlated attempt", reason => {
   const {client, server} = makeLive();
   consume(client, server, begin("submit-update", 2));
   consume(client, server, {kind: "chunk", transferId: 2, offset: 0, bytes: new Uint8Array([0, 0])});
-  consume(server, client, {kind: "result", result: "retry", deliveryId: "d", updateDigest: digest, reason: "admission-unavailable"});
+  consume(server, client, {kind: "result", result: "retry", deliveryId: "d", updateDigest: digest, reason});
   expect(server.usage()).toMatchObject({closed: false, live: true}); expect(client.usage()).toMatchObject({closed: false, live: true});
   grant(server, client, 773, 6);
   consume(client, server, begin("submit-update", 3));

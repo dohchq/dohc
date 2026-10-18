@@ -27,6 +27,7 @@ export const LIVE_UPDATE_RETRY_VALUES = [
   "admission-unavailable",
   "host-unavailable",
   "application-pending",
+  "host-memory-full",
 ] as const;
 
 export interface LiveDocumentKey {

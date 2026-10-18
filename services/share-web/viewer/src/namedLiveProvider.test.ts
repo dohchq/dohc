@@ -494,7 +494,7 @@ it("cancels a pending retry when its route retires", async () => {
   expect(host.submissions()).toHaveLength(1);
 });
 
-it("retains earlier application evidence when a later admission retry precedes reconnect", async () => {
+it.each(["admission-unavailable", "host-memory-full"] as const)("retains earlier application evidence when a later %s retry precedes reconnect", async reason => {
   const {value, host, doc} = await live(provider({...limits(), maxDeliveryAttempts: 2}));
   vi.useFakeTimers(); edit(value, " draft");
   const first = await host.submitted();
@@ -503,7 +503,7 @@ it("retains earlier application evidence when a later admission retry precedes r
   await host.send({kind: "result", result: "retry", deliveryId: first.begin.deliveryId, updateDigest: first.begin.digest, reason: "application-pending"});
   await vi.advanceTimersByTimeAsync(250);
   await host.submitted(2);
-  await host.send({kind: "result", result: "retry", deliveryId: first.begin.deliveryId, updateDigest: first.begin.digest, reason: "admission-unavailable"});
+  await host.send({kind: "result", result: "retry", deliveryId: first.begin.deliveryId, updateDigest: first.begin.digest, reason});
   host.route.disconnect(); await host.route.settled();
   const second = peer(value, 2); await second.greet(); await second.initial(doc, binding, 1);
   const retry = await second.submitted();
@@ -557,6 +557,46 @@ it("backs off pending application retries to ten seconds and resets after succes
   await vi.advanceTimersByTimeAsync(1);
   expect(host.submissions()).toHaveLength(count + 1);
   await host.submitted(++count);
+  expect(value.state().status).toBe("live");
+});
+it("keeps an edit through host-memory-full retries with backoff, then acknowledges it once", async () => {
+  const value = provider({...limits(), maxDeliveryAttempts: 1});
+  const doc = document("base"), host = peer(value, 1, {replenish: true});
+  await host.greet(); await host.initial(doc);
+  vi.useFakeTimers();
+  edit(value, " draft");
+  const first = await host.submitted();
+  if (first.begin.purpose !== "submit-update") throw new Error("Expected submit");
+  let item = first, count = 1;
+  async function retry() {
+    if (item.begin.purpose !== "submit-update") throw new Error("Expected submit");
+    await host.send({kind: "result", result: "retry", deliveryId: item.begin.deliveryId, updateDigest: item.begin.digest, reason: "host-memory-full"});
+  }
+  // More refusals than delivery attempts: none of them was committed, so none counts.
+  for (const delay of [250, 500, 1_000, 2_000, 4_000, 8_000, 10_000, 10_000]) {
+    await retry();
+    expect(value.state()).toMatchObject({status: "live", reason: "host-memory-full", pendingUpdates: 1, lastApplied: null});
+    expect(host.isClosed()).toBe(false);
+    await vi.advanceTimersByTimeAsync(delay - 1);
+    expect(host.submissions()).toHaveLength(count);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(host.submissions()).toHaveLength(count + 1);
+    item = await host.submitted(++count);
+    expect(item.bytes).toEqual(first.bytes);
+    expect(item.begin).toMatchObject({deliveryId: first.begin.deliveryId, digest: first.begin.digest});
+  }
+  await host.ack(item, 1, 3);
+  expect(value.state()).toMatchObject({status: "live", reason: null, pendingUpdates: 0,
+    lastApplied: {deliveryId: first.begin.deliveryId, journalCursor: 3}});
+  await vi.advanceTimersByTimeAsync(20_000);
+  expect(host.submissions()).toHaveLength(count);
+  edit(value, " next");
+  item = await host.submitted(++count);
+  await retry();
+  await vi.advanceTimersByTimeAsync(249);
+  expect(host.submissions()).toHaveLength(count);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(host.submissions()).toHaveLength(count + 1);
   expect(value.state().status).toBe("live");
 });
 it("bounds pending application resubmissions and retains the draft at the attempt limit", async () => {

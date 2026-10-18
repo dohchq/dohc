@@ -95,6 +95,20 @@ it("freezes a conflicting delivery for explicit recovery instead of retrying for
   expect(await f.delivery.deliver(fresh.authority, envelope)).toEqual({kind: "quarantine", reason: "delivery-conflict"});
 });
 
+it("keeps an entry for another attempt when the host has no memory for it", async () => {
+  const options: Parameters<typeof fixture>[0] = {retained: true, result: {result: "retry", reason: "host-memory-full"}};
+  const f = fixture(options);
+  const pass = async () => {
+    const fresh = await f.delivery.freshOwnerAuthority(binding);
+    if (fresh.kind !== "authority") throw new Error("Missing authority");
+    return f.delivery.deliver(fresh.authority, envelope);
+  };
+  expect(await pass()).toEqual({kind: "retry"});
+  options.result = undefined;
+  expect(await pass()).toEqual({kind: "receipt", receipt: f.receipt});
+  expect(f.submit.mock.calls[1]![0]).toEqual(f.submit.mock.calls[0]![0]);
+});
+
 it("freezes a provenance refusal for visible recovery", async () => {
   const f = fixture({result: {result: "refused", reason: "provenance-refused"}}), fresh = await f.delivery.freshOwnerAuthority(binding);
   if (fresh.kind !== "authority") throw new Error("Missing authority");
