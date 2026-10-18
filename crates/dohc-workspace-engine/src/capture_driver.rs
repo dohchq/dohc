@@ -1544,20 +1544,6 @@ fn read_capture_policy(root: &Path) -> PolicyState {
     PolicyState::Known(snapshot.files_policy)
 }
 
-/// Whether the apply's policy pass retires one of the plan's unread paths,
-/// which drops it from the manifest. Any other unread path keeps its entry,
-/// so a workspace with evicted files does not refresh the manifest on every
-/// version switch. A policy capture cannot read holds the pass, so it counts.
-fn policy_retires_unread(root: &Path, retained_unread: &[String]) -> bool {
-    !retained_unread.is_empty()
-        && match read_capture_policy(root) {
-            PolicyState::Known(policy) => retained_unread
-                .iter()
-                .any(|path| policy_excludes(&policy, path)),
-            PolicyState::Unavailable => true,
-        }
-}
-
 /// Whether a known policy narrows `path` out of engine ownership (the secret
 /// floor is policy-independent and never narrowed).
 fn policy_excludes(
@@ -2602,12 +2588,7 @@ pub(crate) async fn reconcile_full_for_switch(
             Err(SwitchReconcileError::Degraded(degraded_paths))
         }
         Ok(run) => {
-            let manifest_changed = match &run {
-                ReconcileRun::Completed(plan) => {
-                    !plan.ops.is_empty() || policy_retires_unread(root, &plan.retained_unread)
-                }
-                _ => false,
-            };
+            let has_ops = matches!(&run, ReconcileRun::Completed(plan) if !plan.ops.is_empty());
             let context = ApplyRunContext {
                 root,
                 actor,
@@ -2626,8 +2607,12 @@ pub(crate) async fn reconcile_full_for_switch(
                 RootBoundRun { captured_root, run },
                 &token,
             )
-            .await
-            .clean;
+            .await;
+            // An unread path changes the manifest only when the policy pass
+            // retires it. A pass the policy held fails the apply, and every
+            // failure refreshes the manifest.
+            let manifest_changed = has_ops || applied.retired_unread;
+            let applied = applied.clean;
             // A new file an editor still holds is not recorded yet, so the
             // switch would leave it behind.
             let deferred = match handle.stats().await {
@@ -2768,16 +2753,20 @@ fn moment_recorded_payload(
 struct ApplyOutcome {
     clean: bool,
     collection_busy_exhausted: bool,
+    /// The policy pass retired a path the scan retained unread.
+    retired_unread: bool,
 }
 
 impl ApplyOutcome {
     const CLEAN: Self = Self {
         clean: true,
         collection_busy_exhausted: false,
+        retired_unread: false,
     };
     const FAILED: Self = Self {
         clean: false,
         collection_busy_exhausted: false,
+        retired_unread: false,
     };
 }
 
@@ -2792,6 +2781,7 @@ impl CollectionReconcileFailure {
         ApplyOutcome {
             clean: false,
             collection_busy_exhausted: matches!(self, Self::BusyBudgetExhausted),
+            retired_unread: false,
         }
     }
 }
@@ -3149,6 +3139,7 @@ async fn apply_bound_run_with_handle(
     } else {
         read_capture_policy(root)
     };
+    let mut retired_unread = false;
     for path in &plan.retained_unread {
         let excluded = match &capture_policy {
             PolicyState::Known(policy) => policy_excludes(policy, path),
@@ -3223,6 +3214,7 @@ async fn apply_bound_run_with_handle(
                 Some(Ok(paths)) => {
                     result.not_owned_paths.push(path.clone());
                     pending_placement_paths.extend(paths);
+                    retired_unread = true;
                 }
                 // A failed over-cap retire must fail the receipt too: this
                 // loop is the only thing that can retire such a head, so it
@@ -3305,11 +3297,13 @@ async fn apply_bound_run_with_handle(
         return ApplyOutcome {
             clean: false,
             collection_busy_exhausted,
+            retired_unread,
         };
     }
     ApplyOutcome {
         clean,
         collection_busy_exhausted,
+        retired_unread,
     }
 }
 

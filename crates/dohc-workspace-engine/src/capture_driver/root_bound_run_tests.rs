@@ -334,21 +334,77 @@ async fn prepared_and_converged_runs_refuse_a_replacement_workspace_root() {
     std::fs::rename(&moved_root, &root).expect("restore planned workspace root");
 }
 
-#[test]
-fn only_a_policy_retirement_of_an_unread_path_changes_the_manifest() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let root = scratch.path();
-    std::fs::create_dir_all(root.join(".dohc")).expect("policy folder");
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_a_policy_retirement_of_an_unread_path_changes_the_manifest() {
+    let store_scratch = ScratchDir::new().expect("store scratch");
+    let capture_scratch = ScratchDir::new().expect("capture scratch");
+    let root = capture_scratch.path().to_path_buf();
+    std::fs::write(root.join("big.md"), b"captured content").expect("write captured file");
+    let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine database path");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("open actor").actor;
+    let seed_actor = actor.clone();
+    let seed_root = root.clone();
+    std::thread::spawn(move || {
+        let mut sink = StoreCaptureSink::new(bound_sink_params(
+            seed_actor,
+            WORKSPACE_ID,
+            "main",
+            seed_root,
+            1,
+        ));
+        assert!(matches!(
+            sink.ingest(
+                "big.md",
+                0,
+                "advisory-sha",
+                "text/plain",
+                IngestReason::Added
+            )
+            .expect("seed captured head"),
+            dohc_engine_files::IngestOutcome::Captured { .. }
+        ));
+    })
+    .join()
+    .expect("workspace seed thread");
+    // Past the scan cap, the scan retains the file unread, as it does an
+    // evicted one. A sparse file keeps the test fast.
+    std::fs::File::options()
+        .write(true)
+        .open(root.join("big.md"))
+        .and_then(|file| file.set_len(ScanBounds::default().max_file_bytes + 1))
+        .expect("grow beyond scan cap");
+
+    let leases = LeaseRegistry::new();
+    let status = Arc::new(DriverStatus::default());
+    let self_writes = SelfWriteSuppression::default();
+    let switch = || {
+        reconcile_full_for_switch(
+            &root,
+            &actor,
+            WORKSPACE_ID,
+            &leases,
+            &status,
+            &self_writes,
+            None,
+            None,
+            CaptureProvenance::default(),
+            EngineEvents::default(),
+            CancellationToken::new(),
+        )
+    };
+    // The policy still tracks it: the manifest keeps its entry.
+    assert_eq!(switch().await, Ok(false));
+    // A policy capture cannot read holds the pass, and any failure refreshes.
+    let policy_path = root.join(".dohc/files.toml");
+    std::fs::create_dir_all(&policy_path).expect("make policy unreadable");
+    assert_eq!(switch().await, Err(SwitchReconcileError::ApplyFailed));
+    std::fs::remove_dir(&policy_path).expect("remove unreadable policy");
+    // The policy narrows it: the pass retires it and the manifest drops it.
     std::fs::write(
-        root.join(".dohc/files.toml"),
-        "version = 1\n[[rule]]\npath = \"private/**\"\ntracked = false\n",
+        &policy_path,
+        "version = 1\n[[rule]]\npath = \"big.md\"\ntracked = false\n",
     )
-    .expect("policy");
-    assert!(!policy_retires_unread(root, &[]));
-    // An evicted file the policy still tracks keeps its manifest entry.
-    assert!(!policy_retires_unread(root, &["photo.bin".to_owned()]));
-    assert!(policy_retires_unread(
-        root,
-        &["photo.bin".to_owned(), "private/scan.pdf".to_owned()]
-    ));
+    .expect("narrow the file");
+    assert_eq!(switch().await, Ok(true));
 }
