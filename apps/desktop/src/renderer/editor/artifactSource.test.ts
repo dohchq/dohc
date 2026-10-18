@@ -1,5 +1,7 @@
 import {afterEach, beforeEach, expect, it, vi} from 'vitest';
 import * as Y from 'yjs';
+vi.mock('yjs', async original => {const actual = await original<typeof import('yjs')>(); return {...actual, encodeStateAsUpdate: vi.fn(actual.encodeStateAsUpdate)};});
+function witnessedDoc() {const doc = new Y.Doc(); for (const key of ['dohcMarkdownSource','dohcMarkdownSourceSha256','dohcMarkdownSourceProjectionSha256']) doc.getMap('meta').set(key, 'plain'); return doc;}
 
 class TestWorker {
   static instances: TestWorker[] = [];
@@ -18,7 +20,7 @@ afterEach(() => {vi.unstubAllGlobals(); vi.useRealTimers();});
 
 it('transfers snapshots and correlates replies without release messages', async () => {
   const {projectArtifactSource} = await import('./artifactSource');
-  const doc = new Y.Doc();
+  const doc = witnessedDoc();
   const first = projectArtifactSource(doc);
   doc.getText('edit').insert(0, 'changed');
   const second = projectArtifactSource(doc);
@@ -41,7 +43,7 @@ it('transfers snapshots and correlates replies without release messages', async 
 
 it('joins an idle proof, reuses its answer, and invalidates on every document update', async () => {
   const {projectArtifactSource} = await import('./artifactSource');
-  const doc = new Y.Doc();
+  const doc = witnessedDoc();
   const idle = projectArtifactSource(doc);
   const opening = projectArtifactSource(doc);
   const worker = TestWorker.instances[0]!;
@@ -63,7 +65,7 @@ it('joins an idle proof, reuses its answer, and invalidates on every document up
 
 it('rejects pending requests on a worker failure and starts a fresh worker on retry', async () => {
   const {projectArtifactSource} = await import('./artifactSource');
-  const doc = new Y.Doc();
+  const doc = witnessedDoc();
   const pending = projectArtifactSource(doc);
   const refused = expect(pending).rejects.toThrow('Source projection worker failed');
   TestWorker.instances[0]!.onerror!();
@@ -80,7 +82,7 @@ it('rejects pending requests on a worker failure and starts a fresh worker on re
 it('bounds a worker that never responds', async () => {
   vi.useFakeTimers();
   const {projectArtifactSource} = await import('./artifactSource');
-  const doc = new Y.Doc();
+  const doc = witnessedDoc();
   const pending = projectArtifactSource(doc);
   const refused = expect(pending).rejects.toThrow('Source projection timed out');
   await vi.advanceTimersByTimeAsync(15_000);
@@ -130,7 +132,7 @@ it('keeps short-note preparation off the opening task, with an inclusive idle bo
   vi.stubGlobal('requestIdleCallback', idle);
   vi.stubGlobal('cancelIdleCallback', cancel);
   const {prepareArtifactSource} = await import('./artifactSource');
-  const doc = new Y.Doc();
+  const doc = witnessedDoc();
   const meta = doc.getMap('meta');
   meta.set('dohcMarkdownSource', 'x'.repeat(64 * 1024));
   meta.set('dohcMarkdownSourceSha256', 'hash');
@@ -149,11 +151,37 @@ it('keeps short-note preparation off the opening task, with an inclusive idle bo
 });
 
 it('restarts after one timeout and resends other pending snapshots',async()=>{
- vi.useFakeTimers();const {projectArtifactSource}=await import('./artifactSource');const a=new Y.Doc(),b=new Y.Doc();
+ vi.useFakeTimers();const {projectArtifactSource}=await import('./artifactSource');const a=witnessedDoc(),b=witnessedDoc();
  const first=projectArtifactSource(a);const refused=expect(first).rejects.toThrow('Source projection timed out');
  await vi.advanceTimersByTimeAsync(1000);const second=projectArtifactSource(b);const observed=second.catch(()=> 'unexpected refusal');
  const old=TestWorker.instances[0]!;const original=old.postMessage.mock.calls[1]![0];
  await vi.advanceTimersByTimeAsync(14000);await refused;expect(TestWorker.instances).toHaveLength(2);
  const replacement=TestWorker.instances[1]!;const resent=replacement.postMessage.mock.calls[0]![0];
  expect(resent.snapshot).toEqual(original.snapshot);replacement.onmessage!({data:{id:resent.id,markdown:'Survived'}});expect(await observed).toBe('Survived');a.destroy();b.destroy();
+});
+
+it.each(['plain < text', 'plain & text', '[x]: hidden'])('never snapshots or starts a worker for guarded source %s', async source => {
+  vi.useFakeTimers(); const {prepareArtifactSource, projectArtifactSource} = await import('./artifactSource');
+  const doc = witnessedDoc(); doc.getMap('meta').set('dohcMarkdownSource',source); vi.mocked(Y.encodeStateAsUpdate).mockClear();
+  expect(prepareArtifactSource(doc)).toBeUndefined(); await projectArtifactSource(doc);
+  expect(Y.encodeStateAsUpdate).not.toHaveBeenCalled(); expect(TestWorker.instances).toHaveLength(0); expect(vi.getTimerCount()).toBe(0); doc.destroy();
+});
+it('projects an unwitnessed document without a snapshot or worker', async () => {
+  vi.useFakeTimers();
+  const {projectArtifactSource} = await import('./artifactSource'); const doc = new Y.Doc(); vi.mocked(Y.encodeStateAsUpdate).mockClear();
+  const output = projectArtifactSource(doc); expect(Y.encodeStateAsUpdate).not.toHaveBeenCalled(); expect(TestWorker.instances).toHaveLength(0); expect(await output).toBe(''); doc.destroy();
+});
+it('terminates a quiet worker and keeps the unchanged per-revision answer', async () => {
+  vi.useFakeTimers(); const {projectArtifactSource} = await import('./artifactSource'); const doc = witnessedDoc();
+  const pending = projectArtifactSource(doc); const worker = TestWorker.instances[0]!; worker.onmessage!({data:{id:worker.postMessage.mock.calls[0]![0].id,markdown:'Verified'}});
+  expect(await pending).toBe('Verified'); await vi.advanceTimersByTimeAsync(999); expect(worker.terminate).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1); expect(worker.terminate).toHaveBeenCalledOnce(); expect(await projectArtifactSource(doc)).toBe('Verified'); expect(TestWorker.instances).toHaveLength(1);
+  doc.getMap('meta').set('edit','changed'); const changed = projectArtifactSource(doc); const next=TestWorker.instances[1]!;
+  await vi.advanceTimersByTimeAsync(1000); expect(next.terminate).not.toHaveBeenCalled(); next.onmessage!({data:{id:next.postMessage.mock.calls[0]![0].id,markdown:'Changed'}}); expect(await changed).toBe('Changed'); doc.destroy();
+});
+it('cancels idle termination when another document needs a proof', async () => {
+  vi.useFakeTimers(); const {projectArtifactSource} = await import('./artifactSource'); const a=witnessedDoc(), b=witnessedDoc();
+  const first=projectArtifactSource(a),worker=TestWorker.instances[0]!; worker.onmessage!({data:{id:worker.postMessage.mock.calls[0]![0].id,markdown:'First'}}); await first;
+  await vi.advanceTimersByTimeAsync(500); const second=projectArtifactSource(b); await vi.advanceTimersByTimeAsync(1000); expect(worker.terminate).not.toHaveBeenCalled();
+  worker.onmessage!({data:{id:worker.postMessage.mock.calls[1]![0].id,markdown:'Second'}}); await second; await vi.advanceTimersByTimeAsync(1000); expect(worker.terminate).toHaveBeenCalledOnce(); a.destroy();b.destroy();
 });

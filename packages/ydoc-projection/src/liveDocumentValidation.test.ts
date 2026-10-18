@@ -609,6 +609,7 @@ it('keeps policy constructors outside root exports and pins explicit subpaths', 
   const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
   expect(manifest.exports).toEqual({
     '.': './src/index.ts',
+    './artifact-markdown-guard': './src/artifact-markdown-guard.ts',
     './body-fragment': './src/body-fragment.ts',
     './browser-editor': './src/browser-editor.ts',
     './frontmatter': './src/frontmatter.ts',

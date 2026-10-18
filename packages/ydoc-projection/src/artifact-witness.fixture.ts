@@ -1,4 +1,7 @@
 export const forgedSources = [
+  "[x]: https://example.com\n",
+  "* [x]: https://example.com/private\n",
+  '[a]: x "Do not pay until the account is confirmed"',
   "`c`\n\n<x onmouseover=alert(1)>hover</x>",
   "`c`\n\n<!-- secret -->",
   "see [r] <x>.</x>\n>[r]: https://evil.example",

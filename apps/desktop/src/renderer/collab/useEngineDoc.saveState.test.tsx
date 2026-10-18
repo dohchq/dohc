@@ -31,6 +31,10 @@ vi.mock("@dohc/ydoc-projection", async (importOriginal) => {
       if (projectionFails) throw new Error("projection failed");
       return actual.yDocToMarkdown(doc);
     },
+    yDocToArtifactMarkdown: (doc: Y.Doc) => {
+      if (projectionFails) throw new Error("projection failed");
+      return actual.yDocToArtifactMarkdown(doc);
+    },
   };
 });
 

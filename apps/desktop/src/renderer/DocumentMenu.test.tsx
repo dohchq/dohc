@@ -756,4 +756,19 @@ describe("DocumentMenu", () => {
     await act(async()=>{if(kind==='refusal')finish(null);else fail(Error('late'));await pending.catch(()=>{});});
     expect(screen.queryByText('Document not open')).toBeNull();expect(screen.queryByText("Couldn't copy")).toBeNull();
   });
+
+  it.each(['copy-markdown', 'export-markdown'])('finishes %s when the menu closes during serialization', async item => {
+    const user = userEvent.setup();
+    stubClipboard();
+    let finish!: (text: string) => void;
+    const pending = new Promise<string>(resolve => {finish = resolve;});
+    render(<DocumentMenu workspaceId="ws-1" suggestedName="Plan" getMarkdown={() => pending}/>);
+    await user.click(screen.getByTestId('document-menu-trigger'));
+    await user.click(screen.getByTestId(`document-menu-item-${item}`));
+    await user.keyboard('{Escape}');
+    await act(async () => {finish(MARKDOWN); await pending;});
+    if (item === 'copy-markdown') expect(writeText).toHaveBeenCalledWith(MARKDOWN);
+    else expect(exportDocumentFile).toHaveBeenCalledWith(expect.objectContaining({content: MARKDOWN}));
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
 });

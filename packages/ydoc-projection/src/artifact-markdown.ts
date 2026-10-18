@@ -2,6 +2,7 @@ import {exceedsLiveMarkdownLimit, exceedsUtf8Bytes} from '@dohc/live-session-con
 import {digest} from 'lib0/hash/sha256'
 import type * as Y from 'yjs'
 import {markdownToYDoc, yDocToMarkdown} from './import-export.js'
+import {canPreserveMarkdownSource} from './artifact-markdown-guard.js'
 
 export const SOURCE_META_KEYS = ['dohcMarkdownSource', 'dohcMarkdownSourceSha256', 'dohcMarkdownSourceProjectionSha256'] as const
 const utf8 = new TextEncoder()
@@ -71,8 +72,7 @@ function artifactMarkdown(doc: Y.Doc, proofs?: Map<string, true>): string {
   if (!SOURCE_META_KEYS.some(key => doc.getMap('meta').has(key))) return canonical
   const meta = doc.getMap('meta')
   const source = meta.get('dohcMarkdownSource')
-  // The journal import check alone does not prove the engine's inert-markup reading.
-  if (typeof source !== 'string' || source.includes('<') || source.includes('&')) return canonical
+  if (!canPreserveMarkdownSource(source)) return canonical
   if (!proofs) {
     const result = resolveMarkdownSource(doc, canonical)
     return result.kind === 'verified' ? result.markdown : canonical

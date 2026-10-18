@@ -105,6 +105,7 @@ describe("engine-mode DocumentMenu exports the live editor body, not stale props
   };
 
   beforeEach(() => {
+  vi.mocked(projectArtifactSource).mockImplementation(async doc => (await import('@dohc/ydoc-projection')).yDocToArtifactMarkdown(doc));
     engineDocState.available = true;
     engineDocState.doc = markdownToYDoc(LIVE_BODY);
     engineDocState.saveState = { kind: "saved-here" };
@@ -284,7 +285,17 @@ describe("engine-mode DocumentMenu exports the live editor body, not stale props
     const user=userEvent.setup();Object.defineProperty(navigator,'clipboard',{value:{writeText},configurable:true});render(<FileInspector workspaceId="ws-1" path="a.md"/>);await screen.findByTestId('editor-stub');
     await user.click(screen.getByTestId('document-menu-trigger'));await user.click(screen.getByTestId('document-menu-item-copy-markdown'));await waitFor(()=>expect(writeText).toHaveBeenCalledWith(canonical));
     await user.click(screen.getByTestId('document-menu-item-export-markdown'));await waitFor(()=>expect(bridgeMock.exportDocumentFile).toHaveBeenCalledWith(expect.objectContaining({content:canonical})));
-    expect(editorSerialize).not.toHaveBeenCalled();expect(projectArtifactSource).toHaveBeenCalledWith(doc);doc.destroy();
+    expect(editorSerialize).not.toHaveBeenCalled();expect(projectArtifactSource).not.toHaveBeenCalled();doc.destroy();
+  });
+
+  it.each(['without witness','worker error'])('Copy and Export use canonical output %s', async kind => {
+    const doc=markdownToYDoc('Body\n\n'); engineDocState.doc=doc;
+    if(kind==='worker error'){for(const key of ['dohcMarkdownSource','dohcMarkdownSourceSha256','dohcMarkdownSourceProjectionSha256']) doc.getMap('meta').set(key,'plain');}
+    vi.mocked(projectArtifactSource).mockRejectedValue(Error('worker failed'));
+    const user=userEvent.setup(); Object.defineProperty(navigator,'clipboard',{value:{writeText},configurable:true}); render(<FileInspector workspaceId="ws-1" path="a.md"/>); await screen.findByTestId('editor-stub');
+    await user.click(screen.getByTestId('document-menu-trigger'));await user.click(screen.getByTestId('document-menu-item-copy-markdown'));await waitFor(()=>expect(writeText).toHaveBeenCalledWith(yDocToMarkdown(doc)));
+    await user.click(screen.getByTestId('document-menu-item-export-markdown'));await waitFor(()=>expect(bridgeMock.exportDocumentFile).toHaveBeenCalledWith(expect.objectContaining({content:yDocToMarkdown(doc)})));
+    if(kind==='without witness') expect(projectArtifactSource).not.toHaveBeenCalled(); doc.destroy();
   });
 
   it('reuses worker output without serializing the editor for readiness',async()=>{

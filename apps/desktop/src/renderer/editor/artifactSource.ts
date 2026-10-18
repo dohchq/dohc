@@ -1,12 +1,15 @@
 import * as Y from 'yjs';
+import {canPreserveMarkdownSource} from '@dohc/ydoc-projection/artifact-markdown-guard';
 
 let worker: Worker | null = null;
+let idleTimer: ReturnType<typeof setTimeout> | undefined;
 let nextId = 0;
 const documents = new WeakMap<Y.Doc, {projection?: Promise<string>}>();
 type Request = {snapshot: Uint8Array; resolve: (text: string) => void; reject: (error: Error) => void; timer?: ReturnType<typeof setTimeout>};
 const requests = new Map<number, Request>();
 
 function stop(error: Error): void {
+  clearTimeout(idleTimer);
   worker?.terminate();
   worker = null;
   for (const request of requests.values()) {clearTimeout(request.timer); request.reject(error);}
@@ -16,6 +19,7 @@ function stop(error: Error): void {
 /** Only the worker may decide whether a retained witness is fresh and verified. */
 export function prepareArtifactSource(doc: Y.Doc): (() => void) | undefined {
   const meta = doc.getMap('meta');
+  if (!canPreserveMarkdownSource(meta.get('dohcMarkdownSource'))) return;
   if (!['dohcMarkdownSource', 'dohcMarkdownSourceSha256', 'dohcMarkdownSourceProjectionSha256']
     .every(key => typeof meta.get(key) === 'string')) return;
   let cancelled = false;
@@ -42,11 +46,13 @@ function startWorker(): Worker {
     if (!request) return;
     requests.delete(data.id); clearTimeout(request.timer);
     if (data.error) request.reject(new Error(data.error)); else request.resolve(data.markdown);
+    if (!requests.size) idleTimer = setTimeout(() => {worker?.terminate(); worker = null;}, 1000);
   };
   return started;
 }
 
 function send(id: number, request: Request): void {
+  clearTimeout(idleTimer);
   clearTimeout(request.timer);
   request.timer = setTimeout(() => {
     requests.delete(id);
@@ -64,6 +70,11 @@ function send(id: number, request: Request): void {
 
 /** A cold source proof must not parse a large outside file on the UI thread. */
 export function projectArtifactSource(doc: Y.Doc): Promise<string> {
+  const meta = doc.getMap('meta');
+  if (!canPreserveMarkdownSource(meta.get('dohcMarkdownSource'))
+    || !['dohcMarkdownSourceSha256', 'dohcMarkdownSourceProjectionSha256'].every(key => typeof meta.get(key) === 'string')) {
+    return import('./import-export').then(({yDocToMarkdown}) => yDocToMarkdown(doc));
+  }
   let document = documents.get(doc);
   if (document?.projection) return document.projection;
   worker ??= startWorker();

@@ -159,9 +159,10 @@ export function DocumentMenu(props: {
       action,
       attempt,
     );
-    if (!serialized || !actions.isCurrent(action) || !attempts.isCurrent(attempt)) return;
+    if (!serialized || !actions.isCurrent(action)) return;
     const markdown = serialized.markdown;
     if (markdown === null) {
+      if (!attempts.isCurrent(attempt)) return;
       showFeedback(
         "copy-markdown",
         REFUSAL_LABEL,
@@ -219,9 +220,10 @@ export function DocumentMenu(props: {
       action,
       attempt,
     );
-    if (!serialized || !actions.isCurrent(action) || !attempts.isCurrent(attempt)) return;
+    if (!serialized || !actions.isCurrent(action)) return;
     const documentMarkdown = serialized.markdown;
     if (documentMarkdown === null) {
+      if (!attempts.isCurrent(attempt)) return;
       // Before closing: the feedback replaces the item's label, so a refusal
       // shown into a closed menu is a refusal the user never sees — the
       // export would just appear to do nothing.

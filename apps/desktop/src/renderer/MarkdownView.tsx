@@ -20,6 +20,7 @@ import {
 } from "./ui/StateMark";
 import { LazySourceCodeEditor } from "./LazySourceCodeEditor";
 import { prepareArtifactSource, projectArtifactSource } from "./editor/artifactSource";
+import { canPreserveMarkdownSource } from "@dohc/ydoc-projection/artifact-markdown-guard";
 import type { PendingTextUndo } from "./fileEditorUndo";
 import {
   AUTOSAVE_DEBOUNCE_MS,
@@ -725,7 +726,14 @@ export function MarkdownView(props: {
 
   // Read the live Y.Doc at the action, while retaining the mounted-editor guard.
   const serializeEngineDraft = async (): Promise<string | null> => {
-    if (displayDoc) return wysiwygRef.current === null || displayDoc.isDestroyed ? null : projectArtifactSource(displayDoc);
+    if (displayDoc) {
+      if (wysiwygRef.current === null || displayDoc.isDestroyed) return null;
+      if (canPreserveMarkdownSource(displayDoc.getMap('meta').get('dohcMarkdownSource'))) {
+        try {return await projectArtifactSource(displayDoc);} catch { /* Canonical output needs no witness proof. */ }
+      }
+      const {yDocToMarkdown} = await loadImportExport();
+      return displayDoc.isDestroyed ? null : yDocToMarkdown(displayDoc);
+    }
     const editorBody = wysiwygRef.current?.getMarkdown();
     return mergeMarkdownEditorBody(latestDraft.current, editorBody ?? markdownEditorBody(props.body));
   };
@@ -1225,8 +1233,6 @@ export function MarkdownView(props: {
     const documentKey = props.documentKey;
     let cancelled = false;
     let serialize: ((doc: Y.Doc) => string | Promise<string>) | null = null;
-    let revision = 0;
-    let painted = 0;
     let inFlight = false;
     let trailing = false;
     let updateTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1235,14 +1241,12 @@ export function MarkdownView(props: {
       if (cancelled || !serialize) return;
       if (inFlight) {trailing = true; return;}
       inFlight = true;
-      const requested = ++revision;
       try {
         const markdown = await serialize(doc);
-        if (cancelled || requested <= painted) return;
-        painted = requested;
+        if (cancelled) return;
         setSourceProjection({ documentKey, doc, markdown });
       } catch (error) {
-        if (!cancelled && requested === revision) props.onButtonError?.(
+        if (!cancelled) props.onButtonError?.(
           'dohc could not open the Markdown source.', error, () => {void recompute();},
         );
       } finally {
@@ -1256,9 +1260,9 @@ export function MarkdownView(props: {
       void recompute();
     };
     void loadImportExport().then((mod) => {
-      serialize = (current) => current.getMap('meta').has('dohcMarkdownSource')
+      serialize = (current) => canPreserveMarkdownSource(current.getMap('meta').get('dohcMarkdownSource'))
         ? projectArtifactSource(current)
-        : mod.yDocToArtifactMarkdown(current);
+        : mod.yDocToMarkdown(current);
       if (updateTimer !== null) {
         clearTimeout(updateTimer);
         updateTimer = null;
@@ -1990,9 +1994,8 @@ export function MarkdownView(props: {
                 workspaceId: props.workspaceId,
                 reportError: props.onButtonError,
                 suggestedName: filenameStem(props.path),
-                // Always live, even in source view: the WYSIWYG editor stays
-                // MOUNTED (hidden) while source is shown, so its ref keeps
-                // serializing the current Y.Doc state at click time.
+                // Read the live Y.Doc at the action. The hidden mounted editor
+                // supplies the readiness guard while source view is shown.
                 getMarkdown: () => serializeEngineDraft(),
                 documentKey: props.documentKey,
               }}

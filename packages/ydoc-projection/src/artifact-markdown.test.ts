@@ -69,7 +69,7 @@ import {resolveMarkdownSource, createArtifactMarkdownProjector} from './artifact
 it.each(forgedSources)('keeps an engine-refused source inert: %s', text => {
  const doc=witnessed(text);const canonical=projection.yDocToMarkdown(doc);
  expect(resolveMarkdownSource(doc,canonical)).toEqual({kind:'verified',markdown:text});
- expect(output(doc)).toBe(canonical);doc.destroy();
+ expect(output(doc)).toBe(canonical);expect(createArtifactMarkdownProjector()(doc)).toBe(canonical);doc.destroy();
 })
 it('reuses bounded proofs across fresh documents, after recomputing both content hashes',()=>{
  const project=createArtifactMarkdownProjector();const parse=vi.spyOn(projection,'markdownToYDoc');
