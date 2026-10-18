@@ -175,11 +175,10 @@ describe("workspace authority owner", () => {
       return result;
     });
     await entered.promise;
-    const lease = test.owner.acquire("workspace");
-    lease.release();
+    const binding = test.owner.currentBinding("workspace");
     const retiring = retirement === "invalidate"
       ? test.owner.invalidate("workspace")
-      : test.owner.retireBinding(lease.binding, { removeBinding: () => test.replace(null) });
+      : test.owner.retireBinding(binding, { removeBinding: () => test.replace(null) });
     expect(test.disposed).toEqual([]);
     resume.resolve();
     await expect(running).resolves.toEqual({ rootPath: "real:alias" });
@@ -199,11 +198,10 @@ describe("workspace authority owner", () => {
       commit();
     });
     await entered.promise;
-    const lease = test.owner.acquire("workspace");
-    lease.release();
+    const binding = test.owner.currentBinding("workspace");
     const retiring = retirement === "invalidate"
       ? test.owner.invalidate("workspace")
-      : test.owner.retireBinding(lease.binding, { removeBinding: () => test.replace(null) });
+      : test.owner.retireBinding(binding, { removeBinding: () => test.replace(null) });
     resume.resolve();
     await expect(running).rejects.toThrow("This workspace was closed. Open it again.");
     await retiring;

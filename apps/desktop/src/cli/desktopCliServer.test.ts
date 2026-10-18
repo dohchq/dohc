@@ -817,12 +817,12 @@ describe("raw fileMove and fileDelete socket requests", () => {
     return { ...f, root, invoke };
   }
 
-  it.each(["fileDelete", "fileMove"] as const)("returns a completed %s with Undo when the post-work authority check throws", async verb => {
+  it.each(["fileDelete", "fileMove"] as const)("returns a completed %s with Undo after its workspace closes", async verb => {
     let drained: Promise<void> | undefined;
     const f = await setup(f => {
       f.dependencies.withPhysicalWorkspaceOperation = (id, work) => f.authorities.withOperation(id, async operation => {
         const result = await work(operation);
-        // Retire after preparation returns, before withOperation's assertCurrent.
+        // Retire after preparation returns, before completion runs.
         if (vi.mocked(f.capture.changePathsAs).mock.calls.length) drained = f.authorities.invalidate(id);
         return result;
       });
