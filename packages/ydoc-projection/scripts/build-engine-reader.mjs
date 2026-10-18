@@ -1,4 +1,5 @@
 import {createHash} from 'node:crypto';
+import {isBuiltin} from 'node:module';
 import {readFile, mkdir, writeFile} from 'node:fs/promises';
 import {dirname, join, relative, resolve} from 'node:path';
 import {fileURLToPath, pathToFileURL} from 'node:url';
@@ -8,45 +9,68 @@ import {build} from 'esbuild';
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const repoRoot = resolve(packageRoot, '../..');
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
-const forbidden = new Set(['net', 'http', 'https', 'dns', 'child_process', 'worker_threads']);
-const moduleName = specifier => specifier.replace(/^node:/, '').split('/')[0];
+const allowed = new Set(['crypto', 'node:crypto']);
+const loaders = new Set(['require', '__require']);
+const forbiddenMembers = new Set(['require', 'getBuiltinModule', 'createRequire', 'binding', '_linkedBinding', 'dlopen']);
 function checkSpecifier(specifier) {
-  if (forbidden.has(moduleName(specifier))) throw new Error(`Reader import refused: ${specifier}`);
+  if (!allowed.has(specifier)) throw new Error(`Reader import refused: ${specifier}`);
 }
 
 /** Inspect the final bundle too: a computed import cannot evade the resolver check. */
 export function checkReaderBundle(code) {
   const ast = parse(code, {sourceType: 'unambiguous', createImportExpressions: true});
-  const pending = [ast];
+  const pending = [[ast, undefined]];
+  const imports = new Set();
   while (pending.length) {
-    const node = pending.pop();
+    const [node, parent] = pending.pop();
     if (!node || typeof node !== 'object') continue;
     let source;
     if (node.type === 'ImportDeclaration' || node.type === 'ExportAllDeclaration'
       || node.type === 'ExportNamedDeclaration' || node.type === 'ImportExpression') source = node.source;
     if (node.type === 'CallExpression' && node.callee.type === 'Identifier'
-      && ['require', '__require'].includes(node.callee.name)) source = node.arguments[0];
+      && loaders.has(node.callee.name)) {
+      if (node.arguments.length !== 1 || node.arguments[0].type !== 'StringLiteral') {
+        throw new Error('Computed reader imports are refused.');
+      }
+      source = node.arguments[0];
+    }
+    if (node.type === 'Identifier' && node.name === 'require'
+      && !(parent?.type === 'CallExpression' && parent.callee === node
+        && parent.arguments.length === 1 && parent.arguments[0].type === 'StringLiteral')) {
+      throw new Error('Indirect reader require is refused.');
+    }
+    if (node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression') {
+      const name = node.computed
+        ? (node.property.type === 'TemplateLiteral' && node.property.expressions.length === 0
+          ? node.property.quasis[0].value.cooked : node.property.value)
+        : node.property.name;
+      if (forbiddenMembers.has(name)) throw new Error(`Reader loader member refused: ${name}`);
+    }
     if (source) {
       if (source.type !== 'StringLiteral') throw new Error('Computed reader imports are refused.');
       checkSpecifier(source.value);
+      imports.add(source.value);
     }
     for (const [key, value] of Object.entries(node)) {
       if (['loc', 'start', 'end', 'comments', 'tokens'].includes(key)) continue;
-      if (Array.isArray(value)) pending.push(...value);
-      else if (value && typeof value === 'object') pending.push(value);
+      if (Array.isArray(value)) pending.push(...value.map(child => [child, node]));
+      else if (value && typeof value === 'object') pending.push([value, node]);
     }
   }
+  return [...imports].sort();
 }
 
 /** Fixed entry point; destination belongs to preparation/tests, never to a document. */
 export async function buildEngineReader(destination = join(packageRoot, 'dist/engine-reader')) {
-  if (process.versions.node !== '24.16.0') throw new Error('Reader preparation requires pinned Node 24.16.0.');
   const result = await build({
     absWorkingDir: repoRoot, entryPoints: [join(packageRoot, 'src/engine-markdown-reader.ts')],
     outfile: 'reader.cjs', bundle: true, platform: 'node', target: 'node24', format: 'cjs',
     write: false, metafile: true, logLevel: 'silent',
     plugins: [{name: 'fixed-reader-imports', setup(build) {
-      build.onResolve({filter: /.*/}, args => {checkSpecifier(args.path); return undefined;});
+      build.onResolve({filter: /.*/}, args => {
+        if (isBuiltin(args.path) || args.path.startsWith('node:')) checkSpecifier(args.path);
+        return undefined;
+      });
     }}],
   });
   const output = result.outputFiles[0];
@@ -61,6 +85,7 @@ export async function buildEngineReader(destination = join(packageRoot, 'dist/en
     importerSha256: sourceHash('import-export.ts'), schemaSha256: sourceHash('dohc-markdown-extensions.ts'),
     lockSha256: hash(await readFile(join(repoRoot, 'pnpm-lock.yaml'))),
     runtime: {version: process.versions.node, platform: process.platform, arch: process.arch,
+      unicode: process.versions.unicode, icu: process.versions.icu,
       sha256: hash(await readFile(process.execPath))},
   };
   const manifest = {...identity, buildSha256: hash(JSON.stringify(identity)), sources};

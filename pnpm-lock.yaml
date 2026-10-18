@@ -907,6 +907,9 @@ importers:
         specifier: 13.6.30
         version: 13.6.30
     devDependencies:
+      '@babel/parser':
+        specifier: 7.29.8
+        version: 7.29.8
       '@types/node':
         specifier: ^24.13.3
         version: 24.13.3

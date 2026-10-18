@@ -10,7 +10,16 @@ import {resolveMarkdownSource} from './artifact-markdown.js'
 
 const policy = {maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000_000, maxDecodedPayloadByteVisits: 100_000_000,
   maxStructClientGroupVisits: 1_000_000, maxDeleteClientGroupVisits: 1_000_000, maxDeleteIntervalVisits: 1_000_000, maxIndexOperations: 10_000_000}
-const reader = createEngineMarkdownReader(policy)
+const bytesReader = createEngineMarkdownReader(policy)
+// Fixtures stay readable; production accepts bytes only.
+const reader = {
+  construct(input: Omit<Parameters<typeof bytesReader.construct>[0], 'source'> & {source: string}) {
+    return bytesReader.construct({...input, source: new TextEncoder().encode(input.source)})
+  },
+  prove(input: Omit<Parameters<typeof bytesReader.prove>[0], 'source'> & {source: string}) {
+    return bytesReader.prove({...input, source: new TextEncoder().encode(input.source)})
+  },
+}
 const document = {workspaceId: 'workspace', mainVersionId: 'main', objectId: 'object', lineageClaimId: 'lineage'}
 const context = {document, currentPath: 'note.md'}
 const sha = (text: string) => createHash('sha256').update(text).digest('hex')
@@ -39,6 +48,7 @@ it.each(rows)('constructs and replays the desktop reading: $name', row => {
       expect(Y.encodeStateVector(replay)).toEqual(result.stateVector)
       expect(result.canonical).toBe(yDocToMarkdown(imported))
       expect(result.sourceSha256).toBe(sha(row.source))
+      expect(result.sourceByteLength).toBe(new TextEncoder().encode(row.source).length)
       expect(replay.getMap('meta').get('dohcMarkdownSource')).toBe(row.source)
       expect(replay.getMap('meta').get('dohcMarkdownSourceSha256')).toBe(sha(row.source))
       expect(replay.getMap('meta').get('dohcMarkdownSourceProjectionSha256')).toBe(sha(result.canonical))
@@ -139,8 +149,8 @@ it('updates frontmatter styles and values without losing the existing body linea
 })
 
 it('checks bounds and well-formed source before decoding a checkpoint', () => {
-  for (const source of ['x'.repeat(2 * 1024 * 1024 + 1), '\ud800']) {
-    expect(reader.construct({...context, checkpoint: new Uint8Array([255]), source})).toMatchObject({kind: 'refused', reason: 'invalid-source'})
+  for (const source of [new Uint8Array(2 * 1024 * 1024 + 1), new Uint8Array([0xed, 0xa0, 0x80])]) {
+    expect(bytesReader.construct({...context, checkpoint: new Uint8Array([255]), source})).toMatchObject({kind: 'refused', reason: 'invalid-source'})
   }
 })
 
@@ -152,4 +162,82 @@ it('refuses malformed checkpoints and unknown public metadata', () => {
     expect(reader.construct({...context, checkpoint: Y.encodeStateAsUpdate(doc), source: '- parent\n  - other\n'}))
       .toMatchObject({kind: 'refused', reason: 'journal-refused'})
   } finally {doc.destroy()}
+})
+
+it.each(['- parent\n  - child\n', '---\nz: "kept"\na: one\n---\n\n- parent\n  - child\n', '---\r\na: one\r\n---\r\n\r\nBody\r\n'])('construct is idempotent for %j', source => {
+  const base = markdownToYDoc('Earlier')
+  try {
+    const first = reader.construct({...context, source, checkpoint: Y.encodeStateAsUpdate(base)})
+    expect(first.kind).toBe('accepted')
+    if (first.kind !== 'accepted') throw new Error(JSON.stringify(first))
+    Y.applyUpdate(base, first.delta)
+    const second = reader.construct({...context, source, checkpoint: Y.encodeStateAsUpdate(base)})
+    expect(second.kind).toBe('accepted')
+    if (second.kind !== 'accepted') throw new Error(JSON.stringify(second))
+    const decoded = Y.decodeUpdate(second.delta)
+    expect(decoded.structs).toHaveLength(0)
+    expect(decoded.ds.clients.size).toBe(0)
+  } finally {base.destroy()}
+})
+
+it('records only changed source-item keys, and only for kept frontmatter', () => {
+  const source = '---\nz: "kept"\na: old\n---\n\nBody', base = markdownToYDoc(source)
+  try {
+    const prefix = 'dohcFrontmatterSourceItem:'
+    const oldItem = base.getMap('meta')._map.get(prefix + 'z')!.id
+    const result = reader.construct({...context, source: source.replace('a: old', 'a: new'), checkpoint: Y.encodeStateAsUpdate(base)})
+    expect(result.kind).toBe('accepted')
+    if (result.kind !== 'accepted') throw new Error(JSON.stringify(result))
+    Y.applyUpdate(base, result.delta)
+    expect(base.getMap('meta')._map.get(prefix + 'z')!.id).toEqual(oldItem)
+    const canonical = reader.construct({...context, source: '---\na: new\nz: kept\n---\n\nBody', checkpoint: Y.encodeStateAsUpdate(base)})
+    expect(canonical.kind).toBe('accepted')
+    if (canonical.kind !== 'accepted') throw new Error(JSON.stringify(canonical))
+    Y.applyUpdate(base, canonical.delta)
+    expect([...base.getMap('meta').keys()].filter(key => key.startsWith(prefix))).toEqual([])
+  } finally {base.destroy()}
+})
+
+it.each(['A\n\nC', 'A\n\nB changed\n\nC'])('preserves the boundary block identities for %j', source => {
+  const base = markdownToYDoc('A\n\nB\n\nC')
+  try {
+    const body = base.getXmlFragment('body'), [a, b, c] = body.toArray()
+    const result = reader.construct({...context, source, checkpoint: Y.encodeStateAsUpdate(base)})
+    expect(result.kind).toBe('accepted')
+    if (result.kind !== 'accepted') throw new Error(JSON.stringify(result))
+    Y.applyUpdate(base, result.delta)
+    expect(body.get(0)).toBe(a)
+    expect(body.get(body.length - 1)).toBe(c)
+    if (body.length === 2) expect(b!._item!.deleted).toBe(true)
+    else expect((body.get(1) as Y.XmlElement).toString()).toContain('B changed')
+  } finally {base.destroy()}
+})
+
+it('never seeds a missing lineage', () => {
+  const empty = new Y.Doc(), missing = markdownToYDoc('Earlier')
+  missing.getMap('meta').delete('schemaVersion')
+  try {
+    for (const doc of [empty, missing]) {
+      expect(reader.construct({...context, source: 'Body', checkpoint: Y.encodeStateAsUpdate(doc)}))
+        .toEqual({kind: 'refused', reason: 'invalid-schema'})
+    }
+  } finally {empty.destroy(); missing.destroy()}
+})
+
+it('binds UTF-8 bytes without stripping a BOM or replacing invalid input', () => {
+  const base = markdownToYDoc('Earlier'), rawReader = createEngineMarkdownReader(policy)
+  try {
+    const checkpoint = Y.encodeStateAsUpdate(base), source = new TextEncoder().encode('\ufeff- parent\n  - child\n')
+    const result = rawReader.construct({...context, source: source, checkpoint})
+    expect(result.kind).toBe('accepted')
+    if (result.kind !== 'accepted') throw new Error(JSON.stringify(result))
+    expect(result.sourceSha256).toBe(createHash('sha256').update(source).digest('hex'))
+    Y.applyUpdate(base, result.delta)
+    expect(base.getMap('meta').get('dohcMarkdownSource')).toBe(new TextDecoder('utf-8', {ignoreBOM: true}).decode(source))
+    expect(rawReader.prove({...context, source: source, checkpoint: Y.encodeStateAsUpdate(base)}).kind).toBe('accepted')
+    for (const invalid of [new Uint8Array([0xff]), new Uint8Array([0xc0, 0xaf]), new Uint8Array([0xed, 0xa0, 0x80])]) {
+      expect(rawReader.construct({...context, source: invalid, checkpoint})).toEqual({kind: 'refused', reason: 'invalid-source'})
+      expect(rawReader.prove({...context, source: invalid, checkpoint})).toEqual({kind: 'refused', reason: 'invalid-source'})
+    }
+  } finally {base.destroy()}
 })

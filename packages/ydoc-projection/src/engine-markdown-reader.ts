@@ -4,7 +4,7 @@ import * as Y from 'yjs'
 import {readMarkdownSourceWitness} from './artifact-markdown.js'
 import {sameFrontmatterValue, FRONTMATTER_SOURCE_META_KEY, MARKDOWN_CRLF_META_KEY} from './frontmatter.js'
 import {recordFrontmatterSourceItems, writeFrontmatterMap} from './frontmatter-map.js'
-import {getDohcProseMirrorSchema, getDohcYDocFrontmatter, markdownToYDoc, yDocToMarkdown} from './import-export.js'
+import {DOHC_SCHEMA_VERSION, getDohcProseMirrorSchema, getDohcYDocFrontmatter, markdownToYDoc, yDocToMarkdown} from './import-export.js'
 import {createLiveMarkdownJournalValidator, type LiveMarkdownRegistrationInput} from './liveDocumentValidation.js'
 import type {OrderedLiveUpdateCutPolicy} from './orderedLiveUpdateCut.js'
 
@@ -17,7 +17,7 @@ const schema = getDohcProseMirrorSchema()
 const root = (doc: Y.Doc) => yXmlFragmentToProseMirrorRootNode(doc.getXmlFragment('body'), schema)
 
 /** source must be the engine's compared snapshot, never a value read from witness metadata. */
-export interface EngineMarkdownInput extends LiveMarkdownRegistrationInput {readonly source: string}
+export interface EngineMarkdownInput extends LiveMarkdownRegistrationInput {readonly source: Uint8Array}
 type Reason = 'invalid-source' | 'invalid-update' | 'invalid-schema' | 'witness-mismatch'
   | 'reading-mismatch' | 'capacity-refused' | 'journal-refused'
 type Refused = {readonly kind: 'refused'; readonly reason: Reason}
@@ -25,6 +25,7 @@ interface Proof {
   readonly kind: 'accepted'
   readonly canonical: string
   readonly sourceSha256: string
+  readonly sourceByteLength: number
   readonly projectionSha256: string
   readonly stateSha256: string
   readonly stateVector: Uint8Array
@@ -35,12 +36,16 @@ class Refusal extends Error {constructor(readonly reason: Reason) {super(reason)
 function requireReading(condition: boolean, reason: Reason): asserts condition {
   if (!condition) throw new Refusal(reason)
 }
-function checkInput(input: EngineMarkdownInput): void {
-  requireReading(typeof input.source === 'string' && input.source.isWellFormed()
-    && input.source.length <= MAX_SOURCE_BYTES && utf8.encode(input.source).length <= MAX_SOURCE_BYTES, 'invalid-source')
+function checkInput(input: EngineMarkdownInput): string {
+  requireReading(input.source instanceof Uint8Array && input.source.length <= MAX_SOURCE_BYTES, 'invalid-source')
+  let source: string
+  try {source = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(input.source)}
+  catch {throw new Refusal('invalid-source')}
   requireReading(input.checkpoint instanceof Uint8Array && input.checkpoint.length > 0
     && input.checkpoint.length <= MAX_UPDATE_BYTES, 'invalid-update')
+  return source
 }
+// ProseMirror drops hidden Yjs state; this comparison is sound only with the strict journal check afterward.
 function compareReadings(actual: Y.Doc, imported: Y.Doc): void {
   const actualRoot = root(actual), importedRoot = root(imported)
   actualRoot.check(); importedRoot.check()
@@ -49,6 +54,9 @@ function compareReadings(actual: Y.Doc, imported: Y.Doc): void {
 }
 function refused(error: unknown): Refused {
   return {kind: 'refused', reason: error instanceof Refusal ? error.reason : 'invalid-schema'}
+}
+function setIfChanged(meta: Y.Map<unknown>, key: string, value: unknown): void {
+  if (meta.get(key) !== value) meta.set(key, value)
 }
 
 /** Pure construction/reading proofs. Snapshot authority and the 50 KB admission cap belong to the engine. */
@@ -59,21 +67,24 @@ export function createEngineMarkdownReader(policy: OrderedLiveUpdateCutPolicy) {
     const result = journal({document: input.document, currentPath: input.currentPath,
       checkpoint: input.checkpoint, suffix: [], candidate: delta})
     requireReading(result.kind === 'accepted', 'journal-refused')
-    const sourceSha256 = textSha(input.source)
+    const sourceSha256 = sha(input.source)
     requireReading(result.evidence.projectedMarkdownSha256 === sourceSha256
-      && result.evidence.projectedMarkdownByteLength === utf8.encode(input.source).length, 'witness-mismatch')
-    return {kind: 'accepted', canonical, sourceSha256, projectionSha256: textSha(canonical),
+      && result.evidence.projectedMarkdownByteLength === input.source.length, 'witness-mismatch')
+    return {kind: 'accepted', canonical, sourceSha256, sourceByteLength: input.source.length, projectionSha256: textSha(canonical),
       stateSha256: result.evidence.stateUpdateSha256, stateVector: Y.encodeStateVector(doc)}
   }
   return {
     construct(input: EngineMarkdownInput): EngineMarkdownConstruction {
       let doc: Y.Doc | undefined, imported: Y.Doc | undefined
       try {
-        checkInput(input)
+        const source = checkInput(input)
         doc = new Y.Doc({gc: false})
         Y.applyUpdate(doc, input.checkpoint)
+        requireReading(doc.getMap('meta').get('schemaVersion') === DOHC_SCHEMA_VERSION, 'invalid-schema')
         const before = Y.encodeStateVector(doc)
-        imported = markdownToYDoc(input.source)
+        const updates: Uint8Array[] = []
+        doc.on('update', (update: Uint8Array) => updates.push(update))
+        imported = markdownToYDoc(source)
         const target = root(imported)
         target.check()
         const beforeRoot = root(doc), fragment = doc.getXmlFragment('body')
@@ -97,19 +108,18 @@ export function createEngineMarkdownReader(policy: OrderedLiveUpdateCutPolicy) {
           for (const key of frontmatter.keys()) if (!Object.hasOwn(sourceValues, key)) frontmatter.delete(key)
           writeFrontmatterMap(frontmatter, Object.fromEntries(Object.entries(sourceValues)
             .filter(([key, value]) => !Object.hasOwn(oldValues, key) || !sameFrontmatterValue(value, oldValues[key]))))
-          meta.set('schemaVersion', 1)
           for (const key of [FRONTMATTER_SOURCE_META_KEY, MARKDOWN_CRLF_META_KEY]) {
-            if (sourceMeta.has(key)) meta.set(key, sourceMeta.get(key))
+            if (sourceMeta.has(key)) setIfChanged(meta, key, sourceMeta.get(key))
             else meta.delete(key)
           }
           recordFrontmatterSourceItems(frontmatter, meta)
-          meta.set('dohcMarkdownSource', input.source)
-          meta.set('dohcMarkdownSourceSha256', textSha(input.source))
-          meta.set('dohcMarkdownSourceProjectionSha256', textSha(canonical))
+          setIfChanged(meta, 'dohcMarkdownSource', source)
+          setIfChanged(meta, 'dohcMarkdownSourceSha256', sha(input.source))
+          setIfChanged(meta, 'dohcMarkdownSourceProjectionSha256', textSha(canonical))
         })
         compareReadings(doc, imported)
-        requireReading(yDocToMarkdown(doc) === canonical, 'reading-mismatch')
-        const delta = Y.encodeStateAsUpdate(doc, before)
+        // Full-state encoding repeats historical deletes even for a no-op; keep only this construction's updates.
+        const delta = Y.diffUpdate(Y.mergeUpdates(updates), before)
         return {...validate(input, delta, doc, canonical), delta}
       } catch (error) {return refused(error)}
       finally {doc?.destroy(); imported?.destroy()}
@@ -117,16 +127,14 @@ export function createEngineMarkdownReader(policy: OrderedLiveUpdateCutPolicy) {
     prove(input: EngineMarkdownInput): EngineMarkdownProof {
       let doc: Y.Doc | undefined, imported: Y.Doc | undefined
       try {
-        checkInput(input)
+        const source = checkInput(input)
         doc = new Y.Doc({gc: false}); Y.applyUpdate(doc, input.checkpoint)
         const witness = readMarkdownSourceWitness(Object.fromEntries(doc.getMap('meta').entries()))
         requireReading(witness !== 'absent' && witness !== 'invalid', 'witness-mismatch')
+        requireReading(witness.source === source, 'witness-mismatch')
         const canonical = yDocToMarkdown(doc)
-        requireReading(witness.source === input.source
-          && witness.projectionSha === textSha(canonical), 'witness-mismatch')
-        imported = markdownToYDoc(input.source)
+        imported = markdownToYDoc(source)
         compareReadings(doc, imported)
-        requireReading(yDocToMarkdown(imported) === canonical, 'reading-mismatch')
         // A no-op candidate gives existing state the journal's strict, non-dropping check.
         return validate(input, new Uint8Array([0, 0]), doc, canonical)
       } catch (error) {return refused(error)}
