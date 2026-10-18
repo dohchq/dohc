@@ -7636,9 +7636,11 @@ export function createWorkspaceEngineCapture(
           } catch (error) {
             // A refused store was never opened, so nothing is pending in
             // it. Failing the stop here would block the move-aside rebuild,
-            // which closes the capture first.
-            const cancelled = captureWaitAbort.signal.aborted &&
-              error === captureWaitAbort.signal.reason;
+            // which closes the capture first. Quit abandons a store whose
+            // workspace never finished opening for the same reason.
+            const cancelled = (captureWaitAbort.signal.aborted &&
+              error === captureWaitAbort.signal.reason) ||
+              error instanceof EngineWorkspaceShuttingDownError;
             if (!cancelled && engineStoreRefusalOf(error) === null) throw error;
           }
         }

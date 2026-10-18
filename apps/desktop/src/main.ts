@@ -5666,7 +5666,12 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     updateAfterStartupFailure: () => updateAfterFailure("startup"),
     updateAfterWindowLoadFailure: () => updateAfterFailure("window-load"),
   },
-  launch: { finished: finishLaunch },
+  launch: {
+    finished: () => {
+      finishLaunch();
+      desktopEngine.launchSettled();
+    },
+  },
   beforeQuit: beforeQuitWithTypingRecovery,
   beforeQuitWithoutWindows: beforeQuitWithTypingRecovery,
   shutdown: {

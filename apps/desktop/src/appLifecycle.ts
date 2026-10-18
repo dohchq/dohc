@@ -1,5 +1,6 @@
 import { flushTypingCheckpointsSync } from "./workspaces/outageTypingRecovery";
 import { isAbsolute } from "node:path";
+import { DISPATCH_STOP_LIMIT_MS } from "./shutdownBudgets";
 import {
   classifyShareHandoffArguments,
   receiveShareHandoffArguments,
@@ -40,6 +41,13 @@ const UPDATE_START_FALLBACK_MS = 10_000;
 // window loaded, or when it quits cleanly first. A build that crashes or
 // exits sooner on every start builds up the launch count.
 export const LAUNCH_SETTLED_MS = 30_000;
+
+// Resolves when the work settles or the limit passes, whichever comes first.
+function settledWithin(work: Promise<void>, limitMs: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const limit = new Promise<void>((resolve) => { timer = setTimeout(resolve, limitMs); });
+  return Promise.race([work.catch(() => undefined), limit]).finally(() => clearTimeout(timer));
+}
 
 interface CliServer {
   close(): Promise<void>;
@@ -146,7 +154,7 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     shutdown.beginEngineShutdown();
     const searchStop = shutdown.stopSearch().catch(() => undefined);
     const sitePreviewStop = shutdown.stopSitePreviews();
-    const chatDispatchStop = services.dispatch.stop().catch(() => undefined);
+    const chatDispatchStop = settledWithin(services.dispatch.stop(), DISPATCH_STOP_LIMIT_MS);
     const cliServerStop = chatDispatchStop.then(() =>
       (cliServerStartup ?? Promise.resolve(cliServer))
         .then((server) => server?.close())

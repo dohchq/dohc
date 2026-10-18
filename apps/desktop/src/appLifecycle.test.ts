@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAppLifecycle, LAUNCH_SETTLED_MS } from "./appLifecycle";
 import { createExitRounds, createQuitGuard } from "./quitGuard";
-import { QUIT_ASK_TIMEOUT_MS, resolveShutdownDeadlineExitCode, WILL_QUIT_BUDGET_MS } from "./shutdownBudgets";
+import { DISPATCH_STOP_LIMIT_MS, QUIT_ASK_TIMEOUT_MS, resolveShutdownDeadlineExitCode, WILL_QUIT_BUDGET_MS } from "./shutdownBudgets";
 import { closeElectronApplication } from "../../../scripts/verification/close-electron.mjs";
 import { DESKTOP_CLOSE_GRACE_MS } from "../../../scripts/verification/desktop-close-policy.mjs";
 import { beginLaunch, finishLaunch, type MarkerFileSystem } from "./launch/launchMarker";
@@ -885,6 +885,23 @@ describe("desktop shutdown", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(f.dependencies.shutdown.closeWorkspaces).toHaveBeenCalledOnce();
     expect(f.app.exit).toHaveBeenCalledOnce();
+  });
+
+  it("stops waiting on a dispatch stop at its limit and still closes within the budget", async () => {
+    vi.useFakeTimers();
+    const f = fixture((d) => {
+      d.shutdown.budgetMs = WILL_QUIT_BUDGET_MS;
+      d.shutdown.deadlineExitCode = 1;
+      d.services.dispatch.stop = () => new Promise<void>(() => undefined);
+    });
+    await boot(f);
+    f.app.emit("will-quit", event());
+    await vi.advanceTimersByTimeAsync(DISPATCH_STOP_LIMIT_MS - 1);
+    expect(f.dependencies.shutdown.closeWorkspaces).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.log.slice(-4)).toEqual(["workspaces-close", "database-stop", "relay-close", "engine-stop"]);
+    expect(f.app.exit).toHaveBeenCalledExactlyOnceWith(0);
+    expect(DISPATCH_STOP_LIMIT_MS).toBeLessThan(WILL_QUIT_BUDGET_MS);
   });
 
   it("sends reports alongside teardown and exits only once both finish", async () => {

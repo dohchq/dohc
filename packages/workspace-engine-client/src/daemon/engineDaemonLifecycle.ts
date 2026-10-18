@@ -183,6 +183,11 @@ export interface EngineDaemonLifecycleOptions {
   // ever generated. Consumers use this to invalidate state that daemon
   // events would otherwise keep fresh (e.g. the history timeline).
   onLaunch?: () => void;
+  // Holds the first launch's background smoke until it settles: "skip" when
+  // a real workspace open already proved workspace work, "run" otherwise.
+  // The smoke takes the engine's one open lock, so starting it at the
+  // handshake slowed the first workspace open. Without this, it starts there.
+  startupSmoke?: Promise<"run" | "skip">;
 }
 
 export interface EngineBinaryPathOptions {
@@ -981,13 +986,22 @@ export class EngineDaemonLifecycle {
     );
   }
 
-  // The first launch's smoke checks workspace work after the handshake.
+  // The first launch's smoke checks workspace work after the handshake, or
+  // once `startupSmoke` asks for it.
   // Failures kill for replacement through the normal restart path.
   private async runDeferredSmoke(
     generation: number,
     client: EngineDaemonClient,
   ): Promise<void> {
     try {
+      if (this.options.startupSmoke) {
+        const stopped = new Promise<"skip">((resolve) => {
+          if (this.stopController.signal.aborted) resolve("skip");
+          this.stopController.signal.addEventListener("abort", () => resolve("skip"), { once: true });
+        });
+        const decision = await Promise.race([this.options.startupSmoke.catch((): "run" => "run"), stopped]);
+        if (decision === "skip" || !this.probedGenerationIsLive(generation, client)) return;
+      }
       await this.runSmoke(client);
     } catch (error) {
       // A generation that already exited, was replaced, or is stopping has

@@ -1790,6 +1790,55 @@ describe("Rust engine daemon lifecycle", () => {
     }
   });
 
+  // An unheld smoke has sent its open by the time a temp directory of our own
+  // has been made and removed: it starts with the same work, earlier.
+  async function smokeWouldHaveStarted(): Promise<void> {
+    rmSync(mkdtempSync(join(tmpdir(), "dohc-smoke-window-")), { recursive: true });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    for (let turn = 0; turn < 10; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  it.each(["run", "skip"] as const)("holds the first launch's smoke until it is told to %s", async (decision) => {
+    // The smoke takes the engine's one open lock. Sent at the handshake, it
+    // made the first workspace open wait behind it (#2187).
+    const client = new FakeClient(healthyPing);
+    const startupSmoke = Promise.withResolvers<"run" | "skip">();
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      launch: async () => client,
+      startupSmoke: startupSmoke.promise,
+    });
+    try {
+      await lifecycle.start();
+      await smokeWouldHaveStarted();
+      expect(client.requests).toEqual([]);
+      startupSmoke.resolve(decision);
+      if (decision === "run") {
+        await vi.waitFor(() => expect(client.requests.map((request) => request.method)).toEqual(
+          ["workspace.open", "versions.active", "workspace.close"]), WAIT);
+      } else {
+        await smokeWouldHaveStarted();
+        expect(client.requests).toEqual([]);
+      }
+    } finally {
+      await lifecycle.stop();
+    }
+  });
+
+  it("stops without waiting for a held smoke", async () => {
+    const client = new FakeClient(healthyPing);
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      launch: async () => client,
+      startupSmoke: new Promise<"run" | "skip">(() => undefined),
+    });
+    await lifecycle.start();
+    await smokeWouldHaveStarted();
+    await lifecycle.stop();
+    expect(client.closed).toBe(true);
+    expect(client.requests).toEqual([]);
+  });
+
   it("routes a background smoke failure through onFailure and the restart path", async () => {
     // The smoke's own rejection reaches onFailure unwrapped and non-terminal
     // — the same error the blocking smoke used to throw out of start(). The
