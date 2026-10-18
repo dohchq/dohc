@@ -1980,6 +1980,7 @@ export function MarkdownView(props: {
                     ? engine.saveError
                     : undefined
               }
+              onRetry={engine.retryReplacement ?? undefined}
             />
           }
           actions={

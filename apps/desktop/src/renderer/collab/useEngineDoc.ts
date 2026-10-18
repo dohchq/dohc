@@ -120,6 +120,9 @@ export type UseEngineDoc = {
   // The recovery row that read-only transition created, if it still exists.
   readOnlyDraftId: number | null;
   readOnlyCause: ReadOnlyTransitionCause | null;
+  // Try again for a history replacement that could not set the earlier edits
+  // aside. The editor stays frozen until it succeeds.
+  retryReplacement: (() => void) | null;
   // An open lost to a delete or move interval. This is not a terminal outcome:
   // the operation can still fail, so the caller stays read-only and retries.
   removalInProgress: EngineRemovalInProgress | null;
@@ -298,6 +301,7 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
   const readOnlyCause = !input.enabled
     ? input.accessEnded && history?.bound ? "access-ended" : history?.cause ?? null
     : readOnlyWhileEditing ? settled!.readOnlyTransition!.cause : null;
+  const retryReplacement = readOnlyWhileEditing ? settled!.readOnlyTransition!.retry ?? null : null;
   const permanentFailureWhileEditing =
     outcome?.kind === "bound" &&
     settled?.permanentFailure?.token === outcome.token;
@@ -335,6 +339,7 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     readOnlyWhileEditing,
     readOnlyDraftId,
     readOnlyCause,
+    retryReplacement,
     removalInProgress,
     artifactAssets,
     readArtifactAsset,

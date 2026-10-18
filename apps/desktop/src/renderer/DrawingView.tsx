@@ -296,6 +296,7 @@ export function DrawingView({
             state={drawingChipState}
             shown={drawingShown}
             title={typeof drawingChipState !== "string" && drawingChipState.kind === "error" && engine.saveError ? engine.saveError : undefined}
+            onRetry={engine.retryReplacement ?? undefined}
           />
         }
       />

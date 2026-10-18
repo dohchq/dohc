@@ -318,8 +318,14 @@ export type EngineDocLeaseSnapshot = {
     draftId: number | null;
     cause: DocumentGoneCause;
   } | null;
-  // The draft this transition set aside, when it set one aside.
-  readOnlyTransition: { token: number; cause: ReadOnlyTransitionCause; draftId: number | null } | null;
+  // The draft this transition set aside, when it set one aside. A failed
+  // history replacement keeps its Try again here for the frozen editor.
+  readOnlyTransition: {
+    token: number;
+    cause: ReadOnlyTransitionCause;
+    draftId: number | null;
+    retry?: () => void;
+  } | null;
   permanentFailure: { token: number } | null;
   sceneRecoveryAssets: {
     token: number;
@@ -433,16 +439,28 @@ function createEngineDocSession(
   let pendingSavedSeq: number | null = null;
   let replacementPending = false;
   let replacementSaveState: EngineYDocSaveStateEvent | null = null;
-  // The replacement in progress: the draft holding the retired mirror's
-  // edits, whether storage kept it, and whether it follows a refusal main
-  // reported. Main announces that replacement right after the refusal.
+  // The replacement in progress: the mirror it retires, the draft holding
+  // that mirror's edits, and whether it follows a refusal main reported
+  // against that mirror. Main announces that replacement right after the
+  // refusal.
+  let replacedDoc: Y.Doc | null = null;
   let replacedDraftId: number | null = null;
-  let replacedDraftUnstored = false;
   let replacementFailed = false;
-  let lastEventRefused = false;
+  let refusedDoc: Y.Doc | null = null;
   let replacementAfterRefusal = false;
+  const replacedDraftUnstored = (): boolean =>
+    replacedDraftId !== null && orphanedDraftStorageRefused(path, replacedDraftId);
   let pendingSavedState: SaveState = SAVED_HERE;
-  const retiredDraftObservers = new Map<Y.Doc, () => void>();
+  // One draft per retired mirror, kept across Try again. Its revision orders
+  // the async refinements of every attempt, so an older one cannot overwrite
+  // newer text.
+  type RetiredDraft = {
+    draftId: number | null;
+    revision: number;
+    projection: Promise<void>;
+    detach: () => void;
+  };
+  const retiredDrafts = new Map<Y.Doc, RetiredDraft>();
   let lifecycle: Promise<void> = Promise.resolve();
   let disposePromise: Promise<void> | null = null;
   let closeBarrierPromise: Promise<void> | null = null;
@@ -951,16 +969,17 @@ function createEngineDocSession(
     writesRefused.current = true;
     if (disposed) return;
     replacementFailed = true;
+    const tryAgain = (): void => {
+      if (!disposed) void retry().catch(() => undefined);
+    };
     reportDocumentReplacement(workspaceId, path, replacedDraftId !== null, {
-      setAsideFailed: replacedDraftUnstored,
+      setAsideFailed: replacedDraftUnstored(),
       cause: error,
-      retry: () => {
-        if (!disposed) void retry().catch(() => undefined);
-      },
+      retry: tryAgain,
     });
     publish((current) => ({
       ...current,
-      readOnlyTransition: { token, cause: "lineage-failure", draftId: null },
+      readOnlyTransition: { token, cause: "lineage-failure", draftId: null, retry: tryAgain },
     }));
     const bound = retiredBinding ?? binding;
     if (bound) {
@@ -974,7 +993,7 @@ function createEngineDocSession(
 
   const onSaveState = (event: EngineYDocSaveStateEvent): void => {
     if (disposed || event.sessionId !== sessionId) return;
-    lastEventRefused = event.editRefusal !== undefined;
+    refusedDoc = event.editRefusal !== undefined ? (binding?.doc ?? null) : null;
     if(event.typingUnresolved !== undefined) typingUnresolved=event.typingUnresolved;
     if (event.access === "deleted" || event.access === "object-changed") {
       pendingSavedSeq = null;
@@ -1083,9 +1102,15 @@ function createEngineDocSession(
     const retiredRecoverySlot = recovery;
     // A deletion (or other capture) already owns a draft for this mirror —
     // the retired preserve refines that row instead of adding a sibling.
-    let draftId: number | null = retiredRecoverySlot.draftId;
-    let retiredRecoveryRevision = 0;
-    let projectionQueue: Promise<void> = Promise.resolve();
+    // Try again reuses the draft an earlier attempt made.
+    const earlier = retiredDrafts.get(retired);
+    earlier?.detach();
+    const retiredDraft: RetiredDraft = earlier ?? {
+      draftId: retiredRecoverySlot.draftId,
+      revision: 0,
+      projection: Promise.resolve(),
+      detach: () => undefined,
+    };
     const activeBinding = binding;
     const retiredAssets = activeBinding
       ? [...activeBinding.artifactAssets]
@@ -1125,13 +1150,13 @@ function createEngineDocSession(
     }
     const persist = (): void => {
       const bytes = Y.encodeStateAsUpdate(retired);
+      const revision = ++retiredDraft.revision;
       if (documentKind === "scene") {
         const publishesRecoveryStatus = retiredRecoverySlot === recovery;
-        const revision = ++retiredRecoveryRevision;
         const statusRevision = ++recoveryStatusRevision;
         const sceneRecovery = prepareSceneRecovery(bytes, retiredAuthority);
-        if (draftId === null) {
-          draftId = captureOrphanedDraft(
+        if (retiredDraft.draftId === null) {
+          retiredDraft.draftId = captureOrphanedDraft(
             workspaceId,
             path,
             sceneRecovery.immediateText,
@@ -1141,11 +1166,13 @@ function createEngineDocSession(
           replaceOrphanedDraft(
             workspaceId,
             path,
-            draftId,
+            retiredDraft.draftId,
             sceneRecovery.immediateText,
             recoveryIdentity(bytes, retiredAuthority?.objectId ?? null),
           );
         }
+        const draftId = retiredDraft.draftId;
+        if (replacedDoc === retired) replacedDraftId = draftId;
         if (publishesRecoveryStatus) {
           setSceneRecoveryAssets(
             sceneRecovery.requiredAssetCount === 0
@@ -1164,14 +1191,13 @@ function createEngineDocSession(
           retiredRecoverySlot.snapshotBytes = bytes;
           retiredRecoverySlot.draftId = draftId;
         }
-        const capturedDraftId = draftId;
         void sceneRecovery.completed
           .then((recovered) => {
-            if (revision !== retiredRecoveryRevision) return;
+            if (revision !== retiredDraft.revision) return;
             replaceOrphanedDraft(
               workspaceId,
               path,
-              capturedDraftId,
+              draftId,
               recovered.text,
             );
             if (
@@ -1198,11 +1224,13 @@ function createEngineDocSession(
         return;
       }
       const crude = durableMarkdownFromSnapshot(retired, bytes);
-      if (draftId === null) {
-        draftId = captureOrphanedDraft(workspaceId, path, crude, recoveryIdentity(bytes, retiredAuthority?.objectId ?? null));
+      if (retiredDraft.draftId === null) {
+        retiredDraft.draftId = captureOrphanedDraft(workspaceId, path, crude, recoveryIdentity(bytes, retiredAuthority?.objectId ?? null));
       } else {
-        replaceOrphanedDraft(workspaceId, path, draftId, crude, recoveryIdentity(bytes, retiredAuthority?.objectId ?? null));
+        replaceOrphanedDraft(workspaceId, path, retiredDraft.draftId, crude, recoveryIdentity(bytes, retiredAuthority?.objectId ?? null));
       }
+      const draftId = retiredDraft.draftId;
+      if (replacedDoc === retired) replacedDraftId = draftId;
       if (retiredRecoverySlot === recovery) {
         // The slot must know about this draft and snapshot: a deletion or
         // read-only push arriving after the preserve refines this row
@@ -1210,14 +1238,14 @@ function createEngineDocSession(
         retiredRecoverySlot.snapshotBytes = bytes;
         retiredRecoverySlot.draftId = draftId;
       }
-      const capturedDraftId = draftId;
-      projectionQueue = projectionQueue
+      retiredDraft.projection = retiredDraft.projection
         .then(async () => {
           const markdown = await markdownFromSnapshot(bytes);
+          if (revision !== retiredDraft.revision) return;
           replaceOrphanedDraft(
             workspaceId,
             path,
-            capturedDraftId,
+            draftId,
             markdown,
           );
         })
@@ -1228,21 +1256,27 @@ function createEngineDocSession(
           );
         });
     };
+    replacedDoc = retired;
+    replacedDraftId = retiredDraft.draftId;
     // A dirty mirror may contain the update main refused when replacement
-    // began. Persist it synchronously before acknowledging. If a transaction
-    // already in the editor lands before React unmounts the retired doc, the
-    // observer refreshes that same durable draft.
-    if ((saveStateRef.current.kind !== "saved-here" && saveStateRef.current.kind !== "unknown") || deliveryPending) persist();
-    retiredDraftObservers.get(retired)?.();
+    // began. Persist it synchronously before acknowledging, and again for
+    // Try again after storage refused it. If a transaction already in the
+    // editor lands before React unmounts the retired doc, the observer
+    // refreshes that same durable draft.
+    if ((saveStateRef.current.kind !== "saved-here" && saveStateRef.current.kind !== "unknown") || deliveryPending || replacedDraftUnstored()) persist();
     const onRetiredUpdate = () => persist();
     retired.on("update", onRetiredUpdate);
-    retiredDraftObservers.set(retired, () => retired.off("update", onRetiredUpdate));
-    replacedDraftId = draftId;
-    replacedDraftUnstored = draftId !== null && orphanedDraftStorageRefused(path, draftId);
-    // The retired editor stays until storage keeps its edits, and the winner
-    // waits for Try again.
-    if (replacedDraftUnstored) throw new Error("Storage refused the earlier edits.");
+    retiredDraft.detach = () => retired.off("update", onRetiredUpdate);
+    retiredDrafts.set(retired, retiredDraft);
+    assertRetiredDocumentStored();
     setOutcome(null);
+  };
+
+  // The retired editor stays until storage keeps its edits, and the winner
+  // waits for Try again. Checked again right before the acknowledgement,
+  // because a late edit can reach a draft that storage refuses.
+  const assertRetiredDocumentStored = (): void => {
+    if (replacedDraftUnstored()) throw new Error("Storage refused the earlier edits.");
   };
 
   const destroyBinding = async (): Promise<void> => {
@@ -1279,9 +1313,10 @@ function createEngineDocSession(
               if (replacementPending) return;
               replacementPending = true;
               replacementSaveState = null;
-              replacementAfterRefusal = lastEventRefused;
+              replacementAfterRefusal = refusedDoc !== null && refusedDoc === binding?.doc;
             },
             onDocumentReplacing: preserveRetiredDocument,
+            beforeReplacementAcknowledged: assertRetiredDocumentStored,
             onLineageReplacementFailure: captureLineageReplacementFailure,
           });
           binding = bound;
@@ -1334,8 +1369,8 @@ function createEngineDocSession(
             // A refusal main reported already has its own notice.
             const setAside = replacedDraftId !== null && !replacementAfterRefusal;
             if (setAside || replacementFailed) reportDocumentReplacement(workspaceId, path, setAside, null);
+            replacedDoc = null;
             replacedDraftId = null;
-            replacedDraftUnstored = false;
             replacementFailed = false;
             // The losing slot owns its recovery draft and any pending image
             // reads. The winner starts a fresh slot so later delete/unmount
@@ -1394,8 +1429,8 @@ function createEngineDocSession(
       unsubscribeSaveState = null;
       detachSaveObserver?.();
       detachSaveObserver = null;
-      for (const detach of retiredDraftObservers.values()) detach();
-      retiredDraftObservers.clear();
+      for (const retired of retiredDrafts.values()) retired.detach();
+      retiredDrafts.clear();
       const immediateDestroy = binding ? destroyBinding() : null;
       closeBarrierPromise = immediateDestroy
         ? immediateDestroy

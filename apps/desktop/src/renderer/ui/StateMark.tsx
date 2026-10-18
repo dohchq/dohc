@@ -1,6 +1,7 @@
 import { Clock, Lock, TriangleAlert } from "lucide-react";
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { SaveState } from "@dohc/workspace-contracts/save-state";
+import { SecondaryButton } from "./controls";
 import { useShownAfter } from "./useShownAfter";
 
 // Save facts and access/view facts share this presentation map.
@@ -188,7 +189,8 @@ function Mark(props: { kind: StateMarkKind }) {
  * saving or saved-to-host chip for screen readers only: those pass on their
  * own, so typing never changes what the row draws. Words appear when the
  * file is held, a pending share has lasted (and then stay while the person
- * keeps typing), or the state needs the person. */
+ * keeps typing), or the state needs the person. `onRetry` puts Try again
+ * beside the chip, for a state the person can retry from the editor. */
 export function StateMark(props: {
   state: string | SaveState;
   shown: SaveStateKey | AccessStateKey | SaveState;
@@ -197,6 +199,7 @@ export function StateMark(props: {
   className?: string;
   truncate?: boolean;
   quietWhenCalm?: boolean;
+  onRetry?: () => void;
 }) {
   const storedKey = typeof props.shown === "string" ? props.shown : saveStatePresentationKey(props.shown);
   const quiet = props.quietWhenCalm === true;
@@ -292,10 +295,15 @@ export function StateMark(props: {
       )}
     </span>
   );
-  if (!props.truncate) return chip;
+  const retry = props.onRetry ? (
+    <SecondaryButton size="compact" data-testid={`${props.testId}-retry`} onClick={props.onRetry}>
+      Try again
+    </SecondaryButton>
+  ) : null;
+  if (!props.truncate) return <>{chip}{retry}</>;
   // The tooltip sits beside the chip, not in it, so the chip's text stays its
   // label while the tooltip is open.
-  return (
+  const explained = (
     <span
       className="inline-flex min-w-0 max-w-full"
       onMouseEnter={() => setOpen(true)}
@@ -317,6 +325,7 @@ export function StateMark(props: {
       ) : null}
     </span>
   );
+  return <>{explained}{retry}</>;
 }
 
 // Between the chip and its tooltip, and between the tooltip and the window's edge.

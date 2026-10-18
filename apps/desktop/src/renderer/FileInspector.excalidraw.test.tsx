@@ -1033,6 +1033,36 @@ describe("FileInspector Excalidraw view", () => {
     );
   });
 
+  it("offers Try again on the frozen drawing when storage refuses its earlier edits", async () => {
+    const scene = new Y.Doc();
+    declareSceneRoots(scene);
+    const bridge = bridgeFor(drawing("engine"), scene);
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(<FileInspector workspaceId="ws-1" path="drawing.excalidraw" />);
+    await screen.findByTestId("mock-excalidraw-canvas");
+    const retired = (canvas.props as unknown as ExcalidrawCanvasProps).sceneDoc!;
+    act(() =>
+      insertElementRevision(retired, {
+        id: "shape-1", type: "rectangle", version: 1, versionNonce: 1, isDeleted: false, index: "a0",
+      }),
+    );
+    await waitFor(() => expect(bridge.applyEngineYDocUpdate).toHaveBeenCalledOnce());
+
+    const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
+    });
+    const winner = new Y.Doc();
+    declareSceneRoots(winner);
+    act(() => bridge.emitLineageReplacement(Y.encodeStateAsUpdate(winner)));
+    const retry = await screen.findByTestId("drawing-save-state-retry");
+    expect(bridge.acknowledgeEngineYDocLineageReplacement).not.toHaveBeenCalled();
+
+    setItem.mockRestore();
+    fireEvent.click(retry);
+    await waitFor(() => expect(bridge.acknowledgeEngineYDocLineageReplacement).toHaveBeenCalledOnce());
+    await waitFor(() => expect(screen.queryByTestId("drawing-save-state-retry")).toBeNull());
+  });
+
   it("keeps a truncated drawing non-writable while its scene opens", async () => {
     const bridge = bridgeFor('{"type":"excalidraw","elements":[');
     bridge.readWorkspaceText = vi.fn(async () => ({

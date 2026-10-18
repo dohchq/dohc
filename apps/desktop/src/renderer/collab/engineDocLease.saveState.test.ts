@@ -20,6 +20,8 @@ import {
 const projectionGate = vi.hoisted(() => ({
   pending: null as Promise<void> | null,
   completed: 0,
+  // When set, each projection waits until the test releases it.
+  held: null as Array<{ markdown: string; release: () => void }> | null,
 }));
 
 vi.mock("@dohc/ydoc-projection", async (importOriginal) => {
@@ -30,6 +32,14 @@ vi.mock("@dohc/ydoc-projection", async (importOriginal) => {
     ...actual,
     yDocToArtifactMarkdown(doc: Y.Doc) {
       const markdown = actual.yDocToArtifactMarkdown(doc);
+      const held = projectionGate.held;
+      if (held) {
+        return new Promise<void>((release) => held.push({ markdown, release }))
+          .then(() => {
+            projectionGate.completed += 1;
+            return `${markdown} [projected]`;
+          });
+      }
       return (
         projectionGate.pending?.then(() => {
           projectionGate.completed += 1;
@@ -103,6 +113,7 @@ beforeEach(() => {
   resetOrphanedDrafts();
   projectionGate.pending = null;
   projectionGate.completed = 0;
+  projectionGate.held = null;
 });
 
 it.each([false, true])("flushes and closes Stop's draft before the request, then reopens it (waiting=%s)", async waiting => {
@@ -168,6 +179,9 @@ it("refuses a superseded Stop while the next transition still runs",async () => 
 });
 
 afterEach(async () => {
+  const held = projectionGate.held;
+  projectionGate.held = null;
+  for (const projection of held ?? []) projection.release();
   cleanup();
   retained?.release();
   await disposeEngineDocLeasesForTests();
@@ -253,6 +267,34 @@ it("persists a late edit on the losing mirror during replacement", async () => {
   await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
   expect(harness.applied).toHaveLength(0);
   expect(retained.snapshot.outcome?.kind).toBe("bound");
+});
+
+it("keeps the losing mirror when storage refuses its late edit, and Try again installs the winner", async () => {
+  const notices = observeReplacementNotices();
+  await retainBound();
+  const losingDoc = retained.boundDoc();
+
+  // Clean when replacement starts, so nothing is set aside until the late edit.
+  harness.emitLineageReplacement("winner");
+  const setItem = refuseDraftStorage();
+  act(() => {
+    const text = losingDoc.getText("plainText");
+    text.insert(text.length, "!");
+  });
+
+  await waitFor(() => expect(retained.snapshot.readOnlyTransition?.cause).toBe("lineage-failure"));
+  expect(harness.acknowledgedGenerations).toEqual([]);
+  expect(retained.boundDoc()).toBe(losingDoc);
+  expect(drafts.result.current.map((draft) => draft.text)).toEqual(["seed!"]);
+  expect(storedDraftTexts()).toEqual([]);
+  const failure = notices.reports().at(-1)!;
+  expect(failure).toMatchObject({ message: REPLACED_DOCUMENT_UNSAVED, retry: expect.any(Function) });
+
+  setItem.mockRestore();
+  act(() => failure.retry!());
+  await waitFor(() => expect(retained.boundDoc().getText("plainText").toString()).toBe("winner"));
+  expect(harness.acknowledgedGenerations).toEqual([2]);
+  expect(storedDraftTexts()).toEqual(["seed!"]);
 });
 
 it("binds a winning lineage while the deleted path stays deleted", async () => {
@@ -484,6 +526,87 @@ it("keeps the retired editor frozen while storage refuses its edits, and Try aga
   act(() => editDocument());
   await flushLocalBatch();
   expect(harness.applied).toHaveLength(2);
+});
+
+it("keeps the newest retired text when an earlier attempt's projection finishes last", async () => {
+  await retainBound();
+  const losingDoc = retained.boundDoc();
+  act(() => editDocument());
+  await flushLocalBatch();
+  projectionGate.held = [];
+  const setItem = refuseDraftStorage();
+  harness.emitLineageReplacement("winner");
+  await waitFor(() => expect(retained.snapshot.readOnlyTransition?.retry).toBeTypeOf("function"));
+  const retry = retained.snapshot.readOnlyTransition!.retry!;
+  // Typed into the frozen editor after the failed attempt.
+  act(() => editDocument());
+
+  setItem.mockRestore();
+  act(() => retry());
+  await waitFor(() => expect(retained.boundDoc().getText("plainText").toString()).toBe("winner"));
+  // A late edit on the retired mirror after the winner installed.
+  act(() => {
+    const text = losingDoc.getText("plainText");
+    text.insert(text.length, "!");
+  });
+
+  // Each attempt and edit projects once, and so does the recovery slot's own
+  // refresh. Release the newest text first, so an older projection that is
+  // still pending finishes last.
+  const held = projectionGate.held;
+  for (let released = 0; released < 5; released += 1) {
+    await waitFor(() => expect(held.length).toBeGreaterThan(0));
+    const newest = held.reduce((best, entry) => entry.markdown.length > best.markdown.length ? entry : best);
+    held.splice(held.indexOf(newest), 1);
+    newest.release();
+  }
+  await waitFor(() => expect(projectionGate.completed).toBe(5));
+  const newestText = `${losingDoc.getText("plainText").toString()} [projected]`;
+  expect(losingDoc.getText("plainText").toString()).toBe("seed!!!");
+  await waitFor(() => expect(drafts.result.current.map((draft) => draft.text)).toEqual([newestText]));
+  expect(storedDraftTexts()).toEqual([newestText]);
+});
+
+it("shows the success notice when an unrelated refusal came before an earlier history", async () => {
+  const notices = observeReplacementNotices();
+  await retainBound();
+  act(() => editDocument());
+  await flushLocalBatch();
+  // This refusal belongs to the first history, and its replacement.
+  harness.emitEditRefusal("dohc could not save an edit.", 1);
+  harness.emitLineageReplacement("winner");
+  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
+  expect(notices.reports()).toEqual([]);
+
+  act(() => editDocument());
+  await flushLocalBatch();
+  harness.emitLineageReplacement("final", [], 3);
+  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2, 3]));
+  expect(notices.reports()).toEqual([expect.objectContaining({ tone: "success", message: REPLACED_DOCUMENT_SAVED })]);
+});
+
+it("keeps Try again on the frozen editor when a retry fails, then installs the winner", async () => {
+  await retainBound();
+  const losingDoc = retained.boundDoc();
+  act(() => editDocument());
+  await flushLocalBatch();
+  const setItem = refuseDraftStorage();
+  harness.emitLineageReplacement("winner");
+  await waitFor(() => expect(retained.snapshot.readOnlyTransition?.cause).toBe("lineage-failure"));
+  const first = retained.snapshot.readOnlyTransition!.retry!;
+
+  // Try again while storage still refuses: still frozen, with a new Try again.
+  act(() => first());
+  await waitFor(() => expect(retained.snapshot.readOnlyTransition?.retry).not.toBe(first));
+  expect(retained.boundDoc()).toBe(losingDoc);
+  expect(harness.acknowledgedGenerations).toEqual([]);
+
+  setItem.mockRestore();
+  act(() => retained.snapshot.readOnlyTransition!.retry!());
+  await waitFor(() => expect(retained.boundDoc().getText("plainText").toString()).toBe("winner"));
+  expect(retained.snapshot.readOnlyTransition).toBeNull();
+  expect(harness.acknowledgedGenerations).toEqual([2]);
+  expect(storedDraftTexts()).toEqual(["seed!"]);
 });
 
 it("keeps the earlier edits in Notices and withdraws Try again when the frozen tab closes", async () => {

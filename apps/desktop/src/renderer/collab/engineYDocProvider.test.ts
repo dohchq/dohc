@@ -1307,6 +1307,64 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     await binding.destroy();
   });
 
+  it("installs a newer replacement queued behind an older one that fails", async () => {
+    const mock = mockTransport(["Losing root."]);
+    mock.releaseReplacement();
+    let failOlder!: (error: Error) => void;
+    const olderPreservation = new Promise<void>((_resolve, reject) => {
+      failOlder = reject;
+    });
+    let preservations = 0;
+    const binding = await bindEngineYDoc(mock.transport, undefined, {
+      onDocumentReplacing: () => (preservations++ === 0 ? olderPreservation : undefined),
+      onLineageReplacementFailure: vi.fn(),
+    });
+    const replace = (text: string, lineageGeneration: number) => {
+      const winner = new Y.Doc();
+      typeIntoBody(winner, text);
+      return mock.replaceLineage({
+        update: Y.encodeStateAsUpdate(winner), recoveredPaths: [], artifactAssets: [], lineageGeneration,
+      });
+    };
+
+    const older = replace("Older winner.", 2);
+    const newer = replace("Newer winner.", 3);
+    failOlder(new Error("storage refused"));
+    await expect(older).rejects.toThrow("storage refused");
+    await newer;
+    expect(mock.acknowledgedGenerations).toEqual([3]);
+    expect(bodyText(binding.doc!)).toContain("Newer winner.");
+    await binding.destroy();
+  });
+
+  it("does not acknowledge when the check right before it refuses", async () => {
+    const mock = mockTransport(["Losing root."]);
+    mock.releaseReplacement();
+    let stored = false;
+    const retries: Array<() => Promise<void>> = [];
+    const binding = await bindEngineYDoc(mock.transport, undefined, {
+      beforeReplacementAcknowledged: () => {
+        if (!stored) throw new Error("storage refused");
+      },
+      onLineageReplacementFailure: (_error, _retired, retry) => retries.push(retry),
+    });
+    const losingDoc = binding.doc!;
+    const winner = new Y.Doc();
+    typeIntoBody(winner, "Winning root.");
+
+    await expect(mock.replaceLineage({
+      update: Y.encodeStateAsUpdate(winner), recoveredPaths: [], artifactAssets: [], lineageGeneration: 2,
+    })).rejects.toThrow("storage refused");
+    expect(mock.acknowledgedGenerations).toEqual([]);
+    expect(binding.doc).toBe(losingDoc);
+
+    stored = true;
+    await retries[0]!();
+    expect(mock.acknowledgedGenerations).toEqual([2]);
+    expect(bodyText(binding.doc!)).toContain("Winning root.");
+    await binding.destroy();
+  });
+
   it("serializes consecutive lineage replacements", async () => {
     const mock = mockTransport(["Losing root."]);
     const binding = await bindEngineYDoc(mock.transport);
