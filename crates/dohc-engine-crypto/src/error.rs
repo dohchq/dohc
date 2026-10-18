@@ -50,6 +50,14 @@ pub enum CryptoError {
     /// path where TS applies the same strict guard.
     #[error("a base64 field is invalid")]
     InvalidBase64,
+
+    /// The workspace's volume gave the new key file ACL entries, as a network
+    /// file system can apply its server's, so the key could not be kept
+    /// private. No key was written.
+    #[error(
+        "this volume adds sharing permissions to new files, so dohc can't keep this file private"
+    )]
+    VolumeSharesNewFiles,
 }
 
 impl CryptoError {
@@ -63,6 +71,7 @@ impl CryptoError {
             CryptoError::InvalidTagLength => "invalid-tag",
             CryptoError::PlaintextTooLarge | CryptoError::PlaintextNotUtf8 => "invalid-text",
             CryptoError::InvalidBase64 => "invalid-input",
+            CryptoError::VolumeSharesNewFiles => "volume-shares-new-files",
         }
     }
 }

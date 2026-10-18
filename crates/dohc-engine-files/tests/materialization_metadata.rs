@@ -528,8 +528,8 @@ fn a_write_keeps_finder_tags_and_the_acl_but_not_the_text_encoding() {
     assert_eq!(acl(&note), entries);
 }
 
-/// fcopyfile carries a quarantine over whatever it is asked to copy, so a
-/// file downloaded from the internet stays quarantined after a write.
+/// A save drops a quarantine, but a file downloaded from the internet must
+/// stay quarantined after a write.
 #[cfg(target_vendor = "apple")]
 #[test]
 fn a_quarantined_file_stays_quarantined() {
@@ -549,11 +549,11 @@ fn a_quarantined_file_stays_quarantined() {
 }
 
 /// A folder entry that every new file inherits denies writing extended
-/// attributes, so the tag cannot be copied to the temp. The file's own deny
-/// entry must still reach the new file before its mode does.
+/// attributes. The temp does not inherit it, so the tag is copied, and the
+/// file's own deny entry still reaches the new file before its mode does.
 #[cfg(target_vendor = "apple")]
 #[test]
-fn an_acl_deny_entry_holds_when_an_xattr_cannot_be_copied() {
+fn a_folder_entry_denying_xattrs_does_not_reach_the_temp() {
     let scratch = Scratch::new();
     let root = scratch.path().join("ws");
     std::fs::create_dir(&root).unwrap();
@@ -572,8 +572,68 @@ fn an_acl_deny_entry_holds_when_an_xattr_cannot_be_copied() {
     );
 
     assert!(acl(&note).contains("deny read"), "{}", acl(&note));
+    assert!(!acl(&note).contains("writeextattr"), "{}", acl(&note));
     assert_eq!(mode(&note), 0o644);
-    assert_eq!(xattr(&note, TAGS), None, "the folder entry blocks the copy");
+    assert_eq!(xattr(&note, TAGS).as_deref(), Some(RED_TAG));
+}
+
+/// A folder entry that gives every new file in it read access for everyone.
+#[cfg(target_vendor = "apple")]
+const SHARED_FOLDER: &str = "group:everyone allow read,file_inherit,directory_inherit";
+
+/// A secret's temp is the file the secret becomes, so a grant the folder
+/// gives the temp at creation would let everyone read the plaintext.
+#[cfg(target_vendor = "apple")]
+#[test]
+fn a_folders_inherited_grant_never_reaches_a_secret() {
+    let scratch = Scratch::new();
+    let root = scratch.path().join("ws");
+    std::fs::create_dir_all(root.join("app")).unwrap();
+    add_acl_entry(&root, SHARED_FOLDER);
+    add_acl_entry(&root.join("app"), SHARED_FOLDER);
+    let mut store = EngineStore::open(&scratch.path().join("engine.db"), 0).unwrap();
+    let job = queue(&mut store, ".env", b"encrypted", Preimage::Absent);
+    assert_eq!(
+        materialize_secret_one(&store, &root, &job, b"SECRET=1\n", &options()).unwrap(),
+        JobOutcome::Completed
+    );
+    drop(store);
+    engine_write(&scratch.path().join("engine.db"), &root, "app/.env", None);
+
+    for env in [root.join(".env"), root.join("app/.env")] {
+        assert_eq!(acl(&env), "", "{} took the folder's grant", env.display());
+        assert_eq!(mode(&env), 0o600);
+    }
+}
+
+/// A write gives the file the ACL it had, inherited entries included, and
+/// never the entries the folder gives a new file. A new file still takes
+/// them, as it would from any other program.
+#[cfg(target_vendor = "apple")]
+#[test]
+fn a_write_keeps_the_files_own_acl_and_a_new_file_inherits_the_folders() {
+    let scratch = Scratch::new();
+    let root = scratch.path().join("ws");
+    std::fs::create_dir(&root).unwrap();
+    let private = root.join("private.md");
+    std::fs::write(&private, b"before").unwrap();
+    add_acl_entry(&root, SHARED_FOLDER);
+    let shared = root.join("shared.md");
+    std::fs::write(&shared, b"before").unwrap();
+    let inherited = acl(&shared);
+    assert!(
+        inherited.contains("everyone inherited allow read"),
+        "{inherited}"
+    );
+    let db = scratch.path().join("engine.db");
+
+    engine_write(&db, &root, "private.md", Some(b"before"));
+    engine_write(&db, &root, "shared.md", Some(b"before"));
+    engine_write(&db, &root, "new.md", None);
+
+    assert_eq!(acl(&private), "", "the write widened the file's access");
+    assert_eq!(acl(&shared), inherited);
+    assert!(acl(&root.join("new.md")).contains("everyone inherited allow read"));
 }
 
 /// FAT32 has no extended attributes of its own. macOS keeps them in a `._`

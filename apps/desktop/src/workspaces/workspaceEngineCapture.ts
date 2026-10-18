@@ -51,6 +51,7 @@ import {
   isConflictStaleTargetRefusal,
   isEngineStoreBusyRefusal,
   isFileLockedRefusal,
+  isVolumeSharesNewFilesRefusal,
   isYdocUpdateAdmissionRefusal,
   ydocUpdateDependsOn,
   isTransientEngineRefusal,
@@ -577,8 +578,9 @@ export interface WorkspaceEngineCapture {
     // file, which is silent data loss.
     // Tokens identify settles across daemon generations. Lifecycle events are
     // separate from visible state: a busy outcome still reports "settling".
-    // Opening and corrective status reports claim no edits.
-    onSaveState?: (state: EngineYDocSaveState, token: number, event: EngineYDocSaveEvent, authorCapacity?: boolean) => void;
+    // Opening and corrective status reports claim no edits. `failure` is the
+    // error a failed settle met; capture sends no read-only cause.
+    onSaveState?: (state: EngineYDocSaveState, token: number, event: EngineYDocSaveEvent, authorCapacity?: boolean, readOnlyCause?: undefined, failure?: unknown) => void;
   }): Promise<WorkspaceEngineYDocProviderSession>;
   // WS-G2-C-2: flush + release any live Y.Doc session at OR under a
   // path before a destructive op that does not run through the capture chain
@@ -863,6 +865,12 @@ function hasRefusalInCauseChain(
 
 function isFileLockedCause(error: unknown): boolean {
   return hasRefusalInCauseChain(error, isFileLockedRefusal);
+}
+
+// The volume adds sharing permissions to new files, so the engine refused to
+// write this one.
+export function isVolumeSharesNewFilesCause(error: unknown): boolean {
+  return hasRefusalInCauseChain(error, isVolumeSharesNewFilesRefusal);
 }
 
 // Blocked by something that clears on its own — a program outside dohc
@@ -4254,9 +4262,10 @@ export function createWorkspaceEngineCapture(
           token: number,
           event: EngineYDocSaveEvent,
           authorCapacity?: boolean,
+          failure?: unknown,
         ): void => {
           try {
-            input.onSaveState?.(state, token, event, authorCapacity);
+            input.onSaveState?.(state, token, event, authorCapacity, undefined, failure);
           } catch {
             // Observer boundary: a renderer-facing status hook must never
             // re-enter the session or wedge the settle chain.
@@ -4505,6 +4514,7 @@ export function createWorkspaceEngineCapture(
             saveToken,
             "outcome",
             hasRefusalInCauseChain(error, isYdocAuthorCapacityRefusal),
+            error,
           );
         };
         let entry: LiveYDocSession | null = null;
