@@ -154,12 +154,19 @@ impl ActorHandle {
                         params![ws, version, super::PARSER_GENERATION], |r| r.get(0),
                     ).map_err(sql)?;
                     let complete = complete && candidates.unchecked.is_empty();
+                    let subject_paths = {
+                        let mut stmt = c.prepare_cached("SELECT path FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3").map_err(sql)?;
+                        stmt.query_map(params![ws, version, object], |r| r.get::<_, String>(0)).map_err(sql)?
+                            .collect::<Result<std::collections::HashSet<_>, _>>().map_err(sql)?
+                    };
                     let mut sources: Vec<_> = candidates
                         .sources
                         .into_iter()
+                        .filter(|(source, _)| source != &object)
                         .map(|(object, path)| (path, Some(object)))
                         .chain(candidates.unchecked.into_iter().map(|path| (path, None)))
                         .filter(|(path, _)| path >= &after.0)
+                        .filter(|(path, _)| !subject_paths.contains(path))
                         .collect();
                     sources.sort_by(|a, b| a.0.cmp(&b.0));
                     let more = sources.len() > 8;
@@ -246,8 +253,8 @@ impl ActorHandle {
                             "source":path,"title":parsed.title,"ordinal":ordinal,
                             "span":[occurrence.start_utf16,occurrence.end_utf16],
                             "line":occurrence.line,"snippet":occurrence.snippet,
-                            "highlightStart":occurrence.start_utf16-occurrence.snippet_offset_utf16,
-                            "highlightEnd":occurrence.end_utf16-occurrence.snippet_offset_utf16
+                            "highlightStart":occurrence.highlight_start,
+                            "highlightEnd":occurrence.highlight_end
                         });
                         page["entries"].as_array_mut().expect("array").push(entry);
                         page["nextCursor"] =

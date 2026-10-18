@@ -433,3 +433,46 @@ async fn resolve_uses_uncaptured_source_paths_and_returns_creation_paths() {
         assert_eq!(result["results"][0], expected, "{kind} {literal}");
     }
 }
+
+#[tokio::test]
+async fn incoming_excludes_the_subject_object() {
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    let mut store = open(&db);
+    write(&mut store, "target", "target.md", "[[target]] [self](target.md)", 1);
+    write(&mut store, "other", "other.md", "[[target]]", 2);
+    drain(&mut store);
+    drop(store);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).unwrap().actor;
+    let result = page(&actor, "target.md", None).await;
+    assert_eq!(result["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(result["entries"][0]["source"], "other.md");
+}
+
+#[tokio::test]
+async fn incoming_windows_snippets_around_each_link() {
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    let mut store = open(&db);
+    write(&mut store, "target", "target.md", "", 1);
+    let text = format!("  short [[target]]\n  {} [[target]] {}", "😀".repeat(200), "x".repeat(200));
+    write(&mut store, "source", "source.md", &text, 2);
+    drain(&mut store);
+    drop(store);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).unwrap().actor;
+    let result = page(&actor, "target.md", None).await;
+    let entries = result["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["snippet"], "short [[target]]");
+    let snippet = entries[1]["snippet"].as_str().unwrap();
+    assert!(snippet.starts_with('…') && snippet.ends_with('…'));
+    assert!(snippet.chars().count() <= 162);
+    for row in entries {
+        let units: Vec<u16> = row["snippet"].as_str().unwrap().encode_utf16().collect();
+        let start = row["highlightStart"].as_u64().unwrap() as usize;
+        let end = row["highlightEnd"].as_u64().unwrap() as usize;
+        assert_eq!(String::from_utf16(&units[start..end]).unwrap(), "[[target]]");
+    }
+}
