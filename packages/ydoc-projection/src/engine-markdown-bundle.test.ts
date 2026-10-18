@@ -36,7 +36,9 @@ it('builds a complete fixed bundle with reproducible source/runtime identity', a
     expect(manifest.runtime.sha256).toBe(createHash('sha256').update(await readFile(process.execPath)).digest('hex'))
     expect(await buildEngineReader(destination)).toEqual(manifest)
     // The CJS closure must work without any node_modules alongside it.
+    const log = console.log
     const bundle = createRequire(import.meta.url)(join(destination, 'reader.cjs'))
+    expect(console.log).toBe(log)
     const base = markdownToYDoc('Earlier')
     const policy = {maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000_000, maxDecodedPayloadByteVisits: 100_000_000,
       maxStructClientGroupVisits: 1_000_000, maxDeleteClientGroupVisits: 1_000_000, maxDeleteIntervalVisits: 1_000_000, maxIndexOperations: 10_000_000}

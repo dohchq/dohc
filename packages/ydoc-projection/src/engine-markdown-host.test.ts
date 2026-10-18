@@ -38,8 +38,9 @@ async function start(entry = bundle, preload?: string) {
     {cwd, env: {}, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe']})
   const closed = once(child, 'close')
   const diagnostics: Buffer[] = [], output: Buffer[] = []
+  let received = 0, consumed = 0
   child.stderr.on('data', bytes => diagnostics.push(bytes))
-  child.stdout.on('data', bytes => output.push(bytes))
+  child.stdout.on('data', bytes => {output.push(bytes); received += bytes.length})
   child.stdin.on('error', () => {})
   const iterator = child.stdout[Symbol.asyncIterator]()
   let pending = Buffer.alloc(0)
@@ -49,7 +50,7 @@ async function start(entry = bundle, preload?: string) {
       if (next.done) throw new Error('Reader EOF: ' + Buffer.concat(diagnostics).toString())
       pending = Buffer.concat([pending, next.value])
     }
-    const result = pending.subarray(0, length); pending = pending.subarray(length); return result
+    const result = pending.subarray(0, length); pending = pending.subarray(length); consumed += length; return result
   }
   async function read() {
     const header = await exact(12)
@@ -57,6 +58,7 @@ async function start(entry = bundle, preload?: string) {
     return {type: header[4], flags: header[5], bytes: await exact(header.readUInt32LE(8))}
   }
   return {child, closed, read, diagnostics, output,
+    expectNoUnreadOutput() {expect(received - consumed).toBe(0)},
     async json() {const f = await read(); expect(f.type).toBe(1); return JSON.parse(f.bytes.toString())},
     async close() {
       child.stdout.destroy(); child.stderr.destroy(); child.stdin.destroy(); child.kill()
@@ -94,6 +96,7 @@ async function success(host: Awaited<ReturnType<typeof start>>, id: number) {
   const delta = Buffer.concat(chunks)
   expect(declared(delta)).toEqual(result.delta)
   expect(await host.json()).toEqual({id, end: true})
+  host.expectNoUnreadOutput()
   return {result, delta, chunkCount: chunks.length}
 }
 
@@ -145,7 +148,8 @@ async function rejection(host: Host, bytes: Buffer) {
   } finally {host.child.stdout.off('data', onOutput); deadline.removeEventListener('abort', onTimeout)}
 }
 
-it.each(['unknown-field', 'comma-key', 'wrong-id', 'method', 'oversize', 'bad-magic', 'truncated-control',
+it.each(['unknown-field', 'comma-key', 'document-comma-key', 'wrong-id', 'method', 'oversize', 'bad-magic',
+  'reserved-low', 'reserved-high', 'control-flags', 'blob-flags', 'blob-prefix', 'truncated-control',
   'surplus', 'truncated-blob', 'digest', 'length', 'blob-id', 'blob-size', 'end-id', 'end-field', 'hello-first'])(
   'rejects %s with stdin open and no response', async mode => {
     const host = await start(), base = markdownToYDoc('Earlier')
@@ -155,22 +159,33 @@ it.each(['unknown-field', 'comma-key', 'wrong-id', 'method', 'oversize', 'bad-ma
         return
       }
       await hello(host)
-      const source = mode === 'truncated-blob' ? Buffer.alloc(2) : Buffer.from('Body')
+      const source = mode === 'truncated-blob' ? Buffer.alloc(2)
+        : mode === 'length' ? Buffer.alloc(2 * 1024 * 1024 + 1)
+          : mode === 'blob-size' ? Buffer.alloc(65537) : Buffer.from('Body')
       const checkpoint = Y.encodeStateAsUpdate(base), frames = requestFrames(2, 'construct', source, checkpoint)
       const r = JSON.parse(frames[0]!.subarray(12).toString())
       if (mode === 'unknown-field') {r.extra = 'secret'; frames[0] = control(r)}
       if (mode === 'comma-key') {delete r.currentPath; delete r.document; r['currentPath,document'] = 'secret'; frames[0] = control(r)}
+      if (mode === 'document-comma-key') {
+        delete r.document.objectId; delete r.document.workspaceId; r.document['objectId,workspaceId'] = 'secret'; frames[0] = control(r)
+      }
       if (mode === 'wrong-id') {r.id = 3; frames[0] = control(r)}
       if (mode === 'method') {r.method = 'eval'; frames[0] = control(r)}
       if (mode === 'oversize') {frames[0]!.writeUInt32LE(65537, 8); frames.splice(1); frames[0] = frames[0]!.subarray(0, 12)}
       if (mode === 'bad-magic') frames[0]![0] = 0
+      if (mode === 'reserved-low' || mode === 'reserved-high' || mode === 'control-flags') {
+        frames[0]![mode === 'reserved-low' ? 6 : mode === 'reserved-high' ? 7 : 5] = 1
+        frames.splice(1); frames[0] = frames[0]!.subarray(0, 12)
+      }
+      if (mode === 'blob-flags') {frames[1]![5] = 2; frames.splice(2); frames[1] = frames[1]!.subarray(0, 12)}
+      if (mode === 'blob-prefix') frames.splice(1, frames.length - 1, frame(2, 1, Buffer.alloc(7)).subarray(0, 12))
       if (mode === 'truncated-control') frames[0] = frame(1, 0, frames[0]!.subarray(12, frames[0]!.length - 1))
       if (mode === 'surplus') frames.splice(-1, 0, blob(2, checkpoint))
       if (mode === 'truncated-blob') frames[1] = blob(1, source.subarray(0, 1))
       if (mode === 'digest') {r.checkpoint.sha256 = '0'.repeat(64); frames[0] = control(r)}
-      if (mode === 'length') {r.source.length = 2 ** 32; frames[0] = control(r)}
+      if (mode === 'length') frames.splice(1)
       if (mode === 'blob-id') frames[1] = blob(9, source)
-      if (mode === 'blob-size') frames[1] = blob(1, Buffer.alloc(65537))
+      if (mode === 'blob-size') frames.splice(1, frames.length - 1, blob(1, source))
       if (mode === 'end-id') frames[frames.length - 1] = control({id: 3, end: true})
       if (mode === 'end-field') frames[frames.length - 1] = control({id: 2, end: true, extra: 'secret'})
       await rejection(host, Buffer.concat(frames))
@@ -229,13 +244,14 @@ it('chunks source and returned delta above 64 KiB', async () => {
 it.each([false, true])('suppresses Yjs collision warnings; other console methods=%s', async emitConsole => {
   const preload = join(directory, 'collision-' + emitConsole + '.cjs')
   await writeFile(preload, "require('node:crypto').webcrypto.getRandomValues = array => array.fill(1234);\n"
-    + (emitConsole ? "setImmediate(() => {for (const name of ['log','info','warn','error','debug','trace','dir','table','assert']) console[name]('secret');});" : ''))
+    + (emitConsole ? "setImmediate(() => {for (const name of ['log','info','warn','error','debug','trace','dir','table']) console[name]('secret'); console.assert(false, 'secret');});" : ''))
   const host = await start(bundle, preload), base = markdownToYDoc('Earlier', {clientID: 1234})
   try {
     await hello(host)
     request(host.child, 2, 'construct', Buffer.from('Body'), Y.encodeStateAsUpdate(base))
     expect((await success(host, 2)).result.kind).toBe('constructed')
     host.child.stdin.end(); expect((await host.closed)[0]).toBe(0)
+    host.expectNoUnreadOutput()
     expect(Buffer.concat(host.diagnostics).length).toBe(0)
   } finally {base.destroy(); await host.close()}
 })
