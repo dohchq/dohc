@@ -17,8 +17,9 @@ const keptCommits = 40;
 // The verifier's two-hour limit, so a scope whose watchdog failed still ends.
 const scopeLimitSeconds = 2 * 60 * 60;
 // Every WSL distro shares one VM, Docker's included, under the host's WSL memory limit.
-// The run's own limit keeps an out-of-memory kill inside the run.
-const scopeMemory = "-p MemoryHigh=9G -p MemoryMax=11G";
+// The run's own limit keeps an out-of-memory kill inside the run. The run continues after
+// a kill, so its receipt and `scope.json` record what happened.
+const scopeMemory = "-p MemoryHigh=9G -p MemoryMax=11G -p OOMPolicy=continue";
 
 /** The WSL distro this host verifies Linux in, or null. */
 export function linuxDistro(env = process.env, platform = process.platform) {
@@ -62,7 +63,8 @@ export function parseTips(stdout) {
 }
 
 /**
- * Stops any earlier run's processes, then puts the checkout at `head`, fetching the bundle's `missing` commits first.
+ * Stops any earlier run's processes, then puts the checkout at `head`, fetching the bundle's `missing` commits first,
+ * and installs its dependencies, as the queue prepares a Windows lane. The verifier reads them before its own install.
  * Only one run holds the Linux slot, so every scope with the prefix belongs to a run that is gone.
  */
 export function syncScript({ bundle, ref, missing, head, base }) {
@@ -79,17 +81,25 @@ git clean -q -ffdx --exclude=node_modules --exclude=target
 test "$(git rev-parse HEAD)" = ${quote(head)}
 git cat-file -e ${quote(`${base}^{commit}`)}
 test -z "$(git status --porcelain)"
+pnpm install --frozen-lockfile --config.confirm-modules-purge=false
 `;
 }
 
 /**
  * Runs the verifier's Rust job in a user scope. A watchdog in the scope stops it when the
  * launcher ends, so a run whose Windows side was killed leaves nothing behind.
+ * Afterwards the scope's peak memory and out-of-memory kills go to `scope.json`.
  */
 export function runScript({ unit, base, grant, output, jobs }) {
   const verify = `launcher=$$
 setsid bash -c "while kill -0 $launcher 2>/dev/null; do sleep 5; done; systemctl --user stop ${unit}.scope" </dev/null >/dev/null 2>&1 &
-node scripts/verification/verify.mjs pr --base ${base} --job rust`;
+node scripts/verification/verify.mjs pr --base ${base} --job rust
+status=$?
+cgroup=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)
+peak=$(cat "$cgroup/memory.peak" 2>/dev/null || true)
+kills=$(awk '$1 == "oom_kill" {print $2}' "$cgroup/memory.events" 2>/dev/null || true)
+printf '{"memoryPeak":%s,"oomKills":%s}\\n' "\${peak:-null}" "\${kills:-null}" > "$DOHC_VERIFICATION_OUTPUT/scope.json"
+exit $status`;
   return `set -euo pipefail
 cd "${home}/linux"
 export TMPDIR="${home}/tmp" CARGO_BUILD_JOBS=${jobs} RUST_TEST_THREADS=${jobs} NEXTEST_TEST_THREADS=${jobs}
@@ -99,11 +109,11 @@ exec systemd-run --user --scope --quiet --collect --unit=${unit} -p RuntimeMaxSe
 }
 
 /**
- * Run the Rust gate for `head` against `base` in `distro` and return the Linux verifier's receipt.
- * `output` is a Windows folder for its evidence. A failure of the host or of the transfer
- * carries `environment`, so the queue retries it instead of failing the change.
+ * Run the Rust gate for `head` against `base` in `distro`. Returns the Linux verifier's receipt and the scope's memory use.
+ * `output` is a Windows folder for its evidence. A failure of the host, of the transfer, or one after an
+ * out-of-memory kill carries `environment`, so the queue retries it instead of failing the change.
  */
-export async function linuxRustJob({ distro, head, base, output, signal, request = "inline", attempt = null, command = run, budget = resolveBuildBudget() }) {
+export async function linuxRustJob({ distro, head, base, output, signal, request = "inline", attempt = null, command = run, gitRead = git, budget = resolveBuildBudget() }) {
   const environment = cause => error => {
     if (signal?.aborted || error?.interrupted) throw error;
     throw Object.assign(error instanceof Error ? error : new Error(String(error)), { environment: cause });
@@ -122,20 +132,20 @@ export async function linuxRustJob({ distro, head, base, output, signal, request
   let cargo;
   try {
     // Refs left by a run killed before its cleanup. None belongs to a live run, because this one holds the slot.
-    for (const stale of git(["for-each-ref", "--format=%(refname)", "refs/verification-linux/"]).split(/\r?\n/u).filter(Boolean)) git(["update-ref", "-d", stale]);
+    for (const stale of gitRead(["for-each-ref", "--format=%(refname)", "refs/verification-linux/"]).split(/\r?\n/u).filter(Boolean)) gitRead(["update-ref", "-d", stale]);
     const { tips, has } = parseTips((await wsl("tips", tipsScript({ head, base }), { quietStdout: true }).catch(environment("linux host"))).stdout);
     const missing = ["head", "base"].filter(name => !has.has(name === "head" ? head : base));
     const bundle = missing.length ? join(output, "sync.bundle") : null;
     try {
       if (bundle) {
-        for (const name of missing) git(["update-ref", `${ref}/${name}`, name === "head" ? head : base]);
-        const known = tips.length ? git(["rev-list", "--no-walk", "--ignore-missing", ...tips]).split(/\s+/u).filter(Boolean) : [];
+        for (const name of missing) gitRead(["update-ref", `${ref}/${name}`, name === "head" ? head : base]);
+        const known = tips.length ? gitRead(["rev-list", "--no-walk", "--ignore-missing", ...tips]).split(/\s+/u).filter(Boolean) : [];
         await command("git", ["bundle", "create", bundle, ...missing.map(name => `${ref}/${name}`), ...known.map(sha => `^${sha}`)],
           { log: join(output, "wsl-bundle.log"), signal, quietStdout: true }).catch(environment("linux sync"));
       }
       await wsl("sync", syncScript({ bundle: bundle && wslPath(bundle), ref, missing, head, base })).catch(environment("linux sync"));
     } finally {
-      for (const name of missing) try { git(["update-ref", "-d", `${ref}/${name}`]); } catch { /* Not created. */ }
+      for (const name of missing) try { gitRead(["update-ref", "-d", `${ref}/${name}`]); } catch { /* Not created. */ }
       if (bundle) rmSync(bundle, { force: true });
     }
     // The Linux build counts against the host's disk floor and cargo lanes, like a build in another lane.
@@ -146,8 +156,13 @@ export async function linuxRustJob({ distro, head, base, output, signal, request
     const failure = await wsl("run", runScript({ unit, base, grant, output: wslPath(output), jobs: budget.jobs })).then(() => null, error => error);
     if (failure && (signal?.aborted || failure.interrupted)) throw failure;
     const receipt = readJson(join(output, "result.json"));
-    if (!receipt?.final || receipt.commit !== head) environment("linux host")(failure ?? new Error("The Linux verifier wrote no final receipt."));
-    return receipt;
+    if (!receipt?.final) environment("linux host")(failure ?? new Error("The Linux verifier wrote no final receipt."));
+    if (receipt.failure?.kind === "environment") environment(`linux ${receipt.failure.cause}`)(new Error(receipt.error ?? "The Linux host failed."));
+    if (receipt.commit !== head) environment("linux host")(new Error(`The Linux verifier checked ${receipt.commit ?? "no commit"}, not ${head}.`));
+    const scope = readJson(join(output, "scope.json"));
+    // A compiler or test killed at the run's memory limit says nothing about the change.
+    if (receipt.verdict !== "PASS" && scope?.oomKills > 0) environment("linux memory")(new Error(`The Linux job failed after ${scope.oomKills} out-of-memory kills at its limit.`));
+    return { receipt, scope };
   } finally {
     cargo?.release();
     // Belt and braces with the scope's watchdog: nothing this run started outlives it.

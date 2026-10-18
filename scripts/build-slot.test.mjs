@@ -651,6 +651,20 @@ test("status CLI reads absent queues without creating or acquiring anything", t 
   assert.equal(existsSync(absent), false);
 });
 
+test("status CLI reports the Linux slot only on a host that runs Linux jobs", t => {
+  const root = slotRoot();
+  t.after(() => rmSync(root, {recursive: true, force: true}));
+  const status = () => {
+    const result = spawnSync(process.execPath, [new URL("../tools/rust-engine-program/build-slot.mjs", import.meta.url).pathname.replace(/^\/(\w:)/u, "$1"), "--status", "--root", root], {encoding: "utf8", timeout: 5000});
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout).lanes.map(lane => lane.kind);
+  };
+  assert.deepEqual(status(), ["build-slot", "verification-slot"]);
+  writeFileSync(join(root, "verification-linux"), "Ubuntu");
+  assert.deepEqual(status(), ["build-slot", "verification-slot", "linux-slot"]);
+  assert.deepEqual(readdirSync(root), ["verification-linux"]);
+});
+
 test("status CLI reports invalid configuration and shows a lane held above the setting", t => {
   const root = slotRoot();
   t.after(() => rmSync(root, {recursive: true, force: true}));

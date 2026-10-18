@@ -442,19 +442,18 @@ export async function verify(args) {
       if (!linux) return;
       const linuxOutput = join(output, "rust-linux");
       let receipt;
+      let scope;
       try {
         await checkedStep({ name: "rust-linux", distro: linux, log: join(linuxOutput, "wsl-run.log"), report: join(linuxOutput, "result.json") }, async () => {
-          receipt = await linuxRustJob({ distro: linux, head: report.commit, base: report.baseCommit, output: linuxOutput,
-            signal: cancellation.signal, request: grant?.request, attempt: grant?.attempt });
-          if (receipt.verdict === "PASS") return;
-          const host = receipt.failure?.kind === "environment" ? { environment: `linux ${receipt.failure.cause}` } : {};
-          throw Object.assign(new Error(`The Rust job failed on Linux: ${receipt.error ?? "read its receipt"}`), host);
+          ({ receipt, scope } = await linuxRustJob({ distro: linux, head: report.commit, base: report.baseCommit, output: linuxOutput,
+            signal: cancellation.signal, request: grant?.request, attempt: grant?.attempt }));
+          if (receipt.verdict !== "PASS") throw new Error(`The Rust job failed on Linux: ${receipt.error ?? "read its receipt"}`);
         });
       } finally {
         const linuxStep = row => ({ ...row, step: row.step === "rust" ? "rust-linux" : `rust-linux ${row.step}` });
         flaky.push(...(receipt?.flaky ?? []).map(linuxStep));
         failed.push(...(receipt?.failed ?? []).map(linuxStep));
-        report.linux = { distro: linux, result: join(linuxOutput, "result.json"), verdict: receipt?.verdict ?? null, seconds: receipt?.seconds ?? null };
+        report.linux = { distro: linux, result: join(linuxOutput, "result.json"), verdict: receipt?.verdict ?? null, seconds: receipt?.seconds ?? null, memoryPeak: scope?.memoryPeak ?? null };
         save();
       }
     }
