@@ -605,12 +605,14 @@ it('keeps policy constructors outside root exports and pins explicit subpaths', 
   expect(barrel).not.toHaveProperty('createLiveMarkdownRegistrationValidator')
   expect(barrel).not.toHaveProperty('validateRegistrationCutForProjection')
   expect(barrel).not.toHaveProperty('createLiveMarkdownJournalValidator')
+  expect(barrel).not.toHaveProperty('createEngineMarkdownReader')
   expect(barrel).not.toHaveProperty('validateJournalCutForProjection')
   const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
   expect(manifest.exports).toEqual({
     '.': './src/index.ts',
     './artifact-markdown-guard': './src/artifact-markdown-guard.ts',
     './body-fragment': './src/body-fragment.ts',
+    './engine-markdown-reader': './src/engine-markdown-reader.ts',
     './browser-editor': './src/browser-editor.ts',
     './frontmatter': './src/frontmatter.ts',
     './frontmatter-map': './src/frontmatter-map.ts',
