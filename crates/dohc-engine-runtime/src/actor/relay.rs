@@ -151,6 +151,9 @@ pub enum RelayOperation {
     },
     /// Make a pristine workspace the session host's hosted replica under the
     /// relay's coordinate, before any other write gives it an ordinary one.
+    /// Then confirm the relay holds nothing of its origin past what it
+    /// numbered. Every attach runs this before its first other hosted call,
+    /// so a store that lost pushed commits stops before anyone edits it.
     CreateHostedReplica {
         workspace_id: String,
         new_origin_id: String,
@@ -726,6 +729,10 @@ mod relay_push_tests;
 #[cfg(test)]
 #[path = "relay_base_repair_tests.rs"]
 mod relay_base_repair_tests;
+
+#[cfg(test)]
+#[path = "relay_hosted_origin_tests.rs"]
+mod relay_hosted_origin_tests;
 
 #[cfg(test)]
 mod deferred_relay_tests {
@@ -1928,11 +1935,13 @@ impl ActorHandle {
             return Err(RuntimeError::Cancelled);
         }
         let http_transport = build_http_transport(configuration)?;
-        // A hosted replica reads and writes only the session host's scoped feed.
+        // A hosted replica reads and writes only the session host's scoped
+        // feed, and so does the operation that creates one.
         let workspace_id = operation.workspace_id().to_owned();
-        let hosted = self
-            .run(move |store, _cache| Ok(is_hosted_replica(store, &workspace_id)?))
-            .await?;
+        let hosted = operation.replicas() == Replicas::Hosted
+            || self
+                .run(move |store, _cache| Ok(is_hosted_replica(store, &workspace_id)?))
+                .await?;
         let http_transport = Arc::new(if hosted {
             http_transport.hosted()
         } else {
@@ -2695,24 +2704,30 @@ fn run_relay_operation(
             replication_epoch,
             stream_identity,
             created_at_ms,
-        } => match create_hosted_replica(
-            store,
-            &workspace_id,
-            &new_origin_id,
-            &replication_epoch,
-            &stream_identity,
-            created_at_ms,
-            &NoFaults,
-        )
-        .map_err(|error| match error {
-            SyncError::InvalidInput { reason } => {
-                RuntimeError::Relay(RelayError::HostedRefusal(reason))
+        } => {
+            match create_hosted_replica(
+                store,
+                &workspace_id,
+                &new_origin_id,
+                &replication_epoch,
+                &stream_identity,
+                created_at_ms,
+                &NoFaults,
+            )
+            .map_err(|error| match error {
+                SyncError::InvalidInput { reason } => {
+                    RuntimeError::Relay(RelayError::HostedRefusal(reason))
+                }
+                error => RuntimeError::Sync(error),
+            })? {
+                TxnOutcome::Committed(_) => {}
+                TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
             }
-            error => RuntimeError::Sync(error),
-        })? {
-            TxnOutcome::Committed(_) => Ok(RelayOperationOutcome::HostedReplicaCreated),
-            TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
-        },
+            // After the commit, so a lost answer leaves the replica created
+            // and the retry asks again.
+            client.confirm_hosted_origin(store, &workspace_id)?;
+            Ok(RelayOperationOutcome::HostedReplicaCreated)
+        }
         RelayOperation::PullHosted {
             workspace_id,
             root,

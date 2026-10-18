@@ -5721,3 +5721,119 @@ fn a_before_side_the_feed_serves_is_fetched_and_kept() {
             .is_none()
     );
 }
+
+/// What this connection has written, to show a probe wrote nothing.
+fn total_changes(store: &EngineStore) -> u64 {
+    store
+        .read_with(|conn| Ok::<_, SyncError>(conn.total_changes()))
+        .unwrap()
+}
+
+/// Confirm the origin, and check that it sent exactly one empty push from
+/// the start of the host's origin and wrote nothing.
+fn confirm(client: &RelaySyncClient<HostedFeed>, store: &EngineStore) -> Result<(), RelayError> {
+    let before = (
+        client.transport().pushes.lock().unwrap().len(),
+        total_changes(store),
+    );
+    let confirmed = client.confirm_hosted_origin(store, "ws");
+    let pushes = client.transport().pushes.lock().unwrap();
+    assert_eq!(pushes.len(), before.0 + 1, "one push to the hosted log");
+    let probe = pushes.last().unwrap();
+    assert_eq!(
+        (probe.origin_id.as_str(), probe.after_seq, probe.ops.len()),
+        (HOST, -1, 0)
+    );
+    assert_eq!(total_changes(store), before.1, "the probe writes nothing");
+    confirmed
+}
+
+/// #2088: the relay may hold the host's origin up to what the replica
+/// numbered: nothing on a fresh replica, everything it pushed, or less
+/// while journaled rows wait for the next push.
+#[test]
+fn the_origin_probe_accepts_a_relay_no_further_than_the_replica_numbered() {
+    let (_scratch, _path, mut store) = hosted_store();
+    host_document(&mut store, "doc-a");
+    let client = RelaySyncClient::new(HostedFeed::new());
+    confirm(&client, &store).unwrap();
+
+    journal_live_update(&mut store, "doc-a", b"one");
+    journal_live_update(&mut store, "doc-a", b"two");
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &NoLiveLeases, 3_000, 1_000_000)
+        .unwrap();
+    assert_eq!(last_outbound_seq(&store), 1);
+    confirm(&client, &store).unwrap();
+
+    journal_live_update(&mut store, "doc-a", b"unpushed");
+    assert_eq!(last_outbound_seq(&store), 2);
+    confirm(&client, &store).unwrap();
+}
+
+#[test]
+fn the_origin_probe_refuses_a_relay_past_what_the_replica_numbered() {
+    let (_scratch, _path, store) = hosted_store();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    client.transport().append(envelope(
+        HOST,
+        0,
+        "ydoc.update",
+        json!({"objectId": "doc-a"}),
+    ));
+    assert!(matches!(
+        confirm(&client, &store),
+        Err(RelayError::OriginDiverged)
+    ));
+}
+
+/// Copy the store's files, as an operator restoring an older volume would
+/// have kept them.
+fn copy_store(from: &std::path::Path, to: &std::path::Path) {
+    for suffix in ["", "-wal", "-shm"] {
+        let source = std::path::PathBuf::from(format!("{}{suffix}", from.display()));
+        let target = std::path::PathBuf::from(format!("{}{suffix}", to.display()));
+        if source.exists() {
+            std::fs::copy(&source, &target).unwrap();
+        } else if target.exists() {
+            std::fs::remove_file(&target).unwrap();
+        }
+    }
+}
+
+/// #2088's reproduction: a store restored from a copy older than its last
+/// push. The feed serves the host's own rows back, so one pull imports them
+/// and the journal's maximum climbs to the relay's, which hides the loss
+/// from a push. The counter still says what this store numbered.
+#[test]
+fn the_origin_probe_finds_commits_a_restored_store_lost_after_a_pull() {
+    let (_scratch, path, store, client) = departing_b_at("doc-b.md");
+    drop(store);
+    let copy = ScratchDir::new().unwrap();
+    let saved = copy.path().join("engine.db");
+    copy_store(&path, &saved);
+
+    let mut store = EngineStore::open(&path, 2_000).unwrap();
+    journal_live_update(&mut store, "doc-b", b"lost one");
+    journal_live_update(&mut store, "doc-b", b"lost two");
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &NoLiveLeases, 3_000, 1_000_000)
+        .unwrap();
+    sync(&client, &mut store);
+    confirm(&client, &store).unwrap();
+    drop(store);
+
+    copy_store(&saved, &path);
+    let mut store = EngineStore::open(&path, 4_000).unwrap();
+    assert_eq!(last_outbound_seq(&store), -1);
+    sync(&client, &mut store);
+    assert_eq!(
+        crate::relay::local_max_origin_seq(&store, "ws", HOST).unwrap(),
+        1,
+        "the pull imported the lost rows"
+    );
+    assert!(matches!(
+        confirm(&client, &store),
+        Err(RelayError::OriginDiverged)
+    ));
+}
