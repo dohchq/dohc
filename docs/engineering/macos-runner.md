@@ -20,11 +20,13 @@ The runner therefore follows these rules:
 A job can still change anything `dohc-ci` can change: its home folder, its toolchains, its Colima VM, and the runner's own files.
 A later run, including the nightly check of `main`, inherits those changes.
 Treat a passing check as evidence from a machine that every writer controls, not as a release gate.
-To reset the runner, delete the `dohc-ci` user and repeat the setup below.
+To reset the runner, follow [Reset the runner](#reset-the-runner).
 
-Other local users' files must stay closed to `dohc-ci`.
-macOS gives every standard user the `staff` group, and a new home folder lets that group read it.
-Services on `127.0.0.1` are reachable from every account on the Mac. Each one must authenticate its callers.
+A job can also reach what every account on the Mac shares:
+
+- **Other users' home folders.** macOS gives every standard user the `staff` group, and a new home folder lets that group read it. Setup closes Ice's home folder.
+- **Services on `127.0.0.1`.** Every account can connect to them. T3 Code listens on `127.0.0.1:3773` from the launch agent `com.icedevera.t3-desktop`, and it runs full-access agents as Ice. A caller that can drive it can act as Ice.
+- **`/tmp`.** It is shared by every account. Tests fall back to `/tmp/dohc-test-scratch` when `TMPDIR` is unset, and that folder already exists, owned by `ice`. Setup gives the runner its own `TMPDIR`.
 
 For pull requests from forks:
 
@@ -70,6 +72,8 @@ The session is necessary because the e2e suite opens Electron windows.
 
 ### Prepare the Mac as Ice
 
+Complete every step in this part before you register the runner.
+
 1. Remove the old runner registration. Its service is already unloaded.
 
    ```sh
@@ -79,11 +83,14 @@ The session is necessary because the e2e suite opens Electron windows.
    cd ~ && rm -rf ~/dev/actions-runner
    ```
 
-2. Close your home folder to other local users:
+2. Close your home folder to other local users, then confirm that the command prints `700`:
 
    ```sh
    chmod 700 /Users/ice
+   stat -f %Lp /Users/ice
    ```
+
+   Do not continue until it prints `700`.
 
 3. Create `dohc-ci` as a standard user. The command asks for its password.
 
@@ -101,7 +108,17 @@ The session is necessary because the e2e suite opens Electron windows.
 5. Confirm that Homebrew has Colima, Docker, and Git: `brew install colima docker git`.
    `dohc-ci` runs these programs but cannot change them.
 
-6. Create a runner registration token. Keep it for the next part. It expires after one hour.
+6. Confirm that a caller without credentials cannot drive any service on `127.0.0.1`.
+   List the services with `lsof -nP -iTCP -sTCP:LISTEN`. Check each one that listens on `127.0.0.1` or `*`.
+   For T3 Code, check both of its entry points:
+   - `curl -s -w ' %{http_code}\n' http://127.0.0.1:3773/mcp` must print `401`.
+   - The web UI at `http://127.0.0.1:3773/` must not show threads or start a turn for a browser that has no T3 Code credentials. Open it from the `dohc-ci` session in step 2 of the next part, before you register.
+
+   The known state, from a probe on 2026-10-19 without credentials: `/mcp` answered `401 {"error":"invalid_mcp_credential"}`, and `/` served the web UI with status 200.
+   That probe did not show whether the UI's socket accepts callers without credentials.
+   If you cannot confirm that it refuses them, do not run the runner while T3 Code runs. Stop the runner with `./svc.sh stop` as `dohc-ci` before you start T3 Code.
+
+7. Create a runner registration token. Keep it for the next part. It expires after one hour.
 
    ```sh
    gh api -X POST repos/dohchq/dohc/actions/runners/registration-token --jq .token
@@ -121,26 +138,33 @@ Switch to `dohc-ci` with fast user switching, sign in, and open Terminal.
    cargo install --locked cargo-nextest --version 0.9.143
    ```
 
-2. Start this user's own Colima VM once: `colima start`.
+2. Complete Ice's step 6 for T3 Code's web UI from this session.
+
+3. Start this user's own Colima VM once: `colima start`.
    Each job starts it again if it is not running.
    Do not give `dohc-ci` another user's Docker socket. A Docker client controls the Colima VM, and Colima mounts its owner's home folder into that VM.
 
-3. Download the macOS ARM64 runner into `~/actions-runner`. Follow the download step on the repository's Settings > Actions > Runners > New self-hosted runner page.
+4. Download the macOS ARM64 runner into `~/actions-runner`. Follow the download step on the repository's Settings > Actions > Runners > New self-hosted runner page.
 
-4. Register and start the runner with the token from Ice's step 6:
+5. Register and start the runner with the token from Ice's step 7.
+   `read -s` keeps the token out of the shell history.
 
    ```sh
    cd ~/actions-runner
    export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-   ./config.sh --url https://github.com/dohchq/dohc --token <token> --name dohc-ci-mac-mini --labels dohc-ci --unattended
+   read -s TOKEN
+   ./config.sh --url https://github.com/dohchq/dohc --token "$TOKEN" --name dohc-ci-mac-mini --labels dohc-ci --unattended
+   unset TOKEN
+   echo "TMPDIR=$(getconf DARWIN_USER_TEMP_DIR)" >> .env
    ./svc.sh install
    ./svc.sh start
    ```
 
    The runner records that `PATH` in `.path`. Jobs find `cargo`, `colima`, and `docker` through it.
+   The `TMPDIR` line in `.env` gives jobs this user's own temporary folder instead of the shared `/tmp`.
    `svc.sh` installs a launch agent for `dohc-ci`, so it starts each time `dohc-ci` signs in.
 
-5. Switch back to your own account. Leave `dohc-ci` signed in.
+6. Switch back to your own account. Leave `dohc-ci` signed in.
 
 Each job downloads the Node version in `.node-version` and the pnpm version in `package.json`.
 The verifier installs the pinned Playwright Chromium for `dohc-ci`. Xcode Command Line Tools are installed for every user.
@@ -151,9 +175,25 @@ FileVault prevents automatic login.
 Sign in as Ice, switch to `dohc-ci` and sign in, then switch back.
 The runner starts when `dohc-ci` signs in.
 
+## Reset the runner
+
+A job can copy the runner's `.credentials_rsaparams` and act as the runner after the account is gone.
+Remove the registration on GitHub first, then delete the account.
+
+1. As Ice, remove the registration. Use `config.sh remove` as `dohc-ci`, or delete it through the API:
+
+   ```sh
+   id=$(gh api repos/dohchq/dohc/actions/runners --jq '.runners[] | select(.name == "dohc-ci-mac-mini") | .id')
+   gh api -X DELETE "repos/dohchq/dohc/actions/runners/$id"
+   ```
+
+2. Sign `dohc-ci` out, then delete the account and its home folder: `sudo sysadminctl -deleteUser dohc-ci`.
+3. Repeat [the setup](#set-up-the-runner).
+
 ## Unverified until the first run
 
 The e2e suite has not yet run in a background fast-user-switching session.
 The first nightly run must confirm that Electron windows open and render there, and that failure screenshots capture them.
 It must also confirm that the clipboard tests pass, because each session has its own clipboard.
+It must also confirm that two Colima VMs, Ice's and `dohc-ci`'s, can run together: Ice's VM already has a `limactl` process listening on port 53, which a second VM may also need, and each VM takes its own memory from the Mac's 16 GB.
 Until then, a failure in those areas can come from the session rather than from dohc.

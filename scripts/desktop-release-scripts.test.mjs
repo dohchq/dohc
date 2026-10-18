@@ -454,14 +454,13 @@ test("desktop releases start only by dispatch, keep macOS off self-hosted runner
     }
   }
 
-  // The hosted Mac's bash 3.2 rejects the preflight and publish scripts, so
-  // both jobs install Homebrew bash first on macOS.
-  for (const job of [jobs.preflight, jobs.publish]) {
-    const [installBash] = job.steps;
-    assert.equal(installBash.if, "runner.os == 'macOS'");
-    assert.match(installBash.run, /^brew install bash$/m);
-    assert.match(installBash.run, /command -v bash/);
-  }
+  // The hosted Mac's bash 3.2 rejects the preflight's release script, so
+  // preflight installs Homebrew bash first on macOS. Publish runs under 3.2.
+  const [installBash] = jobs.preflight.steps;
+  assert.equal(installBash.if, "runner.os == 'macOS'");
+  assert.match(installBash.run, /^brew install bash$/m);
+  assert.match(installBash.run, /command -v bash/);
+  assert.doesNotMatch(releaseStep(jobs.publish, "is_release_upload_file").run, /globstar/);
 
   // Desktop tests need the built runtime exports and the native engine.
   const preflightOrder = step => jobs.preflight.steps.indexOf(step);
@@ -541,13 +540,13 @@ test("desktop releases start only by dispatch, keep macOS off self-hosted runner
   assert.ok(secretExpressions.length > 0, "the workflow still declares release secrets");
   for (const expression of secretExpressions) {
     const secrets = Object.fromEntries([...expression.matchAll(/secrets\.(\w+)/gu)].map(([, name]) => [name, `configured-${name}`]));
-    const macOnly = /secrets\.(MACOS|APPLE)_/u.test(expression);
+    // Signing secrets belong to one platform. Every other secret serves all targets.
+    const owner = /secrets\.(MACOS|APPLE)_/u.test(expression) ? "macOS" : /secrets\.WIN_/u.test(expression) ? "Windows" : null;
     for (const target of desktopReleaseTargets("all")) {
       const matrix = { os: target.os };
       assert.equal(releaseExpression(expression, { preflight: { outputs: { dry_run: "true" } } }, secrets, {}, matrix), "", "dry runs receive no release secrets");
       const published = releaseExpression(expression, { preflight: { outputs: { dry_run: "false" } } }, secrets, {}, matrix);
-      // Only the hosted macOS job receives the macOS signing and notarization secrets.
-      if (macOnly && target.os !== "macOS") assert.equal(published, "", `${target.label} receives no macOS secret`);
+      if (owner && target.os !== owner) assert.equal(published, "", `${target.label} receives no ${owner} signing secret`);
       else assert.ok(published, `${target.label} publishing can use configured secrets`);
     }
   }
