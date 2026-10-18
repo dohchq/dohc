@@ -79,6 +79,11 @@ dohc-windows-files = { path = "../dohc-windows-files" }
 [target.'cfg(target_os = "linux")'.dependencies]
 dohc-linux-files = { path = "../dohc-linux-files" }
 
+[target.'cfg(target_vendor = "apple")'.dependencies]
+# Keeps Finder tags, other extended attributes and the ACL when a write
+# replaces a file.
+dohc-macos-files = { path = "../dohc-macos-files" }
+
 [dev-dependencies]
 # The differential harness parses the workspace-kernel golden fixtures under tests/fixtures
 # (independently-computed hashes) and the crate's extended goldens.
