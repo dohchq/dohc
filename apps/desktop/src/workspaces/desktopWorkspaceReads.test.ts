@@ -213,14 +213,14 @@ describe("desktop workspace reads", () => {
     }
   });
 
-  it("rejects a share read completed after the physical attachment retires", async () => {
+  it("returns a share snapshot completed after the physical attachment retires", async () => {
     const test = await fixture("standalone");
     test.canonical.set("note.md", { kind: "text", bytes: Buffer.from("canonical") });
     const entered = deferred();
     const release = deferred();
     test.beforeRead.run = async () => { entered.resolve(); await release.promise; };
     const reading = test.reads.readOwnedWorkspaceText(test.workspace, "note.md");
-    const outcome = expect(reading).rejects.toThrow("This workspace was closed. Open it again.");
+    const outcome = expect(reading).resolves.toMatchObject({ text: "canonical", contentHash: hash("canonical") });
     await entered.promise;
     const retired = test.authority.invalidate("workspace-a");
     try { release.resolve(); await outcome; await retired; }

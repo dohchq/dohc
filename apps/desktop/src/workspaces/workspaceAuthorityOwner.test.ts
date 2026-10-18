@@ -161,36 +161,53 @@ describe("workspace authority owner", () => {
     expect(test.disposed).toEqual([retiredIdentity]);
   });
 
-  it("runs physical work against the canonical attachment and rechecks it before returning", async () => {
-    const test = testOwner({
-      workspaceId: "workspace",
-      rootPath: "alias",
-      label: "A",
-    });
+  it.each(["invalidate", "retireBinding"] as const)("returns finished physical work while %s drains its canonical attachment", async retirement => {
+    const test = testOwner({ workspaceId: "workspace", rootPath: "alias", label: "A" });
     const entered = Promise.withResolvers<void>();
     const resume = Promise.withResolvers<void>();
     let attachmentId!: symbol;
-    const running = test.owner.withOperation("workspace", async (operation) => {
+    const running = test.owner.withOperation("workspace", async operation => {
       attachmentId = operation.workspace.attachmentId;
-      expect(operation.workspace).toMatchObject({
-        workspaceId: "workspace",
-        rootPath: "real:alias",
-        label: "A",
-        attachmentId: operation.workspace.attachmentId,
-      });
+      expect(operation.workspace).toMatchObject({ workspaceId: "workspace", rootPath: "real:alias", label: "A", attachmentId });
+      const result = { rootPath: operation.workspace.rootPath };
       entered.resolve();
       await resume.promise;
-      return operation.workspace.rootPath;
+      return result;
     });
-
     await entered.promise;
-    test.replace(null);
-    const retiring = test.owner.invalidate("workspace");
+    const lease = test.owner.acquire("workspace");
+    lease.release();
+    const retiring = retirement === "invalidate"
+      ? test.owner.invalidate("workspace")
+      : test.owner.retireBinding(lease.binding, { removeBinding: () => test.replace(null) });
+    expect(test.disposed).toEqual([]);
     resume.resolve();
-
-    await expect(running).rejects.toThrow("This workspace was closed. Open it again.");
+    await expect(running).resolves.toEqual({ rootPath: "real:alias" });
     await retiring;
     expect(test.disposed).toEqual([attachmentId]);
+  });
+
+  it.each(["invalidate", "retireBinding"] as const)("refuses unfinished work that checks its attachment after %s", async retirement => {
+    const test = testOwner({ workspaceId: "workspace", rootPath: "root", label: "A" });
+    const entered = Promise.withResolvers<void>();
+    const resume = Promise.withResolvers<void>();
+    const commit = vi.fn();
+    const running = test.owner.withOperation("workspace", async operation => {
+      entered.resolve();
+      await resume.promise;
+      operation.assertCurrent();
+      commit();
+    });
+    await entered.promise;
+    const lease = test.owner.acquire("workspace");
+    lease.release();
+    const retiring = retirement === "invalidate"
+      ? test.owner.invalidate("workspace")
+      : test.owner.retireBinding(lease.binding, { removeBinding: () => test.replace(null) });
+    resume.resolve();
+    await expect(running).rejects.toThrow("This workspace was closed. Open it again.");
+    await retiring;
+    expect(commit).not.toHaveBeenCalled();
   });
 
   it("keeps the admitted canonical root when its registry alias is retargeted", async () => {
@@ -276,6 +293,7 @@ describe("workspace authority owner", () => {
       );
       entered.resolve();
       await childClosed.promise;
+      operation.assertCurrent();
     });
 
     await entered.promise;
@@ -300,6 +318,7 @@ describe("workspace authority owner", () => {
       attachmentA = operation.workspace.attachmentId;
       entered.resolve();
       await daemonReady.promise;
+      operation.assertCurrent();
     });
 
     await entered.promise;
