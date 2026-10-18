@@ -1916,3 +1916,262 @@ async fn a_lease_release_reoffers_quarantined_outside_writes() {
     assert_eq!(captured, 1);
     assert_eq!((recovered.deferred, recovered.quarantined), (0, 0));
 }
+
+// A rename that changes only case reaches peers as a retire of the old
+// spelling and an ingest of the new one, and a peer whose disk ignores case
+// must receive them in that order: written first, `Notes.md` would be the
+// file the later retire of `notes.md` deletes. While an editor holds
+// `notes.md` open its retire waits, so the ingest of `Notes.md` waits with
+// it. Skips where the disk keeps case apart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_respelled_file_waits_for_its_open_old_spelling_to_retire() {
+    let store_scratch = ScratchDir::new().expect("store scratch");
+    let capture_scratch = ScratchDir::new().expect("capture scratch");
+    let root = capture_scratch.path().to_path_buf();
+    std::fs::write(root.join("notes.md"), SEED).expect("write file");
+    if !root.join("NOTES.md").exists() {
+        eprintln!("SKIP: this disk keeps case apart");
+        return;
+    }
+    let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine database path");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("open actor").actor;
+    let leases = LeaseRegistry::new();
+    let files = FilesActor::spawn_async(root.clone(), ScanBounds::default())
+        .await
+        .expect("files actor");
+    let files = FilesActorCloseGuard::new(files);
+    let status = Arc::new(DriverStatus::default());
+    let self_writes = SelfWriteSuppression::default();
+    let mut releases_seen = leases.release_generation(WORKSPACE_ID);
+    let pass = || async {
+        let run = reconcile_if_dirty_bound(&root, &files.handle(), CancellationToken::new())
+            .await
+            .expect("reconcile");
+        apply_bound_run_with_handle(
+            apply_context(&root, &actor, &leases, &status, &self_writes),
+            &files.handle(),
+            run,
+            &CancellationToken::new(),
+        )
+        .await;
+    };
+    pass().await;
+    assert_eq!(head_count(&db, "notes.md"), 1);
+
+    let key = DocKey::new(
+        WORKSPACE_ID,
+        "main",
+        derive_capture_object_id(WORKSPACE_ID, "main", "notes.md"),
+    )
+    .expect("old spelling key");
+    let lease = leases.acquire(&key).expect("an editor holds notes.md");
+    std::fs::rename(root.join("notes.md"), root.join("Notes.md")).expect("respell");
+    files.handle().request_rescan();
+    pass().await;
+    assert_eq!(
+        head_count(&db, "notes.md"),
+        1,
+        "the open file is not retired"
+    );
+    assert_eq!(head_count(&db, "Notes.md"), 0, "the new spelling waits");
+
+    drop(lease);
+    offer_unrecorded_after_release(&leases, WORKSPACE_ID, &mut releases_seen, &files.handle())
+        .await;
+    pass().await;
+    assert_eq!(head_count(&db, "notes.md"), 0);
+    assert_eq!(head_count(&db, "Notes.md"), 1);
+    let moments: Vec<(String, String)> = rusqlite::Connection::open(&db)
+        .expect("open database observer")
+        .prepare(
+            "SELECT path, operation FROM moments WHERE workspace_id = ?1 ORDER BY moment_order",
+        )
+        .expect("prepare")
+        .query_map([WORKSPACE_ID], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("moments")
+        .collect::<Result<_, _>>()
+        .expect("moments");
+    let respelled: Vec<_> = moments
+        .iter()
+        .skip(1)
+        .map(|(path, operation)| (path.as_str(), operation.as_str()))
+        .collect();
+    assert_eq!(
+        respelled,
+        [("notes.md", "delete"), ("Notes.md", "write")],
+        "{moments:?}"
+    );
+
+    files.close().await;
+    supervisor.close(&db).expect("close actor");
+}
+
+// A file a peer synced has a head capture does not own, so its absence never
+// retires it. A respell is not an absence: the file is still there under the
+// new spelling. Renamed only by case, the synced head retires at its old
+// spelling and the new spelling is captured, so peers keep one file instead
+// of two heads that share it. Skips where the disk keeps case apart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_respelled_synced_file_leaves_one_head() {
+    let store_scratch = ScratchDir::new().expect("store scratch");
+    let capture_scratch = ScratchDir::new().expect("capture scratch");
+    let root = capture_scratch.path().to_path_buf();
+    std::fs::write(root.join("notes.md"), SEED).expect("write file");
+    if !root.join("NOTES.md").exists() {
+        eprintln!("SKIP: this disk keeps case apart");
+        return;
+    }
+    let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine database path");
+    {
+        let mut store = dohc_engine_storage::EngineStore::open(&db, 1).expect("open store");
+        let mut versions = dohc_engine_domain::VersionedTextStore::new(&mut store);
+        versions
+            .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
+            .expect("main version");
+        versions
+            .write_text(
+                &dohc_engine_domain::WriteText {
+                    workspace_id: WORKSPACE_ID.into(),
+                    version_id: "main".into(),
+                    object_id: "synced".into(),
+                    path: "notes.md".into(),
+                    text: SEED.into(),
+                    moment_id: "synced-write".into(),
+                    metadata_origin: "sync".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 2,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("synced head");
+    }
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("open actor").actor;
+    let leases = LeaseRegistry::new();
+    let files = FilesActor::spawn_async(root.clone(), ScanBounds::default())
+        .await
+        .expect("files actor");
+    let files = FilesActorCloseGuard::new(files);
+    let status = Arc::new(DriverStatus::default());
+    let self_writes = SelfWriteSuppression::default();
+    let pass = || async {
+        let run = reconcile_if_dirty_bound(&root, &files.handle(), CancellationToken::new())
+            .await
+            .expect("reconcile");
+        apply_bound_run_with_handle(
+            apply_context(&root, &actor, &leases, &status, &self_writes),
+            &files.handle(),
+            run,
+            &CancellationToken::new(),
+        )
+        .await;
+    };
+    pass().await;
+    assert_eq!(head_count(&db, "notes.md"), 1);
+
+    std::fs::rename(root.join("notes.md"), root.join("Notes.md")).expect("respell");
+    files.handle().request_rescan();
+    pass().await;
+    assert_eq!(head_count(&db, "notes.md"), 0, "the synced head retires");
+    assert_eq!(head_count(&db, "Notes.md"), 1);
+    let moments: Vec<(String, String)> = rusqlite::Connection::open(&db)
+        .expect("open database observer")
+        .prepare(
+            "SELECT path, operation FROM moments WHERE workspace_id = ?1 ORDER BY moment_order",
+        )
+        .expect("prepare")
+        .query_map([WORKSPACE_ID], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("moments")
+        .collect::<Result<_, _>>()
+        .expect("moments");
+    let respelled: Vec<_> = moments
+        .iter()
+        .skip(1)
+        .map(|(path, operation)| (path.as_str(), operation.as_str()))
+        .collect();
+    assert_eq!(
+        respelled,
+        [("notes.md", "delete"), ("Notes.md", "write")],
+        "{moments:?}"
+    );
+
+    files.close().await;
+    supervisor.close(&db).expect("close actor");
+}
+
+// A folder renamed only by case is not a proven respell, so its files keep
+// their old handling: the old spellings stay tracked and peers receive no
+// delete, even once an editor that held one of them lets go. A delete after
+// the new spelling's write would remove the file at a peer whose disk
+// ignores case. Skips where the disk keeps case apart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_respelled_folder_sends_no_delete_after_its_write() {
+    let store_scratch = ScratchDir::new().expect("store scratch");
+    let capture_scratch = ScratchDir::new().expect("capture scratch");
+    let root = capture_scratch.path().to_path_buf();
+    std::fs::create_dir(root.join("Drafts")).expect("folder");
+    std::fs::write(root.join("Drafts/plan.md"), SEED).expect("write file");
+    if !root.join("DRAFTS/plan.md").exists() {
+        eprintln!("SKIP: this disk keeps case apart");
+        return;
+    }
+    let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine database path");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("open actor").actor;
+    let leases = LeaseRegistry::new();
+    let files = FilesActor::spawn_async(root.clone(), ScanBounds::default())
+        .await
+        .expect("files actor");
+    let files = FilesActorCloseGuard::new(files);
+    let status = Arc::new(DriverStatus::default());
+    let self_writes = SelfWriteSuppression::default();
+    let mut releases_seen = leases.release_generation(WORKSPACE_ID);
+    let pass = || async {
+        let run = reconcile_if_dirty_bound(&root, &files.handle(), CancellationToken::new())
+            .await
+            .expect("reconcile");
+        apply_bound_run_with_handle(
+            apply_context(&root, &actor, &leases, &status, &self_writes),
+            &files.handle(),
+            run,
+            &CancellationToken::new(),
+        )
+        .await;
+    };
+    pass().await;
+    assert_eq!(head_count(&db, "Drafts/plan.md"), 1);
+
+    let key = DocKey::new(
+        WORKSPACE_ID,
+        "main",
+        derive_capture_object_id(WORKSPACE_ID, "main", "Drafts/plan.md"),
+    )
+    .expect("old spelling key");
+    let lease = leases
+        .acquire(&key)
+        .expect("an editor holds Drafts/plan.md");
+    std::fs::rename(root.join("Drafts"), root.join("drafts")).expect("respell folder");
+    files.handle().request_rescan();
+    pass().await;
+    drop(lease);
+    offer_unrecorded_after_release(&leases, WORKSPACE_ID, &mut releases_seen, &files.handle())
+        .await;
+    files.handle().request_rescan();
+    pass().await;
+    let deletes: Vec<String> = rusqlite::Connection::open(&db)
+        .expect("open database observer")
+        .prepare("SELECT path FROM moments WHERE workspace_id = ?1 AND operation = 'delete'")
+        .expect("prepare")
+        .query_map([WORKSPACE_ID], |row| row.get(0))
+        .expect("moments")
+        .collect::<Result<_, _>>()
+        .expect("moments");
+    assert_eq!(deletes, Vec::<String>::new());
+
+    files.close().await;
+    supervisor.close(&db).expect("close actor");
+}

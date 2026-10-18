@@ -159,6 +159,134 @@ fn rename_looks_like_remove_plus_add() {
     assert_eq!(retire_paths(&p), ["old-name.md"]);
 }
 
+/// APFS keeps finding a file through its old spelling after a rename that
+/// changes only case or Unicode normalization. The old spelling must still
+/// retire, or it stays tracked beside the new one and every pass is degraded.
+/// A case-sensitive volume passes trivially. Windows keeps the old behavior
+/// until the check passes a Windows run.
+#[cfg(not(windows))]
+#[test]
+fn respelled_rename_retires_the_old_spelling() {
+    for (before, after) in [
+        ("notes.md", "Notes.md"),
+        ("caf\u{e9}.md", "cafe\u{301}.md"),
+        ("drafts/a.md", "drafts/A.md"),
+    ] {
+        let ws = Scratch::new();
+        ws.write(before, b"portable content\n");
+        let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+        let mut ctrl = ReconcileController::new();
+        let token = CancellationToken::new();
+        let _ = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
+
+        ws.rename(before, after);
+        // Case-sensitive APFS keeps the old spelling of a rename that changes
+        // only Unicode normalization: nothing was renamed there.
+        let first = after.split('/').next().unwrap();
+        if !std::fs::read_dir(ws.path())
+            .expect("list")
+            .any(|entry| entry.expect("entry").file_name() == first)
+        {
+            continue;
+        }
+
+        let p = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
+        assert_eq!(ingest_paths(&p, IngestReason::Added), [after], "{after}");
+        assert_eq!(retire_paths(&p), [before], "{before}");
+        assert!(p.unconfirmed_removed.is_empty() && !p.degraded, "{p:?}");
+        assert!(!ctrl.tracks_path(before));
+    }
+}
+
+/// A folder renamed only by case is not proven a respell: its files keep
+/// their old handling, so nothing retires and peers get no delete. Skips
+/// where the volume keeps case apart.
+#[cfg(not(windows))]
+#[test]
+fn a_folder_respell_retires_nothing() {
+    let ws = Scratch::new();
+    ws.write("drafts/a.md", b"portable content\n");
+    if !ws.path().join("DRAFTS/a.md").exists() {
+        eprintln!("SKIP: this volume keeps case apart");
+        return;
+    }
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut ctrl = ReconcileController::new();
+    let token = CancellationToken::new();
+    let _ = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
+    std::fs::rename(ws.path().join("drafts"), ws.path().join("Drafts")).expect("rename folder");
+
+    let p = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
+    assert!(retire_paths(&p).is_empty(), "{p:?}");
+    assert_eq!(p.unconfirmed_removed, ["drafts/a.md"]);
+    assert!(ctrl.tracks_path("drafts/a.md"));
+}
+
+#[cfg(not(windows))]
+#[test]
+fn the_tracked_spelling_is_not_another_spelling() {
+    let ws = Scratch::new();
+    ws.write("notes/a.md", b"a");
+    assert!(!dohc_engine_files::stored_under_other_spelling(
+        ws.path(),
+        "notes/a.md"
+    ));
+    std::fs::rename(ws.path().join("notes"), ws.path().join("Notes")).expect("rename");
+    assert!(
+        !dohc_engine_files::stored_under_other_spelling(ws.path(), "notes/a.md"),
+        "a folder respell is not proven"
+    );
+    std::fs::rename(ws.path().join("Notes/a.md"), ws.path().join("Notes/A.md")).expect("rename");
+    assert_eq!(
+        dohc_engine_files::stored_under_other_spelling(ws.path(), "Notes/a.md"),
+        ws.path().join("Notes/a.md").exists(),
+        "only a volume that still finds the old spelling stores another one"
+    );
+    assert!(!dohc_engine_files::stored_under_other_spelling(
+        ws.path(),
+        "Notes/A.md"
+    ));
+}
+
+/// On a disk that keeps case apart, `notes.md` and `Notes.md` can be two
+/// links to one file. Each is its own spelling, so neither reads as gone,
+/// even after the other link was opened last. Skips where the disk ignores
+/// case.
+#[cfg(not(windows))]
+#[test]
+fn a_case_variant_hard_link_is_not_another_spelling() {
+    let ws = Scratch::new();
+    ws.write("notes.md", b"a");
+    if std::fs::hard_link(ws.path().join("notes.md"), ws.path().join("Notes.md")).is_err() {
+        eprintln!("SKIP: this disk ignores case");
+        return;
+    }
+    for (opened, probed) in [("Notes.md", "notes.md"), ("notes.md", "Notes.md")] {
+        std::fs::read(ws.path().join(opened)).expect("open the other link");
+        assert!(
+            !dohc_engine_files::stored_under_other_spelling(ws.path(), probed),
+            "{probed}"
+        );
+    }
+}
+
+/// A link to a folder whose name differs only in case is not a rename, even
+/// when the link leaves the workspace.
+#[test]
+fn a_symlink_is_never_another_spelling() {
+    let ws = Scratch::new();
+    let outside = Scratch::new();
+    outside.write("Notes/a.md", b"outside");
+    if !ws.try_symlink_dir("notes", &outside.path().join("Notes")) {
+        eprintln!("SKIP: platform refused a directory symlink");
+        return;
+    }
+    assert!(!dohc_engine_files::stored_under_other_spelling(
+        ws.path(),
+        "notes/a.md"
+    ));
+}
+
 /// A head captured before the floor named `.DS_Store` comes back in the
 /// rehydration seed. The scanner never lists it again, so it must not wait for
 /// a retire it cannot confirm while the file stays on disk.
@@ -505,7 +633,7 @@ fn persistently_degraded_path_stops_forcing_perpetual_rescans() {
 struct ReappearedProbe;
 
 impl AbsenceProbe for ReappearedProbe {
-    fn confirms_absent(&self, _absolute_path: &Path) -> bool {
+    fn confirms_absent(&self, _root: &Path, _relative: &str) -> bool {
         false
     }
 }
@@ -513,7 +641,7 @@ impl AbsenceProbe for ReappearedProbe {
 struct TransientUnreadableProbe;
 
 impl AbsenceProbe for TransientUnreadableProbe {
-    fn confirms_absent(&self, _absolute_path: &Path) -> bool {
+    fn confirms_absent(&self, _root: &Path, _relative: &str) -> bool {
         false
     }
 }

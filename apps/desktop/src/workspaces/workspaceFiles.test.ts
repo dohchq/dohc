@@ -1317,7 +1317,10 @@ describe("importDroppedPaths", () => {
     const trip = join(outside, "Trip");
     await mkdir(trip);
     await writeFile(join(trip, "plan.md"), "plan");
-    await Promise.all(Array.from({ length: 10_000 }, (_, i) => writeFile(join(trip, `._${i}`), "")));
+    // In batches: 10,000 files open at once run out of handles on Windows.
+    for (let start = 0; start < 10_000; start += 500) {
+      await Promise.all(Array.from({ length: 500 }, (_, i) => writeFile(join(trip, `._${start + i}`), "")));
+    }
     expect((await importDroppedPaths(root, [trip], [root])).imported).toEqual(["Trip/plan.md"]);
 
     await writeFile(join(trip, "._10000"), "");
