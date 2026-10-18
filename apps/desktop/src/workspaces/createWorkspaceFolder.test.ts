@@ -268,7 +268,7 @@ describe("createWorkspaceFolder", () => {
       .rejects.toThrow(DISK_ROOT_REFUSAL);
   });
 
-  // /Volumes reports the system's device, so only its name marks it.
+  // /Volumes reports the system's device, so only its identity marks it.
   it.skipIf(process.platform !== "darwin")("refuses macOS's /Volumes, directly and through a link", async () => {
     const link = join(base, "volumes-link");
     await symlink("/Volumes", link, linkType);
