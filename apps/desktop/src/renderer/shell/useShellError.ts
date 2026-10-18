@@ -1,4 +1,4 @@
-import { createContext, useCallback, useEffect, useRef, useState } from "react";
+import { createContext, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { shareCaptureNoticeState } from "../../workspaces/shareCaptureNotice";
 import type { ShareUnconfirmedChanges } from "../../workspaces/shareViewInfo";
 import { CreationPartialError, creationPartialNotice } from "@dohc/cli/creation";
@@ -114,17 +114,6 @@ export type ReportShellFailure = (failure: {
 }) => void;
 export const ShellErrorReporter = createContext<ReportShellFailure | null>(null);
 
-// The step a macOS privacy refusal offers: the pane where a person allows
-// dohc the folder.
-export const OPEN_SYSTEM_PRIVACY_SETTINGS: NonNullable<ShellError["action"]> = {
-  label: "Open System Settings",
-  run: () => {
-    bridge().openSystemPrivacySettings().catch((error: unknown) => {
-      console.error("[desktop] could not open System Settings:", error);
-    });
-  },
-};
-
 export function useShellError(workspaceId: string) {
   const [shellErrors, setShellErrors] = useState<readonly ShellError[]>([]);
   const shellErrorsRef = useRef(shellErrors);
@@ -182,6 +171,27 @@ export function useShellError(workspaceId: string) {
     },
     [],
   );
+  // The step a macOS privacy refusal offers: the pane where a person allows
+  // dohc the folder. A pane macOS would not open files its own notice, in the
+  // workspace that asked.
+  const currentWorkspace = useRef(workspaceId);
+  currentWorkspace.current = workspaceId;
+  const privacySettingsAction = useMemo<NonNullable<ShellError["action"]>>(() => {
+    const run = (): void => {
+      const owner = currentWorkspace.current;
+      bridge().openSystemPrivacySettings().catch((error: unknown) => {
+        if (currentWorkspace.current !== owner) return;
+        const { cause } = readError(error);
+        push({
+          message: withErrorWords("dohc could not open System Settings.", error),
+          ...(cause ? { details: [["Cause", cause]] } : {}),
+          retry: run,
+          identity: "open-system-settings",
+        });
+      });
+    };
+    return { label: "Open System Settings", run };
+  }, [push]);
   const clearIdentity = useCallback((identity: string) => {
     setShellErrors((current) =>
       current.some((error) => error.identity === identity) ? current.filter((error) => error.identity !== identity) : current,
@@ -291,11 +301,11 @@ export function useShellError(workspaceId: string) {
           : `form:${partial.created[0]!.split("/").slice(0, -1).join("/")}` } : identity !== undefined ? { identity } : {}),
         ...(details.length ? { details } : {}),
         retry,
-        ...(isPrivacyDenied(error) ? { action: OPEN_SYSTEM_PRIVACY_SETTINGS } : {}),
+        ...(isPrivacyDenied(error) ? { action: privacySettingsAction } : {}),
         ...(kind ? { kind } : {}),
       });
     },
-    [push],
+    [push, privacySettingsAction],
   );
   // The error hook the shell hands its parts (ReportButtonError): no kind, and
   // an identity when the part names what failed.
@@ -330,7 +340,7 @@ export function useShellError(workspaceId: string) {
       const shown = readError(failure.message);
       const cause = failure.cause === undefined ? shown.cause : readError(failure.cause).cause;
       const action = failure.action ??
-        (isPrivacyDenied(failure.message) || isPrivacyDenied(failure.cause) ? OPEN_SYSTEM_PRIVACY_SETTINGS : undefined);
+        (isPrivacyDenied(failure.message) || isPrivacyDenied(failure.cause) ? privacySettingsAction : undefined);
       const details: ReadonlyArray<ErrorDetailField> = [
         ...(failure.details ?? []),
         ...(cause ? [["Cause", cause] as const] : []),
@@ -347,7 +357,7 @@ export function useShellError(workspaceId: string) {
         ...(failure.identity !== undefined ? { identity: failure.identity } : {}),
       }, failure.quiet ? "quiet" : failure.repeat ? "repeat" : false);
     },
-    [push],
+    [push, privacySettingsAction],
   );
   // Content search lives in the shell so its results survive panel switches.
   // Invocation failures use the shell's persistent error and retry contract;
@@ -708,5 +718,6 @@ export function useShellError(workspaceId: string) {
     dismissShellError,
     retryShellError,
     runShellErrorAction,
+    privacySettingsAction,
   };
 }

@@ -64,6 +64,16 @@ for (const refusal of [
       await expect.poll(() => app.evaluate(() => Reflect.get(globalThis, "openedExternally") as string[]))
         .toEqual(["x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders"]);
       await expect(stopped.getByRole("button", { name: "Try again" })).toBeVisible();
+
+      // When macOS will not open the pane, the person still hears about it.
+      await app.evaluate(({ shell }) => {
+        shell.openExternal = async () => { throw new Error("Failed to open URL"); };
+      });
+      await stopped.getByRole("button", { name: "Open System Settings" }).click();
+      const toast = page.getByTestId("workspace-shell-error");
+      await expect(toast).toContainText("dohc could not open System Settings.");
+      await expect(toast.getByTestId("workspace-shell-error-retry")).toBeVisible();
+      await page.screenshot({ path: test.info().outputPath(`privacy-settings-failed-${refusal.name}.png`) });
     } finally {
       if (desktop) await cleanupDesktopWorkspace(desktop, temp);
       else await temp.cleanup();

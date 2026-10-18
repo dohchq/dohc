@@ -102,7 +102,7 @@ import { useSettingsFileNotices } from "./shell/useSettingsFileNotices";
 import { useKeptCopyNotices } from "./shell/useKeptCopyNotices";
 import { useCaptureRecoveryNotices } from "./shell/useCaptureRecoveryNotices";
 import { useCaptureHoldNotices } from "./shell/useCaptureHoldNotices";
-import { OPEN_SYSTEM_PRIVACY_SETTINGS, ShellErrorReporter, useShellError } from "./shell/useShellError";
+import { ShellErrorReporter, useShellError } from "./shell/useShellError";
 import { useDocumentSaveNotices } from "./shell/useDocumentSaveNotices";
 import { useReportsNotice } from "./shell/useReportsNotice";
 import { useShareRemovalNotices } from "./shell/useShareRemovalNotices";
@@ -835,6 +835,7 @@ export function DesktopWorkspaceShell(props: {
     retryShellError,
     runShellErrorAction,
     clearIdentity,
+    privacySettingsAction,
   } = useShellError(workspaceId);
   const stopAndRestore = useStopAndRestore(workspaceId, {ready: workspaceIsReady && !props.workspace.shareView,
     onError: (fallback, error, retry, identity) => reportShellError(fallback, error, retry, undefined, identity)});
@@ -5897,8 +5898,8 @@ export function DesktopWorkspaceShell(props: {
           <div className="flex items-center gap-2">
             {isPrivacyDenied(workspaceOpenFailure.message) ? (
               <>
-                <PrimaryButton onClick={OPEN_SYSTEM_PRIVACY_SETTINGS.run}>
-                  {OPEN_SYSTEM_PRIVACY_SETTINGS.label}
+                <PrimaryButton onClick={privacySettingsAction.run}>
+                  {privacySettingsAction.label}
                 </PrimaryButton>
                 <SecondaryButton onClick={retryWorkspaceOpen}>Try again</SecondaryButton>
               </>

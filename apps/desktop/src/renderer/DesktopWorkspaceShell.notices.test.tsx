@@ -950,6 +950,38 @@ describe("workspace shell errors", () => {
     );
   });
 
+  it("files a toast with Try again when System Settings does not open", async () => {
+    const bridge = makeBridge(Promise.resolve(null), "darwin");
+    bridge.openWorkspace.mockRejectedValue(new Error(
+      "Error invoking remote method 'desktop:open-workspace': Error [privacy-denied]: EPERM: operation not permitted, opendir '/Users/me/Documents/Trip'",
+    ));
+    bridge.openSystemPrivacySettings
+      .mockRejectedValueOnce(new Error(
+        "Error invoking remote method 'desktop:open-system-privacy-settings': Error: Failed to open URL",
+      ))
+      .mockResolvedValueOnce(undefined);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const recovery = await screen.findByTestId("workspace-open-failed");
+    fireEvent.click(within(recovery).getByRole("button", { name: "Open System Settings" }));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("dohc could not open System Settings. Failed to open URL");
+    await user.click(within(toast).getByRole("button", { name: "Copy error details" }));
+    expect(await navigator.clipboard.readText()).toContain("dohc could not open System Settings.");
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    const row = (await within(await screen.findByTestId("notice-center"))
+      .findByText("dohc could not open System Settings. Failed to open URL")).closest("li")!;
+    expect(within(row).getByRole("button", { name: "Try again" })).toBeTruthy();
+    expect(within(row).getByRole("button", { name: "Copy error details" })).toBeTruthy();
+
+    await user.click(within(row).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridge.openSystemPrivacySettings).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(row.isConnected).toBe(false));
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(screen.getByTestId("workspace-open-failed")).toBeTruthy();
+  });
+
   it("offers System Settings on a toast when macOS refuses one read", async () => {
     const bridge = makeBridge(Promise.resolve(null), "darwin");
     bridge.listWorkspaceFiles.mockRejectedValueOnce(new Error(
