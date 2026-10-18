@@ -2472,6 +2472,17 @@ export function DesktopWorkspaceShell(props: {
     };
     openSwitch();
   }, [openAutomationControls, openFile, reportShellError, workspaceIsReady]);
+  // A file the OS opened with dohc. Main sends it once this window has opened
+  // this workspace, and it opens when the workspace is ready.
+  const [openedFromOs, setOpenedFromOs] = useState<{ path: string } | null>(null);
+  useEffect(() => bridge().onWorkspaceActivated((next, file) => {
+    if (file !== undefined && next.workspaceId === workspaceId) setOpenedFromOs({ path: file });
+  }), [workspaceId]);
+  useEffect(() => {
+    if (!workspaceIsReady || openedFromOs === null) return;
+    setOpenedFromOs(null);
+    openFile(openedFromOs.path);
+  }, [openFile, openedFromOs, workspaceIsReady]);
   const clearAutomationFocus = useCallback(() => setAutomationFocus(null), []);
   const recordHistory = useRecordHistory(workspaceId, { reportShellError, clearKind, openAutomationRun: openAutomation });
   // A Collection page's errors and notices, which can answer after this

@@ -46,7 +46,7 @@ import {
   UpdateStateEvent,
   WorkbenchMenuCommand,
   WorkspaceIdPayload,
-  WorkspaceSummary,
+  WorkspaceActivated,
   WorkspacePathOpenFailedEvent,
   WindowFullScreenEvent,
   crashReportOperations,
@@ -500,7 +500,7 @@ const bridge: DohcDesktopBridge = {
     return () => { menuCommandListeners.delete(listener); };
   },
   onWorkspaceActivated: (listener) =>
-    onEvent(CHANNELS.workspaceActivated, WorkspaceSummary, listener),
+    onEvent(CHANNELS.workspaceActivated, WorkspaceActivated, ({ file, ...workspace }) => listener(workspace, file)),
   onWorkspacePathOpenFailed: (listener) =>
     onEvent(CHANNELS.workspacePathOpenFailed, WorkspacePathOpenFailedEvent, () => listener()),
   onUpdateState: (listener) => onEvent(CHANNELS.updateState, UpdateStateEvent, listener),

@@ -264,6 +264,8 @@ export function registerOpenWorkspaceIpcHandler<
   };
   setPreferredWorkspaceId(workspaceId: string, sender: Sender): void;
   markWorkspaceOpened(workspaceId: string): void;
+  // The renderer finished opening this workspace, so it hears what main sends it.
+  workspaceShown(workspaceId: string, sender: Sender): void;
   syncStatusWithOwnedProjection(
     workspace: Workspace,
     status: SyncStatusResult,
@@ -277,6 +279,7 @@ export function registerOpenWorkspaceIpcHandler<
     rendererWorkspaceSessions,
     setPreferredWorkspaceId,
     markWorkspaceOpened,
+    workspaceShown,
     syncStatusWithOwnedProjection,
     openWorkspaceActivity,
   } = dependencies;
@@ -313,6 +316,7 @@ export function registerOpenWorkspaceIpcHandler<
           error,
         );
       }
+      workspaceShown(workspace.workspaceId, event.sender);
       return status;
     });
   });

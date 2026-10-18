@@ -1,6 +1,6 @@
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { isAppImageBoot, resolveDohcMcpCommand } from "./dohcMcpCommand";
+import { isAppImageBoot, isTemporaryMacAppPath, resolveDohcMcpCommand } from "./dohcMcpCommand";
 
 describe("resolveDohcMcpCommand", () => {
   it("recognizes only a non-empty APPIMAGE path", () => {
@@ -76,6 +76,26 @@ describe("resolveDohcMcpCommand", () => {
         env: { APPIMAGE: "/home/user/Downloads/dohc-1.2.3-linux-x86_64.AppImage" },
       }),
     ).toBeNull();
+  });
+
+  it("returns unavailable for a macOS app on a disk image or a translocated copy", () => {
+    const temporary = [
+      "/Volumes/dohc 1.2.3/dohc.app/Contents/Resources",
+      "/private/var/folders/x1/abc/T/AppTranslocation/0F2C9A1E-1111-4222-8333-944455556666/d/dohc.app/Contents/Resources",
+    ];
+    for (const resourcesPath of temporary) {
+      expect(isTemporaryMacAppPath(resourcesPath)).toBe(true);
+      expect(resolveDohcMcpCommand({ isPackaged: true, resourcesPath, platform: "darwin", env: {} })).toBeNull();
+    }
+    const installed = "/Applications/dohc.app/Contents/Resources";
+    expect(isTemporaryMacAppPath(installed)).toBe(false);
+    // An app installed in the Applications folder at a volume's top stays put;
+    // one in any deeper folder named Applications does not count.
+    expect(isTemporaryMacAppPath("/Volumes/External/Applications/dohc.app/Contents/Resources")).toBe(false);
+    expect(isTemporaryMacAppPath("/Volumes/dohc 1.2.3/Stuff/Applications/dohc.app/Contents/Resources")).toBe(true);
+    expect(isTemporaryMacAppPath("/Users/sam/Applications/dohc.app/Contents/Resources")).toBe(false);
+    expect(resolveDohcMcpCommand({ isPackaged: true, resourcesPath: installed, platform: "darwin", env: {} }))
+      .toBe(join(installed, "cli-bin", "dohc-mcp"));
   });
 
   it("keeps the workspace bin in dev and the DOHC_MCP_COMMAND override everywhere", () => {
