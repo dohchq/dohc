@@ -1,14 +1,16 @@
 import { editorTabTestId } from "../src/testPins";
 import { DOCUMENT_END } from "./helpers/keys";
 import { expect, test } from "@playwright/test";
-import { access, readFile } from "node:fs/promises";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { cleanupTestScratch, createTestScratch } from "../src/workspaces/testTemp";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
   explorerRow,
   openWorkspaceFromFirstRun,
+  revealExplorerPath,
   waitForWorkspaceFile,
   writeWorkspaceFiles,
 } from "./helpers/workspace";
@@ -174,5 +176,56 @@ test("renaming a live Markdown file first lands the newest editor update", async
       .toBe(false);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+// Finder and File Explorer drag a folder, or a bundle document such as .rtfd,
+// as one item. A real OS drag through Chromium (Input.dispatchDragEvent
+// carries the folder's path) copies it whole and leaves Finder's files behind.
+test("dropping a folder from the OS imports it whole", async ({}, testInfo) => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  try {
+    const outside = await createTestScratch("dohc-drop-");
+    const trip = join(outside, "Trip");
+    await mkdir(join(trip, "photos"), { recursive: true });
+    await writeFile(join(trip, "plan.md"), "# Plan\n");
+    await writeFile(join(trip, "photos", "beach.txt"), "sand\n");
+    await writeFile(join(trip, "photos", ".DS_Store"), "finder");
+    await writeWorkspaceFiles(temp, [{ path: "notes.md", contents: "# Notes\n" }]);
+    desktop = await launchDesktopApp({ workspace: temp });
+    const { app, page } = desktop;
+    const workspace = await openWorkspaceFromFirstRun(page, temp);
+    await waitForWorkspaceFile(page, workspace.workspaceId, "notes.md");
+
+    const dropFromOs = async (path: string) => {
+      const box = await page.getByTestId("file-tree").boundingBox();
+      if (!box) throw new Error("The file tree has no bounding box");
+      const point = { x: Math.round(box.x + box.width / 2), y: Math.round(box.y + box.height - 24) };
+      const cdp = await app.context().newCDPSession(page);
+      const data = { items: [], files: [path], dragOperationsMask: 1 };
+      for (const type of ["dragEnter", "dragOver", "drop"] as const) {
+        await cdp.send("Input.dispatchDragEvent", { type, ...point, data });
+      }
+      await cdp.detach();
+    };
+
+    await dropFromOs(trip);
+    await expect(page.getByText("Imported 2 files.").first()).toBeVisible();
+    await revealExplorerPath(page, "Trip/photos/beach.txt");
+    await expect(explorerRow(page, "Trip/plan.md")).toBeVisible();
+    expect(await readFile(join(temp.rootPath, "Trip", "photos", "beach.txt"), "utf8")).toBe("sand\n");
+    expect(await pathExists(join(temp.rootPath, "Trip", "photos", ".DS_Store"))).toBe(false);
+    await page.screenshot({ path: testInfo.outputPath("folder-drop.png") });
+
+    // A drop of empty folders lands no file, and says how many folders it made.
+    await mkdir(join(outside, "Empty", "Inner"), { recursive: true });
+    await dropFromOs(join(outside, "Empty"));
+    await expect(page.getByText("Created 2 folders.").first()).toBeVisible();
+    await revealExplorerPath(page, "Empty/Inner");
+    await page.screenshot({ path: testInfo.outputPath("empty-folder-drop.png") });
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+    await cleanupTestScratch();
   }
 });

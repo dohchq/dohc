@@ -144,6 +144,7 @@ let realpathOverride:
 let failRenameToPathOnce: { path: string; error: Error } | null = null;
 let failRemovePathOnce: { path: string; error: Error } | null = null;
 let failReaddirPathOnce: { path: string; error: Error } | null = null;
+let beforeOpen: ((path: string) => Promise<void>) | null = null;
 let collisionRecordRenameTargets: string[] = [];
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
@@ -183,6 +184,10 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       }
       return actual.rename(oldPath, newPath);
     }) as typeof actual.rename,
+    open: (async (...args: Parameters<typeof actual.open>) => {
+      await beforeOpen?.(String(args[0]));
+      return actual.open(...args);
+    }) as typeof actual.open,
     rm: (async (
       path: Parameters<typeof actual.rm>[0],
       options?: Parameters<typeof actual.rm>[1],
@@ -194,6 +199,21 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       }
       return actual.rm(path, options);
     }) as typeof actual.rm,
+  };
+});
+
+// Another process changes a dropped folder after the screen and before the
+// import reads it. A test can also forge what the screen recorded.
+let afterDropScreen: ((screened: Awaited<ReturnType<typeof import("./workspaceFiles").screenDroppedPaths>>) => Promise<void>) | null = null;
+vi.mock("./workspaceFiles", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./workspaceFiles")>();
+  return {
+    ...actual,
+    screenDroppedPaths: (async (...args: Parameters<typeof actual.screenDroppedPaths>) => {
+      const screened = await actual.screenDroppedPaths(...args);
+      await afterDropScreen?.(screened);
+      return screened;
+    }) as typeof actual.screenDroppedPaths,
   };
 });
 
@@ -388,6 +408,8 @@ interface OwnedChangeScope {
   workspaceId: string;
   rootPath: string;
   shareViewStore: () => CaptureVersionedTextStore;
+  // Files the share grants one by one. Absent grants the whole version.
+  grantedPaths?: string[];
 }
 
 async function applyOwnedShareViewChange(
@@ -406,7 +428,7 @@ async function applyOwnedShareViewChange(
     shareId: SHARE_ID,
     recipientUserId: "recipient-a",
     granterEmail: "granter@example.com",
-    grantedSelector: { paths: [], versionId: "main", access: "edit" },
+    grantedSelector: { paths: scope.grantedPaths ?? [], versionId: "main", access: "edit" },
     ended: false,
   };
   const files = createShareViewFiles({
@@ -4525,6 +4547,242 @@ describe("shared view refresh", () => {
     } finally {
       releaseMutation();
       await store.close();
+    }
+  });
+
+  // The store holds files, not folders: a dropped folder lands through its
+  // files, under a name no held file's folder already uses.
+  it("imports a dropped folder through its files, beside a held folder of its name", async () => {
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+    const sourceRoot = await createTestScratch("dohc-shared-view-desktop-");
+    const trip = join(sourceRoot, "Trip");
+    await mkdir(join(trip, "sub"), { recursive: true });
+    await mkdir(join(trip, "empty"), { recursive: true });
+    await writeFile(join(trip, "plan.md"), "plan\n", "utf8");
+    await writeFile(join(trip, "sub", "notes.md"), "notes\n", "utf8");
+    await writeFile(join(trip, ".DS_Store"), "finder", "utf8");
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    relay.addWrite("docs/Trip/seed.md", "seed");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    // Only the store holds the folder now, so only the store can say its
+    // name is taken.
+    await rm(join(rootDir, "docs", "Trip"), { recursive: true });
+
+    const store = harness.openStore({ workspaceId: WORKSPACE, rootPath: rootDir });
+    try {
+      const outcome = await applyShareViewFileImport({
+        workspaceId: WORKSPACE,
+        rootPath: rootDir,
+        shareViewStore: () => store,
+        absolutePaths: [trip],
+        screenAgainstRoots: [rootDir],
+        targetDir: "docs",
+      });
+      expect({ ...outcome, imported: outcome.imported.sort() }).toEqual({
+        imported: ["docs/Trip (2)/plan.md", "docs/Trip (2)/sub/notes.md"],
+        skipped: 0,
+      });
+      await expect(
+        readFile(join(rootDir, "docs", "Trip (2)", "sub", "notes.md"), "utf8"),
+      ).resolves.toBe("notes\n");
+      const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
+      const held = await store.listTextFileMetadata({
+        workspaceId: WORKSPACE,
+        versionId: main.id,
+      });
+      expect(held.map((file) => file.path).sort()).toEqual([
+        "docs/Trip (2)/plan.md",
+        "docs/Trip (2)/sub/notes.md",
+        "docs/Trip/seed.md",
+      ]);
+    } finally {
+      await store.close();
+    }
+  });
+
+  async function dropIntoDocs(
+    build: (sourceRoot: string) => Promise<string[]>,
+    options: { held?: string; grantedPaths?: string[] } = {},
+  ) {
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+    const sourceRoot = await createTestScratch("dohc-shared-view-desktop-");
+    const absolutePaths = await build(sourceRoot);
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    relay.addWrite(options.held ?? "docs/seed.md", "seed");
+    await refreshSharedViewOnce(harness, { rootDir, workspaceId: WORKSPACE, shareId: SHARE_ID });
+    const store = harness.openStore({ workspaceId: WORKSPACE, rootPath: rootDir });
+    const importing = applyShareViewFileImport({
+      workspaceId: WORKSPACE,
+      rootPath: rootDir,
+      shareViewStore: () => store,
+      absolutePaths,
+      screenAgainstRoots: [rootDir],
+      targetDir: "docs",
+      ...(options.grantedPaths ? { grantedPaths: options.grantedPaths } : {}),
+    });
+    const stored = async () => {
+      const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
+      return store.listTextFileMetadata({ workspaceId: WORKSPACE, versionId: main.id });
+    };
+    const storePaths = async () => (await stored()).map((file) => file.path).sort();
+    return { importing, stored, storePaths, close: () => store.close() };
+  }
+
+  // A share view never takes a .env. The grant decides every file before the
+  // first write, so the refusal names it and nothing lands.
+  it("refuses a drop holding a file the grant refuses before any file lands", async () => {
+    const drop = await dropIntoDocs(async (sourceRoot) => {
+      await writeFile(join(sourceRoot, "first.md"), "first\n", "utf8");
+      await mkdir(join(sourceRoot, "Trip"));
+      await writeFile(join(sourceRoot, "Trip", "plan.md"), "plan\n", "utf8");
+      await writeFile(join(sourceRoot, "Trip", ".env"), "TOKEN=1\n", "utf8");
+      return [join(sourceRoot, "first.md"), join(sourceRoot, "Trip")];
+    });
+    try {
+      await expect(drop.importing).rejects.toThrow("docs/Trip/.env");
+      expect(await drop.storePaths()).toEqual(["docs/seed.md"]);
+    } finally {
+      await drop.close();
+    }
+  });
+
+  // The validator decodes %2f, so the grant would check docs/Trip/x/y.md
+  // while the store took the raw name.
+  it("skips a nested name the destination would rewrite", async () => {
+    const drop = await dropIntoDocs(async (sourceRoot) => {
+      await mkdir(join(sourceRoot, "Trip"));
+      await writeFile(join(sourceRoot, "Trip", "ok.md"), "ok\n", "utf8");
+      await writeFile(join(sourceRoot, "Trip", "x%2fy.md"), "encoded\n", "utf8");
+      return [join(sourceRoot, "Trip")];
+    });
+    try {
+      await expect(drop.importing).resolves.toEqual({ imported: ["docs/Trip/ok.md"], skipped: 1 });
+      expect(await drop.storePaths()).toEqual(["docs/Trip/ok.md", "docs/seed.md"]);
+    } finally {
+      await drop.close();
+    }
+  });
+
+  it.each(["file", "folder"] as const)("never reads a %s swapped for a link after the screen", async (swapped) => {
+    const secrets = await createTestScratch("dohc-shared-view-secrets-");
+    await writeFile(join(secrets, "a.md"), "SECRET\n", "utf8");
+    let trip = "";
+    afterDropScreen = async () => {
+      if (swapped === "file") {
+        await rm(join(trip, "notes", "a.md"));
+        await symlink(join(secrets, "a.md"), join(trip, "notes", "a.md"), "file");
+      } else {
+        await rm(join(trip, "notes"), { recursive: true });
+        await symlink(secrets, join(trip, "notes"), "dir");
+      }
+    };
+    try {
+      const drop = await dropIntoDocs(async (sourceRoot) => {
+        trip = join(sourceRoot, "Trip");
+        await mkdir(join(trip, "notes"), { recursive: true });
+        await writeFile(join(trip, "notes", "a.md"), "notes\n", "utf8");
+        return [trip];
+      });
+      try {
+        await expect(drop.importing).rejects.toThrow("changed after dohc checked it");
+        expect(await drop.storePaths()).toEqual(["docs/seed.md"]);
+      } finally {
+        await drop.close();
+      }
+    } finally {
+      afterDropScreen = null;
+    }
+  });
+
+  // notes.md is held, so the dropped notes.md lands as notes (2).md, which
+  // the grant does not name. That is known before ok.md is written.
+  it("checks the final collision names against the grant before any file lands", async () => {
+    const drop = await dropIntoDocs(async (sourceRoot) => {
+      await writeFile(join(sourceRoot, "ok.md"), "ok\n", "utf8");
+      await writeFile(join(sourceRoot, "notes.md"), "notes\n", "utf8");
+      return [join(sourceRoot, "ok.md"), join(sourceRoot, "notes.md")];
+    }, { held: "docs/notes.md", grantedPaths: ["docs/ok.md", "docs/notes.md"] });
+    try {
+      await expect(drop.importing).rejects.toThrow("docs/notes (2).md");
+      expect(await drop.storePaths()).toEqual(["docs/notes.md"]);
+    } finally {
+      await drop.close();
+    }
+  });
+
+  // Capture reads main.ts under sites/<app>/ as site source text, so the
+  // import classifies it by the path it lands at, not its path in the drop.
+  it("classifies a dropped file by the path it lands at", async () => {
+    const drop = await dropIntoDocs(async (sourceRoot) => {
+      await mkdir(join(sourceRoot, "sites", "app"), { recursive: true });
+      await writeFile(join(sourceRoot, "sites", "app", "main.ts"), "export {};\n", "utf8");
+      return [join(sourceRoot, "sites")];
+    });
+    try {
+      await expect(drop.importing).resolves.toEqual({ imported: ["docs/sites/app/main.ts"], skipped: 0 });
+      expect((await drop.stored()).find((file) => file.path === "docs/sites/app/main.ts")?.contentKind).toBe("text");
+    } finally {
+      await drop.close();
+    }
+  });
+
+  itNonRoot("skips a dropped file it cannot read, as the path reader does", async () => {
+    let locked = "";
+    const drop = await dropIntoDocs(async (sourceRoot) => {
+      await mkdir(join(sourceRoot, "Trip"));
+      await writeFile(join(sourceRoot, "Trip", "ok.md"), "ok\n", "utf8");
+      locked = join(sourceRoot, "Trip", "locked.md");
+      await writeFile(locked, "locked\n", "utf8");
+      await denyFileContentRead(locked);
+      return [join(sourceRoot, "Trip")];
+    });
+    try {
+      await expect(drop.importing).resolves.toEqual({ imported: ["docs/Trip/ok.md"], skipped: 1 });
+    } finally {
+      await restoreRead(locked, 0o600);
+      await drop.close();
+    }
+  });
+
+  // The forged identity stands for a screen that recorded the link target's
+  // file. The folder check after the open still refuses the read.
+  it("checks a dropped file's folder again after opening it", async () => {
+    const secrets = await createTestScratch("dohc-shared-view-secrets-");
+    await writeFile(join(secrets, "a.md"), "SECRET\n", "utf8");
+    const secret = await lstat(join(secrets, "a.md"), { bigint: true });
+    let trip = "";
+    afterDropScreen = async (screened) => {
+      const entry = screened.usable[0]!.entries!.find((candidate) => candidate.path === "sub/a.md")!;
+      entry.identity = { dev: secret.dev, ino: secret.ino };
+      beforeOpen = async (path) => {
+        if (path !== join(trip, "sub", "a.md")) return;
+        beforeOpen = null;
+        await rm(join(trip, "sub"), { recursive: true });
+        await symlink(secrets, join(trip, "sub"), "dir");
+      };
+    };
+    try {
+      const drop = await dropIntoDocs(async (sourceRoot) => {
+        trip = join(sourceRoot, "Trip");
+        await mkdir(join(trip, "sub"), { recursive: true });
+        await writeFile(join(trip, "sub", "a.md"), "a\n", "utf8");
+        return [trip];
+      });
+      try {
+        await expect(drop.importing).rejects.toThrow("sub changed after dohc checked it.");
+        expect(await drop.storePaths()).toEqual(["docs/seed.md"]);
+      } finally {
+        await drop.close();
+      }
+    } finally {
+      afterDropScreen = null;
+      beforeOpen = null;
     }
   });
 
