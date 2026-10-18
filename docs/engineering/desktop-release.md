@@ -9,11 +9,12 @@ targets and deployment requirements.
 | Platform | Architectures | Published installer | Update package |
 | --- | --- | --- | --- |
 | Windows | x64 | NSIS `.exe` | `.exe` |
-| macOS | x64, arm64 | `.dmg` | `.zip` |
+| macOS | arm64 (Apple silicon) | `.dmg` | `.zip` |
 | Linux | x64 | AppImage | `.AppImage` |
 
 The desktop release workflow builds each target from the matching Rust engine
-target. Stable releases require signing credentials for Windows and macOS.
+target. macOS releases support Apple silicon only; there is no Intel build.
+Stable releases require signing credentials for Windows and macOS.
 Nightly builds may be unsigned for testing. An unsigned build is not a stable
 release.
 
@@ -41,16 +42,15 @@ Every release job runs on a self-hosted runner. Cloud runners stay off.
 | Preflight, version check, and Publish for other selections | `self-hosted`, `windows`, `x64` |
 | Windows x64 package | `self-hosted`, `windows`, `x64` |
 | Linux x64 package | `self-hosted`, `linux`, `x64` |
-| macOS x64 and arm64 packages | `self-hosted`, `macos`, `arm64` |
+| macOS arm64 package | `self-hosted`, `macos`, `arm64` |
 
 A job waits in the queue until a runner with its labels is online.
 Each runner needs Git with bash, rustup, and the platform's native build tools.
 The coordinator runner also needs the GitHub CLI, `gh`, for the version check and publishing.
 Run the Windows and macOS runners in a signed-in desktop session for the packaged app check.
 The Linux runner also needs `xvfb-run` for the fuse smoke.
-The macOS runner boots the x64 package under Rosetta. Install it once with `softwareupdate --install-rosetta --agree-to-license`.
 After packaging, that check verifies the actual executable's fuse values and starts it with an isolated profile.
-The smoke looks for `apps/desktop/release/linux-unpacked` on Linux, and on a Mac for `apps/desktop/release/mac-arm64/dohc.app` (Apple silicon) or `apps/desktop/release/mac/dohc.app` (Intel). Point `DOHC_SMOKE_PACKAGE_DIRECTORY` at any other unpacked directory or app bundle.
+The smoke looks for `apps/desktop/release/linux-unpacked` on Linux, and on a Mac for `apps/desktop/release/mac-arm64/dohc.app`. Point `DOHC_SMOKE_PACKAGE_DIRECTORY` at any other unpacked directory or app bundle.
 The package and publish jobs receive the environment's secrets.
 Register only runners that the release owner controls.
 On a shared Windows runner, set `DOHC_BUILD_SLOT_ROOT=C:\w\_locks` in the runner's `.env` file.
@@ -79,24 +79,6 @@ Before selecting `all`, confirm that the PC has enough resources for both builds
 WSLg can display the packaged app, and Xvfb supports automated startup checks.
 These checks do not prove Linux desktop installation, protocol registration, or real AppImage upgrades.
 Use a normal Linux desktop or desktop VM for those release rehearsals.
-
-### Package macOS x64 on Apple silicon
-
-The Apple silicon runner packages both macOS architectures.
-pnpm installs only the host's native binaries unless the install names another CPU.
-The package job installs the binaries for its architecture and stages the app compiler for it.
-Before each `pnpm run` or `pnpm exec`, pnpm checks the install and can reinstall without `--cpu`.
-The package job turns that check off with `pnpm_config_verify_deps_before_run=false`.
-Packaging refuses a compiler staged for another architecture.
-
-To package macOS x64 on an Apple silicon Mac, use one shell for every step:
-
-1. Set `pnpm_config_verify_deps_before_run` to `false`.
-2. Run `pnpm install --frozen-lockfile --cpu=current --cpu=x64`.
-3. Run `pnpm build:desktop`. It stages the arm64 compiler.
-4. Run `node apps/desktop/scripts/stage-app-compiler.mjs --arch=x64`. It downloads the pinned x64 Node and builds the compiler owner for `x86_64-apple-darwin`, the Rust target step 5 also needs.
-5. Run `pnpm --filter @dohc/desktop run build:engine --target x86_64-apple-darwin`.
-6. Run `pnpm --filter @dohc/desktop exec electron-builder --x64 --publish never`.
 
 ## Contributor access to releases
 
@@ -442,7 +424,6 @@ first stable release.
 Download the matching update manifest and every file it lists.
 Keep them in one directory with the installer for your target architecture.
 On macOS, include the `.dmg` installer and `.zip` update packages.
-A published macOS manifest can list packages for both architectures.
 Then run:
 
 ```powershell
@@ -454,7 +435,7 @@ node scripts/verify-desktop-release-artifacts.mjs `
   --channel latest
 ```
 
-Use `mac` with `x64` or `arm64` for a macOS release. Use `linux` with `x64`
+Use `mac` with `arm64` for a macOS release. Use `linux` with `x64`
 for an AppImage release. The command checks artifact bytes only.
 For Windows and macOS stable releases, confirm the signature with the platform
 tools before opening the installer. This workflow has no equivalent signing

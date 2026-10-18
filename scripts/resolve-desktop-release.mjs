@@ -20,15 +20,6 @@ export function desktopReleaseTargets(platforms = "windows") {
       require_signing: "1",
     },
     {
-      label: "macOS x64",
-      os: "macOS",
-      artifact_platform: "mac",
-      runner: ["self-hosted", "macos", "arm64"],
-      arch: "x64",
-      target: "x86_64-apple-darwin",
-      require_signing: "1",
-    },
-    {
       label: "macOS arm64",
       os: "macOS",
       artifact_platform: "mac",
