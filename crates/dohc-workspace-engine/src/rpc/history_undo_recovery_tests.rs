@@ -99,6 +99,8 @@ async fn workspace_open_resumes_interrupted_undo_and_places_every_inverse() {
         .unwrap();
     let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
     let open = service.open(Some(&handle)).unwrap();
+    let initial_recovery = lock(&open.undo_recovery).take().unwrap();
+    initial_recovery.await.unwrap();
     assert!(matches!(
         open.actor
             .history_undo_in_turns(
