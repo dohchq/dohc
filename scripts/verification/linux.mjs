@@ -5,7 +5,9 @@
 
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { freemem } from "node:os";
 import { join, resolve } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { acquireBuildSlot, acquireLinuxSlot, freeDiskGb, resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.mjs";
 import { git, readJson, repoRoot, run } from "./process.mjs";
 
@@ -19,7 +21,10 @@ const scopeLimitSeconds = 2 * 60 * 60;
 // Every WSL distro shares one VM, Docker's included, under the host's WSL memory limit.
 // The run's own limit keeps an out-of-memory kill inside the run. The run continues after
 // a kill, so its receipt and `scope.json` record what happened.
-const scopeMemory = "-p MemoryHigh=9G -p MemoryMax=11G -p OOMPolicy=continue";
+const scopeMaxGb = 11;
+const scopeMemory = `-p MemoryHigh=${scopeMaxGb - 2}G -p MemoryMax=${scopeMaxGb}G -p OOMPolicy=continue`;
+// The queue distrusts a check that failed after Windows free memory fell below this.
+const hostFloorGb = 3;
 
 /** The WSL distro this host verifies Linux in, or null. */
 export function linuxDistro(env = process.env, platform = process.platform) {
@@ -43,7 +48,10 @@ export function wslPath(path) {
 
 const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
 
-/** Prints the commits the Linux checkout keeps, then `head` and `base` if it has them. Creates the checkout on first use. */
+/**
+ * Prints the commits the Linux checkout keeps, then `head` and `base` if it has them, then the VM's page cache in kB.
+ * Creates the checkout on first use.
+ */
 export const tipsScript = ({ head, base }) => `set -euo pipefail
 repo="${home}/linux"
 mkdir -p "$repo"
@@ -51,16 +59,24 @@ mkdir -p "$repo"
 cd "$repo"
 git for-each-ref --format='tip %(objectname)' refs/dohc/
 for commit in ${quote(head)} ${quote(base)}; do git cat-file -e "$commit^{commit}" 2>/dev/null && echo "has $commit"; done
-true
+awk '$1 == "Cached:" {print "cached", $2}' /proc/meminfo
 `;
 
-/** What the tips script found: the checkout's commits, and whether it has `head` and `base`. */
+/** What the tips script found: the checkout's commits, whether it has `head` and `base`, and the VM's page cache in GB. */
 export function parseTips(stdout) {
   const lines = stdout.split(/\r?\n/u).map(line => line.trim().split(" "));
   const sha = value => /^[0-9a-f]{40}$/u.test(value ?? "");
+  const cached = Number(lines.find(([kind]) => kind === "cached")?.[1]);
   return { tips: lines.filter(([kind, value]) => kind === "tip" && sha(value)).map(([, value]) => value),
-    has: new Set(lines.filter(([kind, value]) => kind === "has" && sha(value)).map(([, value]) => value)) };
+    has: new Set(lines.filter(([kind, value]) => kind === "has" && sha(value)).map(([, value]) => value)),
+    cachedGb: Number.isFinite(cached) ? cached / 1024 ** 2 : 0 };
 }
+
+/**
+ * The Windows free memory the Linux job needs before it builds. The VM already holds its page cache,
+ * so the job grows the VM only by what its limit exceeds that cache. The host keeps the queue's floor beside it.
+ */
+export const neededMemoryGb = cachedGb => hostFloorGb + Math.max(0, scopeMaxGb - cachedGb);
 
 /**
  * Stops any earlier run's processes, then puts the checkout at `head`, fetching the bundle's `missing` commits first,
@@ -113,7 +129,8 @@ exec systemd-run --user --scope --quiet --collect --unit=${unit} -p RuntimeMaxSe
  * `output` is a Windows folder for its evidence. A failure of the host, of the transfer, or one after an
  * out-of-memory kill carries `environment`, so the queue retries it instead of failing the change.
  */
-export async function linuxRustJob({ distro, head, base, output, signal, request = "inline", attempt = null, command = run, gitRead = git, budget = resolveBuildBudget() }) {
+export async function linuxRustJob({ distro, head, base, output, signal, request = "inline", attempt = null, command = run, gitRead = git, budget = resolveBuildBudget(),
+  freeMemoryGb = () => freemem() / 1024 ** 3, memoryPollMs = 30_000 }) {
   const environment = cause => error => {
     if (signal?.aborted || error?.interrupted) throw error;
     throw Object.assign(error instanceof Error ? error : new Error(String(error)), { environment: cause });
@@ -133,7 +150,7 @@ export async function linuxRustJob({ distro, head, base, output, signal, request
   try {
     // Refs left by a run killed before its cleanup. None belongs to a live run, because this one holds the slot.
     for (const stale of gitRead(["for-each-ref", "--format=%(refname)", "refs/verification-linux/"]).split(/\r?\n/u).filter(Boolean)) gitRead(["update-ref", "-d", stale]);
-    const { tips, has } = parseTips((await wsl("tips", tipsScript({ head, base }), { quietStdout: true }).catch(environment("linux host"))).stdout);
+    const { tips, has, cachedGb } = parseTips((await wsl("tips", tipsScript({ head, base }), { quietStdout: true }).catch(environment("linux host"))).stdout);
     const missing = ["head", "base"].filter(name => !has.has(name === "head" ? head : base));
     const bundle = missing.length ? join(output, "sync.bundle") : null;
     try {
@@ -148,7 +165,10 @@ export async function linuxRustJob({ distro, head, base, output, signal, request
       for (const name of missing) try { gitRead(["update-ref", "-d", `${ref}/${name}`]); } catch { /* Not created. */ }
       if (bundle) rmSync(bundle, { force: true });
     }
-    // The Linux build counts against the host's disk floor and cargo lanes, like a build in another lane.
+    // The Linux build counts against the host's memory, disk floor, and cargo lanes, like a build in another lane.
+    const needed = neededMemoryGb(cachedGb);
+    if (freeMemoryGb() < needed) console.log(`[verification] The Linux job waits for ${needed.toFixed(1)} GB of free memory; ${freeMemoryGb().toFixed(1)} GB is free.`);
+    while (freeMemoryGb() < needed) await sleep(memoryPollMs, undefined, { signal }).catch(error => { throw signal?.aborted ? signal.reason : error; });
     const free = freeDiskGb(repoRoot);
     if (free === null || free < budget.diskFloorGb) throw Object.assign(new Error(`The Linux build needs ${budget.diskFloorGb} GB free; observed ${free ?? "unknown"}.`), { environment: "disk space" });
     cargo = await acquireBuildSlot({ ...budget, cooperativeCancellation: true, signal, metadata }).catch(environment("linux slot"));

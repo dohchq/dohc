@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { linuxDistro, linuxRustJob, parseTips, runScript, syncScript, wslPath } from "./linux.mjs";
+import { linuxDistro, linuxRustJob, neededMemoryGb, parseTips, runScript, syncScript, wslPath } from "./linux.mjs";
 
 const head = "a".repeat(40);
 const base = "b".repeat(40);
@@ -34,7 +34,7 @@ test("Windows paths map to WSL's mounts", () => {
 });
 
 test("the tips script's report names kept commits and the ones it already has", () => {
-  assert.deepEqual(parseTips(`tip ${known}\ntip not-a-sha\nhas ${base}\n\nwarning: noise\n`), { tips: [known], has: new Set([base]) });
+  assert.deepEqual(parseTips(`tip ${known}\ntip not-a-sha\nhas ${base}\n\nwarning: noise\n`), { tips: [known], has: new Set([base]), cachedGb: 0 });
 });
 
 test("a sync fetches only missing commits, and pruning never drops the run's own", () => {
@@ -56,7 +56,7 @@ test("the run script quotes the grant and limits the run's memory and time", () 
 });
 
 /** Run the job against fakes. `verify` writes the Linux verifier's receipt, or throws for the run's failure. */
-async function job({ tips = `tip ${known}\n`, verify, signal, gitRefs = [] } = {}) {
+async function job({ tips = `tip ${known}\n`, verify, signal, gitRefs = [], freeMemory = () => 64 } = {}) {
   const root = mkdtempSync(join(tmpdir(), "dohc-linux-job-"));
   const output = join(root, "output");
   const calls = [];
@@ -79,7 +79,7 @@ async function job({ tips = `tip ${known}\n`, verify, signal, gitRefs = [] } = {
   };
   try {
     const budget = { root: join(root, "slots"), slots: 4, jobs: 2, diskFloorGb: 0 };
-    const result = await linuxRustJob({ distro: "Ubuntu", head, base, output, signal, command, gitRead, budget }).then(({ receipt, scope }) => ({ receipt, scope }), error => ({ error }));
+    const result = await linuxRustJob({ distro: "Ubuntu", head, base, output, signal, command, gitRead, budget, freeMemoryGb: freeMemory, memoryPollMs: 5 }).then(({ receipt, scope }) => ({ receipt, scope }), error => ({ error }));
     return { ...result, calls, gitCalls, refs, slots: budget.root, scripts: name => readFileSync(join(output, `wsl-${name}.sh`), "utf8") };
   } finally { rmSync(root, { recursive: true, force: true }); }
 }
@@ -141,7 +141,7 @@ test("an unreachable WSL is the host's failure and holds no slot afterwards", wi
   try {
     const budget = { root, slots: 4, jobs: 2, diskFloorGb: 0 };
     const command = async (executable, args) => { if (args.at(-1).endsWith("wsl-tips.sh")) throw new Error("wsl.exe failed (-1)"); return { stdout: "" }; };
-    const error = await linuxRustJob({ distro: "Ubuntu", head, base, output: join(root, "output"), command, gitRead: () => "", budget }).catch(error => error);
+    const error = await linuxRustJob({ distro: "Ubuntu", head, base, output: join(root, "output"), command, gitRead: () => "", budget, freeMemoryGb: () => 64 }).catch(error => error);
     assert.equal(error.environment, "linux host");
     assert.equal(existsSync(join(root, "linux-slot-1")), false);
   } finally { rmSync(root, { recursive: true, force: true }); }
@@ -173,8 +173,29 @@ test("the slot root keeps one Linux run at a time", windowsOnly, async () => {
       }
       return { stdout: script.endsWith("wsl-tips.sh") ? `has ${head}\nhas ${base}\n` : "" };
     };
-    const runs = [1, 2].map(n => linuxRustJob({ distro: "Ubuntu", head, base, output: join(root, `output-${n}`), command, gitRead: () => "", budget }));
+    const runs = [1, 2].map(n => linuxRustJob({ distro: "Ubuntu", head, base, output: join(root, `output-${n}`), command, gitRead: () => "", budget, freeMemoryGb: () => 64 }));
     for (const { receipt } of await Promise.all(runs)) assert.equal(receipt.verdict, "PASS");
     assert.equal(most, 1);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("the job needs only the memory its limit exceeds the VM's page cache, above the queue's floor", () => {
+  assert.equal(neededMemoryGb(0), 14);
+  assert.equal(neededMemoryGb(4), 10);
+  assert.equal(neededMemoryGb(12), 3);
+  assert.equal(parseTips("cached 10485760\n").cachedGb, 10);
+  assert.equal(parseTips("").cachedGb, 0);
+});
+
+test("a short host waits for memory before it builds, and a stop ends the wait", windowsOnly, async () => {
+  const frees = [2, 2, 20];
+  const waited = await job({ verify: writeReceipt({ final: true, commit: head, verdict: "PASS" }), tips: `has ${head}\nhas ${base}\ncached 0\n`, freeMemory: () => frees.length > 1 ? frees.shift() : frees[0] });
+  assert.equal(waited.receipt.verdict, "PASS");
+  assert.equal(frees.length, 1);
+  const stop = new AbortController();
+  const stopped = job({ tips: `has ${head}\nhas ${base}\ncached 0\n`, freeMemory: () => 1, signal: stop.signal });
+  setTimeout(() => stop.abort(Object.assign(new Error("Stopped after rust failed."), { stopped: true })), 50);
+  const { error, calls } = await stopped;
+  assert.equal(error.stopped, true);
+  assert.equal(calls.some(call => call.args.at(-1).endsWith("wsl-run.sh")), false);
 });
