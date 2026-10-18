@@ -40,7 +40,7 @@ import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
-import { arch, platform, release, tmpdir } from "node:os";
+import { arch, platform, release } from "node:os";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { verifyNativeTarget } from "./native-target.mjs";
 import {
@@ -54,7 +54,7 @@ import {
   formatTreeState,
   readTreeState,
 } from "./tree-provenance.mjs";
-import { SCRATCH_SENTINEL, inspectScratchRun } from "./scratch-leak-report.mjs";
+import { SCRATCH_SENTINEL, inspectScratchRun, testScratchParent } from "./scratch-leak-report.mjs";
 import { clippy, fmtCheck, nextest } from "./gate-commands.mjs";
 import { readGit } from "./git-read.mjs";
 
@@ -125,9 +125,10 @@ const capsField =
 // `os.tmpdir()` and Rust's `std::env::temp_dir()` read different variables and
 // agree only by luck: under WSL the inherited TEMP/TMP point at /mnt/c, which
 // Node returns, while Rust with TMPDIR unset returns /tmp. Deriving it twice
-// let this row count an absent tree and call the run clean.
+// let this row count an absent tree and call the run clean. The root sits in
+// this user's private scratch parent, which no other account can enter.
 const scratchRunId = `rust-gate-${process.pid}-${randomBytes(8).toString("hex")}`;
-const scratchRunRoot = join(tmpdir(), "dohc-test-scratch", scratchRunId);
+const scratchRunRoot = join(testScratchParent(), scratchRunId);
 process.env.DOHC_TEST_SCRATCH_ROOT = scratchRunRoot;
 // The sentinel is how the row tells "nothing leaked" from "nothing looked".
 // It is written before the tests and required afterwards; if it is missing the

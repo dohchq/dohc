@@ -1,5 +1,12 @@
 import { errorMessage } from "./workspaceError.ts";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  type Stats,
+} from "node:fs";
 import {
   lstat,
   mkdir,
@@ -12,7 +19,11 @@ import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
+// The shared parent on Windows, inside that user's own temp directory.
 const SCRATCH_PARENT = "dohc-test-scratch";
+// The parent on macOS and Linux is `dohc-scratch-<uid>` in the shared /tmp.
+// The name is short because a macOS socket path must stay under 104 bytes.
+const USER_SCRATCH_PREFIX = "dohc-scratch-";
 // How long a run root must be untouched before this sweep may remove it.
 //
 // This sweep walks the parent every runtime shares, so it can reach a live Rust
@@ -60,11 +71,60 @@ let processRunId: string | undefined;
 
 function nativeTmpdir(): string {
   // In WSL, os.tmpdir() can inherit Windows TEMP/TMP and land under /mnt/c,
-  // where watcher and SQLite behavior can differ from native Linux temp.
-  // Windows keeps using the platform temp dir. macOS /tmp is a link into
-  // /private, and code that canonicalizes a path must see the path it was given.
+  // where watcher and SQLite behavior can differ from native Linux temp. On
+  // macOS, $TMPDIR is a long /var/folders path, and a socket path must fit in
+  // 104 bytes. Windows keeps using the platform temp dir. macOS /tmp is a link
+  // into /private, and code that canonicalizes a path must see the path it was
+  // given.
   if (process.platform === "win32") return tmpdir();
   return realpathSync(existsSync("/tmp") ? "/tmp" : tmpdir());
+}
+
+/**
+ * The parent every run root of this user sits in. Every account shares /tmp,
+ * so the parent carries the user's id and only that user may enter it. The
+ * Rust twin and the Rust gate derive the same name.
+ */
+export function testScratchParent(): string {
+  if (process.platform === "win32") return join(tmpdir(), SCRATCH_PARENT);
+  return join(nativeTmpdir(), `${USER_SCRATCH_PREFIX}${currentUid()}`);
+}
+
+function currentUid(): number {
+  const uid = process.getuid?.();
+  if (uid === undefined) throw new Error("test scratch needs a user id on this platform");
+  return uid;
+}
+
+/**
+ * Why this user must not write into a scratch parent, or `undefined` when it
+ * may. Another account could otherwise read or replace this user's test files.
+ * Exported to be tested.
+ */
+export function scratchParentProblem(path: string, stats: Stats, uid: number): string | undefined {
+  if (stats.isSymbolicLink() || !stats.isDirectory()) {
+    return `test scratch parent ${path} is not a directory. Remove it, then run the tests again.`;
+  }
+  if (stats.uid !== uid) {
+    return `test scratch parent ${path} belongs to user ${stats.uid}, not ${uid}. Remove it as its owner, then run the tests again.`;
+  }
+  if ((stats.mode & 0o077) !== 0) {
+    return `test scratch parent ${path} has mode ${(stats.mode & 0o777).toString(8)}, which lets other accounts in. Run chmod 700 on it, then run the tests again.`;
+  }
+  return undefined;
+}
+
+/** Make this user's scratch parent, or refuse one another account could reach. */
+function ensureScratchParentSync(): void {
+  if (process.platform === "win32") return;
+  const parent = testScratchParent();
+  try {
+    mkdirSync(parent, { mode: 0o700 });
+  } catch (error) {
+    if (errorCode(error) !== "EEXIST") throw error;
+  }
+  const problem = scratchParentProblem(parent, lstatSync(parent), currentUid());
+  if (problem) throw new Error(problem);
 }
 
 export function testScratchRunRoot(): string {
@@ -79,7 +139,7 @@ export function testScratchRunRoot(): string {
     }
     return handedDown;
   }
-  return join(nativeTmpdir(), SCRATCH_PARENT, scratchRunId());
+  return join(testScratchParent(), scratchRunId());
 }
 
 export async function createTestScratch(prefix: string): Promise<string> {
@@ -139,7 +199,8 @@ export async function removeTestScratch(path: string): Promise<void> {
 
 export async function sweepOldTestScratch(): Promise<void> {
   const currentRun = testScratchRunRoot();
-  await sweepScratchParent(join(nativeTmpdir(), SCRATCH_PARENT), currentRun, Date.now());
+  ensureScratchParentSync();
+  await sweepScratchParent(testScratchParent(), currentRun, Date.now());
 }
 
 export async function sweepScratchParent(
@@ -289,6 +350,7 @@ function safePrefix(prefix: string): string {
 export async function prepareTestScratch({ sweep = true } = {}): Promise<void> {
   swept ??= sweep ? sweepOldTestScratch() : Promise.resolve();
   startup ??= swept.then(async () => {
+    if (!process.env.DOHC_TEST_SCRATCH_ROOT) ensureScratchParentSync();
     await mkdir(testScratchRunRoot(), { recursive: true });
   });
   await startup;
@@ -299,6 +361,7 @@ export async function prepareTestScratch({ sweep = true } = {}): Promise<void> {
 // Vitest evaluates setup before the test module needs a synchronous creator.
 // Playwright never reaches here: its helpers are async.
 function ensureScratchRunSync(): void {
+  if (!process.env.DOHC_TEST_SCRATCH_ROOT) ensureScratchParentSync();
   mkdirSync(testScratchRunRoot(), { recursive: true });
 }
 
