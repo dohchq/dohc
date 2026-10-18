@@ -512,6 +512,7 @@ import { WorkspaceGraphIndex } from "./workspaces/workspaceGraph";
 
 import { createDesktopChatBookmarks, type DesktopChatBookmarkProjectionState } from "./workspaces/desktopChatBookmarks";
 import { readCachedUserSettingsFile } from "./settings/userSettingsStore";
+import type { ThemeMode } from "./settings/userSettings";
 import { readWorkspaceSettingsFile } from "./workspaces/workspaceSettingsFile";
 import { createSearchRegistry } from "./workspaces/workspaceSearch";
 import { WorkspaceSearchOwner } from "./workspaces/workspaceSearchOwner";
@@ -928,7 +929,7 @@ function workspaceSummaries(): WorkspaceSummary[] {
 const devToolsGranted = devToolsEnabled(process.env, app);
 
 const desktopWindows = createDesktopWindows({
-  app, BrowserWindow, Menu, dialog, process, workspaceSummaries, currentUpdateState,
+  app, Menu, dialog, process, workspaceSummaries, currentUpdateState,
   stateDir, readCachedUserSettingsFile, createMainWindow,
   // Menu clicks arrive after startup, when the settings owner exists.
   stepWindowZoom: (step) => settingsIpc.stepWindowZoom(step),
@@ -5491,6 +5492,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       cachedPreferredName = settings.profile.preferredName;
       cachedAgentName = settings.profile.agentName;
       desktopWindows.seedZoomLevel(settings.appearance.zoomLevel);
+      applyThemeMode(settings.appearance.themeMode);
     },
     prepareCli: () => {
       if (!app.isPackaged || process.platform !== "linux" || !isAppImageBoot()) return;
@@ -5827,12 +5829,18 @@ function afterRendererCrashLoop(): void {
   void updateAfterFailure("window-crash");
 }
 
+// macOS draws dohc's menus, dialogs, and window background in the theme the
+// user chose; "system" follows the OS.
+function applyThemeMode(themeMode: ThemeMode): void {
+  if (process.platform === "darwin") nativeTheme.themeSource = themeMode;
+}
+
 // The owner of the user settings file: every save, zoom step, reset, and
 // edit made in the file goes through it and takes effect there.
 const settingsIpc = createSettingsIpc<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
   stateDir,
   setCachedPreferredName: (preferredName, agentName) => { cachedPreferredName = preferredName; cachedAgentName = agentName; },
-  applyZoomLevelToWindows, refreshDispatchTray, openDispatchWorkspaces,
+  applyZoomLevelToWindows, applyThemeMode, refreshDispatchTray, openDispatchWorkspaces,
   chatDispatchService, withRendererWorkspaceOperation, notifyRenderer,
   broadcastUserSettings: (settings) => {
     // Reports follow the switches before any window learns of them.

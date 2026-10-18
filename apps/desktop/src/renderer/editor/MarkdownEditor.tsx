@@ -139,7 +139,7 @@ import {
 import { intraBlockRange, type IntraBlockMatch } from "./intraBlock";
 import { SafeTrailingNode } from "./safeTrailingNode";
 import { hasFormattableSelection, selectionFormat } from "./selectionFormat";
-import { createCollaborationHistoryHandle } from "./sharedCollaborationHistory";
+import { CollaborationHistoryInput, createCollaborationHistoryHandle } from "./sharedCollaborationHistory";
 import { ListConversions, parseMarkdownListClipboard } from "./listEditing";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
@@ -771,6 +771,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
                   field: "body",
                   yUndoOptions: { undoManager: collaborationHistory! },
                 }),
+                CollaborationHistoryInput,
                 // Only wired when the caller hands us an Awareness
                 // bound to this same ydoc (docPresence.ts's bindDocPresence).
                 // No awareness (today's only caller, or a peer that dropped

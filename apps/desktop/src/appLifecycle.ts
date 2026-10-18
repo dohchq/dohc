@@ -259,6 +259,8 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     // Apply persisted zoom before creating the first window; overlap its IO
     // and renderer load with the daemon handshake.
     bootstrap.applySettings(await cachedSettingsRead);
+    // dohc's menu replaces Electron's default before any window shows.
+    workspaces.refreshNativeSurfaces();
     const window = windows.create();
     const windowLoaded = windows.whenLoaded(window);
     bootstrap.markFirstWindow();

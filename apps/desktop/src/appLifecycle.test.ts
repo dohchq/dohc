@@ -143,7 +143,7 @@ afterEach(() => {
 });
 
 describe("desktop bootstrap", () => {
-  it("registers IPC before the window, applies stored zoom, and overlaps the daemon handshake", async () => {
+  it("registers IPC and installs the menu before the window, applies stored zoom, and overlaps the daemon handshake", async () => {
     const f = fixture();
     const ready = f.lifecycle.start();
     expect(f.log).toEqual([]);
@@ -152,7 +152,7 @@ describe("desktop bootstrap", () => {
     expect(f.log).toEqual(["app-ready", "engine-start", "settings-read", "handlers"]);
     f.settings.resolve({ zoom: 1.75 });
     expect(await f.created.promise).toEqual({ id: 1, zoom: 1.75 });
-    expect(f.log.slice(-4)).toEqual(["settings-apply", "window", "load-listener", "first-window"]);
+    expect(f.log.slice(-5)).toEqual(["settings-apply", "native", "window", "load-listener", "first-window"]);
     expect(f.dependencies.services.startCli).not.toHaveBeenCalled();
     expect(f.dependencies.workspaces.openPath).not.toHaveBeenCalled();
     expect(f.dependencies.services.warmCredentials).not.toHaveBeenCalled();

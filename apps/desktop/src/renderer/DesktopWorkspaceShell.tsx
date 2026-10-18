@@ -174,6 +174,7 @@ import {
 import { LazyDesktopSettings } from "./settings/LazyDesktopSettings";
 import { workspaceName } from "./Titlebar";
 import { toggleTheme } from "./theme";
+import { runUpdateCheck, runUpdateInstall } from "./appMenuCommands";
 import {
   PrimaryButton,
   SecondaryButton,
@@ -191,7 +192,6 @@ import {
   remapOrphanedDraftPaths,
   useOrphanedDraftPaths,
 } from "./orphanedDrafts";
-import { requestGuardedUpdateInstall } from "./RecoveryCloseGuard";
 import { useFocusReturn, useFocusSurface } from "./ui/focusReturn";
 import { CUSTOMIZE_TARGETS, CustomizeContext, type CustomizePart } from "./settings/customize";
 import { useAskAgent } from "./shell/useAskAgent";
@@ -2984,8 +2984,12 @@ export function DesktopWorkspaceShell(props: {
       void closeTabsAfterFlush([{ groupId: group.id, tab }]);
     } else if (current.editorGroups.length > 1) {
       mutateWb((state) => closeEditorGroup(state, group.id));
+    } else if (group.tabs.length === 0 && bridge().platform === "darwin") {
+      // With nothing left to close, macOS closes the window.
+      void bridge().closeThisWindow().catch((error) =>
+        reportShellError("Could not close this window.", error));
     }
-  }, [closeTabsAfterFlush, mutateWb]);
+  }, [closeTabsAfterFlush, mutateWb, reportShellError]);
 
   const closeAllTabs = useCallback(() => {
     void closeTabsAfterFlush(
@@ -3332,36 +3336,14 @@ export function DesktopWorkspaceShell(props: {
       reportShellError("Could not refresh workspace files.", error),
     );
   }, [refreshFiles, reportShellError]);
-  const checkForDesktopUpdates = useCallback(async () => {
-    try {
-      const result = await bridge().checkForUpdates();
-      if (!result.checked) {
-        reportShellError("No update check was started.", new Error(result.state.message));
-      }
-    } catch (error) {
-      reportShellError("Could not check for updates.", error);
-    }
-  }, [reportShellError]);
-  const installDesktopUpdate = useCallback(async () => {
-    try {
-      // Through the guard: with set-aside drafts
-      // present the recovery dialog opens instead of the one-shot install.
-      const result = await requestGuardedUpdateInstall();
-      if (result === null) return;
-      if (!result.accepted) {
-        reportShellError(
-          "Could not install the update.",
-          new Error(
-            result.state.status === "error"
-              ? result.state.message
-              : "The restart request was not accepted.",
-          ),
-        );
-      }
-    } catch (error) {
-      reportShellError("Could not install the update.", error);
-    }
-  }, [reportShellError]);
+  const checkForDesktopUpdates = useCallback(
+    () => runUpdateCheck(reportShellError),
+    [reportShellError],
+  );
+  const installDesktopUpdate = useCallback(
+    () => runUpdateInstall(reportShellError),
+    [reportShellError],
+  );
 
   const moveTabIntoNewGroup = useCallback(
     (groupId: string = wbRef.current.activeEditorGroup, path?: string) => {

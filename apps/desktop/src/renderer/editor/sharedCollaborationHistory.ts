@@ -1,4 +1,33 @@
+import { Extension } from "@tiptap/core";
+import { Plugin, PluginKey } from "@tiptap/pm/state";
 import * as Y from "yjs";
+
+// Edit > Undo and Redo in the application menu reach the editor as
+// beforeinput events, not keys. Collaboration binds only the keys, so
+// without this Chromium would undo its own record of DOM edits instead of
+// the document's history.
+export const CollaborationHistoryInput = Extension.create({
+  name: "dohcCollaborationHistoryInput",
+  addProseMirrorPlugins() {
+    const editor = this.editor;
+    return [
+      new Plugin({
+        key: new PluginKey("dohc-collaboration-history-input"),
+        props: {
+          handleDOMEvents: {
+            beforeinput: (_view, event) => {
+              if (event.inputType !== "historyUndo" && event.inputType !== "historyRedo") return false;
+              event.preventDefault();
+              if (event.inputType === "historyUndo") editor.commands.undo();
+              else editor.commands.redo();
+              return true;
+            },
+          },
+        },
+      }),
+    ];
+  },
+});
 
 type UndoEventName = Parameters<Y.UndoManager["on"]>[0];
 type UndoEventHandler = Parameters<Y.UndoManager["on"]>[1];

@@ -19,9 +19,15 @@ let nextSender = 1;
 class Contents extends EventEmitter {
   readonly id = nextSender++;
   destroyed = false;
+  // A loaded renderer unless the window was just created.
+  url = "app://renderer";
+  loading = false;
   setZoomLevel = vi.fn();
   send = vi.fn();
   isDestroyed() { return this.destroyed; }
+  isCrashed() { return false; }
+  getURL() { return this.url; }
+  isLoadingMainFrame() { return this.loading; }
   get native(): WebContents { return this as unknown as WebContents; }
 }
 
@@ -34,7 +40,11 @@ class Window extends EventEmitter {
   isMinimized() { return this.minimized; }
   destroy() { this.destroyed = true; this.emit("closed"); }
   get native(): BrowserWindow { return this as unknown as BrowserWindow; }
-  finishLoad() { this.webContents.emit("did-finish-load"); }
+  startLoad() { this.webContents.url = ""; this.webContents.loading = true; return this; }
+  finishLoad() {
+    this.webContents.url = "app://renderer"; this.webContents.loading = false;
+    this.webContents.emit("did-finish-load");
+  }
   failLoad(isMainFrame = true) {
     this.webContents.emit("did-fail-load", {}, -105, "ERR_NAME_NOT_RESOLVED", "app://renderer", isMainFrame);
   }
@@ -71,8 +81,8 @@ function fixture(platform: NodeJS.Platform = "win32", workspaceSummaries?: Depen
     app: {
       isReady: () => ready, isPackaged: false, getVersion: () => "1.2.3",
       clearRecentDocuments: vi.fn(), addRecentDocument: vi.fn(), setUserTasks: vi.fn(() => true),
+      setAboutPanelOptions: vi.fn(),
     },
-    BrowserWindow: { getAllWindows: () => all.map((item) => item.native) },
     Menu: {
       buildFromTemplate: vi.fn((template) => { templates.push(template); return { template } as unknown as Menu; }),
       setApplicationMenu: vi.fn(),
@@ -89,7 +99,7 @@ function fixture(platform: NodeJS.Platform = "win32", workspaceSummaries?: Depen
     stepWindowZoom: vi.fn(async () => structuredClone(stored)),
     createMainWindow: vi.fn((options) => {
       createdOptions.push(options);
-      const window = new Window(); all.push(window); return window.native;
+      const window = new Window().startLoad(); all.push(window); return window.native;
     }),
     preloadArguments: ["--dohc-dev-tools"],
     get rendererWorkspaceSessions() { return currentSessions; },
@@ -203,12 +213,15 @@ describe("desktop workspace windows", () => {
     f.windows.trackWorkspaceWindow(first.native); f.windows.trackWorkspaceWindow(second.native);
     expect(f.windows.liveWorkspaceWindow()).toBe(first.native);
     expect(f.windows.targetWindow(undefined)).toBe(first.native);
-    expect(f.windows.targetWindow(utility.native)).toBe(utility.native);
+    // The hidden export window shows nothing, so it is never a target.
+    expect(f.windows.targetWindow(utility.native)).toBe(first.native);
     first.destroy();
     expect(f.windows.workspaceWindows.allLive()).toEqual([second.native]);
     second.destroy();
     expect(f.windows.liveWorkspaceWindow()).toBeUndefined();
-    expect(f.windows.targetWindow(undefined)).toBe(utility.native);
+    expect(f.windows.targetWindow(utility.native)).toBeUndefined();
+    const manager = f.windows.showOrCreateManagerWindow();
+    expect(f.windows.targetWindow(utility.native)).toBe(manager);
   });
 
   it("activates the target window and prioritizes that workspace without changing the input list", async () => {
@@ -410,6 +423,7 @@ describe("desktop workspace windows", () => {
     await vi.waitFor(() => expect(window.webContents.send).toHaveBeenCalledWith(CHANNELS.workspaceActivated, workspace("b")));
     expect(f.all[0]!.webContents.send).not.toHaveBeenCalled();
     expect(window.restore).toHaveBeenCalledOnce(); expect(window.focus).toHaveBeenCalledOnce();
+    f.all[0]!.finishLoad();
     click(item(f, "Go", "Settings"), manager);
     expect(manager.webContents.send).toHaveBeenCalledWith(CHANNELS.menuCommand, "settings");
   });
@@ -751,5 +765,78 @@ describe("desktop native menus", () => {
     expect(f.dependencies.dialog.showMessageBox).toHaveBeenCalledWith({
       title: "About dohc", message: "dohc", detail: "Version 1.2.3\nYour workspace is a folder.",
     });
+    expect(f.dependencies.app.setAboutPanelOptions).not.toHaveBeenCalled();
+  });
+
+  it("names dohc and its version in the macOS About panel", () => {
+    const f = fixture("darwin"); f.windows.refreshApplicationMenu();
+    expect(f.dependencies.app.setAboutPanelOptions).toHaveBeenCalledWith({
+      applicationName: "dohc", applicationVersion: "1.2.3", version: "",
+    });
+  });
+
+  it("opens one window for menu commands chosen with none open, and sends each once, in order, when it loads", async () => {
+    const f = fixture("darwin"); f.windows.refreshApplicationMenu();
+    const appMenu = submenu(f.templates.at(-1)![0]!);
+    click(appMenu.find((entry) => entry.label === "Settings…")!);
+    click(item(f, "File", "New file"));
+    click(item(f, "File", "Close tab"));
+    expect(f.dependencies.createMainWindow).toHaveBeenCalledOnce();
+    const created = f.all[0]!;
+    expect(f.windows.workspaceWindows.allLive()).toEqual([created.native]);
+    expect(created.webContents.send).not.toHaveBeenCalled();
+    created.emit("ready-to-show");
+    expect(created.show).toHaveBeenCalledOnce(); expect(created.focus).toHaveBeenCalledOnce();
+    created.finishLoad();
+    await vi.waitFor(() => expect(created.webContents.send).toHaveBeenCalledTimes(3));
+    expect(created.webContents.send.mock.calls).toEqual([
+      [CHANNELS.menuCommand, "settings"], [CHANNELS.menuCommand, "new-file"], [CHANNELS.menuCommand, "close-tab"],
+    ]);
+    // A loaded window takes a command at once.
+    click(item(f, "File", "New folder"));
+    expect(created.webContents.send).toHaveBeenLastCalledWith(CHANNELS.menuCommand, "new-folder");
+    expect(created.webContents.send).toHaveBeenCalledTimes(4);
+  });
+
+  it("holds menu commands for a window still loading, such as the first one at launch", async () => {
+    const f = fixture("darwin"); const starting = new Window().startLoad();
+    f.windows.trackWorkspaceWindow(starting.native); f.windows.refreshApplicationMenu();
+    click(item(f, "File", "New file"), starting.native);
+    click(item(f, "File", "Close tab"));
+    expect(starting.webContents.send).not.toHaveBeenCalled();
+    starting.finishLoad();
+    await vi.waitFor(() => expect(starting.webContents.send).toHaveBeenCalledTimes(2));
+    expect(starting.webContents.send.mock.calls).toEqual([
+      [CHANNELS.menuCommand, "new-file"], [CHANNELS.menuCommand, "close-tab"],
+    ]);
+    expect(f.dependencies.createMainWindow).not.toHaveBeenCalled();
+  });
+
+  it("sends a command chosen after a window finished loading but before it stopped", async () => {
+    const f = fixture("darwin"); const window = new Window();
+    window.webContents.loading = true;
+    f.windows.trackWorkspaceWindow(window.native); f.windows.refreshApplicationMenu();
+    click(item(f, "File", "New file"));
+    expect(window.webContents.send).not.toHaveBeenCalled();
+    window.webContents.loading = false;
+    window.webContents.emit("did-stop-loading");
+    await vi.waitFor(() => expect(window.webContents.send).toHaveBeenCalledWith(CHANNELS.menuCommand, "new-file"));
+  });
+
+  it("opens a workspace window instead of sending a command to the hidden export window", () => {
+    const f = fixture("darwin"); const exportWindow = new Window(); f.windows.refreshApplicationMenu();
+    click(item(f, "File", "New file"), exportWindow.native);
+    expect(exportWindow.webContents.send).not.toHaveBeenCalled();
+    expect(f.dependencies.createMainWindow).toHaveBeenCalledOnce();
+    expect(f.windows.workspaceWindows.allLive()).toEqual([f.all[0]!.native]);
+  });
+
+  it("drops a window-less menu command when its new window closes before it loads", () => {
+    const f = fixture("darwin"); f.windows.refreshApplicationMenu();
+    click(item(f, "File", "New file"));
+    const closing = f.all[0]!;
+    closing.destroy();
+    closing.finishLoad();
+    expect(closing.webContents.send).not.toHaveBeenCalled();
   });
 });

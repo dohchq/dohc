@@ -16,6 +16,8 @@ vi.mock("electron", () => electron);
 
 it("registers the listener before announcing its workspace, and removes only that subscription on close", async () => {
   await import("./preload");
+  // The preload's own listeners register as it loads.
+  electron.ipcRenderer.on.mockClear();
   const bridge = electron.contextBridge.exposeInMainWorld.mock.calls.find(([name]) => name === "dohcDesktop")![1] as DohcDesktopBridge;
   const listener = vi.fn();
   const close = bridge.onShareDirectWritesPushed(listener, "share");
