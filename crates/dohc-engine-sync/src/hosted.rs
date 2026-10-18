@@ -91,15 +91,9 @@ pub(crate) fn allocate_outbound_seq_in_tx(
     op_kind: &str,
     payload_json: &str,
 ) -> Result<Option<i64>, SyncError> {
-    let last: Option<i64> = tx
-        .query_row(
-            "SELECT last_outbound_seq FROM hosted_replicas WHERE workspace_id=?1",
-            [workspace_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(SyncError::corrupt)?;
-    let Some(last) = last else { return Ok(None) };
+    let Some(last) = last_outbound_seq(tx, workspace_id)? else {
+        return Ok(None);
+    };
     let payload = serde_json::from_str(payload_json).map_err(|_| SyncError::InvalidInput {
         reason: "payload is not valid JSON",
     })?;
@@ -129,6 +123,21 @@ pub(crate) fn allocate_outbound_seq_in_tx(
     )
     .map_err(SyncError::persist)?;
     Ok(Some(next))
+}
+
+/// The last sequence a hosted replica numbered under its own origin, or `None`
+/// for any other replica.
+pub(crate) fn last_outbound_seq(
+    conn: &Connection,
+    workspace_id: &str,
+) -> Result<Option<i64>, SyncError> {
+    conn.query_row(
+        "SELECT last_outbound_seq FROM hosted_replicas WHERE workspace_id=?1",
+        [workspace_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(SyncError::corrupt)
 }
 
 /// The hosted document an op names, read where each kind states it, as the

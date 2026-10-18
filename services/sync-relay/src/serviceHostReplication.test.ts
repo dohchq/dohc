@@ -52,6 +52,35 @@ it("gives the service host credential 404 on every ordinary replication route", 
   expect(await hosted.json()).toMatchObject({replicationEpoch: "epoch", streamIdentity: "stream"});
 });
 
+// #2088: an empty push to the hosted log is the session host's origin probe.
+// It stores nothing and answers the highest position the relay holds at that origin.
+it("answers an empty hosted push with its origin's highest position and stores nothing", async () => {
+  const f = await fixture();
+  const enrollment = f.storage.enrollServiceHostDocument({workspaceId: scope.workspaceId, ownerUserId: "owner-1", shareId: scope.shareId,
+    path: binding.currentPath, nowMs: 10, guard() {}});
+  const bearer = deriveServiceHostBearer(enrollment, {key, namespace});
+  const handle = createServiceHostReplication({storage: f.storage, prefix: "dohc-service-v1.", hostedFeed: true,
+    authorize: input => authorizeServiceHostReplication(f.storage, {key, namespace, ...input})});
+  const origin = "service-host:host";
+  const probe = async () => {
+    const response = await handle(new Request(`https://relay.test/sync/${scope.workspaceId}/hosted/log`, {method: "POST",
+      headers: {authorization: `Bearer ${bearer}`, "content-type": "application/json"},
+      body: JSON.stringify({replicationEpoch: "epoch", streamIdentity: "stream", originId: origin, ops: []})}));
+    expect(response.status).toBe(200);
+    return response.json();
+  };
+  const rows = () => f.raw.prepare("SELECT origin_id,origin_seq FROM sync_relay_log WHERE workspace_id=? ORDER BY relay_seq").all(scope.workspaceId);
+  const empty = rows();
+  expect(await probe()).toMatchObject({ok: true, accepted: 0, inserted: 0, skipped: 0, currentMaxOriginSeq: -1});
+  expect(rows()).toEqual(empty);
+  f.storage.appendLogBatch({workspaceId: scope.workspaceId, originId: origin, ops: [0, 1].map(originSeq => parseLogOp({
+    originSeq, opKind: "moment.append", recordedAtMs: 1, payload: {},
+  }))});
+  const held = rows();
+  expect(await probe()).toMatchObject({ok: true, accepted: 0, inserted: 0, skipped: 0, currentMaxOriginSeq: 1});
+  expect(rows()).toEqual(held);
+});
+
 it("answers a replica's held read at once and never reports a watch", async () => {
   const f = await fixture();
   const plain = await f.get("/log?replicationEpoch=epoch&streamIdentity=stream&since=1&hold=30000");

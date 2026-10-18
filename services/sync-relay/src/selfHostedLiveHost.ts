@@ -107,7 +107,7 @@ export async function startSelfHostedLiveHost(options: {
   // stays detached, untouched, and releases nothing. A marker beside the store
   // keeps it so after a restart, before any pull could find the divergence again.
   const marker = (name: string) => divergedMarker(root, name);
-  const recovery = (name: string) => `Recovery is not automatic yet. The store and every edit in it are kept. Keep ${marker(name)}: without it the next relay start attaches the store again, and edits made before it detaches again stay only in the store.`;
+  const recovery = (name: string) => `Recovery is not automatic yet. The store and every edit in it are kept. Keep ${marker(name)}. Without it the next relay start attaches the store again and checks it against the relay before anyone can edit.`;
   const diverged = new Set((await readdir(root)).flatMap(name => /^([0-9a-f]{64})\.diverged$/.exec(name)?.[1] ?? []));
   for (const name of diverged) options.onError?.(new Error(`The live editing copy in store ${join(root, name)} diverged from the relay earlier. It stays detached. ${recovery(name)}`));
   // Diverged stores whose marker is not yet durable, with whether its failure was reported.

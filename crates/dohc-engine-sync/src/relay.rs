@@ -2029,6 +2029,39 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         })
     }
 
+    /// Confirm the relay holds nothing of this hosted replica's own origin
+    /// past what the replica numbered. A store restored from an older copy
+    /// lost commits it already pushed. The counter is the only local record of
+    /// them: a pull imports the host's own rows back into the journal, so the
+    /// journal's maximum rises to the relay's. Sends one empty push to the
+    /// hosted log and writes nothing.
+    pub fn confirm_hosted_origin(
+        &self,
+        store: &EngineStore,
+        workspace_id: &str,
+    ) -> Result<(), RelayError> {
+        let numbered = store
+            .read_with(|conn| crate::hosted::last_outbound_seq(conn, workspace_id))
+            .map_err(local)?
+            .ok_or(RelayError::HostedRefusal(
+                crate::hosted::NOT_A_HOSTED_REPLICA,
+            ))?;
+        let identity = read_sync_identity(store, workspace_id)
+            .map_err(local)?
+            .ok_or(RelayError::InvalidResponse)?;
+        let probe = self.transport.push_hosted(push_probe_request(
+            workspace_id,
+            &identity,
+            &identity.origin_id,
+            -1,
+        ))?;
+        validate_probe_response(&probe)?;
+        if probe.current_max_origin_seq > numbered {
+            return Err(RelayError::OriginDiverged);
+        }
+        Ok(())
+    }
+
     /// Pull one hosted pass: the first document still backfilling reads its
     /// own rows from its backfill cursor, and only when none is left does the
     /// main feed move, skipping the rows of every document that is not ready.
@@ -4624,7 +4657,7 @@ fn list_workspace_origins(
 
 /// The highest sequence `origin_id` wrote here. A hosted replica's own origin
 /// reads its counter too, which outlives the journal rows it numbered.
-fn local_max_origin_seq(
+pub(crate) fn local_max_origin_seq(
     store: &EngineStore,
     workspace_id: &str,
     origin_id: &str,

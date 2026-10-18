@@ -145,6 +145,16 @@ it("runs nothing after the relay reports a diverged origin", async () => {
   }
 });
 
+it("pulls nothing when creation finds the relay ahead of the replica's origin", async () => {
+  const f = fixture();
+  f.answers["sync.createHostedReplica"] = () => {throw diverged();};
+  await expect(f.driver.pull()).rejects.toThrow("relay-origin-diverged");
+  expect(f.driver.diverged).toBe(true);
+  await expect(f.driver.pull()).rejects.toThrow("origin diverged");
+  await expect(f.driver.publish()).rejects.toThrow("origin diverged");
+  expect(f.methods()).toEqual(["sync.createHostedReplica"]);
+});
+
 it("does not latch other engine refusals", async () => {
   const f = fixture();
   f.answers["sync.pullHosted"] = () => {throw new EngineRequestError(1, {code: "INVALID_PARAMS", message: "invalid-pending-cursor", retry: "no"});};

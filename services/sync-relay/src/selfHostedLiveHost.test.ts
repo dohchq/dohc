@@ -620,7 +620,7 @@ it("keeps a diverged store detached and reported after the relay restarts", asyn
   cleanup.push(() => restarted.close());
   expect(restarted.diverged(f.enrollment()!)).toBe(true);
   expect(onError.mock.calls).toEqual([[expect.objectContaining({message: `The live editing copy in store ${store} diverged from the relay earlier. It stays detached. ` +
-    `Recovery is not automatic yet. The store and every edit in it are kept. Keep ${marker}: without it the next relay start attaches the store again, and edits made before it detaches again stay only in the store.`})]]);
+    `Recovery is not automatic yet. The store and every edit in it are kept. Keep ${marker}. Without it the next relay start attaches the store again and checks it against the relay before anyone can edit.`})]]);
   const routes = createServiceHostEnrollmentRoutes({storage: f.storage, history: f.history, host: restarted,
     resolveActor: async () => ({workspaceId: scope.workspaceId, userId: "owner-1"})});
   const response = await routes(new Request(`https://relay.test/sync/${scope.workspaceId}/live-host`, {headers: {authorization: "Bearer account-token"}}));

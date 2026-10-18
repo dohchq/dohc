@@ -84,7 +84,10 @@ struct HostedRelay {
     revision: usize,
     epoch_log_floor: i64,
     requests: Vec<String>,
+    /// Every push that carried ops.
     pushed: Vec<Value>,
+    /// Every empty push: the origin probe each `sync.createHostedReplica` sends.
+    probes: Vec<Value>,
     /// Answer pushes with an origin maximum past what was sent.
     diverge: bool,
 }
@@ -313,11 +316,20 @@ impl HostedRelay {
             ("POST", "log") => {
                 let body: Value = serde_json::from_slice(&request.body).expect("push JSON");
                 let ops = body["ops"].as_array().expect("push ops").clone();
-                let last = ops
-                    .last()
-                    .and_then(|op| op["originSeq"].as_i64())
+                let origin = body["originId"].clone();
+                if ops.is_empty() {
+                    self.probes.push(body);
+                } else {
+                    self.pushed.push(body);
+                }
+                let last = self
+                    .pushed
+                    .iter()
+                    .filter(|push| push["originId"] == origin)
+                    .flat_map(|push| push["ops"].as_array().expect("push ops"))
+                    .filter_map(|op| op["originSeq"].as_i64())
+                    .max()
                     .unwrap_or(-1);
-                self.pushed.push(body);
                 TestResponse::json(
                     200,
                     json!({
@@ -738,6 +750,24 @@ async fn a_hosted_replica_pulls_its_documents_and_pushes_live_writes_to_the_host
         json!({"hosted": true}),
         "the same coordinate answers the same"
     );
+    {
+        let relay = relay.relay();
+        assert_eq!(
+            relay.requests,
+            vec![format!("POST /sync/{WORKSPACE}/hosted/log"); 2],
+            "each create probes the hosted log, and nothing else"
+        );
+        let origins = relay
+            .probes
+            .iter()
+            .map(|probe| {
+                assert_eq!(probe["ops"], json!([]));
+                probe["originId"].as_str().expect("probe origin").to_owned()
+            })
+            .collect::<Vec<_>>();
+        assert!(origins[0].starts_with("service-host:host_"), "{origins:?}");
+        assert_eq!(origins[0], origins[1], "the replica keeps its origin");
+    }
 
     // The first pass learns the scope and applies nothing.
     let learned = host.pull().await;
@@ -822,6 +852,43 @@ async fn a_hosted_replica_pulls_its_documents_and_pushes_live_writes_to_the_host
             "{method}"
         );
     }
+}
+
+/// #2088: the relay holds more of the replica's origin than the replica
+/// numbered, as after its store lost pushed commits. The next attach's
+/// create refuses, and nothing past its probe reaches the relay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn create_refuses_a_replica_whose_relay_holds_more_of_its_origin() {
+    let relay = rotated_relay();
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, &relay).await;
+    let mut host = Host {
+        transport,
+        handle,
+        id: 1,
+    };
+    assert_eq!(host.create().await, json!({"hosted": true}));
+    relay.relay().diverge = true;
+    host.id += 1;
+    let refused = call_error(
+        &host.transport,
+        &host.handle,
+        host.id,
+        "sync.createHostedReplica",
+        json!({"workspaceId": WORKSPACE, "replicationEpoch": "epoch-2", "streamIdentity": "stream-2"}),
+    )
+    .await;
+    assert_eq!(
+        (refused.code, refused.message.as_str()),
+        (ErrorCode::InvalidParams, "relay-origin-diverged")
+    );
+    let relay = relay.relay();
+    assert_eq!(
+        relay.requests,
+        vec![format!("POST /sync/{WORKSPACE}/hosted/log"); 2]
+    );
+    assert!(relay.pushed.is_empty());
 }
 
 const HOSTED_FEED_ONLY: &str = "invalid-input: a hosted replica uses only its hosted feed";

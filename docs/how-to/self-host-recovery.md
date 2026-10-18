@@ -69,8 +69,8 @@ Recovery is not automatic yet.
 The store and every live edit in it stay unchanged.
 Preserve the volume in a private archive before you change anything.
 Keep the marker.
-Without it the next relay start attaches the store again, and people can make live edits before the server notices the copy still diverges.
-Those edits stay only in the store, and no tool recovers them yet.
+Without it the next relay start attaches the store again.
+The server checks the copy against the relay before anyone can edit, finds that it still diverges, and writes the marker again.
 Deleting the owner's server account removes the store and its marker.
 
 ## Save a relay snapshot
