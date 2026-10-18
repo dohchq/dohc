@@ -302,6 +302,11 @@ export function isPrivacyDenied(error: unknown): boolean {
   return readError(error).words === PRIVACY_DENIED_WORDS;
 }
 
+/** The volume adds sharing permissions to new files, so dohc refused to write one. */
+export function isVolumeSharesNewFiles(error: unknown): boolean {
+  return readError(error).words === VOLUME_SHARES_NEW_FILES_WORDS;
+}
+
 /** A refusal only a newer dohc can get past, so Try again would do nothing. */
 export function needsNewerDohc(error: unknown): boolean {
   return readError(error).words === NEWER_DOHC;
