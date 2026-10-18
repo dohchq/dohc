@@ -630,7 +630,7 @@ fn sibling_cleanup_syncs_removal_before_forgetting_location() {
                     &std::io::Error::from(ErrorKind::PermissionDenied),
                 ));
             }
-            sync_parent_dir(Some(parent), DurabilityPolicy::per_os())
+            sync_parent_dir(&store, Some(parent), DurabilityPolicy::per_os())
         });
         assert!(synced, "cleanup must sync the parent");
         assert_eq!(result.is_err(), fail_sync);

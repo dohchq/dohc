@@ -41,6 +41,8 @@ export interface CloudLoginStore {
 export interface CloudLoginOptions {
   store: CloudLoginStore;
   fetch?: typeof fetch;
+  // Accept plain http servers on this machine, under the e2e switch only.
+  allowInsecureLoopbackForTests?: boolean;
 }
 
 export interface CloudLogin {
@@ -185,6 +187,7 @@ type CloudLoginPollResult = {
 
 export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
   const fetchImpl = options.fetch ?? fetch;
+  const insecureLoopback = options.allowInsecureLoopbackForTests === true;
   let pending: PendingLogin | null = null;
   let attemptEpoch = 0;
   let storeMutation: Promise<void> = Promise.resolve();
@@ -305,6 +308,21 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
         .catch(() => undefined);
       throw error;
     }
+  }
+  // Sign-in takes only https servers, or plain http on this machine under the
+  // e2e switch. A session saved for any other server reads as signed out, so
+  // no call sends its token in clear text.
+  function allowedServer(url: string): boolean {
+    try {
+      return canonicalCloudOrigin(new URL(url).origin, insecureLoopback) !== null;
+    } catch {
+      return false;
+    }
+  }
+  async function loadSession(): Promise<CloudCredentials | null> {
+    const saved = await options.store.load();
+    if (saved === null || !allowedServer(saved.serverUrl)) return null;
+    return saved.relayUrl === undefined || allowedServer(saved.relayUrl) ? saved : null;
   }
   let pollInFlight: {
     attempt: PendingLogin;
@@ -432,7 +450,7 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
         pending = null;
         return attemptEpoch;
       });
-      const descriptor = await discoverServer(serverUrl, fetchImpl);
+      const descriptor = await discoverServer(serverUrl, fetchImpl, insecureLoopback);
       if (attemptEpoch !== epoch) throw new Error("Server sign-in was cancelled.");
       const response = await postJson(`${descriptor.authUrl}/api/auth/device/code`, {
         client_id: CLIENT_ID,
@@ -451,7 +469,7 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
       let verificationUri: URL;
       try {
         verificationUri = new URL(data.verification_uri_complete ?? data.verification_uri);
-        if (canonicalCloudOrigin(verificationUri.origin) !== descriptor.authUrl ||
+        if (canonicalCloudOrigin(verificationUri.origin, insecureLoopback) !== descriptor.authUrl ||
             verificationUri.username || verificationUri.password || verificationUri.hash ||
             typeof data.device_code !== "string" || !data.device_code || data.device_code.length > 2048 ||
             typeof data.user_code !== "string" || !data.user_code || data.user_code.length > 128 ||
@@ -485,7 +503,7 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
 
     async status() {
       await storeMutation;
-      const credentials = await options.store.load();
+      const credentials = await loadSession();
       if (credentials === null) return { connected: false };
       if (await sessionIsDead(credentials)) {
         await retryInvalidatedDeletion(credentials).catch(() => undefined);
@@ -531,7 +549,7 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
 
     async credentials() {
       await storeMutation;
-      const loaded = await options.store.load();
+      const loaded = await loadSession();
       if (loaded === null) return null;
       // A tombstoned record is a dead session: handing it out would let a
       // sync engine retry the dead token as if it were live.

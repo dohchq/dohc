@@ -34,7 +34,8 @@ export type DaemonErrorCode =
   | "AMBIGUOUS_SELECTOR"
   | "INVALID_CHANNEL"
   | "RELAY_METHOD_NOT_ALLOWED"
-  | "RELAY_INVALID_RESPONSE";
+  | "RELAY_INVALID_RESPONSE"
+  | "RELAY_HTTPS_REQUIRED";
 
 export interface DaemonWireError extends Omit<WireError, "code"> {
   code: DaemonErrorCode;
@@ -412,6 +413,7 @@ export const DAEMON_ERROR_CODES: readonly DaemonErrorCode[] = [
   "INVALID_CHANNEL",
   "RELAY_METHOD_NOT_ALLOWED",
   "RELAY_INVALID_RESPONSE",
+  "RELAY_HTTPS_REQUIRED",
   "INTERNAL",
 ];
 

@@ -1,5 +1,6 @@
 import { decodeOrdinarySyncResult } from "@dohc/workspace-engine-client/relay-wire";
 import { runInKeyedLane } from "../keyedLane";
+import { insecureLoopbackServersForTests } from "./cloudConfiguration";
 import {
   RelayApiVersionError,
   RelayConflictError,
@@ -77,9 +78,6 @@ function normalizedRelayUrl(baseUrl: string): string {
   return baseUrl.replace(/\/+$/u, "");
 }
 
-export const INSECURE_LOOPBACK_RELAY_TEST_ENV =
-  "DOHC_E2E_ALLOW_INSECURE_LOOPBACK_RELAY";
-
 const LOOPBACK_RELAY_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 /**
@@ -92,7 +90,7 @@ export function allowInsecureLoopbackRelayForTests(
   relayBaseUrl: string,
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): boolean {
-  if (env[INSECURE_LOOPBACK_RELAY_TEST_ENV] !== "1") return false;
+  if (!insecureLoopbackServersForTests(env)) return false;
   let url: URL;
   try {
     url = new URL(relayBaseUrl);

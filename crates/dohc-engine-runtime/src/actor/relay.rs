@@ -2931,7 +2931,7 @@ fn remove_retired_files(
 ) -> Result<bool, RuntimeError> {
     let mut freed = false;
     for file in dohc_engine_sync::retired_hosted_files(store, workspace_id)? {
-        if !dohc_engine_files::remove_file_holding(root, &file.path, &file.sha256)? {
+        if !dohc_engine_files::remove_file_holding(store, root, &file.path, &file.sha256)? {
             unexpected.get_or_insert(file.path);
             continue;
         }
@@ -2940,7 +2940,7 @@ fn remove_retired_files(
         while let Some((folder, _)) = parent.rsplit_once('/') {
             let path = root.join(folder);
             match left_folder(
-                dohc_engine_files::remove_empty_directory_target(root, folder),
+                dohc_engine_files::remove_empty_directory_target(store, root, folder),
                 || std::fs::symlink_metadata(&path).map(|m| m.is_dir()),
                 || Ok(std::fs::read_dir(&path)?.next().transpose()?.is_none()),
             ) {

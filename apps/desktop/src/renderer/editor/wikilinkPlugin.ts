@@ -176,7 +176,7 @@ function displayFor(
     const t = (file.title ?? '').trim()
     if (t) return { display: t, resolved: true }
     // No title — fall back to leaf of the path.
-    const leaf = file.path.replace(/\.md$/i, '').split('/').pop() ?? file.path
+    const leaf = file.path.replace(/\.(md|markdown)$/i, '').split('/').pop() ?? file.path
     return { display: leaf, resolved: true }
   }
   // Broken — display the bare path; the dashed style signals brokenness.

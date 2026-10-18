@@ -223,6 +223,11 @@ describe("error words", () => {
       .toBe("This share is read-only.");
   });
 
+  it("names https when the engine refuses a server address", () => {
+    expect(readError(acrossIpc(refusal("RELAY_HTTPS_REQUIRED", "workspace operation failed"))).words)
+      .toBe("Your server's address does not use https. Disconnect, then connect your server again with its https address.");
+  });
+
   it("reads the app compiler and the Collection worker by their codes", () => {
     expect(readError(acrossIpc(new CompilerProcessError("exit", "Compiler exited (1).")))).toEqual({
       words: "The app's code did not build.",

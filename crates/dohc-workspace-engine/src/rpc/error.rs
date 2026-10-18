@@ -378,6 +378,7 @@ fn map_relay_code(error: RelayError) -> ErrorCode {
             ErrorCode::ProtocolVersionUnsupported
         }
         RelayError::MethodNotAllowed => ErrorCode::RelayMethodNotAllowed,
+        RelayError::HttpsRequired => ErrorCode::RelayHttpsRequired,
         // A served share op the engine cannot replay is the relay's response
         // failing validation, which is the code that already says so. The
         // share-view pull never returns this — it records it as a skipped op
@@ -1267,6 +1268,7 @@ mod tests {
                 ErrorCode::RelayMethodNotAllowed,
             ),
             (RelayError::InvalidResponse, ErrorCode::RelayInvalidResponse),
+            (RelayError::HttpsRequired, ErrorCode::RelayHttpsRequired),
         ];
         for (relay, expected) in cases {
             assert_eq!(

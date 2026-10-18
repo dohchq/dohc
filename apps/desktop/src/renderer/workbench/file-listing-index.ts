@@ -1,5 +1,4 @@
 import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
-import { basenameOf } from "../path";
 import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
 import type { WikilinkFile } from "../editor/wikilinkPlugin";
 
@@ -27,14 +26,8 @@ export function indexFileListing(
     const isMarkdown = fileKindForPath(file.path).displayKind === "markdown";
     if (isMarkdown) {
       hasMarkdownPath = true;
-      if (file.kind === "file") {
-        const pathNoExt = file.path.replace(/\.(md|markdown)$/i, "");
-        markdownWikilinkFiles.push({
-          path: file.path,
-          title: basenameOf(pathNoExt),
-          fileId: null,
-        });
-      }
+      // The listing knows no titles; a reference falls back to the file name.
+      if (file.kind === "file") markdownWikilinkFiles.push({ path: file.path, fileId: null });
     }
 
     if (

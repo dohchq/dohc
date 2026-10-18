@@ -30,6 +30,10 @@ serde_json = "1"
 # probe, not by filling a disk.
 fs4 = "1"
 
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+# The barrier flush that orders a materialized file before the commits after it.
+dohc-macos-files = { path = "../dohc-macos-files" }
+
 [dev-dependencies]
 dohc-test-scratch = { path = "../dohc-test-scratch" }
 
