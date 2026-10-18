@@ -305,6 +305,7 @@
     "desktop:update-state",
     "desktop:usage-record-stopped",
     "desktop:user-settings-changed",
+    "desktop:window-full-screen",
     "desktop:withdraw-share-changes",
     "desktop:workspace-activated",
     "desktop:workspace-activity",

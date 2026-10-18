@@ -2,6 +2,7 @@ import { Component, type ErrorInfo, type ReactNode } from "react";
 import { DohcMark } from "@dohc/brand";
 import { requestGuardedReload } from "./RecoveryCloseGuard";
 import { reportRendererError } from "./rendererErrorReport";
+import { TITLEBAR_HEIGHT_PX } from "./tokens";
 
 // Crash containment for the renderer. React unmounts the entire tree when a
 // render/lifecycle error reaches the root with no boundary — the user sees a
@@ -144,8 +145,10 @@ export class AppErrorBoundary extends Component<
       <div
         data-testid="app-crash-screen"
         role="alert"
-        className="flex h-screen flex-col items-center justify-center gap-3 bg-bg px-8 text-center"
+        className="relative flex h-screen flex-col items-center justify-center gap-3 bg-bg px-8 text-center"
       >
+        {/* No title bar here, so this strip moves the window. */}
+        <div aria-hidden className="titlebar-drag absolute inset-x-0 top-0" style={{ height: TITLEBAR_HEIGHT_PX }} />
         <DohcMark size={30} className="text-line" />
         <span className="text-sm font-semibold text-ink">
           something went wrong

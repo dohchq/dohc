@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Titlebar, workspaceName } from "./Titlebar";
 import type { Workspace } from "./DesktopWorkspaceShell";
+import { initWindowFullScreen } from "./windowFullScreen";
 
 const workspace: Workspace = {
   workspaceId: "ws-1",
@@ -15,6 +16,19 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
 });
+
+function stubFullScreen(platform: NodeJS.Platform): (fullScreen: boolean) => void {
+  let listener: ((event: { fullScreen: boolean }) => void) | undefined;
+  vi.stubGlobal("dohcDesktop", {
+    platform,
+    onWindowFullScreen: (next: typeof listener) => {
+      listener = next;
+      return () => undefined;
+    },
+  });
+  initWindowFullScreen();
+  return (fullScreen) => listener?.({ fullScreen });
+}
 
 describe("workspaceName", () => {
   it("uses the final path segment and ignores trailing separators", () => {
@@ -40,6 +54,31 @@ describe("Titlebar", () => {
     render(<Titlebar workspace={workspace} workspaces={[workspace]} onQuickOpen={() => undefined} />);
 
     expect(screen.getByTestId("titlebar-quick-open").textContent).toContain("⌘P");
+  });
+
+  // macOS draws the traffic lights over the title bar's left end and hides
+  // them in full screen. Main tells the window which state it is in.
+  it("starts 12px after the macOS traffic lights, or 12px from the edge in full screen", () => {
+    const sendFullScreen = stubFullScreen("darwin");
+    render(<Titlebar workspace={workspace} workspaces={[workspace]} onQuickOpen={() => undefined} />);
+    const titlebar = screen.getByTestId("titlebar");
+    expect(titlebar.style.paddingLeft).toBe("88px");
+
+    act(() => sendFullScreen(true));
+    expect(titlebar.style.paddingLeft).toBe("12px");
+    act(() => sendFullScreen(false));
+    expect(titlebar.style.paddingLeft).toBe("88px");
+  });
+
+  it("keeps the window-controls inset in full screen off macOS", () => {
+    const sendFullScreen = stubFullScreen("win32");
+    render(<Titlebar workspace={workspace} workspaces={[workspace]} onQuickOpen={() => undefined} />);
+    const titlebar = screen.getByTestId("titlebar");
+    const windowed = titlebar.getAttribute("style");
+
+    act(() => sendFullScreen(true));
+    expect(titlebar.getAttribute("style")).toBe(windowed);
+    act(() => sendFullScreen(false));
   });
 
   it("shows Ctrl P quick-open shortcut off macOS", () => {

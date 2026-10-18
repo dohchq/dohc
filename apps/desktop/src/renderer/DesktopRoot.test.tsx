@@ -681,6 +681,13 @@ describe("registry read failure", () => {
 
     expect(await screen.findByText("dohc does not have permission to use this file or folder.")).toBeTruthy();
     expect(document.body.textContent).not.toContain("EACCES");
+    // The window has no OS title bar, so the screen draws its own drag strip
+    // over its top edge without moving the message.
+    const page = screen.getByText("dohc couldn't read its workspace registry").parentElement!;
+    const strip = page.querySelector<HTMLElement>(":scope > .titlebar-drag");
+    expect(page.className).toContain("relative");
+    expect(strip?.className).toContain("absolute");
+    expect(strip?.style.height).toBe("40px");
     fireEvent.click(screen.getByRole("button", { name: "Show technical details" }));
     const details = screen.getByRole("region", { name: "Technical details" });
     expect(details.textContent).toContain("Cause: Error [EACCES]: EACCES: permission denied, open 'C:\\dohc\\dohc-workspaces.json'");

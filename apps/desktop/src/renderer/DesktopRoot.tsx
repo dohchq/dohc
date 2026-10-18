@@ -24,6 +24,7 @@ import type { OpenOnSwitch } from "./shell/useSentNoticeProps";
 import { useStatesPageOpen } from "./dev/statesRoute";
 import { ReactionStoreProvider } from "./workbench/reactionStore";
 import { useAccountDeletion } from "./shell/useAccountDeletion";
+import { TITLEBAR_HEIGHT_PX } from "./tokens";
 
 // Development only, and its own chunk: the app's bundle does not carry it.
 const LazyStatesPage = lazy(() =>
@@ -245,7 +246,9 @@ export function DesktopRoot() {
     ]);
     return (
       <StandaloneNotices>
-      <div className="flex h-screen flex-col items-center justify-center gap-2 bg-bg px-8 text-center">
+      <div className="relative flex h-screen flex-col items-center justify-center gap-2 bg-bg px-8 text-center">
+        {/* No title bar here, so this strip moves the window. */}
+        <div aria-hidden className="titlebar-drag absolute inset-x-0 top-0" style={{ height: TITLEBAR_HEIGHT_PX }} />
         <span className="text-sm font-semibold text-ink">
           dohc couldn't read its workspace registry
         </span>
