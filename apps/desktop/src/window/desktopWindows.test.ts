@@ -560,11 +560,12 @@ describe("desktop native menus", () => {
     expect(recentEntries()).toMatchObject([{ label: "Created Project", sublabel: created.rootPath }]);
     expect(f.templates).toHaveLength(2);
 
+    const attachedPath = roots.usableRoot(join(root, "Attached Project"));
     const attached = await createWorkspaceFolder({
-      rootPath: roots.usableRoot(join(root, "Attached Project")), kind: "shared",
+      rootPath: attachedPath, homeDir: home, kind: "shared",
       workspaceId: "attached-workspace",
     });
-    await expect(invoke(CHANNELS.attachWorkspaceFolder, { rootPath: attached.rootPath })).resolves.toEqual(attached);
+    await expect(invoke(CHANNELS.attachWorkspaceFolder, { rootPath: attachedPath })).resolves.toEqual(attached);
     expect(createRegistryStore(registryFile).list()).toEqual([created, attached]);
     expect(recentEntries()).toMatchObject([
       { label: "Created Project", sublabel: created.rootPath },
@@ -579,7 +580,7 @@ describe("desktop native menus", () => {
       { title: "Open Created Project", description: created.rootPath },
       { title: "Open Attached Project", description: attached.rootPath },
     ]);
-    await expect(invoke(CHANNELS.attachWorkspaceFolder, { rootPath: attached.rootPath })).rejects.toThrow("already attached");
+    await expect(invoke(CHANNELS.attachWorkspaceFolder, { rootPath: attachedPath })).rejects.toThrow("already attached");
     expect(f.templates).toHaveLength(3);
     expect(createRegistryStore(registryFile).list()).toEqual([created, attached]);
 

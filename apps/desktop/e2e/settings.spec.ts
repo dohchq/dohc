@@ -3,7 +3,7 @@ import { desktopPins, activityPin, settingsNavPin, settingsSectionPin } from "..
 import { test, expect, type Page } from "@playwright/test";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { normalizeAbsolutePath } from "@dohc/workspace-core";
+import { canonicalWorkspaceRoot } from "../src/workspaces/createWorkspaceFolder";
 import { launchDesktopApp, type LaunchedDesktopApp } from "./helpers/desktopApp";
 import {
   cleanupDesktopWorkspace,
@@ -116,8 +116,8 @@ test("settings search, theme persistence, MCP config, and corrupt settings recov
       .toBe("dark");
 
     await desktop.page.getByTestId(settingsNavPin("agents")).click();
-    // The snippet renders the app-canonical forward-slash workspace path.
-    const canonicalRootPath = normalizeAbsolutePath(temp.rootPath);
+    // The snippet renders the workspace's real path in forward-slash form.
+    const canonicalRootPath = canonicalWorkspaceRoot(temp.rootPath);
     await expect(desktop.page.getByTestId("mcp-config-snippet")).toContainText(
       canonicalRootPath,
     );

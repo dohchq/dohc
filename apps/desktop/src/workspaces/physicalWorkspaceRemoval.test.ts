@@ -64,6 +64,7 @@ it("reports a draft cleanup failure during failed-join rollback without replacin
   h.removeDrafts.mockRejectedValueOnce(cleanupError);
   const logError = vi.fn();
   const run = createJoinedWorkspaceRunner({
+    canonicalizeRoot: root => root,
     reserve: input => h.owner.reserveBinding(input),
     createFolder: async () => h.workspace,
     register: (reservation, workspace) => h.owner.registerReservedBinding(reservation, workspace, {
