@@ -1,0 +1,21 @@
+import { expect, it, vi } from "vitest";
+import { createWorkspaceLinksReader } from "./workspaceLinks";
+import type { RegistryEntry } from "./registryStore";
+import type { ShareViewFiles } from "./shareViewFiles";
+import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+it("uses share authority and marks separate mount engines uncovered", async () => {
+  const page = { versionId: "main", subject: { path: "a.md", objectId: "a" }, entries: [], unchecked: [], complete: true, mountsCovered: true, nextCursor: null };
+  const result = { versionId: "main", results: [], mountsCovered: true };
+  const share = { linksIn: vi.fn(async () => page), linksResolve: vi.fn(async () => result) } as unknown as ShareViewFiles;
+  const owned = { incomingLinks: vi.fn(async () => page), resolveLinks: vi.fn(async () => result) } as unknown as VersionedLiveAdapter;
+  const withAdapter = async <T>(_workspace: RegistryEntry, run: (adapter: VersionedLiveAdapter) => Promise<T>): Promise<T | null> => run(owned);
+  const reader = createWorkspaceLinksReader(withAdapter, () => share);
+  const workspace: RegistryEntry = { workspaceId: "ws", rootPath: "root", kind: "personal", mode: "local-first" };
+  expect(await reader.incoming(workspace, { subject: { path: "a.md" } })).toEqual(page);
+  const mounted = { ...workspace, shareMounts: [{}] } as RegistryEntry;
+  expect(await reader.incoming(mounted, { subject: { objectId: "a" } })).toMatchObject({ mountsCovered: false, complete: false });
+  expect(await reader.resolve(mounted, { source: "a.md", literals: [] })).toMatchObject({ mountsCovered: false });
+  const shared = { ...workspace, shareView: { shareId: "share", access: "view" } } as unknown as RegistryEntry;
+  await reader.incoming(shared, { subject: { path: "a.md" } });
+  expect(share.linksIn).toHaveBeenCalledWith({ kind: "standalone", workspaceId: "ws" }, { subject: { path: "a.md" } });
+});

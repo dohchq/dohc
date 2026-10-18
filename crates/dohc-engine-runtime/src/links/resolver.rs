@@ -159,6 +159,21 @@ impl Resolver {
             .and_then(|value| value.as_deref())
     }
 
+    pub(super) fn resolve_markdown(&self, source: &str, raw: &str) -> Option<&str> {
+        let target = target(raw)?;
+        let directory = source.rsplit_once('/').map_or("", |(dir, _)| dir);
+        let candidate = if target.starts_with('/') || directory.is_empty() {
+            target.trim_start_matches('/').to_owned()
+        } else {
+            format!("{directory}/{target}")
+        };
+        let mut normalized = super::normalize_path(&candidate)?;
+        if target.ends_with('/') {
+            normalized.push('/');
+        }
+        self.family(&normalized)
+    }
+
     pub(super) fn resolve(&self, source: &str, raw: &str) -> Option<&str> {
         let target = target(raw)?;
         let directory = source.rsplit_once('/').map_or("", |(dir, _)| dir);
@@ -200,9 +215,6 @@ mod tests {
     fn shared_resolver_cases() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!("parity.json")).unwrap();
         for case in fixture["resolve"].as_array().unwrap() {
-            if case["kind"].as_str() != Some("wikilink") {
-                continue;
-            }
             let paths = case["paths"]
                 .as_array()
                 .map(|paths| {
@@ -219,8 +231,14 @@ mod tests {
                     paths
                 });
             let index = Resolver::new(paths);
+            let resolve = if case["kind"] == "markdown" {
+                Resolver::resolve_markdown
+            } else {
+                Resolver::resolve
+            };
             assert_eq!(
-                index.resolve(
+                resolve(
+                    &index,
                     case["source"].as_str().unwrap(),
                     case["literal"].as_str().unwrap()
                 ),

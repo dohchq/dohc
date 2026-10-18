@@ -6,6 +6,7 @@
 // need one). Every tool routes through src/tools.ts, which contains all path
 // validation; this file is only registration + transport.
 
+import { LinksInInput, LinksResolveInput } from "@dohc/workspace-contracts/links";
 import { McpServer, type ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { pathToFileURL } from "node:url";
@@ -23,7 +24,7 @@ import {
 } from "@dohc/security-contract/share-selector";
 import {
   MCP_TOOL_CAPABILITIES,
-  readOperation, undoOperation,
+  linksIn, linksResolve, readOperation, undoOperation,
   getShareCopyDetails,
   createDocument,
   createRecord,
@@ -162,6 +163,8 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async () => text(await stopWorkspaceSync(ctx, agentName())),
   );
 
+  register("dohc_links_in", { description: "Read a bounded page of documents linking to a file. Cursors continue the same subject and version.", inputSchema: LinksInInput.shape }, async args => text(await linksIn(ctx, args)));
+  register("dohc_links_resolve", { description: "Resolve wikilink or Markdown literals from one source document using the engine's link rules.", inputSchema: LinksResolveInput.shape }, async args => text(await linksResolve(ctx, args)));
   register("dohc_read_operation", {
     description: "List the paths changed by one operation, up to 50 per page. Returns change references and paths without retained contents. Owner workspace only.",
     inputSchema: { operationId: HistoryOperationId, cursor: z.string().optional() },

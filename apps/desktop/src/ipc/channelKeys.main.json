@@ -70,7 +70,6 @@
   "folderAppChanged",
   "forgetWorkspace",
   "getAgentRunStatus",
-  "getBacklinks",
   "getChatThreadRevision",
   "getCollection",
   "getCollectionAutomationRun",

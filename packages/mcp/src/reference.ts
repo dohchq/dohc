@@ -170,6 +170,8 @@ export const CHAT_EXAMPLES: Record<string, string[][]> = {
 // What each MCP tool returns. A CLI verb means the tool passes on that
 // verb's result schema; a string is written from the tool in tools.ts.
 export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
+  dohc_links_in: { cli: "linksIn" },
+  dohc_links_resolve: { cli: "linksResolve" },
   dohc_read_share_copy: { cli: "shareCopy" },
   dohc_dataset: "what that verb returns, listed under [`dohc dataset`](#dohc-dataset).",
   dohc_publish_app: "the requested action's result, listed under [`dohc app`](#dohc-app). Only `createLink` returns a bearer link `url` once, in `linkCreated`. `urlUnavailable` includes `grantId` so the owner can end it in dohc. Shared approval returns `published` with `appQuery` (`?app=<publicationId>`), never the link URL. Append `appQuery` before the fragment of any link URL, including one returned by `createLink`. Keep the link secret yourself.",
@@ -438,7 +440,9 @@ function shellBlock(line: string): string {
 // result; the JSON verbs of `dataset` and `app` return the result kinds
 // listed above.
 function verbReturns(command: string, name: string): string {
-  const socketVerb = command === "chat"
+  const socketVerb = command === "links"
+    ? ({ in: "linksIn", resolve: "linksResolve" } as const)[name as "in" | "resolve"]
+    : command === "chat"
     ? name
     : command === "history"
       ? HISTORY_RESULTS[name]

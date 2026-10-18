@@ -112,6 +112,7 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
     notifyRenderer: () => undefined,
   });
   const dependencies: Dependencies = {
+    links: { incoming: vi.fn(async () => null), resolve: vi.fn(async () => ({ versionId: "main", results: [], mountsCovered: true })) },
     automations: () => ({ automationIdAt: vi.fn(), runs: vi.fn(), run: vi.fn(), retry: vi.fn() }),
     buttons: () => ({ inspect: vi.fn(async () => []), press: vi.fn() }),
     findWorkspace: (id) => rows.get(id) ?? null,
@@ -1034,4 +1035,36 @@ describe.each(["cli", "mcp"] as const)("share copy through %s", door => {
     await expect(context.shareCopy!({ shareId: "share", grantId: "grant" })).rejects.toThrow("attachment changed");
     expect(f.remote).not.toHaveBeenCalled();
   });
+});
+
+it("gives CLI and MCP the IPC link answer in a share without Chats capture", async () => {
+  const f = fixture(await createTestScratch("links-share-cli-"));
+  f.setCapture(null); f.setDaemon(null);
+  f.dependencies.sharedViewOf = () => ({ shareId: "share" }) as ReturnType<Dependencies["sharedViewOf"]>;
+  const resolved = { versionId: "main", results: [{ path: "target.md", fragment: "heading" }], mountsCovered: true };
+  const input = { source: "source.md", literals: [{ kind: "wikilink" as const, literal: "target#heading" }] };
+  f.dependencies.links.resolve = vi.fn(async () => resolved);
+  await f.create().startDesktopCliServer();
+  const token = "a".repeat(64);
+  const send = async (request: CliRequestWithoutToken) => {
+    const response = cliTransportResponseSchema.parse(JSON.parse(await handleCliRequestLine(JSON.stringify({ ...request, token }), token, f.options())));
+    if (!response.ok) throw new Error(response.error);
+    return response.result;
+  };
+  const cli = await executeCli({ argv: ["links", "resolve", "source.md", JSON.stringify(input.literals), "--json"], cwd: f.workspace.rootPath, env: {}, request: send });
+  expect(cli.exitCode).toBe(0);
+  expect(JSON.parse(cli.stdout)).toMatchObject(resolved);
+  const { linksResolve } = await import("@dohc/mcp/tools");
+  expect(await linksResolve({ root: f.workspace.rootPath, home: "state", request: send }, input)).toEqual(resolved);
+  expect(f.dependencies.openWorkspaceActivity).not.toHaveBeenCalled();
+  expect(f.dependencies.linkedChatStoreFor).not.toHaveBeenCalled();
+  expect(f.dependencies.links.resolve).toHaveBeenCalledTimes(2);
+  const held = deferred();
+  f.dependencies.links.resolve = vi.fn(async () => { await held.promise; return resolved; });
+  const pending = f.options().links!.resolve(f.workspace, input);
+  await vi.waitFor(() => expect(f.dependencies.links.resolve).toHaveBeenCalledOnce());
+  const retired = f.authorities.invalidate(f.workspace.workspaceId);
+  held.release();
+  await expect(pending).rejects.toThrow();
+  await retired;
 });

@@ -77,6 +77,10 @@ function buildCliRequest(
     actor: command.actor,
   } as const;
   switch (command.verb) {
+    case "linksIn":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, subject: command.subject, cursor: command.cursor } };
+    case "linksResolve":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, source: command.source, literals: command.literals } };
     case "historyOperation":
       return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, operationId: command.operationId, ...(command.cursor ? { cursor: command.cursor } : {}) } };
     case "historyUndo":

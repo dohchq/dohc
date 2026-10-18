@@ -61,6 +61,7 @@ async function settledMarkdown(rootPath: string, path: string): Promise<string> 
 }
 
 interface DesktopCliServerDependencies<State> {
+  links: ReturnType<typeof import("../workspaces/workspaceLinks").createWorkspaceLinksReader>;
   stopWorkspaceSync?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, author?: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor): Promise<import("@dohc/cli/protocol").CliResultByVerb["stopSync"]>;
   shareCopy?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: import("@dohc/workspace-contracts/share-copy").ShareCopyInput): Promise<import("@dohc/workspace-contracts/share-copy").ShareCopyResult>;
   access?(workspaceId: string): NonNullable<CliWorkspaceContext["access"]>;
@@ -474,6 +475,12 @@ export function createDesktopCliServer<State>(
     };
   }
 
+  const readLinks = <T>(requested: CliRegistryWorkspace, run: (workspace: RegistryEntry) => Promise<T>) =>
+    withPhysicalWorkspaceOperation(requested.workspaceId, operation => {
+      if (resolve(operation.workspace.rootPath) !== resolve(requested.rootPath)) throw new Error("The workspace attachment changed.");
+      return run(operation.workspace);
+    });
+
   async function startDesktopCliServer(): Promise<CliServerHandle> {
     return startCliServer({
       recordSuccess: dependencies.recordSuccess,
@@ -487,6 +494,10 @@ export function createDesktopCliServer<State>(
             readOnly: Boolean(sharedViewOf(workspaceId)),
           })),
       openWorkspace: openCliWorkspace,
+      links: {
+        incoming: (workspace, input) => readLinks(workspace, current => dependencies.links.incoming(current, input)),
+        resolve: (workspace, input) => readLinks(workspace, current => dependencies.links.resolve(current, input)),
+      },
       chatWrites,
       localUserDisplayName,
       localPersonId,

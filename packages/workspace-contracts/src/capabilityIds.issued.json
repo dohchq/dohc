@@ -240,5 +240,7 @@
   "share.discussion.activity.wait",
   "share.discussion.activity.cancel",
   "share.live.restore",
-  "device.privacy.open"
+  "device.privacy.open",
+  "links.in",
+  "links.resolve"
 ]

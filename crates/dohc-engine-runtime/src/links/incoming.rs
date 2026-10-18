@@ -15,6 +15,7 @@ pub(crate) fn candidates(
     ws: &str,
     version: &str,
     target: &str,
+    kinds: &[&str],
 ) -> Result<Candidates, StorageError> {
     let keys = serde_json::to_string(&path_keys(target)).expect("string pairs serialize to JSON");
     let mut stmt = conn.prepare_cached(
@@ -23,7 +24,7 @@ pub(crate) fn candidates(
            ON k.workspace_id=?1 AND k.version_id=?2 AND k.key_kind=json_extract(probe.value,'$[0]') AND k.key=json_extract(probe.value,'$[1]')
          JOIN link_sources s ON s.workspace_id=k.workspace_id AND s.version_id=k.version_id AND s.object_id=k.object_id AND s.index_key=k.index_key
          JOIN links l ON l.workspace_id=k.workspace_id AND l.version_id=k.version_id AND l.object_id=k.object_id AND l.index_key=k.index_key AND l.ordinal=k.ordinal
-         WHERE l.kind='wikilink'
+         WHERE l.kind IN (SELECT value FROM json_each(?5))
          UNION SELECT object_id FROM link_pending WHERE workspace_id=?1 AND version_id=?2
          UNION SELECT object_id FROM link_sources WHERE workspace_id=?1 AND version_id=?2 AND (status='unindexed' OR parser_generation<>?4))
          SELECT candidate.object_id,MIN(a.path),MAX(coalesce(s.status='unindexed',0))
@@ -33,13 +34,22 @@ pub(crate) fn candidates(
          GROUP BY candidate.object_id"
     ).map_err(sql)?;
     let objects = stmt
-        .query_map(params![ws, version, keys, super::PARSER_GENERATION], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, bool>(2)?,
-            ))
-        })
+        .query_map(
+            params![
+                ws,
+                version,
+                keys,
+                super::PARSER_GENERATION,
+                serde_json::to_string(kinds).expect("string kinds serialize")
+            ],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, bool>(2)?,
+                ))
+            },
+        )
         .map_err(sql)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(sql)?;

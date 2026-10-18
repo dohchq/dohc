@@ -16,6 +16,7 @@ use serde_json::json;
 fn method_requires_initial_capture_ready(method: &str) -> bool {
     (method.starts_with("sync.") && method != "sync.remoteChanges")
         || method.starts_with("share.")
+        || method.starts_with("links.")
         || method.starts_with("search.")
         || method.starts_with("collections.")
         || method.starts_with("liveApplication.")
@@ -341,6 +342,15 @@ impl EngineService {
             }
             "engine.ping" => engine_ping(),
             "workspace.open" => Box::pin(self.workspace_open(&ctx, request.params)).await?,
+            "links.in" | "links.resolve" => {
+                self.links_read(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                    request.method == "links.in",
+                )
+                .await?
+            }
             "files.resolve" => {
                 self.files_resolve(&ctx, request.workspace, request.params)
                     .await?
@@ -1132,6 +1142,8 @@ impl EngineService {
             && !matches!(
                 method,
                 "workspace.close"
+                    | "links.in"
+                    | "links.resolve"
                     | "files.changesSince"
                     | "files.drain"
                     | "search.queryChatMessagesGranular"
@@ -1329,6 +1341,8 @@ mod tests {
             "versions.ensureMain"
         ));
         for method in [
+            "links.in",
+            "links.resolve",
             "files.resolve",
             "ydoc.ownerStop.request",
             "ydoc.ownerStop.release",

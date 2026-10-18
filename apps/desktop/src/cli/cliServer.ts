@@ -1,3 +1,4 @@
+import type { LinksInInput, LinksInResult, LinksResolveInput, LinksResolveResult } from "@dohc/workspace-contracts/links";
 import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
 import { creationPartialMessage } from "@dohc/cli/creation";
 import { atomicReplaceFileSync } from "../atomicReplaceFile";
@@ -334,6 +335,10 @@ export interface CliServerOptions {
   stateDir: string;
   listWorkspaces(): readonly CliRegistryWorkspace[];
   openWorkspace(workspace: CliRegistryWorkspace): Promise<CliWorkspaceContext>;
+  links?: {
+    incoming(workspace: CliRegistryWorkspace, input: LinksInInput): Promise<LinksInResult>;
+    resolve(workspace: CliRegistryWorkspace, input: LinksResolveInput): Promise<LinksResolveResult>;
+  };
   // Messages, reactions, and decisions go through the same module renderer
   // chat uses, so a CLI or MCP write gets the same checks and effects.
   chatWrites: ChatWrites;
@@ -3438,6 +3443,18 @@ async function dispatchWorkspace(
   }
 }
 
+async function dispatchLinks(
+  request: Extract<CliRequest, { verb: "linksIn" | "linksResolve" }>,
+  options: CliServerOptions,
+): Promise<unknown> {
+  const workspace = await resolveCliWorkspace(request.args.cwd, options.listWorkspaces());
+  if (!workspace) throw new CliCommandError("not inside a dohc workspace");
+  if (!options.links) throw new CliCommandError("Workspace links are unavailable.");
+  return request.verb === "linksIn"
+    ? { page: await options.links.incoming(workspace, { subject: request.args.subject, cursor: request.args.cursor }) }
+    : options.links.resolve(workspace, { source: request.args.source, literals: request.args.literals });
+}
+
 async function dispatchAccount(
   request: Extract<CliRequest, { verb: "accountDeletePreview" | "accountDelete" }>,
   options: CliServerOptions,
@@ -3538,7 +3555,9 @@ export async function handleCliRequestLine(
     const completion = { replayed: false };
     const unvalidated = request.verb === "accountDeletePreview" || request.verb === "accountDelete"
       ? await dispatchAccount(request, options)
-      : await dispatch(request, await workspaceContextForRequest(request, options), options, completion);
+      : request.verb === "linksIn" || request.verb === "linksResolve"
+        ? await dispatchLinks(request, options)
+        : await dispatch(request, await workspaceContextForRequest(request, options), options, completion);
     const result = parseCliResult(parsed.data.verb, unvalidated);
     const response = cliTransportResponseSchema.parse({
       protocolVersion: CLI_PROTOCOL_VERSION,

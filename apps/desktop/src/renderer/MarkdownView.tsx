@@ -27,7 +27,7 @@ import {
   publishOwnedUnmountDraft,
   type DraftFlush,
 } from "./useAutosavedTextDraft";
-import { resolveWikilinkNavigation, resolveWorkspaceLinkNavigation } from "./wikilinkNavigation";
+import { resolveLinkNavigation } from "./wikilinkNavigation";
 import { reportTextSave } from "./shell/useDocumentSaveNotices";
 import { CopyButton } from "./ui/CopyButton";
 import { SkeletonRows } from "./ui/SkeletonRows";
@@ -769,23 +769,29 @@ export function MarkdownView(props: {
   const openWorkspaceLinkRef = useRef<(target: WorkspaceLinkTarget) => void>(
     () => undefined,
   );
-  openWikilinkRef.current = (target) => {
-    const navigation = resolveWikilinkNavigation(
-      target,
-      props.path,
-      knownFiles,
-      ++linkNavigationNonce.current,
-    );
-    props.onOpenPath?.(navigation.path, navigation.headingTarget);
+  const navigationIdentity = useRef({ workspaceId: props.workspaceId, path: props.path });
+  if (navigationIdentity.current.workspaceId !== props.workspaceId || navigationIdentity.current.path !== props.path) {
+    navigationIdentity.current = { workspaceId: props.workspaceId, path: props.path };
+  }
+  useEffect(() => () => { navigationIdentity.current = { workspaceId: "", path: "" }; }, []);
+  const navigate = (literal: string, kind: "wikilink" | "markdown") => {
+    const identity = navigationIdentity.current;
+    const nonce = ++linkNavigationNonce.current;
+    const current = () => navigationIdentity.current === identity && linkNavigationNonce.current === nonce;
+    void resolveLinkNavigation(props.workspaceId, props.path, literal, kind, nonce)
+      .then(navigation => {
+        if (current() && navigation) props.onOpenPath?.(navigation.path, navigation.headingTarget);
+      })
+      .catch(error => {
+        if (current()) props.onButtonError?.("This link could not be opened.", error, () => navigate(literal, kind));
+      });
   };
-  openWorkspaceLinkRef.current = (target) => {
-    const navigation = resolveWorkspaceLinkNavigation(
-      target,
-      props.path,
-      knownFiles,
-      ++linkNavigationNonce.current,
-    );
-    props.onOpenPath?.(navigation.path, navigation.headingTarget);
+  openWikilinkRef.current = target => navigate(target, "wikilink");
+  openWorkspaceLinkRef.current = target => {
+    // The activation parser has decoded the path. Encode delimiters before the
+    // engine splits the literal's query and fragment, then decodes its path.
+    const path = target.path.split("/").map(encodeURIComponent).join("/");
+    navigate(path + (target.rawFragment !== undefined ? "#" + target.rawFragment : ""), "markdown");
   };
   const markdownOpenMarkedRef = useRef(false);
   // Complete the open from the first real Markdown surface that commits. The

@@ -90,6 +90,24 @@ No arguments.
 
 Returns `{ ok: true, workspaceId, workspaceSynced: false, syncPause?: { atMs, author } } | { ok: false, reason }`.
 
+### `dohc_links_in`
+
+Read a bounded page of documents linking to a file. Cursors continue the same subject and version.
+
+- `subject`: `{ path: string } | { objectId: string }`. Required.
+- `cursor`: `string`
+
+Returns `{ page: { versionId, subject, entries, unchecked, complete, mountsCovered, nextCursor } | null }`.
+
+### `dohc_links_resolve`
+
+Resolve wikilink or Markdown literals from one source document using the engine's link rules.
+
+- `source`: `string`. Required.
+- `literals`: `({ kind: "wikilink" | "markdown", literal: string })[]`. Required.
+
+Returns `{ versionId, results: ({ path, fragment } | null)[], mountsCovered }`.
+
 ### `dohc_read_operation`
 
 List the paths changed by one operation, up to 50 per page. Returns change references and paths without retained contents. Owner workspace only.
@@ -526,6 +544,32 @@ Two environment variables also change what the CLI does:
 
 - `DOHC_RUN_ID` links the messages that `post` and `reply` write to a local agent run.
 - `DOHC_STATE_DIR` names the app's state folder when the CLI cannot find the running app in its default place.
+
+### `dohc links`
+
+Read and resolve document links.
+
+#### `dohc links in`
+
+```sh
+dohc links in <subject-json> [options]
+```
+
+Read documents that link to a file.
+
+- `--cursor <cursor>`: Continue the previous page.
+
+With `--json`, prints `{ schemaVersion, page: { versionId, subject, entries, unchecked, complete, mountsCovered, nextCursor } | null }`.
+
+#### `dohc links resolve`
+
+```sh
+dohc links resolve <source> <literals-json> [options]
+```
+
+Resolve links from one document.
+
+With `--json`, prints `{ schemaVersion, versionId, results: ({ path, fragment } | null)[], mountsCovered }`.
 
 ### `dohc sync`
 

@@ -14,6 +14,7 @@ pub struct Occurrence {
     pub end_utf16: usize,
     pub line: usize,
     pub snippet: String,
+    pub snippet_offset_utf16: usize,
 }
 pub struct Parsed {
     pub work: Work,
@@ -290,6 +291,7 @@ pub fn extract(text: &str) -> Result<Vec<Occurrence>, ()> {
                     end_utf16: utf16[end],
                     line: lines[i],
                     snippet,
+                    snippet_offset_utf16: utf16[start_line],
                 });
             }
             i = end;

@@ -2,18 +2,33 @@ import { ChevronRight, Link2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type {
   ChatFileMentionRecord,
-  GetBacklinksResult,
 } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { useAsyncResponseEffect } from "./useAsyncResponseEffect";
 
-type BacklinkSource = GetBacklinksResult["sources"][number];
+import type { LinksInResult } from "@dohc/workspace-contracts/links";
+type BacklinksResult = { sources: BacklinkSource[]; nextCursor: string | null };
+type BacklinkSource = { sourcePath: string; sourceTitle: string; snippets: { text: string; line: number; highlightStart: number; highlightEnd: number }[] };
+function sourcesFor(entries: NonNullable<LinksInResult>["entries"]): BacklinkSource[] {
+  const sources = new Map<string, BacklinkSource>();
+  for (const entry of entries) {
+    let source = sources.get(entry.source);
+    if (!source) { source = { sourcePath: entry.source, sourceTitle: entry.title, snippets: [] }; sources.set(entry.source, source); }
+    source.snippets.push({ text: entry.snippet, line: entry.line, highlightStart: entry.highlightStart, highlightEnd: entry.highlightEnd });
+  }
+  return [...sources.values()];
+}
+function mergeSources(left: BacklinkSource[], right: BacklinkSource[]): BacklinkSource[] {
+  const result = new Map(left.map(source => [source.sourcePath, source]));
+  for (const source of right) { const prior = result.get(source.sourcePath); result.set(source.sourcePath, prior ? { ...prior, snippets: [...prior.snippets, ...source.snippets] } : source); }
+  return [...result.values()];
+}
 type BacklinkSnippet = BacklinkSource["snippets"][number];
 type LoadedBacklinks = {
   workspaceId: string;
   path: string;
   sources: BacklinkSource[];
-  chatMentions: ChatFileMentionRecord[];
+  nextCursor: string | null;
 };
 type BacklinksLoadIdentity = {
   chatMentionsAvailable: boolean;
@@ -25,8 +40,7 @@ type BacklinksLoadIdentity = {
 type BacklinksLoadOutcome =
   | {
       ok: true;
-      result: GetBacklinksResult;
-      chatMentions: ChatFileMentionRecord[];
+      result: BacklinksResult;
     }
   | { ok: false };
 type BacklinksLoadRequest = {
@@ -64,11 +78,7 @@ function snippetParts(snippet: BacklinkSnippet): {
   };
 }
 
-// "Linked mentions" — the inbound links to the open document, mirroring
-// Obsidian/Notion. Computation lives in main (it must read every workspace
-// file); this surface renders the result quietly at the bottom of the document,
-// hides itself entirely when there are none, and reuses the open pathway so a
-// mention click navigates like a wikilink.
+// Linked mentions reads bounded engine pages and keeps chat mentions separate.
 export function BacklinksPanel(props: {
   workspaceId: string;
   path: string;
@@ -84,6 +94,7 @@ export function BacklinksPanel(props: {
 }) {
   const [loaded, setLoaded] = useState<LoadedBacklinks | null>(null);
   const [open, setOpen] = useState(true);
+  const [loadedChats, setLoadedChats] = useState<{ workspaceId: string; path: string; mentions: ChatFileMentionRecord[] } | null>(null);
   const { workspaceId, path, refreshKey } = props;
   // Absent reads as unavailable: a caller that has not decided must not make
   // dohc ask for a capability it may not have.
@@ -93,7 +104,7 @@ export function BacklinksPanel(props: {
   const current =
     loaded?.workspaceId === workspaceId && loaded.path === path ? loaded : null;
   const sources = current?.sources ?? [];
-  const chatMentions = current?.chatMentions ?? [];
+  const chatMentions = loadedChats?.workspaceId === workspaceId && loadedChats.path === path ? loadedChats.mentions : [];
 
   // Recompute when the window regains focus. This catches edits made in
   // another app without polling. The focus nonce joins the same request
@@ -120,26 +131,14 @@ export function BacklinksPanel(props: {
           prior.identity.focusNonce !== identity.focusNonce,
       );
 
-      const getBacklinks = bridge().getBacklinks;
+      const linksIn = bridge().linksIn;
       // Partial bridges (tests, older hosts) may not expose it — degrade to none.
-      if (typeof getBacklinks !== "function") {
+      if (typeof linksIn !== "function") {
         previousRequest.current = null;
         return null;
       }
-      const getChatMentions = chatMentionsAvailable
-        ? bridge().listChatFileMentions
-        : undefined;
-      const response = Promise.all([
-        getBacklinks({ workspaceId, path }),
-        typeof getChatMentions === "function"
-          ? getChatMentions({ workspaceId, path }).catch(() => ({ mentions: [] }))
-          : Promise.resolve({ mentions: [] }),
-      ]).then<BacklinksLoadOutcome, BacklinksLoadOutcome>(
-        ([result, chats]) => ({
-          ok: true,
-          result,
-          chatMentions: chats.mentions,
-        }),
+      const response = linksIn({ workspaceId, subject: { path } }).then<BacklinksLoadOutcome, BacklinksLoadOutcome>(
+        page => ({ ok: true, result: { sources: sourcesFor(page?.entries ?? []), nextCursor: page?.nextCursor ?? null } }),
         () => ({ ok: false }),
       );
       // Focus refreshes are opportunistic. If one fails, the preceding
@@ -156,7 +155,7 @@ export function BacklinksPanel(props: {
     {
       onSuccess: (outcome) => {
         if (!outcome.ok) {
-          setLoaded({ workspaceId, path, sources: [], chatMentions: [] });
+          setLoaded({ workspaceId, path, sources: [], nextCursor: null });
           return;
         }
         // Guard the async response against a workspace/path switch mid-flight
@@ -165,15 +164,28 @@ export function BacklinksPanel(props: {
           workspaceId,
           path,
           sources: outcome.result.sources,
-          chatMentions: outcome.chatMentions,
+          nextCursor: outcome.result.nextCursor,
         });
       },
       onError: () => {
-        setLoaded({ workspaceId, path, sources: [], chatMentions: [] });
+        setLoaded({ workspaceId, path, sources: [], nextCursor: null });
       },
     },
     [chatMentionsAvailable, workspaceId, path, refreshKey, focusNonce],
   );
+
+  useAsyncResponseEffect(() => {
+    const read = chatMentionsAvailable ? bridge().listChatFileMentions : undefined;
+    return typeof read === "function" ? read({ workspaceId, path }) : null;
+  }, {
+    onSuccess: result => setLoadedChats({ workspaceId, path, mentions: result.mentions }),
+    onError: () => setLoadedChats({ workspaceId, path, mentions: [] }),
+  }, [chatMentionsAvailable, workspaceId, path, refreshKey, focusNonce]);
+
+  useAsyncResponseEffect(() => current?.nextCursor ? bridge().linksIn({ workspaceId, subject: { path }, cursor: current.nextCursor }) : null, {
+    onSuccess: page => setLoaded(previous => previous && previous === current ? { ...previous, sources: mergeSources(previous.sources, sourcesFor(page?.entries ?? [])), nextCursor: page?.nextCursor ?? null } : previous),
+    onError: () => undefined,
+  }, [workspaceId, path, current]);
 
   const linkedTotal = sources.reduce((sum, source) => sum + source.snippets.length, 0);
   const total = linkedTotal + chatMentions.length;

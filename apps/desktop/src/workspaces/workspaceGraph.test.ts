@@ -11,9 +11,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // nothing while slowing every genuine async hang report.
 import {
   buildMarkdownGraph,
-  computeBacklinks,
   extractMarkdownGraphLinks,
-  type BacklinkSource,
   type MarkdownGraphDocument,
   type WorkspaceGraph,
   type WorkspaceGraphFileSource,
@@ -133,13 +131,7 @@ async function coldGraphReference(
 // the open file, find every other file whose links resolve to it. Reuses the
 // graph's link extraction + resolution so a backlink and a graph edge always
 // agree on what points where.
-async function coldBacklinksReference(
-  targetPath: string,
-  source: Required<WorkspaceGraphFileSource>,
-): Promise<BacklinkSource[]> {
-  const { docs, graphPaths } = await loadGraphDocuments(source);
-  return computeBacklinks(docs, targetPath, { allPaths: graphPaths });
-}
+
 
 let root: string;
 
@@ -413,11 +405,7 @@ describe("WorkspaceGraphIndex", () => {
     await expect(index.readGraph(root, incrementalSource)).resolves.toEqual(
       await coldGraphReference(freshSource),
     );
-    await expect(
-      index.readBacklinks(root, "beta.md", incrementalSource),
-    ).resolves.toEqual(
-      await coldBacklinksReference("beta.md", freshSource),
-    );
+
     incrementalRead.mockClear();
 
     files.set("alpha.md", {
@@ -429,11 +417,7 @@ describe("WorkspaceGraphIndex", () => {
     await expect(index.readGraph(root, incrementalSource)).resolves.toEqual(
       await coldGraphReference(freshSource),
     );
-    await expect(
-      index.readBacklinks(root, "beta.md", incrementalSource),
-    ).resolves.toEqual(
-      await coldBacklinksReference("beta.md", freshSource),
-    );
+
     expect(incrementalRead).toHaveBeenCalledTimes(1);
     expect(incrementalRead).toHaveBeenCalledWith("alpha.md");
   });
@@ -483,9 +467,7 @@ describe("WorkspaceGraphIndex", () => {
         expect(await index.readGraph(root, source)).toEqual(
           await coldGraphReference(freshSource),
         );
-        expect(await index.readBacklinks(root, "target.md", source)).toEqual(
-          await coldBacklinksReference("target.md", freshSource),
-        );
+
       };
 
       await assertDifferential();
@@ -574,11 +556,9 @@ describe("WorkspaceGraphIndex", () => {
     ]);
     expect(graph.unresolvedLinks).toBe(1);
 
-    const backlinks = await index.readBacklinks(root, "public.md", source);
-    expect(backlinks).toEqual(
-      await coldBacklinksReference("public.md", source),
-    );
-    expect(backlinks.map((entry) => entry.sourcePath)).toEqual(["allowed.md"]);
+
+
+
   });
 
   it("preserves the cold file and byte budgets", async () => {
@@ -730,10 +710,8 @@ describe("WorkspaceGraphIndex", () => {
       { source: "index.md", target: "target.md", kind: "wikilink" },
     ]);
 
-    const backlinks = await index.readBacklinks(root, "target.md", source);
-    expect(backlinks).toMatchObject([
-      { sourcePath: "index.md", sourceTitle: "Canonical source" },
-    ]);
+
+
   });
 
   it("bounds text copied from a supplied canonical source", async () => {
@@ -806,226 +784,7 @@ describe("WorkspaceGraphIndex", () => {
   });
 });
 
-describe("computeBacklinks", () => {
-  it("inverts the graph into per-source mentions with highlighted snippets", () => {
-    const sources = computeBacklinks(
-      [
-        {
-          path: "notes/alpha.md",
-          text: "# Alpha\nSee [[Target]] for context.\n",
-        },
-        {
-          path: "notes/beta.md",
-          text: "# Beta\nThe [spec](../notes/target.md) is here.\n",
-        },
-        { path: "notes/target.md", text: "# Target\n" },
-        { path: "notes/unrelated.md", text: "# Unrelated\n[[Alpha]]\n" },
-      ],
-      "notes/target.md",
-    );
 
-    expect(sources).toEqual([
-      {
-        sourcePath: "notes/alpha.md",
-        sourceTitle: "Alpha",
-        snippets: [
-          {
-            text: "See [[Target]] for context.",
-            line: 2,
-            highlightStart: 4,
-            highlightEnd: 14,
-          },
-        ],
-      },
-      {
-        sourcePath: "notes/beta.md",
-        sourceTitle: "Beta",
-        snippets: [
-          {
-            text: "The [spec](../notes/target.md) is here.",
-            line: 2,
-            highlightStart: 4,
-            highlightEnd: 30,
-          },
-        ],
-      },
-    ]);
-    // The highlight range brackets exactly the link markup in the snippet.
-    expect(sources[0]!.snippets[0]!.text.slice(4, 14)).toBe("[[Target]]");
-    expect(sources[1]!.snippets[0]!.text.slice(4, 30)).toBe(
-      "[spec](../notes/target.md)",
-    );
-  });
-
-  it("attributes anchor links [[page#heading]] to the page itself", () => {
-    const sources = computeBacklinks(
-      [
-        {
-          path: "src.md",
-          text: "Jump to [[Target#Section Two]] now.\n",
-        },
-        { path: "target.md", text: "# Target\n## Section Two\n" },
-      ],
-      "target.md",
-    );
-
-    expect(sources).toHaveLength(1);
-    expect(sources[0]!.sourcePath).toBe("src.md");
-    expect(sources[0]!.snippets[0]!.text).toBe(
-      "Jump to [[Target#Section Two]] now.",
-    );
-    const snippet = sources[0]!.snippets[0]!;
-    expect(snippet.text.slice(snippet.highlightStart, snippet.highlightEnd)).toBe(
-      "[[Target#Section Two]]",
-    );
-  });
-
-  it("excludes unresolved links and self-links", () => {
-    const sources = computeBacklinks(
-      [
-        // Self-link: target linking to itself is never its own backlink.
-        { path: "target.md", text: "# Target\n[[Target]] loops.\n" },
-        // Unresolved: no such file exists.
-        { path: "ghost.md", text: "[[Nowhere]] and [[Target]]\n" },
-      ],
-      "target.md",
-    );
-
-    // Only ghost.md's [[Target]] survives; its [[Nowhere]] is unresolved and
-    // target.md's self-link is skipped entirely.
-    expect(sources).toEqual([
-      {
-        sourcePath: "ghost.md",
-        sourceTitle: "ghost",
-        snippets: [
-          {
-            text: "[[Nowhere]] and [[Target]]",
-            line: 1,
-            highlightStart: 16,
-            highlightEnd: 26,
-          },
-        ],
-      },
-    ]);
-  });
-
-  it("ignores links inside fenced and inline code", () => {
-    const sources = computeBacklinks(
-      [
-        {
-          path: "src.md",
-          text: [
-            "Real [[Target]] mention.",
-            "```",
-            "[[Target]] in a fence",
-            "```",
-            "Inline `[[Target]]` too.",
-          ].join("\n"),
-        },
-        { path: "target.md", text: "# Target\n" },
-      ],
-      "target.md",
-    );
-
-    expect(sources).toHaveLength(1);
-    expect(sources[0]!.snippets).toHaveLength(1);
-    expect(sources[0]!.snippets[0]!).toMatchObject({
-      text: "Real [[Target]] mention.",
-      line: 1,
-    });
-  });
-
-  it("windows a long line around the mention with ellipses", () => {
-    const filler = "word ".repeat(60); // 300 chars of context before the link
-    const sources = computeBacklinks(
-      [
-        { path: "src.md", text: `${filler}[[Target]] ${filler}` },
-        { path: "target.md", text: "# Target\n" },
-      ],
-      "target.md",
-    );
-
-    const snippet = sources[0]!.snippets[0]!;
-    expect(snippet.text.length).toBeLessThanOrEqual(162); // 160 + two ellipses
-    expect(snippet.text.startsWith("…")).toBe(true);
-    expect(snippet.text.endsWith("…")).toBe(true);
-    expect(snippet.text.slice(snippet.highlightStart, snippet.highlightEnd)).toBe(
-      "[[Target]]",
-    );
-  });
-
-  it("bounds total mentions scanned by a workspace-wide budget", () => {
-    // MAX_GRAPH_LINK_CANDIDATES (20k) is spent across all source docs, like
-    // buildMarkdownGraph — not refreshed per file. A leading doc packed with
-    // non-matching mentions exhausts the budget, so a later doc's real mention
-    // is never scanned (bounded cost). Pre-fix, every file got the full 20k.
-    const heavy = "[[Nowhere]]\n".repeat(20_001);
-    const sources = computeBacklinks(
-      [
-        { path: "aaa.md", text: heavy },
-        { path: "zzz.md", text: "Real [[Target]] mention.\n" },
-        { path: "target.md", text: "# Target\n" },
-      ],
-      "target.md",
-    );
-
-    // aaa.md alone drains the budget (its links resolve nowhere → 0 sources);
-    // zzz.md is cut off before its matching mention is reached.
-    expect(sources).toEqual([]);
-  });
-
-  it("reads backlinks off disk for the open document", async () => {
-    await writeFile(
-      join(root, "one.md"),
-      "# One\nLink to [[Target]] here.\n",
-    );
-    await writeFile(join(root, "target.md"), "# Target\n");
-
-    const sources = await new WorkspaceGraphIndex().readBacklinks(root, "target.md", {
-      list: () => listFiles(root),
-    });
-    expect(sources).toEqual([
-      {
-        sourcePath: "one.md",
-        sourceTitle: "One",
-        snippets: [
-          {
-            text: "Link to [[Target]] here.",
-            line: 2,
-            highlightStart: 8,
-            highlightEnd: 18,
-          },
-        ],
-      },
-    ]);
-  });
-
-  it("never surfaces a secret-floor file as a backlink source", async () => {
-    // A secret-classified markdown file linking to the open doc must not leak
-    // its content: no backlink entry and no snippet, matching the hard search
-    // floor that fails-closed on `.env`-family paths.
-    await writeFile(
-      join(root, ".env.local.md"),
-      "SECRET=deadbeef\nLink to [[Target]] here.\n",
-    );
-    await writeFile(join(root, "target.md"), "# Target\n");
-
-    const sources = await new WorkspaceGraphIndex().readBacklinks(root, "target.md", {
-      list: () => listFiles(root),
-    });
-    expect(sources).toEqual([]);
-  });
-
-  it("still surfaces backlinks from policy-allowed files", async () => {
-    await writeFile(join(root, "allowed.md"), "# Allowed\nSee [[Target]].\n");
-    await writeFile(join(root, "target.md"), "# Target\n");
-
-    const sources = await new WorkspaceGraphIndex().readBacklinks(root, "target.md", {
-      list: () => listFiles(root),
-    });
-    expect(sources.map((source) => source.sourcePath)).toEqual(["allowed.md"]);
-  });
-});
 
 // Rust uses the same fixtures for extraction, resolution and candidate keys.
 const linkParity = JSON.parse(

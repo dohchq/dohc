@@ -1,22 +1,8 @@
 //! Persisted derived links. Reads and writes here run only on the owning actor;
 //! body integrity checks, parsing and lexical key construction run off it.
-// Decision 12 ships these read-only primitives before their rewrite-pass caller.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "incoming lookup has no production caller until the rewrite pass ships"
-    )
-)]
 mod incoming;
 mod parser;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Resolver and its index builder have no production caller until the rewrite pass ships; target cleaning already serves probe keys"
-    )
-)]
+mod query;
 mod resolver;
 #[cfg(test)]
 #[path = "link_tests.rs"]

@@ -2,7 +2,7 @@
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { GetBacklinksResult } from "../ipc/bridgeContract";
+import { linkQueryPage, type BacklinksFixture } from "../testing/linkQueryPage.fixture";
 import { BacklinksPanel } from "./BacklinksPanel";
 
 import { deferred } from "../testing/deferred";
@@ -11,22 +11,22 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function stubBacklinks(result: GetBacklinksResult) {
-  const getBacklinks = vi.fn(async () => result);
-  vi.stubGlobal("dohcDesktop", { getBacklinks });
-  return getBacklinks;
+function stubBacklinks(result: BacklinksFixture) {
+  const linksIn = vi.fn(async () => result);
+  vi.stubGlobal("dohcDesktop", { linksIn: (...args: unknown[]) => Promise.resolve((linksIn as (...args: unknown[]) => Promise<BacklinksFixture>)(...args)).then(linkQueryPage) });
+  return linksIn;
 }
 
-function stubBacklinksWithChatFailure(result: GetBacklinksResult) {
-  const getBacklinks = vi.fn(async () => result);
+function stubBacklinksWithChatFailure(result: BacklinksFixture) {
+  const linksIn = vi.fn(async () => result);
   const listChatFileMentions = vi.fn(async () => {
     throw new Error("Chats are unavailable for this workspace");
   });
-  vi.stubGlobal("dohcDesktop", { getBacklinks, listChatFileMentions });
-  return { getBacklinks, listChatFileMentions };
+  vi.stubGlobal("dohcDesktop", { linksIn: () => linksIn().then(linkQueryPage), listChatFileMentions });
+  return { linksIn, listChatFileMentions };
 }
 
-function backlinksSource(title: string): GetBacklinksResult {
+function backlinksSource(title: string): BacklinksFixture {
   return {
     sources: [
       {
@@ -45,7 +45,7 @@ function backlinksSource(title: string): GetBacklinksResult {
   };
 }
 
-const TWO_SOURCES: GetBacklinksResult = {
+const TWO_SOURCES: BacklinksFixture = {
   sources: [
     {
       sourcePath: "notes/alpha.md",
@@ -105,12 +105,12 @@ describe("BacklinksPanel", () => {
   // which is why nothing else can see this call. Backlinks themselves are not
   // an engine call and must still be read.
   it("asks for no chat mentions when the caller says they are unavailable", async () => {
-    const { getBacklinks, listChatFileMentions } =
+    const { linksIn, listChatFileMentions } =
       stubBacklinksWithChatFailure(TWO_SOURCES);
     render(<BacklinksPanel workspaceId="ws-1" path="notes/target.md" />);
 
     await screen.findByTestId("backlinks");
-    expect(getBacklinks).toHaveBeenCalled();
+    expect(linksIn).toHaveBeenCalled();
     expect(listChatFileMentions).not.toHaveBeenCalled();
     expect(screen.getByTestId("backlinks-count").textContent).toBe("3");
   });
@@ -148,16 +148,16 @@ describe("BacklinksPanel", () => {
   });
 
   it("renders nothing when there are no mentions", async () => {
-    const getBacklinks = stubBacklinks({ sources: [] });
+    const linksIn = stubBacklinks({ sources: [] });
     const { container } = render(
       <BacklinksPanel workspaceId="ws-1" path="notes/target.md" />,
     );
 
-    await waitFor(() => expect(getBacklinks).toHaveBeenCalled());
+    await waitFor(() => expect(linksIn).toHaveBeenCalled());
     expect(container.querySelector("[data-testid='backlinks']")).toBeNull();
   });
 
-  it("degrades to nothing when the bridge lacks getBacklinks", () => {
+  it("degrades to nothing when the bridge lacks linksIn", () => {
     vi.stubGlobal("dohcDesktop", {});
     const { container } = render(
       <BacklinksPanel workspaceId="ws-1" path="notes/target.md" />,
@@ -166,12 +166,12 @@ describe("BacklinksPanel", () => {
   });
 
   it("never renders results loaded for a previous workspace or path", async () => {
-    const workspaceA = deferred<GetBacklinksResult>();
-    const workspaceB = deferred<GetBacklinksResult>();
-    const getBacklinks = vi.fn((input: { workspaceId: string }) =>
+    const workspaceA = deferred<BacklinksFixture>();
+    const workspaceB = deferred<BacklinksFixture>();
+    const linksIn = vi.fn((input: { workspaceId: string }) =>
       input.workspaceId === "ws-a" ? workspaceA.promise : workspaceB.promise,
     );
-    vi.stubGlobal("dohcDesktop", { getBacklinks });
+    vi.stubGlobal("dohcDesktop", { linksIn: (...args: unknown[]) => Promise.resolve((linksIn as (...args: unknown[]) => Promise<BacklinksFixture>)(...args)).then(linkQueryPage) });
     const view = render(
       <BacklinksPanel workspaceId="ws-a" path="notes/target.md" />,
     );
@@ -179,9 +179,9 @@ describe("BacklinksPanel", () => {
     view.rerender(
       <BacklinksPanel workspaceId="ws-b" path="notes/other.md" />,
     );
-    expect(getBacklinks).toHaveBeenLastCalledWith({
+    expect(linksIn).toHaveBeenLastCalledWith({
       workspaceId: "ws-b",
-      path: "notes/other.md",
+      subject: { path: "notes/other.md" },
     });
 
     await act(async () => {
@@ -201,11 +201,11 @@ describe("BacklinksPanel", () => {
   });
 
   it("refreshes backlinks when the window regains focus", async () => {
-    const getBacklinks = vi
+    const linksIn = vi
       .fn()
       .mockResolvedValueOnce(backlinksSource("Initial"))
       .mockResolvedValueOnce(backlinksSource("Focused"));
-    vi.stubGlobal("dohcDesktop", { getBacklinks });
+    vi.stubGlobal("dohcDesktop", { linksIn: (...args: unknown[]) => Promise.resolve((linksIn as (...args: unknown[]) => Promise<BacklinksFixture>)(...args)).then(linkQueryPage) });
     render(<BacklinksPanel workspaceId="ws-a" path="notes/target.md" />);
 
     expect((await screen.findByTestId("backlink-source")).textContent).toContain(
@@ -219,23 +219,23 @@ describe("BacklinksPanel", () => {
       ),
     );
     expect(screen.queryByText("Initial")).toBeNull();
-    expect(getBacklinks).toHaveBeenCalledTimes(2);
+    expect(linksIn).toHaveBeenCalledTimes(2);
   });
 
   it("keeps the current backlinks when a focus refresh fails", async () => {
-    const focused = deferred<GetBacklinksResult>();
-    const getBacklinks = vi
+    const focused = deferred<BacklinksFixture>();
+    const linksIn = vi
       .fn()
       .mockResolvedValueOnce(backlinksSource("Initial"))
       .mockReturnValueOnce(focused.promise);
-    vi.stubGlobal("dohcDesktop", { getBacklinks });
+    vi.stubGlobal("dohcDesktop", { linksIn: (...args: unknown[]) => Promise.resolve((linksIn as (...args: unknown[]) => Promise<BacklinksFixture>)(...args)).then(linkQueryPage) });
     render(<BacklinksPanel workspaceId="ws-a" path="notes/target.md" />);
     expect((await screen.findByTestId("backlink-source")).textContent).toContain(
       "Initial",
     );
 
     act(() => window.dispatchEvent(new Event("focus")));
-    await waitFor(() => expect(getBacklinks).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(linksIn).toHaveBeenCalledTimes(2));
     await act(async () => {
       focused.reject(new Error("focus refresh failed"));
       await focused.promise.catch(() => undefined);
@@ -245,18 +245,18 @@ describe("BacklinksPanel", () => {
   });
 
   it("keeps the pending initial result when a focus refresh fails", async () => {
-    const initial = deferred<GetBacklinksResult>();
-    const focused = deferred<GetBacklinksResult>();
-    const getBacklinks = vi
+    const initial = deferred<BacklinksFixture>();
+    const focused = deferred<BacklinksFixture>();
+    const linksIn = vi
       .fn()
       .mockReturnValueOnce(initial.promise)
       .mockReturnValueOnce(focused.promise);
-    vi.stubGlobal("dohcDesktop", { getBacklinks });
+    vi.stubGlobal("dohcDesktop", { linksIn: (...args: unknown[]) => Promise.resolve((linksIn as (...args: unknown[]) => Promise<BacklinksFixture>)(...args)).then(linkQueryPage) });
     render(<BacklinksPanel workspaceId="ws-a" path="notes/target.md" />);
-    await waitFor(() => expect(getBacklinks).toHaveBeenCalledOnce());
+    await waitFor(() => expect(linksIn).toHaveBeenCalledOnce());
 
     act(() => window.dispatchEvent(new Event("focus")));
-    await waitFor(() => expect(getBacklinks).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(linksIn).toHaveBeenCalledTimes(2));
     await act(async () => {
       focused.reject(new Error("focus refresh failed"));
       await focused.promise.catch(() => undefined);
@@ -272,12 +272,12 @@ describe("BacklinksPanel", () => {
   });
 
   it("clears the current backlinks when a workspace refresh fails", async () => {
-    const refreshed = deferred<GetBacklinksResult>();
-    const getBacklinks = vi
+    const refreshed = deferred<BacklinksFixture>();
+    const linksIn = vi
       .fn()
       .mockResolvedValueOnce(backlinksSource("Initial"))
       .mockReturnValueOnce(refreshed.promise);
-    vi.stubGlobal("dohcDesktop", { getBacklinks });
+    vi.stubGlobal("dohcDesktop", { linksIn: (...args: unknown[]) => Promise.resolve((linksIn as (...args: unknown[]) => Promise<BacklinksFixture>)(...args)).then(linkQueryPage) });
     const view = render(
       <BacklinksPanel
         workspaceId="ws-a"
@@ -296,7 +296,7 @@ describe("BacklinksPanel", () => {
         refreshKey={1}
       />,
     );
-    await waitFor(() => expect(getBacklinks).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(linksIn).toHaveBeenCalledTimes(2));
     await act(async () => {
       refreshed.reject(new Error("workspace refresh failed"));
       await refreshed.promise.catch(() => undefined);
@@ -306,18 +306,18 @@ describe("BacklinksPanel", () => {
   });
 
   it("does not let the initial response overwrite a newer focus refresh", async () => {
-    const initial = deferred<GetBacklinksResult>();
-    const focused = deferred<GetBacklinksResult>();
-    const getBacklinks = vi
+    const initial = deferred<BacklinksFixture>();
+    const focused = deferred<BacklinksFixture>();
+    const linksIn = vi
       .fn()
       .mockReturnValueOnce(initial.promise)
       .mockReturnValueOnce(focused.promise);
-    vi.stubGlobal("dohcDesktop", { getBacklinks });
+    vi.stubGlobal("dohcDesktop", { linksIn: (...args: unknown[]) => Promise.resolve((linksIn as (...args: unknown[]) => Promise<BacklinksFixture>)(...args)).then(linkQueryPage) });
     render(<BacklinksPanel workspaceId="ws-a" path="notes/target.md" />);
-    await waitFor(() => expect(getBacklinks).toHaveBeenCalledOnce());
+    await waitFor(() => expect(linksIn).toHaveBeenCalledOnce());
 
     act(() => window.dispatchEvent(new Event("focus")));
-    await waitFor(() => expect(getBacklinks).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(linksIn).toHaveBeenCalledTimes(2));
     await act(async () => {
       focused.resolve(backlinksSource("Current"));
       await focused.promise;
@@ -333,4 +333,19 @@ describe("BacklinksPanel", () => {
     expect(screen.getByTestId("backlink-source").textContent).toContain("Current");
     expect(screen.queryByText("Stale")).toBeNull();
   });
+});
+
+it("paints engine pages without waiting for chat refresh, including sources beyond the old scan limit", async () => {
+  const chats = deferred<{ mentions: [] }>();
+  const second = deferred<ReturnType<typeof linkQueryPage>>();
+  const first = linkQueryPage(backlinksSource("File5001"));
+  first.nextCursor = "next";
+  const linksIn = vi.fn().mockResolvedValueOnce(first).mockReturnValueOnce(second.promise);
+  vi.stubGlobal("dohcDesktop", { linksIn, listChatFileMentions: () => chats.promise });
+  render(<BacklinksPanel workspaceId="ws" path="target.md" chatMentionsAvailable />);
+  await screen.findAllByText("File5001");
+  await act(async () => { second.resolve(linkQueryPage(backlinksSource("File5002"))); });
+  await screen.findAllByText("File5002");
+  expect(linksIn).toHaveBeenCalledWith({ workspaceId: "ws", subject: { path: "target.md" }, cursor: "next" });
+  await act(async () => chats.resolve({ mentions: [] }));
 });

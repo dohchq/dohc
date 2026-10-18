@@ -602,7 +602,7 @@ impl ActorHandle {
         .await
     }
 
-    async fn run<R: Send + 'static>(
+    pub(crate) async fn run<R: Send + 'static>(
         &self,
         work: impl FnOnce(&mut EngineStore, &mut WriterDocCache) -> Result<R, RuntimeError>
         + Send
