@@ -159,7 +159,6 @@ export const CHANNELS = {
   cloudJoinWorkspace: "desktop:cloud-join-workspace",
   publishOwnerApp: "desktop:publish-owner-app",
   ownerAppResponses: "desktop:owner-app-responses",
-  dataset: "desktop:dataset",
   // An automation claim failed or a retry queued one: run history reads again.
   automationRunsChanged: "desktop:automation-runs-changed",
   // The crash report changed; the renderer reads it again.
