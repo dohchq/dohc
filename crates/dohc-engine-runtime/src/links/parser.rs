@@ -302,8 +302,8 @@ pub fn extract(text: &str) -> Result<Vec<Occurrence>, ()> {
                 if window_start > start_line + trim_bytes {
                     snippet.push('…');
                 }
-                let highlight_start = snippet.encode_utf16().count()
-                    + text[window_start..i].encode_utf16().count();
+                let highlight_start =
+                    snippet.encode_utf16().count() + text[window_start..i].encode_utf16().count();
                 snippet.push_str(&text[window_start..window_end]);
                 let highlight_end =
                     highlight_start + text[i..end.min(window_end)].encode_utf16().count();

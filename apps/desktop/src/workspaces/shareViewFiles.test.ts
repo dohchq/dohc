@@ -3078,12 +3078,12 @@ it("keeps link reads inside the share target gate and tracked-path floor, includ
   ], unchecked: ["notes/c.md", ".env"], nextCursor: null, complete: false, mountsCovered: true };
   const store = Object.assign(readStore({ text: "" }), {
     incomingLinks: vi.fn(async () => page),
-    resolveLinks: vi.fn(async () => ({ versionId: "main", results: [{ path: "notes/a.md", fragment: null }, { path: ".env", fragment: null }], mountsCovered: true })),
+    resolveLinks: vi.fn(async () => ({ versionId: "main", results: [{ path: "notes/a.md", fragment: null }, { path: ".env", fragment: null }, { path: null, create: "notes/new.md", fragment: null }, { path: null, create: ".env.local", fragment: null }], mountsCovered: true })),
   });
   const openStore = vi.fn(() => store);
   const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => current, openStore });
   expect(await files.linksIn(requested, { subject: { path: "notes/a.md" } })).toMatchObject({ entries: [page.entries[0]], unchecked: ["notes/c.md"] });
-  expect(await files.linksResolve(requested, { source: "notes/b.md", literals: [{ kind: "wikilink", literal: "a" }, { kind: "wikilink", literal: ".env" }] })).toMatchObject({ results: [{ path: "notes/a.md", fragment: null }, null] });
+  expect(await files.linksResolve(requested, { source: "notes/b.md", literals: [{ kind: "wikilink", literal: "a" }, { kind: "wikilink", literal: ".env" }] })).toMatchObject({ results: [{ path: "notes/a.md", fragment: null }, null, { path: null, create: "notes/new.md", fragment: null }, null] });
   await expect(files.linksResolve(requested, { source: ".env", literals: [] })).rejects.toBeInstanceOf(SharedFileReadOnlyError);
   await withShareViewRefreshLifecycleLock(rootPath, async () => {
     const pending = files.linksIn(requested, { subject: { path: "notes/a.md" } });

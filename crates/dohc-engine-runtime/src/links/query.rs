@@ -157,8 +157,12 @@ impl ActorHandle {
                     let complete = complete && candidates.unchecked.is_empty() && after.2;
                     let subject_paths = {
                         let mut stmt = c.prepare_cached("SELECT path FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3").map_err(sql)?;
-                        stmt.query_map(params![ws, version, object], |r| r.get::<_, String>(0)).map_err(sql)?
-                            .collect::<Result<std::collections::HashSet<_>, _>>().map_err(sql)?
+                        let paths = stmt
+                            .query_map(params![ws, version, object], |r| r.get::<_, String>(0))
+                            .map_err(sql)?
+                            .collect::<Result<std::collections::HashSet<_>, _>>()
+                            .map_err(sql)?;
+                        paths
                     };
                     let mut sources: Vec<_> = candidates
                         .sources
