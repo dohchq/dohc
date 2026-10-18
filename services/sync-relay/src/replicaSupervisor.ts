@@ -1,5 +1,5 @@
 import {currentViewFileVisible, ReplicaCurrentViewRefused} from "./storage/replicaCurrentViews";
-import {historyObjectKey, historyStateKey, historyStructuralReason, type ReplicaHistoryObservation} from "./storage/replicaHistoryPins";
+import {historyObjectKey, sameHistoryState, historyStructuralReason, type ReplicaHistoryObservation} from "./storage/replicaHistoryPins";
 import type {ReplicaCurrentView, ReplicaCurrentViewPage, ReplicaCurrentViewPosition, ReplicaCurrentViewCursor, ReplicaCurrentViewSelector} from "@dohc/workspace-engine-client/daemon";
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
@@ -96,27 +96,31 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
     finishNotification();
   }
 
-  function persist(entry: Entry, view = entry.newest, force = false, beforeStructuralChange = false) {
+  function armHistory(entry: Entry) {
+    clearTimeout(entry.history); entry.history=undefined;
+    const due = options.storage.nextReplicaHistoryPinAt(entry.lease.workspaceId);
+    if (due !== null && !entry.stopping) {
+      entry.history=setTimeout(()=>{void flush(entry,true);
+      },Math.max(1,due-Date.now())); entry.history.unref();
+    }
+  }
+  function persist(entry: Entry, view = entry.newest, beforeStructuralChange = false) {
     clearTimeout(entry.quiet); clearTimeout(entry.ceiling);
     entry.quiet = entry.ceiling = undefined;
-    if ((!entry.pendingView && !force) || !view) return;
+    if (!entry.pendingView || !view) return;
     try {
       const observations=[...(entry.historyObservations?.values() ?? [])].map(o=>beforeStructuralChange ? {...o,beforeStructuralChange:true} : o);
       entry.newest = options.storage.storeReplicaCurrentView(entry.lease, view,observations);
       entry.pendingView = false;
       entry.historyObservations?.clear();
-      clearTimeout(entry.history); entry.history=undefined;
-      const due = options.storage.nextReplicaHistoryPinAt(entry.lease.workspaceId);
-      if (due !== null && !entry.stopping) {
-        entry.history=setTimeout(()=>{void flush(entry,true);},Math.max(1,due-Date.now())); entry.history.unref();
-      }
+      armHistory(entry);
     } catch (error) {
       if (!(error instanceof ReplicaCurrentViewRefused)) throw error;
       report(entry, error);
       entry.newest = undefined; entry.pendingView = false;
     }
   }
-  async function flush(entry: Entry, force = false) {
+  async function flush(entry: Entry, sampleHistory = false) {
     try {
       const selectors = options.storage.replicaCurrentViewSelectors(entry.lease.workspaceId);
       const pending = entry.newest;
@@ -124,7 +128,10 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
       if (pending && [...pending.files, ...pending.omitted].some(file => !currentViewFileVisible(selectors, file))) {
         await schedule(entry);
       }
-      if (!entry.stopping) persist(entry,entry.newest,force);
+      if (!entry.stopping) {
+        persist(entry);
+        if (sampleHistory) {options.storage.sampleReplicaHistory(entry.lease); armHistory(entry);}
+      }
     } catch (error) {report(entry, error); void retire(entry).catch(e => report(entry, e));}
   }
   function acceptView(entry: Entry, view: ReplicaCurrentView, spilled: boolean) {
@@ -136,17 +143,28 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
       const selectors=options.storage.replicaCurrentViewSelectors(entry.lease.workspaceId);
       const files=previous.files.filter(file=>currentViewFileVisible(selectors,file)), shas=new Set(files.map(file=>file.sha256));
       persist(entry,{...previous,files,texts:previous.texts.filter(text=>shas.has(text.sha256)),
-        omitted:previous.omitted.filter(file=>currentViewFileVisible(selectors,file))},false,true);
+        omitted:previous.omitted.filter(file=>currentViewFileVisible(selectors,file))},true);
     }
     entry.historyObservations ??= new Map();
     const prior = new Map(previous?.files.map(f=>[historyObjectKey(f),f]) ?? []), now=Date.now();
+    let changed=!previous || previous.logCursor !== view.logCursor || previous.journalCursor !== view.journalCursor;
+    let structural=!previous;
     for (const key of new Set([...prior.keys(),...next.keys()])) {
       if (omitted.has(key)) continue;
       const old=prior.get(key), file=next.get(key);
-      if (old && file && historyStateKey(old) === historyStateKey(file)) continue;
+      if (old && file && sameHistoryState(old,file) && old.byteLength === file.byteLength) continue;
+      changed=true;
+      if (!old || !file || historyStructuralReason(old,file) || old.contentKind !== file.contentKind) structural=true;
       const identity=file ?? old!;
       entry.historyObservations.set(key,{versionId:identity.versionId,objectId:identity.objectId,
         firstChangedAtMs:entry.historyObservations.get(key)?.firstChangedAtMs ?? now,changedAtMs:now});
+    }
+    const priorOmitted=new Map(previous?.omitted.map(f=>[historyObjectKey(f),f]) ?? []);
+    if (view.omitted.length !== priorOmitted.size) changed=structural=true;
+    for (const file of view.omitted) {
+      const old=priorOmitted.get(historyObjectKey(file));
+      if (!old || old.path !== file.path || old.reason !== file.reason) changed=structural=true;
+      else if (old.sha256 !== file.sha256) changed=true;
     }
     const fresh = !entry.newest;
     if (spilled) {
@@ -158,13 +176,10 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
     for (const text of view.texts) held.set(text.sha256, text.text);
     const needed = new Set(view.files.filter(f => f.contentKind === "text").map(f => f.sha256));
     view.texts = [...held].filter(([sha]) => needed.has(sha)).map(([sha256, text]) => ({sha256, text}));
-    const structure = (v: ReplicaCurrentView) => JSON.stringify([
-      v.files.map(f => [f.versionId, f.objectId, f.path, f.contentKind, f.lineageClaimId, f.restoreGeneration]),
-      v.omitted.map(f => [f.versionId, f.objectId, f.path, f.reason])]);
     entry.newest = view;
-    if (!fresh && previous && JSON.stringify([previous.files, previous.omitted]) === JSON.stringify([view.files, view.omitted])) return;
+    if (!changed) {if (fresh) armHistory(entry); return;}
     entry.pendingView = true;
-    if (fresh || !previous || structure(previous) !== structure(view)) {
+    if (fresh || structural) {
       persist(entry);
       return;
     }
@@ -183,7 +198,7 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
       // Startup may still own the directory and child. Wait before disposing either.
       try {
         await entry.run?.catch(() => {});
-        try { persist(entry); } catch (error) { report(entry,error); }
+        try { persist(entry); options.storage.sampleReplicaHistory(entry.lease); } catch (error) { report(entry,error); }
         options.storage.discardReplicaCurrentView(entry.lease);
         options.storage.releaseReplicaCurrentView(entry.lease);
         try { await entry.child?.close(); } catch (error) { report(entry, error); }

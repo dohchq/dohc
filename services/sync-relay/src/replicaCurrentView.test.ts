@@ -335,7 +335,7 @@ it("round4: an empty null-version selector collects and grants nothing", async (
   expect(() => f.storage.storeReplicaCurrentView(f.lease, f.view())).toThrow();
 });
 
-it("round4: ending one of two shares removes its stored and cached text", async () => {
+it("round4: ending one of two shares hides its cached text and preserves the surviving cut", async () => {
   const f = await fixture();
   f.storage.createShare({share:{shareId:"other",workspaceId:"w",granterUserId:"owner",selectorJson:'{"paths":["other"],"versionId":null}',createdAtMs:1},
     grant:{grantId:"other-g",shareId:"other",principalKind:"user",principalUserId:"reader",principalEmail:null,access:"view",generation:1,status:"active",createdAtMs:1,revokedAtMs:null,parentGrantId:null}});
@@ -349,8 +349,8 @@ it("round4: ending one of two shares removes its stored and cached text", async 
     f.storage.revokeShareGrant({shareId:"s",grantId:"g",revokedAtMs:2});
     expect(cached.readText(sha("old"))).toBeNull();
     expect(supervisor.currentView("w")?.view.files ?? []).toEqual([]);
-    expect(f.db.prepare("SELECT * FROM sync_relay_replica_cuts").all()).toEqual([]);
-    expect(f.db.prepare("SELECT * FROM sync_relay_replica_cut_texts").all()).toEqual([]);
+    expect(f.db.prepare("SELECT * FROM sync_relay_replica_cuts").all()).toHaveLength(1);
+    expect(f.storage.readReplicaCurrentViewText("w",sha("old"))).toBeNull();
   } finally { await supervisor.close(); }
 });
 

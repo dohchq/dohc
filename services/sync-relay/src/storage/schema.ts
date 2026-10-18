@@ -1,5 +1,6 @@
 import {initializeReplicaCurrentViewSchema} from "./replicaCurrentViewSchema";
 import {initializeReplicaHistorySchema, HISTORY_JOURNAL_POSITION_INDEX} from "./replicaHistorySchema";
+import {initializeReplicaHistoryWorkSchema} from "./replicaHistoryWorkSchema";
 import {initializeHostedSettlementSchema} from "./hostedSettlementSchema";
 import { initializeLiveAuthorshipSchema, originalLiveJournalSql, liveAuthorSchemaMarked, assertLiveAuthorColumns } from "./liveAuthorshipSchema";
 import { initializeAppPublicationSchema } from "./publicationSchema";
@@ -1278,6 +1279,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     initializeRelayAdmissionColumn(db);
     initializeReplicaCurrentViewSchema(db);
     initializeReplicaHistorySchema(db);
+    initializeReplicaHistoryWorkSchema(db);
     initializeNoticeSchema(db);
     initializeShareNoticeDeliverySchema(db);
     initializeAutomationHostSchema(db);

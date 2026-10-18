@@ -7,7 +7,7 @@ import type {ReplicaReadLease} from "../replicaReadPrincipal";
 import type {StorageContext} from "./context";
 import {currentShareGrantSql} from "./currentShareGrant";
 import {readReplicaStanding} from "./replicaReads";
-import {pinReplicaHistory, thinReplicaHistoryPins, type ReplicaHistoryObservation} from "./replicaHistoryPins";
+import {historyObjectKey, sameHistoryState, pinReplicaHistory, thinReplicaHistoryPins, type ReplicaHistoryObservation, type ReplicaHistoryChanges} from "./replicaHistoryPins";
 import {replicaStatement as statement} from "./replicaStatements";
 import {deleteUnreferencedReplicaTexts, readReplicaText} from "./replicaTextStorage";
 
@@ -91,10 +91,15 @@ function validateReplicaCurrentView(storage: StorageContext, lease: ReplicaReadL
       view.logCursor > standing.logSeq || view.journalCursor > standing.journalCursor) fail();
   const saved = statement(storage,"SELECT * FROM sync_relay_replica_cuts WHERE workspace_id=?").get(lease.workspaceId);
   if (saved && (view.logCursor < Number(saved.log_cursor) || view.journalCursor < Number(saved.journal_cursor))) fail();
-  const history = statement(storage,"SELECT max(pin_log_cursor) AS log_cursor,max(pin_journal_cursor) AS journal_cursor FROM sync_relay_history_clocks WHERE workspace_id=?").get(lease.workspaceId)!;
-  if (view.logCursor < Number(history.log_cursor) || view.journalCursor < Number(history.journal_cursor)) fail();
+  for (const [cursor,position] of [["pin_log_cursor",view.logCursor],["pin_journal_cursor",view.journalCursor]] as const) {
+    const history = statement(storage,`SELECT ${cursor} AS position FROM sync_relay_history_clocks WHERE workspace_id=? ORDER BY ${cursor} DESC LIMIT 1`).get(lease.workspaceId);
+    if (history && position < Number(history.position)) fail();
+  }
   const selectors = replicaCurrentViewSelectors(storage, lease.workspaceId), paths = new Set<string>(), objects = new Set<string>();
   const previous = new Map(storedFiles(storage, lease.workspaceId).map(f => [fileLineageKey(f), f]));
+  const remaining = new Map([...previous.values()].map(f=>[historyObjectKey(f),f]));
+  const previousOmitted = new Map<string,ReplicaCurrentView["omitted"][number]>(JSON.parse(String(saved?.omitted_json ?? "[]")).map((f: ReplicaCurrentView["omitted"][number])=>[historyObjectKey(f),f]));
+  const changes: ReplicaHistoryChanges = new Map();
   const fences = currentViewFences(storage, lease.workspaceId);
   const currentPaths = currentViewPaths(view.files, view.omitted, fences);
   const predecessors=new Set(observations.filter(o=>o.beforeStructuralChange).map(o=>JSON.stringify([o.versionId,o.objectId])));
@@ -116,16 +121,25 @@ function validateReplicaCurrentView(storage: StorageContext, lease: ReplicaReadL
         file = old;
       }
     }
-    const object = JSON.stringify([file.versionId, file.objectId]), path = filePathKey(file);
+    const object = historyObjectKey(file), path = filePathKey(file);
     if (objects.has(object) || paths.has(path)) fail();
     objects.add(object); paths.add(path); files.push(file);
+    const before=remaining.get(object);
+    if (!before || !sameHistoryState(before,file)) changes.set(object,{before,after:file});
+    remaining.delete(object); previousOmitted.delete(object);
   }
   for (const omitted of view.omitted) {
-    const object = JSON.stringify([omitted.versionId, omitted.objectId]), path = JSON.stringify([omitted.versionId, omitted.path]);
+    const object = historyObjectKey(omitted), path = filePathKey(omitted);
     if (!omitted.objectId || !currentViewFileVisible(selectors, omitted) || !/^[a-f0-9]{64}$/.test(omitted.sha256) || omitted.reason !== "text-frame-limit" || objects.has(object) || paths.has(path)) fail();
     objects.add(object); paths.add(path);
+    const unavailable=previousOmitted.get(object);
+    if (remaining.has(object) || unavailable?.path !== omitted.path || unavailable.sha256 !== omitted.sha256)
+      changes.set(object,{before:remaining.get(object),omitted});
+    remaining.delete(object); previousOmitted.delete(object);
   }
-  return {...view, files};
+  for (const [key,before] of remaining) changes.set(key,{before});
+  for (const [key,omitted] of previousOmitted) changes.set(key,{departed:omitted});
+  return {view:{...view, files},changes};
 }
 export function discardReplicaCurrentView(storage: StorageContext, lease: ReplicaReadLease) {
   if (statement(storage,"SELECT 1 FROM sync_relay_replica_cut_text_refs WHERE workspace_id=? AND ref_count=0 LIMIT 1").get(lease.workspaceId)) {
@@ -176,7 +190,7 @@ export function flipReplicaCurrentView(storage: StorageContext, lease: ReplicaRe
     // Also invalidate when deletion/recreation repeats a cut sequence and header.
     readCaches.get(storage)?.delete(lease.workspaceId);
     return storage.replicaViewTx(() => {
-      const view = validateReplicaCurrentView(storage, lease, state.view,state.observations);
+      const {view,changes} = validateReplicaCurrentView(storage, lease, state.view,state.observations);
       const chunks = statement(storage,"SELECT count(*) AS n,min(ordinal) AS first,max(ordinal) AS last,sum(length(bytes)) AS bytes FROM sync_relay_replica_cut_texts WHERE workspace_id=? AND sha256=?");
       const checked = new Map<string, number>();
       for (const file of view.files) {
@@ -189,7 +203,7 @@ export function flipReplicaCurrentView(storage: StorageContext, lease: ReplicaRe
         const row = chunks.get(lease.workspaceId, file.sha256)!;
         if (!row.n || row.first !== 0 || Number(row.last) !== Number(row.n) - 1 || row.bytes !== file.byteLength) fail();
       }
-      const references=pinReplicaHistory(storage,view,state.observations);
+      const references=pinReplicaHistory(storage,view,changes,state.observations);
       for (const row of statement(storage,"SELECT sha256,count(*) AS n FROM sync_relay_replica_cut_files WHERE workspace_id=? AND content_kind='text' GROUP BY sha256").all(lease.workspaceId))
         references.set(String(row.sha256),(references.get(String(row.sha256)) ?? 0)-Number(row.n));
       for (const file of view.files) if (file.contentKind === "text") references.set(file.sha256,(references.get(file.sha256) ?? 0)+1);
@@ -207,6 +221,18 @@ export function flipReplicaCurrentView(storage: StorageContext, lease: ReplicaRe
       return view;
     });
   } catch (error) {discardReplicaCurrentView(storage, lease); throw error;}
+}
+export function sampleReplicaHistory(storage: StorageContext, lease: ReplicaReadLease) {
+  storage.replicaViewTx(() => {
+    current(storage,lease);
+    const header=statement(storage,"SELECT log_cursor,journal_cursor FROM sync_relay_replica_cuts WHERE workspace_id=?").get(lease.workspaceId);
+    if (!header) return;
+    const references=pinReplicaHistory(storage,{workspaceId:lease.workspaceId,logCursor:Number(header.log_cursor),journalCursor:Number(header.journal_cursor)},new Map());
+    for (const [sha,delta] of references)
+      statement(storage,"UPDATE sync_relay_replica_cut_text_refs SET ref_count=ref_count+? WHERE workspace_id=? AND sha256=?").run(delta,lease.workspaceId,sha);
+    thinReplicaHistoryPins(storage,lease.workspaceId);
+    deleteUnreferencedReplicaTexts(storage,lease.workspaceId);
+  });
 }
 export function readReplicaCurrentView(storage: StorageContext, workspace: string): ReplicaCurrentView | null {
   const standing = readReplicaStanding(storage, workspace);
