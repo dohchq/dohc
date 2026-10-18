@@ -342,6 +342,7 @@ fn reconcile_settles_deferred_and_raced_paths_without_degrading() {
         ],
         retained_over_cap: Vec::new(),
         unconfirmed_removed: Vec::new(),
+        respelled_retires: Default::default(),
         degraded: false,
         degraded_paths: Vec::new(),
         prepared_from_dirty: true,
@@ -409,6 +410,38 @@ fn retire_is_refused_when_a_regular_file_reappeared() {
     supervisor.close(&db).expect("close actor");
     assert_eq!(
         snapshot(&db, "back.md").expect("head retained").text,
+        "captured"
+    );
+}
+
+/// An ordinary retire refuses a file stored under another spelling too: only
+/// a retire the reconcile proved respelled may treat that file as moved.
+/// Skips where the disk keeps case apart.
+#[test]
+fn an_ordinary_retire_refuses_a_file_at_another_spelling() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let supervisor = WorkspaceSupervisor::new();
+    let (db, mut sink) = sink_for(&scratch, &supervisor);
+    write_file(scratch.path(), "notes.md", b"captured");
+    ingest(&mut sink, "notes.md").expect("seed ingest");
+    std::fs::rename(
+        scratch.path().join("notes.md"),
+        scratch.path().join("Notes.md"),
+    )
+    .expect("respell");
+    if !scratch.path().join("notes.md").exists() {
+        eprintln!("SKIP: this disk keeps case apart");
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+        return;
+    }
+
+    assert_eq!(sink.retire("notes.md"), Err(RETIRE_RACED));
+
+    drop(sink);
+    supervisor.close(&db).expect("close actor");
+    assert_eq!(
+        snapshot(&db, "notes.md").expect("head retained").text,
         "captured"
     );
 }

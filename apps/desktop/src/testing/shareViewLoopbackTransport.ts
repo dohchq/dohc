@@ -387,8 +387,11 @@ export class ShareViewLoopbackTransport implements EngineDaemonClient {
           afterPath !== null &&
           afterSha !== null
         ) {
+          // One op, one apply, as the daemon counts it.
+          const counted = applied;
           if (beforePath !== afterPath) await applyDelete(beforePath, origin);
           await applyWrite(afterPath, afterSha, contentKind, origin);
+          applied = Math.min(applied, counted + 1);
         } else if (
           operation === "write" &&
           afterPath !== null &&

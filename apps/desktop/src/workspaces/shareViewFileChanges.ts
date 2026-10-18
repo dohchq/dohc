@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import type { Stats } from "node:fs";
-import { lstat, readdir, realpath } from "node:fs/promises";
+import { lstat, readdir, realpath, type FileHandle } from "node:fs/promises";
 import { basename, join } from "node:path";
 import {
   validateUserMaterializePath,
   validateUserWritePath,
+  type FsEntryIdentity,
   type WritePathValidation,
 } from "@dohc/workspace-core";
 import type { ShareViewChangedPath } from "@dohc/workspace-contracts/relay";
@@ -20,14 +21,23 @@ import {
   unjournalablePathMessages,
 } from "./shareViewRecords";
 import {
+  droppedEntryParent,
   importNameFor,
+  ImportPathChangedError,
+  landsAsNamed,
   movePath,
+  openDroppedFile,
   resolveImportDestination,
   screenDroppedPaths,
+  verifyDroppedFolder,
+  type DroppedEntry,
+  type DroppedFolderCheck,
+  type DroppedSource,
   type ImportCopyOutcome,
+  type ImportSource,
 } from "./workspaceFiles";
 import type { WorkspaceTextWriteResult } from "./workspaceAssets";
-import { readDiskContent } from "./workspaceEngineCapture";
+import { readDiskContent, readOpenedDiskContent, type DiskTextState } from "./workspaceEngineCapture";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 import { isEngineTransportFailure } from "./shareViewEngineFailure";
 
@@ -626,10 +636,6 @@ async function applyShareViewFileImport(
     targetDir: string | undefined;
   },
 ): Promise<ImportCopyOutcome> {
-  const screened =
-    input.screenAgainstRoots === null
-      ? { usable: input.absolutePaths, refused: 0 }
-      : await screenDroppedPaths(input.absolutePaths, input.screenAgainstRoots);
   const store = input.shareViewStore();
   const main = await store.ensureMainVersion({
     workspaceId: input.workspaceId,
@@ -640,6 +646,11 @@ async function applyShareViewFileImport(
     input.rootPath,
     input.targetDir,
   );
+  const screened =
+    input.screenAgainstRoots === null
+      ? { usable: input.absolutePaths, refused: 0 }
+      : await screenDroppedPaths(input.absolutePaths, input.screenAgainstRoots, relDir);
+  const landedPath = (path: string) => (relDir === "" ? path : `${relDir}/${path}`);
   // Names already occupied, on both sides. The store is what a change is made
   // of; the projection can also hold a file the recipient put there by hand,
   // and the disk copy this replaces would never have overwritten it.
@@ -652,13 +663,13 @@ async function applyShareViewFileImport(
   //
   // Store-held names can also have no projection to probe, so use the same
   // conservative case fold as `claimed` below.
+  // A held file deeper down takes its top folder's name here, so a dropped
+  // folder named like it lands beside it, never inside it.
   const heldInDir = new Set<string>(
     [...held.keys()]
-      .filter((path) =>
-        relDir === "" ? !path.includes("/") : path.startsWith(`${relDir}/`),
-      )
+      .filter((path) => relDir === "" || path.startsWith(`${relDir}/`))
       .map((path) =>
-        (relDir === "" ? path : path.slice(relDir.length + 1)).toLowerCase(),
+        (relDir === "" ? path : path.slice(relDir.length + 1)).split("/")[0]!.toLowerCase(),
       ),
   );
   // Names claimed EARLIER IN THIS RUN have nothing on disk to probe yet, so
@@ -668,46 +679,95 @@ async function applyShareViewFileImport(
   const nameTaken = async (candidate: string): Promise<boolean> =>
     heldInDir.has(candidate.toLowerCase()) ||
     claimed.has(candidate.toLowerCase()) ||
-    (await projectionHolds(
-      input.rootPath,
-      relDir === "" ? candidate : `${relDir}/${candidate}`,
-    ));
+    (await projectionHolds(input.rootPath, landedPath(candidate)));
+
+  // Every source whose name lands as it is spelled. The store holds files,
+  // not folders, so a folder lands through the files in it, and one with no
+  // file in it is skipped.
+  let skipped = screened.refused;
+  const planned: { source: ImportSource; name: string }[] = [];
+  for (const source of screened.usable) {
+    const name = basename(typeof source === "string" ? source : source.source);
+    const files = typeof source === "string" || source.entries === null
+      || source.entries.some((entry) => !entry.folder);
+    if (!landsAsNamed(landedPath(name)) || !files) {
+      skipped += 1;
+      continue;
+    }
+    planned.push({ source, name });
+  }
+  // Each source claims its final name, in drop order, before anything is
+  // written, so the grant below decides the paths that will land. A file is
+  // read first, so one the engine cannot own claims no collision variant.
+  const landings: { source: ImportSource; name: string }[] = [];
+  for (const { source, name: wanted } of planned) {
+    if (!isFolderSource(source) && !isOwnable(await readSourceContent(source, landedPath(wanted)))) {
+      skipped += 1;
+      continue;
+    }
+    const name = await importNameFor(wanted, absDir, nameTaken);
+    if (name === null) {
+      skipped += 1;
+      continue;
+    }
+    claimed.add(name.toLowerCase());
+    landings.push({ source, name });
+  }
+  // The grant decides every file before the first write, so a file it
+  // refuses, such as a .env, stops the import before anything lands, and the
+  // refusal names that file.
+  for (const { source, name } of landings) {
+    const paths = isFolderSource(source)
+      ? source.entries.filter((entry) => !entry.folder).map((entry) => `${name}/${entry.path}`)
+      : [name];
+    for (const path of paths) input.assertPathAllowed?.(landedPath(path));
+  }
 
   const imported: string[] = [];
   const changed: ShareViewChangedPath[] = [];
-  let skipped = screened.refused;
+  const write = async (name: string, content: OwnableContent) => {
+    const path = landedPath(name);
+    input.assertPathAllowed?.(path);
+    await input.projection.markPending(input.rootPath, [path]);
+    await input.projection.writeStoreContent({
+      store,
+      workspaceId: input.workspaceId,
+      versionId: main.id,
+      path,
+      content,
+    });
+    imported.push(path);
+    changed.push({ path, operation: "write", contentKind: content.kind });
+  };
   try {
-    for (const source of screened.usable) {
-      const validated = validateUserMaterializePath(basename(source), { platform: process.platform });
-      if (!validated.ok) {
-        skipped += 1;
+    for (const { source, name } of landings) {
+      if (!isFolderSource(source)) {
+        // Read again: the first read only decided whether the file claims a
+        // name, and holding every dropped file's bytes would cost memory.
+        const content = await readSourceContent(source, landedPath(name));
+        if (!isOwnable(content)) {
+          skipped += 1;
+          continue;
+        }
+        await write(name, content);
         continue;
       }
-      // Read the content before claiming a name: a source the engine cannot
-      // own must not consume a collision variant it never used.
-      const content = await readDiskContent(source);
-      if (content.kind !== "text" && content.kind !== "binary") {
-        skipped += 1;
-        continue;
+      await verifyDroppedFolder(source.source, source.identity);
+      for (const entry of source.entries) {
+        const from = join(source.source, entry.path);
+        // A folder is checked before the files below it are read.
+        if (entry.folder) {
+          await verifyDroppedFolder(from, entry.identity);
+          continue;
+        }
+        const path = `${name}/${entry.path}`;
+        const content = await readDroppedContent(from, entry.identity, landedPath(path), droppedEntryParent(source, entry));
+        if (!isOwnable(content)) {
+          skipped += 1;
+          continue;
+        }
+        await write(path, content);
       }
-      const name = await importNameFor(validated.normalized, absDir, nameTaken);
-      if (name === null) {
-        skipped += 1;
-        continue;
-      }
-      claimed.add(name.toLowerCase());
-      const path = relDir === "" ? name : `${relDir}/${name}`;
-      input.assertPathAllowed?.(path);
-      await input.projection.markPending(input.rootPath, [path]);
-      await input.projection.writeStoreContent({
-        store,
-        workspaceId: input.workspaceId,
-        versionId: main.id,
-        path,
-        content,
-      });
-      imported.push(path);
-      changed.push({ path, operation: "write", contentKind: content.kind });
     }
   } finally {
     // What landed is materialized even when a later source fails, so the
@@ -724,6 +784,53 @@ async function applyShareViewFileImport(
     );
   }
   return { imported, skipped };
+}
+
+type OwnableContent = Extract<DiskTextState, { kind: "text" | "binary" }>;
+
+function isOwnable(content: DiskTextState): content is OwnableContent {
+  return content.kind === "text" || content.kind === "binary";
+}
+
+function isFolderSource(source: ImportSource): source is DroppedSource & { entries: DroppedEntry[] } {
+  return typeof source !== "string" && source.entries !== null;
+}
+
+function readSourceContent(source: string | DroppedSource, landing: string): Promise<DiskTextState> {
+  return typeof source === "string"
+    ? readDiskContent(source)
+    : readDroppedContent(source.source, source.identity, landing, undefined);
+}
+
+// A dropped file's content, read from the handle its identity check opened
+// and classified by the path it lands at, as capture classifies it. A file
+// that changed stops the import. A file that cannot be read is skipped, as
+// the path reader skips it.
+async function readDroppedContent(
+  path: string,
+  identity: FsEntryIdentity,
+  landing: string,
+  parent: DroppedFolderCheck | undefined,
+): Promise<DiskTextState> {
+  let handle: FileHandle;
+  try {
+    handle = await openDroppedFile(path, identity, parent);
+  } catch (error) {
+    return unreadOrThrow(error);
+  }
+  try {
+    return await readOpenedDiskContent(handle, landing);
+  } catch (error) {
+    return unreadOrThrow(error);
+  } finally {
+    await handle.close();
+  }
+}
+
+function unreadOrThrow(error: unknown): DiskTextState {
+  if (error instanceof ImportPathChangedError) throw error;
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === "ENOENT" || code === "ENOTDIR" ? { kind: "absent" } : { kind: "unreadable" };
 }
 
 /**

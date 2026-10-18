@@ -369,6 +369,7 @@ dependencies = [
  "dohc-engine-storage",
  "dohc-engine-testkit",
  "dohc-linux-files",
+ "dohc-macos-files",
  "dohc-test-scratch",
  "dohc-windows-files",
  "file-id",
@@ -489,6 +490,14 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "signal-hook-registry",
+]
+
+[[package]]
+name = "dohc-macos-files"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "rustix",
 ]
 
 [[package]]

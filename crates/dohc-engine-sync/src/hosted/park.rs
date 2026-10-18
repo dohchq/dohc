@@ -251,7 +251,10 @@ pub fn departed_hosted_materialization(
         }
         Ok::<_, SyncError>(page)
     })?;
-    Ok(Some(page.into_values().collect()))
+    Ok(Some(crate::relay::page_order(
+        page.into_values(),
+        |change| change.operation,
+    )))
 }
 
 /// Each row journaled for a document in a version that can carry a
