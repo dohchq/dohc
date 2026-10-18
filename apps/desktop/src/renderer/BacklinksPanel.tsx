@@ -7,7 +7,7 @@ import { bridge } from "./bridge";
 import { useAsyncResponseEffect } from "./useAsyncResponseEffect";
 
 import type { LinksInResult } from "@dohc/workspace-contracts/links";
-type BacklinksResult = { sources: BacklinkSource[]; complete: boolean };
+type BacklinksResult = { sources: BacklinkSource[]; complete: boolean; indexBuilding: boolean };
 type BacklinkSource = { sourcePath: string; sourceTitle: string; snippets: { text: string; line: number; highlightStart: number; highlightEnd: number }[] };
 function sourcesFor(entries: NonNullable<LinksInResult>["entries"]): BacklinkSource[] {
   const sources = new Map<string, BacklinkSource>();
@@ -24,6 +24,7 @@ type LoadedBacklinks = {
   path: string;
   sources: BacklinkSource[];
   complete: boolean;
+  indexBuilding: boolean;
 };
 type BacklinksLoadIdentity = {
   chatMentionsAvailable: boolean;
@@ -37,7 +38,7 @@ type BacklinksLoadOutcome =
       ok: true;
       result: BacklinksResult;
     }
-  | { ok: false };
+  | { ok: false; error?: unknown };
 type BacklinksLoadRequest = {
   identity: BacklinksLoadIdentity;
   response: Promise<BacklinksLoadOutcome>;
@@ -84,6 +85,7 @@ export function BacklinksPanel(props: {
   // visibly — can only refuse it. Opt-in, and named the way GraphView names
   // the same fact, so both chat affordances read one word.
   chatMentionsAvailable?: boolean;
+  onError?: (message: string, error: unknown, retry: (() => void) | null) => void;
   onOpenPath?: (path: string) => void;
   onOpenChatMention?: (mention: ChatFileMentionRecord) => void;
 }) {
@@ -96,7 +98,9 @@ export function BacklinksPanel(props: {
   const chatMentionsAvailable = props.chatMentionsAvailable === true;
   const [focusNonce, setFocusNonce] = useState(0);
   const previousRequest = useRef<BacklinksLoadRequest | null>(null);
-  const completion = useRef<{ workspaceId: string; path: string; complete: boolean } | null>(null);
+  const reportError = useRef(props.onError);
+  reportError.current = props.onError;
+  const [walkInFlight, setWalkInFlight] = useState(false);
   const current =
     loaded?.workspaceId === workspaceId && loaded.path === path ? loaded : null;
   const sources = current?.sources ?? [];
@@ -111,54 +115,59 @@ export function BacklinksPanel(props: {
     return () => window.removeEventListener("focus", onFocus);
   }, []);
 
-  const [gathering, setGathering] = useState<{ workspaceId: string; path: string } | null>(null);
   useEffect(() => {
     let active = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let delay = 250;
-    let incomplete = completion.current?.workspaceId === workspaceId
-      && completion.current.path === path && !completion.current.complete;
+    let failures = 0;
     const identity = { chatMentionsAvailable, workspaceId, path, refreshKey, focusNonce };
     const prior = previousRequest.current;
     const focusOnly = prior && sameBacklinksLoadBase(prior.identity, identity)
       && prior.identity.focusNonce !== focusNonce;
     const linksIn = bridge().linksIn;
     if (typeof linksIn !== "function") return;
+    setWalkInFlight(true);
     const walk = async (): Promise<BacklinksLoadOutcome> => {
       try {
         const entries: NonNullable<LinksInResult>["entries"] = [];
         let cursor: string | undefined;
         let complete = true;
+        let indexBuilding = false;
         do {
           const page = await linksIn({ workspaceId, subject: { path }, ...(cursor ? { cursor } : {}) });
+          if (!active && page?.nextCursor) return { ok: false };
           entries.push(...(page?.entries ?? []));
           complete &&= page?.complete ?? true;
+          indexBuilding ||= page?.indexBuilding ?? false;
           cursor = page?.nextCursor ?? undefined;
-          if (!complete) incomplete = true;
-          if (active && !complete) {
-            completion.current = { workspaceId, path, complete: false };
-            setGathering({ workspaceId, path });
-          }
-          if (!active && cursor) return { ok: false };
+          // Keep the previous list until the walk ends, but expose its current index state.
+          if (active) setLoaded(previous => ({ workspaceId, path, complete, indexBuilding,
+            sources: previous?.workspaceId === workspaceId && previous.path === path ? previous.sources : [] }));
         } while (cursor);
-        return { ok: true, result: { sources: sourcesFor(entries), complete } };
-      } catch { return { ok: false }; }
+        return { ok: true, result: { sources: sourcesFor(entries), complete, indexBuilding } };
+      } catch (error) { return { ok: false, error }; }
     };
     const publish = (outcome: BacklinksLoadOutcome) => {
       if (!active) return;
       if (outcome.ok) {
-        completion.current = { workspaceId, path, complete: outcome.result.complete };
+        failures = 0;
         setLoaded({ workspaceId, path, ...outcome.result });
-        setGathering(outcome.result.complete ? null : { workspaceId, path });
+        if (!outcome.result.indexBuilding) {
+          setWalkInFlight(false);
+          return;
+        }
+      } else if (++failures >= 3) {
+        setWalkInFlight(false);
+        reportError.current?.("Linked mentions could not be loaded.", outcome.error,
+          () => { if (active) setFocusNonce(nonce => nonce + 1); });
+        return;
       }
-      if ((outcome.ok && !outcome.result.complete) || (!outcome.ok && incomplete)) {
-        timer = setTimeout(() => {
-          delay = Math.min(delay * 2, 8000);
-          const response = walk();
-          previousRequest.current = { identity, response };
-          void response.then(publish);
-        }, delay);
-      }
+      timer = setTimeout(() => {
+        delay = Math.min(delay * 2, 8000);
+        const response = walk();
+        previousRequest.current = { identity, response };
+        void response.then(publish);
+      }, delay);
     };
     const response = walk();
     // An opportunistic focus failure may still use the preceding pending answer.
@@ -179,7 +188,7 @@ export function BacklinksPanel(props: {
 
   const linkedTotal = sources.reduce((sum, source) => sum + source.snippets.length, 0);
   const total = linkedTotal + chatMentions.length;
-  const isGathering = current?.complete === false || (gathering?.workspaceId === workspaceId && gathering.path === path);
+  const isGathering = current?.indexBuilding === true && walkInFlight;
   if (total === 0 && !isGathering) return null;
 
   return (

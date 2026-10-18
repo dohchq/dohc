@@ -385,7 +385,7 @@ it("keeps the previous list until every refresh page has arrived", async () => {
 it("shows gathering and retries incomplete walks with backoff capped at eight seconds", async () => {
   vi.useFakeTimers();
   try {
-    const incomplete = { ...linkQueryPage(backlinksSource("Pending")), complete: false };
+    const incomplete = { ...linkQueryPage(backlinksSource("Pending")), complete: false, indexBuilding: true };
     const linksIn = vi.fn().mockResolvedValue(incomplete);
     vi.stubGlobal("dohcDesktop", { linksIn });
     render(<BacklinksPanel workspaceId="ws" path="target.md" />);
@@ -411,7 +411,7 @@ it("shows gathering and retries incomplete walks with backoff capped at eight se
 it("shows gathering for an empty incomplete page and cancels retries on unmount", async () => {
   vi.useFakeTimers();
   try {
-    const linksIn = vi.fn().mockResolvedValue({ ...linkQueryPage({ sources: [] }), complete: false });
+    const linksIn = vi.fn().mockResolvedValue({ ...linkQueryPage({ sources: [] }), complete: false, indexBuilding: true });
     vi.stubGlobal("dohcDesktop", { linksIn });
     const view = render(<BacklinksPanel workspaceId="ws" path="target.md" />);
     await act(async () => {});
@@ -438,7 +438,7 @@ it("retries an incomplete walk even when a later page fails", async () => {
   vi.useFakeTimers();
   try {
     const linksIn = vi.fn()
-      .mockResolvedValueOnce({ ...linkQueryPage(backlinksSource("Partial")), complete: false, nextCursor: "next" })
+      .mockResolvedValueOnce({ ...linkQueryPage(backlinksSource("Partial")), complete: false, indexBuilding: true, nextCursor: "next" })
       .mockRejectedValueOnce(new Error("page failed"))
       .mockResolvedValueOnce(linkQueryPage(backlinksSource("Ready")));
     vi.stubGlobal("dohcDesktop", { linksIn });
@@ -450,5 +450,65 @@ it("retries an incomplete walk even when a later page fails", async () => {
     expect(screen.queryByRole("status")).toBeNull();
     expect(screen.getByTestId("backlink-source").textContent).toContain("Ready");
     cleanup();
+  } finally { vi.useRealTimers(); }
+});
+
+
+it("does not gather or retry lasting omissions, including uncovered mounts", async () => {
+  vi.useFakeTimers();
+  try {
+    const linksIn = vi.fn().mockResolvedValue({ ...linkQueryPage(backlinksSource("Kept")),
+      complete: false, indexBuilding: false, mountsCovered: false, unchecked: ["large.md"] });
+    vi.stubGlobal("dohcDesktop", { linksIn });
+    render(<BacklinksPanel workspaceId="ws" path="target.md" />);
+    await act(async () => {});
+    expect(screen.getByTestId("backlink-source").textContent).toContain("Kept");
+    expect(screen.queryByRole("status")).toBeNull();
+    await act(async () => vi.advanceTimersByTimeAsync(60000));
+    expect(linksIn).toHaveBeenCalledOnce();
+  } finally { vi.useRealTimers(); }
+});
+
+it("stops failed walks after three attempts and offers a fresh walk through Notices", async () => {
+  vi.useFakeTimers();
+  try {
+    const error = new Error("engine unavailable");
+    const linksIn = vi.fn()
+      .mockResolvedValueOnce({ ...linkQueryPage(backlinksSource("Kept")), complete: false, indexBuilding: true })
+      .mockRejectedValue(error);
+    const onError = vi.fn();
+    vi.stubGlobal("dohcDesktop", { linksIn });
+    render(<BacklinksPanel workspaceId="ws" path="target.md" onError={onError} />);
+    await act(async () => {});
+    await act(async () => vi.advanceTimersByTimeAsync(250 + 500 + 1000));
+    expect(linksIn).toHaveBeenCalledTimes(4);
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onError).toHaveBeenCalledWith("Linked mentions could not be loaded.", error, expect.any(Function));
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.getByTestId("backlink-source").textContent).toContain("Kept");
+    await act(async () => vi.advanceTimersByTimeAsync(60000));
+    expect(linksIn).toHaveBeenCalledTimes(4);
+    linksIn.mockResolvedValue(linkQueryPage(backlinksSource("Recovered")));
+    await act(async () => onError.mock.calls[0]![2]());
+    expect(screen.getByTestId("backlink-source").textContent).toContain("Recovered");
+  } finally { vi.useRealTimers(); }
+});
+
+it("does not let a stale Notices retry request another document", async () => {
+  vi.useFakeTimers();
+  try {
+    const linksIn = vi.fn().mockRejectedValue(new Error("unavailable"));
+    const onError = vi.fn();
+    vi.stubGlobal("dohcDesktop", { linksIn });
+    const view = render(<BacklinksPanel workspaceId="ws" path="old.md" onError={onError} />);
+    await act(async () => {});
+    await act(async () => vi.advanceTimersByTimeAsync(750));
+    const retry = onError.mock.calls[0]![2];
+    linksIn.mockResolvedValue(linkQueryPage({ sources: [] }));
+    view.rerender(<BacklinksPanel workspaceId="ws" path="new.md" onError={onError} />);
+    await act(async () => {});
+    const count = linksIn.mock.calls.length;
+    await act(async () => retry());
+    expect(linksIn).toHaveBeenCalledTimes(count);
   } finally { vi.useRealTimers(); }
 });

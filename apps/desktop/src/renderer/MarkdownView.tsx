@@ -1950,6 +1950,7 @@ export function MarkdownView(props: {
       refreshKey={props.refreshKey}
       onOpenPath={props.onOpenPath}
       onOpenChatMention={props.onOpenChatMention}
+      onError={props.onButtonError}
       chatMentionsAvailable={props.chatMentionsAvailable}
     />
   );

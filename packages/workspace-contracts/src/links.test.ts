@@ -20,7 +20,17 @@ it("rejects a creation answer without a path or with two target paths", () => {
 it("allows a hundred unchecked sources and refuses more", () => {
   const page = { versionId: "main", subject: { path: "target.md", objectId: "target" },
     entries: [], unchecked: Array.from({ length: 100 }, (_, n) => `source-${n}.md`),
-    complete: false, mountsCovered: true, nextCursor: null };
+    complete: false, indexBuilding: false, mountsCovered: true, nextCursor: null };
   expect(LinksInResult.parse(page)).toEqual(page);
   expect(LinksInResult.safeParse({ ...page, unchecked: [...page.unchecked, "extra.md"] }).success).toBe(false);
+});
+
+
+it("distinguishes building from lasting unchecked sources", () => {
+  const base = { versionId: "main", subject: { path: "a.md", objectId: "a" }, entries: [],
+    unchecked: ["large.md"], complete: false, indexBuilding: false, mountsCovered: false, nextCursor: null };
+  expect(LinksInResult.parse(base)).toEqual(base);
+  expect(LinksInResult.parse({ ...base, indexBuilding: true })?.indexBuilding).toBe(true);
+  const { indexBuilding: _building, ...missing } = base;
+  expect(LinksInResult.safeParse(missing).success).toBe(false);
 });

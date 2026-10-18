@@ -33,6 +33,7 @@ export const LinksInResult = z.object({
   entries: z.array(LinkEntry).max(100),
   unchecked: z.array(path).max(100),
   complete: z.boolean(),
+  indexBuilding: z.boolean(),
   mountsCovered: z.boolean(),
   nextCursor: z.string().max(32768).nullable(),
 }).strict().nullable();

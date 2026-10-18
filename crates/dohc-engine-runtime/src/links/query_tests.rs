@@ -109,7 +109,9 @@ async fn incoming_pages_share_resolution_and_survive_settles_without_writing() {
         })
         .await
         .unwrap();
-    assert_eq!(page(&actor, "target.md", None).await["complete"], true);
+    let fresh = page(&actor, "target.md", None).await;
+    assert_eq!(fresh["complete"], true);
+    assert_eq!(fresh["indexBuilding"], false);
 }
 
 #[tokio::test]
@@ -548,6 +550,7 @@ async fn cursor_keeps_incompleteness_when_the_index_catches_up() {
     let _hold = actor.hold_link_drain();
     let first = page(&actor, "target.md", None).await;
     assert_eq!(first["complete"], false);
+    assert_eq!(first["indexBuilding"], true);
     actor
         .run(|store, _| {
             drain(store);
@@ -562,6 +565,7 @@ async fn cursor_keeps_incompleteness_when_the_index_catches_up() {
     )
     .await;
     assert_eq!(next["complete"], false);
+    assert_eq!(next["indexBuilding"], true);
     assert_eq!(next["entries"].as_array().unwrap().len(), 10);
     assert_eq!(page(&actor, "target.md", None).await["complete"], true);
 }
@@ -608,6 +612,7 @@ async fn pages_bound_bytes_and_do_not_repeat_unchecked_sources() {
         assert!(pages < 10);
         assert!(result.to_string().len() <= 64 * 1024);
         assert_eq!(result["complete"], false);
+        assert_eq!(result["indexBuilding"], false);
         for row in result["entries"].as_array().unwrap() {
             assert!(entries.insert(row["source"].as_str().unwrap().to_owned()));
         }
@@ -620,4 +625,39 @@ async fn pages_bound_bytes_and_do_not_repeat_unchecked_sources() {
     assert!(pages > 1);
     assert_eq!(entries.len(), 120);
     assert_eq!(unchecked, vec![json!("a.md")]);
+}
+
+#[tokio::test]
+async fn index_building_reports_missing_rows_even_after_seed_is_ready() {
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    let mut store = open(&db);
+    write(&mut store, "target", "target.md", "", 1);
+    write(&mut store, "source", "source.md", "[[target]]", 2);
+    drain(&mut store);
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("DELETE FROM link_sources WHERE object_id='source'", [])
+                .map_err(sql)?;
+            Ok::<_, StorageError>(())
+        })
+        .unwrap();
+    drop(store);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).unwrap().actor;
+    let _hold = actor.hold_link_drain();
+    let result = page(&actor, "target.md", None).await;
+    assert_eq!(result["complete"], false);
+    assert_eq!(result["indexBuilding"], true);
+    actor
+        .run(|store, _| {
+            write(store, "source", "source.md", "[[target]] again", 3);
+            drain(store);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let result = page(&actor, "target.md", None).await;
+    assert_eq!(result["indexBuilding"], false);
+    assert_eq!(result["complete"], true);
 }

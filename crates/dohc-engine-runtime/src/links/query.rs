@@ -8,6 +8,9 @@ use serde_json::{Value, json};
 use std::sync::OnceLock;
 use tokio_util::sync::CancellationToken;
 
+type CursorPosition = (String, usize, bool, bool);
+type CursorPayload = (String, String, String, String, usize, bool, bool);
+
 fn invalid() -> RuntimeError {
     StorageError::InvalidInput {
         reason: "invalid links cursor or subject",
@@ -26,9 +29,9 @@ fn encode_cursor(
     ws: &str,
     version: &str,
     subject: &str,
-    after: &(String, usize, bool),
+    after: &CursorPosition,
 ) -> Result<String, RuntimeError> {
-    let bytes = json!([version, subject, "in", after.0, after.1, after.2]).to_string();
+    let bytes = json!([version, subject, "in", after.0, after.1, after.2, after.3]).to_string();
     let sealed = seal(cursor_key()?, ws, "links.in", bytes.as_bytes()).map_err(|_| invalid())?;
     Ok(json!([
         sealed.iv_base64(),
@@ -44,9 +47,9 @@ fn decode_cursor(
     version: &str,
     subject: &str,
     cursor: Option<String>,
-) -> Result<(String, usize, bool), RuntimeError> {
+) -> Result<CursorPosition, RuntimeError> {
     let Some(cursor) = cursor else {
-        return Ok((String::new(), 0, true));
+        return Ok((String::new(), 0, true, false));
     };
     if cursor.len() > 32768 {
         return Err(invalid());
@@ -55,12 +58,13 @@ fn decode_cursor(
         serde_json::from_str(&cursor).map_err(|_| invalid())?;
     let sealed = SealedSecret::from_base64(&iv, &tag, &body, length).map_err(|_| invalid())?;
     let plaintext = open(cursor_key()?, ws, "links.in", &sealed).map_err(|_| invalid())?;
-    let (v, s, direction, path, ordinal, complete): (String, String, String, String, usize, bool) =
+    let decoded: CursorPayload =
         serde_json::from_slice(plaintext.as_bytes()).map_err(|_| invalid())?;
+    let (v, s, direction, path, ordinal, complete, building) = decoded;
     if v != version || s != subject || direction != "in" {
         return Err(invalid());
     }
-    Ok((path, ordinal, complete))
+    Ok((path, ordinal, complete, building))
 }
 
 fn resolve<'a>(resolver: &'a Resolver, source: &str, literal: &str, kind: &str) -> Option<&'a str> {
@@ -154,7 +158,13 @@ impl ActorHandle {
                         "SELECT coalesce((SELECT seed_phase='ready' AND parser_generation=?3 FROM link_index_state WHERE workspace_id=?1 AND version_id=?2),0) AND NOT EXISTS(SELECT 1 FROM link_pending WHERE workspace_id=?1 AND version_id=?2)",
                         params![ws, version, super::PARSER_GENERATION], |r| r.get(0),
                     ).map_err(sql)?;
-                    let complete = complete && candidates.unchecked.is_empty() && after.2;
+                    let missing: bool = c.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM link_aliases a WHERE a.workspace_id=?1 AND a.version_id=?2
+                         AND NOT EXISTS(SELECT 1 FROM link_sources s WHERE s.workspace_id=a.workspace_id AND s.version_id=a.version_id AND s.object_id=a.object_id))",
+                        params![ws, version], |r| r.get(0),
+                    ).map_err(sql)?;
+                    let index_building = !complete || missing || after.3;
+                    let complete = !index_building && candidates.unchecked.is_empty() && after.2;
                     let subject_paths = {
                         let mut stmt = c
                             .prepare_cached(
@@ -200,12 +210,14 @@ impl ActorHandle {
                         resolver,
                         prepared,
                         complete,
+                        index_building,
                         more,
                     )))
                 }).map_err(RuntimeError::from)
             })
             .await?;
-        let Some((version, object, target, after, paths, sources, complete, more)) = prepared
+        let Some((version, object, target, after, paths, sources, complete, index_building, more)) =
+            prepared
         else {
             return Ok(Value::Null);
         };
@@ -213,7 +225,7 @@ impl ActorHandle {
             let resolver = paths.build();
             let mut page = json!({
                 "versionId":version,"subject":{"objectId":object,"path":target},
-                "entries":[],"unchecked":[],"complete":complete,
+                "entries":[],"unchecked":[],"complete":complete,"indexBuilding":index_building,
                 "mountsCovered":true,"nextCursor":null
             });
             // Reserve one maximum-length cursor; serialize each added row only once.
@@ -227,7 +239,7 @@ impl ActorHandle {
                 &workspace,
                 &version,
                 &object,
-                &(longest.clone(), usize::MAX, false),
+                &(longest.clone(), usize::MAX, false, false),
             )?)
             .to_string()
             .len();
@@ -249,7 +261,7 @@ impl ActorHandle {
                     bytes += size;
                     page["unchecked"].as_array_mut().expect("array").push(row);
                     // An unchecked source is terminal, even if it was partially read on a prior page.
-                    last = (path, usize::MAX, complete);
+                    last = (path, usize::MAX, complete, index_building);
                     continue;
                 }
                 if let Some(parsed) = parsed {
@@ -267,7 +279,7 @@ impl ActorHandle {
                         if resolve(&resolver, &path, &occurrence.literal, occurrence.kind)
                             != Some(target.as_str())
                         {
-                            last = (path.clone(), ordinal, complete);
+                            last = (path.clone(), ordinal, complete, index_building);
                             continue;
                         }
                         let entry = json!({
@@ -284,13 +296,14 @@ impl ActorHandle {
                         }
                         bytes += size;
                         page["entries"].as_array_mut().expect("array").push(entry);
-                        last = (path.clone(), ordinal, complete);
+                        last = (path.clone(), ordinal, complete, index_building);
                     }
                 }
-                last = (path, usize::MAX, complete);
+                last = (path, usize::MAX, complete, index_building);
             }
             page["complete"] = json!(complete);
             last.2 = complete;
+            last.3 = index_building;
             page["nextCursor"] = if stopped || more {
                 json!(encode_cursor(&workspace, &version, &object, &last)?)
             } else {
@@ -312,7 +325,7 @@ mod tests {
 
     #[test]
     fn cursor_decryption_is_bound_to_the_workspace() {
-        let cursor = encode_cursor("ws", "main", "target", &("a.md".into(), 3, true)).unwrap();
+        let cursor = encode_cursor("ws", "main", "target", &("a.md".into(), 3, true, false)).unwrap();
         assert!(decode_cursor("other", "main", "target", Some(cursor)).is_err());
     }
 }

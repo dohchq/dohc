@@ -3075,7 +3075,7 @@ it("keeps link reads inside the share target gate and tracked-path floor, includ
   const page = { versionId: "main", subject: { path: "notes/a.md", objectId: "a" }, entries: [
     { source: "notes/b.md", title: "B", ordinal: 0, span: [0, 5] as [number, number], line: 1, snippet: "[[a]]", highlightStart: 0, highlightEnd: 5 },
     { source: ".env", title: "secret", ordinal: 0, span: [0, 5] as [number, number], line: 1, snippet: "[[a]]", highlightStart: 0, highlightEnd: 5 },
-  ], unchecked: ["notes/c.md", ".env"], nextCursor: null, complete: false, mountsCovered: true };
+  ], unchecked: ["notes/c.md", ".env"], nextCursor: null, complete: false, indexBuilding: false, mountsCovered: true };
   const store = Object.assign(readStore({ text: "" }), {
     incomingLinks: vi.fn(async () => page),
     resolveLinks: vi.fn(async () => ({ versionId: "main", results: [{ path: "notes/a.md", fragment: null }, { path: ".env", fragment: null }, { path: null, create: "notes/new.md", fragment: null }, { path: null, create: ".env.local", fragment: null }], mountsCovered: true })),

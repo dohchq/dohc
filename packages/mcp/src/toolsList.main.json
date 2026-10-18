@@ -2026,7 +2026,7 @@
     },
     {
       "name": "dohc_links_in",
-      "description": "Read a bounded page of documents linking to a file. Cursors continue the same subject and version.",
+      "description": "Read a bounded page of documents linking to a file. indexBuilding reports active indexing; unchecked names omitted sources. complete excludes mount coverage, reported by mountsCovered. Cursors carry index state across pages.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -3551,7 +3551,7 @@
     },
     {
       "name": "dohc_links_in",
-      "description": "Read a bounded page of documents linking to a file. Cursors continue the same subject and version.",
+      "description": "Read a bounded page of documents linking to a file. indexBuilding reports active indexing; unchecked names omitted sources. complete excludes mount coverage, reported by mountsCovered. Cursors carry index state across pages.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -4212,7 +4212,7 @@
     },
     {
       "name": "dohc_links_in",
-      "description": "Read a bounded page of documents linking to a file. Cursors continue the same subject and version.",
+      "description": "Read a bounded page of documents linking to a file. indexBuilding reports active indexing; unchecked names omitted sources. complete excludes mount coverage, reported by mountsCovered. Cursors carry index state across pages.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -4873,7 +4873,7 @@
     },
     {
       "name": "dohc_links_in",
-      "description": "Read a bounded page of documents linking to a file. Cursors continue the same subject and version.",
+      "description": "Read a bounded page of documents linking to a file. indexBuilding reports active indexing; unchecked names omitted sources. complete excludes mount coverage, reported by mountsCovered. Cursors carry index state across pages.",
       "inputSchema": {
         "type": "object",
         "properties": {

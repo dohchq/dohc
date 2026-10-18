@@ -360,7 +360,7 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
     const refused = REFUSING_VERBS.has(command.verb) ? refusal(result) : null;
     if (refused !== null) throw new DohcCliError(refused);
     const output = command.json
-      ? command.verb === "linksIn" ? JSON.stringify(result, null, 2) : jsonOutput(result)
+      ? result === null ? "null" : jsonOutput(result)
       : renderCliResult(command.verb, result, {
           grepFilesWithMatches: command.verb === "grep" ? command.filesWithMatches : false,
           grepContext: command.verb === "grep" ? command.context : 0,

@@ -17,7 +17,7 @@ import { documentMarkdown, markdownToYDoc } from "@dohc/ydoc-projection";
 import { directDocumentProjection } from "../workspaces/documentProjection";
 import { CHATS_METHOD, WORKSPACE_METHOD, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { executeCli } from "@dohc/cli";
-import { CLI_PROTOCOL_VERSION, cliTransportResponseSchema, type CliRequestWithoutToken } from "@dohc/cli/protocol";
+import { CLI_JSON_SCHEMA_VERSION, CLI_PROTOCOL_VERSION, cliTransportResponseSchema, type CliRequestWithoutToken } from "@dohc/cli/protocol";
 import { VersionedTextStoreError } from "@dohc/workspace-contracts/engine";
 import { createDesktopCliServer } from "./desktopCliServer";
 import { handleCliRequestLine } from "./cliServer";
@@ -1071,7 +1071,7 @@ it("gives CLI and MCP the IPC link answer in a share without Chats capture", asy
 
 it("returns an incoming page directly through CLI and MCP", async () => {
   const f = fixture(await createTestScratch("links-in-cli-"));
-  const page = { versionId: "main", subject: { path: "a.md", objectId: "a" }, entries: [], unchecked: [], complete: true, mountsCovered: true, nextCursor: null };
+  const page = { versionId: "main", subject: { path: "a.md", objectId: "a" }, entries: [], unchecked: [], complete: true, indexBuilding: false, mountsCovered: true, nextCursor: null };
   f.dependencies.links.incoming = vi.fn(async () => page);
   await f.create().startDesktopCliServer();
   const token = "a".repeat(64);
@@ -1083,7 +1083,7 @@ it("returns an incoming page directly through CLI and MCP", async () => {
   const subject = { path: "a.md" };
   const cli = await executeCli({ argv: ["links", "in", JSON.stringify(subject), "--json"], cwd: f.workspace.rootPath, env: {}, request: send });
   expect(cli.exitCode).toBe(0);
-  expect(JSON.parse(cli.stdout)).toEqual(page);
+  expect(JSON.parse(cli.stdout)).toEqual({ schemaVersion: CLI_JSON_SCHEMA_VERSION, ...page });
   const { linksIn } = await import("@dohc/mcp/tools");
   expect(await linksIn({ root: f.workspace.rootPath, home: "state", request: send }, { subject })).toEqual(page);
 });

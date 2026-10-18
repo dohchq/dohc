@@ -92,12 +92,12 @@ Returns `{ ok: true, workspaceId, workspaceSynced: false, syncPause?: { atMs, au
 
 ### `dohc_links_in`
 
-Read a bounded page of documents linking to a file. Cursors continue the same subject and version.
+Read a bounded page of documents linking to a file. indexBuilding reports active indexing; unchecked names omitted sources. complete excludes mount coverage, reported by mountsCovered. Cursors carry index state across pages.
 
 - `subject`: `{ path: string } | { objectId: string }`. Required.
 - `cursor`: `string`
 
-Returns `{ versionId, subject: { path, objectId }, entries: { source, title, ordinal, span, line, highlightStart, highlightEnd, snippet }[], unchecked, complete, mountsCovered, nextCursor } | null`.
+Returns `{ versionId, subject: { path, objectId }, entries: { source, title, ordinal, span, line, highlightStart, highlightEnd, snippet }[], unchecked, complete, indexBuilding, mountsCovered, nextCursor } | null`.
 
 ### `dohc_links_resolve`
 
@@ -549,6 +549,8 @@ Two environment variables also change what the CLI does:
 
 Read and resolve document links.
 
+`indexBuilding` is true while the link index is being built: seed work, pending updates, or eligible files without an index row. It carries across cursor pages; start a fresh walk to observe completion. `unchecked` names sources that could not be checked, including oversized files. These can keep `complete` false after building stops. `complete` describes the local index; `mountsCovered` separately reports mounted-share coverage. IPC, CLI, and MCP return these same fields.
+
 #### `dohc links in`
 
 ```sh
@@ -559,7 +561,7 @@ Read documents that link to a file.
 
 - `--cursor <cursor>`: Continue the previous page.
 
-With `--json`, prints `{ schemaVersion, versionId, subject: { path, objectId }, entries: { source, title, ordinal, span, line, highlightStart, highlightEnd, snippet }[], unchecked, complete, mountsCovered, nextCursor }` or `null`.
+With `--json`, prints `{ schemaVersion, versionId, subject: { path, objectId }, entries: { source, title, ordinal, span, line, highlightStart, highlightEnd, snippet }[], unchecked, complete, indexBuilding, mountsCovered, nextCursor }` or `null`.
 
 #### `dohc links resolve`
 
