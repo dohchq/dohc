@@ -6,7 +6,6 @@ import { accessOperations } from "./ipc/accessOperations";
 import { settingsOperations } from "./ipc/settingsOperations";
 import { workspaceFileOperations } from "./ipc/workspaceFileOperations";
 import { devToolsGranted } from "./ipc/devToolsIpc";
-import {OwnerRestoreRequest, OwnerRestoreActionResponse, type OwnerRestoreAction, type OwnerRestoreResult} from "./ipc/ownerRestoreContract";
 import {OwnerAppPublicationRequest, OwnerAppPublicationResult} from "./ipc/ownerAppPublicationContract";
 import { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "@dohc/cli/app-responses";
@@ -26,7 +25,6 @@ import {
   systemMotionOperations,
   serverAccountOperations,
   SitePreviewReplacedEvent,
-  OwnerLiveDocumentActionPayload,
   DesktopUserSettingsResult,
   ShareDirectWritesPushedEvent,
   shareDirectWriteDeliveryOperations,
@@ -114,6 +112,7 @@ async function invokeParsed<Schema extends z.ZodType>(
 // reject IPC that the outgoing document queued while renderer reload cleanup
 // was draining on the same WebContents object.
 const rendererDocumentId = crypto.randomUUID();
+const relay = operationBridge(relayShareOperations, invoke);
 
 const bridge: DohcDesktopBridge = {
   ...operationBridge(workspaceFileOperations, invoke),
@@ -123,7 +122,8 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(shareMountOperations, invoke),
   ...operationBridge(shareProposalOperations, invoke),
   ...operationBridge(sharedChannelOperations, invoke),
-  ...operationBridge(relayShareOperations, invoke),
+  ...relay,
+  ownerRestore: relay.ownerRestore as DohcDesktopBridge["ownerRestore"],
   ...operationBridge(systemMotionOperations, invoke),
   ...operationBridge(serverAccountOperations, invoke),
   ...operationBridge(historyOperations, invoke),
@@ -238,29 +238,10 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.cloudEnableSync, payload),
   cloudJoinWorkspace: (payload) =>
     ipcRenderer.invoke(CHANNELS.cloudJoinWorkspace, payload),
-  stopOwnerLiveDocument: async payload => {
-    await ipcRenderer.invoke(CHANNELS.stopOwnerLiveDocument, OwnerLiveDocumentActionPayload.parse(payload));
-  },
-  resumeOwnerLiveDocument: async payload => {
-    await ipcRenderer.invoke(CHANNELS.resumeOwnerLiveDocument, OwnerLiveDocumentActionPayload.parse(payload));
-  },
-  listRelayShares: () => ipcRenderer.invoke(CHANNELS.listRelayShares),
-  getRelayReceivedShare: (payload) =>
-    ipcRenderer.invoke(CHANNELS.getRelayReceivedShare, payload),
-  revokeRelayShare: (payload) => ipcRenderer.invoke(CHANNELS.revokeRelayShare, payload),
-  undoRelayShare: (payload) => ipcRenderer.invoke(CHANNELS.undoRelayShare, payload),
-  ownerRestore: async <Action extends OwnerRestoreAction>(payload: OwnerRestoreRequest & {action: Action}) => {
-    const request = OwnerRestoreRequest.parse(payload);
-    return OwnerRestoreActionResponse[request.action].parse(await ipcRenderer.invoke(CHANNELS.ownerRestore, request)) as OwnerRestoreResult<Action>;
-  },
   publishOwnerApp: async (payload: OwnerAppPublicationRequest) => OwnerAppPublicationResult.parse(
     await ipcRenderer.invoke(CHANNELS.publishOwnerApp, OwnerAppPublicationRequest.parse(payload))),
   dataset: async (payload: DatasetRequest) => DatasetResult.parse(await ipcRenderer.invoke(CHANNELS.dataset, DatasetRequest.parse(payload))),
   ownerAppResponses:async(payload:OwnerAppResponsesRequest)=>OwnerAppResponsesResult.parse(await ipcRenderer.invoke(CHANNELS.ownerAppResponses,OwnerAppResponsesRequest.parse(payload))),
-  pollRelayShareDiscussionActivity: (payload) =>
-    ipcRenderer.invoke(CHANNELS.pollRelayShareDiscussionActivity, payload),
-  cancelRelayShareDiscussionActivity: (payload) =>
-    ipcRenderer.invoke(CHANNELS.cancelRelayShareDiscussionActivity, payload),
   ...operationBridge(sharedViewAccessOperations, invoke),
   listCollectionAutomations: (payload) =>
     ipcRenderer.invoke(CHANNELS.listCollectionAutomations, payload),

@@ -178,6 +178,29 @@ describe("main inventories", () => {
       expect(row).not.toHaveProperty("handlerCheck");
     }
   });
+  it("records the nine remaining relay operation rows with their existing admission", () => {
+    const workspaceChannels = ["owner-restore", "stop-owner-live-document", "resume-owner-live-document", "poll-relay-share-discussion-activity"]
+      .map(name => `desktop:${name}`);
+    const deviceChannels = ["list-relay-shares", "get-relay-received-share", "revoke-relay-share", "undo-relay-share", "cancel-relay-share-discussion-activity"]
+      .map(name => `desktop:${name}`);
+    const channels = [...workspaceChannels, ...deviceChannels];
+    const migrated = rows.filter(row => channels.includes(row.channel));
+    expect(migrated.map(row => row.channel).sort()).toEqual(channels.sort());
+    for (const row of migrated) {
+      if (workspaceChannels.includes(row.channel)) {
+        expect(row, row.channel).toMatchObject({
+          guard: "active-workspace", scope: "workspace",
+          inactiveMessage: ["desktop:stop-owner-live-document", "desktop:resume-owner-live-document"].includes(row.channel)
+            ? "Live editing stopped because this window changed workspaces."
+            : "Sharing stopped because this window changed workspaces.",
+        });
+      } else {
+        expect(row, row.channel).toMatchObject({ guard: "trusted-sender", scope: "device" });
+        expect(row).not.toHaveProperty("inactiveMessage");
+      }
+      expect(row).not.toHaveProperty("handlerCheck");
+    }
+  });
   it("preserves socket verbs, public verbs, and all public help", () => {
     expect(socketVerbs).toEqual(mainCli.socketVerbs);
     expect(Object.keys(CLI_COMMANDS)).toEqual(mainCli.publicGroups);

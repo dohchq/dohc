@@ -154,5 +154,14 @@
   "desktop:pause-relay-share-discussion": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:resume-relay-share-discussion": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:promote-relay-share-grant": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
-  "desktop:revoke-relay-share-grant": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null }
+  "desktop:revoke-relay-share-grant": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:stop-owner-live-document": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:resume-owner-live-document": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:list-relay-shares": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:get-relay-received-share": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:revoke-relay-share": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:undo-relay-share": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:poll-relay-share-discussion-activity": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:cancel-relay-share-discussion-activity": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:owner-restore": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null }
 }

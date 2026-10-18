@@ -6,28 +6,22 @@ import {
   OwnerLiveRefusalsResult,
   OwnerLiveDocument,
   OwnerLiveDocumentsResult,
-  OwnerLiveDocumentActionPayload,
   CreateRelayShareResult,
-  GetRelayReceivedSharePayload,
   GetRelayReceivedShareResult,
   ListRelaySharesResult,
   RelayShareReceivedRow,
-  RevokeRelaySharePayload,
   RevokeRelayShareResult,
   RelayShareRevokeResponse,
   RelayShareUndoResponse,
-  UndoRelaySharePayload,
   UndoRelayShareResult,
   AddRelayShareLinkResult,
   AppendRelayShareDiscussionResult,
   BlockRelayShareDiscussionPrincipalResult,
-  CancelRelayShareDiscussionActivityPayload,
   CreateRelayShareLinkResult,
   DeleteRelayShareDiscussionMessageResult,
   ListRelayShareDiscussionResult,
   ListRelayShareLinksResult,
   PauseRelayShareDiscussionResult,
-  PollRelayShareDiscussionActivityPayload,
   PollRelayShareDiscussionActivityResult,
   PromoteRelayShareGrantResult,
   RelayShareDiscussionAppendResponse,
@@ -53,9 +47,8 @@ import {
   UnblockRelayShareDiscussionPrincipalResult,
 } from "./bridgeContract";
 import { z } from "zod";
-import { CHANNELS } from "./channels";
-import {OwnerRestoreRequest, OwnerRestoreActionResponse} from "./ownerRestoreContract";
-import { assertOriginalWorkspace, createOwnerRelayShareHandler, createOwnerRelayShareOperation } from "./ownerRelayShareHandler";
+import {OwnerRestoreActionResponse} from "./ownerRestoreContract";
+import { assertOriginalWorkspace, createOwnerRelayShareOperation } from "./ownerRelayShareHandler";
 import { awaitCredentialGeneration, RelaySessionError } from "../mainChatIpcHandlers";
 import { requireCredentials } from "../workspaces/credentialScopedOperation";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
@@ -98,23 +91,12 @@ interface RelayShareRequest {
   ): Promise<{ kind: "success"; body: Result } | { kind: "missing"; removed: boolean }>;
 }
 
-export function registerRelaySharesIpcHandlers<
+export function createRelaySharesIpcHandlers<
   Sender extends { id: number },
   Event extends { sender: Sender },
   Workspace extends { workspaceId: string; shareView?: unknown },
   Operation extends { workspace: Workspace; assertCurrent(): void },
 >(dependencies: {
-  registerHandler(
-    channel: string,
-    handler: (event: Event, payload: unknown) => unknown,
-  ): void;
-  assertTrustedSender(event: Event): void;
-  withRendererWorkspaceOperation<Result>(
-    sender: Sender,
-    workspaceId: string,
-    inactiveMessage: string,
-    work: (operation: Operation) => Promise<Result>,
-  ): Promise<Result>;
   remoteForWorkspace(workspace: Workspace, options?: { allowPaused: boolean }): Promise<{
     credentials: CloudCredentials;
     credentialGeneration: number;
@@ -142,9 +124,6 @@ export function registerRelaySharesIpcHandlers<
 }): OperationHandlers<typeof relayShareOperations, Event, Operation> {
   type Handlers = OperationHandlers<typeof relayShareOperations, Event, Operation>;
   const {
-    registerHandler,
-    assertTrustedSender,
-    withRendererWorkspaceOperation,
     remoteForWorkspace,
     currentCredentialGeneration,
     currentCredentials,
@@ -156,16 +135,6 @@ export function registerRelaySharesIpcHandlers<
     sharesChanged,
     reconcileReceivedShares,
   } = dependencies;
-  const ownerRelayShareHandler = createOwnerRelayShareHandler<
-    Sender,
-    Workspace,
-    Operation,
-    CloudCredentials
-  >({
-    withWorkspaceOperation: withRendererWorkspaceOperation,
-    remoteForWorkspace,
-    credentialGeneration: currentCredentialGeneration,
-  });
   const ownerRelayShareOperation = createOwnerRelayShareOperation<Workspace, Operation, CloudCredentials>({
     remoteForWorkspace,
     credentialGeneration: currentCredentialGeneration,
@@ -240,44 +209,36 @@ export function registerRelaySharesIpcHandlers<
     }, assertOriginalWorkspace);
   };
 
-  for (const [channel, stop] of [[CHANNELS.stopOwnerLiveDocument, true], [CHANNELS.resumeOwnerLiveDocument, false]] as const) {
-    registerHandler(channel, async (event, payload) => {
-      assertTrustedSender(event);
-      const input = OwnerLiveDocumentActionPayload.parse(payload);
-      return withRendererWorkspaceOperation(event.sender,input.workspaceId,"Live editing stopped because this window changed workspaces.",async operation => {
-        operation.assertCurrent();assertOriginalWorkspace(operation.workspace);
-        return withOwnerLiveStopTransition(input.workspaceId,input.path,async () => {
-          const local=stop ? await dependencies.ownerLiveStop(operation.workspace,"request",input.path) : undefined;
-          operation.assertCurrent();
-          if (stop && local && !local.retirementOwed) return;
-          let result: unknown;
-          try {
-            const {credentials,credentialGeneration}=await remoteForWorkspace(operation.workspace);
-            if (credentialGeneration!==currentCredentialGeneration()) throw new Error("Sharing account changed.");
-            result=await relayShareJsonWithCredentials<unknown>(credentials,`/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-host`,{
-              method:stop ? "DELETE" : "POST",body:JSON.stringify(stop ? {path:local!.document.currentPath,objectId:local!.document.objectId,retire:true,...(local!.binding ? {restoreFenceGeneration:local!.binding.restoreFenceGeneration} : {})} : {path:input.path}),
-            });
-            operation.assertCurrent();
-            if (credentialGeneration!==currentCredentialGeneration()) throw new Error("Sharing account changed.");
-          } catch (error) {
-            operation.assertCurrent();
-            if (stop) throw new Error("Stop live editing is waiting. Reconnect or wait for the restore to finish.",{cause:error});
-            throw error;
-          }
-          const response=z.object({ok:z.literal(true),objectId:stop ? z.literal(local!.document.objectId) : z.string().optional(),path:stop ? z.string().min(1) : z.literal(input.path),status:stop ? z.literal("retired") : z.enum(["ready","preparing","unavailable"]),acceptedCursor:stop ? z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER) : z.number().optional()}).parse(result);
-          if (response.status==="unavailable") throw new Error("This document could not resume live editing. Refresh the list and try again.");
-          if (stop) await dependencies.ownerLiveStop(operation.workspace,local!.binding ? "release" : "retired",input.path,local!.binding ?? local!.document,response.acceptedCursor);
-          else await dependencies.ownerLiveStop(operation.workspace,"clear",input.path);
-          operation.assertCurrent();
+  const ownerLiveDocumentAction = (stop: boolean): Handlers["stopOwnerLiveDocument"] => async (input, { operation }) => {
+    operation.assertCurrent();assertOriginalWorkspace(operation.workspace);
+    return withOwnerLiveStopTransition(input.workspaceId,input.path,async () => {
+      const local=stop ? await dependencies.ownerLiveStop(operation.workspace,"request",input.path) : undefined;
+      operation.assertCurrent();
+      if (stop && local && !local.retirementOwed) return;
+      let result: unknown;
+      try {
+        const {credentials,credentialGeneration}=await remoteForWorkspace(operation.workspace);
+        if (credentialGeneration!==currentCredentialGeneration()) throw new Error("Sharing account changed.");
+        result=await relayShareJsonWithCredentials<unknown>(credentials,`/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-host`,{
+          method:stop ? "DELETE" : "POST",body:JSON.stringify(stop ? {path:local!.document.currentPath,objectId:local!.document.objectId,retire:true,...(local!.binding ? {restoreFenceGeneration:local!.binding.restoreFenceGeneration} : {})} : {path:input.path}),
         });
-      });
+        operation.assertCurrent();
+        if (credentialGeneration!==currentCredentialGeneration()) throw new Error("Sharing account changed.");
+      } catch (error) {
+        operation.assertCurrent();
+        if (stop) throw new Error("Stop live editing is waiting. Reconnect or wait for the restore to finish.",{cause:error});
+        throw error;
+      }
+      const response=z.object({ok:z.literal(true),objectId:stop ? z.literal(local!.document.objectId) : z.string().optional(),path:stop ? z.string().min(1) : z.literal(input.path),status:stop ? z.literal("retired") : z.enum(["ready","preparing","unavailable"]),acceptedCursor:stop ? z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER) : z.number().optional()}).parse(result);
+      if (response.status==="unavailable") throw new Error("This document could not resume live editing. Refresh the list and try again.");
+      if (stop) await dependencies.ownerLiveStop(operation.workspace,local!.binding ? "release" : "retired",input.path,local!.binding ?? local!.document,response.acceptedCursor);
+      else await dependencies.ownerLiveStop(operation.workspace,"clear",input.path);
+      operation.assertCurrent();
     });
-  }
+  };
 
-  registerHandler(CHANNELS.ownerRestore, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = OwnerRestoreRequest.parse(payload);
-    return ownerRelayShareHandler(event.sender, input.workspaceId, async (operation, credentials, session) => {
+  const ownerRestore: Handlers["ownerRestore"] = async (input, { operation }) => {
+    return ownerRelayShareOperation(operation, async (operation, credentials, session) => {
       const prefix = `/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-restores`;
       let path: string, body: unknown;
       if (input.action === "options") {
@@ -317,7 +278,7 @@ export function registerRelaySharesIpcHandlers<
           documentKey(result.result.binding) !== documentKey(result.status.document))) throw new Error("The restore review belongs to another file.");
       return result;
     }, assertOriginalWorkspace);
-  });
+  };
 
   // ---- Relay shares ----
 
@@ -371,8 +332,7 @@ export function registerRelaySharesIpcHandlers<
     );
   };
 
-  registerHandler(CHANNELS.listRelayShares, async (event) => {
-    assertTrustedSender(event);
+  const listRelayShares: Handlers["listRelayShares"] = async () => {
     await warmCredentialCache();
     const capturedGeneration = currentCredentialGeneration();
     const result = await awaitCredentialGeneration({
@@ -401,11 +361,9 @@ export function registerRelaySharesIpcHandlers<
     const granted = lanes.granted.map(withCode);
     const received = lanes.received.map(withCode);
     return ListRelaySharesResult.parse({ granted, received, removed: result.removed });
-  });
+  };
 
-  registerHandler(CHANNELS.getRelayReceivedShare, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = GetRelayReceivedSharePayload.parse(payload);
+  const getRelayReceivedShare: Handlers["getRelayReceivedShare"] = async (input) => {
     await warmCredentialCache();
     const credentials = requireCredentials(currentCredentials(), RelaySessionError);
     const credentialGeneration = currentCredentialGeneration();
@@ -440,11 +398,9 @@ export function registerRelaySharesIpcHandlers<
       throw new Error("Invalid exact received share response.");
     }
     return GetRelayReceivedShareResult.parse({ found: true, share: received });
-  });
+  };
 
-  registerHandler(CHANNELS.revokeRelayShare, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = RevokeRelaySharePayload.parse(payload);
+  const revokeRelayShare: Handlers["revokeRelayShare"] = async (input) => {
     const relayResult = await relayShareJson<unknown>(
       `/sync/shares/${encodeURIComponent(input.shareId)}/revoke`,
       {
@@ -457,14 +413,12 @@ export function registerRelaySharesIpcHandlers<
       throw new Error(relayShareErrorCopy(500, null));
     }
     return RevokeRelayShareResult.parse({ undo: parsed.data.undo });
-  });
+  };
 
   // Restores what a removal ended, from the receipt the removal returned.
   // The same account transport as the removal, so the Undo on a notice works
   // after the dialog that removed it has closed and names no workspace.
-  registerHandler(CHANNELS.undoRelayShare, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = UndoRelaySharePayload.parse(payload);
+  const undoRelayShare: Handlers["undoRelayShare"] = async (input) => {
     const relayResult = await relayShareJson<unknown>(
       `/sync/shares/${encodeURIComponent(input.shareId)}/undo`,
       {
@@ -478,7 +432,7 @@ export function registerRelaySharesIpcHandlers<
       throw new Error(relayShareErrorCopy(500, null));
     }
     return UndoRelayShareResult.parse({ shareId: parsed.data.shareId });
-  });
+  };
 
   const createRelayShareLink: Handlers["createRelayShareLink"] = async (input, { operation }) => {
     return ownerRelayShareOperation(
@@ -724,87 +678,70 @@ export function registerRelaySharesIpcHandlers<
     );
   };
 
-  registerHandler(
-    CHANNELS.pollRelayShareDiscussionActivity,
-    async (event, payload) => {
-      assertTrustedSender(event);
-      const input = PollRelayShareDiscussionActivityPayload.parse(payload);
-      const poll = relayShareDiscussionActivityPolls.begin(
-        event.sender.id,
-        input.pollId,
-        JSON.stringify([input.workspaceId, input.shareId]),
-      );
-      const safety = setTimeout(
-        () => poll.abort(),
-        RELAY_SHARE_DISCUSSION_ACTIVITY_POLL_SAFETY_MS,
-      );
-      try {
-        return await withRendererWorkspaceOperation(
-          event.sender,
-          input.workspaceId,
-          "Sharing stopped because this window changed workspaces.",
-          async (operation) => {
-            operation.assertCurrent();
-            if (shareViewIsPresent(operation.workspace.shareView)) {
-              throw new Error(
-                "This is a shared view — only the original workspace can be shared.",
-              );
-            }
-            const { credentials, credentialGeneration } =
-              await remoteForWorkspace(operation.workspace);
-            operation.assertCurrent();
-            if (poll.signal.aborted) throw new Error("aborted");
-            const relayResult = await awaitCredentialGeneration({
-              capturedGeneration: credentialGeneration,
-              currentGeneration: currentCredentialGeneration,
-              run: () => {
-                operation.assertCurrent();
-                const path = `/sync/shares/${encodeURIComponent(input.shareId)}/discussion/activity`;
-                return relayShareJsonWithCredentials<unknown>(
-                  credentials,
-                  `${path}?workspaceId=${encodeURIComponent(operation.workspace.workspaceId)}&since=${input.since}&hold=${input.hold}&limit=${input.limit}`,
-                  { signal: poll.signal },
-                );
-              },
-            });
-            operation.assertCurrent();
-            if (poll.signal.aborted) throw new Error("aborted");
-            const parsed =
-              RelayShareDiscussionActivityResponse.safeParse(relayResult);
-            if (!parsed.success) {
-              throw new Error(relayShareErrorCopy(500, null));
-            }
-            operation.assertCurrent();
-            if (currentCredentialGeneration() !== credentialGeneration) {
-              throw new Error("Your server session changed. Try again.");
-            }
-            if (poll.signal.aborted) throw new Error("aborted");
-            return PollRelayShareDiscussionActivityResult.parse({
-              latestRevision: parsed.data.latestRevision,
-              cursorRevision: parsed.data.cursorRevision,
-              hasMore: parsed.data.hasMore,
-              messages: parsed.data.messages,
-              principals: parsed.data.principals,
-              linkCommentsPaused: parsed.data.linkCommentsPaused,
-            });
-          },
+  const pollRelayShareDiscussionActivity: Handlers["pollRelayShareDiscussionActivity"] = async (input, { event, operation }) => {
+    const poll = relayShareDiscussionActivityPolls.begin(
+      event.sender.id,
+      input.pollId,
+      JSON.stringify([input.workspaceId, input.shareId]),
+    );
+    const safety = setTimeout(
+      () => poll.abort(),
+      RELAY_SHARE_DISCUSSION_ACTIVITY_POLL_SAFETY_MS,
+    );
+    try {
+      operation.assertCurrent();
+      if (shareViewIsPresent(operation.workspace.shareView)) {
+        throw new Error(
+          "This is a shared view — only the original workspace can be shared.",
         );
-      } finally {
-        clearTimeout(safety);
-        poll.release();
       }
-    },
-  );
+      const { credentials, credentialGeneration } =
+        await remoteForWorkspace(operation.workspace);
+      operation.assertCurrent();
+      if (poll.signal.aborted) throw new Error("aborted");
+      const relayResult = await awaitCredentialGeneration({
+        capturedGeneration: credentialGeneration,
+        currentGeneration: currentCredentialGeneration,
+        run: () => {
+          operation.assertCurrent();
+          const path = `/sync/shares/${encodeURIComponent(input.shareId)}/discussion/activity`;
+          return relayShareJsonWithCredentials<unknown>(
+            credentials,
+            `${path}?workspaceId=${encodeURIComponent(operation.workspace.workspaceId)}&since=${input.since}&hold=${input.hold}&limit=${input.limit}`,
+            { signal: poll.signal },
+          );
+        },
+      });
+      operation.assertCurrent();
+      if (poll.signal.aborted) throw new Error("aborted");
+      const parsed =
+        RelayShareDiscussionActivityResponse.safeParse(relayResult);
+      if (!parsed.success) {
+        throw new Error(relayShareErrorCopy(500, null));
+      }
+      operation.assertCurrent();
+      if (currentCredentialGeneration() !== credentialGeneration) {
+        throw new Error("Your server session changed. Try again.");
+      }
+      if (poll.signal.aborted) throw new Error("aborted");
+      return PollRelayShareDiscussionActivityResult.parse({
+        latestRevision: parsed.data.latestRevision,
+        cursorRevision: parsed.data.cursorRevision,
+        hasMore: parsed.data.hasMore,
+        messages: parsed.data.messages,
+        principals: parsed.data.principals,
+        linkCommentsPaused: parsed.data.linkCommentsPaused,
+      });
+    } finally {
+      clearTimeout(safety);
+      poll.release();
+    }
+  };
 
-  registerHandler(
-    CHANNELS.cancelRelayShareDiscussionActivity,
-    (event, payload) => {
-      assertTrustedSender(event);
-      const input = CancelRelayShareDiscussionActivityPayload.parse(payload);
-      relayShareDiscussionActivityPolls.cancel(event.sender.id, input.pollId);
-      return undefined;
-    },
-  );
+  const cancelRelayShareDiscussionActivity: Handlers["cancelRelayShareDiscussionActivity"] = (input, { event }) => {
+    relayShareDiscussionActivityPolls.cancel(event.sender.id, input.pollId);
+    return undefined;
+  };
 
   const appendRelayShareDiscussion: Handlers["appendRelayShareDiscussion"] = async (input, { operation }) => {
     return ownerRelayShareOperation(
@@ -1056,10 +993,17 @@ export function registerRelaySharesIpcHandlers<
   };
 
   return {
+    ownerRestore,
     listOwnerLiveDocuments,
     listOwnerLiveRefusals,
     retryOwnerLiveShare,
+    stopOwnerLiveDocument: ownerLiveDocumentAction(true),
+    resumeOwnerLiveDocument: ownerLiveDocumentAction(false),
     createRelayShare,
+    listRelayShares,
+    getRelayReceivedShare,
+    revokeRelayShare,
+    undoRelayShare,
     createRelayShareLink,
     addRelayShareLink,
     listRelayShareLinks,
@@ -1067,6 +1011,8 @@ export function registerRelaySharesIpcHandlers<
     rotateRelayShareLink,
     revokeRelayShareLink,
     listRelayShareDiscussion,
+    pollRelayShareDiscussionActivity,
+    cancelRelayShareDiscussionActivity,
     appendRelayShareDiscussion,
     deleteRelayShareDiscussionMessage,
     blockRelayShareDiscussionPrincipal,
