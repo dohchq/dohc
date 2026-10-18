@@ -84,6 +84,24 @@ function withPlatform<T>(platform: NodeJS.Platform, run: () => T): T {
   }
 }
 
+describe("missing workspace messages", () => {
+  it("uses reopening guidance at each missing registry check", () => {
+    const writes = [
+      () => store.pauseRemote("missing"),
+      () => store.setRemote("missing", { serverUrl: "https://relay.test", ownerUserId: "owner" }),
+      () => store.setShareRoster("missing", { grants: [], links: [], formerGrants: [], endedGrants: [] }, false),
+      () => store.markShareRosterPulled("missing"),
+    ];
+    for (const write of writes) {
+      expect(write).toThrow("This workspace is not open. Open it again.");
+    }
+  });
+
+  it("preserves the shared-view caller's missing message", () => {
+    expect(() => store.markShareViewEnded("missing")).toThrow("Unknown shared view: missing");
+  });
+});
+
 // A relay listing applied to the received-share records: the reconcile runs
 // on the record as the file holds it, the result is persisted, and the caller
 // learns whether anything changed.
@@ -105,7 +123,7 @@ describe("received share reconciliation", () => {
     const reread = createRegistryStore(registryPath).find("ws-1");
     expect(reread?.sharedChannels?.[0]?.ended).toBeUndefined();
     expect(reread?.confirmedRemovedShares).toEqual([{ shareId: "other", removedAtMs: 5 }]);
-    expect(() => store.reconcileRecipientShares("missing", () => null)).toThrow("Unknown workspace");
+    expect(() => store.reconcileRecipientShares("missing", () => null)).toThrow("This workspace is not open. Open it again.");
   });
 });
 
@@ -758,7 +776,7 @@ describe("registry store", () => {
 
     reopened.completeJoinBootstrap("ws-1");
     expect(createRegistryStore(registryPath).find("ws-1")?.joinBootstrapPending).toBeUndefined();
-    expect(() => reopened.completeJoinBootstrap("missing")).toThrow(/Unknown workspace/);
+    expect(() => reopened.completeJoinBootstrap("missing")).toThrow("This workspace is not open. Open it again.");
   });
 
   // The cache may only show a warning hidden once the same change reached
@@ -998,7 +1016,7 @@ describe("registry store", () => {
         genericChatWritable: false,
         grantedSelector: { paths: ["docs"], versionId: null, access: "view" },
       }),
-    ).toThrow(/Unknown workspace/);
+    ).toThrow("This workspace is not open. Open it again.");
   });
 
   it("keeps the shared-view identity truthful when its atomic rename fails", () => {

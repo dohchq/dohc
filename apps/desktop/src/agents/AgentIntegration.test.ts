@@ -497,7 +497,7 @@ describe("AgentIntegration", () => {
       rootFor: () => null,
       setAgentRun: () => {},
     });
-    await expect(integration.startAgentRun("nope")).rejects.toThrow(/Unknown workspace/);
+    await expect(integration.startAgentRun("nope")).rejects.toThrow("This workspace was closed. Open it again.");
   });
 
   it("records a failed start when the workspace attribution slot is occupied", async () => {

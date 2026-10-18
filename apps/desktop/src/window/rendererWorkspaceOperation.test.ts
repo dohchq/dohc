@@ -129,7 +129,7 @@ describe("renderer workspace operation runner", () => {
       currentSession: () => session,
       withPhysicalOperation: async (workspaceId: string, work) => {
         if (workspaceId !== workspace.workspaceId) {
-          throw new Error(`Unknown workspace: ${workspaceId}`);
+          throw new Error("This workspace was closed. Open it again.");
         }
         return await work({
           workspace,

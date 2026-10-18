@@ -98,7 +98,7 @@ function harness(input: {
       withActiveWorkspace(_sender, workspaceId, subject, action, work) {
         subjects.push({ subject, action });
         if (workspaceId !== workspace.workspaceId) {
-          throw new Error(`Unknown workspace: ${workspaceId}`);
+          throw new Error("This workspace was closed. Open it again.");
         }
         if (
           (input.activeWorkspaceId ?? workspace.workspaceId) !== workspaceId

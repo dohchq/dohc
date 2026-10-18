@@ -76,7 +76,7 @@ function harness(input: { capture: boolean; rootPath: string }) {
   });
   const search = workspaceSearchHandlers<TestEvent, typeof workspace>({
     withWorkspaceOperation: async (_event, workspaceId, work) => {
-      if (workspaceId !== workspace.workspaceId) throw new Error("Unknown workspace.");
+      if (workspaceId !== workspace.workspaceId) throw new Error("This workspace was closed. Open it again.");
       return work({
         workspace,
         attachmentId: Symbol.for("workspace-1"),

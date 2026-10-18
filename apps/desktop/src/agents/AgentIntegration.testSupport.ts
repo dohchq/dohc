@@ -30,7 +30,7 @@ export function createInMemoryAgentIntegration(
     workspaceIds: () => [...states.keys()],
     acquire: (workspaceId) => {
       const rootPath = options.rootFor(workspaceId);
-      if (!rootPath) throw new Error(`Unknown workspace: ${workspaceId}`);
+      if (!rootPath) throw new Error("This workspace was closed. Open it again.");
       let state = states.get(workspaceId);
       if (!state) {
         state = new AgentIntegrationState();
