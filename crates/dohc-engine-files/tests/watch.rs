@@ -323,3 +323,96 @@ async fn probe_root_delete_recreate_race_is_not_silently_missed() {
 
     watcher.stop().expect("stop");
 }
+
+/// A FAT32 disk image attached under a scratch directory, detached on drop.
+#[cfg(target_vendor = "apple")]
+struct FatVolume {
+    mount: std::path::PathBuf,
+}
+
+#[cfg(target_vendor = "apple")]
+impl FatVolume {
+    /// `None` when this host cannot create or attach the image.
+    fn attach(dir: &std::path::Path) -> Option<Self> {
+        let image = dir.join("fat.dmg");
+        let mount = dir.join("mnt");
+        std::fs::create_dir(&mount).ok()?;
+        let made = std::process::Command::new("hdiutil")
+            .args(["create", "-quiet", "-size", "40m", "-fs", "MS-DOS FAT32"])
+            .args(["-volname", "DOHCFAT"])
+            .arg(&image)
+            .status()
+            .ok()?;
+        let attached = made.success()
+            && std::process::Command::new("hdiutil")
+                .args(["attach", "-quiet", "-nobrowse", "-mountpoint"])
+                .arg(&mount)
+                .arg(&image)
+                .status()
+                .ok()?
+                .success();
+        attached.then_some(Self { mount })
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+impl Drop for FatVolume {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("hdiutil")
+            .args(["detach", "-quiet", "-force"])
+            .arg(&self.mount)
+            .status();
+    }
+}
+
+/// A FAT32 volume stores a name that is not UTF-8 percent-encoded but
+/// reports its raw bytes to FSEvents. The watcher must keep reporting
+/// changes: the FSEvents callback of an unpatched notify 8.2.0 panicked on
+/// that path, and a panic there aborts the process.
+#[cfg(target_vendor = "apple")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_watcher_survives_a_name_that_is_not_utf8() {
+    use std::os::unix::ffi::OsStrExt;
+    let scratch = Scratch::new();
+    let Some(volume) = FatVolume::attach(scratch.path()) else {
+        eprintln!("SKIP: hdiutil could not attach a FAT32 image here");
+        return;
+    };
+    let root = volume.mount.join("ws");
+    std::fs::create_dir(&root).expect("workspace on the FAT32 volume");
+    let actor = dohc_engine_files::FilesActor::spawn_async(root.clone(), ScanBounds::default())
+        .await
+        .expect("actor");
+    let handle = actor.handle();
+    let ready = NativeWatcher::start(root.clone(), handle.clone(), CancellationToken::new())
+        .await
+        .expect("watch start");
+    let mut watcher = ready.watcher;
+    apply_and_ack(&handle, ready.initial_reconcile).await;
+
+    std::fs::write(root.join(std::ffi::OsStr::from_bytes(b"\xff.md")), b"raw")
+        .expect("FAT32 takes a name that is not UTF-8");
+    wait_dirty(&handle).await;
+    let run = handle
+        .reconcile_if_dirty(CancellationToken::new())
+        .await
+        .expect("reconcile the raw-byte name");
+    apply_and_ack(&handle, run).await;
+
+    std::fs::write(root.join("after.md"), b"after").expect("ordinary file");
+    wait_dirty(&handle).await;
+    let run = handle
+        .reconcile_if_dirty(CancellationToken::new())
+        .await
+        .expect("reconcile the ordinary file");
+    let plan = apply_and_ack(&handle, run).await;
+    assert!(
+        plan.ops
+            .iter()
+            .any(|op| matches!(op, CaptureOp::Ingest { path, .. } if path == "after.md")),
+        "{:?}",
+        plan.ops
+    );
+    watcher.stop().expect("stop");
+    drop(actor);
+}
