@@ -458,7 +458,8 @@ export function createWorkspaceFilesIpc<
       };
       // OS drag-in path: renderer-supplied absolute paths (see the trust-delta
       // note on the payload) re-validated by the drag-in screen — regular
-      // files only, never any registered workspace's .dohc metadata. The
+      // files and folders, never a link or any registered workspace's .dohc
+      // metadata. The
       // renderer-supplied targetDir is re-validated inside the import path
       // (resolveImportDestination) before any copy.
       const droppedPaths = input.droppedPaths;

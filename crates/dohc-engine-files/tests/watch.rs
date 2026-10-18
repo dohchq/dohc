@@ -1,5 +1,7 @@
 mod common;
 
+#[cfg(target_vendor = "apple")]
+use common::FatVolume;
 use common::Scratch;
 use dohc_engine_files::{
     CancellationToken, CaptureError, CaptureOp, CaptureSink, FilesHandle, IngestOutcome,
@@ -322,47 +324,6 @@ async fn probe_root_delete_recreate_race_is_not_silently_missed() {
     );
 
     watcher.stop().expect("stop");
-}
-
-/// A FAT32 disk image attached under a scratch directory, detached on drop.
-#[cfg(target_vendor = "apple")]
-struct FatVolume {
-    mount: std::path::PathBuf,
-}
-
-#[cfg(target_vendor = "apple")]
-impl FatVolume {
-    /// `None` when this host cannot create or attach the image.
-    fn attach(dir: &std::path::Path) -> Option<Self> {
-        let image = dir.join("fat.dmg");
-        let mount = dir.join("mnt");
-        std::fs::create_dir(&mount).ok()?;
-        let made = std::process::Command::new("hdiutil")
-            .args(["create", "-quiet", "-size", "40m", "-fs", "MS-DOS FAT32"])
-            .args(["-volname", "DOHCFAT"])
-            .arg(&image)
-            .status()
-            .ok()?;
-        let attached = made.success()
-            && std::process::Command::new("hdiutil")
-                .args(["attach", "-quiet", "-nobrowse", "-mountpoint"])
-                .arg(&mount)
-                .arg(&image)
-                .status()
-                .ok()?
-                .success();
-        attached.then_some(Self { mount })
-    }
-}
-
-#[cfg(target_vendor = "apple")]
-impl Drop for FatVolume {
-    fn drop(&mut self) {
-        let _ = std::process::Command::new("hdiutil")
-            .args(["detach", "-quiet", "-force"])
-            .arg(&self.mount)
-            .status();
-    }
 }
 
 /// A FAT32 volume stores a name that is not UTF-8 percent-encoded but
