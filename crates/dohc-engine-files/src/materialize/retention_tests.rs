@@ -57,7 +57,7 @@ fn sweep(store: &EngineStore, root: &Path, now: i64) {
                 &row.target_path,
             )
             .unwrap();
-            match inspect(root, &row, now, held, false).unwrap() {
+            match inspect(root, &row, now, held, 0).unwrap() {
                 Inspection::Release(token) => {
                     if crate::materialize::placement_is_held_in(
                         store,
@@ -473,12 +473,12 @@ fn remounted_identity_compares_digest_and_never_keeps_forever() {
         .unwrap();
     let row = store.retained_displacements_after(0).unwrap().remove(0);
     assert!(matches!(
-        inspect(root, &row, 30_000, false, false).unwrap(),
+        inspect(root, &row, 30_000, false, 0).unwrap(),
         Inspection::Release(_)
     ));
     let source = root.join(&row.source_path);
     std::fs::write(&source, b"outside after mount").unwrap();
-    match inspect(root, &row, 30_001, false, false).unwrap() {
+    match inspect(root, &row, 30_001, false, 0).unwrap() {
         Inspection::Changed { current, bytes } => {
             assert_eq!(bytes, b"outside after mount");
             assert_ne!(current.device, row.device);
@@ -522,7 +522,7 @@ fn oversized_retained_source_becomes_a_recoverable_kept_copy() {
         .set_len(MAX_MATERIALIZE_BYTES as u64 + 1)
         .unwrap();
     assert!(matches!(
-        inspect(root, &row, 1, false, false).unwrap(),
+        inspect(root, &row, 1, false, 0).unwrap(),
         Inspection::Oversized
     ));
     store.keep_oversized_retained(&row, 1).unwrap();
@@ -1142,7 +1142,7 @@ fn checked_delete_release_failure_preserves_receipt_error_and_rolls_back() {
         } else {
             assert!(!root.join(&row.source_path).exists());
             assert!(matches!(
-                crate::retained::inspect(root, &row, 1000, false, false).unwrap(),
+                crate::retained::inspect(root, &row, 1000, false, 0).unwrap(),
                 crate::retained::Inspection::Missing
             ));
         }

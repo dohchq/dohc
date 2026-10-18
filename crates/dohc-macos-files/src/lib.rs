@@ -160,7 +160,7 @@ const BUSY_CHECKED: [&[u8]; 6] = [b"apfs", b"hfs", b"exfat", b"msdos", b"smbfs",
 /// is never unlinked. A program on another computer that has a network
 /// share's file open is never seen.
 pub fn remove_unless_open(file: std::fs::File, path: &std::path::Path) -> io::Result<bool> {
-    if !checks_busy(&rustix::fs::fstatfs(&file)?.f_fstypename) {
+    if !refuses_busy_unlink(&file)? {
         return Ok(false);
     }
     drop(file);
@@ -173,6 +173,12 @@ pub fn remove_unless_open(file: std::fs::File, path: &std::path::Path) -> io::Re
         Err(rustix::io::Errno::BUSY) => Ok(false),
         Err(e) => Err(e.into()),
     }
+}
+
+/// Whether `file`'s file system is known to refuse unlinking a file a
+/// process has open, so [`remove_unless_open`] can ever unlink it.
+pub fn refuses_busy_unlink(file: impl AsFd) -> io::Result<bool> {
+    Ok(checks_busy(&rustix::fs::fstatfs(file)?.f_fstypename))
 }
 
 /// Whether the file system named by `f_fstypename` is in [`BUSY_CHECKED`].

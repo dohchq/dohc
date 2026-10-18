@@ -7,6 +7,13 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 const ACTIVE_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
+/// After each refused unlink an unchanged source waits twice as long before
+/// it is read and tried again, from 30 seconds up to 15 minutes.
+const FIRST_RETRY: Duration = Duration::from_secs(30);
+const MAX_RETRY: Duration = Duration::from_secs(15 * 60);
+fn next_retry(previous: Option<Duration>) -> Duration {
+    previous.map_or(FIRST_RETRY, |wait| (wait * 2).min(MAX_RETRY))
+}
 #[derive(Default)]
 struct State {
     root: Option<PathBuf>,
@@ -63,9 +70,10 @@ impl Worker {
                 let mut cursor = 0;
                 let mut delay = Duration::ZERO;
                 let mut generation = 0;
-                // Sources whose unlink was refused after a read at their row's
-                // stamp. Their release is retried without another read.
-                let mut refused = std::collections::HashSet::new();
+                // Each refused source's last wait and the time it may be read
+                // and tried again. A restart forgets them, at one read each.
+                let mut backoff: std::collections::HashMap<i64, (Duration, i64)> =
+                    std::collections::HashMap::new();
                 loop {
                     let (lock, cv) = &*control.0;
                     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -81,7 +89,7 @@ impl Worker {
                         break;
                     }
                     if generation != state.generation {
-                        refused.clear();
+                        backoff.clear();
                     }
                     generation = state.generation;
                     let path = state.root.clone().expect("bound root");
@@ -131,10 +139,11 @@ impl Worker {
                                 .as_millis()
                                 .min(i64::MAX as u128) as i64;
                             let id = row.displacement_id;
-                            let inspection = inspect(&path, &row, now, held, refused.contains(&id));
+                            let retry_at = backoff.get(&id).map_or(0, |&(_, at)| at);
+                            let inspection = inspect(&path, &row, now, held, retry_at);
                             if !matches!(inspection, Ok(Inspection::Release(_) | Inspection::Keep))
                             {
-                                refused.remove(&id);
+                                backoff.remove(&id);
                             }
                             let result = match inspection {
                                 Ok(Inspection::Changed { current, bytes }) => {
@@ -148,11 +157,20 @@ impl Worker {
                                     Ok(s.keep_oversized_retained(&row, now)?)
                                 }),
                                 Ok(Inspection::Release(source)) => {
-                                    release(&handle, &path, row, Some(source)).map(|stays| {
-                                        if stays {
-                                            refused.insert(id);
-                                        } else {
-                                            refused.remove(&id);
+                                    release(&handle, &path, row, Some(source)).map(|outcome| {
+                                        match outcome {
+                                            Released::Done => {
+                                                backoff.remove(&id);
+                                            }
+                                            Released::Held => {}
+                                            Released::Refused => {
+                                                let wait =
+                                                    next_retry(backoff.get(&id).map(|&(w, _)| w));
+                                                let at = now.saturating_add(
+                                                    wait.as_millis().min(i64::MAX as u128) as i64,
+                                                );
+                                                backoff.insert(id, (wait, at));
+                                            }
                                         }
                                     })
                                 }
@@ -197,14 +215,22 @@ impl Worker {
         }
     }
 }
-/// Release `row` and unlink its source. Return whether the source stays
-/// because its unlink was refused.
+/// What became of a row [`release`] was asked to release.
+enum Released {
+    Done,
+    /// A hold on the target forbids the release for now.
+    Held,
+    /// The source stays: it changed, a process has it open, or its volume
+    /// cannot tell.
+    Refused,
+}
+/// Release `row` and unlink its source.
 fn release(
     handle: &ActorHandle,
     root: &std::path::Path,
     row: dohc_engine_storage::RetainedDisplacement,
     source: Option<dohc_engine_files::retained::Release>,
-) -> Result<bool, RuntimeError> {
+) -> Result<Released, RuntimeError> {
     let root = root.to_path_buf();
     let directory = root
         .join(&row.source_path)
@@ -214,18 +240,18 @@ fn release(
         // Serialize hold creation with the last check and unlink. Changed reads
         // still import above; only source release waits for the hold to clear.
         if dohc_engine_files::placement_is_held_in(s, &row.workspace_id, &row.target_path)? {
-            return Ok(false);
+            return Ok(Released::Held);
         }
         if let Some(source) = source
             && !source.remove().map_err(RuntimeError::Materialize)?
         {
-            return Ok(true);
+            return Ok(Released::Refused);
         }
         s.release_retained(row.displacement_id)?;
         if let Some(directory) = directory {
             cleanup_staging_directory(s, &root, &directory)?;
         }
-        Ok(false)
+        Ok(Released::Done)
     })
 }
 impl Drop for Worker {

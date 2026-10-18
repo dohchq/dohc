@@ -132,17 +132,17 @@ impl Release {
     }
 }
 
-/// `refused` says the last release of `row`'s source was refused after its
-/// bytes were read at the row's stamp. While that stamp holds, the release is
-/// retried without reading them again.
+/// An unchanged source is kept, unread, until both its quiet period and
+/// `retry_at_ms` have passed. The caller backs off a refused release with
+/// `retry_at_ms`. A changed stamp is read at once.
 pub fn inspect(
     root: &Path,
     row: &RetainedDisplacement,
     now_ms: i64,
     held: bool,
-    refused: bool,
+    retry_at_ms: i64,
 ) -> Result<Inspection, MaterializeError> {
-    inspect_with_reader(root, row, now_ms, held, refused, read_source)
+    inspect_with_reader(root, row, now_ms, held, retry_at_ms, read_source)
 }
 
 fn read_source(file: &std::fs::File, path: &Path) -> Result<Vec<u8>, MaterializeError> {
@@ -158,7 +158,7 @@ fn inspect_with_reader(
     row: &RetainedDisplacement,
     now_ms: i64,
     held: bool,
-    refused: bool,
+    retry_at_ms: i64,
     read: impl FnOnce(&std::fs::File, &Path) -> Result<Vec<u8>, MaterializeError>,
 ) -> Result<Inspection, MaterializeError> {
     let rel = Path::new(&row.source_path);
@@ -195,14 +195,15 @@ fn inspect_with_reader(
     if held && !identity_changed && !changed {
         return Ok(Inspection::Keep);
     }
-    if !held && !identity_changed && meta.nlink() > 1 {
+    if !held && !identity_changed && meta.nlink() > 1 && now_ms >= retry_at_ms {
         return Ok(Inspection::Release(Release {
             path,
             file,
             stamp: initial,
         }));
     }
-    let quiet = now_ms.saturating_sub(row.changed_at_ms) >= QUIET_PERIOD_MS;
+    let quiet =
+        now_ms.saturating_sub(row.changed_at_ms) >= QUIET_PERIOD_MS && now_ms >= retry_at_ms;
     if !identity_changed && !quiet && !changed {
         return Ok(Inspection::Keep);
     }
@@ -215,12 +216,15 @@ fn inspect_with_reader(
     if lease_checked && writer_present(&file, &path)? {
         return Ok(Inspection::Keep);
     }
-    if refused && !identity_changed && !changed {
-        return Ok(Inspection::Release(Release {
-            path,
-            file,
-            stamp: initial,
-        }));
+    // A volume that cannot refuse a busy unlink never releases its source,
+    // so only a changed stamp needs a read there.
+    #[cfg(target_vendor = "apple")]
+    if !identity_changed
+        && !changed
+        && !dohc_macos_files::refuses_busy_unlink(&file)
+            .map_err(|e| MaterializeError::io(&path, &e))?
+    {
+        return Ok(Inspection::Keep);
     }
     let bytes = read(&file, &path)?;
     if bytes.len() > MAX_MATERIALIZE_BYTES {
@@ -298,14 +302,14 @@ fn materialize_held_source_reads_only_after_stamp_changes() {
     };
     for _ in 0..10 {
         assert!(matches!(
-            inspect_with_reader(root, &row, 60_000, true, false, read).unwrap(),
+            inspect_with_reader(root, &row, 60_000, true, 0, read).unwrap(),
             Inspection::Keep
         ));
     }
     println!("10 quiet held inspections: {} reads", reads.get());
     assert_eq!(reads.get(), 0, "quiet held sources must not be read");
     std::fs::write(&source, b"late outside write").unwrap();
-    match inspect_with_reader(root, &row, 60_000, true, false, read).unwrap() {
+    match inspect_with_reader(root, &row, 60_000, true, 0, read).unwrap() {
         Inspection::Changed { current, bytes } => {
             assert_eq!(bytes, b"late outside write");
             row = current;
@@ -316,13 +320,13 @@ fn materialize_held_source_reads_only_after_stamp_changes() {
     assert_eq!(reads.get(), 1);
     for _ in 0..10 {
         assert!(matches!(
-            inspect_with_reader(root, &row, 90_000, true, false, read).unwrap(),
+            inspect_with_reader(root, &row, 90_000, true, 0, read).unwrap(),
             Inspection::Keep
         ));
     }
     assert_eq!(reads.get(), 1, "imported held sources must not be re-read");
     row.device = "previous mount".into();
-    match inspect_with_reader(root, &row, 90_000, true, false, read).unwrap() {
+    match inspect_with_reader(root, &row, 90_000, true, 0, read).unwrap() {
         Inspection::Changed { current, bytes } => {
             assert_eq!(bytes, b"late outside write");
             row = current;
@@ -330,12 +334,12 @@ fn materialize_held_source_reads_only_after_stamp_changes() {
         _ => panic!("held remounts must refresh the stamp once"),
     }
     assert!(matches!(
-        inspect_with_reader(root, &row, 90_000, true, false, read).unwrap(),
+        inspect_with_reader(root, &row, 90_000, true, 0, read).unwrap(),
         Inspection::Keep
     ));
     assert_eq!(reads.get(), 2);
     assert!(matches!(
-        inspect_with_reader(root, &row, 90_000, false, false, read).unwrap(),
+        inspect_with_reader(root, &row, 90_000, false, 0, read).unwrap(),
         Inspection::Release(_)
     ));
     assert_eq!(reads.get(), 3);
@@ -346,16 +350,16 @@ fn materialize_held_source_reads_only_after_stamp_changes() {
 
 #[cfg(test)]
 #[test]
-fn a_refused_release_retries_without_reading_until_the_stamp_changes() {
+fn a_backed_off_source_is_read_only_after_its_retry_time_or_a_change() {
     use std::cell::Cell;
-    let scratch = dohc_test_scratch::ScratchDir::new_named("refused-release-reads").unwrap();
+    let scratch = dohc_test_scratch::ScratchDir::new_named("backed-off-reads").unwrap();
     let root = scratch.path();
     let source = root.join("source");
     std::fs::write(&source, b"before").unwrap();
     let (device, inode, size, mtime, ctime) = stamp(&std::fs::metadata(&source).unwrap());
     let row = RetainedDisplacement {
         displacement_id: 1,
-        job_id: "refused".into(),
+        job_id: "backed-off".into(),
         workspace_id: "ws".into(),
         target_path: "notes.md".into(),
         source_path: "source".into(),
@@ -374,7 +378,7 @@ fn a_refused_release_retries_without_reading_until_the_stamp_changes() {
     };
     let reader = std::fs::File::open(&source).unwrap();
     let Inspection::Release(release) =
-        inspect_with_reader(root, &row, 60_000, false, false, read).unwrap()
+        inspect_with_reader(root, &row, 60_000, false, 0, read).unwrap()
     else {
         panic!("a quiet unchanged source is released");
     };
@@ -383,18 +387,23 @@ fn a_refused_release_retries_without_reading_until_the_stamp_changes() {
     assert!(!release.remove().unwrap(), "an open source stays on macOS");
     #[cfg(not(target_vendor = "apple"))]
     drop(release);
-    for now in 61_000..61_010 {
+    for now in 60_001..60_011 {
         assert!(matches!(
-            inspect_with_reader(root, &row, now, false, true, read).unwrap(),
-            Inspection::Release(_)
+            inspect_with_reader(root, &row, now, false, 90_000, read).unwrap(),
+            Inspection::Keep
         ));
     }
-    assert_eq!(reads.get(), 1, "a refused source is not read again");
+    assert_eq!(reads.get(), 1, "a backed-off source is not read");
+    assert!(matches!(
+        inspect_with_reader(root, &row, 90_000, false, 90_000, read).unwrap(),
+        Inspection::Release(_)
+    ));
+    assert_eq!(reads.get(), 2, "every release attempt reads first");
     drop(reader);
     std::fs::write(&source, b"changed").unwrap();
     assert!(matches!(
-        inspect_with_reader(root, &row, 62_000, false, true, read).unwrap(),
+        inspect_with_reader(root, &row, 90_001, false, 1_000_000, read).unwrap(),
         Inspection::Changed { .. }
     ));
-    assert_eq!(reads.get(), 2, "a changed stamp is read at once");
+    assert_eq!(reads.get(), 3, "a changed stamp is read at once");
 }
