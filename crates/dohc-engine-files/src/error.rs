@@ -41,6 +41,9 @@ pub enum FilesError {
     ScanIo {
         path: String,
         kind: std::io::ErrorKind,
+        /// The OS error number, which tells EPERM from EACCES where `kind`
+        /// cannot. See [`privacy_denied`].
+        raw_os_error: Option<i32>,
     },
 
     /// The workspace root does not resolve to a readable directory.
@@ -84,12 +87,25 @@ pub enum FilesError {
     InvalidCaptureReceipt { path: String },
 }
 
+/// The code of an io failure that is macOS refusing dohc a folder.
+pub const PRIVACY_DENIED: &str = "privacy-denied";
+
+/// Whether an io failure's OS error number is macOS refusing dohc a folder:
+/// one the person chose "Don't Allow" for, such as Documents, or a removable
+/// or network volume. The refusal is EPERM. Ordinary file permissions fail
+/// with EACCES, and std maps both to `PermissionDenied`.
+pub fn privacy_denied(raw_os_error: Option<i32>) -> bool {
+    // EPERM is 1 on every Unix.
+    cfg!(target_vendor = "apple") && raw_os_error == Some(1)
+}
+
 impl FilesError {
     /// Construct a [`FilesError::ScanIo`] from a path and io error.
     pub(crate) fn scan_io(path: impl Into<String>, err: &std::io::Error) -> Self {
         FilesError::ScanIo {
             path: path.into(),
             kind: err.kind(),
+            raw_os_error: err.raw_os_error(),
         }
     }
 
@@ -100,6 +116,9 @@ impl FilesError {
             FilesError::TooManyEntries { .. } => "too-many-entries",
             FilesError::FileTooLarge { .. } => "file-too-large",
             FilesError::DiffTooLarge { .. } => "diff-too-large",
+            FilesError::ScanIo { raw_os_error, .. } if privacy_denied(*raw_os_error) => {
+                PRIVACY_DENIED
+            }
             FilesError::ScanIo { .. } => "scan-io",
             FilesError::InvalidRoot { .. } => "invalid-root",
             FilesError::PoolUnavailable { .. } => "pool-unavailable",

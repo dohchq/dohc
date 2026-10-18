@@ -541,9 +541,9 @@ struct PermissionDeniedAt {
 }
 
 impl ScanIoFaultInjector for PermissionDeniedAt {
-    fn error_kind(&self, path: &str, operation: ScanIoOperation) -> Option<ErrorKind> {
+    fn error(&self, path: &str, operation: ScanIoOperation) -> Option<std::io::Error> {
         (path == self.path && operation == ScanIoOperation::Metadata)
-            .then_some(ErrorKind::PermissionDenied)
+            .then(|| ErrorKind::PermissionDenied.into())
     }
 }
 

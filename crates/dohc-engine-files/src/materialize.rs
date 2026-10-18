@@ -796,7 +796,13 @@ pub enum MaterializeError {
     Storage(#[from] StorageError),
     /// A filesystem step failed for a non-transient reason.
     #[error("materialization io failed at {path}: {kind:?}")]
-    Io { path: String, kind: ErrorKind },
+    Io {
+        path: String,
+        kind: ErrorKind,
+        /// The OS error number, which tells EPERM from EACCES where `kind`
+        /// cannot. See [`crate::privacy_denied`].
+        raw_os_error: Option<i32>,
+    },
     /// The job references a content blob that is not in the store — a corrupt
     /// job (the enqueue should have committed the blob in the same txn).
     #[error("job {job_id} references missing blob {sha256}")]
@@ -830,6 +836,7 @@ impl MaterializeError {
         MaterializeError::Io {
             path: path.to_string_lossy().into_owned(),
             kind: err.kind(),
+            raw_os_error: err.raw_os_error(),
         }
     }
 
@@ -837,6 +844,9 @@ impl MaterializeError {
     pub fn code(&self) -> &'static str {
         match self {
             MaterializeError::Storage(e) => e.code(),
+            MaterializeError::Io { raw_os_error, .. } if crate::privacy_denied(*raw_os_error) => {
+                crate::PRIVACY_DENIED
+            }
             MaterializeError::Io { .. } => "materialize-io",
             MaterializeError::MissingBlob { .. } => "missing-blob",
             MaterializeError::UnsafeTargetPath => "unsafe-target-path",
@@ -5515,7 +5525,12 @@ fn resolve_replace_exhaustion(
 /// Whether an io error is a transient sharing/lock condition worth retrying
 /// (Windows AV/indexer `ERROR_SHARING_VIOLATION` = os error 32, or a permission
 /// denial std maps such handles to). A non-transient error is returned at once.
+/// EPERM on Unix is not a lock: a macOS privacy refusal or an immutable file
+/// does not clear while dohc waits.
 fn is_transient_lock(err: &std::io::Error) -> bool {
+    if cfg!(unix) && err.raw_os_error() == Some(1) {
+        return false;
+    }
     if err.kind() == ErrorKind::PermissionDenied {
         return true;
     }
@@ -6059,6 +6074,50 @@ mod tests {
             MAX_REPLACE_ATTEMPTS as usize
         );
         assert!(matches!(result, Err(MaterializeError::Io { .. })));
+    }
+
+    /// EPERM is not a lock on Unix: a macOS privacy refusal does not clear
+    /// while the replace waits, so it fails on the first try and keeps its
+    /// OS error. On macOS it has its own code. EACCES still retries.
+    #[cfg(unix)]
+    #[test]
+    fn replace_fails_eperm_at_once_and_names_a_macos_privacy_denial() {
+        let scratch = Scratch::new("replace-eperm");
+        let tmp = scratch.root.join("tmp-file");
+        std::fs::write(&tmp, b"pending bytes").expect("write tmp");
+        let attempt = |error: fn() -> std::io::Error| {
+            let replacer = AlwaysFailReplacer {
+                error,
+                attempts: AtomicUsize::new(0),
+            };
+            let result = create_from_temp(
+                &scratch.root.join("target.md"),
+                &tmp,
+                &options_with(&replacer),
+            );
+            (replacer.attempts.load(Ordering::Relaxed), result)
+        };
+
+        let (attempts, result) = attempt(|| std::io::Error::from_raw_os_error(1));
+        assert_eq!(attempts, 1);
+        let error = result.expect_err("EPERM fails the replace");
+        assert!(matches!(
+            error,
+            MaterializeError::Io {
+                raw_os_error: Some(1),
+                ..
+            }
+        ));
+        let eperm = if cfg!(target_vendor = "apple") {
+            "privacy-denied"
+        } else {
+            "materialize-io"
+        };
+        assert_eq!(error.code(), eperm);
+
+        let (attempts, result) = attempt(|| std::io::Error::from_raw_os_error(13));
+        assert_eq!(attempts, MAX_REPLACE_ATTEMPTS as usize);
+        assert_eq!(result.expect_err("EACCES").code(), "materialize-io");
     }
 
     /// The replace boundary's meanings of ERROR_ACCESS_DENIED (#554, #595

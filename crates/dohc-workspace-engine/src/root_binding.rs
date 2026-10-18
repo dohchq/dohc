@@ -25,11 +25,26 @@ pub enum RootBindingError {
     Unstamped,
     #[error("engine database is bound to another root")]
     DatabaseMismatch,
+    /// macOS refused dohc the root's folder. See
+    /// [`dohc_engine_files::privacy_denied`].
+    #[error("{}", dohc_engine_files::PRIVACY_DENIED)]
+    PrivacyDenied,
+}
+
+/// A macOS privacy refusal names itself; any other io failure is `otherwise`.
+fn io_failure(otherwise: RootBindingError) -> impl FnOnce(std::io::Error) -> RootBindingError {
+    move |error| {
+        if dohc_engine_files::privacy_denied(error.raw_os_error()) {
+            RootBindingError::PrivacyDenied
+        } else {
+            otherwise
+        }
+    }
 }
 
 /// Canonicalize a root without creating anything.
 pub fn canonical_root(root: &Path) -> Result<PathBuf, RootBindingError> {
-    std::fs::canonicalize(root).map_err(|_| RootBindingError::RootUnavailable)
+    std::fs::canonicalize(root).map_err(io_failure(RootBindingError::RootUnavailable))
 }
 
 /// The root's binding token, or `None` when the root has never been bound.
@@ -41,7 +56,7 @@ pub fn read_root_binding(root: &Path) -> Result<Option<String>, RootBindingError
         Ok(token) if token.is_empty() => return Ok(None),
         Ok(token) => token,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(RootBindingError::Unreadable),
+        Err(error) => return Err(io_failure(RootBindingError::Unreadable)(error)),
     };
     if !valid_token(&token) {
         return Err(RootBindingError::Malformed);
@@ -69,9 +84,9 @@ fn write_new_root_binding_with_hook(
         .create(true)
         .truncate(false)
         .open(marker.with_extension("lock"))
-        .map_err(|_| RootBindingError::Unwritable)?;
+        .map_err(io_failure(RootBindingError::Unwritable))?;
     before_lock();
-    fs4::FileExt::lock(&anchor).map_err(|_| RootBindingError::Unwritable)?;
+    fs4::FileExt::lock(&anchor).map_err(io_failure(RootBindingError::Unwritable))?;
     // The lock file stays in place so every process locks the same inode.
     // Read the marker only after the previous owner finishes publication.
     if let Some(token) = read_root_binding(root)? {
@@ -85,7 +100,7 @@ fn write_new_root_binding_with_hook(
     match std::fs::remove_file(&pending) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err(RootBindingError::Unwritable),
+        Err(error) => return Err(io_failure(RootBindingError::Unwritable)(error)),
     }
     let publish = (|| {
         use std::io::Write as _;
@@ -98,9 +113,9 @@ fn write_new_root_binding_with_hook(
         drop(file);
         std::fs::rename(&pending, &marker)
     })();
-    if publish.is_err() {
+    if let Err(error) = publish {
         let _ = std::fs::remove_file(&pending);
-        return Err(RootBindingError::Unwritable);
+        return Err(io_failure(RootBindingError::Unwritable)(error));
     }
     sync_binding_dir(&marker)?;
     Ok(token)
@@ -110,7 +125,7 @@ fn sync_binding_dir(marker: &Path) -> Result<(), RootBindingError> {
     #[cfg(unix)]
     std::fs::File::open(marker.parent().ok_or(RootBindingError::Unwritable)?)
         .and_then(|directory| directory.sync_all())
-        .map_err(|_| RootBindingError::Unwritable)?;
+        .map_err(io_failure(RootBindingError::Unwritable))?;
     #[cfg(not(unix))]
     let _ = marker;
     Ok(())
@@ -139,7 +154,7 @@ fn create_binding_dir(marker: &Path) -> Result<(), RootBindingError> {
     }
     builder
         .create(parent)
-        .map_err(|_| RootBindingError::Unwritable)
+        .map_err(io_failure(RootBindingError::Unwritable))
 }
 
 fn valid_token(token: &[u8]) -> bool {
@@ -256,6 +271,26 @@ mod tests {
             assert!(!pending.exists());
             assert_eq!(write_new_root_binding(scratch.path()).unwrap(), token);
         }
+    }
+
+    /// EPERM is how macOS refuses a folder the person has not allowed. Each
+    /// root step names it; EACCES and other failures keep their own error.
+    #[test]
+    fn an_eperm_root_step_is_a_privacy_denial_on_macos() {
+        let eperm = io_failure(RootBindingError::Unwritable)(std::io::Error::from_raw_os_error(1));
+        if cfg!(target_vendor = "apple") {
+            assert!(matches!(eperm, RootBindingError::PrivacyDenied));
+        } else {
+            assert!(matches!(eperm, RootBindingError::Unwritable));
+        }
+        assert!(matches!(
+            io_failure(RootBindingError::RootUnavailable)(std::io::Error::from_raw_os_error(13)),
+            RootBindingError::RootUnavailable
+        ));
+        assert_eq!(
+            RootBindingError::PrivacyDenied.to_string(),
+            "privacy-denied"
+        );
     }
 
     #[test]
