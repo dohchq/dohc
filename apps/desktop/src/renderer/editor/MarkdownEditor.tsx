@@ -70,7 +70,8 @@ import {
 import { UrlPasteOffer } from "./UrlPasteOffer";
 import { bridge } from "../bridge";
 import { FindReplaceBar } from "./FindReplaceBar";
-import { findReplaceExtension } from "./findReplace";
+import { findReplaceExtension, runFindCommand } from "./findReplace";
+import { onEditorMenuCommand } from "./editorMenuCommands";
 import { makeInlineAtomPlugin } from "./inlineAtomPlugin";
 import { makeTableControlsPlugin } from "./tableControls";
 import {
@@ -933,6 +934,13 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
         pane.removeEventListener("dragover", onDragOver);
         pane.removeEventListener("drop", onDrop);
       };
+    }, [editor]);
+
+    // Edit > Find on macOS, while focus is in this editor or its find bar.
+    useEffect(() => {
+      const container = containerRef.current;
+      if (!container || !editor) return;
+      return onEditorMenuCommand(container, (command) => runFindCommand(editor, command));
     }, [editor]);
 
     // A choice is its own undo step in either history, so Undo, like Ctrl+Z,

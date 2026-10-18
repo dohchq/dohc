@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { MENU_COMMANDS, WORKBENCH_MENU_COMMANDS } from "../../ipc/channels";
+import { EDITOR_MENU_COMMANDS, MENU_COMMANDS, WORKBENCH_MENU_COMMANDS, isEditorMenuCommand } from "../../ipc/channels";
 import type { ShareViewWriteScope } from "../../workspaces/shareWriteGate";
 import { CommandPalette } from "../CommandPalette";
 import { VIEW_IDENTITY } from "../workbench/viewIdentity";
@@ -74,9 +74,10 @@ describe("command availability", () => {
 });
 
 describe("command inventory", () => {
-  it("every application menu id names a row or opens the palette", () => {
-    const unknownIds = MENU_COMMANDS.filter((id) => id !== "command-palette" && !isStaticCommandId(id));
+  it("every application menu id names a row, opens the palette, or goes to the focused editor", () => {
+    const unknownIds = MENU_COMMANDS.filter((id) => id !== "command-palette" && !isStaticCommandId(id) && !isEditorMenuCommand(id));
     expect(unknownIds).toEqual([]);
+    expect(EDITOR_MENU_COMMANDS.filter((id) => isStaticCommandId(id))).toEqual([]);
   });
 
   it("checks the five global workbench command ids without changing their dispatch", () => {
