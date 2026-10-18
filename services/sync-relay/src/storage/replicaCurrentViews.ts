@@ -9,7 +9,7 @@ import {currentShareGrantSql} from "./currentShareGrant";
 import {readReplicaStanding} from "./replicaReads";
 import {pinReplicaHistory, thinReplicaHistoryPins, type ReplicaHistoryObservation} from "./replicaHistoryPins";
 import {replicaStatement as statement} from "./replicaStatements";
-import {deleteUnreferencedReplicaTexts, readReplicaText} from "./replicaTextStorage";
+import {deleteUnreferencedReplicaTexts, hasReplicaText, readReplicaText} from "./replicaTextStorage";
 
 const STAGE_BYTES = 8 * 1024 * 1024;
 const incarnations = new WeakMap<StorageContext, Map<string, ReplicaReadLease>>();
@@ -135,7 +135,7 @@ export function discardReplicaCurrentView(storage: StorageContext, lease: Replic
 export function stageReplicaCurrentView(storage: StorageContext, lease: ReplicaReadLease, view: ReplicaCurrentView, observations: ReplicaHistoryObservation[] = []): StagedCurrentView {
   try {
     current(storage, lease);
-    const stored = new Set(statement(storage,"SELECT DISTINCT sha256 FROM sync_relay_replica_cut_texts WHERE workspace_id=?").all(lease.workspaceId).map(row => row.sha256));
+    const stored = new Set<string>();
     const requested = new Map(view.files.filter(f => f.contentKind === "text").map(f => [f.sha256, f.byteLength]));
     const insert = statement(storage,"INSERT INTO sync_relay_replica_cut_texts VALUES (?,?,?,?) ON CONFLICT(workspace_id,sha256,ordinal) DO NOTHING");
     const reference = statement(storage,"INSERT INTO sync_relay_replica_cut_text_refs VALUES (?,?,0) ON CONFLICT(workspace_id,sha256) DO NOTHING");
@@ -152,7 +152,9 @@ export function stageReplicaCurrentView(storage: StorageContext, lease: ReplicaR
       batch = []; batchBytes = 0;
     };
     for (const text of view.texts) {
-      if (stored.has(text.sha256)) continue;
+      if (stored.has(text.sha256) || hasReplicaText(storage,lease.workspaceId,text.sha256)) {
+        stored.add(text.sha256); continue;
+      }
       const bytes = Buffer.from(text.text);
       if (createHash("sha256").update(bytes).digest("hex") !== text.sha256 || requested.get(text.sha256) !== bytes.length) fail();
       for (let offset = 0, ordinal = 0; offset < bytes.length || ordinal === 0; ordinal++) {

@@ -1,6 +1,10 @@
 import type {StorageContext} from "./context";
 import {replicaStatement as statement} from "./replicaStatements";
 
+export function hasReplicaText(storage: StorageContext, workspace: string, sha: string): boolean {
+  return !!statement(storage,"SELECT sha256 FROM sync_relay_replica_cut_texts WHERE workspace_id=? AND sha256=? LIMIT 1").get(workspace,sha);
+}
+
 export function replicaTextCleanupSql(workspace?: string) {
   const scope=workspace === undefined ? "" : `workspace_id=${workspace} AND `;
   return [`DELETE FROM sync_relay_replica_cut_texts WHERE (workspace_id,sha256) IN
