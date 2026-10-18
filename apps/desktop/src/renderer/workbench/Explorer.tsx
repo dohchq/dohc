@@ -1473,8 +1473,11 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           onKeyDown={(event) => {
             event.stopPropagation();
             if (isComposingKey(event)) return;
-            if (event.key === "Escape") finishEdit(false, true);
-            else if (event.key === "Enter") finishEdit(true, true);
+            if (event.key !== "Escape" && event.key !== "Enter") return;
+            // Focus returns to the row during this keydown. The key's default
+            // action would press that row and open a path the move has not made.
+            event.preventDefault();
+            finishEdit(event.key === "Enter", true);
           }}
           onBlur={() => { renameFocus.current = null; finishEdit(true); }}
           // The name field takes the text menu, not the tree's menu.

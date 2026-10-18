@@ -197,6 +197,18 @@ it.each(["Enter", "Escape"])("returns to the tree row after rename %s", async (k
   fireEvent.keyDown(input, { key });
   await waitFor(() => expect(document.activeElement).toBe(screen.getAllByTestId("tree-row").find((node) => node.dataset.path === "notes.md")));
 });
+// Focus returns to the renamed row during the same keydown. A browser presses
+// that row with the key's default action, which opened the new path before
+// the move made it, and the editor stayed on "no longer available".
+it("keeps the key that ends a rename from pressing the row focus returns to", async () => {
+  for (const key of ["Enter", "Escape"]) {
+    const { unmount } = render(<Explorer {...explorerProps()} />);
+    const input = await beginRename("notes.md");
+    fireEvent.change(input, { target: { value: "plan.md" } });
+    expect(fireEvent.keyDown(input, { key }), key).toBe(false);
+    unmount();
+  }
+});
 it("follows the renamed row through its optimistic path change", async () => {
   render(<Explorer {...explorerProps()} />);
   await renameTo("hello.m", "renamed.md");
