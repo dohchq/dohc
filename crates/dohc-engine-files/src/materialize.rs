@@ -3245,7 +3245,12 @@ fn remove_emptied_directory(
         }
     }
     #[cfg(not(target_vendor = "apple"))]
-    after_inspect();
+    {
+        // Only macOS removes metadata, so the open only proved this is a
+        // directory and not a link.
+        drop(directory);
+        after_inspect();
+    }
     rustix::fs::unlinkat(&parent_fd, leaf, AtFlags::REMOVEDIR).is_ok()
 }
 
