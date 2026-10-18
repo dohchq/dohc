@@ -109,17 +109,21 @@ mod tests {
         let main = get(&c, &cache, "main");
         let fork = get(&c, &cache, "fork");
         assert!(Arc::ptr_eq(&main, &get(&c, &cache, "main")));
-        c.execute_batch("UPDATE path_aliases SET path='renamed.md' WHERE version_id='fork';").unwrap();
+        c.execute_batch("UPDATE path_aliases SET path='renamed.md' WHERE version_id='fork';")
+            .unwrap();
         assert!(Arc::ptr_eq(&main, &get(&c, &cache, "main")));
         let renamed = get(&c, &cache, "fork");
         assert!(!Arc::ptr_eq(&fork, &renamed));
         assert_eq!(renamed.resolve("s.md", "renamed"), Some("renamed.md"));
-        c.execute_batch("BEGIN; DELETE FROM path_aliases; ROLLBACK;").unwrap();
+        c.execute_batch("BEGIN; DELETE FROM path_aliases; ROLLBACK;")
+            .unwrap();
         assert!(Arc::ptr_eq(&main, &get(&c, &cache, "main")));
-        c.execute_batch("INSERT INTO path_aliases VALUES('ws','main','x.md','x');").unwrap();
+        c.execute_batch("INSERT INTO path_aliases VALUES('ws','main','x.md','x');")
+            .unwrap();
         let inserted = get(&c, &cache, "main");
         assert_eq!(inserted.resolve("s.md", "x"), Some("x.md"));
-        c.execute_batch("DELETE FROM path_aliases WHERE path='x.md';").unwrap();
+        c.execute_batch("DELETE FROM path_aliases WHERE path='x.md';")
+            .unwrap();
         assert_eq!(get(&c, &cache, "main").resolve("s.md", "x"), None);
     }
     #[test]
@@ -132,7 +136,8 @@ mod tests {
             Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let cache = Arc::default();
         let first = get(&reader, &cache, "main");
-        c.execute_batch("UPDATE path_aliases SET path='b.md';").unwrap();
+        c.execute_batch("UPDATE path_aliases SET path='b.md';")
+            .unwrap();
         let second = get(&reader, &cache, "main");
         assert!(!Arc::ptr_eq(&first, &second));
         assert_eq!(second.resolve("s.md", "b"), Some("b.md"));
