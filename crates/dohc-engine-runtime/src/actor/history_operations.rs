@@ -51,8 +51,15 @@ impl ActorHandle {
         request: String,
         author: Option<String>,
     ) -> Result<Option<HistoryUndoResult>, RuntimeError> {
-        self.run(move |store, _| {
-            let version = VersionedTextStore::new(store)
+        let db = self
+            .run(|store, _| Ok(store.database_path().to_path_buf()))
+            .await?;
+        tokio::task::spawn_blocking(move || {
+            let mut store = EngineStore::open_read_only(&db)?;
+            store
+                .read_with(|conn| conn.execute_batch("BEGIN"))
+                .map_err(StorageError::corrupt_public)?;
+            let version = VersionedTextStore::new(&mut store)
                 .get_active_version(&ws)?
                 .version_id;
             let replay = store.read_with(|conn| {
@@ -113,6 +120,7 @@ impl ActorHandle {
             Ok(None)
         })
         .await
+        .map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
     pub async fn ensure_history_undo_path_available(

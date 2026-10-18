@@ -3,13 +3,56 @@ use dohc_engine_domain::{
     undo_compensation_moments_in, undo_member_in_tx, undo_progress_key, undo_request_fingerprint,
 };
 use serde::{Deserialize, Serialize};
-use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::time::Instant;
 
+type StoredMember = (
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    i64,
+    String,
+    Option<String>,
+);
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(from = "StoredMember", into = "StoredMember")]
 struct Member {
     effect: OperationMoment,
     head: String,
     sha: Option<String>,
+}
+impl From<Member> for StoredMember {
+    fn from(member: Member) -> Self {
+        let effect = member.effect;
+        (
+            effect.moment_id,
+            effect.object_id,
+            effect.operation,
+            effect.path,
+            effect.before_path,
+            effect.moment_order,
+            member.head,
+            member.sha,
+        )
+    }
+}
+impl From<StoredMember> for Member {
+    fn from(value: StoredMember) -> Self {
+        Self {
+            effect: OperationMoment {
+                moment_id: value.0,
+                object_id: value.1,
+                operation: value.2,
+                path: value.3,
+                before_path: value.4,
+                moment_order: value.5,
+            },
+            head: value.6,
+            sha: value.7,
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -88,7 +131,11 @@ pub(super) fn not_restored(
         .map_err(StorageError::corrupt_public)
         .map_err(Into::into)
 }
-fn disk_check(root: &Path, member: &Member) -> Result<(), RuntimeError> {
+type DiskProof = (
+    dohc_engine_files::ProjectionProbe,
+    Option<dohc_engine_files::ProjectionTargetStamp>,
+);
+fn disk_check(root: &Path, member: &Member) -> Result<DiskProof, RuntimeError> {
     let probe =
         dohc_engine_files::ProjectionProbe::new(root).map_err(StorageError::persist_public)?;
     let m = &member.effect;
@@ -100,6 +147,7 @@ fn disk_check(root: &Path, member: &Member) -> Result<(), RuntimeError> {
     if probe.stamp(target) != dohc_engine_files::ProjectionTargetStamp::Absent {
         return Err(refuse(target, "old path occupied on disk").into());
     }
+    let mut source = None;
     if let Some(sha) = &member.sha {
         let stamp = probe.stamp(&m.path);
         if !matches!(stamp, dohc_engine_files::ProjectionTargetStamp::File { .. })
@@ -108,8 +156,9 @@ fn disk_check(root: &Path, member: &Member) -> Result<(), RuntimeError> {
         {
             return Err(refuse(&m.path, "source changed on disk").into());
         }
+        source = Some(stamp);
     }
-    Ok(())
+    Ok((probe, source))
 }
 fn result(
     store: &EngineStore,
@@ -169,9 +218,31 @@ impl ActorHandle {
             request.clone(),
             author.clone(),
         );
-        let prior = self
-            .run(move |store, _| store.read_with(|conn| load(conn, &w, &o, &r, a.as_deref())))
+        #[cfg(test)]
+        let probe_request = request.clone();
+        let db = self
+            .run(move |store, _| {
+                #[cfg(test)]
+                let started = Instant::now();
+                if store.is_passive() {
+                    return Err(DomainError::InvalidInput {
+                        reason: "Undo needs the owner",
+                    }
+                    .into());
+                }
+                let path = store.database_path().to_path_buf();
+                #[cfg(test)]
+                tests::record_phase(&probe_request, "admission", None, started.elapsed(), true);
+                Ok(path)
+            })
             .await?;
+        let read_db = db.clone();
+        let prior = tokio::task::spawn_blocking(move || {
+            let store = EngineStore::open_read_only(&read_db)?;
+            store.read_with(|conn| load(conn, &w, &o, &r, a.as_deref()))
+        })
+        .await
+        .map_err(|_| RuntimeError::ActorUnavailable)??;
         let deduped = prior.is_some();
         let plan = if let Some((plan, _, _)) = prior {
             plan
@@ -193,47 +264,53 @@ impl ActorHandle {
                 request.clone(),
                 author.clone(),
             );
-            let _capture = gates[0].lock().await;
-            let _sessions = gates[1].lock().await;
-            let prepared = self
-                .run(move |store, _| {
-                    if store.is_passive() {
-                        return Err(DomainError::InvalidInput {
-                            reason: "Undo needs the owner",
-                        }
-                        .into());
-                    }
-                    let version = VersionedTextStore::new(store)
-                        .get_active_version(&w)?
-                        .version_id;
-                    let members = store.read_with(|conn| -> Result<_, RuntimeError> {
-                        let mut originals = preflight_undo_operation_in(conn, &w, &version, &o)?;
-                        originals.sort_by_key(|m| m.operation != "rename");
-                        originals
-                            .into_iter()
-                            .map(|effect| {
-                                check_undo_ownership(conn, &w, &version, &effect)?;
-                                let head = signature(conn, &w, &version, &effect.object_id)?;
-                                let sha = if effect.operation == "rename" {
-                                    Some(rename_head_sha(conn, &w, &version, &effect.object_id)?)
-                                } else {
-                                    None
-                                };
-                                Ok(Member { effect, head, sha })
-                            })
-                            .collect::<Result<Vec<_>, RuntimeError>>()
-                    })?;
-                    Ok(Plan {
-                        workspace: w,
-                        version,
-                        operation: o,
-                        request: r,
-                        author: a,
-                        members,
-                    })
+            let read_db = db.clone();
+            let prepared = tokio::task::spawn_blocking(move || {
+                #[cfg(test)]
+                let started = Instant::now();
+                let mut store = EngineStore::open_read_only(&read_db)?;
+                store
+                    .read_with(|conn| conn.execute_batch("BEGIN"))
+                    .map_err(StorageError::corrupt_public)?;
+                let version = VersionedTextStore::new(&mut store)
+                    .get_active_version(&w)?
+                    .version_id;
+                let members = store.read_with(|conn| -> Result<_, RuntimeError> {
+                    let mut originals = preflight_undo_operation_in(conn, &w, &version, &o)?;
+                    originals.sort_by_key(|m| m.operation != "rename");
+                    originals
+                        .into_iter()
+                        .map(|effect| {
+                            check_undo_ownership(conn, &w, &version, &effect)?;
+                            let head = signature(conn, &w, &version, &effect.object_id)?;
+                            let sha = if effect.operation == "rename" {
+                                Some(rename_head_sha(conn, &w, &version, &effect.object_id)?)
+                            } else {
+                                None
+                            };
+                            Ok(Member { effect, head, sha })
+                        })
+                        .collect::<Result<Vec<_>, RuntimeError>>()
+                })?;
+                #[cfg(test)]
+                tests::record_phase(
+                    &r,
+                    "planning-check (worker)",
+                    None,
+                    started.elapsed(),
+                    false,
+                );
+                Ok::<_, RuntimeError>(Plan {
+                    workspace: w,
+                    version,
+                    operation: o,
+                    request: r,
+                    author: a,
+                    members,
                 })
-                .await?;
-            drop((_sessions, _capture));
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)??;
             let disk_root = root.clone();
             let (prepared, body) = tokio::task::spawn_blocking(move || {
                 for member in &prepared.members {
@@ -247,9 +324,9 @@ impl ActorHandle {
             let p = prepared.clone();
             let f = faults.clone();
             self.run(move |store,_| {
-                if let Some((plan,_,_)) = store.read_with(|conn| load(conn,&p.workspace,&p.operation,&p.request,p.author.as_deref()))? { return Ok(plan); }
                 #[cfg(test)]
                 let started = Instant::now();
+                if let Some((plan,_,_)) = store.read_with(|conn| load(conn,&p.workspace,&p.operation,&p.request,p.author.as_deref()))? { return Ok(plan); }
                 let outcome = store.write_with(f.as_ref(),|tx| -> Result<(),RuntimeError> {
                     let busy: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM engine_requests p JOIN engine_requests r ON r.request_id=json_extract(CASE WHEN p.kind='history-undo-plan' THEN p.payload_hash ELSE '{}' END,'$.request') WHERE p.kind='history-undo-plan' AND r.kind='history-undo-pending' AND json_extract(CASE WHEN p.kind='history-undo-plan' THEN p.payload_hash ELSE '{}' END,'$.workspace')=?1 AND json_extract(CASE WHEN p.kind='history-undo-plan' THEN p.payload_hash ELSE '{}' END,'$.operation')=?2)",params![p.workspace,p.operation],|r|r.get(0)).map_err(StorageError::corrupt_public)?;
                     if busy { return Err(DomainError::UndoRefused {path:p.operation.clone(),reason:"Undo in progress"}.into()); }
@@ -258,69 +335,106 @@ impl ActorHandle {
                     Ok(())
                 });
                 #[cfg(test)]
-                tests::record_plan(&p.request,started.elapsed());
+                tests::record_phase(&p.request,"persist-plan",None,started.elapsed(),true);
                 match outcome? { TxnOutcome::Committed(()) => Ok(p), TxnOutcome::Crashed {..} => Err(RuntimeError::OperationCrashed) }
             }).await?
         };
         let plan = Arc::new(plan);
         loop {
+            let p = plan.clone();
+            let (prepared_cursor, complete): (i64, bool) = self.run(move |store, _| {
+                #[cfg(test)]
+                let started = Instant::now();
+                let outcome = store.read_with(|conn| conn.query_row("SELECT result_seq,kind='history-undo-complete' FROM engine_requests WHERE request_id=?1",[&p.request],|r| Ok((r.get(0)?,r.get(1)?)))).map_err(StorageError::corrupt_public).map_err(Into::into)
+                ;
+                #[cfg(test)]
+                tests::record_phase(&p.request,"read-progress",None,started.elapsed(),true);
+                outcome
+            }).await?;
+            if complete {
+                let p = plan.clone();
+                return tokio::task::spawn_blocking(move || {
+                    #[cfg(test)]
+                    let started = Instant::now();
+                    let store = EngineStore::open_read_only(&db)?;
+                    let outcome = result(&store, &p, deduped);
+                    #[cfg(test)]
+                    tests::record_phase(
+                        &p.request,
+                        "read-result (worker)",
+                        None,
+                        started.elapsed(),
+                        false,
+                    );
+                    outcome
+                })
+                .await
+                .map_err(|_| RuntimeError::ActorUnavailable)?;
+            }
+            let index = usize::try_from(prepared_cursor).map_err(|_| corrupt())?;
+            let member = plan.members.get(index).ok_or_else(corrupt)?.clone();
+            let disk_root = root.clone();
+            let (disk, policy) = tokio::task::spawn_blocking(move || {
+                (
+                    disk_check(&disk_root, &member),
+                    crate::search::read_engine_search_policy(&disk_root),
+                )
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
             let _capture = gates[0].clone().lock_owned().await;
             let _sessions = gates[1].clone().lock_owned().await;
-            let (p, root, f) = (plan.clone(), root.clone(), faults.clone());
-            let done = self.run(move |store,cache| {
+            let (p, f) = (plan.clone(), faults.clone());
+            self.run(move |store,cache| {
                 let _guards = (_capture,_sessions);
                 #[cfg(test)]
                 let started = Instant::now();
+                #[cfg(test)]
+                let mut check_time = std::time::Duration::ZERO;
                 let outcome = with_local_file_mutation_cache_reset(cache, || {
-                    let start = Instant::now();
-                    let (mut cursor,complete): (i64,bool) = store.read_with(|conn| conn.query_row("SELECT result_seq,kind='history-undo-complete' FROM engine_requests WHERE request_id=?1",[&p.request],|r| Ok((r.get(0)?,r.get(1)?)))).map_err(StorageError::corrupt_public)?;
-                    if complete { return Ok(true); }
-                    let policy = crate::search::read_engine_search_policy(&root);
-                    loop {
-                        let index = usize::try_from(cursor).map_err(|_| corrupt())?;
-                        let member = p.members.get(index).ok_or_else(corrupt)?;
-                        let active = VersionedTextStore::new(store).get_active_version(&p.workspace)?.version_id;
-                        let unchanged = active == p.version && store.read_with(|conn| signature(conn,&p.workspace,&p.version,&member.effect.object_id))? == member.head;
-                        let target = member.effect.before_path.as_deref().unwrap_or(&member.effect.path);
-                        let vacant: bool = store.read_with(|conn| conn.query_row("SELECT NOT EXISTS(SELECT 1 FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND path=?3)",params![p.workspace,p.version,target],|r|r.get(0))).map_err(StorageError::corrupt_public)?;
-                        let admitted = store.read_with(|conn| check_undo_ownership(conn,&p.workspace,&p.version,&member.effect));
-                        let disk = disk_check(&root,member);
-                        let changed = !unchanged || !vacant || matches!(&admitted,Err(RuntimeError::Domain(DomainError::UndoRefused {..}) | RuntimeError::Sync(dohc_engine_sync::SyncError::LiveDocumentBindingActive))) || matches!(&disk,Err(RuntimeError::Domain(DomainError::UndoRefused {..})));
-                        if !changed { admitted?; disk?; }
-                        match store.write_with(f.as_ref(),|tx| -> Result<(),RuntimeError> {
-                            if changed {
-                                let path = tx.query_row("SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![p.workspace,p.version,member.effect.object_id],|r| r.get::<_,String>(0)).optional().map_err(StorageError::corrupt_public)?.unwrap_or_else(|| member.effect.path.clone());
-                                tx.execute("INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) VALUES(?1,?2,?3,?4,'history-undo-skipped')",params![format!("{}:{cursor}",undo_progress_key(&p.request)),path,cursor,now]).map_err(StorageError::persist_public)?;
-                            } else {
-                                tx.execute_batch("SAVEPOINT undo_member").map_err(StorageError::persist_public)?;
-                                let objects = serde_json::to_string(&[&member.effect.object_id]).map_err(|_| corrupt())?;
-                                crate::search::index::begin_file_search_index_batch(tx,&policy,&p.workspace,&p.version,&objects).map_err(super::super::search::search_domain)?;
-                                let inverse = undo_member_in_tx(tx,&p.workspace,&p.version,&undo_correlation_id(&p.workspace,&p.operation,&p.request),p.author.as_deref(),now,member.effect.clone(),|tx,m| publish_undo_member(tx,&p.workspace,&p.version,&policy,m,now));
-                                match inverse {
-                                    Ok(_) => tx.execute_batch("RELEASE undo_member").map_err(StorageError::persist_public)?,
-                                    Err(DomainError::UndoRefused {path,..}) => {
-                                        tx.execute_batch("ROLLBACK TO undo_member; RELEASE undo_member").map_err(StorageError::persist_public)?;
-                                        tx.execute("INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) VALUES(?1,?2,?3,?4,'history-undo-skipped')",params![format!("{}:{cursor}",undo_progress_key(&p.request)),path,cursor,now]).map_err(StorageError::persist_public)?;
-                                    },
-                                    Err(error) => return Err(error.into()),
-                                }
+                    let (cursor,complete): (i64,bool) = store.read_with(|conn| conn.query_row("SELECT result_seq,kind='history-undo-complete' FROM engine_requests WHERE request_id=?1",[&p.request],|r| Ok((r.get(0)?,r.get(1)?)))).map_err(StorageError::corrupt_public)?;
+                    if complete || cursor != prepared_cursor { return Ok(()); }
+                    let index = usize::try_from(cursor).map_err(|_| corrupt())?;
+                    let member = p.members.get(index).ok_or_else(corrupt)?;
+                    let active = VersionedTextStore::new(store).get_active_version(&p.workspace)?.version_id;
+                    let unchanged = active == p.version && store.read_with(|conn| signature(conn,&p.workspace,&p.version,&member.effect.object_id))? == member.head;
+                    let target = member.effect.before_path.as_deref().unwrap_or(&member.effect.path);
+                    let vacant: bool = store.read_with(|conn| conn.query_row("SELECT NOT EXISTS(SELECT 1 FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND path=?3)",params![p.workspace,p.version,target],|r|r.get(0))).map_err(StorageError::corrupt_public)?;
+                    let admitted = store.read_with(|conn| check_undo_ownership(conn,&p.workspace,&p.version,&member.effect));
+                    let disk_changed = matches!(&disk,Err(RuntimeError::Domain(DomainError::UndoRefused {..}))) || disk.as_ref().is_ok_and(|(probe, source)| {
+                        probe.stamp(target) != dohc_engine_files::ProjectionTargetStamp::Absent || source.as_ref().is_some_and(|stamp| probe.stamp(&member.effect.path) != *stamp)
+                    });
+                    let changed = !unchanged || !vacant || matches!(&admitted,Err(RuntimeError::Domain(DomainError::UndoRefused {..}) | RuntimeError::Sync(dohc_engine_sync::SyncError::LiveDocumentBindingActive))) || disk_changed;
+                    if !changed { admitted?; disk?; }
+                    #[cfg(test)]
+                    { check_time = started.elapsed(); }
+                    match store.write_with(f.as_ref(),|tx| -> Result<(),RuntimeError> {
+                        if changed {
+                            let path = tx.query_row("SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![p.workspace,p.version,member.effect.object_id],|r| r.get::<_,String>(0)).optional().map_err(StorageError::corrupt_public)?.unwrap_or_else(|| member.effect.path.clone());
+                            tx.execute("INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) VALUES(?1,?2,?3,?4,'history-undo-skipped')",params![format!("{}:{cursor}",undo_progress_key(&p.request)),path,cursor,now]).map_err(StorageError::persist_public)?;
+                        } else {
+                            tx.execute_batch("SAVEPOINT undo_member").map_err(StorageError::persist_public)?;
+                            let objects = serde_json::to_string(&[&member.effect.object_id]).map_err(|_| corrupt())?;
+                            crate::search::index::begin_file_search_index_batch(tx,&policy,&p.workspace,&p.version,&objects).map_err(super::super::search::search_domain)?;
+                            let inverse = undo_member_in_tx(tx,&p.workspace,&p.version,&undo_correlation_id(&p.workspace,&p.operation,&p.request),p.author.as_deref(),now,member.effect.clone(),|tx,m| publish_undo_member(tx,&p.workspace,&p.version,&policy,m,now));
+                            match inverse {
+                                Ok(_) => tx.execute_batch("RELEASE undo_member").map_err(StorageError::persist_public)?,
+                                Err(DomainError::UndoRefused {path,..}) => {
+                                    tx.execute_batch("ROLLBACK TO undo_member; RELEASE undo_member").map_err(StorageError::persist_public)?;
+                                    tx.execute("INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) VALUES(?1,?2,?3,?4,'history-undo-skipped')",params![format!("{}:{cursor}",undo_progress_key(&p.request)),path,cursor,now]).map_err(StorageError::persist_public)?;
+                                },
+                                Err(error) => return Err(error.into()),
                             }
-                            tx.execute("UPDATE engine_requests SET result_seq=?2,kind=?3,committed_at=?4 WHERE request_id=?1",params![p.request,cursor+1,if index+1==p.members.len() {"history-undo-complete"} else {"history-undo-pending"},now]).map_err(StorageError::persist_public)?;
-                            Ok(())
-                        })? { TxnOutcome::Committed(()) => {}, TxnOutcome::Crashed {..} => return Err(RuntimeError::OperationCrashed) }
-                        cursor += 1;
-                        if cursor as usize == p.members.len() { return Ok(true); }
-                        if member.effect.operation == "rename" || start.elapsed() >= Duration::from_millis(5) { return Ok(false); }
-                    }
+                        }
+                        tx.execute("UPDATE engine_requests SET result_seq=?2,kind=?3,committed_at=?4 WHERE request_id=?1",params![p.request,cursor+1,if index+1==p.members.len() {"history-undo-complete"} else {"history-undo-pending"},now]).map_err(StorageError::persist_public)?;
+                        Ok(())
+                    })? { TxnOutcome::Committed(()) => {}, TxnOutcome::Crashed {..} => return Err(RuntimeError::OperationCrashed) }
+                    Ok(())
                 });
                 #[cfg(test)]
-                tests::record(&p.request,started.elapsed());
+                tests::record(&p.request, prepared_cursor as usize, &p.members[prepared_cursor as usize].effect.operation, prepared_cursor as usize + 1 == p.members.len(), started.elapsed(), check_time);
                 outcome
             }).await?;
-            if done {
-                let p = plan.clone();
-                return self.run(move |store, _| result(store, &p, deduped)).await;
-            }
             tokio::task::yield_now().await;
         }
     }

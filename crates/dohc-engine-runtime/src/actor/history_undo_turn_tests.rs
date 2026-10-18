@@ -6,11 +6,13 @@ use std::sync::{
     Barrier, Mutex, OnceLock,
     atomic::{AtomicUsize, Ordering},
 };
+use std::time::Duration;
 
 type Hook = (std::sync::mpsc::Sender<()>, Arc<Barrier>);
 #[derive(Default)]
 struct Probe {
     times: Vec<Duration>,
+    phases: Vec<Phase>,
     hook: Option<Hook>,
     notify: Option<Arc<tokio::sync::Notify>>,
 }
@@ -18,19 +20,57 @@ fn probes() -> &'static Mutex<std::collections::HashMap<String, Probe>> {
     static PROBES: OnceLock<Mutex<std::collections::HashMap<String, Probe>>> = OnceLock::new();
     PROBES.get_or_init(Mutex::default)
 }
-pub(super) fn record_plan(request: &str, elapsed: Duration) {
+#[derive(Clone, serde::Serialize)]
+struct Phase {
+    phase: String,
+    member: Option<usize>,
+    elapsed_ns: u128,
+    actor: bool,
+    check_ns: Option<u128>,
+}
+pub(super) fn record_phase(
+    request: &str,
+    phase: &str,
+    member: Option<usize>,
+    elapsed: Duration,
+    actor: bool,
+) {
     probes()
         .lock()
         .unwrap()
         .entry(request.to_owned())
         .or_default()
-        .times
-        .push(elapsed);
+        .phases
+        .push(Phase {
+            phase: phase.into(),
+            member,
+            elapsed_ns: elapsed.as_nanos(),
+            actor,
+            check_ns: None,
+        });
 }
-pub(super) fn record(request: &str, elapsed: Duration) {
+pub(super) fn record(
+    request: &str,
+    member: usize,
+    operation: &str,
+    last: bool,
+    elapsed: Duration,
+    checks: Duration,
+) {
+    record_phase(
+        request,
+        &format!(
+            "{operation}-inverse{}",
+            if last { "+complete-ledger" } else { "" }
+        ),
+        Some(member),
+        elapsed,
+        true,
+    );
     let (hook, notify) = {
         let mut probes = probes().lock().unwrap();
         let probe = probes.entry(request.to_owned()).or_default();
+        probe.phases.last_mut().unwrap().check_ns = Some(checks.as_nanos());
         probe.times.push(elapsed);
         (probe.hook.take(), probe.notify.take())
     };
@@ -375,10 +415,48 @@ async fn two_thousand_members_hold_each_turn_under_fifty_ms_and_admit_ydoc_updat
     let total = start.elapsed();
     let (waits, gaps) = updates.await.unwrap();
     assert_eq!(result.moments.len(), 2000);
-    let times = probes().lock().unwrap()["turn-perf"].times.clone();
+    let phases = probes().lock().unwrap()["turn-perf"].phases.clone();
+    let times: Vec<Duration> = phases
+        .iter()
+        .filter(|p| p.actor)
+        .map(|p| Duration::from_nanos(u64::try_from(p.elapsed_ns).unwrap()))
+        .collect();
+    for (turn, phase) in phases.iter().enumerate() {
+        eprintln!(
+            "UNDO phase={turn} activity={} member={:?} actor={} elapsed_ms={:.4} check_ms={:?} write_ms={:?}",
+            phase.phase,
+            phase.member,
+            phase.actor,
+            phase.elapsed_ns as f64 / 1_000_000.0,
+            phase.check_ns.map(|ns| ns as f64 / 1_000_000.0),
+            phase
+                .check_ns
+                .map(|ns| (phase.elapsed_ns - ns) as f64 / 1_000_000.0)
+        );
+    }
+    let mut sorted = times.clone();
+    sorted.sort();
+    eprintln!(
+        "UNDO 2000 members: turns={} p95={:?} max={:?} ydoc_max_gap={:?} ydoc_max_wait_ns={:?}",
+        times.len(),
+        sorted[sorted.len() * 95 / 100],
+        sorted.last(),
+        gaps.iter().max(),
+        waits.iter().max()
+    );
     if let Ok(dir) = std::env::var("DOHC_HISTORY_UNDO_EVIDENCE_DIR") {
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(Path::new(&dir).join("turn-timings.json"),serde_json::json!({"members":2000,"totalNs":total.as_nanos(),"turnNs":times.iter().map(Duration::as_nanos).collect::<Vec<_>>(),"updateWaitNs":waits,"updateTurnGaps":gaps}).to_string()).unwrap();
+        let evidence = serde_json::json!({"members":2000,"totalNs":total.as_nanos(),"turnNs":times.iter().map(Duration::as_nanos).collect::<Vec<_>>(),"phases":phases,"updateWaitNs":waits,"updateTurnGaps":gaps}).to_string();
+        let attempt = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::fs::write(
+            Path::new(&dir).join(format!("turn-timings-{attempt}.json")),
+            &evidence,
+        )
+        .unwrap();
+        std::fs::write(Path::new(&dir).join("turn-timings.json"), evidence).unwrap();
     }
     drop(hold);
     close(supervisor).await;
