@@ -7183,3 +7183,81 @@ fn ydoc_update_index_insert_measurement() {
         }
     }
 }
+
+/// A rename that changes only case reaches a pull as a delete of the old
+/// spelling and a write of the new one. On a disk that ignores case the write
+/// opens the old file, so the page must delete first: `Notes.md` sorts before
+/// `notes.md`, and in path order the delete would remove the renamed file.
+#[test]
+fn relay_pull_puts_a_renames_delete_before_its_write() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_000, &NoFaults)
+        .expect("main");
+    let text = "body\n";
+    let sha = dohc_engine_storage::hex_sha256(text.as_bytes());
+    let write = envelope(
+        "peer",
+        0,
+        "moment.append",
+        json!({
+            "momentId": "write-notes", "versionId": "main", "objectId": "notes",
+            "objectCreatedAtMs": 1, "path": "notes.md", "recordedAtMs": 2_000,
+            "operation": "write", "payloadBeforeBlobSha256": null, "payloadBeforePath": null,
+            "payloadAfterBlobSha256": sha, "payloadAfterPath": "notes.md",
+            "payloadAfterContentKind": "text", "metadata": {"origin": "sync"},
+            "beforePresent": "absent"
+        }),
+    );
+    let rename = envelope(
+        "peer",
+        1,
+        "moment.append",
+        json!({
+            "momentId": "rename-notes", "versionId": "main", "objectId": "notes",
+            "objectCreatedAtMs": 1, "path": "notes.md", "recordedAtMs": 2_001,
+            "operation": "rename", "payloadBeforeBlobSha256": sha,
+            "payloadBeforePath": "notes.md", "payloadBeforeContentKind": "text",
+            "payloadAfterBlobSha256": sha, "payloadAfterPath": "Notes.md",
+            "payloadAfterContentKind": "text", "metadata": {"origin": "sync"},
+            "beforePresent": "present", "beforeObjectId": "notes", "beforeVersionId": "main",
+            "beforePath": "notes.md", "beforeBlobSha256": sha, "beforeContentKind": "text",
+            "beforeUpdatedAtMs": 2_000, "beforeLatestMomentId": "write-notes",
+            "beforeMetadata": {"origin": "sync"}
+        }),
+    );
+    let mut relay = PagedRelay::new([(
+        0,
+        PullResponse {
+            ops: vec![write, rename],
+            next_cursor: 2,
+            has_more: false,
+        },
+    )]);
+    relay.blobs.insert(sha, text.as_bytes().to_vec());
+    let outcome = RelaySyncClient::new(relay)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            3_000,
+        )
+        .expect("pull");
+    let SyncPassOutcome::Complete {
+        applied,
+        changed_paths,
+        ..
+    } = outcome
+    else {
+        panic!("incomplete pull: {outcome:?}");
+    };
+    assert_eq!(applied, 2);
+    let page: Vec<_> = changed_paths
+        .iter()
+        .map(|change| (change.operation, change.path.as_str()))
+        .collect();
+    assert_eq!(page, [("delete", "notes.md"), ("write", "Notes.md")]);
+}
