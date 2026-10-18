@@ -94,6 +94,8 @@ export type WorkspaceOpenParams = WorkspaceJsonObject & {
   captureMode?: "none";
   storeMode?: "passive";
   recoverRunningDispatches?: boolean;
+  /** Full owner opens without relay only: an unfinished ordinary pull's pages become local truth. */
+  abandonOrdinaryPull?: boolean;
 };
 export type CaptureRecoveryImportParams = WorkspaceJsonObject & {
   versionId: string; objectId: string; path: string;

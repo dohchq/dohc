@@ -1925,6 +1925,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 .cloned(),
         );
         preflight_collisions(store, workspace_id, &identity.origin_id, &ops)?;
+        let pull_token =
+            match crate::cursor::begin_ordinary_pull(store, &identity, faults).map_err(local)? {
+                TxnOutcome::Committed(token) => token,
+                TxnOutcome::Crashed { .. } => {
+                    return Err(RelayError::Local("injected-crash".to_owned()));
+                }
+            };
         self.repair_pending_ydoc_base_orders(
             store,
             workspace_id,
@@ -1999,6 +2006,10 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             replication_epoch: identity.replication_epoch,
             stream_identity: identity.stream_identity,
             settlement_report_id,
+            ordinary_pull: Some(crate::OrdinaryPullCompletion {
+                token: pull_token,
+                terminal: !has_more,
+            }),
         };
         if crashes(faults, FaultPoint::SyncBetweenApplyAndCursorCommit) {
             return Ok(SyncPassOutcome::CrashedAfterApply {
@@ -2690,13 +2701,23 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }
         let save = |store: &mut EngineStore, state: Option<&str>, keep_refusal: bool| match store
             .write_with(faults, |tx| {
+                // A refused claim stops this replica's sync, which abandons
+                // its unfinished ordinary pull.
+                let refused = CLAIM_REFUSALS.iter().any(|(code, _)| Some(*code) == state);
                 let changed = tx
                     .execute(
                         "UPDATE sync_identity SET \
                      claim_account_id=CASE WHEN ?3 THEN claim_account_id ELSE ?4 END, \
-                     claim_state=CASE WHEN ?3 THEN COALESCE(claim_state,?2) ELSE ?2 END \
+                     claim_state=CASE WHEN ?3 THEN COALESCE(claim_state,?2) ELSE ?2 END, \
+                     ordinary_pull_token=CASE WHEN ?5 THEN NULL ELSE ordinary_pull_token END \
                      WHERE workspace_id=?1",
-                        params![req.workspace_id, state, keep_refusal, state.and(account_id)],
+                        params![
+                            req.workspace_id,
+                            state,
+                            keep_refusal,
+                            state.and(account_id),
+                            refused
+                        ],
                     )
                     .map_err(SyncError::persist)?;
                 if changed != 1 {

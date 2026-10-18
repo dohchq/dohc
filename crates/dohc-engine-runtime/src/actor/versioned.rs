@@ -3506,6 +3506,7 @@ mod doc_cache_reset_tests {
                 stream_identity: "stream".into(),
                 bootstrap_complete: true,
                 settlement_report_id: None,
+                ordinary_pull: None,
             },
             &NoFaults,
             &dohc_engine_sync::NoLiveLeases,

@@ -154,6 +154,35 @@ describe("desktop engine construction", () => {
     } finally { await f.close(); }
   });
 
+  const remote = { serverUrl: "https://server.test", ownerUserId: "owner" };
+  it.each<[string, Partial<RegistryEntry>, boolean]>([
+    ["a saved pause", { pausedRemote: remote }, true],
+    ["a folder reopened as local work", {}, true],
+    ["ordinary sync with no session", { remote }, false],
+    ["a join still bootstrapping", { joinBootstrapPending: true }, false],
+    ["a received share", { shareView: { shareId: "share", granterEmail: null, genericChatWritable: false,
+      grantedSelector: { paths: ["docs"], versionId: null, access: "view" } } }, false],
+  ])("owner opens with %s ask to abandon an unfinished pull: %s", async (_case, entry, abandons) => {
+    const f = fixture();
+    const workspace = { workspaceId: "local-only", rootPath: await createTestScratch("abandon-open-") };
+    f.rows.set(workspace.workspaceId, { ...workspace, kind: "personal", mode: "local-first", ...entry });
+    try {
+      await f.engine.start();
+      const sessions = f.engine.sessions!;
+      await sessions.run(workspace, async () => undefined);
+      await sessions.closeWorkspace(workspace);
+      // A capture-free open is temporary and never asks.
+      await sessions.run({ ...workspace, captureMode: "none" }, async () => undefined);
+      const opens = f.client.requests
+        .filter(request => request.method === "workspace.open" && workspaceIdOf(request) === "local-only")
+        .map(request => request.params);
+      expect(opens).toHaveLength(2);
+      if (abandons) expect(opens[0]).toMatchObject({ abandonOrdinaryPull: true });
+      else expect(opens[0]).not.toHaveProperty("abandonOrdinaryPull");
+      expect(opens[1]).not.toHaveProperty("abandonOrdinaryPull");
+    } finally { await f.close(); }
+  });
+
   it("passes account changes to relay-session cleanup", async () => {
     const f = fixture();
     try {

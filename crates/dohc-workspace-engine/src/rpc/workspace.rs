@@ -392,6 +392,11 @@ struct WorkspaceOpenParams {
     project_collections: bool,
     #[serde(default)]
     relay: Option<RelayOpenParams>,
+    /// The workspace has no ordinary sync configured, so an unfinished
+    /// ordinary pull's applied pages become local truth before anything can
+    /// reconcile them.
+    #[serde(default)]
+    abandon_ordinary_pull: bool,
 }
 
 #[derive(Deserialize)]
@@ -708,6 +713,14 @@ impl EngineService {
                 "passive store configuration is incompatible",
             ));
         }
+        if params.abandon_ordinary_pull
+            && (passive || params.skip_startup_maintenance || params.relay.is_some())
+        {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "abandonOrdinaryPull needs a full owner open without relay",
+            ));
+        }
         let cancellation = OperationCancellation::new(ctx);
         let _open_serial = tokio::select! {
             biased;
@@ -813,6 +826,15 @@ impl EngineService {
                         )
                     })?;
                     driver.set_author_json(author_json);
+                }
+                if params.abandon_ordinary_pull {
+                    Self::read_under_ctx(
+                        &cancellation,
+                        "workspace.open (abandon ordinary pull)",
+                        open.actor
+                            .abandon_ordinary_pull(params.workspace_id.clone()),
+                    )
+                    .await?;
                 }
                 return Ok(json!({ "workspace": handle }));
             }
@@ -1005,6 +1027,16 @@ impl EngineService {
         .await?
         {
             return Err(bound_to_another_workspace());
+        }
+        // Before startup maintenance, capture or a Collections worker can
+        // reconcile against what the pull left.
+        if params.abandon_ordinary_pull {
+            Self::read_under_ctx(
+                &cancellation,
+                "workspace.open (abandon ordinary pull)",
+                actor.abandon_ordinary_pull(params.workspace_id.clone()),
+            )
+            .await?;
         }
         if requested_mode == WorkspaceOpenMode::Passive {
             Self::read_under_ctx(
@@ -1429,6 +1461,100 @@ mod tests {
     use dohc_engine_testkit::ScratchDir;
     use dohc_engine_testkit::ScriptedFaults;
     use std::time::Duration;
+
+    fn engine_db(root: &std::path::Path) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open(root.join(".dohc").join("engine").join("engine.db"))
+            .unwrap();
+        conn.busy_timeout(Duration::from_secs(5)).unwrap();
+        conn
+    }
+
+    fn leave_pull_unfinished(root: &std::path::Path) {
+        engine_db(root)
+            .execute(
+                "INSERT INTO sync_identity \
+                 (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms,ordinary_pull_token) \
+                 VALUES ('local-only','origin','epoch','stream',1,'unfinished') \
+                 ON CONFLICT(workspace_id) DO UPDATE SET ordinary_pull_token='unfinished'",
+                [],
+            )
+            .unwrap();
+    }
+
+    fn pull_token(root: &std::path::Path) -> Option<String> {
+        engine_db(root)
+            .query_row(
+                "SELECT ordinary_pull_token FROM sync_identity WHERE workspace_id='local-only'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn abandoning_an_ordinary_pull_needs_a_full_owner_open_without_relay() {
+        let scratch = ScratchDir::new().unwrap();
+        let service = EngineService::new();
+        let base = json!({"rootDir":scratch.path(), "workspaceId":"local-only",
+            "captureMode":"none", "abandonOrdinaryPull":true});
+        for (key, value) in [
+            ("storeMode", json!("passive")),
+            ("skipStartupMaintenance", json!(true)),
+            (
+                "relay",
+                json!({"baseUrl":"https://relay.test", "bearerToken":"token"}),
+            ),
+        ] {
+            let mut params = base.clone();
+            params[key] = value;
+            let refused = service
+                .workspace_open(&RequestContext::unbounded(), params)
+                .await
+                .expect_err(key);
+            assert_eq!(refused.code, ErrorCode::InvalidParams, "{key}");
+            assert_eq!(
+                refused.message, "abandonOrdinaryPull needs a full owner open without relay",
+                "{key}"
+            );
+        }
+        assert!(lock(&service.handles).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_local_only_owner_open_abandons_the_unfinished_ordinary_pull() {
+        let scratch = ScratchDir::new().unwrap();
+        let service = EngineService::new();
+        let plain =
+            json!({"rootDir":scratch.path(), "workspaceId":"local-only", "captureMode":"none"});
+        let mut abandoning = plain.clone();
+        abandoning["abandonOrdinaryPull"] = json!(true);
+        let open = |params: Value| {
+            let service = &service;
+            async move {
+                let opened = service
+                    .workspace_open(&RequestContext::unbounded(), params)
+                    .await
+                    .unwrap();
+                serde_json::from_value::<WorkspaceHandle>(opened["workspace"].clone()).unwrap()
+            }
+        };
+        let handle = open(plain.clone()).await;
+        service.workspace_close(Some(handle)).await.unwrap();
+        leave_pull_unfinished(scratch.path());
+
+        // A transport failure, sign-out or detach reopens without it.
+        let handle = open(plain).await;
+        assert_eq!(pull_token(scratch.path()).as_deref(), Some("unfinished"));
+        // The open binding takes it too.
+        assert_eq!(open(abandoning.clone()).await, handle);
+        assert_eq!(pull_token(scratch.path()), None);
+        service.workspace_close(Some(handle)).await.unwrap();
+
+        leave_pull_unfinished(scratch.path());
+        let handle = open(abandoning).await;
+        assert_eq!(pull_token(scratch.path()), None);
+        service.workspace_close(Some(handle)).await.unwrap();
+    }
 
     #[tokio::test]
     async fn passive_store_refuses_read_only_attach() {
@@ -3651,6 +3777,7 @@ mod tests {
                     replication_epoch: "epoch".to_owned(),
                     stream_identity: "stream".to_owned(),
                     settlement_report_id: None,
+                    ordinary_pull: None,
                 }),
             },
         );

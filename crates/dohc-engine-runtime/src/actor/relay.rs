@@ -1910,6 +1910,18 @@ impl ActorHandle {
         .await
     }
 
+    /// Make an unfinished ordinary pull's applied pages local truth, for a
+    /// workspace that opens with no ordinary sync configured.
+    pub async fn abandon_ordinary_pull(&self, workspace_id: String) -> Result<(), RuntimeError> {
+        self.run(move |store, _cache| {
+            match dohc_engine_sync::abandon_ordinary_pull(store, &workspace_id, &NoFaults)? {
+                TxnOutcome::Committed(()) => Ok(()),
+                TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+            }
+        })
+        .await
+    }
+
     /// How many changes that did not originate on this computer the engine
     /// has applied to the workspace; 0 before the first.
     pub async fn remote_changes_applied(&self, workspace_id: String) -> Result<i64, RuntimeError> {
@@ -3371,6 +3383,7 @@ mod hosted_refusal_tests {
                     stream_identity: "stream".into(),
                     bootstrap_complete: true,
                     settlement_report_id: None,
+                    ordinary_pull: None,
                 },
                 now_ms: 2_000,
             },

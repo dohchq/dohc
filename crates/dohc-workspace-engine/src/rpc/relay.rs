@@ -2418,6 +2418,7 @@ mod tests {
                         stream_identity: "stream".to_owned(),
                         bootstrap_complete: true,
                         settlement_report_id: None,
+                        ordinary_pull: None,
                     }),
                 )
                 .expect("issue a cursor");
