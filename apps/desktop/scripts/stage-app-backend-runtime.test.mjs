@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createRequire } from 'node:module';
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -16,7 +16,8 @@ const builderRequire = createRequire(require.resolve('electron-builder/package.j
 const { getFileMatchers, copyFiles } = builderRequire('app-builder-lib/out/fileMatcher.js');
 
 test('packaging preserves the relocated child and Wasm closure and rejects resource drift', async t => {
-  const root = await mkdtemp(join(tmpdir(), 'dohc-app-runtime-package-'));
+  // A Collection's folder may not contain links, and macOS's temp folder is one.
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'dohc-app-runtime-package-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const source = join(root, 'source');
   await stageAppBackendRuntime({ destination: join(source, 'resources/app-backend-runtime') });

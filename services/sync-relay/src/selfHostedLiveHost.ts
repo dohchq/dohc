@@ -155,7 +155,9 @@ export async function startSelfHostedLiveHost(options: {
     return {workspaces, documents: targets.map(document), departing: departing.map(document)};
   }
   async function start(): Promise<Host> {
-    const temporary = await mkdtemp(join(tmpdir(), "dohc-self-host-config-"));
+    // The service host refuses a configuration path that resolves elsewhere,
+    // and macOS keeps its temporary folder behind a link.
+    const temporary = await mkdtemp(join(realpathSync(tmpdir()), "dohc-self-host-config-"));
     try {
       const configPath = join(temporary, "service.json");
       // The daemon starts empty. Each update attaches and detaches its workspaces and documents.

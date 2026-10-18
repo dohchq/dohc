@@ -1,9 +1,19 @@
 import { execFile } from "node:child_process";
+import { basename } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
 const ENGINE_BASENAME = "dohc-workspace-engine";
+
+/**
+ * Whether a process table name is the engine. macOS `comm` is the executable's
+ * full path, Linux truncates it to 15 bytes, and Windows adds `.exe`.
+ */
+function isEngineProcessName(name: string): boolean {
+  const executable = basename(name).replace(/\.exe$/iu, "");
+  return executable === (process.platform === "linux" ? ENGINE_BASENAME.slice(0, 15) : ENGINE_BASENAME);
+}
 
 interface ProcessRow {
   pid: number;
@@ -66,9 +76,7 @@ export async function engineDaemonPids(appPid: number): Promise<number[]> {
     }
   }
   return rows
-    .filter(
-      (row) => row.pid !== appPid && descendants.has(row.pid) && row.name.startsWith(ENGINE_BASENAME),
-    )
+    .filter((row) => row.pid !== appPid && descendants.has(row.pid) && isEngineProcessName(row.name))
     .map((row) => row.pid);
 }
 

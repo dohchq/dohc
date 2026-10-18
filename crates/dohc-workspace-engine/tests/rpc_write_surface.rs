@@ -3469,8 +3469,7 @@ async fn active_secret_delete_refuses_non_regular_target_and_leaves_job_pending(
     let target = scratch.path().join(".env");
     std::fs::remove_file(&target).expect("remove prior plaintext");
     #[cfg(unix)]
-    let socket =
-        std::os::unix::net::UnixListener::bind(&target).expect("socket at secret delete path");
+    let socket = bind_socket_at(&target);
     #[cfg(not(unix))]
     {
         std::fs::create_dir(&target).expect("directory at secret delete path");
@@ -7044,4 +7043,41 @@ fn seed_binary_before_fork(root: &Path, workspace_id: &str) {
             &faults,
         )
         .expect("fork");
+}
+
+/// A live socket at `target`. A socket path must fit `sun_path` (104 bytes on
+/// macOS, 108 on Linux), which a scratch path can exceed. A longer target is
+/// bound in a short folder on its own filesystem, so the rename cannot cross
+/// devices, and moved into place; the listener keeps it live there.
+#[cfg(unix)]
+fn bind_socket_at(target: &Path) -> std::os::unix::net::UnixListener {
+    use std::os::unix::{fs::MetadataExt, net::UnixListener};
+    let sun_path = if cfg!(target_vendor = "apple") {
+        104
+    } else {
+        108
+    };
+    let fits = |path: &Path| path.as_os_str().len() < sun_path;
+    if fits(target) {
+        return UnixListener::bind(target).expect("socket at target");
+    }
+    let parent = target.parent().expect("target parent");
+    let device = std::fs::metadata(parent).expect("target parent").dev();
+    let short = parent
+        .ancestors()
+        .map(|dir| dir.join(format!(".dohc-sock-{}", std::process::id())))
+        .find(|folder| {
+            fits(&folder.join("s"))
+                && folder
+                    .parent()
+                    .and_then(|dir| std::fs::metadata(dir).ok())
+                    .is_some_and(|metadata| metadata.dev() == device)
+        })
+        .expect("a short folder on the target's filesystem");
+    std::fs::create_dir(&short).expect("short socket folder");
+    let socket = short.join("s");
+    let listener = UnixListener::bind(&socket).expect("bind short socket");
+    std::fs::rename(&socket, target).expect("socket at target");
+    std::fs::remove_dir(&short).expect("remove short socket folder");
+    listener
 }

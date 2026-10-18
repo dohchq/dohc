@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { once } from 'node:events';
 import { createServer as httpsServer, request as httpsRequest } from 'node:https';
@@ -105,7 +105,8 @@ export function presencePeerSchedulePass(peers: Array<{ selectionHz: number; typ
 export async function createPresenceFixture(options: { workspace: Workspace; profile: string; runDir: string; signal: AbortSignal }) {
   const { workspace, runDir, signal } = options;
   const profile = selfHostLiveProfile(), documents = readPresenceDocuments(workspace);
-  const privateDir = join(runDir, 'presence'); await mkdir(privateDir);
+  // The relay deployment refuses a path that resolves elsewhere, such as one under macOS /tmp.
+  const privateDir = join(realpathSync(runDir), 'presence'); await mkdir(privateDir);
   const configPath = join(privateDir, 'deployment.json');
   initializeRelayDeployment({ configPath, relayPath: join(privateDir, 'data', 'relay.sqlite'), continuityDirectory: join(privateDir, 'continuity') });
   const deployment = openRelayDeployment(configPath, { liveTickets: { ...profile.namedLive.tickets, now: Date.now } });
