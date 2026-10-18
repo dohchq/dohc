@@ -13,6 +13,7 @@ import {deliverStopRestore, snapshotStopRestoreLookup} from "./liveRestoreDelive
 import type {StopRestoreLookup} from "./storage/liveRestoreOperation";
 import type {LiveRestorePreparation} from "./liveRestorePreparation";
 import {LiveHostRegistrations} from "./liveHostRegistration";
+import type {ServiceSeedDelivery} from "./serviceOwnerTransport";
 
 type OwnerDeliveryOutcome = CommittedDeliveryOutcome & {continueDrain: boolean};
 // The host settled but its file write has not landed. The pass waits for the next wake instead of draining on.
@@ -33,6 +34,8 @@ export class OwnerCommittedDelivery {
     ownerAdmission: OwnerOutboxAdmission;
     restore?: LiveRestorePreparation;
     publish?(signal?: AbortSignal): Promise<unknown>;
+    /** A native service transport's permission to acknowledge its adoption seed before applying it. */
+    seedDelivery?(): ServiceSeedDelivery | undefined;
   }) {
     authorityInteger(connection.bounds.maxBytes,1); authorityInteger(connection.bounds.maxEvents,1); authorityInteger(connection.deadlineMs,1);
     this.#store = storage.createLiveCommittedDeliveryStore(history, connection.ownerAdmission.activation);
@@ -171,6 +174,7 @@ export class OwnerCommittedDelivery {
       };
       const outbox = await drainOwnerOutbox({storage: this.storage,admission: c.ownerAdmission,client: c.client,workspace: c.workspace,host: c.host,
         registrationId,binding: saved.binding,nextRequestId: c.nextRequestId,deadlineMs: c.deadlineMs,signal,assertCurrent: current.assertCurrent,
+        seedDelivery: c.seedDelivery?.(),
         adoption: {...recorded, applied: () => {if (this.#adopted.get(key) === adopted) this.#seedApplied.set(key, recorded.adoptionId);}},
         applyThrough: async receipt => {
           await applyPending(receipt);

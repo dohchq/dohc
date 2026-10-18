@@ -1211,6 +1211,31 @@ pub fn acknowledge(
     receipts: &[OwnerDeliveryReceipt],
 ) -> Result<OwnerOutboxAcknowledgeResult, OwnerOutboxError> {
     validate_identifier(outbox_id, "outbox id must be non-empty and bounded")?;
+    validate_receipts(receipts)?;
+    let outcome = store.write_with(&NoFaults, |tx| {
+        let parent = read_parent(tx, outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
+        require_workspace(workspace_id, &parent.binding.workspace_id)?;
+        if parent.state == OwnerOutboxState::Quarantined {
+            return Err(OwnerOutboxError::Frozen);
+        }
+        let observed = draft::read_observed_in(tx, &parent.binding)?.is_some();
+        if observed && accepted::check_release_in(tx, &parent, receipts)? {
+            return Ok(OwnerOutboxAcknowledgeResult {
+                acknowledged: receipts.len() as i64,
+                pending_bytes: parent.pending_bytes,
+                oldest_entry_at_ms: parent.oldest_entry_at_ms,
+            });
+        }
+        let result = acknowledge_prefix_in(tx, &parent, receipts)?;
+        if observed {
+            accepted::prune_in(tx, &parent.binding)?;
+        }
+        Ok(result)
+    })?;
+    committed(outcome)
+}
+
+fn validate_receipts(receipts: &[OwnerDeliveryReceipt]) -> Result<(), OwnerOutboxError> {
     if receipts.is_empty() {
         return Err(OwnerOutboxError::InvalidInput("receipts must not be empty"));
     }
@@ -1219,110 +1244,197 @@ pub fn acknowledge(
         if !delivery_ids.insert(&receipt.delivery_id) {
             return Err(OwnerOutboxError::ReceiptMismatch);
         }
-        validate_identifier(
-            &receipt.delivery_id,
-            "delivery id must be non-empty and bounded",
-        )?;
-        validate_digest(&receipt.update_digest)?;
-        if !(1..=9_007_199_254_740_991).contains(&receipt.accepting_host_epoch) {
-            return Err(OwnerOutboxError::InvalidInput(
-                "accepting host epoch must be a positive safe integer",
-            ));
-        }
-        if !(1..=9_007_199_254_740_991).contains(&receipt.journal_cursor) {
-            return Err(OwnerOutboxError::InvalidInput(
-                "journal cursor must be a positive safe integer",
-            ));
-        }
+        validate_receipt(receipt)?;
     }
+    Ok(())
+}
 
-    let outcome = store.write_with(&NoFaults, |tx| {
-        let parent = read_parent(tx, outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
-        require_workspace(workspace_id, &parent.binding.workspace_id)?;
-        if parent.state == OwnerOutboxState::Quarantined { return Err(OwnerOutboxError::Frozen); }
-        let observed = draft::read_observed_in(tx, &parent.binding)?.is_some();
-        if observed && accepted::check_release_in(tx, &parent, receipts)? {
-            return Ok(OwnerOutboxAcknowledgeResult {acknowledged: receipts.len() as i64,
-                pending_bytes: parent.pending_bytes, oldest_entry_at_ms: parent.oldest_entry_at_ms});
-        }
-        let mut statement = tx
-            .prepare(
-                "SELECT sequence,delivery_id,update_digest,byte_length \
-                 FROM owner_ydoc_outbox_entries \
-                 WHERE outbox_id=?1 AND pending=1 ORDER BY sequence",
-            )
-            .map_err(read_sql)?;
-        let rows = statement
-            .query_map([outbox_id], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?))
-            })
-            .map_err(read_sql)?;
-        let prefix = rows
-            .take(receipts.len())
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(read_sql)?;
-        if prefix.len() != receipts.len()
-            || prefix.iter().zip(receipts).any(|((_, delivery_id, digest, _), receipt)| {
-                delivery_id != &receipt.delivery_id || digest != &receipt.update_digest
-            })
-        {
-            return Err(OwnerOutboxError::ReceiptMismatch);
-        }
-        let acknowledged_bytes = prefix.iter().try_fold(0_i64, |total, row| {
-            total.checked_add(row.3).ok_or(OwnerOutboxError::Corrupt)
-        })?;
-        let last_sequence = prefix.last().ok_or(OwnerOutboxError::ReceiptMismatch)?.0;
-        let released_digests = prefix
-            .iter()
-            .map(|(_, _, digest, _)| digest.clone())
-            .collect::<BTreeSet<_>>();
-        if observed {
-            for receipt in receipts {
-                tx.execute("UPDATE owner_ydoc_outbox_entries SET accepted_receipt_json=?3 WHERE outbox_id=?1 AND delivery_id=?2 AND pending=1",
-                    params![outbox_id,receipt.delivery_id,serde_json::to_string(receipt).map_err(|_|OwnerOutboxError::Corrupt)?]).map_err(write_sql)?;
-            }
-        }
-        let acknowledged = tx
-            .execute(
-                "UPDATE owner_ydoc_outbox_entries SET pending=0,update_blob_digest=NULL \
-                 WHERE outbox_id=?1 AND pending=1 AND sequence<=?2",
-                params![outbox_id, last_sequence],
+fn validate_receipt(receipt: &OwnerDeliveryReceipt) -> Result<(), OwnerOutboxError> {
+    validate_identifier(
+        &receipt.delivery_id,
+        "delivery id must be non-empty and bounded",
+    )?;
+    validate_digest(&receipt.update_digest)?;
+    if !(1..=9_007_199_254_740_991).contains(&receipt.accepting_host_epoch) {
+        return Err(OwnerOutboxError::InvalidInput(
+            "accepting host epoch must be a positive safe integer",
+        ));
+    }
+    if !(1..=9_007_199_254_740_991).contains(&receipt.journal_cursor) {
+        return Err(OwnerOutboxError::InvalidInput(
+            "journal cursor must be a positive safe integer",
+        ));
+    }
+    Ok(())
+}
+
+/// Acknowledge the pending prefix of `outbox_id` that `receipts` name, in
+/// order, keeping each receipt. Every receipt must name its entry's exact
+/// delivery and digest.
+pub(crate) fn acknowledge_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    outbox_id: &str,
+    receipts: &[OwnerDeliveryReceipt],
+) -> Result<OwnerOutboxAcknowledgeResult, OwnerOutboxError> {
+    validate_receipts(receipts)?;
+    let parent = read_parent(tx, outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
+    if parent.state == OwnerOutboxState::Quarantined {
+        return Err(OwnerOutboxError::Frozen);
+    }
+    acknowledge_prefix_in(tx, &parent, receipts)
+}
+
+/// Keep the missing receipt of an entry that was acknowledged before
+/// receipts were kept. An entry that already keeps this exact receipt writes
+/// nothing, and any other entry refuses.
+pub(crate) fn record_missing_receipt_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    outbox_id: &str,
+    receipt: &OwnerDeliveryReceipt,
+) -> Result<(), OwnerOutboxError> {
+    validate_receipt(receipt)?;
+    let json = serde_json::to_string(receipt).map_err(|_| OwnerOutboxError::Corrupt)?;
+    let entry: Option<(String, bool, Option<String>, Option<String>)> = tx
+        .query_row(
+            "SELECT update_digest,pending,accepted_receipt_json,terminal_reason FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND delivery_id=?2",
+            params![outbox_id, receipt.delivery_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()
+        .map_err(read_sql)?;
+    let (digest, pending, saved, terminal) = entry.ok_or(OwnerOutboxError::NotFound)?;
+    if digest != receipt.update_digest || pending || terminal.is_some() {
+        return Err(OwnerOutboxError::ReceiptMismatch);
+    }
+    match saved {
+        Some(saved) if saved == json => Ok(()),
+        Some(_) => Err(OwnerOutboxError::ReceiptMismatch),
+        None => {
+            tx.execute(
+                "UPDATE owner_ydoc_outbox_entries SET accepted_receipt_json=?3 WHERE outbox_id=?1 AND delivery_id=?2 AND pending=0 AND accepted_receipt_json IS NULL",
+                params![outbox_id, receipt.delivery_id, json],
             )
             .map_err(write_sql)?;
-        if acknowledged != receipts.len() {
-            return Err(OwnerOutboxError::Corrupt);
+            Ok(())
         }
-        for digest in released_digests {
-            delete_binary_blob_if_unreferenced(tx, &digest)?;
-        }
-        let pending_bytes = parent
-            .pending_bytes
-            .checked_sub(acknowledged_bytes)
-            .filter(|value| *value >= 0)
-            .ok_or(OwnerOutboxError::Corrupt)?;
-        let oldest_entry_at_ms = tx
-            .query_row(
-                "SELECT MIN(created_at_ms) FROM owner_ydoc_outbox_entries \
-                 WHERE outbox_id=?1 AND pending=1",
-                [outbox_id],
-                |row| row.get::<_, Option<i64>>(0),
-            )
-            .map_err(read_sql)?;
-        tx.execute(
-            "UPDATE owner_ydoc_outboxes SET pending_bytes=?2,oldest_entry_at_ms=?3, \
-             state=CASE WHEN state='sealed' AND ?2=0 THEN 'active' ELSE state END WHERE outbox_id=?1",
-            params![outbox_id, pending_bytes, oldest_entry_at_ms],
+    }
+}
+
+/// The terminal reason of an adoption seed its released activation never
+/// delivered. The reason alone proves nothing; the caller validates the seed.
+pub(crate) const ACTIVATION_RELEASED: &str = "activation-released";
+
+/// Retire a pending adoption seed the caller proved was never delivered. It
+/// keeps no receipt and no bytes, and the totals count it no longer.
+pub(crate) fn abandon_seed_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    outbox_id: &str,
+    sequence: i64,
+) -> Result<(), OwnerOutboxError> {
+    let digest: Option<String> = tx
+        .query_row(
+            "UPDATE owner_ydoc_outbox_entries SET pending=0,accepted_receipt_json=NULL,update_blob_digest=NULL,\
+             terminal_blob_digest=NULL,terminal_reason=?3 WHERE outbox_id=?1 AND sequence=?2 AND pending=1 \
+             AND accepted_receipt_json IS NULL RETURNING update_digest",
+            params![outbox_id, sequence, ACTIVATION_RELEASED],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(write_sql)?;
+    let digest = digest.ok_or(OwnerOutboxError::ReceiptMismatch)?;
+    refresh_pending_in_tx(tx, outbox_id)?;
+    delete_binary_blob_if_unreferenced(tx, &digest)
+}
+
+fn acknowledge_prefix_in(
+    tx: &rusqlite::Transaction<'_>,
+    parent: &ParentRow,
+    receipts: &[OwnerDeliveryReceipt],
+) -> Result<OwnerOutboxAcknowledgeResult, OwnerOutboxError> {
+    let outbox_id = parent.outbox_id.as_str();
+    let mut statement = tx
+        .prepare(
+            "SELECT sequence,delivery_id,update_digest,byte_length \
+             FROM owner_ydoc_outbox_entries \
+             WHERE outbox_id=?1 AND pending=1 ORDER BY sequence",
+        )
+        .map_err(read_sql)?;
+    let rows = statement
+        .query_map([outbox_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })
+        .map_err(read_sql)?;
+    let prefix = rows
+        .take(receipts.len())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(read_sql)?;
+    if prefix.len() != receipts.len()
+        || prefix
+            .iter()
+            .zip(receipts)
+            .any(|((_, delivery_id, digest, _), receipt)| {
+                delivery_id != &receipt.delivery_id || digest != &receipt.update_digest
+            })
+    {
+        return Err(OwnerOutboxError::ReceiptMismatch);
+    }
+    let acknowledged_bytes = prefix.iter().try_fold(0_i64, |total, row| {
+        total.checked_add(row.3).ok_or(OwnerOutboxError::Corrupt)
+    })?;
+    let last_sequence = prefix.last().ok_or(OwnerOutboxError::ReceiptMismatch)?.0;
+    let released_digests = prefix
+        .iter()
+        .map(|(_, _, digest, _)| digest.clone())
+        .collect::<BTreeSet<_>>();
+    // Every acknowledgement keeps its receipt, observed or not: a cleared
+    // entry alone does not prove the relay accepted it.
+    for receipt in receipts {
+        tx.execute("UPDATE owner_ydoc_outbox_entries SET accepted_receipt_json=?3 WHERE outbox_id=?1 AND delivery_id=?2 AND pending=1",
+            params![outbox_id,receipt.delivery_id,serde_json::to_string(receipt).map_err(|_|OwnerOutboxError::Corrupt)?]).map_err(write_sql)?;
+    }
+    let acknowledged = tx
+        .execute(
+            "UPDATE owner_ydoc_outbox_entries SET pending=0,update_blob_digest=NULL \
+             WHERE outbox_id=?1 AND pending=1 AND sequence<=?2",
+            params![outbox_id, last_sequence],
         )
         .map_err(write_sql)?;
-        if observed { accepted::prune_in(tx, &parent.binding)?; }
-        Ok(OwnerOutboxAcknowledgeResult {
-            acknowledged: i64::try_from(receipts.len())
-                .map_err(|_| OwnerOutboxError::InvalidInput("too many receipts"))?,
-            pending_bytes,
-            oldest_entry_at_ms,
-        })
-    })?;
-    committed(outcome)
+    if acknowledged != receipts.len() {
+        return Err(OwnerOutboxError::Corrupt);
+    }
+    for digest in released_digests {
+        delete_binary_blob_if_unreferenced(tx, &digest)?;
+    }
+    let pending_bytes = parent
+        .pending_bytes
+        .checked_sub(acknowledged_bytes)
+        .filter(|value| *value >= 0)
+        .ok_or(OwnerOutboxError::Corrupt)?;
+    let oldest_entry_at_ms = tx
+        .query_row(
+            "SELECT MIN(created_at_ms) FROM owner_ydoc_outbox_entries \
+             WHERE outbox_id=?1 AND pending=1",
+            [outbox_id],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .map_err(read_sql)?;
+    tx.execute(
+        "UPDATE owner_ydoc_outboxes SET pending_bytes=?2,oldest_entry_at_ms=?3, \
+         state=CASE WHEN state='sealed' AND ?2=0 THEN 'active' ELSE state END WHERE outbox_id=?1",
+        params![outbox_id, pending_bytes, oldest_entry_at_ms],
+    )
+    .map_err(write_sql)?;
+    Ok(OwnerOutboxAcknowledgeResult {
+        acknowledged: i64::try_from(receipts.len())
+            .map_err(|_| OwnerOutboxError::InvalidInput("too many receipts"))?,
+        pending_bytes,
+        oldest_entry_at_ms,
+    })
 }
 
 pub fn quarantine(

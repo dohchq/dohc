@@ -34,7 +34,8 @@ function stopAccess(client:unknown){
 }
 
 const verified=(native:ReturnType<typeof nativeHost>)=>serviceOwnerTransport({client:{sendRequest:native} as never,
-  workspace:"native-workspace",capture:async()=>capture,binding,nextRequestId:()=>2,assertCurrent(){}}).client;
+  workspace:"native-workspace",capture:async()=>capture,binding,storage:{},host:{mode:"service",hostId:"service",hostEpoch:1,instanceId:"instance",connectionId:"connection"} as never,
+  nextRequestId:()=>2,assertCurrent(){}}).client;
 
 it("stops a retained service owner through its verified session, sending native only the binding",async()=>{
   const native=nativeHost(true);

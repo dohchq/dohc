@@ -77,7 +77,7 @@ fn add_activation(f: &mut Fixture, id: &str, predecessor: &str, released: bool, 
                     covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,
                     max_pending_bytes,max_pending_age_ms,released_at_ms,released_restore_generation,
                     released_accepted_cursor,released_boundary_json,carried_manifest_json)
-                 VALUES ('namespace',?1,'workspace','main','object',?2,'adoption',?3,?4,?5,?6,?7,1,3,'{}',
+                 VALUES ('namespace',?1,'workspace','main','object',?2,iif(?8,NULL,'adoption'),?3,?4,?5,?6,?7,1,3,'{}',
                     iif(?8,NULL,'evidence'),iif(?8,NULL,'coverage'),iif(?8,NULL,0),iif(?8,NULL,?9),
                     iif(?8,NULL,0),iif(?8,NULL,'null'),iif(?8,NULL,1),iif(?8,NULL,1),
                     iif(?8,20,NULL),iif(?8,0,NULL),iif(?8,0,NULL),iif(?8,'[]',NULL),iif(?8,'[]',NULL))",
@@ -344,6 +344,47 @@ fn a_successor_follows_the_released_tail_of_its_own_chain() {
     );
     add_activation(&mut f, "current", "third", false, 5);
     assert_eq!(chain_tail(&f, "namespace").unwrap(), None, "the lineage is current again");
+}
+
+#[test]
+fn a_lineage_with_no_current_activation_settles_through_its_furthest_cut() {
+    let mut f = Fixture::new();
+    f.edit(true);
+    f.adopt().unwrap();
+    let mut event = f.cut.events[0].clone();
+    f.doc
+        .rewrite_content_to_markdown(ContentKind::Richdoc, "remote after adoption")
+        .unwrap();
+    event.update_bytes = f.doc.encode_full_state();
+    event.metadata.accepted.receipt.delivery_id = "remote-after-adoption".into();
+    event.metadata.accepted.receipt.journal_cursor = 8;
+    event.metadata.accepted.receipt.update_digest = hex_sha256(&event.update_bytes);
+    assert!(matches!(
+        apply_committed(&mut f.store, &mut WriterDocCache::new(), &f.handle, event, &NoFaults,
+            100_000_000, |_, _, _, _| Ok(())).unwrap(),
+        ApplicationResult::Applied(..)
+    ));
+    let pending = |f: &Fixture| {
+        f.store
+            .read_with(|conn| unload_pending(conn, "workspace", "object"))
+            .unwrap()
+    };
+    assert_eq!(pending(&f), Some(UnloadPending::Settlement), "applied past the cut at 7");
+    release(&mut f, "adoption");
+    assert_eq!(pending(&f), Some(UnloadPending::Settlement), "released, its cut still bounds it");
+    add_activation(&mut f, "successor", "adoption", false, 1);
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE live_owner_activations SET terminal_cursor=8 WHERE activation_id='successor'",
+                [],
+            )
+            .map_err(write_sql)
+        })
+        .unwrap();
+    assert_eq!(pending(&f), None, "the current activation's cut covers it");
+    release(&mut f, "successor");
+    assert_eq!(pending(&f), None, "with none current, the furthest cut still covers it");
 }
 
 #[test]

@@ -406,10 +406,10 @@ export class ServiceActivationDriver {
   #owner(target:ServiceActivationTarget,capture:(signal?:AbortSignal)=>Promise<NativeOwnerActivation>,state:Pick<Owner,"binding"|"actor"|"activationPending">,access?:ServiceActivationAccess):Owner{
     const o=this.options,c=o.config,workspace=o.workspaces.get(target.workspaceId)!;
     const transport=serviceOwnerTransport({client:o.client,workspace:workspace.handle,capture,binding:state.binding,
-      nextRequestId:o.nextRequestId,assertCurrent:o.assertCurrent});
+      storage:o.storage,host:o.host,nextRequestId:o.nextRequestId,assertCurrent:o.assertCurrent});
     const consumer=new OwnerCommittedDelivery(o.storage,o.history,{client:transport.client,workspace:workspace.handle,
       host:o.host,deadlineMs:o.deadlineMs,nextRequestId:o.nextRequestId,bounds:o.adoption,restore:o.restore,
-      publish:signal=>workspace.replica.publish(signal),
+      publish:signal=>workspace.replica.publish(signal),seedDelivery:transport.seedDelivery,
       ownerAdmission:{trustedAccount:o.trustedAccount,activation:access,shares:new Map([[target.workspaceId,target.shareId]]),
         maxEntriesPerDrain:c.maxEntriesPerDrain,maxBytesPerDrain:c.maxBytesPerDrain,validate:c.validateAdmission}});
     return {consumer,transport,completed:false,target:targetKey(target),...state};

@@ -50,6 +50,10 @@ pub use adoption::{adopt_owner_committed, OwnerAdoptionAck, OwnerAdoptionCut};
 mod restore_content;
 pub(crate) mod restore_fence;
 mod restore_resume;
+mod retirement;
+pub use retirement::{
+    reconcile_activation, JournalEvidence, Reconciliation, RetirementKey, RetirementScope,
+};
 mod settlement;
 pub use bootstrap::{
     bootstrap_committed, BootstrapResult, LiveApplicationBootstrap, LiveApplicationBootstrapAck,
@@ -910,6 +914,9 @@ pub enum ApplicationPending {
     /// terminal that materializes releases the interval, after which the same
     /// delivery applies.
     SettlementRequired,
+    /// The current native service activation's adoption seed has no receipt
+    /// yet. Only the seed's own delivery applies until it has one.
+    DeliveryPending,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApplicationResult {
@@ -1144,30 +1151,55 @@ pub enum UnloadPending {
     Materialization,
 }
 
-/// The settlement clause reads only the binding's current lineage: a restore
-/// replaces the lineage, and the replaced one never settles again. `?3` counts
-/// deferred updates.
+/// `?3` counts deferred updates.
 const UNLOAD_PENDING: &str = "SELECT
     EXISTS(SELECT 1 FROM live_restore_fences
         WHERE workspace_id=?1 AND object_id=?2 AND resume_receipt_json IS NULL),
     (?3 AND EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 AND object_id=?2))
         OR EXISTS(SELECT 1 FROM owner_ydoc_outboxes
-            WHERE workspace_id=?1 AND object_id=?2 AND pending_bytes>0 AND state<>'quarantined'),
-    EXISTS(SELECT 1 FROM live_device_update_applications a
-        JOIN live_device_application_bindings b
-            ON b.relay_database_namespace=a.relay_database_namespace AND b.workspace_id=a.workspace_id
-            AND b.main_version_id=a.main_version_id AND b.object_id=a.object_id
-            AND b.lineage_claim_id=a.lineage_claim_id
-        WHERE a.workspace_id=?1 AND a.object_id=?2 AND a.journal_cursor>max(
-            COALESCE((SELECT max(s.terminal_cursor) FROM live_device_settlements s
-                WHERE s.relay_database_namespace=a.relay_database_namespace AND s.workspace_id=a.workspace_id
-                AND s.main_version_id=a.main_version_id AND s.object_id=a.object_id
-                AND s.lineage_claim_id=a.lineage_claim_id),0),
-            COALESCE((SELECT o.terminal_cursor FROM live_owner_activations o
-                WHERE o.released_at_ms IS NULL
-                AND o.relay_database_namespace=a.relay_database_namespace AND o.workspace_id=a.workspace_id
-                AND o.main_version_id=a.main_version_id AND o.object_id=a.object_id
-                AND o.lineage_claim_id=a.lineage_claim_id),0)))";
+            WHERE workspace_id=?1 AND object_id=?2 AND pending_bytes>0 AND state<>'quarantined')";
+
+/// Whether the lineage `(?1..?5)` applied an update, through cursor `?6` when
+/// given, past both its last settlement and its owner boundary: the cut of
+/// its current activation, or else the furthest cut any of its activations
+/// adopted. Updates through an adoption's cut settled before it.
+const SETTLEMENT_PENDING: &str = "SELECT EXISTS(SELECT 1 FROM live_device_update_applications a
+    WHERE a.relay_database_namespace=?1 AND a.workspace_id=?2 AND a.main_version_id=?3
+      AND a.object_id=?4 AND a.lineage_claim_id=?5 AND (?6 IS NULL OR a.journal_cursor<=?6)
+      AND a.journal_cursor>max(
+        COALESCE((SELECT max(s.terminal_cursor) FROM live_device_settlements s
+            WHERE s.relay_database_namespace=?1 AND s.workspace_id=?2 AND s.main_version_id=?3
+              AND s.object_id=?4 AND s.lineage_claim_id=?5),0),
+        COALESCE((SELECT o.terminal_cursor FROM live_owner_activations o WHERE o.released_at_ms IS NULL
+              AND o.relay_database_namespace=?1 AND o.workspace_id=?2 AND o.main_version_id=?3
+              AND o.object_id=?4 AND o.lineage_claim_id=?5),
+            (SELECT max(o.terminal_cursor) FROM live_owner_activations o
+              WHERE o.relay_database_namespace=?1 AND o.workspace_id=?2 AND o.main_version_id=?3
+                AND o.object_id=?4 AND o.lineage_claim_id=?5),0)))";
+
+/// The one settlement-pending predicate: reconciliation, unload and parking
+/// all ask it of one lineage.
+pub(crate) fn settlement_pending(
+    conn: &Connection,
+    namespace: &str,
+    key: &DocKey,
+    lineage_claim_id: &str,
+    through: Option<i64>,
+) -> Result<bool, ApplicationError> {
+    conn.query_row(
+        SETTLEMENT_PENDING,
+        params![
+            namespace,
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            lineage_claim_id,
+            through
+        ],
+        |row| row.get(0),
+    )
+    .map_err(read_sql)
+}
 
 /// Name the first incomplete restore, delivery, or settlement record for one
 /// document. The caller still proves the artifact holds the head.
@@ -1197,22 +1229,44 @@ fn pending(
     object_id: &str,
     deferred: bool,
 ) -> Result<Option<UnloadPending>, ApplicationError> {
-    let (restore, delivery, settlement): (bool, bool, bool) = conn
+    let (restore, delivery): (bool, bool) = conn
         .query_row(
             UNLOAD_PENDING,
             params![workspace_id, object_id, deferred],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(read_sql)?;
-    Ok(if restore {
-        Some(UnloadPending::Restore)
-    } else if delivery {
-        Some(UnloadPending::Delivery)
-    } else if settlement {
-        Some(UnloadPending::Settlement)
-    } else {
-        None
-    })
+    if restore {
+        return Ok(Some(UnloadPending::Restore));
+    }
+    if delivery {
+        return Ok(Some(UnloadPending::Delivery));
+    }
+    // Only each binding's current lineage: a restore replaces the lineage,
+    // and the replaced one never settles again.
+    let mut bindings = conn
+        .prepare(
+            "SELECT relay_database_namespace,main_version_id,lineage_claim_id
+             FROM live_device_application_bindings WHERE workspace_id=?1 AND object_id=?2",
+        )
+        .map_err(read_sql)?;
+    let rows = bindings
+        .query_map(params![workspace_id, object_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(read_sql)?;
+    for row in rows {
+        let (namespace, version, lineage) = row.map_err(read_sql)?;
+        let key = DocKey::new(workspace_id, version, object_id)?;
+        if settlement_pending(conn, &namespace, &key, &lineage, None)? {
+            return Ok(Some(UnloadPending::Settlement));
+        }
+    }
+    Ok(None)
 }
 
 fn invalidate_registration(
@@ -1440,6 +1494,14 @@ pub fn apply_committed(
                         true,
                     ),
                     Vec::new(),
+                ));
+            }
+            if pending_seed(tx, &held.namespace, b)?.is_some_and(|(delivery, digest)| {
+                let receipt = &event.metadata.accepted.receipt;
+                delivery != receipt.delivery_id || digest != receipt.update_digest
+            }) {
+                return Ok(ApplicationResult::Pending(
+                    ApplicationPending::DeliveryPending,
                 ));
             }
             check_provenance(tx, &held.namespace, &event)?;
@@ -1683,14 +1745,52 @@ struct OwnDraft {
     declaration: Option<AgentDeclaration>,
 }
 
+/// The delivery and digest of the current activation's adoption seed while
+/// the relay's receipt for it is outstanding. Only a native service
+/// activation, which keeps its imported source, delivers its seed before
+/// applying it; a device host applies its seed first.
+fn pending_seed(
+    conn: &Connection,
+    namespace: &str,
+    b: &LiveObjectBinding,
+) -> Result<Option<(String, String)>, ApplicationError> {
+    conn.query_row(
+        &format!(
+            "SELECT e.delivery_id,e.update_digest FROM owner_ydoc_outbox_entries e
+             JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id
+             JOIN {} v ON v.relay_database_namespace=?1 AND v.workspace_id=o.workspace_id
+               AND v.main_version_id=o.main_version_id AND v.object_id=o.object_id
+               AND v.lineage_claim_id=o.lineage_claim_id
+             JOIN ydoc_owner_activation_sources s ON s.activation_id=v.activation_id
+               AND s.relay_database_namespace=?1 AND s.workspace_id=o.workspace_id
+               AND s.version_id=o.main_version_id AND s.object_id=o.object_id
+               AND s.lineage_claim_id=o.lineage_claim_id
+             WHERE o.workspace_id=?2 AND o.main_version_id=?3 AND o.object_id=?4 AND o.lineage_claim_id=?5
+               AND e.pending=1 AND json_extract(e.native_source_json,'$.origin.kind')='adoptionSeed'
+               AND json_extract(e.native_source_json,'$.adoptionId')=v.activation_id",
+            owner_activations::CURRENT_ACTIVATIONS
+        ),
+        params![
+            namespace,
+            b.workspace_id,
+            b.main_version_id,
+            b.object_id,
+            b.lineage_claim_id
+        ],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+    .map_err(read_sql)
+}
+
 fn own_draft(
     tx: &Transaction<'_>,
     key: &DocKey,
     receipt: &LiveUpdateReceipt,
 ) -> Result<Option<OwnDraft>, ApplicationError> {
-    let entry: Option<(String, Option<String>)> = tx
+    let entry: Option<(String, Option<String>, Option<String>)> = tx
         .query_row(
-            "SELECT e.native_source_json,e.agent_declaration_json FROM owner_ydoc_outbox_entries e \
+            "SELECT e.native_source_json,e.agent_declaration_json,e.accepted_receipt_json FROM owner_ydoc_outbox_entries e \
              JOIN owner_ydoc_outboxes o ON o.outbox_id = e.outbox_id \
              WHERE e.delivery_id = ?1 AND e.update_digest = ?2 \
                AND o.workspace_id = ?3 AND o.main_version_id = ?4 AND o.object_id = ?5 \
@@ -1702,13 +1802,24 @@ fn own_draft(
                 key.version_id,
                 key.object_id
             ],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(read_sql)?;
-    let Some((source, declaration)) = entry else {
+    let Some((source, declaration, saved)) = entry else {
         return Ok(None);
     };
+    // An acknowledged entry keeps the receipt the relay gave it; only that
+    // acceptance applies as this entry.
+    if let Some(saved) = saved {
+        let saved: crate::owner_outbox::OwnerDeliveryReceipt =
+            serde_json::from_str(&saved).map_err(|_| ApplicationError::Corrupt)?;
+        if saved.journal_cursor != receipt.journal_cursor
+            || saved.accepting_host_epoch != receipt.accepting_host_epoch
+        {
+            return Err(ApplicationError::Conflict);
+        }
+    }
     let source: crate::owner_outbox::OwnerOutboxNativeSource =
         serde_json::from_str(&source).map_err(|_| ApplicationError::Corrupt)?;
     Ok(Some(OwnDraft {

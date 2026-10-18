@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { expect, it, vi } from "vitest";
 import { drainOwnerOutbox, type OwnerOutboxAdmission } from "./ownerOutboxDelivery.js";
+import { serviceOwnerTransport } from "./serviceOwnerTransport.js";
 import type {LiveUpdateHostApplicationAck, LiveUpdateReceipt} from "@dohc/live-session-contract/live-update-admission";
 
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
@@ -9,30 +10,47 @@ const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("he
 const seedKey = (adoptionId: string, sequence: number) => (updateDigest: string) =>
   `owner-adoption:${sha(Buffer.from(JSON.stringify([adoptionId, sequence, updateDigest])))}`;
 
-function fixture(maxEntriesPerDrain = 3, maxBytesPerDrain = 10_000, agentDeclaration?: object, firstKey?: (updateDigest: string) => string, personEdit = true) {
+// The delivery native gives an outbox's first entry (owner_outbox.rs).
+const firstDelivery = (updateDigest: string) => `owner-delivery-${sha(Buffer.from(`outbox\0${1}\0${updateDigest}`))}`;
+const serviceHost = {mode: "service", hostId: "host", hostEpoch: 1, instanceId: "instance", connectionId: "connection"};
+
+/** `seedDigest` makes the first entry's delivery the one native gives a seed of that full state. */
+function fixture(maxEntriesPerDrain = 3, maxBytesPerDrain = 10_000, agentDeclaration?: object, firstKey?: (updateDigest: string) => string, personEdit = true,
+  seedDigest?: string) {
   const base = Buffer.alloc(1_048_576, 17);
   const binding = {workspaceId: "workspace",mainVersionId: "main",objectId: "object",lineageClaimId: sha(base),currentPath: "a.md",selectorPaths: ["a.md"],restoreFenceGeneration: 1};
   const entries = [1,3,7].map(sequence => ({sequence,
     appendKey: sequence === 1 && firstKey ? firstKey(sha(Buffer.from([sequence]))) : `append-${sequence}`,
-    deliveryId: `delivery-${sequence}`,updateDigest: sha(Buffer.from([sequence])),byteLength: 1,createdAtMs: sequence,
+    deliveryId: sequence === 1 && seedDigest ? firstDelivery(seedDigest) : `delivery-${sequence}`,updateDigest: sha(Buffer.from([sequence])),byteLength: 1,createdAtMs: sequence,
     ...(personEdit ? {personEdit: true} : {}),
     ...(sequence === 1 && agentDeclaration ? {agentDeclaration} : {})}));
   const applied = vi.fn();
-  const host = {hostId: "host",hostEpoch: 1,instanceId: "instance",connectionId: "connection"};
-  const requests: Array<{part: string; bytes: number}> = [], receipts: unknown[] = [];
+  const host = {...serviceHost};
+  const requests: Array<{part: string; bytes: number}> = [], receipts: unknown[] = [], order: string[] = [];
   const state = {value: "active"};
-  const applyThrough = vi.fn(async (receipt: LiveUpdateReceipt): Promise<LiveUpdateHostApplicationAck | null> => ({...receipt,localYDocSequence: receipt.journalCursor,applicationReplayed: true}));
+  const applyThrough = vi.fn(async (receipt: LiveUpdateReceipt): Promise<LiveUpdateHostApplicationAck | null> => {
+    order.push("apply"); return {...receipt,localYDocSequence: receipt.journalCursor,applicationReplayed: true};
+  });
   let requestId = 0;
   const cursor = (snapshot: string, part: string, sequence = 0, offset = 0) => ({snapshot,part,sequence,offset});
-  const client = {sendRequest: vi.fn(async (request: {id: number; method: string; params: Record<string, unknown>}) => {
-    if (request.method === "liveApplication.ownerOutbox") return {id: request.id,result: {outboxId: "outbox",pendingBytes: entries.length,state: state.value}};
-    if (request.method === "liveApplication.acknowledgeOwnerOutbox") {
+  // A native service transport sends the same calls under native names.
+  const methods: Record<string, string> = {"ydoc.ownerOutbox.acknowledge": "liveApplication.acknowledgeOwnerOutbox", "ydoc.ownerOutbox.readPending": "liveApplication.readOwnerOutbox"};
+  // Before a fresh adoption native names no adopted cursor and no outbox.
+  const native = {activationId: "adoption", adopted: true};
+  const client = {sendLiveOwnerAdoption: vi.fn(async (request: {id: number}) => {native.adopted = true; return {id: request.id, result: {status: "adopted", adoption: {}}};}),
+    sendRequest: vi.fn(async (request: {id: number; method: string; params: Record<string, unknown>}) => {
+    const method = methods[request.method] ?? request.method;
+    if (method === "liveApplication.register") return {id: request.id,result: {registrationId: 1}};
+    if (method === "liveApplication.ownerState") return {id: request.id,result: {adoptionId: native.activationId,expectedLocalSequence: 7,
+      throughCursor: native.adopted ? 0 : null,outboxId: native.adopted ? "outbox" : null,pendingBytes: entries.length,outboxState: state.value}};
+    if (method === "liveApplication.ownerOutbox") return {id: request.id,result: {outboxId: "outbox",pendingBytes: entries.length,state: state.value}};
+    if (method === "liveApplication.acknowledgeOwnerOutbox") {
       const receipt = (request.params.receipts as Array<{deliveryId: string; updateDigest: string}>)[0]!;
       expect(receipt).toMatchObject({deliveryId: entries[0]!.deliveryId,updateDigest: entries[0]!.updateDigest});
-      receipts.push(receipt); entries.shift();
+      order.push("acknowledge"); receipts.push(receipt); entries.shift();
       return {id: request.id,result: {acknowledged: 1,pendingBytes: entries.length,oldestEntryAtMs: entries[0]?.createdAtMs ?? null}};
     }
-    expect(request.method).toBe("liveApplication.readOwnerOutbox");
+    expect(method).toBe("liveApplication.readOwnerOutbox");
     const snapshot = sha(Buffer.from(JSON.stringify(entries)));
     const requested = request.params.cursor as ReturnType<typeof cursor> | undefined;
     if (requested && requested.snapshot !== snapshot) return {id: request.id,result: {kind: "readChanged"}};
@@ -54,12 +72,34 @@ function fixture(maxEntriesPerDrain = 3, maxBytesPerDrain = 10_000, agentDeclara
     getShare: () => ({workspaceId: "workspace",shareId: "share",granterUserId: "owner"}),
     resolveCurrentLiveDocumentBinding: () => ({kind: "current",host,binding,authority: {principalKind: "owner", principalId: "owner"}}),
     readLiveUpdateJournalCut: () => ({kind: "cut",cut: {checkpoint: {bytes: new Uint8Array([0,0])},suffix: []}}),
-    commitLiveUpdateJournal: vi.fn((input: {metadata: {deliveryId: string; updateDigest: string}}) => ({result: {kind: "accepted",receipt: {deliveryId: input.metadata.deliveryId,updateDigest: input.metadata.updateDigest,journalCursor: receipts.length + 1,acceptingHostEpoch: 1}}})),
+    commitLiveUpdateJournal: vi.fn((input: {metadata: {deliveryId: string; updateDigest: string}}) => {
+      order.push("commit");
+      return {result: {kind: "accepted",receipt: {deliveryId: input.metadata.deliveryId,updateDigest: input.metadata.updateDigest,journalCursor: receipts.length + 1,acceptingHostEpoch: 1}}};
+    }),
   };
   const validate = vi.fn<OwnerOutboxAdmission["validate"]>(() => ({} as never));
   const admission: OwnerOutboxAdmission = {trustedAccount: accountId => ({accountId, name: "Owner name"}), shares: new Map([["workspace","share"]]),maxEntriesPerDrain,maxBytesPerDrain,validate};
-  return {requests,receipts,storage,state,client,applyThrough,validate,applied,admission,run: () => drainOwnerOutbox({client: client as never,storage: storage as never,admission,workspace: "handle",host: host as never,registrationId: 1,binding,
-    adoption: {adoptionId: "adoption",sequence: 7,applied},nextRequestId: () => ++requestId,deadlineMs: 30_000,assertCurrent() {},applyThrough})};
+  /**
+   * A native service transport over this native outbox, registered and
+   * adopted, `fresh` through its own adoption. Its capture names
+   * `activationId` and a full state of `digest`.
+   */
+  const service = async ({activationId = "adoption", digest = sha(Buffer.from([1])), scope = {}, fresh = false}:
+    {activationId?: string; digest?: string; scope?: {binding?: typeof binding; host?: object; storage?: object}; fresh?: boolean} = {}) => {
+    native.activationId = activationId; native.adopted = !fresh;
+    const transport = serviceOwnerTransport({client: client as never, workspace: "handle", binding: scope.binding ?? binding,
+      storage: scope.storage ?? storage, host: (scope.host ?? host) as never, nextRequestId: () => ++requestId, assertCurrent() {},
+      capture: async () => ({activationId, sessionId: "session", source: {nativeHeadSequence: 7, fullStateDigest: digest}}) as never});
+    const request = {workspace: "handle", deadlineMs: 30_000};
+    await transport.client.sendRequest({...request, id: ++requestId, method: "liveApplication.register", params: {binding: scope.binding ?? binding}});
+    await transport.client.sendRequest({...request, id: ++requestId, method: "liveApplication.ownerState", params: {registrationId: 1}});
+    if (fresh) await transport.client.sendLiveOwnerAdoption({...request, id: ++requestId, registrationId: 1, sessionId: "session"} as never,
+      {adoptionId: activationId, expectedLocalSequence: 7, events: [], terminalReceipt: null} as never, {} as never);
+    return transport;
+  };
+  return {requests,receipts,order,binding,storage,state,client,applyThrough,validate,applied,admission,service,
+    run: (options: Partial<Parameters<typeof drainOwnerOutbox>[0]> = {}) => drainOwnerOutbox({client: client as never,storage: storage as never,admission,workspace: "handle",host: host as never,registrationId: 1,binding,
+      adoption: {adoptionId: "adoption",sequence: 7,applied},nextRequestId: () => ++requestId,deadlineMs: 30_000,assertCurrent() {},applyThrough,...options})};
 }
 
 it("proves the adoption's seed applied only from the host's verified ACK, before the queue drops it", async () => {
@@ -87,6 +127,100 @@ it("proves no seed waits when the head is later work, even while it is pending, 
   drained.applied.mockClear();
   expect(await drained.run()).toEqual({admittedEntries: 0, hasMore: false});
   expect(drained.applied).toHaveBeenCalledTimes(1);
+});
+
+const seedDigest = sha(Buffer.from([1]));
+const seedFixture = (digest = seedDigest) => fixture(1, 10_000, undefined, seedKey("adoption", 7), false, digest);
+
+it("acknowledges a native service seed before applying it, and proves its application only from the ACK", async () => {
+  const f = seedFixture(), transport = await f.service();
+  f.applyThrough.mockImplementationOnce(async receipt => {
+    expect(f.order).toEqual(["commit", "acknowledge"]);
+    expect(f.applied).not.toHaveBeenCalled();
+    f.order.push("apply");
+    return {...receipt, localYDocSequence: 1, applicationReplayed: false};
+  });
+  expect(await f.run({client: transport.client, seedDelivery: transport.seedDelivery()})).toEqual({admittedEntries: 1, hasMore: true});
+  expect(f.order).toEqual(["commit", "acknowledge", "apply"]);
+  expect(f.applied).toHaveBeenCalledTimes(1);
+});
+
+it("keeps a service seed's application for a later pass, which neither a later head nor an empty queue proves", async () => {
+  const f = seedFixture(), transport = await f.service(), options = {client: transport.client, seedDelivery: transport.seedDelivery()};
+  f.applyThrough.mockResolvedValueOnce(null);
+  expect(await f.run(options)).toEqual({admittedEntries: 1, hasMore: true});
+  expect(f.receipts).toMatchObject([{deliveryId: firstDelivery(seedDigest)}]);
+  expect(await f.run(options)).toEqual({admittedEntries: 1, hasMore: true});
+  expect(await f.run(options)).toEqual({admittedEntries: 1, hasMore: false});
+  expect(f.order.slice(2)).toEqual(["commit", "apply", "acknowledge", "commit", "apply", "acknowledge"]);
+  expect(await f.run(options)).toEqual({admittedEntries: 0, hasMore: false});
+  expect(f.applied).not.toHaveBeenCalled();
+});
+
+it("keeps a service seed's application unproved when a later pass drains the queue to empty", async () => {
+  const f = fixture(4, 10_000, undefined, seedKey("adoption", 7), false, seedDigest), transport = await f.service();
+  const options = {client: transport.client, seedDelivery: transport.seedDelivery()};
+  f.applyThrough.mockResolvedValueOnce(null);
+  expect(await f.run(options)).toEqual({admittedEntries: 1, hasMore: true});
+  expect(await f.run(options)).toEqual({admittedEntries: 2, hasMore: false});
+  expect(f.applied).not.toHaveBeenCalled();
+});
+
+it("keeps the native service order for the same activation's resumed transport", async () => {
+  const f = seedFixture(), first = await f.service(), resumed = await f.service();
+  expect(first.seedDelivery()).not.toBe(resumed.seedDelivery());
+  await f.run({client: resumed.client, seedDelivery: resumed.seedDelivery()});
+  expect(f.order).toEqual(["commit", "acknowledge", "apply"]);
+});
+
+it("acknowledges a freshly adopted service seed first, though its adoption named no outbox yet", async () => {
+  const f = seedFixture(), transport = await f.service({fresh: true});
+  expect(f.client.sendLiveOwnerAdoption).toHaveBeenCalledTimes(1);
+  await f.run({client: transport.client, seedDelivery: transport.seedDelivery()});
+  expect(f.order).toEqual(["commit", "acknowledge", "apply"]);
+});
+
+type DrainOptions = Partial<Parameters<typeof drainOwnerOutbox>[0]>;
+it.each<[string, string, (f: ReturnType<typeof seedFixture>) => Promise<DrainOptions>]>([
+  ["no capability, as a device host", seedDigest, async () => ({})],
+  ["copied public values", seedDigest, async f => ({client: (await f.service()).client, seedDelivery: {activationId: "adoption"}})],
+  ["a serialized capability", seedDigest, async f => {
+    const t = await f.service(); return {client: t.client, seedDelivery: JSON.parse(JSON.stringify(t.seedDelivery()))};
+  }],
+  ["a reconstructed capability", seedDigest, async f => {
+    const t = await f.service(); return {client: t.client, seedDelivery: Object.freeze({...t.seedDelivery()!})};
+  }],
+  ["a cloned capability", seedDigest, async f => {
+    const t = await f.service(); return {client: t.client, seedDelivery: structuredClone(t.seedDelivery())};
+  }],
+  ["pending activation access alone", seedDigest, async f => ({client: (await f.service()).client,
+    admission: {...f.admission, activation: {activationId: "adoption"}}})],
+  ["another activation", seedDigest, async f => {
+    const t = await f.service({activationId: "other"}); return {client: t.client, seedDelivery: t.seedDelivery()};
+  }],
+  ["another seed delivery", "f".repeat(64), async f => {
+    const t = await f.service(); return {client: t.client, seedDelivery: t.seedDelivery()};
+  }],
+  ["another seed digest", "f".repeat(64), async f => {
+    const t = await f.service({digest: "f".repeat(64)}); return {client: t.client, seedDelivery: t.seedDelivery()};
+  }],
+  ["another binding", seedDigest, async f => {
+    const t = await f.service({scope: {binding: {...f.binding, restoreFenceGeneration: 2}}}); return {client: t.client, seedDelivery: t.seedDelivery()};
+  }],
+  ["another host", seedDigest, async f => {
+    const t = await f.service({scope: {host: {...serviceHost, connectionId: "other"}}}); return {client: t.client, seedDelivery: t.seedDelivery()};
+  }],
+  ["another storage", seedDigest, async f => {
+    const t = await f.service({scope: {storage: {}}}); return {client: t.client, seedDelivery: t.seedDelivery()};
+  }],
+  ["another transport", seedDigest, async f => {
+    const issuer = await f.service(), other = await f.service(); return {client: other.client, seedDelivery: issuer.seedDelivery()};
+  }],
+])("applies the seed before acknowledging it with %s", async (_name, digest, options) => {
+  const f = seedFixture(digest);
+  expect(await f.run(await options(f))).toEqual({admittedEntries: 1, hasMore: true});
+  expect(f.order).toEqual(["commit", "apply", "acknowledge"]);
+  expect(f.applied).toHaveBeenCalledTimes(1);
 });
 
 it.each([["another adoption", seedKey("other", 7)], ["another adopted head", seedKey("adoption", 6)]])(

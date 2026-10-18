@@ -1,3 +1,4 @@
+import {createHash} from "node:crypto";
 import {beforeEach, expect, it, vi} from "vitest";
 import type {EngineClient} from "@dohc/workspace-engine-client/daemon";
 import {DaemonRefusalError} from "@dohc/workspace-engine-client";
@@ -78,7 +79,7 @@ function fixture({prefix = 0, owners = 1, maxEvents = 10, suffix = 0} = {}) {
     bounds: {maxBytes: 10_000,maxEvents},
     ownerAdmission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([[document.workspaceId,"share"]]),maxEntriesPerDrain: 10,maxBytesPerDrain: 10_000,validate: () => ({} as never)},
   });
-  return {consumer,client,store,retained,outboxAcks,ownerEntries,persist,invalidate: () => {current = false;}};
+  return {consumer,client,store,storage,journal,retained,outboxAcks,ownerEntries,persist,invalidate: () => {current = false;}};
 }
 
 it("holds the local owner entry until native application completes", async () => {
@@ -329,5 +330,78 @@ it("continues applying incoming accepted edits while the retained owner outbox i
   expect(f.client.sendLiveApplication.mock.calls[0]![1].metadata.accepted.receipt).toEqual(receipt(1));
   expect(f.outboxAcks).toEqual([]);
   expect(f.retained).toEqual(f.ownerEntries);
+  expect(f.consumer.adoptionSeedApplied(document)).toBe(true);
+});
+
+it("applies a seed whose acknowledgement reply was lost on the next pass, from its journal row", async () => {
+  const f = fixture(), seed = f.ownerEntries[0]!;
+  vi.mocked(drainOwnerOutbox)
+    .mockImplementationOnce(async () => {f.journal.push(seed); throw new Error("Acknowledgement reply lost.");})
+    .mockImplementationOnce(async () => ({admittedEntries: 0, hasMore: false}));
+  await expect(f.consumer.drain(document)).rejects.toThrow("Acknowledgement reply lost.");
+  expect(f.client.sendLiveApplication).not.toHaveBeenCalled();
+  // The queue is empty now, which proves nothing; the pass still applies the journal.
+  expect(await f.consumer.drain(document)).toMatchObject({kind: "done", terminalReceipt: seed});
+  expect(f.client.sendLiveApplication.mock.calls.map(([, event]) => event.metadata.accepted.receipt)).toEqual([seed]);
+});
+
+it("brings a device host's seed to readiness, applied before it is acknowledged, past the host's hold", async () => {
+  const f = fixture({owners: 0});
+  const actual = await vi.importActual<typeof import("./ownerOutboxDelivery")>("./ownerOutboxDelivery");
+  vi.mocked(drainOwnerOutbox).mockImplementation(actual.drainOwnerOutbox);
+  const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+  const update = Buffer.from([1, 2]), updateDigest = sha(update);
+  const entry = {sequence: 1, appendKey: `owner-adoption:${sha(Buffer.from(JSON.stringify(["adoption", 7, updateDigest])))}`,
+    deliveryId: "seed-delivery", updateDigest, byteLength: update.length, createdAtMs: 1};
+  const seed = {deliveryId: entry.deliveryId, updateDigest, journalCursor: 1, acceptingHostEpoch: 1} as LiveUpdateReceipt;
+  const collaborator = receipt(2);
+  const host = {mode: "device", hostId: "host", hostEpoch: 1, instanceId: "instance", connectionId: "connection"};
+  let pending = true;
+  const order: string[] = [];
+  Object.assign(f.storage, {
+    resolveCurrentLiveDocumentBinding: () => ({kind: "current", host, binding, authority: {principalKind: "owner", principalId: "owner"}}),
+    readLiveUpdateJournalCut: () => ({kind: "cut", cut: {checkpoint: {bytes: new Uint8Array([0, 0])}, suffix: []}}),
+    // A collaborator's update is journaled right after the seed.
+    commitLiveUpdateJournal: () => {
+      order.push("commit");
+      if (!f.journal.length) f.journal.push(seed, collaborator);
+      return {result: {kind: "accepted", receipt: seed}};
+    },
+  });
+  const at = (part: string, sequence = 0) => ({snapshot: sha(Buffer.from(String(pending))), part, sequence, offset: 0});
+  const page = (part: string, sequence: number, bytes: Uint8Array, nextCursor: ReturnType<typeof at> | null) =>
+    ({kind: "page", ...at(part, sequence), totalBytes: bytes.length, digest: sha(bytes), bytesBase64: Buffer.from(bytes).toString("base64"), nextCursor});
+  const register = f.client.sendRequest.getMockImplementation()!;
+  f.client.sendRequest.mockImplementation(async input => {
+    const params = input.params as Record<string, unknown>;
+    if (input.method === "liveApplication.ownerOutbox") {
+      return {id: input.id, result: {outboxId: "outbox", pendingBytes: pending ? update.length : 0, state: "active"}};
+    }
+    if (input.method === "liveApplication.acknowledgeOwnerOutbox") {
+      expect(params.receipts).toEqual([seed]);
+      order.push("acknowledge"); pending = false;
+      return {id: input.id, result: {acknowledged: 1, pendingBytes: 0, oldestEntryAtMs: null}};
+    }
+    if (input.method === "liveApplication.readOwnerOutbox") {
+      const part = (params.cursor as {part?: string} | undefined)?.part;
+      const result = part === undefined ? page("header", 0, Buffer.from(JSON.stringify({outboxId: "outbox", binding,
+        baseUpdateDigest: binding.lineageClaimId, baseByteLength: 2, state: "active", pendingBytes: pending ? update.length : 0,
+        pendingEntryCount: pending ? 1 : 0, nextSequence: 2, oldestEntryAtMs: pending ? 1 : null, quarantineReason: null, observedBinding: null,
+        firstEntryCursor: pending ? at("entryHeader", 1) : null})), at("base"))
+        : part === "entryHeader" ? page("entryHeader", 1, Buffer.from(JSON.stringify(entry)), at("update", 1)) : page("update", 1, update, null);
+      return {id: input.id, result: result as never};
+    }
+    return register(input);
+  });
+  // The host holds every other delivery while its seed waits for a receipt.
+  const apply = f.client.sendLiveApplication.getMockImplementation()!;
+  f.client.sendLiveApplication.mockImplementation(async (input, event) => {
+    const delivery = event.metadata.accepted.receipt.deliveryId;
+    if (pending && delivery !== entry.deliveryId) return {id: input.id, result: {status: "pending", reason: "delivery-pending"}};
+    order.push(`apply ${delivery}`);
+    return apply(input, event);
+  });
+  expect(await f.consumer.drain(document)).toMatchObject({kind: "done", terminalReceipt: collaborator});
+  expect(order).toEqual(["commit", "apply seed-delivery", "acknowledge", `apply ${collaborator.deliveryId}`]);
   expect(f.consumer.adoptionSeedApplied(document)).toBe(true);
 });

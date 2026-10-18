@@ -30,6 +30,7 @@ mod tests {
     include!("adoption_restore_tail_tests.rs");
     include!("activation_tests.rs");
     include!("owner_activations_tests.rs");
+    include!("retirement_tests.rs");
 
     struct Fixture {
         store: EngineStore,
@@ -1082,6 +1083,19 @@ mod tests {
                 f.store.table_row_count("live_owner_adoptions").unwrap(),
                 i64::from(committed)
             );
+            // The registration names whatever the durable binding row names.
+            let named: Option<String> = f
+                .store
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT activation_id FROM live_device_application_bindings",
+                        [],
+                        |row| row.get(0),
+                    )
+                })
+                .unwrap();
+            assert_eq!(named, committed.then(|| "adoption".to_owned()));
+            assert_eq!(f.handle.activation_id(), named);
             let path = f._scratch.join("engine.db");
             drop(f.store);
             f.store = EngineStore::open(&path, 10).unwrap();
@@ -1526,7 +1540,14 @@ pub fn adopt_owner_committed(
             held.activation_id = Some(ack.adoption_id.clone());
             Ok(ack)
         }
-        TxnOutcome::Crashed { .. } => Err(ApplicationError::Interrupted),
+        // The binding row names the activation once the commit is durable,
+        // so the registration names it too.
+        TxnOutcome::Crashed { committed } => {
+            if committed {
+                held.activation_id = Some(cut.adoption_id.clone());
+            }
+            Err(ApplicationError::Interrupted)
+        }
     }
 }
 

@@ -264,20 +264,7 @@ impl EngineService {
             return Err(workspace_unavailable());
         }
         let session_id = if let Some(id) = existing {
-            let mut sessions = lock(&self.sessions);
-            if resuming {
-                let session = sessions.get_mut(&id).ok_or_else(workspace_unavailable)?;
-                if session.lineage_claim_id.as_deref()
-                    != Some(captured.source.lineage_claim_id.as_str())
-                {
-                    return Err(workspace_unavailable());
-                }
-                session.restore_generation = captured.restore_generation;
-            }
-            // The reused session now serves the activation this capture names.
-            if let Some(session) = sessions.get_mut(&id) {
-                session.activation_id = Some(captured.activation_id.clone());
-            }
+            reuse_session(&mut lock(&self.sessions), &id, &captured, resuming)?;
             id
         } else {
             let sequence = self
@@ -324,6 +311,25 @@ impl EngineService {
     }
 }
 
+/// A reused session serves a capture of its own lineage only. It takes the
+/// capture's activation, and a resume's restore generation, after that check.
+fn reuse_session(
+    sessions: &mut std::collections::HashMap<String, super::ydoc::YdocSession>,
+    id: &str,
+    captured: &dohc_engine_collab::live_update_application::ImportedOwnerActivation,
+    resuming: bool,
+) -> Result<(), WireError> {
+    let session = sessions.get_mut(id).ok_or_else(workspace_unavailable)?;
+    if session.lineage_claim_id.as_deref() != Some(captured.source.lineage_claim_id.as_str()) {
+        return Err(workspace_unavailable());
+    }
+    if resuming {
+        session.restore_generation = captured.restore_generation;
+    }
+    session.activation_id = Some(captured.activation_id.clone());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,7 +340,8 @@ mod tests {
     use dohc_engine_protocol::transport::RequestContext;
 
     /// A release names the activation it ends. One naming another activation
-    /// than the session serves closes nothing and removes no source.
+    /// than the session serves closes nothing and removes no source. A
+    /// capture of another lineage never retags a reused session.
     #[tokio::test]
     async fn a_release_for_another_activation_leaves_the_session_and_its_source() {
         let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
@@ -395,7 +402,7 @@ mod tests {
         let lease = service.leases.scoped(&open.root).acquire(&key).unwrap();
         let session = super::super::ydoc::YdocSession::imported_owner(
             workspace.clone(),
-            key,
+            key.clone(),
             &captured,
             lease,
         )
@@ -437,5 +444,56 @@ mod tests {
         release("tagged").await.unwrap();
         assert!(!lock(&service.sessions).contains_key("ydoc-tagged"));
         assert_eq!(sources(), ["requested"]);
+
+        // A capture of another lineage leaves a reused session's tag alone.
+        let lease = service.leases.scoped(&open.root).acquire(&key).unwrap();
+        let session = super::super::ydoc::YdocSession::imported_owner(
+            workspace.clone(),
+            key,
+            &captured,
+            lease,
+        )
+        .unwrap();
+        lock(&service.sessions).insert("ydoc-reused".into(), session);
+        let tag = || lock(&service.sessions)["ydoc-reused"].activation_id.clone();
+        let capture = |activation: &str, lineage: &str| ImportedOwnerActivation {
+            activation_id: activation.into(),
+            source: ImportedOwnerSource {
+                lineage_claim_id: lineage.into(),
+                ..captured.source.clone()
+            },
+            baseline_bytes: Vec::new(),
+            full_state: Vec::new(),
+            restore_generation: Some(4),
+        };
+        let other = dohc_engine_storage::hex_sha256(b"other lineage");
+        for resuming in [false, true] {
+            assert!(
+                reuse_session(
+                    &mut lock(&service.sessions),
+                    "ydoc-reused",
+                    &capture("mismatched", &other),
+                    resuming
+                )
+                .is_err()
+            );
+            assert_eq!(tag().as_deref(), Some("tagged"), "resuming={resuming}");
+            assert_eq!(
+                lock(&service.sessions)["ydoc-reused"].restore_generation,
+                None
+            );
+        }
+        reuse_session(
+            &mut lock(&service.sessions),
+            "ydoc-reused",
+            &capture("matched", &captured.source.lineage_claim_id),
+            true,
+        )
+        .unwrap();
+        assert_eq!(tag().as_deref(), Some("matched"));
+        assert_eq!(
+            lock(&service.sessions)["ydoc-reused"].restore_generation,
+            Some(4)
+        );
     }
 }

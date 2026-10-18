@@ -1344,6 +1344,7 @@ fn pending_result(
         ApplicationPending::ApplicabilityUnavailable => "applicability-unavailable",
         ApplicationPending::BindingMismatch => "binding-mismatch",
         ApplicationPending::SettlementRequired => "settlement-required",
+        ApplicationPending::DeliveryPending => "delivery-pending",
     }})
 }
 

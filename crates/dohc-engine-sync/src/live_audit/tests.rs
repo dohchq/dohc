@@ -3597,7 +3597,29 @@ fn imported_activation_publication(foreign_baseline: bool, preserve_baseline: bo
         bytes,
         _scratch: scratch,
     };
-    accept_named_event(&mut f, 1, delivery);
+    accept_named_event(&mut f, 1, delivery.clone());
+    // The seed keeps its receipt; until then the host holds every later delivery.
+    let outbox: String = f
+        .store
+        .read_with(|conn| {
+            conn.query_row("SELECT outbox_id FROM owner_ydoc_outboxes", [], |r| {
+                r.get(0)
+            })
+            .map_err(SyncError::corrupt)
+        })
+        .unwrap();
+    dohc_engine_collab::owner_outbox::acknowledge(
+        &mut f.store,
+        "ws",
+        &outbox,
+        &[dohc_engine_collab::owner_outbox::OwnerDeliveryReceipt {
+            delivery_id: delivery,
+            update_digest: hex_sha256(&f.bytes),
+            journal_cursor: 1,
+            accepting_host_epoch: 1,
+        }],
+    )
+    .unwrap();
     if foreign_baseline {
         VersionedTextStore::new(&mut f.store)
             .write_text(

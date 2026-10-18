@@ -4350,3 +4350,49 @@ async fn stop_keeps_each_pending_entrys_declared_credit() {
     }
     supervisor.close_all().unwrap();
 }
+
+/// Outside a restore the session host queues no native update of its own:
+/// applying accepted work and settling it leave its outbox without one, so
+/// retirement never has one to account for.
+#[tokio::test]
+async fn host_application_and_settlement_queue_no_native_update() {
+    let f = Fixture::new();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    let owner = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    let handle = f.adopt(&owner).await;
+    let remote = Ydoc::wire();
+    remote.apply(&f.bytes).unwrap();
+    let declaration = AgentDeclaration {
+        agent_id: "remote-agent".into(),
+        on_behalf_of: Some("owner".into()),
+        depth: 1,
+    };
+    let mut terminal = None;
+    for cursor in 1..=3 {
+        let bytes = remote.richdoc_append_paragraph(&format!("Remote paragraph {cursor}"));
+        let (receipt, result) =
+            deliver_declared(&handle, &f.binding, cursor, &bytes, declaration.clone()).await;
+        assert!(matches!(result, ApplicationResult::Applied(..)));
+        terminal = Some(receipt);
+    }
+    let settled = f.settle(&handle, terminal).await;
+    assert_eq!(settled.application_count, 3);
+    assert!(f.file().contains("Remote paragraph 3"));
+    let native: i64 = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT count(*) FROM owner_ydoc_outbox_entries
+                 WHERE json_extract(native_source_json,'$.origin.kind')='nativeUpdate'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(native, 0);
+    supervisor.close_all().unwrap();
+}

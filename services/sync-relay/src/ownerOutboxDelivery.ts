@@ -11,6 +11,7 @@ import { parseLiveUpdateHostApplicationAck, type LiveDocumentKey, type LiveUpdat
 import type { SyncRelayStorage, LiveHostConnectionCoordinate } from "./storage.js";
 import type { LiveJournalValidation } from "./storage/types.js";
 import { configRecord } from "./deviceLiveHostConfig.js";
+import { receiptFirstSeed, type ServiceSeedDelivery } from "./serviceOwnerTransport.js";
 
 export type LiveAdmissionValidation = LiveJournalValidation | {
   readonly kind: "retry";
@@ -38,9 +39,10 @@ export type CapacityLiveAdmissionValidator = OwnerOutboxAdmission["validate"] & 
  * The adoption this queue belongs to, as the relay recorded it from the host's
  * adoption ACK. A divergent adoption queues its local seed first, under
  * `owner-adoption:sha256([adoptionId, sequence, updateDigest])`. `applied`
- * releases the accepted-feed gate when the queue is empty, its head is later
- * work, or the host acknowledged applying the seed. A quarantined queue also
- * releases that gate while preserving its unapplied local work.
+ * releases the accepted-feed gate when the host acknowledged applying the
+ * seed, or, while every entry is applied before it is acknowledged, when the
+ * queue is empty or its head is later work. A quarantined queue also releases
+ * that gate while preserving its unapplied local work.
  */
 export interface OwnerOutboxAdoption {
   readonly adoptionId: string;
@@ -48,11 +50,17 @@ export interface OwnerOutboxAdoption {
   applied(): void;
 }
 
-/** Runs within one authenticated device delivery and rechecks standing at every await. */
+/**
+ * Runs within one authenticated device delivery and rechecks standing at every await.
+ * Each entry is applied before the queue drops it, except a native service
+ * activation's seed under its `seedDelivery`: that is acknowledged first, so
+ * the host keeps the relay's receipt for it before applying it.
+ */
 export async function drainOwnerOutbox(options: {
   storage: SyncRelayStorage; admission: OwnerOutboxAdmission; client: EngineClient;
   workspace: string; host: LiveHostConnectionCoordinate; registrationId: number;
   binding: LiveObjectBinding; adoption: OwnerOutboxAdoption; nextRequestId(): number; deadlineMs: number; signal?: AbortSignal;
+  seedDelivery?: ServiceSeedDelivery;
   assertCurrent(): void;
   applyThrough(receipt: LiveUpdateReceipt): Promise<LiveUpdateHostApplicationAck | null>;
 }): Promise<{admittedEntries: number; hasMore: boolean; retryReady?: boolean}> {
@@ -75,8 +83,12 @@ export async function drainOwnerOutbox(options: {
     return {outboxId: status.outboxId, pendingBytes: status.pendingBytes};
   };
   const status = await readStatus(), outboxId = status.outboxId;
+  // Read after the status, which names a fresh adoption's outbox. Acknowledged
+  // first, the seed can leave the queue before the host applies it, so neither
+  // an empty queue nor a later head proves its application.
+  const receiptFirst = receiptFirstSeed(options.seedDelivery, {storage, transport: client, activationId: adoption.adoptionId, binding, host});
   if (status.quarantined) {adoption.applied(); return {admittedEntries: 0, hasMore: false};}
-  if (status.pendingBytes === 0) {adoption.applied(); return {admittedEntries: 0, hasMore: false};}
+  if (status.pendingBytes === 0) {if (!receiptFirst) adoption.applied(); return {admittedEntries: 0, hasMore: false};}
   if (typeof outboxId !== "string") throw new Error("Invalid owner outbox identity.");
   let receivedBytes = 0, admittedEntries = 0;
   const byteBudget = new Error("Owner drain byte budget exceeded.");
@@ -102,13 +114,15 @@ export async function drainOwnerOutbox(options: {
       const pending = await outbox.readDeliveryHead(outboxId,binding); check();
       if (!isDeepStrictEqual(pending.binding,binding) || pending.baseUpdateDigest !== binding.lineageClaimId) throw new Error("Owner outbox binding changed.");
       if (pending.state === "quarantined") {adoption.applied(); return {admittedEntries, hasMore: false};}
-      if (!pending.entry) {adoption.applied(); return {admittedEntries, hasMore: false};}
+      if (!pending.entry) {if (!receiptFirst) adoption.applied(); return {admittedEntries, hasMore: false};}
       const entry = pending.entry;
-      // The seed is the queue's first entry, so a later head proves it applied.
-      // Another adoption's key here means this queue is not the one recorded.
+      // The seed is the queue's first entry, so a later head proves it applied
+      // when entries are applied first. Another adoption's key here means this
+      // queue is not the one recorded.
       const seed = entry.appendKey === seedKey(entry.updateDigest);
       if (!seed && entry.appendKey.startsWith("owner-adoption:")) throw new Error("Owner outbox holds another adoption's seed.");
-      if (!seed) adoption.applied();
+      if (!seed && !receiptFirst) adoption.applied();
+      const acknowledgeFirst = seed && receiptFirst?.deliveryId === entry.deliveryId && receiptFirst.updateDigest === entry.updateDigest;
       const shareId = admission.shares.get(binding.workspaceId);
       const share = shareId ? storage.getShare(shareId) : null;
       if (!share || share.workspaceId !== binding.workspaceId) throw new Error("Owner share is unavailable.");
@@ -151,6 +165,7 @@ export async function drainOwnerOutbox(options: {
         throw new Error("Owner update admission refused.");
       }
       const receipt = committed.result.receipt;
+      if (acknowledgeFirst) {await outbox.acknowledge(outboxId,[receipt]); check(); admittedEntries++;}
       const applied = await options.applyThrough(receipt); check();
       if (applied === null) return {admittedEntries, hasMore: true};
       const ack = parseLiveUpdateHostApplicationAck(applied);
@@ -159,8 +174,7 @@ export async function drainOwnerOutbox(options: {
         throw new Error("Native application ACK identity changed.");
       }
       if (seed) adoption.applied();
-      await outbox.acknowledge(outboxId,[committed.result.receipt]); check();
-      admittedEntries++;
+      if (!acknowledgeFirst) {await outbox.acknowledge(outboxId,[receipt]); check(); admittedEntries++;}
     }
     const remaining = await readStatus();
     if (remaining.outboxId !== outboxId) throw new Error("Owner outbox changed.");
