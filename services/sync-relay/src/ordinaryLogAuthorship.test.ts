@@ -14,6 +14,43 @@ const context = {kind: "account", accountId: "alice"};
 const snapshot: LiveAuthorSnapshot = [{kind: "human", humanId: "alice", humanName: "Alice"}];
 
 describe("ordinary admitted authorship", () => {
+  it("reuses account names across pushes for five seconds and isolates accounts", async () => {
+    let now = 2000;
+    const lookup = vi.fn((id: string) => `${id} at ${now}`);
+    const storage = await testStorage();
+    const handler = testHandler(storage, {lookupUserDisplayName: lookup, nowMs: () => now});
+    for (const id of ["alice", "bob"]) await claimWorkspace(handler, id, id);
+    const push = async (id: string, seq: number) => {
+      const response = await handler(request(id, `/sync/${id}/log`, jsonBody({originId: "device",
+        ops: [update({authorContext: {kind: "account", accountId: id}}, seq)]})));
+      expect(response.status).toBe(200);
+      return storage.fetchLogCoordinate({workspaceId: id, originId: "device", originSeq: seq})?.admittedAuthorSnapshot;
+    };
+    expect(await push("alice", 0)).toEqual([{kind: "human", humanId: "alice", humanName: "alice at 2000"}]);
+    now = 6999;
+    expect(await push("alice", 1)).toEqual([{kind: "human", humanId: "alice", humanName: "alice at 2000"}]);
+    expect(lookup).toHaveBeenCalledTimes(1);
+    expect(await push("bob", 0)).toEqual([{kind: "human", humanId: "bob", humanName: "bob at 6999"}]);
+    now = 7000;
+    expect(await push("alice", 2)).toEqual([{kind: "human", humanId: "alice", humanName: "alice at 7000"}]);
+    expect(lookup).toHaveBeenCalledTimes(3);
+  });
+
+  it("retries a failed account lookup on the next push", async () => {
+    const lookup = vi.fn().mockRejectedValueOnce(new Error("accounts unavailable")).mockResolvedValue("Alice");
+    const storage = await testStorage();
+    const handler = testHandler(storage, {lookupUserDisplayName: lookup});
+    await claimWorkspace(handler, "alice", "workspace");
+    for (let seq = 0; seq < 2; seq++) {
+      const response = await handler(request("alice", "/sync/workspace/log", jsonBody({originId: "device",
+        ops: [update({authorContext: context}, seq)]})));
+      expect(response.status).toBe(200);
+    }
+    expect(storage.fetchLogCoordinate({workspaceId: "workspace", originId: "device", originSeq: 0})?.admittedAuthorSnapshot).toBeUndefined();
+    expect(storage.fetchLogCoordinate({workspaceId: "workspace", originId: "device", originSeq: 1})?.admittedAuthorSnapshot).toEqual(snapshot);
+    expect(lookup).toHaveBeenCalledTimes(2);
+  });
+
   it.each(["ydoc.update", "moment.append"])("names solo owner typing on %s without trusting a client name", async opKind => {
     const storage = await testStorage();
     const handler = testHandler(storage, {lookupUserDisplayName: () => "Alice"});
@@ -118,10 +155,31 @@ describe("ordinary admitted authorship", () => {
   it("bounds server names and declared agent entries by serialized bytes", async () => {
     for (const name of [null, "", "x".repeat(513)]) {
       const [admitted] = await parseAuthenticatedLogOps([update({authorContext: context})], "alice", () => name);
-      expect(admitted?.admittedAuthorSnapshot).toEqual([{kind: "human", humanId: "alice", humanName: "alice"}]);
+      expect(admitted?.admittedAuthorSnapshot).toEqual([{kind: "human", humanId: "alice", humanName: "Unnamed"}]);
     }
     const escaped = "\u0001".repeat(350);
     await expect(parseAuthenticatedLogOps([update({authorContext: {...context, agent: {agentId: escaped, agentName: escaped}}})], "alice", () => "Alice")).rejects.toThrow("invalid ydoc.update authorContext");
+  });
+
+  it.each(["ydoc.update", "moment.append"])("stores an owner %s unnamed when the name lookup throws or rejects", async opKind => {
+    for (const lookupUserDisplayName of [() => {throw new Error("accounts unavailable");},
+      () => Promise.reject(new Error("accounts unavailable"))]) {
+      const storage = await testStorage();
+      const handler = testHandler(storage, {lookupUserDisplayName});
+      await claimWorkspace(handler, "alice", "workspace");
+      const sha = await putBlob(handler, "alice", "workspace", "Owner typing");
+      const payload = {authorContext: context, ...(opKind === "moment.append" ? {
+        momentId: "solo-moment", versionId: "main", objectId: "doc", path: "doc.md", operation: "write",
+        payloadAfterPath: "doc.md", payloadAfterBlobSha256: sha,
+      } : {})};
+      const response = await handler(request("alice", "/sync/workspace/log", jsonBody({originId: "device",
+        ops: [{...update(payload), opKind}]})));
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({inserted: 1});
+      const row = storage.fetchLogCoordinate({workspaceId: "workspace", originId: "device", originSeq: 0});
+      expect(row?.payloadJson).toBe(stableJsonStringify(payload));
+      expect(row?.admittedAuthorSnapshot).toBeUndefined();
+    }
   });
 
   it.each([undefined, null, ""])("rejects an account context without an account identity: %j", async accountId => {

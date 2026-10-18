@@ -2,7 +2,7 @@ use super::*;
 use dohc_engine_domain::WriteText;
 
 #[test]
-fn solo_typing_journals_the_recorded_account_context() {
+fn solo_typing_credits_deltas_but_not_full_state_bases() {
     use dohc_engine_domain::{ChangeActorKind, ChangeAttribution};
     let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
@@ -31,12 +31,11 @@ fn solo_typing_journals_the_recorded_account_context() {
     }
     let rows = list_replication_ops(&engine, "ws", "local", 0, 10).unwrap();
     assert_eq!(rows.len(), 2);
-    for row in rows {
-        assert_eq!(
-            row.payload["authorContext"],
-            json!({"kind":"account","accountId":"owner-account"})
-        );
-    }
+    assert!(rows[0].payload.get("authorContext").is_none());
+    assert_eq!(
+        rows[1].payload["authorContext"],
+        json!({"kind":"account","accountId":"owner-account"})
+    );
 }
 
 #[test]

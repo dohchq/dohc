@@ -89,7 +89,7 @@ export function parseLogOp(value: unknown): SyncRelayLogInput {
 
 export type LogAuthorNameLookup = (userId: string) => Promise<string | null> | string | null;
 
-async function authenticatedDisplayName(actorUserId: string, lookupUserDisplayName?: LogAuthorNameLookup, fallback = actorUserId): Promise<string> {
+async function authenticatedDisplayName(actorUserId: string, lookupUserDisplayName?: LogAuthorNameLookup, fallback = "Unnamed"): Promise<string> {
   const name = (await lookupUserDisplayName?.(actorUserId))?.trim() || fallback;
   try {
     parseLiveAuthorSnapshot([{kind: "human", humanId: actorUserId, humanName: name}]);
@@ -157,7 +157,12 @@ export async function parseAuthenticatedLogOps(
     ? ordinaryAuthorContext((values[index] as Record<string, unknown>).payload, op.opKind)
     : undefined);
   if (!contexts.some(context => context?.kind === "account" && context.accountId === actorUserId)) return ops;
-  const humanName = await authenticatedDisplayName(actorUserId, lookupUserDisplayName);
+  let humanName: string;
+  try {
+    humanName = await authenticatedDisplayName(actorUserId, lookupUserDisplayName);
+  } catch {
+    return ops;
+  }
   for (const [index, context] of contexts.entries()) {
     if (context?.kind !== "account" || context.accountId !== actorUserId) continue;
     ops[index]!.admittedAuthorSnapshot = parseLiveAuthorSnapshot([

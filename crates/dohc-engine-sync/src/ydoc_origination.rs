@@ -376,7 +376,8 @@ pub fn ydoc_update_payload(
     if let Some(attribution) = attribution {
         payload["attribution"] =
             serde_json::to_value(attribution).expect("a bounded attribution encodes as JSON");
-        if attribution.actor_kind == dohc_engine_domain::ChangeActorKind::Human
+        if !is_base_state
+            && attribution.actor_kind == dohc_engine_domain::ChangeActorKind::Human
             && let Some(account_id) = actor_origin_id
             && let Some(context) = crate::outbound::ordinary_account_context(account_id)
         {
