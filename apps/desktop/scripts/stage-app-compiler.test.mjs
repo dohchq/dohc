@@ -32,14 +32,18 @@ test("staging refuses an unpinned executable without running it", async t => {
   const root = await mkdtemp(join(tmpdir(), "dohc-compiler-bad-pin-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const nodeExecutable = join(root, "node.exe"); await writeFile(nodeExecutable, "not Node");
-  for (const [platform, arch] of [["win32", "x64"], ["darwin", "arm64"], ["darwin", "x64"]]) {
+  for (const [platform, arch] of [["win32", "x64"], ["darwin", "arm64"]]) {
     await assert.rejects(stageAppCompiler({ platform, arch, nodeExecutable, destination: join(root, "staged") }), /official Node/);
   }
+  // dohc has no Intel Mac build, so neither staging nor packaging can make one.
+  const intelMac = { message: "The packaged app compiler requires macOS arm64. dohc has no Intel Mac build." };
+  await assert.rejects(stageAppCompiler({ platform: "darwin", arch: "x64", nodeExecutable, destination: join(root, "staged") }), intelMac);
+  await assert.rejects(requireAppCompiler(root, "darwin", "x64"), intelMac);
   for (const [platform, arch] of [["win32", "arm64"], ["linux", "arm"], ["freebsd", "x64"]]) {
     assert.deepEqual(await stageAppCompiler({ platform, arch }), { supported: false });
   }
   await assert.rejects(requireAppCompiler(root, "win32", "arm64"), /Windows x64/);
-  for (const [platform, arch] of [["win32", "x64"], ["linux", "x64"], ["linux", "arm64"], ["darwin", "x64"], ["darwin", "arm64"]]) {
+  for (const [platform, arch] of [["win32", "x64"], ["linux", "x64"], ["linux", "arm64"], ["darwin", "arm64"]]) {
     await assert.rejects(requireAppCompiler(root, platform, arch), /ENOENT/);
   }
   assert.equal(await requireAppCompiler(root, "linux", "arm"), undefined);
@@ -49,7 +53,7 @@ test("staging refuses an unpinned executable without running it", async t => {
     { message: `App compiler requires @esbuild/linux-${foreign}. Install it with pnpm install --cpu=current --cpu=${foreign}.` });
 });
 
-const posixTarget = ["darwin", "linux"].includes(process.platform) && ["arm64", "x64"].includes(process.arch);
+const posixTarget = process.platform === "darwin" ? process.arch === "arm64" : process.platform === "linux" && ["arm64", "x64"].includes(process.arch);
 test("installed macOS and Linux Collection compiler runs electron-builder resources after relocation", { skip: !posixTarget, timeout: 30000 }, async t => {
   const root = await mkdtemp(join(tmpdir(), "dohc-installed-dataset-compiler-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -63,7 +67,8 @@ test("installed macOS and Linux Collection compiler runs electron-builder resour
   const destination = join(resourcesRoot, "app-compiler");
   await requireAppCompiler(destination);
   // Packaging for the other architecture needs that architecture's binary.
-  await assert.rejects(requireAppCompiler(destination, process.platform, process.arch === "x64" ? "arm64" : "x64"), /does not match/);
+  await assert.rejects(requireAppCompiler(destination, process.platform, process.arch === "x64" ? "arm64" : "x64"),
+    process.platform === "darwin" ? /macOS arm64/ : /does not match/);
   const binary = join(destination, `node_modules/@esbuild/${process.platform}-${process.arch}/bin/esbuild`);
   for (const executable of [binary, ...(process.platform === "darwin" ? ["node", "compiler-owner"].map(name => join(destination, name)) : [])]) {
     assert.equal((await stat(executable)).mode & 0o111, 0o111, `every user can run ${executable}`);
@@ -91,7 +96,7 @@ test("installed compiler runs electron-builder resources after relocation and ch
   const destination = join(resourcesRoot, "app-compiler");
   assert.equal(createHash("sha256").update(await readFile(join(destination, appTarget.file))).digest("hex"), appTarget.sha256);
   await requireAppCompiler(destination);
-  const compile = await createInstalledAppCompiler(resourcesRoot, false);
+  const compile = await createInstalledAppCompiler(resourcesRoot);
   const bytes = Buffer.from("import './style.css'; document.body.textContent = 'installed';");
   const style = Buffer.from("body { color: green }");
   const file = (path, bytes) => ({ path, bytes, sha256: createHash("sha256").update(bytes).digest("hex") });
@@ -136,12 +141,13 @@ test("build Node version does not control the pinned runtime and downloads remai
     assert.equal(url, "https://nodejs.org/dist/v24.16.0/win-x64/node.exe"); return new Response("wrong binary");
   } }), /checksum/);
   await assert.rejects(readPinnedCompilerNode({ ...windows, fetchNode: async () => new Response("", { headers: { "content-length": String(129 * 1024 * 1024) } }) }), /size bound/);
-  for (const arch of ["arm64", "x64"]) {
-    await assert.rejects(readPinnedCompilerNode({ platform: "darwin", arch, currentNodeExecutable, fetchNode: async url => {
-      assert.equal(url, `https://nodejs.org/dist/v24.16.0/node-v24.16.0-darwin-${arch}.tar.gz`); return new Response("wrong archive");
-    } }), /archive does not match/);
+  await assert.rejects(readPinnedCompilerNode({ platform: "darwin", arch: "arm64", currentNodeExecutable, fetchNode: async url => {
+    assert.equal(url, "https://nodejs.org/dist/v24.16.0/node-v24.16.0-darwin-arm64.tar.gz"); return new Response("wrong archive");
+  } }), /archive does not match/);
+  for (const target of ["darwin-x64", "linux-x64"]) {
+    const [platform, arch] = target.split("-");
+    await assert.rejects(readPinnedCompilerNode({ platform, arch }), { message: `App compiler has no pinned Node for ${target}.` });
   }
-  await assert.rejects(readPinnedCompilerNode({ platform: "linux", arch: "x64" }), /no pinned Node for linux-x64/);
   // Only the host's target downloads the real runtime, unless development staging already holds it.
   if (!appTarget) return;
   const target = { platform: process.platform, arch: process.arch };

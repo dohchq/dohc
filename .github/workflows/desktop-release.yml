@@ -205,10 +205,6 @@ jobs:
     environment: desktop-release
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
-    # pnpm checks the install before each pnpm run or exec and reinstalls
-    # without the Install step's --cpu. No later step changes dependencies.
-    env:
-      pnpm_config_verify_deps_before_run: "false"
     strategy:
       fail-fast: false
       # Windows and WSL share the same PC for this selection.
@@ -232,10 +228,8 @@ jobs:
           corepack enable
           corepack prepare pnpm@11.20.0 --activate
 
-      # pnpm installs only the runner's native binaries. The Apple silicon
-      # runner also packages macOS x64, which needs the x64 ones.
       - name: Install
-        run: pnpm install --frozen-lockfile --cpu=current --cpu=${{ matrix.arch }}
+        run: pnpm install --frozen-lockfile
 
       - name: Stamp desktop package version
         env:
@@ -272,11 +266,6 @@ jobs:
         run: |
           rustup target add "${{ matrix.target }}"
           pnpm --filter @dohc/desktop run build:engine --target "${{ matrix.target }}"
-
-      # The desktop build staged the Collection compiler for the runner.
-      # Packaging requires the one for the package's architecture.
-      - name: Stage app compiler
-        run: node apps/desktop/scripts/stage-app-compiler.mjs --arch=${{ matrix.arch }}
 
       - id: signing
         name: Resolve signing mode
@@ -363,12 +352,11 @@ jobs:
         run: xvfb-run -a pnpm smoke:fuses:desktop
 
       # Checks the bundle's signature and fuses, builds one app through the
-      # arm64 package's signed compiler, then boots it. The x64 package boots
-      # under Rosetta on the Apple silicon runner.
+      # package's signed compiler, then boots it.
       - name: macOS packaged smoke
         if: runner.os == 'macOS'
         env:
-          DOHC_SMOKE_PACKAGE_DIRECTORY: ${{ github.workspace }}/apps/desktop/release/${{ matrix.arch == 'arm64' && 'mac-arm64' || 'mac' }}/dohc.app
+          DOHC_SMOKE_PACKAGE_DIRECTORY: ${{ github.workspace }}/apps/desktop/release/mac-arm64/dohc.app
         run: pnpm smoke:fuses:desktop
 
       - name: Windows packaged smoke
@@ -416,7 +404,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          shopt -s globstar nullglob
+          shopt -s nullglob
           channel="${{ needs.preflight.outputs.release_channel }}"
           unexpected_channel="nightly"
           if [[ "$channel" == "nightly" ]]; then
@@ -454,23 +442,7 @@ jobs:
             esac
           }
 
-          mac_manifest_name="${channel}-mac.yml"
-          mac_manifests=(release-artifacts/**/"$mac_manifest_name")
-          if (( ${#mac_manifests[@]} > 0 )); then
-            cp "${mac_manifests[0]}" "release-upload/$mac_manifest_name"
-            for manifest in "${mac_manifests[@]:1}"; do
-              node scripts/merge-update-manifests.mjs \
-                --platform mac \
-                "release-upload/$mac_manifest_name" \
-                "$manifest" \
-                "release-upload/$mac_manifest_name"
-            done
-          fi
-
           while IFS= read -r -d '' file; do
-            if [[ "$(basename "$file")" == "$mac_manifest_name" ]]; then
-              continue
-            fi
             if ! is_release_upload_file "$file"; then
               continue
             fi

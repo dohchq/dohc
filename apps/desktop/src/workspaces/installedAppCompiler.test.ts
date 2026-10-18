@@ -16,23 +16,20 @@ it("passes the compiler's reason on in place of the supervisor's code", () => {
   expect(appBuildError(other)).toBe(other);
 });
 
-it("builds apps on Windows x64 and macOS 13.5 or later only", () => {
-  expect(appCompilerRefusal("win32", "x64", "10.0.26100", false)).toBeUndefined();
+it("builds apps on Windows x64 and Apple silicon Macs with macOS 13.5 or later only", () => {
+  expect(appCompilerRefusal("win32", "x64", "10.0.26100")).toBeUndefined();
   // macOS 13.5 is Darwin 22.6, the oldest release the pinned Node runs on.
-  for (const kernel of ["22.6.0", "22.10.0", "23.0.0", "27.0.0"]) {
-    for (const arch of ["arm64", "x64"]) expect(appCompilerRefusal("darwin", arch, kernel, false)).toBeUndefined();
-  }
+  for (const kernel of ["22.6.0", "22.10.0", "23.0.0", "27.0.0"]) expect(appCompilerRefusal("darwin", "arm64", kernel)).toBeUndefined();
   for (const kernel of ["21.6.0", "22.5.0"]) {
-    expect(appCompilerRefusal("darwin", "arm64", kernel, false)).toBe("Publishing and opening apps needs macOS 13.5 or later. Update macOS, then try again.");
+    expect(appCompilerRefusal("darwin", "arm64", kernel)).toBe("Publishing and opening apps needs macOS 13.5 or later. Update macOS, then try again.");
   }
-  for (const [platform, arch] of [["win32", "arm64"], ["linux", "x64"], ["darwin", "ia32"]] as const) {
-    expect(appCompilerRefusal(platform, arch, "27.0.0", false)).toBe("Publishing and opening apps needs Windows x64 or macOS 13.5 or later.");
+  // dohc ships no Intel build, so an x64 Mac process refuses whatever its macOS.
+  for (const arch of ["x64", "ia32"]) {
+    for (const kernel of ["21.6.0", "27.0.0"]) {
+      expect(appCompilerRefusal("darwin", arch, kernel)).toBe("Publishing and opening apps needs an Apple silicon Mac with macOS 13.5 or later.");
+    }
   }
-});
-
-it("refuses an x64 dohc that Rosetta translates, and only on macOS", () => {
-  expect(appCompilerRefusal("darwin", "x64", "27.0.0", true)).toBe("This Intel version of dohc can't publish or open apps on an Apple silicon Mac. Download the Apple silicon version from github.com/dohchq/dohc/releases, then try again.");
-  // A native Intel Mac keeps the full path, and Windows keeps its own.
-  expect(appCompilerRefusal("darwin", "x64", "27.0.0", false)).toBeUndefined();
-  expect(appCompilerRefusal("win32", "x64", "10.0.26100", true)).toBeUndefined();
+  for (const [platform, arch] of [["win32", "arm64"], ["linux", "x64"], ["linux", "arm64"]] as const) {
+    expect(appCompilerRefusal(platform, arch, "27.0.0")).toBe("Publishing and opening apps needs Windows x64, or an Apple silicon Mac with macOS 13.5 or later.");
+  }
 });
