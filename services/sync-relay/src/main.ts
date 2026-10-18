@@ -20,6 +20,7 @@ import { createVerifiedEmailLookups } from "./verifiedEmailLookups";
 import {ACCOUNT_DELETION_PATH, ACCOUNT_DELETION_KEY_HEADER, accountDeletionKey, accountDeletionFenceKey} from "@dohc/workspace-auth/accountDeletion";
 import {createAccountDeletionRoute, fencePendingAccountDeletions} from "./accountDeletionRoute";
 import type {StorageContext} from "./storage/context";
+import {startLiveJournalCheck} from "./storage/liveJournalCheck";
 import { createSignUpInviteRoute } from "./signUpInviteRoute";
 import { errorBody, errorResponse, notFound } from "./errors";
 import { RELAY_API_VERSIONS, relayApiVersionRefusal } from "./apiVersion";
@@ -708,7 +709,12 @@ automations = automationServer && automationReplicaKey && automationRoot ? await
   onError: (context, error) => console.error(`[sync-relay] automations: ${context}:`, error),
 }) : undefined;
 
+let journalCheck: ReturnType<typeof startLiveJournalCheck> | undefined;
+const stopJournalCheck = () => journalCheck?.close();
+process.once('SIGINT', stopJournalCheck); process.once('SIGTERM', stopJournalCheck);
+server.once('close', stopJournalCheck);
 server.listen(requestedPort, host, () => {
+  journalCheck = startLiveJournalCheck((storage as StorageContext).db);
   void (async () => {
     for (const job of pendingDeletions.splice(0)) await deletions.purge(job.user_id,job.email).catch(() => console.error("[sync-relay] Account deletion remains pending."));
   })();
@@ -722,6 +728,7 @@ server.listen(requestedPort, host, () => {
 installShutdown(server, {
   gracePeriodMs: SHUTDOWN_GRACE_PERIOD_MS,
   onClosed: async () => {
+    stopJournalCheck();
     await publicationOperator.close();
     await documentProjection?.close();
     await ownerAdmissionRun?.close();
