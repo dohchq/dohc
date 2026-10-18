@@ -3,13 +3,14 @@ import {join} from "node:path";
 import {createReplicaSupervisor} from "./replicaSupervisor";
 import {closeTestStorages, tempRoot, testStorage} from "./testing";
 
-const state = vi.hoisted(() => ({symlink: false, uid: 42, mode: 0o40700}));
+const state = vi.hoisted(() => ({symlink: false, uid: 42, mode: 0o40700, real: ""}));
 vi.mock("node:fs/promises", async original => ({
   ...await original<typeof import("node:fs/promises")>(),
+  realpath: async (path: string) => state.real || path,
   lstat: vi.fn(async () => ({isSymbolicLink: () => state.symlink, isDirectory: () => true, uid: state.uid, mode: state.mode})),
 }));
 afterEach(async () => {
-  state.symlink = false; state.uid = 42; state.mode = 0o40700;
+  state.symlink = false; state.uid = 42; state.mode = 0o40700; state.real = "";
   vi.unstubAllGlobals(); await closeTestStorages();
 });
 async function supervisor(platform = "linux", root?: string) {
@@ -34,4 +35,9 @@ it.each(["linux", "darwin"])("refuses an overlong %s socket path", async platfor
 it("keeps Windows root behavior", async () => {
   state.symlink = true; state.uid = 43; state.mode = 0o40777;
   await (await supervisor("win32")).close();
+});
+it("measures the canonical socket path after creating the root", async () => {
+  state.real = "/private/" + "x".repeat(90);
+  const instance = await supervisor("darwin");
+  await expect(instance.settled("w")).rejects.toThrow(/socket path.*bytes/);
 });

@@ -45,6 +45,11 @@ libc = "0.2"
 # Keeps the engine's folder out of iCloud Drive.
 dohc-macos-files = { path = "../dohc-macos-files" }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4.7"
+seccompiler = "0.5.0"
+rustix = { version = "1", features = ["process", "thread"] }
+
 [features]
 # Enables capture probe state and controls plus marker hooks (`*_for_harness`).
 # The probe type exists in all builds; production builds must not enable this feature.

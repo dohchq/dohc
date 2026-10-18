@@ -36,6 +36,10 @@ The release includes the isolated app runtime. The release build checks its comp
 ## Prepare the host
 
 Install Docker Engine with Linux container support, Docker Compose 2.24.4 or newer, and Node.js 24.16 or newer.
+Development read replicas require Linux 5.19 or later with Landlock ABI 2 or later enabled.
+Other hosts refuse replicas. Replicas remain disabled by default.
+`check:self-host --running` reports whether the running container can apply the sandbox.
+Replicas use the separate `/replicas` volume. Backups and deployment archives skip this disposable data.
 Have an SMTP service ready for verification and password reset emails.
 The SMTP service must support TLS.
 

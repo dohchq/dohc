@@ -2,14 +2,15 @@ import {currentViewFileVisible, ReplicaCurrentViewRefused} from "./storage/repli
 import {historyObjectKey, sameHistoryState, historyStructuralReason, type ReplicaHistoryObservation} from "./storage/replicaHistoryPins";
 import type {ReplicaCurrentView, ReplicaCurrentViewPage, ReplicaCurrentViewPosition, ReplicaCurrentViewCursor, ReplicaCurrentViewSelector} from "@dohc/workspace-engine-client/daemon";
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, realpath, rm, statfs } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { SyncRelayStorage } from "./storage";
 import { observeRelayWrites } from "./relayWriteChanges";
 import { createReplicaReadPrincipal, type ReplicaReadLease } from "./replicaReadPrincipal";
 
-/** PR 2's catch-up and store budgets belong at the startChild boundary. */
-export const REPLICA_SUPERVISOR_LIMITS = Object.freeze({ maxRunning: 4, idleMs: 5 * 60_000, maxViewTextBytes: 64*1024*1024 });
+export const REPLICA_SUPERVISOR_LIMITS = Object.freeze({ maxRunning: 4, idleMs: 5 * 60_000, maxViewTextBytes: 64*1024*1024,
+  maxStoreBytes: 512*1024*1024, minFreeBytes: 1024*1024*1024, lifetimeMs: 15*60_000, diskCheckMs: 1000 });
+class ReplicaBudgetError extends Error {}
 export interface ReplicaChild {
   readonly pid?: number;
   readonly exited?: Promise<void>;
@@ -29,6 +30,10 @@ export interface ReplicaSupervisorOptions {
   readonly maxRunning?: number;
   readonly idleMs?: number;
   readonly maxViewTextBytes?: number;
+  readonly maxStoreBytes?: number;
+  readonly minFreeBytes?: number;
+  readonly lifetimeMs?: number;
+  readonly diskCheckMs?: number;
   readonly onError?: (workspaceId: string, error: unknown) => void;
 }
 interface Entry {
@@ -49,6 +54,10 @@ interface Entry {
   ceiling?: ReturnType<typeof setTimeout>;
   history?: ReturnType<typeof setTimeout>;
   historyObservations?: Map<string,ReplicaHistoryObservation>;
+  lifetime?: ReturnType<typeof setTimeout>;
+  disk?: ReturnType<typeof setTimeout>;
+  diskCheck?: Promise<void>;
+  closing?: Promise<void>;
 }
 
 /** Explicit construction only. Production startup must wait for PR 6's readers. */
@@ -56,7 +65,8 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
   const limits = { ...REPLICA_SUPERVISOR_LIMITS, ...options };
   if (!isAbsolute(options.storeRoot)) throw new TypeError("Replica store root must be absolute.");
   if (dirname(resolve(options.storeRoot)) === resolve(options.storeRoot)) throw new TypeError("Replica store root must be a private directory.");
-  for (const value of [limits.maxRunning, limits.idleMs, limits.maxViewTextBytes]) {
+  for (const value of [limits.maxRunning, limits.idleMs, limits.maxViewTextBytes, limits.maxStoreBytes,
+    limits.minFreeBytes, limits.lifetimeMs, limits.diskCheckMs]) {
     if (!Number.isSafeInteger(value) || value < 1) throw new TypeError("Invalid replica budget.");
   }
   const principal = createReplicaReadPrincipal(options.storage);
@@ -71,7 +81,7 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
       if (!root.isDirectory() || root.uid !== process.getuid!()) throw new Error("Replica store root must be a directory owned by the process user.");
       if (root.mode & 0o022) throw new Error("Replica store root must not be writable by group or others.");
       const limit = process.platform === "darwin" ? 104 : 108;
-      const bytes = Buffer.byteLength(join(resolve(options.storeRoot), "replica-XXXXXX", "relay.sock"));
+      const bytes = Buffer.byteLength(join(await realpath(options.storeRoot), "replica-XXXXXX", "relay.sock"));
       if (bytes >= limit) throw new Error(`Replica socket path requires ${bytes + 1} bytes; this host permits ${limit}. Use a shorter store root.`);
     })
     .then(() => readdir(options.storeRoot, { withFileTypes: true }))
@@ -202,16 +212,18 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
     entry.stopping = true;
     principal.revoke(entry.lease);
     clearTimeout(entry.idle);
+    clearTimeout(entry.lifetime); clearTimeout(entry.disk);
     clearTimeout(entry.quiet); clearTimeout(entry.ceiling);
     clearTimeout(entry.history);
     entry.retirement = (async () => {
       // Startup may still own the directory and child. Wait before disposing either.
       try {
         await entry.run?.catch(() => {});
+        await entry.diskCheck?.catch(() => {});
         try { if (standingCurrent(entry.lease,false) && !persist(entry)) options.storage.sampleReplicaHistory(entry.lease); } catch (error) { report(entry,error); }
         options.storage.discardReplicaCurrentView(entry.lease);
         options.storage.releaseReplicaCurrentView(entry.lease);
-        try { await entry.child?.close(); } catch (error) { report(entry, error); }
+        try { await (entry.closing ?? entry.child?.close()); } catch (error) { report(entry, error); }
         finally {
           try { if (entry.storeDir) await rm(entry.storeDir, { recursive: true, force: true }); }
           catch (error) { report(entry, error); }
@@ -224,6 +236,34 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
     return entry.retirement;
   }
 
+  function exhaust(entry: Entry, error: unknown) {
+    if (entry.stopping) return;
+    report(entry, error);
+    // Close before waiting for an in-flight pull, which can otherwise wait on the child forever.
+    entry.closing ??= entry.child?.close();
+    void entry.closing?.catch(failure => report(entry, failure));
+    void retire(entry).catch(failure => report(entry, failure));
+  }
+  async function checkDisk(entry: Entry) {
+    let bytes = 0;
+    const visit = async (path: string): Promise<void> => {
+      const info = await lstat(path);
+      bytes += Math.max(info.size, (info.blocks ?? 0) * 512);
+      if (bytes > limits.maxStoreBytes) throw new ReplicaBudgetError("Replica store exceeded its disk budget.");
+      if (info.isDirectory() && !info.isSymbolicLink()) {
+        for (const item of await readdir(path)) await visit(join(path, item));
+      }
+    };
+    await visit(entry.storeDir!);
+  }
+  function monitorDisk(entry: Entry) {
+    entry.disk = setTimeout(() => {
+      if (entry.stopping) return;
+      entry.diskCheck = (entry.child ? checkDisk(entry) : Promise.resolve()).then(() => {if (!entry.stopping) monitorDisk(entry);}, error => exhaust(entry, error));
+    }, limits.diskCheckMs);
+    entry.disk.unref();
+  }
+
   function schedule(entry: Entry): Promise<void> {
     clearTimeout(entry.idle);
     entry.dirty = true;
@@ -232,12 +272,18 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
       const fresh = !entry.child;
       if (fresh) {
         await mkdir(options.storeRoot, { recursive: true, mode: 0o700 });
+        const free = await statfs(options.storeRoot);
+        if (free.bavail * free.bsize < limits.minFreeBytes) throw new ReplicaBudgetError("Replica storage is low on free space. Free space on the replicas volume before retrying.");
         entry.storeDir = await mkdtemp(join(options.storeRoot, "replica-"));
+        entry.lifetime = setTimeout(() => exhaust(entry, new ReplicaBudgetError("Replica maximum lifetime reached.")), limits.lifetimeMs);
+        entry.lifetime.unref();
+        monitorDisk(entry);
       }
       for (let attempt = 0; ; attempt++) {
         try {
           if (!entry.child && !entry.stopping && principal.current(entry.lease)) {
             entry.child = await options.startChild({ storeDir: entry.storeDir!, lease: entry.lease, relayHandler: principal.handle });
+            if (entry.stopping) {await (entry.closing ??= entry.child.close()); return;}
             const child = entry.child;
             void child.exited?.then(() => {
               // A first-pull crash belongs to the one-time fresh-store rebuild below.
@@ -254,6 +300,7 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
             await entry.child!.pull();
             entry.frontier = standing.logSeq;
             entry.journalFrontier = standing.journalCursor;
+            await checkDisk(entry);
             if (principal.current(entry.lease)) {
               const selectors = options.storage.replicaCurrentViewSelectors(entry.lease.workspaceId);
               for (;;) {
@@ -319,15 +366,18 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
           }
           return;
         } catch (error) {
-          if (!fresh || attempt === 1 || entry.frontier >= 0 || entry.stopping || !principal.current(entry.lease)) throw error;
+          if (error instanceof ReplicaBudgetError || !fresh || attempt === 1 || entry.frontier >= 0 || entry.stopping || !principal.current(entry.lease)) throw error;
           // A crash before the passive role is recorded can leave an owner-role store.
           options.storage.releaseReplicaCurrentView(entry.lease);
           principal.revoke(entry.lease);
           await entry.child?.close();
+          clearTimeout(entry.disk);
+          await entry.diskCheck;
           entry.child = undefined;
           await rm(entry.storeDir!, { recursive: true, force: true });
           if (entry.stopping) throw error;
           await mkdir(entry.storeDir!, { mode: 0o700 });
+          monitorDisk(entry);
           if (entry.stopping || !standingCurrent(entry.lease)) throw error;
           entry.lease = principal.issue(entry.lease.workspaceId, randomUUID());
           options.storage.bindReplicaCurrentView(entry.lease);
@@ -345,7 +395,7 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
         entry.idle.unref();
       }
     }, error => {
-      report(entry, error);
+      if (!entry.stopping) report(entry, error);
       void retire(entry).catch(failure => report(entry, failure));
     });
     return running;

@@ -10,15 +10,60 @@ import { createReplicaEngineStarter } from "./replicaEngine";
 import {ReplicaCurrentViewRefused} from "./storage/replicaCurrentViews";
 import {registered, cleanupLiveDeliveryFixtures} from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport";
 
-const fsFailure = vi.hoisted(() => ({ path: "" }));
+const fsFailure = vi.hoisted(() => ({ path: "", free: undefined as number | undefined }));
 vi.mock("node:fs/promises", async original => {
   const fs = await original<typeof import("node:fs/promises")>();
-  return { ...fs, rm: (...args: Parameters<typeof fs.rm>) => {
+  return { ...fs, statfs: (...args: Parameters<typeof fs.statfs>) => fsFailure.free === undefined ? fs.statfs(...args) : Promise.resolve({bavail: fsFailure.free, bsize: 1}), rm: (...args: Parameters<typeof fs.rm>) => {
     if (args[0] === fsFailure.path) return Promise.reject(new Error("EPERM private store"));
     return fs.rm(...args);
   } };
 });
-afterEach(async () => { fsFailure.path = ""; vi.restoreAllMocks(); vi.useRealTimers(); await closeTestStorages(); });
+afterEach(async () => { fsFailure.path = ""; fsFailure.free = undefined; vi.restoreAllMocks(); vi.useRealTimers(); await closeTestStorages(); });
+
+it("refuses low free space before creating a child", async () => {
+  const {storage} = await fixture(), startChild = vi.fn();
+  fsFailure.free = 0;
+  const supervisor = createReplicaSupervisor({storage, storeRoot: await tempRoot("low-free"), startChild});
+  try {await expect(supervisor.activate("w")).rejects.toThrow(/free space/); expect(startChild).not.toHaveBeenCalled();}
+  finally {await supervisor.close();}
+});
+
+it.each(["during", "after"])("retires an oversized store %s a pull without rebuilding it", async phase => {
+  const {storage} = await fixture(), entered = deferred(), stopped = deferred();
+  let store = "", starts = 0;
+  const close = vi.fn(async () => {stopped.resolve();});
+  const errors: unknown[] = [];
+  const supervisor = createReplicaSupervisor({storage, storeRoot: await tempRoot("store-budget"),
+    maxStoreBytes: 8192, diskCheckMs: 1, onError: (_, e) => errors.push(e), startChild: async input => {
+      starts++; store = input.storeDir;
+      return {close, currentView: emptyCurrentView(input), pull: async () => {
+        writeFileSync(join(store, "too-big"), Buffer.alloc(32_768)); entered.resolve();
+        if (phase === "during") await stopped.promise;
+      }};
+    }});
+  try {
+    const activation = supervisor.activate("w");
+    const failure = expect(activation).rejects.toThrow(/disk budget|standing ended/);
+    await entered.promise; await failure; await supervisor.settled("w");
+    expect(starts).toBe(1); expect(close).toHaveBeenCalledOnce(); expect(existsSync(store)).toBe(false);
+    expect(errors.filter(e => String(e).includes("disk budget"))).toHaveLength(1);
+  } finally {stopped.resolve(); await supervisor.close();}
+});
+
+it("closes a busy child at its maximum lifetime", async () => {
+  const {storage} = await fixture(), entered = deferred(), stopped = deferred();
+  vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
+  const close = vi.fn(async () => {stopped.resolve();});
+  let store = "";
+  const supervisor = createReplicaSupervisor({storage, storeRoot: await tempRoot("lifetime"), lifetimeMs: 100,
+    startChild: async input => {store = input.storeDir; return {close, currentView: emptyCurrentView(input),
+      pull: async () => {entered.resolve(); await stopped.promise;}};}});
+  try {
+    const activation = supervisor.activate("w"), failure = expect(activation).rejects.toThrow("standing ended");
+    await entered.promise; await vi.advanceTimersByTimeAsync(100); await failure; await supervisor.settled("w");
+    expect(close).toHaveBeenCalledOnce(); expect(existsSync(store)).toBe(false);
+  } finally {stopped.resolve(); await supervisor.close();}
+});
 
 const emptyCurrentView=(input: ReplicaChildInput)=>async()=>({workspaceId:input.lease.workspaceId,revision:0,logCursor:0,journalCursor:0,files:[],texts:[],moved:false,nextCursor:null,refusedFiles:[]});
 
@@ -82,6 +127,32 @@ it("refreshes a fenced pending view after its in-flight drain", async () => {
     expect(stored.mock.calls[1]![1].texts).toEqual([expect.objectContaining({text: "4"})]);
     expect(errors).toEqual([]);
   } finally {release(); await draining; await supervisor.close();}
+});
+
+it.each(["ceiling", "failure"])("fenced flush handles %s without retaining timers or reporting twice", async mode => {
+  const {storage} = await fixture(), errors: unknown[] = [];
+  vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
+  const timers = vi.spyOn(globalThis, "setTimeout");
+  let pulls = 0;
+  const supervisor = createReplicaSupervisor({storage, storeRoot: await tempRoot("flush-regression"), diskCheckMs: 600_000,
+    onError: (_, error) => errors.push(error), startChild: async input => ({close: async () => {},
+      pull: async () => {if (++pulls === 3 && mode === "failure") throw Error("refresh failed");},
+      currentView: async () => {
+        const text = String(pulls), sha256 = createHash("sha256").update(text).digest("hex");
+        return {...await emptyCurrentView(input)(), files: [{versionId: "main", objectId: "a", path: "a.txt",
+          contentKind: "text" as const, sha256, byteLength: text.length, lineageClaimId: null, restoreGeneration: null}], texts: [{sha256, text}]};
+      }})});
+  try {
+    await supervisor.activate("w"); await supervisor.activate("w");
+    if (mode === "ceiling") for (let second = 1; second < 30; second++) {
+      await vi.advanceTimersByTimeAsync(1000); await supervisor.activate("w");
+    }
+    vi.spyOn(storage, "replicaCurrentViewSelectors").mockReturnValueOnce([{versionId: "main", paths: ["blocked"]}]);
+    await vi.advanceTimersByTimeAsync(mode === "ceiling" ? 1000 : 2000);
+    await supervisor.settled("w"); await Promise.resolve();
+    if (mode === "ceiling") expect(timers.mock.calls.filter(call => call[1] === 30_000)).toHaveLength(2);
+    else expect(errors.filter(error => String(error).includes("refresh failed"))).toHaveLength(1);
+  } finally {await supervisor.close();}
 });
 
 async function fixture(workspaceId = "w") {
@@ -328,7 +399,7 @@ it("refuses unsupported production hosts and invalid limits before starting anyt
   const { storage } = await fixture();
   expect(() => createReplicaSupervisor({ storage, storeRoot: "relative", startChild: async input => { throw Error(); } })).toThrow("absolute");
   expect(() => createReplicaSupervisor({ storage, storeRoot: resolve("private"), maxRunning: 0, startChild: async input => { throw Error(); } })).toThrow("budget");
-  expect(() => createReplicaEngineStarter({ engineExecutable: "C:/daemon.exe" })).toThrow(/development/i);
+  expect(() => createReplicaEngineStarter({ engineExecutable: "C:/daemon.exe" })).toThrow(/development|Linux 5.19/i);
 });
 
 it("sweeps stores from a prior process before admitting a child", async () => {

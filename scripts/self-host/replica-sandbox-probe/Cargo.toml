@@ -1,0 +1,21 @@
+[package]
+name = "replica-sandbox-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Syscall attack probes need unsafe calls. Keep them outside the production workspace's forbid lint.
+[workspace]
+
+[[bin]]
+name = "replica-sandbox-probe"
+path = "main.rs"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4.7"
+seccompiler = "0.5.0"
+rustix = { version = "1", features = ["process", "thread"] }
+libc = "0.2"
+
+[profile.dev]
+debug = false

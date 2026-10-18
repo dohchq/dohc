@@ -75,6 +75,13 @@ impl From<Envelope> for OutputItem {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args == ["--replica-sandbox-check"] {
+        println!(
+            "Landlock ABI {}",
+            dohc_workspace_engine::replica_sandbox::apply(&std::env::current_dir()?)?
+        );
+        return Ok(());
+    }
     if args == ["--projection-only"] {
         if std::env::var_os("DOHC_ENGINE_LIVE_HOST_CONFIG").is_some()
             || std::env::var_os("DOHC_ENGINE_OWNER_HOST_CONFIG").is_some()
@@ -88,6 +95,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
     let replica = args == ["--replica"];
+    if replica {
+        dohc_workspace_engine::replica_sandbox::apply(&std::env::current_dir()?)?;
+    }
     let passive = replica || args == ["--store-role", "passive"];
     if !args.is_empty() && !passive {
         return Err(io::Error::other("unknown engine arguments").into());
@@ -98,7 +108,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         .ok_or_else(|| {
             io::Error::new(io::ErrorKind::PermissionDenied, "engine auth token missing")
         })?;
-    tokio::runtime::Runtime::new()?.block_on(run_stdio(auth_token, passive, replica))
+    let runtime = if replica {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(4)
+            .enable_all()
+            .build()?
+    } else {
+        tokio::runtime::Runtime::new()?
+    };
+    runtime.block_on(run_stdio(auth_token, passive, replica))
 }
 
 fn passive_ingress(

@@ -39,6 +39,6 @@ ENV NODE_ENV=production DOHC_REVISION=$DOHC_REVISION
 WORKDIR /app
 COPY --from=build --chown=node:node /release/ /app/
 COPY --from=native --chown=node:node /source/target/release/dohc-workspace-engine /app/bin/dohc-workspace-engine
-RUN mkdir /data /continuity /host-data /snapshots && chown node:node /data /continuity /host-data /snapshots
+RUN mkdir /data /continuity /host-data /snapshots /replicas && chown node:node /data /continuity /host-data /snapshots /replicas && chmod 700 /replicas
 USER node
 ENTRYPOINT ["node", "/app/tools/self-host/entrypoint.mjs"]

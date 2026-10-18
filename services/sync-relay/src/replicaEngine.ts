@@ -3,6 +3,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
+import { release } from "node:os";
 import { Duplex } from "node:stream";
 import { parseCanonicalAdmittedLiveUpdateMetadata } from "@dohc/live-session-contract";
 import type { ReplicaLiveJournalPage } from "./storage/liveUpdateJournal";
@@ -12,15 +13,18 @@ import { serveReplicaRelay } from "./replicaRelaySocket";
 
 export interface ReplicaEngineOptions {
   readonly engineExecutable: string;
-  readonly allowUnisolatedDevelopment?: boolean;
+  readonly allowDevelopment?: boolean;
   readonly deadlineMs?: number;
 }
 
-/** The child receives only private paths, an RPC token, and its GET credential. PR 4b adds Linux isolation. */
+/** The child receives only private paths, an RPC token, and its GET credential. */
 export function createReplicaEngineStarter(options: ReplicaEngineOptions) {
-  // PR 4 must replace this all-platform opt-in with Linux isolation.
-  if (!options.allowUnisolatedDevelopment) {
-    throw new Error("Relay replicas require explicit development permission until Linux isolation is available.");
+  const [major = 0, minor = 0] = release().split(".").map(Number);
+  if (process.platform !== "linux" || !(major > 5 || major === 5 && minor >= 19)) {
+    throw new Error("Relay replicas require Linux 5.19 or later with Landlock ABI 2 or later enabled. Run the relay on a supported Linux host.");
+  }
+  if (!options.allowDevelopment) {
+    throw new Error("Relay replicas require explicit development permission.");
   }
   if (!isAbsolute(options.engineExecutable)) throw new TypeError("Replica engine executable must be absolute.");
   const deadlineMs = options.deadlineMs ?? 120_000;
@@ -30,8 +34,8 @@ export function createReplicaEngineStarter(options: ReplicaEngineOptions) {
     const authToken = randomBytes(32).toString("hex");
     const relay = await serveReplicaRelay(storeDir, lease, relayHandler);
     let child: ChildProcessWithoutNullStreams;
-    try { child = spawn(options.engineExecutable, ["--replica"], { cwd: storeDir, env: { DOHC_ENGINE_AUTH_TOKEN: authToken,
-      ...(process.platform === "win32" ? { SystemRoot: process.env.SystemRoot } : {}) },
+    // SQLite can spill a pull to disk. Keep its temporary files inside the confined store.
+    try { child = spawn(options.engineExecutable, ["--replica"], { cwd: storeDir, env: { DOHC_ENGINE_AUTH_TOKEN: authToken, TMPDIR: storeDir },
       windowsHide: true, stdio: ["pipe", "pipe", "pipe"] }); }
     catch (error) { await relay.close(); throw error; }
     const termination = new Promise<void>(resolve => child.once("close", () => resolve()));
@@ -55,9 +59,13 @@ export function createReplicaEngineStarter(options: ReplicaEngineOptions) {
     const close = () => closing ??= (async () => { stopped = true; client.close(); child.kill("SIGKILL");
       await termination; await relay.close(); })();
     try {
-      await client.ready();
+      try { await client.ready(); }
+      catch (error) { throw new Error("Replica sandbox could not start. Run the engine with --replica-sandbox-check in the relay container. Use Linux 5.19 or later with Landlock ABI 2 or later enabled and permit landlock_* in its seccomp profile.", {cause: error}); }
       const ping = await request("engine.ping", {});
-      if (ping.mode !== "replica" || ping.sandboxLevel !== "none") throw new Error("Replica engine mode is unavailable.");
+      if (ping.mode !== "replica") throw new Error("Replica engine mode is unavailable.");
+      if (!Number.isSafeInteger(ping.landlockAbi) || Number(ping.landlockAbi) < 2) {
+        throw new Error("Replica engine did not apply Landlock ABI 2 or later. Enable Landlock on Linux 5.19 or later and permit landlock_* in the container seccomp profile.");
+      }
       const opened = await request("workspace.open", { rootDir: storeDir, workspaceId: lease.workspaceId,
         storeMode: "passive", captureMode: "none", recoverRunningDispatches: false,
         relay: { socketPath: relay.socketPath, bearerToken: lease.bearer } });
@@ -85,7 +93,7 @@ export function createReplicaEngineStarter(options: ReplicaEngineOptions) {
         const frontiers = replicaFrontiers(await request("replica.frontiers", {}));
         await drainReplicaJournal(frontiers.journalCursor, async after => {
           const response = await relayHandler(new Request(`http://localhost/sync/${encodeURIComponent(lease.workspaceId)}/live-journal?after=${after}&limit=500`, {
-            headers: {authorization: `Bearer ${lease.bearer}`}, signal: AbortSignal.timeout(deadlineMs)}));
+            headers: {authorization: `Bearer ${lease.bearer}`}}));
           if (response.status !== 200) throw new Error(`Replica journal read failed (${response.status}).`);
           return await response.json() as ReplicaLiveJournalPage;
         }, async (after, page) => {
