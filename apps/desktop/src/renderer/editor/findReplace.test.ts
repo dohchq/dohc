@@ -17,6 +17,7 @@ import {
   makeFindReplacePlugin,
   nextMatchIndex,
   prevMatchIndex,
+  type FindReplaceAction,
   type FindReplaceState,
 } from "./findReplace";
 
@@ -309,6 +310,38 @@ describe("findReplaceExtension keys", () => {
   it.each(["win32", "linux"])("opens Replace with Ctrl+H on %s", (platform) => {
     expect(replaceOpenAfter(platform, { key: "h", keyCode: 72, ctrlKey: true })).toBe(true);
     expect(replaceOpenAfter(platform, { key: "f", keyCode: 70, ctrlKey: true, altKey: true })).toBe(false);
+  });
+
+  it.each([
+    ["darwin", { key: "g", metaKey: true }, { key: "G", metaKey: true, shiftKey: true }, [{ key: "g", ctrlKey: true }, { key: "F3" }]],
+    ["win32", { key: "F3" }, { key: "F3", shiftKey: true }, [{ key: "g", ctrlKey: true }, { key: "g", metaKey: true }]],
+    ["linux", { key: "F3" }, { key: "F3", shiftKey: true }, [{ key: "g", ctrlKey: true }]],
+  ] as const)("finds again from the document on %s while the bar has a query", (platform, next, previous, others) => {
+    vi.stubGlobal("dohcDesktop", { platform });
+    const editor = new Editor({ extensions: [StarterKit, findReplaceExtension], content: "<p>the cat, the mat, the hat</p>" });
+    try {
+      const press = (init: KeyboardEventInit) => editor.view.someProp("handleKeyDown", (handle) =>
+        handle(editor.view, new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init }))) ?? false;
+      const find = (action: FindReplaceAction) => editor.view.dispatch(editor.state.tr.setMeta(findReplaceKey, action));
+      const active = () => findReplaceKey.getState(editor.state)?.activeIndex;
+      // With the bar closed, the key is left to anything else that wants it.
+      expect(press(next)).toBe(false);
+      find({ type: "open", replace: false, query: "the" });
+      expect(active()).toBe(0);
+      expect(press(next)).toBe(true);
+      expect(active()).toBe(1);
+      press(next);
+      press(next);
+      expect(active()).toBe(0);
+      expect(press(previous)).toBe(true);
+      expect(active()).toBe(2);
+      for (const other of others) expect(press(other), JSON.stringify(other)).toBe(false);
+      expect(active()).toBe(2);
+      find({ type: "setQuery", query: "" });
+      expect(press(next)).toBe(false);
+    } finally {
+      editor.destroy();
+    }
   });
 
   it("matches ⌥⌘F through the keymap's keyCode fallback, where macOS reports ƒ", () => {

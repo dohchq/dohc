@@ -93,6 +93,20 @@ export function buildMenuTemplate(options: {
       { role: "quit", label: "Quit dohc" },
     ],
   };
+  // The standard macOS Window menu, with Safari's tab commands. AppKit
+  // appends the window list.
+  const windowMenu: MenuItemConstructorOptions = {
+    role: "windowMenu",
+    submenu: [
+      { role: "minimize" },
+      { role: "zoom" },
+      { type: "separator" },
+      ...command("next-tab"),
+      ...command("previous-tab"),
+      { type: "separator" },
+      { role: "front" },
+    ],
+  };
 
   return [
     ...(isMac ? [appMenu] : []),
@@ -122,6 +136,8 @@ export function buildMenuTemplate(options: {
         ...command("import-files"),
         ...command("export-workspace"),
         { type: "separator" },
+        // macOS keeps tab switching in the Window menu.
+        ...(isMac ? [] : [...command("next-tab"), ...command("previous-tab")]),
         ...command("close-tab"),
         // VS Code convention: CommandOrControl+W closes the tab in the
         // renderer. The close role uses a separate window shortcut.
@@ -186,8 +202,7 @@ export function buildMenuTemplate(options: {
     },
     // macOS keeps Settings in the app menu.
     ...(isMac ? [] : [{ label: "Go", submenu: [...command("settings")] }]),
-    // Standard macOS Window menu (minimize/zoom/front + window list).
-    ...(isMac ? [{ role: "windowMenu" } as const] : []),
+    ...(isMac ? [windowMenu] : []),
     // macOS adds its menu search to Help, which shows only when it has an
     // item. Help holds the command palette, which lists every command.
     {

@@ -59,8 +59,8 @@ export function registerNativeMenusIpcHandlers<
   // Native explorer context menu over the closed EXPLORER_MENU_COMMANDS set:
   // main owns every label and the item structure (the renderer only names
   // what was right-clicked), and the chosen id resolves the same invoke —
-  // null on dismiss. "Reveal in file manager" is performed here (containment
-  // first) so no broader open-path IPC needs to exist for it.
+  // null on dismiss. Show in Finder, or its Windows and Linux twin, runs here
+  // (containment first) so no broader open-path IPC needs to exist for it.
   registerHandler(CHANNELS.showExplorerMenu, async (event, payload) => {
     assertTrustedSender(event);
     const input = ShowExplorerMenuPayload.parse(payload);
@@ -134,7 +134,7 @@ export function registerNativeMenusIpcHandlers<
             // needs a relay-side workspace to grant from.
             canShare: menuContext.canShare,
             shareView: menuContext.shareView,
-          }).map((entry) =>
+          }, process.platform).map((entry) =>
             entry.kind === "separator"
               ? { type: "separator" as const }
               : item(entry.label, entry.id),

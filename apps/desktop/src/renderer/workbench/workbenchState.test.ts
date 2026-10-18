@@ -6,6 +6,7 @@ import {
   activateTab,
   activeGroup,
   activeTabPath,
+  adjacentTabPath,
   allTabs,
   clampAboutWidth,
   clampOpenEditorsHeight,
@@ -69,6 +70,16 @@ function withTabs(...paths: string[]): WorkbenchState {
 }
 
 describe("tabs", () => {
+  it("finds the next and previous tab in a group, wrapping at the ends", () => {
+    const group = activeGroup(activateTab(withTabs("a.md", "b.md", "c.md"), DEFAULT_EDITOR_GROUP_ID, "a.md"));
+    expect(adjacentTabPath(group, 1)).toBe("b.md");
+    expect(adjacentTabPath(group, -1)).toBe("c.md");
+    expect(adjacentTabPath({ ...group, activeTab: "c.md" }, 1)).toBe("a.md");
+    expect(adjacentTabPath({ ...group, activeTab: null }, 1)).toBe("a.md");
+    expect(adjacentTabPath({ ...group, activeTab: null }, -1)).toBe("c.md");
+    expect(adjacentTabPath({ ...group, tabs: [], activeTab: null }, 1)).toBeNull();
+  });
+
   it("starts with one focused empty editor group", () => {
     const state = defaultWorkbenchState();
     expect(state.editorGroups).toEqual([
