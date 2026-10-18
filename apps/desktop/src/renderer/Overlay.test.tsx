@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { StrictMode, useLayoutEffect, useRef, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Overlay } from "./Overlay";
+import { Menu } from "./ui/Menu";
 
 afterEach(() => {
   cleanup();
@@ -56,6 +58,33 @@ describe("Overlay", () => {
     fireEvent.keyDown(document, { key: "Escape" });
 
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes an open menu on the first Escape and the overlay on the second", async () => {
+    const user = userEvent.setup();
+    function Dialog() {
+      const [open, setOpen] = useState(true);
+      const [menuOpen, setMenuOpen] = useState(false);
+      return open ? (
+        <Overlay onClose={() => setOpen(false)} panelProps={{ role: "dialog", "aria-label": "Actions" }}>
+          <Menu label="Row actions" open={menuOpen} onOpenChange={setMenuOpen}
+            items={[{ id: "rename", label: "Rename", onSelect: vi.fn() }]} />
+        </Overlay>
+      ) : null;
+    }
+    render(<Dialog />);
+    const dialog = screen.getByRole("dialog", { name: "Actions" });
+    const trigger = screen.getByRole("button", { name: "Row actions" });
+    await user.click(trigger);
+    expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "Rename" }));
+
+    await user.keyboard("{Escape}");
+
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(screen.getByRole("dialog", { name: "Actions" })).toBe(dialog);
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   it("closes only the topmost of two nested overlays on Escape", () => {

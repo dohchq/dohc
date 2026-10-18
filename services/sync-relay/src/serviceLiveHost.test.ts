@@ -11,6 +11,8 @@ import { startServiceLiveHost, deleteConfiguredServiceWorkspaceRoots, type Servi
 import { EngineRequestError } from "@dohc/workspace-engine-client/daemon";
 import {hasRelayWriteObservers, notifyRelayWrite, observeRelayWrites} from "./relayWriteChanges.js";
 import {createNamedFrameChanges} from "./liveHostChanges.js";
+import {captureOwnerLiveFrameHost} from "./namedLiveFrameHost.js";
+import type {LiveHostConnectionCoordinate} from "./storage.js";
 import {ServiceActivationDriver} from "./serviceActivationDriver.js";
 import {liveEditors} from "./liveEditors.js";
 import { OwnerCommittedDelivery } from "./ownerCommittedDelivery.js";
@@ -51,8 +53,10 @@ async function fixture() {
 function clientFrom(options: { env: Record<string, string> }) {
   const nativePath = options.env.DOHC_ENGINE_LIVE_HOST_CONFIG!;
   const config = JSON.parse(readFileSync(nativePath, "utf8"));
-  const client = { sendRequest: vi.fn(async () => ({ result: { relayNamespace: config.relayNamespace, host: config.host,
-    workspaces: config.workspaces.map((row: { workspaceId: string }) => ({ workspaceId: row.workspaceId, workspaceHandle: "actual-open-handle" })) } })),
+  // It creates each hosted replica it is asked to, and answers anything else with its discovery.
+  const client = { sendRequest: vi.fn(async (request?: {method: string}) => request?.method === "sync.createHostedReplica" ? {result: {hosted: true}} : ({
+    result: { relayNamespace: config.relayNamespace, host: config.host,
+      workspaces: config.workspaces.map((row: { workspaceId: string }) => ({ workspaceId: row.workspaceId, workspaceHandle: "actual-open-handle" })) } })),
     close: vi.fn(), waitForExit: vi.fn(async () => {}) };
   return { client, config, nativePath };
 }
@@ -174,55 +178,40 @@ it("registers only the discovered engine identity and releases its incarnation o
   expect(f.storage.getLiveHostControl()?.admissionState).toBe("closed");
 });
 
-it("prepares attached ordinary replication without registering a partly activated live host", async () => {
+// The engine's hosted replica replies, with fields a test can override.
+const hostedPass = (overrides: Record<string, unknown> = {}) => ({fetched: 0, applied: 0, refused: 0, skipped: 0, conflictsOpened: 0, hasMore: false,
+  pendingCursor: {kind: "hosted", token: "pending"}, changedPaths: [], refusals: [], sharingDeclined: [], held: [], departed: [], ...overrides});
+const hostedCommit = (overrides: Record<string, unknown> = {}) => ({committed: true, hasMore: false, retirement: null, departed: [], sharingDeclined: [], ...overrides});
+const pushReply = {status: "complete", hasMore: false, pushed: 0, sharingDeclined: [], ownerAdmissionPending: []};
+
+it("gives the engine a configured hosted replica's relay without registering a partly activated live host", async () => {
   const f = await fixture(); let captured!: ReturnType<typeof clientFrom>;
-  const attachment = {relay: {baseUrl: "https://relay.example", bearerToken: "actual-owner-credential"},
-    identity: {kind: "join", replicationEpoch: "actual-epoch", streamIdentity: "actual-stream"}, maxPagesPerPull: 1};
+  const attachment = {relay: {baseUrl: "https://relay.example", bearerToken: "actual-service-credential"},
+    identity: {replicationEpoch: "actual-epoch", streamIdentity: "actual-stream"}, maxPagesPerPull: 1};
   const adoption = {maxBytes: 1_000_000, maxEvents: 10, ownerOutbox: {maxPendingBytes: 1_000_000, maxPendingAgeMs: 60_000}};
   Object.assign(f.config, {adoption});
-  Object.assign(f.config.workspaces[0]!, {ordinaryReplication: attachment}); await f.save();
-  spawn.mockImplementation(async options => {
-    captured = clientFrom(options);
-    const discovery = captured.client.sendRequest.getMockImplementation()!;
-    captured.client.sendRequest.mockImplementation(async (...args: unknown[]) => {
-      const request = args[0] as {method: string};
-      if (request.method === "liveApplication.hosts") return discovery();
-      if (request.method === "sync.adoptJoinIdentity") return {result: {adopted: true}} as never;
-      if (request.method === "sync.materializePendingCursor") return {result: {materialized: true}} as never;
-      if (request.method === "sync.commitCursor") return {result: {committed: true, sharingDeclined: []}} as never;
-      return {result: {status: "complete", nextCursor: 7, pendingCursor: {kind: "relay", token: "native-issued-token"},
-        hasMore: false, fetched: 1, applied: 1, refused: 0, skipped: 0, conflictsOpened: 0, refusals: [], sharingDeclined: [],
-        changedPaths: [{versionId: "main", path: "work.md", operation: "write", contentKind: "text"}]}} as never;
-    });
-    return captured.client;
-  });
+  Object.assign(f.config.workspaces[0]!, {hostedReplication: attachment}); await f.save();
+  spawn.mockImplementation(async options => {captured = clientFrom(options); return captured.client;});
   const before = f.storage.getLiveHostControl();
   const host = await startServiceLiveHost(f);
   try {
     expect(captured.config.workspaces[0]).toEqual({root: f.config.workspaces[0]!.root, workspaceId: "workspace", maxRegistrations: 8, relay: attachment.relay});
-    expect(captured.config.workspaces[0]).not.toHaveProperty("ordinaryReplication");
+    expect(captured.config.workspaces[0]).not.toHaveProperty("hostedReplication");
     expect(captured.config.adoption).toEqual(adoption);
     expect(f.storage.getLiveHostControl()).toEqual(before);
     expect(f.storage.getLiveHostControl()?.registeredConnectionId).toBeNull();
     await expect(host.drain({workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64)})).rejects.toThrow("retired");
-    expect(await host.prepareOrdinary("workspace")).toMatchObject({nextCursor: 7, hasMore: false});
-    expect(captured.client.sendRequest).toHaveBeenCalledWith(expect.objectContaining({method: "sync.materializePendingCursor",
-      workspace: "actual-open-handle", params: {workspaceId: "workspace", pendingCursor: {kind: "relay", token: "native-issued-token"}}}), expect.any(AbortSignal));
-    expect(f.storage.getLiveHostControl()).toEqual(before);
+    expect(captured.client.sendRequest).toHaveBeenCalledTimes(1);
   } finally { await host.close(); }
   expect(f.storage.getLiveHostControl()).toEqual(before);
 });
 
-it("rejects an unconfigured ordinary workspace before starting a pull", async () => {
-  const f = await fixture(); let captured!: ReturnType<typeof clientFrom>;
+it("refuses a configured replica of any other kind before spawning", async () => {
+  const f = await fixture();
   Object.assign(f.config.workspaces[0]!, {ordinaryReplication: {relay: {baseUrl: "https://relay.example", bearerToken: "owner"},
-    identity: {kind: "claim"}, maxPagesPerPull: 1}}); await f.save();
-  spawn.mockImplementation(async options => {captured = clientFrom(options); return captured.client;});
-  const host = await startServiceLiveHost(f);
-  try {
-    await expect(host.prepareOrdinary("other")).rejects.toThrow("attachment");
-    expect(captured.client.sendRequest).toHaveBeenCalledTimes(1);
-  } finally {await host.close();}
+    identity: {kind: "join", replicationEpoch: "epoch", streamIdentity: "stream"}, maxPagesPerPull: 1}}); await f.save();
+  await expect(startServiceLiveHost(f)).rejects.toThrow("Invalid service host configuration.");
+  expect(spawn).not.toHaveBeenCalled();
 });
 
 it("refuses forged engine discovery before opening relay admission", async () => {
@@ -360,8 +349,8 @@ it("requires a restore working reserve and passes only native restore bounds to 
 });
 
 async function configureActivation(f: Awaited<ReturnType<typeof fixture>>,limits = {}) {
-  Object.assign(f.config.workspaces[0]!,{ordinaryReplication:{relay:{baseUrl:"https://relay.example",bearerToken:"owner-token"},
-    identity:{kind:"join",replicationEpoch:"epoch",streamIdentity:"stream"},maxPagesPerPull:1}});
+  Object.assign(f.config.workspaces[0]!,{hostedReplication:{relay:{baseUrl:"https://relay.example",bearerToken:"service-token"},
+    identity:{replicationEpoch:"epoch",streamIdentity:"stream"},maxPagesPerPull:1}});
   Object.assign(f.config,{adoption:{maxBytes:1_000_000,maxEvents:10,ownerOutbox:{maxPendingBytes:1_000_000,maxPendingAgeMs:60_000}},
     sync:{policy:{maxReadBytes:1_000_000,maxOutputBytes:1_000_000,maxClientVectorBytes:1000,maxHostVectorBytes:1000},workingReserveBytes:1_000_000},
     activation:{targets:[{workspaceId:"workspace",path:"file.md",shareId:"share"}],maxCaptureBytes:1_000_000,
@@ -372,7 +361,7 @@ async function configureActivation(f: Awaited<ReturnType<typeof fixture>>,limits
   await f.save();
 }
 
-it("runs bounded ordinary preparation in the configured activation lifecycle and closes its pass",async()=>{
+it("runs a bounded hosted pull in the configured activation lifecycle and closes its pass",async()=>{
   const f=await fixture();let captured!:ReturnType<typeof clientFrom>;
   await configureActivation(f);
   spawn.mockImplementation(async options=>{
@@ -380,16 +369,16 @@ it("runs bounded ordinary preparation in the configured activation lifecycle and
     captured.client.sendRequest.mockImplementation(async(...args:unknown[])=>{
       const request=args[0] as {method:string};
       if(request.method==="liveApplication.hosts")return discovery();
-      if(request.method==="sync.adoptJoinIdentity")return {result:{adopted:true}} as never;
+      if(request.method==="sync.createHostedReplica")return {result:{hosted:true}} as never;
       if(request.method==="sync.materializePendingCursor")return {result:{materialized:true}} as never;
-      if(request.method==="sync.commitCursor")return {result:{committed:true,sharingDeclined:[]}} as never;
-      return {result:{status:"complete",nextCursor:1,pendingCursor:{kind:"relay",token:"pending"},hasMore:true,
-        fetched:1,applied:1,refused:0,skipped:0,conflictsOpened:0,refusals:[],sharingDeclined:[],changedPaths:[]}} as never;
+      if(request.method==="sync.commitCursor")return {result:hostedCommit({hasMore:true})} as never;
+      return {result:hostedPass({hasMore:true,fetched:1,applied:1})} as never;
     });return captured.client;
   });
   const host=await startServiceLiveHost(f);
   await vi.waitFor(()=>expect(captured.client.sendRequest).toHaveBeenCalledWith(expect.objectContaining({method:"sync.commitCursor"}),expect.any(AbortSignal)));
-  await expect(host.prepareOrdinary("workspace")).rejects.toThrow("activation driver owns");
+  // One page per pull: the pass stops at the page boundary and does not capture.
+  expect(captured.client.sendRequest.mock.calls.filter(call=>((call as unknown[])[0] as {method:string}).method==="sync.pullHosted")).toHaveLength(1);
   expect(f.storage.getLiveHostControl()!.registeredConnectionId).toBeNull();
   await host.close();
   expect(captured.client.close).toHaveBeenCalledTimes(1);
@@ -454,7 +443,7 @@ const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest(
 // A service owner whose activation completed under an earlier connection, as
 // after a restart. The started host resumes it from real relay storage; only
 // the engine is mocked. `park` holds the next engine request for one method.
-async function completedServiceOwner(options: {empty?: boolean; frameChanges?: boolean} = {}) {
+async function completedServiceOwner(options: {empty?: boolean; frameChanges?: boolean; polling?: boolean} = {}) {
   const f = await fixture(), raw = new DatabaseSync(join(f.root, "relay", "relay.sqlite"));
   cleanup.push(async () => raw.close());
   const policy = {maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000_000, maxDecodedPayloadByteVisits: 100_000_000,
@@ -512,33 +501,64 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
 
   Object.assign(f.config, {settlement: {maxApplicationsPerSettlement: 8}});
   const target = {workspaceId: "workspace", path: "docs/a.md", shareId: "share"};
-  // An empty host activates documents it gains on its next pass.
-  await configureActivation(f, {targets: options.empty ? [] : [target], passDeadlineMs: 10_000, validation: policy, ...(options.empty ? {pollIntervalMs: 20} : {})});
+  // An empty host activates documents it gains on its next pass. It and a polling host pass every 20 ms.
+  await configureActivation(f, {targets: options.empty ? [] : [target], passDeadlineMs: 10_000, validation: policy,
+    ...(options.empty || options.polling ? {pollIntervalMs: 20} : {})});
   // An empty host receives this workspace and document through `update`.
   const workspace = f.config.workspaces[0]! as ServiceWorkspace;
   if (options.empty) {f.config.workspaces = []; await f.save();}
 
   let parked: {method: string; entered: ReturnType<typeof deferred<void>>; release: ReturnType<typeof deferred<void>>} | undefined;
-  // Queued engine replies: an unload reply or an error that loses it, and overrides for a pull page.
-  const pushed = deferred<void>(), unloads: unknown[] = [], pulls: Record<string, unknown>[] = [];
+  // Queued unload replies, or errors that lose them. `replies` overrides every hosted pass, commit and push until a test changes it.
+  const pushed = deferred<void>(), unloads: unknown[] = [];
+  // `diverge` refuses each pull as diverged. `create` fails each create, as diverged when a relay is ahead at the replica's origin.
+  const replies: {pass: Record<string, unknown>; commit: Record<string, unknown>; push: Record<string, unknown>; diverge?: boolean;
+    create?: "diverged" | Error} = {pass: {}, commit: {}, push: {}};
+  const divergence = (id: number) => new EngineRequestError(id, {code: "INVALID_PARAMS", message: "relay-origin-diverged", retry: "no"} as never);
+  // What the engine applied of each accepted row, by delivery ID. `lost` loses each application's
+  // reply and every ACK read after it, as when the engine applied a row the relay never recorded.
+  // While `pending` is set, the engine answers each application pending and applies nothing.
+  const applied = new Map<string, Record<string, unknown>>(), lost = {replies: false, pending: false};
+  // Once set, each registration gets a new ID and retires the one before it, as the engine does.
+  let registrations: {next: number; live: number} | undefined, registrationRefusal: Error | undefined;
+  const retired = (id: unknown) => registrations !== undefined && id !== registrations.live;
+  const unavailable = (id: number) => new EngineRequestError(id, {code: "INVALID_PARAMS", message: "live-registration-unavailable", retry: "no"} as never);
+  // Whether the engine's settlement reaches the file. Until it does, the same terminal settles again.
+  const settlement = {materialized: true};
   const membership: {method: string; workspace?: string; params: unknown}[] = [];
-  let ownerRequests = 0, client!: ReturnType<typeof clientFrom>["client"] & {captureOwnerActivation: ReturnType<typeof vi.fn>};
+  let ownerRequests = 0, client!: ReturnType<typeof clientFrom>["client"] & {captureOwnerActivation: ReturnType<typeof vi.fn>;
+    sendLiveApplication: ReturnType<typeof vi.fn>; readLiveApplicationAck: ReturnType<typeof vi.fn>};
   // The engine's reason for refusing native capture, as for a document with an open sync conflict.
-  let refusal: Error | undefined;
+  let refusal: Error | undefined, detachFailure: Error | undefined;
   spawn.mockImplementation(async options => {
     const captured = clientFrom(options), discovery = captured.client.sendRequest.getMockImplementation()!;
-    client = Object.assign(captured.client, {captureOwnerActivation: vi.fn(async () => {if (refusal) throw refusal; return capture;})});
+    client = Object.assign(captured.client, {captureOwnerActivation: vi.fn(async () => {if (refusal) throw refusal; return capture;}),
+      sendLiveApplication: vi.fn(async (input: {id: number; registrationId: number}, event: {metadata: {accepted: {receipt: {deliveryId: string; journalCursor: number}}}}) => {
+        if (retired(input.registrationId)) throw unavailable(input.id);
+        const receipt = event.metadata.accepted.receipt;
+        if (lost.pending) return {id: input.id, result: {status: "pending", reason: "application-pending"}};
+        applied.set(receipt.deliveryId, {...receipt, localYDocSequence: receipt.journalCursor + 1});
+        if (lost.replies) throw new Error("Application reply lost.");
+        return {id: input.id, result: {status: "applied", ack: {...applied.get(receipt.deliveryId), applicationReplayed: false}}};
+      }),
+      readLiveApplicationAck: vi.fn(async (input: {id: number; registrationId: number}, identity: {deliveryId: string}) => {
+        if (retired(input.registrationId)) throw unavailable(input.id);
+        if (lost.replies) throw new Error("ACK read lost.");
+        const ack = applied.get(identity.deliveryId);
+        return ack ? {...ack, applicationReplayed: true} : null;
+      })});
     client.sendRequest.mockImplementation(async (...args: unknown[]) => {
       const request = args[0] as {id: number; method: string; workspace?: string; params: Record<string, unknown>}, held = parked;
       if (request.method.startsWith("liveApplication.")) ownerRequests++;
       if (held?.method === request.method) { parked = undefined; held.entered.resolve(); await held.release.promise; }
       const reply = (result: unknown) => ({id: request.id, result}) as never;
+      if (request.method !== "liveApplication.register" && retired(request.params?.registrationId ?? registrations?.live)) throw unavailable(request.id);
       if (/^liveApplication\.(attach|detach|unload)/.test(request.method)) membership.push({method: request.method, workspace: request.workspace, params: request.params});
       switch (request.method) {
         case "liveApplication.hosts": return discovery();
         case "liveApplication.attachWorkspace": return reply({workspaceId: request.params.workspaceId,
           workspaceHandle: request.params.workspaceId === "workspace" ? "attached-handle" : `attached-${request.params.workspaceId}`});
-        case "liveApplication.detachWorkspace": return reply({detached: true});
+        case "liveApplication.detachWorkspace": if (detachFailure) throw detachFailure; return reply({detached: true});
         case "liveApplication.unloadDocument": {
           const next = unloads.shift() ?? {status: "unloaded"};
           if (next instanceof Error) throw next;
@@ -547,37 +567,69 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
         // Native registration accepts exactly the binding.
         case "liveApplication.register":
           if (Object.keys(request.params).join() !== "binding") throw new Error("INVALID_PARAMS: invalid-live-registration");
-          return reply({registrationId: 7});
+          if (registrationRefusal) throw registrationRefusal;
+          if (!registrations) return reply({registrationId: 7});
+          registrations.live = ++registrations.next;
+          return reply({registrationId: registrations.live});
         case "liveApplication.ownerState": return reply({adoptionId: capture.activationId, expectedLocalSequence: 2, throughCursor: 0,
           outboxId: null, pendingBytes: 0, outboxState: "active"});
         case "liveApplication.settle": {
           const terminal = request.params.terminalReceipt as {journalCursor: number} | null;
           return reply({status: "settled", settlement: {settlementId: "settlement", previousCursor: 0, terminalCursor: terminal?.journalCursor ?? 0,
-            applicationCount: 0, localYDocSequence: 2, momentId: "settled-moment", markdownDigest: "c".repeat(64), materialized: true,
+            applicationCount: 0, localYDocSequence: 2, momentId: "settled-moment", markdownDigest: "c".repeat(64), materialized: settlement.materialized,
             collectionReconcileRequired: false}});
         }
         case "liveApplication.fenceRestore": return reply({status: "pending", reason: "native-fence-pending"});
-        case "sync.adoptJoinIdentity": return reply({adopted: true});
-        case "sync.push": pushed.resolve();
-          return reply({status: "complete", hasMore: false, pushed: 0, sharingDeclined: [], ownerAdmissionPending: []});
-        case "sync.pull": return reply({status: "complete", nextCursor: 3, pendingCursor: {kind: "relay", token: "pending"}, hasMore: false,
-          fetched: 0, applied: 0, refused: 0, skipped: 0, conflictsOpened: 0, refusals: [], sharingDeclined: [], changedPaths: [], ...pulls.shift()});
+        case "sync.createHostedReplica":
+          if (replies.create) throw replies.create === "diverged" ? divergence(request.id) : replies.create;
+          return reply({hosted: true});
+        case "sync.push": pushed.resolve(); return reply({...pushReply, ...replies.push});
+        case "sync.pullHosted":
+          if (replies.diverge) throw divergence(request.id);
+          return reply(hostedPass(replies.pass));
         case "sync.materializePendingCursor": return reply({materialized: true});
-        case "sync.commitCursor": return reply({committed: true, sharingDeclined: []});
+        case "sync.commitCursor": return reply(hostedCommit(replies.commit));
       }
       throw new Error(`Unexpected engine request ${request.method}.`);
     });
     return client;
   });
+  // An owner live edit, prepared under the current binding. Calling the result commits it as the host's submit does.
+  const prepareEdit = (value: string, coordinate: LiveHostConnectionCoordinate) => {
+    const live = f.storage.resolveCurrentLiveDocumentBinding({document, actor}), read = f.storage.readLiveUpdateJournalCut({document});
+    if (live.kind !== "current" || read.kind !== "cut") throw new Error("Missing live authority.");
+    const doc = new Y.Doc(), suffix = read.cut.suffix.map(row => row.bytes);
+    for (const bytes of [read.cut.checkpoint.bytes, ...suffix]) Y.applyUpdate(doc, bytes);
+    const vector = Y.encodeStateVector(doc); doc.getMap("frontmatter").set("edit", value);
+    const updateBytes = Buffer.from(Y.encodeStateAsUpdate(doc, vector)); doc.destroy();
+    const validation = validateJournal({document, currentPath: live.binding.currentPath, checkpoint: read.cut.checkpoint.bytes, suffix, candidate: updateBytes});
+    return () => f.storage.commitLiveUpdateJournal({host: coordinate, actor, expectedAuthority: live.authority,
+      metadata: {deliveryId: `edit-${value}`, updateDigest: sha256(updateBytes), binding: live.binding}, cutToken: read.cut, validation, updateBytes, receivedAtMs: 5});
+  };
   const host = await startServiceLiveHost({...f, ...(options.frameChanges ? {frameChanges: createNamedFrameChanges(16)} : {})});
   cleanup.push(() => host.close());
-  // The activation pass publishes readiness before it pushes ordinary changes.
+  // The activation pass publishes readiness before it pushes the hosted replica.
   if (!options.empty) await pushed.promise;
-  return {f, raw, host, document, workspace, target, pushed, unloads, pulls, membership, spawned: () => spawn.mock.calls.length, client: () => client,
+  return {f, raw, host, document, workspace, target, pushed, unloads, replies, settlement, membership, spawned: () => spawn.mock.calls.length, client: () => client,
     ownerRequests: () => ownerRequests,
     ownerCalls: () => client.sendRequest.mock.calls.map(call => (call as unknown[])[0] as {method: string; params: unknown})
       .filter(request => request.method.startsWith("liveApplication.")).map(request => [request.method, request.params]),
     refuseCapture(error: Error | undefined) {refusal = error;},
+    refuseRegistration(error: Error | undefined) {registrationRefusal = error;},
+    failDetach(error: Error | undefined) {detachFailure = error;},
+    applied, lost,
+    freshRegistrations() {registrations = {next: 100, live: 0};},
+    liveRegistration: () => registrations?.live,
+    validateJournal,
+    prepareEdit: (value: string) => prepareEdit(value, host.coordinate),
+    // An owner live edit the relay accepts under the running host, as the host's submit commits it.
+    acceptEdit(value: string, coordinate = host.coordinate) {
+      const committed = prepareEdit(value, coordinate)();
+      if (committed.result.kind !== "accepted") throw new Error(`Live edit was not accepted: ${JSON.stringify(committed.result)}`);
+      return committed.result.receipt;
+    },
+    // The relay's owner delivery tip for the document.
+    tip: () => JSON.parse(String(raw.prepare("SELECT tip_receipt_json FROM sync_relay_live_delivery_owners WHERE object_id='object'").get()!.tip_receipt_json)),
     // Starts a new host on the same relay. Its first pass captures and, while capture is refused, leaves no owner.
     async restart() {
       await host.close();
@@ -648,6 +700,17 @@ it("keeps damaged evidence and caller cancellation visible for public delivery",
 
 const stopLookup = {operationId: "restore", workspaceId: "workspace", ownerUserId: "owner"};
 const conflictOpen = () => new EngineRequestError(1, {code: "INVALID_PARAMS", message: "ydoc-conflict-open", retry: "no"} as never);
+// The engine's refusals of a capture: a hosted document that is not ready, and a retained activation that diverged or its store never held.
+const unready = () => new EngineRequestError(1, {code: "CONFLICT", message: "hosted-document-unready", retry: "no"} as never);
+const diverged = () => new EngineRequestError(1, {code: "CONFLICT", message: "live-application-conflict", retry: "no"} as never);
+// A first capture of a document with no Y.Doc lineage.
+const withoutLineage = () => new EngineRequestError(1, {code: "CONFLICT", message: "live-document-without-lineage", retry: "no"} as never);
+// Appends a relay row naming the document, as another device's push does.
+const appendDocumentRow = (raw: InstanceType<typeof DatabaseSync>, opKind: "moment.append" | "ydoc.update", objectId: string) => {
+  raw.prepare(`INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms)
+    SELECT 'workspace','device',COUNT(*)+1,?,?,0 FROM sync_relay_log WHERE origin_id='device'`).run(opKind, JSON.stringify({versionId: "main", objectId,
+    path: "docs/a.md", contentKind: "richdoc", isBaseState: true, lineageClaimId: "d".repeat(64), updateBlobSha256: "d".repeat(64)}));
+};
 
 // Proves: after a restart, restore steps that send no registration never load
 // the native session, so an open sync conflict cannot block them.
@@ -694,6 +757,54 @@ it("reloads the retained activation after a restart only for a stop that registe
   ]);
 });
 
+const engineMethods = (client: {sendRequest: {mock: {calls: unknown[][]}}}) => client.sendRequest.mock.calls.map(call => (call[0] as {method: string}).method);
+
+// Proves: a configured host that restarts checks its replica's origin before a
+// restore reaches its store. While the check fails, startup and each pass
+// retry it, and a restore is refused with no capture, application or
+// settlement. Once a pass's check succeeds, the restore proceeds.
+it("refuses a restore after a configured restart until its replica checked its origin", async () => {
+  const o = await completedServiceOwner({polling: true});
+  await o.host.close();
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  cleanup.push(async () => log.mockRestore());
+  o.replies.create = new Error("Relay unreachable.");
+  const restarted = await startServiceLiveHost(o.f);
+  cleanup.push(() => restarted.close());
+  const creates = () => engineMethods(o.client()).filter(method => method === "sync.createHostedReplica").length;
+  await vi.waitFor(() => expect(creates()).toBeGreaterThan(2));
+  o.restore();
+  await expect(restarted.stopRestore(stopLookup)).rejects.toThrow("Service restore source is unavailable.");
+  expect(new Set(engineMethods(o.client()))).toEqual(new Set(["liveApplication.hosts", "sync.createHostedReplica"]));
+  expect(o.client().captureOwnerActivation).not.toHaveBeenCalled();
+  expect(o.client().sendLiveApplication).not.toHaveBeenCalled();
+  o.replies.create = undefined;
+  await vi.waitFor(() => expect(o.client().captureOwnerActivation).toHaveBeenCalled());
+  const methods = engineMethods(o.client()), checked = methods.lastIndexOf("sync.createHostedReplica");
+  expect(methods.slice(0, checked).every(method => method === "liveApplication.hosts" || method === "sync.createHostedReplica")).toBe(true);
+  expect(o.client().sendRequest.mock.invocationCallOrder[checked]).toBeLessThan(o.client().captureOwnerActivation.mock.invocationCallOrder[0]!);
+  await expect(restarted.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
+});
+
+// Proves: a configured host that restarts against a relay ahead at its
+// replica's origin detaches the workspace as diverged before startup returns,
+// so a restore finds no workspace and nothing reaches its store.
+it("detaches a configured workspace as diverged at restart before a restore reaches its store", async () => {
+  const o = await completedServiceOwner();
+  await o.host.close();
+  o.replies.create = "diverged";
+  const restarted = await startServiceLiveHost(o.f);
+  cleanup.push(() => restarted.close());
+  const sent = ["liveApplication.hosts", "sync.createHostedReplica", "liveApplication.detachWorkspace"];
+  expect(restarted.diverged()).toEqual([{workspaceId: "workspace", root: o.workspace.root}]);
+  expect(engineMethods(o.client())).toEqual(sent);
+  o.restore();
+  await expect(restarted.stopRestore(stopLookup)).rejects.toThrow("Workspace is not configured on this service host.");
+  expect(engineMethods(o.client())).toEqual(sent);
+  expect(o.client().captureOwnerActivation).not.toHaveBeenCalled();
+  expect(o.client().sendLiveApplication).not.toHaveBeenCalled();
+});
+
 // An empty host whose sibling document activates for real. The other document
 // counts as loaded but never activates, so only its unload reaches the engine.
 async function emptyServiceHost(options: {frameChanges?: boolean} = {}) {
@@ -709,82 +820,854 @@ async function emptyServiceHost(options: {frameChanges?: boolean} = {}) {
   });
   cleanup.push(async () => {vi.restoreAllMocks();});
   const attach = {method: "liveApplication.attachWorkspace", workspace: undefined, params: {root: o.workspace.root, workspaceId: "workspace",
-    maxRegistrations: 8, relay: {baseUrl: "https://relay.example", bearerToken: "owner-token"}}};
-  return {...o, sibling, other, attach, unload: {method: "liveApplication.unloadDocument", workspace: "attached-handle", params: {objectId: other.objectId}}};
+    maxRegistrations: 8, relay: {baseUrl: "https://relay.example", bearerToken: "service-token"}}};
+  const detach = {method: "liveApplication.detachWorkspace", workspace: "attached-handle", params: {}};
+  // The workspace's pulls so far, for waiting on the next one.
+  const pullCount = () => o.client().sendRequest.mock.calls.filter(call => ((call as unknown[])[0] as {method: string}).method === "sync.pullHosted").length;
+  return {...o, sibling, other, attach, detach, pullCount, unload: {method: "liveApplication.unloadDocument", workspace: "attached-handle", params: {objectId: other.objectId}},
+    async nextPull() {const seen = pullCount(); await vi.waitFor(() => expect(pullCount()).toBeGreaterThan(seen + 1));}};
 }
+const stay = {departing: []};
 
-it("adds and unloads documents on one daemon while the sibling document stays ready", async () => {
+it("adds documents on one daemon and unloads one that left while the sibling document stays ready", async () => {
   const o = await emptyServiceHost(), workspaces = [o.workspace];
-  expect(await o.host.update({workspaces, documents: [o.sibling]})).toEqual([]);
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
   await o.pushed.promise;
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
   expect(o.host.settled(o.sibling)).toBe(true);
   expect(o.membership).toEqual([o.attach]);
-  expect(await o.host.update({workspaces, documents: [o.sibling, o.other]})).toEqual([]);
-  expect(o.host.holds(o.other)).toBe(true); expect(o.host.settled(o.other)).toBe(false);
-  // The engine still holds unsettled work for the removed document, so it waits for a later update.
+  await o.host.update({workspaces, documents: [o.sibling, o.other], ...stay});
+  expect(o.host.retains(o.other)).toBe(true); expect(o.host.settled(o.other)).toBe(false);
+  // The engine still holds unsettled work for the document that left, so passes retry its unload.
   o.unloads.push({status: "pending", reason: "settlement-pending"});
-  expect(await o.host.update({workspaces, documents: [o.sibling]})).toEqual([{workspaceId: "workspace", objectId: o.other.objectId}]);
-  expect(o.host.holds(o.other)).toBe(true);
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  await o.host.update({workspaces, documents: [o.sibling], departing: [o.other]});
+  await vi.waitFor(() => expect(o.membership).toEqual([o.attach, o.unload, o.unload]));
+  expect(log).toHaveBeenCalledWith("Service activation pass failed.", "Departing live document is waiting: settlement-pending");
+  // A pull that started after it departed confirms it gone.
+  await vi.waitFor(() => expect(o.host.retains(o.other)).toBe(false));
+  expect(o.host.retains(o.sibling)).toBe(true);
   expect(o.host.isDocumentReady(o.document)).toBe(true);
-  expect(await o.host.update({workspaces, documents: [o.sibling]})).toEqual([]);
-  expect(o.host.holds(o.other)).toBe(false); expect(o.host.holds(o.sibling)).toBe(true);
-  expect(o.membership).toEqual([o.attach, o.unload, o.unload]);
   await expect(o.host.drain(o.document)).resolves.toMatchObject({kind: "done"});
-  expect(o.host.isDocumentReady(o.document)).toBe(true);
   expect(o.spawned()).toBe(1); expect(o.client().close).not.toHaveBeenCalled();
   expect(o.f.storage.getLiveHostControl()?.registeredConnectionId).toBe(o.host.coordinate.connectionId);
 });
 
-it("detaches a workspace after its last document and attaches it again on the same daemon", async () => {
+it("detaches a workspace that is no longer wanted at once and attaches it again on the same daemon", async () => {
   const o = await emptyServiceHost(), workspaces = [o.workspace];
-  await o.host.update({workspaces, documents: [o.sibling]});
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
-  expect(await o.host.update({workspaces: [], documents: []})).toEqual([]);
+  await o.host.update({workspaces: [], documents: [], ...stay});
   expect(o.host.isDocumentReady(o.document)).toBe(false);
-  expect(o.membership.at(-1)).toEqual({method: "liveApplication.detachWorkspace", workspace: "attached-handle", params: {}});
-  await o.host.update({workspaces, documents: [o.sibling]});
+  expect(o.membership).toEqual([o.attach, o.detach]);
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
-  expect(o.membership.map(row => row.method)).toEqual(["liveApplication.attachWorkspace", "liveApplication.unloadDocument",
-    "liveApplication.detachWorkspace", "liveApplication.attachWorkspace"]);
+  expect(o.membership).toEqual([o.attach, o.detach, o.attach]);
   expect(o.spawned()).toBe(1); expect(o.client().close).not.toHaveBeenCalled();
 });
 
-it("keeps a workspace attached while its last document's unload is pending and detaches it once the unload succeeds", async () => {
+// Proves: a workspace whose last document left stays attached until the
+// document unloaded and a later pull found nothing departed. Only then may it
+// detach, and its document is retained until that pull.
+it("keeps a workspace with no documents attached until its replica drains, then detaches it on request", async () => {
   const o = await emptyServiceHost(), workspaces = [o.workspace];
-  await o.host.update({workspaces, documents: [o.other]});
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
   o.unloads.push({status: "pending", reason: "settlement-pending"});
-  expect(await o.host.update({workspaces: [], documents: []})).toEqual([{workspaceId: "workspace", objectId: o.other.objectId}]);
-  // Still attached, so activation passes keep settling the document.
-  expect(o.membership).toEqual([o.attach, o.unload]);
+  o.replies.commit = {departed: [o.sibling.objectId]};
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  await o.host.update({workspaces, documents: [], departing: [o.sibling]});
+  await vi.waitFor(() => expect(o.membership.filter(row => row.method === "liveApplication.unloadDocument")).toHaveLength(2));
+  // Its settled output was published right before each unload.
+  const methods = o.client().sendRequest.mock.calls.map(call => ((call as unknown[])[0] as {method: string}).method);
+  for (const [index, method] of methods.entries()) if (method === "liveApplication.unloadDocument") expect(methods[index - 1]).toBe("sync.push");
+  await o.nextPull();
+  // Its replica still lists it, so nothing lets go.
+  expect(o.host.retains(o.sibling)).toBe(true);
+  expect(o.host.drained("workspace")).toBe(false);
+  await expect(o.host.detachDrained("workspace")).resolves.toBe(false);
   expect(o.host.automationLedger("workspace")).not.toBeNull();
-  expect(await o.host.update({workspaces: [], documents: []})).toEqual([]);
-  expect(o.membership).toEqual([o.attach, o.unload, o.unload, {method: "liveApplication.detachWorkspace", workspace: "attached-handle", params: {}}]);
+  o.replies.commit = {};
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
+  expect(o.host.retains(o.sibling)).toBe(false);
+  await expect(o.host.detachDrained("workspace")).resolves.toBe(true);
+  expect(o.membership.at(-1)).toEqual(o.detach);
   expect(o.host.automationLedger("workspace")).toBeNull();
   expect(o.spawned()).toBe(1); expect(o.client().close).not.toHaveBeenCalled();
 });
 
-it.each(["settlement-pending", "delivery-pending"])("drops a stopped document with %s and detaches its last workspace", async reason => {
-  const o = await emptyServiceHost();
+// An empty host with the document shared with Edit, enrolled and ready.
+async function enrolledServiceHost({freshRegistrations = false, frameChanges = false} = {}) {
+  const o = await emptyServiceHost({frameChanges});
+  if (freshRegistrations) o.freshRegistrations();
   o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 10, guard() {}});
-  await o.host.update({workspaces: [o.workspace], documents: [o.sibling]});
+  await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  const binding = o.f.storage.resolveCurrentLiveDocumentBinding({document: o.document, actor: {kind: "owner", userId: "owner", shareId: "share"}});
+  if (binding.kind !== "current") throw new Error("Missing live binding.");
+  const calls = (from: number) => o.ownerCalls().slice(from).map(([method]) => method as string);
+  return {...o, binding: binding.binding, calls,
+    // The owner's Stop, which fences the document at once.
+    stop() {
+      expect(o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path,
+        enabled: false, retire: true, nowMs: 20, guard() {}})).toMatchObject({enabled: false, retired: true});
+    },
+    depart: (host = o.host) => host.update({workspaces: [o.workspace], documents: [], departing: [o.sibling]})};
+}
+
+// Proves: Stop ends editing authority, not the host's duty to settle what it
+// already applied. A stopped document registers its adoption's binding alone,
+// settles through the tip the relay recorded, with no delivery or admission,
+// then publishes and unloads. It stays while its unload answers pending, and
+// settles again before it unloads again, so its workspace drains only once the
+// engine unloads it. Its accepted cut stays.
+it.each(["settlement-pending", "delivery-pending"])("settles a stopped last document and keeps it while its unload answers %s", async reason => {
+  const o = await emptyServiceHost();
+  // Passes apply the document's work, but none of their settlements reaches the file.
+  o.settlement.materialized = false;
+  o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 10, guard() {}});
+  await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
   const cut = o.f.storage.readLiveUpdateJournalCut({document: o.document});
+  const current = o.f.storage.resolveCurrentLiveDocumentBinding({document: o.document, actor: {kind: "owner", userId: "owner", shareId: "share"}});
+  if (current.kind !== "current") throw new Error("Missing live binding.");
   const generation = o.raw.prepare("SELECT restore_fence_generation FROM sync_relay_live_documents WHERE workspace_id='workspace' AND object_id='object' AND lineage_state='current'").get()!.restore_fence_generation as number;
   const stopped = o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path,
     enabled: false, retire: true, restoreFenceGeneration: generation, nowMs: 20, guard() {}});
   expect(stopped).toMatchObject({enabled: false, retired: true});
+  // An unchanged update waits for the pass that was running at Stop.
+  await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+  const tip = o.tip();
+  o.settlement.materialized = true;
   o.unloads.push({status: "pending", reason});
-  expect(await o.host.update({workspaces: [], documents: []})).toEqual([]);
-  expect(o.host.holds(o.sibling)).toBe(false);
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const sent = o.ownerCalls().length, first = o.park("liveApplication.unloadDocument");
+  await o.host.update({workspaces: [o.workspace], documents: [], departing: [o.sibling]});
+  await first.entered.promise;
+  // It settled what the host applied and published that right before the unload.
+  const methods = o.client().sendRequest.mock.calls.map(call => ((call as unknown[])[0] as {method: string}).method);
+  expect(methods.slice(methods.lastIndexOf("liveApplication.settle"))).toEqual(["liveApplication.settle", "sync.push", "liveApplication.unloadDocument"]);
+  const departure = [["liveApplication.register", {binding: current.binding}], ["liveApplication.settle", {registrationId: 7, terminalReceipt: tip}],
+    ["liveApplication.unloadDocument", {objectId: "object"}]];
+  expect(o.ownerCalls().slice(sent)).toEqual(departure);
+  // The engine answers pending, so the document stays, and the next pass settles and unloads it again.
+  const second = o.park("liveApplication.unloadDocument");
+  let again = false;
+  void second.entered.promise.then(() => {again = true;});
+  first.release.resolve();
+  await vi.waitFor(() => expect(again).toBe(true));
+  expect(o.host.retains(o.sibling)).toBe(true);
+  expect(o.host.drained("workspace")).toBe(false);
+  expect(o.ownerCalls().slice(sent)).toEqual([...departure, ...departure]);
+  expect(o.client().sendLiveApplication).not.toHaveBeenCalled();
+  second.release.resolve();
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
+  expect(o.host.isDocumentReady(o.document)).toBe(false);
+  await expect(o.host.detachDrained("workspace")).resolves.toBe(true);
+  expect(o.host.automationLedger("workspace")).toBeNull();
+  expect(o.membership.at(-1)).toEqual(o.detach);
+  expect(o.f.storage.readLiveUpdateJournalCut({document: o.document})).toEqual(cut);
+  expect(o.client().close).not.toHaveBeenCalled();
+});
+
+const departure = ["liveApplication.register", "liveApplication.settle", "liveApplication.unloadDocument"];
+// The engine requests of a departure, without the membership a restarted daemon starts with.
+const departed = (methods: string[]) => methods.filter(method => !["liveApplication.hosts", "liveApplication.attachWorkspace"].includes(method));
+
+// Proves: an edit the engine applied but whose reply, and every ACK read after
+// it, the relay lost before Stop settles. The departure reads the engine's
+// ACK on its own registration, records it as the relay's tip and settles
+// through it. It sends no application and reads no owner outbox.
+it("records an edit whose application reply was lost before Stop, and settles through it", async () => {
+  const o = await enrolledServiceHost();
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.lost.replies = true;
+  const edit = o.acceptEdit("lost");
+  await vi.waitFor(() => expect(o.applied.has(edit.deliveryId)).toBe(true));
+  o.stop();
+  o.lost.replies = false;
+  // The update waits for any pass that was running, and the departure runs in the next.
+  await o.depart();
+  const applications = o.client().sendLiveApplication.mock.calls.length, sent = o.ownerCalls().length;
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
+  expect(o.tip()).toEqual(edit);
+  expect(o.calls(sent)).toEqual(departure);
+  expect(o.ownerCalls()[sent + 1]).toEqual(["liveApplication.settle", {registrationId: 7, terminalReceipt: edit}]);
+  expect(o.client().readLiveApplicationAck).toHaveBeenLastCalledWith(expect.objectContaining({registrationId: 7}), edit, expect.any(AbortSignal));
+  expect(o.client().sendLiveApplication).toHaveBeenCalledTimes(applications);
+});
+
+// Proves: a row the relay accepted before Stop that the engine never applied
+// stays unapplied: the departure finds no ACK for it, records nothing, and
+// settles through the tip the relay already had.
+it("leaves an accepted edit the engine never applied unapplied, and settles through the earlier tip", async () => {
+  const o = await enrolledServiceHost();
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const seed = o.tip();
+  o.lost.pending = true;
+  const edit = o.acceptEdit("unapplied");
+  await vi.waitFor(() => expect(o.client().sendLiveApplication).toHaveBeenCalled());
+  o.stop();
+  await o.depart();
+  const sent = o.ownerCalls().length;
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
+  expect(o.applied.has(edit.deliveryId)).toBe(false);
+  expect(o.client().readLiveApplicationAck).toHaveBeenLastCalledWith(expect.objectContaining({registrationId: 7}), edit, expect.any(AbortSignal));
+  expect(o.tip()).toEqual(seed);
+  expect(o.ownerCalls().slice(sent)).toEqual([["liveApplication.register", {binding: o.binding}],
+    ["liveApplication.settle", {registrationId: 7, terminalReceipt: seed}], ["liveApplication.unloadDocument", {objectId: "object"}]]);
+});
+
+// Proves: a departed delivery needs neither live authority nor the connection
+// that adopted it, only one with standing now. It records only the host's ACK
+// of the next row the journal accepted, whole, under the same adoption and
+// binding, and an ACK of the tip again changes nothing.
+it("records a departed application only as the next accepted row, for its adoption, on a connection with standing", async () => {
+  const o = await enrolledServiceHost();
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const seed = o.tip();
+  o.lost.replies = true;
+  const edit = o.acceptEdit("stored");
+  await vi.waitFor(() => expect(o.applied.has(edit.deliveryId)).toBe(true));
+  await o.host.close();
+  o.stop();
+  const register = (connectionId: string) => {
+    const host = {...o.host.coordinate, connectionId};
+    expect(o.f.storage.registerLiveHost({...host, updatedAtMs: Date.now(), guard: o.f.storage.captureStanding()}).ok).toBe(true);
+    return host;
+  };
+  const host = register("departure"), store = o.f.storage.createLiveCommittedDeliveryStore(o.f.history);
+  const input = {host, document: o.document, adoptionId: `ordinary-activation-${"a".repeat(64)}`};
+  expect(store.departedOwnerDelivery(input)).toEqual({binding: o.binding, tip: seed, next: edit});
+  const ack = {...edit, localYDocSequence: 3, applicationReplayed: true};
+  const record = (value: unknown, overrides: Partial<typeof input & {binding: typeof o.binding}> = {}) =>
+    () => store.recordDepartedApplication({...input, binding: o.binding, ...overrides}, value);
+  const damaged = "Committed delivery evidence is damaged or conflicts.";
+  for (const wrong of [{journalCursor: edit.journalCursor + 1}, {acceptingHostEpoch: edit.acceptingHostEpoch + 1}, {updateDigest: "f".repeat(64)}, {deliveryId: "another"}]) {
+    expect(record({...ack, ...wrong})).toThrow(damaged);
+  }
+  expect(record(ack, {adoptionId: `ordinary-activation-${"b".repeat(64)}`})).toThrow(damaged);
+  expect(record(ack, {binding: {...o.binding, restoreFenceGeneration: o.binding.restoreFenceGeneration + 1}})).toThrow(damaged);
+  expect(record(ack, {host: {...host, connectionId: "another"}})).toThrow("Committed delivery stale-session.");
+  expect(o.tip()).toEqual(seed);
+  expect(record(ack)()).toEqual({binding: o.binding, tip: edit, next: null});
+  expect(record(ack)()).toEqual({binding: o.binding, tip: edit, next: null});
+  expect(record({...ack, localYDocSequence: 4})).toThrow(damaged);
+  // The engine reports a receipt the journal never accepted.
+  expect(record({...ack, deliveryId: "unaccepted", journalCursor: edit.journalCursor + 1})).toThrow(damaged);
+  expect(o.tip()).toEqual(edit);
+  // A replacement connection with standing continues the same adoption; the earlier one has none.
+  const replacement = register("replacement");
+  expect(store.departedOwnerDelivery({...input, host: replacement})).toEqual({binding: o.binding, tip: edit, next: null});
+  expect(() => store.departedOwnerDelivery(input)).toThrow("Committed delivery stale-session.");
+});
+
+// Proves: a daemon that starts after Stop settles a stopped document it never
+// loaded, from the relay's journal and the engine's record of what it applied,
+// before it publishes and unloads it. It captures no session.
+it("settles a document stopped while no daemon ran, which the daemon after it never loaded", async () => {
+  const o = await enrolledServiceHost();
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.lost.replies = true;
+  const edit = o.acceptEdit("restart");
+  await vi.waitFor(() => expect(o.applied.has(edit.deliveryId)).toBe(true));
+  await o.host.close();
+  o.stop();
+  o.lost.replies = false;
+  const restarted = await startServiceLiveHost({...o.f, frameChanges: createNamedFrameChanges(16)});
+  cleanup.push(() => restarted.close());
+  await o.depart(restarted);
+  await vi.waitFor(() => expect(restarted.drained("workspace")).toBe(true));
+  expect(o.tip()).toEqual(edit);
+  expect(departed(o.calls(0))).toEqual(departure);
+  expect(o.ownerCalls().find(([method]) => method === "liveApplication.settle")).toEqual(["liveApplication.settle", {registrationId: 7, terminalReceipt: edit}]);
+  expect(o.client().captureOwnerActivation).not.toHaveBeenCalled();
+  expect(o.client().sendLiveApplication).not.toHaveBeenCalled();
+});
+
+// Proves: deleting the share ends live authority as Stop does, though the
+// enrollment stays enabled until its release. The document settles from
+// durable state, on this daemon and on one started after it.
+it.each([false, true])("settles a document whose share was deleted, after a restart: %s", async restart => {
+  const o = await enrolledServiceHost();
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.lost.replies = true;
+  const edit = o.acceptEdit("deleted");
+  await vi.waitFor(() => expect(o.applied.has(edit.deliveryId)).toBe(true));
+  if (restart) await o.host.close();
+  expect(o.f.storage.revokeShare("share", 30)).toBe(true);
+  expect(o.f.storage.readServiceHostEnrollment("workspace", o.sibling.path)).toMatchObject({enabled: true, retired: false});
+  expect(o.f.storage.serviceHostDocumentEnabled(o.sibling)).toBe(false);
+  o.lost.replies = false;
+  let host = o.host;
+  if (restart) {
+    host = await startServiceLiveHost({...o.f, frameChanges: createNamedFrameChanges(16)});
+    cleanup.push(() => host.close());
+  }
+  await o.depart(host);
+  const applications = o.client().sendLiveApplication.mock.calls.length, sent = restart ? 0 : o.ownerCalls().length;
+  await vi.waitFor(() => expect(host.drained("workspace")).toBe(true));
+  expect(o.tip()).toEqual(edit);
+  expect(departed(o.calls(sent))).toEqual(departure);
+  expect(o.client().sendLiveApplication).toHaveBeenCalledTimes(applications);
+});
+
+// Proves: deleting the last Edit share cuts off admission at once, as Stop
+// does, while the owner's frame session is open and a drain waits in the
+// engine. The session's next frame, an owner edit prepared before the
+// deletion, and the drain all admit nothing. The edit the host applied before
+// it settles, the document leaves and its workspace drains.
+it("admits nothing after the last Edit share is deleted while a drain waits, and settles what the host applied before", async () => {
+  const o = await enrolledServiceHost({frameChanges: true});
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const session = captureOwnerLiveFrameHost({authenticatedUserId: "owner", shareId: "share", storage: o.f.storage,
+    native: await o.host.captureNative(o.binding), validate: o.validateJournal,
+    bounds: {maxClientVectorBytes: 1_000, maxSyncOutputBytes: 10_000, maxAppliedUpdateBytes: 10_000, maxSubmissionBytes: 10_000, maxAdmissionBytes: 100_000}});
+  const edit = o.acceptEdit("before");
+  await expect(o.host.drain(o.document)).resolves.toMatchObject({kind: "done"});
+  expect(o.tip()).toEqual(edit);
+  const late = o.prepareEdit("after"), parked = o.park("liveApplication.ownerState"), held = o.host.drain(o.document);
+  await parked.entered.promise;
+  expect(o.f.storage.revokeShare("share", 30)).toBe(true);
+  expect(late().result).toEqual({kind: "refused", reason: "authority-refused"});
+  const frame = Buffer.from("frame");
+  await expect(session.submit({deliveryId: "frame-after", updateDigest: sha256(frame), updateBytes: frame}, new AbortController().signal))
+    .rejects.toThrow("Named host standing changed.");
+  expect(session.invalidated.aborted).toBe(true);
+  parked.release.resolve();
+  await expect(held).rejects.toThrow("Service document activation is incomplete.");
+  const cut = o.f.storage.readLiveUpdateJournalCut({document: o.document}), applications = o.client().sendLiveApplication.mock.calls.length;
+  await o.depart();
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
+  expect(o.tip()).toEqual(edit);
+  expect(o.ownerCalls().filter(([method]) => method === "liveApplication.settle").at(-1)).toEqual(["liveApplication.settle", {registrationId: 7, terminalReceipt: edit}]);
+  expect(o.f.storage.readLiveUpdateJournalCut({document: o.document})).toEqual(cut);
+  expect(o.client().sendLiveApplication).toHaveBeenCalledTimes(applications);
+});
+
+// Proves: a departure that registered retires the owner's registration. When
+// its owner resumes before the departure finishes, the owner registers again
+// before it delivers, and the document becomes ready again.
+it("registers the owner again when a stopped document resumes before its departure finished", async () => {
+  const o = await enrolledServiceHost({freshRegistrations: true});
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.stop();
+  // Its publication does not finish, so the departure waits after it settled.
+  o.replies.push = {hasMore: true};
+  const sent = o.ownerCalls().length;
+  await o.depart();
+  await vi.waitFor(() => expect(o.calls(sent).slice(0, 2)).toEqual(["liveApplication.register", "liveApplication.settle"]));
+  expect(o.host.isDocumentReady(o.document)).toBe(false);
+  o.replies.push = {};
+  o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 40, guard() {}});
+  await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  await expect(o.host.drain(o.document)).resolves.toMatchObject({kind: "done"});
+  // A departure reads no owner state, so the first read after Stop is the owner's, right after it registered again.
+  const calls = o.ownerCalls(), resumed = calls.findIndex(([method], index) => index >= sent && method === "liveApplication.ownerState");
+  expect(calls.slice(resumed - 1, resumed + 1)).toEqual([["liveApplication.register", {binding: o.binding}],
+    ["liveApplication.ownerState", {registrationId: o.liveRegistration(), sessionId: "native-session"}]]);
+  expect(o.membership.filter(row => row.method === "liveApplication.unloadDocument")).toEqual([]);
+});
+
+// Proves: the engine refuses to register a stopped document that already
+// parked. Nothing settles or unloads, and the refusal alone releases nothing:
+// the document is forgotten only once a pull that started after it no longer
+// lists it departed. One its replica still lists departed tries again.
+it("forgets a stopped document whose registration the engine refuses only once its replica confirms it parked", async () => {
+  const o = await enrolledServiceHost();
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  await o.host.close();
+  o.stop();
+  o.refuseRegistration(unready());
+  o.replies.commit = {departed: [o.sibling.objectId]};
+  const restarted = await startServiceLiveHost({...o.f, frameChanges: createNamedFrameChanges(16)});
+  cleanup.push(() => restarted.close());
+  const registered = () => o.calls(0).filter(method => method === "liveApplication.register").length;
+  await o.depart(restarted);
+  // Its replica still lists it departed, so it tries again, each time after a pull that started after its last try, and stays retained.
+  await vi.waitFor(() => expect(registered()).toBeGreaterThan(1));
+  expect(registered()).toBeLessThanOrEqual(o.pullCount() + 1);
+  expect(restarted.retains(o.sibling)).toBe(true);
+  expect(restarted.drained("workspace")).toBe(false);
+  o.replies.commit = {};
+  await vi.waitFor(() => expect(restarted.drained("workspace")).toBe(true));
+  expect(restarted.retains(o.sibling)).toBe(false);
+  const tries = registered();
+  await o.nextPull();
+  expect(registered()).toBe(tries);
+  expect(departed(o.calls(0)).filter(method => method !== "liveApplication.register")).toEqual([]);
+});
+
+// Proves: a departing document fails closed when its binding no longer holds:
+// a restore generation no resumed restore accounts for, or an engine that
+// refuses the binding. It never settles or unloads, stays retained, and its
+// workspace does not drain. The failure is reported.
+it.each(["generation", "engine"] as const)("keeps a stopped document whose binding is refused by the %s", async refusal => {
+  const o = await enrolledServiceHost();
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  o.stop();
+  if (refusal === "generation") o.raw.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=restore_fence_generation+1 WHERE object_id='object'");
+  else o.refuseRegistration(diverged());
+  const sent = o.ownerCalls().length, failures = () => log.mock.calls.filter(([message]) => message === "Service activation pass failed.").length;
+  await o.depart();
+  // Each pass tries it again.
+  if (refusal === "engine") await vi.waitFor(() => expect(o.calls(sent).length).toBeGreaterThan(2));
+  else {await vi.waitFor(() => expect(failures()).toBeGreaterThan(0)); await o.nextPull();}
+  expect(o.calls(sent).filter(method => method !== "liveApplication.register")).toEqual([]);
+  if (refusal === "generation") expect(o.calls(sent)).toEqual([]);
+  expect(o.host.retains(o.sibling)).toBe(true);
+  expect(o.host.drained("workspace")).toBe(false);
+  expect(failures()).toBeGreaterThan(0);
+});
+
+// Proves: release waits for retirement, which includes removing the file. A
+// retirement that fails keeps the document listed, a restarted daemon learns
+// that only from its own pull, and the document is released only once a
+// retry removes it.
+it("retains a departed document through a failed file removal and a restart until its retirement succeeds", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace], left = {workspaceId: "workspace", objectId: "object-left", path: "docs/left.md", shareId: "share"};
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  await o.nextPull();
+  await o.host.update({workspaces, documents: [o.sibling], departing: [left]});
+  // Earlier pulls found nothing departed, but none started after it departed.
+  expect(o.host.retains(left)).toBe(true);
+  o.replies.commit = {departed: [left.objectId], retirement: {code: "IO", message: "retired file could not be removed", retry: "afterBackoff"}};
+  await o.nextPull();
+  expect(o.host.retains(left)).toBe(true);
+  await o.host.close();
+  // A restarted daemon has read nothing yet.
+  const restarted = await startServiceLiveHost({...o.f, frameChanges: createNamedFrameChanges(16)});
+  cleanup.push(() => restarted.close());
+  await restarted.update({workspaces, documents: [o.sibling], departing: [left]});
+  expect(restarted.retains(left)).toBe(true);
+  await o.nextPull();
+  expect(restarted.retains(left)).toBe(true);
+  o.replies.commit = {};
+  await vi.waitFor(() => expect(restarted.retains(left)).toBe(false));
+  expect(restarted.retains(o.sibling)).toBe(true);
+});
+
+// Proves: a page that leaves a document held clears its readiness at once,
+// without holding back the workspace's pulls, until a later capture succeeds.
+it("clears a held document's readiness until its next capture succeeds", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace];
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  const captures = o.client().captureOwnerActivation.mock.calls.length;
+  o.refuseCapture(unready());
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.replies.pass = {held: [{objectId: o.sibling.objectId, reason: "hosted-backfill-work-waiting"}]};
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(false));
+  // Pulls go on, and the document waits: every pass captures it again while the engine holds it.
+  await vi.waitFor(() => expect(o.client().captureOwnerActivation.mock.calls.length).toBeGreaterThan(captures + 2));
+  await o.nextPull();
+  expect(o.host.isDocumentReady(o.document)).toBe(false);
+  o.replies.pass = {};
+  o.refuseCapture(undefined);
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  await expect(o.host.drain(o.document)).resolves.toMatchObject({kind: "done"});
+});
+
+// A host on the same relay and engine as the empty host, started after it closed.
+async function restartEmpty(o: Awaited<ReturnType<typeof emptyServiceHost>>) {
+  await o.host.close();
+  const restarted = await startServiceLiveHost({...o.f, frameChanges: createNamedFrameChanges(16)});
+  cleanup.push(() => restarted.close());
+  const requests = () => o.client().sendRequest.mock.calls.map(call => (call as unknown[])[0] as {method: string});
+  const count = (method: string) => requests().filter(request => request.method === method).length;
+  return {restarted, requests, count};
+}
+
+// Proves: after a restart while the engine holds a document, its catch-up pull
+// marks it held before it has an owner, so its workspace keeps pushing and
+// pulling, which bring what it waits for, until its capture succeeds.
+it("keeps pushing and pulling after a restart while the engine holds a document, until its capture succeeds", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace];
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.refuseCapture(unready());
+  o.replies.pass = {held: [{objectId: o.sibling.objectId, reason: "hosted-backfill-work-waiting"}]};
+  const {restarted, count} = await restartEmpty(o);
+  await restarted.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => {expect(count("sync.push")).toBeGreaterThan(2); expect(count("sync.pullHosted")).toBeGreaterThan(2);});
+  expect(o.client().captureOwnerActivation).toHaveBeenCalled();
+  expect(restarted.isDocumentReady(o.document)).toBe(false);
+  o.replies.pass = {};
+  o.refuseCapture(undefined);
+  await vi.waitFor(() => expect(restarted.isDocumentReady(o.document)).toBe(true));
+  await expect(restarted.drain(o.document)).resolves.toMatchObject({kind: "done"});
+});
+
+// Proves: a fresh daemon resumes a departing document an earlier one left,
+// before any pull adopts the scope it left, even one a sibling's activation
+// would make, then settles, publishes and unloads it. Its replica then drains.
+it("resumes a departing document after a restart before any pull, then settles, publishes and unloads it", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace];
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  // The sibling has no owner after the restart, so its activation pulls first.
+  const activate = vi.mocked(ServiceActivationDriver.prototype.activate), through = activate.getMockImplementation()!;
+  activate.mockImplementation(function (this: ServiceActivationDriver, ...args) {
+    if (args[0].path !== o.other.path) return through.apply(this, args);
+    return this.options.workspace("workspace")!.replica.pull(args[1]).then(() => ({kind: "pending" as const, reason: "held"}));
+  });
+  const {restarted, requests} = await restartEmpty(o);
+  await restarted.update({workspaces, documents: [o.other], departing: [o.sibling]});
+  await vi.waitFor(() => expect(o.membership.filter(row => row.method === "liveApplication.unloadDocument")).toHaveLength(1));
+  const capture = o.client().captureOwnerActivation;
+  expect(capture).toHaveBeenCalledWith(expect.anything(), "docs/a.md", 1_000_000, expect.any(AbortSignal), `ordinary-activation-${"a".repeat(64)}`);
+  const methods = requests().map(request => request.method), at = (index: number) => o.client().sendRequest.mock.invocationCallOrder[index]!;
+  const pulled = methods.indexOf("sync.pullHosted"), settled = methods.indexOf("liveApplication.settle");
+  expect(pulled === -1 || at(pulled) > capture.mock.invocationCallOrder[0]!).toBe(true);
+  expect(settled).toBeGreaterThan(-1);
+  expect(methods.indexOf("sync.push", settled)).toBeGreaterThan(settled);
+  expect(methods.indexOf("liveApplication.unloadDocument")).toBeGreaterThan(methods.indexOf("sync.push", settled));
+  await vi.waitFor(() => expect(restarted.retains(o.sibling)).toBe(false));
+});
+
+// Proves: a restarted daemon checks its replica's origin before any work on
+// its store. A relay ahead there detaches the workspace for good before a
+// departing document, stopped or retained, registers, captures, applies or
+// settles, and before any pull.
+it.each([
+  ["stopped", async () => {const o = await enrolledServiceHost(); await o.host.close(); o.stop(); return o;}],
+  ["retained", async () => {
+    const o = await emptyServiceHost();
+    await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+    await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+    await o.host.close();
+    return o;
+  }],
+] as const)("checks a restarted replica's origin before a %s departing document resumes", async (_kind, setup) => {
+  const o = await setup();
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const settles = vi.spyOn(ServiceActivationDriver.prototype, "settleDeparted");
+  o.replies.create = "diverged";
+  const restarted = await startServiceLiveHost({...o.f, frameChanges: createNamedFrameChanges(16)});
+  cleanup.push(() => restarted.close());
+  const update = () => restarted.update({workspaces: [o.workspace], documents: [], departing: [o.sibling]});
+  const methods = () => o.client().sendRequest.mock.calls.map(call => ((call as unknown[])[0] as {method: string}).method);
+  const sent = ["liveApplication.hosts", "liveApplication.attachWorkspace", "sync.createHostedReplica", "liveApplication.detachWorkspace"];
+  await update();
+  await vi.waitFor(() => expect(restarted.diverged()).toEqual([{workspaceId: "workspace", root: o.workspace.root}]));
+  expect(methods()).toEqual(sent);
+  // A later update, and any pass before it, leave the store alone.
+  await update();
+  expect(methods()).toEqual(sent);
+  expect(settles).not.toHaveBeenCalled();
+  expect(o.client().captureOwnerActivation).not.toHaveBeenCalled();
+  expect(o.client().sendLiveApplication).not.toHaveBeenCalled();
+  expect(restarted.retains(o.sibling)).toBe(true);
+});
+
+// Proves: a replica that could not check its origin detaches its workspace
+// before any work on its store, and the next update attaches it and checks again.
+it("detaches a workspace whose replica could not check its origin, and attaches it again on the next update", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace];
+  o.replies.create = new Error("Relay unreachable.");
+  await expect(o.host.update({workspaces, documents: [o.sibling], ...stay})).rejects.toThrow("Relay unreachable.");
+  expect(o.membership).toEqual([o.attach, o.detach]);
+  expect(o.host.diverged()).toEqual([]);
+  expect(o.client().captureOwnerActivation).not.toHaveBeenCalled();
+  o.replies.create = undefined;
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  expect(o.membership).toEqual([o.attach, o.detach, o.attach]);
+});
+
+// Proves: a departing document whose retained activation diverged keeps its
+// unsettled work in the store. It resumes once, then no more: it stays
+// retained and its workspace does not drain.
+it("keeps a departing document retained, resuming it once, when its retained activation diverged after a restart", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace];
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.refuseCapture(diverged());
+  const {restarted} = await restartEmpty(o);
+  await restarted.update({workspaces, documents: [], departing: [o.sibling]});
+  await o.nextPull(); await o.nextPull();
+  expect(o.client().captureOwnerActivation).toHaveBeenCalledTimes(1);
+  expect(restarted.retains(o.sibling)).toBe(true);
+  expect(restarted.drained("workspace")).toBe(false);
+  expect(o.membership.filter(row => row.method === "liveApplication.unloadDocument")).toEqual([]);
+});
+
+// Proves: after a restart, a departing document the engine already parked is
+// not ready to resume and has nothing here to settle or unload. It is
+// forgotten, never captured again, and released once a pull no longer lists it.
+it("releases a departing document that already parked after a restart, capturing it only once", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace];
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.refuseCapture(unready());
+  const {restarted} = await restartEmpty(o);
+  await restarted.update({workspaces, documents: [], departing: [o.sibling]});
+  await vi.waitFor(() => expect(restarted.drained("workspace")).toBe(true));
+  expect(restarted.retains(o.sibling)).toBe(false);
+  await o.nextPull(); await o.nextPull();
+  expect(o.client().captureOwnerActivation).toHaveBeenCalledTimes(1);
+  expect(o.membership.filter(row => row.method === "liveApplication.unloadDocument")).toEqual([]);
+  await expect(restarted.detachDrained("workspace")).resolves.toBe(true);
+});
+
+// Proves: a document held for a live edit its session never admitted cannot
+// become ready, so it gets one capture and then none. Its workspace keeps
+// pushing and pulling, and a sibling keeps its passes. Unblocking allows
+// exactly one more capture, which makes it ready once the hold clears.
+it("captures a document held for an unadmitted live edit once, then not again until it is unblocked", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace];
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  const captures = () => o.client().captureOwnerActivation.mock.calls.length, before = captures();
+  const pushes = () => o.client().sendRequest.mock.calls.filter(call => ((call as unknown[])[0] as {method: string}).method === "sync.push").length;
+  const visits = () => vi.mocked(ServiceActivationDriver.prototype.activate).mock.calls.filter(call => call[0].path === o.other.path).length;
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.refuseCapture(unready());
+  o.replies.pass = {held: [{objectId: o.sibling.objectId, reason: "hosted-live-edit-unadmitted"}]};
+  await vi.waitFor(() => expect(captures()).toBe(before + 1));
+  const pushed = pushes();
+  // A Y.Doc update for it does not lift a refusal.
+  appendDocumentRow(o.raw, "ydoc.update", o.sibling.objectId);
+  await o.nextPull(); await o.nextPull();
+  expect(pushes()).toBeGreaterThan(pushed);
+  expect(captures()).toBe(before + 1);
+  expect(o.host.isDocumentReady(o.document)).toBe(false);
+  expect(o.host.blocked(o.sibling)).toBe("live-edit-unadmitted");
+  await o.host.update({workspaces, documents: [o.sibling, o.other], ...stay});
+  const visited = visits();
+  await vi.waitFor(() => expect(visits()).toBeGreaterThan(visited + 2));
+  expect(captures()).toBe(before + 1);
+  expect(o.host.blocked(o.other)).toBeUndefined();
+  expect(o.host.unblock(o.sibling)).toBe(true);
+  expect(o.host.blocked(o.sibling)).toBeUndefined();
+  await vi.waitFor(() => expect(captures()).toBe(before + 2));
+  const retried = visits();
+  await vi.waitFor(() => expect(visits()).toBeGreaterThan(retried + 2));
+  expect(captures()).toBe(before + 2);
+  o.replies.pass = {};
+  o.refuseCapture(undefined);
+  expect(o.host.unblock(o.sibling)).toBe(true);
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  expect(captures()).toBe(before + 3);
+  expect(o.host.unblock(o.sibling)).toBe(false);
+  await expect(o.host.drain(o.document)).resolves.toMatchObject({kind: "done"});
+});
+
+// Proves: a retained activation the engine refuses as diverged resumes once
+// after a restart and then no more, while its workspace keeps pushing and
+// pulling. Unblocking resumes it exactly once more.
+it("resumes a document whose retained activation diverged once, then not again until it is unblocked", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace];
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.refuseCapture(diverged());
+  const {restarted, count} = await restartEmpty(o), captures = () => o.client().captureOwnerActivation.mock.calls.length;
+  await restarted.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(captures()).toBe(1));
+  expect(o.client().captureOwnerActivation).toHaveBeenLastCalledWith(expect.anything(), "docs/a.md", 1_000_000, expect.any(AbortSignal), `ordinary-activation-${"a".repeat(64)}`);
+  const pushed = count("sync.push");
+  await o.nextPull(); await o.nextPull();
+  expect(count("sync.push")).toBeGreaterThan(pushed);
+  expect(captures()).toBe(1);
+  expect(restarted.isDocumentReady(o.document)).toBe(false);
+  expect(restarted.blocked(o.sibling)).toBe("refused");
+  expect(restarted.unblock(o.sibling)).toBe(true);
+  await vi.waitFor(() => expect(captures()).toBe(2));
+  await vi.waitFor(() => expect(restarted.blocked(o.sibling)).toBe("refused"));
+  await o.nextPull(); await o.nextPull();
+  expect(captures()).toBe(2);
+  expect(restarted.retains(o.sibling)).toBe(true);
+});
+
+// Proves: a document with no Y.Doc lineage has nothing to activate, so its
+// first capture blocks it and no pass captures it again, while its workspace
+// keeps pulling. Unblocking allows exactly one more capture. Any other conflict
+// on a first capture keeps it waiting, captured again on every pass.
+it.each([
+  ["blocks", "live-document-without-lineage", withoutLineage, "without-lineage"],
+  ["keeps retrying", "live-application-conflict", diverged, undefined],
+] as const)("%s a document whose first capture the engine refuses as %s", async (_verb, _reason, refusal, block) => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace];
+  const plain = {workspaceId: "workspace", objectId: "object-plain", path: "docs/plain.md", shareId: "share"};
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const captures = () => o.client().captureOwnerActivation.mock.calls.filter(call => call[1] === plain.path).length;
+  const visits = () => vi.mocked(ServiceActivationDriver.prototype.activate).mock.calls.filter(call => call[0].path === plain.path).length;
+  o.refuseCapture(refusal());
+  await o.host.update({workspaces, documents: [o.sibling, plain], ...stay});
+  await vi.waitFor(() => expect(captures()).toBe(1));
+  const visited = visits(), pulls = o.pullCount();
+  await vi.waitFor(() => {expect(visits()).toBeGreaterThan(visited + 2); expect(o.pullCount()).toBeGreaterThan(pulls + 2);});
+  expect(o.host.blocked(plain)).toBe(block);
+  if (block === undefined) {
+    expect(captures()).toBeGreaterThan(2);
+    return;
+  }
+  expect(captures()).toBe(1);
+  expect(o.host.isDocumentReady(o.document)).toBe(true);
+  expect(o.host.unblock(plain)).toBe(true);
+  await vi.waitFor(() => expect(captures()).toBe(2));
+  await vi.waitFor(() => expect(o.host.blocked(plain)).toBe(block));
+  const retried = visits();
+  await vi.waitFor(() => expect(visits()).toBeGreaterThan(retried + 2));
+  expect(captures()).toBe(2);
+});
+
+// Proves: a document whose capture found no Y.Doc lineage captures once more,
+// with no Resume, only once the relay holds a Y.Doc update for it newer than
+// any that capture saw. A moment, or another document's update, does not lift
+// it. It then activates and stops reporting the block.
+it("activates a document without lineage once a Y.Doc update for it reaches the relay", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace], captures = () => o.client().captureOwnerActivation.mock.calls.length;
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.refuseCapture(withoutLineage());
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.blocked(o.sibling)).toBe("without-lineage"));
+  o.refuseCapture(undefined);
+  appendDocumentRow(o.raw, "moment.append", o.sibling.objectId);
+  appendDocumentRow(o.raw, "ydoc.update", o.other.objectId);
+  await o.nextPull(); await o.nextPull();
+  expect(captures()).toBe(1);
+  expect(o.host.blocked(o.sibling)).toBe("without-lineage");
+  appendDocumentRow(o.raw, "ydoc.update", o.sibling.objectId);
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  expect(captures()).toBe(2);
+  expect(o.host.blocked(o.sibling)).toBeUndefined();
+  await expect(o.host.drain(o.document)).resolves.toMatchObject({kind: "done"});
+});
+
+// Proves: a document still without lineage after the update that lifted its
+// block blocks again, at that update, so it captures once per new update. One
+// whose retry meets another conflict is no longer blocked and waits.
+it("blocks a document again when the update that lifted it carried no lineage", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace], captures = () => o.client().captureOwnerActivation.mock.calls.length;
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.refuseCapture(withoutLineage());
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(captures()).toBe(1));
+  appendDocumentRow(o.raw, "ydoc.update", o.sibling.objectId);
+  await vi.waitFor(() => expect(captures()).toBe(2));
+  await o.nextPull(); await o.nextPull();
+  expect(captures()).toBe(2);
+  expect(o.host.blocked(o.sibling)).toBe("without-lineage");
+  o.refuseCapture(unready());
+  appendDocumentRow(o.raw, "ydoc.update", o.sibling.objectId);
+  await vi.waitFor(() => expect(captures()).toBeGreaterThan(4));
+  expect(o.host.blocked(o.sibling)).toBeUndefined();
+});
+
+// Proves: an update that reached the relay while the capture's pull ran may
+// have missed that pull, so it lifts the block that capture left.
+it("captures a document without lineage once more for an update that arrived during its pull", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace], captures = () => o.client().captureOwnerActivation.mock.calls.length;
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.refuseCapture(withoutLineage());
+  const pulling = o.park("sync.pullHosted");
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await pulling.entered.promise;
+  appendDocumentRow(o.raw, "ydoc.update", o.sibling.objectId);
+  pulling.release.resolve();
+  await vi.waitFor(() => expect(captures()).toBe(2));
+  await o.nextPull(); await o.nextPull();
+  expect(captures()).toBe(2);
+});
+
+// Proves: a diverged replica stops and detaches, its documents stay retained,
+// and no later update attaches its store again on this daemon. A new
+// identity's store is another store, so it attaches.
+it("detaches a diverged workspace for good and retains its documents", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace];
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.replies.diverge = true;
+  await vi.waitFor(() => expect(o.host.diverged()).toEqual([{workspaceId: "workspace", root: o.workspace.root}]));
+  expect(o.membership).toEqual([o.attach, o.detach]);
+  expect(o.host.retains(o.sibling)).toBe(true);
+  expect(o.host.isDocumentReady(o.document)).toBe(false);
+  o.replies.diverge = false;
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  expect(o.membership).toEqual([o.attach, o.detach]);
+  expect(o.host.diverged()).toEqual([{workspaceId: "workspace", root: o.workspace.root}]);
+  expect(o.host.isDocumentReady(o.document)).toBe(false);
+  const rotatedRoot = join(o.f.root, "workspace-rotated"); await mkdir(rotatedRoot);
+  expect(o.f.storage.rotateWorkspaceIdentity({workspaceId: "workspace", ownerUserId: "owner", replicationEpoch: "epoch-2", streamIdentity: "stream-2", rotatedAtMs: 10})).toBe("rotated");
+  await o.host.update({workspaces: [{...o.workspace, root: rotatedRoot,
+    hostedReplication: {...o.workspace.hostedReplication!, identity: {replicationEpoch: "epoch-2", streamIdentity: "stream-2"}}}], documents: [], ...stay});
+  expect(o.membership).toEqual([o.attach, o.detach, {...o.attach, params: {...o.attach.params, root: rotatedRoot}}]);
+  // A second divergence, under the new identity, keeps the first store's.
+  o.replies.diverge = true;
+  await vi.waitFor(() => expect(o.host.diverged()).toEqual([{workspaceId: "workspace", root: o.workspace.root}, {workspaceId: "workspace", root: rotatedRoot}]));
+});
+
+// Proves: a fresh daemon, with no marker to say a store diverged, pulls
+// before the first activation captures anything. A divergence that pull finds
+// detaches the workspace before any document is ready for anyone to edit.
+it("finds a divergence on a fresh daemon before any document is ready", async () => {
+  const o = await emptyServiceHost();
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.replies.diverge = true;
+  await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.diverged()).toEqual([{workspaceId: "workspace", root: o.workspace.root}]));
+  // A document is ready only once captured.
+  expect(o.client().captureOwnerActivation).not.toHaveBeenCalled();
+  expect(o.host.isDocumentReady(o.document)).toBe(false);
+  expect(o.membership).toEqual([o.attach, o.detach]);
+});
+
+// Proves: a divergence counts before its detach, so a detach the exiting
+// engine fails still leaves the workspace in `diverged` for its replacement.
+it("records a divergence whose detach fails as the engine exits", async () => {
+  const o = await emptyServiceHost();
+  await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.failDetach(new EngineRequestError(1, {code: "SESSION_EXPIRED", message: "engine exited", retry: "no"} as never));
+  o.replies.diverge = true;
+  await vi.waitFor(() => expect(o.host.invalidated.aborted).toBe(true));
+  expect(o.membership).toEqual([o.attach, o.detach]);
+  expect(o.host.diverged()).toEqual([{workspaceId: "workspace", root: o.workspace.root}]);
+});
+
+// Proves: deleting an account's workspace detaches it at once, unloading
+// nothing of its hosted document, and removes its store with the live state
+// parked there. Another workspace stays attached with its store.
+it("detaches a deleted workspace at once and removes its store", async () => {
+  const o = await emptyServiceHost(), otherRoot = join(o.f.root, "workspace-2");
+  await mkdir(otherRoot);
+  await o.host.update({workspaces: [o.workspace, {...o.workspace, root: otherRoot, workspaceId: "workspace-2"}], documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  await writeFile(join(o.workspace.root, "replica.sqlite"), "parked live state");
+  await o.host.deleteWorkspaces(["workspace"]);
+  expect(o.membership.filter(row => row.method !== "liveApplication.attachWorkspace")).toEqual([o.detach]);
+  expect(existsSync(o.workspace.root)).toBe(false); expect(existsSync(otherRoot)).toBe(true);
   expect(o.host.isDocumentReady(o.document)).toBe(false);
   expect(o.host.automationLedger("workspace")).toBeNull();
-  expect(o.membership.at(-1)).toEqual({method: "liveApplication.detachWorkspace", workspace: "attached-handle", params: {}});
-  expect(o.f.storage.readLiveUpdateJournalCut({document: o.document})).toEqual(cut);
-  const calls = o.membership.length;
-  expect(await o.host.update({workspaces: [], documents: []})).toEqual([]);
-  expect(o.membership).toHaveLength(calls);
-  expect(o.client().close).not.toHaveBeenCalled();
+  expect(o.host.automationLedger("workspace-2")).not.toBeNull();
+});
+
+// Proves: deleting an account's workspace whose replica diverged removes the
+// store the daemon kept detached, and the daemon no longer reports it.
+it("removes a deleted workspace's diverged store and forgets the divergence", async () => {
+  const o = await emptyServiceHost();
+  await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.replies.diverge = true;
+  await vi.waitFor(() => expect(o.host.diverged()).toEqual([{workspaceId: "workspace", root: o.workspace.root}]));
+  await o.host.deleteWorkspaces(["workspace"]);
+  expect(existsSync(o.workspace.root)).toBe(false);
+  expect(o.host.diverged()).toEqual([]);
+  expect(o.membership).toEqual([o.attach, o.detach]);
 });
 
 it.each([false, true])("detaches a workspace at once when its identity changes, leaving its pending document unsettled (new documents at once: %s)", async newAtOnce => {
@@ -793,33 +1676,64 @@ it.each([false, true])("detaches a workspace at once when its identity changes, 
   await mkdir(siblingRoot); await mkdir(rotatedRoot);
   const sibling = {...o.workspace, root: siblingRoot, workspaceId: "workspace-2"}, siblingDocument = {...o.other, workspaceId: "workspace-2"};
   const rotated = {...o.workspace, root: rotatedRoot,
-    ordinaryReplication: {...o.workspace.ordinaryReplication!, identity: {kind: "join" as const, replicationEpoch: "epoch-2", streamIdentity: "stream-2"}}};
-  await o.host.update({workspaces: [o.workspace, sibling], documents: [o.other, siblingDocument]});
-  expect(o.host.holds(o.other)).toBe(true);
+    hostedReplication: {...o.workspace.hostedReplication!, identity: {replicationEpoch: "epoch-2", streamIdentity: "stream-2"}}};
+  await o.host.update({workspaces: [o.workspace, sibling], documents: [o.other, siblingDocument], ...stay});
+  expect(o.host.retains(o.other)).toBe(true);
   o.membership.splice(0);
   // Settlement under the old identity is refused, so an unload would stay pending forever.
   o.unloads.push({status: "pending", reason: "settlement-pending"});
   expect(o.f.storage.rotateWorkspaceIdentity({workspaceId: "workspace", ownerUserId: "owner", replicationEpoch: "epoch-2", streamIdentity: "stream-2", rotatedAtMs: 10})).toBe("rotated");
-  const detach = {method: "liveApplication.detachWorkspace", workspace: "attached-handle", params: {}};
   const attach = {...o.attach, params: {...o.attach.params, root: rotatedRoot}};
-  const rotatedSet = {workspaces: [rotated, sibling], documents: [o.other, siblingDocument]};
+  const rotatedSet = {workspaces: [rotated, sibling], documents: [o.other, siblingDocument], ...stay};
   if (!newAtOnce) {
-    expect(await o.host.update({workspaces: [sibling], documents: [siblingDocument]})).toEqual([]);
-    expect(o.membership).toEqual([detach]);
-    expect(o.host.holds(o.other)).toBe(false);
+    await o.host.update({workspaces: [sibling], documents: [siblingDocument], ...stay});
+    expect(o.membership).toEqual([o.detach]);
+    expect(o.host.settled(o.other)).toBe(false);
     expect(o.host.automationLedger("workspace")).toBeNull();
     // Nothing is left to retry.
-    expect(await o.host.update({workspaces: [sibling], documents: [siblingDocument]})).toEqual([]);
-    expect(o.membership).toEqual([detach]);
+    await o.host.update({workspaces: [sibling], documents: [siblingDocument], ...stay});
+    expect(o.membership).toEqual([o.detach]);
   }
-  expect(await o.host.update(rotatedSet)).toEqual([]);
-  expect(o.membership).toEqual([detach, attach]);
-  expect(o.host.holds(o.other)).toBe(true);
+  await o.host.update(rotatedSet);
+  expect(o.membership).toEqual([o.detach, attach]);
+  expect(o.host.retains(o.other)).toBe(true);
   // The sibling workspace keeps its attachment and document throughout.
-  expect(o.host.holds(siblingDocument)).toBe(true);
+  expect(o.host.retains(siblingDocument)).toBe(true);
   expect(o.host.automationLedger("workspace-2")).not.toBeNull();
   expect(o.membership.every(row => row.workspace !== "attached-workspace-2")).toBe(true);
   expect(o.spawned()).toBe(1); expect(o.client().close).not.toHaveBeenCalled();
+});
+
+// Proves: after an identity change, an activated document re-enrolled into
+// the new store resumes its retained activation once. That store never held
+// it, so the engine refuses it as a conflict and the document blocks. Its
+// workspace keeps pushing and pulling, and a sibling document keeps its passes.
+it("blocks a document re-enrolled into a new store after an identity change while its workspace keeps syncing", async () => {
+  const o = await emptyServiceHost(), rotatedRoot = join(o.f.root, "workspace-rotated");
+  await mkdir(rotatedRoot);
+  await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  expect(o.f.storage.rotateWorkspaceIdentity({workspaceId: "workspace", ownerUserId: "owner", replicationEpoch: "epoch-2", streamIdentity: "stream-2", rotatedAtMs: 10})).toBe("rotated");
+  const rotated = {...o.workspace, root: rotatedRoot,
+    hostedReplication: {...o.workspace.hostedReplication!, identity: {replicationEpoch: "epoch-2", streamIdentity: "stream-2"}}};
+  const captures = () => o.client().captureOwnerActivation.mock.calls.length, before = captures();
+  const pushes = () => o.client().sendRequest.mock.calls.filter(call => ((call as unknown[])[0] as {method: string}).method === "sync.push").length;
+  const visits = () => vi.mocked(ServiceActivationDriver.prototype.activate).mock.calls.filter(call => call[0].path === o.other.path).length;
+  o.refuseCapture(diverged());
+  await o.host.update({workspaces: [rotated], documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(captures()).toBe(before + 1));
+  expect(o.client().captureOwnerActivation).toHaveBeenLastCalledWith(expect.anything(), "docs/a.md", 1_000_000, expect.any(AbortSignal), `ordinary-activation-${"a".repeat(64)}`);
+  const pushed = pushes();
+  await o.nextPull(); await o.nextPull();
+  expect(pushes()).toBeGreaterThan(pushed);
+  expect(captures()).toBe(before + 1);
+  expect(o.host.isDocumentReady(o.document)).toBe(false);
+  await o.host.update({workspaces: [rotated], documents: [o.sibling, o.other], ...stay});
+  const visited = visits();
+  await vi.waitFor(() => expect(visits()).toBeGreaterThan(visited + 2));
+  expect(captures()).toBe(before + 1);
+  expect(o.host.retains(o.sibling)).toBe(true);
 });
 
 it("keeps the daemon after a refused attach and retires it when the engine expires its connection", async () => {
@@ -830,12 +1744,12 @@ it("keeps the daemon after a refused attach and retires it when the engine expir
       ? Promise.reject(new EngineRequestError(1, {code, message: code, retry: "no"} as never)) : reply(...args));
   };
   refuse("INVALID_PARAMS");
-  await expect(o.host.update({workspaces, documents: [o.sibling]})).rejects.toThrow("INVALID_PARAMS");
+  await expect(o.host.update({workspaces, documents: [o.sibling], ...stay})).rejects.toThrow("INVALID_PARAMS");
   expect(o.host.invalidated.aborted).toBe(false);
-  await o.host.update({workspaces, documents: [o.sibling]});
-  await o.host.update({workspaces: [], documents: []});
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await o.host.update({workspaces: [], documents: [], ...stay});
   refuse("SESSION_EXPIRED");
-  await expect(o.host.update({workspaces, documents: [o.sibling]})).rejects.toThrow("SESSION_EXPIRED");
+  await expect(o.host.update({workspaces, documents: [o.sibling], ...stay})).rejects.toThrow("SESSION_EXPIRED");
   expect(o.host.invalidated.aborted).toBe(true);
 });
 
@@ -845,7 +1759,8 @@ it("removes a detached configured root after restart and keeps unrelated roots",
   const deleted = join(root,"deleted"), kept = join(root,"kept");
   await mkdir(deleted);await mkdir(kept);await writeFile(join(deleted,"account"),"deleted-person");
   const configPath = join(root,"host.json");
-  await writeFile(configPath,JSON.stringify({workspaces:[{root:deleted,workspaceId:"deleted",maxRegistrations:1},{root:kept,workspaceId:"kept",maxRegistrations:1}]}));
+  const hostedReplication = {relay:{baseUrl:"https://relay.example",bearerToken:"service-token"},identity:{replicationEpoch:"epoch",streamIdentity:"stream"},maxPagesPerPull:8};
+  await writeFile(configPath,JSON.stringify({workspaces:[{root:deleted,workspaceId:"deleted",maxRegistrations:1,hostedReplication},{root:kept,workspaceId:"kept",maxRegistrations:1}]}));
   await deleteConfiguredServiceWorkspaceRoots(configPath,["deleted"]);
   await deleteConfiguredServiceWorkspaceRoots(configPath,["deleted"]);
   expect(existsSync(deleted)).toBe(false);expect(existsSync(kept)).toBe(true);
@@ -872,7 +1787,7 @@ async function idleHost(options: {alone?: boolean} = {}) {
   activate.mockImplementation(function (this: ServiceActivationDriver, ...args) {
     return held && args[0].path === o.sibling.path ? Promise.resolve({kind: "pending" as const, reason: "held"}) : through.apply(this, args);
   });
-  await o.host.update({workspaces, documents: [o.sibling, other]});
+  await o.host.update({workspaces, documents: [o.sibling, other], ...stay});
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
   const visits = (path: string) => activate.mock.calls.filter(([target]) => target.path === path).length;
   const requests = () => o.client().sendRequest.mock.calls.map(call => (call as unknown[])[0] as {method: string; params: Record<string, unknown>});
@@ -902,7 +1817,7 @@ it("unloads a hosted document after ten minutes with no live connection, not bef
   // The settled output was published right before the engine unloaded the document.
   const methods = o.methods();
   expect(methods[methods.lastIndexOf("liveApplication.unloadDocument") - 1]).toBe("sync.push");
-  expect(o.host.holds(o.sibling)).toBe(true); expect(o.host.settled(o.sibling)).toBe(true);
+  expect(o.host.retains(o.sibling)).toBe(true); expect(o.host.settled(o.sibling)).toBe(true);
   expect(o.host.isDocumentReady(o.document)).toBe(true);
   expect(o.spawned()).toBe(1); expect(o.client().close).not.toHaveBeenCalled();
 });
@@ -996,8 +1911,9 @@ it("keeps background activation from reloading a dormant document, which leaves 
   await o.passes(4);
   expect(o.client().captureOwnerActivation.mock.calls.length).toBe(captures);
   expect(o.visits(o.sibling.path)).toBe(visits);
-  expect(await o.host.update({workspaces: o.workspaces, documents: [o.other]})).toEqual([]);
-  expect(o.unloaded()).toBe(1); expect(o.host.holds(o.sibling)).toBe(false);
+  await o.host.update({workspaces: o.workspaces, documents: [o.other], departing: [o.sibling]});
+  await vi.waitFor(() => expect(o.host.settled(o.sibling)).toBe(false));
+  expect(o.unloaded()).toBe(1);
 });
 
 it("brings a dormant document back into passes for stop-access work that reloads it, which settle it before it unloads again", async () => {
@@ -1192,23 +2108,26 @@ it("keeps an idle unload the engine stopped waiting for unanswered and sends it 
   await expect(o.host.drain(o.document)).resolves.toMatchObject({kind: "done"});
 });
 
-it("pulls what the relay received for a fully dormant workspace before a reopened document's first sync", async () => {
+it("keeps pulling a fully dormant workspace and pulls again before a reopened document's first sync", async () => {
   const o = await idleHost({alone: true}), send = o.client().sendRequest, capture = o.client().captureOwnerActivation;
   o.advance(600_000);
   await vi.waitFor(() => expect(o.unloaded()).toBe(1));
+  // Passes still pull it, so its replica keeps retiring what left.
   const sent = o.methods().length;
   await o.passes(4);
-  expect(o.methods().slice(sent)).not.toContain("sync.pull");
+  expect(o.methods().slice(sent)).toContain("sync.pullHosted");
   // An owner update reached the relay. A catch-up that stops at a page boundary keeps the document dormant.
   const captures = capture.mock.calls.length;
-  o.pulls.push({hasMore: true, nextCursor: 4, fetched: 1, applied: 1});
-  await expect(o.host.captureNative(o.binding())).rejects.toThrow("Ordinary replication has more pages.");
+  o.replies.pass = {hasMore: true, fetched: 1, applied: 1};
+  await expect(o.host.captureNative(o.binding())).rejects.toThrow("Hosted replication has more pages.");
   expect(capture.mock.calls.length).toBe(captures);
-  o.pulls.push({nextCursor: 5, fetched: 1, applied: 1});
+  o.replies.pass = {fetched: 1, applied: 1};
   const native = await o.host.captureNative(o.binding());
   expect(native.invalidated.aborted).toBe(false);
-  // The pull committed before the document reloaded and its owner delivery registered.
+  // The open's pull committed before the document reloaded and its owner delivery registered.
+  const captured = capture.mock.invocationCallOrder.at(-1)!;
+  const before = (method: string) => send.mock.invocationCallOrder.filter((at, index) => o.methods()[index] === method && at < captured).at(-1)!;
+  expect(before("sync.pullHosted")).toBeLessThan(before("sync.commitCursor"));
   const order = (method: string) => send.mock.invocationCallOrder.filter((_, index) => o.methods()[index] === method).at(-1)!;
-  expect(order("sync.commitCursor")).toBeLessThan(capture.mock.invocationCallOrder.at(-1)!);
-  expect(capture.mock.invocationCallOrder.at(-1)!).toBeLessThan(order("liveApplication.register"));
+  expect(captured).toBeLessThan(order("liveApplication.register"));
 });

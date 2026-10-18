@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import {
   lutimes,
   mkdir,
+  realpath,
   stat,
   symlink,
   utimes,
@@ -91,6 +92,14 @@ describe("test scratch", () => {
       ).toBe(testScratchRunRoot());
     },
   );
+
+  // The relay deployment refuses a path that resolves elsewhere, and macOS
+  // temp directories resolve into /private.
+  it.skipIf(process.platform === "win32")("gives a path with every link already resolved", async () => {
+    const scratch = await createTestScratch("resolved-");
+
+    expect(scratch).toBe(await realpath(scratch));
+  });
 
   // A link is a leaf, not a door. Reading through one asks about a tree the
   // abandoned run does not own, and the answer pins it: an external target

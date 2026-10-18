@@ -2956,7 +2956,7 @@ fn dispatch_claim_is_single_writer_idempotent() {
     assert_eq!(claim.run.exit_code, None);
     assert_eq!(claim.run.failure_reason, None);
     assert_eq!(claim.run.log_path.as_deref(), Some("  logs/run-1.log  "));
-    assert!(!claim.run.failure_note_posted);
+    assert!(!claim.run.failure_handled);
 
     for invalid in [String::new(), "bad\0run".to_owned(), "x".repeat(513)] {
         assert!(

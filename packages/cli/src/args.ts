@@ -1,10 +1,10 @@
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import type { z } from "zod";
-import { DATASET_CAPABILITIES, APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, type CliActor } from "./protocol";
+import { APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, type CliActor } from "./protocol";
 import { DohcCliError } from "./errors";
 import { OwnerAppPublicationRequest } from "./appPublication";
 import { OwnerAppResponsesRequest } from "./appResponses";
-import { DatasetRequest, DatasetSchemaChange } from "./dataset";
+import { DATASET_CAPABILITIES, DatasetRequest, DatasetSchemaChange } from "./dataset";
 import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
 import { AccessObjectRef } from "@dohc/workspace-contracts/access";
 

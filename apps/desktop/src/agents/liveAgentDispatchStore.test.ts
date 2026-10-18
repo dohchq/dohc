@@ -44,7 +44,7 @@ const run = {
   command: "codex",
   startedAtMs: 3,
   logPath: "logs/run-fixed/run-fixed.log",
-  failureNotePosted: false,
+  failureHandled: false,
 };
 
 const pause = {
@@ -91,8 +91,8 @@ function dispatchResult(request: Request): JsonValue {
       return { dispatches: [dispatch], nextCursor: null };
     case "chats.dispatch.openRuns":
       return { claims: [{ dispatch, run, chainDepth: 0 }], nextCursor: null };
-    case "chats.dispatch.markFailureNotePosted":
-      return { ...run, failureNotePosted: true };
+    case "chats.dispatch.markFailureHandled":
+      return { ...run, failureHandled: true };
     case "chats.dispatch.recentCount":
       return 3;
     case "chats.dispatch.recordRunMessage":
@@ -297,10 +297,10 @@ describe("live agent dispatch store", () => {
       { dispatch, run, chainDepth: 0 },
     ]);
     await expect(
-      store.markFailureNotePosted(run.runId, { deadlineMs: 432 }),
+      store.markFailureHandled(run.runId, { deadlineMs: 432 }),
     ).resolves.toEqual({
       ...run,
-      failureNotePosted: true,
+      failureHandled: true,
     });
     await expect(
       store.recentDispatchCount({
@@ -382,7 +382,7 @@ describe("live agent dispatch store", () => {
     });
     expect(
       client.requests.find(
-        ({ method }) => method === "chats.dispatch.markFailureNotePosted",
+        ({ method }) => method === "chats.dispatch.markFailureHandled",
       )?.deadlineMs,
     ).toBe(432);
     expect(
@@ -438,7 +438,7 @@ describe("live agent dispatch store", () => {
         "chats.dispatch.fail",
         "chats.dispatch.listPending",
         "chats.dispatch.openRuns",
-        "chats.dispatch.markFailureNotePosted",
+        "chats.dispatch.markFailureHandled",
         "chats.dispatch.recentCount",
         "chats.dispatch.recordRunMessage",
         "chats.dispatch.listRunMessages",

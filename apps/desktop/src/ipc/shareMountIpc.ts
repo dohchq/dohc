@@ -1,99 +1,43 @@
-import {
-  MountSharePayload,
-  MountShareResult,
-  RefreshShareMountsPayload,
-  RefreshShareMountsResult,
-  UnmountSharePayload,
-  UnmountShareResult,
-} from "./bridgeContract";
-import { CHANNELS } from "./channels";
+import type { WorkspaceSummary } from "./bridgeContract";
+import type { shareMountOperations } from "./shareOperations";
+import type { OperationHandlers } from "./operationTable";
 import type {
   ShareMountCommandWorkspace,
   ShareMountCommands,
 } from "../workspaces/shareMountCommands";
 
-type ShareMountIpcHandler<Event> = (
-  event: Event,
-  payload: unknown,
-) => Promise<unknown>;
+type ShareMountOperation<Workspace> = {
+  readonly workspace: Workspace;
+  assertCurrent(): void;
+};
 
-export function registerShareMountIpcHandlers<
-  Event,
-  Workspace extends ShareMountCommandWorkspace,
-  WorkspaceSummary,
->(dependencies: {
-  registerHandler(channel: string, handler: ShareMountIpcHandler<Event>): void;
-  assertTrustedSender(event: Event): void;
-  withWorkspaceOperation(
-    event: Event,
-    workspaceId: string,
-    work: (operation: {
-      readonly workspace: Workspace;
-      assertCurrent(): void;
-    }) => Promise<unknown>,
-  ): Promise<unknown>;
+export function createShareMountIpcHandlers<Workspace extends ShareMountCommandWorkspace>(dependencies: {
   assertWritableWorkspace(workspace: Workspace): void;
-  commands: Pick<
-    ShareMountCommands<WorkspaceSummary>,
-    "mount" | "refresh" | "unmount"
-  >;
-}): void {
-  dependencies.registerHandler(CHANNELS.mountShare, async (event, payload) => {
-    dependencies.assertTrustedSender(event);
-    const input = MountSharePayload.parse(payload);
-    return dependencies.withWorkspaceOperation(
-      event,
-      input.workspaceId,
-      async (operation) => {
-        dependencies.assertWritableWorkspace(operation.workspace);
-        return MountShareResult.parse(
-          await dependencies.commands.mount({
-            workspace: operation.workspace,
-            shareCode: input.shareCode,
-            assertCurrent: operation.assertCurrent,
-          }),
-        );
-      },
-    );
-  });
-
-  dependencies.registerHandler(
-    CHANNELS.refreshShareMounts,
-    async (event, payload) => {
-      dependencies.assertTrustedSender(event);
-      const input = RefreshShareMountsPayload.parse(payload);
-      return dependencies.withWorkspaceOperation(
-        event,
-        input.workspaceId,
-        async (operation) => {
-          dependencies.assertWritableWorkspace(operation.workspace);
-          return RefreshShareMountsResult.parse(
-            await dependencies.commands.refresh({
-              workspace: operation.workspace,
-              assertCurrent: operation.assertCurrent,
-            }),
-          );
-        },
-      );
+  commands: Pick<ShareMountCommands<WorkspaceSummary>, "mount" | "refresh" | "unmount">;
+}): OperationHandlers<typeof shareMountOperations, unknown, ShareMountOperation<Workspace>> {
+  return {
+    mountShare: async (input, { operation }) => {
+      dependencies.assertWritableWorkspace(operation.workspace);
+      return dependencies.commands.mount({
+        workspace: operation.workspace,
+        shareCode: input.shareCode,
+        assertCurrent: operation.assertCurrent,
+      });
     },
-  );
-
-  dependencies.registerHandler(CHANNELS.unmountShare, async (event, payload) => {
-    dependencies.assertTrustedSender(event);
-    const input = UnmountSharePayload.parse(payload);
-    return dependencies.withWorkspaceOperation(
-      event,
-      input.workspaceId,
-      async (operation) => {
-        dependencies.assertWritableWorkspace(operation.workspace);
-        return UnmountShareResult.parse(
-          await dependencies.commands.unmount({
-            workspace: operation.workspace,
-            shareId: input.shareId,
-            assertCurrent: operation.assertCurrent,
-          }),
-        );
-      },
-    );
-  });
+    refreshShareMounts: async (_input, { operation }) => {
+      dependencies.assertWritableWorkspace(operation.workspace);
+      return dependencies.commands.refresh({
+        workspace: operation.workspace,
+        assertCurrent: operation.assertCurrent,
+      });
+    },
+    unmountShare: async (input, { operation }) => {
+      dependencies.assertWritableWorkspace(operation.workspace);
+      return dependencies.commands.unmount({
+        workspace: operation.workspace,
+        shareId: input.shareId,
+        assertCurrent: operation.assertCurrent,
+      });
+    },
+  };
 }

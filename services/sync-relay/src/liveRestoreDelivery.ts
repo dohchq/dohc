@@ -19,8 +19,8 @@ export async function deliverStopRestore(options: {
   store: LiveCommittedDeliveryStore;
   lookup: StopRestoreLookup;
   connection: {client: EngineClient; workspace: string; host: LiveHostConnectionCoordinate; deadlineMs: number; nextRequestId(): number;
-    /** Publishes this host's ordinary journal; absent where the host has none to drive. */
-    publishOrdinary?(signal?: AbortSignal): Promise<unknown>};
+    /** Publishes this host's replica journal; absent where the host has none to drive. */
+    publish?(signal?: AbortSignal): Promise<unknown>};
   deliveryKind: "bootstrap" | "owner";
   signal?: AbortSignal;
 }): Promise<StopRestoreOutcome> {
@@ -88,8 +88,8 @@ export async function deliverStopRestore(options: {
     check();
     let result = configRecord(response.result, ["status"], ["receipt", "reason"]);
     if (result.status === "pending" && typeof result.reason === "string") {
-      if (!c.publishOrdinary) return {kind: "pending", reason: result.reason};
-      await c.publishOrdinary(signal);
+      if (!c.publish) return {kind: "pending", reason: result.reason};
+      await c.publish(signal);
       check();
       response = await c.client.sendRequest({...request(), method: "liveApplication.fenceRestore", params: {operation: pending.operation as never}}, signal);
       check();

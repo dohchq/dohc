@@ -72,10 +72,12 @@ impl ScratchDir {
             };
             match created {
                 Ok(()) => {
-                    return Ok(Self {
+                    let mut scratch = Self {
                         path,
                         owned_run_root: generated.then(|| run_root.clone()),
-                    });
+                    };
+                    scratch.path = real_path(&scratch.path)?;
+                    return Ok(scratch);
                 }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(error),
@@ -126,6 +128,18 @@ impl Drop for ScratchDir {
             let _root = RUN_ROOT_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
             let _ = fs::remove_dir(root);
         }
+    }
+}
+
+/// The path with every link resolved. macOS temp directories are links into
+/// `/private`, and code that refuses a path resolving elsewhere, such as the
+/// relay deployment, must receive the real one. Windows keeps the path as
+/// made, because `canonicalize` there returns a verbatim `\\?\` path.
+fn real_path(path: &Path) -> io::Result<PathBuf> {
+    if cfg!(unix) {
+        fs::canonicalize(path)
+    } else {
+        Ok(path.to_path_buf())
     }
 }
 
@@ -499,10 +513,22 @@ mod tests {
             let parent = scratch.path().parent().expect("scratch has a parent");
             assert_eq!(
                 parent,
-                current_run_root().expect("run root").0,
+                real_path(&current_run_root().expect("run root").0).expect("real run root"),
                 "a scratch named {name:?} escaped the run root"
             );
         }
+    }
+
+    /// The relay deployment refuses a path that resolves elsewhere, and macOS
+    /// temp directories resolve into `/private`.
+    #[cfg(unix)]
+    #[test]
+    fn a_scratch_path_is_already_resolved() {
+        let scratch = ScratchDir::new().expect("scratch");
+        assert_eq!(
+            scratch.path(),
+            fs::canonicalize(scratch.path()).expect("canonical scratch")
+        );
     }
 
     /// The sweep infers ownership from the run shape, so nothing a caller names

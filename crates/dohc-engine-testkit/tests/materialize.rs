@@ -1734,8 +1734,37 @@ fn a_different_file_with_the_same_bytes_is_not_taken_for_the_kept_copy() {
     );
 }
 
-/// A copy's workspace path stays within the engine's path limit, so capture
-/// records it. Where not one stem byte fits, the kept file and its row stay.
+/// The longest workspace path a kept copy takes here: the engine's limit, or
+/// less on macOS, which refuses a whole path of 1,024 bytes.
+fn kept_copy_path_limit(sc: &Scratch) -> usize {
+    let root = sc
+        .workspace()
+        .canonicalize()
+        .expect("root")
+        .as_os_str()
+        .len();
+    if cfg!(target_vendor = "apple") {
+        1_024.min(1_022 - root)
+    } else {
+        1_024
+    }
+}
+
+/// Folders named `ddd…`, none longer than 201 bytes, `len` bytes in all.
+fn folders(len: usize) -> String {
+    let mut segments = Vec::new();
+    let mut left = len;
+    while left > 201 {
+        segments.push("d".repeat(200));
+        left -= 201;
+    }
+    segments.push("d".repeat(left));
+    segments.join("/")
+}
+
+/// A copy's path stays within the engine's path limit and the OS's, so
+/// capture records it. Where not one stem byte fits, the kept file and its
+/// row stay.
 #[test]
 fn a_kept_copy_fits_the_workspace_path_limit_or_stays_kept() {
     let sc = Scratch::new("kept-copy-path-limit");
@@ -1748,17 +1777,19 @@ fn a_kept_copy_fits_the_workspace_path_limit_or_stays_kept() {
         now_ms: 30,
         faults: &NoFaults,
     };
-    let deep = ["d"; 4].map(|letter| letter.repeat(200)).join("/");
+    let limit = kept_copy_path_limit(&sc);
+    // The folders leave 220 bytes for a file name.
+    let deep = folders(limit - 221);
 
     let long = format!("{deep}/{}.md", "x".repeat(207));
-    assert!(long.len() < 1_024);
+    assert!(long.len() < limit);
     let id = keep_displaced(&sc, &store, &long, b"long");
     let KeptCopySave::Saved(copy) =
         save_kept_displacement(&store, sc.workspace(), "ws", id, &options).expect("save")
     else {
         panic!("a shorter stem fits");
     };
-    assert_eq!(copy.len(), 1_024, "{copy}");
+    assert_eq!(copy.len(), limit, "{copy}");
     assert!(copy.ends_with("x (kept copy).md"), "{copy}");
     assert_eq!(
         dohc_engine_files::classify_engine_file_path(&copy),
@@ -1767,7 +1798,7 @@ fn a_kept_copy_fits_the_workspace_path_limit_or_stays_kept() {
     assert_eq!(read(&sc, &copy).as_deref(), Some(&b"long"[..]));
 
     let full = format!("{deep}/{}/a", "e".repeat(216));
-    assert_eq!(full.len(), 1_022);
+    assert_eq!(full.len(), limit - 2);
     let id = keep_displaced(&sc, &store, &full, b"full");
     assert_eq!(
         save_kept_displacement(&store, sc.workspace(), "ws", id, &options).expect("save"),
@@ -1786,6 +1817,29 @@ fn a_kept_copy_fits_the_workspace_path_limit_or_stays_kept() {
             .collect::<Vec<_>>(),
         vec![id]
     );
+}
+
+/// A kept file whose own path is too long for macOS to name, where no copy
+/// can go beside it, stays kept with its row instead of failing the save.
+#[cfg(target_vendor = "apple")]
+#[test]
+fn a_kept_file_past_the_os_path_limit_stays_kept() {
+    let sc = Scratch::new("kept-copy-os-limit");
+    let store = EngineStore::open(&sc.db(), 1).expect("open");
+    let limit = kept_copy_path_limit(&sc);
+    let rel = format!("{}/{}.md", folders(limit - 60), "z".repeat(100));
+    assert!(rel.len() > limit && rel.len() < 1_024, "{}", rel.len());
+    let id = keep_displaced(&sc, &store, &rel, b"past the limit");
+    assert_eq!(
+        save_kept_displacement(&store, sc.workspace(), "ws", id, &kept_copy_options())
+            .expect("save"),
+        KeptCopySave::NoValidName
+    );
+    assert_eq!(
+        std::fs::read(sc.target(&staged("6a6f62.0"))).expect("kept"),
+        b"past the limit"
+    );
+    assert_eq!(store.list_kept_displacements("ws").expect("kept").len(), 1);
 }
 
 /// A replace that finds nothing unexpected writes no displacement row: the

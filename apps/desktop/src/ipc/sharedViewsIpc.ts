@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { shareCaptureNoticeState } from "../workspaces/shareCaptureNotice";
-import { CHANNELS } from "./channels";
-import { OpenSharedViewPayload, OpenSharedViewResult, RefreshSharedViewPayload, RefreshSharedViewResult, sharedViewAccessOperations, type CheckSharedViewAccessResult, engineStoreRefusalRecovery } from "./bridgeContract";
+import { type OpenSharedViewPayload, RefreshSharedViewPayload, RefreshSharedViewResult, sharedViewAccessOperations, type CheckSharedViewAccessResult, engineStoreRefusalRecovery } from "./bridgeContract";
 import { registerOperations } from "./operationTable";
 import { engineStoreRefusalDetailOf, engineStoreRefusalOf, type EngineStoreRefusal } from "@dohc/workspace-engine-client";
 import { credentialScopedOperation, requireCredentials } from "../workspaces/credentialScopedOperation";
@@ -143,9 +142,7 @@ export function registerSharedViewsIpcHandlers<
   // Mirrors the join flow's ordering guarantees: everything is validated
   // before local state exists, the token only ever goes to the signed-in
   // relay, and a failed first pull rolls the whole thing back.
-  registerHandler(CHANNELS.openSharedView, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = OpenSharedViewPayload.parse(payload);
+  async function openSharedView(input: OpenSharedViewPayload) {
     const parsed = parseShareCode(input.shareCode);
     if (!parsed) {
       throw new Error(
@@ -304,8 +301,8 @@ export function registerSharedViewsIpcHandlers<
     // record's pinned grant, and a raw parse would strip it and hand the
     // renderer a fresh share view with no level to state.
     const summary = workspaceSummaryFor(requireWorkspace(created.workspaceId));
-    return OpenSharedViewResult.parse({ workspace: summary });
-  });
+    return { workspace: summary };
+  }
 
   const pullCache = new Map<Sender, {
     workspaceId: string; attachmentId: symbol; shareId: string;
@@ -578,6 +575,7 @@ export function registerSharedViewsIpcHandlers<
     withActiveWorkspace: (event, workspaceId, inactiveMessage, work) =>
       withRendererWorkspaceOperation(event.sender, workspaceId, inactiveMessage, work),
   }, sharedViewAccessOperations, {
+    openSharedView,
     refreshSharedView: async (input, { event }) => {
       const pressBurst = input.trigger === "press-burst";
       if (pressBurst) input = { ...input, trigger: "background" };

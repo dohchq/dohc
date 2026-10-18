@@ -266,9 +266,10 @@ function createVerificationFixtures(directory) {
         return {stdout:''};
       }
       if(command==='pnpm' && args[0]==='exec') {
-        if(!fixture.js)throw Error('Browser tools unavailable for this change');
+        const e2e=process.env.FIXTURE_MODE==='e2e';
+        if(!fixture.js && !e2e)throw Error('Browser tools unavailable for this change');
         assert.deepEqual(args,['exec','playwright','install','chromium']);
-        assert.equal(options.env.DOHC_REQUIRE_POSTGRES,'1');
+        if(!e2e)assert.equal(options.env.DOHC_REQUIRE_POSTGRES,'1');
         writeFileSync(join(repoRoot,'.dohc-dev/browser-installed'),'yes');
         return {stdout:''};
       }
@@ -294,8 +295,8 @@ function createVerificationFixtures(directory) {
           assert.equal(options.env.DOHC_REQUIRE_POSTGRES,'1');
           assert.equal(existsSync(join(repoRoot,'.dohc-dev/database-started')),true);
           assert.equal(existsSync(join(repoRoot,'.dohc-dev/database-stopped')),false);
-          assert.equal(existsSync(join(repoRoot,'.dohc-dev/browser-installed')),true);
         }
+        assert.equal(existsSync(join(repoRoot,'.dohc-dev/browser-installed')),process.env.FIXTURE_MODE!=='smoke');
         if(args.includes('services/workspace-api/playwright.config.ts')) {
           assert.ok(pr,'Unselected account proof');
           writeFileSync(options.env.PLAYWRIGHT_JSON_OUTPUT_NAME,JSON.stringify({stats:{expected:2,unexpected:process.env.FIXTURE_FAULT==='accounts-cancelled'?1:0,flaky:0,skipped:process.env.FIXTURE_FAULT==='accounts-skipped'?1:0}}));
@@ -524,6 +525,7 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
         assert.deepEqual(report.steps.map(({name})=>name).sort(), [
           ...(mode === "pr" ? ["install"] : []),
           ...(desktop ? ["electron-install", "desktop"] : []),
+          ...(mode === "e2e" ? ["browser-install"] : []),
           "app-backend-runtime",
           ...(rust ? ["pre-queue-fmt", "pre-queue-clippy", "pre-queue-test-build", "cargo-deny-version", "cargo-audit-version", "cargo-nextest-version", "rust", "rust-verdict"] : []),
           ...(js && warm ? ["pre-queue-typecheck"] : []),

@@ -20,10 +20,9 @@ import { databaseSyncStrategy, DOHC_METADATA_GUARD, frameworkConfigName, hasIgno
 import { sendCliRequest } from "@dohc/cli/client";
 import { DohcCliError } from "@dohc/cli/errors";
 import { OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
-import { DatasetRequest } from "@dohc/cli/dataset";
+import { DATASET_CAPABILITIES, DatasetRequest } from "@dohc/cli/dataset";
 import {
   CLI_PROTOCOL_VERSION,
-  DATASET_CAPABILITIES,
   APP_PUBLICATION_CAPABILITIES,
   collectionCreateFieldsSchema,
   collectionQueryCursorSchema,

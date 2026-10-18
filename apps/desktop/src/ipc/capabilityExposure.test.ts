@@ -1,7 +1,7 @@
 // A PR that adds a channel or command edits the main inventory directly. Do not add a delta file.
-import { APP_PUBLICATION_CAPABILITIES, CLI_CAPABILITIES, cliRequestSchema, DATASET_CAPABILITIES } from "@dohc/cli/protocol";
+import { APP_PUBLICATION_CAPABILITIES, CLI_CAPABILITIES, cliRequestSchema } from "@dohc/cli/protocol";
 import { CLI_COMMANDS, parseCliArguments } from "@dohc/cli/args";
-import { DatasetRequest } from "@dohc/cli/dataset";
+import { DATASET_CAPABILITIES, DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import { OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
 import { renderCliHelp } from "@dohc/cli/help";
 import { advertisedCapabilityTools as advertisedTools } from "@dohc/mcp/capability-exposure-fixture";
@@ -100,6 +100,107 @@ describe("main inventories", () => {
       });
     }
   });
+  it("records the eight small share operations with their existing admission", () => {
+    const deviceChannels = [
+      "get-share-handoff-status", "accept-share-handoff", "retry-share-handoff",
+      "dismiss-share-handoff", "open-shared-view",
+    ].map(name => `desktop:${name}`);
+    const mountChannels = ["mount-share", "refresh-share-mounts", "unmount-share"]
+      .map(name => `desktop:${name}`);
+    const channels = [...deviceChannels, ...mountChannels];
+    const shareRows = rows.filter(row => channels.includes(row.channel));
+    expect(shareRows.map(row => row.channel).sort()).toEqual(channels.sort());
+    for (const row of shareRows) {
+      expect(row, row.channel).toMatchObject(mountChannels.includes(row.channel) ? {
+        guard: "active-workspace", scope: "workspace",
+        inactiveMessage: "Share update stopped because this window changed workspaces.",
+      } : { guard: "trusted-sender", scope: "device" });
+      expect(row).not.toHaveProperty("handlerCheck");
+    }
+  });
+  it("records the 14 proposal and Group operations with their existing admission", () => {
+    const messages = {
+      "desktop:list-share-proposals": "Share changes stopped because this window changed workspaces.",
+      "desktop:read-share-proposal-changes": "Share changes stopped because this window changed workspaces.",
+      "desktop:read-share-proposal-file-content": "Share changes stopped because this window changed workspaces.",
+      "desktop:settle-share-proposal": "Share changes stopped because this window changed workspaces.",
+      "desktop:submit-share-changes": "Share changes stopped because this window changed workspaces.",
+      "desktop:push-share-direct-writes": "Share changes stopped because this window changed workspaces.",
+      "desktop:list-my-share-changes": "Share changes stopped because this window changed workspaces.",
+      "desktop:withdraw-share-changes": "Share changes stopped because this window changed workspaces.",
+      "desktop:share-chat-channel": "Sharing stopped because this window changed workspaces.",
+      "desktop:list-joined-shared-channels": "Sharing stopped because this window changed workspaces.",
+      "desktop:list-chat-channel-shares": "Sharing stopped because this window changed workspaces.",
+      "desktop:join-shared-channel": "Joining stopped because this window changed workspaces.",
+      "desktop:leave-shared-channel": "Leaving stopped because this window changed workspaces.",
+      "desktop:dismiss-share-skips": "Share warning update stopped because this window changed workspaces.",
+    };
+    const channels = Object.keys(messages);
+    const shareRows = rows.filter(row => channels.includes(row.channel));
+    expect(shareRows.map(row => row.channel).sort()).toEqual(channels.sort());
+    for (const row of shareRows) {
+      expect(row, row.channel).toMatchObject({
+        guard: "active-workspace", scope: "workspace",
+        inactiveMessage: messages[row.channel as keyof typeof messages],
+      });
+      expect(row).not.toHaveProperty("handlerCheck");
+    }
+  });
+  it("records the 19 owner relay operations with their existing admission", () => {
+    const channels = [
+      "desktop:list-owner-live-documents",
+      "desktop:list-owner-live-refusals",
+      "desktop:retry-owner-live-share",
+      "desktop:create-relay-share",
+      "desktop:create-relay-share-link",
+      "desktop:add-relay-share-link",
+      "desktop:list-relay-share-links",
+      "desktop:retune-relay-share-link",
+      "desktop:rotate-relay-share-link",
+      "desktop:revoke-relay-share-link",
+      "desktop:list-relay-share-discussion",
+      "desktop:append-relay-share-discussion",
+      "desktop:delete-relay-share-discussion-message",
+      "desktop:block-relay-share-discussion-principal",
+      "desktop:unblock-relay-share-discussion-principal",
+      "desktop:pause-relay-share-discussion",
+      "desktop:resume-relay-share-discussion",
+      "desktop:promote-relay-share-grant",
+      "desktop:revoke-relay-share-grant"
+    ];
+    const ownerRows = rows.filter(row => channels.includes(row.channel));
+    expect(ownerRows.map(row => row.channel)).toEqual(channels);
+    for (const row of ownerRows) {
+      expect(row, row.channel).toMatchObject({
+        guard: "active-workspace", scope: "workspace",
+        inactiveMessage: "Sharing stopped because this window changed workspaces.",
+      });
+      expect(row).not.toHaveProperty("handlerCheck");
+    }
+  });
+  it("records the nine remaining relay operation rows with their existing admission", () => {
+    const workspaceChannels = ["owner-restore", "stop-owner-live-document", "resume-owner-live-document", "poll-relay-share-discussion-activity"]
+      .map(name => `desktop:${name}`);
+    const deviceChannels = ["list-relay-shares", "get-relay-received-share", "revoke-relay-share", "undo-relay-share", "cancel-relay-share-discussion-activity"]
+      .map(name => `desktop:${name}`);
+    const channels = [...workspaceChannels, ...deviceChannels];
+    const migrated = rows.filter(row => channels.includes(row.channel));
+    expect(migrated.map(row => row.channel).sort()).toEqual(channels.sort());
+    for (const row of migrated) {
+      if (workspaceChannels.includes(row.channel)) {
+        expect(row, row.channel).toMatchObject({
+          guard: "active-workspace", scope: "workspace",
+          inactiveMessage: ["desktop:stop-owner-live-document", "desktop:resume-owner-live-document"].includes(row.channel)
+            ? "Live editing stopped because this window changed workspaces."
+            : "Sharing stopped because this window changed workspaces.",
+        });
+      } else {
+        expect(row, row.channel).toMatchObject({ guard: "trusted-sender", scope: "device" });
+        expect(row).not.toHaveProperty("inactiveMessage");
+      }
+      expect(row).not.toHaveProperty("handlerCheck");
+    }
+  });
   it("preserves socket verbs, public verbs, and all public help", () => {
     expect(socketVerbs).toEqual(mainCli.socketVerbs);
     expect(Object.keys(CLI_COMMANDS)).toEqual(mainCli.publicGroups);
@@ -164,14 +265,22 @@ describe("capability identities and exposure", () => {
     expect(() => assertAdmission({ ...repro, scope: "workspace", handlerCheck: { check: "existingHandler.check", reason: "Existing lifetime check." } })).not.toThrow();
   });
 
-  it("can tag all dataset actions on one operation row without changing its payload", () => {
-    const row = {
-      capabilityIdsByAction: DATASET_CAPABILITIES, channel: "desktop:dataset", payload: DatasetRequest,
+  it("records the multiplexed dataset operation with its existing admission", () => {
+    const datasetRows = rows.filter(row => row.channel === "desktop:dataset");
+    expect(datasetRows).toHaveLength(1);
+    const row = datasetRows[0]!;
+    expect(row).toMatchObject({
+      capabilityIdsByAction: DATASET_CAPABILITIES, payload: DatasetRequest,
       guard: "trusted-sender", scope: "workspace",
-      handlerCheck: { check: "existingDatasetHandler.check", reason: "Test-only row for the B5 dataset map." },
-    } as const satisfies OperationDefinition;
-    expect(Object.keys(row.capabilityIdsByAction).sort()).toEqual(DatasetRequest.options.map(option => option.shape.action.value).sort());
-    expect(Object.values(row.capabilityIdsByAction)).toHaveLength(34);
+      handlerCheck: { check: "datasetHandler.withRendererWorkspaceOperation" },
+    });
+    expect(row).not.toHaveProperty("capabilityId");
+    expect(row).not.toHaveProperty("inactiveMessage");
+    expect(row.capabilityIdsByAction).toBe(DATASET_CAPABILITIES);
+    expect(row.payload).toBe(DatasetRequest);
+    expect(row.result).toBe(DatasetResult);
+    expect(Object.keys(row.capabilityIdsByAction!).sort()).toEqual(DatasetRequest.options.map(option => option.shape.action.value).sort());
+    expect(Object.values(row.capabilityIdsByAction!)).toHaveLength(34);
     assertAdmission(row);
   });
 
@@ -228,7 +337,8 @@ describe("capability identities and exposure", () => {
     const sorted = (values: readonly (readonly string[])[]) => values.map(value => value.join(":")).sort();
     const actualIpc = OPERATION_TABLES.flatMap(table => Object.entries<OperationDefinition>(table).flatMap(([name, row]) =>
       (row.capabilityId ? [row.capabilityId] : Object.values(row.capabilityIdsByAction)).map(id => [name, id])));
-    expect(sorted(actualIpc)).toEqual(sorted(entries.flatMap(([id, meta]) => meta.ipc.operations.map(name => [name, id]))));
+    const expectedIpc = entries.flatMap(([id, meta]) => meta.ipc.operations.map(name => [name, id]));
+    expect(sorted(actualIpc)).toEqual(sorted(expectedIpc));
     for (const row of rows) assertAdmission(row);
     const offeredTools = new Set<string>();
     for (const level of ["owner", "view", "comment", "edit"] as const) {

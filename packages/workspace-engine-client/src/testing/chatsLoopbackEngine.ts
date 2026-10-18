@@ -613,7 +613,7 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.dispatchRunRecordsForThread:
       return ["threadId", "limit", "pageLimit", "cursor"];
     case CHATS_METHOD.dispatchGetRunRecord:
-    case CHATS_METHOD.dispatchMarkFailureNotePosted:
+    case CHATS_METHOD.dispatchMarkFailureHandled:
       return ["runId"];
     case CHATS_METHOD.dispatchRecentCount: return ["threadId", "sinceMs"];
     case CHATS_METHOD.dispatchFailPendingForThread: return ["threadId", "reason"];
@@ -849,8 +849,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
         return this.recordRunMessage(state, workspace, params);
       case CHATS_METHOD.dispatchSetThreadPaused:
         return this.setThreadPaused(state, workspace, params);
-      case CHATS_METHOD.dispatchMarkFailureNotePosted:
-        return this.markFailureNotePosted(state, workspace, params);
+      case CHATS_METHOD.dispatchMarkFailureHandled:
+        return this.markFailureHandled(state, workspace, params);
       case CHATS_METHOD.dispatchRequeueFailedTrigger:
         return this.requeueFailed(state, workspace, params);
       case CHATS_METHOD.dispatchListAppQuitRecoveries:
@@ -2589,7 +2589,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
       triggerMessageId: dispatch.triggerMessageId,
       command: optionalString(params, "command") ?? "",
       startedAtMs: atMs,
-      failureNotePosted: false,
+      failureHandled: false,
     };
     const logPath = optionalString(params, "logPath");
     if (logPath !== undefined) run.logPath = logPath;
@@ -2804,14 +2804,14 @@ export class ChatsLoopbackEngine implements EngineTransport {
     return jsonResult(pause);
   }
 
-  private markFailureNotePosted(
+  private markFailureHandled(
     state: WorkspaceState,
     workspace: string,
     params: ChatsJsonObject,
   ): JsonValue {
     const run = state.runs.get(requiredString(params, "runId"));
     if (!run || run.workspaceId !== workspace) throw new Error("run-not-found");
-    run.failureNotePosted = true;
+    run.failureHandled = true;
     return jsonResult(run);
   }
 

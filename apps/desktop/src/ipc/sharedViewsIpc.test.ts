@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WatcherStatusResult } from "@dohc/workspace-engine-client";
 import { RelayUnauthorizedError, ShareUnavailableError } from "@dohc/workspace-contracts/relay";
 import { claimWorkspace, closeTestStorages, createShare, inspectDatabase, storagePath, testHandler, testStorage, request } from "@dohc/sync-relay/testing";
-import { CHANNELS } from "./channels";
 import { sharedViewAccessOperations } from "./bridgeContract";
 import { shareCaptureNoticeState } from "../workspaces/shareCaptureNotice";
 import { fetchShareViewAccess, probeShareViewLog, ShareSelectorInvalidError, type ShareViewInfo } from "../workspaces/shareViewInfo";
@@ -31,7 +30,7 @@ it.each(["accept", "refresh"])("%s saves only a nonempty relay owner id", async 
     const h = await harness();
     h.fetchInfo.mockResolvedValue({ ...info, granterUserId });
     const result = operation === "accept"
-      ? await h.invoke(CHANNELS.openSharedView, h.openPayload)
+      ? await h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload)
       : await h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "existing" });
     expect(result).toBeTruthy();
     const saved = h.setView.mock.calls[0]![1];
@@ -256,23 +255,30 @@ describe("registered received-view handlers", () => {
 
   it("registers open before refresh and rejects untrusted or malformed inputs before work", async () => {
     const h = await harness();
-    expect([...h.handlers.keys()]).toEqual([CHANNELS.openSharedView, sharedViewAccessOperations.refreshSharedView.channel,
+    expect([...h.handlers.keys()]).toEqual([sharedViewAccessOperations.openSharedView.channel, sharedViewAccessOperations.refreshSharedView.channel,
       sharedViewAccessOperations.dismissShareCaptureNotice.channel, sharedViewAccessOperations.checkSharedViewAccess.channel]);
     for (const channel of h.handlers.keys()) await expect(h.invoke(channel, null, false)).rejects.toThrow("untrusted");
-    await expect(h.invoke(CHANNELS.openSharedView, { rootPath: "", shareCode: "x" })).rejects.toThrow();
+    await expect(h.invoke(sharedViewAccessOperations.openSharedView.channel, { rootPath: "", shareCode: "x" })).rejects.toThrow();
     await expect(h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "" })).rejects.toThrow();
     await expect(h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, { workspaceId: "" })).rejects.toThrow();
     expect(h.fetchAccess).not.toHaveBeenCalled();
     expect(h.load).not.toHaveBeenCalled(); expect(h.startup).not.toHaveBeenCalled();
   });
 
+  it("opens without entering a sender workspace operation", async () => {
+    const h = await harness();
+    await h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload);
+    expect(h.workspaceOperation).not.toHaveBeenCalled();
+    expect(h.open).toHaveBeenCalledOnce();
+  });
+
   it("rejects a foreign relay before preflight and retains preflight-before-root ordering", async () => {
     const h = await harness();
-    await expect(h.invoke(CHANNELS.openSharedView, { ...h.openPayload, shareCode: "broken" })).rejects.toThrow("share code");
+    await expect(h.invoke(sharedViewAccessOperations.openSharedView.channel, { ...h.openPayload, shareCode: "broken" })).rejects.toThrow("share code");
     expect(h.load).not.toHaveBeenCalled();
-    await expect(h.invoke(CHANNELS.openSharedView, { ...h.openPayload, shareCode: buildShareCode({ shareId: "share", relayUrl: "https://foreign.example.test" }) })).rejects.toThrow("different server");
+    await expect(h.invoke(sharedViewAccessOperations.openSharedView.channel, { ...h.openPayload, shareCode: buildShareCode({ shareId: "share", relayUrl: "https://foreign.example.test" }) })).rejects.toThrow("different server");
     expect(h.fetchInfo).not.toHaveBeenCalled();
-    await expect(h.invoke(CHANNELS.openSharedView, { ...h.openPayload, rootPath: `${h.openPayload.rootPath}-sibling` })).rejects.toThrow("chosen through dohc");
+    await expect(h.invoke(sharedViewAccessOperations.openSharedView.channel, { ...h.openPayload, rootPath: `${h.openPayload.rootPath}-sibling` })).rejects.toThrow("chosen through dohc");
     expect(h.fetchInfo).toHaveBeenCalledOnce(); expect(h.readDir).not.toHaveBeenCalled(); expect(h.mkdir).not.toHaveBeenCalled();
   });
 
@@ -282,23 +288,23 @@ describe("registered received-view handlers", () => {
     [new ShareSelectorInvalidError("share"), "server didn't say"],
   ])("maps preflight errors without creating local state", async (error, message) => {
     const h = await harness(); h.fetchInfo.mockRejectedValue(error);
-    await expect(h.invoke(CHANNELS.openSharedView, h.openPayload)).rejects.toThrow(message as string);
+    await expect(h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload)).rejects.toThrow(message as string);
     expect(h.mkdir).not.toHaveBeenCalled(); expect(h.createFolder).not.toHaveBeenCalled();
   });
 
   it("refuses chat-only shares and populated folders before creation", async () => {
     const h = await harness(); h.fetchInfo.mockResolvedValue({ ...info, selector: null });
-    await expect(h.invoke(CHANNELS.openSharedView, h.openPayload)).rejects.toThrow();
+    await expect(h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload)).rejects.toThrow();
     expect(h.readDir).not.toHaveBeenCalled();
     h.fetchInfo.mockResolvedValue(info); h.readDir.mockResolvedValue(["keep.md"]);
-    await expect(h.invoke(CHANNELS.openSharedView, h.openPayload)).rejects.toThrow("empty folder");
+    await expect(h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload)).rejects.toThrow("empty folder");
     expect(h.mkdir).not.toHaveBeenCalled(); expect(h.createFolder).not.toHaveBeenCalled();
   });
 
   it("holds creation behind preflight and pins the grant before identity, refresh, activity, and projection", async () => {
     const h = await harness(); const started = deferred(); const held = deferred<ShareViewInfo>();
     h.fetchInfo.mockImplementation(() => { h.steps.push("preflight"); started.resolve(); return held.promise; });
-    const result = h.invoke(CHANNELS.openSharedView, h.openPayload);
+    const result = h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload);
     await started.promise; expect(h.mkdir).not.toHaveBeenCalled(); expect(h.registry.size).toBe(1);
     held.resolve(info);
     await expect(result).resolves.toMatchObject({ workspace: { rootPath: h.openPayload.rootPath, shareView: { access: "edit", genericChatWritable: true, granterEmail: info.granterEmail } } });
@@ -311,7 +317,7 @@ describe("registered received-view handlers", () => {
 
   it("rolls back a failed first refresh before opening activity", async () => {
     const h = await harness(); h.reconcile.mockResolvedValue({ kind: "refresh", outcome: { ...outcome, status: "ended" } });
-    const result = h.invoke(CHANNELS.openSharedView, h.openPayload);
+    const result = h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload);
     await expect(result).rejects.toThrow("ended before it could be opened");
     await expect(result).rejects.toThrow(`Files remain in ${h.openPayload.rootPath}.`);
     await expect(result).rejects.toThrow("choose another empty folder");
@@ -322,7 +328,7 @@ describe("registered received-view handlers", () => {
 
   it("names the preserved folder and another empty folder when the share download fails", async () => {
     const h = await harness(); h.reconcile.mockRejectedValue(new Error("download interrupted"));
-    const result = h.invoke(CHANNELS.openSharedView, h.openPayload);
+    const result = h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload);
     await expect(result).rejects.toThrow(`Files remain in ${h.openPayload.rootPath}.`);
     await expect(result).rejects.toThrow("choose another empty folder");
     expect(h.registry.size).toBe(1);
@@ -330,7 +336,7 @@ describe("registered received-view handlers", () => {
 
   it("retains the registered view and reports the recovery path if rollback cleanup fails", async () => {
     const h = await harness(); h.reconcile.mockRejectedValue(new Error("pull failed")); h.cleanup.mockRejectedValue(new Error("folder busy"));
-    const result = h.invoke(CHANNELS.openSharedView, h.openPayload);
+    const result = h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload);
     await expect(result).rejects.toThrow("Files remain in");
     await expect(result).rejects.toThrow("choose Forget from its menu before opening the share again");
     expect(h.registry.size).toBe(2); expect(h.open).not.toHaveBeenCalled();
@@ -339,7 +345,7 @@ describe("registered received-view handlers", () => {
   it("allows the first refresh when edit identity recording fails", async () => {
     const h = await harness(); vi.spyOn(console, "error").mockImplementation(() => undefined);
     h.recordIdentity.mockRejectedValue(new Error("identity unavailable"));
-    await expect(h.invoke(CHANNELS.openSharedView, h.openPayload)).resolves.toMatchObject({ workspace: { shareView: { access: "edit" } } });
+    await expect(h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload)).resolves.toMatchObject({ workspace: { shareView: { access: "edit" } } });
     expect(h.reconcile).toHaveBeenCalledOnce(); expect(h.open).toHaveBeenCalledOnce();
   });
 

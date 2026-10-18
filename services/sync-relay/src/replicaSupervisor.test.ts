@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { hasRelayWriteObservers, notifyRelayWrite } from "./relayWriteChanges";
 import { closeTestStorages, inspectDatabase, storagePath, tempRoot, testStorage } from "./testing";
 import { createReplicaReadPrincipal } from "./replicaReadPrincipal";
@@ -287,7 +287,7 @@ it("settles a pending append notification when shutdown cancels its drain", asyn
 it("refuses unsupported production hosts and invalid limits before starting anything", async () => {
   const { storage } = await fixture();
   expect(() => createReplicaSupervisor({ storage, storeRoot: "relative", startChild: async input => { throw Error(); } })).toThrow("absolute");
-  expect(() => createReplicaSupervisor({ storage, storeRoot: "C:/private", maxRunning: 0, startChild: async input => { throw Error(); } })).toThrow("budget");
+  expect(() => createReplicaSupervisor({ storage, storeRoot: resolve("private"), maxRunning: 0, startChild: async input => { throw Error(); } })).toThrow("budget");
   if (process.platform !== "linux") expect(() => createReplicaEngineStarter({ engineExecutable: "C:/daemon.exe", baseUrl: "https://relay.test" })).toThrow("Linux");
 });
 

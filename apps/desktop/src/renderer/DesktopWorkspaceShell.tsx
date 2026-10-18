@@ -953,14 +953,15 @@ export function DesktopWorkspaceShell(props: {
   // outlives both, so its Try again reopens the dialog with the address that
   // failed, or whichever of the two now applies, once the source has closed.
   // An open deletion review holds the account until it ends, so a Try again
-  // then does nothing: no sign-in, Disconnect, or new review starts under it.
+  // then runs nothing and keeps its row: no sign-in, Disconnect, or new
+  // review starts under it.
   const reportConnectionError = useCallback(
     (error: ConnectionErrorReport) => {
       reportShellFailure({
         message: error.message,
         cause: error.cause,
         retry: () => {
-          if (reviewingAccountDeletion()) return;
+          if (reviewingAccountDeletion()) return false;
           if (error.retry?.()) return;
           if (error.serverUrl === null) return openCloud();
           setCloudRetryServerUrl(error.serverUrl);
@@ -1009,7 +1010,7 @@ export function DesktopWorkspaceShell(props: {
           message: error.message,
           cause: error.cause,
           retry: () => {
-            if (reviewingAccountDeletion()) return;
+            if (reviewingAccountDeletion()) return false;
             if (!error.retry?.()) openSettings("cloud");
           },
         });
@@ -2496,6 +2497,19 @@ export function DesktopWorkspaceShell(props: {
     },
     [openVirtualTab],
   );
+  // A History timeline row opens its Collection on that Collection's
+  // History. The ask names the tab instance the row opened, in the focused
+  // group: the same Collection in another group is another instance, and a
+  // closed instance never returns. Its page takes the ask once and clears it.
+  const [collectionHistoryTab, setCollectionHistoryTab] = useState<WorkbenchTab | null>(null);
+  const openCollectionHistory = useCallback((datasetPath: string, tableId: string) => {
+    const path = transactionalCollectionTabPath(datasetPath, tableId);
+    openVirtualTab(path);
+    const { editorGroups, activeEditorGroup } = wbRef.current;
+    const group = editorGroups.find((candidate) => candidate.id === activeEditorGroup);
+    setCollectionHistoryTab(group?.tabs.find((tab) => tab.path === path) ?? null);
+  }, [openVirtualTab]);
+  const clearCollectionHistory = useCallback(() => setCollectionHistoryTab(null), []);
   const onMoreDataCollections = useCallback(() => {
     void loadMoreDatasets().catch(error => reportShellError("Could not read Collections.", error));
   }, [loadMoreDatasets, reportShellError]);
@@ -2521,15 +2535,15 @@ export function DesktopWorkspaceShell(props: {
     ? chatEditors.get(focusedTabPath).nav : undefined;
   const dataCollections = useMemo(() => datasets.flatMap(dataset => dataset.tables.map(table => ({ datasetId: dataset.datasetId, datasetPath: dataset.datasetPath, tableId: table.tableId, name: table.name, archived: dataset.archived }))), [datasets]);
   // The Collections History can name, with their operations' labels, each
-  // opening on its first table.
+  // opening its History on its first table.
   const historyCollections = useMemo<HistoryCollections>(() => new Map(datasets.map(dataset => {
     const path = dataset.datasetPath, table = dataset.tables[0];
     return [dataset.datasetId, {
       name: dataset.name,
       operationLabels: new Map(dataset.operations.map(operation => [operation.name, operation.label])),
-      ...(path !== null && table ? { open: () => openDataCollection(path, table.tableId) } : {}),
+      ...(path !== null && table ? { openHistory: () => openCollectionHistory(path, table.tableId) } : {}),
     }];
-  })), [datasets, openDataCollection]);
+  })), [datasets, openCollectionHistory]);
   const tabLabels = useMemo(() => new Map([...knownTabLabels, ...chatEditors.titles,
     ...dataCollections.flatMap(table => table.datasetPath === null ? [] : [[transactionalCollectionTabPath(table.datasetPath, table.tableId), table.name] as const]),
   ]), [knownTabLabels, chatEditors.titles, dataCollections]);
@@ -5572,6 +5586,8 @@ export function DesktopWorkspaceShell(props: {
                   onError={collectionReports.onError}
                   onSettled={collectionReports.onSettled}
                   onNotice={collectionReports.onNotice}
+                  historyRequested={collectionHistoryTab !== null && tab === collectionHistoryTab}
+                  onHistoryShown={clearCollectionHistory}
                   onFormCreated={appRoot => {
                     void refreshFiles().catch(error => reportShellError("Could not refresh workspace files.", error));
                     openVirtualTab(siteTabPath(appRoot));

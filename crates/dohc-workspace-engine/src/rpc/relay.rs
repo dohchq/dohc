@@ -1452,6 +1452,11 @@ impl EngineService {
     /// origin. Call it before any other write: that write would give the
     /// workspace an ordinary identity, and a replica never changes between
     /// the two. Repeating it under the same coordinate answers the same.
+    ///
+    /// Each attach calls it before any other hosted call, and each call asks
+    /// the relay for the highest position at the replica's origin. Above what
+    /// the replica numbered, the store lost commits it pushed, and the call
+    /// answers `relay-origin-diverged` before anything pulls or captures.
     pub(super) async fn sync_create_hosted_replica(
         &self,
         ctx: &RequestContext,

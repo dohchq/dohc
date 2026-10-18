@@ -25,7 +25,7 @@ export type WorkspaceReplicationRoute =
  */
 export interface HostedAdmission {
   /** Before preparation: answers retried refusals, and refuses what the current scope already rules out. */
-  screen(originId: string, ops: SyncRelayLogInput[]): void;
+  screen(originId: string, ops: SyncRelayLogInput[]): Promise<void>;
   /** Under the append's writer, for the ops at coordinates the log does not hold yet. */
   admit(ops: SyncRelayLogInput[]): void;
 }
@@ -144,7 +144,7 @@ export function createWorkspaceReplicationRoutes(
       assertChatAuthorship(input.ops, actor.userId);
       assertClientLogProvenance(originId, input.ops, {deferMomentRefusal: true, serviceHost: route.serviceHost !== undefined});
       const ops = await parseAuthenticatedLogOps(input.ops, actor.userId, lookupUserDisplayName);
-      route.serviceHost?.screen(originId, ops);
+      await route.serviceHost?.screen(originId, ops);
       await storage.prepareLogAppend({workspaceId:route.workspaceId,originId,ops},request.signal);
       const result = storage.appendLogBatch({
         workspaceId: route.workspaceId,

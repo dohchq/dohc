@@ -2793,7 +2793,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
     assert_eq!(claimed["run"]["exitCode"], Value::Null);
     assert_eq!(claimed["run"]["failureReason"], Value::Null);
     assert_eq!(claimed["run"]["logPath"], json!("  logs/run-1.log  "));
-    assert_eq!(claimed["run"]["failureNotePosted"], json!(false));
+    assert_eq!(claimed["run"]["failureHandled"], json!(false));
     let retried_claim = call(
         &transport,
         &first_handle,
@@ -4067,15 +4067,15 @@ async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
     )
     .await;
     assert_eq!(recoveries["recoveries"][0]["attemptCount"], json!(1));
-    let noted = call(
+    let handled = call(
         &transport,
         &handle,
         &mut id,
-        "chats.dispatch.markFailureNotePosted",
+        "chats.dispatch.markFailureHandled",
         json!({ "runId": "run" }),
     )
     .await;
-    assert_eq!(noted["failureNotePosted"], json!(true));
+    assert_eq!(handled["failureHandled"], json!(true));
     let requeued = call(
         &transport,
         &handle,

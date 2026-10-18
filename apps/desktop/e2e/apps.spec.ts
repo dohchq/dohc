@@ -138,17 +138,18 @@ test("@apps closes Preview options when a click lands in the preview", async () 
     await expect(frame.getByRole("button", { name: "Inside the app" })).toBeVisible({ timeout: 20_000 });
 
     // The titlebar stops being a drag region while the menu is open, so a
-    // press on it reaches the page too.
+    // press on it reaches the page too. The menu can paint before the effect
+    // that marks it open runs, so the region is polled.
     const titlebarRegion = () =>
       page.getByTestId(desktopPins.titlebar).evaluate((element) => getComputedStyle(element).getPropertyValue("-webkit-app-region"));
     expect(await titlebarRegion()).toBe("drag");
     await page.getByTestId("site-preview-options").click();
     const staticMode = page.getByTestId("site-preview-static");
     await expect(staticMode).toBeVisible();
-    expect(await titlebarRegion()).toBe("no-drag");
+    await expect.poll(titlebarRegion).toBe("no-drag");
     await frame.getByRole("button", { name: "Inside the app" }).click();
     await expect(staticMode).toBeHidden();
-    expect(await titlebarRegion()).toBe("drag");
+    await expect.poll(titlebarRegion).toBe("drag");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

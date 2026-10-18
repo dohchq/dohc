@@ -127,6 +127,26 @@ it("retries without acknowledging when SQLite is busy before the first journal w
   expect(f.relay.journalRows().journal).toHaveLength(1); expect(f.receipts).toHaveLength(1);
 });
 
+// Proves: deleting an enrolled document's last Edit share refuses the owner
+// outbox entry an in-flight drain validated before it. The journal admits
+// nothing and the owner head stays.
+it("refuses an owner outbox entry validated before the document's last Edit share was deleted", async () => {
+  const f = fixture(), entered = deferred(), release = deferred();
+  f.relay.storage.claimWorkspaceIdentity({workspaceId: f.document.workspaceId, replicationEpoch: "epoch", streamIdentity: "stream"});
+  f.relay.storage.enrollServiceHostDocument({workspaceId: f.document.workspaceId, ownerUserId: "owner", shareId: "share",
+    path: f.binding.currentPath, nowMs: 10, guard() {}});
+  f.validate.mockImplementationOnce(async input => {entered.resolve(); await release.promise; return validateJournal(input);});
+  const first = f.run(), firstOutcome = Promise.allSettled([first]);
+  await Promise.race([entered.promise, first.then(() => {throw new Error("Owner drain ended before validation.");})]);
+  expect(f.relay.storage.revokeShare("share", 30)).toBe(true);
+  release.resolve();
+  const [outcome] = await firstOutcome;
+  expect(outcome).toMatchObject({status: "rejected", reason: new Error("Owner update admission refused.")});
+  expect(f.commit.mock.results[0]!.value).toMatchObject({result: {kind: "refused",reason: "authority-refused"},admitted: null});
+  expect(f.relay.journalRows().journal).toEqual([]); expect(f.receipts).toEqual([]);
+  expect(f.pending).toEqual([f.entry]); expect(f.applyThrough).not.toHaveBeenCalled();
+});
+
 it("still throws on a genuine journal admission refusal and retains the owner head", async () => {
   const f = fixture();
   f.validate.mockReturnValueOnce({kind: "refused",reason: "invalid-update",source: "candidate"});

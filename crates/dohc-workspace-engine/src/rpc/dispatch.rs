@@ -958,13 +958,9 @@ impl EngineService {
                 self.chats_dispatch_set_thread_paused(&ctx, request.workspace, request.params)
                     .await?
             }
-            "chats.dispatch.markFailureNotePosted" => {
-                self.chats_dispatch_mark_failure_note_posted(
-                    &ctx,
-                    request.workspace,
-                    request.params,
-                )
-                .await?
+            "chats.dispatch.markFailureHandled" => {
+                self.chats_dispatch_mark_failure_handled(&ctx, request.workspace, request.params)
+                    .await?
             }
             "automations.subscribe" => {
                 self.automations_subscribe(&ctx, request.workspace, request.params)
@@ -1481,7 +1477,7 @@ mod tests {
             "chats.dispatch.listAppQuitRecoveries",
             "chats.dispatch.listPending",
             "chats.dispatch.listRunMessages",
-            "chats.dispatch.markFailureNotePosted",
+            "chats.dispatch.markFailureHandled",
             "chats.dispatch.openRuns",
             "chats.dispatch.recentCount",
             "chats.dispatch.recordEligibleTriggers",

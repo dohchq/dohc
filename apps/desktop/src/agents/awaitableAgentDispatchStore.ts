@@ -21,7 +21,7 @@ export type AwaitableAgentDispatchStore = Omit<
   AwaitableAgentDispatchStoreBase,
   | "getRunRecord"
   | "listRunMessages"
-  | "markFailureNotePosted"
+  | "markFailureHandled"
   | "recordRunMessage"
 > & {
   resolveUncertainClaim?(
@@ -49,10 +49,10 @@ export type AwaitableAgentDispatchStore = Omit<
   ): ReturnType<AgentDispatchStore["listRunMessages"]> | Promise<
     ReturnType<AgentDispatchStore["listRunMessages"]>
   >;
-  markFailureNotePosted(
-    runId: Parameters<AgentDispatchStore["markFailureNotePosted"]>[0],
+  markFailureHandled(
+    runId: Parameters<AgentDispatchStore["markFailureHandled"]>[0],
     options?: AgentDispatchRequestOptions,
-  ): ReturnType<AgentDispatchStore["markFailureNotePosted"]> | Promise<
-    ReturnType<AgentDispatchStore["markFailureNotePosted"]>
+  ): ReturnType<AgentDispatchStore["markFailureHandled"]> | Promise<
+    ReturnType<AgentDispatchStore["markFailureHandled"]>
   >;
 };

@@ -1356,6 +1356,8 @@ test("a newer commit keeps the owner and the place of the request it replaces", 
 
 test("pnpm verify:pr prints the owner the service recorded, and how to name one when only the checkout owns the request", async t => {
   const { root, fixture } = harness(t);
+  // Until this service beats, verify:pr would start the host's installed service instead.
+  await waitFor(() => serviceState(root).alive, "the service must beat");
   const owner = async fields => {
     fixture.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "owner");
     const lines = [];

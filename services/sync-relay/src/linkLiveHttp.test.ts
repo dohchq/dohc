@@ -12,7 +12,7 @@ const limits = {maxConnections: 8, maxConnectionsPerWorkspace: 96, reservedOwner
   upgradeTimeoutMs: 1000, idleTimeoutMs: 5000, drainTimeoutMs: 100};
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {vi.restoreAllMocks(); for (const close of cleanups.splice(0)) await close();});
-async function fixture() {
+async function fixture(sessionHostBlocked?: (document: {workspaceId: string; objectId: string}) => boolean) {
   const f = await ticketFixture(); cleanups.push(f.close); vi.spyOn(Date, "now").mockReturnValue(1000);
   // Synthetic private authority fixture. Public Edit creation/exchange remains closed.
   f.raw.exec("UPDATE sync_relay_share_grants SET principal_kind='link', principal_user_id=NULL");
@@ -21,7 +21,7 @@ async function fixture() {
   const context = {kind: "link" as const, workspaceId: scope.workspaceId, shareId: scope.shareId, grantId: scope.grantId,
     sessionId: "link-session", capabilityHash: hashLinkBearer(bearer, key), profileTokenHash: hashLinkProfileSecret(profile, key)};
   const tickets = createLiveTickets({storage: f.storage, audience, key, hostReports: {currentBinding: async () => report}});
-  const handle = createLinkLiveHttp({storage: f.storage, linkKey: key, hosts: new Set(["relay.test"]), publicOrigin: audience, exchangeKey, limits});
+  const handle = createLinkLiveHttp({storage: f.storage, linkKey: key, hosts: new Set(["relay.test"]), publicOrigin: audience, exchangeKey, limits, sessionHostBlocked});
   return {...f, context, tickets, handle};
 }
 function request(body: unknown = {discriminator, path: binding.currentPath}, path = "/sync/live/link-document", headers: Record<string, string> = {}) {
@@ -94,4 +94,17 @@ it("explains an unavailable live session only after proving the file is shared",
   }
   const hidden = await f.handle(request({discriminator, path: "private/a.md"}));
   expect([hidden.status, await hidden.text()]).toEqual([404, '{"ok":false,"error":"not found"}']);
+});
+
+it("explains a document the session host blocked as unavailable until the block lifts", async () => {
+  let blocked = true;
+  const asked: {workspaceId: string; objectId: string}[] = [];
+  const f = await fixture(document => {asked.push(document); return blocked;});
+  const response = await f.handle(request());
+  expect([response.status, await response.json()]).toEqual([503, linkRefusalBody("link_live_unavailable")]);
+  expect(asked).toEqual([{workspaceId: scope.workspaceId, objectId: binding.objectId}]);
+  const hidden = await f.handle(request({discriminator, path: "private/a.md"}));
+  expect([hidden.status, await hidden.text()]).toEqual([404, '{"ok":false,"error":"not found"}']);
+  blocked = false;
+  expect(await (await f.handle(request())).json()).toEqual({objectId: binding.objectId});
 });

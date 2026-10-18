@@ -1,7 +1,8 @@
 import {
-  APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, CLI_CAPABILITIES, DATASET_CAPABILITIES,
+  APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, CLI_CAPABILITIES,
   type CliRequest, type CliResultByVerb,
 } from "@dohc/cli/protocol";
+import { DATASET_CAPABILITIES } from "@dohc/cli/dataset";
 import { CAPABILITIES, type CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import { USAGE_ACTION_IDS } from "@dohc/workspace-contracts/usage";
 import { RENDERER_USAGE_COVERAGE } from "./rendererUsage";

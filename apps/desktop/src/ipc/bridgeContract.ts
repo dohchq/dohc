@@ -15,7 +15,7 @@ import type {OwnerAppPublicationRequest, OwnerAppPublicationResult} from "./owne
 import type { WorkspaceRefTarget } from "@dohc/workspace-contracts/workspace-ref";
 import { OperationRecovery, HistoryOperationId, HistoryOperationUndoResult } from "@dohc/workspace-contracts/history-operation";
 import { DatasetHistoryPage } from "@dohc/cli/dataset";
-import type { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
+import type { datasetOperations } from "./datasetOperations";
 import type {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "@dohc/cli/app-responses";
 import { normalizeShareDiscussionBody } from "@dohc/security-contract/share-discussion";
 import { SHARE_ACCESS_VALUES, shareAccessRank } from "@dohc/security-contract/share-selector";
@@ -114,6 +114,7 @@ import {
 import { UPDATE_CHANNELS, UPDATE_STATUSES } from "../updates/updateMachine";
 import type { chatOperations } from "./chatOperations";
 import type { settingsOperations } from "./settingsOperations";
+import type { shareHandoffOperations, shareMountOperations, shareProposalOperations, sharedChannelOperations, relayShareOperations } from "./shareOperations";
 import type { workspaceFileOperations } from "./workspaceFileOperations";
 import type { OperationBridge, OperationTable } from "./operationTable";
 import { isLoopbackHostname } from "../security/loopback";
@@ -406,7 +407,7 @@ export type RetryCloudSyncPayload = z.infer<typeof RetryCloudSyncPayload>;
 export const OwnerLiveDocument = z.object({
   path: SAFE_RELATIVE_PATH,
   status: z.enum(["ready", "preparing", "paused", "unavailable", "retired"]),
-  reason: z.enum(["document-unavailable", "workspace-changed"]).optional(),
+  reason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted"]).optional(),
   canResume: z.boolean(),
   deferredStop: z.object({unsentEdits: z.number().int().nonnegative().safe(), editable: z.boolean()}).strict().optional(),
 }).strict();
@@ -1393,7 +1394,7 @@ const SYNC_STATUS_BASE_FIELDS = {
     .optional(),
   // Active describes owner live delivery, not a fully synchronized workspace.
   ownerLiveDelivery: z.enum(["preparing", "active", "retrying"]).optional(),
-  ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "restart-required"]).optional(),
+  ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "restart-required"]).optional(),
   ownerLiveStopFailures: z.array(z.object({path:SAFE_RELATIVE_PATH,detail:z.string()})).optional(),
   hasOwnerLiveRefusals: z.boolean().optional(),
   // A shared view can have canonical file state that has not yet
@@ -5575,8 +5576,12 @@ export const CheckSharedViewAccessResult = z.object({
 });
 export type CheckSharedViewAccessResult = z.infer<typeof CheckSharedViewAccessResult>;
 
-// The handler owns its workspace operation so a stale check replies unverified.
 export const sharedViewAccessOperations = {
+  openSharedView: {
+    capabilityId: "share.view.open", channel: "desktop:open-shared-view",
+    scope: "device", guard: "trusted-sender",
+    payload: OpenSharedViewPayload, result: OpenSharedViewResult,
+  },
   refreshSharedView: {
     capabilityId: "share.view.refresh",
     scope: "workspace",
@@ -6957,6 +6962,12 @@ export interface DohcDesktopBridge
     OperationBridge<typeof workspaceFileOperations>,
     OperationBridge<typeof settingsOperations>,
     OperationBridge<typeof chatOperations>,
+    OperationBridge<typeof datasetOperations>,
+    OperationBridge<typeof shareHandoffOperations>,
+    OperationBridge<typeof shareMountOperations>,
+    OperationBridge<typeof shareProposalOperations>,
+    OperationBridge<typeof sharedChannelOperations>,
+    OperationBridge<typeof relayShareOperations>,
     OperationBridge<typeof shareCopyOperations>,
     OperationBridge<typeof systemMotionOperations>,
     OperationBridge<typeof serverAccountOperations>,
@@ -6980,15 +6991,9 @@ export interface DohcDesktopBridge
     OperationBridge<typeof liveDraftRecoveryOperations>,
     OperationBridge<typeof stopAndRestoreRecoveryOperations>,
     OperationBridge<typeof engineYDocSaveOperations> {
-  listOwnerLiveDocuments(payload: ListOwnerLiveDocumentsPayload): Promise<OwnerLiveDocumentsResult>;
-  listOwnerLiveRefusals(payload: ListOwnerLiveRefusalsPayload): Promise<OwnerLiveRefusalsResult>;
-  retryOwnerLiveShare(payload: RetryOwnerLiveSharePayload): Promise<void>;
-  stopOwnerLiveDocument(payload: OwnerLiveDocumentActionPayload): Promise<void>;
-  resumeOwnerLiveDocument(payload: OwnerLiveDocumentActionPayload): Promise<void>;
   publishOwnerApp(payload: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult>;
   ownerAppResponses(payload:OwnerAppResponsesRequest):Promise<OwnerAppResponsesResult>;
-  dataset(payload: DatasetRequest): Promise<DatasetResult>;
-  ownerRestore<Action extends OwnerRestoreAction>(payload: OwnerRestoreRequest & {action: Action}): Promise<OwnerRestoreResult<Action>>;
+  ownerRestore<Action extends OwnerRestoreAction>(payload: z.input<typeof OwnerRestoreRequest> & {action: Action}): Promise<OwnerRestoreResult<Action>>;
   // Constant, not a call: the titlebar lays out around macOS traffic lights
   // on darwin vs the window-controls overlay everywhere else.
   platform: NodeJS.Platform;
@@ -7081,10 +7086,6 @@ export interface DohcDesktopBridge
   cloudLoginPoll(): Promise<CloudLoginPollResult>;
   cloudStatus(payload?: CloudStatusPayload): Promise<CloudStatusResult>;
   cloudLogout(): Promise<void>;
-  getShareHandoffStatus(): Promise<ShareHandoffStatus>;
-  acceptShareHandoff(payload: AcceptShareHandoffPayload): Promise<void>;
-  retryShareHandoff(): Promise<void>;
-  dismissShareHandoff(payload: DismissShareHandoffPayload): Promise<void>;
   onShareHandoffStatus(
     listener: (status: ShareHandoffStatus) => void,
   ): () => void;
@@ -7092,78 +7093,6 @@ export interface DohcDesktopBridge
   cloudJoinWorkspace(
     payload: CloudJoinWorkspacePayload,
   ): Promise<CloudJoinWorkspaceResult>;
-  // Relay shares: grant side.
-  createRelayShare(payload: CreateRelaySharePayload): Promise<CreateRelayShareResult>;
-  listRelayShares(): Promise<ListRelaySharesResult>;
-  getRelayReceivedShare(
-    payload: GetRelayReceivedSharePayload,
-  ): Promise<GetRelayReceivedShareResult>;
-  revokeRelayShare(payload: RevokeRelaySharePayload): Promise<RevokeRelayShareResult>;
-  // Puts back what a removal ended, using its receipt. Owner only.
-  undoRelayShare(payload: UndoRelaySharePayload): Promise<UndoRelayShareResult>;
-  createRelayShareLink(
-    payload: CreateRelayShareLinkPayload,
-  ): Promise<CreateRelayShareLinkResult>;
-  addRelayShareLink(
-    payload: AddRelayShareLinkPayload,
-  ): Promise<AddRelayShareLinkResult>;
-  listRelayShareLinks(
-    payload: ListRelayShareLinksPayload,
-  ): Promise<ListRelayShareLinksResult>;
-  rotateRelayShareLink(
-    payload: RotateRelayShareLinkPayload,
-  ): Promise<RotateRelayShareLinkResult>;
-  retuneRelayShareLink(
-    payload: RetuneRelayShareLinkPayload,
-  ): Promise<RetuneRelayShareLinkResult>;
-  revokeRelayShareLink(
-    payload: RevokeRelayShareLinkPayload,
-  ): Promise<RevokeRelayShareLinkResult>;
-  listRelayShareDiscussion(
-    payload: ListRelayShareDiscussionPayload,
-  ): Promise<ListRelayShareDiscussionResult>;
-  pollRelayShareDiscussionActivity(
-    payload: PollRelayShareDiscussionActivityPayload,
-  ): Promise<PollRelayShareDiscussionActivityResult>;
-  cancelRelayShareDiscussionActivity(
-    payload: CancelRelayShareDiscussionActivityPayload,
-  ): Promise<void>;
-  appendRelayShareDiscussion(
-    payload: AppendRelayShareDiscussionPayload,
-  ): Promise<AppendRelayShareDiscussionResult>;
-  deleteRelayShareDiscussionMessage(
-    payload: DeleteRelayShareDiscussionMessagePayload,
-  ): Promise<DeleteRelayShareDiscussionMessageResult>;
-  blockRelayShareDiscussionPrincipal(
-    payload: BlockRelayShareDiscussionPrincipalPayload,
-  ): Promise<BlockRelayShareDiscussionPrincipalResult>;
-  unblockRelayShareDiscussionPrincipal(
-    payload: UnblockRelayShareDiscussionPrincipalPayload,
-  ): Promise<UnblockRelayShareDiscussionPrincipalResult>;
-  pauseRelayShareDiscussion(
-    payload: PauseRelayShareDiscussionPayload,
-  ): Promise<PauseRelayShareDiscussionResult>;
-  resumeRelayShareDiscussion(
-    payload: ResumeRelayShareDiscussionPayload,
-  ): Promise<ResumeRelayShareDiscussionResult>;
-  promoteRelayShareGrant(
-    payload: PromoteRelayShareGrantPayload,
-  ): Promise<PromoteRelayShareGrantResult>;
-  revokeRelayShareGrant(
-    payload: RevokeRelayShareGrantPayload,
-  ): Promise<RevokeRelayShareGrantResult>;
-  shareChatChannel(payload: ShareChatChannelPayload): Promise<ShareChatChannelResult>;
-  listChatChannelShares(
-    payload: ListChatChannelSharesPayload,
-  ): Promise<ListChatChannelSharesResult>;
-  listJoinedSharedChannels(
-    payload: ListJoinedSharedChannelsPayload,
-  ): Promise<ListJoinedSharedChannelsResult>;
-  joinSharedChannel(payload: JoinSharedChannelPayload): Promise<JoinSharedChannelResult>;
-  leaveSharedChannel(payload: LeaveSharedChannelPayload): Promise<void>;
-  // Relay shares: receive side — read-only shared views.
-  openSharedView(payload: OpenSharedViewPayload): Promise<OpenSharedViewResult>;
-  dismissShareSkips(payload: DismissShareSkipsPayload): Promise<void>;
   // Collection automations, for the ⚡ panel.
   listCollectionAutomations(payload: ListCollectionAutomationsPayload): Promise<ListCollectionAutomationsResult>;
   switchCollectionAutomation(payload: SwitchCollectionAutomationPayload): Promise<SwitchCollectionAutomationResult>;
@@ -7193,42 +7122,7 @@ export interface DohcDesktopBridge
   listAutomationButtons(payload: ListAutomationButtonsPayload): Promise<ListAutomationButtonsResult>;
   listRecordButtons(payload: ListRecordButtonsPayload): Promise<ListRecordButtonsResult>;
   pressAutomationButton(payload: PressAutomationButtonPayload): Promise<PressAutomationButtonResult>;
-  // Share changes: the granter reviews and settles.
-  listShareProposals(
-    payload: ListShareProposalsPayload,
-  ): Promise<ListShareProposalsResult>;
-  readShareProposalChanges(
-    payload: ReadShareProposalChangesPayload,
-  ): Promise<ReadShareProposalChangesResult>;
-  readShareProposalFileContent(
-    payload: ReadShareProposalFileContentPayload,
-  ): Promise<ReadShareProposalFileContentResult>;
-  settleShareProposal(
-    payload: SettleShareProposalPayload,
-  ): Promise<SettleShareProposalResult>;
-  // Share changes: the recipient sends, tracks, and takes back.
-  submitShareChanges(
-    payload: SubmitShareChangesPayload,
-  ): Promise<SubmitShareChangesResult>;
-  // Writes the share view's changes to a Collection's own files straight
-  // into the owner's workspace. Every other change waits for Send changes.
-  pushShareDirectWrites(
-    payload: PushShareDirectWritesPayload,
-  ): Promise<void>;
   onShareDirectWritesPushed(listener: (event: ShareDirectWritesPushedEvent, delivery: ShareDirectWriteAnswerDelivery) => void, workspaceId: string): () => void;
-  listMyShareChanges(
-    payload: ListMyShareChangesPayload,
-  ): Promise<ListMyShareChangesResult>;
-  withdrawShareChanges(
-    payload: WithdrawShareChangesPayload,
-  ): Promise<WithdrawShareChangesResult>;
-  // Share mounts: a received share materialized into a host workspace's
-  // shared-with-me/<label>/ as ordinary read-only files.
-  mountShare(payload: MountSharePayload): Promise<MountShareResult>;
-  refreshShareMounts(
-    payload: RefreshShareMountsPayload,
-  ): Promise<RefreshShareMountsResult>;
-  unmountShare(payload: UnmountSharePayload): Promise<UnmountShareResult>;
   openWorkspace(payload: OpenWorkspacePayload): Promise<SyncStatusResult>;
   // Engine history + linked Chats. Gated in main on the workspace's engine
   // capture.

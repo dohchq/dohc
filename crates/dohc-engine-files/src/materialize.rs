@@ -3457,8 +3457,9 @@ pub enum KeptCopySave {
     /// The workspace has no kept row under that id, or its file was already
     /// gone. A row whose file is gone is ended too.
     Gone,
-    /// No free sibling name fits the engine's name and path limits and keeps
-    /// the original's classification, so capture could not record a copy.
+    /// No free sibling name fits the engine's and the OS's name and path
+    /// limits and keeps the original's classification, so capture could not
+    /// record a copy.
     /// The file stays at its hidden name, and its row stays.
     NoValidName,
 }
@@ -3530,7 +3531,10 @@ fn save_kept_displacement_with_cleanup(
         return Ok(KeptCopySave::NoValidName);
     }
     let target = resolve_target(&canonical_root, &row.target_path)?;
-    ensure_target_symlink_free(&canonical_root, &target)?;
+    match ensure_target_symlink_free(&canonical_root, &target) {
+        Err(err) if names_too_long(&err) => return Ok(KeptCopySave::NoValidName),
+        checked => checked?,
+    }
     let (parent, file_name) = match row.target_path.rsplit_once('/') {
         Some((parent, name)) => (Some(parent), name),
         None => (None, row.target_path.as_str()),
@@ -3539,6 +3543,12 @@ fn save_kept_displacement_with_cleanup(
     let name_budget = MAX_KEPT_COPY_NAME_BYTES.min(
         MAX_CANONICAL_WORKSPACE_PATH_BYTES
             .saturating_sub(parent.map_or(0, |parent| parent.len() + 1)),
+    );
+    // macOS refuses a whole path of PATH_MAX bytes, its NUL included, so the
+    // copy's full path must fit too.
+    #[cfg(target_vendor = "apple")]
+    let name_budget = name_budget.min(
+        APPLE_PATH_MAX.saturating_sub(target.parent().map_or(0, |dir| dir.as_os_str().len() + 2)),
     );
     for n in 1..=MAX_DISPLACED_NAMES {
         let Some(name) = kept_copy_name(file_name, n, name_budget) else {
@@ -3558,10 +3568,14 @@ fn save_kept_displacement_with_cleanup(
             return Ok(KeptCopySave::NoValidName);
         }
         let copy = sibling_with_name(&target, &name);
+        let exists = match entry_exists(&copy) {
+            Err(err) if names_too_long(&err) => return Ok(KeptCopySave::NoValidName),
+            exists => exists?,
+        };
         // A copy that is the kept file itself, linked before a crash or a
         // failed unlink, is this save's own: finish it. Anything else at the
         // name, even with the same bytes, is another file.
-        if entry_exists(&copy)? {
+        if exists {
             if !is_same_file(&kept, &copy).map_err(|err| MaterializeError::io(&copy, &err))? {
                 continue;
             }
@@ -3573,10 +3587,7 @@ fn save_kept_displacement_with_cleanup(
             match move_kept_copy(&kept, &copy, options) {
                 Ok(true) => {}
                 Ok(false) => continue,
-                Err(MaterializeError::Io {
-                    kind: ErrorKind::InvalidFilename,
-                    ..
-                }) => return Ok(KeptCopySave::NoValidName),
+                Err(err) if names_too_long(&err) => return Ok(KeptCopySave::NoValidName),
                 Err(err) => return Err(err),
             }
         }
@@ -3695,6 +3706,22 @@ fn kept_copy_name(file_name: &str, n: u32, budget: usize) -> Option<String> {
 /// systems allow 255 bytes or 255 UTF-16 units per name, and 255 bytes of
 /// UTF-8 never needs more than 255 UTF-16 units.
 const MAX_KEPT_COPY_NAME_BYTES: usize = 255;
+
+/// macOS `PATH_MAX`: the bytes of a whole path, its NUL included.
+#[cfg(target_vendor = "apple")]
+const APPLE_PATH_MAX: usize = 1_024;
+
+/// Whether the OS refused a path as too long, or as a name it cannot hold.
+/// No kept copy can take such a path, so the file stays kept.
+fn names_too_long(err: &MaterializeError) -> bool {
+    matches!(
+        err,
+        MaterializeError::Io {
+            kind: ErrorKind::InvalidFilename,
+            ..
+        }
+    )
+}
 
 /// Whether a replace left `path`'s file staged where it may still go back:
 /// an open row names it, or a pending job that targets it staged a file no

@@ -76,7 +76,13 @@ for (const mode of ["quit", "last-window", "crash", "crash-reopen-before-import"
       if (mode === "crash" || mode === "crash-reopen-before-import") await hardKillAppTree(app.process().pid!);
       else if (mode === "last-window") {
         const window = await app.browserWindow(page);
+        // A Mac app keeps running after its last window closes, so the person quits it next.
+        const closed = process.platform === "darwin" ? page.waitForEvent("close") : null;
         await window.evaluate(window => {setImmediate(() => window.close());});
+        if (closed) {
+          await closed;
+          await app.evaluate(({app}) => app.quit());
+        }
       } else await app.evaluate(({app}) => app.quit());
       await exited;
       if (mode === "crash" || mode === "crash-reopen-before-import") await expect(desktop.close()).rejects.toThrow(/Electron exited with (status|signal)/);

@@ -30,12 +30,13 @@ export type TimelineItem =
   | { kind: "version"; key: string; version: VersionEntry["version"] }
   | { kind: "collection"; key: string; entry: CollectionEntry };
 
-// The Collections a timeline can name and open, with each operation's label
-// by its name. A Collection this computer cannot open has no `open`.
+// The Collections a timeline can name and open on their History, with each
+// operation's label by its name. A Collection this computer cannot open has
+// no `openHistory`.
 export type HistoryCollections = ReadonlyMap<string, {
   name: string;
   operationLabels?: ReadonlyMap<string, string>;
-  open?: () => void;
+  openHistory?: () => void;
 }>;
 
 // The list label for one moment: its real engine summary when it has one,
@@ -480,9 +481,10 @@ function VersionMarkerRow(props: { version: VersionEntry["version"] }) {
   );
 }
 
-// One saved Collection change. It opens its Collection when this computer
-// can; the change and its Undo are in that Collection's History.
-function CollectionChangeRow(props: { entry: CollectionEntry; label?: string; open?: () => void }) {
+// One saved Collection change. Like a file's row opens its diff, it opens its
+// Collection's History, where the change and its Undo are, when this
+// computer can open that Collection.
+function CollectionChangeRow(props: { entry: CollectionEntry; label?: string; openHistory?: () => void }) {
   const { name, change } = props.entry;
   const recordedAt = change.recordedAtMs === null ? null : formatChatTime(change.recordedAtMs);
   const agent = approvalAgentName(change);
@@ -528,14 +530,14 @@ function CollectionChangeRow(props: { entry: CollectionEntry; label?: string; op
       </span>
     </span>
   );
-  return props.open ? (
+  return props.openHistory ? (
     <button
       type="button"
       data-testid="history-collection-open"
       aria-describedby={metaId}
-      aria-label={`Open Collection ${name}`}
-      title={`Open Collection ${name}`}
-      onClick={props.open}
+      aria-label={`Open Collection history for ${name}`}
+      title={`Open Collection history for ${name}`}
+      onClick={props.openHistory}
       className="block w-full px-3 py-2 text-left transition-colors hover:bg-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
     >
       {body}
@@ -774,7 +776,7 @@ export function EngineHistoryView(props: {
               <CollectionChangeRow
                 entry={item.item.entry}
                 label={labelOf(item.item.entry)}
-                open={collections?.get(item.item.entry.datasetId)?.open}
+                openHistory={collections?.get(item.item.entry.datasetId)?.openHistory}
               />
             ) : item.item.group.moments.length > 1 ? (
               <GroupRow

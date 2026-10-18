@@ -1,3 +1,4 @@
+import { shareHandoffOperations, shareMountOperations, shareProposalOperations, sharedChannelOperations, relayShareOperations } from "./ipc/shareOperations";
 import { chatOperations } from "./ipc/chatOperations";
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import { shareCopyOperations } from "./ipc/shareCopyOperations";
@@ -5,9 +6,8 @@ import { accessOperations } from "./ipc/accessOperations";
 import { settingsOperations } from "./ipc/settingsOperations";
 import { workspaceFileOperations } from "./ipc/workspaceFileOperations";
 import { devToolsGranted } from "./ipc/devToolsIpc";
-import {OwnerRestoreRequest, OwnerRestoreActionResponse, type OwnerRestoreAction, type OwnerRestoreResult} from "./ipc/ownerRestoreContract";
 import {OwnerAppPublicationRequest, OwnerAppPublicationResult} from "./ipc/ownerAppPublicationContract";
-import { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
+import { datasetOperations } from "./ipc/datasetOperations";
 import {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "@dohc/cli/app-responses";
 import type {
   CreateLocalWorkspacePayload,
@@ -25,12 +25,6 @@ import {
   systemMotionOperations,
   serverAccountOperations,
   SitePreviewReplacedEvent,
-  ListOwnerLiveDocumentsPayload,
-  ListOwnerLiveRefusalsPayload,
-  OwnerLiveRefusalsResult,
-  RetryOwnerLiveSharePayload,
-  OwnerLiveDocumentsResult,
-  OwnerLiveDocumentActionPayload,
   DesktopUserSettingsResult,
   ShareDirectWritesPushedEvent,
   shareDirectWriteDeliveryOperations,
@@ -118,11 +112,18 @@ async function invokeParsed<Schema extends z.ZodType>(
 // reject IPC that the outgoing document queued while renderer reload cleanup
 // was draining on the same WebContents object.
 const rendererDocumentId = crypto.randomUUID();
+const relay = operationBridge(relayShareOperations, invoke);
 
 const bridge: DohcDesktopBridge = {
   ...operationBridge(workspaceFileOperations, invoke),
   ...operationBridge(settingsOperations, invoke),
   ...operationBridge(chatOperations, invoke),
+  ...operationBridge(shareHandoffOperations, invoke),
+  ...operationBridge(shareMountOperations, invoke),
+  ...operationBridge(shareProposalOperations, invoke),
+  ...operationBridge(sharedChannelOperations, invoke),
+  ...relay,
+  ownerRestore: relay.ownerRestore as DohcDesktopBridge["ownerRestore"],
   ...operationBridge(systemMotionOperations, invoke),
   ...operationBridge(serverAccountOperations, invoke),
   ...operationBridge(historyOperations, invoke),
@@ -230,13 +231,6 @@ const bridge: DohcDesktopBridge = {
   cloudLoginPoll: () => ipcRenderer.invoke(CHANNELS.cloudLoginPoll),
   cloudStatus: (payload) => ipcRenderer.invoke(CHANNELS.cloudStatus, payload),
   cloudLogout: () => ipcRenderer.invoke(CHANNELS.cloudLogout),
-  getShareHandoffStatus: () =>
-    invokeParsed(CHANNELS.getShareHandoffStatus, ShareHandoffStatus),
-  acceptShareHandoff: (payload) =>
-    ipcRenderer.invoke(CHANNELS.acceptShareHandoff, payload),
-  retryShareHandoff: () => ipcRenderer.invoke(CHANNELS.retryShareHandoff),
-  dismissShareHandoff: (payload) =>
-    ipcRenderer.invoke(CHANNELS.dismissShareHandoff, payload),
   onShareHandoffStatus: (listener) =>
     onEvent(CHANNELS.shareHandoffStatus, ShareHandoffStatus, listener),
   ...operationBridge(workspaceSyncOperations, invoke),
@@ -244,78 +238,11 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.cloudEnableSync, payload),
   cloudJoinWorkspace: (payload) =>
     ipcRenderer.invoke(CHANNELS.cloudJoinWorkspace, payload),
-  createRelayShare: (payload) => ipcRenderer.invoke(CHANNELS.createRelayShare, payload),
-  listOwnerLiveDocuments: async payload => OwnerLiveDocumentsResult.parse(await ipcRenderer.invoke(
-    CHANNELS.listOwnerLiveDocuments, ListOwnerLiveDocumentsPayload.parse(payload))),
-  listOwnerLiveRefusals: async payload => OwnerLiveRefusalsResult.parse(await ipcRenderer.invoke(
-    CHANNELS.listOwnerLiveRefusals, ListOwnerLiveRefusalsPayload.parse(payload))),
-  retryOwnerLiveShare: async payload => {
-    await ipcRenderer.invoke(CHANNELS.retryOwnerLiveShare, RetryOwnerLiveSharePayload.parse(payload));
-  },
-  stopOwnerLiveDocument: async payload => {
-    await ipcRenderer.invoke(CHANNELS.stopOwnerLiveDocument, OwnerLiveDocumentActionPayload.parse(payload));
-  },
-  resumeOwnerLiveDocument: async payload => {
-    await ipcRenderer.invoke(CHANNELS.resumeOwnerLiveDocument, OwnerLiveDocumentActionPayload.parse(payload));
-  },
-  listRelayShares: () => ipcRenderer.invoke(CHANNELS.listRelayShares),
-  getRelayReceivedShare: (payload) =>
-    ipcRenderer.invoke(CHANNELS.getRelayReceivedShare, payload),
-  revokeRelayShare: (payload) => ipcRenderer.invoke(CHANNELS.revokeRelayShare, payload),
-  undoRelayShare: (payload) => ipcRenderer.invoke(CHANNELS.undoRelayShare, payload),
-  createRelayShareLink: (payload) =>
-    ipcRenderer.invoke(CHANNELS.createRelayShareLink, payload),
-  addRelayShareLink: (payload) =>
-    ipcRenderer.invoke(CHANNELS.addRelayShareLink, payload),
-  listRelayShareLinks: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listRelayShareLinks, payload),
-  ownerRestore: async <Action extends OwnerRestoreAction>(payload: OwnerRestoreRequest & {action: Action}) => {
-    const request = OwnerRestoreRequest.parse(payload);
-    return OwnerRestoreActionResponse[request.action].parse(await ipcRenderer.invoke(CHANNELS.ownerRestore, request)) as OwnerRestoreResult<Action>;
-  },
-  retuneRelayShareLink: (payload) =>
-    ipcRenderer.invoke(CHANNELS.retuneRelayShareLink, payload),
   publishOwnerApp: async (payload: OwnerAppPublicationRequest) => OwnerAppPublicationResult.parse(
     await ipcRenderer.invoke(CHANNELS.publishOwnerApp, OwnerAppPublicationRequest.parse(payload))),
-  dataset: async (payload: DatasetRequest) => DatasetResult.parse(await ipcRenderer.invoke(CHANNELS.dataset, DatasetRequest.parse(payload))),
+  ...operationBridge(datasetOperations, invoke),
   ownerAppResponses:async(payload:OwnerAppResponsesRequest)=>OwnerAppResponsesResult.parse(await ipcRenderer.invoke(CHANNELS.ownerAppResponses,OwnerAppResponsesRequest.parse(payload))),
-  rotateRelayShareLink: (payload) =>
-    ipcRenderer.invoke(CHANNELS.rotateRelayShareLink, payload),
-  revokeRelayShareLink: (payload) =>
-    ipcRenderer.invoke(CHANNELS.revokeRelayShareLink, payload),
-  listRelayShareDiscussion: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listRelayShareDiscussion, payload),
-  pollRelayShareDiscussionActivity: (payload) =>
-    ipcRenderer.invoke(CHANNELS.pollRelayShareDiscussionActivity, payload),
-  cancelRelayShareDiscussionActivity: (payload) =>
-    ipcRenderer.invoke(CHANNELS.cancelRelayShareDiscussionActivity, payload),
-  appendRelayShareDiscussion: (payload) =>
-    ipcRenderer.invoke(CHANNELS.appendRelayShareDiscussion, payload),
-  deleteRelayShareDiscussionMessage: (payload) =>
-    ipcRenderer.invoke(CHANNELS.deleteRelayShareDiscussionMessage, payload),
-  blockRelayShareDiscussionPrincipal: (payload) =>
-    ipcRenderer.invoke(CHANNELS.blockRelayShareDiscussionPrincipal, payload),
-  unblockRelayShareDiscussionPrincipal: (payload) =>
-    ipcRenderer.invoke(CHANNELS.unblockRelayShareDiscussionPrincipal, payload),
-  pauseRelayShareDiscussion: (payload) =>
-    ipcRenderer.invoke(CHANNELS.pauseRelayShareDiscussion, payload),
-  resumeRelayShareDiscussion: (payload) =>
-    ipcRenderer.invoke(CHANNELS.resumeRelayShareDiscussion, payload),
-  promoteRelayShareGrant: (payload) =>
-    ipcRenderer.invoke(CHANNELS.promoteRelayShareGrant, payload),
-  revokeRelayShareGrant: (payload) =>
-    ipcRenderer.invoke(CHANNELS.revokeRelayShareGrant, payload),
-  shareChatChannel: (payload) => ipcRenderer.invoke(CHANNELS.shareChatChannel, payload),
-  listChatChannelShares: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listChatChannelShares, payload),
-  listJoinedSharedChannels: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listJoinedSharedChannels, payload),
-  joinSharedChannel: (payload) => ipcRenderer.invoke(CHANNELS.joinSharedChannel, payload),
-  leaveSharedChannel: (payload) =>
-    ipcRenderer.invoke(CHANNELS.leaveSharedChannel, payload),
-  openSharedView: (payload) => ipcRenderer.invoke(CHANNELS.openSharedView, payload),
   ...operationBridge(sharedViewAccessOperations, invoke),
-  dismissShareSkips: (payload) => ipcRenderer.invoke(CHANNELS.dismissShareSkips, payload),
   listCollectionAutomations: (payload) =>
     ipcRenderer.invoke(CHANNELS.listCollectionAutomations, payload),
   switchCollectionAutomation: (payload) => ipcRenderer.invoke(CHANNELS.switchCollectionAutomation, payload),
@@ -448,18 +375,6 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.on(CHANNELS.automationRunWaiting, handler);
     return () => ipcRenderer.removeListener(CHANNELS.automationRunWaiting, handler);
   },
-  listShareProposals: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listShareProposals, payload),
-  readShareProposalChanges: (payload) =>
-    ipcRenderer.invoke(CHANNELS.readShareProposalChanges, payload),
-  readShareProposalFileContent: (payload) =>
-    ipcRenderer.invoke(CHANNELS.readShareProposalFileContent, payload),
-  settleShareProposal: (payload) =>
-    ipcRenderer.invoke(CHANNELS.settleShareProposal, payload),
-  submitShareChanges: (payload) =>
-    ipcRenderer.invoke(CHANNELS.submitShareChanges, payload),
-  pushShareDirectWrites: (payload) =>
-    ipcRenderer.invoke(CHANNELS.pushShareDirectWrites, payload),
   onShareDirectWritesPushed: (listener, workspaceId) => {
     const subscriptionId = crypto.randomUUID();
     const identity = { workspaceId, rendererDocumentId, subscriptionId };
@@ -477,13 +392,6 @@ const bridge: DohcDesktopBridge = {
     update(true);
     return () => { unsubscribe(); update(false); };
   },
-  listMyShareChanges: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listMyShareChanges, payload),
-  withdrawShareChanges: (payload) =>
-    ipcRenderer.invoke(CHANNELS.withdrawShareChanges, payload),
-  mountShare: (payload) => ipcRenderer.invoke(CHANNELS.mountShare, payload),
-  refreshShareMounts: (payload) => ipcRenderer.invoke(CHANNELS.refreshShareMounts, payload),
-  unmountShare: (payload) => ipcRenderer.invoke(CHANNELS.unmountShare, payload),
   openWorkspace: (payload) =>
     ipcRenderer.invoke(CHANNELS.openWorkspace, {
       ...payload,

@@ -165,7 +165,7 @@ const CHAT_REQUEST_CASES: ChatRequestCase[] = [
     method: CHATS_METHOD.dispatchSetThreadPaused,
     params: { threadId: "t", paused: true },
   },
-  { method: CHATS_METHOD.dispatchMarkFailureNotePosted, params: { runId: "r" } },
+  { method: CHATS_METHOD.dispatchMarkFailureHandled, params: { runId: "r" } },
   {
     method: CHATS_METHOD.dispatchRequeueFailedTrigger,
     params: { triggerMessageId: "m", runId: "r" },
@@ -265,7 +265,7 @@ const run = {
   triggerMessageId: "trigger",
   command: "codex",
   startedAtMs: 3,
-  failureNotePosted: false,
+  failureHandled: false,
 };
 
 const NEW_DECODER_CASES: Array<{

@@ -2,8 +2,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolve } from "node:path";
 import { RelayConflictError, SharedFileReadOnlyError, ShareUnavailableError, type ShareProposalOp } from "@dohc/workspace-contracts/relay";
 import { RELAY_API_VERSION, RELAY_API_VERSION_HEADER } from "@dohc/workspace-contracts/relay-values";
-import { CHANNELS } from "./channels";
-import { registerShareProposalsIpcHandlers } from "./shareProposalsIpc";
+import { shareProposalOperations } from "./shareOperations";
+import { registerOperations } from "./operationTable";
+import { createShareProposalsIpc } from "./shareProposalsIpc";
 import { CredentialSessionCache } from "../workspaces/credentialSessionCache";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import type { RegistryEntry } from "../workspaces/registryStore";
@@ -30,19 +31,22 @@ async function harness() {
     workspaceId: "workspace", rootPath: resolve("/share-proposals"), kind: "personal", mode: "local-first",
     remote: { serverUrl: credentials.serverUrl, ownerUserId: credentials.userId },
   };
+  const other: RegistryEntry = { ...workspace, workspaceId: "other", rootPath: resolve("/other") };
   const authorities = createWorkspaceAuthorityOwner({
-    findWorkspace: (id: string) => id === workspace.workspaceId ? workspace : null,
+    findWorkspace: (id: string) => id === workspace.workspaceId ? workspace : id === other.workspaceId ? other : null,
     canonicalizeRoot: (root: string) => root, createState: () => ({}),
   });
   const attachmentId = await authorities.withOperation(workspace.workspaceId, operation => operation.workspace.attachmentId);
+  const otherAttachmentId = await authorities.withOperation("other", operation => operation.workspace.attachmentId);
   let rendererCurrent = true;
   const session = { workspaceId: workspace.workspaceId, attachmentId, generation: 1, isCurrent: () => rendererCurrent };
+  const otherSession = { workspaceId: "other", attachmentId: otherAttachmentId, generation: 1, isCurrent: () => true };
   type Event = { sender: string; trusted: boolean };
   type Workspace = PhysicalWorkspace<RegistryEntry>;
   type Operation = ExactRendererWorkspaceOperation<Workspace, object, typeof session>;
-  type Dependencies = Parameters<typeof registerShareProposalsIpcHandlers<string, Event, Operation>>[0];
+  type Dependencies = Parameters<typeof createShareProposalsIpc<Operation>>[0];
   const withRendererWorkspaceOperation = createRendererWorkspaceOperationRunner<string, Workspace, object, typeof session>({
-    currentSession: () => session, withPhysicalOperation: (id, work) => authorities.withOperation(id, work),
+    currentSession: sender => sender === "other-window" ? otherSession : session, withPhysicalOperation: (id, work) => authorities.withOperation(id, work),
   });
   const cache = new CredentialSessionCache<CloudCredentials>();
   cache.set(credentials);
@@ -63,10 +67,8 @@ async function harness() {
   const relayFor = vi.fn<Dependencies["receivedShareEngine"]["relayFor"]>(() => ({ submitShareProposal: submit, pushDirectWrites: pushDirect } as unknown as EngineRelayWorkspaceClient));
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
   const reported = vi.fn<Dependencies["reportDirectWrites"]>(() => true);
-  const directWrites = registerShareProposalsIpcHandlers<string, Event, Operation>({
-    registerHandler: (channel, handler) => { expect(handlers.has(channel)).toBe(false); handlers.set(channel, handler); },
-    assertTrustedSender: (event) => { if (!event.trusted) throw new Error("untrusted"); },
-    withRendererWorkspaceOperation, warmCredentialCache: warm,
+  const directWrites = createShareProposalsIpc<Operation>({
+    warmCredentialCache: warm,
     withWorkspaceAuthority: (id, work) => authorities.withOperation(id, work),
     reportDirectWrites: reported,
     currentCredentials: () => cache.snapshot().credentials, currentCredentialGeneration: () => cache.snapshot().generation,
@@ -77,8 +79,13 @@ async function harness() {
     listMyShareProposals: listMine, withdrawShareProposal: withdraw,
     withStaleSensitiveWorkspaceOperation, shareViewFiles: { reconcile }, receivedShareEngine: { relayFor },
   });
-  const invoke = (channel: string, payload: unknown = { workspaceId: "workspace" }, trusted = true) =>
-    Promise.resolve().then(() => handlers.get(channel)!({ sender: "window", trusted }, payload));
+  registerOperations<typeof shareProposalOperations, Event, Operation>({
+    handle: (channel, handler) => { expect(handlers.has(channel)).toBe(false); handlers.set(channel, handler); },
+    assertTrustedSender: (event: Event) => { if (!event.trusted) throw new Error("untrusted"); },
+    withActiveWorkspace: (event, id, message, work) => withRendererWorkspaceOperation(event.sender, id, message, work),
+  }, shareProposalOperations, directWrites.handlers);
+  const invoke = (channel: string, payload: unknown = { workspaceId: "workspace" }, trusted = true, sender = "window") =>
+    Promise.resolve().then(() => handlers.get(channel)!({ sender, trusted }, payload));
   const recipient = (access: "view" | "comment" | "edit" = "edit", ended = false) => {
     delete workspace.remote;
     workspace.shareView = {
@@ -89,21 +96,39 @@ async function harness() {
   };
   return { workspace, authorities, attachmentId, cache, warm, list, read, readOp, settle, listMine, withdraw,
     readText, queue, reconcile, submit, pushDirect, relayFor, handlers, invoke, recipient, reported, directWrites,
+    work: [warm, list, read, readOp, settle, listMine, withdraw, readText, queue, reconcile, submit, pushDirect, relayFor],
     retireRenderer: () => { rendererCurrent = false; } };
 }
 
 afterEach(() => vi.unstubAllGlobals());
 
 describe("registered share proposal handlers", () => {
+  it.each(Object.values(shareProposalOperations))("rejects an untrusted sender on $channel before parsing or work", async row => {
+    const h = await harness();
+    await expect(h.invoke(row.channel, null, false)).rejects.toThrow("untrusted");
+    for (const fn of h.work) expect(fn).not.toHaveBeenCalled();
+  });
+
+  it.each(Object.values(shareProposalOperations))("rejects another open workspace on $channel before work", async row => {
+    const h = await harness();
+    const payload = row.payload.parse({
+      workspaceId: "workspace", proposalId: "proposal", opIndex: 0, decision: "accept",
+      channelId: "chan", recipientEmail: "peer@example.test", channelWireIds: [],
+      shareId: "share", generation: 1,
+    });
+    await expect(h.invoke(row.channel, payload, true, "other-window")).rejects.toThrow(row.inactiveMessage);
+    for (const fn of h.work) expect(fn).not.toHaveBeenCalled();
+  });
+
   it("preserves registration order and trusts the sender before parsing or loading credentials", async () => {
     const h = await harness();
     expect([...h.handlers.keys()]).toEqual([
-      CHANNELS.listShareProposals, CHANNELS.readShareProposalChanges, CHANNELS.readShareProposalFileContent,
-      CHANNELS.settleShareProposal, CHANNELS.submitShareChanges, CHANNELS.pushShareDirectWrites,
-      CHANNELS.listMyShareChanges, CHANNELS.withdrawShareChanges,
+      shareProposalOperations.listShareProposals.channel, shareProposalOperations.readShareProposalChanges.channel, shareProposalOperations.readShareProposalFileContent.channel,
+      shareProposalOperations.settleShareProposal.channel, shareProposalOperations.submitShareChanges.channel, shareProposalOperations.pushShareDirectWrites.channel,
+      shareProposalOperations.listMyShareChanges.channel, shareProposalOperations.withdrawShareChanges.channel,
     ]);
     for (const channel of h.handlers.keys()) await expect(h.invoke(channel, null, false)).rejects.toThrow("untrusted");
-    await expect(h.invoke(CHANNELS.listShareProposals, { workspaceId: "" })).rejects.toThrow();
+    await expect(h.invoke(shareProposalOperations.listShareProposals.channel, { workspaceId: "" })).rejects.toThrow();
     expect(h.warm).not.toHaveBeenCalled();
     expect(h.list).not.toHaveBeenCalled();
   });
@@ -111,9 +136,9 @@ describe("registered share proposal handlers", () => {
   it("refuses a received view or a foreign owner before using owner proposal routes", async () => {
     const h = await harness();
     h.workspace.remote!.ownerUserId = "someone-else";
-    await expect(h.invoke(CHANNELS.listShareProposals)).rejects.toThrow("account that synced");
+    await expect(h.invoke(shareProposalOperations.listShareProposals.channel)).rejects.toThrow("account that synced");
     h.recipient();
-    await expect(h.invoke(CHANNELS.listShareProposals)).rejects.toThrow("workspace you shared from");
+    await expect(h.invoke(shareProposalOperations.listShareProposals.channel)).rejects.toThrow("workspace you shared from");
     expect(h.list).not.toHaveBeenCalled();
   });
 
@@ -121,7 +146,7 @@ describe("registered share proposal handlers", () => {
     const h = await harness();
     const started = deferred(); const held = deferred();
     h.warm.mockImplementation(() => { started.resolve(); return held.promise; });
-    const result = h.invoke(CHANNELS.listShareProposals);
+    const result = h.invoke(shareProposalOperations.listShareProposals.channel);
     await started.promise; h.retireRenderer(); held.resolve();
     await expect(result).rejects.toThrow("changed workspaces");
     expect(h.list).not.toHaveBeenCalled();
@@ -131,7 +156,7 @@ describe("registered share proposal handlers", () => {
     const h = await harness();
     const started = deferred(); const held = deferred<Awaited<ReturnType<typeof h.list>>>();
     h.list.mockImplementation(() => { started.resolve(); return held.promise; });
-    const result = h.invoke(CHANNELS.listShareProposals);
+    const result = h.invoke(shareProposalOperations.listShareProposals.channel);
     await started.promise;
     let drained: Promise<void> | undefined;
     if (change === "credentials") h.cache.set({ ...credentials });
@@ -144,9 +169,9 @@ describe("registered share proposal handlers", () => {
 
   it("lists public counts and builds file rows only for paths the proposal names", async () => {
     const h = await harness();
-    await expect(h.invoke(CHANNELS.listShareProposals)).resolves.toEqual({ proposals: [{ ...proposal, ops: 1 }] });
+    await expect(h.invoke(shareProposalOperations.listShareProposals.channel)).resolves.toEqual({ proposals: [{ ...proposal, ops: 1 }] });
     h.read.mockResolvedValue({ ...proposal, ops: [op, { ...op, opIndex: 1, afterPath: null, basedOnPath: null, currentPath: null }] });
-    await expect(h.invoke(CHANNELS.readShareProposalChanges, { workspaceId: "workspace", proposalId: "proposal" })).resolves.toEqual({
+    await expect(h.invoke(shareProposalOperations.readShareProposalChanges.channel, { workspaceId: "workspace", proposalId: "proposal" })).resolves.toEqual({
       proposedByEmail: proposal.proposedByEmail,
       files: [{ opIndex: 0, path: "after.md", operation: "write", drifted: false, afterByteLength: 8 }],
     });
@@ -157,14 +182,14 @@ describe("registered share proposal handlers", () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async () => new Response("incoming"));
     vi.stubGlobal("fetch", fetch);
     const payload = { workspaceId: "workspace", proposalId: "proposal", opIndex: 0 };
-    await expect(h.invoke(CHANNELS.readShareProposalFileContent, payload)).resolves.toEqual({ currentText: "current", incomingText: "incoming" });
+    await expect(h.invoke(shareProposalOperations.readShareProposalFileContent.channel, payload)).resolves.toEqual({ currentText: "current", incomingText: "incoming" });
     expect(h.readText).toHaveBeenCalledWith(expect.objectContaining({ attachmentId: h.attachmentId }), "current.md");
     expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/sync/workspace/blobs/"), expect.anything());
     const sent = new Headers(fetch.mock.calls[0]?.[1]?.headers);
     expect([sent.get("authorization"), sent.get(RELAY_API_VERSION_HEADER)]).toEqual(["Bearer token", String(RELAY_API_VERSION)]);
     h.readText.mockResolvedValue({ text: "prefix", truncated: true, contentHash: null });
     fetch.mockResolvedValue(new Response(new Uint8Array(WORKSPACE_TEXT_EDITOR_MAX_BYTES + 1)));
-    await expect(h.invoke(CHANNELS.readShareProposalFileContent, payload)).resolves.toEqual({ currentText: null, incomingText: null });
+    await expect(h.invoke(shareProposalOperations.readShareProposalFileContent.channel, payload)).resolves.toEqual({ currentText: null, incomingText: null });
   });
 
   it("does not fetch an incoming preview after credentials change during the current-text read", async () => {
@@ -172,45 +197,45 @@ describe("registered share proposal handlers", () => {
     const started = deferred(); const held = deferred<Awaited<ReturnType<typeof h.readText>>>();
     const fetch = vi.fn<typeof globalThis.fetch>(); vi.stubGlobal("fetch", fetch);
     h.readText.mockImplementation(() => { started.resolve(); return held.promise; });
-    const result = h.invoke(CHANNELS.readShareProposalFileContent, { workspaceId: "workspace", proposalId: "proposal", opIndex: 0 });
+    const result = h.invoke(shareProposalOperations.readShareProposalFileContent.channel, { workspaceId: "workspace", proposalId: "proposal", opIndex: 0 });
     await started.promise; h.cache.clear(); held.resolve({ text: "old", truncated: false, contentHash: "hash" });
     await expect(result).rejects.toThrow(); expect(fetch).not.toHaveBeenCalled();
   });
 
   it("queues a pull only for a current accepted proposal and preserves raced settlement states", async () => {
     const h = await harness(); const payload = { workspaceId: "workspace", proposalId: "proposal", decision: "accept" };
-    await expect(h.invoke(CHANNELS.settleShareProposal, payload)).resolves.toEqual({ state: "accepted" });
+    await expect(h.invoke(shareProposalOperations.settleShareProposal.channel, payload)).resolves.toEqual({ state: "accepted" });
     expect(h.queue).toHaveBeenCalledWith("workspace"); h.queue.mockClear();
     h.settle.mockResolvedValue({ proposalId: "proposal", state: "withdrawn" });
-    await expect(h.invoke(CHANNELS.settleShareProposal, payload)).rejects.toThrow("no longer open");
+    await expect(h.invoke(shareProposalOperations.settleShareProposal.channel, payload)).rejects.toThrow("no longer open");
     expect(h.queue).not.toHaveBeenCalled();
     const started = deferred(); const held = deferred<Awaited<ReturnType<typeof h.settle>>>();
     h.settle.mockImplementation(() => { started.resolve(); return held.promise; });
-    const result = h.invoke(CHANNELS.settleShareProposal, payload);
+    const result = h.invoke(shareProposalOperations.settleShareProposal.channel, payload);
     await started.promise; h.cache.set(credentials); held.resolve({ proposalId: "proposal", state: "accepted" });
     await expect(result).rejects.toThrow("cloud binding changed"); expect(h.queue).not.toHaveBeenCalled();
   });
 
   it.each(["view", "comment"] as const)("keeps listing and withdrawal available after downgrade to %s", async (access) => {
     const h = await harness(); h.recipient(access, true);
-    await expect(h.invoke(CHANNELS.submitShareChanges)).rejects.toThrow();
+    await expect(h.invoke(shareProposalOperations.submitShareChanges.channel)).rejects.toThrow();
     expect(h.reconcile).not.toHaveBeenCalled();
-    await expect(h.invoke(CHANNELS.listMyShareChanges)).resolves.toEqual({ proposals: [{ proposalId: "proposal", state: "open", createdAtMs: 1, files: 2 }] });
-    await expect(h.invoke(CHANNELS.withdrawShareChanges, { workspaceId: "workspace", proposalId: "proposal", shareId: "forged" })).resolves.toEqual({ state: "withdrawn" });
+    await expect(h.invoke(shareProposalOperations.listMyShareChanges.channel)).resolves.toEqual({ proposals: [{ proposalId: "proposal", state: "open", createdAtMs: 1, files: 2 }] });
+    await expect(h.invoke(shareProposalOperations.withdrawShareChanges.channel, { workspaceId: "workspace", proposalId: "proposal", shareId: "forged" })).resolves.toEqual({ state: "withdrawn" });
     expect(h.withdraw).toHaveBeenCalledWith(expect.objectContaining({ shareId: "pinned-share" }));
   });
 
   it("settles local changes before submitting the pinned grant and uses a new submit id each time", async () => {
     const h = await harness(); h.recipient();
     const payload = { workspaceId: "workspace", shareId: "forged", grantedSelector: { paths: ["/"] } };
-    await expect(h.invoke(CHANNELS.submitShareChanges, payload)).resolves.toEqual({ ok: true, submitted: 1, skippedOutsideShare: 0, morePending: false, capturedLocalChanges: 3 });
+    await expect(h.invoke(shareProposalOperations.submitShareChanges.channel, payload)).resolves.toEqual({ ok: true, submitted: 1, skippedOutsideShare: 0, morePending: false, capturedLocalChanges: 3 });
     expect(h.reconcile).toHaveBeenCalledWith(expect.anything(), { kind: "standalone", workspaceId: "workspace" }, "settle");
     expect(h.relayFor).toHaveBeenCalledWith(expect.objectContaining({ attachmentId: h.attachmentId, engineWorkspaceId: "workspace" }));
     expect(h.submit).toHaveBeenCalledWith(expect.objectContaining({ shareId: "pinned-share", grantedSelector: { paths: ["docs"], versionId: null, access: "edit" } }));
-    await h.invoke(CHANNELS.submitShareChanges, payload);
+    await h.invoke(shareProposalOperations.submitShareChanges.channel, payload);
     expect(h.submit.mock.calls[0]![0].submitId).not.toBe(h.submit.mock.calls[1]![0].submitId);
     h.submit.mockRejectedValue(new Error("offline"));
-    await expect(h.invoke(CHANNELS.submitShareChanges)).resolves.toEqual({ ok: false, capturedLocalChanges: 3, errorMessage: "offline" });
+    await expect(h.invoke(shareProposalOperations.submitShareChanges.channel)).resolves.toEqual({ ok: false, capturedLocalChanges: 3, errorMessage: "offline" });
   });
 
   it("pushes direct writes through the pinned grant without settling files first", async () => {
@@ -227,7 +252,7 @@ describe("registered share proposal handlers", () => {
         writes: [{ paths: ["docs/packing/automations.yaml"], result: "refused", reason: "not valid" }],
         morePending: false,
       });
-    await expect(h.invoke(CHANNELS.pushShareDirectWrites, { workspaceId: "workspace", shareId: "forged" })).resolves.toBeUndefined();
+    await expect(h.invoke(shareProposalOperations.pushShareDirectWrites.channel, { workspaceId: "workspace", shareId: "forged" })).resolves.toBeUndefined();
     expect(h.reported).toHaveBeenLastCalledWith("workspace", {
       status: "pushed",
       writes: [
@@ -251,7 +276,7 @@ describe("registered share proposal handlers", () => {
         morePending: true,
       })
       .mockRejectedValueOnce(new Error("offline"));
-    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toBeUndefined();
+    await expect(h.invoke(shareProposalOperations.pushShareDirectWrites.channel)).resolves.toBeUndefined();
     expect(h.reported).toHaveBeenLastCalledWith("workspace", {
       status: "failed",
       writes: [{ paths: ["docs/packing/automations.yaml"], result: "refused", reason: "not valid" }],
@@ -259,25 +284,25 @@ describe("registered share proposal handlers", () => {
       lasting: false,
     });
     h.pushDirect.mockRejectedValueOnce(new SharedFileReadOnlyError());
-    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toBeUndefined();
+    await expect(h.invoke(shareProposalOperations.pushShareDirectWrites.channel)).resolves.toBeUndefined();
     expect(h.reported.mock.calls.at(-1)?.[1]).toMatchObject({ status: "failed", lasting: true });
     h.pushDirect.mockRejectedValueOnce(Object.assign(new Error("too large"), { wireCode: "PAYLOAD_TOO_LARGE" }));
-    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toBeUndefined();
+    await expect(h.invoke(shareProposalOperations.pushShareDirectWrites.channel)).resolves.toBeUndefined();
     expect(h.reported.mock.calls.at(-1)?.[1]).toMatchObject({ status: "failed", lasting: true });
     h.pushDirect.mockRejectedValueOnce(new RelayConflictError());
-    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toBeUndefined();
+    await expect(h.invoke(shareProposalOperations.pushShareDirectWrites.channel)).resolves.toBeUndefined();
     expect(h.reported.mock.calls.at(-1)?.[1]).toMatchObject({ status: "failed", lasting: true });
     h.pushDirect.mockRejectedValueOnce(Object.assign(new Error("busy"), { wireCode: "OVERLOADED" }));
-    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toBeUndefined();
+    await expect(h.invoke(shareProposalOperations.pushShareDirectWrites.channel)).resolves.toBeUndefined();
     expect(h.reported.mock.calls.at(-1)?.[1]).toMatchObject({ status: "failed", lasting: false });
   });
 
   it("says when the share is unavailable, and asks the relay again on the next push", async () => {
     const h = await harness(); h.recipient();
     h.pushDirect.mockRejectedValueOnce(new ShareUnavailableError());
-    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toBeUndefined();
+    await expect(h.invoke(shareProposalOperations.pushShareDirectWrites.channel)).resolves.toBeUndefined();
     expect(h.reported).toHaveBeenLastCalledWith("workspace", { status: "unavailable" });
-    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toBeUndefined();
+    await expect(h.invoke(shareProposalOperations.pushShareDirectWrites.channel)).resolves.toBeUndefined();
     expect(h.reported).toHaveBeenCalledTimes(1);
     expect(h.pushDirect).toHaveBeenCalledTimes(2);
   });
@@ -286,7 +311,7 @@ describe("registered share proposal handlers", () => {
     const h = await harness(); h.recipient();
     const held = deferred<Awaited<ReturnType<EngineRelayWorkspaceClient["pushDirectWrites"]>>>();
     h.pushDirect.mockImplementationOnce(() => held.promise);
-    const opened = h.invoke(CHANNELS.pushShareDirectWrites);
+    const opened = h.invoke(shareProposalOperations.pushShareDirectWrites.channel);
     await vi.waitFor(() => expect(h.pushDirect).toHaveBeenCalledTimes(1));
     h.retireRenderer();
     held.resolve({ writes: [{ paths: ["docs/packing/automations.yaml"], result: "refused", reason: "not valid" }], morePending: false });
@@ -327,7 +352,7 @@ describe("registered share proposal handlers", () => {
       morePending,
     });
     h.pushDirect.mockResolvedValueOnce(page(2_000)).mockResolvedValueOnce(page(501)).mockResolvedValueOnce(page(1, false));
-    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toBeUndefined();
+    await expect(h.invoke(shareProposalOperations.pushShareDirectWrites.channel)).resolves.toBeUndefined();
     const result = h.reported.mock.calls.at(-1)![1] as { status: string; writes: unknown[] };
     expect(h.pushDirect).toHaveBeenCalledTimes(3);
     expect(h.reported).toHaveBeenCalledTimes(2);
@@ -340,7 +365,7 @@ describe("registered share proposal handlers", () => {
 
   it.each(["view", "comment"] as const)("pushes nothing from a %s share", async (access) => {
     const h = await harness(); h.recipient(access);
-    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).rejects.toThrow();
+    await expect(h.invoke(shareProposalOperations.pushShareDirectWrites.channel)).rejects.toThrow();
     expect(h.pushDirect).not.toHaveBeenCalled();
   });
 
@@ -348,7 +373,7 @@ describe("registered share proposal handlers", () => {
     const h = await harness(); h.recipient();
     const started = deferred(); const held = deferred<Awaited<ReturnType<typeof h.reconcile>>>();
     h.reconcile.mockImplementation(() => { started.resolve(); return held.promise; });
-    const result = h.invoke(CHANNELS.submitShareChanges);
+    const result = h.invoke(shareProposalOperations.submitShareChanges.channel);
     await started.promise; h.recipient("view");
     held.resolve({ kind: "settle", capturedPaths: 0, repairedPaths: 0, unjournalablePaths: [], collisionRecordQuarantined: false });
     await expect(result).rejects.toThrow(); expect(h.submit).not.toHaveBeenCalled();
@@ -357,12 +382,12 @@ describe("registered share proposal handlers", () => {
   it("refuses a recipient on another relay and rejects grant changes during its listing", async () => {
     const h = await harness(); h.recipient();
     h.cache.set({ ...credentials, relayUrl: "https://other.example.test" });
-    await expect(h.invoke(CHANNELS.listMyShareChanges)).rejects.toThrow("server this share came from");
+    await expect(h.invoke(shareProposalOperations.listMyShareChanges.channel)).rejects.toThrow("server this share came from");
     expect(h.listMine).not.toHaveBeenCalled();
     h.cache.set(credentials);
     const started = deferred(); const held = deferred<Awaited<ReturnType<typeof h.listMine>>>();
     h.listMine.mockImplementation(() => { started.resolve(); return held.promise; });
-    const result = h.invoke(CHANNELS.listMyShareChanges);
+    const result = h.invoke(shareProposalOperations.listMyShareChanges.channel);
     await started.promise; h.recipient("comment"); held.resolve([]);
     await expect(result).rejects.toThrow("shared view changed");
   });
@@ -370,10 +395,10 @@ describe("registered share proposal handlers", () => {
   it("refuses unsafe reconciliation and reports a raced withdrawal honestly", async () => {
     const h = await harness(); h.recipient();
     h.reconcile.mockResolvedValue({ kind: "settle", capturedPaths: 0, repairedPaths: 0, unjournalablePaths: [], collisionRecordQuarantined: true });
-    await expect(h.invoke(CHANNELS.submitShareChanges)).rejects.toThrow("damaged shared file recovery");
+    await expect(h.invoke(shareProposalOperations.submitShareChanges.channel)).rejects.toThrow("damaged shared file recovery");
     h.reconcile.mockResolvedValue({ kind: "settle", capturedPaths: 0, repairedPaths: 0, unjournalablePaths: [{ path: "docs/file", reason: "unreadable" }], collisionRecordQuarantined: false });
-    await expect(h.invoke(CHANNELS.submitShareChanges)).rejects.toThrow(); expect(h.submit).not.toHaveBeenCalled();
+    await expect(h.invoke(shareProposalOperations.submitShareChanges.channel)).rejects.toThrow(); expect(h.submit).not.toHaveBeenCalled();
     h.withdraw.mockResolvedValue({ proposalId: "proposal", state: "accepted" });
-    await expect(h.invoke(CHANNELS.withdrawShareChanges, { workspaceId: "workspace", proposalId: "proposal" })).rejects.toThrow("already answered");
+    await expect(h.invoke(shareProposalOperations.withdrawShareChanges.channel, { workspaceId: "workspace", proposalId: "proposal" })).rejects.toThrow("already answered");
   });
 });

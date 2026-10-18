@@ -21,10 +21,12 @@ use dohc_engine_protocol::{
     wire::WorkspaceHandle,
 };
 use dohc_engine_runtime::WorkspaceSupervisor;
-use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome, hex_sha256};
+use dohc_engine_storage::{
+    ENGINE_SQLITE_BUSY_TIMEOUT_MS, EngineStore, NoFaults, TxnOutcome, hex_sha256,
+};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use dohc_workspace_engine::{EngineService, root_binding::write_root_binding};
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{Value, json};
 
 const BEARER: &str = "relay-test-token";
@@ -954,7 +956,15 @@ fn resync_requests(
 // uncaptured harness. Use the production exporter to exercise that wire pair.
 fn journal_editor_settlement(scratch: &ScratchDir, workspace: &str, moment: &str) {
     let mut conn = Connection::open(engine_db_path(scratch).unwrap()).unwrap();
-    let tx = conn.transaction().unwrap();
+    // The engine writes this store at the same time. Wait for its write lock
+    // as the engine's own connections do, rather than failing at once.
+    conn.busy_timeout(Duration::from_millis(u64::from(
+        ENGINE_SQLITE_BUSY_TIMEOUT_MS,
+    )))
+    .unwrap();
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
     dohc_engine_sync::journal_moment_append_in_tx(&tx, workspace, moment).unwrap();
     tx.commit().unwrap();
 }

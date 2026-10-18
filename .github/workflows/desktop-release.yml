@@ -306,6 +306,9 @@ jobs:
           DOHC_REQUIRE_SIGNING: ${{ steps.signing.outputs.require }}
           CSC_LINK: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.MACOS_CSC_LINK || '' }}
           WIN_CSC_LINK: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.WIN_CSC_LINK || '' }}
+          APPLE_ID: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.APPLE_TEAM_ID || '' }}
         run: pnpm smoke:package:desktop
 
       - name: Package desktop
@@ -347,6 +350,14 @@ jobs:
         env:
           DOHC_E2E_NO_CHROMIUM_SANDBOX: "1"
         run: xvfb-run -a pnpm smoke:fuses:desktop
+
+      # Checks the bundle's signature and fuses, then boots it. The x64 package
+      # boots under Rosetta on the Apple silicon runner.
+      - name: macOS packaged smoke
+        if: runner.os == 'macOS'
+        env:
+          DOHC_SMOKE_PACKAGE_DIRECTORY: ${{ github.workspace }}/apps/desktop/release/${{ matrix.arch == 'arm64' && 'mac-arm64' || 'mac' }}/dohc.app
+        run: pnpm smoke:fuses:desktop
 
       - name: Windows packaged smoke
         if: runner.os == 'Windows'

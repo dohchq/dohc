@@ -102,8 +102,9 @@ export function changedFiles(baseCommit, includeUncommitted = false, root = repo
 
 export function readSelfHostNativeProof(output, executable, sha256) {
   const tests = JSON.parse(readFileSync(join(output, "vitest.json"), "utf8"));
-  if (!tests.success || tests.numTotalTests !== 1 || tests.numPassedTests !== 1 || tests.numFailedTests || tests.numPendingTests || tests.numTodoTests) {
-    throw new Error("The self-host native proof did not complete its mandatory test.");
+  if (!tests.success || !Number.isSafeInteger(tests.numTotalTests) || tests.numTotalTests < 1 || tests.numPassedTests !== tests.numTotalTests ||
+    tests.numFailedTests || tests.numPendingTests || tests.numTodoTests) {
+    throw new Error("The self-host native proof did not complete its mandatory tests.");
   }
   const directories = readdirSync(output, {withFileTypes: true}).filter(entry => entry.isDirectory() && entry.name.startsWith("self-host-live-"));
   if (directories.length !== 1) throw new Error("The self-host native proof did not produce one evidence record.");
@@ -476,6 +477,8 @@ export async function verify(args) {
             report.statesPage = `not run: the states page compares pixels on win32 only, and this host is ${process.platform}`; save();
           }
         }
+        // Desktop specs that open a browser page use the same pinned browser as the PR gate's account proof.
+        if (mode === "e2e") await proofStep("browser-install", ...pnpm(["exec", "playwright", "install", "chromium"]), env);
         const tags = mode === "pr" ? desktopProofTags() : {selected: ["@verification-smoke"], required: ["@verification-smoke"]};
         const forwarded = mode === "e2e" ? args.slice(1).filter((arg) => arg !== "--") : ["--grep", tags.selected.join("|")];
         const jsonReport = join(output, "playwright.json");

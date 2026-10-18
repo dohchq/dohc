@@ -1,3 +1,4 @@
+import { shareHandoffOperations, shareMountOperations, shareProposalOperations, sharedChannelOperations, relayShareOperations } from "./ipc/shareOperations";
 import { createOperationHistory } from "./workspaces/workspaceHistoryOperations";
 import { createReceivedFileReferenceScopes } from "./workspaces/workspaceFileReferenceScopes";
 import { mountRootFor } from "./workspaces/shareMounts";
@@ -63,7 +64,8 @@ import { openRemoteDatasetRecoveryExport } from "./workspaces/remoteDatasetRecov
 import { createOwnerDatasetCopyRegistry, datasetCopyOwnerKey } from "./workspaces/ownerDatasetCopyRegistry";
 import { createRemoteDatasetReplicaSource } from "./workspaces/remoteDatasetReplica";
 import { createDatasetHandler } from "./ipc/datasetIpc";
-import { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
+import { datasetOperations } from "./ipc/datasetOperations";
+import { type DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import { createHash } from "node:crypto";
 import { createDatasetSources, type SourceCreationProgress } from "./workspaces/datasetSourceCreation";
 import { flushDatasetSourceCapture } from "./workspaces/datasetSourceCapture";
@@ -81,13 +83,13 @@ import { registerDirectMessagesIpcHandlers, peekReceivedGrantKindForShare } from
 import { createChatScopeCapability } from "./ipc/chatScope";
 import { registerChatsIpcHandlers } from "./ipc/chatsIpc";
 import { workspaceVersionHandlers } from "./ipc/workspaceVersionsIpc";
-import { registerShareProposalsIpcHandlers } from "./ipc/shareProposalsIpc";
+import { createShareProposalsIpc } from "./ipc/shareProposalsIpc";
 import { createShareDirectWriteDelivery } from "./ipc/shareDirectWriteDelivery";
 import { registerSharedViewsIpcHandlers } from "./ipc/sharedViewsIpc";
 import { createWorkspaceSyncStop } from "./workspaces/stopWorkspaceSync";
 import { registerCloudIpcHandlers } from "./ipc/cloudIpc";
-import { registerSharedChannelsIpcHandlers } from "./ipc/sharedChannelsIpc";
-import { registerShareHandoffIpcHandlers } from "./ipc/shareHandoffIpc";
+import { createSharedChannelsIpc } from "./ipc/sharedChannelsIpc";
+import { createShareHandoffIpcHandlers } from "./ipc/shareHandoffIpc";
 import { createDesktopSharedChannelSync } from "./workspaces/desktopSharedChannelSync";
 import { createWorkspaceFilesIpc } from "./ipc/workspaceFilesIpc";
 import { settingsOperations } from "./ipc/settingsOperations";
@@ -168,7 +170,7 @@ import {
 } from "./ipc/bridgeContract";
 import { CHANNELS } from "./ipc/channels";
 import { createSitesIpcHandlers } from "./ipc/sitesIpc";
-import { registerShareMountIpcHandlers } from "./ipc/shareMountIpc";
+import { createShareMountIpcHandlers } from "./ipc/shareMountIpc";
 import { createEngineYDocSessionIpc } from "./workspaces/engineYDocSessionIpc";
 import { createDocumentProjectionWorker } from "./workspaces/documentProjection";
 import { createLocalChangeAuthor } from "@dohc/workspace-core";
@@ -360,7 +362,7 @@ import {
 import { createServerAccountDeletion } from "./workspaces/serverAccountDeletion";
 import { registerServerAccountIpc } from "./ipc/serverAccountIpc";
 import { createJoinedWorkspaceRunner } from "./workspaces/createJoinedWorkspace";
-import { registerRelaySharesIpcHandlers } from "./ipc/relaySharesIpc";
+import { createRelaySharesIpcHandlers } from "./ipc/relaySharesIpc";
 import { requireCredentials } from "./workspaces/credentialScopedOperation";
 import { createExactMountOperationRunner } from "./workspaces/exactMountOperation";
 import { CredentialSessionCache } from "./workspaces/credentialSessionCache";
@@ -6077,11 +6079,9 @@ function registerIpcHandlers(): void {
 
   windowIpc.registerExternalUrl();
 
-  registerShareHandoffIpcHandlers<IpcMainInvokeEvent>({
-    registerHandler: handleIpc,
-    assertTrustedSender,
+  registerOperations(operationBoundary, shareHandoffOperations, createShareHandoffIpcHandlers({
     shareHandoffRedemption,
-  });
+  }));
 
   registerCloudIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
     registerHandler: handleIpc,
@@ -6106,15 +6106,12 @@ function registerIpcHandlers(): void {
     openWorkspaceActivity, completeWorkspaceJoinBootstrap, desktopMarks,
   });
 
-  registerRelaySharesIpcHandlers<
+  const relayShareHandlers = createRelaySharesIpcHandlers<
     WebContents,
     IpcMainInvokeEvent,
     DesktopRendererWorkspaceOperation["workspace"],
     DesktopRendererWorkspaceOperation
   >({
-    registerHandler: handleIpc,
-    assertTrustedSender,
-    withRendererWorkspaceOperation,
     remoteForWorkspace,
     currentCredentialGeneration: () => credentialCacheGeneration,
     currentCredentials: () => cachedCredentials,
@@ -6147,6 +6144,7 @@ function registerIpcHandlers(): void {
     sharesChanged: (workspaceId) => { receivedShareAcquisition.invalidate(); invalidateHistoryLabels(workspaceId); shareRosters.sharesChanged(workspaceId); },
     reconcileReceivedShares,
   });
+  registerOperations(operationBoundary, relayShareOperations, relayShareHandlers);
 
   let installedAppCompiler: ReturnType<typeof createInstalledAppCompiler> | undefined;
   const ownerPublicationDependencies = {
@@ -6369,9 +6367,8 @@ function registerIpcHandlers(): void {
       });
     });
   });
-  handleIpc(CHANNELS.dataset, async (event, raw: unknown) => {
-    assertTrustedSender(event);
-    return DatasetResult.parse(await datasetHandler(event.sender, DatasetRequest.parse(raw)));
+  registerOperations(operationBoundary, datasetOperations, {
+    dataset: (request, { event }) => datasetHandler(event.sender, request),
   });
   const cliDataset = createDatasetHandler<string, DesktopRendererWorkspaceOperation["workspace"], WorkspaceAuthorityOperation<RegistryEntry, DesktopWorkspaceAuthorityState>>({
     ...datasetDependencies, withWorkspaceOperation: (_caller, workspaceId, work) => workspaceAuthorities.withOperation(workspaceId, work),
@@ -6448,16 +6445,13 @@ function registerIpcHandlers(): void {
   });
   ownerAppResponsesForCli=input=>cliOwnerResponses(input.workspaceId,input);
   const {
+    handlers: sharedChannelHandlers,
     assertShareNotHeldElsewhere,
     reserveAndPullSharedChannelForWorkspace,
     endWorkspaceJoinedChannel,
-  } = registerSharedChannelsIpcHandlers<
-    WebContents, IpcMainInvokeEvent,
+  } = createSharedChannelsIpc<
     DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation
   >({
-    registerHandler: handleIpc,
-    assertTrustedSender,
-    withRendererWorkspaceOperation,
     requireEngineCapture,
     assertWritableWorkspace,
     linkedChatStoreFor,
@@ -6487,6 +6481,7 @@ function registerIpcHandlers(): void {
     sharesChanged: (workspaceId) => { receivedShareAcquisition.invalidate(); invalidateHistoryLabels(workspaceId); shareRosters.sharesChanged(workspaceId); },
     reconcileReceivedShares,
   });
+  registerOperations(operationBoundary, sharedChannelOperations, sharedChannelHandlers);
 
   const agentRunsIpc = createAgentRunsIpc<WebContents, IpcMainInvokeEvent, RegistryEntry, DesktopRendererWorkspaceOperation>({
     detectAgentTools: (workspaceRoot: string, signal: AbortSignal) =>
@@ -6660,9 +6655,8 @@ function registerIpcHandlers(): void {
     canReleaseRuns: workspaceId => findWorkspace(workspaceId)?.remote !== undefined && !!cachedCredentials?.relayUrl,
   }).retryServerReleases;
 
-  shareDirectWrites = registerShareProposalsIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
-    registerHandler: handleIpc,
-    assertTrustedSender, withRendererWorkspaceOperation, warmCredentialCache,
+  const shareProposalsIpc = createShareProposalsIpc<DesktopRendererWorkspaceOperation>({
+    warmCredentialCache,
     withWorkspaceAuthority: (workspaceId, work) =>
       workspaceAuthorities.withAuthority(workspaceId, (lease) => work({
         get workspace() { return canonicalWorkspaceFor(lease); },
@@ -6680,6 +6674,8 @@ function registerIpcHandlers(): void {
     listMyShareProposals, withdrawShareProposal, withStaleSensitiveWorkspaceOperation,
     shareViewFiles, receivedShareEngine,
   });
+  shareDirectWrites = shareProposalsIpc;
+  registerOperations(operationBoundary, shareProposalOperations, shareProposalsIpc.handlers);
 
   registerSharedViewsIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation, DesktopWorkspaceAuthorityLease>({
     registerHandler: handleIpc,
@@ -6710,19 +6706,10 @@ function registerIpcHandlers(): void {
   // the effective-policy floor — mounted content cannot leak into the
   // host's history or its synced copy.
 
-  registerShareMountIpcHandlers({
-    registerHandler: handleIpc,
-    assertTrustedSender,
-    withWorkspaceOperation: (event, workspaceId, work) =>
-      withRendererWorkspaceOperation(
-        event.sender,
-        workspaceId,
-        "Share update stopped because this window changed workspaces.",
-        work,
-      ),
+  registerOperations(operationBoundary, shareMountOperations, createShareMountIpcHandlers({
     assertWritableWorkspace,
     commands: shareMountCommands,
-  });
+  }));
 
   registerDesktopDatabaseIpcHandlers<
     WebContents,

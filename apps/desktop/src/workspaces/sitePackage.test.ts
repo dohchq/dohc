@@ -2223,6 +2223,12 @@ describe("listSitePackages", () => {
   it("refuses to share a manifest whose path exceeds the relay selector's character bound", async () => {
     const segment = "a".repeat(250);
     const nestedDir = join(root, "long-path", segment, segment, segment, segment, segment);
+    if (process.platform === "darwin") {
+      // macOS limits a whole path to 1024 bytes, so no file a site can read
+      // lies past the bound there.
+      await expect(mkdir(nestedDir, { recursive: true })).rejects.toMatchObject({ code: "ENAMETOOLONG" });
+      return;
+    }
     await mkdir(nestedDir, { recursive: true });
     await writeFile(
       join(root, "long-path", "index.html"),

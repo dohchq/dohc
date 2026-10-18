@@ -20,7 +20,7 @@ describe("chats result decoder rejection", () => {
       triggerMessageId: "trigger",
       command: "agent",
       startedAtMs: 1,
-      failureNotePosted: false,
+      failureHandled: false,
     };
     const wireRuns: { [key: string]: JsonValue | undefined } = {};
     for (const messageId of ["__proto__", "constructor"]) {
