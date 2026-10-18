@@ -2,8 +2,8 @@
 //! this module owns the physical full-body representation.
 use rusqlite::{Connection, Row, RowIndex};
 
-/// Body projection for a trusted SQL table alias. Keep joined list hydration
-/// in its outer statement; the chunk backend changes this expression.
+/// Body column for a trusted SQL table alias, marking the joined list reads.
+/// Chunked bodies can't be read in SQL; that switch must rewrite these callers.
 pub fn body_column(alias: &str) -> String {
     format!("{alias}.text")
 }
