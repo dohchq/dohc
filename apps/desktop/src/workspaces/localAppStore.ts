@@ -46,7 +46,7 @@ export function createLocalAppStore(options: {
   const root = (appRoot: string) => db.prepare("SELECT revision,active_kind,active_publication_id FROM local_app_roots WHERE app_root=?").get(appRoot) as Root | undefined;
   function nextRevision(appRoot: string) {
     const next = (root(appRoot)?.revision ?? 0) + 1;
-    if (!Number.isSafeInteger(next) || next < 1) throw new Error("Invalid app authority revision.");
+    if (!Number.isSafeInteger(next) || next < 1) throw new Error("This app's stored authorityRevision cannot advance.");
     return next;
   }
   function writeRoot(row: Pick<LocalAppRow, "appRoot" | "kind" | "publicationId">, revision: number, active: boolean) {
@@ -55,7 +55,7 @@ export function createLocalAppStore(options: {
   }
   function assertCanAdvance(revisions: string, values: string[] = []) {
     if (db.prepare('SELECT 1 FROM (' + revisions + ') WHERE revision<0 OR revision>=? LIMIT 1').get(...values, Number.MAX_SAFE_INTEGER))
-      throw new Error("Invalid app authority revision.");
+      throw new Error("This app's stored authorityRevision cannot advance.");
   }
   options.transaction(() => {
     db.exec("CREATE TABLE IF NOT EXISTS local_app_roots(app_root TEXT PRIMARY KEY,revision INTEGER NOT NULL,active_kind TEXT,active_publication_id TEXT,CHECK((active_kind IS NULL)=(active_publication_id IS NULL))) STRICT");

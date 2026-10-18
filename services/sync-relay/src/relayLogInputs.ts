@@ -89,7 +89,7 @@ export function parseLogOp(value: unknown): SyncRelayLogInput {
 
 export type LogAuthorNameLookup = (userId: string) => Promise<string | null> | string | null;
 
-async function authenticatedDisplayName(actorUserId: string, lookupUserDisplayName?: LogAuthorNameLookup, fallback = actorUserId): Promise<string> {
+async function authenticatedDisplayName(actorUserId: string, lookupUserDisplayName?: LogAuthorNameLookup, fallback = "Unnamed"): Promise<string> {
   const name = (await lookupUserDisplayName?.(actorUserId))?.trim() || fallback;
   try {
     parseLiveAuthorSnapshot([{kind: "human", humanId: actorUserId, humanName: name}]);
@@ -133,15 +133,17 @@ export async function parseNamedShareLogOps(
   return ops;
 }
 
-function ordinaryAuthorContext(payload: unknown): LiveAuthorContext | undefined {
+function ordinaryAuthorContext(payload: unknown, opKind: string): LiveAuthorContext | undefined {
   const fields = payload as Record<string, unknown>;
+  if (opKind === "moment.append" && (Object.hasOwn(fields, "settlementReference") ||
+    Object.hasOwn(fields, "attributionUnavailable") || fields.authors != null)) return undefined;
   if (!Object.hasOwn(fields, "authorContext")) return undefined;
   try {
     const context = parseLiveAuthorContext(fields.authorContext);
     if (context.agent) parseLiveAuthorSnapshot([{kind: "agent", ...context.agent}]);
     return context;
   } catch {
-    throw badRequest("invalid ydoc.update authorContext");
+    throw badRequest(`invalid ${opKind} authorContext`);
   }
 }
 
@@ -151,11 +153,30 @@ export async function parseAuthenticatedLogOps(
   lookupUserDisplayName?: LogAuthorNameLookup,
 ): Promise<SyncRelayLogInput[]> {
   const ops = values.map(value => parseLogOp(value));
-  const contexts = ops.map((op, index) => op.opKind === "ydoc.update"
-    ? ordinaryAuthorContext((values[index] as Record<string, unknown>).payload)
+  const contexts = ops.map((op, index) => op.opKind === "ydoc.update" || op.opKind === "moment.append"
+    ? ordinaryAuthorContext((values[index] as Record<string, unknown>).payload, op.opKind)
     : undefined);
+  // Consume ordinary recording claims even if queued moment authors were
+  // repaired. Main's live, declared-agent and settlement contexts stay intact.
+  for (const [index, op] of ops.entries()) {
+    const payload = (values[index] as {payload: Record<string, unknown>}).payload;
+    const context = payload.authorContext as {kind?: unknown; accountId?: unknown; agent?: unknown} | null | undefined;
+    if (context?.kind !== "account" || context.agent != null) continue;
+    if (op.opKind === "moment.append" && (Object.hasOwn(payload, "settlementReference") ||
+      Object.hasOwn(payload, "attributionUnavailable"))) continue;
+    const attribution = payload.attribution as {actorKind?: unknown} | null | undefined;
+    if (op.opKind !== "moment.append" && !(op.opKind === "ydoc.update" && payload.isBaseState === false &&
+      payload.actorOriginId === context.accountId && attribution?.actorKind === "human")) continue;
+    const {authorContext: _claim, ...stored} = payload;
+    op.payloadJson = stableJsonStringify(stored);
+  }
   if (!contexts.some(context => context?.kind === "account" && context.accountId === actorUserId)) return ops;
-  const humanName = await authenticatedDisplayName(actorUserId, lookupUserDisplayName);
+  let humanName: string;
+  try {
+    humanName = await authenticatedDisplayName(actorUserId, lookupUserDisplayName);
+  } catch {
+    return ops;
+  }
   for (const [index, context] of contexts.entries()) {
     if (context?.kind !== "account" || context.accountId !== actorUserId) continue;
     ops[index]!.admittedAuthorSnapshot = parseLiveAuthorSnapshot([

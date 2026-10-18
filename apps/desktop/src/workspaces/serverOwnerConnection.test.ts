@@ -39,7 +39,7 @@ const refusal = {shareId: "share", paths: ["docs"], code: "live_document_limit",
 it("reports an older relay's non-JSON refusal before parsing a success body", async () => {
   const f=fixture(), session=(await f.connection.connect(f.workspace,new AbortController().signal))!;
   f.fetch.mockResolvedValueOnce(new Response("Bad request",{status:400}));
-  await expect(session.retire({objectId:"object",currentPath:"old.md",restoreFenceGeneration:0},new AbortController().signal)).rejects.toThrow("Owner live retirement failed");
+  await expect(session.retire({objectId:"object",currentPath:"old.md",restoreFenceGeneration:0},new AbortController().signal)).rejects.toThrow("dohc could not stop live editing. Try again.");
   await expect(session.documents(new AbortController().signal)).resolves.toEqual({ok:true,documents:[]});
 });
 it.each(["restore-fenced", "restore-in-progress"])("keeps Stop pending for %s and retries the successor generation", async code => {

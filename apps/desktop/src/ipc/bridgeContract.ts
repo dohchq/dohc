@@ -448,6 +448,7 @@ export const RetryOwnerLiveSharePayload = WorkspaceIdPayload.extend({shareId: OW
 export type RetryOwnerLiveSharePayload = z.infer<typeof RetryOwnerLiveSharePayload>;
 
 export const ListWorkspaceFilesPayload = WorkspaceIdPayload.extend({
+  filePath: PATH_STRING.optional(),
   // Activity refreshes may reuse main's last complete listing. Every other
   // caller omits this and forces a disk/share walk, so direct mutations and
   // the Explorer's explicit refresh cannot observe a pre-watcher cache.
@@ -1600,10 +1601,17 @@ const SHARED_AUTHOR_ID = z.string().min(1).refine(
 // Display only. This token grants no workspace or author authority.
 export const ActorPresentation = z.object({
   group: z.string(),
-  hue: z.enum(["rust", "amber", "teal", "blue", "indigo", "plum", "rose", "olive"]).nullable(),
+  hue: z.enum(["rust", "amber", "teal", "blue", "indigo", "plum", "rose"]).nullable(),
   self: z.boolean(),
 });
 export type ActorPresentation = z.infer<typeof ActorPresentation>;
+export const AgentColorChangedEvent = z.object({
+  workspaceId: WorkspaceIdPayload.shape.workspaceId,
+  group: z.string(),
+  hue: ActorPresentation.shape.hue,
+}).strict();
+export type AgentColorChangedEvent = z.infer<typeof AgentColorChangedEvent>;
+export const SetAgentColorPayload = AgentColorChangedEvent;
 
 // A Collection automation's name or its Collection's, as History reads it.
 export const AUTOMATION_AUTHOR_TEXT_MAX = 4096;
@@ -3295,7 +3303,7 @@ const SitePackageInfo = z
     ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "shared site roots must stay inside their authority mount root",
+        message: "Shared app folders must stay inside the shared folder.",
         path: ["root"],
       });
     }
@@ -7215,6 +7223,7 @@ export interface DohcDesktopBridge
   detectAgentTools(payload: AgentRunPayload): Promise<AgentToolsResult>;
   setTitlebarTheme(payload: SetTitlebarThemePayload): Promise<void>;
   onWindowFullScreen(listener: (event: WindowFullScreenEvent) => void): () => void;
+  onAgentColorChanged(listener: (event: AgentColorChangedEvent) => void): () => void;
   onUserSettingsChanged(
     listener: (result: DesktopUserSettingsResult) => void,
   ): () => void;

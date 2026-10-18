@@ -19,6 +19,7 @@ import type { WorkspaceFileListingScope } from "./workspaceFileListingScope";
 export function createOwnedWorkspaceReads(input: {
   workspace: ShareViewFilesWorkspaceRecord;
   listFiles(scope?: WorkspaceFileListingScope): Promise<WorkspacePathListing>;
+  lookupFiles(paths: readonly string[]): Promise<WorkspacePathListing>;
   repairProjection(target: ShareViewFilesTarget): Promise<void>;
   onSearchSourceFailure?: (
     source: OwnedWorkspaceSearchSource,
@@ -50,6 +51,7 @@ export function createOwnedWorkspaceReads(input: {
 
   return createOwnedWorkspaceReadPort({
     listFiles: input.listFiles,
+    lookupFiles: input.lookupFiles,
     hasShareState: workspaceHasReceivedShareState(input.workspace),
     searchSources,
     repairProjection: input.repairProjection,

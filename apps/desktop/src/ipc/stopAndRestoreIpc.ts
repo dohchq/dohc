@@ -268,7 +268,7 @@ export function registerStopAndRestoreIpc<
     const stillPending = async () => {
       if (active.released) return false;
       const current = dependencies.currentAutomations(workspaceId);
-      if (current !== automations) throw new Error("This workspace was closed.");
+      if (current !== automations) throw new Error("This workspace was closed. Open it again.");
       const entry = (await current.pendingRestores()).find(entry => entry.id === retentionId);
       active.released = !entry?.session || entry.serverRelease === true;
       return !active.released;

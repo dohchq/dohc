@@ -2,7 +2,7 @@ import { chatOperations } from "./chatOperations";
 import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createDesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
-import { createTestScratch } from "../workspaces/testTemp";
+import { createTestScratch, createTestScratchSync } from "../workspaces/testTemp";
 import { StartChannelThreadResult, SendChatMessageResult, ListChatMessagesResult, ListChatThreadDecisionsResult } from "./bridgeContract";
 import { workspaceFileRefs } from "../workspaces/workspaceFileReferenceScopes";
 import { createEngineFileResolver, workspaceFileRef } from "../workspaces/resolveEngineFiles";
@@ -29,6 +29,7 @@ type Event = { sender: { trusted: boolean } };
 type Operation = { workspace: RegistryEntry; assertCurrent(): void };
 
 function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatStore) {
+  const stateDirectory = createTestScratchSync("chats-ipc-settings-");
   const workspace: RegistryEntry = {
     workspaceId: "workspace", rootPath: "/workspace", kind: "personal", mode: "local-first",
   };
@@ -176,6 +177,7 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
     assertTrustedSender, chatScope, requireEngineCapture, linkedChatStoreFor, chatWrites,
     assertWritableWorkspace: value => { if (shareViewIsPresent(value.shareView)) throw new Error("Read-only workspace"); },
     readWorkspace: () => workspace,
+    stateDir: () => stateDirectory,
     warmCredentialCache, localUserId: () => "owner",
     localInstallationId: () => "local-owner", currentCredentials: () => null,
     chatRelayIdentityFor,
@@ -449,7 +451,7 @@ describe("registered chat reads and reader-local state", () => {
     const entered = deferred();
     test.openWorkspaceActivity.mockImplementationOnce(() => { entered.resolve(); return opened.promise; });
     const read = test.invoke(chatOperations.listChatMessages.channel, { workspaceId: "workspace", threadId: "thread" });
-    const rejected = expect(read).rejects.toThrow("retired workspace authority");
+    const rejected = expect(read).rejects.toThrow("This workspace was closed. Open it again.");
     await entered.promise;
     const retired = test.authorities.invalidate("workspace");
     opened.resolve();
@@ -464,7 +466,7 @@ describe("registered chat reads and reader-local state", () => {
     await test.authorities.invalidate("workspace");
     const successor = test.authorities.acquire("workspace");
     successor.release();
-    await expect(test.chatScope.chatFileObjectId(scope, "notes/a.md")).rejects.toThrow("retired workspace authority");
+    await expect(test.chatScope.chatFileObjectId(scope, "notes/a.md")).rejects.toThrow("This workspace changed while this ran. Try again.");
     expect(test.resolveEngineFiles).not.toHaveBeenCalled();
   });
 });
@@ -774,7 +776,7 @@ describe("registered chat channel and read-state boundaries", () => {
   it.each([
     { name: "untrusted sender", payload: { workspaceId: "workspace", threadId: "thread", upToSequence: 4 }, untrusted: true, error: "Untrusted sender" },
     { name: "invalid payload", payload: { workspaceId: "workspace" }, untrusted: false, error: /Invalid input/u },
-    { name: "missing workspace", payload: { workspaceId: "missing-workspace", threadId: "thread", upToSequence: 4 }, untrusted: false, error: "Unknown workspace: missing-workspace" },
+    { name: "missing workspace", payload: { workspaceId: "missing-workspace", threadId: "thread", upToSequence: 4 }, untrusted: false, error: "This workspace is not open. Open it again." },
   ])("refuses reader-local state for $name before accessing chat scope", async ({ payload, untrusted, error }) => {
     const test = fixture("view");
     const result = untrusted

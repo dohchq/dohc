@@ -32,6 +32,7 @@ export const CAPABILITIES = {
   "settings.user.read": capability("Read this computer's user settings.", {ipc: ["getUserSettings"]}),
   "settings.user.reload": capability("Reload and apply this computer's user settings file.", {ipc: ["reloadUserSettings"]}),
   "settings.user.write": capability("Save changes to this computer's user settings.", {ipc: ["setUserSettings"]}),
+  "agent.color.set": capability("Choose a personal color for an agent shown in the admitted workspace.", {ipc: ["setAgentColor"]}),
   "app.pin.set": capability("Pin or unpin an app in this computer's sidebar.", {ipc: ["setAppPinned"]}),
   "settings.user.reset": capability("Reset this computer's user settings.", {ipc: ["resetUserSettings"]}),
   "settings.user.path.read": capability("Read the path of this computer's user settings file.", {ipc: ["getUserSettingsFilePath"]}),

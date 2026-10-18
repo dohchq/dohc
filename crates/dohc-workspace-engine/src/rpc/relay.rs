@@ -53,7 +53,9 @@ pub(crate) struct PendingCursor {
 #[derive(Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct RelayOpenParams {
+    #[serde(default)]
     base_url: String,
+    socket_path: Option<std::path::PathBuf>,
     bearer_token: String,
     #[cfg(debug_assertions)]
     #[serde(default)]
@@ -61,9 +63,26 @@ pub(super) struct RelayOpenParams {
 }
 
 impl RelayOpenParams {
+    pub(super) fn validate_transport(&self, replica: bool) -> Result<(), WireError> {
+        if self.socket_path.is_some() && !replica {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "relay.socketPath requires replica mode",
+            ));
+        }
+        if self.socket_path.is_none() && self.base_url.is_empty() {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "relay.baseUrl is required",
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn configuration(&self) -> RelayConfiguration {
         RelayConfiguration {
             base_url: self.base_url.clone(),
+            socket_path: self.socket_path.clone(),
             bearer_token: self.bearer_token.clone(),
             #[cfg(debug_assertions)]
             allow_insecure_loopback_for_tests: self.allow_insecure_loopback_for_tests,

@@ -45,6 +45,45 @@ it("drains queued writes after a view loses a restore race",async()=>{
   finally{await supervisor.close();}
 });
 
+it("refreshes a fenced pending view after its in-flight drain", async () => {
+  const {storage} = await fixture();
+  vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
+  let release!: () => void, entered!: () => void, pulls = 0;
+  const held = new Promise<void>(resolve => {release = resolve;});
+  const started = new Promise<void>(resolve => {entered = resolve;});
+  const stored = vi.spyOn(storage, "storeReplicaCurrentView");
+  const db = inspectDatabase(storagePath(storage));
+  const selector = db.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE workspace_id='w'");
+  const errors: unknown[] = [];
+  const supervisor = createReplicaSupervisor({storage, storeRoot: await tempRoot("flush-during-drain"),
+    onError: (_, error) => errors.push(error), startChild: async input => ({
+      close: async () => {},
+      pull: async () => {if (++pulls === 3) {entered(); await held;}},
+      currentView: async () => {
+        const text = String(pulls), sha256 = createHash("sha256").update(text).digest("hex");
+        return {...await emptyCurrentView(input)(), files: [{versionId: "main", objectId: "a", path: "a.txt",
+          contentKind: "text" as const, sha256, byteLength: 1, lineageClaimId: null, restoreGeneration: null}],
+          texts: [{sha256, text}]};
+      },
+    })});
+  let draining: Promise<void> | undefined;
+  try {
+    await supervisor.activate("w");
+    await supervisor.activate("w");
+    expect(stored).toHaveBeenCalledTimes(1);
+    draining = supervisor.activate("w"); await started;
+    selector.run('{"paths":["blocked"],"versionId":"main"}');
+    vi.advanceTimersByTime(2000); await Promise.resolve();
+    expect(stored).toHaveBeenCalledTimes(1);
+    selector.run('{"paths":[],"versionId":"main"}');
+    release(); await draining; await Promise.resolve();
+    expect(stored).toHaveBeenCalledTimes(2);
+    expect(pulls).toBe(4);
+    expect(stored.mock.calls[1]![1].texts).toEqual([expect.objectContaining({text: "4"})]);
+    expect(errors).toEqual([]);
+  } finally {release(); await draining; await supervisor.close();}
+});
+
 async function fixture(workspaceId = "w") {
   const storage = await testStorage();
   const seed = (id: string) => {
@@ -195,16 +234,17 @@ it("coalesces an append during pull and never starts two children for one worksp
 it("revokes a starting child, waits for it, and deletes its private directory", async () => {
   const { storage } = await fixture();
   const entered = deferred(), release = deferred();
-  let storeDir = "", bearer = "";
+  let storeDir = "", bearer = "", relayHandler!: (request: Request) => Promise<Response>;
   const pull = vi.fn(async () => {}), close = vi.fn(async () => {});
   const supervisor = createReplicaSupervisor({ storage, storeRoot: await tempRoot("startup"), startChild: async input => {
-    storeDir = input.storeDir; bearer = input.lease.bearer; entered.resolve(); await release.promise; return { currentView: emptyCurrentView(input), pull, close };
+    storeDir = input.storeDir; bearer = input.lease.bearer; relayHandler = input.relayHandler; entered.resolve(); await release.promise; return { currentView: emptyCurrentView(input), pull, close };
   } });
   const activation = supervisor.activate("w");
   const rejected = expect(activation).rejects.toThrow("standing ended");
   await entered.promise;
   storage.revokeShareGrant({ shareId: "w", grantId: "w", revokedAtMs: 2 });
-  expect((await supervisor.handle(new Request("https://relay.test/sync/w/bootstrap", { headers: { authorization: `Bearer ${bearer}` } }))).status).toBe(404);
+  expect((await relayHandler(new Request("https://relay.test/sync/w/bootstrap", { headers: { authorization: `Bearer ${bearer}` } }))).status).toBe(404);
+  expect(supervisor).not.toHaveProperty("handle");
   const shutdown = supervisor.close();
   expect(existsSync(storeDir)).toBe(true);
   release.resolve(); await rejected; await shutdown;
@@ -288,7 +328,7 @@ it("refuses unsupported production hosts and invalid limits before starting anyt
   const { storage } = await fixture();
   expect(() => createReplicaSupervisor({ storage, storeRoot: "relative", startChild: async input => { throw Error(); } })).toThrow("absolute");
   expect(() => createReplicaSupervisor({ storage, storeRoot: resolve("private"), maxRunning: 0, startChild: async input => { throw Error(); } })).toThrow("budget");
-  if (process.platform !== "linux") expect(() => createReplicaEngineStarter({ engineExecutable: "C:/daemon.exe", baseUrl: "https://relay.test" })).toThrow("Linux");
+  expect(() => createReplicaEngineStarter({ engineExecutable: "C:/daemon.exe" })).toThrow(/development/i);
 });
 
 it("sweeps stores from a prior process before admitting a child", async () => {

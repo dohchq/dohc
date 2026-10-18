@@ -42,7 +42,7 @@ import {
 const PLAIN_TEXT_FIELD = 'plainText'
 const FRONTMATTER_FIELD = 'frontmatter'
 const META_FIELD = 'meta'
-const DOHC_SCHEMA_VERSION = 1
+export const DOHC_SCHEMA_VERSION = 1
 const PLAIN_TEXT_CONTENT_KIND = 'plain-text'
 const PARSE_SENTINEL_RE = /\uE000DOHC_PARSE_\d+\uE001/gu
 // The block escapes the serializer writes anywhere: references the parser

@@ -189,7 +189,7 @@ async function updateReceived<Row>(
 ): Promise<void> {
   for (let recorded = false; ; recorded = true) {
     const workspace = findWorkspace(workspaceId);
-    if (!workspace) throw new Error(`Unknown workspace: ${workspaceId}`);
+    if (!workspace) throw new Error("This workspace is not open. Open it again.");
     const current = stored(workspace);
     const next = update(current);
     if (next === current) return;

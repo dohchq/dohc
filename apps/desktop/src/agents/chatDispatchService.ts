@@ -1343,7 +1343,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   ): Promise<void> {
     await enqueue(workspaceId, async () => {
       const workspace = options.workspaceFor(workspaceId);
-      if (!workspace) throw new Error(`Unknown workspace: ${workspaceId}`);
+      if (!workspace) throw new Error("This workspace is not open. Open it again.");
       await options.dispatchStoreFor(workspace).setThreadDispatchPaused({
         workspaceId,
         threadId,
@@ -1360,7 +1360,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     threadId: string,
   ): Promise<ChatDispatchThreadState> {
     const workspace = options.workspaceFor(workspaceId);
-    if (!workspace) throw new Error(`Unknown workspace: ${workspaceId}`);
+    if (!workspace) throw new Error("This workspace is not open. Open it again.");
     const dispatch = options.dispatchStoreFor(workspace);
     const [pauseState, pending] = await Promise.all([
       dispatch.getThreadDispatchPauseState(workspaceId, threadId),
