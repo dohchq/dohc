@@ -49,8 +49,8 @@ pub use bounds::{
 };
 pub use capture::{
     BatchIngestResult, CaptureApplyResult, CaptureError, CaptureSink, CapturedIngest,
-    HeldObservation, IngestOutcome, apply_reconcile_plan, apply_reconcile_plan_cancellable,
-    apply_then_ack,
+    HeldObservation, IngestOutcome, RespelledRetire, apply_reconcile_plan,
+    apply_reconcile_plan_cancellable, apply_then_ack,
 };
 pub use diff::{ManifestEntry, ScanDiff, ScanManifest, diff_scans};
 pub use error::FilesError;
@@ -73,7 +73,8 @@ pub use policy::{
 };
 pub use reconcile::{
     AbsenceProbe, CaptureOp, DEGRADED_RESCAN_BACKOFF, IngestReason, MAX_QUARANTINED_PATHS,
-    ReconcileController, ReconcilePlan, ReconcileRun, ScanGeneration, StdAbsenceProbe,
+    ReconcileController, ReconcilePlan, ReconcileRun, Respelling, ScanGeneration, StdAbsenceProbe,
+    stored_under_other_spelling,
 };
 pub use scan::{
     FailedPath, FileEntry, ScanIoFaultInjector, ScanIoOperation, ScanListing, ScanOutcome, Scanner,
