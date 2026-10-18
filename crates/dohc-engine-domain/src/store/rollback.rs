@@ -12,9 +12,9 @@ use crate::error::DomainError;
 use crate::records::{
     MomentOp, MomentRecord, RollbackTextFileMutation, SnapshotRecord, VersionRecord,
 };
+use dohc_engine_storage::text;
 use dohc_engine_storage::{
     FaultInjector, MaterializationJobSpec, Preimage, enqueue_delete_job, enqueue_job,
-    put_binary_blob,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::collections::{HashMap, HashSet};
@@ -372,10 +372,7 @@ impl<'a> VersionedTextStore<'a> {
                             reason: "text rollback snapshot has no text blob",
                         },
                     )?;
-                    tx.execute(
-                        "INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?1, ?2, ?3)",
-                        params![blob_sha256, before.text.len() as i64, before.text],
-                    )
+                    text::insert(tx, blob_sha256, before.text.len() as i64, &before.text, true)
                     .map_err(DomainError::sql_persist)?;
                 }
                 tx.execute(
@@ -593,7 +590,7 @@ fn enqueue_binary_rollback_restore(
                         reason: "binary rollback snapshot has no binary hash",
                     })?
             } else {
-                put_binary_blob(tx, before.text.as_bytes()).map_err(DomainError::from)?
+                text::put_materialization(tx, before.text.as_bytes()).map_err(DomainError::from)?
             };
             enqueue_job(
                 tx,
@@ -776,14 +773,14 @@ fn select_moment_by_order(
 ) -> Result<Option<MomentRecord>, DomainError> {
     let row = conn
         .query_row(
-            concat!("SELECT moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
+            &format!(concat!("SELECT moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
              operation, after_blob_sha256, before_present, before_blob_sha256, \
              before_latest_moment_id, metadata_origin, metadata_summary, \
              metadata_correlation_id, author_json, sync_record_only, \
              COALESCE(after_content_kind, 'text'), after_binary.sha256, \
-             COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             CASE WHEN after_text_blob.byte_length <= 131072 AND LENGTH(CAST(after_text_blob.text AS BLOB)) <= 131072 THEN after_text_blob.text END, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             CASE WHEN before_text_blob.byte_length <= 131072 AND LENGTH(CAST(before_text_blob.text AS BLOB)) <= 131072 THEN before_text_blob.text END, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length), \
-             COALESCE(LENGTH(CAST(after_text_blob.text AS BLOB)), LENGTH(after_binary.bytes)), \
-             COALESCE(LENGTH(CAST(before_text_blob.text AS BLOB)), LENGTH(before_binary.bytes)), \
+             COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             CASE WHEN after_text_blob.byte_length <= 131072 AND LENGTH(CAST({body_after_text_blob} AS BLOB)) <= 131072 THEN {body_after_text_blob} END, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             CASE WHEN before_text_blob.byte_length <= 131072 AND LENGTH(CAST({body_before_text_blob} AS BLOB)) <= 131072 THEN {body_before_text_blob} END, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length), \
+             COALESCE(LENGTH(CAST({body_after_text_blob} AS BLOB)), LENGTH(after_binary.bytes)), \
+             COALESCE(LENGTH(CAST({body_before_text_blob} AS BLOB)), LENGTH(before_binary.bytes)), \
              m.payload_before_path \
              FROM moments m \
              LEFT JOIN binary_blobs after_binary ON after_binary.sha256 = m.after_binary_sha256 \
@@ -791,7 +788,7 @@ fn select_moment_by_order(
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
                AND moment_order <= ?4 AND (sync_record_only IS NULL OR sync_record_only = 0) \
                AND ", crate::exclude_capture_recovery_sql!("m"), " \
-             ORDER BY moment_order DESC LIMIT 1"),
+             ORDER BY moment_order DESC LIMIT 1"), body_after_text_blob = text::body_column("after_text_blob"), body_before_text_blob = text::body_column("before_text_blob")),
             params![workspace_id, version_id, object_id, max_order],
             map_moment_row,
         )

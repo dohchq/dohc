@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DohcDesktopBridge, EngineYDocSaveStateEvent, RetryEngineYDocSaveResult, SaveFailureReason, SyncStatusResult } from "../../ipc/bridgeContract";
-import { PRIVACY_DENIED_WORDS } from "../../ipc/errorWords";
+import { PRIVACY_DENIED_WORDS, VOLUME_SHARES_NEW_FILES_WORDS } from "../../ipc/errorWords";
 import { deferred } from "../../testing/deferred";
 import { CsvView } from "../CsvView";
 import { documentVersionKey } from "../documentVersionKey";
@@ -191,6 +191,36 @@ describe("document save notices", () => {
     expect(notice!.action?.label).toBe("Open System Settings");
     notice!.action!.run();
     expect(openSystemPrivacySettings).toHaveBeenCalledOnce();
+  });
+
+  it("says why a live document can't be kept private on a volume that shares new files", () => {
+    const { result } = renderHook(() => {
+      const shell = useShellError("ws-1");
+      useDocumentSaveNotices({ workspaceId: "ws-1", report: shell.reportShellFailure, clear: shell.clearIdentity, open });
+      return shell.shellErrors;
+    });
+    emit(failed("volume-shares-new-files"));
+    expect(result.current).toHaveLength(1);
+    const [notice] = result.current;
+    expect(notice!.title).toBe("Couldn't save notes/a.md");
+    expect(notice!.message).toBe(VOLUME_SHARES_NEW_FILES_WORDS);
+    expect(notice!.details).toContainEqual(["Cause", "The disk adds sharing permissions to new files."]);
+    expect(notice!.retry).not.toBeNull();
+    expect(notice!.action).toBeUndefined();
+  });
+
+  it("says why a plain-text file can't be kept private on a volume that shares new files", async () => {
+    writeWorkspaceText.mockRejectedValueOnce(writeRejected("DaemonRefusalError [INTERNAL]: volume-shares-new-files"));
+    render(<Shell />);
+    const document = textFile("ws-1", ".env", "OLD=1");
+    const editor = renderHook(useAutosavedTextDraft, { initialProps: document });
+    act(() => editor.result.current.setDraft("SECRET=1"));
+    await act(async () => { await editor.result.current.saveNow(); });
+    const toast = screen.getByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("Couldn't save .env");
+    expect(toast.textContent).toContain(VOLUME_SHARES_NEW_FILES_WORDS);
+    expect(toast.textContent).not.toContain("dohc couldn't write the file.");
+    await closeEditor(editor, document);
   });
 
   it("says only what it knows when the file is not read-only", () => {

@@ -738,6 +738,68 @@ describe("raw fileWrite socket requests", () => {
 
 });
 
+describe("completed CLI writes during workspace close", () => {
+  it.each(["fileWrite", "collectionSetFields"] as const)("returns a completed %s after its workspace closes", async verb => {
+    const root = await createTestScratch("dohc-cli-completed-write-");
+    await mkdir(join(root, ".dohc"));
+    const f = fixture(root);
+    const doc = new Y.Doc();
+    let committed = false;
+    let drained: Promise<void> | undefined;
+    f.dependencies.withPhysicalWorkspaceOperation = (id, work) => f.authorities.withOperation(id, async operation => {
+      const result = await work(operation);
+      if (committed && !drained) drained = f.authorities.invalidate(id);
+      return result;
+    });
+    const write = f.capture.writeAuthoredFile.getMockImplementation()!;
+    f.capture.writeAuthoredFile.mockImplementation(async (...args) => {
+      const result = await write(...args);
+      committed = true;
+      return result;
+    });
+    const session = {
+      doc, initialUpdate: Y.encodeStateAsUpdate(doc),
+      applyDecidedLocalUpdate: async (decide: (doc: Y.Doc) => Uint8Array | null, armed?: () => void) => {
+        const update = decide(doc);
+        if (update === null) return false;
+        Y.applyUpdate(doc, update); armed?.(); return true;
+      },
+      settleNow: async () => {
+        await mkdir(join(root, "tasks"), { recursive: true });
+        await writeFile(join(root, "tasks/one.md"), `---\nstatus: ${doc.getMap("frontmatter").get("status")}\n---\n`);
+        committed = true;
+        return { materialized: true };
+      },
+      close: vi.fn(async () => undefined),
+    } as unknown as WorkspaceEngineYDocProviderSession;
+    f.dependencies.collectionEditContextFor = async (operation, person, signal) => desktopRecordEditContext({
+      person, workspaceRoot: operation.workspace.rootPath,
+      capture: { openRecordSession: async () => session, writeAuthoredFile: vi.fn() },
+      withAdapter: async () => null, onCaptureSettled: () => () => undefined, signal,
+    });
+    await f.create().startDesktopCliServer();
+    try {
+      const args = verb === "fileWrite"
+        ? { files: [{ path: "plain.txt", contentBase64: Buffer.from("finished").toString("base64"), createOnly: true }], requestId: "completed" }
+        : { recordPath: "tasks/one.md", fields: { status: "done" } };
+      const line = await handleCliRequestLine(JSON.stringify({
+        token: "a".repeat(64), protocolVersion: CLI_PROTOCOL_VERSION, verb, args: { cwd: root, actor: "agent", ...args },
+      }), "a".repeat(64), f.options());
+      const transport = cliTransportResponseSchema.parse(JSON.parse(line));
+      expect(committed).toBe(true);
+      expect(drained).toBeDefined();
+      expect(await readFile(join(root, verb === "fileWrite" ? "plain.txt" : "tasks/one.md"), "utf8"))
+        .toBe(verb === "fileWrite" ? "finished" : "---\nstatus: done\n---\n");
+      expect(transport.ok ? parseCliResult(verb, transport.result) : transport.error)
+        .toEqual(verb === "fileWrite" ? { ok: true, written: ["plain.txt"] } : { ok: true, recordPath: "tasks/one.md" });
+      if (verb === "collectionSetFields") expect(session.close).toHaveBeenCalledOnce();
+    } finally {
+      await drained;
+      await f.authorities.close();
+      doc.destroy();
+    }
+  });
+});
 describe("raw fileMove and fileDelete socket requests", () => {
   async function setup(configure?: (f: ReturnType<typeof fixture>) => void) {
     const root = await createTestScratch("dohc-cli-file-move-");
@@ -755,12 +817,12 @@ describe("raw fileMove and fileDelete socket requests", () => {
     return { ...f, root, invoke };
   }
 
-  it.each(["fileDelete", "fileMove"] as const)("returns a completed %s with Undo when the post-work authority check throws", async verb => {
+  it.each(["fileDelete", "fileMove"] as const)("returns a completed %s with Undo after its workspace closes", async verb => {
     let drained: Promise<void> | undefined;
     const f = await setup(f => {
       f.dependencies.withPhysicalWorkspaceOperation = (id, work) => f.authorities.withOperation(id, async operation => {
         const result = await work(operation);
-        // Retire after preparation returns, before withOperation's assertCurrent.
+        // Retire after preparation returns, before completion runs.
         if (vi.mocked(f.capture.changePathsAs).mock.calls.length) drained = f.authorities.invalidate(id);
         return result;
       });

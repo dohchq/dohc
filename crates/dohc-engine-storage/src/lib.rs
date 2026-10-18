@@ -42,6 +42,7 @@ pub mod materialize;
 pub mod remote_changes;
 pub mod replica;
 pub mod store;
+pub mod text;
 
 mod checkpoint;
 pub(crate) mod migration;

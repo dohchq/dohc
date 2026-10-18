@@ -338,6 +338,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "base64 0.23.1",
+ "dohc-macos-files",
  "dohc-test-scratch",
  "getrandom 0.4.3",
  "libc",
@@ -553,6 +554,7 @@ dependencies = [
  "dohc-engine-storage",
  "dohc-engine-sync",
  "dohc-engine-testkit",
+ "dohc-macos-files",
  "dohc-workspace-engine",
  "file-id",
  "fs4",

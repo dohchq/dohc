@@ -797,6 +797,24 @@ describe("engine Y.Doc IPC adapter", () => {
     }
   });
 
+  it("names a save the engine refused because the volume shares new files", async () => {
+    const root = mkdtempSync(join(tmpdir(), "dohc-save-volume-"));
+    mkdirSync(join(root, "notes"));
+    writeFileSync(join(root, "notes", "a.md"), "# A\n");
+    try {
+      const h = harness(providerSession(), { rootPath: root });
+      const sender = new FakeSender(7);
+      await h.ipc.open(sender, openPayload);
+      const refusal = new DaemonRefusalError({ code: "INTERNAL", message: "volume-shares-new-files", retry: "no" }, undefined);
+      h.capturedOpen()?.onSaveState?.("error", 1, "outcome", false, undefined, new Error("settle failed", { cause: refusal }));
+      expect(sender.sent.map(({ payload }) => (payload as { saveFailure?: unknown }).saveFailure).at(-1))
+        .toEqual({ reason: "volume-shares-new-files" });
+      await h.ipc.shutdown();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   // A Finder lock refuses writes with EPERM, as a macOS privacy refusal does,
   // but the file still reads, so it is read-only, not a privacy refusal.
   it.runIf(process.platform === "darwin")("names a file locked in Finder read-only", async () => {

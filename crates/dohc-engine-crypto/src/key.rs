@@ -282,15 +282,29 @@ pub fn create_key_file(root: &std::path::Path) -> Result<SecretDataKey, CryptoEr
     static MINT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = MINT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let temp = path.with_extension(format!("tmp-{}-{seq}", std::process::id()));
+    // On macOS a 0600 mode does not limit an ACL entry the workspace folder
+    // gives every new file, so the key takes none of them. A failed create
+    // removes what it made, so nothing is left here for a path to clean up.
+    #[cfg(target_vendor = "apple")]
+    let mut file = (|| -> std::io::Result<std::fs::File> {
+        let invalid = || std::io::Error::from(std::io::ErrorKind::InvalidInput);
+        let folder = std::fs::File::open(temp.parent().ok_or_else(invalid)?)?;
+        let name = temp.file_name().ok_or_else(invalid)?;
+        Ok(dohc_macos_files::create_uninherited(folder, name, 0o600)?.into())
+    })()
+    .map_err(|err| key_create_error(&err))?;
     let written = (|| -> std::io::Result<()> {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&temp)?;
+        #[cfg(not(target_vendor = "apple"))]
+        let mut file = {
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            options.open(&temp)?
+        };
         use std::io::Write;
         // The serialized payload carries the key; it must zeroize on drop
         // like every other buffer holding key material.
@@ -305,6 +319,16 @@ pub fn create_key_file(root: &std::path::Path) -> Result<SecretDataKey, CryptoEr
     }
     let publication = std::fs::hard_link(&temp, &path);
     finish_key_publication(&path, &temp, publication)
+}
+
+/// The error for a key file that could not be created.
+#[cfg(target_vendor = "apple")]
+fn key_create_error(err: &std::io::Error) -> CryptoError {
+    if dohc_macos_files::volume_shares_new_files(err) {
+        CryptoError::VolumeSharesNewFiles
+    } else {
+        CryptoError::KeyFileMalformed
+    }
 }
 
 fn finish_key_publication(
@@ -341,6 +365,42 @@ fn finish_key_publication(
 mod tests {
     use super::*;
     use zeroize::Zeroize;
+
+    /// A workspace folder whose ACL gives every new file read access for
+    /// everyone must not pass that grant to the data key.
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn a_folders_inherited_grant_never_reaches_the_key_file() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("key-acl").unwrap();
+        let added = std::process::Command::new("/bin/chmod")
+            .args([
+                "+a",
+                "group:everyone allow read,file_inherit,directory_inherit",
+            ])
+            .arg(scratch.path())
+            .status()
+            .unwrap();
+        assert!(added.success());
+        create_key_file(scratch.path()).unwrap();
+        let listing = std::process::Command::new("/bin/ls")
+            .arg("-le")
+            .arg(scratch.path().join(SECRET_KEY_FILE_RELATIVE))
+            .output()
+            .unwrap();
+        let listing = String::from_utf8(listing.stdout).unwrap();
+        assert_eq!(listing.lines().count(), 1, "{listing}");
+    }
+
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn a_volume_that_shares_new_files_reaches_the_caller_by_its_code() {
+        let refused = std::io::Error::other(dohc_macos_files::VolumeSharesNewFiles);
+        let err = key_create_error(&refused);
+        assert_eq!(err, CryptoError::VolumeSharesNewFiles);
+        assert_eq!(err.code(), "volume-shares-new-files");
+        let other = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert_eq!(key_create_error(&other), CryptoError::KeyFileMalformed);
+    }
 
     #[test]
     fn key_file_round_trips_byte_exact() {

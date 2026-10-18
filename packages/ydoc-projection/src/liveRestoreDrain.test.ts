@@ -1422,11 +1422,13 @@ it.each([["bootstrap","service"],["bootstrap","device"],["owner","device"]] as c
   const f=contentProposalFixture(kind,mode,kind==="owner");
   try {
     const proposed=f.store.recordStopRestoreProposal(f.input,f.encoded,policy,200),before=f.journalRows();
+    // Coverage window statements are cached per database, so the row bound lives in the cost test.
     const prepare=vi.spyOn(f.context.db,"prepare");
     const admitted=f.store.admitStopRestoreProposal(f.input,proposed.proposalDigest,policy,201);
     const provenanceReads=prepare.mock.calls.map(([sql])=>sql).filter(sql=>sql.includes("sync_relay_live_update_struct_provenance") && /^\s*SELECT/i.test(sql));
     expect(provenanceReads.length).toBeGreaterThan(0);
-    expect(provenanceReads.every(sql=>/WHERE[\s\S]*journal_cursor\s*(?:[<>=]|IN\b)/i.test(sql))).toBe(true);
+    expect(provenanceReads.every(sql=>/WHERE[\s\S]*journal_cursor\s*(?:[<>=]|IN\b)/i.test(sql) ||
+      /WHERE[\s\S]*client_id=\?[\s\S]*start_clock<=\?[\s\S]*start_clock>=/i.test(sql))).toBe(true);
     prepare.mockRestore();
     expect(admitted.phase).toBe("relay-admitted");
     expect(f.raw.prepare("SELECT admission_state FROM sync_relay_live_documents").get()!.admission_state).toBe("closed");

@@ -2,6 +2,7 @@
 
 use crate::{durable, CollabError, ContentKind, DocKey, Regime, Ydoc};
 use dohc_engine_storage::hex_sha256;
+use dohc_engine_storage::text;
 use rusqlite::{params, OptionalExtension, Transaction};
 
 /// Captured by the engine when it opens the artifact, never supplied by the renderer.
@@ -43,9 +44,9 @@ pub fn retain_owner_base_source_in_tx(
         return Err(corrupt("original owner base missing"));
     }
     let artifact: Option<(String, i64)> = tx.query_row(
-        "SELECT b.text,b.byte_length FROM moments m JOIN blobs b ON b.sha256=m.after_blob_sha256 WHERE m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND m.path=?4 AND m.moment_id=?5 AND m.after_content_kind='text' AND m.after_blob_sha256=?6",
+        "SELECT b.sha256,b.byte_length FROM moments m JOIN blobs b ON b.sha256=m.after_blob_sha256 WHERE m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND m.path=?4 AND m.moment_id=?5 AND m.after_content_kind='text' AND m.after_blob_sha256=?6",
         params![key.workspace_id,key.version_id,key.object_id,path,source.moment_id,source.blob_sha256],
-        |row| Ok((row.get(0)?,row.get(1)?)),
+        |row| Ok((text::from_row(tx, row, 0)?,row.get(1)?)),
     ).optional().map_err(durable::map_sql)?;
     let Some((text, byte_length)) = artifact else {
         return Ok(false);

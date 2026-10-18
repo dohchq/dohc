@@ -628,12 +628,7 @@ export function createWorkspaceAuthorityOwner<
       const lease = this.acquire(workspaceId);
       try {
         const operation = operationForLease(lease);
-        return Promise.resolve(work(operation))
-          .then((result) => {
-            operation.assertCurrent();
-            return result;
-          })
-          .finally(() => lease.release());
+        return Promise.resolve(work(operation)).finally(() => lease.release());
       } catch (error) {
         lease.release();
         return Promise.reject(error);
