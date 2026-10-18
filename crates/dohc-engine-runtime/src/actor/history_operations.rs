@@ -19,7 +19,7 @@ use dohc_engine_storage::{
 };
 use rusqlite::{OptionalExtension, params};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -236,9 +236,63 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         now: i64,
     ) -> Result<HistoryUndoResult, RuntimeError> {
+        let (read_ws, read_operation, read_request, read_author) = (
+            ws.clone(),
+            operation.clone(),
+            request.clone(),
+            author.clone(),
+        );
+        let (version, inputs) = self
+            .run(move |store, _| {
+                let version = VersionedTextStore::new(store)
+                    .get_active_version(&read_ws)?
+                    .version_id;
+                let inputs = store.read_with(|conn| -> Result<_, DomainError> {
+                    if undo_request_is_replay_in(
+                        conn,
+                        &read_ws,
+                        &read_operation,
+                        &read_request,
+                        read_author.as_deref(),
+                    )? {
+                        return Ok(Vec::new());
+                    }
+                    operation_moments_in(conn, &read_ws, &version, &read_operation)?
+                        .into_iter()
+                        .filter(|member| member.operation == "write")
+                        .map(|member| {
+                            Ok((
+                                member.moment_id.clone(),
+                                link_inverse_input(conn, &read_ws, &version, &member)?,
+                            ))
+                        })
+                        .collect()
+                })?;
+                Ok((version, inputs))
+            })
+            .await?;
+        let prepared = tokio::task::spawn_blocking(move || {
+            inputs
+                .into_iter()
+                .map(|(moment, (before, after, head, path))| {
+                    let text = crate::links::rewrite::inverse(&before, &after, &head).ok_or(
+                        DomainError::UndoRefused {
+                            path,
+                            reason: "link changed after rename",
+                        },
+                    )?;
+                    Ok((
+                        moment,
+                        (dohc_engine_storage::hex_sha256(head.as_bytes()), text),
+                    ))
+                })
+                .collect::<Result<HashMap<_, _>, DomainError>>()
+        })
+        .await
+        .map_err(|_| RuntimeError::ActorUnavailable)??;
         self.run(move |store, cache| {
             with_local_file_mutation_cache_reset(cache, || {
-                commit_history_undo_on_store(
+                commit_history_undo_with_inverse_on_store(
                     store,
                     &ws,
                     &operation,
@@ -247,6 +301,18 @@ impl ActorHandle {
                     &root,
                     faults.as_ref(),
                     now,
+                    |conn, ws, current_version, member| {
+                        let refuse = || DomainError::UndoRefused {
+                            path: member.path.clone(), reason: "link changed after rename",
+                        };
+                        let (sha, text) = prepared.get(&member.moment_id).ok_or_else(refuse)?;
+                        let current: String = conn.query_row(
+                            "SELECT blob_sha256 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                            params![ws, current_version, member.object_id], |row| row.get(0),
+                        ).map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+                        if current_version != version || &current != sha { return Err(refuse()); }
+                        Ok(text.clone())
+                    },
                 )
             })
         })
@@ -404,20 +470,30 @@ pub(super) fn check_path_ownership(
     Ok(())
 }
 
-fn link_write_inverse(
+fn link_inverse_input(
     conn: &rusqlite::Connection,
     ws: &str,
     version: &str,
     member: &OperationMoment,
-) -> Result<String, DomainError> {
-    let (before, after, head, path): (String, String, String, String) = conn.query_row(
+) -> Result<(String, String, String, String), DomainError> {
+    conn.query_row(
         "SELECT b.text,a.text,h.text,s.path FROM moments m
          JOIN blobs b ON b.sha256=m.payload_before_blob_sha256
          JOIN blobs a ON a.sha256=m.payload_after_blob_sha256
          JOIN snapshots s ON s.workspace_id=m.workspace_id AND s.version_id=?2 AND s.object_id=m.object_id
          JOIN blobs h ON h.sha256=s.blob_sha256 WHERE m.workspace_id=?1 AND m.moment_id=?3",
         params![ws, version, member.moment_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-    ).map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+    ).optional().map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?
+        .ok_or(DomainError::UndoRefused { path: member.path.clone(), reason: "linking document removed" })
+}
+
+fn link_write_inverse(
+    conn: &rusqlite::Connection,
+    ws: &str,
+    version: &str,
+    member: &OperationMoment,
+) -> Result<String, DomainError> {
+    let (before, after, head, path) = link_inverse_input(conn, ws, version, member)?;
     crate::links::rewrite::inverse(&before, &after, &head).ok_or(DomainError::UndoRefused {
         path,
         reason: "link changed after rename",
@@ -451,6 +527,34 @@ pub(super) fn commit_history_undo_on_store(
     faults: &dyn FaultInjector,
     now: i64,
 ) -> Result<HistoryUndoResult, RuntimeError> {
+    commit_history_undo_with_inverse_on_store(
+        store,
+        ws,
+        operation,
+        request,
+        author,
+        root,
+        faults,
+        now,
+        link_write_inverse,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn commit_history_undo_with_inverse_on_store<W>(
+    store: &mut EngineStore,
+    ws: &str,
+    operation: &str,
+    request: &str,
+    author: Option<&str>,
+    root: &Path,
+    faults: &dyn FaultInjector,
+    now: i64,
+    mut inverse_write: W,
+) -> Result<HistoryUndoResult, RuntimeError>
+where
+    W: FnMut(&rusqlite::Connection, &str, &str, &OperationMoment) -> Result<String, DomainError>,
+{
     let version_id = VersionedTextStore::new(store)
         .get_active_version(ws)?
         .version_id;
@@ -557,7 +661,7 @@ pub(super) fn commit_history_undo_on_store(
             request,
             author,
             now,
-            |tx, member| link_write_inverse(tx, ws, &version_id, member),
+            |tx, member| inverse_write(tx, ws, &version_id, member),
             |tx, m| {
                 let (path, text, kind, sha): (String, Option<String>, String, String) = tx
                     .query_row(
