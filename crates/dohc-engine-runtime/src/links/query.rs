@@ -227,7 +227,7 @@ impl ActorHandle {
                 &workspace,
                 &version,
                 &object,
-                &(longest.clone(), usize::MAX, false)
+                &(longest.clone(), usize::MAX, false),
             )?)
             .to_string()
             .len();
