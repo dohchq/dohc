@@ -245,6 +245,7 @@ fn sparse_five_thousand_file_query_stage_profile() {
                     params![format!("note-{n:05}.md"), id],
                 )
                 .unwrap();
+                tx.execute("INSERT INTO snapshots(workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin) SELECT workspace_id,version_id,?1,?2,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin FROM snapshots WHERE workspace_id='ws' AND version_id='main' AND object_id='target'", params![id, format!("note-{n:05}.md")]).unwrap();
             }
             tx.commit().unwrap();
             Ok::<_, rusqlite::Error>(())
@@ -292,7 +293,7 @@ fn sparse_five_thousand_file_query_stage_profile() {
         rows.push(json!({"aliases":aliases,"maps":maps,"candidates":query,"hydrate":hydrate,"snippets":snippets,"cachedResolver":start.elapsed().as_secs_f64()*1000.0}));
     }
     if let Some(path) = std::env::var_os("DOHC_LINK_STAGE_PROFILE") {
-        std::fs::write(path, json!({"method":"Debug Rust test, 5000 authoritative aliases, one indexed source; 4998 empty objects, no snapshots. Stage timings are diagnostic, not additive IPC samples.","rows":rows}).to_string()).unwrap();
+        std::fs::write(path, json!({"method":"Debug Rust test, 5000 authoritative aliases, one linked source, 4998 small snapshots sharing the target blob. Stage timings are diagnostic, not additive IPC samples.","rows":rows}).to_string()).unwrap();
     }
 }
 
