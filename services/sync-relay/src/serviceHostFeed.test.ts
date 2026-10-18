@@ -95,6 +95,15 @@ async function fixture() {
   return {...f, handle, bearer, append, share, setGrant, enroll, request, page, read, push, upload, blobStatus, hostCoordinate, objects, uploads};
 }
 
+it.each(["owner-1", "reader-2"])("binds service-host moment context %s to its authenticated owner", async accountId => {
+  const f = await fixture();
+  const payload = write(binding.objectId, "docs/a.md", A, {authorContext: {kind: "account", accountId}});
+  expect((await f.push([["moment.append", payload]])).status).toBe(200);
+  expect(f.hostCoordinate(0)?.payloadJson).toBe(stableJsonStringify(write(binding.objectId, "docs/a.md", A)));
+  expect(f.hostCoordinate(0)?.admittedAuthorSnapshot).toEqual(accountId === "owner-1"
+    ? [{kind: "human", humanId: "owner-1", humanName: "Unnamed"}] : undefined);
+});
+
 it("serves hosted rows unchanged and refuses private files, their blobs and coordinates", async () => {
   const f = await fixture();
   const first = await f.page();
