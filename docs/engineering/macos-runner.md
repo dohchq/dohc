@@ -26,7 +26,7 @@ A job can also reach what every account on the Mac shares:
 
 - **Other users' home folders.** macOS gives every standard user the `staff` group, and a new home folder lets that group read it. Setup closes Ice's home folder.
 - **Services on `127.0.0.1`.** Every account can connect to them. T3 Code listens on `127.0.0.1:3773` from the launch agent `com.icedevera.t3-desktop`, and it runs full-access agents as Ice. A caller that can drive it can act as Ice.
-- **`/tmp`.** It is shared by every account. Test scratch folders live in `/tmp/dohc-test-scratch-<uid>`, which only that user may enter. The tests refuse such a folder when another account owns it or can enter it, and they write nothing in it.
+- **`/tmp`.** It is shared by every account. Test scratch folders live in `/tmp/dohc-scratch-<uid>`, which only that user may enter. The tests refuse such a folder when another account owns it or can enter it, and they write nothing in it.
   A job can still create Ice's folder before Ice's tests do. Those tests then stop with an error that names the folder; remove it with `sudo rm -rf` and run them again.
 
 For pull requests from forks:
@@ -72,7 +72,7 @@ Ice runs this setup once with administrator rights.
 It creates `dohc-ci`, gives it its own login session, and registers the runner inside that session.
 The session is necessary because the e2e suite opens Electron windows.
 
-Do not register the runner until T3 Code refuses a caller without credentials, as step 6 below confirms.
+Do not register the runner until T3 Code refuses a caller without credentials, as step 6 of [Prepare the Mac as Ice](#prepare-the-mac-as-ice) confirms.
 
 ### Prepare the Mac as Ice
 
@@ -95,6 +95,11 @@ Complete every step in this part before you register the runner.
    ```
 
    Do not continue until it prints `700`.
+   Then remove the old shared test scratch folder. Its mode lets other accounts read the test files left in it:
+
+   ```sh
+   rm -rf /tmp/dohc-test-scratch
+   ```
 
 3. Create `dohc-ci` as a standard user. The command asks for its password.
 
