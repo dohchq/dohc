@@ -197,7 +197,7 @@ const bridge: DohcDesktopBridge = {
   // webUtils.getPathForFile in the preload is the sanctioned resolver.
   // TRUST DELTA flagged in the contract: these paths are renderer-supplied
   // once they cross the bridge — main re-validates each one through the
-  // picker-grade import path (files only, never a workspace's .dohc).
+  // picker-grade import path (files and folders, never a workspace's .dohc).
   getDroppedFilePaths: (files) => {
     const paths: string[] = [];
     for (const file of files) {
