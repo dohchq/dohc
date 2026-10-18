@@ -4,6 +4,7 @@ import { withClosedEngineDocSession } from "./collab/engineDocLease";
 import { CreationPartialError } from "@dohc/cli/creation";
 import {shareSenderLabel} from "@dohc/security-contract/share-labels";
 import { AgentSettingsProvider } from "./workbench/AgentBadge";
+import { AgentColorContext, saveAgentColor } from "./workbench/AgentColorPicker";
 import { EngineMomentDiffPage } from "./workbench/EngineMomentDiffPage";
 import { StopAndRestoreDialog, useStopAndRestore } from "./StopAndRestoreDialog";
 import { useRecordHistory } from "./collections/useRecordHistory";
@@ -1325,6 +1326,10 @@ export function DesktopWorkspaceShell(props: {
         );
       }
     },
+    [reportShellError, workspaceId],
+  );
+  const setAgentColor = useMemo(
+    () => saveAgentColor(bridge(), workspaceId, reportShellError),
     [reportShellError, workspaceId],
   );
   const showPinnedAppMenu = useCallback(
@@ -4965,6 +4970,7 @@ export function DesktopWorkspaceShell(props: {
   );
   return (
     <AgentSettingsProvider settings={props.userSettings?.settings ?? null}>
+    <AgentColorContext.Provider value={setAgentColor}>
     <CustomizeContext.Provider value={customizeContext}>
     <CollectionFieldMarksProvider workspaceId={workspaceId}>
     <ShellErrorReporter.Provider value={reportShellFailure}>
@@ -6389,6 +6395,7 @@ export function DesktopWorkspaceShell(props: {
     </ShellErrorReporter.Provider>
     </CollectionFieldMarksProvider>
     </CustomizeContext.Provider>
+    </AgentColorContext.Provider>
     </AgentSettingsProvider>
   );
 }
