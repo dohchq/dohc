@@ -9,7 +9,12 @@
 //! 1. Load the content blob; short-circuit idempotently if the target already
 //!    holds exactly it (a prior run renamed but crashed before marking
 //!    complete — no second write, no duplicate).
-//! 2. Write a **sibling temp file**, bounded bytes, restrictive mode.
+//! 2. Write a **sibling temp file**, bounded bytes. A secret's temp is
+//!    owner-only. On POSIX an ordinary temp takes the group and permission
+//!    bits of the file it replaces, and on macOS its ACL and the extended
+//!    attributes a save keeps. When the full mode could give someone else
+//!    more access, because the group or the ACL did not carry over, the temp
+//!    takes only the owner's bits. A temp for a new file follows the umask.
 //! 3. **Flush** per the per-OS [`DurabilityPolicy`].
 //! 4. **Revalidate the preimage** immediately before the replace: if an external
 //!    editor produced newer content after the DB commit, do not overwrite —
@@ -1602,9 +1607,11 @@ fn materialize_ordinary_write(
         return Ok(JobOutcome::AlreadyMaterialized);
     }
 
-    // Step 2: sibling temp file, bounded, restrictive mode.
+    // Step 2: sibling temp file, bounded, with the target's permissions. A
+    // secret path routed here still gets an owner-only temp.
     let tmp = temp_sibling(target, &job.job_id);
-    let temp_file = write_temp(&tmp, content)?;
+    let owner_only = crate::policy::normalized_path_is_secret(&job.target_path);
+    let temp_file = write_temp(target, &tmp, content, owner_only)?;
     if should_crash(faults, FaultPoint::MaterializeAfterTempWrite) {
         // A crash here leaves an orphan temp; startup replay ignores it (temp is
         // never captured as user content: it lives under a `.dohc-write-` name
@@ -4582,7 +4589,13 @@ impl SecretParentGuard {
     ) -> Result<std::fs::File, MaterializeError> {
         #[cfg(unix)]
         {
-            write_secret_temp_at_unix(&self.parent_fd, name, display_path, content)
+            write_temp_at_unix(
+                &self.parent_fd,
+                name,
+                display_path,
+                content,
+                TempAccess::Owner,
+            )
         }
 
         #[cfg(not(unix))]
@@ -4990,21 +5003,186 @@ fn read_current_at_unix(
     read_current_file(std::fs::File::from(fd), display_path)
 }
 
+/// Who may open a temp. Apart from what the folder's ACL grants every new
+/// file, a temp gives nobody but the owner more access than the file it
+/// replaces.
 #[cfg(unix)]
-fn write_secret_temp_at_unix(
+enum TempAccess {
+    /// Only the owner: secret plaintext, or a target the engine cannot read.
+    Owner,
+    /// A new ordinary file. The umask decides its mode.
+    New,
+    /// The regular file the temp replaces.
+    Like(Replaced),
+}
+
+#[cfg(unix)]
+impl TempAccess {
+    /// Stat `target` without following a link first, so nothing opens a FIFO
+    /// or a device there. A missing target is a new file. A regular file is
+    /// opened without following a link. Any other entry, or a file the
+    /// engine cannot open, gets an owner-only temp.
+    fn replacing(parent_fd: &rustix::fd::OwnedFd, target: &OsStr) -> Self {
+        use rustix::fs::{AtFlags, FileType, Mode, OFlags};
+
+        match rustix::fs::statat(parent_fd, target, AtFlags::SYMLINK_NOFOLLOW) {
+            Err(rustix::io::Errno::NOENT) => return Self::New,
+            Ok(stat) if FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile => {}
+            _ => return Self::Owner,
+        }
+        let Ok(file) = rustix::fs::openat(
+            parent_fd,
+            target,
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) else {
+            return Self::Owner;
+        };
+        let stat = match rustix::fs::fstat(&file) {
+            Ok(stat) if FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile => stat,
+            _ => return Self::Owner,
+        };
+        Self::Like(Replaced {
+            #[cfg(target_os = "linux")]
+            has_acl: has_posix_acl(&file),
+            #[cfg(target_vendor = "apple")]
+            file,
+            mode: Mode::from_raw_mode(stat.st_mode & 0o777),
+            uid: stat.st_uid,
+            gid: stat.st_gid,
+        })
+    }
+}
+
+/// What an ordinary temp takes from the regular file it replaces: the group,
+/// the permission bits and, on macOS, the ACL and the extended attributes a
+/// save keeps. Setuid, setgid and sticky bits, the owner and times are not
+/// copied, so capture sees the replace.
+#[cfg(unix)]
+struct Replaced {
+    #[cfg(target_vendor = "apple")]
+    file: rustix::fd::OwnedFd,
+    mode: rustix::fs::Mode,
+    uid: u32,
+    gid: u32,
+    /// Whether the file has a POSIX ACL, which the temp does not take.
+    #[cfg(target_os = "linux")]
+    has_acl: bool,
+}
+
+#[cfg(unix)]
+impl Replaced {
+    /// Give the empty temp this file's group, ACL and mode, as [`temp_mode`]
+    /// allows. A failed copy never fails the write.
+    fn apply_to(&self, temp: &std::fs::File) {
+        let has_gid = || rustix::fs::fstat(temp).is_ok_and(|stat| stat.st_gid == self.gid);
+        let gid = Some(rustix::fs::Gid::from_raw(self.gid));
+        let group_kept = has_gid() || (rustix::fs::fchown(temp, None, gid).is_ok() && has_gid());
+        let owner_kept = rustix::fs::fstat(temp).is_ok_and(|stat| stat.st_uid == self.uid);
+        // A Linux ACL's mask shows as the group bits. A folder's default ACL
+        // can give the temp an ACL the file never had.
+        #[cfg(target_os = "linux")]
+        let acl_kept = !self.has_acl && !has_posix_acl(temp);
+        #[cfg(target_vendor = "apple")]
+        let acl_kept = dohc_macos_files::copy_acl(&self.file, temp).is_ok();
+        #[cfg(target_vendor = "apple")]
+        dohc_macos_files::copy_saved_xattrs(&self.file, temp);
+        // No check exists for another Unix's ACLs.
+        #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
+        let acl_kept = false;
+        let mode = temp_mode(self.mode, group_kept, acl_kept, owner_kept);
+        let _ = rustix::fs::fchmod(temp, mode);
+    }
+}
+
+/// The mode a temp takes from a file with `mode`. The full mode needs the
+/// file's ACL on the temp, or no ACL on either, and it needs the file's group
+/// or equal group and other bits. Otherwise only the owner's bits stay, so
+/// nobody but the owner gains access. A temp with another owner than the
+/// file, the engine's user, keeps read and write, so the engine can read the
+/// file it wrote.
+#[cfg(unix)]
+fn temp_mode(
+    mode: rustix::fs::Mode,
+    group_kept: bool,
+    acl_kept: bool,
+    owner_kept: bool,
+) -> rustix::fs::Mode {
+    use rustix::fs::Mode;
+
+    let bits = mode.bits();
+    let group_is_other = (bits >> 3) & 0o7 == bits & 0o7;
+    let mode = if acl_kept && (group_kept || group_is_other) {
+        mode
+    } else {
+        mode & Mode::RWXU
+    };
+    if owner_kept {
+        mode
+    } else {
+        mode | Mode::RUSR | Mode::WUSR
+    }
+}
+
+#[cfg(all(test, unix))]
+mod temp_mode_tests {
+    use super::temp_mode;
+    use rustix::fs::Mode;
+
+    #[test]
+    fn a_temp_with_another_owner_keeps_owner_read_and_write() {
+        let mode = temp_mode(Mode::from_raw_mode(0o040), true, true, false);
+        assert_eq!(mode, Mode::from_raw_mode(0o640));
+        let mode = temp_mode(Mode::from_raw_mode(0o755), true, true, false);
+        assert_eq!(mode, Mode::from_raw_mode(0o755));
+    }
+
+    #[test]
+    fn a_lost_group_keeps_the_mode_only_when_group_and_other_bits_match() {
+        for (old, new) in [
+            (0o755, 0o755),
+            (0o644, 0o644),
+            (0o640, 0o600),
+            (0o604, 0o600),
+        ] {
+            let mode = temp_mode(Mode::from_raw_mode(old), false, true, true);
+            assert_eq!(mode, Mode::from_raw_mode(new), "{old:o}");
+        }
+    }
+
+    #[test]
+    fn an_acl_left_behind_keeps_only_the_owner_bits() {
+        let mode = temp_mode(Mode::from_raw_mode(0o755), true, false, true);
+        assert_eq!(mode, Mode::from_raw_mode(0o700));
+    }
+}
+
+/// Whether a file has a POSIX access ACL. A failed check counts as one.
+#[cfg(target_os = "linux")]
+fn has_posix_acl(file: impl rustix::fd::AsFd) -> bool {
+    !matches!(
+        rustix::fs::fgetxattr(file, "system.posix_acl_access", &mut [0u8; 0]),
+        Err(rustix::io::Errno::NODATA | rustix::io::Errno::NOTSUP)
+    )
+}
+
+#[cfg(unix)]
+fn write_temp_at_unix(
     parent_fd: &rustix::fd::OwnedFd,
     name: &OsStr,
     display_path: &Path,
     content: &[u8],
+    access: TempAccess,
 ) -> Result<std::fs::File, MaterializeError> {
     use rustix::fs::{Mode, OFlags};
     use std::io::Write as _;
 
     let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let create = || {
-        rustix::fs::openat(parent_fd, name, flags, Mode::from_raw_mode(0o600))
-            .map(std::fs::File::from)
-    };
+    let mode = Mode::from_raw_mode(match access {
+        TempAccess::New => 0o666,
+        TempAccess::Owner | TempAccess::Like(_) => 0o600,
+    });
+    let create = || rustix::fs::openat(parent_fd, name, flags, mode).map(std::fs::File::from);
     let mut file = match create() {
         Ok(file) => file,
         Err(err) if err == rustix::io::Errno::EXIST => {
@@ -5046,6 +5224,9 @@ fn write_secret_temp_at_unix(
             return Err(MaterializeError::io(display_path, &err));
         }
     };
+    if let TempAccess::Like(replaced) = &access {
+        replaced.apply_to(&file);
+    }
     if let Err(err) = file.write_all(content) {
         drop(file);
         let _ = rustix::fs::unlinkat(parent_fd, name, rustix::fs::AtFlags::empty());
@@ -5098,20 +5279,36 @@ fn filesystem_job_component(id: &str) -> String {
     }
 }
 
-fn write_temp(tmp: &Path, content: &[u8]) -> Result<std::fs::File, MaterializeError> {
+/// Write an ordinary job's temp beside `target`, which it will replace. An
+/// `owner_only` temp is 0600 whatever the target allows.
+fn write_temp(
+    target: &Path,
+    tmp: &Path,
+    content: &[u8],
+    owner_only: bool,
+) -> Result<std::fs::File, MaterializeError> {
     #[cfg(unix)]
     {
         use std::os::fd::OwnedFd;
 
         let parent_path = tmp.parent().ok_or(MaterializeError::UnsafeTargetPath)?;
         let name = tmp.file_name().ok_or(MaterializeError::UnsafeTargetPath)?;
+        let target_name = target
+            .file_name()
+            .ok_or(MaterializeError::UnsafeTargetPath)?;
         let parent_fd: OwnedFd = std::fs::File::open(parent_path)
             .map_err(|err| MaterializeError::io(parent_path, &err))?
             .into();
-        write_secret_temp_at_unix(&parent_fd, name, tmp, content)
+        let access = if owner_only {
+            TempAccess::Owner
+        } else {
+            TempAccess::replacing(&parent_fd, target_name)
+        };
+        write_temp_at_unix(&parent_fd, name, tmp, content, access)
     }
     #[cfg(not(unix))]
     {
+        let _ = (target, owner_only);
         write_secret_temp_no_follow(tmp, content)
     }
 }
@@ -7148,8 +7345,14 @@ mod tests {
         let plaintext = b"SECRET=must-not-escape\n";
         let opened = open_secret_parent_unix(root, relative_parent, &display_parent);
         if let Ok(parent_fd) = &opened {
-            write_secret_temp_at_unix(parent_fd, OsStr::new(".env"), &redirected_target, plaintext)
-                .expect("a mistakenly accepted parent handle permits the secret write");
+            write_temp_at_unix(
+                parent_fd,
+                OsStr::new(".env"),
+                &redirected_target,
+                plaintext,
+                TempAccess::Owner,
+            )
+            .expect("a mistakenly accepted parent handle permits the secret write");
         }
 
         assert!(

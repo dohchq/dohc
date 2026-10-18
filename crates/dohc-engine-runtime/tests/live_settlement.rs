@@ -2365,7 +2365,9 @@ async fn accepted_frames_claim_once_through_settlement_and_capture() {
     // Bind the bootstrapped record as adopted; its file reaches disk only
     // when the session settles.
     let mut raw = rusqlite::Connection::open(&f.db).unwrap();
-    let tx = raw.transaction().unwrap();
+    let tx = raw
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
     dohc_engine_domain::reconcile_collections_in_tx(&tx, "workspace", "main").unwrap();
     dohc_engine_domain::set_collection_adoption_state_in_tx(
         &tx,

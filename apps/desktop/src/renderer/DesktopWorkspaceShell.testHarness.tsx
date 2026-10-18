@@ -539,7 +539,7 @@ function makeBaseBridge(
       accepted: true,
       state: READY_UPDATE_STATE,
     })),
-    getDroppedFilePaths: vi.fn(() => []),
+    getDroppedFilePaths: vi.fn((_files: File[]): string[] => []),
     cloudStatus: vi.fn(async () => ({
       connected: true,
       email: "me@dohc.test",

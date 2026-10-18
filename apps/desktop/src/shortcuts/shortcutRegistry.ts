@@ -7,7 +7,7 @@ type EditorShortcutId = "editor-mac-backspace" | "editor-mac-delete" | "editor-m
   | "editor-code" | "editor-code-block" | "editor-italic" | "editor-strike" | "editor-underline" | "editor-ordered-list" | "editor-task-list";
 type OwnedShortcutId = "command-palette" | "close-window" | "history-restore-undo"
   | EditorShortcutId
-  | "palette-move" | "palette-accept" | "palette-dismiss" | "find-next" | "find-previous" | "find-close" | "dev-panel";
+  | "palette-move" | "palette-accept" | "palette-dismiss" | "find-next" | "find-previous" | "find-again-next" | "find-again-previous" | "find-close" | "dev-panel";
 type ShortcutOwner = "history-restore" | "shell" | "main" | "native" | "document" | "editor" | "palette" | "find" | "dev";
 interface ShortcutKeys {
   accelerators: readonly string[];
@@ -22,6 +22,7 @@ interface ShortcutDefinition extends ShortcutKeys {
   // The row exists only on this platform.
   platform?: "darwin";
 }
+type ShortcutEvent = Pick<KeyboardEvent, "key" | "code" | "metaKey" | "ctrlKey" | "shiftKey" | "altKey">;
 
 export const SHORTCUTS = {
   "new-file": { owner: "shell", accelerators: ["CommandOrControl+N"] },
@@ -30,6 +31,10 @@ export const SHORTCUTS = {
   "toggle-sidebar": { owner: "shell", accelerators: ["CommandOrControl+B"] },
   "toggle-about": { owner: "shell", accelerators: ["CommandOrControl+Alt+B"], macOptionCode: "KeyB" },
   "close-tab": { owner: "shell", accelerators: ["CommandOrControl+W"] },
+  // ⌃Tab everywhere, as in browsers. macOS adds ⇧⌘] as Safari does, and
+  // Windows and Linux add Ctrl+PageDown as VS Code does.
+  "next-tab": { owner: "shell", accelerators: ["Ctrl+Tab", "Ctrl+PageDown"], mac: { accelerators: ["Ctrl+Tab", "CommandOrControl+Shift+]"] } },
+  "previous-tab": { owner: "shell", accelerators: ["Ctrl+Shift+Tab", "Ctrl+PageUp"], mac: { accelerators: ["Ctrl+Shift+Tab", "CommandOrControl+Shift+["] } },
   "new-editor-group-right": { owner: "shell", accelerators: ["CommandOrControl+\\"] },
   "settings": { owner: "shell", accelerators: ["CommandOrControl+,"] },
   "history-restore-undo": { owner: "history-restore", accelerators: ["CommandOrControl+Z"] },
@@ -75,6 +80,11 @@ export const SHORTCUTS = {
   "palette-dismiss": { owner: "palette", accelerators: ["Escape"], keys: ["esc"] },
   "find-next": { owner: "find", accelerators: ["Enter"] },
   "find-previous": { owner: "find", accelerators: ["Shift+Enter"] },
+  // While the find bar has a query, from the bar or the document: ⌘G on
+  // macOS, as in Safari and TextEdit, and F3 elsewhere, as in VS Code. The
+  // find feature answers them itself; no editor keymap mounts them.
+  "find-again-next": { owner: "find", accelerators: ["F3"], mac: { accelerators: ["CommandOrControl+G"] } },
+  "find-again-previous": { owner: "find", accelerators: ["Shift+F3"], mac: { accelerators: ["CommandOrControl+Shift+G"] } },
   "find-close": { owner: "find", accelerators: ["Escape"] },
   "dev-panel": { owner: "dev", accelerators: ["CommandOrControl+Shift+D"] },
 } as const satisfies Partial<Record<StaticCommandId | OwnedShortcutId, ShortcutDefinition>>;
@@ -131,20 +141,34 @@ export function matchShellShortcut(event: KeyboardEvent, platform: string | unde
 
 // Modal guards also consume held and composing chords before native menu fallback.
 export function matchShellShortcutChord(event: KeyboardEvent, platform: string | undefined): ShellShortcutId | null {
-  if (!hasPrimaryModifier(event, platform) || event.defaultPrevented) return null;
+  // Every shell chord holds Control or Command, so typing returns here.
+  if ((!event.ctrlKey && !event.metaKey) || event.defaultPrevented) return null;
   for (const id of Object.keys(SHORTCUTS) as ShortcutId[]) {
-    const row: ShortcutDefinition = SHORTCUTS[id];
-    if (row.owner !== "shell" && row.owner !== "history-restore") continue;
-    for (const accelerator of shortcutOn(id, platform).accelerators) {
-      const parts = accelerator.split("+");
-      if (event.shiftKey !== parts.includes("Shift") || event.altKey !== parts.includes("Alt")) continue;
-      const key = parts.at(-1)!.toLowerCase();
-      // macOS reports the Option character, such as ∫ for ⌥⌘B, in event.key.
-      if (event.key.toLowerCase() === key
-        || (row.macOptionCode && platform === "darwin" && event.code === row.macOptionCode)) {
-        return id as ShellShortcutId;
-      }
+    const owner = SHORTCUTS[id].owner;
+    if ((owner === "shell" || owner === "history-restore") && matchesShortcut(event, id, platform)) {
+      return id as ShellShortcutId;
     }
   }
   return null;
+}
+
+// Shift changes event.key, such as } for ⇧⌘], so these keys also match by
+// their physical key.
+const SHIFTED_KEY_CODES: Readonly<Record<string, string>> = { "[": "BracketLeft", "]": "BracketRight" };
+
+// Whether the event is one of the row's chords. CommandOrControl is Command
+// on macOS and Control elsewhere; Ctrl is Control on every platform.
+export function matchesShortcut(event: ShortcutEvent, id: ShortcutId, platform: string | undefined): boolean {
+  const row: ShortcutDefinition = SHORTCUTS[id];
+  const mac = platform === "darwin";
+  return shortcutOn(id, platform).accelerators.some((accelerator) => {
+    const parts = accelerator.split("+");
+    const primary = parts.includes("CommandOrControl");
+    if (event.metaKey !== (mac && primary) || event.ctrlKey !== (parts.includes("Ctrl") || (!mac && primary))
+      || event.shiftKey !== parts.includes("Shift") || event.altKey !== parts.includes("Alt")) return false;
+    const key = parts.at(-1)!.toLowerCase();
+    return event.key.toLowerCase() === key || event.code === SHIFTED_KEY_CODES[key]
+      // macOS reports the Option character, such as ∫ for ⌥⌘B, in event.key.
+      || (row.macOptionCode !== undefined && mac && event.code === row.macOptionCode);
+  });
 }

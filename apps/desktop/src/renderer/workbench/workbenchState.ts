@@ -611,6 +611,15 @@ export function activateTab(
     : { ...next, activeEditorGroup: groupId };
 }
 
+// The tab after or before the group's active tab, wrapping at the ends.
+export function adjacentTabPath(group: EditorGroup, step: 1 | -1): string | null {
+  const { tabs } = group;
+  const index = tabs.findIndex((tab) => tab.path === group.activeTab);
+  // With no active tab, next is the first tab and previous the last.
+  const from = index === -1 && step === -1 ? 0 : index;
+  return tabs[(from + step + tabs.length) % tabs.length]?.path ?? null;
+}
+
 // Close a tab. When the group's active tab closes, the tab that enters its
 // slot takes over, or the new last tab does.
 export function closeTab(

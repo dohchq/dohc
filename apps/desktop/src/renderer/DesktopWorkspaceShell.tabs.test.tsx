@@ -161,6 +161,44 @@ describe("shell tab surfaces", () => {
     expect(pane.queryByTestId("file-inspector")).toBeNull();
   });
 
+  it.each([
+    ["darwin", { key: "}", code: "BracketRight", metaKey: true, shiftKey: true }],
+    ["win32", { key: "PageDown", ctrlKey: true }],
+  ] as const)("cycles the focused group's tabs on %s, and leaves a claimed chord alone", async (platform, alternate) => {
+    const tabs = ["a.txt", "b.txt", "c.txt"];
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs(tabs)), platform);
+    bridge.listWorkspaceFiles.mockResolvedValue({
+      visibility: { status: "ready", rules: [] },
+      files: tabs.map((path) => ({ path, kind: "file" as const })),
+      folders: [],
+    });
+    renderShell(bridge);
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+    const pane = within(screen.getByTestId("editor-group-primary"));
+    const active = () => pane.getAllByRole("tab").find((tab) => tab.getAttribute("aria-selected") === "true")?.dataset.testid;
+    expect(active()).toBe(editorTabTestId("a.txt"));
+
+    fireEvent.keyDown(window, { key: "Tab", ctrlKey: true });
+    await waitFor(() => expect(active()).toBe(editorTabTestId("b.txt")));
+    fireEvent.keyDown(window, { key: "Tab", ctrlKey: true, shiftKey: true });
+    await waitFor(() => expect(active()).toBe(editorTabTestId("a.txt")));
+    fireEvent.keyDown(window, { key: "Tab", ctrlKey: true, shiftKey: true });
+    await waitFor(() => expect(active()).toBe(editorTabTestId("c.txt")));
+    fireEvent.keyDown(window, alternate);
+    await waitFor(() => expect(active()).toBe(editorTabTestId("a.txt")));
+    act(() => bridge.emitMenuCommand("previous-tab"));
+    await waitFor(() => expect(active()).toBe(editorTabTestId("c.txt")));
+
+    // A control that gives ⌃Tab its own meaning claims it first.
+    const field = document.createElement("input");
+    document.body.append(field);
+    field.addEventListener("keydown", (event) => event.preventDefault());
+    fireEvent.keyDown(field, { key: "Tab", ctrlKey: true });
+    field.remove();
+    act(() => bridge.emitMenuCommand("next-tab"));
+    await waitFor(() => expect(active()).toBe(editorTabTestId("a.txt")));
+  });
+
   it.each(["darwin", "win32"] as const)("closes the last tab, then on macOS the window (%s)", async (platform) => {
     const bridge = makeBridge(Promise.resolve(storedStateWithTabs(["b.md"])), platform);
     renderShell(bridge);

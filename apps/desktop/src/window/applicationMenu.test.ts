@@ -216,6 +216,49 @@ describe("application menu template", () => {
     ]);
   });
 
+  it.each(["win32", "linux"] as const)("%s shows the tab commands beside Close tab, with Ctrl+PageDown kept as an alternate", (platform) => {
+    const { template, sendCommand } = build(false, platform);
+    const file = items(template, "File");
+    expect(file.map((entry) => entry.label ?? entry.role).slice(-6)).toEqual([
+      "Show next tab", "Show next tab (alternate)",
+      "Show previous tab", "Show previous tab (alternate)",
+      "Close tab", "Close window",
+    ]);
+    for (const [label, accelerator, hidden] of [
+      ["Show next tab", "Ctrl+Tab", false],
+      ["Show next tab (alternate)", "Ctrl+PageDown", true],
+      ["Show previous tab", "Ctrl+Shift+Tab", false],
+      ["Show previous tab (alternate)", "Ctrl+PageUp", true],
+    ] as const) {
+      const entry = file.find((item) => item.label === label);
+      expect(entry, label).toMatchObject({ accelerator, registerAccelerator: false });
+      expect(entry?.visible === false, label).toBe(hidden);
+    }
+    const fakeWindow = { id: 11 };
+    (file.find((item) => item.label === "Show previous tab")?.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
+    expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "previous-tab");
+  });
+
+  it("darwin: the Window menu holds Show next tab and Show previous tab, as in Safari", () => {
+    const { template, sendCommand } = build(false, "darwin");
+    const windowMenu = template.find((entry) => entry.role === "windowMenu")!;
+    const entries = windowMenu.submenu as MenuItemConstructorOptions[];
+    expect(entries.map((entry) => entry.role ?? entry.label ?? entry.type)).toEqual([
+      "minimize", "zoom", "separator",
+      "Show next tab", "Show next tab (alternate)",
+      "Show previous tab", "Show previous tab (alternate)",
+      "separator", "front",
+    ]);
+    expect(entries.filter((entry) => entry.label?.startsWith("Show")).map((entry) => [entry.accelerator, entry.visible !== false])).toEqual([
+      ["Ctrl+Tab", true], ["CommandOrControl+Shift+]", false],
+      ["Ctrl+Shift+Tab", true], ["CommandOrControl+Shift+[", false],
+    ]);
+    expect(items(template, "File").some((entry) => entry.label?.startsWith("Show"))).toBe(false);
+    const fakeWindow = { id: 12 };
+    (entries.find((entry) => entry.label === "Show next tab (alternate)")?.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
+    expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "next-tab");
+  });
+
   it("keeps separate CommandOrControl shortcuts for Close Tab and Close Window", () => {
     // The close role defaults to CommandOrControl+W. That shortcut belongs to
     // Close Tab, so Close Window must use a different accelerator.
