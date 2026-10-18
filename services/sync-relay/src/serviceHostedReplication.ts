@@ -100,6 +100,13 @@ export class ServiceHostedReplication {
     } finally { this.#running = false; }
   }
   /**
+   * Creates the replica, as the first hosted call of this instance does, which
+   * fails as diverged when the relay holds rows at its origin it never wrote.
+   */
+  async create(callerSignal?: AbortSignal): Promise<void> {
+    await this.#run(callerSignal, async () => {});
+  }
+  /**
    * Runs up to maxPagesPerPull hosted passes. `onPage` hears each pass once it
    * committed, or committed nothing, before the next is asked for. A
    * retirement that failed after its commit fails the pull; the next pull

@@ -508,7 +508,10 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   let parked: {method: string; entered: ReturnType<typeof deferred<void>>; release: ReturnType<typeof deferred<void>>} | undefined;
   // Queued unload replies, or errors that lose them. `replies` overrides every hosted pass, commit and push until a test changes it.
   const pushed = deferred<void>(), unloads: unknown[] = [];
-  const replies: {pass: Record<string, unknown>; commit: Record<string, unknown>; push: Record<string, unknown>; diverge?: boolean} = {pass: {}, commit: {}, push: {}};
+  // `diverge` refuses each pull as diverged. `create` fails each create, as diverged when a relay is ahead at the replica's origin.
+  const replies: {pass: Record<string, unknown>; commit: Record<string, unknown>; push: Record<string, unknown>; diverge?: boolean;
+    create?: "diverged" | Error} = {pass: {}, commit: {}, push: {}};
+  const divergence = (id: number) => new EngineRequestError(id, {code: "INVALID_PARAMS", message: "relay-origin-diverged", retry: "no"} as never);
   // What the engine applied of each accepted row, by delivery ID. `lost` loses each application's
   // reply and every ACK read after it, as when the engine applied a row the relay never recorded.
   // While `pending` is set, the engine answers each application pending and applies nothing.
@@ -574,10 +577,12 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
             collectionReconcileRequired: false}});
         }
         case "liveApplication.fenceRestore": return reply({status: "pending", reason: "native-fence-pending"});
-        case "sync.createHostedReplica": return reply({hosted: true});
+        case "sync.createHostedReplica":
+          if (replies.create) throw replies.create === "diverged" ? divergence(request.id) : replies.create;
+          return reply({hosted: true});
         case "sync.push": pushed.resolve(); return reply({...pushReply, ...replies.push});
         case "sync.pullHosted":
-          if (replies.diverge) throw new EngineRequestError(request.id, {code: "INVALID_PARAMS", message: "relay-origin-diverged", retry: "no"} as never);
+          if (replies.diverge) throw divergence(request.id);
           return reply(hostedPass(replies.pass));
         case "sync.materializePendingCursor": return reply({materialized: true});
         case "sync.commitCursor": return reply(hostedCommit(replies.commit));
@@ -1271,6 +1276,56 @@ it("resumes a departing document after a restart before any pull, then settles, 
   expect(methods.indexOf("sync.push", settled)).toBeGreaterThan(settled);
   expect(methods.indexOf("liveApplication.unloadDocument")).toBeGreaterThan(methods.indexOf("sync.push", settled));
   await vi.waitFor(() => expect(restarted.retains(o.sibling)).toBe(false));
+});
+
+// Proves: a restarted daemon checks its replica's origin before any work on
+// its store. A relay ahead there detaches the workspace for good before a
+// departing document, stopped or retained, registers, captures, applies or
+// settles, and before any pull.
+it.each([
+  ["stopped", async () => {const o = await enrolledServiceHost(); await o.host.close(); o.stop(); return o;}],
+  ["retained", async () => {
+    const o = await emptyServiceHost();
+    await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+    await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+    await o.host.close();
+    return o;
+  }],
+] as const)("checks a restarted replica's origin before a %s departing document resumes", async (_kind, setup) => {
+  const o = await setup();
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const settles = vi.spyOn(ServiceActivationDriver.prototype, "settleDeparted");
+  o.replies.create = "diverged";
+  const restarted = await startServiceLiveHost({...o.f, frameChanges: createNamedFrameChanges(16)});
+  cleanup.push(() => restarted.close());
+  const update = () => restarted.update({workspaces: [o.workspace], documents: [], departing: [o.sibling]});
+  const methods = () => o.client().sendRequest.mock.calls.map(call => ((call as unknown[])[0] as {method: string}).method);
+  const sent = ["liveApplication.hosts", "liveApplication.attachWorkspace", "sync.createHostedReplica", "liveApplication.detachWorkspace"];
+  await update();
+  await vi.waitFor(() => expect(restarted.diverged()).toEqual([{workspaceId: "workspace", root: o.workspace.root}]));
+  expect(methods()).toEqual(sent);
+  // A later update, and any pass before it, leave the store alone.
+  await update();
+  expect(methods()).toEqual(sent);
+  expect(settles).not.toHaveBeenCalled();
+  expect(o.client().captureOwnerActivation).not.toHaveBeenCalled();
+  expect(o.client().sendLiveApplication).not.toHaveBeenCalled();
+  expect(restarted.retains(o.sibling)).toBe(true);
+});
+
+// Proves: a replica that could not check its origin detaches its workspace
+// before any work on its store, and the next update attaches it and checks again.
+it("detaches a workspace whose replica could not check its origin, and attaches it again on the next update", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace];
+  o.replies.create = new Error("Relay unreachable.");
+  await expect(o.host.update({workspaces, documents: [o.sibling], ...stay})).rejects.toThrow("Relay unreachable.");
+  expect(o.membership).toEqual([o.attach, o.detach]);
+  expect(o.host.diverged()).toEqual([]);
+  expect(o.client().captureOwnerActivation).not.toHaveBeenCalled();
+  o.replies.create = undefined;
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  expect(o.membership).toEqual([o.attach, o.detach, o.attach]);
 });
 
 // Proves: a departing document whose retained activation diverged keeps its

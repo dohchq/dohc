@@ -406,6 +406,18 @@ export async function startServiceLiveHost(options: {
       joined.throwIfAborted();
       try {install(workspace, result);} catch (error) {abort(); throw error;}
       changes?.notifyHost([workspace.workspaceId]);
+      // Its replica checks its origin before any work on its store, departures
+      // included. A diverged store stays detached for good. Any other failure
+      // detaches it too, so the next update attaches it and checks again.
+      const attached = attachments.get(workspace.workspaceId);
+      if (!attached) return;
+      try {await attached.hosted.create(joined);}
+      catch (error) {
+        const divergence = attached.hosted.diverged;
+        if (divergence) diverged.set(workspace.root, workspace.workspaceId);
+        try {await detach(workspace.workspaceId, signal);} catch {throw error;}
+        if (!divergence) throw error;
+      }
     };
     // Detach does not wait for unsettled work. The workspace store keeps it until the workspace attaches again.
     const detach = async (workspaceId: string, joined: AbortSignal) => {
@@ -785,7 +797,9 @@ export async function startServiceLiveHost(options: {
        * and unload documents that left, while their workspace stays attached.
        * On a fresh daemon, they first resume departing documents that are
        * still enabled. A workspace that is no longer wanted, or whose identity
-       * changed, detaches at once. A diverged store stays detached.
+       * changed, detaches at once. Each workspace it attaches checks its
+       * replica's origin before anything else; a diverged store detaches and
+       * stays detached.
        */
       update,
       /**
