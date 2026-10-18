@@ -1544,6 +1544,20 @@ fn read_capture_policy(root: &Path) -> PolicyState {
     PolicyState::Known(snapshot.files_policy)
 }
 
+/// Whether the apply's policy pass retires one of the plan's unread paths,
+/// which drops it from the manifest. Any other unread path keeps its entry,
+/// so a workspace with evicted files does not refresh the manifest on every
+/// version switch. A policy capture cannot read holds the pass, so it counts.
+fn policy_retires_unread(root: &Path, retained_unread: &[String]) -> bool {
+    !retained_unread.is_empty()
+        && match read_capture_policy(root) {
+            PolicyState::Known(policy) => retained_unread
+                .iter()
+                .any(|path| policy_excludes(&policy, path)),
+            PolicyState::Unavailable => true,
+        }
+}
+
 /// Whether a known policy narrows `path` out of engine ownership (the secret
 /// floor is policy-independent and never narrowed).
 fn policy_excludes(
@@ -2588,11 +2602,12 @@ pub(crate) async fn reconcile_full_for_switch(
             Err(SwitchReconcileError::Degraded(degraded_paths))
         }
         Ok(run) => {
-            let manifest_changed = matches!(
-                &run,
-                ReconcileRun::Completed(plan)
-                    if !plan.ops.is_empty() || !plan.retained_unread.is_empty()
-            );
+            let manifest_changed = match &run {
+                ReconcileRun::Completed(plan) => {
+                    !plan.ops.is_empty() || policy_retires_unread(root, &plan.retained_unread)
+                }
+                _ => false,
+            };
             let context = ApplyRunContext {
                 root,
                 actor,

@@ -1102,3 +1102,43 @@ fn an_untracked_evicted_file_the_policy_narrows_is_never_read() {
     assert!(!prepared.degraded, "{prepared:?}");
     assert!(prepared.ops.is_empty(), "{prepared:?}");
 }
+
+#[test]
+fn an_evicted_file_edited_elsewhere_is_rehashed_once_it_downloads() {
+    let ws = Scratch::new();
+    ws.write("resized.md", b"before");
+    ws.write("same-size.md", b"before");
+    ws.age_mtime("resized.md", 60);
+    ws.age_mtime("same-size.md", 60);
+    let normal = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut ctrl = ReconcileController::new();
+    reconcile_and_apply(&mut ctrl, &normal, ws.path(), &CancellationToken::new());
+
+    ctrl.mark_dirty();
+    let evicted = plan(
+        ctrl.reconcile_if_dirty(
+            &evicted_scanner(&["resized.md", "same-size.md"]),
+            ws.path(),
+            &CancellationToken::new(),
+        )
+        .expect("evicted reconcile"),
+    );
+    assert_eq!(evicted.retained_unread, ["resized.md", "same-size.md"]);
+    apply_then_ack(&mut ctrl, &evicted, &mut AcceptAll, &NoFaults).expect("apply/ack");
+
+    // Another Mac edits both, and each downloads with the new bytes and a
+    // new mtime. One keeps its size, so only the mtime can reveal the edit.
+    ws.write("resized.md", b"after, longer");
+    ws.write("same-size.md", b"AFTER!");
+    ws.age_mtime("resized.md", 30);
+    ws.age_mtime("same-size.md", 30);
+    ctrl.mark_dirty();
+    let downloaded = plan(
+        ctrl.reconcile_if_dirty(&normal, ws.path(), &CancellationToken::new())
+            .expect("reconcile"),
+    );
+    assert_eq!(
+        ingest_paths(&downloaded, IngestReason::Changed),
+        ["resized.md", "same-size.md"]
+    );
+}

@@ -333,3 +333,22 @@ async fn prepared_and_converged_runs_refuse_a_replacement_workspace_root() {
     std::fs::remove_dir_all(&root).expect("remove replacement workspace root");
     std::fs::rename(&moved_root, &root).expect("restore planned workspace root");
 }
+
+#[test]
+fn only_a_policy_retirement_of_an_unread_path_changes_the_manifest() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let root = scratch.path();
+    std::fs::create_dir_all(root.join(".dohc")).expect("policy folder");
+    std::fs::write(
+        root.join(".dohc/files.toml"),
+        "version = 1\n[[rule]]\npath = \"private/**\"\ntracked = false\n",
+    )
+    .expect("policy");
+    assert!(!policy_retires_unread(root, &[]));
+    // An evicted file the policy still tracks keeps its manifest entry.
+    assert!(!policy_retires_unread(root, &["photo.bin".to_owned()]));
+    assert!(policy_retires_unread(
+        root,
+        &["photo.bin".to_owned(), "private/scan.pdf".to_owned()]
+    ));
+}
