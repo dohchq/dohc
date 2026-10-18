@@ -1,6 +1,6 @@
 //! Copy a file's macOS ACL and extended attributes between open descriptors,
-//! flush a descriptor behind a drive write barrier, and keep a folder out of
-//! iCloud Drive.
+//! flush a descriptor behind a drive write barrier, keep a folder out of
+//! iCloud Drive, and unlink a file only when no process has it open.
 #![cfg(target_vendor = "apple")]
 use std::ffi::{CStr, c_char, c_int, c_uint, c_void};
 use std::io;
@@ -144,6 +144,53 @@ pub fn exclude_from_sync(dir: &Path) -> io::Result<()> {
     }
 }
 
+/// `AT_NODELETEBUSY` in `<sys/fcntl.h>`.
+const AT_NODELETEBUSY: u32 = 0x4000;
+
+/// The file systems known to refuse `AT_NODELETEBUSY` on a busy file: APFS,
+/// HFS+, ExFAT and FAT, tested on disk images, and the SMB and NFS clients,
+/// whose remove calls `vnode_isinuse` for the flag.
+const BUSY_CHECKED: [&[u8]; 6] = [b"apfs", b"hfs", b"exfat", b"msdos", b"smbfs", b"nfs"];
+
+/// Close `file` and unlink `path`, its name, unless any process of any user
+/// has the file open or mapped. Return whether it was unlinked. A reader
+/// counts as much as a writer; opens for events only (`O_EVTONLY`) do not.
+/// The file system checks inside the unlink call, so no open can come between
+/// the check and the unlink. On a file system not known to check, the file
+/// is never unlinked. A program on another computer that has a network
+/// share's file open is never seen.
+pub fn remove_unless_open(file: std::fs::File, path: &std::path::Path) -> io::Result<bool> {
+    if !refuses_busy_unlink(&file)? {
+        return Ok(false);
+    }
+    drop(file);
+    match rustix::fs::unlinkat(
+        rustix::fs::CWD,
+        path,
+        rustix::fs::AtFlags::from_bits_retain(AT_NODELETEBUSY),
+    ) {
+        Ok(()) => Ok(true),
+        Err(rustix::io::Errno::BUSY) => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Whether `file`'s file system is known to refuse unlinking a file a
+/// process has open, so [`remove_unless_open`] can ever unlink it.
+pub fn refuses_busy_unlink(file: impl AsFd) -> io::Result<bool> {
+    Ok(checks_busy(&rustix::fs::fstatfs(file)?.f_fstypename))
+}
+
+/// Whether the file system named by `f_fstypename` is in [`BUSY_CHECKED`].
+fn checks_busy(kind: &[c_char]) -> bool {
+    let kind: Vec<u8> = kind
+        .iter()
+        .take_while(|&&byte| byte != 0)
+        .map(|&byte| byte as u8)
+        .collect();
+    BUSY_CHECKED.contains(&kind.as_slice())
+}
+
 /// Read a value whose size `read` reports for an empty buffer, unless it is
 /// larger than [`MAX_XATTR_BYTES`] or grows between the two reads.
 fn read_bounded(read: impl Fn(&mut [u8]) -> rustix::io::Result<usize>) -> Option<Vec<u8>> {
@@ -191,5 +238,43 @@ mod tests {
         .unwrap();
         super::exclude_from_sync(&dir).unwrap();
         assert_eq!(read().unwrap(), b"kept");
+    }
+
+    #[test]
+    fn an_open_file_is_not_removed() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("remove-unless-open").unwrap();
+        let path = scratch.path().join("log.txt");
+        std::fs::write(&path, b"kept").unwrap();
+        let open = || std::fs::File::open(&path).unwrap();
+        let writer = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        assert!(!super::remove_unless_open(open(), &path).unwrap());
+        drop(writer);
+        let reader = open();
+        assert!(!super::remove_unless_open(open(), &path).unwrap());
+        drop(reader);
+        assert!(super::remove_unless_open(open(), &path).unwrap());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn only_file_systems_known_to_check_busy_files_unlink() {
+        let name = |kind: &str| {
+            let mut field = [0; 16];
+            for (slot, byte) in field.iter_mut().zip(kind.bytes()) {
+                *slot = byte as std::ffi::c_char;
+            }
+            super::checks_busy(&field)
+        };
+        for kind in ["apfs", "hfs", "exfat", "msdos", "smbfs", "nfs"] {
+            assert!(name(kind), "{kind}");
+        }
+        for kind in [
+            "macfuse", "osxfuse", "fskit", "webdav", "afpfs", "apfsx", "",
+        ] {
+            assert!(!name(kind), "{kind}");
+        }
     }
 }
