@@ -27,7 +27,7 @@ export function createWorkspaceLinksReader(
         const mount = workspace.shareMounts?.find(mount => mount.shareId === shareId);
         if (!mount) throw new Error("Shared folder is unavailable.");
         const prefix = `shared-with-me/${mount.label}/`;
-        return { ...result, results: result.results.map(row => row === null ? null : row.path === null
+        return { ...result, mountsCovered: false, results: result.results.map(row => row === null ? null : row.path === null
           ? { ...row, create: prefix + row.create }
           : { ...row, path: prefix + row.path }) };
       }

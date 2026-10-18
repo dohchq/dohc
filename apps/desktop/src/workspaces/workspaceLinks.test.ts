@@ -41,7 +41,7 @@ it("resolves a mounted source through its store and projects found and creation 
   const workspace = { workspaceId: "ws", rootPath: "root", shareMounts: [{ shareId: "share", label: "Team" }] } as RegistryEntry;
   const literals = [{ kind: "wikilink" as const, literal: "found#section" }, { kind: "wikilink" as const, literal: "new" }];
   expect(await reader.resolve(workspace, { source: "shared-with-me/Team/notes/source.md", literals })).toMatchObject({
-    versionId: "share-version", results: [
+    versionId: "share-version", mountsCovered: false, results: [
       { path: "shared-with-me/Team/found.md", fragment: "section" },
       { path: null, create: "shared-with-me/Team/notes/new.md", fragment: null },
     ],
