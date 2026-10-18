@@ -3954,6 +3954,71 @@ mod tests {
         service.workspace_close(Some(workspace)).await.unwrap();
     }
 
+    /// Phase A over RPC evicts the reconciled document's writer cache entry,
+    /// and only that one: the next write to it misses, and one to its
+    /// sibling still hits. The activation never adopted, so neither document
+    /// is an owner's and both take local writes.
+    #[tokio::test]
+    async fn phase_a_evicts_only_the_reconciled_documents_cache_entry() {
+        let (_scratch, service, owner, workspace, _, _) = retirement_fixture(false).await;
+        let open = service.open(Some(&workspace)).unwrap();
+        let docs = [("document", Ydoc::wire()), ("sibling", Ydoc::wire())];
+        let record = |object: &str, update: Vec<u8>| {
+            open.actor.ydoc_record_update(
+                DocKey::new("workspace", "main", object).unwrap(),
+                format!("{object}.md"),
+                dohc_engine_collab::ContentKind::Plaintext,
+                dohc_engine_collab::Regime::LocalOnly,
+                update,
+                None,
+                None,
+                None,
+                false,
+                None,
+                None,
+                10,
+                Arc::new(NoFaults),
+                dohc_engine_runtime::CancellationToken::new(),
+                None,
+            )
+        };
+        for (object, doc) in &docs {
+            record(object, doc.plaintext_insert(0, "cached"))
+                .await
+                .unwrap();
+        }
+        let before = open.actor.ydoc_cache_stats_for_test().await.unwrap();
+        let reconciled = service
+            .call(
+                host_context(&owner),
+                reconcile_request(&workspace, retirement_key("activation")),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reconciled.response.result["status"], "reconciled");
+        let evicted = open.actor.ydoc_cache_stats_for_test().await.unwrap();
+        assert_eq!(evicted.removes, before.removes + 1, "one entry went");
+        let (_, sibling) = &docs[1];
+        record("sibling", sibling.plaintext_insert(0, "warm "))
+            .await
+            .unwrap();
+        assert_eq!(
+            open.actor.ydoc_cache_stats_for_test().await.unwrap().misses,
+            evicted.misses,
+            "the sibling's entry stayed"
+        );
+        let (_, document) = &docs[0];
+        record("document", document.plaintext_insert(0, "cold "))
+            .await
+            .unwrap();
+        assert_eq!(
+            open.actor.ydoc_cache_stats_for_test().await.unwrap().misses,
+            evicted.misses + 1,
+            "the reconciled document's entry went"
+        );
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
     /// Phase A ends only the reconciled document's state: another
     /// document's session carrying the same activation tag stays.
     #[tokio::test]
@@ -4154,18 +4219,27 @@ mod tests {
         );
     }
 
-    fn bindings(service: &EngineService, workspace: &WorkspaceHandle) -> i64 {
+    fn rows(service: &EngineService, workspace: &WorkspaceHandle, table: &str) -> i64 {
         let open = service.open(Some(workspace)).unwrap();
         let store = dohc_engine_storage::EngineStore::open_read_only(&open.db_path).unwrap();
         store
             .read_with(|conn| {
                 conn.query_row(
-                    "SELECT count(*) FROM live_device_application_bindings WHERE object_id='document'",
+                    &format!("SELECT count(*) FROM {table} WHERE object_id='document'"),
                     [],
                     |row| row.get(0),
                 )
             })
             .unwrap()
+    }
+
+    fn bindings(service: &EngineService, workspace: &WorkspaceHandle) -> i64 {
+        rows(service, workspace, "live_device_application_bindings")
+    }
+
+    /// The document's recorded retirement intents.
+    fn intents(service: &EngineService, workspace: &WorkspaceHandle) -> i64 {
+        rows(service, workspace, "live_owner_retirements")
     }
 
     /// Release is only for the configured host, and only for a document that
@@ -4208,6 +4282,11 @@ mod tests {
             "in scope"
         );
         assert_eq!(teardown(&service, &owner, &workspace, document), before);
+        assert_eq!(
+            intents(&service, &workspace),
+            0,
+            "a refused key records nothing"
+        );
         host_document(&service, &workspace, true, false);
         assert_eq!(
             release(host_context(&owner)).await.unwrap().response.result,
@@ -4218,6 +4297,7 @@ mod tests {
             (false, None, before.2.clone(), true),
             "Phase A ended its runtime and kept its binding"
         );
+        assert_eq!(intents(&service, &workspace), 1, "its intent was recorded");
         host_document(&service, &workspace, true, true);
         shape(
             &service,
@@ -4235,6 +4315,7 @@ mod tests {
             json!({"status":"released","replayed":false,"boundary":boundary})
         );
         assert_eq!(bindings(&service, &workspace), 0, "its own binding goes");
+        assert_eq!(intents(&service, &workspace), 0, "and so does its intent");
         assert_eq!(
             release(host_context(&owner)).await.unwrap().response.result,
             json!({"status":"released","replayed":true,"boundary":boundary})

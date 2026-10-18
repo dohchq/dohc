@@ -285,7 +285,6 @@ impl ApplicationOwner {
             live: true,
         };
         let input_json = serde_json::to_string(&input).map_err(|_| ApplicationError::Corrupt)?;
-        let retired = self.retired.clone();
         let outcome = store.write_with(faults, |tx| {
             require_workspace(tx, &held)?;
             let saved: Option<(String, String)> = tx.query_row(
@@ -320,11 +319,8 @@ impl ApplicationOwner {
             require_registration(tx,&key,&held.namespace,b)?;
             // A restore moves the generation a retirement's key names, so a
             // retiring activation keeps it waiting until its release.
-            if let Some((current, _)) = owner_activations::current_activation(tx, Some(&held.namespace), &key, &b.lineage_claim_id)? {
-                if retired.contains(&current.activation_id)
-                    || matches!(seed_hold(tx, &held.namespace, b)?, Some(SeedHold::Abandoned)) {
-                    return Err(ApplicationError::Conflict);
-                }
+            if retirement::retiring(tx, &key)? {
+                return Err(ApplicationError::Conflict);
             }
             let previous=restore_resume::generation(tx,&held)?.map(|receipt|receipt.operation_id);
             if !read_binding(tx, &held)?.is_some_and(|(binding, coordinate, available)| {

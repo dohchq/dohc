@@ -476,6 +476,142 @@ mod tests {
         assert!(!late, "no write for the retired activation runs");
     }
 
+    /// A capture naming an activation Phase A retired over RPC is refused
+    /// before it looks the activation up or takes the document's lease, and
+    /// opens no session. One naming another activation goes on, here to the
+    /// lease another session holds.
+    #[tokio::test]
+    async fn a_capture_naming_a_retired_activation_is_refused() {
+        use dohc_engine_protocol::transport::EngineService as _;
+        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let configuration = serde_json::from_value(json!({
+            "version": 1, "relayNamespace": "capture-test",
+            "host": {"hostId":"host","hostEpoch":1,"instanceId":"instance","connectionId":"connection"},
+            "workspaces": [{"root":scratch.path(),"workspaceId":"workspace","maxRegistrations":4,
+                "relay":{"baseUrl":"https://relay.invalid","bearerToken":"owner"}}],
+            "ingress": {"aggregateBytes":512*1024*1024,"applicationWorkingReserveBytes":8*1024*1024,"maxUploads":1,"uploadDeadlineMs":30_000},
+            "settlement": {"maxApplicationsPerSettlement":4},
+            "sync":{"policy":{"maxClientVectorBytes":1024,"maxHostVectorBytes":4096,"maxOutputBytes":1_000_000,"maxReadBytes":10_000_000},"workingReserveBytes":16*1024*1024}
+        }))
+        .unwrap();
+        let (service, owner, _ingress) = EngineService::configured_live_host(configuration)
+            .await
+            .unwrap();
+        let workspace = lock(&service.handles).keys().next().unwrap().clone();
+        let open = service.open(Some(&workspace)).unwrap();
+        open.actor
+            .ensure_main_version(
+                "workspace".into(),
+                0,
+                Arc::new(dohc_engine_storage::NoFaults),
+                dohc_engine_runtime::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let key = DocKey::new("workspace", "main", "document").unwrap();
+        let lineage = dohc_engine_storage::hex_sha256(b"lineage");
+        let source = |activation: &str| ImportedOwnerActivation {
+            activation_id: activation.into(),
+            source: ImportedOwnerSource {
+                version: 1,
+                relay_database_namespace: "capture-test".into(),
+                workspace_id: "workspace".into(),
+                main_version_id: "main".into(),
+                object_id: "document".into(),
+                lineage_claim_id: lineage.clone(),
+                current_path: "document.md".into(),
+                replication_epoch: "epoch".into(),
+                stream_identity: "stream".into(),
+                committed_cursor: 0,
+                base_origin_id: "origin".into(),
+                base_origin_seq: 0,
+                base_relay_seq: 0,
+                source_moment_id: "moment".into(),
+                source_digest: lineage.clone(),
+                source_byte_length: 0,
+                native_head_sequence: 0,
+                full_state_digest: lineage.clone(),
+                full_state_byte_length: 0,
+            },
+            baseline_bytes: Vec::new(),
+            full_state: Vec::new(),
+            restore_generation: None,
+        };
+        {
+            let conn = rusqlite::Connection::open(&open.db_path).unwrap();
+            conn.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+            for activation in ["retiring", "other"] {
+                conn.execute(
+                    "INSERT INTO ydoc_owner_activation_sources VALUES (?1,'capture-test','workspace','main','document',?2,'moment',?2,?2,?3)",
+                    rusqlite::params![
+                        activation,
+                        lineage,
+                        serde_json::to_string(&source(activation).source).unwrap()
+                    ],
+                )
+                .unwrap();
+            }
+        }
+        // Another activation's session holds the document's lease.
+        let lease = service.leases.scoped(&open.root).acquire(&key).unwrap();
+        let session = super::super::ydoc::YdocSession::imported_owner(
+            workspace.clone(),
+            key,
+            &source("other"),
+            lease,
+        )
+        .unwrap();
+        lock(&service.sessions).insert("ydoc-other".into(), session);
+        let ctx = || {
+            let mut ctx = RequestContext::unbounded();
+            ctx.connection = Some(owner.handle());
+            ctx
+        };
+        let request = |method: &str, params: serde_json::Value| Request {
+            id: 9,
+            method: method.into(),
+            workspace: Some(workspace.clone()),
+            deadline_ms: None,
+            idempotency_key: None,
+            progress: false,
+            params,
+        };
+        let reconciled = service
+            .call(
+                ctx(),
+                request(
+                    "liveApplication.reconcileActivation",
+                    json!({"objectId":"document","lineageClaimId":lineage,"activationId":"retiring",
+                        "restoreFenceGeneration":0,"acceptedThrough":5,"afterReceipt":null,"maxApplications":4}),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reconciled.response.result["status"], "reconciled");
+        let capture = |activation: &str| {
+            service.call(
+                ctx(),
+                request(
+                    "liveApplication.captureOwnerActivation",
+                    json!({"path":"elsewhere.md","maxBytes":1_000_000,"activationId":activation}),
+                ),
+            )
+        };
+        let sessions = || lock(&service.sessions).keys().cloned().collect::<Vec<_>>();
+        assert_eq!(
+            capture("retiring").await.unwrap_err().code,
+            ErrorCode::Conflict
+        );
+        assert_eq!(sessions(), ["ydoc-other"]);
+        assert_eq!(
+            capture("other").await.unwrap_err().code,
+            ErrorCode::WorkspaceUnavailable,
+            "it went on to the held lease"
+        );
+        assert_eq!(sessions(), ["ydoc-other"]);
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
     /// A release names the activation it ends. One naming another activation
     /// than the session serves closes nothing and removes no source. A
     /// capture of another lineage never retags a reused session.

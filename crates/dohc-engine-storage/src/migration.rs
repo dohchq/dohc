@@ -3333,7 +3333,9 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
 /// its baseline relay coordinate; a released activation that never adopted
 /// carries no adoption fact or origin, and its baseline only if it had one.
 /// Every adoption becomes its own current activation, and a binding names the
-/// activation of its lineage's adoption.
+/// activation of its lineage's adoption. A retirement records the exact
+/// activation and restore generation it began for, before it ends any of the
+/// activation's runtime, and keeps that row until the activation's release.
 const V2_LIVE_OWNER_ACTIVATIONS_DDL: &str = "\
 CREATE UNIQUE INDEX live_owner_adoptions_lineage ON live_owner_adoptions
     (relay_database_namespace,adoption_id,workspace_id,main_version_id,object_id,lineage_claim_id);
@@ -3397,6 +3399,19 @@ CREATE UNIQUE INDEX live_owner_activations_successor ON live_owner_activations
     (relay_database_namespace,predecessor_activation_id) WHERE predecessor_activation_id IS NOT NULL;
 CREATE INDEX live_owner_activations_lineage ON live_owner_activations
     (relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id);
+CREATE TABLE live_owner_retirements (
+    relay_database_namespace TEXT NOT NULL CHECK (length(CAST(relay_database_namespace AS BLOB)) > 0),
+    activation_id TEXT NOT NULL CHECK (length(CAST(activation_id AS BLOB)) BETWEEN 1 AND 1024),
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    restore_fence_generation INTEGER NOT NULL CHECK (restore_fence_generation BETWEEN 0 AND 9007199254740991),
+    PRIMARY KEY (relay_database_namespace, activation_id),
+    FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX live_owner_retirements_document ON live_owner_retirements
+    (workspace_id,main_version_id,object_id);
 INSERT INTO live_owner_activations (relay_database_namespace,activation_id,workspace_id,main_version_id,
     object_id,lineage_claim_id,origin_adoption_id,binding_json,source_moment_id,source_digest,source_byte_length,
     baseline_moment_relay_sequence,baseline_registered_at_ms,host_coordinate_json,evidence_digest,coverage_digest,
@@ -4431,7 +4446,7 @@ mod tests {
             ),
             (
                 "v2-live-owner-activations",
-                "48712c41c04010abdd02293cace12a416fa7c2718567559884a5384167746352",
+                "f2c32ddab5a8e72b268129df84ddb9f89c0b9879e24e5672026ca4cd35c0ba31",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

@@ -5168,6 +5168,150 @@ fn only_its_own_activation_keeps_a_captured_source() {
     assert_eq!(sources(&store), 2, "recorded sources stay for the return");
 }
 
+/// Round 3b's deferred input, through the whole retirement: a Y.Doc update
+/// for `doc-b` arrives before its base and waits. `doc-b` leaves and parks
+/// with it, and its adopted activation then releases and keeps it. Once
+/// `doc-b` returns, the base its return fetches drains the update, and
+/// nothing applies twice.
+#[test]
+fn deferred_input_survives_parking_and_release_and_drains_after_the_return() {
+    use dohc_engine_collab::live_object_binding::LiveObjectBinding;
+    use dohc_engine_collab::live_update_application::{
+        ApplicationHostCoordinate, Release, RetirementKey, RetirementScope, release_activation,
+    };
+    let (_scratch, _path, mut store, client) = departing_b();
+    let feed = client.transport();
+    let ydoc = dohc_engine_collab::Ydoc::wire();
+    ydoc.plaintext_insert(0, "hosted b");
+    let base = ydoc.encode_full_state();
+    let base_sha = dohc_engine_storage::hex_sha256(&base);
+    let update = ydoc.plaintext_insert(8, " and more");
+    let update_sha = dohc_engine_storage::hex_sha256(&update);
+    feed.blobs.lock().unwrap().insert(base_sha.clone(), base);
+    feed.blobs
+        .lock()
+        .unwrap()
+        .insert(update_sha.clone(), update);
+    let ydoc_update = |sha: &str, base: bool| {
+        json!({"versionId": "main", "objectId": "doc-b", "path": "a.md",
+            "contentKind": "plaintext", "updateBlobSha256": sha,
+            "lineageClaimId": base_sha, "isBaseState": base})
+    };
+    feed.append(envelope(
+        "peer",
+        0,
+        "ydoc.update",
+        ydoc_update(&update_sha, false),
+    ));
+    sync(&client, &mut store);
+    let deferred = "SELECT COUNT(*) FROM ydoc_deferred_updates WHERE object_id='doc-b'";
+    assert_eq!(count(&store, deferred), 1, "the update waits for its base");
+
+    // The adopted activation that holds `doc-b`, with its binding and the
+    // accepted history its adoption ended at.
+    let lineage = dohc_engine_storage::hex_sha256(b"activation lineage");
+    let binding = LiveObjectBinding {
+        workspace_id: "ws".into(),
+        main_version_id: "main".into(),
+        object_id: "doc-b".into(),
+        lineage_claim_id: lineage.clone(),
+        current_path: "a.md".into(),
+        selector_paths: vec!["a.md".into()],
+        restore_fence_generation: 0,
+    };
+    store
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_storage::put_binary_blob(tx, b"activation lineage")
+                .map_err(SyncError::Storage)?;
+            tx.execute(
+                "INSERT INTO live_owner_adoptions (relay_database_namespace,adoption_id, \
+                   workspace_id,main_version_id,object_id,lineage_claim_id,binding_json, \
+                   source_moment_id,source_digest,source_byte_length, \
+                   baseline_moment_relay_sequence,baseline_registered_at_ms,evidence_digest, \
+                   coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor, \
+                   terminal_receipt_json,host_coordinate_json,max_pending_bytes,max_pending_age_ms) \
+                 VALUES ('relay','activation','ws','main','doc-b',?1,?2,'moment-owner-1',?3,8,0,0, \
+                   'e','c',0,0,0,'null','{}',1,1)",
+                params![lineage, serde_json::to_string(&binding).unwrap(), text_sha("hosted b")],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(ACTIVATE_ADOPTION, params!["relay", "activation"])
+                .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO live_device_application_bindings VALUES \
+                 ('relay','ws','main','doc-b',?1,'a.md','[\"a.md\"]',0,'host',1,'instance', \
+                  'connection',1,'activation')",
+                [&lineage],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO live_accepted_checkpoints VALUES \
+                 ('relay','ws','main','doc-b',?1,0,0,'null','{}',?1,?1,?2,NULL,NULL)",
+                params![lineage, "e".repeat(64)],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+
+    feed.unshare("doc-b");
+    sync_parking(&client, &mut store);
+    assert!(is_parked(&store, "doc-b"));
+    assert_eq!(count(&store, deferred), 1, "parking keeps it");
+    let released = release_activation(
+        &mut store,
+        &RetirementScope {
+            namespace: "relay",
+            workspace_id: "ws",
+            max_deliveries: 8,
+            max_applications: 8,
+        },
+        &RetirementKey {
+            object_id: "doc-b".into(),
+            lineage_claim_id: lineage,
+            activation_id: "activation".into(),
+            restore_fence_generation: 0,
+            accepted_through: 0,
+        },
+        &ApplicationHostCoordinate {
+            host_id: "host".into(),
+            host_epoch: 1,
+            instance_id: "instance".into(),
+            connection_id: "connection".into(),
+        },
+        30,
+        &NoFaults,
+    )
+    .unwrap();
+    assert!(matches!(
+        released,
+        Release::Released {
+            replayed: false,
+            ..
+        }
+    ));
+    assert_eq!(count(&store, deferred), 1, "release keeps it");
+
+    // The base is written while `doc-b` is out of the scope, so only its
+    // return fetches it.
+    feed.append(envelope(
+        "base-peer",
+        0,
+        "ydoc.update",
+        ydoc_update(&base_sha, true),
+    ));
+    let journal = coordinates(&store);
+    feed.share("doc-b", "a.md");
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    assert_eq!(count(&store, deferred), 0, "the returned base drained it");
+    assert_eq!(content(&store).0, heads(&[("doc-b", "hosted b and more")]));
+    let mut expected = journal;
+    expected.push(("base-peer".to_owned(), 0));
+    expected.sort();
+    assert_eq!(coordinates(&store), expected, "only the base is new");
+}
+
 /// A folder move is held only while the current activation holds the
 /// document. Its release ends that, though the lineage's origin stays; the
 /// conflict and binding-change checks read the same current activation.

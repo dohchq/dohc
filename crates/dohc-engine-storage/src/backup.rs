@@ -71,6 +71,7 @@ const COMPARED_TABLES: &[&str] = &[
     "relay_deferred_blobs",
     "live_owner_adoptions",
     "live_owner_activations",
+    "live_owner_retirements",
     "live_device_bootstraps",
     "live_device_settlements",
     "live_settlement_publication_states",
@@ -587,6 +588,7 @@ mod tests {
             tx.execute("INSERT INTO ydoc_owner_activation_sources VALUES ('activation','relay','workspace','main','owner',?1,'source',?2,?1,'{}')",rusqlite::params![sha,source]).unwrap();
             tx.execute("INSERT INTO live_owner_adoptions VALUES ('relay','adoption','workspace','main','owner',?1,'{}','source',?2,0,1,0,?1,?1,0,0,0,'null','{}',1000000,60000)",rusqlite::params![sha,source]).unwrap();
             tx.execute("INSERT INTO live_owner_activations VALUES ('relay','adoption','workspace','main','owner',?1,'adoption',NULL,'{}','source',?2,0,1,0,'{}',?1,?1,0,0,0,'null',1000000,60000,NULL,NULL,NULL,NULL,NULL,NULL)",rusqlite::params![sha,source]).unwrap();
+            tx.execute("INSERT INTO live_owner_retirements VALUES ('relay','adoption','workspace','main','owner',?1,0)",[&sha]).unwrap();
             tx.execute("INSERT INTO replication_log VALUES ('workspace','peer',0,'moment.append','{}',0,1,'refused')",[]).unwrap();
             tx.execute("INSERT INTO replication_refused_moment_blobs VALUES ('workspace','peer',0,'payload-after',NULL,?1)",[&sha]).unwrap();
             tx.execute("INSERT INTO replication_refused_ydoc_blobs VALUES ('workspace','peer',0,?1)",[&sha]).unwrap();
@@ -628,6 +630,7 @@ mod tests {
             "ydoc_owner_activation_sources",
             "live_owner_adoptions",
             "live_owner_activations",
+            "live_owner_retirements",
             "live_device_bootstraps",
             "live_device_settlements",
             "live_device_application_bindings",
@@ -676,6 +679,7 @@ mod tests {
             "live_restore_fences",
             "live_owner_adoptions",
             "live_owner_activations",
+            "live_owner_retirements",
             "live_device_bootstraps",
             "live_device_settlements",
             "live_device_application_bindings",

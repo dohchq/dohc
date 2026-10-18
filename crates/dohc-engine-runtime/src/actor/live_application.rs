@@ -11,7 +11,7 @@ use dohc_engine_collab::live_update_application::{
     NativeRestorePreparation, NativeRestoreProposal, NativeRestoreResume,
     NativeRestoreResumeReceipt, OwnerAdoptionAck, OwnerAdoptionCut, Reconciliation, Release,
     RetiredActivations, RetirementKey, RetirementScope, RetirementTarget, UnloadPending,
-    adopt_owner_committed, apply_committed, bootstrap_committed, check_retirement,
+    adopt_owner_committed, apply_committed, begin_retirement, bootstrap_committed,
     read_application_ack, reconcile_activation, release_activation, unload_pending,
     validate_application_binding, validate_registration_activation, with_retirement_settlement,
     with_settlement,
@@ -504,8 +504,9 @@ impl ActorLiveApplicationOwner {
         self.retired.clone()
     }
 
-    /// Validate a retirement's key, then run its Phase A on the writer queue:
-    /// see [`ApplicationOwner::retire_activation`]. An invalid key, and a
+    /// Validate a retirement's key and record its intent, then run its Phase
+    /// A on the writer queue: see [`begin_retirement`] and
+    /// [`ApplicationOwner::retire_activation`]. An invalid key, and a
     /// released activation's replay, tear nothing down. A `release` also
     /// validates that its document left the scope.
     pub async fn begin_retirement(
@@ -1565,8 +1566,13 @@ impl Request {
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|owner| {
-                    let target =
-                        check_retirement(store, &scope.scope(&workspace_id), &key, release)?;
+                    let target = begin_retirement(
+                        store,
+                        &scope.scope(&workspace_id),
+                        &key,
+                        release,
+                        &dohc_engine_storage::NoFaults,
+                    )?;
                     if !target.released {
                         owner.retire_activation(
                             cache,

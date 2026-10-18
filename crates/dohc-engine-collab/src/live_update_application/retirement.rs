@@ -68,25 +68,101 @@ pub struct RetirementTarget {
     pub released: bool,
 }
 
-/// Validate a retirement's key, before the caller changes any runtime state.
-/// A release also needs its document to have left the replica's scope.
-pub fn check_retirement(
-    store: &EngineStore,
+/// Validate a retirement's key and durably record its intent, before the
+/// caller ends any of the activation's runtime. The intent outlasts a
+/// restart, so no restore moves the generation the key names until the
+/// release clears it. A release also needs its document to have left the
+/// replica's scope. A released activation's replay records nothing.
+pub fn begin_retirement(
+    store: &mut EngineStore,
     scope: &RetirementScope<'_>,
     key: &RetirementKey,
     release: bool,
+    faults: &dyn FaultInjector,
 ) -> Result<RetirementTarget, ApplicationError> {
-    store.read_with(|conn| {
-        let retiring = validate_retirement(conn, scope, key)?;
+    let outcome = store.write_with(faults, |tx| {
+        let retiring = validate_retirement(tx, scope, key)?;
         let released = retiring.released_through.is_some();
-        if release && !released {
-            departed_parked(conn, &retiring.doc)?;
+        if !released {
+            if release {
+                departed_parked(tx, &retiring.doc)?;
+            }
+            record_intent(tx, scope.namespace, &retiring, key)?;
         }
-        Ok(RetirementTarget {
+        Ok::<_, ApplicationError>(RetirementTarget {
             doc: retiring.doc,
             released,
         })
-    })
+    })?;
+    match outcome {
+        TxnOutcome::Committed(target) => Ok(target),
+        TxnOutcome::Crashed { .. } => Err(ApplicationError::Interrupted),
+    }
+}
+
+/// Record that the retirement of this exact activation and generation began.
+/// Each later Phase A for the same key finds it; another generation conflicts.
+fn record_intent(
+    tx: &Transaction<'_>,
+    namespace: &str,
+    retiring: &Retiring,
+    key: &RetirementKey,
+) -> Result<(), ApplicationError> {
+    let doc = &retiring.doc;
+    let row = params![
+        namespace,
+        key.activation_id,
+        doc.workspace_id,
+        doc.version_id,
+        doc.object_id,
+        retiring.lineage_claim_id,
+        key.restore_fence_generation
+    ];
+    tx.execute(
+        "INSERT OR IGNORE INTO live_owner_retirements (relay_database_namespace,activation_id,workspace_id,
+            main_version_id,object_id,lineage_claim_id,restore_fence_generation) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+        row,
+    )
+    .map_err(write_sql)?;
+    let recorded: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM live_owner_retirements WHERE relay_database_namespace=?1
+               AND activation_id=?2 AND workspace_id=?3 AND main_version_id=?4 AND object_id=?5
+               AND lineage_claim_id=?6 AND restore_fence_generation=?7)",
+            row,
+            |row| row.get(0),
+        )
+        .map_err(read_sql)?;
+    if !recorded {
+        return Err(ApplicationError::Conflict);
+    }
+    Ok(())
+}
+
+/// Whether an activation of the document is retiring: its retirement began,
+/// in any namespace, and it is not released yet.
+pub(super) fn retiring(conn: &Connection, doc: &DocKey) -> Result<bool, ApplicationError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM live_owner_retirements
+           WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)",
+        params![doc.workspace_id, doc.version_id, doc.object_id],
+        |row| row.get(0),
+    )
+    .map_err(read_sql)
+}
+
+/// A release ends the retirement it began.
+fn clear_intent(
+    tx: &Transaction<'_>,
+    namespace: &str,
+    activation_id: &str,
+) -> Result<(), ApplicationError> {
+    tx.execute(
+        "DELETE FROM live_owner_retirements WHERE relay_database_namespace=?1 AND activation_id=?2",
+        params![namespace, activation_id],
+    )
+    .map_err(write_sql)?;
+    Ok(())
 }
 
 /// Whether the document, which must have left the replica's scope, parked.
@@ -1016,6 +1092,7 @@ fn release_in_tx(
     if changed != 1 || delete_own_binding(tx, scope.namespace, &retiring, key)? != 1 {
         return Err(ApplicationError::Corrupt);
     }
+    clear_intent(tx, scope.namespace, &key.activation_id)?;
     Ok(Release::Released {
         replayed: false,
         boundary: Some(boundary),
@@ -1135,6 +1212,7 @@ fn release_unadopted(
     )
     .map_err(write_sql)?;
     delete_own_binding(tx, scope.namespace, retiring, key)?;
+    clear_intent(tx, scope.namespace, &key.activation_id)?;
     Ok(Release::Released {
         replayed: false,
         boundary: inherited,

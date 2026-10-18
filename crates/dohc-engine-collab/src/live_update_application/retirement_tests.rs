@@ -1538,9 +1538,27 @@ fn only_release_ends_an_abandoned_seed_hold() {
     assert!(hold(&f).is_none(), "the successor's hold names only its own seed");
 }
 
-/// Opus's round 3a F5: a restore moves the generation a retirement's key
-/// names. While the activation retires, in memory after Phase A or durably
-/// once its seed was abandoned, a restore fence is refused and writes nothing.
+fn begin(f: &mut Fixture, through: i64) -> Result<RetirementTarget, ApplicationError> {
+    let key = retirement_key(f, through);
+    begin_retirement(&mut f.store, &retirement_scope(), &key, false, &NoFaults)
+}
+
+/// Each recorded retirement intent: its activation and generation.
+fn intents(f: &Fixture) -> Vec<(String, i64)> {
+    f.store
+        .read_with(|conn| {
+            conn.prepare("SELECT activation_id,restore_fence_generation FROM live_owner_retirements ORDER BY 1")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .unwrap()
+}
+
+/// Sol's round 3b blocker: a restore moves the generation a retirement's key
+/// names. Its intent is written before Phase A ends any runtime, survives a
+/// restart that forgets Phase A, and refuses a restore fence, with no
+/// abandoned seed behind it, until the release clears it. An invalid key or
+/// a released replay records nothing.
 #[test]
 fn a_restore_waits_while_its_activation_retires() {
     let fence = |f: &mut Fixture| {
@@ -1566,16 +1584,42 @@ fn a_restore_waits_while_its_activation_retires() {
     };
     let mut f = Fixture::new();
     f.adopt().unwrap();
-    let key = f.key.clone();
-    f._owner.retire_activation(&mut WriterDocCache::new(), "namespace", &retirement_host(), &key, "adoption");
+    let mut wrong = retirement_key(&f, 10);
+    wrong.restore_fence_generation = 1;
+    assert!(matches!(
+        begin_retirement(&mut f.store, &retirement_scope(), &wrong, false, &NoFaults),
+        Err(ApplicationError::Conflict)
+    ));
+    assert!(intents(&f).is_empty(), "an invalid key records nothing");
+    assert!(!begin(&mut f, 10).unwrap().released);
+    assert!(!begin(&mut f, 10).unwrap().released, "Phase A runs again on its own intent");
+    assert_eq!(intents(&f), [("adoption".to_owned(), 0)]);
+    // A restart, then a reconnect: the store reopens and no owner retired
+    // the activation in memory. Nothing abandoned a seed.
+    drop(f.store);
+    f.store = EngineStore::open(&f._scratch.join("engine.db"), 31).unwrap();
+    f._owner = ApplicationOwner::new("workspace".into()).unwrap();
+    assert_eq!(intents(&f), [("adoption".to_owned(), 0)], "the intent survives the restart");
+    assert!(f
+        .store
+        .read_with(|conn| super::super::seed_hold(conn, "namespace", &f.binding))
+        .unwrap()
+        .is_none());
     assert!(matches!(fence(&mut f), Err(ApplicationError::Conflict)));
     assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 0);
-    // An abandoned seed holds it after a restart forgot Phase A.
-    let (mut f, seed, _) = seeded();
-    let absent = JournalEvidence { receipts: vec![], absent: vec![seed] };
-    reconcile(&mut f, 10, None, Some(&absent)).unwrap();
-    assert!(matches!(fence(&mut f), Err(ApplicationError::Conflict)));
-    assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 0);
+    // The retirement still completes, and its release clears the intent.
+    host_document(&mut f, true, true);
+    assert!(matches!(release_through(&mut f, 10).unwrap(), Release::Released { replayed: false, .. }));
+    assert!(intents(&f).is_empty());
+    assert!(begin(&mut f, 10).unwrap().released);
+    assert!(intents(&f).is_empty(), "a released replay records nothing");
+    // A never-adopted source's retirement holds a restore the same way.
+    let mut f = never_adopted();
+    begin(&mut f, 10).unwrap();
+    assert_eq!(intents(&f), [("captured".to_owned(), 0)]);
+    host_document(&mut f, true, false);
+    release_through(&mut f, 10).unwrap();
+    assert!(intents(&f).is_empty());
     // Not retiring, the same fence lands.
     let mut f = Fixture::new();
     f.adopt().unwrap();
@@ -1736,19 +1780,115 @@ fn readers_after_a_release() {
     assert!(matches!(bootstrap_tip(&f), Err(ApplicationError::Conflict)));
     write(&mut f, "DELETE FROM live_device_bootstraps");
     // Its carried delivery keeps coverage accepted-only and its budget
-    // retained; ordinary ownership and enrollment see no current owner.
-    assert_eq!(held(&f), (true, false, true, true));
+    // retained. Ordinary ownership sees no current owner, and enrollment
+    // still refuses the lineage its owner adopted.
+    assert_eq!(held(&f), (true, false, false, true));
     write(&mut f, "UPDATE live_owner_activations SET carried_manifest_json='[]'");
-    assert_eq!(held(&f), (false, false, true, false), "with nothing carried, nothing is retained");
+    assert_eq!(held(&f), (false, false, false, false), "with nothing carried, nothing is retained");
     // No owner delivery lands on the released lineage, under any limits.
     let entries = f.store.table_row_count("owner_ydoc_outbox_entries").unwrap();
     assert!(matches!(append(&mut f, 1_000_000), Err(owner_outbox::OwnerOutboxError::Frozen)));
     // Its delivered entries stay accepted; none is refused afterwards.
     assert!(refuse(&mut f).is_err());
     assert_eq!(f.store.table_row_count("owner_ydoc_outbox_entries").unwrap(), entries);
-    // An observed binding installs only on the exact local state, which
-    // still holds the carried update.
-    assert!(observe(&mut f).is_ok());
+    // Nor does an observed binding install on it.
+    let observed = f.store.table_row_count("ydoc_owner_bindings").unwrap();
+    assert!(matches!(observe(&mut f), Err(owner_outbox::OwnerOutboxError::ParentMismatch)));
+    assert_eq!(f.store.table_row_count("ydoc_owner_bindings").unwrap(), observed);
+}
+
+/// Opus's round 3b note: only a lineage an owner adopted refuses enrollment
+/// and an observed binding once nothing holds it. A lineage never adopted,
+/// with no binding, takes both.
+#[test]
+fn a_lineage_never_adopted_still_enrolls_and_installs_an_observed_binding() {
+    let mut f = Fixture::new();
+    write(&mut f, "DELETE FROM live_device_application_bindings");
+    let binding = f.binding.clone();
+    assert!(f
+        .store
+        .read_with(|conn| owner_outbox::enrollment::capture_in(conn, &binding))
+        .is_ok());
+    observe(&mut f).unwrap();
+    assert_eq!(f.store.table_row_count("ydoc_owner_bindings").unwrap(), 1);
+}
+
+/// Sol's round 3b blocker: a never-adopted release carries its predecessor's
+/// deliveries, but has no adoption to state their limits. The configured
+/// host's budget must still cover the limits they were accepted under: the
+/// chain's last adopted activation's, through any number of never-adopted
+/// releases. A never-adopted release records no adoption fact. A chain no
+/// activation adopted has no limits to cover.
+#[test]
+fn carried_deliveries_keep_the_limits_they_were_accepted_under() {
+    let exceeds = |f: &Fixture, bytes: i64| {
+        f.store
+            .read_with(|conn| owner_activations::retained_limits_exceed(conn, "workspace", bytes, 100_000))
+            .unwrap()
+    };
+    let another_source = |f: &mut Fixture| {
+        write(
+            f,
+            "INSERT INTO ydoc_owner_activation_sources SELECT 'second',relay_database_namespace,workspace_id,
+                version_id,object_id,lineage_claim_id,source_moment_id,source_digest,full_state_digest,descriptor_json
+             FROM ydoc_owner_activation_sources WHERE activation_id='captured'",
+        )
+    };
+    let (mut f, covered, _, _) = covered_and_carried();
+    host_document(&mut f, true, true);
+    retirement_settle(&mut f, 10, Some(covered)).unwrap();
+    release_through(&mut f, 10).unwrap();
+    // The adoption allowed 1,000,000 pending bytes: a budget below it is
+    // refused, one at it accepted.
+    assert_eq!((exceeds(&f, 999_999), exceeds(&f, 1_000_000)), (true, false), "the adopted tail");
+    another_source(&mut f);
+    for (id, through) in [("captured", 12), ("second", 14)] {
+        f.cut.adoption_id = id.into();
+        release_through(&mut f, through).unwrap();
+        let (limits, adopted, manifest): (Option<i64>, Option<String>, String) = f
+            .store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT max_pending_bytes,evidence_digest,carried_manifest_json FROM live_owner_activations
+                     WHERE activation_id=?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!((limits, adopted), (None, None), "{id} records no adoption fact");
+        assert_eq!(serde_json::from_str::<Vec<CarriedDelivery>>(&manifest).unwrap().len(), 1, "{id}");
+        assert_eq!((exceeds(&f, 999_999), exceeds(&f, 1_000_000)), (true, false), "{id}");
+    }
+    // Two never-adopted releases with no adopted ancestor carry nothing;
+    // shaped to carry anyway, the chain has no limits to exceed.
+    let mut f = never_adopted();
+    host_document(&mut f, true, false);
+    release_through(&mut f, 10).unwrap();
+    another_source(&mut f);
+    f.cut.adoption_id = "second".into();
+    release_through(&mut f, 12).unwrap();
+    write(&mut f, "UPDATE live_owner_activations SET carried_manifest_json='[{}]' WHERE activation_id='second'");
+    assert!(!exceeds(&f, 1));
+}
+
+/// Phase A retires only its own namespace's registrations on its own host
+/// coordinate. One tagged with the same activation under another connection
+/// or namespace stays live.
+#[test]
+fn phase_a_ends_only_registrations_on_its_own_coordinate() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let key = f.key.clone();
+    let live = |f: &Fixture| f.handle.registration.lock().unwrap().live && f._owner.current.len() == 1;
+    let other = ApplicationHostCoordinate { connection_id: "other".into(), ..retirement_host() };
+    for (namespace, coordinate) in [("namespace", other), ("elsewhere", retirement_host())] {
+        f._owner.retire_activation(&mut WriterDocCache::new(), namespace, &coordinate, &key, "adoption");
+        assert!(live(&f), "{namespace} {coordinate:?}");
+    }
+    f._owner.retire_activation(&mut WriterDocCache::new(), "namespace", &retirement_host(), &key, "adoption");
+    assert!(!f.handle.registration.lock().unwrap().live);
+    assert!(f._owner.current.is_empty());
 }
 
 /// Install an observed binding of the document at its exact local state.

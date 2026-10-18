@@ -108,6 +108,9 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OwnerActivation> {
 
 /// Whether a retained activation of one of the workspace's documents adopted
 /// outbox limits above these, which a configured host's budget must cover.
+/// A released tail that never adopted carries its predecessor's deliveries
+/// under the limits they were accepted with: those of the last activation in
+/// its chain that adopted.
 pub fn retained_limits_exceed(
     conn: &Connection,
     workspace_id: &str,
@@ -116,10 +119,18 @@ pub fn retained_limits_exceed(
 ) -> Result<bool, ApplicationError> {
     conn.query_row(
         &format!(
-            "SELECT EXISTS(SELECT 1 FROM {RETAINED_ACTIVATIONS} a JOIN ydoc_docs d
-               ON d.workspace_id=a.workspace_id AND d.version_id=a.main_version_id AND d.object_id=a.object_id
-               AND d.lineage_claim_id=a.lineage_claim_id
-             WHERE a.workspace_id=?1 AND (a.max_pending_bytes>?2 OR a.max_pending_age_ms>?3))"
+            "WITH RECURSIVE provenance(namespace,predecessor,max_pending_bytes,max_pending_age_ms) AS (
+               SELECT a.relay_database_namespace,a.predecessor_activation_id,a.max_pending_bytes,a.max_pending_age_ms
+                 FROM {RETAINED_ACTIVATIONS} a JOIN ydoc_docs d
+                   ON d.workspace_id=a.workspace_id AND d.version_id=a.main_version_id AND d.object_id=a.object_id
+                   AND d.lineage_claim_id=a.lineage_claim_id
+                 WHERE a.workspace_id=?1
+               UNION ALL
+               SELECT v.relay_database_namespace,v.predecessor_activation_id,v.max_pending_bytes,v.max_pending_age_ms
+                 FROM provenance p JOIN live_owner_activations v
+                   ON v.relay_database_namespace=p.namespace AND v.activation_id=p.predecessor
+                 WHERE p.max_pending_bytes IS NULL)
+             SELECT EXISTS(SELECT 1 FROM provenance WHERE max_pending_bytes>?2 OR max_pending_age_ms>?3)"
         ),
         params![workspace_id, max_pending_bytes, max_pending_age_ms],
         |row| row.get(0),

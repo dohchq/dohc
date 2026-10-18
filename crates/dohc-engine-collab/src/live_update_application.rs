@@ -52,7 +52,7 @@ pub(crate) mod restore_fence;
 mod restore_resume;
 mod retirement;
 pub use retirement::{
-    check_retirement, reconcile_activation, release_activation, CarriedDelivery, JournalEvidence,
+    begin_retirement, reconcile_activation, release_activation, CarriedDelivery, JournalEvidence,
     Reconciliation, Release, ReleasePending, RetainedPrefix, RetirementKey, RetirementScope,
     RetirementTarget,
 };
