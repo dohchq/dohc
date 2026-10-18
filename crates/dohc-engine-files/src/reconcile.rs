@@ -18,7 +18,7 @@
 use crate::diff::{ManifestEntry, ScanDiff, ScanManifest, diff_scans};
 use crate::error::FilesError;
 use crate::scan::{ScanOutcome, Scanner};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -79,6 +79,14 @@ impl CaptureOp {
     }
 }
 
+/// The spelling a respelled path's file is stored under now, and the bytes
+/// the scan found there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Respelling {
+    pub path: String,
+    pub sha256: String,
+}
+
 /// A reconcile plan: the ordered capture ops plus the generation transition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReconcilePlan {
@@ -94,6 +102,10 @@ pub struct ReconcilePlan {
     /// Missing paths retained because a scan failure or final lstat result did
     /// not prove absence. Their prior manifest entries remain last-known-good.
     pub unconfirmed_removed: Vec<String>,
+    /// Retires the plan's ingests respell, proven on disk: the old spelling
+    /// still opens the file, which is stored under another spelling. Each
+    /// names the ingest of that spelling.
+    pub respelled_retires: BTreeMap<String, Respelling>,
     /// The pass saw one or more readability failures or an unconfirmed retire.
     /// Callers mirror TS `onCaptureOutcome({ok:false})` while still applying
     /// every independent safe operation.
@@ -111,9 +123,15 @@ pub struct ReconcilePlan {
 
 impl ReconcilePlan {
     /// Build a plan from a classified diff. Ops are sorted by path so the plan
-    /// is deterministic and inspectable.
+    /// is deterministic and inspectable, except that a retire whose path an
+    /// ingested path respells comes before every ingest. `stored_spelling`
+    /// gives the spelling a retired path's file is stored under, when that is
+    /// another one; the retire is respelled only when the plan ingests that
+    /// exact path.
+    #[allow(clippy::too_many_arguments)]
     fn from_diff(
         diff: ScanDiff,
+        stored_spelling: impl Fn(&str) -> Option<String>,
         from_generation: ScanGeneration,
         to_generation: ScanGeneration,
         prepared_from_dirty: bool,
@@ -146,12 +164,67 @@ impl ReconcilePlan {
             ops.push(CaptureOp::Retire { path });
         }
         ops.sort_by(|a, b| a.path().cmp(b.path()));
+        // A rename that changes only case or Unicode normalization retires the
+        // old spelling first. A peer on a disk that ignores case then deletes
+        // the old file before it writes the new one, never the new one after.
+        let key = crate::floor::path_collision_key;
+        let retired: BTreeSet<String> = ops
+            .iter()
+            .filter_map(|op| match op {
+                CaptureOp::Retire { path } => Some(key(path)),
+                CaptureOp::Ingest { .. } => None,
+            })
+            .collect();
+        let paired: BTreeSet<String> = if retired.is_empty() {
+            BTreeSet::new()
+        } else {
+            ops.iter()
+                .filter_map(|op| match op {
+                    CaptureOp::Ingest { path, .. } => Some(key(path)),
+                    CaptureOp::Retire { .. } => None,
+                })
+                .filter(|path| retired.contains(path))
+                .collect()
+        };
+        let mut respelled_retires = BTreeMap::new();
+        if !paired.is_empty() {
+            ops.sort_by_key(
+                |op| !matches!(op, CaptureOp::Retire { path } if paired.contains(&key(path))),
+            );
+            let ingests: BTreeMap<&str, &str> = ops
+                .iter()
+                .filter_map(|op| match op {
+                    CaptureOp::Ingest { path, sha256, .. } if paired.contains(&key(path)) => {
+                        Some((path.as_str(), sha256.as_str()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            for op in &ops {
+                let CaptureOp::Retire { path } = op else {
+                    break;
+                };
+                if let Some(stored) = stored_spelling(path)
+                    && let Some(sha256) = ingests.get(stored.as_str())
+                {
+                    let sha256 = (*sha256).to_owned();
+                    respelled_retires.insert(
+                        path.clone(),
+                        Respelling {
+                            path: stored,
+                            sha256,
+                        },
+                    );
+                }
+            }
+        }
         ReconcilePlan {
             from_generation,
             to_generation,
             ops,
             retained_over_cap: diff.retained_over_cap,
             unconfirmed_removed: diff.unconfirmed_removed,
+            respelled_retires,
             degraded,
             degraded_paths,
             prepared_from_dirty,
@@ -191,10 +264,12 @@ pub enum ReconcileRun {
 /// regular-file reappearance or an indeterminate error (retain). The trait
 /// keeps all three outcomes directly testable on every platform.
 pub trait AbsenceProbe: Send + Sync {
-    /// True when the tracked regular file is confirmed gone, including when a
-    /// non-regular entry now occupies its path. False retains on either a
-    /// regular-file reappearance or an indeterminate probe error.
-    fn confirms_absent(&self, absolute_path: &Path) -> bool;
+    /// True when the tracked regular file at `relative` under `root` is
+    /// confirmed gone, including when a non-regular entry now occupies its
+    /// path or the file found there is stored under another spelling. False
+    /// retains on either a regular-file reappearance or an indeterminate
+    /// probe error.
+    fn confirms_absent(&self, root: &Path, relative: &str) -> bool;
 }
 
 /// Production probe: gone/non-regular retires; regular or indeterminate retains.
@@ -202,19 +277,73 @@ pub trait AbsenceProbe: Send + Sync {
 pub struct StdAbsenceProbe;
 
 impl AbsenceProbe for StdAbsenceProbe {
-    fn confirms_absent(&self, absolute_path: &Path) -> bool {
-        match std::fs::symlink_metadata(absolute_path) {
+    fn confirms_absent(&self, root: &Path, relative: &str) -> bool {
+        let Some(absolute) = absolute_path(root, relative) else {
+            return false;
+        };
+        match std::fs::symlink_metadata(absolute) {
             Err(err) if matches!(err.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
                 true
             }
             // The scanner tracks regular files only. A directory, symlink, or
             // other non-regular replacement confirms that tracked file gone.
-            Ok(metadata) => !metadata.file_type().is_file(),
+            Ok(metadata) => {
+                !metadata.file_type().is_file() || stored_under_other_spelling(root, relative)
+            }
             // Permission, lock, sharing, and other errors cannot prove the
             // regular file gone, so retain its last-known-good state.
             Err(_) => false,
         }
     }
+}
+
+/// Whether `relative` reaches an entry under `root` only through another
+/// stored spelling of its file name. APFS ignores case and Unicode
+/// normalization, so a lookup of `notes.md` finds a file renamed to
+/// `Notes.md`. The stored spelling shows that `relative` itself is gone. A
+/// symlink is never another spelling, and a folder renamed by case or
+/// normalization is not proven: its files keep their old handling.
+///
+/// Always false on Windows. NTFS ignores case too, so a case-only rename
+/// there has the same fault, but this check must pass a Windows run before
+/// it applies there.
+pub fn stored_under_other_spelling(root: &Path, relative: &str) -> bool {
+    stored_spelling(root, relative).is_some()
+}
+
+/// The spelling under which `relative`'s entry is stored, when that differs
+/// from `relative` only in case or Unicode normalization. See
+/// [`stored_under_other_spelling`]; `None` on Windows.
+fn stored_spelling(root: &Path, relative: &str) -> Option<String> {
+    if cfg!(windows) {
+        return None;
+    }
+    let root = root.canonicalize().ok()?;
+    let stored = root.join(relative).canonicalize().ok()?;
+    let stored = stored.strip_prefix(&root).ok()?;
+    let tracked: Vec<&str> = relative.split('/').collect();
+    if stored.components().count() != tracked.len() {
+        return None;
+    }
+    let mut lookup = root.clone();
+    let mut spelling = Vec::with_capacity(tracked.len());
+    let leaf = tracked.len() - 1;
+    for (index, (stored, tracked)) in stored.components().zip(tracked).enumerate() {
+        lookup.push(tracked);
+        let stored = stored.as_os_str().to_str()?;
+        if stored != tracked
+            && (index < leaf
+                || crate::floor::fold_segment(stored) != crate::floor::fold_segment(tracked)
+                || std::fs::symlink_metadata(&lookup)
+                    .ok()
+                    .is_none_or(|entry| entry.file_type().is_symlink()))
+        {
+            return None;
+        }
+        spelling.push(stored);
+    }
+    let spelling = spelling.join("/");
+    (spelling != relative).then_some(spelling)
 }
 
 /// Owns the reconcile state: the last committed manifest, the current scan
@@ -406,9 +535,7 @@ impl ReconcileController {
         let mut confirmed_removed = Vec::with_capacity(diff.removed.len());
         let mut lstat_unconfirmed = Vec::new();
         for path in diff.removed.drain(..) {
-            let confirmed = absolute_path(root, &path)
-                .is_some_and(|absolute| absence_probe.confirms_absent(&absolute));
-            if confirmed {
+            if absence_probe.confirms_absent(root, &path) {
                 confirmed_removed.push(path);
             } else {
                 lstat_unconfirmed.push(path);
@@ -429,6 +556,7 @@ impl ReconcileController {
         let dirty_epoch = self.dirty_epoch;
         let plan = ReconcilePlan::from_diff(
             diff,
+            |path| stored_spelling(root, path),
             from,
             to,
             prepared_from_dirty,
@@ -820,6 +948,7 @@ mod ack_receipt_tests {
             ops: Vec::new(),
             retained_over_cap: Vec::new(),
             unconfirmed_removed: Vec::new(),
+            respelled_retires: BTreeMap::new(),
             degraded: false,
             degraded_paths: Vec::new(),
             prepared_from_dirty: true,
@@ -863,6 +992,7 @@ mod ack_receipt_tests {
             ops: Vec::new(),
             retained_over_cap: vec!["over-cap.md".to_owned()],
             unconfirmed_removed: Vec::new(),
+            respelled_retires: BTreeMap::new(),
             degraded: false,
             degraded_paths: Vec::new(),
             prepared_from_dirty: true,
@@ -887,5 +1017,94 @@ mod ack_receipt_tests {
             "a side-effect retire must drop the manifest entry"
         );
         let _ = Accept;
+    }
+}
+
+#[cfg(test)]
+mod respell_order_tests {
+    use super::*;
+    use crate::diff::ScanDiff;
+    use crate::scan::FileEntry;
+
+    fn entry(path: &str) -> FileEntry {
+        FileEntry {
+            path: path.to_owned(),
+            size: 1,
+            mtime_ms: 0,
+            sha256: "a".repeat(64),
+            media_type: "text/markdown",
+        }
+    }
+
+    /// The retire of a spelling comes before any ingest that respells it,
+    /// changed as well as added: path order would put `Notes.md` before
+    /// `notes.md`, and a peer that ignores case would delete the new file.
+    /// Only a retire the disk proves respelled counts as one.
+    #[test]
+    fn a_retire_comes_before_every_ingest_that_respells_it() {
+        for (added, changed) in [
+            (vec![entry("Notes.md")], vec![]),
+            (vec![], vec![entry("Notes.md")]),
+        ] {
+            for proven in [true, false] {
+                let diff = ScanDiff {
+                    added: added.clone(),
+                    changed: changed.clone(),
+                    removed: vec!["notes.md".to_owned(), "zz.md".to_owned()],
+                    ..ScanDiff::default()
+                };
+                let plan = ReconcilePlan::from_diff(
+                    diff,
+                    |_| proven.then(|| "Notes.md".to_owned()),
+                    ScanGeneration(0),
+                    ScanGeneration(1),
+                    false,
+                    0,
+                    false,
+                    Vec::new(),
+                );
+                let paths: Vec<&str> = plan.ops.iter().map(CaptureOp::path).collect();
+                assert_eq!(paths, ["notes.md", "Notes.md", "zz.md"]);
+                let respelled: Vec<(&str, &str)> = plan
+                    .respelled_retires
+                    .iter()
+                    .map(|(path, to)| (path.as_str(), to.path.as_str()))
+                    .collect();
+                assert_eq!(
+                    respelled,
+                    if proven {
+                        vec![("notes.md", "Notes.md")]
+                    } else {
+                        vec![]
+                    }
+                );
+            }
+        }
+    }
+
+    /// A folded group can hold names the volume keeps apart, such as one with
+    /// a zero-width space. A retire pairs only with the ingest at the exact
+    /// spelling its file is stored under, never with another name that shares
+    /// its key.
+    #[test]
+    fn a_respelled_retire_pairs_only_with_its_stored_spelling() {
+        for (ingested, paired) in [("AB.md", false), ("A\u{200b}B.md", true)] {
+            let diff = ScanDiff {
+                added: vec![entry(ingested)],
+                removed: vec!["a\u{200b}b.md".to_owned()],
+                ..ScanDiff::default()
+            };
+            let plan = ReconcilePlan::from_diff(
+                diff,
+                |_| Some("A\u{200b}B.md".to_owned()),
+                ScanGeneration(0),
+                ScanGeneration(1),
+                false,
+                0,
+                false,
+                Vec::new(),
+            );
+            assert_eq!(!plan.respelled_retires.is_empty(), paired, "{ingested}");
+        }
     }
 }

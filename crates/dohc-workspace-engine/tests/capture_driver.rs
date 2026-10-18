@@ -2214,6 +2214,100 @@ async fn capture_reconcile_forces_a_full_manifest_rebuild() {
         .expect("close");
 }
 
+/// APFS keeps finding a file through its old spelling after a rename that
+/// changes only case or Unicode normalization (Finder, `mv`, `git mv`). The
+/// old spelling must retire, or a case-sensitive peer receives both files.
+/// That holds inside a folder too, and Finder metadata beside the files is
+/// never captured. Windows keeps the old
+/// behavior until the check passes a Windows run. Skips where the disk keeps
+/// case apart, since a rename there changes the stored name.
+#[cfg(not(windows))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn outside_renames_that_only_respell_retire_the_old_spelling() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_file(scratch.path(), "probe.md", b"");
+    let ignores_case = scratch.path().join("PROBE.md").exists();
+    std::fs::remove_file(scratch.path().join("probe.md")).expect("remove probe");
+    if !ignores_case {
+        eprintln!("SKIP: this disk keeps case apart");
+        return;
+    }
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    let renames = [
+        ("notes.md", "Notes.md", "case"),
+        ("Drafts/plan.md", "Drafts/Plan.md", "case in a folder"),
+        ("caf\u{e9}.md", "cafe\u{301}.md", "normalization"),
+    ];
+    for (before, _, text) in renames {
+        write_file(scratch.path(), before, text.as_bytes());
+    }
+    write_file(scratch.path(), ".DS_Store", b"finder view state");
+    write_file(scratch.path(), "Drafts/._plan.md", b"appledouble");
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    for (before, _, text) in renames {
+        wait_for_text(&transport, &handle, before, Some(text)).await;
+    }
+
+    std::fs::rename(
+        scratch.path().join("notes.md"),
+        scratch.path().join("Notes.md"),
+    )
+    .expect("respell file");
+    std::fs::rename(
+        scratch.path().join("Drafts/plan.md"),
+        scratch.path().join("Drafts/Plan.md"),
+    )
+    .expect("respell file in a folder");
+    std::fs::rename(
+        scratch.path().join("caf\u{e9}.md"),
+        scratch.path().join("cafe\u{301}.md"),
+    )
+    .expect("renormalize file");
+
+    for (before, after, text) in renames {
+        wait_for_text(&transport, &handle, after, Some(text)).await;
+        wait_for_text(&transport, &handle, before, None).await;
+    }
+    let flush = transport
+        .call(
+            RequestContext::unbounded(),
+            request(2, "capture.flush", Some(handle.clone()), json!({})),
+        )
+        .await
+        .expect("capture.flush");
+    assert_eq!(flush.result["settled"], json!(true), "{}", flush.result);
+    assert_eq!(flush.result["degraded"], json!(false), "{}", flush.result);
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(3, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+
+    let store = EngineStore::open(&scratch.path().join(".dohc/engine/engine.db"), 100)
+        .expect("reopen store");
+    let mut aliases: Vec<String> = store
+        .read_with(|conn| {
+            conn.prepare("SELECT path FROM path_aliases WHERE workspace_id = ?1")?
+                .query_map([WORKSPACE_ID], |row| row.get(0))?
+                .collect::<Result<_, rusqlite::Error>>()
+        })
+        .expect("aliases");
+    aliases.sort();
+    let mut expected: Vec<String> = renames
+        .iter()
+        .map(|(_, after, _)| (*after).to_owned())
+        .collect();
+    expected.sort();
+    assert_eq!(
+        aliases, expected,
+        "one alias per file, none for OS metadata"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn capture_flush_turns_external_writes_into_read_your_writes() {
     let scratch = ScratchDir::new().expect("scratch");

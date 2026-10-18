@@ -20,8 +20,8 @@ use dohc_engine_domain::{
     CaptureSecretRetire, DomainError, SecretFileStore, SecretMomentRecord, SecretWriteResult,
     VersionedTextStore, WriteResult, capture_ingest_binary_with_admission_in_tx,
     capture_ingest_in_batch_with_admission_in_tx, capture_ingest_with_admission_in_tx,
-    capture_manifest_seed, capture_retire_in_tx, capture_secret_retire_with,
-    ensure_main_version_in_tx,
+    capture_manifest_seed, capture_retire_in_tx, capture_retire_respelled_in_tx,
+    capture_secret_retire_with, ensure_main_version_in_tx,
 };
 use dohc_engine_files::floor::path_collision_key;
 use dohc_engine_storage::capture_file_holds::{self, CaptureFileHold};
@@ -204,6 +204,7 @@ mod capture_file_hold_tests {
         let result = capture_retire_on_store(
             &mut store,
             &retire,
+            None,
             scratch.path(),
             &Root,
             true,
@@ -844,6 +845,7 @@ mod capture_file_hold_tests {
             capture_retire_on_store(
                 &mut store,
                 &retire,
+                None,
                 scratch.path(),
                 &Root,
                 true,
@@ -1382,9 +1384,42 @@ impl ActorHandle {
                 capture_retire_on_store(
                     store,
                     &input,
+                    None,
                     &root_dir,
                     root_guard.as_ref(),
                     confirm_absent,
+                    self_writes.as_ref(),
+                    &leases,
+                    faults.as_ref(),
+                )
+            })
+        })
+    }
+
+    /// Retire `input.path`, whose file the disk shows stored under `to`, another
+    /// spelling of it, with the bytes `to_sha256`. See
+    /// [`dohc_engine_domain::capture_retire_respelled_in_tx`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn capture_retire_respelled_blocking_guarded(
+        &self,
+        input: CaptureRetire,
+        to: String,
+        to_sha256: String,
+        root_dir: PathBuf,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        leases: LeaseRegistry,
+        faults: Arc<dyn FaultInjector>,
+        root_guard: Arc<dyn WorkspaceRootGuard>,
+    ) -> Result<CaptureRetireResult, RuntimeError> {
+        self.run_blocking(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                capture_retire_on_store(
+                    store,
+                    &input,
+                    Some((&to, &to_sha256)),
+                    &root_dir,
+                    root_guard.as_ref(),
+                    false,
                     self_writes.as_ref(),
                     &leases,
                     faults.as_ref(),
@@ -2706,6 +2741,7 @@ pub(super) fn confirm_absent_on_disk(
 fn capture_retire_on_store(
     store: &mut EngineStore,
     input: &CaptureRetire,
+    respelled_to: Option<(&str, &str)>,
     root_dir: &std::path::Path,
     root_guard: &dyn WorkspaceRootGuard,
     confirm_absent: bool,
@@ -2772,7 +2808,11 @@ fn capture_retire_on_store(
             ])
             .map_err(StorageError::persist_public)?;
         }
-        let mut result = capture_retire_in_tx(tx, input).map_err(RuntimeError::from)?;
+        let mut result = match respelled_to {
+            Some((to, to_sha256)) => capture_retire_respelled_in_tx(tx, input, to, to_sha256),
+            None => capture_retire_in_tx(tx, input),
+        }
+        .map_err(RuntimeError::from)?;
         if result.retired.is_some() {
             placement_admission?;
         }
