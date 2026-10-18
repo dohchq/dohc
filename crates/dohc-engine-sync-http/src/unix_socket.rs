@@ -64,7 +64,10 @@ pub(super) struct UnixTransport {
 }
 
 /// macOS refuses socket options once the peer has closed, yet buffered bytes
-/// and EOF still read, and a write still reports the closed peer.
+/// and EOF still read, and a write still reports the closed peer. Only the
+/// kernel's EINVAL is ignored: std's own zero-duration error carries no OS
+/// code, and the request timeout bounds every duration to 30 s, so an
+/// out-of-range value never reaches the kernel.
 fn set_timeout(result: std::io::Result<()>) -> Result<(), Error> {
     match result {
         Err(error)
