@@ -3,7 +3,8 @@ import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } 
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { DohcDesktopBridge, EngineYDocSaveStateEvent, RetryEngineYDocSaveResult, SyncStatusResult } from "../../ipc/bridgeContract";
+import type { DohcDesktopBridge, EngineYDocSaveStateEvent, RetryEngineYDocSaveResult, SaveFailureReason, SyncStatusResult } from "../../ipc/bridgeContract";
+import { PRIVACY_DENIED_WORDS } from "../../ipc/errorWords";
 import { deferred } from "../../testing/deferred";
 import { CsvView } from "../CsvView";
 import { documentVersionKey } from "../documentVersionKey";
@@ -22,6 +23,7 @@ const listeners = new Set<(event: EngineYDocSaveStateEvent) => void>();
 const retryEngineYDocSave = vi.fn<(payload: { workspaceId: string; path: string }) => Promise<RetryEngineYDocSaveResult>>();
 const writeWorkspaceText = vi.fn<DohcDesktopBridge["writeWorkspaceText"]>();
 const open = vi.fn<(path: string) => void>();
+const openSystemPrivacySettings = vi.fn(async () => undefined);
 
 const SYNCED: SyncStatusResult = {
   state: "synced",
@@ -107,9 +109,9 @@ const emit = (event: Partial<EngineYDocSaveStateEvent>) =>
       listener({ sessionId: "session-1", workspaceId: "ws-1", path: "notes/a.md", state: { kind: "saving" }, seq: 1, ...event });
     }
   });
-const failed = (readOnly = true): Partial<EngineYDocSaveStateEvent> => ({
+const failed = (reason: SaveFailureReason = "read-only"): Partial<EngineYDocSaveStateEvent> => ({
   state: { kind: "error", reason: "dohc could not confirm the file was saved.", issueId: null },
-  saveFailure: { readOnly },
+  saveFailure: { reason },
 });
 
 describe("document save notices", () => {
@@ -123,6 +125,7 @@ describe("document save notices", () => {
       },
       retryEngineYDocSave,
       writeWorkspaceText,
+      openSystemPrivacySettings,
       getUpdateState: () => new Promise(() => {}),
       onUpdateState: () => () => {},
     });
@@ -172,9 +175,27 @@ describe("document save notices", () => {
     expect(screen.queryByTestId("connection-notices")).toBeNull();
   });
 
+  it("says macOS blocked the folder, and offers System Settings beside Try again", () => {
+    const { result } = renderHook(() => {
+      const shell = useShellError("ws-1");
+      useDocumentSaveNotices({ workspaceId: "ws-1", report: shell.reportShellFailure, clear: shell.clearIdentity, open });
+      return shell.shellErrors;
+    });
+    emit(failed("privacy-denied"));
+    expect(result.current).toHaveLength(1);
+    const [notice] = result.current;
+    expect(notice!.title).toBe("Couldn't save notes/a.md");
+    expect(notice!.message).toBe(PRIVACY_DENIED_WORDS);
+    expect(notice!.details).toContainEqual(["Cause", "macOS blocked dohc from this folder."]);
+    expect(notice!.retry).not.toBeNull();
+    expect(notice!.action?.label).toBe("Open System Settings");
+    notice!.action!.run();
+    expect(openSystemPrivacySettings).toHaveBeenCalledOnce();
+  });
+
   it("says only what it knows when the file is not read-only", () => {
     render(<Shell />);
-    emit(failed(false));
+    emit(failed(null));
     const toast = screen.getByTestId("workspace-shell-error");
     expect(toast.textContent).toContain("dohc couldn't write the file.");
     expect(toast.textContent).not.toContain("read-only");
@@ -239,7 +260,7 @@ describe("document save notices", () => {
     render(<Shell />);
     emit({ sessionId: "session-1", state: { kind: "saved-here" } });
     emit({ ...failed(), sessionId: "session-2" });
-    emit({ ...failed(false), sessionId: "session-1", closing: true });
+    emit({ ...failed(null), sessionId: "session-1", closing: true });
     expect(screen.getByTestId("workspace-shell-error").textContent).toContain("read-only");
   });
 

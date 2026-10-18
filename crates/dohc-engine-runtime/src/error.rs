@@ -192,6 +192,8 @@ mod tests {
             MaterializeError::Io {
                 path: "record.md".into(),
                 kind: std::io::ErrorKind::PermissionDenied,
+                raw_os_error: None,
+                privacy_denied: false,
             },
         ] {
             let code = error.code();

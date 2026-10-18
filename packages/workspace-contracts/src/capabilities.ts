@@ -270,6 +270,7 @@ export const CAPABILITIES = {
   "document.draft.list": capability("Read saved live drafts for review.", {ipc: ["listLiveDraftRecovery"]}),
   "document.save.retry": capability("Try again to save an open document to its file.", {ipc: ["retryEngineYDocSave"]}),
   "device.motion.read": capability("Read this computer's reduced-motion preference.", {ipc: ["getSystemReducedMotion"]}),
+  "device.privacy.open": capability("Open macOS privacy settings at Files & Folders.", {ipc: ["openSystemPrivacySettings"]}),
   "account.delete.preview": capability("Review what deleting the connected server account removes.", {ipc: ["previewServerAccountDeletion"], mcpReason: "No desktop MCP tool; account deletion needs the account password."}),
   "account.delete": capability("Delete the connected server account with its password.", {ipc: ["deleteServerAccount", "retryServerAccountDisconnect"], mcpReason: "No desktop MCP tool; account deletion needs the account password."}),
 } as const;

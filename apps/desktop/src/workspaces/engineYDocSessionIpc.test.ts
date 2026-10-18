@@ -7,6 +7,7 @@ import {
 } from "@dohc/workspace-engine-client";
 import * as Y from "yjs";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -27,6 +28,13 @@ import {
   type EngineYDocSessionCapture,
 } from "./engineYDocSessionIpc";
 import { CHANNELS, ENGINE_YDOC_UPDATE_MAX_BYTES } from "../ipc/channels";
+import { isPrivacyDenial } from "./privacyDenial";
+
+// A real macOS privacy refusal needs System Settings; a test answers for it.
+vi.mock("./privacyDenial", async (actual) => {
+  const real = await actual<typeof import("./privacyDenial")>();
+  return { ...real, isPrivacyDenial: vi.fn(real.isPrivacyDenial) };
+});
 import { deferred } from "../testing/deferred";
 
 const AUTHORITY_ID = Symbol("attachment-a");
@@ -749,11 +757,11 @@ describe("engine Y.Doc IPC adapter", () => {
       const failures = () => sender.sent.map(({ payload }) => (payload as { saveFailure?: unknown }).saveFailure);
 
       h.capturedOpen()?.onSaveState?.("error", 1, "outcome");
-      expect(failures().at(-1)).toEqual({ readOnly: false });
+      expect(failures().at(-1)).toEqual({ reason: null });
       chmodSync(file, 0o444);
       h.capturedOpen()?.onSaveState?.("settling", 2, "start");
       h.capturedOpen()?.onSaveState?.("error", 2, "outcome");
-      expect(failures().at(-1)).toEqual({ readOnly: true });
+      expect(failures().at(-1)).toEqual({ reason: "read-only" });
       // An author-capacity refusal and an error no settle reported are not save failures.
       h.capturedOpen()?.onSaveState?.("settling", 3, "start");
       h.capturedOpen()?.onSaveState?.("error", 3, "outcome", true);
@@ -764,6 +772,49 @@ describe("engine Y.Doc IPC adapter", () => {
       await h.ipc.shutdown();
     } finally {
       chmodSync(file, 0o644);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("names a save macOS refused as a privacy refusal, not a read-only file", async () => {
+    const root = mkdtempSync(join(tmpdir(), "dohc-save-privacy-"));
+    mkdirSync(join(root, "notes"));
+    const file = join(root, "notes", "a.md");
+    writeFileSync(file, "# A\n");
+    chmodSync(file, 0o444);
+    vi.mocked(isPrivacyDenial).mockReturnValueOnce(true);
+    try {
+      const h = harness(providerSession(), { rootPath: root });
+      const sender = new FakeSender(7);
+      await h.ipc.open(sender, openPayload);
+      h.capturedOpen()?.onSaveState?.("error", 1, "outcome");
+      expect(sender.sent.map(({ payload }) => (payload as { saveFailure?: unknown }).saveFailure).at(-1))
+        .toEqual({ reason: "privacy-denied" });
+      await h.ipc.shutdown();
+    } finally {
+      chmodSync(file, 0o644);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // A Finder lock refuses writes with EPERM, as a macOS privacy refusal does,
+  // but the file still reads, so it is read-only, not a privacy refusal.
+  it.runIf(process.platform === "darwin")("names a file locked in Finder read-only", async () => {
+    const root = mkdtempSync(join(tmpdir(), "dohc-save-locked-"));
+    mkdirSync(join(root, "notes"));
+    const file = join(root, "notes", "a.md");
+    writeFileSync(file, "# A\n");
+    execFileSync("chflags", ["uchg", file]);
+    try {
+      const h = harness(providerSession(), { rootPath: root });
+      const sender = new FakeSender(7);
+      await h.ipc.open(sender, openPayload);
+      h.capturedOpen()?.onSaveState?.("error", 1, "outcome");
+      expect(sender.sent.map(({ payload }) => (payload as { saveFailure?: unknown }).saveFailure).at(-1))
+        .toEqual({ reason: "read-only" });
+      await h.ipc.shutdown();
+    } finally {
+      execFileSync("chflags", ["nouchg", file]);
       rmSync(root, { recursive: true, force: true });
     }
   });
@@ -813,7 +864,7 @@ describe("engine Y.Doc IPC adapter", () => {
     h.capturedOpen()?.onSaveState?.("error", 0, "status");
     expect(sender.sent.slice(-5).map(({ payload }) => payload)).toEqual([
       { sessionId: openPayload.sessionId, ...DOCUMENT, typingUnresolved: false, ...engineSaveState("settling"), seq: 0 },
-      { sessionId: openPayload.sessionId, ...DOCUMENT, typingUnresolved: false, ...engineSaveState("error"), seq: 4, saveFailure: { readOnly: false } },
+      { sessionId: openPayload.sessionId, ...DOCUMENT, typingUnresolved: false, ...engineSaveState("error"), seq: 4, saveFailure: { reason: null } },
       { sessionId: openPayload.sessionId, ...DOCUMENT, typingUnresolved: false, ...engineSaveState("changed-on-disk"), seq: 0 },
       { sessionId: openPayload.sessionId, ...DOCUMENT, typingUnresolved: false, ...engineSaveState("settling"), seq: 0 },
       { sessionId: openPayload.sessionId, ...DOCUMENT, typingUnresolved: false, ...engineSaveState("error"), seq: 0 },

@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { ENGINE_STORE_BACKUP_DIR } from "../ipc/bridgeContract";
+import { PRIVACY_DENIED_WORDS } from "../ipc/errorWords";
 import type { OwnerLiveDocumentsResult, McpConfigResult, NoticeRow, RebuildEngineStoreResult, ResolveAutomationControlsResult, SyncStatusResult, EngineYDocSaveStateEvent } from "../ipc/bridgeContract";
 import type { SentNotices } from "./shell/useSentNotices";
 import type { OpenOnSwitch } from "./shell/useSentNoticeProps";
@@ -926,6 +927,77 @@ describe("workspace shell errors", () => {
       "Detail: dohc is still reading this workspace's files. Try again when it finishes.",
       "Cause: DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again.",
     ]);
+  });
+
+  it("stops a workspace macOS refuses, and offers System Settings beside Try again", async () => {
+    const bridge = makeBridge(Promise.resolve(null), "darwin");
+    bridge.openWorkspace.mockRejectedValueOnce(new Error(
+      "Error invoking remote method 'desktop:open-workspace': Error [privacy-denied]: EPERM: operation not permitted, opendir '/Users/me/Documents/Trip'",
+    ));
+    renderShell(bridge);
+
+    const recovery = await screen.findByTestId("workspace-open-failed");
+    expect(recovery.textContent).toContain(PRIVACY_DENIED_WORDS);
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    fireEvent.click(within(recovery).getByRole("button", { name: "Open System Settings" }));
+    expect(bridge.openSystemPrivacySettings).toHaveBeenCalledOnce();
+    expect(screen.getByTestId("workspace-open-failed")).toBe(recovery);
+
+    fireEvent.click(within(recovery).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridge.openWorkspace).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+  });
+
+  it("files a toast with Try again when System Settings does not open", async () => {
+    const bridge = makeBridge(Promise.resolve(null), "darwin");
+    bridge.openWorkspace.mockRejectedValue(new Error(
+      "Error invoking remote method 'desktop:open-workspace': Error [privacy-denied]: EPERM: operation not permitted, opendir '/Users/me/Documents/Trip'",
+    ));
+    bridge.openSystemPrivacySettings
+      .mockRejectedValueOnce(new Error(
+        "Error invoking remote method 'desktop:open-system-privacy-settings': Error: Failed to open URL",
+      ))
+      .mockResolvedValueOnce(undefined);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const recovery = await screen.findByTestId("workspace-open-failed");
+    fireEvent.click(within(recovery).getByRole("button", { name: "Open System Settings" }));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("dohc could not open System Settings. Failed to open URL");
+    await user.click(within(toast).getByRole("button", { name: "Copy error details" }));
+    expect(await navigator.clipboard.readText()).toContain("dohc could not open System Settings.");
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    const row = (await within(await screen.findByTestId("notice-center"))
+      .findByText("dohc could not open System Settings. Failed to open URL")).closest("li")!;
+    expect(within(row).getByRole("button", { name: "Try again" })).toBeTruthy();
+    expect(within(row).getByRole("button", { name: "Copy error details" })).toBeTruthy();
+
+    await user.click(within(row).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridge.openSystemPrivacySettings).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(row.isConnected).toBe(false));
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(screen.getByTestId("workspace-open-failed")).toBeTruthy();
+  });
+
+  it("offers System Settings on a toast when macOS refuses one read", async () => {
+    const bridge = makeBridge(Promise.resolve(null), "darwin");
+    bridge.listWorkspaceFiles.mockRejectedValueOnce(new Error(
+      "Error invoking remote method 'desktop:list-workspace-files': DaemonRefusalError [INTERNAL]: privacy-denied",
+    ));
+    renderShell(bridge);
+
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(`Could not refresh workspace files. ${PRIVACY_DENIED_WORDS}`);
+    fireEvent.click(within(toast).getByTestId("workspace-shell-error-action"));
+    expect(bridge.openSystemPrivacySettings).toHaveBeenCalledOnce();
+    expect(within(toast).getByTestId("workspace-shell-error-action").textContent).toBe("Open System Settings");
+
+    fireEvent.click(screen.getByTestId("workspace-shell-error-retry"));
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2));
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
   it("retries a failed initial listing without reopening the workspace", async () => {

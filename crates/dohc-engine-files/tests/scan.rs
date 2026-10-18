@@ -363,12 +363,49 @@ fn invalid_root_is_typed() {
     assert_eq!(err.code(), "invalid-root");
 }
 
+/// Refuses the root's listing with one OS error number.
+struct DenyRoot(i32);
+
+impl ScanIoFaultInjector for DenyRoot {
+    fn error(&self, path: &str, operation: ScanIoOperation) -> Option<std::io::Error> {
+        (path.is_empty() && operation == ScanIoOperation::ReadDir)
+            .then(|| std::io::Error::from_raw_os_error(self.0))
+    }
+}
+
+/// macOS refuses a folder the person has not allowed with EPERM, and the
+/// root's scan says so. EACCES, an ordinary permission, keeps `scan-io`.
+#[test]
+fn an_eperm_root_is_a_privacy_denial_on_macos() {
+    let ws = Scratch::new();
+    ws.write("a.md", b"a");
+    let code = |raw| {
+        let scanner = Scanner::new_with_io_faults(ScanBounds::default(), Arc::new(DenyRoot(raw)))
+            .expect("scanner");
+        let err = scanner
+            .scan(ws.path(), &CancellationToken::new())
+            .expect_err("refused root");
+        assert!(matches!(
+            err,
+            dohc_engine_files::FilesError::ScanIo { raw_os_error: Some(r), .. } if r == raw
+        ));
+        err.code()
+    };
+    let eperm = if cfg!(target_os = "macos") {
+        "privacy-denied"
+    } else {
+        "scan-io"
+    };
+    assert_eq!(code(1), eperm);
+    assert_eq!(code(13), "scan-io");
+}
+
 struct DenyHash;
 
 impl ScanIoFaultInjector for DenyHash {
-    fn error_kind(&self, path: &str, operation: ScanIoOperation) -> Option<ErrorKind> {
+    fn error(&self, path: &str, operation: ScanIoOperation) -> Option<std::io::Error> {
         (path == "locked.md" && operation == ScanIoOperation::Hash)
-            .then_some(ErrorKind::PermissionDenied)
+            .then(|| ErrorKind::PermissionDenied.into())
     }
 }
 
@@ -392,7 +429,7 @@ impl ConcurrentHashProbe {
 }
 
 impl ScanIoFaultInjector for ConcurrentHashProbe {
-    fn error_kind(&self, _path: &str, operation: ScanIoOperation) -> Option<ErrorKind> {
+    fn error(&self, _path: &str, operation: ScanIoOperation) -> Option<std::io::Error> {
         if operation != ScanIoOperation::Hash {
             return None;
         }
@@ -466,7 +503,7 @@ struct ReplaceOnHashProbe {
 }
 
 impl ScanIoFaultInjector for ReplaceOnHashProbe {
-    fn error_kind(&self, path: &str, operation: ScanIoOperation) -> Option<ErrorKind> {
+    fn error(&self, path: &str, operation: ScanIoOperation) -> Option<std::io::Error> {
         if path == "doc.md"
             && operation == ScanIoOperation::Hash
             && !self.fired.swap(true, std::sync::atomic::Ordering::SeqCst)
@@ -479,7 +516,7 @@ impl ScanIoFaultInjector for ReplaceOnHashProbe {
 }
 
 impl ScanIoFaultInjector for MutateOnHashProbe {
-    fn error_kind(&self, path: &str, operation: ScanIoOperation) -> Option<ErrorKind> {
+    fn error(&self, path: &str, operation: ScanIoOperation) -> Option<std::io::Error> {
         if path == "doc.md"
             && operation == ScanIoOperation::Hash
             && !self.fired.swap(true, std::sync::atomic::Ordering::SeqCst)

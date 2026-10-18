@@ -30,8 +30,10 @@ import { createWorkspaceFileProtocolHandler } from "./security/workspaceFileProt
 import {readOwnerRestoreResponse} from "./ipc/readOwnerRestoreResponse";
 import { readDatasetResponse } from "./ipc/readDatasetResponse";
 import { ipcWireError } from "./ipc/errorWords";
+import { assertRootNotPrivacyDenied, withPrivacyDenial } from "./workspaces/privacyDenial";
 import { createUpdateInstall, registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
 import { registerSystemMotionIpc } from "./ipc/systemMotionIpc";
+import { registerSystemPrivacySettingsIpc } from "./ipc/systemPrivacySettingsIpc";
 import { createWindowIpc } from "./ipc/windowIpc";
 import {
   devToolsEnabled,
@@ -5805,7 +5807,7 @@ function handleIpc(channel: string, listener: Parameters<typeof ipcMain.handle>[
       if (counted) telemetry.track(counted);
       return result;
     } catch (error) {
-      throw ipcWireError(error);
+      throw ipcWireError(withPrivacyDenial(error));
     }
   });
 }
@@ -5978,6 +5980,7 @@ const stopWorkspaceSync = createWorkspaceSyncStop({
 
 function registerIpcHandlers(): void {
   registerSystemMotionIpc(operationBoundary, () => systemPreferences.getAnimationSettings());
+  registerSystemPrivacySettingsIpc(operationBoundary, process.platform, (url) => shell.openExternal(url));
   registerServerAccountIpc(operationBoundary, serverAccountDeletion);
   shareDirectWriteDelivery.register(operationBoundary);
   const shareCopyHandler = createShareCopyHandler<WebContents, RegistryEntry, DesktopRendererWorkspaceOperation>({
@@ -6858,8 +6861,11 @@ function registerIpcHandlers(): void {
     markWorkspaceOpened,
     workspaceShown: (workspaceId, sender) => workspaceFileOpens.shown(sender, workspaceId),
     syncStatusWithOwnedProjection,
-    openWorkspaceActivity: (operation) =>
-      openWorkspaceActivityForOperation(operation, {}, ensureWorkspaceActivityOpen),
+    openWorkspaceActivity: async (operation) => {
+      // A root macOS refuses would open with every file and engine call failing.
+      await assertRootNotPrivacyDenied(operation.workspace.rootPath);
+      return openWorkspaceActivityForOperation(operation, {}, ensureWorkspaceActivityOpen);
+    },
   });
 
   // Named versions. Every handler resolves the workspace through

@@ -127,6 +127,7 @@ impl ObservationWalker {
                 }
                 Err(error) if dir == root => {
                     return Err(crate::FilesError::scan_io(
+                        &dir,
                         dir.to_string_lossy().into_owned(),
                         &error,
                     ));

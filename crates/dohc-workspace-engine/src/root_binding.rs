@@ -25,11 +25,30 @@ pub enum RootBindingError {
     Unstamped,
     #[error("engine database is bound to another root")]
     DatabaseMismatch,
+    /// macOS refused dohc the root's folder. See
+    /// [`dohc_engine_files::privacy_denied`].
+    #[error("{}", dohc_engine_files::PRIVACY_DENIED)]
+    PrivacyDenied,
+}
+
+/// A macOS privacy refusal at `path` names itself; any other io failure is
+/// `otherwise`.
+fn io_failure(
+    path: &Path,
+    otherwise: RootBindingError,
+) -> impl FnOnce(std::io::Error) -> RootBindingError {
+    move |error| {
+        if dohc_engine_files::privacy_denied(&error, path) {
+            RootBindingError::PrivacyDenied
+        } else {
+            otherwise
+        }
+    }
 }
 
 /// Canonicalize a root without creating anything.
 pub fn canonical_root(root: &Path) -> Result<PathBuf, RootBindingError> {
-    std::fs::canonicalize(root).map_err(|_| RootBindingError::RootUnavailable)
+    std::fs::canonicalize(root).map_err(io_failure(root, RootBindingError::RootUnavailable))
 }
 
 /// The root's binding token, or `None` when the root has never been bound.
@@ -41,7 +60,7 @@ pub fn read_root_binding(root: &Path) -> Result<Option<String>, RootBindingError
         Ok(token) if token.is_empty() => return Ok(None),
         Ok(token) => token,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(RootBindingError::Unreadable),
+        Err(error) => return Err(io_failure(&marker, RootBindingError::Unreadable)(error)),
     };
     if !valid_token(&token) {
         return Err(RootBindingError::Malformed);
@@ -63,15 +82,16 @@ fn write_new_root_binding_with_hook(
 ) -> Result<String, RootBindingError> {
     let marker = root.join(ROOT_BINDING_RELATIVE_PATH);
     create_binding_dir(&marker)?;
+    let lock = marker.with_extension("lock");
     let anchor = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(marker.with_extension("lock"))
-        .map_err(|_| RootBindingError::Unwritable)?;
+        .open(&lock)
+        .map_err(io_failure(&lock, RootBindingError::Unwritable))?;
     before_lock();
-    fs4::FileExt::lock(&anchor).map_err(|_| RootBindingError::Unwritable)?;
+    fs4::FileExt::lock(&anchor).map_err(io_failure(&lock, RootBindingError::Unwritable))?;
     // The lock file stays in place so every process locks the same inode.
     // Read the marker only after the previous owner finishes publication.
     if let Some(token) = read_root_binding(root)? {
@@ -85,7 +105,7 @@ fn write_new_root_binding_with_hook(
     match std::fs::remove_file(&pending) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err(RootBindingError::Unwritable),
+        Err(error) => return Err(io_failure(&pending, RootBindingError::Unwritable)(error)),
     }
     let publish = (|| {
         use std::io::Write as _;
@@ -98,9 +118,9 @@ fn write_new_root_binding_with_hook(
         drop(file);
         std::fs::rename(&pending, &marker)
     })();
-    if publish.is_err() {
+    if let Err(error) = publish {
         let _ = std::fs::remove_file(&pending);
-        return Err(RootBindingError::Unwritable);
+        return Err(io_failure(&marker, RootBindingError::Unwritable)(error));
     }
     sync_binding_dir(&marker)?;
     Ok(token)
@@ -110,7 +130,7 @@ fn sync_binding_dir(marker: &Path) -> Result<(), RootBindingError> {
     #[cfg(unix)]
     std::fs::File::open(marker.parent().ok_or(RootBindingError::Unwritable)?)
         .and_then(|directory| directory.sync_all())
-        .map_err(|_| RootBindingError::Unwritable)?;
+        .map_err(io_failure(marker, RootBindingError::Unwritable))?;
     #[cfg(not(unix))]
     let _ = marker;
     Ok(())
@@ -139,7 +159,7 @@ fn create_binding_dir(marker: &Path) -> Result<(), RootBindingError> {
     }
     builder
         .create(parent)
-        .map_err(|_| RootBindingError::Unwritable)
+        .map_err(io_failure(parent, RootBindingError::Unwritable))
 }
 
 fn valid_token(token: &[u8]) -> bool {
@@ -256,6 +276,53 @@ mod tests {
             assert!(!pending.exists());
             assert_eq!(write_new_root_binding(scratch.path()).unwrap(), token);
         }
+    }
+
+    /// EPERM is how macOS refuses a folder the person has not allowed. Each
+    /// root step names it; EACCES and other failures keep their own error.
+    #[test]
+    fn an_eperm_root_step_is_a_privacy_denial_on_macos() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let eperm = io_failure(scratch.path(), RootBindingError::Unwritable)(
+            std::io::Error::from_raw_os_error(1),
+        );
+        if cfg!(target_os = "macos") {
+            assert!(matches!(eperm, RootBindingError::PrivacyDenied));
+        } else {
+            assert!(matches!(eperm, RootBindingError::Unwritable));
+        }
+        assert!(matches!(
+            io_failure(scratch.path(), RootBindingError::RootUnavailable)(
+                std::io::Error::from_raw_os_error(13)
+            ),
+            RootBindingError::RootUnavailable
+        ));
+        assert_eq!(
+            RootBindingError::PrivacyDenied.to_string(),
+            "privacy-denied"
+        );
+    }
+
+    /// A folder locked in Finder also refuses new files with EPERM. That is
+    /// the folder's own state, not a privacy refusal.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_locked_engine_folder_is_not_a_privacy_denial() {
+        let chflags = |flag: &str, path: &Path| {
+            let status = std::process::Command::new("chflags")
+                .arg(flag)
+                .arg(path)
+                .status()
+                .expect("chflags");
+            assert!(status.success());
+        };
+        let scratch = ScratchDir::new().expect("scratch");
+        let engine = scratch.join(".dohc").join("engine");
+        std::fs::create_dir_all(&engine).expect("engine dir");
+        chflags("uchg", &engine);
+        let minted = write_new_root_binding(scratch.path());
+        chflags("nouchg", &engine);
+        assert!(matches!(minted, Err(RootBindingError::Unwritable)));
     }
 
     #[test]

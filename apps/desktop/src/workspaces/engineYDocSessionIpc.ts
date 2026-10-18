@@ -44,7 +44,9 @@ import {
   type RetryEngineYDocSavePayload as RetrySavePayload,
   type RetryEngineYDocSaveResult as RetrySaveResult,
   type ReadOnlyTransitionCause,
+  type SaveFailureReason,
 } from "../ipc/bridgeContract";
+import { isPrivacyDenial } from "./privacyDenial";
 import { CHANNELS, type EngineYDocSaveStateName } from "../ipc/channels";
 import {
   createEngineYDocSaveSeqState,
@@ -134,22 +136,23 @@ interface EngineYDocSessionIpcOptions {
   localPersonId: () => string;
 }
 
-// Whether the file refuses writes. A missing file, or one that cannot be
-// checked, is not read-only.
-function fileIsReadOnly(absolutePath: string): boolean {
+// Why the file refuses writes. A missing file, or one that cannot be
+// checked, names no reason.
+function saveFailureReason(absolutePath: string): SaveFailureReason {
   try {
     accessSync(absolutePath, fsConstants.W_OK);
-    return false;
+    return null;
   } catch (error) {
+    if (isPrivacyDenial(error)) return "privacy-denied";
     const code = (error as NodeJS.ErrnoException).code;
-    return code === "EACCES" || code === "EPERM";
+    return code === "EACCES" || code === "EPERM" ? "read-only" : null;
   }
 }
 
 interface SessionEvent {
   readOnlyCause?: ReadOnlyTransitionCause;
   authorCapacity?: boolean;
-  saveFailure?: { readOnly: boolean };
+  saveFailure?: { reason: SaveFailureReason };
   editRefusal?: import("../ipc/bridgeContract").EngineYDocSaveStateEvent["editRefusal"];
   state: EngineYDocSaveStateName;
   seq: number;
@@ -668,7 +671,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         const emit = (event: SessionEvent): void => {
           if (lastEvent?.state === event.state &&
             (event.state === "settling" || lastEvent.seq === event.seq) &&
-            lastEvent.saveFailure?.readOnly === event.saveFailure?.readOnly &&
+            lastEvent.saveFailure?.reason === event.saveFailure?.reason &&
             lastEvent.authorCapacity === event.authorCapacity &&
             lastEvent.readOnlyCause === event.readOnlyCause &&
             lastEvent.editRefusal?.requestId === event.editRefusal?.requestId &&
@@ -706,10 +709,11 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
                   : event === "outcome"
                     ? noteSettleOutcome(saveSeq, token)
                     : 0;
-              // A settle that could not write the file. The read-only check is
-              // one stat, made only on a failure, so the notice can name it.
+              // A settle that could not write the file. The reason check is
+              // one or two access calls, made only on a failure, so the notice
+              // can name it.
               const saveFailure = state === "error" && event === "outcome" && !authorCapacity
-                ? { readOnly: fileIsReadOnly(join(workspace.rootPath, canonicalPath)) }
+                ? { reason: saveFailureReason(join(workspace.rootPath, canonicalPath)) }
                 : undefined;
               publish(() => emit({
                 state, seq, ...(authorCapacity ? { authorCapacity: true } : {}),

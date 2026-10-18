@@ -6883,6 +6883,9 @@ export type EngineYDocLineageReplacementEvent = z.infer<
 export const ReadOnlyTransitionCause = z.enum(["access-ended", "reconnecting", "lineage-failure"]);
 export type ReadOnlyTransitionCause = z.infer<typeof ReadOnlyTransitionCause>;
 
+export const SaveFailureReason = z.enum(["read-only", "privacy-denied"]).nullable();
+export type SaveFailureReason = z.infer<typeof SaveFailureReason>;
+
 export const EngineYDocSaveStateEvent = z.object({
   typingUnresolved: z.boolean().optional(),
   readOnlyCause: ReadOnlyTransitionCause.optional(),
@@ -6900,9 +6903,10 @@ export const EngineYDocSaveStateEvent = z.object({
   path: z.string(),
   state: SaveStateSchema,
   access: z.enum(["read-only", "deleted", "object-changed"]).optional(),
-  // A settle failed to write the file. Absent for an edit refusal, an
-  // author-capacity refusal, and an error no settle reported.
-  saveFailure: z.object({ readOnly: z.boolean() }).optional(),
+  // A settle failed to write the file, and why when a check can tell. Absent
+  // for an edit refusal, an author-capacity refusal, and an error no settle
+  // reported.
+  saveFailure: z.object({ reason: SaveFailureReason }).optional(),
   // Sent while the session closes, after its editor has gone.
   closing: z.literal(true).optional(),
   seq: z.number().int().nonnegative(),
@@ -6945,6 +6949,18 @@ export const systemMotionOperations = {
     channel: "desktop:get-system-reduced-motion",
     payload: z.object({}),
     result: SystemReducedMotionResult,
+    guard: "trusted-sender",
+  },
+} as const satisfies OperationTable;
+
+// macOS only. Main opens Privacy & Security at Files & Folders; the window
+// names no URL.
+export const systemPrivacySettingsOperations = {
+  openSystemPrivacySettings: {
+    capabilityId: "device.privacy.open",
+    scope: "device",
+    channel: "desktop:open-system-privacy-settings",
+    payload: z.object({}),
     guard: "trusted-sender",
   },
 } as const satisfies OperationTable;
@@ -6992,6 +7008,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof relayShareOperations>,
     OperationBridge<typeof shareCopyOperations>,
     OperationBridge<typeof systemMotionOperations>,
+    OperationBridge<typeof systemPrivacySettingsOperations>,
     OperationBridge<typeof serverAccountOperations>,
     OperationBridge<typeof accessOperations>,
     OperationBridge<typeof workspaceVersionOperations>,

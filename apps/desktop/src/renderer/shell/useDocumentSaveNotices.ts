@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import type { EngineYDocSaveStateEvent } from "../../ipc/bridgeContract";
-import { isShareReadOnlyRefusal } from "../../ipc/errorWords";
+import type { EngineYDocSaveStateEvent, SaveFailureReason } from "../../ipc/bridgeContract";
+import { isPrivacyDenied, isShareReadOnlyRefusal, PRIVACY_DENIED_WORDS } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
 import type { ErrorDetailField } from "./copyDetails";
 import type { ShellErrorKind } from "./useShellError";
@@ -22,13 +22,18 @@ const REPLACES_FAILURE = new Set<EngineYDocSaveStateEvent["state"]["kind"]>([
   "saved-here", "saved-to-host", "pending-share", "file-locked", "changed-on-disk",
 ]);
 
-export function saveFailureNotice(path: string, readOnly: boolean): Pick<DocumentSaveFailure, "title" | "message" | "details"> {
+// The reason that tells a person the most, when writers give different ones.
+const REASON_ORDER: readonly SaveFailureReason[] = ["privacy-denied", "read-only"];
+
+export function saveFailureNotice(path: string, reason: SaveFailureReason): Pick<DocumentSaveFailure, "title" | "message" | "details"> {
+  const cause = reason === "privacy-denied" ? "macOS blocked dohc from this folder."
+    : reason === "read-only" ? "The file is read-only." : null;
   return {
     title: `Couldn't save ${path}`,
-    message: readOnly
-      ? "The file is read-only. Make it writable, then try again."
+    message: reason === "privacy-denied" ? PRIVACY_DENIED_WORDS
+      : reason === "read-only" ? "The file is read-only. Make it writable, then try again."
       : "dohc couldn't write the file.",
-    details: [["File", path, path.length], ...(readOnly ? [["Cause", "The file is read-only."] as const] : [])],
+    details: [["File", path, path.length], ...(cause ? [["Cause", cause] as const] : [])],
   };
 }
 
@@ -57,10 +62,10 @@ export function reportTextSave(workspaceId: string, path: string, failure: TextS
 // file, and a live document's path when main cannot open its session.
 type Writer = "engine" | "text";
 
-// One writer's failed save: whether the file is read-only, and the newest
+// One writer's failed save: why, when a check could tell, and the newest
 // way to try that writer again.
 interface WriterFailure {
-  readOnly: boolean;
+  reason: SaveFailureReason;
   retry: (failure: WriterFailure) => void;
 }
 
@@ -107,7 +112,8 @@ export function useDocumentSaveNotices(input: {
     const fileNotice = (path: string, failed: FailedFile, cause?: unknown): void => {
       failed.reported = true;
       latest.current.report({
-        ...saveFailureNotice(path, [...failed.writers.values()].some((failure) => failure.readOnly)),
+        ...saveFailureNotice(path, REASON_ORDER.find((reason) =>
+          [...failed.writers.values()].some((failure) => failure.reason === reason)) ?? null),
         ...(cause === undefined ? {} : { cause }),
         identity: identity(path),
         retry: () => {
@@ -121,15 +127,15 @@ export function useDocumentSaveNotices(input: {
         },
       });
     };
-    const fail = (path: string, writer: Writer, readOnly: boolean, retry: WriterFailure["retry"], cause?: unknown): void => {
+    const fail = (path: string, writer: Writer, reason: SaveFailureReason, retry: WriterFailure["retry"], cause?: unknown): void => {
       let failed = files.get(path);
       if (!failed) {
         failed = { reported: false, writers: new Map() };
         files.set(path, failed);
         counted();
       }
-      const failure = failed.writers.get(writer) ?? { readOnly, retry };
-      failure.readOnly = readOnly;
+      const failure = failed.writers.get(writer) ?? { reason, retry };
+      failure.reason = reason;
       failure.retry = retry;
       failed.writers.set(writer, failure);
       if (!failed.reported) fileNotice(path, failed, cause);
@@ -176,7 +182,7 @@ export function useDocumentSaveNotices(input: {
       // An author-capacity refusal has its own notice, including one a Try
       // again ran into, so this document's save notice gives way to it.
       if (event.authorCapacity) forget(event.path, "engine");
-      else if (event.saveFailure) fail(event.path, "engine", event.saveFailure.readOnly, retryDocument(event.path));
+      else if (event.saveFailure) fail(event.path, "engine", event.saveFailure.reason, retryDocument(event.path));
       else if (event.access || REPLACES_FAILURE.has(event.state.kind)) forget(event.path, "engine");
     });
     const textSave = (save: TextSave): void => {
@@ -186,7 +192,7 @@ export function useDocumentSaveNotices(input: {
         forget(save.path, "text");
         return;
       }
-      fail(save.path, "text", false, (failure) => {
+      fail(save.path, "text", isPrivacyDenied(failed.cause) ? "privacy-denied" : null, (failure) => {
         if (!failed.retry()) reopen(save.path, "text", failure);
       }, failed.cause);
     };
