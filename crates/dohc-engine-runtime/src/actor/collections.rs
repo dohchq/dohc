@@ -2134,7 +2134,7 @@ fn reconcile_collections_on_store(
         if token.is_cancelled() {
             return Err(RuntimeError::Cancelled);
         }
-        if store.placement_is_held(workspace_id, &candidate.file_path)? {
+        if dohc_engine_files::placement_is_held_in(store, workspace_id, &candidate.file_path)? {
             continue;
         }
         match adopt_collection_record_on_store(
@@ -2214,7 +2214,11 @@ fn reconcile_collections_on_store(
         if pending_seed_objects.contains(&candidate.source_object_id) {
             continue;
         }
-        if store.placement_is_held(workspace_id, &candidate.source_file_path)? {
+        if dohc_engine_files::placement_is_held_in(
+            store,
+            workspace_id,
+            &candidate.source_file_path,
+        )? {
             continue;
         }
         match cleanup_collection_relation_on_store(

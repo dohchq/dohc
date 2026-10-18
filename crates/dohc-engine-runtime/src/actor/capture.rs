@@ -23,6 +23,7 @@ use dohc_engine_domain::{
     capture_manifest_seed, capture_retire_in_tx, capture_secret_retire_with,
     ensure_main_version_in_tx,
 };
+use dohc_engine_files::floor::path_collision_key;
 use dohc_engine_storage::capture_file_holds::{self, CaptureFileHold};
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError, TxnOutcome};
 use rusqlite::{Connection, Transaction, params};
@@ -1047,6 +1048,13 @@ pub struct CapturePassSettlement {
     pub repair_recoveries: bool,
 }
 
+/// Matches job targets that name `path` on a disk that ignores case or
+/// Unicode normalization, as capture holds match them.
+fn names_path(path: &str) -> impl Fn(&str) -> bool {
+    let path = path_collision_key(path);
+    move |target| path_collision_key(target) == path
+}
+
 fn select_released_switch_jobs(
     conn: &Connection,
     workspace_id: &str,
@@ -1056,10 +1064,10 @@ fn select_released_switch_jobs(
     let released: Vec<String> = paths
         .iter()
         .filter(|path| path.released_hold)
-        .map(|path| path.path.to_lowercase())
+        .map(|path| path_collision_key(&path.path))
         .collect();
     for (id, target) in dohc_engine_storage::pending_switch_jobs_in(conn, workspace_id)? {
-        let target = target.to_lowercase();
+        let target = path_collision_key(&target);
         if released.iter().any(|path| {
             target == *path
                 || target
@@ -1140,7 +1148,7 @@ impl ActorHandle {
                     .paths
                     .iter()
                     .filter(|path| path.released_hold)
-                    .map(|path| path.path.to_lowercase())
+                    .map(|path| path_collision_key(&path.path))
                     .collect();
                 root_guard.validate(&root_dir)?;
                 let replay = super::materialization::replay_pending_materializations(
@@ -1989,7 +1997,7 @@ fn capture_ingest_in_tx(
         capture_file_holds::rebase_switch_jobs_in(
             tx,
             &input.workspace_id,
-            &input.path,
+            names_path(&input.path),
             &dohc_engine_storage::Preimage::Present(result.snapshot.blob_sha256.clone()),
         )?;
         capture_file_holds::clear_in(tx, &input.workspace_id, &input.path)?;
@@ -2484,7 +2492,7 @@ fn capture_ingest_binary_on_store(
             capture_file_holds::rebase_switch_jobs_in(
                 tx,
                 &input.workspace_id,
-                &input.path,
+                names_path(&input.path),
                 &dohc_engine_storage::Preimage::Present(dohc_engine_storage::hex_sha256(
                     &input.bytes,
                 )),
@@ -2826,7 +2834,7 @@ fn capture_retire_on_store(
             capture_file_holds::rebase_switch_jobs_in(
                 tx,
                 &input.workspace_id,
-                &input.path,
+                names_path(&input.path),
                 &dohc_engine_storage::Preimage::Absent,
             )?;
             capture_file_holds::clear_in(tx, &input.workspace_id, &input.path)?;

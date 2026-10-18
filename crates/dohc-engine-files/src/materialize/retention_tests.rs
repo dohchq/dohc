@@ -51,14 +51,20 @@ fn sweep(store: &EngineStore, root: &Path, now: i64) {
         }
         cursor = rows.last().unwrap().displacement_id;
         for row in rows {
-            let held = store
-                .placement_is_held(&row.workspace_id, &row.target_path)
-                .unwrap();
+            let held = crate::materialize::placement_is_held_in(
+                store,
+                &row.workspace_id,
+                &row.target_path,
+            )
+            .unwrap();
             match inspect(root, &row, now, held).unwrap() {
                 Inspection::Release(token) => {
-                    if store
-                        .placement_is_held(&row.workspace_id, &row.target_path)
-                        .unwrap()
+                    if crate::materialize::placement_is_held_in(
+                        store,
+                        &row.workspace_id,
+                        &row.target_path,
+                    )
+                    .unwrap()
                     {
                         continue;
                     }
@@ -75,9 +81,12 @@ fn sweep(store: &EngineStore, root: &Path, now: i64) {
                     .record_retained_read(&row, &current, &bytes, now)
                     .unwrap(),
                 Inspection::Missing => {
-                    if !store
-                        .placement_is_held(&row.workspace_id, &row.target_path)
-                        .unwrap()
+                    if !crate::materialize::placement_is_held_in(
+                        store,
+                        &row.workspace_id,
+                        &row.target_path,
+                    )
+                    .unwrap()
                     {
                         store.release_retained(row.displacement_id).unwrap();
                     }

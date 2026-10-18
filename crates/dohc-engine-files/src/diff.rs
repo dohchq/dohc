@@ -73,6 +73,13 @@ impl ScanManifest {
         self.entries.remove(path);
     }
 
+    /// Drop the paths the floor excludes. The scanner never lists them, so
+    /// their absence could never be confirmed.
+    pub(crate) fn drop_excluded(&mut self) {
+        self.entries
+            .retain(|path, _| !crate::floor::is_excluded_file(path));
+    }
+
     /// Number of tracked entries.
     pub fn len(&self) -> usize {
         self.entries.len()

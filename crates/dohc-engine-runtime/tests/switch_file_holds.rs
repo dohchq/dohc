@@ -252,6 +252,80 @@ async fn switch_hold_missing_case_alias() {
     supervisor.close(&database).unwrap();
 }
 
+/// APFS opens `café` under either Unicode normalization. A switch that
+/// writes one spelling must not replace a held file stored under the other.
+#[tokio::test]
+async fn switch_hold_normalization_alias() {
+    let (held, alias) = ("cafe\u{301}.txt", "caf\u{e9}.txt");
+    let scratch = ScratchDir::new().unwrap();
+    std::fs::write(scratch.path().join(held), OUTSIDE).unwrap();
+    if !scratch.path().join(alias).exists() {
+        return; // This alias exists only on a normalization-insensitive volume.
+    }
+    let database = engine_db_path(&scratch).unwrap();
+    {
+        let mut store = EngineStore::open(&database, 1).unwrap();
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version(WS, "main", 1, &NoFaults)
+            .unwrap();
+        let object = seed(&mut store, "main", held, "main\n", 2);
+        store
+            .write_with(&NoFaults, |tx| {
+                capture_file_holds::record_in(
+                    tx,
+                    &CaptureFileHold {
+                        workspace_id: WS.into(),
+                        source_version_id: "main".into(),
+                        object_id: object,
+                        path: held.into(),
+                        observed_sha256: dohc_engine_storage::hex_sha256(OUTSIDE.as_bytes()),
+                        observed_size: OUTSIDE.len() as u64,
+                        reason: capture_file_holds::NOT_REPRESENTABLE.into(),
+                        observed_at_ms: 3,
+                        attempt_count: 1,
+                        retry_requested: false,
+                    },
+                )
+            })
+            .unwrap();
+        VersionedTextStore::new(&mut store)
+            .create_named_version(
+                &CreateNamedVersion {
+                    workspace_id: WS.into(),
+                    new_version_id: "target".into(),
+                    name: "Target".into(),
+                    from_version_id: "main".into(),
+                    now_ms: 4,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        seed(&mut store, "target", held, "target\n", 5);
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE snapshots SET path=?1 WHERE workspace_id=?2 AND version_id='target' AND path=?3", [alias, WS, held]).map_err(dohc_engine_storage::StorageError::persist_public)?;
+            tx.execute("UPDATE path_aliases SET path=?1 WHERE workspace_id=?2 AND version_id='target' AND path=?3", [alias, WS, held]).map_err(dohc_engine_storage::StorageError::persist_public)
+        }).unwrap();
+    }
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&database, 6).unwrap().actor;
+    let before = actor.capture_file_holds(WS.into()).await.unwrap();
+    actor
+        .set_active_version(
+            switch(&scratch, "target", 7),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(actor.capture_file_holds(WS.into()).await.unwrap(), before);
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(held)).unwrap(),
+        OUTSIDE
+    );
+    supervisor.close(&database).unwrap();
+}
+
 fn conflict_texts(scratch: &ScratchDir) -> Vec<String> {
     std::fs::read_dir(scratch.path())
         .unwrap()

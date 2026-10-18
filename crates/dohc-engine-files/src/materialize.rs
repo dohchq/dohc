@@ -105,7 +105,7 @@
 //! ancestor-redirection race is closed.
 
 use crate::bounds::{MAX_CAPTURE_BINARY_BYTES, MAX_CAPTURE_TEXT_BYTES};
-use crate::floor::is_excluded_file;
+use crate::floor::{is_excluded_file, path_collision_key};
 use crate::media::{is_text_media_type, media_type_for_path};
 use crate::policy::{
     MAX_CANONICAL_WORKSPACE_PATH_BYTES, PathClassification, classify_engine_file_path,
@@ -940,7 +940,7 @@ impl PlacementHolds {
     ) -> Self {
         let case_aliases = paths
             .keys()
-            .map(|path| (path.to_lowercase(), path.clone()))
+            .map(|path| (path_collision_key(path), path.clone()))
             .collect();
         Self {
             workspace_id: workspace_id.to_owned(),
@@ -956,8 +956,9 @@ impl PlacementHolds {
         self.paths.iter().map(|(path, hold)| (path.as_str(), hold))
     }
 
-    /// Lexical checks never resolve or read the outside file. Lowercase aliases
-    /// deliberately over-park distinct paths on case-sensitive volumes.
+    /// Lexical checks never resolve or read the outside file. Case and
+    /// normalization aliases deliberately over-park distinct paths on
+    /// case-sensitive volumes.
     pub fn get(&self, path: &str) -> Option<(&str, &PlacementHold)> {
         if let Some((path, hold)) = self.paths.get_key_value(path) {
             return Some((path, hold));
@@ -965,7 +966,7 @@ impl PlacementHolds {
         if self.is_empty() {
             return None;
         }
-        let stored = self.case_aliases.get(&path.to_lowercase())?;
+        let stored = self.case_aliases.get(&path_collision_key(path))?;
         self.paths
             .get_key_value(stored)
             .map(|(path, hold)| (path.as_str(), hold))
@@ -1104,6 +1105,13 @@ fn materialize_one_inner(
     let MaterializeOptions { now_ms, faults, .. } = *options;
     // Canonicalizing the root deliberately accepts aliases above (or at) the
     // workspace boundary. The component walk below owns only descendants.
+    // A job an older build queued for OS metadata the floor now excludes (an
+    // old `.DS_Store`) has nothing to place. It ends as cancelled and reports no
+    // further work, so no replay counts it as failed.
+    if crate::floor::names_os_metadata(&job.target_path) {
+        store.mark_materialization_cancelled(&job.job_id, now_ms)?;
+        return Ok(JobOutcome::AlreadyMaterialized);
+    }
     let canonical_root =
         std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
     let target = resolve_target(&canonical_root, &job.target_path)?;
@@ -3179,7 +3187,8 @@ pub fn remove_file_holding(root: &Path, rel: &str, sha256: &str) -> Result<bool,
 /// Remove the directory at `rel` when it is empty, so a file can take its
 /// name. Used when a sync page deletes the last tracked files under a path
 /// and then writes a file there. Only a real, empty directory below the
-/// workspace root is removed; `false` when nothing was removed.
+/// workspace root is removed; `false` when nothing was removed. On macOS a
+/// directory that holds only Finder's files, such as `.DS_Store`, is empty.
 pub fn remove_empty_directory_target(root: &Path, rel: &str) -> Result<bool, MaterializeError> {
     let canonical_root =
         std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
@@ -3194,13 +3203,87 @@ pub fn remove_empty_directory_target(root: &Path, rel: &str) -> Result<bool, Mat
     {
         return Ok(false);
     }
-    // `remove_dir` refuses a directory that is not empty.
-    if std::fs::remove_dir(&target).is_ok() {
+    if remove_emptied_directory(&canonical_root, rel, &target, || {}) {
         sync_parent_dir(target.parent(), DurabilityPolicy::per_os())?;
         Ok(true)
     } else {
         Ok(false)
     }
+}
+
+/// Remove the directory at `rel` if it is empty. On Unix every step goes
+/// through directory handles opened without following a link, so a folder
+/// swapped for a link cannot point a deletion outside the workspace. On macOS
+/// Finder's files go first when they are all the directory holds;
+/// `after_inspect` runs between that check and the deletion.
+#[cfg(unix)]
+fn remove_emptied_directory(
+    root: &Path,
+    rel: &str,
+    target: &Path,
+    after_inspect: impl FnOnce(),
+) -> bool {
+    use rustix::fs::{AtFlags, Mode, OFlags};
+    let relative = Path::new(rel);
+    let Some(leaf) = relative.file_name() else {
+        return false;
+    };
+    let parent = relative.parent().unwrap_or_else(|| Path::new(""));
+    let Ok(Some(parent_fd)) = open_existing_secret_parent_unix(root, parent, target) else {
+        return false;
+    };
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let Ok(directory) = rustix::fs::openat(&parent_fd, leaf, flags, Mode::empty()) else {
+        return false;
+    };
+    #[cfg(target_vendor = "apple")]
+    {
+        let finder_files = finder_files_only(&directory);
+        after_inspect();
+        for name in finder_files.into_iter().flatten() {
+            let _ = rustix::fs::unlinkat(&directory, name.as_c_str(), AtFlags::empty());
+        }
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    after_inspect();
+    rustix::fs::unlinkat(&parent_fd, leaf, AtFlags::REMOVEDIR).is_ok()
+}
+
+#[cfg(not(unix))]
+fn remove_emptied_directory(
+    _root: &Path,
+    _rel: &str,
+    target: &Path,
+    after_inspect: impl FnOnce(),
+) -> bool {
+    after_inspect();
+    std::fs::remove_dir(target).is_ok()
+}
+
+/// The names in `directory` when every entry is a regular file Finder wrote,
+/// such as `.DS_Store`. `None` when anything else is there.
+#[cfg(target_vendor = "apple")]
+fn finder_files_only(directory: &rustix::fd::OwnedFd) -> Option<Vec<std::ffi::CString>> {
+    use rustix::fs::{AtFlags, FileType};
+    let mut entries = rustix::fs::Dir::read_from(directory).ok()?;
+    let mut names = Vec::new();
+    while let Some(entry) = entries.read() {
+        let entry = entry.ok()?;
+        let name = entry.file_name();
+        if matches!(name.to_bytes(), b"." | b"..") {
+            continue;
+        }
+        let regular = rustix::fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)
+            .is_ok_and(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile);
+        let finder = name.to_str().is_ok_and(|text| {
+            crate::floor::is_finder_metadata_file(&crate::floor::normalize_segment(text))
+        });
+        if !regular || !finder {
+            return None;
+        }
+        names.push(name.to_owned());
+    }
+    Some(names)
 }
 
 fn unavailable_recovery_roots() -> &'static std::sync::Mutex<std::collections::HashSet<PathBuf>> {
@@ -4113,6 +4196,29 @@ fn preimage_matches(preimage: &Preimage, current: &CurrentTarget) -> bool {
     }
 }
 
+/// Whether a hold on `held` covers `path`: the same path in any case or
+/// Unicode normalization, or a path beneath it. Aliases deliberately over-hold
+/// distinct paths on case-sensitive volumes.
+pub fn path_is_held(held: &str, path: &str) -> bool {
+    let (held, path) = (path_collision_key(held), path_collision_key(path));
+    path == held
+        || path
+            .strip_prefix(&held)
+            .is_some_and(|tail| tail.starts_with('/'))
+}
+
+/// Whether a durable capture hold in `workspace` covers `path`.
+pub fn placement_is_held_in(
+    store: &EngineStore,
+    workspace: &str,
+    path: &str,
+) -> Result<bool, StorageError> {
+    Ok(store
+        .held_paths(workspace)?
+        .iter()
+        .any(|held| path_is_held(held, path)))
+}
+
 /// Protect lexical aliases and held ancestors on every platform. Filesystem
 /// aliases are checked only here, after the placement boundary resolves them.
 fn placement_is_held(
@@ -4143,7 +4249,7 @@ fn placement_is_held(
         #[cfg(not(windows))]
         return Ok(false);
     }
-    if store.placement_is_held(workspace, path)? {
+    if placement_is_held_in(store, workspace, path)? {
         return Ok(true);
     }
     #[cfg(windows)]
@@ -4161,7 +4267,7 @@ fn placement_is_held(
             .to_string_lossy()
             .replace('\\', "/");
         if resolved != path {
-            return Ok(store.placement_is_held(workspace, &resolved)?);
+            return Ok(placement_is_held_in(store, workspace, &resolved)?);
         }
     }
     #[cfg(not(windows))]
@@ -5341,6 +5447,64 @@ mod tests {
         assert!(super::remove_empty_directory_target(root, "../d").is_err());
     }
 
+    /// Finder writes `.DS_Store` into every folder it shows. Once the last
+    /// file leaves, that folder is empty and goes, but no other file goes
+    /// with it, and a volume folder such as `.Trashes` keeps its folder.
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn a_directory_holding_only_finder_files_is_empty() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("os-metadata-directory").unwrap();
+        let root = scratch.path();
+        std::fs::create_dir_all(root.join("d/sub")).unwrap();
+        std::fs::write(root.join("d/sub/.DS_Store"), "finder").unwrap();
+        std::fs::write(root.join("d/sub/._a.md"), "appledouble").unwrap();
+        std::fs::write(root.join("d/.DS_Store"), "finder").unwrap();
+        std::fs::write(root.join("d/keep.md"), "keep").unwrap();
+        std::fs::create_dir_all(root.join("t/.Trashes/501")).unwrap();
+        std::fs::write(root.join("t/.Trashes/501/trashed.md"), "trashed").unwrap();
+        std::fs::create_dir_all(root.join("w")).unwrap();
+        std::fs::write(root.join("w/Thumbs.db"), "explorer").unwrap();
+        assert!(super::remove_empty_directory_target(root, "d/sub").unwrap());
+        assert!(!root.join("d/sub").exists());
+        assert!(!super::remove_empty_directory_target(root, "d").unwrap());
+        assert!(root.join("d/.DS_Store").exists());
+        assert!(root.join("d/keep.md").exists());
+        assert!(!super::remove_empty_directory_target(root, "t").unwrap());
+        assert!(root.join("t/.Trashes/501/trashed.md").exists());
+        assert!(!super::remove_empty_directory_target(root, "w").unwrap());
+        assert!(root.join("w/Thumbs.db").exists());
+    }
+
+    /// A folder swapped for a link between the check and the deletion must
+    /// not send the deletion through the link.
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn a_folder_swapped_for_a_link_keeps_the_files_outside() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("os-metadata-swap").unwrap();
+        let outside = dohc_test_scratch::ScratchDir::new_named("os-metadata-outside").unwrap();
+        let root = std::fs::canonicalize(scratch.path()).unwrap();
+        std::fs::create_dir_all(root.join("d/sub")).unwrap();
+        std::fs::write(root.join("d/sub/.DS_Store"), "ours").unwrap();
+        std::fs::write(outside.path().join(".DS_Store"), "outside").unwrap();
+        let target = root.join("d/sub");
+        let removed = super::remove_emptied_directory(&root, "d/sub", &target, || {
+            std::fs::rename(root.join("d/sub"), root.join("d/moved")).unwrap();
+            std::os::unix::fs::symlink(outside.path(), root.join("d/sub")).unwrap();
+        });
+        assert!(!removed);
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join(".DS_Store")).unwrap(),
+            "outside"
+        );
+        assert!(
+            std::fs::symlink_metadata(root.join("d/sub"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(root.join("d/moved").is_dir());
+    }
+
     #[test]
     fn a_file_is_removed_only_while_it_holds_the_expected_bytes() {
         let scratch = dohc_test_scratch::ScratchDir::new_named("file-holding").unwrap();
@@ -5494,14 +5658,37 @@ mod tests {
                 )
             })
             .unwrap();
-        assert!(
-            store
-                .placement_is_held("workspace", "plans/trip.md")
-                .unwrap()
-        );
-        assert!(store.placement_is_held("workspace", "PLANS").unwrap());
-        assert!(!store.placement_is_held("other", "PLANS").unwrap());
-        assert!(!store.placement_is_held("workspace", "planets.md").unwrap());
+        assert!(placement_is_held_in(&store, "workspace", "plans/trip.md").unwrap());
+        assert!(placement_is_held_in(&store, "workspace", "PLANS").unwrap());
+        assert!(!placement_is_held_in(&store, "other", "PLANS").unwrap());
+        assert!(!placement_is_held_in(&store, "workspace", "planets.md").unwrap());
+    }
+
+    /// APFS stores `café` in whichever normalization it was written in and
+    /// opens it under either, so a write to one must not replace a held other.
+    #[test]
+    fn holds_cover_every_spelling_a_disk_may_alias() {
+        for (held, path) in [
+            ("caf\u{e9}.md", "cafe\u{301}.md"),
+            ("cafe\u{301}/plan.md", "CAF\u{c9}/plan.md"),
+            ("Stra\u{df}e.md", "STRASSE.md"),
+            ("notes", "Notes/a.md"),
+        ] {
+            assert!(path_is_held(held, path), "{held} {path}");
+            let holds = PlacementHolds::from_paths(
+                "workspace",
+                std::collections::HashMap::from([(
+                    held.to_owned(),
+                    PlacementHold {
+                        source_version_id: "main".into(),
+                        preimage: Preimage::Absent,
+                    },
+                )]),
+            );
+            assert!(holds.blocks(path), "{held} {path}");
+        }
+        assert!(!path_is_held("caf\u{e9}.md", "cafe.md"));
+        assert!(!path_is_held("notes", "notes.md"));
     }
 
     fn options_with(replacer: &dyn AtomicReplacer) -> MaterializeOptions<'_> {

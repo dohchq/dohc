@@ -92,6 +92,44 @@ fn stage_job(store: &mut EngineStore, content: &[u8], job: &MaterializationJobSp
         .expect("enqueue");
 }
 
+/// An older build queued a write for Finder's `.DS_Store`, a path the floor
+/// now excludes. Replay ends the job without touching the file, so it never
+/// fails again.
+#[test]
+fn a_job_at_an_ignored_path_ends_without_touching_the_file() {
+    let sc = Scratch::new("ignored-job");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    std::fs::write(sc.target(".DS_Store"), b"this device's view").expect("finder file");
+    let content = b"another device's view";
+    let job = spec(
+        "j-ds",
+        ".DS_Store",
+        &hex_sha256(content),
+        Preimage::Absent,
+        1,
+        10,
+    );
+    stage_job(&mut store, content, &job);
+
+    assert_eq!(
+        drain(&store, &sc, &StdReplacer, &NoFaults),
+        vec![JobOutcome::AlreadyMaterialized]
+    );
+    assert_eq!(store.pending_materialization_count().expect("pending"), 0);
+    assert_eq!(
+        store
+            .load_materialization_job("j-ds")
+            .expect("job")
+            .expect("row")
+            .status,
+        dohc_engine_storage::JobStatus::Cancelled
+    );
+    assert_eq!(
+        std::fs::read(sc.target(".DS_Store")).expect("finder file"),
+        b"this device's view"
+    );
+}
+
 #[test]
 fn materializes_a_new_file_and_marks_complete() {
     let sc = Scratch::new("basic");
