@@ -116,6 +116,7 @@ async function moveRecoveryFloor(record: MoveRecoveryRecord, floor: Floor): Prom
   for (const path of paths) if (path !== record.from) throw invalid();
   await floor(record.from, undefined, true);
   await floor(record.to, undefined, true);
+  if ("entries" in record && record.entries.length) { await floor(record.from); await floor(record.to); }
 }
 function decodeCursor(cursor: string, workspaceId: string, operationId: string): HistoryCursor {
   let parsed: HistoryCursor;

@@ -174,8 +174,8 @@ async function checkPlacement(rootPath: string, to: string): Promise<void> {
 async function placeFile(rootPath: string, from: string, to: string, visibleSource: boolean): Promise<void> {
   await checkPlacement(rootPath, to);
   await mkdir(dirname(to), { recursive: true });
-  const source = await lstat(from), target = await lstat(to).catch(() => null);
-  const alreadyPlaced = target?.isFile() && source.ino !== 0 && source.dev === target.dev && source.ino === target.ino;
+  const source = await lstat(from, { bigint: true }), target = await lstat(to, { bigint: true }).catch(() => null);
+  const alreadyPlaced = target?.isFile() && source.ino !== 0n && source.dev === target.dev && source.ino === target.ino && source.size === target.size;
   if (!alreadyPlaced) await link(from, to).catch(async (error: unknown) => {
     // Node has no conditional unlink of a visible name. Copying and removing
     // that name could discard a concurrent edit or replacement.

@@ -444,3 +444,61 @@ it("keeps a private source if flushing its fallback copy fails", async () => {
   expect(sync).toHaveBeenCalledOnce();
   expect(await readFile(join(f.rootPath, ".dohc/trash/staged.txt"), "utf8")).toBe("kept");
 });
+
+it("refuses a rowless person's Undo through a replaced parent link", async () => {
+  const f = await fixture(); await f.write("docs/oversized.bin", "original");
+  const moved = await f.move("docs/oversized.bin", "archive/oversized.bin"); await recovery.waitForRecovery(moved.operationId!);
+  await rename(join(f.rootPath, "archive"), join(f.rootPath, "saved")); await f.write("other/oversized.bin", "unrelated");
+  await filesystem.symlink(join(f.rootPath, "other"), join(f.rootPath, "archive"), "junction");
+  expect(await f.undo()).toEqual({ ok: false, reason: "Cannot undo the move. archive/oversized.bin now leads somewhere else." });
+  expect(await readFile(join(f.rootPath, "other/oversized.bin"), "utf8")).toBe("unrelated");
+  await expect(filesystem.lstat(join(f.rootPath, "docs/oversized.bin"))).rejects.toMatchObject({ code: "ENOENT" });
+  expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
+});
+it("supersedes queued work when engine Undo replies before placement", async () => {
+  const f = await fixture(); await f.write("a.txt"); await f.moveAsAgent("a.txt", "b.txt"); f.restoring(true);
+  expect(await queuedUndo(f)).toMatchObject({ result: { ok: true, tracked: { state: "restoring" } }, follower: "WorkspaceOperationSupersededError" });
+  await expect(filesystem.lstat(join(f.rootPath, "a.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+  expect(await queuedUndo(f)).toMatchObject({ result: { ok: true }, follower: "current" });
+});
+it.each([false, true])("distinguishes rowless file identities without rounded ids or unequal sizes, size=%s", async differentSize => {
+  const f = await fixture(); await f.write("moved.bin", "moved"); await f.write("old.bin", "other");
+  const stat = filesystem.lstat;
+  vi.spyOn(filesystem, "lstat").mockImplementation((async (path, options) => {
+    const value = await stat(path, options);
+    if (path === join(f.rootPath, "moved.bin") || path === join(f.rootPath, "old.bin")) {
+      const old = path === join(f.rootPath, "old.bin");
+      const ino = 9007199254740992n + (old && !differentSize ? 1n : 0n);
+      return Object.assign(Object.create(Object.getPrototypeOf(value)), value, { ino: options?.bigint ? ino : Number(ino),
+        size: options?.bigint ? BigInt(old && differentSize ? 6 : 5) : old && differentSize ? 6 : 5 });
+    }
+    return value;
+  }) as typeof filesystem.lstat);
+  expect(await placeBack(f.rootPath, join(f.rootPath, "moved.bin"), join(f.rootPath, "old.bin"), "", true)).toEqual([""]);
+  expect(await readFile(join(f.rootPath, "moved.bin"), "utf8")).toBe("moved");
+  expect(await readFile(join(f.rootPath, "old.bin"), "utf8")).toBe("other");
+});
+it("reports a restored hard link whose moved name is still open, then finishes on retry", async () => {
+  const f = await fixture(); await f.write("oversized.bin"); await f.moveAsAgent("oversized.bin", "archive/oversized.bin");
+  const unlink = filesystem.unlink;
+  vi.spyOn(filesystem, "unlink").mockImplementation(async path => {
+    if (path === join(f.rootPath, "archive/oversized.bin")) throw Object.assign(new Error("open file"), { code: "EPERM" });
+    return unlink(path);
+  });
+  expect(await f.undo()).toMatchObject({ ok: true, remaining: [{ path: "oversized.bin", retry: true,
+    reason: "oversized.bin is back, but dohc could not remove its moved name at archive/oversized.bin. Close apps using the file, then Undo again to finish." }] });
+  expect(await readFile(join(f.rootPath, "oversized.bin"), "utf8")).toBe("oversized.bin");
+  vi.mocked(filesystem.unlink).mockRestore();
+  expect(await f.undo()).toMatchObject({ ok: true, restored: ["oversized.bin"], remaining: [] });
+  await expect(filesystem.lstat(join(f.rootPath, "archive/oversized.bin"))).rejects.toMatchObject({ code: "ENOENT" });
+});
+it("does not save an engine intent for rowless Undo before placement", async () => {
+  const f = await fixture(); await f.write("oversized.bin"); await f.moveAsAgent("oversized.bin", "archive/oversized.bin");
+  const save = recovery.saveRecoveryRecord;
+  vi.spyOn(recovery, "saveRecoveryRecord").mockImplementationOnce(async (...args) => { await save(...args); throw new Error("crash after save"); });
+  expect(await f.undo()).toEqual({ ok: false, reason: "crash after save" });
+  const record = JSON.parse(await readFile(f.recordPath(), "utf8"));
+  expect(record.engine).not.toHaveProperty("requested");
+  expect(record.engine).toEqual({ materialized: true, momentCount: 0 });
+  expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
+});

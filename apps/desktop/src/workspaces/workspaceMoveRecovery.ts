@@ -88,10 +88,8 @@ export async function undoMoveRecovery(root: string, record: FileMoveRecoveryRec
   const word = moveWord(record.from, record.to);
   const refuse = (detail: string): never => { throw new Error(`Cannot undo the ${word}. ${detail}`); };
   const engineUndo = async () => {
-    const before = await info(join(root, record.from));
-    try { assertCurrent(); return await history.undoHistoryOperation({ workspaceId, operationId: record.operationId,
-      requestId: `move-undo:${record.operationId}`, author }); }
-    finally { if (!before && await info(join(root, record.from))) markChanged(); }
+    assertCurrent(); return history.undoHistoryOperation({ workspaceId, operationId: record.operationId,
+      requestId: `move-undo:${record.operationId}`, author });
   };
   assertCurrent();
   if (record.replaced) throw new Error(replacedMoveReason(record));
@@ -113,10 +111,11 @@ export async function undoMoveRecovery(root: string, record: FileMoveRecoveryRec
     if (destination.isDirectory()) return refuse(`${record.to} is now a folder. Move it first.`);
     assertCurrent();
     record.engine = { requested: true };
-    await saveRecoveryRecord(root, record, "move");
+    if (record.tracked) await saveRecoveryRecord(root, record, "move");
   }
   if ("requested" in record.engine) {
     const receipt = record.tracked ? await engineUndo() : { materialized: true, momentCount: 0 };
+    if (record.tracked) markChanged();
     record.engine = { materialized: receipt.materialized, momentCount: receipt.momentCount };
     record.pending = [...record.entries];
     if (record.entries.length) await saveRecoveryRecord(root, record, "move");
@@ -135,8 +134,12 @@ export async function undoMoveRecovery(root: string, record: FileMoveRecoveryRec
     if (entry && !left.length) result.restored.push(path);
     for (const path of remaining) {
       const source = moveEntryTarget(record, path);
-      result.remaining.push({ path, retry: true, reason: await info(join(root, path))
-        ? `${path} now occupies the old path. Move it first. The moved file stays at ${source}.`
+      const old = await lstat(join(root, path), { bigint: true }).catch(() => null);
+      const moved = await lstat(join(root, source), { bigint: true }).catch(() => null);
+      const linked = old?.isFile() && moved?.isFile() && old.ino !== 0n && old.dev === moved.dev && old.ino === moved.ino && old.size === moved.size;
+      result.remaining.push({ path, retry: true, reason: linked
+        ? `${path} is back, but dohc could not remove its moved name at ${source}. Close apps using the file, then Undo again to finish.`
+        : old ? `${path} now occupies the old path. Move it first. The moved file stays at ${source}.`
         : `dohc could not put ${path} back. It stays at ${source}.` });
     }
     record.progress = result;
