@@ -1,9 +1,15 @@
 //! Copy a file's macOS ACL and extended attributes between open descriptors,
-//! and flush a descriptor behind a drive write barrier.
+//! flush a descriptor behind a drive write barrier, and keep a folder out of
+//! iCloud Drive.
 #![cfg(target_vendor = "apple")]
 use std::ffi::{CStr, c_char, c_int, c_uint, c_void};
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
+use std::path::Path;
+
+/// The attribute that tells macOS file providers, iCloud Drive among them,
+/// not to sync an item or anything inside it.
+pub const SYNC_IGNORE_XATTR: &CStr = c"com.apple.fileprovider.ignore#P";
 
 /// The largest attribute value, or list of names, the copy reads.
 const MAX_XATTR_BYTES: usize = 1 << 20;
@@ -127,6 +133,17 @@ pub fn barrier_fsync(fd: impl AsFd) -> io::Result<()> {
     }
 }
 
+/// Keep `dir` and everything in it out of iCloud Drive and other file
+/// providers. The folder stays on this Mac, and the provider deletes any
+/// copy it already uploaded. Never follows a symlink, and leaves an existing
+/// attribute untouched.
+pub fn exclude_from_sync(dir: &Path) -> io::Result<()> {
+    match rustix::fs::lsetxattr(dir, SYNC_IGNORE_XATTR, b"1", rustix::fs::XattrFlags::CREATE) {
+        Ok(()) | Err(rustix::io::Errno::EXIST) => Ok(()),
+        Err(errno) => Err(errno.into()),
+    }
+}
+
 /// Read a value whose size `read` reports for an empty buffer, unless it is
 /// larger than [`MAX_XATTR_BYTES`] or grows between the two reads.
 fn read_bounded(read: impl Fn(&mut [u8]) -> rustix::io::Result<usize>) -> Option<Vec<u8>> {
@@ -149,5 +166,30 @@ mod tests {
         std::fs::write(&path, b"ordered").unwrap();
         super::barrier_fsync(std::fs::File::open(&path).unwrap()).unwrap();
         super::barrier_fsync(std::fs::File::open(scratch.path()).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_folder_excluded_from_sync_carries_the_provider_ignore_attribute_once() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("exclude-from-sync").unwrap();
+        let dir = scratch.path().join("engine");
+        std::fs::create_dir(&dir).unwrap();
+        let read = || {
+            let mut value = [0; 8];
+            rustix::fs::lgetxattr(&dir, super::SYNC_IGNORE_XATTR, &mut value)
+                .map(|len| value[..len].to_vec())
+        };
+        assert_eq!(read(), Err(rustix::io::Errno::NOATTR));
+        super::exclude_from_sync(&dir).unwrap();
+        assert_eq!(read().unwrap(), b"1");
+        // A second call keeps the attribute instead of failing or rewriting it.
+        rustix::fs::lsetxattr(
+            &dir,
+            super::SYNC_IGNORE_XATTR,
+            b"kept",
+            rustix::fs::XattrFlags::empty(),
+        )
+        .unwrap();
+        super::exclude_from_sync(&dir).unwrap();
+        assert_eq!(read().unwrap(), b"kept");
     }
 }

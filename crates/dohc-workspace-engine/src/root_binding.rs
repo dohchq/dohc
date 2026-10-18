@@ -159,7 +159,13 @@ fn create_binding_dir(marker: &Path) -> Result<(), RootBindingError> {
     }
     builder
         .create(parent)
-        .map_err(io_failure(parent, RootBindingError::Unwritable))
+        .map_err(io_failure(parent, RootBindingError::Unwritable))?;
+    // The engine's state belongs to this Mac. Keep it out of iCloud Drive
+    // before any of it exists, and on each open of an older workspace. A
+    // volume without extended attributes has no file provider to sync it.
+    #[cfg(target_os = "macos")]
+    let _ = dohc_macos_files::exclude_from_sync(parent);
+    Ok(())
 }
 
 fn valid_token(token: &[u8]) -> bool {
@@ -323,6 +329,36 @@ mod tests {
         let minted = write_new_root_binding(scratch.path());
         chflags("nouchg", &engine);
         assert!(matches!(minted, Err(RootBindingError::Unwritable)));
+    }
+
+    /// iCloud Drive must never sync the engine's folder, in a new workspace or
+    /// in one an earlier build left without the exclusion.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn opening_a_root_keeps_its_engine_folder_out_of_icloud() {
+        let excluded = |root: &Path| {
+            std::process::Command::new("xattr")
+                .args(["-p", "com.apple.fileprovider.ignore#P"])
+                .arg(root.join(".dohc/engine"))
+                .output()
+                .expect("xattr")
+                .status
+                .success()
+        };
+        let fresh = ScratchDir::new().expect("scratch");
+        write_new_root_binding(fresh.path()).expect("mint");
+        assert!(excluded(fresh.path()));
+
+        let older = ScratchDir::new().expect("scratch");
+        let engine = older.join(".dohc").join("engine");
+        std::fs::create_dir_all(&engine).expect("engine dir");
+        std::fs::write(engine.join("ROOT_BINDING"), "a".repeat(TOKEN_HEX_LEN)).expect("binding");
+        assert!(!excluded(older.path()));
+        assert_eq!(
+            write_new_root_binding(older.path()).expect("open"),
+            "a".repeat(TOKEN_HEX_LEN)
+        );
+        assert!(excluded(older.path()));
     }
 
     #[test]
