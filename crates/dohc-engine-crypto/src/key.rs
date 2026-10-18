@@ -282,16 +282,18 @@ pub fn create_key_file(root: &std::path::Path) -> Result<SecretDataKey, CryptoEr
     static MINT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = MINT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let temp = path.with_extension(format!("tmp-{}-{seq}", std::process::id()));
+    // On macOS a 0600 mode does not limit an ACL entry the workspace folder
+    // gives every new file, so the key takes none of them. A failed create
+    // removes what it made, so nothing is left here for a path to clean up.
+    #[cfg(target_vendor = "apple")]
+    let mut file = (|| -> std::io::Result<std::fs::File> {
+        let invalid = || std::io::Error::from(std::io::ErrorKind::InvalidInput);
+        let folder = std::fs::File::open(temp.parent().ok_or_else(invalid)?)?;
+        let name = temp.file_name().ok_or_else(invalid)?;
+        Ok(dohc_macos_files::create_uninherited(folder, name, 0o600)?.into())
+    })()
+    .map_err(|_| CryptoError::KeyFileMalformed)?;
     let written = (|| -> std::io::Result<()> {
-        // On macOS a 0600 mode does not limit an ACL entry the workspace
-        // folder gives every new file, so the key takes none of them.
-        #[cfg(target_vendor = "apple")]
-        let mut file = {
-            let invalid = || std::io::Error::from(std::io::ErrorKind::InvalidInput);
-            let folder = std::fs::File::open(temp.parent().ok_or_else(invalid)?)?;
-            let name = temp.file_name().ok_or_else(invalid)?;
-            std::fs::File::from(dohc_macos_files::create_uninherited(folder, name, 0o600)?)
-        };
         #[cfg(not(target_vendor = "apple"))]
         let mut file = {
             let mut options = std::fs::OpenOptions::new();

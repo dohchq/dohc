@@ -19,9 +19,11 @@ const MAX_XATTR_BYTES: usize = 1 << 20;
 /// `XATTR_OPERATION_INTENT_SAVE` in `<xattr_flags.h>`.
 const XATTR_OPERATION_INTENT_SAVE: c_uint = 2;
 
-/// `ACL_TYPE_EXTENDED` and `ACL_FLAG_NO_INHERIT` in `<sys/acl.h>`.
+/// `ACL_TYPE_EXTENDED`, `ACL_FLAG_NO_INHERIT` and `ACL_FIRST_ENTRY` in
+/// `<sys/acl.h>`.
 const ACL_TYPE_EXTENDED: c_int = 0x100;
 const ACL_FLAG_NO_INHERIT: c_int = 1 << 17;
+const ACL_FIRST_ENTRY: c_int = 0;
 
 /// `FILESEC_MODE` and `FILESEC_ACL` in `<sys/fcntl.h>`.
 const FILESEC_MODE: c_int = 4;
@@ -29,8 +31,8 @@ const FILESEC_ACL: c_int = 5;
 
 // SAFETY: These match `<xattr_flags.h>`, macOS 10.10 and later, where
 // `xattr_operation_intent_t` is `unsigned int`, `<sys/acl.h>`, where
-// `acl_type_t` and `acl_flag_t` are C enums and `acl_t` and `acl_flagset_t`
-// are pointers, and `<sys/fcntl.h>`, where `filesec_property_t` is a C enum
+// `acl_type_t` and `acl_flag_t` are C enums, `entry_id` is an `int`, and
+// `acl_t`, `acl_entry_t` and `acl_flagset_t` are pointers, and `<sys/fcntl.h>`, where `filesec_property_t` is a C enum
 // and `filesec_t` is a pointer.
 #[allow(unsafe_code)]
 unsafe extern "C" {
@@ -40,6 +42,7 @@ unsafe extern "C" {
     fn acl_add_flag_np(flags: *mut c_void, flag: c_int) -> c_int;
     fn acl_set_flagset_np(acl: *mut c_void, flags: *mut c_void) -> c_int;
     fn acl_get_fd_np(fd: c_int, kind: c_int) -> *mut c_void;
+    fn acl_get_entry(acl: *mut c_void, entry_id: c_int, entry: *mut *mut c_void) -> c_int;
     fn acl_set_fd_np(fd: c_int, acl: *mut c_void, kind: c_int) -> c_int;
     fn acl_free(acl: *mut c_void) -> c_int;
     fn filesec_init() -> *mut c_void;
@@ -51,15 +54,29 @@ unsafe extern "C" {
 /// Create `name` in `dir` for writing, exclusively and without following a
 /// link, with `mode` less the umask and none of the entries `dir`'s ACL gives
 /// every new file. The kernel applies the empty ACL as it creates the file,
-/// so nobody but the owner and root can open it before it gets another.
+/// so nobody but the owner and root can open it before it gets another. A
+/// file that is not in `dir`, or that has any ACL entry, is removed and
+/// refused: a network file system may apply the server's entries instead.
 pub fn create_uninherited(dir: impl AsFd, name: &OsStr, mode: u16) -> io::Result<OwnedFd> {
-    let dir = dir.as_fd();
+    create_uninherited_with(dir.as_fd(), name, mode, || {}, |_| {})
+}
+
+/// [`create_uninherited`], with test seams just before and after the create.
+fn create_uninherited_with(
+    dir: BorrowedFd<'_>,
+    name: &OsStr,
+    mode: u16,
+    before_create: impl FnOnce(),
+    after_create: impl FnOnce(&CStr),
+) -> io::Result<OwnedFd> {
     // openx_np takes a path. It refuses a link anywhere in the folder's own
     // path, and the identity check below refuses a folder moved meanwhile.
     let mut path = rustix::fs::getpath(dir)?.into_bytes();
     path.push(b'/');
     path.extend_from_slice(name.as_bytes());
-    let file = match open_uninherited(&CString::new(path)?, mode) {
+    let path = CString::new(path)?;
+    before_create();
+    let file = match open_uninherited(&path, mode) {
         // A file system without ACLs, such as FAT, refuses one at creation,
         // and has none for the file to inherit.
         Err(err) if err.raw_os_error() == Some(libc::EINVAL) && !has_acls(dir) => {
@@ -75,12 +92,61 @@ pub fn create_uninherited(dir: impl AsFd, name: &OsStr, mode: u16) -> io::Result
         }
         file => file?,
     };
-    let created = rustix::fs::fstat(&file)?;
+    after_create(&path);
+    if let Err(err) = check_created(dir, name, &file) {
+        remove_if_same(&file, &path);
+        return Err(err);
+    }
+    Ok(file)
+}
+
+/// Check that `file` is `name` in `dir` and has no ACL entries.
+fn check_created(dir: BorrowedFd<'_>, name: &OsStr, file: &OwnedFd) -> io::Result<()> {
+    let created = rustix::fs::fstat(file)?;
     let named = rustix::fs::statat(dir, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)?;
     if (created.st_dev, created.st_ino) != (named.st_dev, named.st_ino) {
         return Err(io::Error::other("the new file is not in its folder"));
     }
-    Ok(file)
+    if has_entries(file.as_fd())? {
+        return Err(io::Error::other(
+            "the file system gave the new file ACL entries",
+        ));
+    }
+    Ok(())
+}
+
+/// Unlink `path` only while it still names `file`, so an entry that took its
+/// place is never removed.
+fn remove_if_same(file: &OwnedFd, path: &CStr) {
+    if let (Ok(open), Ok(named)) = (rustix::fs::fstat(file), rustix::fs::lstat(path))
+        && (open.st_dev, open.st_ino) == (named.st_dev, named.st_ino)
+    {
+        let _ = rustix::fs::unlinkat(rustix::fs::CWD, path, rustix::fs::AtFlags::empty());
+    }
+}
+
+/// Whether the file's ACL has any entry. A file system without ACLs has none.
+fn has_entries(fd: BorrowedFd<'_>) -> io::Result<bool> {
+    // SAFETY: The descriptor stays open for the call, which retains nothing.
+    #[allow(unsafe_code)]
+    let acl = unsafe { acl_get_fd_np(fd.as_raw_fd(), ACL_TYPE_EXTENDED) };
+    if acl.is_null() {
+        let err = io::Error::last_os_error();
+        return match err.raw_os_error() {
+            Some(libc::ENOENT | libc::ENOTSUP | libc::EOPNOTSUPP) => Ok(false),
+            _ => Err(err),
+        };
+    }
+    let mut entry = std::ptr::null_mut();
+    // SAFETY: `acl` came from acl_get_fd_np. acl_get_entry only reads it and
+    // writes `entry`, which points into `acl` and is not used after the free.
+    #[allow(unsafe_code)]
+    let found = unsafe {
+        let found = acl_get_entry(acl, ACL_FIRST_ENTRY, &mut entry) == 0;
+        acl_free(acl);
+        found
+    };
+    Ok(found)
 }
 
 /// Whether the folder's file system supports ACLs. An error counts as
@@ -378,12 +444,7 @@ mod tests {
         let scratch = dohc_test_scratch::ScratchDir::new_named("create-uninherited").unwrap();
         let dir = scratch.path().join("shared");
         std::fs::create_dir(&dir).unwrap();
-        let added = std::process::Command::new("/bin/chmod")
-            .args(["+a", "group:everyone allow read,file_inherit"])
-            .arg(&dir)
-            .status()
-            .unwrap();
-        assert!(added.success());
+        add_entry(&dir, "group:everyone allow read,file_inherit");
         let folder = std::fs::File::open(&dir).unwrap();
         std::fs::write(dir.join("inheriting"), b"").unwrap();
         assert!(has_entries(&dir.join("inheriting")));
@@ -395,5 +456,70 @@ mod tests {
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
         let again = super::create_uninherited(&folder, name, 0o600).unwrap_err();
         assert_eq!(again.kind(), std::io::ErrorKind::AlreadyExists);
+    }
+
+    fn add_entry(path: &std::path::Path, entry: &str) {
+        let added = std::process::Command::new("/bin/chmod")
+            .args(["+a", entry])
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(added.success());
+    }
+
+    /// The folder is renamed after its path is read and another takes its
+    /// name, so the file is created in the replacement.
+    #[test]
+    fn a_file_created_in_a_swapped_folder_is_removed() {
+        use std::os::fd::AsFd;
+        let scratch = dohc_test_scratch::ScratchDir::new_named("create-swapped").unwrap();
+        let dir = scratch.path().join("ws");
+        std::fs::create_dir(&dir).unwrap();
+        let folder = std::fs::File::open(&dir).unwrap();
+        let swap = || {
+            std::fs::rename(&dir, scratch.path().join("moved")).unwrap();
+            std::fs::create_dir(&dir).unwrap();
+        };
+        let name = std::ffi::OsStr::new("temp");
+        let err =
+            super::create_uninherited_with(folder.as_fd(), name, 0o600, swap, |_| {}).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound, "{err}");
+        assert!(!dir.join("temp").exists(), "the replacement keeps a file");
+        assert!(!scratch.path().join("moved/temp").exists());
+    }
+
+    /// A network file system can apply the server's entries in place of the
+    /// empty ACL. The seam adds one the way such a server would.
+    #[test]
+    fn a_file_given_acl_entries_is_removed_and_refused() {
+        use std::os::fd::AsFd;
+        use std::os::unix::ffi::OsStrExt;
+        let scratch = dohc_test_scratch::ScratchDir::new_named("create-served-acl").unwrap();
+        let folder = std::fs::File::open(scratch.path()).unwrap();
+        let grant = |path: &std::ffi::CStr| {
+            let path = std::path::Path::new(std::ffi::OsStr::from_bytes(path.to_bytes()));
+            add_entry(path, "group:everyone allow read");
+        };
+        let name = std::ffi::OsStr::new("temp");
+        let err =
+            super::create_uninherited_with(folder.as_fd(), name, 0o600, || {}, grant).unwrap_err();
+        assert!(err.to_string().contains("ACL entries"), "{err}");
+        assert!(!scratch.path().join("temp").exists());
+    }
+
+    #[test]
+    fn cleanup_never_removes_an_entry_that_took_the_files_place() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("create-cleanup").unwrap();
+        let path = scratch.path().join("temp");
+        std::fs::write(&path, b"created").unwrap();
+        let created = std::os::fd::OwnedFd::from(std::fs::File::open(&path).unwrap());
+        std::fs::rename(&path, scratch.path().join("aside")).unwrap();
+        std::fs::write(&path, b"unrelated").unwrap();
+        let c_path = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        super::remove_if_same(&created, &c_path);
+        assert_eq!(std::fs::read(&path).unwrap(), b"unrelated");
+        std::fs::rename(scratch.path().join("aside"), &path).unwrap();
+        super::remove_if_same(&created, &c_path);
+        assert!(!path.exists());
     }
 }
