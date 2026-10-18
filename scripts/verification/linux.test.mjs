@@ -1,4 +1,4 @@
-// The Linux Rust job, with WSL, Git, and the Linux verifier replaced by recorded fakes.
+// Rust on Linux, with WSL, Git, and the Linux verifier replaced by recorded fakes.
 // Slots are real, in a private root, so a test never holds the host's.
 
 import assert from "node:assert/strict";
@@ -33,30 +33,43 @@ test("Windows paths map to WSL's mounts", () => {
   assert.equal(wslPath("D:/x y/z"), "/mnt/d/x y/z");
 });
 
-test("the tips script's report names kept commits and the ones it already has", () => {
+test("the tips script's report names kept commits, the ones it already has, and the VM's page cache", () => {
   assert.deepEqual(parseTips(`tip ${known}\ntip not-a-sha\nhas ${base}\n\nwarning: noise\n`), { tips: [known], has: new Set([base]), cachedGb: 0 });
+  assert.equal(parseTips("cached 10485760\n").cachedGb, 10);
 });
 
-test("a sync fetches only missing commits, and pruning never drops the run's own", () => {
-  const script = syncScript({ bundle: "/mnt/c/o/sync.bundle", ref: "refs/verification-linux/r1", missing: ["head"], head, base });
-  assert.match(script, new RegExp(`git fetch -q --no-tags '/mnt/c/o/sync.bundle' '\\+refs/verification-linux/r1/head:refs/dohc/${head}'\n`));
-  assert.match(script, new RegExp(`grep -v -e '${head}' -e '${base}' \\|\\| true`));
-  assert.match(script, /systemctl --user stop 'dohc-verification-linux-\*\.scope'/);
+test("the job needs only the memory its limit exceeds the VM's page cache, above the queue's floor", () => {
+  assert.equal(neededMemoryGb(0), 14);
+  assert.equal(neededMemoryGb(4), 10);
+  assert.equal(neededMemoryGb(12), 3);
+});
+
+test("a sync fetches only missing commits, prunes none of the run's own, and installs only for the full job", () => {
+  const sync = install => syncScript({ bundle: "/mnt/c/o/sync.bundle", ref: "refs/verification-linux/r1", missing: ["head"], head, base, install });
+  assert.match(sync(false), new RegExp(`git fetch -q --no-tags '/mnt/c/o/sync.bundle' '\\+refs/verification-linux/r1/head:refs/dohc/${head}'\n`));
+  assert.match(sync(false), new RegExp(`grep -v -e '${head}' -e '${base}' \\|\\| true`));
+  assert.match(sync(false), /systemctl --user stop 'dohc-verification-linux-\*\.scope'/);
   assert.doesNotMatch(syncScript({ bundle: null, ref: "refs/verification-linux/r1", missing: [], head, base }), /git fetch/);
-  assert.match(script, /\npnpm install --frozen-lockfile --config\.confirm-modules-purge=false\n$/);
+  assert.doesNotMatch(sync(false), /pnpm install/);
+  assert.match(sync(true), /\npnpm install --frozen-lockfile --config\.confirm-modules-purge=false\n$/);
 });
 
-test("the run script quotes the grant and limits the run's memory and time", () => {
+test("the run script runs clippy for a PR and the verifier for a full run, quotes the grant, and limits memory and time", () => {
   const grant = { request: "it's", attempt: 1, head, base };
-  const script = runScript({ unit: "dohc-verification-linux-r1", base, grant, output: "/mnt/c/o", jobs: 8 });
-  assert.match(script, /DOHC_VERIFICATION_GRANT='\{"request":"it'\\''s"/);
-  assert.match(script, /CARGO_BUILD_JOBS=8 RUST_TEST_THREADS=8 NEXTEST_TEST_THREADS=8/);
-  assert.match(script, /--unit=dohc-verification-linux-r1 -p RuntimeMaxSec=7200 -p MemoryHigh=9G -p MemoryMax=11G -p OOMPolicy=continue/);
-  assert.match(script, new RegExp(`verify\\.mjs pr --base ${base} --job rust`));
+  const script = full => runScript({ unit: "dohc-verification-linux-r1", base, grant, output: "/mnt/c/o", jobs: 8, full });
+  assert.match(script(true), /DOHC_VERIFICATION_GRANT='\{"request":"it'\\''s"/);
+  assert.match(script(true), /CARGO_BUILD_JOBS=8 RUST_TEST_THREADS=8 NEXTEST_TEST_THREADS=8 CARGO_INCREMENTAL=0 RUSTUP_AUTO_INSTALL=0/);
+  assert.match(script(true), /--unit=dohc-verification-linux-r1 -p RuntimeMaxSec=7200 -p MemoryHigh=9G -p MemoryMax=11G -p OOMPolicy=continue/);
+  assert.match(script(true), new RegExp(`\nnode scripts/verification/verify\\.mjs pr --base ${base} --job rust\n`));
+  assert.match(script(false), /\ncargo clippy --locked --workspace --all-targets --all-features -- -D warnings\n/);
+  assert.doesNotMatch(script(false), /verify\.mjs/);
 });
 
-/** Run the job against fakes. `verify` writes the Linux verifier's receipt, or throws for the run's failure. */
-async function job({ tips = `tip ${known}\n`, verify, signal, gitRefs = [], freeMemory = () => 64 } = {}) {
+/**
+ * Run the job against fakes. `verify` stands in for the scope's command: it writes the Linux
+ * verifier's receipt and the scope's record, or throws for the command's failure.
+ */
+async function job({ tips = `tip ${known}\n`, verify, full = true, signal, gitRefs = [], freeMemory = () => 64 } = {}) {
   const root = mkdtempSync(join(tmpdir(), "dohc-linux-job-"));
   const output = join(root, "output");
   const calls = [];
@@ -79,20 +92,31 @@ async function job({ tips = `tip ${known}\n`, verify, signal, gitRefs = [], free
   };
   try {
     const budget = { root: join(root, "slots"), slots: 4, jobs: 2, diskFloorGb: 0 };
-    const result = await linuxRustJob({ distro: "Ubuntu", head, base, output, signal, command, gitRead, budget, freeMemoryGb: freeMemory, memoryPollMs: 5 }).then(({ receipt, scope }) => ({ receipt, scope }), error => ({ error }));
-    return { ...result, calls, gitCalls, refs, slots: budget.root, scripts: name => readFileSync(join(output, `wsl-${name}.sh`), "utf8") };
+    const result = await linuxRustJob({ distro: "Ubuntu", head, base, output, full, signal, command, gitRead, budget, freeMemoryGb: freeMemory, memoryPollMs: 5 })
+      .then(({ receipt, scope }) => ({ receipt, scope }), error => ({ error }));
+    const written = readJson(join(output, "result.json"));
+    const scripts = Object.fromEntries(["sync", "run"].map(name => [name, existsSync(join(output, `wsl-${name}.sh`)) ? readFileSync(join(output, `wsl-${name}.sh`), "utf8") : null]));
+    return { ...result, written, calls, gitCalls, refs, scripts };
   } finally { rmSync(root, { recursive: true, force: true }); }
 }
 
-const writeReceipt = (receipt, scope) => output => {
-  writeFileSync(join(output, "result.json"), JSON.stringify(receipt));
+function readJson(path) {
+  try { return JSON.parse(readFileSync(path, "utf8")); } catch { return null; }
+}
+
+const quiet = { memoryPeak: 1, oomKills: 0 };
+/** The scope's command as it ends: an optional receipt, the scope's record, then an optional failure. */
+const ends = ({ receipt, scope = quiet, exitCode } = {}) => output => {
+  if (receipt) writeFileSync(join(output, "result.json"), JSON.stringify(receipt));
   if (scope) writeFileSync(join(output, "scope.json"), JSON.stringify(scope));
+  if (exitCode !== undefined) throw Object.assign(new Error(`wsl.exe failed (${exitCode}).`), { exitCode, commandExitFailure: true });
 };
+const passed = { final: true, commit: head, verdict: "PASS" };
 
 test("a run bundles the missing commits, verifies in WSL, and stops its scope", windowsOnly, async () => {
-  const passed = { final: true, commit: head, verdict: "PASS" };
-  const result = await job({ verify: writeReceipt(passed), gitRefs: ["refs/verification-linux/old/head"] });
+  const result = await job({ verify: ends({ receipt: passed }), gitRefs: ["refs/verification-linux/old/head"] });
   assert.deepEqual(result.receipt, passed);
+  assert.deepEqual(result.scope, quiet);
   const bundle = result.calls.find(call => call.executable === "git");
   assert.deepEqual(bundle.args.slice(0, 2), ["bundle", "create"]);
   assert.match(bundle.args[2], /sync\.bundle$/);
@@ -101,26 +125,39 @@ test("a run bundles the missing commits, verifies in WSL, and stops its scope", 
   assert.equal(result.refs.size, 0);
   const wsl = result.calls.filter(call => call.executable === "wsl.exe").map(call => call.args[3] === "systemctl" ? "stop" : call.args.at(-1).split("/").at(-1));
   assert.deepEqual(wsl, ["wsl-tips.sh", "wsl-sync.sh", "wsl-run.sh", "stop"]);
-  const unit = result.calls.at(-1).args.at(-1);
-  assert.match(unit, /^dohc-verification-linux-\w+\.scope$/);
+  assert.match(result.calls.at(-1).args.at(-1), /^dohc-verification-linux-\w+\.scope$/);
   assert.deepEqual(result.calls.at(-1).args.slice(0, 6), ["-d", "Ubuntu", "--exec", "systemctl", "--user", "stop"]);
 });
 
 test("a checkout that has both commits gets no bundle", windowsOnly, async () => {
-  const result = await job({ tips: `has ${head}\nhas ${base}\n`, verify: writeReceipt({ final: true, commit: head, verdict: "PASS" }) });
+  const result = await job({ tips: `has ${head}\nhas ${base}\n`, verify: ends({ receipt: passed }) });
   assert.equal(result.calls.filter(call => call.executable === "git").length, 0);
   assert.equal(result.gitCalls.filter(args => args[0] === "update-ref").length, 0);
 });
 
-test("a failed check comes back as the receipt; a missing receipt is the host's failure", windowsOnly, async () => {
+test("a PR's clippy passes or fails the change by cargo's exit, and writes its own receipt", windowsOnly, async () => {
+  const pass = await job({ full: false, verify: ends() });
+  assert.deepEqual(pass.receipt, { version: 1, mode: "clippy", final: true, commit: head, verdict: "PASS", failed: [], flaky: [] });
+  assert.deepEqual(pass.written, pass.receipt);
+  assert.doesNotMatch(pass.scripts.sync, /pnpm install/);
+  assert.match(pass.scripts.run, /\ncargo clippy /);
+  const fail = await job({ full: false, verify: ends({ exitCode: 101 }) });
+  assert.equal(fail.error, undefined);
+  assert.equal(fail.receipt.verdict, "FAIL");
+  assert.match(fail.receipt.error, /cargo clippy failed on Linux/);
+  for (const exitCode of [127, 4294967295]) assert.equal((await job({ full: false, verify: ends({ exitCode }) })).error.environment, "linux host");
+});
+
+test("a failed check comes back as the receipt; anything the scope or verifier did not finish is the host's failure", windowsOnly, async () => {
   const failed = { final: true, commit: head, verdict: "FAIL", failure: { kind: "check", cause: "rust" } };
-  assert.deepEqual((await job({ verify: writeReceipt(failed) })).receipt, failed);
-  const selection = await job({ verify: writeReceipt({ final: true, verdict: "FAIL", error: "Cannot find module 'js-yaml'", failure: { kind: "environment", cause: "selection" } }) });
+  assert.deepEqual((await job({ verify: ends({ receipt: failed, exitCode: 1 }) })).receipt, failed);
+  const selection = await job({ verify: ends({ receipt: { final: true, verdict: "FAIL", error: "Cannot find module 'js-yaml'", failure: { kind: "environment", cause: "selection" } }, exitCode: 1 }) });
   assert.equal(selection.error.environment, "linux selection");
   assert.match(selection.error.message, /js-yaml/);
-  for (const verify of [() => {}, writeReceipt({ final: false, commit: head, verdict: "FAIL" }), writeReceipt({ final: true, commit: base, verdict: "PASS" }),
-    () => { throw Object.assign(new Error("wsl.exe failed (1)"), { exitCode: 1 }); }]) {
-    const { error, calls } = await job({ verify });
+  for (const [full, verify] of [[true, ends()], [true, ends({ receipt: { final: false, commit: head, verdict: "FAIL" } })], [true, ends({ receipt: { ...passed, commit: base } })],
+    // systemd-run could not start the scope, so neither the command nor the scope's record ran.
+    [true, ends({ receipt: passed, scope: null })], [false, ends({ scope: null, exitCode: 1 })]]) {
+    const { error, calls } = await job({ full, verify });
     assert.equal(error.environment, "linux host");
     assert.equal(calls.at(-1).args[3], "systemctl");
   }
@@ -128,12 +165,13 @@ test("a failed check comes back as the receipt; a missing receipt is the host's 
 
 test("a failure after an out-of-memory kill is the host's; a pass after one stands", windowsOnly, async () => {
   const kills = { memoryPeak: 11811160064, oomKills: 2 };
-  const failedAfterKill = await job({ verify: writeReceipt({ final: true, commit: head, verdict: "FAIL", failure: { kind: "check", cause: "rust" } }, kills) });
-  assert.equal(failedAfterKill.error.environment, "linux memory");
-  assert.match(failedAfterKill.error.message, /2 out-of-memory kills/);
-  const passed = await job({ verify: writeReceipt({ final: true, commit: head, verdict: "PASS" }, kills) });
-  assert.equal(passed.receipt.verdict, "PASS");
-  assert.deepEqual(passed.scope, kills);
+  const afterKill = await job({ verify: ends({ receipt: { final: true, commit: head, verdict: "FAIL", failure: { kind: "check", cause: "rust" } }, scope: kills, exitCode: 1 }) });
+  assert.equal(afterKill.error.environment, "linux memory");
+  assert.match(afterKill.error.message, /2 out-of-memory kills/);
+  assert.equal((await job({ full: false, verify: ends({ scope: kills, exitCode: 101 }) })).error.environment, "linux memory");
+  const passedAfterKill = await job({ verify: ends({ receipt: passed, scope: kills }) });
+  assert.equal(passedAfterKill.receipt.verdict, "PASS");
+  assert.deepEqual(passedAfterKill.scope, kills);
 });
 
 test("an unreachable WSL is the host's failure and holds no slot afterwards", windowsOnly, async () => {
@@ -156,6 +194,19 @@ test("a stopped run keeps the interruption, not a host failure, and still stops 
   assert.equal(calls.at(-1).args[3], "systemctl");
 });
 
+test("a short host waits for memory before it builds, and a stop ends the wait", windowsOnly, async () => {
+  const frees = [2, 2, 20];
+  const waited = await job({ verify: ends({ receipt: passed }), tips: `has ${head}\nhas ${base}\ncached 0\n`, freeMemory: () => frees.length > 1 ? frees.shift() : frees[0] });
+  assert.equal(waited.receipt.verdict, "PASS");
+  assert.equal(frees.length, 1);
+  const stop = new AbortController();
+  const stopped = job({ tips: `has ${head}\nhas ${base}\ncached 0\n`, freeMemory: () => 1, signal: stop.signal });
+  setTimeout(() => stop.abort(Object.assign(new Error("Stopped after rust failed."), { stopped: true })), 50);
+  const { error, calls } = await stopped;
+  assert.equal(error.stopped, true);
+  assert.equal(calls.some(call => call.args.at(-1).endsWith("wsl-run.sh")), false);
+});
+
 test("the slot root keeps one Linux run at a time", windowsOnly, async () => {
   const root = mkdtempSync(join(tmpdir(), "dohc-linux-turns-"));
   try {
@@ -168,7 +219,7 @@ test("the slot root keeps one Linux run at a time", windowsOnly, async () => {
       if (script.endsWith("wsl-run.sh")) {
         active += 1; most = Math.max(most, active);
         await new Promise(done => setTimeout(done, 200));
-        writeFileSync(join(script.replace(/^\/mnt\/(\w)\//u, "$1:/").replace(/\/wsl-run\.sh$/u, ""), "result.json"), JSON.stringify({ final: true, commit: head, verdict: "PASS" }));
+        writeFileSync(join(script.replace(/^\/mnt\/(\w)\//u, "$1:/").replace(/\/wsl-run\.sh$/u, ""), "scope.json"), JSON.stringify(quiet));
         active -= 1;
       }
       return { stdout: script.endsWith("wsl-tips.sh") ? `has ${head}\nhas ${base}\n` : "" };
@@ -177,25 +228,4 @@ test("the slot root keeps one Linux run at a time", windowsOnly, async () => {
     for (const { receipt } of await Promise.all(runs)) assert.equal(receipt.verdict, "PASS");
     assert.equal(most, 1);
   } finally { rmSync(root, { recursive: true, force: true }); }
-});
-
-test("the job needs only the memory its limit exceeds the VM's page cache, above the queue's floor", () => {
-  assert.equal(neededMemoryGb(0), 14);
-  assert.equal(neededMemoryGb(4), 10);
-  assert.equal(neededMemoryGb(12), 3);
-  assert.equal(parseTips("cached 10485760\n").cachedGb, 10);
-  assert.equal(parseTips("").cachedGb, 0);
-});
-
-test("a short host waits for memory before it builds, and a stop ends the wait", windowsOnly, async () => {
-  const frees = [2, 2, 20];
-  const waited = await job({ verify: writeReceipt({ final: true, commit: head, verdict: "PASS" }), tips: `has ${head}\nhas ${base}\ncached 0\n`, freeMemory: () => frees.length > 1 ? frees.shift() : frees[0] });
-  assert.equal(waited.receipt.verdict, "PASS");
-  assert.equal(frees.length, 1);
-  const stop = new AbortController();
-  const stopped = job({ tips: `has ${head}\nhas ${base}\ncached 0\n`, freeMemory: () => 1, signal: stop.signal });
-  setTimeout(() => stop.abort(Object.assign(new Error("Stopped after rust failed."), { stopped: true })), 50);
-  const { error, calls } = await stopped;
-  assert.equal(error.stopped, true);
-  assert.equal(calls.some(call => call.args.at(-1).endsWith("wsl-run.sh")), false);
 });

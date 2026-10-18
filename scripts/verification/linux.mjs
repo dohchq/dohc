@@ -1,7 +1,8 @@
-// The Rust gate on Linux. On the shared Windows host, a PR run that selects Rust also runs
-// it in the host's WSL distro, so a change that breaks only the Linux build or its tests
-// fails before merge. `verification-linux` beside the build slots names the distro.
-// Without it, nothing runs on Linux.
+// Rust on Linux. On the shared Windows host, a PR run that selects Rust also runs the gate's
+// clippy command in the host's WSL distro, so a change that breaks only the Linux build fails
+// before merge. A full run, such as the nightly, runs the whole Rust job there, tests included.
+// A full Rust job on every PR would take as long as the Windows one, one at a time for every lane.
+// `verification-linux` beside the build slots names the distro. Without it, nothing runs on Linux.
 
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -9,6 +10,7 @@ import { freemem } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { acquireBuildSlot, acquireLinuxSlot, freeDiskGb, resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.mjs";
+import { clippy } from "../../tools/rust-engine-program/gate-commands.mjs";
 import { git, readJson, repoRoot, run } from "./process.mjs";
 
 // Runs take turns in one checkout, so the distro holds one build's output.
@@ -79,11 +81,11 @@ export function parseTips(stdout) {
 export const neededMemoryGb = cachedGb => hostFloorGb + Math.max(0, scopeMaxGb - cachedGb);
 
 /**
- * Stops any earlier run's processes, then puts the checkout at `head`, fetching the bundle's `missing` commits first,
- * and installs its dependencies, as the queue prepares a Windows lane. The verifier reads them before its own install.
+ * Stops any earlier run's processes, then puts the checkout at `head`, fetching the bundle's `missing` commits first.
+ * With `install`, it installs dependencies, as the queue prepares a Windows lane: the verifier reads them before its own install.
  * Only one run holds the Linux slot, so every scope with the prefix belongs to a run that is gone.
  */
-export function syncScript({ bundle, ref, missing, head, base }) {
+export function syncScript({ bundle, ref, missing, head, base, install }) {
   const fetch = missing.map(name => quote(`+${ref}/${name}:refs/dohc/${name === "head" ? head : base}`));
   return `set -euo pipefail
 systemctl --user stop ${quote(`${scopePrefix}*.scope`)} 2>/dev/null || true
@@ -97,19 +99,19 @@ git clean -q -ffdx --exclude=node_modules --exclude=target
 test "$(git rev-parse HEAD)" = ${quote(head)}
 git cat-file -e ${quote(`${base}^{commit}`)}
 test -z "$(git status --porcelain)"
-pnpm install --frozen-lockfile --config.confirm-modules-purge=false
+${install ? "pnpm install --frozen-lockfile --config.confirm-modules-purge=false" : ""}
 `;
 }
 
 /**
- * Runs the verifier's Rust job in a user scope. A watchdog in the scope stops it when the
- * launcher ends, so a run whose Windows side was killed leaves nothing behind.
+ * Runs the job in a user scope: with `full`, the verifier's Rust job; otherwise the gate's clippy command.
+ * A watchdog in the scope stops it when the launcher ends, so a run whose Windows side was killed leaves nothing behind.
  * Afterwards the scope's peak memory and out-of-memory kills go to `scope.json`.
  */
-export function runScript({ unit, base, grant, output, jobs }) {
+export function runScript({ unit, base, grant, output, jobs, full }) {
   const verify = `launcher=$$
 setsid bash -c "while kill -0 $launcher 2>/dev/null; do sleep 5; done; systemctl --user stop ${unit}.scope" </dev/null >/dev/null 2>&1 &
-node scripts/verification/verify.mjs pr --base ${base} --job rust
+${full ? `node scripts/verification/verify.mjs pr --base ${base} --job rust` : `cargo ${clippy.join(" ")}`}
 status=$?
 cgroup=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)
 peak=$(cat "$cgroup/memory.peak" 2>/dev/null || true)
@@ -118,18 +120,19 @@ printf '{"memoryPeak":%s,"oomKills":%s}\\n' "\${peak:-null}" "\${kills:-null}" >
 exit $status`;
   return `set -euo pipefail
 cd "${home}/linux"
-export TMPDIR="${home}/tmp" CARGO_BUILD_JOBS=${jobs} RUST_TEST_THREADS=${jobs} NEXTEST_TEST_THREADS=${jobs}
+export TMPDIR="${home}/tmp" CARGO_BUILD_JOBS=${jobs} RUST_TEST_THREADS=${jobs} NEXTEST_TEST_THREADS=${jobs} CARGO_INCREMENTAL=0 RUSTUP_AUTO_INSTALL=0
 export DOHC_VERIFICATION_GRANT=${quote(JSON.stringify(grant))} DOHC_VERIFICATION_OUTPUT=${quote(output)}
 exec systemd-run --user --scope --quiet --collect --unit=${unit} -p RuntimeMaxSec=${scopeLimitSeconds} ${scopeMemory} bash -c ${quote(verify)}
 `;
 }
 
 /**
- * Run the Rust gate for `head` against `base` in `distro`. Returns the Linux verifier's receipt and the scope's memory use.
+ * Check `head` against `base` in `distro`: with `full`, the whole Rust job; otherwise the gate's clippy command,
+ * which builds every target. Returns a receipt, the Linux verifier's when `full`, and the scope's memory use.
  * `output` is a Windows folder for its evidence. A failure of the host, of the transfer, or one after an
  * out-of-memory kill carries `environment`, so the queue retries it instead of failing the change.
  */
-export async function linuxRustJob({ distro, head, base, output, signal, request = "inline", attempt = null, command = run, gitRead = git, budget = resolveBuildBudget(),
+export async function linuxRustJob({ distro, head, base, output, full = false, signal, request = "inline", attempt = null, command = run, gitRead = git, budget = resolveBuildBudget(),
   freeMemoryGb = () => freemem() / 1024 ** 3, memoryPollMs = 30_000 }) {
   const environment = cause => error => {
     if (signal?.aborted || error?.interrupted) throw error;
@@ -144,7 +147,7 @@ export async function linuxRustJob({ distro, head, base, output, signal, request
   const run = randomUUID().slice(0, 8);
   const unit = `${scopePrefix}${run}`;
   const ref = `refs/verification-linux/${run}`;
-  const metadata = { purpose: "Linux Rust gate", checkout: repoRoot, commit: head, phase: request };
+  const metadata = { purpose: full ? "Linux Rust gate" : "Linux clippy", checkout: repoRoot, commit: head, phase: request };
   const slot = await acquireLinuxSlot({ root: budget.root, metadata, signal }).catch(environment("linux slot"));
   let cargo;
   try {
@@ -160,7 +163,7 @@ export async function linuxRustJob({ distro, head, base, output, signal, request
         await command("git", ["bundle", "create", bundle, ...missing.map(name => `${ref}/${name}`), ...known.map(sha => `^${sha}`)],
           { log: join(output, "wsl-bundle.log"), signal, quietStdout: true }).catch(environment("linux sync"));
       }
-      await wsl("sync", syncScript({ bundle: bundle && wslPath(bundle), ref, missing, head, base })).catch(environment("linux sync"));
+      await wsl("sync", syncScript({ bundle: bundle && wslPath(bundle), ref, missing, head, base, install: full })).catch(environment("linux sync"));
     } finally {
       for (const name of missing) try { gitRead(["update-ref", "-d", `${ref}/${name}`]); } catch { /* Not created. */ }
       if (bundle) rmSync(bundle, { force: true });
@@ -173,13 +176,24 @@ export async function linuxRustJob({ distro, head, base, output, signal, request
     if (free === null || free < budget.diskFloorGb) throw Object.assign(new Error(`The Linux build needs ${budget.diskFloorGb} GB free; observed ${free ?? "unknown"}.`), { environment: "disk space" });
     cargo = await acquireBuildSlot({ ...budget, cooperativeCancellation: true, signal, metadata }).catch(environment("linux slot"));
     const grant = { request, attempt, head, base };
-    const failure = await wsl("run", runScript({ unit, base, grant, output: wslPath(output), jobs: budget.jobs })).then(() => null, error => error);
+    const failure = await wsl("run", runScript({ unit, base, grant, output: wslPath(output), jobs: budget.jobs, full })).then(() => null, error => error);
     if (failure && (signal?.aborted || failure.interrupted)) throw failure;
-    const receipt = readJson(join(output, "result.json"));
-    if (!receipt?.final) environment("linux host")(failure ?? new Error("The Linux verifier wrote no final receipt."));
-    if (receipt.failure?.kind === "environment") environment(`linux ${receipt.failure.cause}`)(new Error(receipt.error ?? "The Linux host failed."));
-    if (receipt.commit !== head) environment("linux host")(new Error(`The Linux verifier checked ${receipt.commit ?? "no commit"}, not ${head}.`));
+    // The scope writes this after its command, so without it the command never ran.
     const scope = readJson(join(output, "scope.json"));
+    if (!scope) environment("linux host")(failure ?? new Error("The Linux scope recorded nothing."));
+    let receipt;
+    if (full) {
+      receipt = readJson(join(output, "result.json"));
+      if (!receipt?.final) environment("linux host")(failure ?? new Error("The Linux verifier wrote no final receipt."));
+      if (receipt.failure?.kind === "environment") environment(`linux ${receipt.failure.cause}`)(new Error(receipt.error ?? "The Linux host failed."));
+      if (receipt.commit !== head) environment("linux host")(new Error(`The Linux verifier checked ${receipt.commit ?? "no commit"}, not ${head}.`));
+    } else {
+      // cargo exits 101 on a build error or warning. 126 and 127, or wsl.exe's own failure, mean the shell could not run it.
+      if (failure && !(failure.exitCode >= 1 && failure.exitCode <= 125)) environment("linux host")(failure);
+      receipt = { version: 1, mode: "clippy", final: true, commit: head, verdict: failure ? "FAIL" : "PASS",
+        ...(failure ? { error: `cargo clippy failed on Linux. Read ${join(output, "wsl-run.log")}.` } : {}), failed: [], flaky: [] };
+      writeFileSync(join(output, "result.json"), JSON.stringify(receipt, null, 2) + "\n");
+    }
     // A compiler or test killed at the run's memory limit says nothing about the change.
     if (receipt.verdict !== "PASS" && scope?.oomKills > 0) environment("linux memory")(new Error(`The Linux job failed after ${scope.oomKills} out-of-memory kills at its limit.`));
     return { receipt, scope };

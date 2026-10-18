@@ -217,7 +217,7 @@ export async function verify(args) {
     // and when no changed file narrows it, as for packages. Otherwise it runs only the tests that read the source tree.
     const repositoryTests = !gates.js ? undefined
       : keepGoing || !files.length || selectsRepositoryTests(files, workflow) ? "test:repo" : "test:repo:tree";
-    // On a host that names a WSL distro, the Rust job also runs there. Reused Rust evidence covers renderer changes only, so it needs none.
+    // On a host that names a WSL distro, Rust is also checked there. Reused Rust evidence covers renderer changes only, so it needs none.
     const linux = gates.rust && !reuseRust ? linuxDistro() : null;
     return { baseCommit, files, workflow, requiredGates, gates, repositoryTests, linux };
   }
@@ -437,23 +437,24 @@ export async function verify(args) {
         throw error;
       }
     }
-    // The Rust job again, in the host's WSL distro, beside the Windows one. Its receipt keeps the Linux steps and logs.
+    // Rust in the host's WSL distro, beside the Windows job: clippy for a PR, the whole Rust job for a full run.
     async function linuxJob() {
       if (!linux) return;
       const linuxOutput = join(output, "rust-linux");
+      const mode = full ? "gate" : "clippy";
       let receipt;
       let scope;
       try {
-        await checkedStep({ name: "rust-linux", distro: linux, log: join(linuxOutput, "wsl-run.log"), report: join(linuxOutput, "result.json") }, async () => {
-          ({ receipt, scope } = await linuxRustJob({ distro: linux, head: report.commit, base: report.baseCommit, output: linuxOutput,
+        await checkedStep({ name: "rust-linux", distro: linux, mode, log: join(linuxOutput, "wsl-run.log"), report: join(linuxOutput, "result.json") }, async () => {
+          ({ receipt, scope } = await linuxRustJob({ distro: linux, head: report.commit, base: report.baseCommit, output: linuxOutput, full,
             signal: cancellation.signal, request: grant?.request, attempt: grant?.attempt }));
-          if (receipt.verdict !== "PASS") throw new Error(`The Rust job failed on Linux: ${receipt.error ?? "read its receipt"}`);
+          if (receipt.verdict !== "PASS") throw new Error(`Rust failed on Linux: ${receipt.error ?? "read its receipt"}`);
         });
       } finally {
         const linuxStep = row => ({ ...row, step: row.step === "rust" ? "rust-linux" : `rust-linux ${row.step}` });
         flaky.push(...(receipt?.flaky ?? []).map(linuxStep));
         failed.push(...(receipt?.failed ?? []).map(linuxStep));
-        report.linux = { distro: linux, result: join(linuxOutput, "result.json"), verdict: receipt?.verdict ?? null, seconds: receipt?.seconds ?? null, memoryPeak: scope?.memoryPeak ?? null };
+        report.linux = { distro: linux, mode, result: join(linuxOutput, "result.json"), verdict: receipt?.verdict ?? null, memoryPeak: scope?.memoryPeak ?? null };
         save();
       }
     }
