@@ -20,9 +20,13 @@ export type HostMemorySample = {
 const unescapeMount = (value: string) => value.replace(/\\([0-7]{3})/gu, (_, octal: string) => String.fromCharCode(parseInt(octal, 8)));
 const bytes = (text: string) => /^\d+$/u.test(text.trim()) ? Number(text.trim()) : undefined;
 
-/** Finds the relay's cgroup v2 folder through /proc/self/cgroup and the mount table. Returns undefined when none is usable. */
+/**
+ * Finds the relay's cgroup v2 folder through /proc/self/cgroup and the mount table. Returns undefined when none is usable.
+ * Of several usable mounts, the one with the highest root shows the most ancestors, and so every limit above the relay.
+ */
 export async function discoverHostCgroup(files: HostMemoryFiles = nodeFiles, platform: NodeJS.Platform = process.platform): Promise<HostCgroup | undefined> {
   if (platform !== "linux") return undefined;
+  let best: {cgroup: HostCgroup; depth: number} | undefined;
   try {
     const path = (await files.readFile("/proc/self/cgroup")).split("\n").find(line => line.startsWith("0::"))?.slice(3);
     if (!path?.startsWith("/")) return undefined;
@@ -31,14 +35,15 @@ export async function discoverHostCgroup(files: HostMemoryFiles = nodeFiles, pla
       if (separator < 0 || fields[separator + 1] !== "cgroup2") continue;
       const root = unescapeMount(fields[3]!), mountPoint = unescapeMount(fields[4]!);
       const inside = root === "/" ? path : path === root ? "/" : path.startsWith(`${root}/`) ? path.slice(root.length) : undefined;
-      if (inside === undefined) continue;
+      const depth = root === "/" ? 0 : root.split("/").length - 1;
+      if (inside === undefined || (best && best.depth <= depth)) continue;
       const cgroup = {directory: inside === "/" ? mountPoint : posix.join(mountPoint, inside), mountPoint};
       // A folder without the memory controller cannot be measured.
-      if (bytes(await files.readFile(posix.join(cgroup.directory, "memory.current"))) === undefined) return undefined;
-      return cgroup;
+      if (bytes(await files.readFile(posix.join(cgroup.directory, "memory.current")).catch(() => "")) === undefined) continue;
+      best = {cgroup, depth};
     }
-  } catch {}
-  return undefined;
+  } catch { return undefined; }
+  return best?.cgroup;
 }
 
 /** The lowest finite memory.max among the cgroup and its visible ancestors. */

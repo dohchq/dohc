@@ -37,6 +37,24 @@ describe("cgroup v2 discovery", () => {
     expect(await discoverHostCgroup(files, "linux")).toEqual({directory: "/mnt/cgroup v2/inner", mountPoint: "/mnt/cgroup v2"});
   });
 
+  it("chooses the mount that shows the most ancestors, whatever the mount order", async () => {
+    const leaf = cgroup2("/docker/abc", "/sys/fs/cgroup"), parent = cgroup2("/docker", "/mnt/parent");
+    for (const order of [[leaf, parent], [parent, leaf]]) {
+      const files = tree({"/proc/self/cgroup": "0::/docker/abc\n", "/proc/self/mountinfo": order.join("\n"),
+        "/sys/fs/cgroup/memory.current": "1", "/sys/fs/cgroup/memory.max": "max\n",
+        "/mnt/parent/abc/memory.current": "1", "/mnt/parent/abc/memory.max": "max\n", "/mnt/parent/memory.max": `${512 * MiB}\n`});
+      const cgroup = await discoverHostCgroup(files, "linux");
+      expect(cgroup).toEqual({directory: "/mnt/parent/abc", mountPoint: "/mnt/parent"});
+      expect(await readCgroupMemoryLimit(cgroup!, files)).toBe(512 * MiB);
+    }
+  });
+
+  it("skips a mount without the memory controller and uses another", async () => {
+    const files = tree({"/proc/self/cgroup": "0::/docker/abc\n",
+      "/proc/self/mountinfo": [cgroup2("/", "/sys/fs/cgroup"), cgroup2("/docker/abc", "/mnt/leaf")].join("\n"), "/mnt/leaf/memory.current": "1"});
+    expect(await discoverHostCgroup(files, "linux")).toEqual({directory: "/mnt/leaf", mountPoint: "/mnt/leaf"});
+  });
+
   it("reports no cgroup off Linux without reading anything", async () => {
     const files = tree({});
     for (const platform of ["win32", "darwin"] as const) expect(await discoverHostCgroup(files, platform)).toBeUndefined();
