@@ -232,7 +232,13 @@ fn sparse_five_thousand_file_query_stage_profile() {
     let db = engine_db_path(&scratch).unwrap();
     let mut store = open(&db);
     write(&mut store, "target", "target.md", "# Target", 1);
-    write(&mut store, "source", "note-00001.md", "# Source\n\n[[target]]", 2);
+    write(
+        &mut store,
+        "source",
+        "note-00001.md",
+        "# Source\n\n[[target]]",
+        2,
+    );
     store
         .read_with(|c| {
             let tx = c.unchecked_transaction().unwrap();
@@ -317,14 +323,22 @@ async fn incoming_and_resolve_share_alias_invalidation_and_close_releases_maps()
     );
     actor
         .run(|store, _| {
-            store
-                .read_with(|c| {
-                    c.execute(
-                        "UPDATE path_aliases SET path='renamed.md' WHERE object_id='target'",
-                        [],
-                    )
-                })
-                .unwrap();
+            VersionedTextStore::new(store).rename_text_file(
+                &dohc_engine_domain::RenameTextFile {
+                    workspace_id: "ws".into(),
+                    version_id: "main".into(),
+                    from_path: "target.md".into(),
+                    to_path: "renamed.md".into(),
+                    moment_id: "rename-target".into(),
+                    request_id: None,
+                    metadata_origin: "test".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 3,
+                },
+                &NoFaults,
+            )?;
             Ok(())
         })
         .await

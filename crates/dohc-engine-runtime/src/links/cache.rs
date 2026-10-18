@@ -108,7 +108,8 @@ mod tests {
         let cache = Arc::default();
         let main = get(&c, &cache, "main");
         let fork = get(&c, &cache, "fork");
-        c.execute_batch("UPDATE path_aliases SET path=path;").unwrap();
+        c.execute_batch("UPDATE path_aliases SET path=path;")
+            .unwrap();
         assert!(Arc::ptr_eq(&main, &get(&c, &cache, "main")));
         c.execute_batch("UPDATE path_aliases SET path='renamed.md' WHERE version_id='fork';")
             .unwrap();
@@ -157,8 +158,11 @@ mod tests {
         assert!(cache.lock().unwrap().entries.is_empty());
         let huge = "a".repeat(2 * 1024 * 1024);
         let open_cache = Arc::default();
-        c.execute("INSERT INTO path_aliases VALUES('ws','huge',?1,'h')", [huge])
-            .unwrap();
+        c.execute(
+            "INSERT INTO path_aliases VALUES('ws','huge',?1,'h')",
+            [huge],
+        )
+        .unwrap();
         get(&c, &open_cache, "huge");
         assert!(open_cache.lock().unwrap().entries.is_empty());
     }
