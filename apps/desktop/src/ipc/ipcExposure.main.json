@@ -4,6 +4,7 @@
     "desktop:accept-share-handoff",
     "desktop:acknowledge-reports-notice",
     "desktop:add-relay-share-link",
+    "desktop:agent-color-changed",
     "desktop:agent-run-state",
     "desktop:append-relay-share-discussion",
     "desktop:apply-database-edit",
@@ -260,6 +261,7 @@
     "desktop:search-workspace",
     "desktop:send-chat-message",
     "desktop:send-crash-report",
+    "desktop:set-agent-color",
     "desktop:set-app-pinned",
     "desktop:set-chat-follow",
     "desktop:set-chat-reaction",
@@ -341,6 +343,7 @@
     "desktop:mark-notices": "trusted-sender",
     "desktop:run-skipped-schedule-now": "trusted-sender",
     "desktop:retry-automation-notice": "trusted-sender",
-    "desktop:undo-history-operation": "trusted-sender"
+    "desktop:undo-history-operation": "trusted-sender",
+    "desktop:set-agent-color": "active-workspace"
   }
 }

@@ -303,7 +303,6 @@ export function SwitchControl(props: {
 const HUE_FILLS: Record<IdentityHue, string> = {
   rust: "bg-hue-rust",
   amber: "bg-hue-amber",
-  olive: "bg-hue-olive",
   teal: "bg-hue-teal",
   blue: "bg-hue-blue",
   indigo: "bg-hue-indigo",

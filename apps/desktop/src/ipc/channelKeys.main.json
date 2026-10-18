@@ -247,5 +247,6 @@
   "writeClipboardText",
   "writeCollectionAutomations",
   "writeWorkspaceAsset",
-  "writeWorkspaceText"
+  "writeWorkspaceText",
+  "agentColorChanged"
 ]

@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createHistoryPresentationRequest } from "../workspaces/actorPresentation";
 import { createSettingsIpc } from "./settingsIpc";
 import { settingsOperations } from "./settingsOperations";
 import { registerOperations } from "./operationTable";
@@ -33,6 +34,7 @@ const settingsRequests = [
   [settingsOperations.reloadUserSettings.channel, undefined],
   [settingsOperations.setUserSettings.channel, settingsPayload],
   [settingsOperations.setAppPinned.channel, { workspaceId: "workspace-a", appRoot: "apps/trip", pinned: true }],
+  [settingsOperations.setAgentColor.channel, { workspaceId: "workspace-a", group: "unknown", hue: null }],
   [settingsOperations.resetUserSettings.channel, undefined],
   [settingsOperations.getUserSettingsFilePath.channel, undefined],
   [settingsOperations.openUserSettingsFile.channel, undefined],
@@ -95,6 +97,7 @@ async function harness() {
   const applyThemeMode = vi.fn((value: ThemeMode) => { effects.push({ kind: "theme", value, persisted: persisted() }); });
   const setSpellCheckerEnabled = vi.fn<(enabled: boolean) => void>();
   const broadcastUserSettings = vi.fn();
+  const broadcastAgentColor = vi.fn();
   const notifyRenderer = vi.fn();
   const refreshDispatchTray = vi.fn<() => Promise<unknown>>(async () => undefined);
   const openDispatchWorkspaces = vi.fn(() => [...entries.values()]);
@@ -105,7 +108,7 @@ async function harness() {
     stateDir: () => stateDirectory, setCachedPreferredName,
     applyZoomLevelToWindows, applyThemeMode, setSpellCheckerEnabled, refreshDispatchTray, openDispatchWorkspaces,
     chatDispatchService: { scanWorkspace }, withRendererWorkspaceOperation,
-    broadcastUserSettings, notifyRenderer, openPath,
+    broadcastUserSettings, broadcastAgentColor, notifyRenderer, openPath,
     knownWorkspaceIds: () => [...entries.keys()],
   });
   registerOperations<typeof settingsOperations, Event, Operation>({
@@ -123,7 +126,7 @@ async function harness() {
   return {
     handlers, effects, entries, authorities, sessions, first, second, open,
     zoom: capability.stepWindowZoom, setCachedPreferredName, applyZoomLevelToWindows, applyThemeMode, setSpellCheckerEnabled,
-    refreshDispatchTray, openDispatchWorkspaces, scanWorkspace, broadcastUserSettings, notifyRenderer,
+    refreshDispatchTray, openDispatchWorkspaces, scanWorkspace, broadcastUserSettings, broadcastAgentColor, notifyRenderer,
     openPath, reload: capability.reloadUserSettings,
     preferredName: () => preferredName, stateDirectory: () => stateDirectory,
     setStateDirectory: (value: string) => { stateDirectory = value; },
@@ -639,5 +642,65 @@ describe("registered workspace settings and UI state", () => {
       release.resolve();
       await rejection;
     }
+  });
+});
+
+
+function agentTokens(workspaceId: string) {
+  return createHistoryPresentationRequest({ source: "own-store", workspaceId, assertCurrent: () => undefined,
+    installationId: "device", credentials: null, serverUrl: undefined, synced: false })([
+    { kind: "agent", agentId: "bot", onBehalfOf: "device" }, { kind: "human", humanId: "device" },
+  ]);
+}
+describe("personal agent colour IPC", () => {
+  it("rejects unknown, human, foreign-workspace and inactive groups without saving", async () => {
+    const h = await harness();
+    const [agent, human] = agentTokens("workspace-a");
+    const [foreign] = agentTokens("workspace-b");
+    for (const group of ["unknown", human!.group, foreign!.group]) {
+      await expect(h.invoke(settingsOperations.setAgentColor.channel, { workspaceId: "workspace-a", group, hue: "blue" })).rejects.toThrow();
+    }
+    await expect(h.invoke(settingsOperations.setAgentColor.channel,
+      { workspaceId: "workspace-a", group: agent!.group, hue: "blue" }, h.second)).rejects.toThrow();
+    expect(h.broadcastAgentColor).not.toHaveBeenCalled();
+    expect((await userSettingsStore.readUserSettingsFile(h.stateDirectory())).source).toBe("default");
+  });
+  it("persists locally, omits keys from every settings result, preserves renderer saves, and clears with null or reset", async () => {
+    const h = await harness();
+    const [agent] = agentTokens("workspace-a");
+    const [other] = agentTokens("workspace-b");
+    const change = { workspaceId: "workspace-a", group: agent!.group, hue: "blue" } as const;
+    await h.invoke(settingsOperations.setAgentColor.channel, change);
+    expect(h.broadcastAgentColor.mock.calls.map(([event]) => event)).toEqual([
+      change, { ...change, workspaceId: "workspace-b", group: other!.group },
+    ]);
+    expect(h.broadcastUserSettings).not.toHaveBeenCalled();
+    const stored = await userSettingsStore.readUserSettingsFile(h.stateDirectory());
+    expect(Object.values(stored.settings.appearance.agentColors ?? {})).toEqual(["blue"]);
+    for (const channel of [settingsOperations.getUserSettings.channel, settingsOperations.reloadUserSettings.channel]) {
+      const result = await h.invoke(channel);
+      expect(JSON.stringify(result)).not.toContain("agentColors");
+    }
+    const settings = { ...DEFAULT_USER_SETTINGS, editor: { ...DEFAULT_USER_SETTINGS.editor, fontSize: 16 } };
+    const saved = await h.invoke(settingsOperations.setUserSettings.channel, { settings, base: DEFAULT_USER_SETTINGS });
+    expect(JSON.stringify(saved)).not.toContain("agentColors");
+    expect((await userSettingsStore.readUserSettingsFile(h.stateDirectory())).settings.appearance.agentColors).toEqual(stored.settings.appearance.agentColors);
+    for (const [result] of h.broadcastUserSettings.mock.calls) expect(JSON.stringify(result)).not.toContain("agentColors");
+    expect(h.scanWorkspace).not.toHaveBeenCalled();
+    await h.invoke(settingsOperations.setAgentColor.channel, { ...change, hue: null });
+    expect((await userSettingsStore.readUserSettingsFile(h.stateDirectory())).settings.appearance.agentColors).toEqual({});
+    expect(h.broadcastAgentColor).toHaveBeenCalledWith({ ...change, hue: null });
+    await h.invoke(settingsOperations.setAgentColor.channel, change);
+    await h.invoke(settingsOperations.resetUserSettings.channel);
+    expect((await userSettingsStore.readUserSettingsFile(h.stateDirectory())).settings.appearance.agentColors).toBeUndefined();
+    expect(h.broadcastAgentColor).toHaveBeenLastCalledWith({ ...change, workspaceId: "workspace-b", group: other!.group, hue: null });
+  });
+  it("never discloses rejected stored keys through ignored-setting paths", async () => {
+    const h = await harness();
+    await writeFile(join(h.stateDirectory(), userSettingsStore.USER_SETTINGS_FILE), JSON.stringify({ ...DEFAULT_USER_SETTINGS,
+      appearance: { ...DEFAULT_USER_SETTINGS.appearance, agentColors: { "private-account-and-server": "olive" } } }));
+    const result = await h.reload();
+    expect(JSON.stringify(result)).not.toContain("private-account-and-server");
+    expect(JSON.stringify(h.broadcastUserSettings.mock.calls)).not.toContain("private-account-and-server");
   });
 });

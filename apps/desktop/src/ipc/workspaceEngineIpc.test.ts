@@ -232,6 +232,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
     localPersonId: () => "person-local",
     localPersonName: () => "Ice",
     localInstallationId: () => "install-local",
+    stateDir: () => "C:/w/sol-agent-colours/.agent-artifacts/no-settings",
     warmCredentialCache, currentCredentials: () => identity.credentials,
     // Read from main's own account, as the sign-in stands when the request arrives.
     localPerson: async () => ({ kind: "human", humanId: session.account ?? "install-local" }),

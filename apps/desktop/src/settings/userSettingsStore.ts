@@ -2,10 +2,10 @@ import { lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { atomicReplaceFile } from "../atomicReplaceFile";
 import { join, resolve } from "node:path";
 import {
-  DEFAULT_USER_SETTINGS,
-  DesktopUserSettings,
+  DEFAULT_USER_SETTINGS, type AgentColors,
+  StoredUserSettings,
   settingsDeepEqual,
-  type DesktopUserSettingsResult,
+  type StoredUserSettingsResult,
 } from "./userSettings";
 import {
   isSettingsObject,
@@ -17,10 +17,12 @@ import {
 export const USER_SETTINGS_FILE = "dohc-settings.json";
 export const MAX_USER_SETTINGS_FILE_BYTES = 256 * 1024;
 
-const userSettingKinds = settingKinds(DesktopUserSettings, DEFAULT_USER_SETTINGS);
+const schemaSettingKinds = settingKinds(StoredUserSettings, DEFAULT_USER_SETTINGS);
+const userSettingKinds: typeof schemaSettingKinds = path =>
+  path.length === 2 && path[0] === "appearance" && path[1] === "agentColors" ? "group" : schemaSettingKinds(path);
 
-function parseUserSettings(candidate: unknown): DesktopUserSettings | null {
-  const parsed = DesktopUserSettings.safeParse(candidate);
+function parseUserSettings(candidate: unknown): StoredUserSettings | null {
+  const parsed = StoredUserSettings.safeParse(candidate);
   return parsed.success ? parsed.data : null;
 }
 
@@ -31,10 +33,22 @@ interface UserSettingsSnapshot {
   text: string | null;
   problem: string | null;
   raw: Record<string, unknown> | null;
-  result: DesktopUserSettingsResult;
+  result: StoredUserSettingsResult;
 }
 
 const snapshots = new Map<string, Promise<UserSettingsSnapshot>>();
+const presentationColors = new Map<string, AgentColors | undefined>();
+function rememberColors(root: string, snapshot: UserSettingsSnapshot): UserSettingsSnapshot {
+  presentationColors.set(root, snapshot.result.settings.appearance.agentColors);
+  return snapshot;
+}
+
+// A request reads once, then resolves against the current settings after its awaits.
+export async function agentColorsForPresentation(dir: string): Promise<() => AgentColors | undefined> {
+  const root = resolve(dir);
+  await snapshotFor(root);
+  return () => presentationColors.get(root);
+}
 
 function unusable(
   path: string,
@@ -109,20 +123,23 @@ function settingsPath(root: string): string {
 function snapshotFor(root: string): Promise<UserSettingsSnapshot> {
   const existing = snapshots.get(root);
   if (existing) return existing;
-  const read = loadUserSettings(settingsPath(root));
+  const read = loadUserSettings(settingsPath(root)).then(snapshot => {
+    if (snapshots.get(root) === read) rememberColors(root, snapshot);
+    return snapshot;
+  });
   snapshots.set(root, read);
   return read;
 }
 
 export async function readUserSettingsFile(
   dir: string,
-): Promise<DesktopUserSettingsResult> {
+): Promise<StoredUserSettingsResult> {
   return (await loadUserSettings(settingsPath(resolve(dir)))).result;
 }
 
 export async function readCachedUserSettingsFile(
   dir: string,
-): Promise<DesktopUserSettingsResult> {
+): Promise<StoredUserSettingsResult> {
   return (await snapshotFor(resolve(dir))).result;
 }
 
@@ -143,20 +160,23 @@ async function textOnDisk(path: string): Promise<string | null> {
 async function commitUserSettings(
   root: string,
   content: Record<string, unknown>,
-): Promise<DesktopUserSettingsResult>;
+): Promise<StoredUserSettingsResult>;
 async function commitUserSettings(
   root: string,
   content: Record<string, unknown>,
   expected: { text: string | null },
-): Promise<DesktopUserSettingsResult | null>;
+): Promise<StoredUserSettingsResult | null>;
 async function commitUserSettings(
   root: string,
   content: Record<string, unknown>,
   expected?: { text: string | null },
-): Promise<DesktopUserSettingsResult | null> {
+): Promise<StoredUserSettingsResult | null> {
   await mkdir(root, { recursive: true });
   const path = settingsPath(root);
   const text = `${JSON.stringify(content, null, 2)}\n`;
+  if (Buffer.byteLength(text, "utf8") > MAX_USER_SETTINGS_FILE_BYTES) {
+    throw new Error("dohc did not save settings because the file would exceed 256 KB. Clear some settings and try again.");
+  }
   const snapshot = snapshotOfText(path, text);
   const conflict = Symbol("settings changed");
   try {
@@ -166,7 +186,7 @@ async function commitUserSettings(
         await rename(source, destination);
       },
     });
-    snapshots.set(root, Promise.resolve(snapshot));
+    snapshots.set(root, Promise.resolve(rememberColors(root, snapshot)));
     return snapshot.result;
   } catch (error) {
     if (error === conflict) return null;
@@ -188,8 +208,8 @@ const SAVE_ATTEMPTS = 5;
  */
 export async function updateUserSettingsFile(
   dir: string,
-  change: (current: DesktopUserSettings) => DesktopUserSettings,
-): Promise<DesktopUserSettingsResult> {
+  change: (current: StoredUserSettings) => StoredUserSettings,
+): Promise<StoredUserSettingsResult> {
   const root = resolve(dir);
   const path = settingsPath(root);
   for (let attempt = 0; attempt < SAVE_ATTEMPTS; attempt += 1) {
@@ -198,9 +218,9 @@ export async function updateUserSettingsFile(
       throw new Error(`dohc did not save settings. ${onDisk.result.warning}`);
     }
     const current = onDisk.result.settings;
-    const next = DesktopUserSettings.parse(change(current));
+    const next = StoredUserSettings.parse(change(current));
     if (settingsDeepEqual(next, current)) {
-      snapshots.set(root, Promise.resolve(onDisk));
+      snapshots.set(root, Promise.resolve(rememberColors(root, onDisk)));
       return onDisk.result;
     }
     const saved = await commitUserSettings(
@@ -220,20 +240,20 @@ export async function updateUserSettingsFile(
  */
 export function writeUserSettingsFile(
   dir: string,
-  settings: DesktopUserSettings,
-  base: DesktopUserSettings,
-): Promise<DesktopUserSettingsResult> {
-  const next = DesktopUserSettings.parse(settings);
+  settings: StoredUserSettings,
+  base: StoredUserSettings,
+): Promise<StoredUserSettingsResult> {
+  const next = StoredUserSettings.parse(settings);
   return updateUserSettingsFile(dir, (current) =>
-    DesktopUserSettings.parse(overlaySettings(current, base, next)));
+    StoredUserSettings.parse(overlaySettings(current, base, next)));
 }
 
 /** Replaces the whole file. Reset user settings is the one caller. */
 export async function replaceUserSettingsFile(
   dir: string,
-  settings: DesktopUserSettings,
-): Promise<DesktopUserSettingsResult> {
-  return commitUserSettings(resolve(dir), DesktopUserSettings.parse(settings));
+  settings: StoredUserSettings,
+): Promise<StoredUserSettingsResult> {
+  return commitUserSettings(resolve(dir), StoredUserSettings.parse(settings));
 }
 
 /**
@@ -247,7 +267,7 @@ export async function ensureUserSettingsFile(dir: string): Promise<string> {
   const text = `${JSON.stringify(DEFAULT_USER_SETTINGS, null, 2)}\n`;
   try {
     await writeFile(path, text, { flag: "wx" });
-    snapshots.set(root, Promise.resolve(snapshotOfText(path, text)));
+    snapshots.set(root, Promise.resolve(rememberColors(root, snapshotOfText(path, text))));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
   }
@@ -262,7 +282,7 @@ export async function ensureUserSettingsFile(dir: string): Promise<string> {
  */
 export async function reloadUserSettingsFile(
   dir: string,
-): Promise<DesktopUserSettingsResult | null> {
+): Promise<StoredUserSettingsResult | null> {
   const root = resolve(dir);
   const previous = await snapshots.get(root);
   const loaded = await loadUserSettings(settingsPath(root));
@@ -272,6 +292,6 @@ export async function reloadUserSettingsFile(
   const snapshot = previous && loaded.problem !== null
     ? { ...loaded, result: { ...loaded.result, settings: previous.result.settings } }
     : loaded;
-  snapshots.set(root, Promise.resolve(snapshot));
+  snapshots.set(root, Promise.resolve(rememberColors(root, snapshot)));
   return snapshot.result;
 }

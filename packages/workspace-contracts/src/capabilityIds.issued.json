@@ -239,5 +239,6 @@
   "share.revoke.undo",
   "share.discussion.activity.wait",
   "share.discussion.activity.cancel",
-  "share.live.restore"
+  "share.live.restore",
+  "agent.color.set"
 ]

@@ -7,6 +7,26 @@ export const neutralPresentation: ActorPresentation = { group: "", hue: null, se
 export const ownPresentation: ActorPresentation = { group: "own", hue: null, self: true };
 export const ownAgentPresentation: ActorPresentation = { group: "own-agent", hue: null, self: true };
 const listeners = new Set<() => void>();
+const agentOverrides = new Map<string, { workspaceId: string; hue: IdentityHue | null }>();
+export function clearAgentColorOverrides(workspaceId?: string): void {
+  let changed = false;
+  for (const [group, override] of agentOverrides) {
+    if (workspaceId === undefined || override.workspaceId === workspaceId) { agentOverrides.delete(group); changed = true; }
+  }
+  if (!changed) return;
+  for (const listener of listeners) listener();
+}
+export function bindAgentColorUpdates(
+  api: Pick<DohcDesktopBridge, "onAgentColorChanged">,
+  workspaceId: () => string | undefined,
+): () => void {
+  const stop = api.onAgentColorChanged(event => {
+    if (event.workspaceId !== workspaceId()) return;
+    agentOverrides.set(event.group, { workspaceId: event.workspaceId, hue: event.hue });
+    for (const listener of listeners) listener();
+  });
+  return () => { stop(); clearAgentColorOverrides(); };
+}
 export function setOwnPresentation(token: ActorPresentation | undefined): void {
   const hue = token?.hue ?? null;
   if (ownPresentation.hue === hue) return;
@@ -25,20 +45,24 @@ const HUE_CLASSES: Record<IdentityHue, string> = {
   rust: "bg-hue-rust/15 text-hue-rust", amber: "bg-hue-amber/15 text-hue-amber",
   teal: "bg-hue-teal/15 text-hue-teal", blue: "bg-hue-blue/15 text-hue-blue",
   indigo: "bg-hue-indigo/15 text-hue-indigo", plum: "bg-hue-plum/15 text-hue-plum",
-  rose: "bg-hue-rose/15 text-hue-rose", olive: "bg-hue-olive/15 text-hue-olive",
+  rose: "bg-hue-rose/15 text-hue-rose",
 };
 const AGENT_CLASSES: Record<IdentityHue, string> = {
-  rust: "border-hue-rust/50 bg-bg text-hue-rust", amber: "border-hue-amber/50 bg-bg text-hue-amber",
-  teal: "border-hue-teal/50 bg-bg text-hue-teal", blue: "border-hue-blue/50 bg-bg text-hue-blue",
-  indigo: "border-hue-indigo/50 bg-bg text-hue-indigo", plum: "border-hue-plum/50 bg-bg text-hue-plum",
-  rose: "border-hue-rose/50 bg-bg text-hue-rose", olive: "border-hue-olive/50 bg-bg text-hue-olive",
+  rust: "border-hue-rust bg-bg text-hue-rust", amber: "border-hue-amber bg-bg text-hue-amber",
+  teal: "border-hue-teal bg-bg text-hue-teal", blue: "border-hue-blue bg-bg text-hue-blue",
+  indigo: "border-hue-indigo bg-bg text-hue-indigo", plum: "border-hue-plum bg-bg text-hue-plum",
+  rose: "border-hue-rose bg-bg text-hue-rose",
 };
 function hueFor(token: ActorPresentation, kind: "human" | "agent"): IdentityHue | null {
-  return (token.self ? chosenHue(kind) : null) ?? token.hue;
+  if (kind === "agent") {
+    const hue = agentOverrides.has(token.group) ? agentOverrides.get(token.group)?.hue ?? null : token.hue;
+    return hue ?? (token.self ? chosenHue("agent") : null);
+  }
+  return (token.self ? chosenHue("human") : null) ?? token.hue;
 }
 export function presentationClasses(token: ActorPresentation, kind: "human" | "agent" = "human"): string {
   const hue = hueFor(token, kind);
-  return kind === "agent" ? hue ? AGENT_CLASSES[hue] : "border-agent/50 bg-bg text-agent"
+  return kind === "agent" ? hue ? AGENT_CLASSES[hue] : "border-agent bg-bg text-agent"
     : hue ? HUE_CLASSES[hue] : "bg-panel-2 text-muted";
 }
 export function presentationTheme(): "light" | "dark" {

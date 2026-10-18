@@ -241,6 +241,7 @@ export const CHANNELS = {
   setTitlebarTheme: "desktop:set-titlebar-theme",
   windowFullScreen: "desktop:window-full-screen",
   stepWindowZoom: "desktop:step-window-zoom",
+  agentColorChanged: "desktop:agent-color-changed",
   userSettingsChanged: "desktop:user-settings-changed",
   folderAppChanged: "desktop:folder-app-changed",
   searchResults: "desktop:search-results",

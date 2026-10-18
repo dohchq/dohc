@@ -1431,8 +1431,8 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="hue-control" title="Hue control">
-        <Specimen label="person, olive chosen">
-          <HueControl label="Your color" value="olive" shape="person" onChange={noop} />
+        <Specimen label="person, rose chosen">
+          <HueControl label="Your color" value="rose" shape="person" onChange={noop} />
         </Specimen>
         <Specimen label="agent, none chosen">
           <HueControl label="Your agent's color" value={null} shape="agent" onChange={noop} />

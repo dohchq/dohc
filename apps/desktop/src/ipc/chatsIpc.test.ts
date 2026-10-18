@@ -176,6 +176,7 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
     assertTrustedSender, chatScope, requireEngineCapture, linkedChatStoreFor, chatWrites,
     assertWritableWorkspace: value => { if (shareViewIsPresent(value.shareView)) throw new Error("Read-only workspace"); },
     readWorkspace: () => workspace,
+    stateDir: () => "C:/w/sol-agent-colours/.agent-artifacts/no-settings",
     warmCredentialCache, localUserId: () => "owner",
     localInstallationId: () => "local-owner", currentCredentials: () => null,
     chatRelayIdentityFor,

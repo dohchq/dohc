@@ -26,6 +26,7 @@ import {
   serverAccountOperations,
   SitePreviewReplacedEvent,
   DesktopUserSettingsResult,
+  AgentColorChangedEvent,
   ShareDirectWritesPushedEvent,
   shareDirectWriteDeliveryOperations,
   EngineYDocLineageReplacementEvent,
@@ -457,6 +458,7 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.setTitlebarTheme, payload),
   onWindowFullScreen: (listener) =>
     onEvent(CHANNELS.windowFullScreen, WindowFullScreenEvent, listener),
+  onAgentColorChanged: listener => onEvent(CHANNELS.agentColorChanged, AgentColorChangedEvent, listener),
   onUserSettingsChanged: (listener) =>
     onEvent(CHANNELS.userSettingsChanged, DesktopUserSettingsResult, listener),
   stepWindowZoom: (payload) =>

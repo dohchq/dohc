@@ -177,6 +177,15 @@ export const DEFAULT_USER_SETTINGS: DesktopUserSettings = {
   privacy: DEFAULT_PRIVACY_SETTINGS,
 };
 
+// Main-only settings. Actor keys never cross the renderer boundary.
+export const AgentColors = z.record(z.string().max(2048).refine(key => new TextEncoder().encode(key).byteLength <= 2048), z.enum(IDENTITY_HUES))
+  .refine(colors => Object.keys(colors).length <= 256);
+export type AgentColors = z.infer<typeof AgentColors>;
+export const StoredUserSettings = DesktopUserSettings.safeExtend({
+  appearance: DesktopUserSettings.shape.appearance.extend({ agentColors: AgentColors.optional() }),
+});
+export type StoredUserSettings = z.infer<typeof StoredUserSettings>;
+
 export const SETTINGS_READ_SOURCES = ["stored", "default", "recovered"] as const;
 
 export const DesktopUserSettingsResult = z.object({
@@ -187,6 +196,18 @@ export const DesktopUserSettingsResult = z.object({
   ignored: IgnoredSettings.optional(),
 }).strict();
 export type DesktopUserSettingsResult = z.infer<typeof DesktopUserSettingsResult>;
+
+export const StoredUserSettingsResult = DesktopUserSettingsResult.extend({ settings: StoredUserSettings });
+export type StoredUserSettingsResult = z.infer<typeof StoredUserSettingsResult>;
+
+export function rendererUserSettingsResult(result: StoredUserSettingsResult): DesktopUserSettingsResult {
+  const { agentColors: _private, ...appearance } = result.settings.appearance;
+  const ignored = result.ignored?.filter(item => !item.key.startsWith("appearance.agentColors"));
+  return DesktopUserSettingsResult.parse({
+    ...result, settings: { ...result.settings, appearance },
+    ignored: ignored?.length ? ignored : undefined,
+  });
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
