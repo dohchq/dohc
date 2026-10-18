@@ -1,6 +1,8 @@
 use super::*;
 use serde_json::{Value, json};
 use std::{fs, process::Command, sync::OnceLock};
+#[path = "../tests/containment.rs"]
+mod containment;
 #[path = "../tests/real.rs"]
 mod real;
 pub(super) fn started(shared: &Shared, pid: u32, cwd: &std::path::Path) {
@@ -9,8 +11,7 @@ pub(super) fn started(shared: &Shared, pid: u32, cwd: &std::path::Path) {
     s.lifecycle.2 = Some((pid, cwd.into()));
     shared.wake.notify_all();
 }
-pub(super) fn reaped(shared: &Shared, child: &mut std::process::Child) {
-    assert!(child.try_wait().unwrap().is_some());
+pub(super) fn reaped(shared: &Shared) {
     let mut s = shared.state.lock().unwrap();
     s.lifecycle.1 += 1;
     s.lifecycle.2 = None;
@@ -30,11 +31,7 @@ fn runtime() -> (PathBuf, Value) {
 }
 fn fixture(mode: &str) -> (tempfile::TempDir, Config) {
     let parent = std::env::current_dir().unwrap();
-    let dir = if mode == "relative" {
-        tempfile::tempdir_in(&parent).unwrap()
-    } else {
-        tempfile::tempdir().unwrap()
-    };
+    let dir = tempfile::tempdir().unwrap();
     let (node, runtime) = runtime();
     let identity = json!({"version":1,"runtime":runtime,"buildSha256":"test","parentCwd":parent});
     let script = include_str!("fake.cjs")
@@ -153,7 +150,46 @@ fn assert_pending(future: std::pin::Pin<&mut impl Future<Output = Result>>) {
 }
 
 #[test]
-fn missing_and_identity() {
+fn oversized_metadata_is_refused_before_starting_a_child() {
+    let (_dir, c) = fixture("ok");
+    let mut reader = Reader::new(Some(c));
+    for field in 0..5 {
+        let mut r = request("ok");
+        let value = "x".repeat(4097);
+        match field {
+            0 => r.current_path = value,
+            1 => r.document.workspace_id = value,
+            2 => r.document.main_version_id = value,
+            3 => r.document.object_id = value,
+            _ => r.document.lineage_claim_id = value,
+        }
+        fail(run(reader.request(r)), Failure::TooLarge);
+    }
+    let mut r = request("ok");
+    r.current_path = "\0".repeat(4096);
+    r.document.object_id = "\0".repeat(4096);
+    r.document.workspace_id = "\0".repeat(4096);
+    fail(run(reader.request(r)), Failure::TooLarge);
+    let starts = reader.shared.state.lock().unwrap().lifecycle.0;
+    assert_eq!(starts, 0);
+    finish(&mut reader);
+}
+
+#[test]
+fn closed_supervisor_does_not_start_a_child() {
+    let (_dir, c) = fixture("ok");
+    let shared = Arc::new(Shared::default());
+    shared.state.lock().unwrap().closed = true;
+    let result =
+        process::Worker::start(&c, shared.clone(), Instant::now() + Duration::from_secs(5));
+    let refused = matches!(result, Err(Failure::Unavailable));
+    drop(result);
+    assert!(refused);
+    assert_eq!(shared.state.lock().unwrap().lifecycle.0, 0);
+}
+
+#[test]
+fn invalid_configuration_or_identity_is_unavailable() {
     for fault in [
         "none",
         "relative",
@@ -174,16 +210,24 @@ fn missing_and_identity() {
         "embedded-identity",
         "startup-crash",
     ] {
-        let (_dir, mut c) = fixture(fault);
+        let (dir, mut c) = fixture(fault);
         match fault {
             "relative" => {
-                c.manifest = c
-                    .manifest
-                    .strip_prefix(std::env::current_dir().unwrap())
-                    .unwrap()
-                    .into()
+                let mut relative = PathBuf::new();
+                for component in std::env::current_dir().unwrap().components() {
+                    if matches!(component, std::path::Component::Normal(_)) {
+                        relative.push("..");
+                    }
+                }
+                for component in c.manifest.components() {
+                    if let std::path::Component::Normal(name) = component {
+                        relative.push(name);
+                    }
+                }
+                assert!(relative.exists());
+                c.manifest = relative;
             }
-            "runtime" => c.node = c.node.with_extension("absent"),
+            "runtime" => c.node = dir.path().join("absent.exe"),
             "bundle" => fs::remove_file(&c.bundle).unwrap(),
             "manifest" => fs::remove_file(&c.manifest).unwrap(),
             "hash" => fs::write(&c.bundle, "wrong").unwrap(),
@@ -251,28 +295,28 @@ macro_rules! reply_fault {
         }
     };
 }
-reply_fault!(returned_sha, "sha");
-reply_fault!(returned_length, "length");
+reply_fault!(wrong_source_digest_crashes_reader, "sha");
+reply_fault!(wrong_source_length_crashes_reader, "length");
 reply_fault!(obsolete_flag_rejected, "obsolete-flag");
-reply_fault!(eof_before_delta, "eof-delta");
-reply_fault!(truncated_delta, "truncated-delta");
-reply_fault!(eof_before_end, "eof-end");
-reply_fault!(truncated_end, "truncated-end");
-reply_fault!(end_id, "end-id");
-reply_fault!(response_id, "id");
-reply_fault!(response_kind, "kind");
-reply_fault!(response_fields, "extra");
-reply_fault!(delta_digest, "delta");
-reply_fault!(delta_limit, "declaration");
-reply_fault!(malformed_frame, "malformed");
-reply_fault!(oversize_frame, "oversize");
-reply_fault!(fix1_refusal_reason, "refused-reason");
-reply_fault!(fix1_refusal_id, "refused-id");
-reply_fault!(fix1_projection_sha, "projection-sha");
-reply_fault!(fix1_state_sha, "state-sha");
+reply_fault!(eof_before_delta_crashes_reader, "eof-delta");
+reply_fault!(truncated_delta_crashes_reader, "truncated-delta");
+reply_fault!(eof_before_end_crashes_reader, "eof-end");
+reply_fault!(truncated_end_crashes_reader, "truncated-end");
+reply_fault!(wrong_end_id_crashes_reader, "end-id");
+reply_fault!(wrong_response_id_crashes_reader, "id");
+reply_fault!(wrong_response_kind_crashes_reader, "kind");
+reply_fault!(unknown_response_fields_crash_reader, "extra");
+reply_fault!(wrong_delta_digest_crashes_reader, "delta");
+reply_fault!(oversized_delta_declaration_crashes_reader, "declaration");
+reply_fault!(malformed_frame_crashes_reader, "malformed");
+reply_fault!(oversized_frame_crashes_reader, "oversize");
+reply_fault!(unknown_refusal_reason_crashes_reader, "refused-reason");
+reply_fault!(wrong_refusal_id_crashes_reader, "refused-id");
+reply_fault!(malformed_projection_sha_crashes_reader, "projection-sha");
+reply_fault!(malformed_state_sha_crashes_reader, "state-sha");
 
 #[test]
-fn fix1_spawn_boundary() {
+fn child_receives_only_the_fixed_launch_contract() {
     let (_dir, c) = fixture("ok");
     let mut reader = Reader::new(Some(c));
     assert!(run(reader.request(request("ok"))).is_ok());
@@ -292,14 +336,14 @@ fn fix1_spawn_boundary() {
     finish(&mut reader);
 }
 #[test]
-fn fix1_no_configuration_thread() {
+fn missing_configuration_creates_no_owner_thread() {
     let mut reader = Reader::new(None);
     assert!(reader.owner.is_none());
     fail(run(reader.request(request("ok"))), Failure::Unavailable);
     finish(&mut reader);
 }
 #[test]
-fn fix1_prove_delta() {
+fn prove_rejects_a_nonempty_delta() {
     let (_dir, c) = fixture("ok");
     let mut reader = Reader::new(Some(c));
     let mut r = request("prove-delta");
@@ -308,7 +352,7 @@ fn fix1_prove_delta() {
     finish(&mut reader);
 }
 #[test]
-fn fix1_debug_redacts_delta() {
+fn debug_output_reports_delta_length_without_bytes() {
     let (_dir, c) = fixture("ok");
     let mut reader = Reader::new(Some(c));
     let result = run(reader.request(request("ok"))).unwrap();
@@ -316,7 +360,7 @@ fn fix1_debug_redacts_delta() {
     finish(&mut reader);
 }
 #[test]
-fn fix1_method_replacement() {
+fn construct_and_prove_for_one_document_coexist() {
     let (_dir, c) = fixture("ok");
     let mut reader = Reader::new(Some(c));
     assert!(run(reader.request(request("ok"))).is_ok());
@@ -334,7 +378,7 @@ fn fix1_method_replacement() {
     }
 }
 #[test]
-fn fix1_checkpoint_and_refusal() {
+fn every_outcome_binds_the_sent_checkpoint() {
     let (_dir, c) = fixture("ok");
     let mut reader = Reader::new(Some(c));
     for bytes in [vec![0, 0], vec![1, 2, 3]] {
@@ -367,7 +411,7 @@ fn fix1_checkpoint_and_refusal() {
     finish(&mut reader);
 }
 #[test]
-fn fix1_rejected_replacement_keeps_old() {
+fn rejected_replacement_preserves_the_queued_request() {
     let (_dir, c) = fixture("ok");
     let mut reader = Reader::new(Some(c));
     assert!(run(reader.request(request("ok"))).is_ok());
@@ -395,15 +439,19 @@ fn fix1_rejected_replacement_keeps_old() {
 }
 #[cfg(windows)]
 #[test]
-fn fix1_executable_extension() {
+fn extensionless_executable_is_rejected_before_spawn() {
     let (dir, mut c) = fixture("ok");
     let bare = dir.path().join("node");
-    fs::copy(&c.node, &bare).unwrap();
-    fs::copy(&c.node, bare.with_extension("exe")).unwrap();
-    c.node = bare.with_extension("exe");
     let mut allowed = Reader::new(Some(c.clone()));
     assert!(run(allowed.request(request("ok"))).is_ok());
     finish(&mut allowed);
+    // Any checked PE executable can expose a missing pre-spawn extension guard.
+    // Reuse this test binary; no extra Node distribution is needed.
+    let executable = std::env::current_exe().unwrap();
+    fs::hard_link(&executable, &bare).unwrap();
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&c.manifest).unwrap()).unwrap();
+    manifest["runtime"]["sha256"] = wire::sha(&fs::read(executable).unwrap()).into();
+    fs::write(&c.manifest, manifest.to_string()).unwrap();
     c.node = bare;
     let mut reader = Reader::new(Some(c));
     fail(run(reader.request(request("ok"))), Failure::Unavailable);
@@ -416,7 +464,7 @@ fn fix1_executable_extension() {
 }
 
 #[test]
-fn reviewed_protocol_success() {
+fn construct_and_prove_return_checked_success() {
     let (_dir, c) = fixture("ok");
     let mut reader = Reader::new(Some(c));
     assert!(matches!(

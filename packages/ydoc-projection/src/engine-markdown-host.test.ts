@@ -38,9 +38,8 @@ async function start(entry = bundle, preload?: string) {
     {cwd, env: {}, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe']})
   const closed = once(child, 'close')
   const diagnostics: Buffer[] = [], output: Buffer[] = []
-  let received = 0, consumed = 0
   child.stderr.on('data', bytes => diagnostics.push(bytes))
-  child.stdout.on('data', bytes => {output.push(bytes); received += bytes.length})
+  child.stdout.on('data', bytes => {output.push(bytes)})
   child.stdin.on('error', () => {})
   const iterator = child.stdout[Symbol.asyncIterator]()
   let pending = Buffer.alloc(0)
@@ -50,7 +49,7 @@ async function start(entry = bundle, preload?: string) {
       if (next.done) throw new Error('Reader EOF: ' + Buffer.concat(diagnostics).toString())
       pending = Buffer.concat([pending, next.value])
     }
-    const result = pending.subarray(0, length); pending = pending.subarray(length); consumed += length; return result
+    const result = pending.subarray(0, length); pending = pending.subarray(length); return result
   }
   async function read() {
     const header = await exact(12)
@@ -58,7 +57,13 @@ async function start(entry = bundle, preload?: string) {
     return {type: header[4], flags: header[5], bytes: await exact(header.readUInt32LE(8))}
   }
   return {child, closed, read, diagnostics, output,
-    expectNoUnreadOutput() {expect(received - consumed).toBe(0)},
+    async expectNoUnreadOutput() {
+      child.stdin.end()
+      const unread = [pending]; pending = Buffer.alloc(0)
+      for (;;) {const next = await iterator.next(); if (next.done) break; unread.push(next.value)}
+      await closed
+      expect(Buffer.concat(unread).length).toBe(0)
+    },
     async json() {const f = await read(); expect(f.type).toBe(1); return JSON.parse(f.bytes.toString())},
     async close() {
       child.stdout.destroy(); child.stderr.destroy(); child.stdin.destroy(); child.kill()
@@ -96,7 +101,6 @@ async function success(host: Awaited<ReturnType<typeof start>>, id: number) {
   const delta = Buffer.concat(chunks)
   expect(declared(delta)).toEqual(result.delta)
   expect(await host.json()).toEqual({id, end: true})
-  host.expectNoUnreadOutput()
   return {result, delta, chunkCount: chunks.length}
 }
 
@@ -106,6 +110,7 @@ it('hello reports protocol, schema and actual runtime only', async () => {
     expect(await hello(host)).toEqual({id: 1, kind: 'hello', protocolVersion: 1, schemaVersion: 1,
       runtime: {version: process.versions.node, platform: process.platform, arch: process.arch,
         unicode: process.versions.unicode, icu: process.versions.icu}})
+    await host.expectNoUnreadOutput()
   } finally {await host.close()}
 })
 it.each([false, true])('constructs and proves a saved fixture; BOM=%s', async bom => {
@@ -127,6 +132,7 @@ it.each([false, true])('constructs and proves a saved fixture; BOM=%s', async bo
     expect(await host.json()).toMatchObject({id: 4, kind: 'refused'})
     request(host.child, 5, 'construct', new Uint8Array([255]), Y.encodeStateAsUpdate(base))
     expect(await host.json()).toEqual({id: 5, kind: 'refused', reason: 'invalid-source'})
+    await host.expectNoUnreadOutput()
   } finally {base.destroy(); await host.close()}
 }, 30000)
 
@@ -143,12 +149,13 @@ async function rejection(host: Host, bytes: Buffer) {
   try {
     host.child.stdin.write(bytes)
     expect((await Promise.race([host.closed, output]))[0]).toBe(1)
+    await host.expectNoUnreadOutput()
     expect(Buffer.concat(host.output).length).toBe(0)
     expect(Buffer.concat(host.diagnostics).toString()).toBe('')
   } finally {host.child.stdout.off('data', onOutput); deadline.removeEventListener('abort', onTimeout)}
 }
 
-it.each(['unknown-field', 'comma-key', 'document-comma-key', 'wrong-id', 'method', 'oversize', 'bad-magic',
+it.each(['unknown-field', 'comma-key', 'document-comma-key', 'document-key', 'checkpoint-length', 'wrong-id', 'method', 'oversize', 'bad-magic',
   'reserved-low', 'reserved-high', 'control-flags', 'blob-flags', 'blob-prefix', 'truncated-control',
   'surplus', 'truncated-blob', 'digest', 'length', 'blob-id', 'blob-size', 'end-id', 'end-field', 'hello-first'])(
   'rejects %s with stdin open and no response', async mode => {
@@ -169,6 +176,10 @@ it.each(['unknown-field', 'comma-key', 'document-comma-key', 'wrong-id', 'method
       if (mode === 'document-comma-key') {
         delete r.document.objectId; delete r.document.workspaceId; r.document['objectId,workspaceId'] = 'secret'; frames[0] = control(r)
       }
+      if (mode === 'document-key') {
+        r.document.renamedObjectId = r.document.objectId; delete r.document.objectId; frames[0] = control(r)
+      }
+      if (mode === 'checkpoint-length') {r.checkpoint.length = 20 * 1024 * 1024 + 1; frames[0] = control(r); frames.splice(1)}
       if (mode === 'wrong-id') {r.id = 3; frames[0] = control(r)}
       if (mode === 'method') {r.method = 'eval'; frames[0] = control(r)}
       if (mode === 'oversize') {frames[0]!.writeUInt32LE(65537, 8); frames.splice(1); frames[0] = frames[0]!.subarray(0, 12)}
@@ -201,6 +212,7 @@ it.each(['before-hello', 'after-hello', 'after-request'])('clean EOF exits zero:
       request(host.child, 2, 'construct', Buffer.from('Body'), Y.encodeStateAsUpdate(base)); await success(host, 2)
     }
     host.child.stdin.end(); expect((await host.closed)[0]).toBe(0)
+    await host.expectNoUnreadOutput()
     expect(Buffer.concat(host.diagnostics).length).toBe(0)
   } finally {base.destroy(); await host.close()}
 })
@@ -213,6 +225,7 @@ it.each(['header', 'control', 'blob', 'request'])('EOF inside %s exits one', asy
       : stage === 'control' ? frames[0]!.subarray(0, 16)
         : stage === 'blob' ? Buffer.concat([frames[0]!, frames[1]!.subarray(0, 22)]) : Buffer.concat(frames.slice(0, -1))
     host.child.stdin.end(bytes); expect((await host.closed)[0]).toBe(1)
+    await host.expectNoUnreadOutput()
     expect(Buffer.concat(host.output).length).toBe(0)
     expect(Buffer.concat(host.diagnostics).length).toBe(0)
   } finally {base.destroy(); await host.close()}
@@ -227,6 +240,7 @@ it('handles zero-length source and checkpoint blobs', async () => {
     expect(await host.json()).toEqual({id: 3, kind: 'refused', reason: 'invalid-update'})
     request(host.child, 4, 'construct', Buffer.from('Body'), Y.encodeStateAsUpdate(base))
     expect((await success(host, 4)).result.kind).toBe('constructed')
+    await host.expectNoUnreadOutput()
   } finally {base.destroy(); await host.close()}
 })
 it('chunks source and returned delta above 64 KiB', async () => {
@@ -239,6 +253,7 @@ it('chunks source and returned delta above 64 KiB', async () => {
     Y.applyUpdate(base, result.delta)
     request(host.child, 3, 'prove', source, Y.encodeStateAsUpdate(base))
     expect((await success(host, 3)).result.kind).toBe('proved')
+    await host.expectNoUnreadOutput()
   } finally {base.destroy(); await host.close()}
 })
 it.each([false, true])('suppresses Yjs collision warnings; other console methods=%s', async emitConsole => {
@@ -251,7 +266,7 @@ it.each([false, true])('suppresses Yjs collision warnings; other console methods
     request(host.child, 2, 'construct', Buffer.from('Body'), Y.encodeStateAsUpdate(base))
     expect((await success(host, 2)).result.kind).toBe('constructed')
     host.child.stdin.end(); expect((await host.closed)[0]).toBe(0)
-    host.expectNoUnreadOutput()
+    await host.expectNoUnreadOutput()
     expect(Buffer.concat(host.diagnostics).length).toBe(0)
   } finally {base.destroy(); await host.close()}
 })
@@ -260,10 +275,20 @@ it.runIf(process.platform === 'win32')('starts the bundle through a directory ju
   try {
     await symlink(directory, alias, 'junction')
     const host = await start(join(alias, 'reader.cjs'))
-    try {expect((await hello(host)).kind).toBe('hello')}
+    try {expect((await hello(host)).kind).toBe('hello'); await host.expectNoUnreadOutput()}
     finally {await host.close()}
   } finally {await unlink(alias); await rm(parent, {recursive: true, force: true})}
 })
+
+it('accepts a source of exactly 2 MiB', async () => {
+  const host = await start(), base = markdownToYDoc('Earlier')
+  const source = Buffer.alloc(2 * 1024 * 1024, 97)
+  try {
+    await hello(host); request(host.child, 2, 'construct', source, Y.encodeStateAsUpdate(base))
+    expect((await success(host, 2)).result).toMatchObject({kind: 'constructed', sourceByteLength: source.length, sourceSha256: hash(source)})
+    await host.expectNoUnreadOutput()
+  } finally {base.destroy(); await host.close()}
+}, 30000)
 it.runIf(process.platform === 'win32')('Windows permission flags deny outside reads and child processes', async () => {
   const code = "const fs=require('node:fs'),cp=require('node:child_process');"
     + "for(const f of [()=>fs.readFileSync(process.execPath),()=>cp.spawnSync(process.execPath,['-e','0'])]){"
