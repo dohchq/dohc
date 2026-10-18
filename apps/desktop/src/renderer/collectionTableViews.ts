@@ -47,8 +47,7 @@ export async function readTableViews(workspaceId:string,datasetId:string,tableId
   try {read=await bridge().readWorkspaceText({workspaceId,relativePath});}
   catch(error) {
     signal.throwIfAborted();
-    // A complete workspace listing distinguishes an absent source from a failed read.
-    const listing=await bridge().listWorkspaceFiles({workspaceId});signal.throwIfAborted();
+    const listing=await bridge().listWorkspaceFiles({workspaceId,filePath:relativePath});signal.throwIfAborted();
     if(listing.cached||listing.files.some(file=>file.path===relativePath))throw error;
     return {document:{formatVersion:1,datasetId,tableId,views:[]},contentHash:null};
   }

@@ -43,6 +43,7 @@ async function fixture(mode: "local" | "standalone" | "mount" = "local") {
   const beforeRead = { run: async () => undefined as void };
   const store = {
     ensureMainVersion: vi.fn(async () => ({ id: "main" })),
+    resolveFiles: vi.fn(async ({ targets }: { targets: { path: string }[] }) => ({ versionId: "main", results: targets.map(({ path }) => canonical.has(path) ? { status: "found", objectId: `object:${path}`, path } : { status: "absent" }) })),
     readTextFile: vi.fn(async ({ path }: { path: string }) => {
       await beforeRead.run();
       const row = canonical.get(path);
@@ -53,7 +54,7 @@ async function fixture(mode: "local" | "standalone" | "mount" = "local") {
     }),
     getMoment: vi.fn(async () => ({ payload: { before: null } })),
     readBinaryFile: vi.fn(async ({ path }: { path: string }) => canonical.get(path)?.bytes ?? null),
-    listTextFileMetadata: vi.fn(async () => [...canonical].map(([path, row]) => ({
+    listTextFileMetadata: vi.fn(async (input?: { under?: string }) => [...canonical].filter(([path]) => input?.under === undefined || path.startsWith(input.under + "/")).map(([path, row]) => ({
       path, objectId: `object:${path}`, contentKind: row.kind,
       byteLength: row.bytes.length, sha256: hash(row.bytes), updatedAtMs: 1,
       latestMomentId: `moment:${path}`, hasYdocMarker: false,
@@ -254,4 +255,55 @@ describe("desktop workspace reads", () => {
     expect(view.allowPath(test.path("missing.md"))).toBe(true);
     expect(view.listing?.files.map((file) => file.path)).toContain(test.path("missing.md"));
   });
+});
+
+it.each(["local", "standalone", "mount"] as const)("looks up exact %s owner files without the complete listing", async mode => {
+  const test = await fixture(mode);
+  await test.disk(test.path("present.txt"), "raw");
+  await test.disk(test.path("folder/child.txt"), "child");
+  await test.disk(test.path("excluded.txt"), "raw only");
+  test.canonical.set("present.txt", { kind: "text", bytes: Buffer.from("owner") });
+  const list = vi.spyOn(test.reads, "listOwnedWorkspaceFilesFor");
+  const paths = ["present.txt", "folder", "missing", ...(mode === "local" ? [] : ["excluded.txt"])].map(test.path);
+  const found = await test.reads.lookupOwnedWorkspaceFilesFor(test.attached, paths);
+  expect(found.files.map(file => file.path)).toEqual([test.path("present.txt")]);
+  expect(list).not.toHaveBeenCalled();
+  expect(test.store.listTextFileMetadata).not.toHaveBeenCalled();
+  if (mode !== "local") expect(test.store.resolveFiles).toHaveBeenCalledWith(expect.objectContaining({ versionId: "main", targets: expect.arrayContaining([{ path: "present.txt" }]) }));
+});
+
+it.each(["standalone", "mount"] as const)("gets a %s app through bounded owner probes and only the selected source subtree", async mode => {
+  const test = await fixture(mode);
+  const repair = vi.fn(async () => undefined);
+  test.repair.run = repair;
+  await test.disk(test.path("app/index.html"), "<h1>app</h1>");
+  await test.disk(test.path("unowned/package.json"), JSON.stringify({ scripts: { dev: "vite" } }));
+  test.canonical.set("app/index.html", { kind: "text", bytes: Buffer.from("<h1>app</h1>") });
+  const { createOwnedSiteCatalog } = await import("./ownedSiteCatalog");
+  const { getSitePackage } = await import("./sitePackage");
+  const catalog = createOwnedSiteCatalog({ reads: test.reads.ownedWorkspaceReadsFor });
+  const old = await catalog.list(test.attached);
+  test.store.listTextFileMetadata.mockClear();
+  repair.mockClear();
+  expect(await catalog.get(test.attached, test.path("app/index.html"), undefined))
+    .toEqual(await getSitePackage(test.rootPath, test.path("app/index.html"), old));
+  expect(repair).toHaveBeenCalledOnce();
+  expect(test.store.listTextFileMetadata).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ under: "app" }));
+  test.store.listTextFileMetadata.mockClear();
+  expect(await catalog.get(test.attached, test.path("unowned"), undefined)).toBeNull();
+  expect(test.store.listTextFileMetadata).not.toHaveBeenCalled();
+});
+
+it("bounds shared lookup batches by UTF-8 bytes and pins the main version", async () => {
+  const test = await fixture("standalone");
+  const paths = Array.from({ length: 40 }, (_, index) => `apps/${"文".repeat(1000)}/${index}.json`);
+  for (const path of paths) test.canonical.set(path, { kind: "text", bytes: Buffer.from("{}") });
+  const found = await test.reads.lookupOwnedWorkspaceFilesFor(test.attached, paths);
+  expect(found.files.map(file => file.path)).toEqual(paths);
+  expect(test.store.resolveFiles.mock.calls.length).toBeGreaterThan(1);
+  for (const [request] of test.store.resolveFiles.mock.calls) {
+    expect(request).toMatchObject({ versionId: "main" });
+    expect(Buffer.byteLength(JSON.stringify({ versionId: "main", targets: request.targets }))).toBeLessThanOrEqual(48 * 1024);
+  }
+  expect(test.store.listTextFileMetadata).not.toHaveBeenCalled();
 });

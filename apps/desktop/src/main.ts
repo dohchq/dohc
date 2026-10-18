@@ -660,6 +660,7 @@ const {
   readOwnedWorkspaceAsset,
   readOwnedWorkspaceAssetFor,
   listOwnedWorkspaceFilesFor,
+  lookupOwnedWorkspaceFilesFor,
   ownedWorkspaceReadsFor,
 } = createDesktopWorkspaceReads({
   listDiskFiles: (rootPath, scope) => workspaceFilesWorker.list(rootPath, scope),
@@ -5237,8 +5238,10 @@ shareViewFiles = {
     ),
   read: (target, request) =>
     withShareViewFilesOperation(target, (files) => files.read(target, request)),
-  list: (target) =>
-    withShareViewFilesOperation(target, (files) => files.list(target)),
+  lookup: (target, paths) =>
+    withShareViewFilesOperation(target, files => files.lookup(target, paths)),
+  list: (target, options) =>
+    withShareViewFilesOperation(target, (files) => files.list(target, options)),
   projectionStatus: (target) =>
     withShareViewFilesOperation(target, (files) =>
       files.projectionStatus(target),
@@ -6052,6 +6055,7 @@ function registerIpcHandlers(): void {
     withRendererWorkspaceOperation,
     exactRendererWorkspaceReferences,
     workspaceFileListings,
+    lookupOwnedWorkspaceFilesFor,
     workspaceFileMutations,
     listOwnedWorkspaceFilesFor,
     readOwnedWorkspaceTextFor,

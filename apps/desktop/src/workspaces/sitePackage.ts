@@ -3379,6 +3379,15 @@ export async function listSitePackages(
   return mapped.sort((a, b) => a.root.localeCompare(b.root));
 }
 
+export async function getDetectedSitePackage(
+  rootPath: string, site: WorkspaceSite, files: WorkspaceFileEntry[], effectiveMode?: SitePackageInfo["configuredPreviewMode"],
+): Promise<SitePackageInfo> {
+  const mapped = await mapWorkspaceSite(rootPath, site, files, await configuredScriptsForSite(rootPath, site));
+  if (effectiveMode === undefined) return mapped;
+  const { shareManifest: _previous, ...info } = mapped;
+  return { ...mapped, shareManifest: await shareManifestForSite(rootPath, info, effectiveMode) };
+}
+
 export async function getSitePackage(
   rootPath: string,
   anyPath: string,

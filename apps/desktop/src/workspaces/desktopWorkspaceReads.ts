@@ -3,7 +3,7 @@ import type { createOwnedProjectionRepairer } from "./ownedProjectionRepair";
 import { createOwnedWorkspaceFileReader } from "./ownedWorkspaceFileReader";
 import { createOwnedWorkspaceReads } from "./ownedWorkspaceReads";
 import type { RegistryEntry } from "./registryStore";
-import { overlayCanonicalShareMountFiles } from "./shareMounts";
+import { classifyResolvedShareProjectionPath, overlayCanonicalShareMountFiles } from "./shareMounts";
 import type { ShareViewFiles, ShareViewFilesTarget } from "./shareViewFiles";
 import { shareMountRegistryIsPresent, storedShareMounts } from "./shareViewFilesTarget";
 import { shareViewIsPresent } from "./shareViewMarker";
@@ -13,7 +13,7 @@ import type { WorkspaceFileListingScope } from "./workspaceFileListingScope";
 
 export interface DesktopWorkspaceReadsDependencies {
   readonly desktopEngine: Pick<ReturnType<typeof createDesktopEngine>, "startup">;
-  readonly shareViewFiles: Pick<ShareViewFiles, "read" | "list">;
+  readonly shareViewFiles: Pick<ShareViewFiles, "read" | "list" | "lookup">;
   readonly ensureOwnedProjectionTargetCurrent: ReturnType<
     typeof createOwnedProjectionRepairer
   >;
@@ -93,9 +93,47 @@ export function createDesktopWorkspaceReads(dependencies: DesktopWorkspaceReadsD
     }).readAsset(relativePath);
   }
 
+  async function lookupOwnedWorkspaceFilesFor(
+    workspace: RegistryEntry & { readonly attachmentId: symbol }, paths: readonly string[],
+  ) {
+    const files: Awaited<ReturnType<typeof listFiles>>["files"] = [];
+    if (shareViewIsPresent(workspace.shareView)) {
+      await dependencies.desktopEngine.startup;
+      return dependencies.shareViewFiles.lookup({ kind: "standalone", workspaceId: workspace.workspaceId }, paths);
+    }
+    const local: string[] = [];
+    const mounts = storedShareMounts(workspace);
+    const routed = new Map<string, { paths: string[]; prefix: string }>();
+    for (const path of paths) {
+      if (shareMountRegistryIsPresent(workspace)) {
+        let projection;
+        try { projection = classifyResolvedShareProjectionPath(path, mounts); }
+        catch { continue; }
+        if (projection.kind === "mount") {
+          const prefix = `shared-with-me/${projection.mount.label}/`;
+          if (path !== prefix + projection.path) continue;
+          const group = routed.get(projection.mount.shareId) ?? { paths: [], prefix };
+          group.paths.push(projection.path);
+          routed.set(projection.mount.shareId, group);
+          continue;
+        }
+      }
+      local.push(path);
+    }
+    if (local.length) files.push(...(await (dependencies.listDiskFiles ?? listFiles)(workspace.rootPath, { paths: local })).files);
+    for (const [shareId, group] of routed) {
+      await dependencies.desktopEngine.startup;
+      const listed = await dependencies.shareViewFiles.lookup({ kind: "mount", workspaceId: workspace.workspaceId, shareId }, group.paths);
+      files.push(...listed.files.map(file => ({ ...file, path: group.prefix + file.path })));
+    }
+    files.sort((a, b) => a.path.localeCompare(b.path));
+    return { files, folders: [] };
+  }
+
   async function listOwnedWorkspaceFilesFor(
     workspace: RegistryEntry & { readonly attachmentId: symbol },
     scope?: WorkspaceFileListingScope,
+    bounded = false,
   ) {
     if (shareViewIsPresent(workspace.shareView)) {
       // The shell lists at mount, which can precede the daemon handshake now
@@ -107,30 +145,34 @@ export function createDesktopWorkspaceReads(dependencies: DesktopWorkspaceReadsD
           kind: "standalone",
           workspaceId: workspace.workspaceId,
         },
-        { includeContentIdentity: true },
+        { includeContentIdentity: true, ...(bounded && scope?.path && scope.path !== "." ? { under: scope.path } : {}) },
       );
     }
     const mounts = storedShareMounts(workspace);
     const disk = await (dependencies.listDiskFiles ?? listFiles)(workspace.rootPath, {
       includeContentIdentity: true,
-      // Mounted shares need the complete disk listing for their canonical
-      // overlay, including malformed registry records that must fail closed.
-      ...(shareMountRegistryIsPresent(workspace) ? {} : scope),
+      ...(bounded || !shareMountRegistryIsPresent(workspace) ? scope : {}),
     });
     if (!shareMountRegistryIsPresent(workspace)) return disk;
     await dependencies.desktopEngine.startup;
     return overlayCanonicalShareMountFiles({
       disk,
       mounts,
-      listCanonical: (mount) =>
-        dependencies.shareViewFiles.list(
+      listCanonical: (mount) => {
+        const prefix = `shared-with-me/${mount.label}`;
+        const path = bounded ? scope?.path : undefined;
+        if (path && path !== "." && path !== prefix && !path.startsWith(prefix + "/") && !prefix.startsWith(path + "/")) {
+          return Promise.resolve({ files: [], folders: [] });
+        }
+        return dependencies.shareViewFiles.list(
           {
             kind: "mount",
             workspaceId: workspace.workspaceId,
             shareId: mount.shareId,
           },
-          { includeContentIdentity: true },
-        ),
+          { includeContentIdentity: true, ...(path?.startsWith(prefix + "/") ? { under: path.slice(prefix.length + 1) } : {}) },
+        );
+      },
       onFailure: (mount, error) => {
         const identity = isRecordValue(mount)
           ? `"${String(mount.label)}" (${String(mount.shareId)})`
@@ -148,7 +190,8 @@ export function createDesktopWorkspaceReads(dependencies: DesktopWorkspaceReadsD
   ) {
     return createOwnedWorkspaceReads({
       workspace,
-      listFiles: (scope) => listOwnedWorkspaceFilesFor(workspace, scope),
+      listFiles: (scope, bounded) => listOwnedWorkspaceFilesFor(workspace, scope, bounded),
+      lookupFiles: (paths) => lookupOwnedWorkspaceFilesFor(workspace, paths),
       repairProjection: (target) =>
         dependencies.ensureOwnedProjectionTargetCurrent({
           rootPath: workspace.rootPath,
@@ -168,6 +211,7 @@ export function createDesktopWorkspaceReads(dependencies: DesktopWorkspaceReadsD
     readOwnedWorkspaceTextFor,
     readOwnedWorkspaceAsset,
     readOwnedWorkspaceAssetFor,
+    lookupOwnedWorkspaceFilesFor,
     listOwnedWorkspaceFilesFor,
     ownedWorkspaceReadsFor,
   };

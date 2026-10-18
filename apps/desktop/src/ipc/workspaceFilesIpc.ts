@@ -85,6 +85,7 @@ export function createWorkspaceFilesIpc<
   workspaceFileListings: Pick<WorkspaceFileListingCache, "list">;
   workspaceFileMutations: WorkspaceFileMutationOwner<Event>;
   listOwnedWorkspaceFilesFor(workspace: Workspace): Promise<WorkspacePathListing>;
+  lookupOwnedWorkspaceFilesFor(workspace: Workspace, paths: readonly string[]): Promise<WorkspacePathListing>;
   readOwnedWorkspaceTextFor(
     workspace: Workspace,
     path: string,
@@ -105,6 +106,7 @@ export function createWorkspaceFilesIpc<
     workspaceFileListings,
     workspaceFileMutations,
     listOwnedWorkspaceFilesFor,
+    lookupOwnedWorkspaceFilesFor,
     readOwnedWorkspaceTextFor,
     assertWritableWorkspace,
     shareViewFiles,
@@ -266,7 +268,9 @@ export function createWorkspaceFilesIpc<
   return {
     listWorkspaceFiles: async (input, { operation }) => {
       const workspace = operation.workspace;
-      const listing = await workspaceFileListings.list({
+      const listing = input.filePath !== undefined
+        ? await lookupOwnedWorkspaceFilesFor(workspace, [input.filePath])
+        : await workspaceFileListings.list({
         workspaceId: workspace.workspaceId,
         attachmentId: workspace.attachmentId,
         allowCached: input.allowCached === true,

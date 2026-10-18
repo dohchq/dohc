@@ -11,7 +11,8 @@ export interface OwnedWorkspaceSearchSource {
 }
 
 export interface OwnedWorkspaceReadPortInput {
-  listFiles(scope?: WorkspaceFileListingScope): Promise<WorkspacePathListing>;
+  listFiles(scope?: WorkspaceFileListingScope, bounded?: boolean): Promise<WorkspacePathListing>;
+  lookupFiles(paths: readonly string[]): Promise<WorkspacePathListing>;
   hasShareState: boolean;
   searchSources: readonly OwnedWorkspaceSearchSource[];
   repairProjection(target: ShareViewFilesTarget): Promise<void>;
@@ -30,10 +31,16 @@ export interface OwnedWorkspaceSearchView {
   listing: WorkspacePathListing | null;
 }
 
+export interface OwnedWorkspaceLookup {
+  listFiles(scope?: WorkspaceFileListingScope): Promise<WorkspacePathListing>;
+  lookupFiles(paths: readonly string[]): Promise<WorkspacePathListing>;
+}
+
 /** The owned workspace's file listing and search scope: owner bytes for
  * received shares, the disk for everything else. */
 export interface OwnedWorkspaceReadPort {
   listFiles(scope?: WorkspaceFileListingScope): Promise<WorkspacePathListing>;
+  prepareLookup(): Promise<OwnedWorkspaceLookup>;
   prepareSearch(path?: string): Promise<OwnedWorkspaceSearchView>;
 }
 
@@ -69,47 +76,41 @@ function includeGlobForOwnerListing(
 export function createOwnedWorkspaceReadPort(
   input: OwnedWorkspaceReadPortInput,
 ): OwnedWorkspaceReadPort {
+  async function prepareLookup(): Promise<OwnedWorkspaceLookup> {
+    const failedPrefixes: string[] = [];
+    for (const source of input.searchSources) {
+      try { await input.repairProjection(source.target); }
+      catch (error) {
+        if (source.prefix === undefined) throw error;
+        failedPrefixes.push(source.prefix);
+        input.onSearchSourceFailure?.(source, error);
+      }
+    }
+    const allowed = (path: string) => !failedPrefixes.some(prefix => isAtOrBelowPrefix(path, prefix));
+    const visible = (listed: WorkspacePathListing): WorkspacePathListing => ({
+      files: listed.files.filter(file => allowed(file.path)),
+      folders: (listed.folders ?? []).filter(allowed),
+    });
+    return {
+      listFiles: async scope => visible(scope === undefined ? await input.listFiles() : await input.listFiles(scope, true)),
+      lookupFiles: async paths => visible(await input.lookupFiles(paths.filter(allowed))),
+    };
+  }
+
   return {
     listFiles: input.listFiles,
-
+    prepareLookup,
     async prepareSearch(requestedPath): Promise<OwnedWorkspaceSearchView> {
       if (!input.hasShareState && requestedPath === undefined) {
         return { listing: null, allowPath: () => true };
       }
-      const failedPrefixes: string[] = [];
-      for (const source of input.searchSources) {
-        try {
-          await input.repairProjection(source.target);
-        } catch (error) {
-          if (source.prefix === undefined) throw error;
-          failedPrefixes.push(source.prefix);
-          input.onSearchSourceFailure?.(source, error);
-        }
-      }
-
-      const listed = await input.listFiles();
-      const visible = {
-        files: listed.files.filter(
-          (file) =>
-            !failedPrefixes.some((prefix) =>
-              isAtOrBelowPrefix(file.path, prefix),
-            ),
-        ),
-        folders: (listed.folders ?? []).filter(
-          (folder) =>
-            !failedPrefixes.some((prefix) =>
-              isAtOrBelowPrefix(folder, prefix),
-            ),
-        ),
-      };
-      const allowed = new Set(
-        visible.files.map((file) => workspacePathKey(file.path)),
-      );
-      const includeGlob = includeGlobForOwnerListing(visible, requestedPath);
+      const listed = await (await prepareLookup()).listFiles();
+      const allowed = new Set(listed.files.map(file => workspacePathKey(file.path)));
+      const includeGlob = includeGlobForOwnerListing(listed, requestedPath);
       return {
-        listing: visible,
+        listing: listed,
         ...(includeGlob !== undefined ? { includeGlob } : {}),
-        allowPath: (path) => allowed.has(workspacePathKey(path)),
+        allowPath: path => allowed.has(workspacePathKey(path)),
       };
     },
   };

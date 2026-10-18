@@ -37,6 +37,7 @@ describe("createOwnedWorkspaceReadPort", () => {
   it("skips a full owner listing for an unrestricted local search", async () => {
     const listOwnedFiles = vi.fn(async () => ({ files: [] }));
     const port = createOwnedWorkspaceReadPort({
+      lookupFiles: async () => { throw Error("Unexpected exact lookup"); },
       listFiles: listOwnedFiles,
       hasShareState: false,
       searchSources: [],
@@ -57,6 +58,7 @@ describe("createOwnedWorkspaceReadPort", () => {
       folders: ["notes"],
     }));
     const port = createOwnedWorkspaceReadPort({
+      lookupFiles: async () => { throw Error("Unexpected exact lookup"); },
       listFiles: listOwnedFiles,
       hasShareState: true,
       searchSources: [],
@@ -98,6 +100,7 @@ describe("createOwnedWorkspaceReadPort", () => {
     const repaired: string[] = [];
     const failures: string[] = [];
     const port = createOwnedWorkspaceReadPort({
+      lookupFiles: async () => { throw Error("Unexpected exact lookup"); },
       listFiles: async () =>
         overlayCanonicalShareMountFiles({
           disk: await listFiles(root),
@@ -151,6 +154,7 @@ describe("createOwnedWorkspaceReadPort", () => {
       folders: [] as string[],
     };
     const port = createOwnedWorkspaceReadPort({
+      lookupFiles: async () => { throw Error("Unexpected exact lookup"); },
       listFiles: async () =>
         overlayCanonicalShareMountFiles({
           disk: await listFiles(root),
