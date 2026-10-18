@@ -93,6 +93,21 @@ pub(super) fn target(raw: &str) -> Option<String> {
 /// The path a click opens when no unique alias exists.
 pub(super) fn creation_path(source: &str, raw: &str, kind: &str) -> Option<String> {
     let target = target(raw)?;
+    let relative = target.trim_start_matches('/');
+    if target.contains('\\')
+        || target.chars().any(char::is_control)
+        || target.starts_with("//")
+        || relative.as_bytes().get(1) == Some(&b':')
+        || relative
+            .split('/')
+            .filter(|part| !matches!(*part, "" | "." | ".."))
+            .any(|part| {
+                dohc_engine_files::policy::classify_engine_file_path(part)
+                    != dohc_engine_files::policy::PathClassification::Tracked
+            })
+    {
+        return None;
+    }
     let directory = source.rsplit_once('/').map_or("", |(dir, _)| dir);
     let rooted_wikilink = kind == "wikilink"
         && target.contains('/')
@@ -109,6 +124,11 @@ pub(super) fn creation_path(source: &str, raw: &str, kind: &str) -> Option<Strin
     }
     if (kind == "wikilink" || without_extension(&path) == path) && !markdown_extension(&path) {
         path.push_str(".md");
+    }
+    if dohc_engine_files::policy::classify_engine_file_path(&path)
+        != dohc_engine_files::policy::PathClassification::Tracked
+    {
+        return None;
     }
     Some(path)
 }
@@ -233,6 +253,61 @@ impl Resolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn creation_rejects_decoded_wikilink_drive() {
+        assert_eq!(creation_path("source.md", "C%3A/Windows/x", "wikilink"), None);
+    }
+
+    #[test]
+    fn creation_rejects_decoded_markdown_drive() {
+        assert_eq!(creation_path("source.md", "/C%3A/Windows/run.bat", "markdown"), None);
+    }
+
+    #[test]
+    fn creation_rejects_decoded_unc_backslashes() {
+        assert_eq!(creation_path("source.md", "%5C%5Chost%5Cshare%5Cx.bat", "markdown"), None);
+    }
+
+    #[test]
+    fn creation_rejects_decoded_nul() {
+        assert_eq!(creation_path("source.md", "x%00y", "wikilink"), None);
+    }
+
+    #[test]
+    fn creation_rejects_decoded_control() {
+        assert_eq!(creation_path("source.md", "x%01y", "wikilink"), None);
+    }
+
+    #[test]
+    fn creation_rejects_decoded_delete_control() {
+        assert_eq!(creation_path("source.md", "x%7Fy", "markdown"), None);
+    }
+
+    #[test]
+    fn creation_rejects_decoded_unc_slashes() {
+        assert_eq!(creation_path("source.md", "%2F%2Fhost/share/x", "wikilink"), None);
+    }
+
+    #[test]
+    fn creation_rejects_reserved_directory() {
+        assert_eq!(creation_path("source.md", ".dohc/engine/x", "wikilink"), None);
+    }
+
+    #[test]
+    fn creation_rejects_decoded_reserved_segment() {
+        assert_eq!(creation_path("source.md", "notes/%2Edohc/engine/x", "markdown"), None);
+    }
+
+    #[test]
+    fn creation_rejects_secret_segment() {
+        assert_eq!(creation_path("source.md", "notes/.env/x", "wikilink"), None);
+    }
+
+    #[test]
+    fn creation_rejects_decoded_secret_segment() {
+        assert_eq!(creation_path("source.md", "notes/%2Eenv/x", "markdown"), None);
+    }
 
     #[test]
     fn shared_resolver_cases() {
