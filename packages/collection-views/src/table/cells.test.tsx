@@ -290,6 +290,18 @@ describe("CellEditor", () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
+  it("leaves an Enter or Escape that an input method owns to the composition", () => {
+    const emit = writeEmitter();
+    const close = vi.fn();
+    renderEditor({ fieldName: "title", value: "Old", emit, close });
+    const input = screen.getByDisplayValue<HTMLInputElement>("Old");
+    fireEvent.change(input, { target: { value: "旅" } });
+    fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+    fireEvent.keyDown(input, { key: "Escape", keyCode: 229 });
+    expect(emit).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+  });
+
   it("commits an emptied text edit as null", () => {
     const emit = writeEmitter();
     renderEditor({ fieldName: "title", value: "Old", emit });

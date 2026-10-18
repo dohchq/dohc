@@ -1,4 +1,5 @@
 import { matchShellShortcut, shortcutText } from "../shortcuts/shortcutRegistry";
+import { isComposingKey } from "./ui/keys";
 import { Search } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { rendererMarks } from "../performance/rendererMarks";
@@ -79,7 +80,7 @@ export function CommandPalette(props: {
       onClose={props.onClose}
       panelProps={{
         onKeyDown: (event) => {
-          if (matchShellShortcut(event.nativeEvent) === (props.toggleShortcut ?? "command-palette")) {
+          if (matchShellShortcut(event.nativeEvent, window.dohcDesktop?.platform) === (props.toggleShortcut ?? "command-palette")) {
             event.preventDefault();
             props.onClose();
           }
@@ -107,6 +108,7 @@ export function CommandPalette(props: {
               setSelectedIndex(0);
             }}
             onKeyDown={(event) => {
+              if (isComposingKey(event)) return;
               if (event.key === "ArrowDown") {
                 event.preventDefault();
                 moveSelection(1);

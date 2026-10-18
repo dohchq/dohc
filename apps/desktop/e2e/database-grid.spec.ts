@@ -65,7 +65,7 @@ test("a CSV imported from its tab row opens as a database whose cells edit from 
     const editor = grid.getByTestId("db-cell-input");
     await expect(editor).toBeFocused();
     await expect(editor).toHaveValue("Signed up");
-    await page.keyboard.press("Control+A");
+    await page.keyboard.press("ControlOrMeta+A");
     await page.keyboard.type("Signed up for a trial");
     await page.keyboard.press("Enter");
 

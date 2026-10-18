@@ -46,7 +46,7 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     desktop = await launchDesktopApp({ workspace, env: { DOHC_TEST_SYNC_DEBOUNCE_MS: "150", DOHC_TEST_SYNC_BACKOFF_MS: "250" } });
     const { page } = desktop;
     await openWorkspaceFromFirstRun(page, workspace);
-    await page.keyboard.press("Control+k");
+    await page.keyboard.press("ControlOrMeta+k");
     await page.getByTestId("command-palette").getByRole("option", { name: "New collection", exact: true }).click();
     const create = page.getByTestId("new-collection-dialog");
     await create.getByLabel("Collection name").fill("Registrations");
@@ -207,7 +207,7 @@ test("@dataset-completion history reverses an authored rule against current reco
     desktop = await launchDesktopApp({ workspace });
     const { page } = desktop;
     const { workspaceId } = await openWorkspaceFromFirstRun(page, workspace);
-    await page.keyboard.press("Control+k");
+    await page.keyboard.press("ControlOrMeta+k");
     await page.getByTestId("command-palette").getByRole("option", { name: "New collection", exact: true }).click();
     const create = page.getByTestId("new-collection-dialog");
     await create.getByLabel("Collection name").fill("Registrations");
@@ -282,7 +282,7 @@ test("@dataset-completion board and calendar page all records and save governed 
     desktop = await launchDesktopApp({ workspace });
     const { page } = desktop;
     const { workspaceId } = await openWorkspaceFromFirstRun(page, workspace);
-    await page.keyboard.press("Control+k");
+    await page.keyboard.press("ControlOrMeta+k");
     await page.getByTestId("command-palette").getByRole("option", { name: "New collection", exact: true }).click();
     const create = page.getByTestId("new-collection-dialog");
     await create.getByLabel("Collection name").fill("Tasks");

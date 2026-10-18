@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { DOCUMENT_END } from "./helpers/keys";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
@@ -78,7 +79,7 @@ async function openLiveDocument(page: Page) {
 
 async function typeAtEnd(page: Page, text: string) {
   await page.getByTestId("markdown-editor").click();
-  await page.keyboard.press("ControlOrMeta+End");
+  await page.keyboard.press(DOCUMENT_END);
   await page.keyboard.type(text);
   await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved");
 }

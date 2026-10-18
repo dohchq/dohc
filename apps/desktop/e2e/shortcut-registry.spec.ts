@@ -1,6 +1,8 @@
 import { expect, test } from "@playwright/test";
 import { launchDesktopApp } from "./helpers/desktopApp";
-import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun } from "./helpers/workspace";
+import {
+  cleanupDesktopWorkspace, createTempWorkspace, explorerRow, openWorkspaceFromFirstRun, waitForWorkspaceFile, writeWorkspaceFiles,
+} from "./helpers/workspace";
 
 // Physical keys go through Electron's accelerator handling, unlike jsdom's
 // key events. Windows does not register these menu keys, so this observes
@@ -63,6 +65,43 @@ test("shell shortcut ownership runs actions without native menu messages", async
     await assertNoNativeCommand();
     await page.keyboard.press("Escape");
     await expect(page.getByRole("textbox", { name: "File name" })).toHaveCount(0);
+
+    if (process.platform === "darwin") {
+      // macOS keeps Control chords for text editing, so none runs a shell command.
+      await focusShell();
+      for (const chord of ["Control+b", "Control+k", "Control+p", "Control+n", "Control+w", "Control+,"]) {
+        await page.keyboard.press(chord);
+        await assertNoNativeCommand();
+      }
+      await expect(page.getByTestId("side-panel")).toBeVisible();
+      await expect(page.getByTestId("command-palette")).toHaveCount(0);
+      await expect(page.getByTestId("quick-open")).toHaveCount(0);
+      await expect(page.getByRole("textbox", { name: "File name" })).toHaveCount(0);
+      await expect(page.getByTestId("settings-dialog")).toHaveCount(0);
+    }
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+// macOS keeps ⌘H for Hide, so a document's Replace takes ⌥⌘F there.
+test("opens a document's Replace with the platform's chord", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  try {
+    await writeWorkspaceFiles(temp, [{ path: "notes.md", contents: "# Notes\n\nThe cat sat.\n" }]);
+    desktop = await launchDesktopApp({ workspace: temp });
+    const page = desktop.page;
+    const workspace = await openWorkspaceFromFirstRun(page, temp);
+    await waitForWorkspaceFile(page, workspace.workspaceId, "notes.md");
+    await explorerRow(page, "notes.md").click();
+    const editor = page.getByTestId("markdown-editor");
+    await expect(editor).toBeVisible({ timeout: 15_000 });
+    await editor.click();
+    await page.keyboard.press(process.platform === "darwin" ? "Meta+Alt+f" : "Control+h");
+    await expect(page.getByPlaceholder("Replace", { exact: true })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("search", { name: "find and replace" })).toHaveCount(0);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

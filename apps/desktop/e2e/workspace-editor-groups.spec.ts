@@ -151,7 +151,7 @@ test("editor groups keep mixed surfaces visible, resize, and collapse", async ()
 
     const lastTab = rightGroup.getByTestId(editorTabTestId("brief.md"));
     await lastTab.focus();
-    await page.keyboard.press(process.platform === "darwin" ? "Meta+w" : "Control+w");
+    await page.keyboard.press("ControlOrMeta+w");
     await expect(rightGroup).toHaveCount(0);
     await expect(leftGroup).toBeFocused();
     await expect(page.getByTestId(editorTabTestId("brief.md"))).toBeVisible();

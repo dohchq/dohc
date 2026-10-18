@@ -127,7 +127,9 @@ test("the editor's listboxes keep the option Enter acts on in view as the arrows
     await capture(page, turnInto, "turn-into");
     await page.keyboard.press("Escape");
     await expect(turnInto).toBeHidden();
-    await page.keyboard.press("Control+k");
+    // Escape hands focus back to the editor on the next frame.
+    await expect(editor).toBeFocused();
+    await page.keyboard.press("ControlOrMeta+k");
     const linkForm = page.locator(".dohc-link-menu");
     await expect(linkForm).toBeVisible();
     await capture(page, linkForm, "link-form");

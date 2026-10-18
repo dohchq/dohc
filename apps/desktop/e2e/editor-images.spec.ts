@@ -1,4 +1,5 @@
 import { readdir, readFile, writeFile } from "node:fs/promises";
+import { DOCUMENT_END } from "./helpers/keys";
 import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import type { ElectronApplication } from "playwright";
@@ -318,7 +319,7 @@ test("/image opens the native picker and embeds the chosen file", async () => {
 
     const editor = page.getByTestId("markdown-editor");
     await editor.click();
-    await page.keyboard.press("Control+End");
+    await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.press("Enter");
     await page.keyboard.type("/image", { delay: 30 });
     await expect(page.locator(".dohc-slash-menu__item").first()).toBeVisible();

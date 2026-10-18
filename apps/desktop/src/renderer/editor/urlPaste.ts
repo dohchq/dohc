@@ -3,6 +3,7 @@ import { Plugin, PluginKey, type EditorState, type Transaction } from "@tiptap/p
 import type { EditorView } from "@tiptap/pm/view";
 import type { ProsemirrorBinding } from "@tiptap/y-tiptap";
 import { ContentString, getItem, Item, type Doc, type RelativePosition, type XmlFragment } from "yjs";
+import { hasPrimaryModifier } from "../../shortcuts/shortcutRegistry";
 export interface UrlPasteOffer { kind: "url-paste"; text: string; url: string; from: number; to: number }
 export function detectUrlPaste(input: { text: string; from: number; to: number; ownLine: boolean; inCode: boolean }): UrlPasteOffer | null {
   if (!input.ownLine || input.inCode || input.from !== input.to || input.text.length > 8192 || /\s/.test(input.text)
@@ -189,7 +190,7 @@ const MODIFIER_KEYS = new Set(["Shift", "Control", "Alt", "Meta", "CapsLock", "A
 // plugin state read.
 export function urlPasteOfferKeyDown(view: EditorView, event: KeyboardEvent, focusRow: () => void): boolean {
   if (!urlPasteOfferKey.getState(view.state) || MODIFIER_KEYS.has(event.key)) return false;
-  if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "k") {
+  if (hasPrimaryModifier(event, window.dohcDesktop?.platform) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "k") {
     focusRow();
     return true;
   }

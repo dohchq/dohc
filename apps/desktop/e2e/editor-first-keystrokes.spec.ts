@@ -1,4 +1,5 @@
 import { editorTabTestId } from "../src/testPins";
+import { DOCUMENT_END } from "./helpers/keys";
 import { expect, test, type Page } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -34,7 +35,7 @@ async function withDesktop(
 }
 
 async function createDocument(page: Page, name: string): Promise<void> {
-  await page.keyboard.press("Control+n");
+  await page.keyboard.press("ControlOrMeta+n");
   const fileName = page.getByRole("textbox", { name: "File name" });
   await expect(fileName).toBeFocused();
   await fileName.fill(name);
@@ -153,7 +154,7 @@ test("a line typed after click, Ctrl+End and Enter lands at the end of an existi
       await expect(row).toBeFocused();
 
       await editor.click();
-      await page.keyboard.press("Control+End");
+      await page.keyboard.press(DOCUMENT_END);
       await page.keyboard.press("Enter");
       await page.keyboard.type("- Ana: appended line");
 

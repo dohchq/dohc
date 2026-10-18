@@ -1,4 +1,5 @@
 import { useMouseBackButton } from "./useMouseBackButton";
+import { isComposingKey } from "./ui/keys";
 import { useRequestSequence } from "./useRequestSequence";
 import { ipcErrorMessage } from "./ipcError";
 import { ArrowLeft } from "lucide-react";
@@ -208,7 +209,7 @@ export function JoinSyncedWorkspace(props: {
               placeholder="dohc-sync:…"
               spellCheck={false}
               onKeyDown={(event) => {
-                if (event.key === "Enter") void join();
+                if (event.key === "Enter" && !isComposingKey(event)) void join();
               }}
               className="h-9 w-full rounded-md border border-line bg-bg px-3 font-mono text-[13px] text-ink placeholder:text-subtle focus:border-ink"
             />
@@ -222,7 +223,7 @@ export function JoinSyncedWorkspace(props: {
                   spellCheck={false}
                   onChange={(event) => setPassphrase(event.currentTarget.value)}
                   onKeyDown={(event) => {
-                    if (event.key === "Enter") void join();
+                    if (event.key === "Enter" && !isComposingKey(event)) void join();
                   }}
                   className="h-9 w-full rounded-md border border-line bg-bg px-3 text-[13px] text-ink placeholder:text-subtle focus:border-ink"
                 />

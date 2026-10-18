@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { DOCUMENT_END } from "./helpers/keys";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
@@ -155,7 +156,7 @@ test("switching the active version while a rich doc stays open re-binds the edit
     // must journal into Draft, never Main.
     const editor = page.getByTestId("markdown-editor");
     await editor.click();
-    await page.keyboard.press("ControlOrMeta+End");
+    await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.type(` ${draftSentinel}`);
     await expect(page.getByTestId("markdown-save-state")).toHaveAttribute(
       "data-state",

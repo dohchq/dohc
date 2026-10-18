@@ -49,7 +49,7 @@ export function buildMenuTemplate(options: {
     name: MenuCommand,
     { enabled = true, label = menuLabel(name), keys = true } = {},
   ): MenuItemConstructorOptions[] => {
-    const accelerators = keys ? shortcutAccelerators(name) : [];
+    const accelerators = keys ? shortcutAccelerators(name, options.platform) : [];
     return (accelerators.length ? accelerators : [undefined]).map((accelerator, index) => ({
       label: index > 0 ? label + " (alternate)" : label,
       enabled,
@@ -125,7 +125,7 @@ export function buildMenuTemplate(options: {
         ...command("close-tab"),
         // VS Code convention: CommandOrControl+W closes the tab in the
         // renderer. The close role uses a separate window shortcut.
-        { role: "close", label: "Close window", accelerator: shortcutAccelerators("close-window")[0] },
+        { role: "close", label: "Close window", accelerator: shortcutAccelerators("close-window", options.platform)[0] },
       ],
     },
     // macOS: Electron's standard Edit menu, which adds Paste and Match
@@ -166,7 +166,7 @@ export function buildMenuTemplate(options: {
           { id: "zoom-in", step: "in" },
           { id: "zoom-out", step: "out" },
         ] as const).flatMap((zoom) =>
-          shortcutAccelerators(zoom.id).map(
+          shortcutAccelerators(zoom.id, options.platform).map(
             (accelerator, index): MenuItemConstructorOptions => ({
               label: menuLabel(zoom.id),
               accelerator,

@@ -1,4 +1,5 @@
 import { activityPin } from "../src/testPins";
+import { DOCUMENT_END } from "./helpers/keys";
 import { expect, test } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -186,7 +187,7 @@ test("a newly saved editor change is searchable before relaunch", async () => {
     await expect(editor).toBeVisible();
     await expect(page.getByTestId("markdown-edit-toggle")).toHaveCount(0);
     await editor.click();
-    await page.keyboard.press("ControlOrMeta+End");
+    await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.type(` ${sentinel}`);
     await expect(editor).toContainText(sentinel);
     await expect(saveState).toHaveAttribute("data-state", "saved", {

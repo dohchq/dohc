@@ -100,7 +100,8 @@ export function RelationPicker({
     <span
       className="flex w-full flex-col gap-0.5"
       onKeyDown={(event) => {
-        if (event.key === "Escape") close();
+        // Escape during IME composition cancels the composition only.
+        if (event.key === "Escape" && !event.nativeEvent.isComposing && event.keyCode !== 229) close();
       }}
       onBlur={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget)) close();

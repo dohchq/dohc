@@ -1487,12 +1487,12 @@ describe("shared view chats surface", () => {
   });
 
   it.each([
-    ["Control", { ctrlKey: true }],
-    ["Command", { metaKey: true }],
+    ["Control", "linux", { ctrlKey: true }],
+    ["Command", "darwin", { metaKey: true }],
   ] as const)(
     "claims %s+Alt+B for a workspace that is not a shared view",
-    async (_name, modifier) => {
-      const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    async (_name, platform, modifier) => {
+      const bridge = makeBridge(Promise.resolve(STORED_STATE), platform);
       renderShell(bridge);
       await screen.findByTestId("about-rail");
 
@@ -1515,7 +1515,7 @@ describe("shared view chats surface", () => {
   );
 
   it("claims Command+Option+B when macOS reports the Option glyph", async () => {
-    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    const bridge = makeBridge(Promise.resolve(STORED_STATE), "darwin");
     renderShell(bridge);
     await screen.findByTestId("about-rail");
 

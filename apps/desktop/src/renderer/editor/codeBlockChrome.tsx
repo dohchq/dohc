@@ -1,3 +1,4 @@
+import { hasPrimaryModifier } from "../../shortcuts/shortcutRegistry";
 import { mapWidgetOwners } from "./widgetOwnership";
 import { stopEditorMouseEvent, isCodeBlockNode } from "./pmHelpers";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
@@ -398,7 +399,7 @@ export function makeCodeBlockContinuationPlugin() {
         if (!block) return false;
 
         const explicitExit =
-          event.key === "Enter" && (event.metaKey || event.ctrlKey);
+          event.key === "Enter" && hasPrimaryModifier(event, window.dohcDesktop?.platform);
         // ArrowDown only takes over when the code block is the last child of
         // its parent — otherwise native navigation must move into the
         // following content instead of injecting a blank paragraph (which

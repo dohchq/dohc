@@ -3905,15 +3905,16 @@ export function DesktopWorkspaceShell(props: {
       // A stopped workspace answers no workspace shortcut.
       if (storeUpdateRequiredRef.current) return;
       const blockingModal = hasBlockingModal();
-      const command = blockingModal ? matchShellShortcutChord(event) : matchShellShortcut(event);
+      const platform = bridge().platform;
+      const command = blockingModal ? matchShellShortcutChord(event, platform) : matchShellShortcut(event, platform);
       if (!command) return;
       // A modal owns the keyboard while it is visible. Native/main-owned
       // shortcuts such as Close Window and zoom never reach this listener,
       // so they continue to work over a modal.
       if (blockingModal) {
-        // Consume Command chords before macOS can route them through the menu.
-        // Text inputs keep Control-key editing and native undo.
-        if (command !== "history-restore-undo" && event.metaKey) event.preventDefault();
+        // Consume the chord before macOS can route it through the menu.
+        // Text inputs keep native undo.
+        if (command !== "history-restore-undo" && platform === "darwin") event.preventDefault();
         return;
       }
       if (command === "settings") {

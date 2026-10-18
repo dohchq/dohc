@@ -1,4 +1,4 @@
-import { shortcutText } from "../shortcuts/shortcutRegistry";
+import { hasPrimaryModifier, shortcutTitle } from "../shortcuts/shortcutRegistry";
 import { SAVED_HERE, SAVING, saveProblem, saveStateEqual, type SaveState } from "@dohc/workspace-contracts/save-state";
 import { registerPendingEditorDraft } from "./pendingEditorDrafts";
 import { RecordButtonsRow } from "./collections/RecordButtonsRow";
@@ -1682,7 +1682,7 @@ export function MarkdownView(props: {
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
-      if (!(event.metaKey || event.ctrlKey) || event.key !== "/") return;
+      if (!hasPrimaryModifier(event, window.dohcDesktop?.platform) || event.key !== "/") return;
       if (props.autoFocus === false) return;
       event.preventDefault();
       // Engine mode: the same keystroke drives the source-view toggle (the
@@ -1988,7 +1988,7 @@ export function MarkdownView(props: {
                 label: showSource ? "Editor" : "Source",
                 testId: "markdown-source-toggle",
                 pressed: showSource,
-                title: `Toggle markdown source (${shortcutText("toggle-markdown-source", window.dohcDesktop?.platform)})`,
+                title: `Toggle markdown source (${shortcutTitle("toggle-markdown-source", window.dohcDesktop?.platform)})`,
                 onClick: toggleSourceView,
               }}
               menu={{
