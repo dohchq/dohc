@@ -1,6 +1,7 @@
 import {
   createContext,
   useContext,
+  useEffect,
   useLayoutEffect,
   useRef,
   useState,
@@ -137,6 +138,22 @@ function AgentColorPopover(props: { scope: Scope; label: string }) {
     popover?.querySelector<HTMLElement>('[role="radio"][tabindex="0"]')?.focus({ preventScroll: true });
   }, [scope.trigger]);
 
+  // Placed once, so it closes when its chat scrolls or the window resizes.
+  // useDismiss's focus return puts focus back on the trigger only when it was inside.
+  const { setOpen } = scope;
+  useEffect(() => {
+    const close = (event: Event) => {
+      if (event.target instanceof Node && container.current?.contains(event.target)) return;
+      setOpen(false);
+    };
+    document.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    return () => {
+      document.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+    };
+  }, [setOpen]);
+
   return (
     <div
       ref={container}
@@ -150,6 +167,12 @@ function AgentColorPopover(props: { scope: Scope; label: string }) {
       onKeyDown={(event) => {
         // useDismiss already closed it; one Escape closes one surface.
         if (event.key === "Escape") event.stopPropagation();
+        // Tab and Shift+Tab close it, as the Menu part does, and the browser
+        // moves focus on from the trigger, wherever the arrows had left it.
+        else if (event.key === "Tab") {
+          scope.trigger.current?.focus({ preventScroll: true });
+          setOpen(false);
+        }
       }}
       style={{
         inset: "auto",

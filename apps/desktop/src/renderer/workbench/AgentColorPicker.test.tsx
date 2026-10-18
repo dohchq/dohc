@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "../../testing/legendListMock";
-import { act, cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import type { ActorPresentation } from "../../ipc/bridgeContract";
@@ -116,6 +116,49 @@ it("closes on Escape and returns focus to the avatar, saving nothing", async () 
   expect(document.activeElement).toBe(trigger);
   expect(save).not.toHaveBeenCalled();
   expect(outer).not.toHaveBeenCalledWith("Escape");
+});
+
+// user-event moves Tab on from the key's original target, which this close
+// removes; a browser moves on from the focused element. So the test pins what
+// the browser moves on from: focus on the trigger, the key not prevented.
+it.each([["Tab", false], ["Shift+Tab", true]] as const)(
+  "closes on %s from a swatch the arrows reached, and leaves the key to move focus on from the avatar",
+  async (_, shiftKey) => {
+    const user = userEvent.setup();
+    const save = vi.fn();
+    render(<Row save={save} />);
+    const trigger = screen.getByRole("button", { name: "Color for Orbit" });
+    trigger.focus();
+    await user.keyboard("{Enter}");
+    await user.keyboard("{ArrowLeft}");
+    expect(document.activeElement).toBe(swatch("Indigo"));
+    let notPrevented = false;
+    act(() => { notPrevented = fireEvent.keyDown(swatch("Indigo"), { key: "Tab", shiftKey }); });
+    expect(notPrevented).toBe(true);
+    expect(document.activeElement).toBe(trigger);
+    await act(async () => undefined);
+    expect(dialog()).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+    expect(save).not.toHaveBeenCalled();
+  },
+);
+
+it.each([
+  ["its chat scrolls", () => fireEvent.scroll(screen.getByTestId("chat"))],
+  ["the window resizes", () => fireEvent(window, new Event("resize"))],
+] as const)("closes when %s, returning focus that was inside it to the avatar", async (_, move) => {
+  const user = userEvent.setup();
+  render(<div data-testid="chat"><Row save={vi.fn()} /></div>);
+  const trigger = screen.getByRole("button", { name: "Color for Orbit" });
+  await user.click(trigger);
+  expect(document.activeElement).toBe(swatch("Plum"));
+  // A scroll inside the popover is its own and keeps it open.
+  fireEvent.scroll(dialog()!);
+  expect(dialog()).not.toBeNull();
+  act(move);
+  await act(async () => undefined);
+  expect(dialog()).toBeNull();
+  expect(document.activeElement).toBe(trigger);
 });
 
 it("opens from the agent's name, which stays plain text to the keyboard", async () => {
