@@ -545,7 +545,6 @@ fn editor_noise(name: &str) -> bool {
         || name.ends_with(".swo")
         || name.ends_with('~')
         || name.len() >= 2 && name.starts_with('#') && name.ends_with('#')
-        || name == ".ds_store"
 }
 
 #[cfg(test)]
@@ -863,6 +862,9 @@ mod tests {
             "a~",
             "#a#",
             ".DS_Store",
+            "._a.md",
+            "Thumbs.db",
+            ".fseventsd/a",
             ".dohc/a",
             ".git/a",
             "node_modules/a",

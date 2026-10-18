@@ -3179,7 +3179,8 @@ pub fn remove_file_holding(root: &Path, rel: &str, sha256: &str) -> Result<bool,
 /// Remove the directory at `rel` when it is empty, so a file can take its
 /// name. Used when a sync page deletes the last tracked files under a path
 /// and then writes a file there. Only a real, empty directory below the
-/// workspace root is removed; `false` when nothing was removed.
+/// workspace root is removed; `false` when nothing was removed. On macOS a
+/// directory that holds only Finder's files, such as `.DS_Store`, is empty.
 pub fn remove_empty_directory_target(root: &Path, rel: &str) -> Result<bool, MaterializeError> {
     let canonical_root =
         std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
@@ -3194,13 +3195,87 @@ pub fn remove_empty_directory_target(root: &Path, rel: &str) -> Result<bool, Mat
     {
         return Ok(false);
     }
-    // `remove_dir` refuses a directory that is not empty.
-    if std::fs::remove_dir(&target).is_ok() {
+    if remove_emptied_directory(&canonical_root, rel, &target, || {}) {
         sync_parent_dir(target.parent(), DurabilityPolicy::per_os())?;
         Ok(true)
     } else {
         Ok(false)
     }
+}
+
+/// Remove the directory at `rel` if it is empty. On Unix every step goes
+/// through directory handles opened without following a link, so a folder
+/// swapped for a link cannot point a deletion outside the workspace. On macOS
+/// Finder's files go first when they are all the directory holds;
+/// `after_inspect` runs between that check and the deletion.
+#[cfg(unix)]
+fn remove_emptied_directory(
+    root: &Path,
+    rel: &str,
+    target: &Path,
+    after_inspect: impl FnOnce(),
+) -> bool {
+    use rustix::fs::{AtFlags, Mode, OFlags};
+    let relative = Path::new(rel);
+    let Some(leaf) = relative.file_name() else {
+        return false;
+    };
+    let parent = relative.parent().unwrap_or_else(|| Path::new(""));
+    let Ok(Some(parent_fd)) = open_existing_secret_parent_unix(root, parent, target) else {
+        return false;
+    };
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let Ok(directory) = rustix::fs::openat(&parent_fd, leaf, flags, Mode::empty()) else {
+        return false;
+    };
+    #[cfg(target_vendor = "apple")]
+    {
+        let finder_files = finder_files_only(&directory);
+        after_inspect();
+        for name in finder_files.into_iter().flatten() {
+            let _ = rustix::fs::unlinkat(&directory, name.as_c_str(), AtFlags::empty());
+        }
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    after_inspect();
+    rustix::fs::unlinkat(&parent_fd, leaf, AtFlags::REMOVEDIR).is_ok()
+}
+
+#[cfg(not(unix))]
+fn remove_emptied_directory(
+    _root: &Path,
+    _rel: &str,
+    target: &Path,
+    after_inspect: impl FnOnce(),
+) -> bool {
+    after_inspect();
+    std::fs::remove_dir(target).is_ok()
+}
+
+/// The names in `directory` when every entry is a regular file Finder wrote,
+/// such as `.DS_Store`. `None` when anything else is there.
+#[cfg(target_vendor = "apple")]
+fn finder_files_only(directory: &rustix::fd::OwnedFd) -> Option<Vec<std::ffi::CString>> {
+    use rustix::fs::{AtFlags, FileType};
+    let mut entries = rustix::fs::Dir::read_from(directory).ok()?;
+    let mut names = Vec::new();
+    while let Some(entry) = entries.read() {
+        let entry = entry.ok()?;
+        let name = entry.file_name();
+        if matches!(name.to_bytes(), b"." | b"..") {
+            continue;
+        }
+        let regular = rustix::fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)
+            .is_ok_and(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile);
+        let finder = name.to_str().is_ok_and(|text| {
+            crate::floor::is_finder_metadata_file(&crate::floor::normalize_segment(text))
+        });
+        if !regular || !finder {
+            return None;
+        }
+        names.push(name.to_owned());
+    }
+    Some(names)
 }
 
 fn unavailable_recovery_roots() -> &'static std::sync::Mutex<std::collections::HashSet<PathBuf>> {
@@ -5339,6 +5414,64 @@ mod tests {
         );
         assert!(!super::remove_empty_directory_target(root, "d/sub").unwrap());
         assert!(super::remove_empty_directory_target(root, "../d").is_err());
+    }
+
+    /// Finder writes `.DS_Store` into every folder it shows. Once the last
+    /// file leaves, that folder is empty and goes, but no other file goes
+    /// with it, and a volume folder such as `.Trashes` keeps its folder.
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn a_directory_holding_only_finder_files_is_empty() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("os-metadata-directory").unwrap();
+        let root = scratch.path();
+        std::fs::create_dir_all(root.join("d/sub")).unwrap();
+        std::fs::write(root.join("d/sub/.DS_Store"), "finder").unwrap();
+        std::fs::write(root.join("d/sub/._a.md"), "appledouble").unwrap();
+        std::fs::write(root.join("d/.DS_Store"), "finder").unwrap();
+        std::fs::write(root.join("d/keep.md"), "keep").unwrap();
+        std::fs::create_dir_all(root.join("t/.Trashes/501")).unwrap();
+        std::fs::write(root.join("t/.Trashes/501/trashed.md"), "trashed").unwrap();
+        std::fs::create_dir_all(root.join("w")).unwrap();
+        std::fs::write(root.join("w/Thumbs.db"), "explorer").unwrap();
+        assert!(super::remove_empty_directory_target(root, "d/sub").unwrap());
+        assert!(!root.join("d/sub").exists());
+        assert!(!super::remove_empty_directory_target(root, "d").unwrap());
+        assert!(root.join("d/.DS_Store").exists());
+        assert!(root.join("d/keep.md").exists());
+        assert!(!super::remove_empty_directory_target(root, "t").unwrap());
+        assert!(root.join("t/.Trashes/501/trashed.md").exists());
+        assert!(!super::remove_empty_directory_target(root, "w").unwrap());
+        assert!(root.join("w/Thumbs.db").exists());
+    }
+
+    /// A folder swapped for a link between the check and the deletion must
+    /// not send the deletion through the link.
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn a_folder_swapped_for_a_link_keeps_the_files_outside() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("os-metadata-swap").unwrap();
+        let outside = dohc_test_scratch::ScratchDir::new_named("os-metadata-outside").unwrap();
+        let root = std::fs::canonicalize(scratch.path()).unwrap();
+        std::fs::create_dir_all(root.join("d/sub")).unwrap();
+        std::fs::write(root.join("d/sub/.DS_Store"), "ours").unwrap();
+        std::fs::write(outside.path().join(".DS_Store"), "outside").unwrap();
+        let target = root.join("d/sub");
+        let removed = super::remove_emptied_directory(&root, "d/sub", &target, || {
+            std::fs::rename(root.join("d/sub"), root.join("d/moved")).unwrap();
+            std::os::unix::fs::symlink(outside.path(), root.join("d/sub")).unwrap();
+        });
+        assert!(!removed);
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join(".DS_Store")).unwrap(),
+            "outside"
+        );
+        assert!(
+            std::fs::symlink_metadata(root.join("d/sub"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(root.join("d/moved").is_dir());
     }
 
     #[test]

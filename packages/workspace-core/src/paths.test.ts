@@ -502,6 +502,16 @@ describe("hasEngineIgnoredSegment (Rust capture floor parity)", () => {
     expect(hasEngineIgnoredSegment(".DOHC-WRITE-123.tmp", "linux")).toBe(true);
   });
 
+  it.each(["linux", "darwin", "win32"] as const)("hides OS metadata on %s", (platform) => {
+    for (const path of [".DS_Store", "notes/.ds_store", "notes/._draft.md", "notes/Icon\r", ".Spotlight-V100/Store-V2/index", "photos/Thumbs.db", "Desktop.ini"]) {
+      expect(hasEngineIgnoredSegment(path, platform), path).toBe(true);
+      expect(validateUserWritePath(path), path).toEqual({ ok: false, reason: "reserved" });
+    }
+    for (const path of ["notes/DS_Store.md", "notes/Icon.png", "notes/_draft.md"]) {
+      expect(hasEngineIgnoredSegment(path, platform), path).toBe(false);
+    }
+  });
+
   it("normalizes case and trailing aliases on Windows", () => {
     expect(hasEngineIgnoredSegment(".DOHC/history/index.json", "win32")).toBe(true);
     expect(hasEngineIgnoredSegment("sub/.git./config", "win32")).toBe(true);

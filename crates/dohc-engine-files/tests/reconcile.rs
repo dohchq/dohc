@@ -159,6 +159,34 @@ fn rename_looks_like_remove_plus_add() {
     assert_eq!(retire_paths(&p), ["old-name.md"]);
 }
 
+/// A head captured before the floor named `.DS_Store` comes back in the
+/// rehydration seed. The scanner never lists it again, so it must not wait for
+/// a retire it cannot confirm while the file stays on disk.
+#[test]
+fn rehydrated_entries_the_floor_excludes_do_not_degrade_capture() {
+    let ws = Scratch::new();
+    ws.write("notes.md", b"kept\n");
+    ws.write(".DS_Store", b"finder");
+    ws.write("photos/._trip.jpg", b"appledouble");
+    let entry = |bytes: &[u8]| ManifestEntry {
+        size: bytes.len() as u64,
+        sha256: dohc_engine_storage::hex_sha256(bytes),
+        mtime_ms: 0,
+    };
+    let manifest = ScanManifest::from_entries([
+        ("notes.md".to_owned(), entry(b"kept\n")),
+        (".DS_Store".to_owned(), entry(b"finder")),
+        ("photos/._trip.jpg".to_owned(), entry(b"appledouble")),
+    ]);
+    let mut ctrl = ReconcileController::rehydrated(manifest, dohc_engine_files::ScanGeneration(1));
+    assert_eq!(ctrl.tracked_len(), 1);
+
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let p = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &CancellationToken::new());
+    assert!(p.is_empty(), "{p:?}");
+    assert!(p.unconfirmed_removed.is_empty() && !p.degraded, "{p:?}");
+}
+
 #[test]
 fn cancellation_mid_scan_leaves_consistent_resumable_state() {
     let ws = Scratch::new();

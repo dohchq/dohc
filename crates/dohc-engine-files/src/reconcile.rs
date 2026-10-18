@@ -272,12 +272,17 @@ impl ReconcileController {
     /// still matches it, so the mandatory post-restart full reconcile is
     /// never skipped.
     ///
+    /// Entries the path floor now excludes are dropped. A `.DS_Store`
+    /// captured before the floor named it can never be listed again, and the
+    /// file still on disk would otherwise hold every pass degraded.
+    ///
     /// Building the seed `ScanManifest` from the domain's own captured-file
     /// records (rather than a caller-supplied one, as here) is a deliberate
     /// follow-up: this crate does not depend on the domain layer (see
     /// `capture.rs`), so the actual rehydration SOURCE lives above this
     /// primitive.
-    pub fn rehydrated(manifest: ScanManifest, generation: ScanGeneration) -> Self {
+    pub fn rehydrated(mut manifest: ScanManifest, generation: ScanGeneration) -> Self {
+        manifest.drop_excluded();
         ReconcileController {
             manifest,
             generation,
