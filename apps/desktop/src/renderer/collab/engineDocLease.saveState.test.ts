@@ -22,8 +22,8 @@ vi.mock("@dohc/ydoc-projection", async (importOriginal) => {
   >();
   return {
     ...actual,
-    yDocToMarkdown(doc: Y.Doc) {
-      const markdown = actual.yDocToMarkdown(doc);
+    yDocToArtifactMarkdown(doc: Y.Doc) {
+      const markdown = actual.yDocToArtifactMarkdown(doc);
       return (
         projectionGate.pending?.then(() => {
           projectionGate.completed += 1;

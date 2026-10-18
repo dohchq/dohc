@@ -19,6 +19,8 @@ import {
   StateMark,
 } from "./ui/StateMark";
 import { LazySourceCodeEditor } from "./LazySourceCodeEditor";
+import { prepareArtifactSource, projectArtifactSource } from "./editor/artifactSource";
+import { canPreserveMarkdownSource } from "@dohc/ydoc-projection/artifact-markdown-guard";
 import type { PendingTextUndo } from "./fileEditorUndo";
 import {
   AUTOSAVE_DEBOUNCE_MS,
@@ -47,15 +49,9 @@ import { rendererMarks } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
 import type { DocumentGoneCause } from "./collab/engineDocLease";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
-import { frontmatterBlockFor } from "@dohc/ydoc-projection/frontmatter";
-import {
-  frontmatterMapValues,
-  writtenFrontmatterKeys,
-} from "@dohc/ydoc-projection/frontmatter-map";
 import {
   markdownEditorBody,
   mergeMarkdownEditorBody,
-  orderFrontmatter,
 } from "./markdown/frontmatter";
 import type {
   BlockNavigationTarget,
@@ -82,11 +78,6 @@ import { dirnameOf } from "./path";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
 
 const EMPTY_WIKILINK_FILES: ReadonlyArray<WikilinkFile> = [];
-
-// The engine Y.Doc frontmatter map field name — the same key PageIdentity and
-// PropertiesPanel use for title, icon, and properties. Read it directly so
-// engine-mode export/copy reflects live frontmatter edits.
-const ENGINE_FRONTMATTER_FIELD = "frontmatter";
 
 // The filename without its directory or extension — the Notion-style empty
 // title placeholder ("2026-plan.md" -> "2026-plan").
@@ -733,44 +724,18 @@ export function MarkdownView(props: {
     return latestDraft.current;
   };
 
-  // Engine-mode export/serialize: in the engine branch the WYSIWYG editor is
-  // always mounted and collab-bound to the engine Y.Doc, so its live body is
-  // the canonical current markdown. serializeDraftRef can't be reused here
-  // because it falls back to the stale (possibly truncated) props.body whenever
-  // the properties panel is open or the doc opened in read mode, neither of
-  // which reflects the live edit. This reads the editor on demand at click time
-  // so the exported source is fresh.
-  //
-  // Frontmatter (title / icon / properties) is edited through PageIdentity and
-  // PropertiesPanel, which write straight into the engine Y.Doc's frontmatter
-  // MAP — not into latestDraft.current, which stays at this mount's initial
-  // markdown. Reading latestDraft.current for the frontmatter therefore exports
-  // a stale title. Serialize the live map instead and combine it with the body
-  // the mounted WYSIWYG editor already owns.
-  const serializeEngineDraft = (): string | null => {
-    // This export path needs the mounted editor's live body. `props.body` is
-    // the markdown cache beside the canonical Y.Doc, so it lags every edit the
-    // document has taken since the read. On the recovery path (a failed read
-    // whose retry bound the document), it is empty. Refuse instead of
-    // exporting stale text; the menu says the document is not ready.
-    const editorBody = wysiwygRef.current?.getMarkdown();
-    if (editorBody === undefined && displayDoc !== null) return null;
-    const body = editorBody ?? markdownEditorBody(props.body);
-    if (!displayDoc) {
-      return mergeMarkdownEditorBody(latestDraft.current, body);
+  // Read the live Y.Doc at the action, while retaining the mounted-editor guard.
+  const serializeEngineDraft = async (): Promise<string | null> => {
+    if (displayDoc) {
+      if (wysiwygRef.current === null || displayDoc.isDestroyed) return null;
+      if (canPreserveMarkdownSource(displayDoc.getMap('meta').get('dohcMarkdownSource'))) {
+        try {return await projectArtifactSource(displayDoc);} catch { /* Canonical output needs no witness proof. */ }
+      }
+      const {yDocToMarkdown} = await loadImportExport();
+      return displayDoc.isDestroyed ? null : yDocToMarkdown(displayDoc);
     }
-    const frontmatter = displayDoc.getMap(ENGINE_FRONTMATTER_FIELD);
-    // The frontmatter text the settle keeps, so a copy matches the file.
-    const meta = displayDoc.getMap("meta");
-    const written = writtenFrontmatterKeys(frontmatter, meta);
-    const block = frontmatterBlockFor(
-      orderFrontmatter(frontmatterMapValues(frontmatter)),
-      meta.get("dohcFrontmatterSource"),
-      body,
-      "\n",
-      written,
-    );
-    return `${block}${body}`;
+    const editorBody = wysiwygRef.current?.getMarkdown();
+    return mergeMarkdownEditorBody(latestDraft.current, editorBody ?? markdownEditorBody(props.body));
   };
 
   const hasSetAsideEdit =
@@ -941,11 +906,14 @@ export function MarkdownView(props: {
   flushEngineUpdatesRef.current = engine.flushPendingLocalUpdates;
 
   // "View markdown as source" (engine mode): a READ-ONLY projection of the
-  // canonical Y.Doc through the same yDocToMarkdown the settle uses to write
-  // the .md — the source view shows exactly what lands on disk. Deliberately
+  // canonical Y.Doc with its verified source, as settlement writes the .md.
+  // The source view shows exactly what lands on disk. Deliberately
   // not editable: `atoms.body` markdown is a derived cache of the Y.Doc, and
   // an editable raw surface would have to round-trip through full-body
   // markdown patching (the invariant this must never become).
+  useEffect(() => {
+    if (displayDoc) return prepareArtifactSource(displayDoc);
+  }, [displayDoc]);
   const [showSource, setShowSource] = useState(false);
   const [sourceProjection, setSourceProjection] = useState<{
     documentKey: string;
@@ -1264,28 +1232,44 @@ export function MarkdownView(props: {
     const doc = displayDoc;
     const documentKey = props.documentKey;
     let cancelled = false;
-    let serialize: ((doc: Y.Doc) => string) | null = null;
+    let serialize: ((doc: Y.Doc) => string | Promise<string>) | null = null;
+    let inFlight = false;
+    let trailing = false;
     let updateTimer: ReturnType<typeof setTimeout> | null = null;
     let updateDeadline: number | null = null;
-    const recompute = () => {
+    const recompute = async () => {
       if (cancelled || !serialize) return;
-      const markdown = serialize(doc);
-      if (cancelled) return;
-      setSourceProjection({ documentKey, doc, markdown });
+      if (inFlight) {trailing = true; return;}
+      inFlight = true;
+      try {
+        const markdown = await serialize(doc);
+        if (cancelled) return;
+        setSourceProjection({ documentKey, doc, markdown });
+      } catch (error) {
+        if (!cancelled) props.onButtonError?.(
+          'dohc could not open the Markdown source.', error, () => {void recompute();},
+        );
+      } finally {
+        inFlight = false;
+        if (trailing && !cancelled) {trailing = false; void recompute();}
+      }
     };
     const runScheduledRecompute = () => {
       updateTimer = null;
       updateDeadline = null;
-      recompute();
+      void recompute();
     };
     void loadImportExport().then((mod) => {
-      serialize = mod.yDocToMarkdown;
+      // A failed witness proof shows canonical Markdown, as Copy does.
+      serialize = (current) => canPreserveMarkdownSource(current.getMap('meta').get('dohcMarkdownSource'))
+        ? projectArtifactSource(current).catch(() => mod.yDocToMarkdown(current))
+        : mod.yDocToMarkdown(current);
       if (updateTimer !== null) {
         clearTimeout(updateTimer);
         updateTimer = null;
         updateDeadline = null;
       }
-      recompute();
+      void recompute();
     });
     // Live: agent edits / co-editors keep flowing into the mirror doc while
     // the source view is up. A co-editor's keystroke burst forwards one delta
@@ -1309,7 +1293,7 @@ export function MarkdownView(props: {
       if (updateTimer !== null) clearTimeout(updateTimer);
       doc.off("update", scheduleRecompute);
     };
-  }, [showSource, displayDoc, props.documentKey]);
+  }, [showSource, displayDoc, props.documentKey, props.onButtonError]);
 
   // One toggle for both branches (the shell's palette command and Ctrl/Cmd+/
   // route through it): engine mode flips the read-only source projection; the
@@ -2011,10 +1995,10 @@ export function MarkdownView(props: {
                 workspaceId: props.workspaceId,
                 reportError: props.onButtonError,
                 suggestedName: filenameStem(props.path),
-                // Always live, even in source view: the WYSIWYG editor stays
-                // MOUNTED (hidden) while source is shown, so its ref keeps
-                // serializing the current Y.Doc state at click time.
+                // Read the live Y.Doc at the action. The hidden mounted editor
+                // supplies the readiness guard while source view is shown.
                 getMarkdown: () => serializeEngineDraft(),
+                documentKey: props.documentKey,
               }}
             />
           }
