@@ -525,7 +525,7 @@ test('missing compactions produce missing history evidence without throwing', ()
   assert.equal(summarizeDocumentSize(data).cases['2/plain'].retainedGrowthBytes.count, 0);
 });
 
-test('linked open controls keep 5000 paragraphs and 500 distinct existing local targets', () => {
+test('linked open controls keep 500 distinct existing local targets, and wikilinks.md opens in the rich editor', () => {
   const files = documentControlFiles();
   assert.equal(files.length, 502);
   assert.deepEqual(
@@ -538,31 +538,39 @@ test('linked open controls keep 5000 paragraphs and 500 distinct existing local 
     // A wikilink names a Markdown target without its extension, as the link picker writes it.
     'wikilinks.md': [...body('wikilinks.md').matchAll(/\[\[([^\]]+)\]\]/g)].map((match) => match[1] + '.md'),
   };
+  // links.md keeps its 5,000 paragraphs. wikilinks.md puts one link in each of 500 paragraphs so it
+  // stays under the editor's 64 KiB rich-editing limit and its pills render.
+  const paragraphs = { 'links.md': 5000, 'wikilinks.md': 500 };
+  assert.ok(Buffer.byteLength(body('wikilinks.md')) < 64 * 1024);
   for (const [name, links] of Object.entries(targets)) {
-    assert.equal((body(name).match(/Paragraph /g) ?? []).length, 5000, name);
+    assert.equal((body(name).match(/Paragraph /g) ?? []).length, paragraphs[name], name);
     assert.equal(links.length, 500, name);
     assert.equal(new Set(links).size, 500, name);
     assert.ok(links.every((link) => files.some((file) => file.name === link)), name);
   }
   assert.ok(!body('wikilinks.md').includes(']('));
   assert.deepEqual(targets['wikilinks.md'], targets['links.md']);
+  // Only the wikilink open waits for the editor's pills, one per link.
+  assert.deepEqual(
+    DOCUMENT_CONTROLS.map(([, , pills]) => pills),
+    [undefined, undefined, targets['wikilinks.md'].length],
+  );
 });
 
 test('the 500-wikilink open is judged against its baseline as the 500-link open is', () => {
+  const WIKILINK = '500-wikilink open to editable with every pill painted';
   const metrics = (result) =>
     result.checks.filter((row) => row.key === 'control' && /^500-(wiki)?link open/.test(row.metric)).map((row) => row.metric);
   const passing = compareSummaries(passingDocumentSummary(), passingDocumentSummary());
-  assert.deepEqual(metrics(passing), ['500-link open p50', '500-wikilink open p50', '500-link open p95', '500-wikilink open p95']);
+  assert.deepEqual(metrics(passing), ['500-link open p50', WIKILINK + ' p50', '500-link open p95', WIKILINK + ' p95']);
   const slower = passingDocumentSummary();
   slower.documentSize.controls.wikilinkOpenMs = stats(400, 40);
-  const failed = compareSummaries(passingDocumentSummary(), slower).checks.find(
-    (row) => row.metric === '500-wikilink open p50',
-  );
+  const failed = compareSummaries(passingDocumentSummary(), slower).checks.find((row) => row.metric === WIKILINK + ' p50');
   assert.equal(failed.verdict, 'failed');
   const unmeasured = passingDocumentSummary();
   delete unmeasured.documentSize.controls.wikilinkOpenMs;
   assert.equal(
-    compareSummaries(passingDocumentSummary(), unmeasured).checks.find((row) => row.metric === '500-wikilink open p95').verdict,
+    compareSummaries(passingDocumentSummary(), unmeasured).checks.find((row) => row.metric === WIKILINK + ' p95').verdict,
     'missing',
   );
 });

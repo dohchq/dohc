@@ -392,7 +392,7 @@ export function compareDocumentSize(baseline, candidate, margin, { includeSoak =
     );
     relative(
       'control',
-      '500-wikilink open',
+      '500-wikilink open to editable with every pill painted',
       candidate.documentSize?.controls?.wikilinkOpenMs,
       baseline.documentSize?.controls?.wikilinkOpenMs,
       p,

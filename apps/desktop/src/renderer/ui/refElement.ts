@@ -1,20 +1,27 @@
+import { createElement } from "react";
+import { flushSync } from "react-dom";
+import { createRoot } from "react-dom/client";
 import { fileKindForPath, type FileKindRecord } from "@dohc/workspace-contracts/kinds";
 import { basenameOf } from "../path";
-import { kindGlyphElement } from "./kindGlyphs";
+import { KIND_GLYPHS } from "./KindGlyph";
+import { REF_HOVER, REF_NAME, refChipClass } from "./refChip";
 
-// The reference chip's look, one recipe for Ref (React) and refElement (DOM).
-// Hover and selected lay the ink fills over the inset surface instead of
-// replacing it.
-const CHIP =
-  "inline-flex h-[22px] max-w-full min-w-0 items-center gap-[5px] whitespace-nowrap rounded border bg-panel-2 px-[7px] align-[1px] text-[13px] leading-none text-ink";
-export const REF_HOVER =
-  "cursor-pointer transition-colors duration-75 hover:bg-[image:linear-gradient(var(--color-hover),var(--color-hover))]";
-export const REF_SELECTED = "bg-[image:linear-gradient(var(--color-selected),var(--color-selected))]";
-export const REF_NAME = "min-w-0 truncate";
+type GlyphId = FileKindRecord["glyphId"];
 
-// A dashed border marks a target that does not resolve.
-export function refChipClass(missing: boolean | undefined): string {
-  return `${CHIP} ${missing ? "border-dashed border-subtle/50" : "border-line"}`;
+// KindGlyph's icons, each rendered once by React into a detached element when
+// this module loads. A module evaluates outside React's render and commit,
+// where flushSync renders at once; inside them it would leave the element
+// empty. Each chip clones its glyph's template.
+const GLYPH_TEMPLATES = renderGlyphTemplates();
+
+function renderGlyphTemplates(): Record<GlyphId, SVGSVGElement> {
+  const ids = Object.keys(KIND_GLYPHS) as GlyphId[];
+  const host = document.createElement("div");
+  const root = createRoot(host);
+  flushSync(() => root.render(ids.map((id) => createElement(KIND_GLYPHS[id], { key: id, "aria-hidden": true }))));
+  const templates = Object.fromEntries(ids.map((id, index) => [id, host.children[index].cloneNode(true)]));
+  root.unmount();
+  return templates as Record<GlyphId, SVGSVGElement>;
 }
 
 // Ref's span as DOM, for ProseMirror widgets and node views, which draw DOM
@@ -32,9 +39,13 @@ export function refElement(props: {
   chip.className = props.opens ? `${refChipClass(props.missing)} ${REF_HOVER}` : refChipClass(props.missing);
   if (props.missing) chip.dataset.missing = "true";
   if (props.path) chip.title = props.path;
+  const glyph = GLYPH_TEMPLATES[(props.kind ?? fileKindForPath(props.path)).glyphId].cloneNode(true) as SVGSVGElement;
+  glyph.setAttribute("width", "13");
+  glyph.setAttribute("height", "13");
+  glyph.classList.add("shrink-0", "text-muted");
   const name = document.createElement("span");
   name.className = REF_NAME;
   name.textContent = props.title || basenameOf(props.path);
-  chip.append(kindGlyphElement(props.kind ?? fileKindForPath(props.path), 13, "text-muted"), name);
+  chip.append(glyph, name);
   return chip;
 }

@@ -15,7 +15,7 @@ import {
 } from './wikilinkPlugin'
 import { desktopMarkdownExtensions } from './extensions'
 import { codeBlock, codeMarkText, doc, paragraph, schema } from './testDocs'
-import { REF_SELECTED, refChipClass } from '../ui/refElement'
+import { REF_SELECTED, refChipClass } from '../ui/refChip'
 
 // D4.8 — wikilink decoration regex tests over real ProseMirror documents
 // (testDocs.ts). A single paragraph's text starts at pos 1, so the

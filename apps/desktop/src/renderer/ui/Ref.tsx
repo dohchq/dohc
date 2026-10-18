@@ -1,7 +1,7 @@
 import { fileKindForPath, type FileKindRecord } from "@dohc/workspace-contracts/kinds";
 import { basenameOf, dirnameOf } from "../path";
 import { KindGlyph } from "./KindGlyph";
-import { REF_HOVER, REF_NAME, REF_SELECTED, refChipClass } from "./refElement";
+import { REF_HOVER, REF_NAME, REF_SELECTED, refChipClass } from "./refChip";
 
 // One reference to a workspace file, the same chip wherever it appears: chat,
 // Linked mentions, Search, History, the link picker and, through refElement,

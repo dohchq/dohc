@@ -1,18 +1,23 @@
 import {
   AppWindow,
+  Database,
+  File,
+  FileCode,
   FileDiff,
+  FileSpreadsheet,
+  FileText,
   Hash,
   History,
+  Image,
   Layers,
   MessageCircle,
+  PenTool,
   Table2,
   Workflow,
-  createLucideIcon,
   type LucideIcon,
 } from "lucide-react";
 import { FILE_KIND_RECORDS, fileKindForPath, type FileKindRecord } from "@dohc/workspace-contracts/kinds";
 import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
-import { KIND_GLYPH_NODES } from "./kindGlyphs";
 
 // One kind, one glyph, one name: every surface draws a file's kind through
 // this part, so the glyph comes from the kind registry and never from a
@@ -24,11 +29,18 @@ import { KIND_GLYPH_NODES } from "./kindGlyphs";
 // text, and a glyph label would rename it. A glyph standing alone asks for
 // `labelled`, and the kind's name becomes its accessible name.
 //
-// The icons are built from kindGlyphs.ts, which the editor's DOM chips also
-// draw from.
-const GLYPHS = Object.fromEntries(
-  Object.entries(KIND_GLYPH_NODES).map(([id, node]) => [id, createLucideIcon(id, node)]),
-) as Record<FileKindRecord["glyphId"], LucideIcon>;
+// A `Record` over the registry's glyph ids, so a new glyph is a compile error
+// here until it has its icon. refElement.ts renders these same icons for the
+// editor's DOM chips.
+export const KIND_GLYPHS: Record<FileKindRecord["glyphId"], LucideIcon> = {
+  file: File,
+  "file-text": FileText,
+  "file-spreadsheet": FileSpreadsheet,
+  "file-code": FileCode,
+  "pen-tool": PenTool,
+  image: Image,
+  database: Database,
+};
 
 export function KindGlyph(props: {
   kind: FileKindRecord;
@@ -36,7 +48,7 @@ export function KindGlyph(props: {
   className?: string;
   labelled?: boolean;
 }) {
-  const Glyph = GLYPHS[props.kind.glyphId];
+  const Glyph = KIND_GLYPHS[props.kind.glyphId];
   const label = props.labelled
     ? { role: "img", "aria-label": props.kind.name }
     : { "aria-hidden": true };

@@ -31,7 +31,8 @@ import type { Node as ProseMirrorNode, ResolvedPos } from '@tiptap/pm/model'
 import { PluginKey } from '@tiptap/pm/state'
 import { Decoration, DecorationSet, type NodeView } from '@tiptap/pm/view'
 import { FILE_KIND_RECORDS, fileKindForPath, type FileKindRecord } from '@dohc/workspace-contracts/kinds'
-import { REF_SELECTED, refElement } from '../ui/refElement'
+import { REF_SELECTED } from '../ui/refChip'
+import { refElement } from '../ui/refElement'
 
 export const wikilinkPluginKey = new PluginKey<WikilinkState>('dohc-wikilink')
 

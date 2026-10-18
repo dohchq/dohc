@@ -209,9 +209,9 @@ async function fixture(runDir, documentCase) {
     await json(join(workspace.rootPath, '.dohc/manifest.json'), { version: 1, workspaceId: workspace.workspaceId, kind: workspace.kind, mode: workspace.mode });
     await json(join(workspace.rootPath, '.dohc/ui-state.json'), { version: 3, activeView: 'explorer', sidebarVisible: true, sidebarWidth: 320, editorGroups: [{ id: 'primary', tabs: ['small.md'], activeTab: 'small.md', size: 1 }], activeEditorGroup: 'primary', aboutVisible: false, aboutWidth: 360 });
     const workspaceHash = createHash('sha256');
-    if (sizeDocument && index === 0) {
+    const controls = sizeDocument && index === 0 ? documentControlFiles() : [];
+    if (controls.length) {
       await mkdir(join(workspace.rootPath,'linked'),{recursive:true});
-      const controls=documentControlFiles();
       for(let begin=0;begin<controls.length;begin+=32) await Promise.all(controls.slice(begin,begin+32).map(file=>{
         workspaceHash.update(file.name+'\0'+file.text+'\0');return writeFile(join(workspace.rootPath,file.name),file.text);
       }));
@@ -245,7 +245,7 @@ async function fixture(runDir, documentCase) {
       await writeFile(join(workspace.rootPath, 'document-size.md'), sizeDocument.text);
       workspaceHash.update('document-size.md\0' + sizeDocument.text + '\0');
     }
-    fixtureHashes.push({ workspaceId: workspace.workspaceId, files: scenario === 'go-to-mixed' ? 2 : fixtureFiles + (sizeDocument && index === 0 ? 502 : 0), collectionFiles: collection.length, digest: workspaceHash.digest('hex'), algorithm: 'SHA256 of name,NUL,UTF8-content,NUL in generation order; workspace metadata excluded' });
+    fixtureHashes.push({ workspaceId: workspace.workspaceId, files: scenario === 'go-to-mixed' ? 2 : fixtureFiles + (controls.length ? controls.length + 1 : 0), collectionFiles: collection.length, digest: workspaceHash.digest('hex'), algorithm: 'SHA256 of name,NUL,UTF8-content,NUL in generation order; workspace metadata excluded' });
     workspaces.push(workspace);
   }
   await json(join(profile, 'dohc-workspaces.json'), { version: 1, workspaces });
@@ -326,7 +326,9 @@ async function shutdown(runDir, instance) {
   void instance.browser.close().catch(() => {});
   active = null;
 }
-async function openDoc(page, name) {
+// `pills` gives the open a second end point, `pillsObservedMs`: the editor is editable and has drawn
+// that many wikilink pills, then painted twice. The read view draws no pills, so it cannot end it.
+async function openDoc(page, name, pills = 0) {
   const start = performance.now();
   await page.getByTestId('file-tree').getByRole('treeitem', { name, exact: true }).click();
   await page.waitForFunction(name => document.querySelector('[data-testid="view-markdown"]')?.textContent?.includes(`Workspace 0 ${name === 'small.md' ? 'small' : 'large'}`), name, { timeout: 120000 });
@@ -351,7 +353,10 @@ async function openDoc(page, name) {
     editActivationObservedMs = performance.now() - editStart;
   }
   await page.locator('[contenteditable="true"]').waitFor({ timeout: 120000 });
-  return { openObservedMs, editActivationObservedMs };
+  if (!pills) return { openObservedMs, editActivationObservedMs };
+  await page.waitForFunction(count => document.querySelectorAll('[contenteditable="true"] .dohc-wikilink-pill').length >= count, pills, { timeout: 120000 });
+  await painted(page);
+  return { openObservedMs, editActivationObservedMs, pillsObservedMs: performance.now() - start };
 }
 async function typing(page, name, { rich = false, arm, beforeInput = () => {}, afterInput = () => {} } = {}) {
   const windowState = await setWindowState(active, 'visible');
@@ -874,8 +879,9 @@ async function soak(instance, data, runDir) {
 async function documentControlOpens(page) {
   receipt.documentControls ??= Object.fromEntries(DOCUMENT_CONTROLS.map(([,key])=>[key,[]]));
   if(receipt.documentControls.legacyOpenMs.length>=DOCUMENT_CONTROL_OPENS) return;
-  for(const [name,key] of DOCUMENT_CONTROLS) {
-    receipt.documentControls[key].push((await openDoc(page,name)).openObservedMs);
+  for(const [name,key,pills] of DOCUMENT_CONTROLS) {
+    const opened=await openDoc(page,name,pills);
+    receipt.documentControls[key].push(pills ? opened.pillsObservedMs : opened.openObservedMs);
     await openDoc(page,'small.md');
   }
 }

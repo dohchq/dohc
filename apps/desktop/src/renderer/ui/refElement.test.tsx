@@ -1,9 +1,11 @@
 // @vitest-environment jsdom
 import { FILE_KIND_RECORDS } from "@dohc/workspace-contracts/kinds";
 import { cleanup, render, screen } from "@testing-library/react";
+import { useEffect, useLayoutEffect } from "react";
 import { afterEach, describe, expect, it } from "vitest";
 import { Ref } from "./Ref";
-import { REF_HOVER, refElement } from "./refElement";
+import { REF_HOVER } from "./refChip";
+import { refElement } from "./refElement";
 
 afterEach(cleanup);
 
@@ -12,6 +14,24 @@ const tokens = (element: Element | null | undefined) => [...(element?.classList 
 // The editor draws DOM, not React, so refElement is Ref's span built by hand.
 // These pin the two to one look.
 describe("refElement", () => {
+  // First, so no earlier call has built a glyph: the editor builds chips
+  // inside React's effects, where flushSync cannot render.
+  it("draws its glyph when built inside a React effect", () => {
+    const built: HTMLSpanElement[] = [];
+    function Host() {
+      useLayoutEffect(() => {
+        built.push(refElement({ path: "data/funnel.csv" }));
+      }, []);
+      useEffect(() => {
+        built.push(refElement({ path: "sketch.excalidraw" }));
+      }, []);
+      return null;
+    }
+    render(<Host />);
+    expect(built).toHaveLength(2);
+    for (const chip of built) expect(chip.querySelector("svg")?.childElementCount).toBeGreaterThan(0);
+  });
+
   it("is Ref's span: the same classes, glyph and name", () => {
     render(<Ref path="research/competitors.md" title="Competitor landscape" testId="ref" />);
     const ref = screen.getByTestId("ref");
