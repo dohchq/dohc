@@ -133,15 +133,17 @@ export async function parseNamedShareLogOps(
   return ops;
 }
 
-function ordinaryAuthorContext(payload: unknown): LiveAuthorContext | undefined {
+function ordinaryAuthorContext(payload: unknown, opKind: string): LiveAuthorContext | undefined {
   const fields = payload as Record<string, unknown>;
+  if (opKind === "moment.append" && (Object.hasOwn(fields, "settlementReference") ||
+    Object.hasOwn(fields, "attributionUnavailable") || fields.authors != null)) return undefined;
   if (!Object.hasOwn(fields, "authorContext")) return undefined;
   try {
     const context = parseLiveAuthorContext(fields.authorContext);
     if (context.agent) parseLiveAuthorSnapshot([{kind: "agent", ...context.agent}]);
     return context;
   } catch {
-    throw badRequest("invalid ydoc.update authorContext");
+    throw badRequest(`invalid ${opKind} authorContext`);
   }
 }
 
@@ -151,8 +153,8 @@ export async function parseAuthenticatedLogOps(
   lookupUserDisplayName?: LogAuthorNameLookup,
 ): Promise<SyncRelayLogInput[]> {
   const ops = values.map(value => parseLogOp(value));
-  const contexts = ops.map((op, index) => op.opKind === "ydoc.update"
-    ? ordinaryAuthorContext((values[index] as Record<string, unknown>).payload)
+  const contexts = ops.map((op, index) => op.opKind === "ydoc.update" || op.opKind === "moment.append"
+    ? ordinaryAuthorContext((values[index] as Record<string, unknown>).payload, op.opKind)
     : undefined);
   if (!contexts.some(context => context?.kind === "account" && context.accountId === actorUserId)) return ops;
   const humanName = await authenticatedDisplayName(actorUserId, lookupUserDisplayName);

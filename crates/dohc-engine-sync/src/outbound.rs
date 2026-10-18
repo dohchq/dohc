@@ -6,6 +6,18 @@ use rusqlite::{OptionalExtension, Transaction, params};
 
 use crate::{SyncError, journal_local_op_in_tx};
 
+/// Recording context is a claim; the relay checks it against its caller.
+pub(crate) fn ordinary_account_context(account_id: &str) -> Option<serde_json::Value> {
+    if account_id.is_empty()
+        || account_id.starts_with("local:")
+        || account_id.len() > 512
+        || account_id.chars().any(char::is_control)
+    {
+        return None;
+    }
+    Some(serde_json::json!({"kind":"account", "accountId":account_id}))
+}
+
 /// The relay derives person attribution; installation identities stay local.
 pub(crate) fn omit_local_person_authors(payload: &mut serde_json::Value) -> bool {
     let Some(authors) = payload
@@ -592,6 +604,17 @@ fn moment_payload_in_tx(
             serde_json::Value::String("Attribution unavailable".into());
     }
     let proof_ready: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM live_device_settlements s JOIN live_settlement_publication_states p USING(settlement_id) WHERE s.workspace_id=?1 AND s.moment_id=?2)",params![workspace_id,row.moment_id],|r|r.get(0)).map_err(SyncError::corrupt)?;
+    if !proof_ready
+        && payload.get("attributionUnavailable").is_none()
+        && let Some([author]) = payload["authors"].as_array().map(Vec::as_slice)
+        && author["kind"] == "human"
+        && author.get("humanName").is_none()
+        && author.get("relayConfirmed").is_none()
+        && let Some(account_id) = author["humanId"].as_str()
+        && let Some(context) = ordinary_account_context(account_id)
+    {
+        payload["authorContext"] = context;
+    }
     if !proof_ready {
         mark_unproven_hosted_authors(&mut payload);
     }
