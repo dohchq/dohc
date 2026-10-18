@@ -231,10 +231,13 @@ impl EngineService {
                 let store = dohc_engine_storage::EngineStore::open_read_only(&db_path).map_err(|_|workspace_unavailable())?;
                 // A resume finds its document through the activation it retained, so one
                 // with no head, as once it parked, still answers whether it is ready.
+                // One whose retirement began finds none, before it takes the lease.
                 let object_id: Option<String> = store.read_with(|conn| match &activation_id {
                     Some(activation_id) => conn.query_row(
-                        "SELECT object_id FROM ydoc_owner_activation_sources WHERE activation_id=?1
-                         AND relay_database_namespace=?2 AND workspace_id=?3 AND version_id='main'",
+                        "SELECT object_id FROM ydoc_owner_activation_sources a WHERE activation_id=?1
+                         AND relay_database_namespace=?2 AND workspace_id=?3 AND version_id='main'
+                         AND NOT EXISTS(SELECT 1 FROM live_owner_retirements r
+                           WHERE r.relay_database_namespace=?2 AND r.activation_id=a.activation_id)",
                         rusqlite::params![activation_id,namespace,workspace_id], |row|row.get(0)).optional(),
                     None => conn.query_row(
                         "SELECT s.object_id FROM snapshots s JOIN path_aliases p USING(workspace_id,version_id,object_id,path)
@@ -243,7 +246,8 @@ impl EngineService {
                 }).map_err(|_|workspace_unavailable())?;
                 let object_id = match object_id {
                     Some(object_id) => object_id,
-                    // This store never held the activation, as after an identity change selected a new one.
+                    // This store never held the activation, as after an identity change selected
+                    // a new one, or its retirement began.
                     None if activation_id.is_some() => return Err(map_runtime(
                         dohc_engine_collab::live_update_application::ApplicationError::Conflict.into())),
                     None => return Err(workspace_unavailable()),
@@ -478,13 +482,14 @@ mod tests {
 
     /// A capture naming an activation Phase A retired over RPC is refused
     /// before it looks the activation up or takes the document's lease, and
-    /// opens no session. One naming another activation goes on, here to the
-    /// lease another session holds.
+    /// opens no session. After a restart forgets Phase A, the intent it
+    /// recorded refuses the capture the same way. One naming another
+    /// activation goes on, here to the lease another session holds.
     #[tokio::test]
     async fn a_capture_naming_a_retired_activation_is_refused() {
         use dohc_engine_protocol::transport::EngineService as _;
         let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
-        let configuration = serde_json::from_value(json!({
+        let configuration = json!({
             "version": 1, "relayNamespace": "capture-test",
             "host": {"hostId":"host","hostEpoch":1,"instanceId":"instance","connectionId":"connection"},
             "workspaces": [{"root":scratch.path(),"workspaceId":"workspace","maxRegistrations":4,
@@ -492,22 +497,7 @@ mod tests {
             "ingress": {"aggregateBytes":512*1024*1024,"applicationWorkingReserveBytes":8*1024*1024,"maxUploads":1,"uploadDeadlineMs":30_000},
             "settlement": {"maxApplicationsPerSettlement":4},
             "sync":{"policy":{"maxClientVectorBytes":1024,"maxHostVectorBytes":4096,"maxOutputBytes":1_000_000,"maxReadBytes":10_000_000},"workingReserveBytes":16*1024*1024}
-        }))
-        .unwrap();
-        let (service, owner, _ingress) = EngineService::configured_live_host(configuration)
-            .await
-            .unwrap();
-        let workspace = lock(&service.handles).keys().next().unwrap().clone();
-        let open = service.open(Some(&workspace)).unwrap();
-        open.actor
-            .ensure_main_version(
-                "workspace".into(),
-                0,
-                Arc::new(dohc_engine_storage::NoFaults),
-                dohc_engine_runtime::CancellationToken::new(),
-            )
-            .await
-            .unwrap();
+        });
         let key = DocKey::new("workspace", "main", "document").unwrap();
         let lineage = dohc_engine_storage::hex_sha256(b"lineage");
         let source = |activation: &str| ImportedOwnerActivation {
@@ -537,79 +527,100 @@ mod tests {
             full_state: Vec::new(),
             restore_generation: None,
         };
-        {
-            let conn = rusqlite::Connection::open(&open.db_path).unwrap();
-            conn.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
-            for activation in ["retiring", "other"] {
-                conn.execute(
-                    "INSERT INTO ydoc_owner_activation_sources VALUES (?1,'capture-test','workspace','main','document',?2,'moment',?2,?2,?3)",
-                    rusqlite::params![
-                        activation,
-                        lineage,
-                        serde_json::to_string(&source(activation).source).unwrap()
-                    ],
-                )
-                .unwrap();
-            }
-        }
-        // Another activation's session holds the document's lease.
-        let lease = service.leases.scoped(&open.root).acquire(&key).unwrap();
-        let session = super::super::ydoc::YdocSession::imported_owner(
-            workspace.clone(),
-            key,
-            &source("other"),
-            lease,
-        )
-        .unwrap();
-        lock(&service.sessions).insert("ydoc-other".into(), session);
-        let ctx = || {
-            let mut ctx = RequestContext::unbounded();
-            ctx.connection = Some(owner.handle());
-            ctx
-        };
-        let request = |method: &str, params: serde_json::Value| Request {
-            id: 9,
-            method: method.into(),
-            workspace: Some(workspace.clone()),
-            deadline_ms: None,
-            idempotency_key: None,
-            progress: false,
-            params,
-        };
-        let reconciled = service
-            .call(
-                ctx(),
-                request(
-                    "liveApplication.reconcileActivation",
-                    json!({"objectId":"document","lineageClaimId":lineage,"activationId":"retiring",
-                        "restoreFenceGeneration":0,"acceptedThrough":5,"afterReceipt":null,"maxApplications":4}),
-                ),
+        for restarted in [false, true] {
+            let (service, owner, _ingress) = EngineService::configured_live_host(
+                serde_json::from_value(configuration.clone()).unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(reconciled.response.result["status"], "reconciled");
-        let capture = |activation: &str| {
-            service.call(
-                ctx(),
-                request(
-                    "liveApplication.captureOwnerActivation",
-                    json!({"path":"elsewhere.md","maxBytes":1_000_000,"activationId":activation}),
-                ),
+            let workspace = lock(&service.handles).keys().next().unwrap().clone();
+            let open = service.open(Some(&workspace)).unwrap();
+            if !restarted {
+                open.actor
+                    .ensure_main_version(
+                        "workspace".into(),
+                        0,
+                        Arc::new(dohc_engine_storage::NoFaults),
+                        dohc_engine_runtime::CancellationToken::new(),
+                    )
+                    .await
+                    .unwrap();
+                let conn = rusqlite::Connection::open(&open.db_path).unwrap();
+                conn.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+                for activation in ["retiring", "other"] {
+                    conn.execute(
+                        "INSERT INTO ydoc_owner_activation_sources VALUES (?1,'capture-test','workspace','main','document',?2,'moment',?2,?2,?3)",
+                        rusqlite::params![
+                            activation,
+                            lineage,
+                            serde_json::to_string(&source(activation).source).unwrap()
+                        ],
+                    )
+                    .unwrap();
+                }
+            }
+            // Another activation's session holds the document's lease.
+            let lease = service.leases.scoped(&open.root).acquire(&key).unwrap();
+            let session = super::super::ydoc::YdocSession::imported_owner(
+                workspace.clone(),
+                key.clone(),
+                &source("other"),
+                lease,
             )
-        };
-        let sessions = || lock(&service.sessions).keys().cloned().collect::<Vec<_>>();
-        assert_eq!(
-            capture("retiring").await.unwrap_err().code,
-            ErrorCode::Conflict
-        );
-        assert_eq!(sessions(), ["ydoc-other"]);
-        assert_eq!(
-            capture("other").await.unwrap_err().code,
-            ErrorCode::WorkspaceUnavailable,
-            "it went on to the held lease"
-        );
-        assert_eq!(sessions(), ["ydoc-other"]);
-        service.workspace_close(Some(workspace)).await.unwrap();
+            .unwrap();
+            lock(&service.sessions).insert("ydoc-other".into(), session);
+            let ctx = || {
+                let mut ctx = RequestContext::unbounded();
+                ctx.connection = Some(owner.handle());
+                ctx
+            };
+            let request = |method: &str, params: serde_json::Value| Request {
+                id: 9,
+                method: method.into(),
+                workspace: Some(workspace.clone()),
+                deadline_ms: None,
+                idempotency_key: None,
+                progress: false,
+                params,
+            };
+            if !restarted {
+                let reconciled = service
+                    .call(
+                        ctx(),
+                        request(
+                            "liveApplication.reconcileActivation",
+                            json!({"objectId":"document","lineageClaimId":lineage,"activationId":"retiring",
+                                "restoreFenceGeneration":0,"acceptedThrough":5,"afterReceipt":null,"maxApplications":4}),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(reconciled.response.result["status"], "reconciled");
+            }
+            let capture = |activation: &str| {
+                service.call(
+                    ctx(),
+                    request(
+                        "liveApplication.captureOwnerActivation",
+                        json!({"path":"elsewhere.md","maxBytes":1_000_000,"activationId":activation}),
+                    ),
+                )
+            };
+            let sessions = || lock(&service.sessions).keys().cloned().collect::<Vec<_>>();
+            assert_eq!(
+                capture("retiring").await.unwrap_err().code,
+                ErrorCode::Conflict,
+                "restarted={restarted}"
+            );
+            assert_eq!(sessions(), ["ydoc-other"]);
+            assert_eq!(
+                capture("other").await.unwrap_err().code,
+                ErrorCode::WorkspaceUnavailable,
+                "it went on to the held lease, restarted={restarted}"
+            );
+            assert_eq!(sessions(), ["ydoc-other"]);
+            service.workspace_close(Some(workspace)).await.unwrap();
+        }
     }
 
     /// A release names the activation it ends. One naming another activation

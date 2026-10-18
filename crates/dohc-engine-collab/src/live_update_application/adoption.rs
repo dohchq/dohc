@@ -1412,7 +1412,8 @@ pub fn adopt_owner_committed(
     if !held.live {
         return Err(ApplicationError::Interrupted);
     }
-    // A retired activation never adopts, so nothing commits whose answer is withheld.
+    // A retired activation never adopts, so nothing commits whose answer is
+    // withheld. The durable intent refuses it below, after a restart too.
     if handle.retired.contains(&cut.adoption_id) {
         return Err(ApplicationError::Conflict);
     }
@@ -1425,6 +1426,7 @@ pub fn adopt_owner_committed(
     let key = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)?;
     let result = store.write_with(faults, |tx| {
         require_workspace(tx, &held)?;
+        retirement::require_not_retiring(tx, &held.namespace, &cut.adoption_id)?;
         if !read_binding(tx, &held)?.is_some_and(|(binding, coordinate, available)| available && binding == *b && coordinate == held.coordinate) {
             return Err(ApplicationError::Interrupted);
         }

@@ -251,8 +251,22 @@ pub fn released_chain_tail(
 /// holds the lineage, which its adoption will activate. Without a name, the
 /// registration serves the current activation, if any. A lineage this relay
 /// adopted whose activation is released takes no unnamed registration: only
-/// an activation gives it live authority again.
+/// an activation gives it live authority again. Neither serves an activation
+/// whose retirement began.
 pub(super) fn registration_activation(
+    conn: &Connection,
+    namespace: &str,
+    binding: &LiveObjectBinding,
+    requested: Option<&str>,
+) -> Result<Option<String>, ApplicationError> {
+    let serves = resolve_registration(conn, namespace, binding, requested)?;
+    if let Some(activation_id) = &serves {
+        super::retirement::require_not_retiring(conn, namespace, activation_id)?;
+    }
+    Ok(serves)
+}
+
+fn resolve_registration(
     conn: &Connection,
     namespace: &str,
     binding: &LiveObjectBinding,

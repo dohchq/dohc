@@ -151,6 +151,28 @@ pub(super) fn retiring(conn: &Connection, doc: &DocKey) -> Result<bool, Applicat
     .map_err(read_sql)
 }
 
+/// Refuse an activation whose retirement began, until its release: no
+/// registration, capture, resume or adoption serves it again, even after a
+/// restart empties the in-memory retired set.
+pub(super) fn require_not_retiring(
+    conn: &Connection,
+    namespace: &str,
+    activation_id: &str,
+) -> Result<(), ApplicationError> {
+    let retiring: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM live_owner_retirements
+               WHERE relay_database_namespace=?1 AND activation_id=?2)",
+            params![namespace, activation_id],
+            |row| row.get(0),
+        )
+        .map_err(read_sql)?;
+    if retiring {
+        return Err(ApplicationError::Conflict);
+    }
+    Ok(())
+}
+
 /// A release ends the retirement it began.
 fn clear_intent(
     tx: &Transaction<'_>,

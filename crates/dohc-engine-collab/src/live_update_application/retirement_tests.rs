@@ -593,17 +593,9 @@ fn a_quarantined_service_seed_is_reported_and_still_retires() {
 /// Phase A ends one activation in its owner: only registrations tagged with
 /// it, and only its document's cache entry. Its binding row stays, and it
 /// never registers under this owner again.
-#[test]
-fn retiring_an_activation_ends_only_its_own_registrations_and_cache_entry() {
-    let mut f = Fixture::new();
-    f.adopt().unwrap();
-    let coordinate = ApplicationHostCoordinate {
-        host_id: "host".into(),
-        host_epoch: 1,
-        instance_id: "instance".into(),
-        connection_id: "connection".into(),
-    };
-    // Another document, which serves no activation, with its own cache entry.
+/// Another document, `other` at `other.md`, with the fixture's text and base.
+/// Returns its binding.
+fn other_document(f: &mut Fixture) -> LiveObjectBinding {
     let fixture: Value =
         serde_json::from_str(include_str!("../../tests/owner-source/owner-source-seed.json"))
             .unwrap();
@@ -629,12 +621,27 @@ fn retiring_an_activation_ends_only_its_own_registrations_and_cache_entry() {
         .unwrap();
     let other = DocKey::new("workspace", "main", "other").unwrap();
     durable::claim_base(&mut f.store, &other, ContentKind::Richdoc, &bytes, &NoFaults, 2).unwrap();
-    let other_binding = LiveObjectBinding {
+    LiveObjectBinding {
         object_id: "other".into(),
         current_path: "other.md".into(),
         selector_paths: vec!["other.md".into()],
         ..f.binding.clone()
+    }
+}
+
+#[test]
+fn retiring_an_activation_ends_only_its_own_registrations_and_cache_entry() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let coordinate = ApplicationHostCoordinate {
+        host_id: "host".into(),
+        host_epoch: 1,
+        instance_id: "instance".into(),
+        connection_id: "connection".into(),
     };
+    // Another document, which serves no activation, with its own cache entry.
+    let other_binding = other_document(&mut f);
+    let other = DocKey::new("workspace", "main", "other").unwrap();
     let other_handle = f
         ._owner
         .register(&mut f.store, "namespace".into(), coordinate.clone(), other_binding)
@@ -1659,6 +1666,96 @@ fn a_released_activation_never_regains_live_authority() {
         } else {
             assert_eq!(unnamed.unwrap().activation_id(), None);
         }
+    }
+}
+
+/// Sol's round 3b blocker: after Phase A and a restart, no owner retired the
+/// activation in memory, but its durable intent still refuses every way back
+/// to live authority, whether it adopted or not. A named or unnamed
+/// registration serving it is refused before any binding changes, a capture
+/// or resume before it retains anything, and an adoption, through a handle
+/// that serves no activation too, before it writes. The retirement still
+/// releases. Another document's activation captures, resumes, registers and
+/// adopts throughout.
+#[test]
+fn a_retiring_activation_never_serves_again_after_a_restart() {
+    let writes = [&RELEASE_WRITES[..], &["binary_blobs", "live_owner_retirements"]].concat();
+    for adopted in [true, false] {
+        let mut f = imported_fixture();
+        let other = other_document(&mut f);
+        let payload = serde_json::json!({
+            "versionId":"main", "objectId":"other", "contentKind":"richdoc", "isBaseState":true,
+            "lineageClaimId":other.lineage_claim_id, "updateBlobSha256":other.lineage_claim_id,
+        });
+        write(&mut f, &format!(
+            "UPDATE ydoc_docs SET path='other.md',base_origin_id='remote',base_origin_seq=8,base_relay_seq=9
+               WHERE object_id='other';
+             INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported)
+               VALUES('workspace','remote',8,'ydoc.update','{payload}',1,1)"
+        ));
+        let other_key = DocKey::new("workspace", "main", "other").unwrap();
+        let id = capture_imported(&mut f, 1_000_000).unwrap().activation_id;
+        f.cut.adoption_id = id.clone();
+        if adopted {
+            f.adopt().unwrap();
+        }
+        begin(&mut f, 10).unwrap();
+        // The intent alone refuses an adoption through a live handle.
+        let before = rows(&f, &writes);
+        assert!(matches!(f.adopt(), Err(ApplicationError::Conflict)), "adopted={adopted}");
+        assert_eq!(rows(&f, &writes), before, "adopted={adopted}");
+        drop(f.store);
+        f.store = EngineStore::open(&f._scratch.join("engine.db"), 31).unwrap();
+        f._owner = ApplicationOwner::new("workspace".into()).unwrap();
+        let unrelated =
+            capture_imported_owner_activation(&mut f.store, "namespace", &other_key, "other.md", 1_000_000, &NoFaults)
+                .unwrap()
+                .activation_id;
+        resume_imported_owner_activation(&mut f.store, "namespace", &other_key, "other.md", &unrelated, 1_000_000)
+            .unwrap();
+        let unrelated_handle = f
+            ._owner
+            .register_activation(&mut f.store, "namespace".into(), retirement_host(), other, unrelated.clone())
+            .unwrap();
+        let live = || unrelated_handle.registration.lock().unwrap().live;
+        // On another connection, a registration that went on would first
+        // retire the unrelated one.
+        let before = rows(&f, &writes);
+        let elsewhere = ApplicationHostCoordinate { connection_id: "elsewhere".into(), ..retirement_host() };
+        for coordinate in [retirement_host(), elsewhere] {
+            let named = f._owner.register_activation(&mut f.store, "namespace".into(), coordinate, f.binding.clone(), id.clone());
+            assert!(matches!(named, Err(ApplicationError::Conflict)), "adopted={adopted}");
+            assert!(live(), "adopted={adopted}");
+        }
+        assert!(matches!(capture_imported(&mut f, 1_000_000), Err(ApplicationError::Conflict)), "adopted={adopted}");
+        assert!(matches!(resume_imported(&mut f, &id, 1_000_000), Err(ApplicationError::Conflict)), "adopted={adopted}");
+        assert_eq!(rows(&f, &writes), before, "adopted={adopted}");
+        // Unnamed, an adopted activation's registration would serve it; a
+        // never-adopted one's serves nothing, and adopts nothing.
+        let unnamed = f._owner.register(&mut f.store, "namespace".into(), retirement_host(), f.binding.clone());
+        if adopted {
+            assert!(matches!(unnamed, Err(ApplicationError::Conflict)));
+        } else {
+            f.handle = unnamed.unwrap();
+            assert_eq!(f.handle.activation_id(), None);
+            assert!(matches!(f.adopt(), Err(ApplicationError::Conflict)));
+        }
+        assert_eq!(rows(&f, &writes), before, "adopted={adopted}");
+        let cut = OwnerAdoptionCut {
+            adoption_id: unrelated.clone(),
+            source_moment_id: "other-original".into(),
+            ..f.cut.clone()
+        };
+        adopt_owner_committed(&mut f.store, &unrelated_handle, cut, 1_000_000, 100, 10, &NoFaults, |_, _, _, _| Ok(()))
+            .unwrap();
+        host_document(&mut f, true, adopted);
+        assert!(
+            matches!(release_through(&mut f, 10).unwrap(), Release::Released { replayed: false, .. }),
+            "adopted={adopted}"
+        );
+        assert!(intents(&f).is_empty());
+        assert!(live(), "adopted={adopted}");
+        assert_eq!(unrelated_handle.activation_id().as_deref(), Some(unrelated.as_str()));
     }
 }
 

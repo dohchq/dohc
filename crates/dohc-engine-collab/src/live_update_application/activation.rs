@@ -223,6 +223,7 @@ pub fn capture_imported_owner_activation(
             return Err(ApplicationError::ConfiguredByteBudgetExceeded);
         }
         let activation_id = format!("ordinary-activation-{}",hex_sha256(descriptor.as_bytes()));
+        super::retirement::require_not_retiring(tx, namespace, &activation_id)?;
         // Another activation holds the lineage, so this capture could never
         // adopt. Retained, nothing would release it, and it would keep its
         // document from parking.
@@ -299,10 +300,11 @@ pub fn resume_imported_owner_activation(
         if cursor<source.committed_cursor || epoch!=source.replication_epoch || stream!=source.stream_identity {
             return Err(ApplicationError::Conflict);
         }
-        // A released activation never resumes, even while its bytes still match.
+        // A released or retiring activation never resumes, even while its bytes still match.
         if owner_activations::activation_by_id(conn,namespace,activation_id)?.is_some_and(|recorded|recorded.released) {
             return Err(ApplicationError::Conflict);
         }
+        super::retirement::require_not_retiring(conn,namespace,activation_id)?;
         let adopted=owner_activations::current_activation(conn,None,key,&source.lineage_claim_id)?
             .map(|(activation,adopted)|(activation.namespace,activation.activation_id,adopted.local_ydoc_sequence,
                 activation.source_moment_id,activation.source_digest,activation.source_byte_length));
