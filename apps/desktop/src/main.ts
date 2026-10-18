@@ -965,7 +965,7 @@ const {
   targetWindow,
   sendWorkspaceActivated,
   applyZoomLevelToWindows,
-  broadcastUserSettings,
+  broadcastUserSettings, broadcastAgentColor,
   refreshApplicationMenu,
   refreshNativeWorkspaceSurfaces,
   prepareForRendererReload,
@@ -5945,6 +5945,7 @@ const settingsIpc = createSettingsIpc<WebContents, IpcMainInvokeEvent, DesktopRe
   applyZoomLevelToWindows, applyThemeMode, refreshDispatchTray, openDispatchWorkspaces,
   setSpellCheckerEnabled: (enabled) => session.defaultSession.setSpellCheckerEnabled(enabled),
   chatDispatchService, withRendererWorkspaceOperation, notifyRenderer,
+  broadcastAgentColor,
   broadcastUserSettings: (settings) => {
     // Reports follow the switches before any window learns of them.
     telemetry.setPrivacy(privacyInEffect(settings));
@@ -6085,7 +6086,7 @@ function registerIpcHandlers(): void {
     assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine,
     withEngineAdapter, requireEngineCapture, readWorkspaceEnginePolicy, readSyncHistory, localAgentDisplayName: () => cachedAgentName ?? "Agent", localPersonId: localUserId,
     localPersonName: localUserDisplayName, localPerson,
-    localInstallationId, warmCredentialCache, currentCredentials: () => cachedCredentials,
+    stateDir, localInstallationId, warmCredentialCache, currentCredentials: () => cachedCredentials,
     historyCollections: async operation => {
       const { workspace } = operation;
       const local = await localDatasetHostFor(workspace, operation.signal);
@@ -6919,7 +6920,7 @@ function registerIpcHandlers(): void {
   registerChatsIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
     registerHandler: handleIpc,
     assertTrustedSender, chatScope, requireEngineCapture, linkedChatStoreFor, chatWrites,
-    assertWritableWorkspace, warmCredentialCache, localUserId,
+    stateDir, assertWritableWorkspace, warmCredentialCache, localUserId,
     localInstallationId, currentCredentials: () => cachedCredentials, chatRelayIdentityFor,
     readWorkspace: findWorkspace,
     syncWorkspaceSharedChannels, syncSharedChannelsForChatTarget,

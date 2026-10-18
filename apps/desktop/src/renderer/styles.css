@@ -45,12 +45,11 @@
   --dohc-danger: #a43e2a;
   --dohc-selection: rgba(58, 126, 233, 0.22);
 
-  /* Identity hues: the shared human hash excludes olive; colour choices include it.
+  /* Identity hues: olive belongs to the agent default.
    * Muted so they sit on the paper; text-strength on every
    * surface and on their own 15% tint (tokens.test.ts). */
   --dohc-hue-rust: #88412c;
   --dohc-hue-amber: #705012;
-  --dohc-hue-olive: #50602a;
   --dohc-hue-teal: #22645a;
   --dohc-hue-blue: #285884;
   --dohc-hue-indigo: #4c528f;
@@ -79,7 +78,6 @@
   --dohc-selection: rgba(102, 148, 245, 0.30);
   --dohc-hue-rust: #dc9378;
   --dohc-hue-amber: #d9b05a;
-  --dohc-hue-olive: #b9c47a;
   --dohc-hue-teal: #82c9bb;
   --dohc-hue-blue: #8fb8e2;
   --dohc-hue-indigo: #a7abee;
@@ -108,7 +106,6 @@
   --color-danger: var(--dohc-danger);
   --color-hue-rust: var(--dohc-hue-rust);
   --color-hue-amber: var(--dohc-hue-amber);
-  --color-hue-olive: var(--dohc-hue-olive);
   --color-hue-teal: var(--dohc-hue-teal);
   --color-hue-blue: var(--dohc-hue-blue);
   --color-hue-indigo: var(--dohc-hue-indigo);

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import {
-  DesktopUserSettingsResult, SetAppPinnedPayload, SetUserSettingsPayload,
+  SetAgentColorPayload, DesktopUserSettingsResult, SetAppPinnedPayload, SetUserSettingsPayload,
   WorkspaceSettingsPayload, SetWorkspaceSettingsPayload, WorkspaceSettingsResult,
   WorkspaceIdPayload, GetWorkspaceUiStateResult, SetWorkspaceUiStatePayload,
 } from "./bridgeContract";
@@ -27,6 +27,12 @@ export const settingsOperations = {
     capabilityId: "app.pin.set", channel: "desktop:set-app-pinned",
     scope: "device", guard: "trusted-sender",
     payload: SetAppPinnedPayload, result: DesktopUserSettingsResult,
+  },
+  setAgentColor: {
+    capabilityId: "agent.color.set", channel: "desktop:set-agent-color",
+    scope: "workspace", guard: "active-workspace",
+    inactiveMessage: "Agent color save stopped because this window changed workspaces.",
+    payload: SetAgentColorPayload,
   },
   resetUserSettings: {
     capabilityId: "settings.user.reset", channel: "desktop:reset-user-settings",

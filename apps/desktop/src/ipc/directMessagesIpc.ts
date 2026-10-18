@@ -1,3 +1,4 @@
+import { agentColorsForPresentation } from "../settings/userSettingsStore";
 import { createActorPresentationRequest } from "../workspaces/actorPresentation";
 import { join } from "node:path";
 import { normalizeChatMessageBody } from "@dohc/workspace-contracts/chat-message-body";
@@ -705,6 +706,7 @@ export function registerDirectMessagesIpcHandlers<
           dm: dmRecordForIpc(dm),
           // A person's own message names no automation.
           message: chatMessageForIpc(message, () => null, await createActorPresentationRequest({
+            agentColors: await agentColorsForPresentation(stateDir()),
             readWorkspace: () => listWorkspaces().find(entry => entry.workspaceId === workspace.workspaceId) ?? null,
             store, assertCurrent: assertCurrentDmSession, installationId: localInstallationId(), credentials: currentCredentials(),
           })(message, message.threadId)),

@@ -1,3 +1,4 @@
+import { agentColorsForPresentation } from "../settings/userSettingsStore";
 import { createWorkspaceHandler } from "./rendererWorkspaceHandler";
 import { shareRecordStatuses } from "../workspaces/shareRecordStatus";
 import { WorkspaceDaemonRequester, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
@@ -79,6 +80,7 @@ export function createWorkspaceEngineIpc<
   /** The person a request is made by, read from main's own account when it arrives. */
   localPerson(): Promise<LocalPersonAuthor>;
   localInstallationId(): string;
+  stateDir(): string;
   warmCredentialCache(): Promise<void>;
   currentCredentials(): CloudCredentials | null;
   /** An automation author as History shows it, in one workspace. */
@@ -313,7 +315,9 @@ export function createWorkspaceEngineIpc<
         }
       };
       const presentations = async (): Promise<EngineMomentAuthorNames["presentations"]> => {
-        if (shared) return createHistoryPresentationRequest({ source: "received", workspaceId: entry.workspaceId, assertCurrent });
+        const agentColors = await agentColorsForPresentation(dependencies.stateDir());
+        assertCurrent();
+        if (shared) return createHistoryPresentationRequest({ agentColors, source: "received", workspaceId: entry.workspaceId, assertCurrent });
         await warmCredentialCache();
         assertCurrent();
         const credentials = currentCredentials();
@@ -323,7 +327,7 @@ export function createWorkspaceEngineIpc<
           || (credentials !== null && ["synced", "unknown"].includes(await readSyncHistory(entry.rootPath)));
         assertCurrent();
         return createHistoryPresentationRequest({
-          source: "own-store", workspaceId: entry.workspaceId, assertCurrent, serverUrl: entry.remote?.serverUrl, synced,
+          agentColors, source: "own-store", workspaceId: entry.workspaceId, assertCurrent, serverUrl: entry.remote?.serverUrl, synced,
           installationId: localInstallationId(), credentials,
         });
       };

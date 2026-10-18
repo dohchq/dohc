@@ -129,6 +129,7 @@ describe("workspace summary changes", () => {
       cloudStatus: vi.fn(async () => ({ connected: false })),
       onCloudSessionChanged: vi.fn(() => () => undefined),
       getUserSettings: vi.fn(async () => ({ settings: DEFAULT_USER_SETTINGS, source: "default" })),
+      onAgentColorChanged: vi.fn(() => () => undefined),
       onUserSettingsChanged: vi.fn(() => () => undefined),
       onWorkspaceActivity: vi.fn((listener: typeof emit) => { emit = listener; return () => undefined; }),
       onWorkspaceActivated: vi.fn(() => () => undefined),
@@ -262,6 +263,7 @@ describe("DesktopRoot", () => {
         settings: DEFAULT_USER_SETTINGS,
         source: "default" as const,
       })),
+      onAgentColorChanged: vi.fn(() => () => undefined),
       onUserSettingsChanged: vi.fn(() => () => undefined),
       onWorkspaceActivity: vi.fn(() => () => undefined),
       onWorkspaceActivated: vi.fn(() => () => undefined),
@@ -303,6 +305,7 @@ describe("DesktopRoot", () => {
         settings: DEFAULT_USER_SETTINGS,
         source: "default" as const,
       })),
+      onAgentColorChanged: vi.fn(() => () => undefined),
       onUserSettingsChanged: vi.fn(() => () => undefined),
       onWorkspaceActivity: vi.fn(() => () => undefined),
       onWorkspaceActivated: vi.fn(() => () => undefined),
@@ -329,6 +332,7 @@ describe("DesktopRoot", () => {
         settings: DEFAULT_USER_SETTINGS,
         source: "default" as const,
       })),
+      onAgentColorChanged: vi.fn(() => () => undefined),
       onUserSettingsChanged: vi.fn(() => () => undefined),
       onWorkspaceActivity: vi.fn(() => () => undefined),
       onWorkspaceActivated: vi.fn(() => () => undefined),
@@ -367,6 +371,7 @@ describe("DesktopRoot", () => {
         settings: DEFAULT_USER_SETTINGS,
         source: "default" as const,
       })),
+      onAgentColorChanged: vi.fn(() => () => undefined),
       onUserSettingsChanged: vi.fn(() => () => undefined),
       onWorkspaceActivity: vi.fn(() => () => undefined),
       onWorkspaceActivated: vi.fn(() => () => undefined),
@@ -402,6 +407,7 @@ describe("DesktopRoot", () => {
         settings: DEFAULT_USER_SETTINGS,
         source: "default" as const,
       })),
+      onAgentColorChanged: vi.fn(() => () => undefined),
       onUserSettingsChanged: vi.fn(() => () => undefined),
       onWorkspaceActivity: vi.fn(() => () => undefined),
       onWorkspaceActivated: vi.fn(() => () => undefined),
@@ -439,6 +445,7 @@ describe("DesktopRoot", () => {
         settings: DEFAULT_USER_SETTINGS,
         source: "default" as const,
       })),
+      onAgentColorChanged: vi.fn(() => () => undefined),
       onUserSettingsChanged: vi.fn(() => () => undefined),
       onWorkspaceActivity: vi.fn(() => () => undefined),
       onWorkspaceActivated: vi.fn(() => () => undefined),
@@ -482,6 +489,7 @@ describe("DesktopRoot", () => {
         settings: DEFAULT_USER_SETTINGS,
         source: "default" as const,
       })),
+      onAgentColorChanged: vi.fn(() => () => undefined),
       onUserSettingsChanged: vi.fn(() => () => undefined),
       onWorkspaceActivity: vi.fn(() => () => undefined),
       onWorkspaceActivated: vi.fn((callback: (workspace: Workspace) => void) => {
@@ -524,6 +532,7 @@ describe("DesktopRoot", () => {
       cloudStatus: vi.fn(async () => ({ connected: false })),
       onCloudSessionChanged: vi.fn(() => () => undefined),
       getUserSettings,
+      onAgentColorChanged: vi.fn(() => () => undefined),
       onUserSettingsChanged: vi.fn((callback: typeof settingsChanged) => {
         settingsChanged = callback;
         return () => undefined;
@@ -572,6 +581,7 @@ describe("a settings file save", () => {
       cloudStatus: vi.fn(async () => ({ connected: false })),
       onCloudSessionChanged: vi.fn(() => () => undefined),
       getUserSettings,
+      onAgentColorChanged: vi.fn(() => () => undefined),
       onUserSettingsChanged: vi.fn((callback: typeof settingsChanged) => {
         settingsChanged = callback;
         return () => undefined;
@@ -630,6 +640,7 @@ describe("startup selection", () => {
         settings: DEFAULT_USER_SETTINGS,
         source: "default" as const,
       })),
+      onAgentColorChanged: vi.fn(() => () => undefined),
       onUserSettingsChanged: vi.fn(() => () => undefined),
       onWorkspaceActivity: vi.fn((listener: (event: { workspaceId?: string }) => void) => {
         emitActivity = listener;
@@ -671,6 +682,7 @@ describe("registry read failure", () => {
       cloudStatus: vi.fn(async () => ({ connected: false })),
       onCloudSessionChanged: vi.fn(() => () => undefined),
       getUserSettings: vi.fn(async () => ({ settings: DEFAULT_USER_SETTINGS, source: "default" as const })),
+      onAgentColorChanged: vi.fn(() => () => undefined),
       onUserSettingsChanged: vi.fn(() => () => undefined),
       onWorkspaceActivity: vi.fn(() => () => undefined),
       onWorkspaceActivated: vi.fn(() => () => undefined),
@@ -714,6 +726,7 @@ describe("registry read failure", () => {
       cloudStatus: vi.fn(async () => ({ connected: false })),
       onCloudSessionChanged: vi.fn(() => () => undefined),
       getUserSettings: vi.fn(async () => ({ settings: DEFAULT_USER_SETTINGS, source: "default" as const })),
+      onAgentColorChanged: vi.fn(() => () => undefined),
       onUserSettingsChanged: vi.fn(() => () => undefined),
       onWorkspaceActivity: vi.fn(() => () => undefined),
       onWorkspaceActivated: vi.fn(() => () => undefined),
@@ -748,6 +761,7 @@ describe("registry grows under an idle first-run window", () => {
         settings: DEFAULT_USER_SETTINGS,
         source: "default" as const,
       })),
+      onAgentColorChanged: vi.fn(() => () => undefined),
       onUserSettingsChanged: vi.fn(() => () => undefined),
       onWorkspaceActivity: vi.fn((listener: (event: { workspaceId?: string }) => void) => {
         emitActivity = listener;
@@ -796,6 +810,7 @@ describe("registry emptied under an open workspace", () => {
         settings: DEFAULT_USER_SETTINGS,
         source: "default" as const,
       })),
+      onAgentColorChanged: vi.fn(() => () => undefined),
       onUserSettingsChanged: vi.fn(() => () => undefined),
       onWorkspaceActivity: vi.fn((listener: (event: { workspaceId?: string }) => void) => {
         emitActivity = listener;
@@ -829,6 +844,7 @@ describe("registry emptied under an open workspace", () => {
         settings: DEFAULT_USER_SETTINGS,
         source: "default" as const,
       })),
+      onAgentColorChanged: vi.fn(() => () => undefined),
       onUserSettingsChanged: vi.fn(() => () => undefined),
       onWorkspaceActivity: vi.fn((listener: (event: { workspaceId?: string }) => void) => {
         emitActivity = listener;
@@ -870,6 +886,7 @@ describe("reaction writes across first run", () => {
         settings: DEFAULT_USER_SETTINGS,
         source: "default" as const,
       })),
+      onAgentColorChanged: vi.fn(() => () => undefined),
       onUserSettingsChanged: vi.fn(() => () => undefined),
       onWorkspaceActivity: vi.fn((listener: (event: { workspaceId?: string }) => void) => {
         emitActivity = listener;
@@ -937,6 +954,7 @@ describe("opening a notice in another workspace", () => {
         settings: DEFAULT_USER_SETTINGS,
         source: "default" as const,
       })),
+      onAgentColorChanged: vi.fn(() => () => undefined),
       onUserSettingsChanged: vi.fn(() => () => undefined),
       onWorkspaceActivity: vi.fn(() => () => undefined),
       onWorkspaceActivated: vi.fn(() => () => undefined),
@@ -991,6 +1009,7 @@ describe("the window's title and menu commands", () => {
       cloudStatus: vi.fn(async () => ({ connected: false })),
       onCloudSessionChanged: vi.fn(() => () => undefined),
       getUserSettings: vi.fn(async () => ({ settings: DEFAULT_USER_SETTINGS, source: "default" as const })),
+      onAgentColorChanged: vi.fn(() => () => undefined),
       onUserSettingsChanged: vi.fn(() => () => undefined),
       onWorkspaceActivity: vi.fn(() => () => undefined),
       onWorkspaceActivated: vi.fn(() => () => undefined),

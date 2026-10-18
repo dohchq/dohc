@@ -841,3 +841,22 @@ describe("desktop native menus", () => {
     expect(closing.webContents.send).not.toHaveBeenCalled();
   });
 });
+
+
+it("sends agent hues only to each window's currently admitted workspace", async () => {
+  const f = fixture();
+  const first = new Window(), same = new Window(), other = new Window(), utility = new Window();
+  for (const window of [first, same, other]) f.windows.trackWorkspaceWindow(window.native);
+  await f.sessions.open(first.webContents.native, { ...workspace("a"), attachmentId: Symbol() }, "doc-first");
+  await f.sessions.open(same.webContents.native, { ...workspace("a"), attachmentId: Symbol() }, "doc-same");
+  await f.sessions.open(other.webContents.native, { ...workspace("b"), attachmentId: Symbol() }, "doc-other");
+  const event = { workspaceId: "a", group: "issued", hue: "blue" } as const;
+  f.windows.broadcastAgentColor(event);
+  for (const window of [first, same]) expect(window.webContents.send).toHaveBeenCalledExactlyOnceWith(CHANNELS.agentColorChanged, event);
+  expect(other.webContents.send).not.toHaveBeenCalled();
+  expect(utility.webContents.send).not.toHaveBeenCalled();
+  await f.sessions.retireAfterCrash(first.webContents.native);
+  first.webContents.send.mockClear();
+  f.windows.broadcastAgentColor(event);
+  expect(first.webContents.send).not.toHaveBeenCalled();
+});
