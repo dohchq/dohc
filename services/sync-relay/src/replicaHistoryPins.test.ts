@@ -8,6 +8,7 @@ import {createReplicaReadPrincipal} from "./replicaReadPrincipal";
 import {createReplicaSupervisor} from "./replicaSupervisor";
 import {initializeReplicaCurrentViewSchema} from "./storage/replicaCurrentViewSchema";
 import type {SqliteDb} from "./storage/types";
+import type {StorageContext} from "./storage/context";
 import {closeTestStorage, closeTestStorages, inspectDatabase, reopenTestStorage, seedLinkGrant, sha256, storagePath, tempRoot, testStorage} from "./testing";
 
 afterEach(async () => {vi.useRealTimers(); await closeTestStorages();});
@@ -179,13 +180,57 @@ it.each(["replication_epoch","stream_identity"])("current reads fail closed on a
 it("position-only views let a floor-ahead grant finish updating",async()=>{
   const f=await fixture();f.save();replacementEvidence(f.db,"log");f.grant("late");
   expect(f.list({grantId:"late"})).toEqual({status:"updating"});
+  expect(f.storage.readReplicaCurrentViewFile({...f.input,grantId:"late",path:"docs/a.md"})).toEqual({status:"updating"});
+  const store=vi.spyOn(f.storage,"storeReplicaCurrentView");
   const supervisor=createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("history-positions"),
     startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...f.view(),moved:false,nextCursor:null,refusedFiles:[]})})});
   try {
     await supervisor.activate("w");
     expect(f.list({grantId:"late"})).toMatchObject({status:"ready"});
+    expect(f.storage.readReplicaCurrentViewFile({...f.input,grantId:"late",path:"docs/a.md"})).toMatchObject({status:"ready",text:"initial"});
+    expect(store).not.toHaveBeenCalled();
     expect(f.db.prepare("SELECT log_cursor FROM sync_relay_replica_cuts").get()).toEqual({log_cursor:1});
-  } finally {await supervisor.close();}
+  } finally {await supervisor.close();vi.restoreAllMocks();}
+});
+
+it.each(["stale-header","log-regression","journal-regression","log-ahead","journal-ahead","workspace","omissions","epoch","stream"])
+  ("header-only advancement refuses %s without changing the cut",async change=>{
+    const f=await fixture();replacementEvidence(f.db,"log");replacementEvidence(f.db,"journal");f.save(f.view());
+    const previous={...f.storage.readReplicaCurrentView("w")!},next=f.view();
+    if(change==="stale-header")previous.revision++;
+    if(change==="log-regression")next.logCursor=0;
+    if(change==="journal-regression")next.journalCursor=0;
+    if(change==="log-ahead")next.logCursor++;
+    if(change==="journal-ahead")next.journalCursor++;
+    if(change==="workspace")next.workspaceId="other";
+    if(change==="omissions")next.omitted=[{versionId:"main",objectId:"omitted",path:"docs/o.md",sha256:sha256("x"),reason:"text-frame-limit"}];
+    if(change==="epoch" || change==="stream")f.db.exec(`UPDATE sync_relay_workspaces SET ${change==="epoch"?"replication_epoch":"stream_identity"}='next'`);
+    const before=f.db.prepare("SELECT * FROM sync_relay_replica_cuts").get();
+    expect(()=>f.storage.advanceReplicaCurrentView(f.lease,next,previous)).toThrow();
+    expect(f.db.prepare("SELECT * FROM sync_relay_replica_cuts").get()).toEqual(before);
+  });
+
+it("header-only advancement samples due pins at the new positions",async()=>{
+  const f=await fixture();f.save();const previous=f.storage.readReplicaCurrentView("w")!;
+  replacementEvidence(f.db,"log");replacementEvidence(f.db,"journal");f.at(130_000);
+  f.storage.advanceReplicaCurrentView(f.lease,f.view(),previous);
+  expect(f.pins()).toMatchObject([{reason:"quiet",log_cursor:1,journal_cursor:1}]);
+  expect(f.db.prepare("SELECT pin_log_cursor,pin_journal_cursor FROM sync_relay_history_clocks").get())
+    .toEqual({pin_log_cursor:1,pin_journal_cursor:1});
+});
+
+it("a pending file edit survives cursor-only views and retirement uses one flip",async()=>{
+  const f=await fixture();f.save();let latest=f.latest;
+  const advance=vi.spyOn(f.storage,"advanceReplicaCurrentView"),store=vi.spyOn(f.storage,"storeReplicaCurrentView"),sample=vi.spyOn(f.storage,"sampleReplicaHistory");
+  const supervisor=createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("history-header-pending"),
+    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...latest,moved:false,nextCursor:null,refusedFiles:[]})})});
+  try {
+    await supervisor.activate("w");latest=f.view("changed");await supervisor.activate("w");
+    replacementEvidence(f.db,"log");latest=f.view("changed");await supervisor.activate("w");
+    await supervisor.evict("w");
+    expect(f.storage.readReplicaCurrentView("w")).toMatchObject({logCursor:1,files:[{sha256:sha256("changed")}]});
+    expect(advance).not.toHaveBeenCalled();expect(store).toHaveBeenCalledTimes(1);expect(sample).not.toHaveBeenCalled();
+  }finally{await supervisor.close();vi.restoreAllMocks();}
 });
 
 it.each(["log","journal"])("current view floor refuses stale stored and live text after a %s replacement",async stream=>{
@@ -307,6 +352,92 @@ it("incremental sampling visits only one changed object among 20,000 files",asyn
   }finally{work.active=false;vi.restoreAllMocks();}
 },120_000);
 
+it("cursor-only views at 20,000 files read and rewrite no file rows",async()=>{
+  let active=false,reads=0,writes=0,txMs=0,transactions=0;
+  const prepare=DatabaseSync.prototype.prepare;
+  vi.spyOn(DatabaseSync.prototype,"prepare").mockImplementation(function(this:DatabaseSync,sql){
+    const prepared=prepare.call(this,sql);
+    return new Proxy(prepared,{get(target,key){
+      const method=Reflect.get(target,key,target);if(typeof method!=="function")return method;
+      return (...args:unknown[])=>{
+        const result=method.apply(target,args);
+        if(active && /\bFROM sync_relay_replica_cut_files\b/.test(sql) && (key==="all" || key==="get"))
+          reads+=key==="all"?result.reduce((n:number,row:Record<string,unknown>)=>n+Number(row.n??1),0):result?1:0;
+        if(active && /^(INSERT INTO|DELETE FROM|UPDATE) sync_relay_replica_cut_files\b/.test(sql) && key==="run")writes+=Number(result.changes);
+        return result;
+      };
+    }});
+  });
+  const f=await fixture(false),files=Array.from({length:20_000},(_,i)=>f.file("initial",{objectId:`object-${i}`,path:`docs/${i}.md`}));
+  f.save({...f.view(),files});
+  let incoming=f.latest;
+  const supervisor=createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("history-header-only"),
+    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...incoming,moved:false,nextCursor:null,refusedFiles:[]})})});
+  const context=f.storage as StorageContext,tx=context.replicaViewTx.bind(context);
+  vi.spyOn(context,"replicaViewTx").mockImplementation(run=>{
+    const start=performance.now();try{return tx(run);}finally{if(active){transactions++;txMs+=performance.now()-start;}}
+  });
+  try {
+    await supervisor.activate("w");
+    const before=f.db.prepare("SELECT cut_seq FROM sync_relay_replica_cuts").get()!;
+    replacementEvidence(f.db,"log");incoming={...f.view(),files,texts:[]};
+    // The fixture admits evidence through a second connection. Warm its data_version before measuring.
+    const cached=f.storage.readReplicaCurrentView("w")!;
+    active=true;await supervisor.activate("w");await vi.advanceTimersByTimeAsync(2000);
+    const saved=f.storage.readReplicaCurrentView("w")!;active=false;
+    const result={files:files.length,fileRowsRead:reads,fileRowsWritten:writes,transactions,transactionMs:txMs};
+    if(process.env.DOHC_HEADER_OUT)writeFileSync(process.env.DOHC_HEADER_OUT,JSON.stringify(result,null,2)+"\n");
+    expect(saved).toMatchObject({logCursor:1,revision:incoming.revision});
+    expect(f.db.prepare("SELECT cut_seq FROM sync_relay_replica_cuts").get()).toEqual({cut_seq:Number(before.cut_seq)+1});
+    expect(reads).toBe(0);expect(writes).toBe(0);expect(transactions).toBe(1);
+    expect(saved.files).toBe(cached.files);
+  }finally{active=false;await supervisor.close();vi.restoreAllMocks();}
+},120_000);
+
+it.each(["last-share","epoch","stream"])("retirement after %s ends standing reports no error",async change=>{
+  const f=await fixture();f.save();const onError=vi.fn();
+  const supervisor=createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("history-retired-standing"),onError,
+    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...f.latest,moved:false,nextCursor:null,refusedFiles:[]})})});
+  try {
+    await supervisor.activate("w");f.at(130_000);
+    if(change==="last-share")f.db.exec("UPDATE sync_relay_share_grants SET status='revoked',revoked_at_ms=130000");
+    else f.db.exec(`UPDATE sync_relay_workspaces SET ${change==="epoch"?"replication_epoch":"stream_identity"}='next'`);
+    await supervisor.evict("w");expect(onError).not.toHaveBeenCalled();
+  }finally{await supervisor.close();}
+});
+
+it("upgrade removes orphan current pins but retains omitted and superseded pins",async()=>{
+  const f=await fixture();f.save();f.at(130_000);f.save();
+  const original=String(f.pins()[0]!.pin_id);
+  f.db.exec(`DROP TRIGGER replica_history_usage_insert; DROP TRIGGER replica_history_usage_delete;
+    DROP TRIGGER replica_history_usage_update; DROP TRIGGER replica_history_identity_floor;
+    DROP TABLE sync_relay_history_pin_usage; DROP INDEX replica_history_due;
+    DROP INDEX IF EXISTS replica_history_log_clock; DROP INDEX IF EXISTS replica_history_journal_clock;
+    DROP INDEX replica_history_current_pin;
+    DELETE FROM sync_relay_migrations WHERE migration_id='replica-history-incremental-v1';
+    DROP TRIGGER replica_current_view_grant_update;
+    CREATE TRIGGER replica_current_view_grant_update AFTER UPDATE ON sync_relay_share_grants BEGIN
+      DELETE FROM sync_relay_replica_cuts WHERE workspace_id=(SELECT workspace_id FROM sync_relay_shares WHERE share_id=NEW.share_id);
+    END;
+    INSERT INTO sync_relay_history_pins SELECT 'omitted',workspace_id,version_id,'omitted',path,content_kind,sha256,byte_length,
+      lineage_claim_id,restore_generation,reason,pinned_at_ms,NULL,log_cursor,journal_cursor,authors_json,NULL,NULL FROM sync_relay_history_pins;
+    INSERT INTO sync_relay_history_pins SELECT 'superseded',workspace_id,version_id,'past',path,content_kind,sha256,byte_length,
+      lineage_claim_id,restore_generation,reason,pinned_at_ms,130000,log_cursor,journal_cursor,authors_json,NULL,NULL FROM sync_relay_history_pins WHERE pin_id='${original}';
+    UPDATE sync_relay_replica_cut_text_refs SET ref_count=ref_count+2;
+    UPDATE sync_relay_share_grants SET status='revoked',revoked_at_ms=130000 WHERE grant_id='g';
+    INSERT INTO sync_relay_replica_cuts VALUES ('w','e','s','old',1,1,0,0,
+      '[{"versionId":"main","objectId":"omitted","path":"docs/omitted.md","sha256":"${sha256("initial")}","reason":"text-frame-limit"}]')`);
+  f.restart();
+  expect(f.pins().map(p=>p.pin_id).sort()).toEqual(["omitted","superseded"]);
+  expect(f.db.prepare("SELECT ref_count FROM sync_relay_replica_cut_text_refs").get()).toEqual({ref_count:2});
+  f.save(f.view());f.at(160_000);f.storage.sampleReplicaHistory(f.lease);
+  expect(f.pins().filter(p=>p.object_id==="object" && p.superseded_at_ms===null)).toHaveLength(1);
+  replacementEvidence(f.db,"log");f.grant("late");f.save(f.view("final"));
+  const pin=f.pins().find(p=>p.object_id==="object")!;
+  expect(f.read(String(pin.pin_id),{grantId:"late"})).toEqual({status:"not-found"});
+  f.restart();expect(f.pins().some(p=>p.pin_id===original)).toBe(false);
+});
+
 it.each(["g","wide"])("surviving share retains current text and pins after %s ends",async ending=>{
   const f=await fixture();f.save();f.at(130_000);f.save();const pin=String(f.pins()[0]!.pin_id);
   const survivor=ending==="g"?"wide":"g";
@@ -399,8 +530,8 @@ it("upgrades existing pins, clocks and stale floors once without resetting match
     DROP TRIGGER replica_history_usage_insert; DROP TRIGGER replica_history_usage_delete;
     DROP TRIGGER replica_history_usage_update; DROP TRIGGER replica_history_identity_floor;
     DROP TABLE sync_relay_history_pin_usage;
-    DROP INDEX replica_history_due; DROP INDEX replica_history_log_clock;
-    DROP INDEX replica_history_journal_clock; DROP INDEX replica_history_current_pin;
+    DROP INDEX replica_history_due;
+    DROP INDEX replica_history_current_pin;
     UPDATE sync_relay_history_grant_floors SET replication_epoch='previous' WHERE grant_id='g';
     DELETE FROM sync_relay_migrations WHERE migration_id='replica-history-incremental-v1'`);
   f.restart();

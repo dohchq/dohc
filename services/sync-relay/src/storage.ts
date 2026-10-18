@@ -621,6 +621,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   replicaCurrentViewSelectors(workspaceId: string) { return replicaCurrentViews.replicaCurrentViewSelectors(this,workspaceId); }
   stageReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.stageReplicaCurrentView>[1],view: Parameters<typeof replicaCurrentViews.stageReplicaCurrentView>[2], observations?: ReplicaHistoryObservation[]) { return replicaCurrentViews.stageReplicaCurrentView(this,lease,view,observations); }
   flipReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.flipReplicaCurrentView>[1],staged: Parameters<typeof replicaCurrentViews.flipReplicaCurrentView>[2]) { return replicaCurrentViews.flipReplicaCurrentView(this,lease,staged); }
+  advanceReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.advanceReplicaCurrentView>[1],view: Parameters<typeof replicaCurrentViews.advanceReplicaCurrentView>[2],previous: Parameters<typeof replicaCurrentViews.advanceReplicaCurrentView>[3]) { return replicaCurrentViews.advanceReplicaCurrentView(this,lease,view,previous); }
   storeReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.stageReplicaCurrentView>[1],view: Parameters<typeof replicaCurrentViews.stageReplicaCurrentView>[2], observations?: ReplicaHistoryObservation[]) {
     const saved=this.flipReplicaCurrentView(lease,this.stageReplicaCurrentView(lease,view,observations));
     const needed=new Set(saved.files.map(f=>f.sha256));

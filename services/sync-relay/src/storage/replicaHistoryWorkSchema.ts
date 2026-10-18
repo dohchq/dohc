@@ -26,10 +26,12 @@ const removeUsage = `UPDATE sync_relay_history_pin_usage SET pin_count=pin_count
 export function initializeReplicaHistoryWorkSchema(db: SqliteDb) {
   if (db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(migration)) return;
   db.exec(`CREATE INDEX replica_history_due ON sync_relay_history_clocks(workspace_id,${historyPinDue}) WHERE dirty_since_ms IS NOT NULL;
-    CREATE INDEX replica_history_log_clock ON sync_relay_history_clocks(workspace_id,pin_log_cursor DESC);
-    CREATE INDEX replica_history_journal_clock ON sync_relay_history_clocks(workspace_id,pin_journal_cursor DESC);
     CREATE INDEX replica_history_current_pin ON sync_relay_history_pins(workspace_id,version_id,object_id) WHERE superseded_at_ms IS NULL;
     DELETE FROM sync_relay_history_clocks AS c WHERE NOT EXISTS (
+      SELECT 1 FROM sync_relay_replica_cut_files f WHERE f.workspace_id=c.workspace_id AND f.version_id=c.version_id AND f.object_id=c.object_id)
+      AND NOT EXISTS (SELECT 1 FROM sync_relay_replica_cuts cut,json_each(cut.omitted_json) o WHERE cut.workspace_id=c.workspace_id
+        AND json_extract(o.value,'$.versionId')=c.version_id AND json_extract(o.value,'$.objectId')=c.object_id);
+    DELETE FROM sync_relay_history_pins AS c WHERE superseded_at_ms IS NULL AND NOT EXISTS (
       SELECT 1 FROM sync_relay_replica_cut_files f WHERE f.workspace_id=c.workspace_id AND f.version_id=c.version_id AND f.object_id=c.object_id)
       AND NOT EXISTS (SELECT 1 FROM sync_relay_replica_cuts cut,json_each(cut.omitted_json) o WHERE cut.workspace_id=c.workspace_id
         AND json_extract(o.value,'$.versionId')=c.version_id AND json_extract(o.value,'$.objectId')=c.object_id);

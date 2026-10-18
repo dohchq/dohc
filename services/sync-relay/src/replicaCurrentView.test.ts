@@ -156,6 +156,12 @@ it("rejects a stale incarnation and paths outside current selectors",async()=>{
   f.storage.bindReplicaCurrentView({...f.lease,incarnation:"replacement"});
   expect(()=>f.storage.storeReplicaCurrentView(f.lease,f.view("new"))).toThrow();
 });
+it("header-only fallback keeps full-store text length validation",async()=>{
+  const f=await fixture(),view=f.view();f.storage.storeReplicaCurrentView(f.lease,view);
+  const wrong={...view,files:view.files.map(file=>({...file,byteLength:file.byteLength+1}))};
+  expect(()=>f.storage.storeReplicaCurrentView(f.lease,wrong)).toThrow();
+  expect(f.storage.readReplicaCurrentView("w")!.files).toEqual(view.files);
+});
 it("deletes views when the last share ends or the epoch changes",async()=>{
   const f=await fixture();f.storage.storeReplicaCurrentView(f.lease,f.view());
   f.storage.revokeShareGrant({shareId:"s",grantId:"g",revokedAtMs:2});
