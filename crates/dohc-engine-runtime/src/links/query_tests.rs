@@ -118,7 +118,7 @@ async fn incoming_reports_unchecked_bounds_sources_and_rejects_version_cursors()
     let db = engine_db_path(&scratch).unwrap();
     let mut store = open(&db);
     write(&mut store, "target", "target.md", "", 1);
-    for i in 0..20 {
+    for i in 0..120 {
         write(
             &mut store,
             &format!("s-{i}"),
@@ -141,6 +141,7 @@ async fn incoming_reports_unchecked_bounds_sources_and_rejects_version_cursors()
     let _hold = actor.hold_link_drain();
     let first = page(&actor, "target.md", None).await;
     assert_eq!(first["unchecked"], json!(["a.md"]));
+    assert_eq!(first["entries"].as_array().unwrap().len(), 99);
     assert_eq!(first["complete"], false);
     let mut cursor = first["nextCursor"].as_str().map(str::to_owned);
     let mut total = first["entries"].as_array().unwrap().len();
@@ -149,7 +150,7 @@ async fn incoming_reports_unchecked_bounds_sources_and_rejects_version_cursors()
         total += result["entries"].as_array().unwrap().len();
         cursor = result["nextCursor"].as_str().map(str::to_owned);
     }
-    assert_eq!(total, 20);
+    assert_eq!(total, 120);
     actor
         .run(|store, _| {
             VersionedTextStore::new(store).create_named_version(

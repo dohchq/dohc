@@ -169,9 +169,9 @@ impl ActorHandle {
                         .filter(|(path, _)| !subject_paths.contains(path))
                         .collect();
                     sources.sort_by(|a, b| a.0.cmp(&b.0));
-                    let more = sources.len() > 8;
+                    let more = sources.len() > 100;
                     let mut prepared = Vec::new();
-                    for (path, object) in sources.into_iter().take(8) {
+                    for (path, object) in sources.into_iter().take(100) {
                         let source = object
                             .map(|object| incoming::read_source(c, &ws, &version, &object))
                             .transpose()?

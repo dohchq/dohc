@@ -271,7 +271,7 @@ describe("BacklinksPanel", () => {
     );
   });
 
-  it("clears the current backlinks when a workspace refresh fails", async () => {
+  it("keeps the current backlinks when a workspace refresh fails", async () => {
     const refreshed = deferred<BacklinksFixture>();
     const linksIn = vi
       .fn()
@@ -302,7 +302,7 @@ describe("BacklinksPanel", () => {
       await refreshed.promise.catch(() => undefined);
     });
 
-    await waitFor(() => expect(screen.queryByTestId("backlinks")).toBeNull());
+    expect(screen.getByTestId("backlink-source").textContent).toContain("Initial");
   });
 
   it("does not let the initial response overwrite a newer focus refresh", async () => {
@@ -343,7 +343,8 @@ it("paints engine pages without waiting for chat refresh, including sources beyo
   const linksIn = vi.fn().mockResolvedValueOnce(first).mockReturnValueOnce(second.promise);
   vi.stubGlobal("dohcDesktop", { linksIn, listChatFileMentions: () => chats.promise });
   render(<BacklinksPanel workspaceId="ws" path="target.md" chatMentionsAvailable />);
-  await screen.findAllByText("File5001");
+  await waitFor(() => expect(linksIn).toHaveBeenCalledTimes(2));
+  expect(screen.queryByText("File5001")).toBeNull();
   await act(async () => { second.resolve(linkQueryPage(backlinksSource("File5002"))); });
   await screen.findAllByText("File5002");
   expect(linksIn).toHaveBeenCalledWith({ workspaceId: "ws", subject: { path: "target.md" }, cursor: "next" });
@@ -362,4 +363,73 @@ it("clears displayed chat mentions when Chats becomes unavailable", async () => 
   view.rerender(<BacklinksPanel workspaceId="ws" path="a.md" chatMentionsAvailable={false} />);
   expect(screen.queryByTestId("chat-file-mentions")).toBeNull();
   expect(listChatFileMentions).toHaveBeenCalledOnce();
+});
+
+it("keeps the previous list until every refresh page has arrived", async () => {
+  const last = deferred<ReturnType<typeof linkQueryPage>>();
+  const first = linkQueryPage(backlinksSource("NewFirst")); first.nextCursor = "last";
+  const linksIn = vi.fn().mockResolvedValueOnce(linkQueryPage(TWO_SOURCES)).mockResolvedValueOnce(first).mockReturnValueOnce(last.promise);
+  vi.stubGlobal("dohcDesktop", { linksIn });
+  const view = render(<BacklinksPanel workspaceId="ws" path="target.md" refreshKey={0} />);
+  await screen.findByText("Alpha");
+  view.rerender(<BacklinksPanel workspaceId="ws" path="target.md" refreshKey={1} />);
+  await waitFor(() => expect(linksIn).toHaveBeenCalledTimes(3));
+  expect(screen.getByTestId("backlinks-count").textContent).toBe("3");
+  expect(screen.queryByText("NewFirst")).toBeNull();
+  await act(async () => last.resolve(linkQueryPage(backlinksSource("NewLast"))));
+  await screen.findAllByText("NewLast");
+  expect(screen.queryByText("Alpha")).toBeNull();
+  expect(screen.getAllByText("NewFirst").length).toBeGreaterThan(0);
+});
+
+it("shows gathering and retries incomplete walks with backoff capped at eight seconds", async () => {
+  vi.useFakeTimers();
+  try {
+    const incomplete = { ...linkQueryPage(backlinksSource("Pending")), complete: false };
+    const linksIn = vi.fn().mockResolvedValue(incomplete);
+    vi.stubGlobal("dohcDesktop", { linksIn });
+    render(<BacklinksPanel workspaceId="ws" path="target.md" />);
+    await act(async () => {});
+    expect(screen.getByRole("status").textContent).toBe("Gathering linked mentions");
+    for (const delay of [250, 500, 1000, 2000, 4000, 8000, 8000]) {
+      const count = linksIn.mock.calls.length;
+      await act(async () => vi.advanceTimersByTimeAsync(delay - 1));
+      expect(linksIn).toHaveBeenCalledTimes(count);
+      await act(async () => vi.advanceTimersByTimeAsync(1));
+      expect(linksIn).toHaveBeenCalledTimes(count + 1);
+    }
+    linksIn.mockResolvedValue(linkQueryPage(backlinksSource("Ready")));
+    await act(async () => vi.advanceTimersByTimeAsync(8000));
+    expect(screen.queryByRole("status")).toBeNull();
+    const count = linksIn.mock.calls.length;
+    await act(async () => vi.advanceTimersByTimeAsync(16000));
+    expect(linksIn).toHaveBeenCalledTimes(count);
+    cleanup();
+  } finally { vi.useRealTimers(); }
+});
+
+it("shows gathering for an empty incomplete page and cancels retries on unmount", async () => {
+  vi.useFakeTimers();
+  try {
+    const linksIn = vi.fn().mockResolvedValue({ ...linkQueryPage({ sources: [] }), complete: false });
+    vi.stubGlobal("dohcDesktop", { linksIn });
+    const view = render(<BacklinksPanel workspaceId="ws" path="target.md" />);
+    await act(async () => {});
+    expect(screen.getByRole("status").textContent).toBe("Gathering linked mentions");
+    view.unmount();
+    await act(async () => vi.advanceTimersByTimeAsync(10000));
+    expect(linksIn).toHaveBeenCalledOnce();
+  } finally { vi.useRealTimers(); }
+});
+
+it("does not ask for another page after the document changes", async () => {
+  const old = deferred<ReturnType<typeof linkQueryPage>>();
+  const linksIn = vi.fn().mockReturnValueOnce(old.promise).mockResolvedValueOnce(linkQueryPage(backlinksSource("Current")));
+  vi.stubGlobal("dohcDesktop", { linksIn });
+  const view = render(<BacklinksPanel workspaceId="old" path="target.md" />);
+  view.rerender(<BacklinksPanel workspaceId="new" path="target.md" />);
+  await screen.findAllByText("Current");
+  await act(async () => old.resolve({ ...linkQueryPage(backlinksSource("Stale")), nextCursor: "old-next" }));
+  expect(linksIn).toHaveBeenCalledTimes(2);
+  expect(screen.queryByText("Stale")).toBeNull();
 });

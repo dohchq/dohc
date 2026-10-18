@@ -1591,7 +1591,7 @@ describe("markdown editor unmount flush", () => {
     await waitFor(() => expect(linksResolve).toHaveBeenCalledWith({ workspaceId: "ws-1", source: "notes/status.md", literals: [{ kind: "markdown", literal: "./new%23plan.md" }] }));
     fireEvent.click(screen.getByRole("link", { name: "FAQ" }));
     await waitFor(() => expect(linksResolve).toHaveBeenLastCalledWith({ workspaceId: "ws-1", source: "notes/status.md", literals: [{ kind: "markdown", literal: "./faq%3F.md#answers" }] }));
-    expect(onOpenPath).toHaveBeenNthCalledWith(1, "notes/new#plan.md");
+    expect(onOpenPath).toHaveBeenNthCalledWith(1, "notes/new#plan.md", undefined);
     expect(onOpenPath).toHaveBeenNthCalledWith(2, "notes/faq?.md", { headingTarget: { anchor: "answers", nonce: expect.any(Number) } });
   });
 
