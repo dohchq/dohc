@@ -42,7 +42,7 @@ import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import type { LocalPersonAuthor } from "./desktopRecordEdits";
 import { undoWorkspaceHistoryOperation, type OperationHistory } from "./workspaceHistoryOperations";
 import { beginPendingRecovery, type DeleteUndoResult } from "./workspaceDeleteRecovery";
-import { deleteWorkspacePathByHand, moveWorkspacePathByHand } from "./workspaceFileMoves";
+import { assertMoveDocumentKind, deleteWorkspacePathByHand, moveWorkspacePathByHand } from "./workspaceFileMoves";
 import {
   createFile,
   createFolder,
@@ -303,6 +303,7 @@ export function createWorkspaceFileMutationOwner<
     movePath: async (event, payload) => {
       const request = admitMutation(event, payload, MoveWorkspacePathPayload.parse);
       const person = await dependencies.localPerson();
+      let published = false;
       let resolve!: (value: MoveWorkspacePathResult) => void, reject!: (error: unknown) => void;
       const result = new Promise<MoveWorkspacePathResult>((done, failed) => { resolve = done; reject = failed; });
       const recording = runAdmittedMutation(event, request, async ({ input, workspace, signal, receivedShare, capture, authorityId, yDocSessions, assertCurrent }) => {
@@ -311,9 +312,9 @@ export function createWorkspaceFileMutationOwner<
           return MoveWorkspacePathResult.parse(await moveWorkspacePathByHand({ workspace, assertCurrent }, input, person, {
             capture, requestId: randomUUID(), trashItem: dependencies.trashItem,
             onRecorded: (path, operationId) => {
-              assertCurrent();
               const value = MoveWorkspacePathResult.parse({ path, operationId, undo: { available: true } });
               const release = beginPendingRecovery(operationId, { signal, waitForReads: true });
+              published = true;
               resolve(value);
               return release;
             },
@@ -324,16 +325,17 @@ export function createWorkspaceFileMutationOwner<
         }
         return withExclusiveWorkspaceOperation(workspace.rootPath, async (markChanged, lease) => {
           const { fromPath, toPath } = normalizeWorkspaceMovePaths(input.fromPath, input.toPath);
-          const fromKind = liveDocumentKindForPath(fromPath), toKind = liveDocumentKindForPath(toPath);
-          if (fromKind !== null && fromKind !== toKind) throw new Error(
-            `A rename cannot change a live document's kind from ${fromKind} to ${toKind ?? "a plain file"}. Create a new file and copy the content instead.`);
+          assertMoveDocumentKind(fromPath, toPath, "rename");
           const path = structuralShareViewChangeValue(workspace.workspaceId,
             await dependencies.shareViewFiles.change(lease, shareTarget(workspace), { kind: "move", fromPath, toPath }), markChanged);
           if (typeof path !== "string") throw new Error("Shared file move returned an invalid result.");
           return MoveWorkspacePathResult.parse({ path });
         });
       });
-      void recording.then(resolve, reject);
+      void recording.then(resolve, error => {
+        if (published) dependencies.logError("Could not finish recording the file move", error);
+        reject(error);
+      });
       return result;
     },
 

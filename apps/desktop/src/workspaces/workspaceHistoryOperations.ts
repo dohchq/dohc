@@ -116,7 +116,6 @@ async function moveRecoveryFloor(record: MoveRecoveryRecord, floor: Floor): Prom
   for (const path of paths) if (path !== record.from) throw invalid();
   await floor(record.from, undefined, true);
   await floor(record.to, undefined, true);
-  for (const path of paths) { await floor(path); await floor(record.to); }
 }
 function decodeCursor(cursor: string, workspaceId: string, operationId: string): HistoryCursor {
   let parsed: HistoryCursor;
@@ -191,7 +190,7 @@ export async function undoWorkspaceHistoryOperation(operation: Operation & { sig
           ? missingMoveRecoveryReason(moveWord(rename.beforePath ?? rename.path, rename.path)) : "This operation is not in History.");
       }
       return undoDeleteRecovery(rootPath, record, author, options.history, workspaceId, () => writable(operation), markChanged);
-    });
+    }, { markOnSuccess: false });
   } catch (error) {
     // Refuse through the authority wrapper before its final currentness check.
     if (operation.signal.aborted) throw new Error("This workspace was closed. Open it again.");

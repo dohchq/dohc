@@ -3,7 +3,7 @@ import { mkdir, rm, readFile, readdir, rename, stat, symlink, writeFile } from "
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
 import { createTestScratch } from "./testTemp";
-import { deleteWorkspacePathByHand } from "./workspaceFileMoves";
+import { deleteWorkspacePathByHand, moveWorkspacePathByHand } from "./workspaceFileMoves";
 import { readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation, type OperationHistory } from "./workspaceHistoryOperations";
 import { withStaleSensitiveWorkspaceOperation } from "./workspaceAssets";
 import { deferred } from "../testing/deferred";
@@ -92,7 +92,7 @@ it("checks beforePath on later History pages before Undo", async () => {
   expect(await f.undo(id, true)).toMatchObject({ ok: false });
   expect(f.history.readHistoryPage).toHaveBeenCalledTimes(2); expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
 });
-it("refuses moves, unknown ids and invalid ids without an engine Undo or record creation", async () => {
+it("refuses unknown ids and invalid ids without an engine Undo or record creation", async () => {
   const f = await fixture();
   f.history.readHistoryPage.mockResolvedValue({ moments: [], nextCursor: null } as never);
   expect(await f.undo(otherId)).toEqual({ ok: false, reason: "This operation is not in History." });
@@ -294,4 +294,12 @@ it("stops a person missing-record lookup at the first delete page", async () => 
   f.history.readHistoryPage.mockResolvedValueOnce({ moments: [{ operation: "delete", path: "folder/tracked.txt" }], nextCursor: { workspaceId: "owner", operationId: otherId, objectId: null, versionId: "main" } } as never);
   expect(await f.undo(otherId)).toEqual({ ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History or the trash." });
   expect(f.history.readHistoryPage).toHaveBeenCalledOnce(); expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
+});
+
+it("successfully undoes a saved file move through operation History", async () => {
+  const f = await fixture([]); await f.write("before.txt", "kept edits");
+  const moved = await moveWorkspacePathByHand(f.operation, { fromPath: "before.txt", toPath: "after.txt" }, person,
+    { capture: null, requestId: "move", trashItem: async () => undefined, markDeleted: vi.fn() });
+  expect(await f.undo(moved.operationId!)).toMatchObject({ ok: true, restored: ["before.txt"], remaining: [] });
+  expect(await readFile(join(f.rootPath, "before.txt"), "utf8")).toBe("kept edits");
 });

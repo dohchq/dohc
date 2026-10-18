@@ -7,7 +7,7 @@ import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promise
 import { dirname, join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { createTestScratch } from "./testTemp";
-import { moveWorkspacePathByHand, prepareMoveWorkspacePathAs, type PathChangeOptions } from "./workspaceFileMoves";
+import { moveWorkspacePathByHand, placeBack, prepareMoveWorkspacePathAs, type PathChangeOptions } from "./workspaceFileMoves";
 import { createWorkspaceFileMutationOwner } from "./workspaceFileMutationOwner";
 import { readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation, type OperationHistory } from "./workspaceHistoryOperations";
 import { readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
@@ -55,11 +55,13 @@ async function fixture() {
   });
   const history = { readHistoryPage, undoHistoryOperation };
   const options = { capture, requestId: "move", trashItem: async () => { throw new Error("OS trash refused"); }, markDeleted: vi.fn() };
+  const logError = vi.fn();
+  let afterMutation = () => {};
   const owner = createWorkspaceFileMutationOwner({ historyFor: () => history, assertTrustedSender: () => undefined,
-    withRendererWorkspaceOperation: async (_event, _id, work) => work({ ...operation, authorityId: Symbol.for("move-owner"), capture,
-      yDocSessions: { withDocumentUnowned: async (_id, _path, work) => work(), markDeletedUnderPath: vi.fn() } }),
+    withRendererWorkspaceOperation: async (_event, _id, work) => { const result = await work({ ...operation, authorityId: Symbol.for("move-owner"), capture,
+      yDocSessions: { withDocumentUnowned: async (_id, _path, work) => work(), markDeletedUnderPath: vi.fn() } }); afterMutation(); return result; },
     shareViewFiles: { change: async () => { throw new Error("Unexpected share change"); } }, localPerson: async () => person,
-    trashItem: options.trashItem, notifyRenderer: vi.fn(), shareViewEdited: vi.fn(), logError: vi.fn(),
+    trashItem: options.trashItem, notifyRenderer: vi.fn(), shareViewEdited: vi.fn(), logError,
   });
   const move = (fromPath: string, toPath: string) => owner.movePath({}, { workspaceId: "move-test", fromPath, toPath });
   const undo = (operationId = activeOperationId, byAgent = false) => undoWorkspaceHistoryOperation(operation, { operationId }, byAgent ? agent : person, { history, agent: byAgent });
@@ -69,7 +71,7 @@ async function fixture() {
     if (!result.ok) throw new Error(result.reason);
     return { ...result, path: result.toPath };
   };
-  return { rootPath, write, operation, retirement, options, capture, members, objects, history, move, moveAsAgent, undo, recordPath,
+  return { rootPath, write, operation, retirement, options, capture, members, objects, history, move, moveAsAgent, undo, recordPath, logError, afterMutation: (work: () => void) => { afterMutation = work; },
     compensationCount: () => compensationCount, restoring: (value: boolean) => { restoring = value; } };
 }
 async function queuedUndo(f: Awaited<ReturnType<typeof fixture>>, byAgent = false) {
@@ -235,12 +237,12 @@ it("retries a rowless file occupied after the receipt without engine work", asyn
   expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
 });
 
-it("passes the engine's deleted-member refusal through without saving progress", async () => {
+it("passes the engine's deleted-member refusal through with only the requested marker", async () => {
   const f = await fixture(); await f.write("folder/tracked.txt"); await f.moveAsAgent("folder/tracked.txt", "archive/tracked.txt");
   await f.write("archive/tracked.txt", "replacement"); const before = await readFile(f.recordPath(), "utf8");
   f.history.undoHistoryOperation.mockRejectedValueOnce(new Error("Undo refused: object moved or removed: archive/tracked.txt"));
   expect(await f.undo()).toEqual({ ok: false, reason: "Undo refused: object moved or removed: archive/tracked.txt" });
-  expect(await readFile(f.recordPath(), "utf8")).toBe(before);
+  expect(JSON.parse(await readFile(f.recordPath(), "utf8"))).toEqual({ ...JSON.parse(before), engine: { requested: true } });
 });
 it("distinguishes a missing move record from an unknown operation and refuses corrupt records", async () => {
   const f = await fixture(); await f.write("folder/tracked.txt"); await f.moveAsAgent("folder/tracked.txt", "archive/tracked.txt");
@@ -268,14 +270,17 @@ it("passes a different author's lost engine reply refusal through", async () => 
   expect(f.history.undoHistoryOperation).toHaveBeenCalledWith(expect.objectContaining({ author: agent, requestId: expect.stringMatching(/^move-undo:dohc-operation:/) }));
 });
 
-it("keeps queued work current after refusal and invalidates it after completed Undo and replay", async () => {
+it("invalidates queued work only when Undo changes disk, never on finished replay", async () => {
   const f = await fixture(); await f.write("a.txt"); await f.move("a.txt", "b.txt");
   const queued = () => queuedUndo(f);
   await f.write("a.txt", "occupant");
   expect(await queued()).toMatchObject({ result: { ok: false }, follower: "current" });
   await rm(join(f.rootPath, "a.txt"));
   expect(await queued()).toMatchObject({ result: { ok: true }, follower: "WorkspaceOperationSupersededError" });
-  expect(await queued()).toMatchObject({ result: { ok: true }, follower: "WorkspaceOperationSupersededError" });
+  const saving = vi.spyOn(recovery, "saveRecoveryRecord");
+  f.history.undoHistoryOperation.mockClear();
+  expect(await queued()).toMatchObject({ result: { ok: true }, follower: "current" });
+  expect(saving).not.toHaveBeenCalled(); expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
 });
 
 it("reports a rowless file placement failure without inventing an occupant and retries it", async () => {
@@ -349,4 +354,93 @@ it("does not publish a person rename before the engine and capture finish", asyn
   await entered.promise; expect(f.members).toHaveLength(1); expect(settled).not.toHaveBeenCalled();
   release.resolve(); const moved = await moving; await recovery.waitForRecovery(moved.operationId!);
   expect(settled).toHaveBeenCalledOnce();
+});
+
+ it.each([false, true])("reaches engine replay after a committed Undo loses its reply, other author=%s", async otherAuthor => {
+  const f = await fixture(); await f.write("a.txt"); const moved = await f.move("a.txt", "b.txt"); await recovery.waitForRecovery(moved.operationId!);
+  const engine = f.history.undoHistoryOperation.getMockImplementation()!;
+  f.history.undoHistoryOperation.mockImplementationOnce(async input => { await engine(input); throw new Error("reply lost after placement"); });
+  expect(await f.undo()).toEqual({ ok: false, reason: "reply lost after placement" });
+  expect(await readFile(join(f.rootPath, "a.txt"), "utf8")).toBe("a.txt");
+  if (otherAuthor) f.history.undoHistoryOperation.mockRejectedValueOnce(new Error("The idempotency key belongs to another author."));
+  expect(await f.undo(undefined, otherAuthor)).toMatchObject(otherAuthor
+    ? { ok: false, reason: "The idempotency key belongs to another author." }
+    : { ok: true, tracked: { state: "restored" } });
+  expect(f.history.undoHistoryOperation).toHaveBeenCalledTimes(2); expect(f.compensationCount()).toBe(1);
+ });
+ it("returns saved restoring progress when replay cannot reach the engine", async () => {
+  const f = await fixture(); await f.write("a.txt"); await f.moveAsAgent("a.txt", "b.txt"); f.restoring(true);
+  const saved = await f.undo(); expect(f.history.undoHistoryOperation).toHaveBeenCalledTimes(1);
+  const saving = vi.spyOn(recovery, "saveRecoveryRecord");
+  f.history.undoHistoryOperation.mockRejectedValueOnce(new Error("engine offline"));
+  expect(await f.undo()).toEqual(saved); expect(saving).not.toHaveBeenCalled();
+ });
+ it.each([".env", "excluded/config.txt"])("moves a person's file to %s without a History rename", async to => {
+  const f = await fixture(); await f.write("config.txt", "configuration");
+  await f.write(".dohc/files.toml", '[[rule]]\npath = "excluded/**"\ntracked = false\n');
+  const moved = await f.move("config.txt", to); await recovery.waitForRecovery(moved.operationId!);
+  expect(f.members).toEqual([]);
+  expect(JSON.parse(await readFile(f.recordPath(), "utf8"))).toMatchObject({ entries: ["config.txt"], tracked: false });
+  expect(await readFile(join(f.rootPath, to), "utf8")).toBe("configuration");
+  expect(await f.undo(moved.operationId)).toMatchObject({ ok: true, restored: ["config.txt"] });
+ });
+ it("returns a completed rename if retirement happens during capture finalization", async () => {
+  const f = await fixture(); await f.write("a.txt");
+  const capture = f.capture.changePathsAs;
+  vi.spyOn(f.capture, "changePathsAs").mockImplementation(async (...args) => {
+    const result = await capture(...args); f.retirement.abort();
+    f.operation.assertCurrent.mockImplementation(() => { throw new Error("workspace closed"); }); return result;
+  });
+  const moved = await f.move("a.txt", "b.txt"); expect(moved).toMatchObject({ path: "b.txt", undo: { available: true } });
+  await assets.withSharedWorkspaceOperation(f.rootPath, async () => undefined);
+  expect(await readFile(join(f.rootPath, "b.txt"), "utf8")).toBe("a.txt");
+ });
+
+it("resumes a rowless hard link left before source removal", async () => {
+  const f = await fixture(); await f.write("oversized.bin"); await f.moveAsAgent("oversized.bin", "archive/oversized.bin");
+  const record = JSON.parse(await readFile(f.recordPath(), "utf8"));
+  await writeFile(f.recordPath(), JSON.stringify({ ...record, engine: { materialized: true, momentCount: 0 }, pending: record.entries }));
+  await filesystem.link(join(f.rootPath, "archive/oversized.bin"), join(f.rootPath, "oversized.bin"));
+  expect(await f.undo()).toMatchObject({ ok: true, restored: ["oversized.bin"], remaining: [] });
+  await expect(filesystem.lstat(join(f.rootPath, "archive/oversized.bin"))).rejects.toMatchObject({ code: "ENOENT" });
+});
+it("keeps the visible source when rowless Undo cannot hard link it", async () => {
+  const f = await fixture(); await f.write("oversized.bin", "kept"); await f.moveAsAgent("oversized.bin", "archive/oversized.bin");
+  vi.spyOn(filesystem, "link").mockRejectedValueOnce(Object.assign(new Error("unsupported"), { code: "ENOTSUP", syscall: "link" }));
+  const copying = vi.spyOn(filesystem, "copyFile");
+  expect(await f.undo()).toMatchObject({ ok: true, remaining: [{ path: "oversized.bin", retry: true }] });
+  expect(copying).not.toHaveBeenCalled();
+  expect(await readFile(join(f.rootPath, "archive/oversized.bin"), "utf8")).toBe("kept");
+});
+
+it("uses the live-session and debt fence when the person's destination exceeds the engine path limit", async () => {
+  const f = await fixture(); await f.write("a.txt");
+  const to = Array.from({ length: 11 }, () => "a".repeat(95)).join("/") + "/moved.txt";
+  const finish = vi.fn(async () => undefined), begin = vi.spyOn(f.capture, "beginFileRename").mockResolvedValue(finish);
+  const authored = vi.spyOn(f.capture, "changePathsAs");
+  const moved = await moveWorkspacePathByHand(f.operation, { fromPath: "a.txt", toPath: to }, person, f.options);
+  expect(begin).toHaveBeenCalledWith("a.txt", to); expect(finish).toHaveBeenCalledWith(true); expect(authored).not.toHaveBeenCalled();
+  expect(await readFile(join(f.rootPath, to), "utf8")).toBe("a.txt");
+  expect(await f.undo(moved.operationId)).toMatchObject({ ok: true, restored: ["a.txt"] });
+});
+
+it("logs a recording failure after the committed move result was published", async () => {
+  const f = await fixture(); await f.write("a.txt");
+  const failure = new Error("authority retired after recording"); f.afterMutation(() => { throw failure; });
+  expect(await f.move("a.txt", "b.txt")).toMatchObject({ path: "b.txt", undo: { available: true } });
+  await expect.poll(() => f.logError.mock.calls).toEqual([["Could not finish recording the file move", failure]]);
+  expect(await readFile(join(f.rootPath, "b.txt"), "utf8")).toBe("a.txt");
+});
+
+it("keeps a private source if flushing its fallback copy fails", async () => {
+  const f = await fixture(); await f.write(".dohc/trash/staged.txt", "kept");
+  vi.spyOn(filesystem, "link").mockRejectedValueOnce(Object.assign(new Error("unsupported"), { code: "ENOTSUP", syscall: "link" }));
+  const open = filesystem.open;
+  const sync = vi.fn(async () => { throw new Error("flush failed"); });
+  vi.spyOn(filesystem, "open").mockImplementationOnce(async (...args: Parameters<typeof filesystem.open>) => {
+    const handle = await open(...args); vi.spyOn(handle, "sync").mockImplementation(sync); return handle;
+  });
+  expect(await placeBack(f.rootPath, join(f.rootPath, ".dohc/trash/staged.txt"), join(f.rootPath, "placed.txt"))).toEqual([""]);
+  expect(sync).toHaveBeenCalledOnce();
+  expect(await readFile(join(f.rootPath, ".dohc/trash/staged.txt"), "utf8")).toBe("kept");
 });

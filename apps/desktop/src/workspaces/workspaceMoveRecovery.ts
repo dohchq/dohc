@@ -13,7 +13,7 @@ const Roots = z.object({ operationId: HistoryOperationId, from: z.string(), to: 
 const FileRecord = Roots.extend({
   entries: z.array(z.string()),
   tracked: z.boolean(), pending: z.array(z.string()).optional(), replaced: z.boolean().optional(),
-  engine: z.object({ materialized: z.boolean(), momentCount: z.number() }).optional(),
+  engine: z.union([z.object({ requested: z.literal(true) }).strict(), z.object({ materialized: z.boolean(), momentCount: z.number() }).strict()]).optional(),
   progress: HistoryOperationUndoResult.options[1].optional(), result: HistoryOperationUndoResult.options[1].optional(),
 }).strict();
 const FolderRecord = Roots.extend({ kind: z.literal("folder"), noUndo: z.string() }).strict();
@@ -87,32 +87,39 @@ export async function undoMoveRecovery(root: string, record: FileMoveRecoveryRec
 ): Promise<z.infer<typeof HistoryOperationUndoResult>> {
   const word = moveWord(record.from, record.to);
   const refuse = (detail: string): never => { throw new Error(`Cannot undo the ${word}. ${detail}`); };
-  const engineUndo = () => history.undoHistoryOperation({ workspaceId, operationId: record.operationId,
-    requestId: `move-undo:${record.operationId}`, author });
-  const refresh = async (result: z.infer<typeof HistoryOperationUndoResult.options[1]>) => {
-    if (result.tracked.state === "restoring") {
-      const current = await engineUndo();
-      if (current.materialized) result.tracked.state = "restored";
-    }
-    await saveRecoveryRecord(root, record, "move");
-    markChanged();
-    return result;
+  const engineUndo = async () => {
+    const before = await info(join(root, record.from));
+    try { assertCurrent(); return await history.undoHistoryOperation({ workspaceId, operationId: record.operationId,
+      requestId: `move-undo:${record.operationId}`, author }); }
+    finally { if (!before && await info(join(root, record.from))) markChanged(); }
   };
   assertCurrent();
   if (record.replaced) throw new Error(replacedMoveReason(record));
-  if (record.result) return refresh(record.result);
-  if (!record.engine) {
-    if (!await info(join(root, record.to))) return refuse(`Nothing is at ${record.to} now. Check History for where it went.`);
-    if (await info(join(root, record.from))) return refuse(`${record.from} now occupies the old path. Move it first.`);
-    if ((await info(join(root, record.to)))?.isDirectory()) {
-      return refuse(`${record.to} is now a folder. Move it first.`);
+  if (record.result) {
+    if (record.result.tracked.state === "restoring") {
+      try {
+        if ((await engineUndo()).materialized) {
+          record.result.tracked.state = "restored";
+          await saveRecoveryRecord(root, record, "move");
+        }
+      } catch { /* A finished Undo keeps its result when refresh is unavailable. */ }
     }
+    return record.result;
+  }
+  if (!record.engine) {
+    const destination = await info(join(root, record.to));
+    if (!destination) return refuse(`Nothing is at ${record.to} now. Check History for where it went.`);
+    if (await info(join(root, record.from))) return refuse(`${record.from} now occupies the old path. Move it first.`);
+    if (destination.isDirectory()) return refuse(`${record.to} is now a folder. Move it first.`);
     assertCurrent();
+    record.engine = { requested: true };
+    await saveRecoveryRecord(root, record, "move");
+  }
+  if ("requested" in record.engine) {
     const receipt = record.tracked ? await engineUndo() : { materialized: true, momentCount: 0 };
     record.engine = { materialized: receipt.materialized, momentCount: receipt.momentCount };
     record.pending = [...record.entries];
-    await saveRecoveryRecord(root, record, "move");
-    markChanged();
+    if (record.entries.length) await saveRecoveryRecord(root, record, "move");
   }
   const result: z.infer<typeof HistoryOperationUndoResult.options[1]> = { ok: true,
     tracked: { state: record.engine.materialized ? "restored" : "restoring", momentCount: record.engine.momentCount },
@@ -120,7 +127,9 @@ export async function undoMoveRecovery(root: string, record: FileMoveRecoveryRec
   for (const path of [...(record.pending ?? record.entries)]) {
     assertCurrent();
     const source = moveEntryTarget(record, path), entry = await info(join(root, source));
+    const before = await info(join(root, path));
     const left = entry ? await placeBack(root, join(root, source), join(root, path)) : [];
+    if (entry && (!left.length || !before && await info(join(root, path)))) markChanged();
     const remaining = left.map(sub => sub ? `${path}/${sub}` : path);
     record.pending = [...(record.pending ?? record.entries).filter(item => item !== path), ...remaining];
     if (entry && !left.length) result.restored.push(path);
@@ -132,9 +141,8 @@ export async function undoMoveRecovery(root: string, record: FileMoveRecoveryRec
     }
     record.progress = result;
     await saveRecoveryRecord(root, record, "move");
-    markChanged();
   }
   if (!record.pending?.length) { record.result = result; delete record.progress; }
   await saveRecoveryRecord(root, record, "move");
-  return refresh(result);
+  return result;
 }

@@ -1649,7 +1649,7 @@ describe("WorkspaceFileMutationOwner", () => {
   });
 });
 
-it("admits operation Undo through the mutation owner and refuses other operations without an engine Undo", async () => {
+it("admits operation Undo through the mutation owner and refuses missing recovery records", async () => {
   const h = await harness();
   const payload = { workspaceId: h.workspace.workspaceId, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111" };
   await expect(h.owner.undoHistoryOperation({ trusted: false }, payload)).rejects.toThrow();
@@ -1667,10 +1667,12 @@ it("admits operation Undo through the mutation owner and refuses other operation
   expect(await h.owner.undoHistoryOperation(trustedEvent, payload)).toEqual({ ok: false, reason: "History operations require the owning workspace. Open it to continue." });
 });
 
-it("returns a person's move operation and saved record without capture", async () => {
+it("returns a person's move operation and successfully undoes it without capture", async () => {
   const h = await harness(); await writeFile(join(h.rootPath, "before.txt"), "body");
   const moved = await h.owner.movePath(trustedEvent, { workspaceId: h.workspace.workspaceId, fromPath: "before.txt", toPath: "after.txt" });
   expect(moved).toMatchObject({ path: "after.txt", operationId: expect.stringMatching(/^dohc-operation:/), undo: { available: true } });
   await waitForRecovery(moved.operationId!);
+  expect(await h.owner.undoHistoryOperation(trustedEvent, { workspaceId: h.workspace.workspaceId, operationId: moved.operationId! })).toMatchObject({ ok: true, restored: ["before.txt"], remaining: [] });
+  expect(await readFile(join(h.rootPath, "before.txt"), "utf8")).toBe("body");
   expect((await readdir(join(h.rootPath, ".dohc/trash"))).filter(name => /^move-[a-f0-9]{64}\.json$/u.test(name))).toHaveLength(1);
 });

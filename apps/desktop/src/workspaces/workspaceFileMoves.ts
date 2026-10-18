@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { OPERATION_ID_PREFIX } from "@dohc/workspace-contracts/engine";
 import { constants } from "node:fs";
-import { copyFile, link, lstat, mkdir, readdir, readlink, realpath, rename, rmdir, stat, symlink, unlink } from "node:fs/promises";
+import { copyFile, link, lstat, mkdir, readdir, open, realpath, rename, rmdir, stat, unlink } from "node:fs/promises";
 import { basename, dirname, join, relative, sep } from "node:path";
 import type { CliResultByVerb } from "@dohc/cli/protocol";
 import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
@@ -12,7 +12,6 @@ import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
 import type { AuthoredPathChanges, WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { historyExcludesSubtree, historyPathAdmission, type WorkspaceEnginePolicySnapshot } from "./workspaceEnginePolicyFile";
 import { deletePath, moveIntoWorkspaceTrash, movePath, prepareWorkspaceMove, prepareWorkspaceDelete, removeEmptyWorkspaceFolder } from "./workspaceFiles";
-import { realRelativeInRoot } from "@dohc/workspace-core/realPath";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import { beginPendingRecovery, finishDeleteRecovery, stageDeleteRecovery, type OperationRecovery, type DeleteRecoveryPlan } from "./workspaceDeleteRecovery";
 
@@ -166,31 +165,26 @@ function historyAdmission(policy: WorkspaceEnginePolicySnapshot): (path: string)
   return historyPathAdmission(policy);
 }
 
-// Places `from`, a file this change staged in the workspace trash, at `to`
-// in the visible workspace only while nothing is at `to`: through a hard
-// link, or an exclusive copy where links are refused. Only the private staged
-// name is ever removed, so nothing another program writes at a visible path
-// can be lost. When that name cannot be removed, a spare copy stays in the
-// trash; the file is placed all the same. Throws, with nothing at `to`, when
-// `to` is taken or leads outside the workspace or into a reserved area.
-async function checkPlacement(rootPath: string, to: string, allowIgnored: boolean): Promise<void> {
+// Private staged sources can be copied. Visible sources require a hard link,
+// so edits through either name survive removal of the moved name.
+async function checkPlacement(rootPath: string, to: string): Promise<void> {
   const path = relative(rootPath, to).split(sep).join("/");
-  if (!allowIgnored) {
-    await assertResolvedWorkspacePath({ rootPath, absolutePath: to, spelled: path, label: "Path", access: "entry" });
-    return;
-  }
-  const checked = validateUserMaterializePath(path, { platform: process.platform, allowIgnoredSegments: true });
-  const target = await realRelativeInRoot(rootPath, to, true);
-  if (!checked.ok || checked.normalized !== path || !target.ok || target.relative !== path) throw new Error("Invalid recovery path");
+  await assertResolvedWorkspacePath({ rootPath, absolutePath: to, spelled: path, label: "Path", access: "entry" });
 }
-async function placeFile(rootPath: string, from: string, to: string, allowIgnored = false): Promise<void> {
-  await checkPlacement(rootPath, to, allowIgnored);
+async function placeFile(rootPath: string, from: string, to: string, visibleSource: boolean): Promise<void> {
+  await checkPlacement(rootPath, to);
   await mkdir(dirname(to), { recursive: true });
-  await link(from, to).catch(async (error: unknown) => {
-    if (errnoOf(error) === "EEXIST") throw error;
+  const source = await lstat(from), target = await lstat(to).catch(() => null);
+  const alreadyPlaced = target?.isFile() && source.ino !== 0 && source.dev === target.dev && source.ino === target.ino;
+  if (!alreadyPlaced) await link(from, to).catch(async (error: unknown) => {
+    // Node has no conditional unlink of a visible name. Copying and removing
+    // that name could discard a concurrent edit or replacement.
+    if (visibleSource || errnoOf(error) === "EEXIST") throw error;
     await copyFile(from, to, constants.COPYFILE_EXCL);
+    const copy = await open(to, "r+");
+    try { await copy.sync(); } finally { await copy.close(); }
   });
-  await unlink(from).catch(() => undefined);
+  await unlink(from).catch(error => { if (visibleSource) throw error; });
 }
 
 // Places `from`, an entry staged in the workspace trash, at `to` without
@@ -198,32 +192,24 @@ async function placeFile(rootPath: string, from: string, to: string, allowIgnore
 // and each entry moves into it the same way. Answers the files, relative to
 // `from`, that stayed in the trash; a folder dohc could not read stays whole
 // under its own name. Never throws.
-export async function placeBack(rootPath: string, from: string, to: string, sub = "", allowIgnored = false): Promise<string[]> {
+export async function placeBack(rootPath: string, from: string, to: string, sub = "", visibleSource = false): Promise<string[]> {
   let entries: string[];
   try {
     const entry = await lstat(from);
-    if (entry.isSymbolicLink()) {
-      await checkPlacement(rootPath, to, allowIgnored);
-      await mkdir(dirname(to), { recursive: true });
-      const destination = await readlink(from);
-      const directory = await stat(from).then(entry => entry.isDirectory(), () => false);
-      await symlink(destination, to, directory ? process.platform === "win32" ? "junction" : "dir" : "file");
-      await unlink(from);
-      return [];
-    }
+    if (entry.isSymbolicLink()) return [sub];
     if (!entry.isDirectory()) {
-      await placeFile(rootPath, from, to, allowIgnored);
+      await placeFile(rootPath, from, to, visibleSource);
       return [];
     }
     entries = await readdir(from);
-    await checkPlacement(rootPath, to, allowIgnored);
+    await checkPlacement(rootPath, to);
     await mkdir(dirname(to), { recursive: true });
     await mkdir(to);
   } catch {
     return [sub];
   }
   const left: string[] = [];
-  for (const name of entries) left.push(...await placeBack(rootPath, join(from, name), join(to, name), sub ? `${sub}/${name}` : name, allowIgnored));
+  for (const name of entries) left.push(...await placeBack(rootPath, join(from, name), join(to, name), sub ? `${sub}/${name}` : name, visibleSource));
   // Whichever folder is empty now goes: the staged one, or the fresh one when nothing reached it.
   await rmdir(left.length ? to : from).catch(() => undefined);
   return left;
@@ -245,7 +231,13 @@ async function toSystemTrash(options: Pick<PathChangeOptions, "trashItem">, stag
   }
 }
 
-type MoveOptions = Omit<PathChangeOptions, "capture"> & { capture: PathChangeOptions["capture"] | null; markChanged?: () => void; onRecorded?: (path: string, operationId: string) => () => void; byHand?: boolean; admit?: () => Promise<void> };
+export function assertMoveDocumentKind(from: string, to: string, word: "move" | "rename"): void {
+  const fromKind = liveDocumentKindForPath(from), toKind = liveDocumentKindForPath(to);
+  if (fromKind !== null && fromKind !== toKind) throw new Error(
+    `A ${word} cannot change a live document's kind from ${fromKind} to ${toKind ?? "a plain file"}. Create a new file and copy the content instead.`);
+}
+
+type MoveOptions = Omit<PathChangeOptions, "capture"> & { capture: Pick<WorkspaceEngineCapture, "changePathsAs"> & Partial<Pick<WorkspaceEngineCapture, "beginFileRename">> | null; prepared?: Awaited<ReturnType<typeof prepareWorkspaceMove>>; markChanged?: () => void; onRecorded?: (path: string, operationId: string) => () => void; byHand?: boolean; admit?: () => Promise<void> };
 
 export function prepareMoveWorkspacePathAs<Workspace extends PathChangeWorkspace, State>(
   operation: WorkspaceAuthorityOperation<Workspace, State>, input: { fromPath: string; toPath: string; overwrite?: boolean },
@@ -261,9 +253,7 @@ export async function moveWorkspacePathByHand(operation: PathChangeOperation, in
     await options.admit?.();
     const prepared = await prepareWorkspaceMove(operation.workspace.rootPath, input.fromPath, input.toPath);
     if ((await stat(join(operation.workspace.rootPath, prepared.physicalFromPath))).isDirectory()) {
-      const fromKind = liveDocumentKindForPath(prepared.physicalFromPath), toKind = liveDocumentKindForPath(prepared.physicalToPath);
-      if (options.capture && fromKind !== null && fromKind !== toKind) throw new Error(
-        `A rename cannot change a live document's kind from ${fromKind} to ${toKind ?? "a plain file"}. Create a new file and copy the content instead.`);
+      if (options.capture) assertMoveDocumentKind(prepared.physicalFromPath, prepared.physicalToPath, "rename");
       const finishRename = await options.capture?.beginFileRename(prepared.physicalFromPath, prepared.physicalToPath);
       try {
         await movePath(operation.workspace.rootPath, prepared.physicalFromPath, prepared.physicalToPath);
@@ -276,7 +266,7 @@ export async function moveWorkspacePathByHand(operation: PathChangeOperation, in
         throw error;
       }
     }
-    const result = await (await prepareMoveWorkspacePath(operation, input, person, { ...options, byHand: true, markChanged }))();
+    const result = await (await prepareMoveWorkspacePath(operation, input, person, { ...options, byHand: true, markChanged, prepared }))();
     if (!result.ok) throw new Error(result.reason);
     return { path: result.toPath, operationId: result.operationId, undo: result.undo };
   });
@@ -293,13 +283,8 @@ async function prepareMoveWorkspacePath(operation: PathChangeOperation,
     const change = async (markChanged: () => void) => {
       let gone: string[] = [];
       // The capture settles, closes and checks these endpoints before the hold.
-      await options.admit?.();
-      const prepared = options.byHand ? await prepareWorkspaceMove(rootPath, input.fromPath, input.toPath) : undefined;
-      if (prepared && options.capture) {
-        const fromKind = liveDocumentKindForPath(prepared.physicalFromPath), toKind = liveDocumentKindForPath(prepared.physicalToPath);
-        if (fromKind !== null && fromKind !== toKind) throw new Error(
-          `A rename cannot change a live document's kind from ${fromKind} to ${toKind ?? "a plain file"}. Create a new file and copy the content instead.`);
-      }
+      const prepared = options.prepared;
+      if (prepared && options.capture) assertMoveDocumentKind(prepared.physicalFromPath, prepared.physicalToPath, "rename");
       const endpoints = prepared ? [prepared.physicalFromPath, prepared.physicalToPath] : [(await admitPath(rootPath, input.fromPath)).physical, (await admitPath(rootPath, input.toPath)).physical];
       const work = async (engine: AuthoredPathChanges | null): Promise<Changed<{ fromPath: string; toPath: string; withoutHistory: string[]; replacedWithoutHistory: string[]; recovery: DeleteRecoveryPlan | undefined; from: string; to: string; overwritten: boolean }, MoveFailure>> => {
           // Admission runs here, with capture held, right before the disk changes.
@@ -323,15 +308,9 @@ async function prepareMoveWorkspacePath(operation: PathChangeOperation,
           }
           const from = options.byHand
             ? { ...spelledFrom, relative: spelledFrom.physical, files: (engine ? await historyFilesUnder(rootPath, spelledFrom.physical, allowed,
-              folder => historyExcludesSubtree(engine.policy, folder)) : []).map(file => file.slice(spelledFrom.physical.length).replace(/^\//u, "")) }
+              folder => historyExcludesSubtree(engine.policy, folder)) : []).map(file => file.slice(spelledFrom.physical.length).replace(/^\//u, "")).filter(sub => allowed(under(to.relative, sub))) }
             : await admitTree(rootPath, input.fromPath, allowed, [to.path, to.relative]);
-          for (const sub of from.files) {
-            const fromKind = liveDocumentKindForPath(under(from.relative, sub));
-            const toKind = liveDocumentKindForPath(under(to.relative, sub));
-            if (fromKind !== null && fromKind !== toKind) {
-              throw new Error(`A ${options.byHand ? "rename" : "move"} cannot change a live document's kind from ${fromKind} to ${toKind ?? "a plain file"}. Create a new file and copy the content instead.`);
-            }
-          }
+          for (const sub of from.files) assertMoveDocumentKind(under(from.relative, sub), under(to.relative, sub), options.byHand ? "rename" : "move");
           const source = join(rootPath, from.relative);
           const target = join(rootPath, to.relative);
           let dest: AdmittedTree | undefined;
@@ -431,9 +410,15 @@ async function prepareMoveWorkspacePath(operation: PathChangeOperation,
           gone = [from.relative, ...(dest ? [destBase] : [])];
           return { done: { fromPath: from.path, toPath: to.path, withoutHistory, replacedWithoutHistory, recovery, from: from.relative, to: to.relative, overwritten: dest !== undefined }, ...(change.staged !== undefined ? { trash: change.staged } : {}) };
         };
+      const fallback = async () => {
+        const finish = options.byHand ? await options.capture?.beginFileRename?.(endpoints[0]!, endpoints[1]!) : undefined;
+        let ok = false;
+        try { const changed = await work(null); ok = "done" in changed; return changed; }
+        finally { await finish?.(ok); }
+      };
       const changed = await (options.capture && endpoints.every(engineAddresses)
         ? options.capture.changePathsAs(endpoints, { operation: "move", author, operationId }, work, () => gone)
-        : work(null));
+        : fallback());
       if ("failed" in changed) return changed;
       const { recovery, from, to, overwritten, ...done } = changed.done;
       if (!recovery) return { ...changed, done: { ...done, ...await finishFolderMoveRecovery(rootPath, operationId, from, to) } };

@@ -5891,10 +5891,11 @@ export function createWorkspaceEngineCapture(
                 };
                 // Every file is checked before any is recorded, and only one
                 // file's bytes are held at a time.
-                for (const file of files) await readable(file);
+                const single = files.length === 1 ? await readable(files[0]!) : undefined;
+                if (!single) for (const file of files) await readable(file);
                 const held: string[] = [];
                 for (const file of files) {
-                  const disk = await readable(file);
+                  const disk = single ?? await readable(file);
                   if (disk.kind === "untracked-content") continue;
                   await writeIfChanged(engine, versionId, file, disk, { origin: "local-file", summary: "Saved latest edits" });
                   held.push(file);
