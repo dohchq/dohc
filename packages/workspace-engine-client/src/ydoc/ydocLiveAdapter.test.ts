@@ -45,10 +45,17 @@ it.each(["journal", "owner-outbox"])("reports the actual acknowledgement lane th
   const provider = await openEngineYdocProviderSession({
     transport: {...forwardYdocBlobEgress(engine), onEvent: handler => engine.onEvent(handler),
       async sendRequest(request) {
-        const response = await engine.sendRequest(request);
-        return lane === "owner-outbox" && request.method === YDOC_METHOD.recordUpdate ? {...response,
-          result: {lineageClaimId: "lineage", ownerDraft: {outboxId: "outbox", sequence: 1, deliveryId: "delivery",
-            updateDigest: "a".repeat(64), pendingBytes: 10, state: "active"}}} : response;
+        if (lane === "journal") return engine.sendRequest(request);
+        // An owner-outbox answer needs a claimed lineage; the loopback engine has none.
+        const params = request.params as {expectedLineageClaimId?: string | null};
+        const response = await engine.sendRequest(params?.expectedLineageClaimId === "lineage"
+          ? {...request, params: {...params, expectedLineageClaimId: null}} : request);
+        if (!response.result || typeof response.result !== "object") return response;
+        const claimed = {...response.result, lineageClaimId: "lineage", lineageOriginatedHere: true};
+        if (request.method !== YDOC_METHOD.recordUpdate) return {...response, result: claimed};
+        const {seq: _seq, ...owner} = claimed as typeof claimed & {seq?: number};
+        return {...response, result: {...owner,
+          ownerDraft: {outboxId: "outbox", sequence: 1, deliveryId: "delivery", updateDigest: "a".repeat(64), pendingBytes: 10, state: "active"}}};
       }}, workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind: "plaintext",
     onRemoteUpdate: () => {}, onLocalUpdateAcknowledged: acknowledged, scheduleSettle: () => () => {},
   });
