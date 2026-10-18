@@ -9,9 +9,9 @@ Use this reference to check which platform and services a feature needs.
 | Sharing with named recipients | Reachable sharing services, recipient identity, and a share grant. |
 | Browser access through a share link | Reachable share-web and relay services, with the owner's selected access. |
 | Shared live document editing | A configured session host and the relay's required admission settings. |
-| Publish an app from the packaged desktop | Windows x64 and a server configured to accept app publishing. |
+| Publish an app from the packaged desktop | Windows x64 or macOS 13.5 or later, and a server configured to accept app publishing. |
 | Create a Collection and its actions | Desktop app on Windows x64, macOS, or Linux. No account or server. |
-| Create and run a local Collection-backed app | Windows x64 compiler and bundled dataset runtime. No account or server; the approved app opens in a local browser session. |
+| Create and run a local Collection-backed app | Windows x64 or macOS 13.5 or later, with the bundled app compiler and dataset runtime. No account or server; the approved app opens in a local browser session. |
 | Share an app with private data | App publishing plus backend-enabled relay services. The shared host must be reachable to confirm operations. |
 | Manage app data through tables or an agent | An approved transactional Collection; table edits and app operations use the same dataset rules. |
 | Run the bundled MCP launcher | Node.js 22.13+, 23.4+, or 24+ on `PATH`. The desktop runtime does not supply Node to MCP. |
@@ -24,9 +24,10 @@ The server preserves its accepted state; it does not silently bind that state to
 
 The release workflow builds Windows x64, macOS x64, macOS arm64, and Linux x64.
 Every release target compiles Collection actions. App publishing and local app
-launch have a narrower platform boundary because their installed compiler
-currently ships a Windows x64 runtime. Reading a shared app in a browser does
-not require that compiler.
+launch need the installed app compiler, which ships for Windows x64 and macOS.
+On macOS it needs 13.5 or later, the oldest release its pinned Node runs on.
+Linux does not ship it yet. Reading a shared app in a browser does not require
+that compiler.
 
 The [app backend guide](../how-to/app-backend.md) covers local launch, sharing,
 owner management, and recovery. Shared app data has one authoritative host;

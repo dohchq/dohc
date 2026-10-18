@@ -45,9 +45,12 @@ Keep these limits visible during approval and launch.
 
 The fixed compiler reads declared inputs and bundles approved dependencies.
 It does not run app-provided configuration, plugins, build hooks, or source.
-Remote scripts stay blocked. The compiler's process limits and minimal environment
-do not provide OS network denial. Arbitrary build scripts need a separate,
-credential-free sandbox before they can run.
+Remote scripts stay blocked. On Windows, the compiler's process limits and
+minimal environment do not provide OS network denial. On macOS, Seatbelt also
+denies the network, reads outside the compiler and writes outside the build
+directory. [App compiler containment](app-compiler.md) states what each platform
+bounds. Arbitrary build scripts need a separate, credential-free sandbox before
+they can run.
 
 ## Dataset hosts commit authority
 
