@@ -52,9 +52,13 @@ vi.mock("yjs", async (importOriginal) => {
   } };
 });
 
+const artifactWorker = vi.hoisted(() => ({ fails: false }));
 vi.mock("./editor/artifactSource", () => ({
   prepareArtifactSource: () => undefined,
-  projectArtifactSource: async (doc: Y.Doc) => (await import("@dohc/ydoc-projection")).yDocToArtifactMarkdown(doc),
+  projectArtifactSource: async (doc: Y.Doc) => {
+    if (artifactWorker.fails) throw new Error("worker failed");
+    return (await import("@dohc/ydoc-projection")).yDocToArtifactMarkdown(doc);
+  },
 }));
 import {forgedSources} from '../../../../packages/ydoc-projection/src/artifact-witness.fixture.ts';
 setupFileInspectorTests();
@@ -263,6 +267,27 @@ describe("engine markdown source view", () => {
     fireEvent.click(await screen.findByTestId("markdown-source-toggle"));
     await waitFor(() => expect(codeEditorText(screen.getByTestId("view-markdown-source"))).toBe(source));
     doc.destroy();
+  });
+
+  it("source view shows canonical Markdown when the witness proof fails", async () => {
+    const source = "---\nzebra: last\ntitle: \"Outside\"\nalpha: first\n---\n\n- one\n- two\n\n";
+    const doc = markdownToYDoc(source);
+    const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+    doc.getMap("meta").set("dohcMarkdownSource", source);
+    doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(source));
+    doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
+    const {bridgeMock} = makeEngineBridge(source);
+    bridgeMock.openEngineYDocSession.mockResolvedValue({available: true, initialUpdate: Y.encodeStateAsUpdate(doc), lineageGeneration: 1});
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    artifactWorker.fails = true;
+    try {
+      render(<FileInspector workspaceId="ws-1" path="a.md" />);
+      fireEvent.click(await screen.findByTestId("markdown-source-toggle"));
+      await waitFor(() => expect(codeEditorText(screen.getByTestId("view-markdown-source"))).toBe(yDocToMarkdown(doc)));
+    } finally {
+      artifactWorker.fails = false;
+      doc.destroy();
+    }
   });
 
   it.each(forgedSources)("source view keeps markup inert: %s", async source => {

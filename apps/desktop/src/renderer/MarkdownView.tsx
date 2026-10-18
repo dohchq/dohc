@@ -1260,8 +1260,9 @@ export function MarkdownView(props: {
       void recompute();
     };
     void loadImportExport().then((mod) => {
+      // A failed witness proof shows canonical Markdown, as Copy does.
       serialize = (current) => canPreserveMarkdownSource(current.getMap('meta').get('dohcMarkdownSource'))
-        ? projectArtifactSource(current)
+        ? projectArtifactSource(current).catch(() => mod.yDocToMarkdown(current))
         : mod.yDocToMarkdown(current);
       if (updateTimer !== null) {
         clearTimeout(updateTimer);
