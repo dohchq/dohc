@@ -9,8 +9,8 @@
 //! 8. See docs/engineering/app-compiler.md.
 use crate::args::Args;
 use crate::profile::profile;
-use crate::sys;
-use crate::tree::Tree;
+use crate::sys::{self, Wait};
+use crate::tree::{System, Tree};
 use std::io::{self, ErrorKind, Write};
 use std::os::fd::AsRawFd;
 use std::process::{ChildStdin, Command, ExitCode, ExitStatus, Stdio};
@@ -20,6 +20,9 @@ const SAMPLE_INTERVAL: Duration = Duration::from_millis(10);
 /// How long teardown may keep signalling before the owner reports failure.
 const TEARDOWN_BUDGET: Duration = Duration::from_secs(2);
 const CHUNK: usize = 64 * 1024;
+/// The caller holds this pipe's other end open for the build and never
+/// writes to it, so input or a hangup on it means the caller is gone.
+const LIFELINE: i32 = 3;
 
 /// Exit codes the desktop reads. Worker codes below 120 pass through.
 const STOP_FAILED: u8 = 121;
@@ -58,6 +61,9 @@ fn worker_code(status: ExitStatus) -> u8 {
 }
 
 fn run() -> Result<u8, String> {
+    if !sys::is_open(LIFELINE) {
+        return Err("The caller did not pass a lifeline on descriptor 3.".to_owned());
+    }
     let owner = sys::lead_process_group().map_err(|error| format!("Process group: {error}"))?;
     sys::close_inherited_descriptors_on_exec().map_err(|error| format!("Descriptors: {error}"))?;
     let args = Args::parse(std::env::args_os())?;
@@ -90,7 +96,7 @@ fn run() -> Result<u8, String> {
     let mut child = command
         .spawn()
         .map_err(|error| format!("Worker: {error}"))?;
-    let mut tree = Tree::new(owner);
+    let mut tree = Tree::new(owner, System);
     let outcome = match child
         .stdin
         .take()
@@ -101,6 +107,7 @@ fn run() -> Result<u8, String> {
         None => Outcome::Unmeasurable(io::Error::other("the worker has no input pipe")),
     };
     let stopped = tree.stop(TEARDOWN_BUDGET);
+    remove_build_directory(&args.build);
     let code = match outcome {
         Outcome::Exited(code) => code,
         Outcome::Memory => MEMORY,
@@ -120,9 +127,18 @@ fn run() -> Result<u8, String> {
     Ok(code)
 }
 
+/// A process that escaped the tree may still write in the build directory,
+/// even swap a directory for a symlink. remove_dir_all opens each directory
+/// with O_NOFOLLOW and unlinks relative to it, so it never follows one. A
+/// path-based recursive remove, Node's included, can. The caller only removes
+/// the directory if it is left empty.
+fn remove_build_directory(build: &std::path::Path) {
+    let _ = std::fs::remove_dir_all(build);
+}
+
 fn watch(
     child: &mut std::process::Child,
-    tree: &mut Tree,
+    tree: &mut Tree<System>,
     input: &mut Input,
     args: &Args,
     deadline: Instant,
@@ -150,8 +166,8 @@ fn watch(
 }
 
 /// Forwards exactly the framed input from the caller to the worker without
-/// blocking, then keeps caller stdin as a lifeline: EOF or any further byte
-/// means the caller is gone or broke the protocol.
+/// blocking, and watches the caller's lifeline throughout, including while
+/// the worker is slow to take its input.
 struct Input {
     remaining: u64,
     pending: Vec<u8>,
@@ -163,6 +179,7 @@ struct Input {
 impl Input {
     fn new(bytes: u64, worker: ChildStdin) -> io::Result<Input> {
         sys::set_nonblocking(0)?;
+        sys::set_nonblocking(LIFELINE)?;
         sys::set_nonblocking(worker.as_raw_fd())?;
         let mut input = Input {
             remaining: bytes,
@@ -180,29 +197,42 @@ impl Input {
         }
     }
 
-    /// Moves input until `until`. False when the lifeline ends.
+    /// Moves input until `until`. False when the caller is gone: its
+    /// lifeline answered, or its input ended before the frame did.
     fn pump(&mut self, until: Instant) -> bool {
         loop {
             let now = Instant::now();
             if now >= until {
                 return true;
             }
-            // Backpressure: read the caller only once the worker took the last chunk.
             let writing = self.sent < self.pending.len();
             let worker = self
                 .worker
                 .as_ref()
                 .filter(|_| writing)
-                .map(AsRawFd::as_raw_fd);
-            let caller = if writing { None } else { Some(0) };
-            let (readable, writable) = match sys::poll(caller, worker, until - now) {
-                Ok(ready) => ready,
-                Err(_) => return false,
+                .map_or(-1, AsRawFd::as_raw_fd);
+            // Backpressure: read more of the frame only once the worker took
+            // the last chunk. The lifeline stays watched either way.
+            let caller = if writing || self.remaining == 0 {
+                -1
+            } else {
+                0
             };
-            if writable {
+            let watch = [
+                (LIFELINE, Wait::Read),
+                (caller, Wait::Read),
+                (worker, Wait::Write),
+            ];
+            let Ok(ready) = sys::poll(&watch, until - now) else {
+                return false;
+            };
+            if ready[0] {
+                return false;
+            }
+            if ready[2] {
                 self.write();
             }
-            if readable && !self.read() {
+            if ready[1] && !self.read() {
                 return false;
             }
         }
@@ -216,8 +246,8 @@ impl Input {
             Ok(count) => self.sent += count,
             Err(error)
                 if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => {}
-            // The worker closed its input. Keep reading the frame so the
-            // lifeline still works.
+            // The worker closed its input. Keep reading the frame, so the
+            // caller's protocol stays the same.
             Err(_) => self.worker = None,
         }
         if self.worker.is_none() || self.sent == self.pending.len() {
@@ -227,16 +257,12 @@ impl Input {
         self.close_when_forwarded();
     }
 
+    /// Reads the next part of the frame. False when the caller's input ended first.
     fn read(&mut self) -> bool {
         let mut buffer = [0u8; CHUNK];
-        let wanted = if self.remaining == 0 {
-            1
-        } else {
-            usize::try_from(self.remaining).map_or(CHUNK, |left| left.min(CHUNK))
-        };
+        let wanted = usize::try_from(self.remaining).map_or(CHUNK, |left| left.min(CHUNK));
         match sys::read(0, &mut buffer[..wanted]) {
             Ok(0) => false,
-            Ok(_) if self.remaining == 0 => false,
             Ok(count) => {
                 self.remaining -= count as u64;
                 if self.worker.is_some() {

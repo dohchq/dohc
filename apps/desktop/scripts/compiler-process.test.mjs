@@ -227,12 +227,12 @@ test('macOS owner leads its own group when started inside the caller group',maco
   const context=await fixture(t,`import{writeFileSync}from'node:fs';${markerLine}writeFileSync(marker,JSON.stringify({pid:process.pid}));setInterval(()=>{},1000);`);
   const build=await mkdtemp(join(context.scratch,'dohc-app-compiler-'));
   const {runtime}=context;
-  const owner=spawn(runtime.ownerExecutable,[String(bounds.maxMemoryBytes),'8','20000','0',context.directory,build,runtime.nodeExecutable,runtime.workerPath],{env:{},stdio:['pipe','ignore','ignore']});
+  const owner=spawn(runtime.ownerExecutable,[String(bounds.maxMemoryBytes),'8','20000','0',context.directory,build,runtime.nodeExecutable,runtime.workerPath],{env:{},stdio:['pipe','ignore','ignore','pipe']});
   const closed=once(owner,'close');t.after(()=>owner.kill('SIGKILL'));
   const {pid}=await waitForMarker(context);
   assert.equal(processGroup(pid),owner.pid);assert.notEqual(processGroup(pid),processGroup(process.pid));
-  owner.stdin.end();
-  assert.equal((await closed)[0],125,'stdin EOF ends the build as a lost caller');
+  owner.stdio[3].destroy();
+  assert.equal((await closed)[0],125,'a closed lifeline ends the build as a lost caller');
   assert.equal(await exited(pid),true);
 });
 test('macOS sandbox accepts quoted and symlinked compiler paths',macos,async t=>{
@@ -249,4 +249,46 @@ test('macOS spawn failure removes its build directory',macos,async t=>{
   const {scratch,runtime}=await fixture(t,'');
   await assert.rejects(runOwnedCompilerProcess({...runtime,ownerExecutable:join(scratch,'missing-owner')},{input:Buffer.alloc(0),bounds}),{reason:'spawn'});
   assert.deepEqual(await readdir(scratch),[]);
+});
+test('macOS cleanup keeps files an escaped process links into its build directory',macos,async t=>{
+  const canary=await mkdtemp(join(tmpdir(),'dohc-compiler-canary-'));t.after(()=>rm(canary,{recursive:true,force:true}));
+  await writeFile(join(canary,'keep.txt'),'user data');
+  // An intermediate process starts the swapper in a new session and exits at
+  // once, before any sample can link the swapper to the tree. The swapper
+  // keeps turning build/d between a non-empty directory and a symlink to the
+  // canary. In a standalone race, Node's recursive rm followed that symlink
+  // and deleted canary files in 2 of 150 rounds. One cleanup is too narrow a
+  // window to fail this test reliably, so it checks only that the fixed
+  // cleanup, with the swapper still running, keeps the canary.
+  const context=await fixture(t,`import{spawn}from'node:child_process';import{writeFileSync}from'node:fs';${markerLine}
+const swapper=\`const fs=require('fs');const b=process.env.TMPDIR,d=b+'d';fs.writeFileSync(b+'swapper.json',JSON.stringify({pid:process.pid}));
+const spin=n=>{const t=process.hrtime.bigint();while(process.hrtime.bigint()-t<BigInt(n)){}};
+for(let i=0;;i++){try{fs.mkdirSync(b+'n'+i);fs.writeFileSync(b+'n'+i+'/f','x');try{fs.unlinkSync(d)}catch{}fs.renameSync(b+'n'+i,d);spin(20000);fs.renameSync(d,b+'old'+i);fs.symlinkSync(process.argv[1],d);spin(400000);}catch{}}\`;
+const launcher=\`require('child_process').spawn(process.execPath,['-e',process.argv[1],process.argv[2]],{detached:true,stdio:'ignore'}).unref();\`;
+spawn(process.execPath,['-e',launcher,swapper,process.argv[2]],{stdio:'ignore'}).once('exit',()=>{
+  const wait=setInterval(()=>{try{const{pid}=JSON.parse(readFileSync(process.env.TMPDIR+'swapper.json','utf8'));clearInterval(wait);writeFileSync(marker,JSON.stringify({escaped:pid}));}catch{}},5);
+});setInterval(()=>{},1000);`.replace("import{writeFileSync}from'node:fs'","import{readFileSync,writeFileSync}from'node:fs'"));
+  context.runtime.workerArgs=[canary];
+  const controller=new AbortController();
+  const running=assert.rejects(runOwnedCompilerProcess(context.runtime,{input:Buffer.alloc(0),bounds,signal:controller.signal}),{reason:'cancelled'});
+  const {escaped}=await waitForMarker(context);
+  t.after(()=>{try{process.kill(escaped,'SIGKILL');}catch{}});
+  controller.abort();await running;
+  assert.equal(await readFile(join(canary,'keep.txt'),'utf8'),'user data');
+  // Stop the swapper before the fixture's own recursive cleanup runs.
+  process.kill(escaped,'SIGKILL');assert.equal(await exited(escaped),true);
+});
+test('macOS owner notices a dead caller while the worker never reads its input',macos,async t=>{
+  const context=await fixture(t,`import{writeFileSync}from'node:fs';${markerLine}writeFileSync(marker,JSON.stringify({pid:process.pid}));setInterval(()=>{},1000);`);
+  const {directory,runtime}=context;
+  const ownerMarker=join(directory,'owner.json'),callerPath=join(directory,'caller.mjs');
+  const supervisor=new URL('../src/workspaces/compilerProcessSupervisor.ts',import.meta.url).href;
+  // 4 MiB fills the pipe to the worker, so the owner holds a pending chunk.
+  const frame=4*1024*1024;
+  await writeFile(callerPath,`import{runOwnedCompilerProcess}from${JSON.stringify(supervisor)};import{writeFileSync}from'node:fs';const runtime=${JSON.stringify(runtime)};runtime.onOwnerSpawn=pid=>writeFileSync(${JSON.stringify(ownerMarker)},JSON.stringify({pid}));await runOwnedCompilerProcess(runtime,{input:Buffer.alloc(${frame}),bounds:${JSON.stringify({...bounds,timeoutMs:60000,maxInputBytes:frame})}});`);
+  const caller=spawn(process.execPath,[callerPath],{stdio:'ignore'});t.after(()=>caller.kill('SIGKILL'));const closed=once(caller,'close');
+  const worker=await waitForMarker(context),owner=await waitForFile(ownerMarker);
+  const started=Date.now();caller.kill('SIGKILL');await closed;
+  for(const pid of [owner.pid,worker.pid])assert.equal(await exited(pid,10000),true,`process ${pid} exited`);
+  assert.ok(Date.now()-started<10000,'the owner did not wait for its 60 s deadline');
 });

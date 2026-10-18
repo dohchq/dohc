@@ -30,7 +30,7 @@ unsafe extern "C" {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Identity {
     pub pid: Pid,
-    started: (u64, u64),
+    pub started: (u64, u64),
 }
 
 /// libproc reports a zombie as ESRCH, so a zombie reads as gone: it holds no
@@ -276,43 +276,56 @@ pub fn set_nonblocking(fd: RawFd) -> io::Result<()> {
     Ok(())
 }
 
-/// Waits up to `timeout` for `read` to have input or a hangup and for `write`
-/// to accept output. Returns (readable, writable). A signal ends the wait early.
-pub fn poll(
-    read: Option<RawFd>,
-    write: Option<RawFd>,
-    timeout: Duration,
-) -> io::Result<(bool, bool)> {
-    let mut fds = [
-        libc::pollfd {
-            fd: read.unwrap_or(-1),
-            events: libc::POLLIN,
+#[derive(Clone, Copy)]
+pub enum Wait {
+    Read,
+    Write,
+}
+
+/// Waits up to `timeout` for any listed descriptor. Each answer is true when
+/// that descriptor has input or a hangup (`Read`) or accepts output
+/// (`Write`). A negative descriptor never answers. A signal ends the wait
+/// early with every answer false.
+pub fn poll(watch: &[(RawFd, Wait)], timeout: Duration) -> io::Result<Vec<bool>> {
+    let mut fds: Vec<libc::pollfd> = watch
+        .iter()
+        .map(|&(fd, wait)| libc::pollfd {
+            fd,
+            events: match wait {
+                Wait::Read => libc::POLLIN,
+                Wait::Write => libc::POLLOUT,
+            },
             revents: 0,
-        },
-        libc::pollfd {
-            fd: write.unwrap_or(-1),
-            events: libc::POLLOUT,
-            revents: 0,
-        },
-    ];
+        })
+        .collect();
+    let count =
+        libc::nfds_t::try_from(fds.len()).map_err(|_| io::Error::other("too many descriptors"))?;
     let milliseconds = c_int::try_from(timeout.as_millis()).unwrap_or(c_int::MAX);
-    // SAFETY: `fds` holds two pollfd records, and poll ignores those whose fd
-    // is negative.
+    // SAFETY: `fds` holds `count` pollfd records, and poll ignores those
+    // whose fd is negative.
     #[allow(unsafe_code)]
-    let ready = unsafe { libc::poll(fds.as_mut_ptr(), 2, milliseconds) };
+    let ready = unsafe { libc::poll(fds.as_mut_ptr(), count, milliseconds) };
     if ready < 0 {
         let error = os_error();
         return if is(&error, libc::EINTR) {
-            Ok((false, false))
+            Ok(vec![false; fds.len()])
         } else {
             Err(error)
         };
     }
     let done = libc::POLLHUP | libc::POLLERR | libc::POLLNVAL;
-    Ok((
-        read.is_some() && fds[0].revents & (libc::POLLIN | done) != 0,
-        write.is_some() && fds[1].revents & (libc::POLLOUT | done) != 0,
-    ))
+    Ok(fds
+        .iter()
+        .map(|fd| fd.fd >= 0 && fd.revents & (fd.events | done) != 0)
+        .collect())
+}
+
+/// Whether `fd` is an open descriptor.
+pub fn is_open(fd: RawFd) -> bool {
+    // SAFETY: fcntl with F_GETFD reads descriptor flags only.
+    #[allow(unsafe_code)]
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    flags >= 0
 }
 
 pub fn read(fd: RawFd, buffer: &mut [u8]) -> io::Result<usize> {
@@ -439,6 +452,106 @@ mod tests {
         assert!(group_members(group).unwrap().contains(&pid));
         assert!(matches!(state(pid).unwrap(), State::Live(identity) if identity.pid == pid));
         assert!(footprint(pid).unwrap().unwrap() > 0);
+    }
+
+    /// Whether one sysctl answers, by name or as a MIB.
+    fn sysctl_answers(name: &str) -> &'static str {
+        let mut buffer = vec![0u8; 1 << 22];
+        let mut size: libc::size_t = buffer.len();
+        let result = if name == "kern.proc.all" {
+            let mut mib = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_ALL];
+            // SAFETY: `mib` holds three integers and `buffer` holds `size`
+            // writable bytes. The call keeps no pointer to either.
+            #[allow(unsafe_code)]
+            unsafe {
+                libc::sysctl(
+                    mib.as_mut_ptr(),
+                    3,
+                    buffer.as_mut_ptr().cast(),
+                    &mut size,
+                    std::ptr::null_mut(),
+                    0,
+                )
+            }
+        } else {
+            let name = CString::new(name).unwrap();
+            // SAFETY: `name` is NUL-terminated, and `buffer` holds `size`
+            // writable bytes. The call keeps no pointer to either.
+            #[allow(unsafe_code)]
+            unsafe {
+                libc::sysctlbyname(
+                    name.as_ptr(),
+                    buffer.as_mut_ptr().cast(),
+                    &mut size,
+                    std::ptr::null_mut(),
+                    0,
+                )
+            }
+        };
+        match result {
+            0 => "read",
+            _ if is(&os_error(), libc::EPERM) => "refused",
+            _ => "failed",
+        }
+    }
+
+    const PROBE: &str = "DOHC_COMPILER_OWNER_SYSCTL_PROBE";
+    const SYSCTLS: [&str; 6] = [
+        "hw.ncpu",
+        "kern.osrelease",
+        "kern.hostname",
+        "kern.uuid",
+        "kern.boottime",
+        "kern.proc.all",
+    ];
+
+    #[test]
+    fn a_confined_child_reads_only_the_sysctls_node_needs() {
+        // The re-executed copy below runs inside the sandbox and reports.
+        if std::env::var_os(PROBE).is_some() {
+            for name in SYSCTLS {
+                println!("probe {name}={}", sysctl_answers(name));
+            }
+            std::process::exit(0);
+        }
+        let me = std::env::current_exe().unwrap().canonicalize().unwrap();
+        let build =
+            std::env::temp_dir().join(format!("dohc-compiler-owner-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&build).unwrap();
+        let build = build.canonicalize().unwrap();
+        // The test binary stands in for Node: it is the one program the profile lets run.
+        let profile = crate::profile::profile(me.parent().unwrap(), &me, &build).unwrap();
+        let mut command = Command::new(&me);
+        command
+            .args([
+                "--exact",
+                "sys::tests::a_confined_child_reads_only_the_sysctls_node_needs",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(PROBE, "1");
+        confine(&mut command, profile, 10);
+        let output = command.output().unwrap();
+        std::fs::remove_dir_all(&build).unwrap();
+        let report: Vec<String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            // libtest may print its own "test ... " before the first line.
+            .filter_map(|line| {
+                line.split_once("probe ")
+                    .map(|(_, report)| report.to_owned())
+            })
+            .collect();
+        assert_eq!(
+            report,
+            [
+                "hw.ncpu=read",
+                "kern.osrelease=read",
+                "kern.hostname=read",
+                "kern.uuid=refused",
+                "kern.boottime=refused",
+                "kern.proc.all=refused"
+            ]
+        );
     }
 
     #[test]

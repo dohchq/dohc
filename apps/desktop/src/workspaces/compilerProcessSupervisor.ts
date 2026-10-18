@@ -1,5 +1,6 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { spawn, type ChildProcess } from "node:child_process";
+import type { Readable, Writable } from "node:stream";
+import { mkdtemp, rmdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -33,7 +34,7 @@ export class CompilerProcessError extends Error {
 
 /** The process that holds the build, and how this caller ends it. */
 interface CompilerOwner {
-  child: ChildProcessWithoutNullStreams;
+  child: ChildProcess & { stdin: Writable; stdout: Readable; stderr: Readable };
   stop(): void;
   /** Runs once the owner closed, before the result settles. Never rejects. */
   finish(): Promise<void>;
@@ -91,7 +92,9 @@ async function killProcessGroup(group: number): Promise<void> {
 /**
  * The owner leads a new process group, confines the worker with Seatbelt, and
  * samples memory and process count. It stops every process it tracks when
- * a bound trips, the deadline passes, or its stdin ends.
+ * a bound trips, the deadline passes, or its lifeline on descriptor 3 ends.
+ * It removes the build directory itself, without following symlinks a
+ * process that escaped its tree may have put there.
  */
 async function macosOwner(runtime: CompilerProcessRuntime, bounds: CompilerProcessBounds, inputBytes: number): Promise<CompilerOwner> {
   if (!runtime.ownerExecutable || !isAbsolute(runtime.ownerExecutable)) throw new Error("Compiler runtime paths must be absolute.");
@@ -99,7 +102,12 @@ async function macosOwner(runtime: CompilerProcessRuntime, bounds: CompilerProce
   const child = spawn(runtime.ownerExecutable, [String(bounds.maxMemoryBytes), String(bounds.maxProcesses), String(bounds.timeoutMs), String(inputBytes),
     dirname(runtime.workerPath), directory, runtime.nodeExecutable, runtime.workerPath, ...(runtime.workerArgs ?? [])],
   // No environment: the owner gives the worker TMPDIR and nothing else.
-  { cwd: directory, env: {}, detached: true, shell: false, stdio: ["pipe", "pipe", "pipe"] });
+  { cwd: directory, env: {}, detached: true, shell: false, stdio: ["pipe", "pipe", "pipe", "pipe"] });
+  // This caller never writes to the lifeline. Closing it, or this process
+  // dying, tells the owner the caller is gone, even while the owner waits on
+  // a worker that has not read its input.
+  const lifeline = child.stdio[3] as Writable;
+  lifeline.on("error", () => {});
   let fallback: NodeJS.Timeout | undefined;
   child.once("exit", () => {
     setTimeout(() => { child.stdout.destroy(); child.stderr.destroy(); }, PIPE_DRAIN_MS).unref();
@@ -107,16 +115,20 @@ async function macosOwner(runtime: CompilerProcessRuntime, bounds: CompilerProce
   return {
     child,
     stop: () => {
-      // EOF on the lifeline makes the owner stop its whole tree, including
+      // A closed lifeline makes the owner stop its whole tree, including
       // descendants that left its group. Killing the group would skip those.
-      child.stdin.destroy();
+      lifeline.destroy();
       fallback ??= setTimeout(() => { if (child.pid !== undefined) void killProcessGroup(child.pid); }, OWNER_STOP_GRACE_MS);
       fallback.unref();
     },
     finish: async () => {
       clearTimeout(fallback);
+      lifeline.destroy();
       if (child.pid !== undefined) await killProcessGroup(child.pid);
-      await rm(directory, { recursive: true, force: true }).catch(() => {});
+      // A recursive remove here would follow a symlink an escaped process
+      // swapped in. The owner already emptied the directory, so a directory
+      // that is not empty stays for the system to clear from the temporary folder.
+      await rmdir(directory).catch(() => {});
     },
     reasons: macosReasons,
   };
