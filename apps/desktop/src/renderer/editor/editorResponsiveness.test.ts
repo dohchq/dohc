@@ -140,11 +140,11 @@ describe("wikilink decoration reuse", () => {
     expect(view.dom.querySelector(".dohc-wikilink-pill")?.textContent).toBe("After");
     files.delete("a");
     view.dispatch(view.state.tr.setSelection(view.state.selection));
-    expect(view.dom.querySelector(".dohc-wikilink-pill--broken")?.textContent).toBe("a");
+    expect(view.dom.querySelector(".dohc-wikilink-pill[data-missing]")?.textContent).toBe("a");
     files = new Map([["a", { path: "a.md", title: "Restored" }]]);
     view.dispatch(view.state.tr.setSelection(view.state.selection));
     expect(view.dom.querySelector(".dohc-wikilink-pill")?.textContent).toBe("Restored");
-    expect(view.dom.querySelector(".dohc-wikilink-pill--broken")).toBeNull();
+    expect(view.dom.querySelector(".dohc-wikilink-pill[data-missing]")).toBeNull();
   });
 
   it("toggles only the link under the cursor and preserves duplicate pills elsewhere", () => {

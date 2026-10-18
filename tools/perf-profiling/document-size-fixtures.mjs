@@ -57,20 +57,36 @@ export function documentFixture(mib, shape, { structural = false } = {}) {
   };
 }
 
+const LINKED_TARGETS = 500;
+
+// Each control document, the receipt key of its cold opens, and for wikilinks.md the pills that end
+// its open. links.md holds 500 Markdown links in 5,000 paragraphs and its open ends when the read
+// view shows the document. wikilinks.md holds the same 500 targets as wikilinks, one per paragraph,
+// so it stays under the editor's 64 KiB rich-editing limit; only the editor draws them, so its open
+// ends when the editor is editable and every pill is painted.
+export const DOCUMENT_CONTROLS = [
+  ['large.md', 'legacyOpenMs'],
+  ['links.md', 'linksOpenMs'],
+  ['wikilinks.md', 'wikilinkOpenMs', LINKED_TARGETS],
+];
+
 export function documentControlFiles() {
-  const targets = Array.from({ length: 500 }, (_, n) => ({
+  const targets = Array.from({ length: LINKED_TARGETS }, (_, n) => ({
     name: 'linked/target-' + n + '.md',
     text: '# Linked target ' + n + '\n',
   }));
-  const paragraphs = Array.from(
-    { length: 5000 },
-    (_, n) =>
-      'Paragraph ' +
-      n +
-      '. Performance text.' +
-      (n % 10 === 0 ? ' [Link ' + n / 10 + '](' + targets[n / 10].name + ')' : ''),
-  );
-  return [{ name: 'links.md', text: '# Workspace 0 large links\n\n' + paragraphs.join('\n\n') + '\n' }, ...targets];
+  const linked = (title, every, link) => {
+    const paragraphs = Array.from(
+      { length: LINKED_TARGETS * every },
+      (_, n) => 'Paragraph ' + n + '. Performance text.' + (n % every === 0 ? ' ' + link(n / every) : ''),
+    );
+    return '# Workspace 0 large ' + title + '\n\n' + paragraphs.join('\n\n') + '\n';
+  };
+  return [
+    { name: 'links.md', text: linked('links', 10, (n) => '[Link ' + n + '](' + targets[n].name + ')') },
+    { name: 'wikilinks.md', text: linked('wikilinks', 1, (n) => '[[' + targets[n].name.slice(0, -3) + ']]') },
+    ...targets,
+  ];
 }
 
 export function documentMatrix(options) {

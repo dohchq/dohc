@@ -29,7 +29,10 @@ import { isCodeBlock, isCodeMark } from "./pmHelpers";
 
 import type { Node as ProseMirrorNode, ResolvedPos } from '@tiptap/pm/model'
 import { PluginKey } from '@tiptap/pm/state'
-import { Decoration, DecorationSet } from '@tiptap/pm/view'
+import { Decoration, DecorationSet, type NodeView } from '@tiptap/pm/view'
+import { FILE_KIND_RECORDS, fileKindForPath, type FileKindRecord } from '@dohc/workspace-contracts/kinds'
+import { REF_SELECTED } from '../ui/refChip'
+import { refElement } from '../ui/refElement'
 
 export const wikilinkPluginKey = new PluginKey<WikilinkState>('dohc-wikilink')
 
@@ -55,7 +58,8 @@ type WikilinkRange = {
 
 type WikilinkPreview = WikilinkRange & {
   display: string
-  resolved: boolean
+  /** The file the target resolves to, or null when it resolves to none. */
+  path: string | null
   source: boolean
 }
 
@@ -133,33 +137,50 @@ export function detectAutocomplete(
   }
 }
 
-/** Build the pill widget DOM for a wikilink range. */
-function makePillElement(
+/** A target names a page unless its extension names another kind: the
+ *  link picker writes Markdown paths without `.md`. */
+function linkKind(target: string): FileKindRecord {
+  const kind = fileKindForPath(target)
+  return kind === FILE_KIND_RECORDS.binary ? FILE_KIND_RECORDS.markdown : kind
+}
+
+/** The editor's wikilink pill: the reference chip (ui/refElement.ts) as an
+ *  atom. ProseMirror treats contentEditable=false as one, so a click lands
+ *  on the pill and the cursor steps past it. `data-wikilink-target` is what
+ *  the editor's click handler opens. `path` is the resolved file, when the
+ *  caller resolved one. */
+export function wikilinkPill(
   target: string,
   display: string,
-  resolved: boolean,
+  link: { path: string | null; missing: boolean },
 ): HTMLElement {
-  const span = document.createElement('span')
-  span.className =
-    'dohc-wikilink-pill' + (resolved ? '' : ' dohc-wikilink-pill--broken')
-  span.setAttribute('data-wikilink-target', target)
-  // The pill is not editable. PM treats contentEditable=false as
-  // an atom — clicks land on the widget itself; cursor skips past.
-  span.contentEditable = 'false'
+  const pill = refElement({
+    path: link.path ?? target,
+    title: display,
+    kind: link.path ? undefined : linkKind(target),
+    missing: link.missing,
+    opens: true,
+  })
+  pill.classList.add('dohc-wikilink-pill')
+  pill.setAttribute('data-wikilink-target', target)
+  pill.contentEditable = 'false'
+  return pill
+}
 
-  const icon = document.createElement('span')
-  icon.className = 'dohc-wikilink-pill__icon'
-  icon.setAttribute('aria-hidden', 'true')
-  // lucide arrow-up-right
-  icon.innerHTML =
-    '<svg viewBox="0 0 24 24" width="11" height="11" stroke="currentColor" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7"/><path d="M7 7h10v10"/></svg>'
-  span.appendChild(icon)
-
-  const label = document.createElement('span')
-  label.className = 'dohc-wikilink-pill__label'
-  label.textContent = display
-  span.appendChild(label)
-  return span
+/** The `wikilink` node's view: the same pill, named by the node's label.
+ *  The node is not resolved against the workspace, so it never shows as
+ *  missing. Keyboard selection of the node shows the chip's selected fill. */
+export function wikilinkNodeView(node: ProseMirrorNode): NodeView {
+  const target = String(node.attrs.target ?? '')
+  const label = node.attrs.label ? String(node.attrs.label) : null
+  const dom = wikilinkPill(target, label || target, { path: null, missing: false })
+  dom.setAttribute('data-dohc-wikilink', target)
+  if (label) dom.setAttribute('data-dohc-wikilink-label', label)
+  return {
+    dom,
+    selectNode: () => dom.classList.add(REF_SELECTED),
+    deselectNode: () => dom.classList.remove(REF_SELECTED),
+  }
 }
 
 /** Resolve display title from the known-files map. Falls back to
@@ -167,20 +188,20 @@ function makePillElement(
 function displayFor(
   target: string,
   knownFiles: ReadonlyMap<string, WikilinkFile>,
-): { display: string; resolved: boolean } {
+): { display: string; path: string | null } {
   const file =
     knownFiles.get(target) ??
     knownFiles.get(`${target}.md`) ??
     null
   if (file) {
     const t = (file.title ?? '').trim()
-    if (t) return { display: t, resolved: true }
+    if (t) return { display: t, path: file.path }
     // No title — fall back to leaf of the path.
     const leaf = file.path.replace(/\.(md|markdown)$/i, '').split('/').pop() ?? file.path
-    return { display: leaf, resolved: true }
+    return { display: leaf, path: file.path }
   }
   // Broken — display the bare path; the dashed style signals brokenness.
-  return { display: target, resolved: false }
+  return { display: target, path: null }
 }
 
 function buildWikilinkDecorations(
@@ -208,10 +229,10 @@ function buildWikilinkDecorations(
     decorations.push(
       Decoration.widget(
         r.from,
-        () => makePillElement(r.target, r.display, r.resolved),
+        () => wikilinkPill(r.target, r.display, { path: r.path, missing: r.path === null }),
         // side:-1 places the widget before the underlying text so
         // clicks land on the widget, not on the hidden text behind.
-        { side: -1, ignoreSelection: true, key: JSON.stringify([index, r.target, r.display, r.resolved]) },
+        { side: -1, ignoreSelection: true, key: JSON.stringify([index, r.target, r.display, r.path]) },
       ),
     )
     decorations.push(
@@ -240,7 +261,7 @@ function wikilinkState(
   }))
   if (previous && ranges === previous.ranges && previews.every((preview, index) => {
     const old = previous.previews[index]
-    return old.source === preview.source && old.display === preview.display && old.resolved === preview.resolved
+    return old.source === preview.source && old.display === preview.display && old.path === preview.path
   })) return previous
   return { ranges, previews, decorations: buildWikilinkDecorations(doc, previews) }
 }

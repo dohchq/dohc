@@ -1169,32 +1169,6 @@ body {
   font-size: 13px;
 }
 
-.dohc-wikilink-pill {
-  display: inline-flex;
-  max-width: 260px;
-  align-items: center;
-  gap: 3px;
-  overflow: hidden;
-  border: 1px solid var(--dohc-line);
-  border-radius: 999px;
-  background: var(--dohc-panel-2);
-  padding: 0 7px;
-  color: var(--dohc-ink);
-  font-size: 12px;
-  vertical-align: baseline;
-}
-
-.dohc-wikilink-pill--broken {
-  border-style: dashed;
-  color: var(--dohc-subtle);
-}
-
-.dohc-wikilink-pill__label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .dohc-atom {
   border-radius: 4px;
   background: color-mix(in srgb, var(--dohc-match) 10%, transparent);
@@ -1202,8 +1176,8 @@ body {
   color: var(--dohc-ink);
   font-family: var(--font-mono);
   font-size: 13px;
-  /* A little horizontal breathing room so the tint doesn't hug the glyphs —
-   * matches the padded wikilink pill; clone keeps it intact across wraps. */
+  /* A little horizontal breathing room so the tint doesn't hug the glyphs;
+   * clone keeps it intact across wraps. */
   padding: 0 3px;
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;

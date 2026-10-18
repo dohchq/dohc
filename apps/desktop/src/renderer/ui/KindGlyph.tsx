@@ -30,8 +30,9 @@ import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
 // `labelled`, and the kind's name becomes its accessible name.
 //
 // A `Record` over the registry's glyph ids, so a new glyph is a compile error
-// here until it has its icon.
-const GLYPHS: Record<FileKindRecord["glyphId"], LucideIcon> = {
+// here until it has its icon. refElement.ts renders these same icons for the
+// editor's DOM chips.
+export const KIND_GLYPHS: Record<FileKindRecord["glyphId"], LucideIcon> = {
   file: File,
   "file-text": FileText,
   "file-spreadsheet": FileSpreadsheet,
@@ -47,7 +48,7 @@ export function KindGlyph(props: {
   className?: string;
   labelled?: boolean;
 }) {
-  const Glyph = GLYPHS[props.kind.glyphId];
+  const Glyph = KIND_GLYPHS[props.kind.glyphId];
   const label = props.labelled
     ? { role: "img", "aria-label": props.kind.name }
     : { "aria-hidden": true };

@@ -57,9 +57,16 @@ describe("buildStandaloneDocumentHtml", () => {
   });
 
   it("renders a wikilink as a styled, non-interactive pill (never an <a> tag)", () => {
-    expect(html).toContain('class="dohc-wikilink-pill"');
-    expect(html).toContain("Roadmap");
+    expect(html).toMatch(/<span class="dohc-wikilink-pill"[^>]*>Roadmap<\/span>/);
     expect(html).not.toContain('<a href="team/roadmap.md"');
+  });
+
+  it("styles the wikilink as the reference chip: hairline, 4px radius, inset, body face", () => {
+    const rule = /\.dohc-wikilink-pill \{([^}]*)\}/.exec(html)?.[1] ?? "";
+    expect(rule).toContain("border: 1px solid var(--line)");
+    expect(rule).toContain("border-radius: 4px");
+    expect(rule).toContain("background: var(--panel-2)");
+    expect(rule).not.toContain("font-family");
   });
 
   it("renders a callout as a styled div carrying its type and title", () => {

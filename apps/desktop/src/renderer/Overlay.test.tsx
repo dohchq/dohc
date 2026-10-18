@@ -5,6 +5,7 @@ import { StrictMode, useLayoutEffect, useRef, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Overlay } from "./Overlay";
 import { Menu } from "./ui/Menu";
+import { StepperControl } from "./settings/SettingRow";
 
 afterEach(() => {
   cleanup();
@@ -83,6 +84,36 @@ describe("Overlay", () => {
     expect(screen.queryByRole("menu")).toBeNull();
     expect(screen.getByRole("dialog", { name: "Actions" })).toBe(dialog);
     await waitFor(() => expect(document.activeElement).toBe(trigger));
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("closes an open tooltip on the first Escape and the overlay on the second", async () => {
+    const user = userEvent.setup();
+    function Dialog() {
+      const [open, setOpen] = useState(true);
+      return open ? (
+        <Overlay onClose={() => setOpen(false)} panelProps={{ role: "dialog", "aria-label": "Settings" }}>
+          <StepperControl
+            setting="zoom"
+            value="100%"
+            decrease={{ label: "Zoom out", onClick: vi.fn() }}
+            reset={{ label: "Reset zoom", to: "100%", onClick: vi.fn() }}
+            increase={{ label: "Zoom in", onClick: vi.fn() }}
+          />
+        </Overlay>
+      ) : null;
+    }
+    render(<Dialog />);
+    const zoomIn = screen.getByRole("button", { name: "Zoom in" });
+    await user.hover(zoomIn);
+    zoomIn.focus();
+    expect(screen.getByRole("tooltip").textContent).toBe("Zoom in");
+
+    await user.keyboard("{Escape}");
+
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    expect(screen.getByRole("dialog", { name: "Settings" })).toBeTruthy();
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("dialog")).toBeNull();
   });
