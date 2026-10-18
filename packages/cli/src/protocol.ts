@@ -10,7 +10,6 @@ import { WORKSPACE_POLICY_PATHS } from "@dohc/security-contract/effective-policy
 import type { AutomationDefinitionList, AutomationSwitchResult } from "@dohc/workspace-contracts/automation-controls";
 import { CreationPartial } from "./creation";
 import { DATASET_CAPABILITIES, DatasetRequest, DatasetResult } from "./dataset";
-export { DATASET_CAPABILITIES } from "./dataset";
 import { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "./appPublication";
 import {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "./appResponses";
 import { ServerAccountDeletionPreview, ServerAccountDeleteRequest, ServerAccountDeleteResult } from "./account";

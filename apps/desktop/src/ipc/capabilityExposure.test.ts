@@ -1,7 +1,7 @@
 // A PR that adds a channel or command edits the main inventory directly. Do not add a delta file.
-import { APP_PUBLICATION_CAPABILITIES, CLI_CAPABILITIES, cliRequestSchema, DATASET_CAPABILITIES } from "@dohc/cli/protocol";
+import { APP_PUBLICATION_CAPABILITIES, CLI_CAPABILITIES, cliRequestSchema } from "@dohc/cli/protocol";
 import { CLI_COMMANDS, parseCliArguments } from "@dohc/cli/args";
-import { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
+import { DATASET_CAPABILITIES, DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import { OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
 import { renderCliHelp } from "@dohc/cli/help";
 import { advertisedCapabilityTools as advertisedTools } from "@dohc/mcp/capability-exposure-fixture";
