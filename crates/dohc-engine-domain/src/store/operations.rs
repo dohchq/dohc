@@ -120,12 +120,34 @@ fn preflight_originals_in(
         });
     }
     let mut objects = std::collections::HashSet::new();
+    let rename = originals
+        .iter()
+        .filter(|m| m.operation == "rename")
+        .collect::<Vec<_>>();
+    let linking_rename = (rename.len() == 1).then(|| rename[0].object_id.as_str());
     for effect in &originals {
         if !objects.insert(&effect.object_id) {
             return Err(DomainError::UndoRefused {
                 path: effect.path.clone(),
                 reason: "multiple changes to one object",
             });
+        }
+        if effect.operation == "write" {
+            if linking_rename.is_none_or(|object| object == effect.object_id) {
+                return Err(DomainError::UndoRefused {
+                    path: effect.path.clone(),
+                    reason: "unsupported inverse",
+                });
+            }
+            let current = get_snapshot(conn, ws, version, &effect.object_id)?;
+            let Some(head) = current else {
+                return Err(DomainError::UndoRefused {
+                    path: effect.path.clone(),
+                    reason: "linking document removed",
+                });
+            };
+            validate_plaintext_storable_path(&head.path)?;
+            continue;
         }
         let old = if effect.operation == "rename" {
             effect
@@ -279,7 +301,7 @@ pub fn replayed_undo_operation_in(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn undo_operation_in_tx<F>(
+pub fn undo_operation_in_tx<F, W>(
     tx: &Transaction<'_>,
     ws: &str,
     version: &str,
@@ -287,10 +309,12 @@ pub fn undo_operation_in_tx<F>(
     request: &str,
     author: Option<&str>,
     now: i64,
+    mut inverse_write: W,
     mut after: F,
 ) -> Result<(Vec<OperationMoment>, bool), DomainError>
 where
     F: FnMut(&Transaction<'_>, &MomentRecord) -> Result<(), DomainError>,
+    W: FnMut(&Transaction<'_>, &OperationMoment) -> Result<String, DomainError>,
 {
     validate_operation_id(operation)?;
     validate_identifier(request, "request_id")?;
@@ -324,6 +348,32 @@ where
                     now_ms: now,
                 },
                 |_, _| Ok(()),
+            )?
+            .moment
+        } else if effect.operation == "write" {
+            let head = get_snapshot(tx, ws, version, &effect.object_id)?.ok_or(
+                DomainError::UndoRefused {
+                    path: effect.path.clone(),
+                    reason: "linking document removed",
+                },
+            )?;
+            let text = inverse_write(tx, &effect)?;
+            super::write_text_in_tx(
+                tx,
+                &WriteText {
+                    workspace_id: ws.into(),
+                    version_id: version.into(),
+                    object_id: effect.object_id,
+                    path: head.path,
+                    text,
+                    moment_id: id,
+                    request_id: None,
+                    metadata_origin: "restore".into(),
+                    metadata_summary: Some("Undo".into()),
+                    metadata_correlation_id: Some(correlation.clone()),
+                    author_json: author.map(str::to_owned),
+                    now_ms: now,
+                },
             )?
             .moment
         } else {

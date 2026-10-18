@@ -1,0 +1,421 @@
+use super::{
+    ActorHandle,
+    versioned::{
+        WriteConditions, versioned_text_write_with_publication_on_store,
+        with_local_file_mutation_cache_reset,
+    },
+};
+use crate::{
+    RuntimeError,
+    links::{incoming, resolver::Resolver, rewrite},
+};
+use dohc_engine_collab::{CollabError, DocKey, LeaseRegistry};
+use dohc_engine_domain::{
+    DomainError, OperationMoment, VersionedTextStore, WriteText, operation_moments_in,
+};
+use dohc_engine_storage::{EngineStore, FaultInjector, StorageError, TxnOutcome, hex_sha256};
+use rusqlite::{Connection, OptionalExtension, params};
+use serde_json::{Value, json};
+use std::{collections::HashSet, path::PathBuf, sync::Arc};
+use tokio_util::sync::CancellationToken;
+
+struct Plan {
+    version: String,
+    rename: OperationMoment,
+    paths: Vec<String>,
+    candidates: incoming::Candidates,
+}
+
+fn valid(conn: &Connection, ws: &str, plan: &Plan) -> Result<bool, RuntimeError> {
+    let mut paths = Resolver::paths_for_version(conn, ws, &plan.version)?;
+    paths.sort();
+    Ok(paths == plan.paths && conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND path=?4)
+         AND NOT EXISTS(SELECT 1 FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND path=?5)
+         AND NOT EXISTS(SELECT 1 FROM moments WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND moment_order>?6 AND operation IN ('rename','delete'))",
+        params![ws, plan.version, plan.rename.object_id, plan.rename.path, plan.rename.before_path, plan.rename.moment_order], |r| r.get::<_, bool>(0),
+    ).map_err(StorageError::corrupt_public)?)
+}
+
+struct Receipt {
+    key: String,
+    binding: String,
+}
+impl Receipt {
+    fn read(&self, conn: &Connection) -> Result<Option<(bool, Value)>, RuntimeError> {
+        let row: Option<(String, String)> = conn
+            .query_row(
+                "SELECT kind,payload_hash FROM engine_requests WHERE request_id=?1",
+                [&self.key],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(StorageError::corrupt_public)?;
+        let Some((kind, body)) = row else {
+            return Ok(None);
+        };
+        let envelope: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+        if kind != "history-link-rewrites" || envelope[0].as_str() != Some(self.binding.as_str()) {
+            return Err(DomainError::IdempotencyKeyReuseMismatch.into());
+        }
+        Ok(Some((
+            envelope[1].as_bool().ok_or(DomainError::StateCorrupt {
+                reason: "link rewrite receipt",
+            })?,
+            envelope[2].clone(),
+        )))
+    }
+    // The discriminator owns this envelope; other request kinds still fail their fingerprint check.
+    fn save(&self, conn: &Connection, done: bool, result: &Value) -> Result<(), RuntimeError> {
+        conn.execute(
+            "INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) VALUES(?1,?2,0,?3,'history-link-rewrites')
+             ON CONFLICT(request_id) DO UPDATE SET payload_hash=excluded.payload_hash,committed_at=excluded.committed_at",
+            params![self.key, json!([self.binding, done, result]).to_string(), crate::links::now_ms()],
+        ).map_err(StorageError::persist_public)?;
+        Ok(())
+    }
+}
+
+fn save(
+    store: &mut EngineStore,
+    receipt: &Receipt,
+    done: bool,
+    result: &Value,
+    faults: &dyn FaultInjector,
+) -> Result<(), RuntimeError> {
+    match store.write_with(faults, |tx| receipt.save(tx, done, result))? {
+        TxnOutcome::Committed(()) => Ok(()),
+        TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
+}
+
+impl ActorHandle {
+    #[allow(clippy::too_many_arguments)]
+    pub async fn history_rewrite_links(
+        &self,
+        workspace: String,
+        operation: String,
+        request: String,
+        author: Option<String>,
+        root: PathBuf,
+        leases: LeaseRegistry,
+        session_ops: Arc<tokio::sync::Mutex<()>>,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<Value, RuntimeError> {
+        let _pass = tokio::select! {
+            () = token.cancelled() => return Err(RuntimeError::Cancelled),
+            guard = Arc::clone(&self.link_rewrite_gate).lock_owned() => guard,
+        };
+        let receipt = Arc::new(Receipt {
+            key: request,
+            binding: hex_sha256(json!([workspace, operation, author]).to_string().as_bytes()),
+        });
+        let (ws, op, r, f) = (
+            workspace.clone(),
+            operation.clone(),
+            receipt.clone(),
+            faults.clone(),
+        );
+        let (plan, mut result) = self
+            .run(move |store, _| {
+                #[cfg(test)]
+                let _turn = tests::Turn::start(&ws, "plan");
+                if store.is_passive() {
+                    return Err(DomainError::InvalidInput {
+                        reason: "link rewrites need the owner",
+                    }
+                    .into());
+                }
+                let prior = store.read_with(|conn| r.read(conn))?;
+                if let Some((true, reply)) = prior {
+                    return Ok((None, reply));
+                }
+                let version = VersionedTextStore::new(store)
+                    .get_active_version(&ws)?
+                    .version_id;
+                let plan = store.read_with(|conn| -> Result<_, RuntimeError> {
+                    let members = operation_moments_in(conn, &ws, &version, &op)?;
+                    let renames: Vec<_> =
+                        members.iter().filter(|m| m.operation == "rename").collect();
+                    let refuse = || DomainError::UndoRefused {
+                        path: op.clone(),
+                        reason: "operation cannot rewrite links",
+                    };
+                    let [rename] = renames.as_slice() else {
+                        return Err(refuse().into());
+                    };
+                    let old = rename.before_path.as_deref().ok_or_else(refuse)?;
+                    if old.to_lowercase() == rename.path.to_lowercase()
+                        || members.iter().any(|m| {
+                            m != *rename
+                                && (m.operation != "write" || m.object_id == rename.object_id)
+                        })
+                    {
+                        return Err(refuse().into());
+                    }
+                    let mut paths = Resolver::paths_for_version(conn, &ws, &version)?;
+                    paths.sort();
+                    let mut candidates = incoming::candidates(conn, &ws, &version, old)?;
+                    let written: HashSet<_> =
+                        members.iter().map(|m| m.object_id.as_str()).collect();
+                    candidates.sources.retain(|(object, path)| {
+                        !written.contains(object.as_str()) && !path.starts_with("shared-with-me/")
+                    });
+                    candidates.unchecked.retain(|path| {
+                        path != &rename.path && !path.starts_with("shared-with-me/")
+                    });
+                    let plan = Plan {
+                        version,
+                        rename: (*rename).clone(),
+                        paths,
+                        candidates,
+                    };
+                    if !valid(conn, &ws, &plan)? {
+                        return Err(refuse().into());
+                    }
+                    Ok(plan)
+                })?;
+                let result = prior.map_or(json!({"documents":0,"links":0}), |(_, result)| result);
+                save(store, &r, false, &result, f.as_ref())?;
+                Ok((Some(plan), result))
+            })
+            .await?;
+        let Some(plan) = plan else {
+            return Ok(result);
+        };
+        let (plan, before, after) = tokio::task::spawn_blocking(move || {
+            let old = plan.rename.before_path.as_deref().unwrap_or("");
+            let before = Resolver::new(
+                plan.paths
+                    .iter()
+                    .filter(|p| **p != plan.rename.path)
+                    .cloned()
+                    .chain([old.to_owned()]),
+            );
+            let after = Resolver::new(plan.paths.clone());
+            (Arc::new(plan), Arc::new(before), Arc::new(after))
+        })
+        .await
+        .map_err(|_| RuntimeError::ActorUnavailable)?;
+        let initially_open: HashSet<_> = plan
+            .candidates
+            .sources
+            .iter()
+            .filter_map(|(object, _)| {
+                let key = DocKey::new(&workspace, &plan.version, object).ok()?;
+                leases.is_held(&key).then(|| object.clone())
+            })
+            .collect();
+        let mut unchecked = plan.candidates.unchecked.clone();
+        for (index, (object, path)) in plan.candidates.sources.iter().enumerate() {
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            if initially_open.contains(object) {
+                unchecked.push(path.clone());
+                continue;
+            }
+            let (ws, p, read_object) = (workspace.clone(), plan.clone(), object.clone());
+            let (admitted, source) = self
+                .run(move |store, _| {
+                    #[cfg(test)]
+                    let _turn = tests::Turn::start(&ws, "read");
+                    let active = VersionedTextStore::new(store)
+                        .get_active_version(&ws)?
+                        .version_id;
+                    if active != p.version || !store.read_with(|conn| valid(conn, &ws, &p))? {
+                        return Ok((false, None));
+                    }
+                    Ok((
+                        true,
+                        store.read_with(|conn| {
+                            let source =
+                                incoming::read_source(conn, &ws, &p.version, &read_object)?;
+                            #[cfg(test)]
+                            tests::after_read(conn, &ws, &read_object);
+                            Ok::<_, StorageError>(source)
+                        })?,
+                    ))
+                })
+                .await?;
+            if !admitted {
+                unchecked.extend(
+                    plan.candidates.sources[index..]
+                        .iter()
+                        .map(|(_, p)| p.clone()),
+                );
+                break;
+            }
+            let Some(source) = source else {
+                unchecked.push(path.clone());
+                continue;
+            };
+            let (p, before, after) = (plan.clone(), before.clone(), after.clone());
+            let prepared = tokio::task::spawn_blocking(move || {
+                let text = source.text().unwrap_or("").to_owned();
+                let parsed = source.parse()?;
+                let edit = if parsed.reason.is_some() {
+                    None
+                } else if parsed.occurrences.is_empty() {
+                    Some((text.clone(), 0))
+                } else {
+                    rewrite::forward(
+                        &text,
+                        parsed.head.as_ref().map_or("", |h| &h.path),
+                        p.rename.before_path.as_deref().unwrap_or(""),
+                        &p.rename.path,
+                        &before,
+                        &after,
+                    )
+                };
+                Ok::<_, RuntimeError>((parsed.head, edit))
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)??;
+            let (Some(head), Some((text, links))) = prepared else {
+                unchecked.push(path.clone());
+                continue;
+            };
+            if links == 0 {
+                continue;
+            }
+            let serial = tokio::select! { () = token.cancelled() => return Err(RuntimeError::Cancelled), guard = Arc::clone(&session_ops).lock_owned() => guard };
+            let key = DocKey::new(&workspace, &plan.version, object)?;
+            let lease = match leases.acquire_internal(&key) {
+                Ok(lease) => lease,
+                Err(CollabError::LeaseHeld) => {
+                    unchecked.push(head.path);
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let next = json!({"documents":result["documents"].as_u64().unwrap_or(0)+1,"links":result["links"].as_u64().unwrap_or(0)+links as u64});
+            let (ws, op, author, root, p, r, next_result, token, f, object) = (
+                workspace.clone(),
+                operation.clone(),
+                author.clone(),
+                root.clone(),
+                plan.clone(),
+                receipt.clone(),
+                next.clone(),
+                token.clone(),
+                faults.clone(),
+                object.clone(),
+            );
+            let source_path = head.path.clone();
+            let committed = self
+                .run(move |store, cache| {
+                    #[cfg(test)]
+                    let _turn = tests::Turn::start(&ws, "commit");
+                    let _admission = (serial, lease);
+                    if token.is_cancelled() {
+                        return Err(RuntimeError::Cancelled);
+                    }
+                    let active = VersionedTextStore::new(store)
+                        .get_active_version(&ws)?
+                        .version_id;
+                    if active != p.version || !store.read_with(|conn| valid(conn, &ws, &p))? {
+                        return Ok(false);
+                    }
+                    let current =
+                        VersionedTextStore::new(store).read_text(&ws, &p.version, &head.path)?;
+                    if current
+                        .as_ref()
+                        .is_none_or(|h| h.object_id != object || h.blob_sha256 != head.hash)
+                        || head.path.starts_with("shared-with-me/")
+                    {
+                        return Ok(false);
+                    }
+                    match store.read_with(|conn| {
+                        super::history_operations::check_path_ownership(
+                            conn, &ws, &p.version, &object, &head.path,
+                        )
+                    }) {
+                        Ok(()) => {}
+                        Err(
+                            RuntimeError::Domain(DomainError::UndoRefused { .. })
+                            | RuntimeError::Sync(
+                                dohc_engine_sync::SyncError::LiveDocumentBindingActive,
+                            ),
+                        ) => return Ok(false),
+                        Err(error) => return Err(error),
+                    }
+                    let policy = crate::search::read_engine_search_policy(&root);
+                    if policy.holds_file_capture()
+                        || !dohc_engine_files::search_policy::resolve_effective_policy(
+                            &head.path,
+                            policy.files_policy.as_deref(),
+                            None,
+                        )
+                        .tracked
+                    {
+                        return Ok(false);
+                    }
+                    let input = WriteText {
+                        workspace_id: ws,
+                        version_id: p.version.clone(),
+                        object_id: object.clone(),
+                        path: head.path,
+                        text,
+                        moment_id: format!(
+                            "link-rewrite-{}",
+                            hex_sha256(json!([op, object]).to_string().as_bytes())
+                        ),
+                        request_id: None,
+                        metadata_origin: "api".into(),
+                        metadata_summary: Some(format!(
+                            "Updated links to {}",
+                            p.rename.path.rsplit('/').next().unwrap_or(&p.rename.path)
+                        )),
+                        metadata_correlation_id: Some(op),
+                        author_json: author,
+                        now_ms: crate::links::now_ms(),
+                    };
+                    with_local_file_mutation_cache_reset(cache, || {
+                        match versioned_text_write_with_publication_on_store(
+                            store,
+                            &input,
+                            Some(&root),
+                            None,
+                            Some(&WriteConditions {
+                                create_only: false,
+                                expected_sha256: Some(head.hash),
+                            }),
+                            Some(&|tx| r.save(tx, false, &next_result)),
+                            f.as_ref(),
+                            &token,
+                        ) {
+                            Ok(_) => Ok(true),
+                            Err(RuntimeError::Domain(DomainError::WritePreconditionFailed {
+                                ..
+                            })) => Ok(false),
+                            Err(error) => Err(error),
+                        }
+                    })
+                })
+                .await?;
+            if committed {
+                result = next;
+            } else {
+                unchecked.push(source_path);
+            }
+        }
+        unchecked.sort();
+        unchecked.dedup();
+        result["uncheckedCount"] = json!(unchecked.len());
+        result["complete"] = json!(unchecked.is_empty());
+        result["unchecked"] = json!(unchecked.into_iter().take(50).collect::<Vec<_>>());
+        let reply = result.clone();
+        self.run(move |store, _| {
+            save(store, &receipt, true, &result, faults.as_ref())?;
+            Ok(())
+        })
+        .await?;
+        Ok(reply)
+    }
+}
+
+#[cfg(test)]
+#[path = "link_rewrite_tests.rs"]
+mod tests;

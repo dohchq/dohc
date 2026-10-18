@@ -35,6 +35,7 @@ mod chats;
 mod checked_deletes;
 mod collections;
 mod history_operations;
+mod link_rewrites;
 pub use history_operations::{HistoryOperation, HistoryUndoResult};
 mod journal;
 mod live_application;
@@ -205,6 +206,7 @@ pub struct WorkspaceActor {
     claims: ClaimAnnouncer,
     link_metrics: SharedMetrics,
     link_drain_holds: Arc<AtomicU64>,
+    link_rewrite_gate: Arc<tokio::sync::Mutex<()>>,
     current_views: Arc<std::sync::Mutex<dohc_engine_sync::replica_cut::CurrentViewCache>>,
 }
 
@@ -367,6 +369,7 @@ impl WorkspaceActor {
                     claims: ClaimAnnouncer::default(),
                     link_metrics,
                     link_drain_holds,
+                    link_rewrite_gate: Arc::default(),
                     current_views: Arc::default(),
                 };
                 #[cfg(unix)]
@@ -400,6 +403,7 @@ impl WorkspaceActor {
             retained_root: self.retention_root.clone(),
             link_metrics: Arc::clone(&self.link_metrics),
             link_drain_holds: Arc::clone(&self.link_drain_holds),
+            link_rewrite_gate: Arc::clone(&self.link_rewrite_gate),
             current_views: Arc::clone(&self.current_views),
         }
     }
@@ -492,6 +496,7 @@ pub struct ActorHandle {
     claims: ClaimAnnouncer,
     link_metrics: SharedMetrics,
     link_drain_holds: Arc<AtomicU64>,
+    link_rewrite_gate: Arc<tokio::sync::Mutex<()>>,
     current_views: Arc<std::sync::Mutex<dohc_engine_sync::replica_cut::CurrentViewCache>>,
 }
 

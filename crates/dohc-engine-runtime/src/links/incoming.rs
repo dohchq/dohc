@@ -82,6 +82,9 @@ pub(crate) struct Source {
 }
 
 impl Source {
+    pub(crate) fn text(&self) -> Option<&str> {
+        self.head.text.as_deref()
+    }
     /// Run off the actor. This result is for resolution, never index publication.
     pub(crate) fn parse(self) -> Result<parser::Parsed, StorageError> {
         parser::parse(self.work, Some(self.head))

@@ -35,6 +35,46 @@ vi.mock("node:fs/promises", async original => {
 const engine = requireEngineBinaryOrSkip();
 const person = { kind: "human", humanId: "local:delete-recovery" } as const;
 
+it.skipIf(engine.missing)("workspace-engine-history rewrites closed links and undoes the move through IPC", async () => {
+  const rootPath = await createTestScratch("dohc-link-rewrite-engine-");
+  await writeFile(join(rootPath, "old.md"), "target\n");
+  for (const name of ["one.md", "two.md", "open.md"]) await writeFile(join(rootPath, name), "[[old#part|label]]\n");
+  const workspace = {workspaceId: "link-rewrites-engine", rootPath, attachmentId: Symbol("link-rewrites")};
+  const lifecycle = createRealDaemonLifecycle({command: engine.require(), maxRestarts: 0});
+  const sessions = createRealDaemonWorkspaceSessions(lifecycle);
+  const capture = createWorkspaceEngineCapture({...workspace, rustEngineSessions: sessions});
+  const operation = {workspace: {...workspace, readOnly: false, shareView: undefined}, state: {}, signal: new AbortController().signal, assertCurrent: vi.fn()};
+  await lifecycle.start();
+  try {
+    capture.start(); await capture.flush();
+    for (const name of ["old.md", "one.md", "two.md", "open.md"]) await waitForPathMoments(capture, name, 1);
+    const history = await sessions.run(workspace, async binding => new VersionedLiveAdapter(binding.client, binding.workspace, {workspaceId: workspace.workspaceId}));
+    const session = await sessions.run(workspace, binding => binding.client.sendRequest({id: 700, method: "ydoc.open", workspace: binding.workspace,
+      params: {versionId: "main", path: "open.md", contentKind: "richdoc", seedFromArtifact: true}}));
+    expect(session).not.toHaveProperty("error");
+    const owner = createWorkspaceFileMutationOwner({historyFor: () => history, assertTrustedSender: () => undefined,
+      withRendererWorkspaceOperation: async (_event, _id, work) => work({workspace: operation.workspace, signal: operation.signal, authorityId: workspace.attachmentId,
+        capture, assertCurrent: operation.assertCurrent, yDocSessions: {withDocumentUnowned: async (_id, _path, work) => work(), markDeletedUnderPath: () => undefined}}),
+      shareViewFiles: {change: async () => {throw new Error("No shares");}}, trashItem: async () => {throw new Error("No trash");}, localPerson: async () => person,
+      notifyRenderer: () => undefined, shareViewEdited: () => undefined, logError: () => undefined});
+    const moved = await owner.movePath({}, {workspaceId: workspace.workspaceId, fromPath: "old.md", toPath: "new.md"});
+    expect(moved).toMatchObject({undo: {available: true}});
+    const operationId = moved.operationId!;
+    const result = await history.rewriteHistoryLinks({workspaceId: workspace.workspaceId, operationId, requestId: "closed-rewrite", author: person});
+    expect(result).toEqual({documents: 2, links: 2, unchecked: ["open.md"], uncheckedCount: 1, complete: false});
+    expect(await history.rewriteHistoryLinks({workspaceId: workspace.workspaceId, operationId, requestId: "closed-rewrite", author: person})).toEqual(result);
+    // Undo starts while forward materialization still has queued work.
+    const undo = () => owner.undoHistoryOperation({}, {workspaceId: workspace.workspaceId, operationId});
+    await expect.poll(undo, {timeout: REAL_DAEMON_DEADLINE_MS}).toMatchObject({ok: true, tracked: {state: "restored", momentCount: 3}});
+    for (const name of ["one.md", "two.md", "open.md"]) {
+      await expect.poll(() => readFile(join(rootPath, name), "utf8"), {timeout: REAL_DAEMON_DEADLINE_MS}).toBe("[[old#part|label]]\n");
+    }
+    expect(await readFile(join(rootPath, "old.md"), "utf8")).toBe("target\n");
+    const replay = await history.undoHistoryOperation({workspaceId: workspace.workspaceId, operationId, requestId: `move-undo:${operationId}`, author: person});
+    expect(replay).toMatchObject({deduped: true, momentCount: 3});
+  } finally {await capture.stop(); await sessions.closeAll(); await lifecycle.stop();}
+}, REAL_DAEMON_TEST_TIMEOUT_MS);
+
 it.skipIf(engine.missing)("undoes a folder delete through the real engine and restores files without History rows", async () => {
   const rootPath = await createTestScratch("dohc-delete-undo-engine-");
   await mkdir(join(rootPath, "folder/node_modules/pkg"), { recursive: true });

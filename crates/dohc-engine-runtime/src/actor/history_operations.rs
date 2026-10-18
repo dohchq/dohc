@@ -370,32 +370,58 @@ fn probe_undo_source(
     probe.probe(path, dohc_engine_files::ProjectionTargetKind::Plaintext)
 }
 
-fn check_undo_ownership(
+pub(super) fn check_path_ownership(
     conn: &rusqlite::Connection,
     ws: &str,
     version: &str,
-    m: &OperationMoment,
+    object: &str,
+    path: &str,
 ) -> Result<(), RuntimeError> {
-    for path in std::iter::once(m.path.as_str()).chain(m.before_path.as_deref()) {
-        let held: Option<String> = conn
-            .query_row(
-                "SELECT path FROM capture_file_holds
-             WHERE workspace_id=?1 AND (path=?2 OR object_id=?3) LIMIT 1",
-                params![ws, path, m.object_id],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(StorageError::corrupt_public)?;
-        if let Some(path) = held {
-            return Err(DomainError::UndoRefused {
-                path,
-                reason: "capture hold",
-            }
-            .into());
+    if path == "shared-with-me" || path.starts_with("shared-with-me/") {
+        return Err(DomainError::UndoRefused {
+            path: path.into(),
+            reason: "received share path",
         }
-        dohc_engine_sync::ensure_no_adopted_owner_under_path(conn, ws, version, path)?;
+        .into());
     }
+    let held: Option<String> = conn
+        .query_row(
+            "SELECT path FROM capture_file_holds
+             WHERE workspace_id=?1 AND (path=?2 OR object_id=?3) LIMIT 1",
+            params![ws, path, object],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(StorageError::corrupt_public)?;
+    if let Some(path) = held {
+        return Err(DomainError::UndoRefused {
+            path,
+            reason: "capture hold",
+        }
+        .into());
+    }
+    dohc_engine_sync::ensure_no_adopted_owner_under_path(conn, ws, version, path)?;
     Ok(())
+}
+
+fn link_write_inverse(
+    conn: &rusqlite::Connection,
+    ws: &str,
+    version: &str,
+    member: &OperationMoment,
+) -> Result<String, DomainError> {
+    let (before, after, head, path): (String, String, String, String) = conn.query_row(
+        "SELECT b.text,a.text,h.text,s.path FROM moments m
+         JOIN blobs b ON b.sha256=m.payload_before_blob_sha256
+         JOIN blobs a ON a.sha256=m.payload_after_blob_sha256
+         JOIN snapshots s ON s.workspace_id=m.workspace_id AND s.version_id=?2 AND s.object_id=m.object_id
+         JOIN blobs h ON h.sha256=s.blob_sha256 WHERE m.workspace_id=?1 AND m.moment_id=?3",
+        params![ws, version, member.moment_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    ).map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+    crate::links::rewrite::inverse(&before, &after, &head).ok_or(DomainError::UndoRefused {
+        path,
+        reason: "link changed after rename",
+    })
 }
 
 fn rename_head_sha(
@@ -415,7 +441,7 @@ fn rename_head_sha(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn commit_history_undo_on_store(
+pub(super) fn commit_history_undo_on_store(
     store: &mut EngineStore,
     ws: &str,
     operation: &str,
@@ -436,14 +462,26 @@ fn commit_history_undo_on_store(
         if replay {
             return Ok(Vec::new());
         }
-        for m in operation_moments_in(conn, ws, &version_id, operation)? {
-            check_undo_ownership(conn, ws, &version_id, &m)?;
+        for mut m in operation_moments_in(conn, ws, &version_id, operation)? {
+            if m.operation == "write" {
+                m.path = conn.query_row("SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                    params![ws, version_id, m.object_id], |r| r.get(0)).optional().map_err(StorageError::corrupt_public)?
+                    .ok_or(DomainError::UndoRefused { path: m.path, reason: "linking document removed" })?;
+                m.before_path = None;
+            }
+            for path in std::iter::once(m.path.as_str()).chain(m.before_path.as_deref()) {
+                check_path_ownership(conn, ws, &version_id, &m.object_id, path)?;
+            }
         }
         let originals = preflight_undo_operation_in(conn, ws, &version_id, operation)?;
         originals
             .into_iter()
-            .map(|m| {
-                let source = if m.operation == "rename" {
+            .map(|mut m| {
+                let source = if m.operation == "rename" || m.operation == "write" {
+                    if m.operation == "write" {
+                        m.path = conn.query_row("SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                            params![ws, version_id, m.object_id], |r| r.get(0)).map_err(StorageError::corrupt_public)?;
+                    }
                     let sha = rename_head_sha(conn, ws, &version_id, &m.object_id)?;
                     let stamp = probe.stamp(&m.path);
                     let digest = probe_undo_source(&probe, &m.path);
@@ -490,7 +528,9 @@ fn commit_history_undo_on_store(
                 }
             }
             let target = m.before_path.as_deref().unwrap_or(&m.path);
-            if probe.stamp(target) != dohc_engine_files::ProjectionTargetStamp::Absent {
+            if m.operation != "write"
+                && probe.stamp(target) != dohc_engine_files::ProjectionTargetStamp::Absent
+            {
                 return Err(DomainError::UndoRefused {
                     path: target.into(),
                     reason: "old path occupied on disk",
@@ -517,6 +557,7 @@ fn commit_history_undo_on_store(
             request,
             author,
             now,
+            |tx, member| link_write_inverse(tx, ws, &version_id, member),
             |tx, m| {
                 let (path, text, kind, sha): (String, Option<String>, String, String) = tx
                     .query_row(
@@ -572,7 +613,15 @@ fn commit_history_undo_on_store(
                     workspace_id: ws.into(),
                     target_path: path,
                     content_sha256: sha.clone(),
-                    preimage: Preimage::Absent,
+                    preimage: if m.operation == dohc_engine_domain::MomentOp::Write {
+                        Preimage::Present(m.before_blob_sha256.clone().ok_or(
+                            DomainError::StateCorrupt {
+                                reason: "link inverse preimage",
+                            },
+                        )?)
+                    } else {
+                        Preimage::Absent
+                    },
                     target_generation: m.moment_order,
                     now_ms: now,
                 };

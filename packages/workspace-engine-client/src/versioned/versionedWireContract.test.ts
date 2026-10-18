@@ -30,6 +30,14 @@ const validMoment = {
 };
 
 describe("versioned result decoder rejection", () => {
+  it("decodes closed-document rewrite counts and rejects malformed replies", () => {
+    const reply = {documents: 2, links: 4, unchecked: ["open.md"], uncheckedCount: 1, complete: false};
+    expect(decodeVersionedResult(VERSIONED_METHOD.historyRewriteLinks, reply)).toEqual(reply);
+    for (const field of ["documents", "links", "uncheckedCount", "complete"]) {
+      expect(() => decodeVersionedResult(VERSIONED_METHOD.historyRewriteLinks, {...reply, [field]: "wrong"})).toThrow(ProtocolShapeError);
+    }
+    expect(() => decodeVersionedResult(VERSIONED_METHOD.historyRewriteLinks, {...reply, unchecked: [7]})).toThrow(ProtocolShapeError);
+  });
   it("preserves parked rollback placement as a distinct outcome", () => {
     const result = {
       rolledBack: true,
