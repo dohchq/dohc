@@ -68,6 +68,7 @@ vi.mock("./ExcalidrawCanvas", () => ({
 }));
 
 import { FileInspector } from "./FileInspector";
+import { REPLACED_HISTORY_DRAFT_NOTICE } from "./fileInspectorUi";
 import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import {
   EMPTY_EXCALIDRAW_DOCUMENT,
@@ -1056,11 +1057,17 @@ describe("FileInspector Excalidraw view", () => {
     act(() => bridge.emitLineageReplacement(Y.encodeStateAsUpdate(winner)));
     const retry = await screen.findByTestId("drawing-save-state-retry");
     expect(bridge.acknowledgeEngineYDocLineageReplacement).not.toHaveBeenCalled();
+    // The same words as the Markdown chip (FileInspector.lineageRetry.test.tsx):
+    // storage refused the edits, so nothing is set aside yet.
+    expect(screen.getByTestId("drawing-save-state").getAttribute("title")).toBe(
+      "dohc could not finish replacing this document. Storage refused the earlier edits.",
+    );
 
     setItem.mockRestore();
     fireEvent.click(retry);
     await waitFor(() => expect(bridge.acknowledgeEngineYDocLineageReplacement).toHaveBeenCalledOnce());
     await waitFor(() => expect(screen.queryByTestId("drawing-save-state-retry")).toBeNull());
+    expect(screen.getByTestId("orphaned-draft-notice").textContent).toContain(REPLACED_HISTORY_DRAFT_NOTICE);
   });
 
   it("keeps a truncated drawing non-writable while its scene opens", async () => {

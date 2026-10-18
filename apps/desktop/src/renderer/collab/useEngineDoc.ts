@@ -23,6 +23,8 @@ import {
 
 export type { EngineRemovalInProgress };
 
+const NO_DRAFT_IDS: readonly number[] = [];
+
 // The engine Y.Doc editor hook for live files. Given a workspace, path, and
 // format kind, it opens a live engine Y.Doc session in main over IPC and binds
 // a mirror Y.Doc to the format editor. Solo editing runs through the engine; a
@@ -123,6 +125,8 @@ export type UseEngineDoc = {
   // Try again for a history replacement that could not set the earlier edits
   // aside. The editor stays frozen until it succeeds.
   retryReplacement: (() => void) | null;
+  // The recovery rows holding edits a finished history replacement set aside.
+  replacedDraftIds: readonly number[];
   // An open lost to a delete or move interval. This is not a terminal outcome:
   // the operation can still fail, so the caller stays read-only and retries.
   removalInProgress: EngineRemovalInProgress | null;
@@ -340,6 +344,7 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     readOnlyDraftId,
     readOnlyCause,
     retryReplacement,
+    replacedDraftIds: settled?.replacedDraftIds ?? NO_DRAFT_IDS,
     removalInProgress,
     artifactAssets,
     readArtifactAsset,

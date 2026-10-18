@@ -295,17 +295,19 @@ export function StateMark(props: {
       )}
     </span>
   );
+  // One line at its natural width: the chip beside it gives way instead.
   const retry = props.onRetry ? (
-    <SecondaryButton size="compact" data-testid={`${props.testId}-retry`} onClick={props.onRetry}>
+    <SecondaryButton size="compact" data-testid={`${props.testId}-retry`} onClick={props.onRetry} className="shrink-0 whitespace-nowrap">
       Try again
     </SecondaryButton>
   ) : null;
   if (!props.truncate) return <>{chip}{retry}</>;
   // The tooltip sits beside the chip, not in it, so the chip's text stays its
-  // label while the tooltip is open.
+  // label while the tooltip is open. Beside Try again, the chip keeps the
+  // header's 25px for its mark and an ellipsis.
   const explained = (
     <span
-      className="inline-flex min-w-0 max-w-full"
+      className={`inline-flex max-w-full ${retry ? "min-w-[25px]" : "min-w-0"}`}
       onMouseEnter={() => setOpen(true)}
       onMouseLeave={(event) => {
         if (!event.currentTarget.contains(document.activeElement)) setOpen(false);

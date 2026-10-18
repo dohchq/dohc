@@ -1929,6 +1929,7 @@ export function MarkdownView(props: {
         path={props.path}
         message="This document became read-only. Copy your text to keep it."
         messageDraftId={readOnlyDraftId.current}
+        replacedDraftIds={engine.replacedDraftIds}
       />
     </>
   );

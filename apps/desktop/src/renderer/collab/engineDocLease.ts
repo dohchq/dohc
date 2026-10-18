@@ -327,6 +327,9 @@ export type EngineDocLeaseSnapshot = {
     retry?: () => void;
   } | null;
   permanentFailure: { token: number } | null;
+  // The drafts holding edits a history replacement set aside, once the new
+  // history shows.
+  replacedDraftIds: readonly number[];
   sceneRecoveryAssets: {
     token: number;
     state: "loading" | "missing";
@@ -366,6 +369,7 @@ function emptyLeaseSnapshot(requestKey: string): EngineDocLeaseSnapshot {
     deletion: null,
     readOnlyTransition: null,
     permanentFailure: null,
+    replacedDraftIds: [],
     sceneRecoveryAssets: null,
   };
 }
@@ -1380,6 +1384,7 @@ function createEngineDocSession(
             // A refusal main reported already has its own notice.
             const setAside = replacedDraftId !== null && !replacementAfterRefusal;
             if (setAside || replacementFailed) reportDocumentReplacement(workspaceId, path, setAside, null);
+            const setAsideDraftId = replacedDraftId;
             replacedDoc = null;
             replacedDraftId = null;
             replacementFailed = false;
@@ -1400,6 +1405,7 @@ function createEngineDocSession(
               readOnlyTransition: null,
               permanentFailure: null,
               ...(deletionPending ? {} : { deletion: null }),
+              ...(setAsideDraftId === null ? {} : { replacedDraftIds: [...current.replacedDraftIds, setAsideDraftId] }),
             }));
             if (!writesRefused.current && !deliveryPending) {
               reportSaveState(UNKNOWN_SAVE_STATE);
