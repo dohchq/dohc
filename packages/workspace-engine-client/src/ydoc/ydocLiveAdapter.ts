@@ -600,7 +600,7 @@ interface LocalUpdateRecord {
 const LINEAGE_CHANGED_WHILE_RECORDING =
   "The document lineage changed while the edit was being recorded. The edit remains in this editor and was not applied to the winning lineage.";
 
-function isLineageChange(error: unknown): boolean {
+export function isLineageChange(error: unknown): boolean {
   return error instanceof YdocAdapterError && error.code === "lineage-changed";
 }
 

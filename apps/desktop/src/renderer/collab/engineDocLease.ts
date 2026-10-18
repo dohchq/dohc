@@ -20,8 +20,10 @@ import {
 } from "../excalidrawAssets";
 import {
   captureOrphanedDraft,
+  orphanedDraftStorageRefused,
   replaceOrphanedDraft,
 } from "../orphanedDrafts";
+import { reportDocumentReplacement } from "../shell/useDocumentSaveNotices";
 import { bytesToBase64 } from "../base64";
 import {
   bindEngineYDoc,
@@ -431,6 +433,14 @@ function createEngineDocSession(
   let pendingSavedSeq: number | null = null;
   let replacementPending = false;
   let replacementSaveState: EngineYDocSaveStateEvent | null = null;
+  // The replacement in progress: the draft holding the retired mirror's
+  // edits, whether storage kept it, and whether it follows a refusal main
+  // reported. Main announces that replacement right after the refusal.
+  let replacedDraftId: number | null = null;
+  let replacedDraftUnstored = false;
+  let replacementFailed = false;
+  let lastEventRefused = false;
+  let replacementAfterRefusal = false;
   let pendingSavedState: SaveState = SAVED_HERE;
   const retiredDraftObservers = new Map<Y.Doc, () => void>();
   let lifecycle: Promise<void> = Promise.resolve();
@@ -936,9 +946,18 @@ function createEngineDocSession(
   const captureLineageReplacementFailure = (
     error: unknown,
     retired: Y.Doc,
+    retry: () => Promise<void>,
   ): void => {
     writesRefused.current = true;
     if (disposed) return;
+    replacementFailed = true;
+    reportDocumentReplacement(workspaceId, path, replacedDraftId !== null, {
+      setAsideFailed: replacedDraftUnstored,
+      cause: error,
+      retry: () => {
+        if (!disposed) void retry().catch(() => undefined);
+      },
+    });
     publish((current) => ({
       ...current,
       readOnlyTransition: { token, cause: "lineage-failure", draftId: null },
@@ -955,6 +974,7 @@ function createEngineDocSession(
 
   const onSaveState = (event: EngineYDocSaveStateEvent): void => {
     if (disposed || event.sessionId !== sessionId) return;
+    lastEventRefused = event.editRefusal !== undefined;
     if(event.typingUnresolved !== undefined) typingUnresolved=event.typingUnresolved;
     if (event.access === "deleted" || event.access === "object-changed") {
       pendingSavedSeq = null;
@@ -1213,9 +1233,15 @@ function createEngineDocSession(
     // already in the editor lands before React unmounts the retired doc, the
     // observer refreshes that same durable draft.
     if ((saveStateRef.current.kind !== "saved-here" && saveStateRef.current.kind !== "unknown") || deliveryPending) persist();
+    retiredDraftObservers.get(retired)?.();
     const onRetiredUpdate = () => persist();
     retired.on("update", onRetiredUpdate);
     retiredDraftObservers.set(retired, () => retired.off("update", onRetiredUpdate));
+    replacedDraftId = draftId;
+    replacedDraftUnstored = draftId !== null && orphanedDraftStorageRefused(path, draftId);
+    // The retired editor stays until storage keeps its edits, and the winner
+    // waits for Try again.
+    if (replacedDraftUnstored) throw new Error("Storage refused the earlier edits.");
     setOutcome(null);
   };
 
@@ -1249,8 +1275,11 @@ function createEngineDocSession(
             hasUnresolvedCheckpoint: ()=>typingUnresolved,
             checkpointForExit: async () => {await bridge().typingRecovery({workspaceId, action: "flush"});},
             onDocumentReplacementStarted: () => {
+              // Try again restarts the replacement already held here.
+              if (replacementPending) return;
               replacementPending = true;
               replacementSaveState = null;
+              replacementAfterRefusal = lastEventRefused;
             },
             onDocumentReplacing: preserveRetiredDocument,
             onLineageReplacementFailure: captureLineageReplacementFailure,
@@ -1302,6 +1331,12 @@ function createEngineDocSession(
 
           bound.onDocumentReplaced((replacement) => {
             if (disposed) return;
+            // A refusal main reported already has its own notice.
+            const setAside = replacedDraftId !== null && !replacementAfterRefusal;
+            if (setAside || replacementFailed) reportDocumentReplacement(workspaceId, path, setAside, null);
+            replacedDraftId = null;
+            replacedDraftUnstored = false;
+            replacementFailed = false;
             // The losing slot owns its recovery draft and any pending image
             // reads. The winner starts a fresh slot so later delete/unmount
             // work cannot rewrite that draft with an independent lineage.
@@ -1352,6 +1387,8 @@ function createEngineDocSession(
       // snapshots synchronously for any doc mutation once writesRefused is
       // true. This guards a mutation landing between disposal and detach.
       if (binding?.doc) refreshRecoveryDraft(binding.doc);
+      // Try again needs this editor. Its earlier edits stay in Notices.
+      if (replacementFailed) reportDocumentReplacement(workspaceId, path, false, null);
       disposed = true;
       unsubscribeSaveState?.();
       unsubscribeSaveState = null;

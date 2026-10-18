@@ -14,7 +14,7 @@ import { AUTOSAVE_DEBOUNCE_MS, useAutosavedTextDraft, type DraftFlush } from "..
 import { WorkspaceSyncStatus } from "../workbench/WorkspaceSyncStatus";
 import { ConnectionNotices } from "./connectionNotices";
 import { errorDetails } from "./copyDetails";
-import { useDocumentSaveNotices } from "./useDocumentSaveNotices";
+import { REPLACED_DOCUMENT_SAVED, REPLACED_DOCUMENT_UNSAVED, reportDocumentReplacement, useDocumentSaveNotices } from "./useDocumentSaveNotices";
 import { useShellError } from "./useShellError";
 
 type WriteResult = Awaited<ReturnType<DohcDesktopBridge["writeWorkspaceText"]>>;
@@ -516,6 +516,59 @@ describe("document save notices", () => {
     expect(await rows(user)).toHaveLength(1);
     expect(titleBar().textContent).toBe("Couldn't save 1 file");
     await closeEditor(editor, document);
+  });
+
+  it("files a replaced document's unsaved earlier edits with Try again and copy, then says where they are", async () => {
+    const user = userEvent.setup();
+    const copied = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+    const retry = vi.fn();
+    const failure = { setAsideFailed: true, cause: new Error("Storage refused the earlier edits."), retry };
+    const noticeRows = async (text: string) => {
+      await user.click(screen.getByTestId("notice-center-toggle"));
+      const found = within(screen.getByRole("dialog", { name: "Notices" })).queryAllByText(text, { exact: false });
+      await user.keyboard("{Escape}");
+      return found;
+    };
+    render(<Shell />);
+
+    act(() => reportDocumentReplacement("ws-1", "notes/a.md", true, failure));
+    // Another workspace's document files nothing here.
+    act(() => reportDocumentReplacement("ws-2", "notes/b.md", true, failure));
+    const toast = screen.getByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("notes/a.md");
+    expect(toast.textContent).toContain(REPLACED_DOCUMENT_UNSAVED);
+    await user.click(within(toast).getByRole("button", { name: "Copy error details" }));
+    expect(copied.mock.calls[0]![0]).toContain("File: notes/a.md");
+    expect(await noticeRows(REPLACED_DOCUMENT_UNSAVED)).toHaveLength(1);
+
+    await user.click(within(screen.getByTestId("workspace-shell-error")).getByRole("button", { name: "Try again" }));
+    expect(retry).toHaveBeenCalledOnce();
+    expect(screen.queryByTestId("connection-notices")).toBeNull();
+
+    // The retry fails twice more: still one row.
+    act(() => reportDocumentReplacement("ws-1", "notes/a.md", true, failure));
+    act(() => reportDocumentReplacement("ws-1", "notes/a.md", true, failure));
+    expect(screen.getAllByTestId("workspace-shell-error")).toHaveLength(1);
+    expect(await noticeRows(REPLACED_DOCUMENT_UNSAVED)).toHaveLength(1);
+
+    // Set aside: the success replaces the failure, and its row stays after the toast closes.
+    act(() => reportDocumentReplacement("ws-1", "notes/a.md", true, null));
+    expect(screen.getAllByTestId("workspace-shell-error")).toHaveLength(1);
+    expect(screen.getByTestId("workspace-shell-error").textContent).toContain(REPLACED_DOCUMENT_SAVED);
+    await user.click(within(screen.getByTestId("workspace-shell-error")).getByRole("button", { name: "Dismiss workspace error" }));
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(await noticeRows(REPLACED_DOCUMENT_UNSAVED)).toHaveLength(0);
+    expect(await noticeRows(REPLACED_DOCUMENT_SAVED)).toHaveLength(1);
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    await user.click(within(screen.getByRole("dialog", { name: "Notices" })).getByRole("button", { name: "Dismiss notice" }));
+    expect(screen.queryByTestId("connection-notices")).toBeNull();
+
+    // A replacement that set nothing aside clears the row its failure filed.
+    act(() => reportDocumentReplacement("ws-1", "notes/a.md", false, { ...failure, setAsideFailed: false }));
+    expect(screen.getByTestId("workspace-shell-error").textContent).toContain("dohc could not finish replacing this document.");
+    act(() => reportDocumentReplacement("ws-1", "notes/a.md", false, null));
+    expect(screen.queryByTestId("connection-notices")).toBeNull();
+    expect(titleBar().textContent).toBe("Local · saved");
   });
 
   it("retries every writer failing for a file from its one row", async () => {

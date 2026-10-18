@@ -2225,6 +2225,51 @@ describe("YdocLiveAdapter", () => {
     adapter.dispose();
   });
 
+  it("keeps a provider recording and settling after an edit meets a replaced history", async () => {
+    const engine = seedPlaintextEngine("base");
+    const handover = Promise.withResolvers<void>();
+    let claim: string | null = null;
+    let restoredResyncs = 0;
+    const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.recordUpdate) return recordUnderClaim(engine, request, claim);
+        // Recovery's resync finds the new claim; the handover's waits.
+        if (request.method === YDOC_METHOD.resync && claim !== null && ++restoredResyncs > 1) await handover.promise;
+        const response = await engine.sendRequest(request);
+        if (request.method !== YDOC_METHOD.resync) return response;
+        return { ...response, result: { ...(response.result as Record<string, JsonValue>), lineageClaimId: claim, lineageOriginatedHere: false } };
+      },
+    };
+    const replacements: Y.Doc[] = [];
+    const provider = await openEngineYdocProviderSession({
+      transport, workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind: "plaintext",
+      onRemoteUpdate() {}, onLineageReplaced: (doc) => replacements.push(doc), scheduleSettle: settleScheduler().schedule,
+    });
+    const losingDoc = provider.doc;
+    // A restore replaced the history under the open editor.
+    claim = "restored-claim";
+    await expect(provider.applyLocalUpdate(plaintextUpdate(provider.initialUpdate, (text) => text.insert(4, " refused"))))
+      .rejects.toMatchObject({ code: "lineage-changed" });
+    // Typing on the losing document is refused before the handover lands.
+    expect(() => provider.applyLocalUpdate(plaintextUpdate(Y.encodeStateAsUpdate(losingDoc), (text) => text.insert(0, "more "))))
+      .toThrow(expect.objectContaining({ code: "lineage-changed" }));
+
+    const resynced = provider.resync!();
+    handover.resolve();
+    await resynced;
+    expect(replacements).toEqual([provider.doc]);
+    expect(losingDoc.getText("plainText").toString()).toBe("more base refused");
+    expect(provider.doc.getText("plainText").toString()).toBe("base");
+
+    // Neither refusal blocks the journal or the settle on the new history.
+    await provider.applyLocalUpdate(plaintextUpdate(Y.encodeStateAsUpdate(provider.doc), (text) => text.insert(4, " fresh")));
+    await provider.nativeOwner!.flush();
+    await expect(provider.settleNow()).resolves.toMatchObject({ content: "base fresh" });
+    await provider.close({ settle: false });
+  });
+
   it("still quarantines a record whose outcome stays unknown", async () => {
     const engine = seedPlaintextEngine("seed");
     let failing = false;

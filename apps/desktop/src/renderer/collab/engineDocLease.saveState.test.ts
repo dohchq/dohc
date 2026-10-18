@@ -10,6 +10,12 @@ import { retainObservedEngineDocLease } from "./engineDocLeaseTestHarness";
 import { harnessBridge, IMAGE_DESCRIPTOR } from "./engineDocSaveStateTestHarness";
 import { EngineYDocDeliveryRefusedError } from "./engineYDocProvider";
 import { parseExcalidrawDocument } from "../excalidrawDocument";
+import {
+  REPLACED_DOCUMENT_SAVED,
+  REPLACED_DOCUMENT_UNSAVED,
+  useDocumentSaveNotices,
+  type DocumentSaveFailure,
+} from "../shell/useDocumentSaveNotices";
 
 const projectionGate = vi.hoisted(() => ({
   pending: null as Promise<void> | null,
@@ -371,6 +377,147 @@ it("keeps recovery from consecutive independent lineage replacements", async () 
   expect(drafts.result.current.length).toBe(2);
   expect(drafts.result.current.map((draft) => draft.text).join("|")).toContain("seed!");
   expect(drafts.result.current.map((draft) => draft.text).join("|")).toContain("winner!");
+});
+
+// The shell's notices for a replaced history, as the lease reports them.
+function observeReplacementNotices() {
+  const report = vi.fn<(failure: DocumentSaveFailure) => void>();
+  const clear = vi.fn<(identity: string) => void>();
+  renderHook(() => useDocumentSaveNotices({ workspaceId: "ws-1", report, clear, open: () => undefined }));
+  return {
+    report,
+    clear,
+    reports: () => report.mock.calls.map(([notice]) => notice)
+      .filter((notice) => notice.identity === "document-replacement:ws-1:notes/big.md"),
+  };
+}
+
+function refuseDraftStorage() {
+  return vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+    throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
+  });
+}
+
+const storedDraftTexts = () => loadStoredDrafts(Date.now(), { bindHandles: false }).map((draft) => draft.text);
+
+it.each(["plain text", "rich text"] as const)(
+  "sets aside %s typed before and during a replaced history, then installs the winner",
+  async (format) => {
+    if (format === "rich text") harness.sourceDoc.getMap("meta").delete("contentKind");
+    const notices = observeReplacementNotices();
+    await retainBound();
+    const losingDoc = retained.boundDoc();
+    const type = (text: string) => act(() => {
+      if (format === "plain text") {
+        const plain = losingDoc.getText("plainText");
+        plain.insert(plain.length, text);
+        return;
+      }
+      const paragraph = new Y.XmlElement("paragraph");
+      const run = new Y.XmlText();
+      run.insert(0, text);
+      paragraph.insert(0, [run]);
+      const body = losingDoc.getXmlFragment("body");
+      body.insert(body.length, [paragraph]);
+    });
+    const [before, during] = format === "plain text" ? [" before", " during"] : ["Typed before", "Typed during"];
+    type(before);
+    await flushLocalBatch();
+    expect(harness.applied).toHaveLength(1);
+    // Still in the send batch when main announces the replaced history.
+    type(during);
+    let acknowledgedAtNotice: number[] | null = null;
+    notices.report.mockImplementation(() => { acknowledgedAtNotice = [...harness.acknowledgedGenerations]; });
+    harness.emitLineageReplacement("winner");
+    await waitFor(() => expect(retained.boundDoc().getText("plainText").toString()).toBe("winner"));
+
+    const expected = format === "plain text" ? "seed before during" : "Typed before\n\nTyped during";
+    expect(harness.applied).toHaveLength(1);
+    await waitFor(() => expect(drafts.result.current.map((draft) => draft.text)).toEqual([expected]));
+    // Reading storage again brings the same text back.
+    expect(storedDraftTexts()).toEqual([expected]);
+    expect(notices.reports()).toEqual([expect.objectContaining({
+      tone: "success", title: "notes/big.md", message: REPLACED_DOCUMENT_SAVED,
+    })]);
+    expect(acknowledgedAtNotice).toEqual([2]);
+
+    act(() => editDocument());
+    await flushLocalBatch();
+    expect(harness.applied).toHaveLength(2);
+  },
+);
+
+it("keeps the retired editor frozen while storage refuses its edits, and Try again installs the same winner once", async () => {
+  const notices = observeReplacementNotices();
+  await retainBound();
+  const losingDoc = retained.boundDoc();
+  act(() => editDocument());
+  await flushLocalBatch();
+  const setItem = refuseDraftStorage();
+  harness.emitLineageReplacement("winner");
+  await waitFor(() => expect(retained.snapshot.readOnlyTransition?.cause).toBe("lineage-failure"));
+
+  // No acknowledgement, no winner, and nothing of the retired editor sent.
+  expect(harness.acknowledgedGenerations).toEqual([]);
+  expect(retained.boundDoc()).toBe(losingDoc);
+  const failure = notices.reports().at(-1)!;
+  expect(failure).toMatchObject({ title: "notes/big.md", message: REPLACED_DOCUMENT_UNSAVED });
+  act(() => editDocument());
+  await flushLocalBatch();
+  expect(harness.applied).toHaveLength(1);
+  await waitFor(() => expect(drafts.result.current.map((draft) => draft.text)).toEqual(["seed!!"]));
+  expect(storedDraftTexts()).toEqual([]);
+
+  setItem.mockRestore();
+  act(() => failure.retry!());
+  await waitFor(() => expect(retained.boundDoc().getText("plainText").toString()).toBe("winner"));
+  expect(harness.acknowledgedGenerations).toEqual([2]);
+  expect(retained.snapshot.readOnlyTransition).toBeNull();
+  expect(storedDraftTexts()).toEqual(["seed!!"]);
+  expect(drafts.result.current).toHaveLength(1);
+  expect(notices.reports().at(-1)).toMatchObject({ tone: "success", message: REPLACED_DOCUMENT_SAVED });
+
+  // The installed generation does not install again.
+  act(() => failure.retry!());
+  await act(async () => { await Promise.resolve(); });
+  expect(harness.acknowledgedGenerations).toEqual([2]);
+  act(() => editDocument());
+  await flushLocalBatch();
+  expect(harness.applied).toHaveLength(2);
+});
+
+it("keeps the earlier edits in Notices and withdraws Try again when the frozen tab closes", async () => {
+  const notices = observeReplacementNotices();
+  await retainBound();
+  act(() => editDocument());
+  await flushLocalBatch();
+  const setItem = refuseDraftStorage();
+  harness.emitLineageReplacement("winner");
+  await waitFor(() => expect(retained.snapshot.readOnlyTransition?.cause).toBe("lineage-failure"));
+  const failure = notices.reports().at(-1)!;
+
+  retained.release();
+  await disposeEngineDocLeasesForTests();
+  await retained.lease.dispose();
+  expect(notices.clear).toHaveBeenCalledWith("document-replacement:ws-1:notes/big.md");
+  expect(drafts.result.current.map((draft) => draft.text)).toEqual(["seed!"]);
+
+  setItem.mockRestore();
+  act(() => failure.retry!());
+  await act(async () => { await Promise.resolve(); });
+  expect(harness.acknowledgedGenerations).toEqual([]);
+});
+
+it("leaves a replacement that follows a refused edit to the refusal's own notice", async () => {
+  const notices = observeReplacementNotices();
+  await retainBound();
+  act(() => editDocument());
+  await flushLocalBatch();
+  harness.emitEditRefusal("dohc could not save an edit.", 1);
+  harness.emitLineageReplacement("winner");
+  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
+  await waitFor(() => expect(drafts.result.current.map((draft) => draft.text)).toEqual(["seed!"]));
+  expect(notices.reports()).toEqual([]);
 });
 
 // Turning sync on claims the open document's lineage, so main hands the

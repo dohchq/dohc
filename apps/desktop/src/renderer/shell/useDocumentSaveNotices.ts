@@ -6,6 +6,7 @@ import type { ErrorDetailField } from "./copyDetails";
 import type { ShellErrorKind } from "./useShellError";
 
 export interface DocumentSaveFailure {
+  tone?: "success";
   title?: string;
   message: string;
   cause?: unknown;
@@ -51,6 +52,32 @@ const textSaveListeners = new Set<(save: TextSave) => void>();
 export function reportTextSave(workspaceId: string, path: string, failure: TextSave["failure"]): void {
   const failed = failure && !isShareReadOnlyRefusal(failure.cause) ? failure : null;
   for (const listener of [...textSaveListeners]) listener({ workspaceId, path, failure: failed });
+}
+
+// A live document's history was replaced while its editor was open.
+// `setAside` says a draft in Notices holds the editor's earlier edits.
+// `failure` is null once the new history shows; until then `retry` sets the
+// edits aside again and installs the same new history.
+interface DocumentReplacement {
+  workspaceId: string;
+  path: string;
+  setAside: boolean;
+  failure: { setAsideFailed: boolean; cause: unknown; retry: () => void } | null;
+}
+
+export const REPLACED_DOCUMENT_SAVED = "This document changed while you were editing. Find your earlier edits in Notices.";
+export const REPLACED_DOCUMENT_UNSAVED = "dohc could not save your earlier edits. Keep this document open and try again.";
+const REPLACED_DOCUMENT_NOT_SHOWN = "dohc could not finish replacing this document.";
+
+const replacementListeners = new Set<(replacement: DocumentReplacement) => void>();
+
+export function reportDocumentReplacement(
+  workspaceId: string,
+  path: string,
+  setAside: boolean,
+  failure: DocumentReplacement["failure"],
+): void {
+  for (const listener of [...replacementListeners]) listener({ workspaceId, path, setAside, failure });
 }
 
 // The engine settles a live document; the plain editor writes every other
@@ -190,10 +217,26 @@ export function useDocumentSaveNotices(input: {
         if (!failed.retry()) reopen(save.path, "text", failure);
       }, failed.cause);
     };
+    // One row per document: setting the edits aside replaces the failure.
+    const replacement = ({ workspaceId: replaced, path, setAside, failure }: DocumentReplacement): void => {
+      if (!current() || replaced !== owner) return;
+      const notice = { title: path, details: [["File", path, path.length]] as const, identity: `document-replacement:${owner}:${path}` };
+      if (failure) {
+        const message = failure.setAsideFailed ? REPLACED_DOCUMENT_UNSAVED
+          : setAside ? `${REPLACED_DOCUMENT_NOT_SHOWN} Find your earlier edits in Notices.` : REPLACED_DOCUMENT_NOT_SHOWN;
+        latest.current.report({ ...notice, message, cause: failure.cause, retry: failure.retry });
+      } else if (setAside) {
+        latest.current.report({ ...notice, tone: "success", message: REPLACED_DOCUMENT_SAVED });
+      } else {
+        latest.current.clear(notice.identity);
+      }
+    };
     textSaveListeners.add(textSave);
+    replacementListeners.add(replacement);
     return () => {
       stopDocuments();
       textSaveListeners.delete(textSave);
+      replacementListeners.delete(replacement);
     };
   }, [workspaceId]);
   return failedSaves.workspaceId === workspaceId ? failedSaves.count : 0;
