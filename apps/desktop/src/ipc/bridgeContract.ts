@@ -6953,6 +6953,18 @@ export const systemMotionOperations = {
   },
 } as const satisfies OperationTable;
 
+// macOS only. Main opens Privacy & Security at Files & Folders; the window
+// names no URL.
+export const systemPrivacySettingsOperations = {
+  openSystemPrivacySettings: {
+    capabilityId: "device.privacy.open",
+    scope: "device",
+    channel: "desktop:open-system-privacy-settings",
+    payload: z.object({}),
+    guard: "trusted-sender",
+  },
+} as const satisfies OperationTable;
+
 // The server account this computer is connected to. Main sends both requests
 // with its own session; the window never sees the session.
 export const serverAccountOperations = {
@@ -6996,6 +7008,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof relayShareOperations>,
     OperationBridge<typeof shareCopyOperations>,
     OperationBridge<typeof systemMotionOperations>,
+    OperationBridge<typeof systemPrivacySettingsOperations>,
     OperationBridge<typeof serverAccountOperations>,
     OperationBridge<typeof accessOperations>,
     OperationBridge<typeof workspaceVersionOperations>,
@@ -7108,8 +7121,6 @@ export interface DohcDesktopBridge
     listener: (event: SitePreviewReplacedEvent) => void,
   ): () => void;
   openExternalUrl(payload: OpenExternalUrlPayload): Promise<void>;
-  /** macOS only: opens Privacy & Security at Files & Folders. */
-  openSystemPrivacySettings(): Promise<void>;
   cloudLoginStart(payload: CloudLoginStartPayload): Promise<CloudLoginStartResult>;
   cloudLoginPoll(): Promise<CloudLoginPollResult>;
   cloudStatus(payload?: CloudStatusPayload): Promise<CloudStatusResult>;

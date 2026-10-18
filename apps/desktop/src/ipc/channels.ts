@@ -163,7 +163,6 @@ export const CHANNELS = {
   stopSitePreview: "desktop:stop-site-preview",
   sitePreviewReplaced: "desktop:site-preview-replaced",
   openExternalUrl: "desktop:open-external-url",
-  openSystemPrivacySettings: "desktop:open-system-privacy-settings",
   cloudLoginStart: "desktop:cloud-login-start",
   cloudLoginPoll: "desktop:cloud-login-poll",
   cloudStatus: "desktop:cloud-status",

@@ -23,6 +23,7 @@ import {
   workspaceSyncOperations,
   CaptureHoldsEvent,
   systemMotionOperations,
+  systemPrivacySettingsOperations,
   serverAccountOperations,
   SitePreviewReplacedEvent,
   DesktopUserSettingsResult,
@@ -137,6 +138,7 @@ const bridge: DohcDesktopBridge = {
   ...relay,
   ownerRestore: relay.ownerRestore as DohcDesktopBridge["ownerRestore"],
   ...operationBridge(systemMotionOperations, invoke),
+  ...operationBridge(systemPrivacySettingsOperations, invoke),
   ...operationBridge(serverAccountOperations, invoke),
   ...operationBridge(historyOperations, invoke),
   ...operationBridge(shareDirectWriteDeliveryOperations, invoke),
@@ -238,7 +240,6 @@ const bridge: DohcDesktopBridge = {
     onEvent(CHANNELS.sitePreviewReplaced, SitePreviewReplacedEvent, listener),
   openExternalUrl: (payload) =>
     ipcRenderer.invoke(CHANNELS.openExternalUrl, payload),
-  openSystemPrivacySettings: () => ipcRenderer.invoke(CHANNELS.openSystemPrivacySettings),
   cloudLoginStart: (payload) =>
     ipcRenderer.invoke(CHANNELS.cloudLoginStart, payload),
   cloudLoginPoll: () => ipcRenderer.invoke(CHANNELS.cloudLoginPoll),

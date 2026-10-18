@@ -179,7 +179,7 @@ export function useShellError(workspaceId: string) {
   const privacySettingsAction = useMemo<NonNullable<ShellError["action"]>>(() => {
     const run = (): void => {
       const owner = currentWorkspace.current;
-      bridge().openSystemPrivacySettings().catch((error: unknown) => {
+      bridge().openSystemPrivacySettings({}).catch((error: unknown) => {
         if (currentWorkspace.current !== owner) return;
         const { cause } = readError(error);
         push({
