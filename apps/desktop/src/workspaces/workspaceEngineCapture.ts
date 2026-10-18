@@ -750,6 +750,7 @@ export interface WorkspaceEngineCapture {
   runRelaySync<T>(
     task: (materializePage: MaterializeRelayPullPage) => Promise<T>,
   ): Promise<T>;
+  onDurableLocalChange(handler: (path: string) => void): () => void;
   // Resolves when everything enqueued so far has been captured.
   flush(): Promise<void>;
   // Stops accepting work and resolves once in-flight capture is durably
@@ -1765,6 +1766,7 @@ export function createWorkspaceEngineCapture(
   let observationResync: Promise<void> = Promise.resolve();
   let stopped = false;
   let shuttingDown = false;
+  const durableLocalListeners = new Set<(path: string) => void>();
   let ydocOpenAbort = new AbortController();
   const captureWaitAbort = new AbortController();
   let daemonCaptureHealthTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2269,6 +2271,8 @@ export function createWorkspaceEngineCapture(
       readonly options: NonNullable<Parameters<EngineYdocProviderSession["applyLocalUpdate"]>[1]>;
       readonly editorVisible: boolean;
       acknowledged: boolean;
+      journalFinished?: boolean;
+      durableNotified?: boolean;
       sent: boolean;
       uncertainFailures: number;
       lastUncertainFailureAt: number | null;
@@ -2284,6 +2288,13 @@ export function createWorkspaceEngineCapture(
       pendingRecords.clear();
       pendingUpdateBytes = 0;
     };
+    const notifyDurable = (record: PendingRecord): void => {
+      if (!record.acknowledged || !record.journalFinished || record.durableNotified || stopped) return;
+      record.durableNotified = true;
+      for (const handler of durableLocalListeners) {
+        try { handler(input.path); } catch (error) { onError("durable edit observer", error); }
+      }
+    };
     const acknowledge = (record: PendingRecord, doc: Y.Doc): void => {
       if (record.acknowledged) return;
       record.acknowledged = true;
@@ -2291,6 +2302,7 @@ export function createWorkspaceEngineCapture(
       Y.applyUpdate(doc, record.update);
       Y.applyUpdate(recordedDoc, record.update);
       retireCheckpointIfDurable();
+      notifyDurable(record);
       if (!record.editorVisible) {
         try { input.onRemoteUpdate(record.update, true); }
         catch (error) { onError(`Y.Doc record update observer of ${input.path}`, error); }
@@ -3196,6 +3208,7 @@ export function createWorkspaceEngineCapture(
         idempotencyKey: applyOptions?.idempotencyKey ?? createId(),
       };
       let decided = false;
+      let durableRecord: PendingRecord | undefined;
       return append(async () => {
         if (canonicalDoc === null || closed) throw closedError();
         const doc = canonicalDoc;
@@ -3210,6 +3223,7 @@ export function createWorkspaceEngineCapture(
           acknowledged: false, sent: false, uncertainFailures: 0,
           lastUncertainFailureAt: null, unanswered: null, refusal: null,
         };
+        durableRecord = record;
         if (pendingRecords.size + queuedUpdateCount >= YDOC_PENDING_MAX_RECORDS ||
             pendingUpdateBytes + queuedUpdateBytes + update.byteLength > YDOC_PENDING_MAX_BYTES) {
           if (refuseRecord(record, new Error("pending-edits-limit"))) {
@@ -3317,6 +3331,12 @@ export function createWorkspaceEngineCapture(
         if (!decided || keyed) throw error;
         onError(`Y.Doc local update of ${input.path}`, error);
         return true;
+      }).then(changed => {
+        if (durableRecord) {
+          durableRecord.journalFinished = true;
+          notifyDurable(durableRecord);
+        }
+        return changed;
       });
     };
 
@@ -7537,6 +7557,11 @@ export function createWorkspaceEngineCapture(
       });
     },
 
+    onDurableLocalChange(handler) {
+      if (stopped) return () => {};
+      durableLocalListeners.add(handler);
+      return () => { durableLocalListeners.delete(handler); };
+    },
     runRelaySync(task) {
       return enqueueResult("relay sync", async () => {
         // A joined daemon can pull before any capture task has opened the
@@ -7630,6 +7655,7 @@ export function createWorkspaceEngineCapture(
       // Everything already enqueued (including the watcher's final settled
       // batch) still runs; only new work is refused.
       stopped = true;
+      durableLocalListeners.clear();
       ydocOpenAbort.abort();
       if (daemonCaptureHealthTimer !== null) {
         clearTimeout(daemonCaptureHealthTimer);

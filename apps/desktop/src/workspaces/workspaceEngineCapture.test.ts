@@ -3604,6 +3604,33 @@ describe("workspaceEngineCapture agent attribution", () => {
 });
 
 describe("Rust engine session selection", () => {
+  it("reports a workspace durable edit after the journal resolves, without forcing a settle", async () => {
+    const root = await createTestScratch("dohc-durable-wake-");
+    const loopback = new VersionedLoopbackEngine();
+    await write(root, "note.md", "existing");
+    loopback.seedTextFile({workspace: WORKSPACE_ID, versionId: "main", path: "note.md", text: "existing"});
+    const journal = deferred<void>();
+    const entered = deferred<void>();
+    const settle = vi.fn();
+    const engine = capture(root, {rustEngineSessions: mockLiveSessions(loopback),
+      openRustYDocProviderSession: async () => {
+        const doc = new Y.Doc();
+        return {doc, initialUpdate: Y.encodeStateAsUpdate(doc), contentKind: "plaintext", path: "note.md",
+          head: "present", lineage: "existing", evict: async () => {}, close: async () => {},
+          applyLocalUpdate: async () => {entered.resolve(); await journal.promise;}, settleNow: settle} as never;
+      }});
+    const changed = vi.fn(); const detach = engine.onDurableLocalChange(changed);
+    const session = await engine.openYDocSession({path: "note.md", onRemoteUpdate: () => {}});
+    const editor = new Y.Doc(); editor.getText("content").insert(0, "edit");
+    session.applyLocalUpdate(Y.encodeStateAsUpdate(editor)); await entered.promise;
+    expect(changed).not.toHaveBeenCalled(); expect(settle).not.toHaveBeenCalled();
+    journal.resolve(); await engine.flush();
+    expect(changed).toHaveBeenCalledExactlyOnceWith("note.md"); expect(settle).not.toHaveBeenCalled();
+    detach(); editor.getText("content").insert(4, "more");
+    session.applyLocalUpdate(Y.encodeStateAsUpdate(editor)); await engine.flush();
+    expect(changed).toHaveBeenCalledTimes(1);
+    await session.close({settle: false}); await engine.stop(); editor.destroy();
+  });
   // An injected store can observe capture operations, but it cannot select the
   // retired in-process Y.Doc provider.
   async function openWith(

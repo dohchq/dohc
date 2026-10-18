@@ -16,6 +16,7 @@ import {
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { pushWithIdentity } from "./pushWithIdentity";
 import { startRelayWatch } from "./relayWatch";
+import type {RelayLogChange} from "./relayLogWait";
 
 export interface RelaySyncOperations {
   claim(): Promise<void>;
@@ -75,7 +76,8 @@ export interface CloudSyncEngineOptions {
   // without polling. A rejection backs the next wait off. The engine aborts
   // `signal` when it no longer needs the answer, and waits for the promise to
   // settle before it waits again or stops.
-  waitForChange?: (since: number, signal: AbortSignal) => Promise<boolean>;
+  waitForChange?: (since: number, signal: AbortSignal) => Promise<RelayLogChange>;
+  retryOwnerDelivery?: (path: string) => void;
   // How long the engine waits after a pass before it pulls again on its own:
   // the fallback for a change `waitForChange` missed. Omitted, the engine
   // pulls only when asked.
@@ -120,6 +122,7 @@ export interface CloudSyncEngine {
   start(): Promise<void>;
   queueSync(): void;
   queuePull(): void;
+  queueWatchedUpload(paths?: readonly string[]): void;
   // Runs a pass now instead of waiting out the backoff, and settles when it
   // ends. The outcome is in the next snapshot, not in the promise. A pass that
   // does not count as an attempt (a retry on reconnecting or waking) updates
@@ -175,15 +178,24 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   // `syncing` while it ran.
   let changeEvents = 0;
   let chain: Promise<void> = Promise.resolve();
+  let watched = false;
+  let detachDurable: (() => void) | undefined;
+  let watchedTimer: ReturnType<typeof setTimeout> | undefined;
+  let watchedQueued = false;
+  let watchedDirty = false;
+  let watchedPushPaused = false;
+  let lastWatchedStart = -Infinity;
+  const editedPaths = new Set<string>();
   // The wait on the relay for a change past the last pull.
   const watch = options.waitForChange && startRelayWatch({
     wait: options.waitForChange,
     initialDelayMs: initialBackoffMs,
     maxDelayMs: maxBackoffMs,
+    watched: setWatched,
     changed: (since) => {
       // The pass that pulls this change restarts the wait.
       changeReported = since;
-      queuePull();
+      queuePull(true);
     },
     failed: (error) => {
       // The sign-in expired: the engine stops, and the status says so.
@@ -208,6 +220,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
 
   // Settles once the wait on the relay has ended.
   function clearTimers(): Promise<void> {
+    setWatched(false);
     clearPassTimers();
     return watch?.stop() ?? Promise.resolve();
   }
@@ -215,6 +228,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   // The timers that would start another pass. A pass leaves the wait on the
   // relay running.
   function clearPassTimers(): void {
+    cancelWatchedTimer();
     if (continuationTimer !== undefined) {
       clearTimeout(continuationTimer);
       continuationTimer = undefined;
@@ -237,6 +251,92 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     }
   }
 
+  function cancelWatchedTimer(): void {
+    if (watchedTimer !== undefined) clearTimeout(watchedTimer);
+    watchedTimer = undefined;
+  }
+
+  function setWatched(value: boolean): void {
+    if (watched === value) return;
+    watched = value;
+    if (value && !stopped) {
+      detachDurable = options.capture.onDurableLocalChange(path => queueWatchedUpload([path]));
+    } else {
+      detachDurable?.();
+      detachDurable = undefined;
+      cancelWatchedTimer();
+      watchedDirty = false;
+      editedPaths.clear();
+    }
+  }
+
+  function queueWatchedUpload(paths?: readonly string[]): void {
+    if (!watched || stopped) return;
+    watchedDirty = true;
+    for (const path of paths ?? []) editedPaths.add(path);
+    scheduleWatchedUpload();
+  }
+
+  function canUploadWatched(): boolean {
+    return watched && !stopped && !authExpired && !claimRefusal && !bootstrapPullPending &&
+      !syncFailure && backoffTimer === undefined && passesPending === 0;
+  }
+
+  function scheduleWatchedUpload(): void {
+    if ((!watchedDirty && editedPaths.size === 0) || watchedQueued || watchedTimer !== undefined || !canUploadWatched()) return;
+    const delay = Math.max(0, lastWatchedStart + 250 - Date.now());
+    if (delay === 0) runWatchedUpload();
+    else watchedTimer = setTimeout(() => {
+      watchedTimer = undefined;
+      runWatchedUpload();
+    }, delay);
+  }
+
+  // Share the ordinary pass and capture chains; this pass only pushes.
+  function runWatchedUpload(): void {
+    watchedQueued = true;
+    const result = chain.then(async () => {
+      if ((!watchedDirty && editedPaths.size === 0) || !canUploadWatched()) return;
+      const pushPending = watchedDirty;
+      watchedDirty = false;
+      lastWatchedStart = Date.now();
+      const paths = [...editedPaths];
+      editedPaths.clear();
+      for (const path of paths) options.retryOwnerDelivery?.(path);
+      if (!pushPending || watchedPushPaused) return;
+      const before = visibleState();
+      const eventsBefore = changeEvents;
+      try {
+        const pushed = await options.capture.runRelaySync(async () => {
+          const result = await pushWithIdentity({
+            push: () => operations.push(),
+            claim: () => operations.claim(),
+          });
+          // A push can drain edits recorded during its I/O. Clear their wake
+          // before releasing capture, so a later durable edit keeps its wake.
+          watchedDirty = result.pushed > 0 && result.hasMore;
+          return result;
+        });
+        watchedPushPaused = pushed.pushed === 0;
+        sharingDeclined = pushed.sharingDeclined;
+        ownerAdmissionPending = pushed.ownerAdmissionPending;
+        if (ownerAdmissionPending.length > 0 && !pushed.hasMore) scheduleBackoff();
+      } catch (error) {
+        cancelWatchedTimer();
+        if (error instanceof RelayOriginDivergedError) {
+          watchedPushPaused = true;
+          queuePull();
+        } else handleFailure(error, undefined, true);
+      } finally {
+        if (visibleState() !== before && changeEvents === eventsBefore) emitChange();
+      }
+    }).finally(() => {
+      watchedQueued = false;
+      scheduleWatchedUpload();
+    });
+    chain = result.catch(() => undefined);
+  }
+
   // Wait past the cursor a successful pull reached. A pull that served a
   // reported change and did not move past it would see the same change at
   // once, so that wait backs off instead of turning into a loop of passes.
@@ -250,10 +350,13 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   // because those pull too. Each local write restarts the debounce, so the
   // pull keeps its own deadline: steady writes cannot postpone it past one
   // debounce interval.
-  function queuePull(): void {
+  function queuePull(fromWatch = false): void {
     if (authExpired || stopped) return;
     if (passesPending > 0 || backoffTimer !== undefined || pullTimer !== undefined) return;
-    if (debounceTimer === undefined) {
+    // Our own append wakes the held read too. Give queued durable uploads the
+    // same fixed pull deadline as local writes waiting on the settle debounce.
+    const uploading = fromWatch && watched && (watchedQueued || watchedDirty || watchedTimer !== undefined);
+    if (debounceTimer === undefined && !uploading) {
       void runPass(false, true);
       return;
     }
@@ -375,6 +478,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       passSharingDeclined.push(...result.sharingDeclined);
       passOwnerPending = result.ownerAdmissionPending;
       pushHasMore = result.hasMore;
+      if (watched) watchedDirty = result.hasMore;
     };
     const passSharingDeclined: PushWorkspaceToRelayResult["sharingDeclined"] = [];
     const pullResult = await options.capture.runRelaySync(
@@ -516,6 +620,9 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         // here, in the serialized lifecycle, so a pass that ends before this
         // one starts cannot leave its backoff behind.
         clearPassTimers();
+        // Its push covers edits already queued. Keep their owner-delivery hints.
+        if (!bootstrapPullPending) watchedDirty = false;
+        watchedPushPaused = false;
         retryQueued = false;
         const eventsBefore = changeEvents;
         const stateBefore = visibleState();
@@ -543,6 +650,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
           watchPast(cursor, servedChange);
         }
         scheduleIdlePull();
+        scheduleWatchedUpload();
       }
     });
     chain = result.catch(() => undefined);
@@ -570,6 +678,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     },
 
     queuePull,
+    queueWatchedUpload,
 
     retryNow(options) {
       if (authExpired || stopped) return Promise.resolve();

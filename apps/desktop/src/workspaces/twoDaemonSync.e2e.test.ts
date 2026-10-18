@@ -6,7 +6,7 @@ import { getCACertificates, setDefaultCACertificates } from "node:tls";
 import { mintLocalhostCa } from "../../../../services/share-web/src/testing/localhostCa";
 import { startServerProxy } from "../../e2e/helpers/selfHostOnboarding";
 import { DatabaseSync } from "node:sqlite";
-import { copyFile, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { copyFile, cp, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
@@ -41,6 +41,7 @@ import { waitForPathMoments } from "./waitForPathMoments";
 import { createRecordByHand, desktopRecordEditContext } from "./desktopRecordEdits";
 import { onWorkspaceCaptureSettled } from "./captureActivityBridge";
 import { createTestScratch } from "./testTemp";
+import {deferred} from "../testing/deferred";
 import {
   installWorkspaceDataKey,
   loadSecretDataKey,
@@ -2033,6 +2034,95 @@ interface OpenEditor {
   // What the renderer holds: the opening state plus every remote update.
   doc: Y.Doc;
 }
+
+it.skipIf(engine.missing)("watched scheduling preserves the exact relay op sequence and keeps private paths out", async () => {
+  const workspaceId = "watched-op-sequence", token = `test:${workspaceId}`;
+  const root = await createTestScratch("dohc-watched-ops-");
+  const relayRoot = await createTestScratch("dohc-watched-relay-");
+  const snapshot = await createTestScratch("dohc-watched-snapshot-");
+  const dbPath = join(relayRoot, "relay.sqlite");
+  let relay = await spawnSyncRelay({dbPath, compiledMain: compiledRelayMain});
+  let owner: LiveDaemonCapture | null = null;
+  let sync: CloudSyncEngine | undefined;
+  let editor: OpenEditor | undefined;
+  try {
+    owner = await openLiveDaemonCapture({workspaceId, rootPath: root, relay: {baseUrl: relay.baseUrl, token}});
+    await owner.relay.claim();
+    await owner.chats.ensureGeneralChannel({workspaceId}); await pushUntilDrained(owner.relay);
+    await writeAndCapture(owner, root, "note.txt", "saved base\n");
+    const seededEditor = await openEditor(owner, "note.txt");
+    await seededEditor.session.settleNow(); await seededEditor.session.close({settle: false}); seededEditor.doc.destroy();
+    await mkdir(join(root, "node_modules"), {recursive: true});
+    await writeFile(join(root, "node_modules/private.txt"), "excluded-private-content");
+    await writeFile(join(root, "node_modules/private.env"), "TOKEN=never-visible-in-log\n");
+    owner.capture.observeFileEvents([
+      {path: "node_modules/private.txt", operation: "update"},
+      {path: "node_modules/private.env", operation: "update"},
+    ]);
+    await owner.capture.flush(); await pushUntilDrained(owner.relay);
+    await owner.close(); owner = null; await relay.stop();
+    const initialLog = new DatabaseSync(dbPath, {readOnly: true});
+    const initialUpdates = (initialLog.prepare("SELECT COUNT(*) AS count FROM sync_relay_log WHERE workspace_id = ? AND op_kind = 'ydoc.update'").get(workspaceId) as {count: number}).count;
+    initialLog.close();
+    await cp(root, join(snapshot, "owner"), {recursive: true});
+    await cp(relayRoot, join(snapshot, "relay"), {recursive: true});
+    const sequences: unknown[][] = [];
+    for (const watched of [false, true]) {
+      // Reuse the same durable journal, identity, lineage and initial Y.Doc bytes.
+      await cp(join(snapshot, "owner"), root, {recursive: true, force: true});
+      await cp(join(snapshot, "relay"), relayRoot, {recursive: true, force: true});
+      relay = await spawnSyncRelay({dbPath, compiledMain: compiledRelayMain});
+      const connection = {baseUrl: relay.baseUrl, token};
+      owner = await openLiveDaemonCapture({workspaceId, rootPath: root, relay: connection, settleDebounceMs: 60_000});
+      editor = await openEditor(owner, "note.txt"); editor.doc.clientID = 777;
+      const accepted: number[] = [];
+      const operations = owner.relay;
+      let report!: (value: {hasMore: boolean; watched: boolean}) => void;
+      sync = createRelaySyncEngine({rootDir: root, relay: connection, capture: owner.capture, onChange: () => {},
+        operations: {...operations, push: async () => {const result = await operations.push(); accepted.push(result.pushed); return result;}},
+        // The real registry/held-read transition is covered by the held-read suites.
+        // Hold the injected watch steady here to compare only upload scheduling.
+        waitForChange: (_since, signal) => new Promise((resolve, reject) => {
+          report = resolve; signal.addEventListener("abort", () => reject(signal.reason), {once: true});
+        })});
+      await sync.start();
+      await vi.waitFor(() => expect(report).toBeTypeOf("function"));
+      report({hasMore: false, watched});
+      const observing = deferred<void>();
+      const detach = owner.capture.onDurableLocalChange(() => observing.resolve());
+      const before = accepted.length;
+      for (let index = 0; index < 30; index += 1) {
+        const vector = Y.encodeStateVector(editor.doc);
+        editor.doc.getText("plainText").insert(editor.doc.getText("plainText").length, String.fromCharCode(97 + index % 26));
+        await editor.session.applyDecidedLocalUpdate(() => Y.encodeStateAsUpdate(editor!.doc, vector));
+      }
+      await observing.promise; detach();
+      if (watched) await vi.waitFor(() => expect(accepted.slice(before).some(count => count > 0)).toBe(true));
+      else expect(accepted.length).toBe(before);
+      await sync.stop(); sync = undefined;
+      await pushUntilDrained(owner.relay);
+      const database = new DatabaseSync(dbPath, {readOnly: true});
+      try {
+        const rows = database.prepare("SELECT origin_seq, op_kind, payload_json FROM sync_relay_log WHERE workspace_id = ? ORDER BY origin_seq").all(workspaceId) as Array<{origin_seq: number; op_kind: string; payload_json: string}>;
+        expect(rows.filter(row => row.op_kind === "ydoc.update")).toHaveLength(initialUpdates + 30);
+        for (let index = 1; index < rows.length; index += 1) expect(rows[index]!.origin_seq).toBe(rows[index - 1]!.origin_seq + 1);
+        for (const row of rows) {
+          expect(row.payload_json).not.toContain("node_modules/private.txt");
+          expect(row.payload_json).not.toContain("excluded-private-content");
+          expect(row.payload_json).not.toContain("never-visible-in-log");
+          expect(row.payload_json).not.toContain("node_modules/private.env");
+        }
+        sequences.push(rows.map(row => [row.origin_seq, row.op_kind, createHash("sha256").update(stableJsonStringify(JSON.parse(row.payload_json))).digest("hex")]));
+      } finally {database.close();}
+      await editor.session.close({settle: false}); editor.doc.destroy(); editor = undefined;
+      await owner.close(); owner = null; await relay.stop();
+    }
+    expect(sequences[1]).toEqual(sequences[0]);
+  } finally {
+    await sync?.stop(); await editor?.session.close({settle: false}); editor?.doc.destroy();
+    await owner?.close(); await relay.stop();
+  }
+}, 120_000);
 
 it.skipIf(engine.missing).each([false, true])(
   "imports a covered artifact without blocking an open editor (peer typed first: %s)",
