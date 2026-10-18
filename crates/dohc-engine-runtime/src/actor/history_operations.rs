@@ -613,7 +613,9 @@ pub(super) fn commit_history_undo_on_store(
                     workspace_id: ws.into(),
                     target_path: path,
                     content_sha256: sha.clone(),
-                    preimage: if m.operation == dohc_engine_domain::MomentOp::Write {
+                    preimage: if m.operation == dohc_engine_domain::MomentOp::Write
+                        && m.before_present
+                    {
                         Preimage::Present(m.before_blob_sha256.clone().ok_or(
                             DomainError::StateCorrupt {
                                 reason: "link inverse preimage",

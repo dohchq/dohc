@@ -16,6 +16,7 @@ type ReadHook = Arc<dyn Fn(&Connection, &str) + Send + Sync>;
 struct Probe {
     turns: Vec<(&'static str, u128)>,
     hook: Option<ReadHook>,
+    committed: Option<Arc<tokio::sync::Notify>>,
 }
 static PROBES: OnceLock<Mutex<HashMap<String, Probe>>> = OnceLock::new();
 fn probes() -> &'static Mutex<HashMap<String, Probe>> {
@@ -41,6 +42,11 @@ impl Drop for Turn {
             probe
                 .turns
                 .push((self.phase, self.start.elapsed().as_nanos()));
+            if self.phase == "commit"
+                && let Some(committed) = &probe.committed
+            {
+                committed.notify_one();
+            }
         }
     }
 }
@@ -568,6 +574,7 @@ async fn pending_heads_byte_bounds_and_unfinished_seed_are_reported() {
     let ws = f.ws.clone();
     f.actor.run(move |store, _| {
         store.write_with(&NoFaults, |tx| {
+            tx.execute("INSERT INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) VALUES(?1,'main','source-0000',1),(?1,'main','source-0001',1) ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET revision=revision+1", [&ws]).map_err(StorageError::persist_public)?;
             tx.execute("DELETE FROM link_pending WHERE workspace_id=?1 AND object_id='source-0002'", [&ws]).map_err(StorageError::persist_public)?;
             tx.execute("DELETE FROM link_sources WHERE workspace_id=?1 AND object_id='source-0002'", [&ws]).map_err(StorageError::persist_public)?;
             tx.execute("INSERT INTO link_index_state(workspace_id,version_id,parser_generation,seed_phase) VALUES(?1,'main',?2,'aliases') ON CONFLICT(workspace_id,version_id) DO UPDATE SET seed_phase='aliases'", params![ws,crate::links::PARSER_GENERATION]).map_err(StorageError::persist_public)?;
@@ -842,6 +849,17 @@ async fn case_only_and_delete_only_operations_refuse() {
 #[tokio::test(flavor = "multi_thread")]
 async fn two_thousand_sources_yield_between_turns_and_measure_undo_hold() {
     let f = Fixture::new(2000, 4999);
+    let _index_hold = f.actor.hold_link_drain();
+    let ws = f.ws.clone();
+    f.actor.run(move |store, _| {
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("INSERT INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) SELECT workspace_id,version_id,object_id,1 FROM snapshots WHERE workspace_id=?1 AND version_id='main' ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET revision=revision+1", [&ws]).map_err(StorageError::persist_public)?;
+            Ok::<_, RuntimeError>(())
+        })?;
+        Ok(())
+    }).await.unwrap();
+    let committed = Arc::new(tokio::sync::Notify::new());
+    probes().lock().unwrap().get_mut(&f.ws).unwrap().committed = Some(committed.clone());
     let actor = f.actor.clone();
     let serial = f.serial.clone();
     let typing_ws = f.ws.clone();
@@ -854,6 +872,7 @@ async fn two_thousand_sources_yield_between_turns_and_measure_undo_hold() {
             .collect::<Vec<_>>()
     };
     let updates = tokio::spawn(async move {
+        committed.notified().await;
         let mut waits = Vec::new();
         let mut positions = Vec::new();
         let mut claim = None;
