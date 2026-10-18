@@ -1619,6 +1619,8 @@ fn list_conflicts(
     after_conflict_id: Option<&str>,
     limit: Option<i64>,
 ) -> Result<Vec<TextConflict>, DomainError> {
+    let snapshot = text::ReadSnapshot::new(conn).map_err(DomainError::sql_corrupt)?;
+
     let after = after_conflict_id
         .map(|conflict_id| {
             conn.query_row(
@@ -1659,14 +1661,12 @@ fn list_conflicts(
     let mut stmt = conn.prepare(&sql).map_err(DomainError::sql_corrupt)?;
     let mut out = Vec::new();
     let rows = stmt
-        .query_map(rusqlite::params_from_iter(values.iter()), |row| {
-            map_conflict_row(conn, row)
-        })
+        .query_map(rusqlite::params_from_iter(values.iter()), map_conflict_row)
         .map_err(DomainError::sql_corrupt)?;
     for row in rows {
         out.push(row.map_err(DomainError::sql_corrupt)??);
     }
-    Ok(out)
+    snapshot.finish(hydrate_conflicts(conn, out), DomainError::sql_corrupt)
 }
 
 #[doc(hidden)]
@@ -1675,13 +1675,18 @@ pub fn load_text_conflict_in_tx(
     workspace_id: &str,
     conflict_id: &str,
 ) -> Result<Option<TextConflict>, DomainError> {
+    let snapshot = text::ReadSnapshot::new(conn).map_err(DomainError::sql_corrupt)?;
+
     let sql = format!("{CONFLICT_SELECT} WHERE c.workspace_id = ?1 AND c.conflict_id = ?2");
-    conn.query_row(&sql, params![workspace_id, conflict_id], |row| {
-        map_conflict_row(conn, row)
-    })
-    .optional()
-    .map_err(DomainError::sql_corrupt)?
-    .transpose()
+    let row = conn
+        .query_row(&sql, params![workspace_id, conflict_id], map_conflict_row)
+        .optional()
+        .map_err(DomainError::sql_corrupt)?
+        .transpose()?;
+    snapshot.finish(
+        hydrate_conflicts(conn, row.into_iter().collect()).map(|rows| rows.into_iter().next()),
+        DomainError::sql_corrupt,
+    )
 }
 
 const CONFLICT_SELECT: &str = "SELECT c.*,
@@ -1699,8 +1704,39 @@ const CONFLICT_SELECT: &str = "SELECT c.*,
     LEFT JOIN binary_blobs current_binary ON current_binary.sha256 = c.current_binary_sha256
     LEFT JOIN binary_blobs incoming_binary ON incoming_binary.sha256 = c.incoming_binary_sha256";
 
-fn map_conflict_row(
+fn hydrate_conflicts(
     conn: &Connection,
+    mut rows: Vec<TextConflict>,
+) -> Result<Vec<TextConflict>, DomainError> {
+    let mut bodies = text::read_batch(
+        conn,
+        rows.iter().flat_map(|row| {
+            [&row.base, &row.current, &row.incoming]
+                .into_iter()
+                .filter_map(|side| {
+                    side.snapshot
+                        .as_ref()
+                        .map(|snapshot| snapshot.blob_sha256.as_str())
+                })
+        }),
+        None,
+    )
+    .map_err(DomainError::sql_corrupt)?;
+    for row in &mut rows {
+        for side in [&mut row.base, &mut row.current, &mut row.incoming] {
+            if let Some(snapshot) = &mut side.snapshot {
+                snapshot.text = bodies
+                    .get_mut(&snapshot.blob_sha256)
+                    .expect("requested body")
+                    .take_text()
+                    .expect("uncapped body");
+            }
+        }
+    }
+    Ok(rows)
+}
+
+fn map_conflict_row(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<Result<TextConflict, DomainError>> {
     let workspace_id: String = row.get("workspace_id")?;
@@ -1740,15 +1776,14 @@ fn map_conflict_row(
                     .get("metadata_correlation_id")
                     .map_err(DomainError::sql_corrupt)?,
             },
-            base: map_side(conn, row, "base", &workspace_id, &source_version_id)?,
-            current: map_side(conn, row, "current", &workspace_id, &target_version_id)?,
-            incoming: map_side(conn, row, "incoming", &workspace_id, &source_version_id)?,
+            base: map_side(row, "base", &workspace_id, &source_version_id)?,
+            current: map_side(row, "current", &workspace_id, &target_version_id)?,
+            incoming: map_side(row, "incoming", &workspace_id, &source_version_id)?,
         })
     })())
 }
 
 fn map_side(
-    conn: &Connection,
     row: &rusqlite::Row<'_>,
     prefix: &str,
     workspace_id: &str,
@@ -1798,8 +1833,12 @@ fn map_side(
                     .get(column("object_id").as_str())
                     .map_err(DomainError::sql_corrupt)?,
                 path: path.clone(),
-                text: text::from_row(conn, row, format!("{prefix}_blob").as_str())
-                    .map_err(DomainError::sql_corrupt)?,
+                text: {
+                    let _: String = row
+                        .get(format!("{prefix}_blob").as_str())
+                        .map_err(DomainError::sql_corrupt)?;
+                    String::new()
+                },
                 blob_sha256: text_blob_sha256.ok_or(DomainError::StateCorrupt {
                     reason: "text conflict side is missing its blob reference",
                 })?,

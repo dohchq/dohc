@@ -2,10 +2,123 @@
 //! this module owns the physical full-body representation.
 use rusqlite::{Connection, Row, RowIndex};
 
-/// Body column for a trusted SQL table alias, marking the joined list reads.
-/// Chunked bodies can't be read in SQL; that switch must rewrite these callers.
-pub fn body_column(alias: &str) -> String {
-    format!("{alias}.text")
+use std::collections::HashMap;
+
+/// Keep metadata and body queries in one snapshot, including in autocommit.
+pub struct ReadSnapshot<'a>(Option<&'a Connection>);
+
+impl<'a> ReadSnapshot<'a> {
+    pub fn new(conn: &'a Connection) -> rusqlite::Result<Self> {
+        if conn.is_autocommit() {
+            conn.execute_batch("SAVEPOINT text_read")?;
+            Ok(Self(Some(conn)))
+        } else {
+            Ok(Self(None))
+        }
+    }
+
+    pub fn finish<T, E>(
+        mut self,
+        result: Result<T, E>,
+        map_error: impl Fn(rusqlite::Error) -> E,
+    ) -> Result<T, E> {
+        let value = result?;
+        if let Some(conn) = self.0 {
+            conn.execute_batch("RELEASE text_read").map_err(map_error)?;
+            self.0 = None;
+        }
+        Ok(value)
+    }
+}
+
+impl Drop for ReadSnapshot<'_> {
+    fn drop(&mut self) {
+        if let Some(conn) = self.0 {
+            let _ = conn.execute_batch("ROLLBACK TO text_read; RELEASE text_read");
+        }
+    }
+}
+
+pub struct Body {
+    pub recorded: i64,
+    pub actual: i64,
+    pub text: Option<String>,
+    remaining: usize,
+}
+
+impl Body {
+    /// Move the last requested copy into its result; clone only shared bodies.
+    pub fn take_text(&mut self) -> Option<String> {
+        self.remaining -= 1;
+        if self.remaining == 0 {
+            self.text.take()
+        } else {
+            self.text.clone()
+        }
+    }
+}
+
+/// Fetch each distinct key once. Callers omit NULL joined keys and retain NULL.
+/// A requested digest missing from the result is corruption.
+pub fn read_batch<'a>(
+    conn: &Connection,
+    digests: impl IntoIterator<Item = &'a str>,
+    cap: Option<i64>,
+) -> rusqlite::Result<HashMap<String, Body>> {
+    let mut keys = HashMap::new();
+    for key in digests {
+        *keys.entry(key).or_insert(0usize) += 1;
+    }
+    if keys.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let json =
+        serde_json::to_string(&keys.keys().collect::<Vec<_>>()).expect("text keys serialize");
+    let mut statement = conn.prepare_cached(if cap.is_some() {
+        "SELECT sha256,byte_length,length(CAST(text AS BLOB)), \
+         CASE WHEN byte_length<=?2 AND length(CAST(text AS BLOB))<=?2 THEN text END \
+         FROM blobs WHERE sha256 IN (SELECT value FROM json_each(?1))"
+    } else {
+        "SELECT sha256,byte_length,NULL,text FROM blobs \
+         WHERE sha256 IN (SELECT value FROM json_each(?1))"
+    })?;
+    let map = |row: &Row<'_>| {
+        let text = if cap.is_some() {
+            row.get(3)?
+        } else {
+            Some(row.get::<_, String>(3)?)
+        };
+        let actual = if cap.is_some() {
+            row.get(2)?
+        } else {
+            text.as_ref().expect("uncapped body").len() as i64
+        };
+        Ok((
+            row.get(0)?,
+            Body {
+                recorded: row.get(1)?,
+                actual,
+                text,
+                remaining: 0,
+            },
+        ))
+    };
+    let mut bodies: HashMap<String, Body> = if let Some(cap) = cap {
+        statement
+            .query_map(rusqlite::params![json, cap], map)?
+            .collect::<Result<_, _>>()?
+    } else {
+        statement
+            .query_map([json], map)?
+            .collect::<Result<_, _>>()?
+    };
+    if bodies.len() != keys.len() {
+        return Err(missing_body(rusqlite::Error::QueryReturnedNoRows));
+    }
+    for (key, body) in &mut bodies {
+        body.remaining = keys[key.as_str()];
+    }
+    Ok(bodies)
 }
 
 /// Read without adding validation or changing the caller's error precedence.

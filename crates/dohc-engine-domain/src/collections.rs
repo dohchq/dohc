@@ -3733,6 +3733,7 @@ fn unindexed_or_conflicted_relation_targets_still_present(
     version_id: &str,
     targets: HashSet<(String, String)>,
 ) -> Result<HashSet<(String, String)>, crate::DomainError> {
+    let snapshot = text::ReadSnapshot::new(conn).map_err(crate::DomainError::sql_corrupt)?;
     let mut targets_by_collection: HashMap<String, HashSet<String>> = HashMap::new();
     for (record_id, collection_path) in targets {
         targets_by_collection
@@ -3777,12 +3778,17 @@ fn unindexed_or_conflicted_relation_targets_still_present(
         let mut matched_count = 0_usize;
         let rows = statement
             .query_map(params![workspace_id, version_id, collection_path], |row| {
-                text::from_row(conn, row, 0)
+                row.get::<_, String>(0)
             })
             .map_err(crate::DomainError::sql_corrupt)?;
-        for text in rows {
-            let text = text.map_err(crate::DomainError::sql_corrupt)?;
-            let Some(record_id) = markdown_record_id(&text).filter(|id| wanted_ids.contains(id))
+        let keys = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(crate::DomainError::sql_corrupt)?;
+        let bodies = text::read_batch(conn, keys.iter().map(String::as_str), None)
+            .map_err(crate::DomainError::sql_corrupt)?;
+        for key in keys {
+            let text = bodies[&key].text.as_deref().expect("uncapped body");
+            let Some(record_id) = markdown_record_id(text).filter(|id| wanted_ids.contains(id))
             else {
                 continue;
             };
@@ -3794,7 +3800,7 @@ fn unindexed_or_conflicted_relation_targets_still_present(
             }
         }
     }
-    Ok(present)
+    snapshot.finish(Ok(present), crate::DomainError::sql_corrupt)
 }
 
 fn load_collection_snapshots(
@@ -3802,8 +3808,10 @@ fn load_collection_snapshots(
     workspace_id: &str,
     version_id: &str,
 ) -> Result<Vec<CollectionSnapshot>, crate::DomainError> {
+    let snapshot = text::ReadSnapshot::new(conn).map_err(crate::DomainError::sql_corrupt)?;
+
     let mut statement = conn
-        .prepare(&format!(
+        .prepare(
             "WITH collection_prefixes(prefix) AS MATERIALIZED (\
                SELECT substr(schema.path,1,length(schema.path)-length(?3)-1) \
                FROM snapshots schema \
@@ -3824,26 +3832,44 @@ fn load_collection_snapshots(
                        AND instr(substr(s.path,length(c.prefix)+2),'/')=0\
                    )))\
              ) \
-             SELECT s.path,s.object_id,{body_b} FROM collection_snapshots s \
+             SELECT s.path,s.object_id,b.sha256 FROM collection_snapshots s \
              JOIN blobs b ON b.sha256=s.blob_sha256 \
              ORDER BY s.path",
-            body_b = text::body_column("b")
-        ))
+        )
         .map_err(crate::DomainError::sql_corrupt)?;
-    statement
+    let rows = statement
         .query_map(
             params![workspace_id, version_id, COLLECTION_SCHEMA_FILENAME],
             |row| {
-                Ok(CollectionSnapshot {
-                    path: row.get(0)?,
-                    object_id: row.get(1)?,
-                    text: row.get(2)?,
-                })
+                Ok((
+                    CollectionSnapshot {
+                        path: row.get(0)?,
+                        object_id: row.get(1)?,
+                        text: String::new(),
+                    },
+                    row.get::<_, String>(2)?,
+                ))
             },
         )
         .map_err(crate::DomainError::sql_corrupt)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(crate::DomainError::sql_corrupt)
+        .map_err(crate::DomainError::sql_corrupt)?;
+    let mut bodies = text::read_batch(conn, rows.iter().map(|(_, key)| key.as_str()), None)
+        .map_err(crate::DomainError::sql_corrupt)?;
+    snapshot.finish(
+        Ok(rows
+            .into_iter()
+            .map(|(mut snapshot, key)| {
+                snapshot.text = bodies
+                    .get_mut(&key)
+                    .expect("requested body")
+                    .take_text()
+                    .expect("uncapped body");
+                snapshot
+            })
+            .collect()),
+        crate::DomainError::sql_corrupt,
+    )
 }
 
 fn load_record_bindings(
@@ -3936,6 +3962,7 @@ fn ensure_historical_record_owners_backfilled(
     workspace_id: &str,
     version_id: &str,
 ) -> Result<(), crate::DomainError> {
+    let snapshot = text::ReadSnapshot::new(tx).map_err(crate::DomainError::sql_corrupt)?;
     let complete = tx
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM collection_historical_record_owner_backfills \
@@ -3979,15 +4006,18 @@ fn ensure_historical_record_owners_backfilled(
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
-                text::from_row(tx, row, 3)?,
+                row.get::<_, String>(3)?,
             ))
         })
         .map_err(crate::DomainError::sql_corrupt)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(crate::DomainError::sql_corrupt)?;
     drop(statement);
-    for (moment_order, object_id, path, text) in moments {
-        let Some(record_id) = markdown_record_id(&text).filter(|value| is_record_id(value)) else {
+    let bodies = text::read_batch(tx, moments.iter().map(|row| row.3.as_str()), None)
+        .map_err(crate::DomainError::sql_corrupt)?;
+    for (moment_order, object_id, path, key) in moments {
+        let text = bodies[&key].text.as_deref().expect("uncapped body");
+        let Some(record_id) = markdown_record_id(text).filter(|value| is_record_id(value)) else {
             continue;
         };
         tx.execute(
@@ -4011,7 +4041,7 @@ fn ensure_historical_record_owners_backfilled(
         params![workspace_id, version_id],
     )
     .map_err(crate::DomainError::sql_persist)?;
-    Ok(())
+    snapshot.finish(Ok(()), crate::DomainError::sql_corrupt)
 }
 
 fn load_historical_record_owners(
@@ -6863,7 +6893,7 @@ mod tests {
         let mut connection = Connection::open_in_memory().expect("open scale database");
         connection
             .execute_batch(
-                "CREATE TABLE blobs(sha256 TEXT PRIMARY KEY,text TEXT NOT NULL);\
+                "CREATE TABLE blobs(sha256 TEXT PRIMARY KEY,byte_length INTEGER NOT NULL,text TEXT NOT NULL);\
                  CREATE TABLE snapshots(\
                    workspace_id TEXT NOT NULL,version_id TEXT NOT NULL,path TEXT NOT NULL,\
                    object_id TEXT NOT NULL,blob_sha256 TEXT NOT NULL,content_kind TEXT NOT NULL\
@@ -6888,7 +6918,7 @@ mod tests {
         let transaction = connection.transaction().expect("begin scale seed");
         {
             let mut insert_blob = transaction
-                .prepare("INSERT INTO blobs(sha256,text) VALUES (?1,?2)")
+                .prepare("INSERT INTO blobs(sha256,byte_length,text) VALUES (?1,length(CAST(?2 AS BLOB)),?2)")
                 .expect("prepare scale blobs");
             let mut insert_snapshot = transaction
                 .prepare(
@@ -6939,7 +6969,7 @@ mod tests {
         let connection = Connection::open_in_memory().expect("open owner index database");
         connection
             .execute_batch(
-                "CREATE TABLE blobs(sha256 TEXT PRIMARY KEY,text TEXT NOT NULL);\
+                "CREATE TABLE blobs(sha256 TEXT PRIMARY KEY,byte_length INTEGER NOT NULL,text TEXT NOT NULL);\
                  CREATE TABLE versions(\
                    workspace_id TEXT NOT NULL,version_id TEXT NOT NULL,\
                    PRIMARY KEY(workspace_id,version_id)\
@@ -6960,10 +6990,11 @@ mod tests {
                    PRIMARY KEY(workspace_id,version_id)\
                  );\
                  INSERT INTO versions(workspace_id,version_id) VALUES('workspace','version');\
-                 INSERT INTO blobs(sha256,text) VALUES\
+                 INSERT INTO blobs(sha256,byte_length,text) \
+                 SELECT column1,length(CAST(column2 AS BLOB)),column2 FROM (VALUES\
                    ('first','---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\n'),\
                    ('raw','---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\n'),\
-                   ('appended','---\nid: rec_cccccccccccccccccccccccccc\n---\n');\
+                   ('appended','---\nid: rec_cccccccccccccccccccccccccc\n---\n'));\
                  INSERT INTO moments(\
                    workspace_id,version_id,object_id,path,after_blob_sha256,\
                    after_content_kind,moment_order\

@@ -1,8 +1,9 @@
 use super::{
     MomentBeforeState, VersionedTextStore, alias_object_id, blob_text, committed, get_moment,
-    get_version, hash_author_fields, hash_fields, lookup_request, map_moment_row, map_version_row,
-    next_moment_order, record_request, upsert_snapshot, validate_addressable_plaintext_path,
-    validate_identifier, validate_moment_metadata, version_exists, version_is_active,
+    get_version, hash_author_fields, hash_fields, hydrate_moments, lookup_request, map_moment_row,
+    map_version_row, next_moment_order, record_request, upsert_snapshot,
+    validate_addressable_plaintext_path, validate_identifier, validate_moment_metadata,
+    version_exists, version_is_active,
 };
 use crate::conflicts::{
     binary_delete_job_id, binary_rename_delete_job_id, binary_rename_write_job_id,
@@ -771,16 +772,18 @@ fn select_moment_by_order(
     object_id: &str,
     max_order: i64,
 ) -> Result<Option<MomentRecord>, DomainError> {
+    let snapshot = text::ReadSnapshot::new(conn).map_err(DomainError::sql_corrupt)?;
+
     let row = conn
         .query_row(
-            &format!(concat!("SELECT moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
+            concat!("SELECT moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
              operation, after_blob_sha256, before_present, before_blob_sha256, \
              before_latest_moment_id, metadata_origin, metadata_summary, \
              metadata_correlation_id, author_json, sync_record_only, \
              COALESCE(after_content_kind, 'text'), after_binary.sha256, \
-             COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             CASE WHEN after_text_blob.byte_length <= 131072 AND LENGTH(CAST({body_after_text_blob} AS BLOB)) <= 131072 THEN {body_after_text_blob} END, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             CASE WHEN before_text_blob.byte_length <= 131072 AND LENGTH(CAST({body_before_text_blob} AS BLOB)) <= 131072 THEN {body_before_text_blob} END, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length), \
-             COALESCE(LENGTH(CAST({body_after_text_blob} AS BLOB)), LENGTH(after_binary.bytes)), \
-             COALESCE(LENGTH(CAST({body_before_text_blob} AS BLOB)), LENGTH(before_binary.bytes)), \
+             COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             after_text_blob.sha256, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             before_text_blob.sha256, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length), \
+             COALESCE(after_text_blob.byte_length, LENGTH(after_binary.bytes)), \
+             COALESCE(before_text_blob.byte_length, LENGTH(before_binary.bytes)), \
              m.payload_before_path \
              FROM moments m \
              LEFT JOIN binary_blobs after_binary ON after_binary.sha256 = m.after_binary_sha256 \
@@ -788,13 +791,17 @@ fn select_moment_by_order(
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
                AND moment_order <= ?4 AND (sync_record_only IS NULL OR sync_record_only = 0) \
                AND ", crate::exclude_capture_recovery_sql!("m"), " \
-             ORDER BY moment_order DESC LIMIT 1"), body_after_text_blob = text::body_column("after_text_blob"), body_before_text_blob = text::body_column("before_text_blob")),
+             ORDER BY moment_order DESC LIMIT 1"),
             params![workspace_id, version_id, object_id, max_order],
             map_moment_row,
         )
         .optional()
         .map_err(DomainError::sql_corrupt)?;
-    row.transpose()
+    snapshot.finish(
+        hydrate_moments(conn, row.transpose()?.into_iter().collect())
+            .map(|rows| rows.into_iter().next()),
+        DomainError::sql_corrupt,
+    )
 }
 
 fn inherited_object_moment(
