@@ -16,7 +16,7 @@ beforeEach(() => {
 });
 afterEach(() => {vi.unstubAllGlobals(); vi.useRealTimers();});
 
-it('transfers snapshots, correlates replies and releases destroyed documents', async () => {
+it('transfers snapshots and correlates replies without release messages', async () => {
   const {projectArtifactSource} = await import('./artifactSource');
   const doc = new Y.Doc();
   const first = projectArtifactSource(doc);
@@ -25,7 +25,7 @@ it('transfers snapshots, correlates replies and releases destroyed documents', a
   const [worker] = TestWorker.instances;
   expect(TestWorker.instances).toHaveLength(1);
   const [a, b] = worker!.postMessage.mock.calls.map(call => call[0]);
-  expect(a.document).toBe(b.document);
+  expect(a).not.toHaveProperty('document');
   const clone = new Y.Doc();
   Y.applyUpdate(clone, a.snapshot);
   expect(worker!.postMessage.mock.calls[0]![1]).toEqual([a.snapshot.buffer]);
@@ -36,7 +36,7 @@ it('transfers snapshots, correlates replies and releases destroyed documents', a
   expect(await projectArtifactSource(doc)).toBe('Latest');
   expect(worker!.postMessage).toHaveBeenCalledTimes(2);
   doc.destroy(); clone.destroy();
-  expect(worker!.postMessage).toHaveBeenLastCalledWith({document: a.document});
+  expect(worker!.postMessage).toHaveBeenCalledTimes(2);
 });
 
 it('joins an idle proof, reuses its answer, and invalidates on every document update', async () => {
@@ -146,4 +146,14 @@ it('keeps short-note preparation off the opening task, with an inclusive idle bo
   expect(vi.getTimerCount()).toBe(1);
   cancelLarge?.();
   doc.destroy();
+});
+
+it('restarts after one timeout and resends other pending snapshots',async()=>{
+ vi.useFakeTimers();const {projectArtifactSource}=await import('./artifactSource');const a=new Y.Doc(),b=new Y.Doc();
+ const first=projectArtifactSource(a);const refused=expect(first).rejects.toThrow('Source projection timed out');
+ await vi.advanceTimersByTimeAsync(1000);const second=projectArtifactSource(b);const observed=second.catch(()=> 'unexpected refusal');
+ const old=TestWorker.instances[0]!;const original=old.postMessage.mock.calls[1]![0];
+ await vi.advanceTimersByTimeAsync(14000);await refused;expect(TestWorker.instances).toHaveLength(2);
+ const replacement=TestWorker.instances[1]!;const resent=replacement.postMessage.mock.calls[0]![0];
+ expect(resent.snapshot).toEqual(original.snapshot);replacement.onmessage!({data:{id:resent.id,markdown:'Survived'}});expect(await observed).toBe('Survived');a.destroy();b.destroy();
 });

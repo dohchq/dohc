@@ -725,11 +725,9 @@ export function MarkdownView(props: {
 
   // Read the live Y.Doc at the action, while retaining the mounted-editor guard.
   const serializeEngineDraft = async (): Promise<string | null> => {
+    if (displayDoc) return wysiwygRef.current === null || displayDoc.isDestroyed ? null : projectArtifactSource(displayDoc);
     const editorBody = wysiwygRef.current?.getMarkdown();
-    if (editorBody === undefined && displayDoc !== null) return null;
-    if (!displayDoc) return mergeMarkdownEditorBody(latestDraft.current, editorBody ?? markdownEditorBody(props.body));
-    const {yDocToArtifactMarkdown} = await loadImportExport();
-    return displayDoc.isDestroyed ? null : yDocToArtifactMarkdown(displayDoc);
+    return mergeMarkdownEditorBody(latestDraft.current, editorBody ?? markdownEditorBody(props.body));
   };
 
   const hasSetAsideEdit =
@@ -1228,19 +1226,28 @@ export function MarkdownView(props: {
     let cancelled = false;
     let serialize: ((doc: Y.Doc) => string | Promise<string>) | null = null;
     let revision = 0;
+    let painted = 0;
+    let inFlight = false;
+    let trailing = false;
     let updateTimer: ReturnType<typeof setTimeout> | null = null;
     let updateDeadline: number | null = null;
     const recompute = async () => {
       if (cancelled || !serialize) return;
+      if (inFlight) {trailing = true; return;}
+      inFlight = true;
       const requested = ++revision;
       try {
         const markdown = await serialize(doc);
-        if (cancelled || requested !== revision) return;
+        if (cancelled || requested <= painted) return;
+        painted = requested;
         setSourceProjection({ documentKey, doc, markdown });
       } catch (error) {
         if (!cancelled && requested === revision) props.onButtonError?.(
           'dohc could not open the Markdown source.', error, () => {void recompute();},
         );
+      } finally {
+        inFlight = false;
+        if (trailing && !cancelled) {trailing = false; void recompute();}
       }
     };
     const runScheduledRecompute = () => {
@@ -1264,7 +1271,6 @@ export function MarkdownView(props: {
     // per keystroke, so wait for a short trailing edge while the maximum wait
     // keeps a sustained burst repainting twice per second.
     const scheduleRecompute = () => {
-      revision += 1;
       const now = Date.now();
       updateDeadline ??= now + SOURCE_VIEW_UPDATE_MAX_WAIT_MS;
       if (updateTimer !== null) clearTimeout(updateTimer);

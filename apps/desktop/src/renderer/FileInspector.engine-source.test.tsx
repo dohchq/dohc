@@ -56,6 +56,7 @@ vi.mock("./editor/artifactSource", () => ({
   prepareArtifactSource: () => undefined,
   projectArtifactSource: async (doc: Y.Doc) => (await import("@dohc/ydoc-projection")).yDocToArtifactMarkdown(doc),
 }));
+import {forgedSources} from '../../../../packages/ydoc-projection/src/artifact-witness.fixture.ts';
 setupFileInspectorTests();
 
 // "View markdown as source" on the ENGINE path: the toggle shows a READ-ONLY
@@ -261,6 +262,21 @@ describe("engine markdown source view", () => {
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
     fireEvent.click(await screen.findByTestId("markdown-source-toggle"));
     await waitFor(() => expect(codeEditorText(screen.getByTestId("view-markdown-source"))).toBe(source));
+    doc.destroy();
+  });
+
+  it.each(forgedSources)("source view keeps markup inert: %s", async source => {
+    const doc = markdownToYDoc(source);
+    const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+    doc.getMap("meta").set("dohcMarkdownSource", source);
+    doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(source));
+    doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
+    const {bridgeMock} = makeEngineBridge(source);
+    bridgeMock.openEngineYDocSession.mockResolvedValue({available: true, initialUpdate: Y.encodeStateAsUpdate(doc), lineageGeneration: 1});
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    fireEvent.click(await screen.findByTestId("markdown-source-toggle"));
+    await waitFor(() => expect(codeEditorText(screen.getByTestId("view-markdown-source"))).toBe(yDocToMarkdown(doc)));
     doc.destroy();
   });
 

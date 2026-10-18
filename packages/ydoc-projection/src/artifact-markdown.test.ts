@@ -63,3 +63,25 @@ it('does not import absent or stale witnesses or change canonical serialization'
   expect(parse).not.toHaveBeenCalled()
   doc.destroy()
 })
+
+import {forgedSources} from './artifact-witness.fixture.js'
+import {resolveMarkdownSource, createArtifactMarkdownProjector} from './artifact-markdown.js'
+it.each(forgedSources)('keeps an engine-refused source inert: %s', text => {
+ const doc=witnessed(text);const canonical=projection.yDocToMarkdown(doc);
+ expect(resolveMarkdownSource(doc,canonical)).toEqual({kind:'verified',markdown:text});
+ expect(output(doc)).toBe(canonical);doc.destroy();
+})
+it('reuses bounded proofs across fresh documents, after recomputing both content hashes',()=>{
+ const project=createArtifactMarkdownProjector();const parse=vi.spyOn(projection,'markdownToYDoc');
+ const a=witnessed();const b=witnessed();parse.mockClear();
+ expect(project(a)).toBe(source);expect(project(b)).toBe(source);expect(parse).toHaveBeenCalledTimes(1);
+ b.getMap('meta').set('dohcMarkdownSource','forged');expect(project(b)).toBe(projection.yDocToMarkdown(b));
+ const c=witnessed();c.getMap('frontmatter').set('title','new');expect(project(c)).toBe(projection.yDocToMarkdown(c));
+ a.destroy();b.destroy();c.destroy();
+})
+
+it('bounds content proofs to eight digest pairs',()=>{
+ const project=createArtifactMarkdownProjector();
+ for(let n=0;n<9;n++){const doc=witnessed(source+n);expect(project(doc)).toBe(source+n);doc.destroy();}
+ const first=witnessed(source+'0');const parse=vi.spyOn(projection,'markdownToYDoc');expect(project(first)).toBe(source+'0');expect(parse).toHaveBeenCalledOnce();first.destroy();
+})

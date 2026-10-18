@@ -26,7 +26,7 @@ type Cache = {tuple: unknown[]; canonicalSha: string; result: Resolution}
 const resolved = new WeakMap<Y.Doc, Cache>()
 
 /** The journal decides whether an unverified active witness must refuse or drop. */
-export function resolveMarkdownSource(doc: Y.Doc, canonical: string): Resolution {
+export function resolveMarkdownSource(doc: Y.Doc, canonical: string, validatedWitness?: ReturnType<typeof readMarkdownSourceWitness>): Resolution {
   const meta = doc.getMap('meta')
   if (!SOURCE_META_KEYS.some(key => meta.has(key))) return {kind: 'absent'}
   const tuple = SOURCE_META_KEYS.map(key => meta.get(key))
@@ -37,7 +37,7 @@ export function resolveMarkdownSource(doc: Y.Doc, canonical: string): Resolution
   // Stale text is never imported. Journal metadata validation still checks its integrity.
   if (tuple[2] !== canonicalSha) result = {kind: 'stale'}
   else {
-    const witness = readMarkdownSourceWitness(Object.fromEntries(SOURCE_META_KEYS.filter(key => meta.has(key)).map(key => [key, meta.get(key)])))
+    const witness = validatedWitness ?? readMarkdownSourceWitness(Object.fromEntries(SOURCE_META_KEYS.filter(key => meta.has(key)).map(key => [key, meta.get(key)])))
     if (witness === 'absent' || witness === 'invalid') result = {kind: witness}
     else if (exceedsLiveMarkdownLimit(witness.source)) result = {kind: 'capacity-refused'}
     else {
@@ -57,8 +57,36 @@ export function resolveMarkdownSource(doc: Y.Doc, canonical: string): Resolution
 
 /** File text while a complete witness proves it; otherwise the current canonical output. */
 export function yDocToArtifactMarkdown(doc: Y.Doc): string {
+  return artifactMarkdown(doc)
+}
+
+/** Bounded content proofs for short-lived documents; no document or source is retained. */
+export function createArtifactMarkdownProjector(): (doc: Y.Doc) => string {
+  const proofs = new Map<string, true>()
+  return doc => artifactMarkdown(doc, proofs)
+}
+
+function artifactMarkdown(doc: Y.Doc, proofs?: Map<string, true>): string {
   const canonical = yDocToMarkdown(doc)
   if (!SOURCE_META_KEYS.some(key => doc.getMap('meta').has(key))) return canonical
-  const result = resolveMarkdownSource(doc, canonical)
+  const meta = doc.getMap('meta')
+  const source = meta.get('dohcMarkdownSource')
+  // The journal import check alone does not prove the engine's inert-markup reading.
+  if (typeof source !== 'string' || source.includes('<') || source.includes('&')) return canonical
+  if (!proofs) {
+    const result = resolveMarkdownSource(doc, canonical)
+    return result.kind === 'verified' ? result.markdown : canonical
+  }
+  const canonicalSha = hash(canonical)
+  if (meta.get('dohcMarkdownSourceProjectionSha256') !== canonicalSha) return canonical
+  const witness = readMarkdownSourceWitness(Object.fromEntries(SOURCE_META_KEYS.filter(key => meta.has(key)).map(key => [key, meta.get(key)])))
+  if (witness === 'absent' || witness === 'invalid') return canonical
+  const key = witness.sourceSha + canonicalSha
+  if (proofs.has(key)) return witness.source
+  const result = resolveMarkdownSource(doc, canonical, witness)
+  if (result.kind === 'verified') {
+    if (proofs.size === 8) proofs.delete(proofs.keys().next().value!)
+    proofs.set(key, true)
+  }
   return result.kind === 'verified' ? result.markdown : canonical
 }

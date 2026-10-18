@@ -672,7 +672,7 @@ function semanticEqual(left: unknown, right: unknown): boolean {
     ))
 }
 
-function validateMetadata(meta: Y.Map<unknown>, zeroStructSeed: boolean): Record<string, unknown> {
+function validateMetadata(meta: Y.Map<unknown>, zeroStructSeed: boolean): {metadata: Record<string, unknown>; witness: ReturnType<typeof readMarkdownSourceWitness>} {
   const snapshot: Record<string, unknown> = Object.create(null)
   for (const [key, value] of meta.entries()) {
     if (!META_KEYS.has(key) && !key.startsWith(FRONTMATTER_SOURCE_ITEM_META_PREFIX)) refuse('invalid-schema')
@@ -697,8 +697,9 @@ function validateMetadata(meta: Y.Map<unknown>, zeroStructSeed: boolean): Record
     itemBytes += utf8.encode(key).length + utf8.encode(item).length
     if (itemBytes > 2 * 1024 * 1024) refuse('invalid-schema')
   }
-  if (readMarkdownSourceWitness(snapshot) === 'invalid') refuse('invalid-schema')
-  return snapshot
+  const witness = readMarkdownSourceWitness(snapshot)
+  if (witness === 'invalid') refuse('invalid-schema')
+  return {metadata: snapshot, witness}
 }
 
 function validatePublicState(
@@ -717,7 +718,7 @@ function validatePublicState(
   const meta = scratch.getMap('meta')
   const zeroStructSeed = topology.canonicalZeroStructSeed
     && !topology.bodyHasActiveItem && body.length === 0 && frontmatter.size === 0 && meta.size === 0
-  const metadata = validateMetadata(meta, zeroStructSeed)
+  const {metadata, witness} = validateMetadata(meta, zeroStructSeed)
   const budget = new ProjectionBudget()
   for (const value of frontmatter.values()) visitPublicValue(value, 0, budget, new Set())
   const originalFingerprint = bodyFingerprint(body, budget)
@@ -749,7 +750,7 @@ function validatePublicState(
   const projectedMarkdown = yDocToMarkdown(scratch)
   if (exceedsLiveMarkdownLimit(projectedMarkdown)) refuse('capacity-refused')
   if (metadata.dohcMarkdownCrlf === true && !projectedMarkdown.includes('\r\n')) refuse('invalid-schema')
-  const source = resolveMarkdownSource(scratch, projectedMarkdown)
+  const source = resolveMarkdownSource(scratch, projectedMarkdown, witness)
   if (source.kind === 'capacity-refused') refuse('capacity-refused')
   if (source.kind === 'invalid' || source.kind === 'import-failed'
     || (source.kind === 'unverified' && unverifiedSource === 'refuse')) refuse('invalid-schema')

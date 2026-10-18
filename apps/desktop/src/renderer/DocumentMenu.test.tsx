@@ -747,4 +747,13 @@ describe("DocumentMenu", () => {
     expect((await exported).kind).toBe("pdf");
     expect(exportDocumentFile).toHaveBeenCalledTimes(1);
   });
+
+  it.each(['refusal','failure'])('does not show a stale serialization %s in a reopened menu',async kind=>{
+    const user=userEvent.setup();let finish!:(value:string|null)=>void;let fail!:(error:Error)=>void;
+    const pending=new Promise<string|null>((resolve,reject)=>{finish=resolve;fail=reject});
+    render(<DocumentMenu workspaceId="ws-1" suggestedName="Plan" getMarkdown={()=>pending}/>);
+    await user.click(screen.getByTestId('document-menu-trigger'));await user.click(screen.getByTestId('document-menu-item-copy-markdown'));await user.keyboard('{Escape}');await user.click(screen.getByTestId('document-menu-trigger'));
+    await act(async()=>{if(kind==='refusal')finish(null);else fail(Error('late'));await pending.catch(()=>{});});
+    expect(screen.queryByText('Document not open')).toBeNull();expect(screen.queryByText("Couldn't copy")).toBeNull();
+  });
 });

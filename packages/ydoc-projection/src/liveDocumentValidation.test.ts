@@ -1025,3 +1025,11 @@ it('never projects a preserved source that holds text the document lacks', () =>
     expect(result.kind === 'accepted' ? result.evidence.projectedMarkdown : canonical, source).toBe(canonical)
   }
 })
+
+const sourceHashProbe=vi.hoisted(()=>({target:undefined as Uint8Array|undefined,count:0}));
+vi.mock('lib0/hash/sha256',async original=>{const actual=await original<typeof import('lib0/hash/sha256')>();return {...actual,digest:(bytes:Uint8Array)=>{const target=sourceHashProbe.target;if(target&&bytes.length===target.length&&bytes.every((byte,i)=>byte===target[i]))sourceHashProbe.count++;return actual.digest(bytes)}}})
+it('hashes source once for proof plus the required evidence digest',()=>{
+ const source='---\nzebra: last\nalpha: first\n---\n\nBody\n\n';
+ const checkpoint=encode(source,doc=>{const meta=doc.getMap('meta');meta.set('dohcMarkdownSource',source);meta.set('dohcMarkdownSourceSha256',hash(new TextEncoder().encode(source)));meta.set('dohcMarkdownSourceProjectionSha256',hash(new TextEncoder().encode(projection.yDocToMarkdown(doc))));});
+ sourceHashProbe.target=new TextEncoder().encode(source);sourceHashProbe.count=0;try {expect(accepted(checkpoint).projectedMarkdown).toBe(source);expect(sourceHashProbe.count).toBe(2);} finally {sourceHashProbe.target=undefined;}
+})

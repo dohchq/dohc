@@ -2,8 +2,9 @@ import * as Y from 'yjs';
 
 let worker: Worker | null = null;
 let nextId = 0;
-const documents = new WeakMap<Y.Doc, {id: number; projection?: Promise<string>}>();
-const requests = new Map<number, {resolve: (text: string) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>}>();
+const documents = new WeakMap<Y.Doc, {projection?: Promise<string>}>();
+type Request = {snapshot: Uint8Array; resolve: (text: string) => void; reject: (error: Error) => void; timer?: ReturnType<typeof setTimeout>};
+const requests = new Map<number, Request>();
 
 function stop(error: Error): void {
   worker?.terminate();
@@ -32,35 +33,54 @@ export function prepareArtifactSource(doc: Y.Doc): (() => void) | undefined {
   return () => {cancelled = true; clearTimeout(timer);};
 }
 
-/** A cold source proof must not parse a large outside file on the UI thread. */
-export function projectArtifactSource(doc: Y.Doc): Promise<string> {
-  let document = documents.get(doc);
-  if (document?.projection) return document.projection;
-  worker ??= new Worker(new URL('./artifactSource.worker.ts', import.meta.url), {type: 'module'});
-  worker.onerror = () => stop(new Error('Source projection worker failed.'));
-  worker.onmessage = ({data}: MessageEvent<{id: number; markdown: string; error?: string}>) => {
+function startWorker(): Worker {
+  const started = new Worker(new URL('./artifactSource.worker.ts', import.meta.url), {type: 'module'});
+  started.onerror = () => {if (worker === started) stop(new Error('Source projection worker failed.'));};
+  started.onmessage = ({data}: MessageEvent<{id: number; markdown: string; error?: string}>) => {
+    if (worker !== started) return;
     const request = requests.get(data.id);
     if (!request) return;
     requests.delete(data.id); clearTimeout(request.timer);
     if (data.error) request.reject(new Error(data.error)); else request.resolve(data.markdown);
   };
+  return started;
+}
+
+function send(id: number, request: Request): void {
+  clearTimeout(request.timer);
+  request.timer = setTimeout(() => {
+    requests.delete(id);
+    request.reject(new Error('Source projection timed out.'));
+    worker?.terminate(); worker = null;
+    if (requests.size) {
+      try {worker = startWorker(); for (const [otherId, other] of requests) send(otherId, other);}
+      catch (error) {stop(error instanceof Error ? error : new Error(String(error)));}
+    }
+  }, 15_000);
+  // Keep the original bytes until completion so another request's timeout can retry this one.
+  const snapshot = request.snapshot.slice();
+  worker!.postMessage({id, snapshot}, [snapshot.buffer]);
+}
+
+/** A cold source proof must not parse a large outside file on the UI thread. */
+export function projectArtifactSource(doc: Y.Doc): Promise<string> {
+  let document = documents.get(doc);
+  if (document?.projection) return document.projection;
+  worker ??= startWorker();
   if (document === undefined) {
-    document = {id: ++nextId}; documents.set(doc, document);
+    document = {}; documents.set(doc, document);
     const entry = document;
     const invalidate = () => {entry.projection = undefined;};
     doc.on('update', invalidate);
-    doc.once('destroy', () => {
-      doc.off('update', invalidate);
-      worker?.postMessage({document: entry.id});
-    });
+    doc.once('destroy', () => {doc.off('update', invalidate);});
   }
   const id = ++nextId;
   const snapshot = Y.encodeStateAsUpdate(doc);
   const entry = document;
   const projection = new Promise<string>((resolve, reject) => {
-    const timer = setTimeout(() => stop(new Error('Source projection timed out.')), 15_000);
-    requests.set(id, {resolve, reject, timer});
-    try {worker!.postMessage({id, document: entry.id, snapshot}, [snapshot.buffer]);}
+    const request: Request = {snapshot, resolve, reject};
+    requests.set(id, request);
+    try {send(id, request);}
     catch (error) {stop(error instanceof Error ? error : new Error(String(error)));}
   });
   entry.projection = projection;

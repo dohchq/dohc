@@ -140,12 +140,13 @@ export function DocumentMenu(props: {
     failureLabel: string,
     what: string,
     action: number,
+    attempt: number,
   ): Promise<{ markdown: string | null } | null> {
     try {
       return { markdown: await props.getMarkdown() };
     } catch (error) {
       console.error(`${what} failed`, error);
-      if (actions.isCurrent(action)) showFeedback(id, failureLabel);
+      if (actions.isCurrent(action) && attempts.isCurrent(attempt)) showFeedback(id, failureLabel);
       return null;
     }
   }
@@ -156,8 +157,9 @@ export function DocumentMenu(props: {
       "Couldn't copy",
       "Copy as Markdown",
       action,
+      attempt,
     );
-    if (!serialized || !actions.isCurrent(action)) return;
+    if (!serialized || !actions.isCurrent(action) || !attempts.isCurrent(attempt)) return;
     const markdown = serialized.markdown;
     if (markdown === null) {
       showFeedback(
@@ -209,14 +211,15 @@ export function DocumentMenu(props: {
     })();
   }
 
-  async function exportDocument(kind: "markdown" | "html" | "pdf", action: number) {
+  async function exportDocument(kind: "markdown" | "html" | "pdf", action: number, attempt: number) {
     const serialized = await serializeOrFail(
       `export-${kind}`,
       "Couldn't export",
       `Export as ${kind.toUpperCase()}`,
       action,
+      attempt,
     );
-    if (!serialized || !actions.isCurrent(action)) return;
+    if (!serialized || !actions.isCurrent(action) || !attempts.isCurrent(attempt)) return;
     const documentMarkdown = serialized.markdown;
     if (documentMarkdown === null) {
       // Before closing: the feedback replaces the item's label, so a refusal
@@ -286,7 +289,7 @@ export function DocumentMenu(props: {
       return;
     }
     void exportDocument(
-      id === "export-pdf" ? "pdf" : id === "export-html" ? "html" : "markdown", action,
+      id === "export-pdf" ? "pdf" : id === "export-html" ? "html" : "markdown", action, attempt,
     );
   }
 
