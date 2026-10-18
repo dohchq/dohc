@@ -451,6 +451,108 @@
       "kind": "wikilink",
       "literal": "report%+2",
       "target": "report%+2.md"
+    },
+    {
+      "name": "space before fragment",
+      "source": "source.md",
+      "literal": "report #part",
+      "kind": "wikilink",
+      "target": "report.md"
+    },
+    {
+      "name": "space before query",
+      "source": "source.md",
+      "literal": "report ?q",
+      "kind": "wikilink",
+      "target": "report.md"
+    },
+    {
+      "name": "malformed percent in fragment",
+      "source": "source.md",
+      "literal": "a%20b#%zz",
+      "kind": "wikilink",
+      "target": "a b.md"
+    },
+    {
+      "name": "hidden global stem",
+      "source": "source.md",
+      "literal": ".report",
+      "kind": "wikilink",
+      "target": "other/.report"
+    },
+    {
+      "name": "double markdown extension global stem",
+      "source": "source.md",
+      "literal": "report.md",
+      "kind": "wikilink",
+      "target": "x/report.md.md"
+    },
+    {
+      "name": "bare dot normalizes source folder",
+      "source": "notes/source.md",
+      "literal": ".",
+      "kind": "wikilink",
+      "target": "notes.md"
+    },
+    {
+      "name": "bare parent normalizes source folder",
+      "source": "notes/sub/source.md",
+      "literal": "..",
+      "kind": "wikilink",
+      "target": "notes.md"
+    },
+    {
+      "name": "leading dot is not an extension",
+      "source": "source.md",
+      "literal": "/x/.md",
+      "kind": "wikilink",
+      "target": "x/.md.md"
+    },
+    {
+      "name": "trailing slash uses last segment extension",
+      "source": "source.md",
+      "literal": "/x.md/",
+      "kind": "wikilink",
+      "target": null,
+      "paths": [
+        "source.md",
+        "x.md/.md"
+      ]
+    },
+    {
+      "name": "surrounding whitespace",
+      "source": "notes/source.md",
+      "literal": " \t report \t ",
+      "kind": "wikilink",
+      "target": "notes/report.md"
+    },
+    {
+      "name": "single folded wikilink match",
+      "source": "source.md",
+      "literal": "/REPORT.MD",
+      "kind": "wikilink",
+      "target": "report.md"
+    },
+    {
+      "name": "positive explicit current folder",
+      "source": "notes/source.md",
+      "literal": "./report",
+      "kind": "wikilink",
+      "target": "notes/report.md"
+    },
+    {
+      "name": "mdx fill in",
+      "source": "source.md",
+      "literal": "/report",
+      "kind": "wikilink",
+      "target": "report.mdx"
+    },
+    {
+      "name": "literal percent in fragment",
+      "source": "source.md",
+      "literal": "report#50%",
+      "kind": "wikilink",
+      "target": "report.md"
     }
   ]
 }

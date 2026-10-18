@@ -18,36 +18,38 @@ pub(crate) fn candidates(
 ) -> Result<Candidates, StorageError> {
     let keys = serde_json::to_string(&path_keys(target)).expect("string pairs serialize to JSON");
     let mut stmt = conn.prepare_cached(
-        "SELECT DISTINCT k.object_id FROM json_each(?3) probe
+        "WITH candidates AS (SELECT DISTINCT k.object_id FROM json_each(?3) probe
          JOIN link_occurrence_keys k INDEXED BY link_occurrence_probe
            ON k.workspace_id=?1 AND k.version_id=?2 AND k.key_kind=json_extract(probe.value,'$[0]') AND k.key=json_extract(probe.value,'$[1]')
          JOIN link_sources s ON s.workspace_id=k.workspace_id AND s.version_id=k.version_id AND s.object_id=k.object_id AND s.index_key=k.index_key
          JOIN links l ON l.workspace_id=k.workspace_id AND l.version_id=k.version_id AND l.object_id=k.object_id AND l.index_key=k.index_key AND l.ordinal=k.ordinal
          WHERE l.kind='wikilink'
          UNION SELECT object_id FROM link_pending WHERE workspace_id=?1 AND version_id=?2
-         UNION SELECT object_id FROM link_sources WHERE workspace_id=?1 AND version_id=?2 AND (status='unindexed' OR parser_generation<>?4)"
+         UNION SELECT object_id FROM link_sources WHERE workspace_id=?1 AND version_id=?2 AND (status='unindexed' OR parser_generation<>?4))
+         SELECT candidate.object_id,MIN(a.path),coalesce(s.status='unindexed',0)
+         FROM candidates candidate
+         JOIN path_aliases a ON a.workspace_id=?1 AND a.version_id=?2 AND a.object_id=candidate.object_id
+         LEFT JOIN link_sources s ON s.workspace_id=a.workspace_id AND s.version_id=a.version_id AND s.object_id=a.object_id
+         GROUP BY candidate.object_id"
     ).map_err(sql)?;
     let objects = stmt
         .query_map(params![ws, version, keys, super::PARSER_GENERATION], |r| {
-            r.get::<_, String>(0)
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, bool>(2)?,
+            ))
         })
         .map_err(sql)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(sql)?;
     let mut sources = Vec::new();
     let mut unchecked = Vec::new();
-    for object in objects {
-        let source: Option<(String, bool)> = conn.query_row(
-            "SELECT a.path,EXISTS(SELECT 1 FROM link_sources s WHERE s.workspace_id=a.workspace_id AND s.version_id=a.version_id AND s.object_id=a.object_id AND s.status='unindexed')
-             FROM path_aliases a WHERE a.workspace_id=?1 AND a.version_id=?2 AND a.object_id=?3 ORDER BY a.path LIMIT 1",
-            params![ws, version, object], |r| Ok((r.get(0)?, r.get(1)?)),
-        ).optional().map_err(sql)?;
-        if let Some((path, unindexed)) = source {
-            if unindexed {
-                unchecked.push(path);
-            } else {
-                sources.push((object, path));
-            }
+    for (object, path, unindexed) in objects {
+        if unindexed {
+            unchecked.push(path);
+        } else {
+            sources.push((object, path));
         }
     }
     let ready: bool = conn.query_row(

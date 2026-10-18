@@ -173,9 +173,9 @@ fn resolver_and_candidates_are_scoped_to_workspace_and_version() {
     .unwrap();
     drain(&mut s);
     s.read_with(|c| {
-        let resolver = Resolver::for_version(c, "ws", "fork")?;
+        let resolver = Resolver::new(Resolver::paths_for_version(c, "ws", "fork")?);
         assert_eq!(resolver.resolve("source.md", "target"), Some("target.md"));
-        let foreign = Resolver::for_version(c, "other", "main")?;
+        let foreign = Resolver::new(Resolver::paths_for_version(c, "other", "main")?);
         assert_eq!(foreign.resolve("source.md", "target"), None);
         assert_eq!(
             incoming::candidates(c, "ws", "fork", "target.md")?
@@ -211,8 +211,9 @@ fn removed_sources_are_ignored_and_candidate_matches_need_resolution() {
     drain(&mut s);
     assert_eq!(lookup(&s, "notes/target.md").sources.len(), 1);
     let resolver = s
-        .read_with(|c| Resolver::for_version(c, "ws", "main"))
+        .read_with(|c| Resolver::paths_for_version(c, "ws", "main"))
         .unwrap();
+    let resolver = Resolver::new(resolver);
     assert_eq!(resolver.resolve("a.md", "target"), None);
     s.write_with(&NoFaults, |tx| {
         tx.execute("DELETE FROM path_aliases WHERE object_id='a'", [])
@@ -312,13 +313,21 @@ fn prior_generation_keys_are_candidates_until_reseeded() {
 fn fresh_seed_does_not_queue_current_sources_again() {
     let scratch = ScratchDir::new().unwrap();
     let mut s = open(&engine_db_path(&scratch).unwrap());
-    write_deferred(&mut s, "a", "a.md", "[[target]]", 1);
+    for n in 0..1000 {
+        write_deferred(
+            &mut s,
+            &format!("n{n:04}"),
+            &format!("n{n:04}.md"),
+            "[[target]]",
+            n + 1,
+        );
+    }
     while seed_step(&mut s).unwrap() {}
     while count(&s, "link_pending") > 0 {
         let mut staged = parsed(&s);
         while !staged.step(&mut s, &NoFaults).unwrap() {}
     }
-    assert_eq!(count(&s, "link_sources"), 1);
+    assert_eq!(count(&s, "link_sources"), 1000);
     assert!(
         s.read_with(
             |c| c.query_row("SELECT seed_phase='ready' FROM link_index_state", [], |r| r
@@ -326,11 +335,442 @@ fn fresh_seed_does_not_queue_current_sources_again() {
         )
         .unwrap()
     );
-    assert!(reseed_step(&mut s).unwrap());
+    assert!(!reseed_step(&mut s).unwrap());
     assert_eq!(
         count(&s, "link_pending"),
         0,
         "the first seed already certified generation 2 keys"
     );
     assert!(!reseed_step(&mut s).unwrap());
+}
+
+fn resolver_for(s: &EngineStore, ws: &str, version: &str) -> Resolver {
+    let paths = s
+        .read_with(|c| Resolver::paths_for_version(c, ws, version))
+        .unwrap();
+    // Index construction needs no connection and can leave the actor.
+    std::thread::spawn(move || Resolver::new(paths))
+        .join()
+        .unwrap()
+}
+
+fn fork(s: &mut EngineStore) {
+    VersionedTextStore::new(s)
+        .create_named_version(
+            &CreateNamedVersion {
+                workspace_id: "ws".into(),
+                new_version_id: "fork".into(),
+                name: "fork".into(),
+                from_version_id: "main".into(),
+                now_ms: 1000,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+}
+
+fn write_scoped(
+    s: &mut EngineStore,
+    ws: &str,
+    version: &str,
+    object: &str,
+    path: &str,
+    text: &str,
+) {
+    VersionedTextStore::new(s)
+        .ensure_main_version(ws, "main", 1, &NoFaults)
+        .unwrap();
+    while seed_step(s).unwrap() {}
+    VersionedTextStore::new(s)
+        .write_text(
+            &WriteText {
+                workspace_id: ws.into(),
+                version_id: version.into(),
+                object_id: object.into(),
+                path: path.into(),
+                text: text.into(),
+                moment_id: format!("{ws}-{version}-{object}"),
+                metadata_origin: "test".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 1001,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+}
+
+#[test]
+fn authoritative_resolver_is_complete_during_deferred_and_partial_seed() {
+    let scratch = ScratchDir::new().unwrap();
+    let mut s = open(&engine_db_path(&scratch).unwrap());
+    write_deferred(&mut s, "a", "a/report.md", "", 1);
+    for n in 0..40 {
+        write_deferred(
+            &mut s,
+            &format!("n{n:03}"),
+            &format!("m/{n:03}.md"),
+            "",
+            n + 2,
+        );
+    }
+    write_deferred(&mut s, "z", "z/report.md", "", 50);
+    assert_eq!(count(&s, "link_aliases"), 0);
+    assert_eq!(
+        resolver_for(&s, "ws", "main").resolve("source.md", "report"),
+        None
+    );
+    assert_eq!(
+        resolver_for(&s, "ws", "main").resolve("source.md", "/z/report"),
+        Some("z/report.md")
+    );
+    assert!(seed_step(&mut s).unwrap());
+    assert_eq!(count(&s, "link_aliases"), 32);
+    assert_eq!(
+        resolver_for(&s, "ws", "main").resolve("source.md", "report"),
+        None
+    );
+    assert_eq!(
+        resolver_for(&s, "ws", "main").resolve("source.md", "/z/report"),
+        Some("z/report.md")
+    );
+}
+
+#[test]
+fn populated_workspaces_and_edited_forks_keep_main_results_isolated() {
+    let scratch = ScratchDir::new().unwrap();
+    let mut s = open(&engine_db_path(&scratch).unwrap());
+    write(&mut s, "a", "source.md", "[[target]]", 1);
+    write(&mut s, "t", "target.md", "", 2);
+    write_scoped(&mut s, "other", "main", "a", "source.md", "[[foreign]]");
+    write_scoped(&mut s, "other", "main", "t", "target.md", "");
+    drain(&mut s);
+    fork(&mut s);
+    let before = lookup(&s, "target.md");
+    write_scoped(&mut s, "ws", "fork", "a", "source.md", "[[fork-only]]");
+    drain(&mut s);
+    assert_eq!(lookup(&s, "target.md"), before);
+    assert_eq!(before.sources, vec![("a".into(), "source.md".into())]);
+    s.read_with(|c| {
+        assert!(
+            incoming::candidates(c, "other", "main", "target.md")?
+                .sources
+                .is_empty()
+        );
+        assert!(
+            incoming::candidates(c, "ws", "fork", "target.md")?
+                .sources
+                .is_empty()
+        );
+        assert_eq!(
+            incoming::candidates(c, "other", "main", "foreign.md")?
+                .sources
+                .len(),
+            1
+        );
+        assert_eq!(
+            incoming::candidates(c, "ws", "fork", "fork-only.md")?
+                .sources
+                .len(),
+            1
+        );
+        assert_eq!(
+            incoming::read_source(c, "other", "main", "a")?
+                .unwrap()
+                .parse()?
+                .occurrences[0]
+                .literal,
+            "foreign"
+        );
+        assert_eq!(
+            incoming::read_source(c, "ws", "fork", "a")?
+                .unwrap()
+                .parse()?
+                .occurrences[0]
+                .literal,
+            "fork-only"
+        );
+        Ok::<_, StorageError>(())
+    })
+    .unwrap();
+    assert_eq!(read(&s, "a").occurrences[0].literal, "target");
+    // A target rename in the fork must not alter either other resolver.
+    s.write_with(&NoFaults, |tx| {
+        tx.execute("UPDATE path_aliases SET path='renamed.md' WHERE workspace_id='ws' AND version_id='fork' AND object_id='t'", []).map_err(sql)?;
+        Ok::<_, StorageError>(())
+    }).unwrap();
+    assert_eq!(
+        resolver_for(&s, "ws", "fork").resolve("source.md", "target"),
+        None
+    );
+    assert_eq!(
+        resolver_for(&s, "ws", "main").resolve("source.md", "target"),
+        Some("target.md")
+    );
+    assert_eq!(
+        resolver_for(&s, "other", "main").resolve("source.md", "target"),
+        Some("target.md")
+    );
+}
+
+fn upgrade_fixture(s: &mut EngineStore) {
+    for n in 0..70 {
+        write(
+            s,
+            &format!("n{n:03}"),
+            &format!("n{n:03}.md"),
+            "[[target]]",
+            n + 1,
+        );
+    }
+    drain(s);
+    s.write_with(&NoFaults, |tx| {
+        tx.execute("UPDATE link_sources SET parser_generation=1", [])
+            .map_err(sql)?;
+        tx.execute(
+            "UPDATE link_index_state SET parser_generation=1,seed_after_object_id=''",
+            [],
+        )
+        .map_err(sql)?;
+        Ok::<_, StorageError>(())
+    })
+    .unwrap();
+}
+
+fn publish_pending(s: &mut EngineStore) {
+    while count(s, "link_pending") > 0 {
+        let jobs = prepare_batch(s, SOURCE_SLICE).unwrap();
+        assert!(!jobs.is_empty());
+        let mut staged = jobs
+            .into_iter()
+            .map(|(w, h)| Staged::new(parser::parse(w, h.unwrap()).unwrap()))
+            .collect::<std::collections::VecDeque<_>>();
+        while !staged.is_empty() {
+            stage_batch(&mut staged, s, &NoFaults).unwrap();
+        }
+    }
+}
+
+fn reseed_state(s: &EngineStore, version: &str) -> (i64, String) {
+    s.read_with(|c| c.query_row("SELECT parser_generation,seed_after_object_id FROM link_index_state WHERE workspace_id='ws' AND version_id=?1", [version], |r| Ok((r.get(0)?,r.get(1)?)))).unwrap()
+}
+
+#[test]
+fn reseed_reopen_retains_cursor_and_queue_and_covers_mixed_generations() {
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    let mut s = open(&db);
+    upgrade_fixture(&mut s);
+    assert!(reseed_step(&mut s).unwrap());
+    assert_eq!(reseed_state(&s, "main"), (1, "n031".into()));
+    assert_eq!(count(&s, "link_pending"), 32);
+    let queue = s
+        .read_with(|c| {
+            c.prepare("SELECT pending_id,object_id,revision FROM link_pending ORDER BY pending_id")?
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .unwrap();
+    drop(s);
+    let mut s = open(&db);
+    assert_eq!(reseed_state(&s, "main"), (1, "n031".into()));
+    let reopened = s
+        .read_with(|c| {
+            c.prepare("SELECT pending_id,object_id,revision FROM link_pending ORDER BY pending_id")?
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .unwrap();
+    assert_eq!(reopened, queue);
+    publish_pending(&mut s);
+    assert_eq!(reseed_state(&s, "main"), (1, "n031".into()));
+    let current: i64 = s
+        .read_with(|c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM link_sources WHERE parser_generation=?1",
+                [PARSER_GENERATION],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(current, 32);
+    assert_eq!(
+        lookup(&s, "absent.md").sources.len(),
+        38,
+        "stale sources remain candidates between batches"
+    );
+    assert_eq!(lookup(&s, "target.md").sources.len(), 70);
+    assert!(reseed_step(&mut s).unwrap());
+    assert_eq!(reseed_state(&s, "main"), (1, "n063".into()));
+    assert_eq!(count(&s, "link_pending"), 32);
+    drain(&mut s);
+    assert_eq!(reseed_state(&s, "main"), (PARSER_GENERATION, String::new()));
+    assert!(lookup(&s, "absent.md").sources.is_empty());
+    assert_eq!(lookup(&s, "target.md").sources.len(), 70);
+}
+
+#[test]
+fn fork_mid_reseed_copies_cursor_and_work_and_resumes_independently() {
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    let mut s = open(&db);
+    upgrade_fixture(&mut s);
+    assert!(reseed_step(&mut s).unwrap());
+    // Publish one source, leaving both current and old generations plus work.
+    let mut staged = parsed(&s);
+    while !staged.step(&mut s, &NoFaults).unwrap() {}
+    fork(&mut s);
+    assert_eq!(reseed_state(&s, "fork"), (1, "n031".into()));
+    let pending: i64 = s
+        .read_with(|c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM link_pending WHERE version_id='fork'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(pending, 31);
+    drop(s);
+    let mut s = open(&db);
+    drain(&mut s);
+    for version in ["main", "fork"] {
+        assert_eq!(
+            reseed_state(&s, version),
+            (PARSER_GENERATION, String::new())
+        );
+        let current: i64 = s.read_with(|c| c.query_row("SELECT COUNT(*) FROM link_sources WHERE version_id=?1 AND parser_generation=?2",params![version,PARSER_GENERATION],|r|r.get(0))).unwrap();
+        assert_eq!(current, 70);
+        assert_eq!(
+            s.read_with(|c| incoming::candidates(c, "ws", version, "target.md"))
+                .unwrap()
+                .sources
+                .len(),
+            70
+        );
+        assert!(
+            s.read_with(|c| incoming::candidates(c, "ws", version, "absent.md"))
+                .unwrap()
+                .sources
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn reseed_skips_edited_sources_ahead_and_triggers_requeue_behind_cursor() {
+    let scratch = ScratchDir::new().unwrap();
+    let mut s = open(&engine_db_path(&scratch).unwrap());
+    upgrade_fixture(&mut s);
+    assert!(reseed_step(&mut s).unwrap());
+    publish_pending(&mut s);
+    write(&mut s, "n040", "n040.md", "[[ahead]]", 100);
+    publish_pending(&mut s);
+    let key: String = s
+        .read_with(|c| {
+            c.query_row(
+                "SELECT index_key FROM link_sources WHERE object_id='n040'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    write(&mut s, "n000", "n000.md", "[[behind]]", 101);
+    assert_eq!(
+        count(&s, "link_pending"),
+        1,
+        "edit behind the cursor is queued by the trigger"
+    );
+    assert_eq!(lookup(&s, "behind.md").sources[0].0, "n000");
+    publish_pending(&mut s);
+    assert!(reseed_step(&mut s).unwrap());
+    assert_eq!(reseed_state(&s, "main"), (1, "n063".into()));
+    let ahead_queued: bool = s
+        .read_with(|c| {
+            c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM link_pending WHERE object_id='n040')",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert!(!ahead_queued);
+    assert_eq!(count(&s, "link_pending"), 31);
+    drain(&mut s);
+    assert_eq!(
+        s.read_with(|c| c.query_row(
+            "SELECT index_key FROM link_sources WHERE object_id='n040'",
+            [],
+            |r| r.get::<_, String>(0)
+        ))
+        .unwrap(),
+        key
+    );
+    assert_eq!(
+        lookup(&s, "behind.md").sources,
+        vec![("n000".into(), "n000.md".into())]
+    );
+    assert_eq!(
+        lookup(&s, "ahead.md").sources,
+        vec![("n040".into(), "n040.md".into())]
+    );
+}
+
+#[test]
+fn reseed_scan_bounds_include_current_sources_and_duplicate_aliases() {
+    let scratch = ScratchDir::new().unwrap();
+    let mut s = open(&engine_db_path(&scratch).unwrap());
+    upgrade_fixture(&mut s);
+    // The first 64 sources are already current. They still consume scan slots.
+    s.write_with(&NoFaults, |tx| {
+        tx.execute(
+            "UPDATE link_sources SET parser_generation=?1 WHERE object_id<'n064'",
+            [PARSER_GENERATION],
+        )
+        .map_err(sql)?;
+        Ok::<_, StorageError>(())
+    })
+    .unwrap();
+    for cursor in ["n031", "n063"] {
+        assert!(reseed_step(&mut s).unwrap());
+        assert_eq!(reseed_state(&s, "main"), (1, cursor.into()));
+        assert_eq!(count(&s, "link_pending"), 0);
+    }
+    assert!(reseed_step(&mut s).unwrap());
+    assert_eq!(count(&s, "link_pending"), 6);
+    drain(&mut s);
+    // One object with many aliases also consumes only one 32-row slice.
+    s.write_with(&NoFaults,|tx| {
+        for n in 0..40 {
+            tx.execute("INSERT INTO path_aliases(workspace_id,version_id,object_id,path) VALUES('ws','main','n000',?1)",[format!("alias-{n:03}.md")]).map_err(sql)?;
+        }
+        Ok::<_,StorageError>(())
+    }).unwrap();
+    drain(&mut s);
+    s.write_with(&NoFaults, |tx| {
+        tx.execute("UPDATE link_index_state SET parser_generation=1", [])
+            .map_err(sql)?;
+        Ok::<_, StorageError>(())
+    })
+    .unwrap();
+    assert!(reseed_step(&mut s).unwrap());
+    assert_eq!(reseed_state(&s, "main"), (1, "n000".into()));
+    assert_eq!(count(&s, "link_pending"), 0);
+    drain(&mut s);
+    assert_eq!(lookup(&s, "target.md").sources.len(), 70);
 }
