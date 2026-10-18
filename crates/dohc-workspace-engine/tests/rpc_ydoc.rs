@@ -177,6 +177,7 @@ async fn captured_seeds_are_uncredited_but_headless_recovery_keeps_the_marker() 
         let doc = Ydoc::wire();
         if flow != "created-empty-document" {
             call(&transport, &handle, 4, "ydoc.recordUpdate", json!({
+            "expectedLineageClaimId": opened["lineageClaimId"],
             "sessionId":opened["sessionId"],
             "updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0,"starting state")),
             "seed":true
@@ -185,6 +186,7 @@ async fn captured_seeds_are_uncredited_but_headless_recovery_keeps_the_marker() 
         if flow == "recovered-edit" {
             // Recovery replays edits separately from the acknowledged starting state.
             call(&transport, &handle, 5, "ydoc.recordUpdate", json!({
+                "expectedLineageClaimId": opened["lineageClaimId"],
                 "sessionId":opened["sessionId"],
                 "updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(14," edit"))
             })).await;
@@ -759,6 +761,7 @@ async fn default_close_settles_and_releases_a_seeded_image_scene_after_an_edit()
         73,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": opened["lineageClaimId"],
             "sessionId": opened["sessionId"],
             "updateBase64": base64::engine::general_purpose::STANDARD
                 .encode(edited.initial_update)
@@ -1781,6 +1784,7 @@ async fn scene_open_defers_missing_authoritative_asset_then_recovers_and_survive
         103,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": opened["lineageClaimId"],
             "sessionId": opened["sessionId"],
             "updateBase64": image_scene_update_with_asset_record(
                 "image-file",
@@ -1923,6 +1927,7 @@ async fn scene_open_rejects_forged_asset_namespace_without_a_writable_fallback()
         123,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": opened["lineageClaimId"],
             "sessionId": opened["sessionId"],
             "updateBase64": image_scene_update_with_asset_record(
                 "image-file", "image/png", "unrelated/user-image.png", &sha256
@@ -2013,6 +2018,7 @@ async fn scene_join_authorizes_a_tombstoned_image_for_remote_undo_only() {
         203,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": first["lineageClaimId"],
             "sessionId": first["sessionId"],
             "updateBase64": base64::engine::general_purpose::STANDARD.encode(deleted)
         }),
@@ -2062,6 +2068,7 @@ async fn scene_join_authorizes_a_tombstoned_image_for_remote_undo_only() {
         207,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": joined["lineageClaimId"],
             "sessionId": joined["sessionId"],
             "updateBase64": base64::engine::general_purpose::STANDARD.encode(undo)
         }),
@@ -2133,6 +2140,7 @@ async fn scene_open_rejects_text_sha_and_mime_asset_authority_without_a_writable
             162,
             "ydoc.recordUpdate",
             json!({
+                "expectedLineageClaimId": opened["lineageClaimId"],
                 "sessionId": opened["sessionId"],
                 "updateBase64": image_scene_update_with_asset_record(
                     "image-file", record_mime, &asset_ref, &expected_sha
@@ -2645,6 +2653,7 @@ async fn ydoc_blob_egress_roundtrips_a_state_above_the_old_json_cap() {
         3,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": null,
             "sessionId": session_id,
             "updateBase64": base64::engine::general_purpose::STANDARD.encode(&first_update)
         }),
@@ -2656,6 +2665,7 @@ async fn ydoc_blob_egress_roundtrips_a_state_above_the_old_json_cap() {
         4,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": null,
             "sessionId": session_id,
             "updateBase64": base64::engine::general_purpose::STANDARD.encode(&second_update)
         }),
@@ -2791,6 +2801,7 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
         6,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": null,
             "sessionId": session_id,
             "updateBase64": plaintext_update("settled text")
         }),
@@ -2919,6 +2930,7 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
         13,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": null,
             "sessionId": reopened_session,
             "updateBase64": plaintext_update("settled text")
         }),
@@ -2976,7 +2988,7 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
         &handle,
         16,
         "ydoc.recordUpdate",
-        json!({ "sessionId": rich_session, "updateBase64": rich_update }),
+        json!({ "expectedLineageClaimId": null, "sessionId": rich_session, "updateBase64": rich_update }),
     )
     .await;
     assert_eq!(recorded["seq"], json!(1));
@@ -3060,6 +3072,7 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
         23,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": null,
             "sessionId": poisoned_session,
             "updateBase64": plaintext_update("poisoned default body")
         }),
@@ -3275,6 +3288,7 @@ async fn a_rival_write_on_a_live_session_path_refuses_session_busy() {
         3,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": null,
             "sessionId": session_id,
             "updateBase64": plaintext_update("session text")
         }),
@@ -3367,6 +3381,7 @@ async fn a_settle_past_the_inband_cap_still_lands_on_disk_and_reports_no_content
         3,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": null,
             "sessionId": session_id,
             "updateBase64": plaintext_update(&huge)
         }),
@@ -3402,6 +3417,7 @@ async fn a_settle_past_the_inband_cap_still_lands_on_disk_and_reports_no_content
         5,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": null,
             "sessionId": session_id,
             "updateBase64": plaintext_update("APPENDED TAIL\n")
         }),
@@ -3504,7 +3520,7 @@ async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
         &handle,
         3,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": plaintext_update(&huge) }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": plaintext_update(&huge) }),
     )
     .await;
     let settled = call_after_backfill(
@@ -3640,6 +3656,7 @@ async fn a_zero_byte_precreated_file_settles_the_first_typed_edit_to_disk() {
         3,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": null,
             "sessionId": session_id,
             "updateBase64": plaintext_update(typed)
         }),
@@ -3733,6 +3750,7 @@ async fn capture_ingesting_a_new_files_empty_artifact_must_not_wedge_its_session
         5,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": null,
             "sessionId": session_id,
             "updateBase64": plaintext_update(typed)
         }),
@@ -3761,6 +3779,7 @@ async fn capture_ingesting_a_new_files_empty_artifact_must_not_wedge_its_session
         7,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": null,
             "sessionId": session_id,
             "updateBase64": plaintext_update("More typing. ")
         }),
@@ -3844,6 +3863,7 @@ async fn capture_ingesting_content_under_a_headless_session_still_refuses() {
         4,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": null,
             "sessionId": session_id,
             "updateBase64": plaintext_update("typed over the rival")
         }),
@@ -3926,6 +3946,7 @@ async fn capture_ingesting_content_under_a_headless_session_still_refuses() {
         9,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": null,
             "sessionId": reopened_id,
             "updateBase64": keystroke
         }),
@@ -3992,6 +4013,7 @@ async fn creating_a_new_file_through_a_ydoc_session_settles_to_disk() {
         3,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": null,
             "sessionId": session_id,
             "updateBase64": plaintext_update("fresh content")
         }),
@@ -4134,7 +4156,7 @@ async fn settle_recovers_after_a_transient_replace_failure() {
         &handle,
         3,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": first }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": first }),
     )
     .await;
     call(
@@ -4165,7 +4187,7 @@ async fn settle_recovers_after_a_transient_replace_failure() {
         &handle,
         5,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": second }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": second }),
     )
     .await;
     let failed = transport
@@ -4274,7 +4296,7 @@ async fn changed_settle_replays_the_pending_job_left_by_a_transient_failure() {
         &handle,
         3,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": first }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": first }),
     )
     .await;
     call(
@@ -4297,7 +4319,7 @@ async fn changed_settle_replays_the_pending_job_left_by_a_transient_failure() {
         &handle,
         5,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": second }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": second }),
     )
     .await;
     transport
@@ -4326,7 +4348,7 @@ async fn changed_settle_replays_the_pending_job_left_by_a_transient_failure() {
         &handle,
         7,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": third }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": third }),
     )
     .await;
     let settled = call(
@@ -4388,7 +4410,7 @@ async fn a_delete_cancels_the_paths_pending_job_so_replay_cannot_resurrect_it() 
         &handle,
         3,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": first }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": first }),
     )
     .await;
     call(
@@ -4419,7 +4441,7 @@ async fn a_delete_cancels_the_paths_pending_job_so_replay_cannot_resurrect_it() 
         &handle,
         5,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": second }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": second }),
     )
     .await;
     let failed = transport
@@ -4576,7 +4598,7 @@ async fn an_inactive_versions_delete_does_not_cancel_the_active_versions_pending
         &handle,
         5,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": first }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": first }),
     )
     .await;
     call(
@@ -4599,7 +4621,7 @@ async fn an_inactive_versions_delete_does_not_cancel_the_active_versions_pending
         &handle,
         7,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": second }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": second }),
     )
     .await;
     transport
@@ -4873,7 +4895,7 @@ async fn a_live_lease_defers_capture_until_the_dirty_session_settles() {
         &handle,
         3,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": plaintext_update(TYPED) }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": plaintext_update(TYPED) }),
     )
     .await;
 
@@ -4997,7 +5019,7 @@ async fn an_uncoverable_dirty_session_evicts_and_the_reopen_resurrects_it() {
         &handle,
         3,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": plaintext_update("what the user typed") }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": plaintext_update("what the user typed") }),
     )
     .await;
 
@@ -5151,6 +5173,7 @@ async fn record_update_refuses_a_replaced_lineage_until_resync_refreshes_the_ses
         3,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": created["lineageClaimId"],
             "sessionId": created_session,
             "updateBase64": plaintext_update("base"),
         }),
@@ -5245,6 +5268,7 @@ async fn record_update_refuses_a_replaced_lineage_until_resync_refreshes_the_ses
                 "ydoc.recordUpdate",
                 Some(handle.clone()),
                 json!({
+                    "expectedLineageClaimId": first_claim,
                     "sessionId": session_id,
                     "updateBase64": plaintext_update(" stale"),
                 }),
@@ -5277,12 +5301,40 @@ async fn record_update_refuses_a_replaced_lineage_until_resync_refreshes_the_ses
         "mismatch resync must not consume the queued foreign base"
     );
 
+    // The resync moved the session to the replacement. An edit made on the
+    // document of the claim it replaced still cannot enter it.
+    let before_old_client_record = settle_fingerprint(&scratch, WORKSPACE_ID);
+    let old_client = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                12,
+                "ydoc.recordUpdate",
+                Some(handle.clone()),
+                json!({
+                    "expectedLineageClaimId": first_claim,
+                    "sessionId": session_id,
+                    "updateBase64": plaintext_update(" old client"),
+                }),
+            ),
+        )
+        .await
+        .expect_err("an edit on the replaced claim must refuse after resync");
+    assert_eq!(old_client.code, ErrorCode::InvalidParams);
+    assert_eq!(old_client.message, "ydoc-lineage-stale");
+    assert_eq!(
+        settle_fingerprint(&scratch, WORKSPACE_ID),
+        before_old_client_record,
+        "the refusal must not mutate durable state"
+    );
+
     let recorded = call(
         &transport,
         &handle,
         8,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": replacement_claim,
             "sessionId": session_id,
             "updateBase64": plaintext_update(" fresh"),
         }),
@@ -5298,6 +5350,7 @@ async fn record_update_refuses_a_replaced_lineage_until_resync_refreshes_the_ses
                 "ydoc.recordUpdate",
                 Some(handle.clone()),
                 json!({
+                    "expectedLineageClaimId": replacement_claim,
                     "sessionId": session_id,
                     "updateBase64": plaintext_update(" forged"),
                     "lineageClaimId": first_claim,
@@ -5371,6 +5424,7 @@ async fn assert_close_drains_deferred_winning_lineage(winner_seed: &str, expect_
         3,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": null,
             "sessionId": session_id,
             "updateBase64": plaintext_update("loser from B"),
         }),
@@ -5593,6 +5647,7 @@ async fn a_declared_seed_only_session_closes_without_writing() {
             id + 2,
             "ydoc.recordUpdate",
             json!({
+                "expectedLineageClaimId": null,
                 "sessionId": session_id,
                 "updateBase64": richdoc_update(&Ydoc::wire(), seed_paragraph),
                 "seed": true
@@ -5690,7 +5745,7 @@ async fn a_real_edit_after_the_seed_still_settles_to_disk() {
         &handle,
         4,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": seed_update, "seed": true }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": seed_update, "seed": true }),
     )
     .await;
     assert_eq!(recorded["seq"], json!(1));
@@ -5699,7 +5754,7 @@ async fn a_real_edit_after_the_seed_still_settles_to_disk() {
         &handle,
         5,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": edit_update }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": edit_update }),
     )
     .await;
     assert_eq!(recorded["seq"], json!(2));
@@ -5747,6 +5802,7 @@ async fn an_edited_document_can_reseed_and_close_without_another_edit() {
     let object = opened["objectId"].as_str().expect("object");
     let doc = Ydoc::wire();
     call(&transport, &handle, 3, "ydoc.recordUpdate", json!({
+        "expectedLineageClaimId": null,
         "sessionId": session, "updateBase64": richdoc_update(&doc, "Original paragraph."), "seed": true
     })).await;
     call(
@@ -5755,6 +5811,7 @@ async fn an_edited_document_can_reseed_and_close_without_another_edit() {
         4,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": null,
             "sessionId": session, "updateBase64": richdoc_update(&doc, "One edit.")
         }),
     )
@@ -5791,6 +5848,7 @@ async fn an_edited_document_can_reseed_and_close_without_another_edit() {
     );
     let session = reopened["sessionId"].as_str().expect("reopened session");
     call(&transport, &handle, 8, "ydoc.recordUpdate", json!({
+        "expectedLineageClaimId": null,
         "sessionId": session, "updateBase64": base64::engine::general_purpose::STANDARD.encode(doc.encode_full_state()), "seed": true
     })).await;
     call(
@@ -5869,6 +5927,7 @@ async fn reseeded_engine_heads_require_materialized_unchanged_seed_content_befor
         let object = opened["objectId"].as_str().expect("object");
         let doc = Ydoc::wire();
         call(&transport, &handle, 3, "ydoc.recordUpdate", json!({
+            "expectedLineageClaimId": null,
             "sessionId": session, "updateBase64": richdoc_update(&doc, "Original paragraph."), "seed": true
         })).await;
         call(
@@ -5877,6 +5936,7 @@ async fn reseeded_engine_heads_require_materialized_unchanged_seed_content_befor
             4,
             "ydoc.recordUpdate",
             json!({
+                "expectedLineageClaimId": null,
                 "sessionId": session, "updateBase64": richdoc_update(&doc, "Saved edit.")
             }),
         )
@@ -5901,6 +5961,7 @@ async fn reseeded_engine_heads_require_materialized_unchanged_seed_content_befor
         .await;
         let session = reopened["sessionId"].as_str().expect("reopened session");
         call(&transport, &handle, 7, "ydoc.recordUpdate", json!({
+            "expectedLineageClaimId": null,
             "sessionId": session, "updateBase64": base64::engine::general_purpose::STANDARD.encode(doc.encode_full_state()), "seed": true
         })).await;
         let connection = rusqlite::Connection::open(engine_db_path(&scratch).expect("db path"))
@@ -5937,6 +5998,7 @@ async fn reseeded_engine_heads_require_materialized_unchanged_seed_content_befor
                     8,
                     "ydoc.recordUpdate",
                     json!({
+                        "expectedLineageClaimId": null,
                         "sessionId": session, "updateBase64": richdoc_update(&doc, "Still unsaved.")
                     }),
                 )
@@ -6018,7 +6080,7 @@ async fn replayed_prior_session_ops_still_settle_on_close() {
         3,
         "ydoc.recordUpdate",
         Some(handle.clone()),
-        json!({ "sessionId": session_id, "updateBase64": seed_update, "seed": true }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": seed_update, "seed": true }),
     );
     seed_request.idempotency_key = Some("original-seed".into());
     let seed_result = transport
@@ -6042,7 +6104,7 @@ async fn replayed_prior_session_ops_still_settle_on_close() {
         &handle,
         4,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": edit_update }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": edit_update }),
     )
     .await;
     // The crash stand-in: the session ends with the lineage dirty on purpose.
@@ -6116,7 +6178,7 @@ async fn a_seed_declared_after_the_first_update_refuses() {
         &handle,
         3,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": seed_update, "seed": true }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": seed_update, "seed": true }),
     )
     .await;
     let refused = call_error(
@@ -6124,7 +6186,7 @@ async fn a_seed_declared_after_the_first_update_refuses() {
         &handle,
         4,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": late_update, "seed": true }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": late_update, "seed": true }),
     )
     .await;
     assert_eq!(refused.code, ErrorCode::InvalidParams);
@@ -6151,7 +6213,7 @@ async fn author_threshold_queues_settlement_after_admission_without_explicit_set
             .await;
     let opened = call(&transport, &handle, 2, "ydoc.open", json!({"versionId":"main","path":"authors.txt","contentKind":"plaintext","seedFromArtifact":false})).await;
     let doc = Ydoc::wire();
-    call(&transport, &handle, 3, "ydoc.recordUpdate", json!({"sessionId":opened["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0,"a")),"actorOriginId":"first","attribution":{"actorKind":"agent","onBehalfOf":"person","depth":0}})).await;
+    call(&transport, &handle, 3, "ydoc.recordUpdate", json!({ "expectedLineageClaimId": opened["lineageClaimId"], "sessionId":opened["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0,"a")),"actorOriginId":"first","attribution":{"actorKind":"agent","onBehalfOf":"person","depth":0}})).await;
     let raw = rusqlite::Connection::open(&db).expect("coverage fixture");
     let mut folded = vec![json!({"kind":"agent","agentId":"first","onBehalfOf":"person"})];
     while json!(&folded).to_string().len()
@@ -6166,7 +6228,7 @@ async fn author_threshold_queues_settlement_after_admission_without_explicit_set
     )
     .expect("folded interval fixture");
     drop(raw);
-    call(&transport, &handle, 4, "ydoc.recordUpdate", json!({"sessionId":opened["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(1,"b")),"actorOriginId":"threshold","attribution":{"actorKind":"agent","onBehalfOf":"person","depth":0}})).await;
+    call(&transport, &handle, 4, "ydoc.recordUpdate", json!({ "expectedLineageClaimId": opened["lineageClaimId"], "sessionId":opened["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(1,"b")),"actorOriginId":"threshold","attribution":{"actorKind":"agent","onBehalfOf":"person","depth":0}})).await;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
         let raw = rusqlite::Connection::open(&db).expect("inspect");
@@ -6231,6 +6293,7 @@ async fn record_update_preserves_existing_human_automation_context() {
     .await;
     let doc = Ydoc::wire();
     call(&transport, &handle, 3, "ydoc.recordUpdate", json!({
+        "expectedLineageClaimId": opened["lineageClaimId"],
         "sessionId": opened["sessionId"],
         "updateBase64": base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0, "forged")),
         "actorOriginId": "someone-else",
@@ -6284,7 +6347,7 @@ async fn attributed_declared_seed_does_not_credit_opening() {
         "ordinary opening has a captured seed source"
     );
     let doc = Ydoc::wire();
-    call(&transport,&handle,3,"ydoc.recordUpdate",json!({"sessionId":opened["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0,"seed")),"seed":true,"actorOriginId":"opener","attribution":{"actorKind":"agent","onBehalfOf":"person","depth":0}})).await;
+    call(&transport,&handle,3,"ydoc.recordUpdate",json!({ "expectedLineageClaimId": opened["lineageClaimId"], "sessionId":opened["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0,"seed")),"seed":true,"actorOriginId":"opener","attribution":{"actorKind":"agent","onBehalfOf":"person","depth":0}})).await;
     call(
         &transport,
         &handle,

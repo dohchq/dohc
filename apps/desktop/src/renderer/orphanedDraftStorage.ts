@@ -12,7 +12,8 @@ type StoredOrphanedDraft = { id: number; workspaceId: string; path: string; text
 const keys = new Map<number, string>();
 const expected = new Map<number, string>();
 const ownedKeys = new Set<string>();
-function persistable(path: string): boolean {
+// Only a tracked path's draft may reach plaintext storage.
+export function persistable(path: string): boolean {
   return classifyEngineFilePathForRead(path, bridge().platform).kind === "tracked";
 }
 function unsupportedVersion(value: unknown): boolean {

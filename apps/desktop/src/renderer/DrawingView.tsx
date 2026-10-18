@@ -295,7 +295,10 @@ export function DrawingView({
             quietWhenCalm
             state={drawingChipState}
             shown={drawingShown}
-            title={typeof drawingChipState !== "string" && drawingChipState.kind === "error" && engine.saveError ? engine.saveError : undefined}
+            // A failed history replacement freezes the drawing read-only; its
+            // save error says why, as the Markdown chip does.
+            title={engine.saveError && (engine.retryReplacement || (typeof drawingChipState !== "string" && drawingChipState.kind === "error")) ? engine.saveError : undefined}
+            onRetry={engine.retryReplacement ?? undefined}
           />
         }
       />

@@ -406,7 +406,7 @@ async fn accepted_response_native_owner_undo_syncs_and_history_restores() {
         &handle,
         22,
         "ydoc.recordUpdate",
-        json!({"sessionId": seeded["sessionId"], "seed": true,
+        json!({ "expectedLineageClaimId": seeded["lineageClaimId"], "sessionId": seeded["sessionId"], "seed": true,
         "updateBase64": base64::engine::general_purpose::STANDARD.encode(doc.encode_full_state())}),
     )
     .await;

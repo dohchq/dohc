@@ -22,8 +22,9 @@ it("the daemon source fixture comes from the real captured Markdown seeder", asy
   try {
     const records = engine.requests.filter((request) => request.method === YDOC_METHOD.recordUpdate);
     expect(records).toHaveLength(1);
-    const seed = records[0]!.params as { seed: boolean; updateBase64: string };
+    const seed = records[0]!.params as { seed: boolean; updateBase64: string; expectedLineageClaimId: string | null };
     expect(seed.seed).toBe(true);
+    expect(seed.expectedLineageClaimId).toBeNull();
     const bytes = Array.from(Buffer.from(seed.updateBase64, "base64"));
     if (process.env.UPDATE_OWNER_SOURCE_FIXTURE === "1") {
       writeFileSync(fixture, `${JSON.stringify({ markdown, canonical, bytes })}\n`);

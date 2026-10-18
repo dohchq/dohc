@@ -68,6 +68,7 @@ vi.mock("./ExcalidrawCanvas", () => ({
 }));
 
 import { FileInspector } from "./FileInspector";
+import { REPLACED_HISTORY_DRAFT_NOTICE } from "./fileInspectorUi";
 import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import {
   EMPTY_EXCALIDRAW_DOCUMENT,
@@ -1031,6 +1032,42 @@ describe("FileInspector Excalidraw view", () => {
         "dohc could not recover 1 image. Copy your set-aside drawing to keep the rest.",
       ),
     );
+  });
+
+  it("offers Try again on the frozen drawing when storage refuses its earlier edits", async () => {
+    const scene = new Y.Doc();
+    declareSceneRoots(scene);
+    const bridge = bridgeFor(drawing("engine"), scene);
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(<FileInspector workspaceId="ws-1" path="drawing.excalidraw" />);
+    await screen.findByTestId("mock-excalidraw-canvas");
+    const retired = (canvas.props as unknown as ExcalidrawCanvasProps).sceneDoc!;
+    act(() =>
+      insertElementRevision(retired, {
+        id: "shape-1", type: "rectangle", version: 1, versionNonce: 1, isDeleted: false, index: "a0",
+      }),
+    );
+    await waitFor(() => expect(bridge.applyEngineYDocUpdate).toHaveBeenCalledOnce());
+
+    const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
+    });
+    const winner = new Y.Doc();
+    declareSceneRoots(winner);
+    act(() => bridge.emitLineageReplacement(Y.encodeStateAsUpdate(winner)));
+    const retry = await screen.findByTestId("drawing-save-state-retry");
+    expect(bridge.acknowledgeEngineYDocLineageReplacement).not.toHaveBeenCalled();
+    // The same words as the Markdown chip (FileInspector.lineageRetry.test.tsx):
+    // storage refused the edits, so nothing is set aside yet.
+    expect(screen.getByTestId("drawing-save-state").getAttribute("title")).toBe(
+      "dohc could not finish replacing this document. Storage refused the earlier edits.",
+    );
+
+    setItem.mockRestore();
+    fireEvent.click(retry);
+    await waitFor(() => expect(bridge.acknowledgeEngineYDocLineageReplacement).toHaveBeenCalledOnce());
+    await waitFor(() => expect(screen.queryByTestId("drawing-save-state-retry")).toBeNull());
+    expect(screen.getByTestId("orphaned-draft-notice").textContent).toContain(REPLACED_HISTORY_DRAFT_NOTICE);
   });
 
   it("keeps a truncated drawing non-writable while its scene opens", async () => {

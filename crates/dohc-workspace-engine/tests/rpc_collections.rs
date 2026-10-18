@@ -426,6 +426,7 @@ async fn assert_empty_seed_completion(full: &str, retires: bool, replicated: boo
     doc.rewrite_content_to_markdown(ContentKind::Richdoc, "")
         .expect("empty importer seed");
     call(&transport, &handle, 42, "ydoc.recordUpdate", json!({
+        "expectedLineageClaimId": empty["lineageClaimId"],
         "sessionId": empty["sessionId"], "seed": true,
         "updateBase64": base64::engine::general_purpose::STANDARD.encode(doc.encode_full_state()),
     })).await;
@@ -686,6 +687,7 @@ async fn assert_empty_seed_completion(full: &str, retires: bool, replicated: boo
         )
         .expect("sibling importer seed");
         call(&transport, &handle, id + 1, "ydoc.recordUpdate", json!({
+            "expectedLineageClaimId": state["lineageClaimId"],
             "sessionId": state["sessionId"], "seed": true,
             "updateBase64": base64::engine::general_purpose::STANDARD.encode(doc.encode_full_state()),
         })).await;
@@ -1129,6 +1131,7 @@ async fn assert_capture_authored_record_edit(human: bool) {
         63,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": opened["lineageClaimId"],
             "sessionId": opened["sessionId"],
             "updateBase64": base64::engine::general_purpose::STANDARD
                 .encode(seed_doc.encode_full_state()),
@@ -1344,6 +1347,7 @@ async fn local_live_id_edit_reasserts_engine_identity_and_keeps_history() {
         11,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": first["lineageClaimId"],
             "sessionId": first["sessionId"],
             "updateBase64": base64::engine::general_purpose::STANDARD
                 .encode(seed_doc.encode_full_state()),
@@ -1380,6 +1384,7 @@ async fn local_live_id_edit_reasserts_engine_identity_and_keeps_history() {
         14,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": second["lineageClaimId"],
             "sessionId": second["sessionId"],
             "updateBase64": base64::engine::general_purpose::STANDARD
                 .encode(edited.frontmatter_set("id", EDITED_ID).unwrap()),
@@ -1394,6 +1399,7 @@ async fn local_live_id_edit_reasserts_engine_identity_and_keeps_history() {
         15,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": second["lineageClaimId"],
             "sessionId": second["sessionId"],
             "updateBase64": base64::engine::general_purpose::STANDARD
                 .encode(edited.frontmatter_set("status", "done").unwrap()),
@@ -1446,6 +1452,7 @@ async fn local_live_id_edit_reasserts_engine_identity_and_keeps_history() {
         31,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": reseed["lineageClaimId"],
             "sessionId": reseed["sessionId"],
             "updateBase64": base64::engine::general_purpose::STANDARD
                 .encode(reseed_doc.encode_full_state()),
@@ -1566,6 +1573,7 @@ async fn an_automation_write_names_its_run_in_record_history() {
         11,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": session["lineageClaimId"],
             "sessionId": session["sessionId"],
             "updateBase64": base64::engine::general_purpose::STANDARD
                 .encode(doc.encode_full_state()),
@@ -1589,6 +1597,7 @@ async fn an_automation_write_names_its_run_in_record_history() {
                 id,
                 "ydoc.recordUpdate",
                 json!({
+                    "expectedLineageClaimId": null,
                     "sessionId": session_id,
                     "updateBase64": base64::engine::general_purpose::STANDARD.encode(update),
                     "actorOriginId": automation_id,
@@ -1641,6 +1650,7 @@ async fn an_automation_write_names_its_run_in_record_history() {
             id,
             "ydoc.recordUpdate",
             json!({
+                "expectedLineageClaimId": session["lineageClaimId"],
                 "sessionId": session["sessionId"],
                 "updateBase64": base64::engine::general_purpose::STANDARD.encode(update),
                 "actorOriginId": automation_id,
@@ -1809,6 +1819,7 @@ async fn remote_id_edit_converges_on_both_devices_under_the_original_identity() 
             102,
             "ydoc.recordUpdate",
             json!({
+                "expectedLineageClaimId": seeded["lineageClaimId"],
                 "sessionId": seeded["sessionId"],
                 "updateBase64": base64::engine::general_purpose::STANDARD.encode(&seed_update),
                 "seed": true,
@@ -3395,6 +3406,7 @@ async fn park_remote_status_update() -> ParkedRecordUpdate {
         102,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": seeded["lineageClaimId"],
             "sessionId": seeded["sessionId"],
             "updateBase64":
                 base64::engine::general_purpose::STANDARD.encode(seed_doc.encode_full_state()),
@@ -4650,6 +4662,7 @@ async fn native_public_trip_poll_moment_materializes_adopts_and_dedupes() {
     doc.rewrite_content_to_markdown(ContentKind::Richdoc, &text)
         .expect("seed response document");
     call(&transport, &handle, 23, "ydoc.recordUpdate", json!({
+        "expectedLineageClaimId": seeded["lineageClaimId"],
         "sessionId": seeded["sessionId"],
         "updateBase64": base64::engine::general_purpose::STANDARD.encode(doc.encode_full_state()),
         "seed": true,

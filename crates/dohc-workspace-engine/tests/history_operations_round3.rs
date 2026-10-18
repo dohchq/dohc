@@ -219,7 +219,7 @@ async fn history_operation_leaves_unrelated_session_and_disk_edit_alone() {
                 22,
                 "ydoc.recordUpdate",
                 Some(handle.clone()),
-                json!({"sessionId":session["sessionId"],"updateBase64":update}),
+                json!({ "expectedLineageClaimId": session["lineageClaimId"], "sessionId":session["sessionId"],"updateBase64":update}),
             ),
         )
         .await;
@@ -246,7 +246,7 @@ async fn history_operation_leaves_unrelated_session_and_disk_edit_alone() {
         &handle,
         24,
         "ydoc.recordUpdate",
-        json!({"sessionId":target_session["sessionId"],"updateBase64":target_update}),
+        json!({ "expectedLineageClaimId": target_session["lineageClaimId"], "sessionId":target_session["sessionId"],"updateBase64":target_update}),
     )
     .await;
     let refusal = transport
@@ -272,7 +272,7 @@ async fn history_operation_leaves_unrelated_session_and_disk_edit_alone() {
                 26,
                 "ydoc.recordUpdate",
                 Some(handle.clone()),
-                json!({"sessionId":target_session["sessionId"],"updateBase64":target_update}),
+                json!({ "expectedLineageClaimId": target_session["lineageClaimId"], "sessionId":target_session["sessionId"],"updateBase64":target_update}),
             ),
         )
         .await;

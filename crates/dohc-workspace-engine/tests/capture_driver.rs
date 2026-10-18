@@ -2757,7 +2757,7 @@ async fn measure_initial_capture(measure_typing: bool) {
                 for i in 0..200 {
                     let update = doc.plaintext_insert(0, "x");
                     let start = std::time::Instant::now();
-                    transport.call(RequestContext::unbounded(),request(300+i,"ydoc.recordUpdate",Some(handle.clone()),json!({"sessionId":session,"updateBase64":base64::engine::general_purpose::STANDARD.encode(update)}))).await.unwrap();
+                    transport.call(RequestContext::unbounded(),request(300+i,"ydoc.recordUpdate",Some(handle.clone()),json!({ "expectedLineageClaimId": null, "sessionId":session,"updateBase64":base64::engine::general_purpose::STANDARD.encode(update)}))).await.unwrap();
                     timings.push(start.elapsed().as_micros());
                 }
                 if draining {
@@ -2874,7 +2874,7 @@ async fn open_and_edited_document_settle_retry_a_huge_first_capture_transaction(
     let doc = dohc_engine_collab::Ydoc::wire();
     doc.apply(&opened.blob_egress.unwrap().bytes).unwrap();
     let update = doc.plaintext_insert(0, "edit survives capture backfill");
-    call(&transport, &handle, 3, "ydoc.recordUpdate", json!({"sessionId":session,"updateBase64":base64::engine::general_purpose::STANDARD.encode(update)})).await;
+    call(&transport, &handle, 3, "ydoc.recordUpdate", json!({ "expectedLineageClaimId": null, "sessionId":session,"updateBase64":base64::engine::general_purpose::STANDARD.encode(update)})).await;
 
     let db = scratch.path().join(".dohc/engine/engine.db");
     let observer = rusqlite::Connection::open(&db).unwrap();

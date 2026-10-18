@@ -199,6 +199,18 @@ function seedNotFirstUpdateRefusal(): Error {
   });
 }
 
+// An update whose expected claim is not the session's
+// (`CollabError::LineageWriteStale`). Loopback lineages stay unclaimed.
+function lineageStaleRefusal(): Error {
+  return Object.assign(new Error("ydoc-lineage-stale"), {
+    wireError: {
+      code: "INVALID_PARAMS",
+      message: "ydoc-lineage-stale",
+      retry: "no",
+    },
+  });
+}
+
 // A journal write whose idempotency key already recorded other content
 // (`CollabError::IdempotencyKeyReused`).
 function idempotencyKeyReuseRefusal(): Error {
@@ -654,6 +666,11 @@ export class YdocLoopbackEngine implements EngineTransport {
     const update = decodeBase64(
       requiredString(params, "updateBase64", "ydoc.recordUpdate params"),
     );
+    const expectedClaim = params.expectedLineageClaimId;
+    if (expectedClaim !== null && typeof expectedClaim !== "string") {
+      throw new Error("ydoc.recordUpdate params.expectedLineageClaimId is required.");
+    }
+    if (expectedClaim !== null) throw lineageStaleRefusal();
     optionalString(params, "actorOriginId");
     const seed = optionalBoolean(params, "seed") ?? false;
     // A seed can only be the first update of a lineage-absent session —
@@ -684,7 +701,7 @@ export class YdocLoopbackEngine implements EngineTransport {
       attribution: params.attribution ?? null,
     });
     session.updateSeq += 1;
-    const result = { seq: session.updateSeq, lineageClaimId: null };
+    const result = { seq: session.updateSeq, lineageClaimId: null, lineageOriginatedHere: false };
     this.recordRequests.set(request.idempotencyKey, { payload, result });
     return result;
   }

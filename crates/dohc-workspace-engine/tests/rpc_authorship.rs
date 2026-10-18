@@ -37,11 +37,14 @@ fn typed_by(person: &str) -> Value {
 fn record_update(
     id: u64,
     handle: &WorkspaceHandle,
-    session: &Value,
+    opened: &Value,
     update: &str,
     author: Value,
 ) -> dohc_engine_protocol::wire::Request {
-    let mut params = json!({"sessionId":session, "updateBase64":update});
+    let mut params = json!({
+        "sessionId":opened["sessionId"], "updateBase64":update,
+        "expectedLineageClaimId":opened["lineageClaimId"]
+    });
     params
         .as_object_mut()
         .unwrap()
@@ -58,7 +61,7 @@ async fn main_named_people_survive_retry_and_restart() {
     let opened = call(&transport,&handle,5,"ydoc.open",json!({"versionId":"main","path":"note.txt","contentKind":"plaintext","seedFromArtifact":false})).await;
     let doc = Ydoc::wire();
     let first = base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0, "a"));
-    let mut original = record_update(6, &handle, &opened["sessionId"], &first, typed_by("alice"));
+    let mut original = record_update(6, &handle, &opened, &first, typed_by("alice"));
     original.idempotency_key = Some("original-alice".into());
     transport
         .call(RequestContext::unbounded(), original)
@@ -66,7 +69,7 @@ async fn main_named_people_survive_retry_and_restart() {
         .unwrap();
     let agent = base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(1, "b"));
     transport
-        .call(RequestContext::unbounded(), record_update(7, &handle, &opened["sessionId"], &agent,
+        .call(RequestContext::unbounded(), record_update(7, &handle, &opened, &agent,
             json!({"actorOriginId":"declared-agent", "attribution":{"actorKind":"agent","onBehalfOf":"bob","depth":0}})))
         .await
         .unwrap();
@@ -83,13 +86,7 @@ async fn main_named_people_survive_retry_and_restart() {
 
     let (restarted, handle) = open(&scratch).await;
     let resumed = call(&restarted,&handle,10,"ydoc.open",json!({"versionId":"main","path":"note.txt","contentKind":"plaintext","seedFromArtifact":false})).await;
-    let mut replay = record_update(
-        11,
-        &handle,
-        &resumed["sessionId"],
-        &first,
-        typed_by("alice"),
-    );
+    let mut replay = record_update(11, &handle, &resumed, &first, typed_by("alice"));
     replay.idempotency_key = Some("original-alice".into());
     let response = restarted
         .call(RequestContext::unbounded(), replay.clone())
@@ -97,7 +94,7 @@ async fn main_named_people_survive_retry_and_restart() {
         .unwrap();
     assert_eq!(response.result["deduped"], true);
     // The same request naming someone else is a different request.
-    let mut relabeled = record_update(12, &handle, &resumed["sessionId"], &first, typed_by("bob"));
+    let mut relabeled = record_update(12, &handle, &resumed, &first, typed_by("bob"));
     relabeled.idempotency_key = Some("original-alice".into());
     assert!(
         restarted

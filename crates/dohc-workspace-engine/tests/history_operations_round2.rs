@@ -254,7 +254,7 @@ async fn history_operation_unknown_id_leaves_live_session_open() {
         &handle,
         22,
         "ydoc.recordUpdate",
-        json!({"sessionId":session["sessionId"],"updateBase64":update}),
+        json!({ "expectedLineageClaimId": session["lineageClaimId"], "sessionId":session["sessionId"],"updateBase64":update}),
     )
     .await;
     call(&transport, &handle, 23, "workspace.close", json!({})).await;

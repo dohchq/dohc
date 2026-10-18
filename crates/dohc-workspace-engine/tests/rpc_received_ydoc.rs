@@ -66,6 +66,7 @@ async fn received_ydoc_method(method: &str) {
         20,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": null,
             "sessionId": session_id,
             "updateBase64": base64::engine::general_purpose::STANDARD
                 .encode(Ydoc::wire().richdoc_append_paragraph("Workspace body.")),
@@ -75,6 +76,7 @@ async fn received_ydoc_method(method: &str) {
     let params = match method {
         "ydoc.open" => open_params,
         "ydoc.recordUpdate" => json!({
+            "expectedLineageClaimId": null,
             "sessionId": session_id,
             "updateBase64": base64::engine::general_purpose::STANDARD
                 .encode(Ydoc::wire().richdoc_append_paragraph("Shared guard test.")),

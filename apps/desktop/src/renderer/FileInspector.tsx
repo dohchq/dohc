@@ -606,6 +606,7 @@ export const FileInspector = memo(function FileInspector(
             ? "This document became read-only before your edit saved. Copy your text to keep it."
             : undefined
       }
+      replacedDraftIds={engine.replacedDraftIds}
     />
   );
 

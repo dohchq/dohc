@@ -419,6 +419,8 @@ export type WorkspaceEngineYDocProviderSession = Omit<
   // document a caller is editing. Only this layer's own teardown may reach it
   //  — see `RestartSafeYDocSession`.
   | "evict"
+  // This layer resyncs a refused generation itself, inside its operation chain.
+  | "resync"
 > & {
   readArtifactAsset(descriptor: ArtifactAssetDescriptor): Promise<{
     descriptor: ArtifactAssetDescriptor;
@@ -2948,6 +2950,22 @@ export function createWorkspaceEngineCapture(
       await adoptGeneration(doc, replacement, onReplayArmed);
     };
 
+    // The engine refused a write because it holds another history. The
+    // refused generation's resync installs the winner through
+    // onLineageReplaced; the refused update is never replayed into it.
+    const replaceRefusedHistory = async (
+      generation: EngineYdocProviderSession,
+      record: PendingRecord,
+    ): Promise<void> => {
+      removePendingRecord(record);
+      if (current !== generation || closed) return;
+      try {
+        await generation.resync?.();
+      } catch (error) {
+        onError(`Y.Doc resync of ${input.path}`, error);
+      }
+    };
+
     // A reopen names the object this session opened, and the engine refuses
     // it when the path now holds another object. That is not a lost
     // generation to retry: report it once and stay closed to reopening.
@@ -3020,8 +3038,12 @@ export function createWorkspaceEngineCapture(
             canonicalDoc = restored;
           }
           // The failed generation still holds this doc, and keeps it until
-          // something replaces the generation.
-          if (isLineageChangedCause(error)) throw error;
+          // something replaces the generation. Replacing it does not
+          // acknowledge this write: the caller receives the refusal.
+          if (isLineageChangedCause(error)) {
+            await replaceRefusedHistory(generation, record);
+            throw error;
+          }
           const refused = recordUpdateFailure(record, error);
           if (refused && record.unanswered === null) {
             const editorVisible = refuseRecord(record, error);
@@ -3244,6 +3266,12 @@ export function createWorkspaceEngineCapture(
             await rebind(generation, { releaseBeforeOpen: true });
             return false;
           }
+          // The renderer keeps the refused typing in its retired editor and
+          // sets it aside before it accepts the winner.
+          if (isLineageChangedCause(error)) {
+            await replaceRefusedHistory(generation, record);
+            return false;
+          }
           // A live refusal still owns its lease and must close first; a
           // transport restart opens first because the old daemon is gone.
           //
@@ -3253,12 +3281,6 @@ export function createWorkspaceEngineCapture(
           // once-guard makes announcing there a no-op when the failure was
           // asynchronous and the count already rose.
           Y.applyUpdate(doc, update);
-          // This is an invariant breach, not a reconnect. Rebinding would
-          // replace this still-visible editor with the winner and silently
-          // discard the refused keystroke. Keep the old document visible
-          // and report the failure; the server's live-session drain rule
-          // makes this branch unreachable in an ordinary arbitration.
-          if (isLineageChangedCause(error)) throw error;
           // A transient refusal is not a broken generation, and rebinding
           // for one is worse than doing nothing. The provider holds what the
           // engine refused and has already re-armed its own ladder to resend

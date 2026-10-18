@@ -6,6 +6,7 @@ import {
   isYdocUpdateAdmissionRefusal,
 } from "../live/daemonLiveAdapter";
 import {
+  isLineageChange,
   RemoteYdocApplyError,
   YdocLiveAdapter,
   YdocOwnerDraftPendingError,
@@ -153,6 +154,9 @@ export interface EngineYdocProviderSession {
     options?: ApplyLocalUpdateOptions & { armSettle?: boolean },
   ): Promise<void>;
   reestablishAcknowledgedState?(update: Uint8Array): Promise<void>;
+  // Resolves once the engine's current state has landed. When the engine
+  // holds another history, `onLineageReplaced` has announced it by then.
+  resync?(): Promise<void>;
   adoptCollectionRecord?(): Promise<"settled" | "ownerPending" | "declined">;
   settleNow(options?: { summary?: string }): Promise<YdocSettleResult>;
   // `settle: false` alone does not promise the file will be left alone: a
@@ -342,7 +346,8 @@ export async function openEngineYdocProviderSession(
     // The caller receives its refusal while the chain keeps later writes usable.
     const journaled = journalChain.then(() => operation).then(() => undefined);
     journalChain = journaled.catch((error: unknown) => {
-      if (isTransientEngineRefusal(error)) return;
+      // A refused history hands over to the winner, where later edits record.
+      if (isTransientEngineRefusal(error) || isLineageChange(error)) return;
       rememberLocalEditError(error);
       if (!isYdocUpdateAdmissionRefusal(error)) throw error;
     });
@@ -465,7 +470,7 @@ export async function openEngineYdocProviderSession(
       try {
         operation = session.applyLocalUpdate(update, {...recordOptions, ...(options.trustedAutomationDraft ? {trustedAutomationDraft: true} : {})});
       } catch (error) {
-        rememberLocalEditError(error);
+        if (!isLineageChange(error)) rememberLocalEditError(error);
         throw error;
       }
       return trackLocalOperation(operation, armSettle);
@@ -480,6 +485,11 @@ export async function openEngineYdocProviderSession(
     async reestablishAcknowledgedState(update) {
       await journalChain;
       await session.reestablishAcknowledgedState(update);
+    },
+
+    async resync() {
+      if (closed) throw new Error(`Y.Doc provider session for ${options.path} is closing.`);
+      await session.resync();
     },
 
     async adoptCollectionRecord() {
