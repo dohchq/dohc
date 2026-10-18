@@ -276,9 +276,11 @@ impl ActorHandle {
                         let member = p.members.get(index).ok_or_else(corrupt)?;
                         let active = VersionedTextStore::new(store).get_active_version(&p.workspace)?.version_id;
                         let unchanged = active == p.version && store.read_with(|conn| signature(conn,&p.workspace,&p.version,&member.effect.object_id))? == member.head;
+                        let target = member.effect.before_path.as_deref().unwrap_or(&member.effect.path);
+                        let vacant: bool = store.read_with(|conn| conn.query_row("SELECT NOT EXISTS(SELECT 1 FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND path=?3)",params![p.workspace,p.version,target],|r|r.get(0))).map_err(StorageError::corrupt_public)?;
                         let admitted = store.read_with(|conn| check_undo_ownership(conn,&p.workspace,&p.version,&member.effect));
                         let disk = disk_check(&root,member);
-                        let changed = !unchanged || matches!(&admitted,Err(RuntimeError::Domain(DomainError::UndoRefused {..}) | RuntimeError::Sync(dohc_engine_sync::SyncError::LiveDocumentBindingActive))) || matches!(&disk,Err(RuntimeError::Domain(DomainError::UndoRefused {..})));
+                        let changed = !unchanged || !vacant || matches!(&admitted,Err(RuntimeError::Domain(DomainError::UndoRefused {..}) | RuntimeError::Sync(dohc_engine_sync::SyncError::LiveDocumentBindingActive))) || matches!(&disk,Err(RuntimeError::Domain(DomainError::UndoRefused {..})));
                         if !changed { admitted?; disk?; }
                         match store.write_with(f.as_ref(),|tx| -> Result<(),RuntimeError> {
                             if changed {

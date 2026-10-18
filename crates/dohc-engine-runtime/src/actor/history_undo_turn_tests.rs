@@ -163,6 +163,13 @@ async fn crash_resumes_the_remaining_members_and_replay_writes_nothing() {
         .unwrap();
     assert_eq!(first.len(), 2);
     assert_eq!(first.last().unwrap().operation, "rename");
+    assert!(
+        actor
+            .preflight_history_undo(WS.into(), OP.into(), "turn-crash".into(), None)
+            .await
+            .unwrap()
+            .is_none()
+    );
     close(supervisor).await;
     let supervisor = crate::WorkspaceSupervisor::new();
     let actor = supervisor
@@ -240,6 +247,52 @@ async fn a_member_changed_after_check_is_not_restored() {
     assert_eq!(replay.not_restored, result.not_restored);
     close(supervisor).await;
 }
+#[tokio::test(flavor = "multi_thread")]
+async fn an_alias_claimed_after_check_is_not_restored_before_it_reaches_disk() {
+    let (root, supervisor, actor) = setup(20);
+    let (send, receive) = std::sync::mpsc::channel();
+    let barrier = Arc::new(Barrier::new(2));
+    probes()
+        .lock()
+        .unwrap()
+        .entry("turn-alias".into())
+        .or_default()
+        .hook = Some((send, barrier.clone()));
+    let db = crate::engine_db_path(&root).unwrap();
+    let edit = tokio::task::spawn_blocking(move || {
+        receive.recv().unwrap();
+        let mut store = EngineStore::open(&db, 21).unwrap();
+        VersionedTextStore::new(&mut store)
+            .write_text(
+                &dohc_engine_domain::WriteText {
+                    workspace_id: WS.into(),
+                    version_id: "main".into(),
+                    object_id: "new-occupant".into(),
+                    path: "file-0001.md".into(),
+                    text: "new pending head".into(),
+                    moment_id: "new-claim".into(),
+                    request_id: None,
+                    metadata_origin: "api".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 22,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        barrier.wait();
+    });
+    let result = run(&actor, &root, "turn-alias", Arc::new(NoFaults))
+        .await
+        .unwrap();
+    edit.await.unwrap();
+    assert_eq!(result.not_restored, vec!["file-0001.md"]);
+    assert_eq!(result.moments.len(), 19);
+    assert!(!root.join("file-0001.md").exists());
+    close(supervisor).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn two_thousand_members_hold_each_turn_under_fifty_ms_and_admit_ydoc_updates() {
     let (root, supervisor, actor) = setup(2000);
