@@ -47,13 +47,20 @@ describe("owner watched held read", () => {
     const start = h(request("owner", "/sync/a/log?since=0&hold=30000")).then(r => { started = r; return r; });
     await vi.advanceTimersByTimeAsync(0);
     expect(activity.stats().waiters).toBe(1);
-    watches.hold("a", "reader-request", 50);
+    watches.holdReader({
+      ok: true,
+      share: { shareId: "share", workspaceId: "a", granterUserId: "owner", selectorJson: '{"paths":["/"]}', createdAtMs: 1 },
+      grant: { grantId: "grant", shareId: "share", principalKind: "user", principalUserId: "reader", principalEmail: null,
+        access: "view", generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null },
+      effectiveSelector: { versionId: "main", paths: ["/"], access: "view" },
+    });
     await vi.advanceTimersByTimeAsync(0);
     expect(started).toBeDefined();
     expect(await (await start).json()).toMatchObject({ watched: true });
+    await vi.advanceTimersByTimeAsync(5_001);
     let response: Response | undefined;
     const end = h(request("owner", "/sync/a/log?since=0&hold=30000&watched=1")).then(r => { response = r; return r; });
-    await vi.advanceTimersByTimeAsync(49);
+    await vi.advanceTimersByTimeAsync(29_998);
     expect(response).toBeUndefined();
     await vi.advanceTimersByTimeAsync(1);
     expect(response).toBeDefined();
