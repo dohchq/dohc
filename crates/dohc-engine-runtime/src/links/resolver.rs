@@ -103,10 +103,8 @@ pub(super) fn creation_path(source: &str, raw: &str, kind: &str) -> Option<Strin
     if path.is_empty() {
         return None;
     }
-    if kind == "wikilink" || without_extension(&path) == path {
-        if !markdown_extension(&path) {
-            path.push_str(".md");
-        }
+    if (kind == "wikilink" || without_extension(&path) == path) && !markdown_extension(&path) {
+        path.push_str(".md");
     }
     Some(path)
 }

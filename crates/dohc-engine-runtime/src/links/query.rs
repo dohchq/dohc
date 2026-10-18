@@ -26,9 +26,9 @@ fn encode_cursor(
     ws: &str,
     version: &str,
     subject: &str,
-    after: &(String, usize),
+    after: &(String, usize, bool),
 ) -> Result<String, RuntimeError> {
-    let bytes = json!([version, subject, "in", after.0, after.1]).to_string();
+    let bytes = json!([version, subject, "in", after.0, after.1, after.2]).to_string();
     let sealed = seal(cursor_key()?, ws, "links.in", bytes.as_bytes()).map_err(|_| invalid())?;
     Ok(json!([
         sealed.iv_base64(),
@@ -44,9 +44,9 @@ fn decode_cursor(
     version: &str,
     subject: &str,
     cursor: Option<String>,
-) -> Result<(String, usize), RuntimeError> {
+) -> Result<(String, usize, bool), RuntimeError> {
     let Some(cursor) = cursor else {
-        return Ok((String::new(), 0));
+        return Ok((String::new(), 0, true));
     };
     if cursor.len() > 32768 {
         return Err(invalid());
@@ -55,12 +55,12 @@ fn decode_cursor(
         serde_json::from_str(&cursor).map_err(|_| invalid())?;
     let sealed = SealedSecret::from_base64(&iv, &tag, &body, length).map_err(|_| invalid())?;
     let plaintext = open(cursor_key()?, ws, "links.in", &sealed).map_err(|_| invalid())?;
-    let (v, s, direction, path, ordinal): (String, String, String, String, usize) =
+    let (v, s, direction, path, ordinal, complete): (String, String, String, String, usize, bool) =
         serde_json::from_slice(plaintext.as_bytes()).map_err(|_| invalid())?;
     if v != version || s != subject || direction != "in" {
         return Err(invalid());
     }
-    Ok((path, ordinal))
+    Ok((path, ordinal, complete))
 }
 
 fn resolve<'a>(resolver: &'a Resolver, source: &str, literal: &str, kind: &str) -> Option<&'a str> {
@@ -111,9 +111,10 @@ impl ActorHandle {
                     if let Some(path) = resolve(&resolver, &source, &literal, &kind) {
                         json!({"path":path,"fragment":fragment})
                     } else {
-                        super::resolver::creation_path(&source, &literal, &kind).map_or(Value::Null, |path| {
-                            json!({"path":null,"create":path,"fragment":fragment})
-                        })
+                        match super::resolver::creation_path(&source, &literal, &kind) {
+                            Some(path) => json!({"path":null,"create":path,"fragment":fragment}),
+                            None => Value::Null,
+                        }
                     }
                 })
                 .collect();
@@ -153,7 +154,7 @@ impl ActorHandle {
                         "SELECT coalesce((SELECT seed_phase='ready' AND parser_generation=?3 FROM link_index_state WHERE workspace_id=?1 AND version_id=?2),0) AND NOT EXISTS(SELECT 1 FROM link_pending WHERE workspace_id=?1 AND version_id=?2)",
                         params![ws, version, super::PARSER_GENERATION], |r| r.get(0),
                     ).map_err(sql)?;
-                    let complete = complete && candidates.unchecked.is_empty();
+                    let complete = complete && candidates.unchecked.is_empty() && after.2;
                     let subject_paths = {
                         let mut stmt = c.prepare_cached("SELECT path FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3").map_err(sql)?;
                         stmt.query_map(params![ws, version, object], |r| r.get::<_, String>(0)).map_err(sql)?
@@ -165,7 +166,7 @@ impl ActorHandle {
                         .filter(|(source, _)| source != &object)
                         .map(|(object, path)| (path, Some(object)))
                         .chain(candidates.unchecked.into_iter().map(|path| (path, None)))
-                        .filter(|(path, _)| path >= &after.0)
+                        .filter(|(path, _)| path > &after.0 || (path == &after.0 && after.1 != usize::MAX))
                         .filter(|(path, _)| !subject_paths.contains(path))
                         .collect();
                     sources.sort_by(|a, b| a.0.cmp(&b.0));
@@ -204,31 +205,41 @@ impl ActorHandle {
                 "entries":[],"unchecked":[],"complete":complete,
                 "mountsCovered":true,"nextCursor":null
             });
+            // Reserve one maximum-length cursor; serialize each added row only once.
+            let longest = sources
+                .iter()
+                .map(|(path, _)| path)
+                .chain(std::iter::once(&after.0))
+                .max_by_key(|path| json!(path).to_string().len())
+                .expect("cursor path");
+            let reserve = json!(encode_cursor(
+                &workspace,
+                &version,
+                &object,
+                &(longest.clone(), usize::MAX, false)
+            )?)
+            .to_string()
+            .len();
+            let mut bytes = page.to_string().len() + reserve + 1;
             let mut last = after.clone();
+            let mut complete = complete;
             let mut examined = 0;
             let mut stopped = false;
             'sources: for (path, source) in sources {
-                if path == after.0 && after.1 == usize::MAX {
-                    continue;
-                }
                 let parsed = source.map(incoming::Source::parse).transpose()?;
                 if parsed.as_ref().is_none_or(|p| p.reason.is_some()) {
-                    page["unchecked"]
-                        .as_array_mut()
-                        .expect("array")
-                        .push(json!(path));
-                    page["complete"] = json!(false);
-                    page["nextCursor"] = json!(encode_cursor(
-                        &workspace,
-                        &version,
-                        &object,
-                        &(path.clone(), usize::MAX),
-                    )?);
-                    if page.to_string().len() > 64 * 1024 - 128 {
-                        page["unchecked"].as_array_mut().expect("array").pop();
+                    complete = false;
+                    let row = json!(path);
+                    let size = row.to_string().len() + 1;
+                    if bytes + size > 64 * 1024 {
                         stopped = true;
                         break;
                     }
+                    bytes += size;
+                    page["unchecked"].as_array_mut().expect("array").push(row);
+                    // An unchecked source is terminal, even if it was partially read on a prior page.
+                    last = (path, usize::MAX, complete);
+                    continue;
                 }
                 if let Some(parsed) = parsed {
                     for (ordinal, occurrence) in parsed.occurrences.iter().enumerate() {
@@ -242,11 +253,10 @@ impl ActorHandle {
                             break 'sources;
                         }
                         examined += 1;
-                        let previous = last.clone();
-                        last = (path.clone(), ordinal);
                         if resolve(&resolver, &path, &occurrence.literal, occurrence.kind)
                             != Some(target.as_str())
                         {
+                            last = (path.clone(), ordinal, complete);
                             continue;
                         }
                         let entry = json!({
@@ -256,19 +266,20 @@ impl ActorHandle {
                             "highlightStart":occurrence.highlight_start,
                             "highlightEnd":occurrence.highlight_end
                         });
-                        page["entries"].as_array_mut().expect("array").push(entry);
-                        page["nextCursor"] =
-                            json!(encode_cursor(&workspace, &version, &object, &last)?);
-                        if page.to_string().len() > 64 * 1024 - 128 {
-                            page["entries"].as_array_mut().expect("array").pop();
-                            last = previous;
+                        let size = entry.to_string().len() + 1;
+                        if bytes + size > 64 * 1024 {
                             stopped = true;
                             break 'sources;
                         }
+                        bytes += size;
+                        page["entries"].as_array_mut().expect("array").push(entry);
+                        last = (path.clone(), ordinal, complete);
                     }
                 }
-                last = (path, usize::MAX);
+                last = (path, usize::MAX, complete);
             }
+            page["complete"] = json!(complete);
+            last.2 = complete;
             page["nextCursor"] = if stopped || more {
                 json!(encode_cursor(&workspace, &version, &object, &last)?)
             } else {
@@ -290,7 +301,7 @@ mod tests {
 
     #[test]
     fn cursor_decryption_is_bound_to_the_workspace() {
-        let cursor = encode_cursor("ws", "main", "target", &("a.md".into(), 3)).unwrap();
+        let cursor = encode_cursor("ws", "main", "target", &("a.md".into(), 3, true)).unwrap();
         assert!(decode_cursor("other", "main", "target", Some(cursor)).is_err());
     }
 }

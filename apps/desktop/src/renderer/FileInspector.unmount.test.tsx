@@ -1592,7 +1592,7 @@ describe("markdown editor unmount flush", () => {
     fireEvent.click(screen.getByRole("link", { name: "FAQ" }));
     await waitFor(() => expect(linksResolve).toHaveBeenLastCalledWith({ workspaceId: "ws-1", source: "notes/status.md", literals: [{ kind: "markdown", literal: "./faq%3F.md#answers" }] }));
     expect(onOpenPath).toHaveBeenNthCalledWith(1, "notes/new#plan.md", undefined);
-    expect(onOpenPath).toHaveBeenNthCalledWith(2, "notes/faq?.md", { headingTarget: { anchor: "answers", nonce: expect.any(Number) } });
+    expect(onOpenPath).toHaveBeenNthCalledWith(2, "notes/faq?.md", { anchor: "answers", nonce: expect.any(Number) });
   });
 
   it("keeps local source mode and selects the target heading line", async () => {

@@ -355,7 +355,10 @@ async fn incoming_and_resolve_share_alias_invalidation_and_close_releases_maps()
         )
         .await
         .unwrap();
-    assert_eq!(resolved["results"][0], json!({"path":null,"create":"target.md","fragment":null}));
+    assert_eq!(
+        resolved["results"][0],
+        json!({"path":null,"create":"target.md","fragment":null})
+    );
     assert_eq!(resolved["results"][1]["path"], "renamed.md");
     assert!(
         page(&actor, "renamed.md", None).await["entries"]
@@ -417,20 +420,59 @@ async fn resolve_uses_uncaptured_source_paths_and_returns_creation_paths() {
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).unwrap().actor;
     let cases = [
-        ("wikilink", "target", json!({"path":"target.md","fragment":null})),
-        ("wikilink", "missing", json!({"path":null,"create":"notes/missing.md","fragment":null})),
-        ("wikilink", "ambiguous", json!({"path":null,"create":"notes/ambiguous.md","fragment":null})),
-        ("markdown", "./guide", json!({"path":null,"create":"notes/guide.md","fragment":null})),
-        ("markdown", "./GUIDE.MARKDOWN", json!({"path":null,"create":"notes/GUIDE.MARKDOWN","fragment":null})),
-        ("markdown", "./new%23release%231.md#decisions", json!({"path":null,"create":"notes/new#release#1.md","fragment":"decisions"})),
-        ("markdown", "../new%20file.md", json!({"path":null,"create":"new file.md","fragment":null})),
-        ("wikilink", "#local", json!({"path":"notes/uncaptured.md","fragment":"local"})),
+        (
+            "wikilink",
+            "target",
+            json!({"path":"target.md","fragment":null}),
+        ),
+        (
+            "wikilink",
+            "missing",
+            json!({"path":null,"create":"notes/missing.md","fragment":null}),
+        ),
+        (
+            "wikilink",
+            "ambiguous",
+            json!({"path":null,"create":"notes/ambiguous.md","fragment":null}),
+        ),
+        (
+            "markdown",
+            "./guide",
+            json!({"path":null,"create":"notes/guide.md","fragment":null}),
+        ),
+        (
+            "markdown",
+            "./GUIDE.MARKDOWN",
+            json!({"path":null,"create":"notes/GUIDE.MARKDOWN","fragment":null}),
+        ),
+        (
+            "markdown",
+            "./new%23release%231.md#decisions",
+            json!({"path":null,"create":"notes/new#release#1.md","fragment":"decisions"}),
+        ),
+        (
+            "markdown",
+            "../new%20file.md",
+            json!({"path":null,"create":"new file.md","fragment":null}),
+        ),
+        (
+            "wikilink",
+            "#local",
+            json!({"path":"notes/uncaptured.md","fragment":"local"}),
+        ),
         ("markdown", "https://example.com", Value::Null),
         ("markdown", "../../escape.md", Value::Null),
     ];
     for (kind, literal, expected) in cases {
-        let result = actor.resolve_links("ws".into(), "notes/uncaptured.md".into(),
-            vec![(kind.into(), literal.into())], CancellationToken::new()).await.unwrap();
+        let result = actor
+            .resolve_links(
+                "ws".into(),
+                "notes/uncaptured.md".into(),
+                vec![(kind.into(), literal.into())],
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
         assert_eq!(result["results"][0], expected, "{kind} {literal}");
     }
 }
@@ -440,7 +482,13 @@ async fn incoming_excludes_the_subject_object() {
     let scratch = ScratchDir::new().unwrap();
     let db = engine_db_path(&scratch).unwrap();
     let mut store = open(&db);
-    write(&mut store, "target", "target.md", "[[target]] [self](target.md)", 1);
+    write(
+        &mut store,
+        "target",
+        "target.md",
+        "[[target]] [self](target.md)",
+        1,
+    );
     write(&mut store, "other", "other.md", "[[target]]", 2);
     drain(&mut store);
     drop(store);
@@ -457,7 +505,11 @@ async fn incoming_windows_snippets_around_each_link() {
     let db = engine_db_path(&scratch).unwrap();
     let mut store = open(&db);
     write(&mut store, "target", "target.md", "", 1);
-    let text = format!("  short [[target]]\n  {} [[target]] {}", "😀".repeat(200), "x".repeat(200));
+    let text = format!(
+        "  short [[target]]\n  {} [[target]] {}",
+        "😀".repeat(200),
+        "x".repeat(200)
+    );
     write(&mut store, "source", "source.md", &text, 2);
     drain(&mut store);
     drop(store);
@@ -476,4 +528,91 @@ async fn incoming_windows_snippets_around_each_link() {
         let end = row["highlightEnd"].as_u64().unwrap() as usize;
         assert_eq!(String::from_utf16(&units[start..end]).unwrap(), "[[target]]");
     }
+}
+
+#[tokio::test]
+async fn cursor_keeps_incompleteness_when_the_index_catches_up() {
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    let mut store = open(&db);
+    write(&mut store, "target", "target.md", "", 1);
+    write(&mut store, "many", "many.md", &"[[target]] ".repeat(110), 2);
+    drop(store);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).unwrap().actor;
+    let _hold = actor.hold_link_drain();
+    let first = page(&actor, "target.md", None).await;
+    assert_eq!(first["complete"], false);
+    actor
+        .run(|store, _| {
+            drain(store);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let next = page(
+        &actor,
+        "target.md",
+        first["nextCursor"].as_str().map(str::to_owned),
+    )
+    .await;
+    assert_eq!(next["complete"], false);
+    assert_eq!(next["entries"].as_array().unwrap().len(), 10);
+    assert_eq!(page(&actor, "target.md", None).await["complete"], true);
+}
+
+#[tokio::test]
+async fn pages_bound_bytes_and_do_not_repeat_unchecked_sources() {
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    let mut store = open(&db);
+    write(&mut store, "target", "target.md", "", 1);
+    write(
+        &mut store,
+        "large",
+        "a.md",
+        &"x".repeat(parser::MAX_DOCUMENT_BYTES + 1),
+        2,
+    );
+    let text = format!(
+        "# {}\n{} [[target]] {}",
+        "😀".repeat(160),
+        "😀".repeat(200),
+        "😀".repeat(200)
+    );
+    for i in 0..120 {
+        write(
+            &mut store,
+            &format!("s{i}"),
+            &format!("s{i:03}.md"),
+            &text,
+            i + 3,
+        );
+    }
+    drain(&mut store);
+    drop(store);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).unwrap().actor;
+    let mut cursor = None;
+    let mut entries = std::collections::HashSet::new();
+    let mut unchecked = Vec::new();
+    let mut pages = 0;
+    loop {
+        let result = page(&actor, "target.md", cursor).await;
+        pages += 1;
+        assert!(pages < 10);
+        assert!(result.to_string().len() <= 64 * 1024);
+        assert_eq!(result["complete"], false);
+        for row in result["entries"].as_array().unwrap() {
+            assert!(entries.insert(row["source"].as_str().unwrap().to_owned()));
+        }
+        unchecked.extend(result["unchecked"].as_array().unwrap().iter().cloned());
+        cursor = result["nextCursor"].as_str().map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert!(pages > 1);
+    assert_eq!(entries.len(), 120);
+    assert_eq!(unchecked, vec![json!("a.md")]);
 }
