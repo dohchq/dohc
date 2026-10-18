@@ -1,0 +1,19 @@
+[package]
+name = "dohc-macos-files"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Safe wrappers that copy a file's macOS ACL and extended attributes."
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+libc = "0.2"
+rustix = { version = "1.1", features = ["fs"] }
+
+# Only the ACL copy and checks and the save-intent check may call macOS FFI.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

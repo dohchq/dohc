@@ -1519,6 +1519,58 @@ describe("file transfers", () => {
     expect(within(notices).queryByRole("button", { name: "Try again" })).toBeNull();
   });
 
+  async function dropFromOs(bridge: ReturnType<typeof makeBridge>, paths: string[]) {
+    bridge.getDroppedFilePaths.mockReturnValue(paths);
+    const tree = await screen.findByTestId("file-tree");
+    fireEvent.drop(tree, { dataTransfer: { files: [new File([], "dropped")], types: ["Files"] } });
+  }
+
+  it("says how many folders a drop of empty folders created", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({ imported: [], skipped: 0, folders: 2 });
+    renderShell(bridge);
+
+    await dropFromOs(bridge, ["/outside/Empty"]);
+    await waitFor(() => expect(bridge.importWorkspaceFiles).toHaveBeenCalledWith({
+      workspaceId: "ws-shell-test", droppedPaths: ["/outside/Empty"],
+    }));
+    expect((await screen.findByTestId("workspace-shell-notice")).textContent).toContain("Created 2 folders.");
+  });
+
+  // Folders that landed are progress: the same drop again would land beside
+  // them, so the notice names them and the Explorer shows them.
+  it("names the folders a stopped drop created, and refreshes the Explorer", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({
+      imported: [],
+      skipped: 0,
+      interrupted: true,
+      folders: 2,
+      stop: { file: "Trip/sub/a.md", refusal: "changed" },
+    });
+    renderShell(bridge);
+    await screen.findByTestId("file-tree");
+    const listings = bridge.listWorkspaceFiles.mock.calls.length;
+
+    await dropFromOs(bridge, ["/outside/Trip"]);
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
+      "Created 2 folders before the import stopped. dohc did not import a.md, because a file or folder changed while dohc copied it. Delete the empty folders before you import again.",
+    );
+    await waitFor(() => expect(bridge.listWorkspaceFiles.mock.calls.length).toBeGreaterThan(listings));
+  });
+
+  // The contract refuses the payload, so the shell says why first.
+  it("refuses more than 100 dropped items with the limit", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    renderShell(bridge);
+
+    await dropFromOs(bridge, Array.from({ length: 101 }, (_, i) => `/outside/f-${i}.md`));
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
+      "Could not import files. dohc imports up to 100 dropped items at once. Drop fewer at a time.",
+    );
+    expect(bridge.importWorkspaceFiles).not.toHaveBeenCalled();
+  });
+
   function sharedViewBridge(refreshOk: boolean[]) {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] }, files: [{ path: "notes/a.md", kind: "file" }], folders: ["notes"] });

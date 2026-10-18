@@ -15,7 +15,7 @@ import {
 import { randomUUID } from "node:crypto";
 import { realpathSync, type BigIntStats } from "node:fs";
 import { lstat, mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, parse } from "node:path";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 import { recordNeverSynced, recordSynced } from "./syncHistory";
 
@@ -111,7 +111,11 @@ async function realFolderPath(path: string): Promise<string> {
     throw error;
   });
   if (!existing?.isDirectory()) await mkdir(path, { recursive: true });
-  return canonicalWorkspaceRoot(path);
+  // A drive's root is refused here, while its real path still reads "C:\".
+  // The app spells it "C:", which names the drive's current folder instead.
+  const real = realpathSync.native(path);
+  if (parse(real).root === real) throw new Error(FILESYSTEM_ROOT_REFUSAL);
+  return rootSpelling(real);
 }
 
 // The folder at a real path, while that path still has no link in it.

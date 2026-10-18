@@ -84,7 +84,7 @@ import {
 } from "@dohc/workspace-fs";
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
-import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, rm, writeFile, type FileHandle } from "node:fs/promises";
 import { folderEntriesOrNone } from "./folderEntries";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isInside } from "../security/pathContainment";
@@ -1420,6 +1420,17 @@ export function readDiskContent(absolutePath: string): Promise<DiskTextState> {
   return readDiskTextState(dirname(absolutePath), basename(absolutePath));
 }
 
+/**
+ * The same rule for a file the caller has opened and identified, such as a
+ * dropped file: the bytes come from the handle, never from the path again.
+ * `path` names the file for the media-type test.
+ */
+export async function readOpenedDiskContent(handle: FileHandle, path: string): Promise<DiskTextState> {
+  const info = await handle.stat();
+  if (!info.isFile()) return { kind: "untracked-content", reason: "non-file" };
+  return diskContentOf(path, info.size, () => handle.readFile());
+}
+
 async function readDiskTextState(rootPath: string, path: string): Promise<DiskTextState> {
   const absolute = join(rootPath, path);
   try {
@@ -1436,52 +1447,59 @@ async function readDiskTextState(rootPath: string, path: string): Promise<DiskTe
     if (!info.isFile()) {
       return { kind: "untracked-content", reason: "non-file" };
     }
-    if (!isTextMediaType(mediaTypeForPath(path), path)) {
-      if (info.size > MAX_ENGINE_CAPTURE_BINARY_BYTES) {
-        return { kind: "untracked-content", reason: "oversized-binary" };
-      }
-      const bytes = await readFile(absolute);
-      if (bytes.length > MAX_ENGINE_CAPTURE_BINARY_BYTES) {
-        return { kind: "untracked-content", reason: "oversized-binary" };
-      }
-      return { kind: "binary", bytes, sha256: sha256Bytes(bytes), byteLength: bytes.byteLength };
-    }
-    if (info.size > MAX_ENGINE_CAPTURE_TEXT_BYTES) {
-      return { kind: "untracked-content", reason: "oversized-text" };
-    }
-    const bytes = await readFile(absolute);
-    if (bytes.length > MAX_ENGINE_CAPTURE_TEXT_BYTES) {
-      // Bytes in hand: carry the sha so a settle's own oversized
-      // materialization is recognizable as our write. The size-only early-out
-      // above cannot because it deliberately refuses to load the file.
-      return {
-        kind: "untracked-content",
-        sha256: sha256Bytes(bytes),
-        reason: "oversized-text",
-      };
-    }
-    const text = bytes.toString("utf8");
-    // The engine only stores text that round-trips through UTF-8; anything
-    // else is binary in disguise, not engine-ownable as text.
-    if (!Buffer.from(text, "utf8").equals(bytes)) {
-      if (
-        liveDocumentKindForPath(path) === "scene" ||
-        bytes.length > MAX_ENGINE_CAPTURE_BINARY_BYTES
-      ) {
-        return {
-          kind: "untracked-content",
-          sha256: sha256Bytes(bytes),
-          reason: "non-utf8",
-        };
-      }
-      return { kind: "binary", bytes, sha256: sha256Bytes(bytes), byteLength: bytes.byteLength };
-    }
-    return { kind: "text", text, sha256: sha256Utf8(text) };
+    return await diskContentOf(path, info.size, () => readFile(absolute));
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT" || code === "ENOTDIR") return { kind: "absent" };
     return { kind: "unreadable" };
   }
+}
+
+// The capture's rule for a regular file's bytes: media type, size caps and
+// the UTF-8 round trip. `size` comes from the stat that found the file, and
+// `read` reads its bytes.
+async function diskContentOf(path: string, size: number, read: () => Promise<Buffer>): Promise<DiskTextState> {
+  if (!isTextMediaType(mediaTypeForPath(path), path)) {
+    if (size > MAX_ENGINE_CAPTURE_BINARY_BYTES) {
+      return { kind: "untracked-content", reason: "oversized-binary" };
+    }
+    const bytes = await read();
+    if (bytes.length > MAX_ENGINE_CAPTURE_BINARY_BYTES) {
+      return { kind: "untracked-content", reason: "oversized-binary" };
+    }
+    return { kind: "binary", bytes, sha256: sha256Bytes(bytes), byteLength: bytes.byteLength };
+  }
+  if (size > MAX_ENGINE_CAPTURE_TEXT_BYTES) {
+    return { kind: "untracked-content", reason: "oversized-text" };
+  }
+  const bytes = await read();
+  if (bytes.length > MAX_ENGINE_CAPTURE_TEXT_BYTES) {
+    // Bytes in hand: carry the sha so a settle's own oversized
+    // materialization is recognizable as our write. The size-only early-out
+    // above cannot because it deliberately refuses to load the file.
+    return {
+      kind: "untracked-content",
+      sha256: sha256Bytes(bytes),
+      reason: "oversized-text",
+    };
+  }
+  const text = bytes.toString("utf8");
+  // The engine only stores text that round-trips through UTF-8; anything
+  // else is binary in disguise, not engine-ownable as text.
+  if (!Buffer.from(text, "utf8").equals(bytes)) {
+    if (
+      liveDocumentKindForPath(path) === "scene" ||
+      bytes.length > MAX_ENGINE_CAPTURE_BINARY_BYTES
+    ) {
+      return {
+        kind: "untracked-content",
+        sha256: sha256Bytes(bytes),
+        reason: "non-utf8",
+      };
+    }
+    return { kind: "binary", bytes, sha256: sha256Bytes(bytes), byteLength: bytes.byteLength };
+  }
+  return { kind: "text", text, sha256: sha256Utf8(text) };
 }
 
 // Like readDiskTextState but for secret-classified paths: `.env` has no text

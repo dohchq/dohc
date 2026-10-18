@@ -7,7 +7,8 @@ use dohc_engine_files::media::is_text_media_type;
 use dohc_engine_files::policy::{PathClassification, classify_engine_file_path_normalized};
 use dohc_engine_files::{
     BatchIngestResult, CaptureError, CaptureOp, CaptureSink, IngestOutcome, IngestReason,
-    MAX_CAPTURE_BINARY_BYTES, MAX_CAPTURE_TEXT_BYTES,
+    MAX_CAPTURE_BINARY_BYTES, MAX_CAPTURE_TEXT_BYTES, RespelledRetire, Respelling,
+    stored_under_other_spelling,
 };
 use dohc_engine_runtime::actor::CapturePlacementPath;
 use dohc_engine_runtime::search::{
@@ -38,6 +39,10 @@ const INGEST_FAILED: CaptureError = CaptureError {
 };
 const BINARY_INGEST_FAILED: CaptureError = CaptureError {
     reason: "capture binary ingest failed",
+};
+/// A respelled path's retire that must wait, as while an editor holds it.
+const RESPELLED_RETIRE_WAITS: CaptureError = CaptureError {
+    reason: "respelled-retire-waits",
 };
 const RETIRE_FAILED: CaptureError = CaptureError {
     reason: "capture retire failed",
@@ -898,14 +903,37 @@ impl StoreCaptureSink {
         only_if_text_head: bool,
         summary: Option<String>,
     ) -> Result<(), CaptureError> {
-        self.retire_head_with(path, only_if_text_head, summary, true, false)
+        self.retire_head_with(path, only_if_text_head, summary, true, false, None)
     }
 
     /// Retire a head because its file is gone. The actor confirms the absence
     /// on its own thread and refuses while the file is back, so a replace
     /// caught between its two renames is never recorded as a delete.
     fn retire_absent_head(&self, path: &str, summary: Option<String>) -> Result<(), CaptureError> {
-        self.retire_head_with(path, false, summary, true, true)
+        self.retire_head_with(path, false, summary, true, true, None)
+    }
+
+    /// Retire the head at a spelling the disk proves respelled to `to`. The
+    /// file is still there under the new spelling, so this is not a deletion;
+    /// the actor lets it retire a head capture does not own, such as one a
+    /// peer synced, while that head still holds the bytes found at `to`.
+    fn retire_respelled_head(
+        &self,
+        path: &str,
+        to: &Respelling,
+    ) -> Result<RespelledRetire, CaptureError> {
+        match self.retire_head_with(
+            path,
+            false,
+            self.provenance.summary.clone(),
+            true,
+            false,
+            Some(to),
+        ) {
+            Ok(()) => Ok(RespelledRetire::Retired),
+            Err(RESPELLED_RETIRE_WAITS) => Ok(RespelledRetire::Waits),
+            Err(error) => Err(error),
+        }
     }
 
     fn retire_head_with(
@@ -915,28 +943,42 @@ impl StoreCaptureSink {
         summary: Option<String>,
         allow_ydoc_origin: bool,
         confirm_absent: bool,
+        respelled_to: Option<&Respelling>,
     ) -> Result<(), CaptureError> {
         let root_guard = self.root_guard()?;
-        let result = self.actor.capture_retire_materialized_blocking_guarded(
-            CaptureRetire {
-                workspace_id: self.workspace_id.clone(),
-                version_id: self.version_id.clone(),
-                path: path.to_owned(),
-                metadata_summary: summary,
-                metadata_correlation_id: self.provenance.correlation_id.clone(),
-                now_ms: self.now_ms,
-                request_id: None,
-                only_if_text_head,
-                only_if_capture_origin: true,
-                allow_ydoc_origin,
-            },
-            self.shadow_root.clone(),
-            confirm_absent,
-            Arc::new(self.self_writes.clone()),
-            self.leases.clone(),
-            Arc::new(NoFaults),
-            root_guard,
-        );
+        let input = CaptureRetire {
+            workspace_id: self.workspace_id.clone(),
+            version_id: self.version_id.clone(),
+            path: path.to_owned(),
+            metadata_summary: summary,
+            metadata_correlation_id: self.provenance.correlation_id.clone(),
+            now_ms: self.now_ms,
+            request_id: None,
+            only_if_text_head,
+            only_if_capture_origin: true,
+            allow_ydoc_origin,
+        };
+        let result = match respelled_to {
+            Some(to) => self.actor.capture_retire_respelled_blocking_guarded(
+                input,
+                to.path.clone(),
+                to.sha256.clone(),
+                self.shadow_root.clone(),
+                Arc::new(self.self_writes.clone()),
+                self.leases.clone(),
+                Arc::new(NoFaults),
+                root_guard,
+            ),
+            None => self.actor.capture_retire_materialized_blocking_guarded(
+                input,
+                self.shadow_root.clone(),
+                confirm_absent,
+                Arc::new(self.self_writes.clone()),
+                self.leases.clone(),
+                Arc::new(NoFaults),
+                root_guard,
+            ),
+        };
         match self.batch_retry.observe(result) {
             Ok(result) => {
                 if result.pending_placement {
@@ -952,6 +994,11 @@ impl StoreCaptureSink {
             // A name the store refuses to address can never hold a head;
             // there is nothing to retire.
             Err(RuntimeError::Domain(DomainError::InvalidPath { .. })) => Ok(()),
+            Err(RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState { .. }))
+                if respelled_to.is_some() =>
+            {
+                Err(RESPELLED_RETIRE_WAITS)
+            }
             Err(_) => Err(RETIRE_FAILED),
         }
     }
@@ -1548,6 +1595,7 @@ impl CaptureSink for StoreCaptureSink {
                     Some("Stopped tracking non-text content".to_owned()),
                     false,
                     false,
+                    None,
                 )?;
                 Ok(IngestOutcome::NotOwned)
             }
@@ -1631,6 +1679,25 @@ impl CaptureSink for StoreCaptureSink {
             }
             // Nothing was ever stored under a non-canonical literal name.
             (PathClassification::Tracked, _) => Ok(()),
+        }
+    }
+
+    fn retire_respelled(
+        &mut self,
+        path: &str,
+        to: &Respelling,
+    ) -> Result<RespelledRetire, CaptureError> {
+        let respelled = matches!(
+            classify_engine_file_path_normalized(path),
+            (PathClassification::Tracked, Some(normalized)) if normalized == path
+        ) && matches!(self.path_containment(path), Containment::Contained)
+            && std::fs::symlink_metadata(self.shadow_root.join(path))
+                .is_ok_and(|metadata| metadata.file_type().is_file())
+            && stored_under_other_spelling(&self.shadow_root, path);
+        if respelled {
+            self.retire_respelled_head(path, to)
+        } else {
+            self.retire(path).map(|()| RespelledRetire::Retired)
         }
     }
 }
