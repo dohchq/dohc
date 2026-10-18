@@ -61,13 +61,13 @@ export function resolveOpenPathTarget<Workspace extends { rootPath: string }>(
 
   // A manifest at a root dohc cannot use, such as the home folder, is passed over.
   for (let current = folder; ; current = dirname(current)) {
-    if (deps.fs.hasManifest(current) && validateWorkspaceRootChoice(current, home).ok) {
+    if (deps.fs.hasManifest(current) && validateWorkspaceRootChoice(current, home, deps.platform).ok) {
       return { kind: "folder", rootPath: current, hasManifest: true, file: fileIn(current) };
     }
     if (dirname(current) === current) break;
   }
 
-  if (!validateWorkspaceRootChoice(folder, home).ok) {
+  if (!validateWorkspaceRootChoice(folder, home, deps.platform).ok) {
     const where = relative(home, folder) === "" ? "Your home folder" : "The top folder of a disk";
     throw new Error(`${where} cannot be a workspace. ${kind === "file"
       ? "Move the file into a folder, then open it again."
