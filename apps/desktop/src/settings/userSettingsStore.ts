@@ -84,6 +84,7 @@ function snapshotOfText(path: string, text: string): UserSettingsSnapshot {
     defaults: DEFAULT_USER_SETTINGS,
     kind: userSettingKinds,
     parse: parseUserSettings,
+    reportIgnored: path => !(path[0] === "appearance" && path[1] === "agentColors"),
   });
   return {
     text,

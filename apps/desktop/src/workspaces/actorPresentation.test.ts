@@ -31,7 +31,7 @@ function request(remote = true, workspaceId = "w", agentColors: Record<string, "
     ...(remote ? { remote: { serverUrl: issuer, ownerUserId: "alice" } } : {}) };
   const store = { findThreadChannelId: vi.fn(async () => "channel"), getChannelWireId: vi.fn(async () => "wire") };
   const assertCurrent = vi.fn();
-  const present = createActorPresentationRequest({ agentColors, readWorkspace: () => workspace, store, installationId: "device", credentials, assertCurrent });
+  const present = createActorPresentationRequest({ agentColors: () => agentColors, readWorkspace: () => workspace, store, installationId: "device", credentials, assertCurrent });
   return { present, store, assertCurrent, replace: () => { workspace = { ...workspace, lastOpenedAt: 1 }; } };
 }
 describe("chat presentation admission", () => {
@@ -257,7 +257,7 @@ describe("personal agent hues", () => {
     const token = await chat.present(chosen, "t");
     expect(token.hue).toBe("blue");
     const history = createHistoryPresentationRequest({ source: "own-store", workspaceId: "w", assertCurrent: () => undefined,
-      serverUrl: issuer, synced: true, installationId: "device", credentials, agentColors: colors });
+      serverUrl: issuer, synced: true, installationId: "device", credentials, agentColors: () => colors });
     expect(history([{ kind: "agent", agentId: "handshake", onBehalfOf: "alice" }])[0]).toEqual(token);
     const foreign = local("agent", "renderer", { issuer, userId: "sam" });
     expect(await chat.present(foreign, "t")).toMatchObject({ hue: null, self: false });
@@ -278,7 +278,7 @@ it("matches dispatch's unnamed run and CLI reply claims on the current base", as
   const colors = { [key]: "blue" } as const;
   const chat = await request(true, "w", colors).present(message({ author: { kind: "agent", displayName: "Agent" }, authorActorKey: key }), "t");
   const [history] = createHistoryPresentationRequest({ source: "own-store", workspaceId: "w", assertCurrent: () => undefined,
-    serverUrl: issuer, synced: true, installationId: "device", credentials, agentColors: colors })([
+    serverUrl: issuer, synced: true, installationId: "device", credentials, agentColors: () => colors })([
     { kind: "agent", agentId: UNNAMED_AGENT_ID, onBehalfOf: "alice" },
   ]);
   expect(history).toEqual(chat);

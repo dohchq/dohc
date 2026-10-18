@@ -674,7 +674,7 @@ describe("personal agent colour IPC", () => {
     expect(h.broadcastAgentColor.mock.calls.map(([event]) => event)).toEqual([
       change, { ...change, workspaceId: "workspace-b", group: other!.group },
     ]);
-    expect(h.broadcastUserSettings).not.toHaveBeenCalled();
+    expect(h.broadcastUserSettings).toHaveBeenCalledWith(expect.objectContaining({ source: "stored" }));
     const stored = await userSettingsStore.readUserSettingsFile(h.stateDirectory());
     expect(Object.values(stored.settings.appearance.agentColors ?? {})).toEqual(["blue"]);
     for (const channel of [settingsOperations.getUserSettings.channel, settingsOperations.reloadUserSettings.channel]) {
@@ -703,4 +703,45 @@ describe("personal agent colour IPC", () => {
     expect(JSON.stringify(result)).not.toContain("private-account-and-server");
     expect(JSON.stringify(h.broadcastUserSettings.mock.calls)).not.toContain("private-account-and-server");
   });
+});
+
+it("skips repeated colour selections and clearing an unset colour", async () => {
+  const h = await harness();
+  const [agent] = agentTokens("workspace-a");
+  const change = { workspaceId: "workspace-a", group: agent!.group, hue: "blue" } as const;
+  await h.invoke(settingsOperations.setAgentColor.channel, { ...change, hue: null });
+  expect((await userSettingsStore.readUserSettingsFile(h.stateDirectory())).source).toBe("default");
+  expect(h.effects).toHaveLength(0);
+  expect(h.broadcastUserSettings).not.toHaveBeenCalled();
+  expect(h.refreshDispatchTray).not.toHaveBeenCalled();
+  await h.invoke(settingsOperations.setAgentColor.channel, change);
+  h.broadcastUserSettings.mockClear();
+  h.broadcastAgentColor.mockClear();
+  h.refreshDispatchTray.mockClear();
+  const effects = h.effects.length;
+  await h.invoke(settingsOperations.setAgentColor.channel, change);
+  expect(h.effects).toHaveLength(effects);
+  expect(h.broadcastUserSettings).not.toHaveBeenCalled();
+  expect(h.broadcastAgentColor).not.toHaveBeenCalled();
+  expect(h.refreshDispatchTray).not.toHaveBeenCalled();
+});
+
+it("broadcasts changed notices alongside a private colour edit", async () => {
+  const h = await harness();
+  await h.invoke(settingsOperations.setUserSettings.channel, settingsPayload);
+  h.broadcastUserSettings.mockClear();
+  await writeFile(join(h.stateDirectory(), userSettingsStore.USER_SETTINGS_FILE), JSON.stringify({
+    ...DEFAULT_USER_SETTINGS, unknownSetting: true,
+    appearance: { ...DEFAULT_USER_SETTINGS.appearance, agentColors: { private: "blue" } },
+  }));
+  await h.reload();
+  expect(h.broadcastUserSettings).toHaveBeenLastCalledWith(expect.objectContaining({
+    ignored: [{ key: "unknownSetting", reason: "unknown" }],
+  }));
+  h.broadcastUserSettings.mockClear();
+  await writeFile(join(h.stateDirectory(), userSettingsStore.USER_SETTINGS_FILE), JSON.stringify({
+    ...DEFAULT_USER_SETTINGS, appearance: { ...DEFAULT_USER_SETTINGS.appearance, agentColors: { private: "rose" } },
+  }));
+  await h.reload();
+  expect(h.broadcastUserSettings).toHaveBeenLastCalledWith(expect.objectContaining({ ignored: undefined }));
 });

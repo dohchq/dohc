@@ -178,7 +178,7 @@ export const DEFAULT_USER_SETTINGS: DesktopUserSettings = {
 };
 
 // Main-only settings. Actor keys never cross the renderer boundary.
-export const AgentColors = z.record(z.string().max(2048).refine(key => new TextEncoder().encode(key).byteLength <= 2048), z.enum(IDENTITY_HUES))
+export const AgentColors = z.record(z.string().refine(key => new TextEncoder().encode(key).byteLength <= 2048), z.enum(IDENTITY_HUES))
   .refine(colors => Object.keys(colors).length <= 256);
 export type AgentColors = z.infer<typeof AgentColors>;
 export const StoredUserSettings = DesktopUserSettings.safeExtend({

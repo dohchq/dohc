@@ -27,12 +27,12 @@ function groupFor(workspaceId: string, identity: string, unknown: boolean): stri
   if (group === undefined) { group = String(nextGroup++); workspace.known.set(identity, group); }
   return group;
 }
-type AgentColorSource = AgentColors | (() => AgentColors | undefined);
+type AgentColorSource = () => AgentColors | undefined;
 function agentColorsReader(source: AgentColorSource | undefined) {
   let previous: AgentColors | undefined;
   let colors = admittedAgentColors();
   return () => {
-    const current = typeof source === "function" ? source() : source;
+    const current = source?.();
     if (current !== previous) { previous = current; colors = admittedAgentColors(current); }
     return colors;
   };

@@ -1,3 +1,4 @@
+import { createTestScratch } from "../workspaces/testTemp";
 import type { TimelineReads } from "../workspaces/historyTimeline";
 import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -226,13 +227,14 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
   const warmCredentialCache = vi.fn(async () => undefined);
   const readSyncHistory = vi.fn(async (_rootPath: string): Promise<SyncHistory> => "never-synced");
   const historyCollections = vi.fn<() => Promise<Pick<TimelineReads, "scope" | "local" | "remote">>>(async () => ({ scope: "test", local: () => ({ pages: [], transferred: [], sourceIds: [], sourceCount: 0 }), remote: async () => { throw new Error("unexpected remote history"); } }));
+  const stateDirectory = await createTestScratch("engine-ipc-settings-");
   const registrations = createWorkspaceEngineIpc({
     historyCollections,
     readWorkspaceEnginePolicy: readPolicy, readSyncHistory,
     localPersonId: () => "person-local",
     localPersonName: () => "Ice",
     localInstallationId: () => "install-local",
-    stateDir: () => "C:/w/sol-agent-colours/.agent-artifacts/no-settings",
+    stateDir: () => stateDirectory,
     warmCredentialCache, currentCredentials: () => identity.credentials,
     // Read from main's own account, as the sign-in stands when the request arrives.
     localPerson: async () => ({ kind: "human", humanId: session.account ?? "install-local" }),

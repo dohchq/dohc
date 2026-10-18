@@ -8,7 +8,6 @@ import type { OperationHandlers } from "./operationTable";
 import {
   DEFAULT_USER_SETTINGS,
   AgentColors, StoredUserSettingsResult, rendererUserSettingsResult,
-  type StoredUserSettings,
   settingsDeepEqual,
   type DesktopUserSettings,
   type ThemeMode,
@@ -33,7 +32,7 @@ const USER_SETTINGS_RELOAD_DEBOUNCE_MS = 150;
 
 type UserSettingsChange = {
   // What the file held before, whose effects were in place.
-  previous: StoredUserSettings;
+  previous: StoredUserSettingsResult;
   result: StoredUserSettingsResult;
 };
 
@@ -92,14 +91,11 @@ export function createSettingsIpc<
   }
 
   async function announce({ previous, result }: UserSettingsChange): Promise<void> {
-    for (const event of agentColorChanges(previous.appearance.agentColors, result.settings.appearance.agentColors)) {
+    for (const event of agentColorChanges(previous.settings.appearance.agentColors, result.settings.appearance.agentColors)) {
       broadcastAgentColor(event);
     }
     const publicResult = rendererUserSettingsResult(result);
-    const privateChange = !settingsDeepEqual(previous.appearance.agentColors, result.settings.appearance.agentColors);
-    if (privateChange && settingsDeepEqual(
-      rendererUserSettingsResult({ settings: previous, source: result.source }).settings, publicResult.settings,
-    )) return;
+    if (settingsDeepEqual(rendererUserSettingsResult(previous), publicResult)) return;
     broadcastUserSettings(publicResult);
     await refreshDispatchTray();
     const { runner, profile } = result.settings;
@@ -108,8 +104,8 @@ export function createSettingsIpc<
     // runner or to the agent's name can make one due, so a zoom step does not
     // scan every open workspace.
     if (
-      settingsDeepEqual(previous.runner, runner) &&
-      previous.profile.agentName === profile.agentName
+      settingsDeepEqual(previous.settings.runner, runner) &&
+      previous.settings.profile.agentName === profile.agentName
     ) {
       return;
     }
@@ -128,11 +124,11 @@ export function createSettingsIpc<
     write: () => Promise<StoredUserSettingsResult | null>,
   ): Promise<UserSettingsChange | null> {
     const change = await enqueueUserSettingsWrite(async () => {
-      const previous = (await readCachedUserSettingsFile(stateDir())).settings;
+      const previous = await readCachedUserSettingsFile(stateDir());
       const written = await write();
       if (!written) return null;
       const result = StoredUserSettingsResult.parse(written);
-      takeEffect(result.settings);
+      if (!settingsDeepEqual(previous, result)) takeEffect(result.settings);
       return { previous, result };
     });
     if (change) await announce(change);
@@ -216,6 +212,7 @@ export function createSettingsIpc<
       const key = agentKeyForGroup(input.workspaceId, input.group);
       await saveUserSettings(() => updateUserSettingsFile(stateDir(), current => {
         operation.assertCurrent();
+        if ((current.appearance.agentColors?.[key] ?? null) === input.hue) return current;
         const agentColors = { ...current.appearance.agentColors };
         if (input.hue === null) delete agentColors[key];
         else agentColors[key] = input.hue;

@@ -593,7 +593,7 @@ describe("private agent colour storage", () => {
     const result = await readUserSettingsFile(dir);
     expect(result.settings.appearance.yourColor).toBeNull();
     expect(result.settings.appearance.agentColors).toEqual({ good: "rose" });
-    expect(result.ignored).toHaveLength(3);
+    expect(result.ignored).toEqual([{ key: "appearance.yourColor", reason: "invalid" }]);
   });
 });
 
@@ -623,4 +623,13 @@ it("refuses a bounded colour map that would make the settings file unreadable on
   await expect(updateUserSettingsFile(dir, current => ({ ...current,
     appearance: { ...current.appearance, agentColors: AgentColors.parse(agentColors) } }))).rejects.toThrow("256 KB");
   expect(await readFile(path, "utf8")).toBe(before);
+});
+
+it("keeps public ignored-key notices after many invalid private colours", async () => {
+  const dir = await createTestScratch("agent-colors-notices-");
+  await writeFile(join(dir, USER_SETTINGS_FILE), JSON.stringify({ ...DEFAULT_USER_SETTINGS,
+    appearance: { ...DEFAULT_USER_SETTINGS.appearance,
+      agentColors: Object.fromEntries(Array.from({ length: 60 }, (_, n) => [String(n), "olive"])) },
+    unknownSetting: true }));
+  expect((await readUserSettingsFile(dir)).ignored).toEqual([{ key: "unknownSetting", reason: "unknown" }]);
 });

@@ -2,7 +2,7 @@ import { chatOperations } from "./chatOperations";
 import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createDesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
-import { createTestScratch } from "../workspaces/testTemp";
+import { createTestScratch, createTestScratchSync } from "../workspaces/testTemp";
 import { StartChannelThreadResult, SendChatMessageResult, ListChatMessagesResult, ListChatThreadDecisionsResult } from "./bridgeContract";
 import { workspaceFileRefs } from "../workspaces/workspaceFileReferenceScopes";
 import { createEngineFileResolver, workspaceFileRef } from "../workspaces/resolveEngineFiles";
@@ -29,6 +29,7 @@ type Event = { sender: { trusted: boolean } };
 type Operation = { workspace: RegistryEntry; assertCurrent(): void };
 
 function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatStore) {
+  const stateDirectory = createTestScratchSync("chats-ipc-settings-");
   const workspace: RegistryEntry = {
     workspaceId: "workspace", rootPath: "/workspace", kind: "personal", mode: "local-first",
   };
@@ -176,7 +177,7 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
     assertTrustedSender, chatScope, requireEngineCapture, linkedChatStoreFor, chatWrites,
     assertWritableWorkspace: value => { if (shareViewIsPresent(value.shareView)) throw new Error("Read-only workspace"); },
     readWorkspace: () => workspace,
-    stateDir: () => "C:/w/sol-agent-colours/.agent-artifacts/no-settings",
+    stateDir: () => stateDirectory,
     warmCredentialCache, localUserId: () => "owner",
     localInstallationId: () => "local-owner", currentCredentials: () => null,
     chatRelayIdentityFor,
