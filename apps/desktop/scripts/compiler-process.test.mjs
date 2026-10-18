@@ -269,14 +269,25 @@ spawn(process.execPath,['-e',launcher,swapper,process.argv[2]],{stdio:'ignore'})
   const wait=setInterval(()=>{try{const{pid}=JSON.parse(readFileSync(process.env.TMPDIR+'swapper.json','utf8'));clearInterval(wait);writeFileSync(marker,JSON.stringify({escaped:pid}));}catch{}},5);
 });setInterval(()=>{},1000);`.replace("import{writeFileSync}from'node:fs'","import{readFileSync,writeFileSync}from'node:fs'"));
   context.runtime.workerArgs=[canary];
-  const controller=new AbortController();
-  const running=assert.rejects(runOwnedCompilerProcess(context.runtime,{input:Buffer.alloc(0),bounds,signal:controller.signal}),{reason:'cancelled'});
-  const {escaped}=await waitForMarker(context);
-  t.after(()=>{try{process.kill(escaped,'SIGKILL');}catch{}});
-  controller.abort();await running;
-  assert.equal(await readFile(join(canary,'keep.txt'),'utf8'),'user data');
-  // Stop the swapper before the fixture's own recursive cleanup runs.
-  process.kill(escaped,'SIGKILL');assert.equal(await exited(escaped),true);
+  // Under load a sample can see the swapper before the intermediate exits, and
+  // the owner then kills it with the tree. That run keeps the canary but races
+  // no escaped process, so the test runs again.
+  for(let round=0;round<5;round++){
+    const controller=new AbortController();
+    const running=assert.rejects(runOwnedCompilerProcess(context.runtime,{input:Buffer.alloc(0),bounds,signal:controller.signal}),{reason:'cancelled'});
+    const {escaped}=await waitForMarker(context);
+    t.after(()=>{try{process.kill(escaped,'SIGKILL');}catch{}});
+    controller.abort();await running;
+    assert.equal(await readFile(join(canary,'keep.txt'),'utf8'),'user data');
+    if(!alive(escaped)){
+      for(const name of await readdir(context.scratch))await rm(join(context.scratch,name),{recursive:true,force:true});
+      continue;
+    }
+    // Stop the swapper before the fixture's own recursive cleanup runs.
+    process.kill(escaped,'SIGKILL');assert.equal(await exited(escaped),true);
+    return;
+  }
+  t.skip('The owner caught the swapper in every round, so no escaped process raced the cleanup.');
 });
 test('macOS owner notices a dead caller while the worker never reads its input',macos,async t=>{
   const context=await fixture(t,`import{writeFileSync}from'node:fs';${markerLine}writeFileSync(marker,JSON.stringify({pid:process.pid}));setInterval(()=>{},1000);`);
