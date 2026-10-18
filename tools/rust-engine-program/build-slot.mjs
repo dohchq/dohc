@@ -799,6 +799,14 @@ export function acquireBuildSlot(options) {
   return acquireSlot({ goneMs: 30 * 60_000, ...options, kind: "build-slot", lanes: "cargo lanes" });
 }
 
+/**
+ * Take the host's one Linux verification run. Runs share one Linux checkout, so they take turns.
+ * The run also takes a cargo lane for its build.
+ */
+export function acquireLinuxSlot({ root, metadata, signal, waitMs = 2 * 60 * 60_000 }) {
+  return acquireSlot({ root, slots: 1, kind: "linux-slot", lanes: "Linux runs", metadata, signal, waitMs, cooperativeCancellation: true });
+}
+
 /** Fail-fast ownership for mutable local resources; this creates no waiter queue. */
 export function acquireExclusiveSlot({ root, kind, metadata, cooperativeCancellation = true, identityDelayMs = defaultIdentityDelayMs }) {
   mkdirSync(root, { recursive: true });
@@ -1087,6 +1095,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     ...(verificationRoot ? [
       buildQueueStatus({root: verificationRoot, kind: "verification-slot", slots: inspectedVerificationSlots}),
     ] : []),
+    ...(cargoRoot && existsSync(join(cargoRoot, "verification-linux")) ? [buildQueueStatus({root: cargoRoot, kind: "linux-slot", slots: 1})] : []),
   ];
   console.log(JSON.stringify({cargoRoot: cargoRoot ?? null, verificationRoot: verificationRoot ?? null,
     verificationSlots: verificationConfigurationError ? null : verificationSlots, verificationConfigurationError, lanes}, null, 2));
