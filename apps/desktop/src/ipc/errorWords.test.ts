@@ -21,6 +21,7 @@ import {
   readCollectionReopenWait,
   readError,
   shouldRecheckShareAccess,
+  VOLUME_SHARES_NEW_FILES_WORDS,
   withErrorWords,
 } from "./errorWords";
 
@@ -159,6 +160,18 @@ describe("error words", () => {
       .toBe(`Could not refresh workspace files. ${PRIVACY_DENIED_WORDS}`);
     expect(PRIVACY_DENIED_WORDS).toBe(
       "macOS blocked dohc from this folder. Allow dohc in System Settings › Privacy & Security › Files & Folders.",
+    );
+  });
+
+  it("says why dohc can't keep a file private on a volume that shares new files, after the caller's sentence", () => {
+    const engine = acrossIpc(refusal("INTERNAL", "volume-shares-new-files"), "desktop:write-workspace-file");
+    expect(readError(engine)).toEqual({
+      words: VOLUME_SHARES_NEW_FILES_WORDS,
+      mapped: true,
+      cause: "DaemonRefusalError [INTERNAL]: volume-shares-new-files",
+    });
+    expect(withErrorWords("Couldn't save .env.", engine)).toBe(
+      "Couldn't save .env. The disk this workspace is on adds sharing permissions to new files, so dohc can't keep this file private. Move the workspace to a disk on this Mac.",
     );
   });
 
