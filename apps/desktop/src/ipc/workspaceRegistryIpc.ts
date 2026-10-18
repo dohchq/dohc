@@ -1,6 +1,6 @@
 import {
   defaultWorkspaceRoot,
-  normalizeAbsolutePath,
+  normalizeRootPath,
   validateWorkspaceRootChoice,
 } from "@dohc/workspace-core";
 import type {
@@ -33,7 +33,7 @@ export function createWorkspaceRootApproval(effectiveHome: () => string) {
   const approvedRoots = new Set<string>();
 
   function approveRoot(rootPath: string): void {
-    approvedRoots.add(normalizeAbsolutePath(rootPath));
+    approvedRoots.add(normalizeRootPath(rootPath, process.platform));
   }
 
   function isApprovedRoot(normalized: string): boolean {
@@ -53,7 +53,7 @@ export function createWorkspaceRootApproval(effectiveHome: () => string) {
   // suggestion or dialog pick — a renderer cannot scope fs ops to a path it
   // invented. All downstream ops use the normalized root.
   function usableRoot(rootPath: string): string {
-    const check = validateWorkspaceRootChoice(rootPath, effectiveHome());
+    const check = validateWorkspaceRootChoice(rootPath, effectiveHome(), process.platform);
     if (!check.ok) throw new Error(check.reason);
     if (!isApprovedRoot(check.normalized)) {
       throw new Error(

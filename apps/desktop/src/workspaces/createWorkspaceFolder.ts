@@ -1,11 +1,12 @@
 import {
   checkManifest,
+  DISK_ROOT_REFUSAL,
   FILESYSTEM_ROOT_REFUSAL,
   HOME_FOLDER_REFUSAL,
   ReservedWorkspaceIdError,
   createWorkspaceManifest,
   defaultWorkspaceMode,
-  normalizeAbsolutePath,
+  normalizeRootPath,
   sameFsEntry,
   validateAttachedFolder,
   validateWorkspaceRootChoice,
@@ -34,10 +35,10 @@ export function canonicalWorkspaceRoot(rootPath: string): string {
   return rootSpelling(realpathSync.native(rootPath));
 }
 
-// The app spells Windows paths with forward slashes. Elsewhere a backslash is
-// part of a folder's name, so the real path stays as it is.
+// Forward slashes on Windows, as the app spells paths there. Elsewhere the
+// real path stays as it is, backslashes in names included.
 function rootSpelling(realPath: string): string {
-  return process.platform === "win32" ? normalizeAbsolutePath(realPath) : realPath;
+  return normalizeRootPath(realPath, process.platform);
 }
 
 // The mount code creates this on first use; it is exported so every path
@@ -122,11 +123,18 @@ async function folderAt(rootPath: string): Promise<BigIntStats> {
   return folder;
 }
 
-// A folder on another device than its parent is where a disk or share is
-// mounted, wherever that is: /Volumes, /mnt, or a folder in home.
-async function isMountRoot(rootPath: string, folder: BigIntStats): Promise<boolean> {
+// The filesystem root under any name, as a bind mount of / gives it.
+async function isFilesystemRoot(folder: BigIntStats): Promise<boolean> {
+  return sameFsEntry(folder, await stat("/", { bigint: true })) === "same";
+}
+
+// Where a disk or share is mounted: a folder on another device than its parent,
+// wherever it is (/Volumes/<disk>, /mnt, a folder in home), and macOS's
+// /Volumes, which holds every disk but reports the system's device.
+async function isDiskRoot(rootPath: string, folder: BigIntStats): Promise<boolean> {
+  if (process.platform === "darwin" && rootPath.toLowerCase() === "/volumes") return true;
   const parent = dirname(rootPath);
-  return parent === rootPath || (await stat(parent, { bigint: true })).dev !== folder.dev;
+  return parent !== rootPath && (await stat(parent, { bigint: true })).dev !== folder.dev;
 }
 
 // The home folder's real path and identity. The identity also catches an
@@ -165,13 +173,15 @@ export async function createWorkspaceFolder(input: {
   const rootPath = await realFolderPath(input.rootPath);
   const folder = await folderAt(rootPath);
   const home = await homeFolder(input.homeDir);
-  const rootCheck = validateWorkspaceRootChoice(rootPath, home.path);
+  const rootCheck = validateWorkspaceRootChoice(rootPath, home.path, process.platform);
   if (!rootCheck.ok) throw new Error(rootCheck.reason);
   if (home.identity && sameFsEntry(folder, home.identity) === "same") throw new Error(HOME_FOLDER_REFUSAL);
-  if (await isMountRoot(rootPath, folder)) throw new Error(FILESYSTEM_ROOT_REFUSAL);
-  // Node cannot write relative to an open folder, so each step below first
-  // proves the path still leads to the folder judged above. A folder or link
-  // put in its place is refused.
+  if (await isFilesystemRoot(folder)) throw new Error(FILESYSTEM_ROOT_REFUSAL);
+  if (await isDiskRoot(rootPath, folder)) throw new Error(DISK_ROOT_REFUSAL);
+  // Node cannot create files relative to an open folder, so writes go by path.
+  // Each step below first checks that the path still leads to the folder
+  // judged above. That detects a folder or link put in its place before the
+  // step; it cannot prevent one swapped in between a check and its write.
   const assertSameFolder = async () => {
     if (sameFsEntry(folder, await folderAt(rootPath)) === "replaced") throw new Error(FOLDER_CHANGED);
   };

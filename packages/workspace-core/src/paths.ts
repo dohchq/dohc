@@ -15,9 +15,11 @@ function isAbsolutePathLike(path: string): boolean {
   );
 }
 
+const NOT_ABSOLUTE_REFUSAL = "attached folders must be absolute paths";
+
 export function validateAttachedFolder(path: string): FolderValidation {
   if (!isAbsolutePathLike(path)) {
-    return { ok: false, reason: "attached folders must be absolute paths" };
+    return { ok: false, reason: NOT_ABSOLUTE_REFUSAL };
   }
   return { ok: true };
 }
@@ -62,12 +64,27 @@ export function normalizeAbsolutePath(path: string): string {
   return trimmed || (drive ? drive : "/");
 }
 
+// normalizeAbsolutePath in one platform's terms. Windows takes either
+// separator and drive or share prefixes. Elsewhere only "/" separates, and a
+// backslash is part of a folder's name, so "/x/a\b" stays one folder.
+export function normalizeRootPath(path: string, platform: string): string {
+  if (platform === "win32") return normalizeAbsolutePath(path);
+  const segments: string[] = [];
+  for (const segment of path.split("/")) {
+    if (segment === "" || segment === ".") continue;
+    if (segment === "..") segments.pop();
+    else segments.push(segment);
+  }
+  return `/${segments.join("/")}`;
+}
+
 type RootChoiceValidation =
   | { ok: true; normalized: string }
   | { ok: false; reason: string };
 
 export const FILESYSTEM_ROOT_REFUSAL = "workspace root cannot be the filesystem root";
 export const HOME_FOLDER_REFUSAL = "workspace root cannot be the home directory itself";
+export const DISK_ROOT_REFUSAL = "The top folder of a disk cannot be a workspace. Open a folder inside it.";
 
 // Registry policy: a workspace root must be a real folder choice — never the
 // filesystem root or the home directory itself, which would hand workspace
@@ -78,11 +95,14 @@ export const HOME_FOLDER_REFUSAL = "workspace root cannot be the home directory 
 export function validateWorkspaceRootChoice(
   rootPath: string,
   homeDir: string,
+  platform: string,
 ): RootChoiceValidation {
   const attached = validateAttachedFolder(rootPath);
   if (!attached.ok) return attached;
-  const normalized = normalizeAbsolutePath(rootPath);
-  const home = normalizeAbsolutePath(homeDir);
+  // Outside Windows only a path from "/" is absolute.
+  if (platform !== "win32" && !rootPath.startsWith("/")) return { ok: false, reason: NOT_ABSOLUTE_REFUSAL };
+  const normalized = normalizeRootPath(rootPath, platform);
+  const home = normalizeRootPath(homeDir, platform);
   // Filesystem root, a drive root (C:), or a UNC server/share root (//server,
   // //server/share) — never a workspace.
   if (

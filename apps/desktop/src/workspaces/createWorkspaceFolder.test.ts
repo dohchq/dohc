@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, readdir, rename, stat, symlink, writeFile } from "node:fs/promises";
 import { dirname, join, parse } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { FILESYSTEM_ROOT_REFUSAL, HOME_FOLDER_REFUSAL } from "@dohc/workspace-core";
+import { DISK_ROOT_REFUSAL, FILESYSTEM_ROOT_REFUSAL, HOME_FOLDER_REFUSAL } from "@dohc/workspace-core";
 import { canonicalWorkspaceRoot, createWorkspaceFolder } from "./createWorkspaceFolder";
 import { readSyncHistory, recordSynced } from "./syncHistory";
 import { createTestScratch } from "./testTemp";
@@ -257,7 +257,7 @@ describe("createWorkspaceFolder", () => {
     });
 
     await expect(createWorkspaceFolder({ rootPath: mounted, homeDir, kind: "personal" }))
-      .rejects.toThrow(FILESYSTEM_ROOT_REFUSAL);
+      .rejects.toThrow(DISK_ROOT_REFUSAL);
     expect(await readdir(mounted)).toEqual([]);
   });
 
@@ -265,7 +265,25 @@ describe("createWorkspaceFolder", () => {
     const link = join(base, "device-link");
     await symlink("/dev", link, linkType);
     await expect(createWorkspaceFolder({ rootPath: link, homeDir, kind: "personal" }))
+      .rejects.toThrow(DISK_ROOT_REFUSAL);
+  });
+
+  // /Volumes reports the system's device, so only its name marks it.
+  it.skipIf(process.platform !== "darwin")("refuses macOS's /Volumes, directly and through a link", async () => {
+    const link = join(base, "volumes-link");
+    await symlink("/Volumes", link, linkType);
+    for (const rootPath of ["/Volumes", link]) {
+      await expect(createWorkspaceFolder({ rootPath, homeDir, kind: "personal" })).rejects.toThrow(DISK_ROOT_REFUSAL);
+    }
+  });
+
+  it("refuses the filesystem root under another name, as a bind mount of / gives it", async () => {
+    const root = join(base, "bound-root");
+    await mkdir(root);
+    statOf("/", async () => await actualFs.stat(root, { bigint: true }));
+    await expect(createWorkspaceFolder({ rootPath: root, homeDir, kind: "personal" }))
       .rejects.toThrow(FILESYSTEM_ROOT_REFUSAL);
+    expect(await readdir(root)).toEqual([]);
   });
 
   it("refuses a folder that is the home folder under another name, and writes nothing", async () => {
