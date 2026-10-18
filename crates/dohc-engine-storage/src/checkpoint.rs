@@ -33,13 +33,21 @@ fn frames(conn: &Connection) -> rusqlite::Result<(i64, i64)> {
 }
 
 impl Checkpoints {
-    pub(crate) fn start(path: &Path) -> Result<Self, crate::StorageError> {
+    /// The background connection. It never waits for a lock, and it syncs
+    /// copied pages as the writer's connection does.
+    pub(crate) fn connection(path: &Path) -> Result<Connection, crate::StorageError> {
         let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
             .map_err(crate::StorageError::persist)?;
         conn.busy_timeout(std::time::Duration::ZERO)
             .map_err(crate::StorageError::persist)?;
         conn.pragma_update(None, "synchronous", "NORMAL")
             .map_err(crate::StorageError::persist)?;
+        crate::schema::set_checkpoint_fullfsync(&conn).map_err(crate::StorageError::persist)?;
+        Ok(conn)
+    }
+
+    pub(crate) fn start(path: &Path) -> Result<Self, crate::StorageError> {
+        let conn = Self::connection(path)?;
         let (requests, rx) = mpsc::sync_channel(1);
         let stopped = Arc::new(AtomicBool::new(false));
         let worker_stopped = Arc::clone(&stopped);

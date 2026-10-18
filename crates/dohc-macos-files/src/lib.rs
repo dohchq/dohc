@@ -1,4 +1,5 @@
-//! Copy a file's macOS ACL and extended attributes between open descriptors.
+//! Copy a file's macOS ACL and extended attributes between open descriptors,
+//! and flush a descriptor behind a drive write barrier.
 #![cfg(target_vendor = "apple")]
 use std::ffi::{CStr, c_char, c_int, c_uint, c_void};
 use std::io;
@@ -102,6 +103,30 @@ fn kept_on_save(name: &CStr) -> bool {
     kept != 0
 }
 
+/// Flush `fd` to its drive, then issue a write barrier there
+/// (`F_BARRIERFSYNC`). The drive persists everything flushed before the
+/// barrier ahead of any later write, but may still hold it in its cache:
+/// this orders writes and does not make them durable. The kernel issues
+/// `F_FULLFSYNC` instead on file systems without barriers. A storage driver
+/// that ignores barriers loses the ordering, as one that ignores
+/// `F_FULLFSYNC` loses durability.
+pub fn barrier_fsync(fd: impl AsFd) -> io::Result<()> {
+    let fd = fd.as_fd();
+    loop {
+        // SAFETY: The descriptor stays open for the call, which takes no
+        // argument and retains nothing.
+        #[allow(unsafe_code)]
+        let result = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_BARRIERFSYNC) };
+        if result != -1 {
+            return Ok(());
+        }
+        let err = io::Error::last_os_error();
+        if err.kind() != io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+}
+
 /// Read a value whose size `read` reports for an empty buffer, unless it is
 /// larger than [`MAX_XATTR_BYTES`] or grows between the two reads.
 fn read_bounded(read: impl Fn(&mut [u8]) -> rustix::io::Result<usize>) -> Option<Vec<u8>> {
@@ -113,4 +138,16 @@ fn read_bounded(read: impl Fn(&mut [u8]) -> rustix::io::Result<usize>) -> Option
     let read_len = read(&mut value).ok()?;
     value.truncate(read_len);
     Some(value)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_barrier_flush_succeeds_on_a_file_and_its_folder() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("barrier-fsync").unwrap();
+        let path = scratch.path().join("note.md");
+        std::fs::write(&path, b"ordered").unwrap();
+        super::barrier_fsync(std::fs::File::open(&path).unwrap()).unwrap();
+        super::barrier_fsync(std::fs::File::open(scratch.path()).unwrap()).unwrap();
+    }
 }
