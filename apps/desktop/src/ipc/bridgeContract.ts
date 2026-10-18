@@ -6989,11 +6989,9 @@ export interface DohcDesktopBridge
     OperationBridge<typeof liveDraftRecoveryOperations>,
     OperationBridge<typeof stopAndRestoreRecoveryOperations>,
     OperationBridge<typeof engineYDocSaveOperations> {
-  stopOwnerLiveDocument(payload: OwnerLiveDocumentActionPayload): Promise<void>;
-  resumeOwnerLiveDocument(payload: OwnerLiveDocumentActionPayload): Promise<void>;
   publishOwnerApp(payload: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult>;
   ownerAppResponses(payload:OwnerAppResponsesRequest):Promise<OwnerAppResponsesResult>;
-  ownerRestore<Action extends OwnerRestoreAction>(payload: OwnerRestoreRequest & {action: Action}): Promise<OwnerRestoreResult<Action>>;
+  ownerRestore<Action extends OwnerRestoreAction>(payload: z.input<typeof OwnerRestoreRequest> & {action: Action}): Promise<OwnerRestoreResult<Action>>;
   // Constant, not a call: the titlebar lays out around macOS traffic lights
   // on darwin vs the window-controls overlay everywhere else.
   platform: NodeJS.Platform;
@@ -7093,20 +7091,6 @@ export interface DohcDesktopBridge
   cloudJoinWorkspace(
     payload: CloudJoinWorkspacePayload,
   ): Promise<CloudJoinWorkspaceResult>;
-  // Relay shares: grant side.
-  listRelayShares(): Promise<ListRelaySharesResult>;
-  getRelayReceivedShare(
-    payload: GetRelayReceivedSharePayload,
-  ): Promise<GetRelayReceivedShareResult>;
-  revokeRelayShare(payload: RevokeRelaySharePayload): Promise<RevokeRelayShareResult>;
-  // Puts back what a removal ended, using its receipt. Owner only.
-  undoRelayShare(payload: UndoRelaySharePayload): Promise<UndoRelayShareResult>;
-  pollRelayShareDiscussionActivity(
-    payload: PollRelayShareDiscussionActivityPayload,
-  ): Promise<PollRelayShareDiscussionActivityResult>;
-  cancelRelayShareDiscussionActivity(
-    payload: CancelRelayShareDiscussionActivityPayload,
-  ): Promise<void>;
   // Collection automations, for the ⚡ panel.
   listCollectionAutomations(payload: ListCollectionAutomationsPayload): Promise<ListCollectionAutomationsResult>;
   switchCollectionAutomation(payload: SwitchCollectionAutomationPayload): Promise<SwitchCollectionAutomationResult>;

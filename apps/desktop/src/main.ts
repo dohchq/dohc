@@ -362,7 +362,7 @@ import {
 import { createServerAccountDeletion } from "./workspaces/serverAccountDeletion";
 import { registerServerAccountIpc } from "./ipc/serverAccountIpc";
 import { createJoinedWorkspaceRunner } from "./workspaces/createJoinedWorkspace";
-import { registerRelaySharesIpcHandlers } from "./ipc/relaySharesIpc";
+import { createRelaySharesIpcHandlers } from "./ipc/relaySharesIpc";
 import { requireCredentials } from "./workspaces/credentialScopedOperation";
 import { createExactMountOperationRunner } from "./workspaces/exactMountOperation";
 import { CredentialSessionCache } from "./workspaces/credentialSessionCache";
@@ -6106,15 +6106,12 @@ function registerIpcHandlers(): void {
     openWorkspaceActivity, completeWorkspaceJoinBootstrap, desktopMarks,
   });
 
-  const relayShareHandlers = registerRelaySharesIpcHandlers<
+  const relayShareHandlers = createRelaySharesIpcHandlers<
     WebContents,
     IpcMainInvokeEvent,
     DesktopRendererWorkspaceOperation["workspace"],
     DesktopRendererWorkspaceOperation
   >({
-    registerHandler: handleIpc,
-    assertTrustedSender,
-    withRendererWorkspaceOperation,
     remoteForWorkspace,
     currentCredentialGeneration: () => credentialCacheGeneration,
     currentCredentials: () => cachedCredentials,
