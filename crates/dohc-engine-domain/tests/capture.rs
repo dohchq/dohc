@@ -1493,3 +1493,107 @@ fn live_capture_labels_default_at_the_primitive() {
         Some("Became a text file")
     );
 }
+
+/// A respell is not a deletion, so a head retires when the disk shows its
+/// file stored under another spelling, whoever owns it, but only when that
+/// loses nothing. Each refused case breaks one condition and keeps the head,
+/// whether a peer synced it or capture recorded it: a newer head the disk has
+/// not caught up with, a write still waiting to land, and a distinct head
+/// already at the new spelling, as a pair of case variants from a peer that
+/// keeps case apart.
+#[test]
+fn a_respelled_head_retires_only_with_its_content() {
+    use dohc_engine_domain::{TxnOutcome, capture_retire_respelled_in_tx};
+    use dohc_engine_storage::{MaterializationJobSpec, Preimage, hex_sha256};
+    let disk = "body\n";
+    let disk_sha = hex_sha256(disk.as_bytes());
+    for owner in ["sync", "capture"] {
+        for case in [
+            "unchanged",
+            "newer head",
+            "pending write",
+            "head at the new spelling",
+        ] {
+            let (_scratch, mut store) = open_store();
+            let synced = |store: &mut EngineStore, object: &str, path: &str, text: &str| {
+                VersionedTextStore::new(store)
+                    .write_text(
+                        &WriteText {
+                            workspace_id: WS.to_owned(),
+                            version_id: VERSION.to_owned(),
+                            object_id: object.to_owned(),
+                            path: path.to_owned(),
+                            text: text.to_owned(),
+                            moment_id: format!("moment-{object}"),
+                            metadata_origin: "sync".to_owned(),
+                            metadata_summary: None,
+                            metadata_correlation_id: None,
+                            author_json: None,
+                            now_ms: 10,
+                            request_id: None,
+                        },
+                        &NO_FAULTS,
+                    )
+                    .expect("synced head");
+            };
+            let head = if case == "newer head" {
+                "newer\n"
+            } else {
+                disk
+            };
+            if owner == "sync" {
+                synced(&mut store, "synced", "notes.md", head);
+            } else {
+                VersionedTextStore::new(&mut store)
+                    .capture_ingest(&ingest("notes.md", head, 10), &NO_FAULTS)
+                    .expect("captured head");
+            }
+            if case == "head at the new spelling" {
+                synced(&mut store, "variant", "Notes.md", disk);
+            }
+            if case == "pending write" {
+                store
+                    .write_with(&NO_FAULTS, |tx| {
+                        let sha = dohc_engine_storage::put_binary_blob(tx, disk.as_bytes())?;
+                        dohc_engine_storage::enqueue_job(
+                            tx,
+                            &MaterializationJobSpec {
+                                job_id: "pending".to_owned(),
+                                workspace_id: WS.to_owned(),
+                                target_path: "notes.md".to_owned(),
+                                content_sha256: sha,
+                                preimage: Preimage::Absent,
+                                target_generation: 1,
+                                now_ms: 11,
+                            },
+                        )
+                    })
+                    .expect("pending write");
+            }
+            let input = CaptureRetire {
+                only_if_capture_origin: true,
+                ..retire("notes.md", 20)
+            };
+            let outcome = store.write_with(&NO_FAULTS, |tx| {
+                capture_retire_respelled_in_tx(tx, &input, "Notes.md", &disk_sha)
+            });
+            let live = VersionedTextStore::new(&mut store)
+                .read_text(WS, VERSION, "notes.md")
+                .expect("read head")
+                .is_some();
+            if case == "unchanged" {
+                let Ok(TxnOutcome::Committed(result)) = outcome else {
+                    panic!("{owner} {case}: {outcome:?}");
+                };
+                assert!(result.retired.is_some(), "{owner} {case}");
+                assert!(!live, "{owner} {case}");
+            } else {
+                assert!(
+                    matches!(outcome, Err(DomainError::WritePreconditionFailed { .. })),
+                    "{owner} {case}: {outcome:?}"
+                );
+                assert!(live, "{owner} {case}");
+            }
+        }
+    }
+}
