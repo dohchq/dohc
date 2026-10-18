@@ -42,7 +42,7 @@ test("packaged agent probe runs on the compiler's pinned Node and checks its clo
   const sourceRoot = join(root, "source");
   const compilerRoot = join(sourceRoot, "resources/app-compiler");
   await mkdir(compilerRoot, { recursive: true });
-  await writeFile(join(compilerRoot, "node.exe"), await readPinnedCompilerNode({ stagedNodePath: join(desktopRoot, "resources/app-compiler/node.exe") }));
+  await writeFile(join(compilerRoot, "node.exe"), await readPinnedCompilerNode({ platform: "win32", arch: "x64", stagedNodePaths: [join(desktopRoot, "resources/app-compiler/node.exe")] }));
   const staged = join(sourceRoot, "resources/agent-probe");
   assert.equal((await stageAgentProbe({ destination: staged, compilerRoot })).changed, true);
   assert.equal((await stageAgentProbe({ destination: staged, compilerRoot })).changed, false);
@@ -73,7 +73,7 @@ test("agent probe staging recompiles when only its compile recipe changes",
   t.after(() => rm(root, { recursive: true, force: true }));
   const compilerRoot = join(root, "app-compiler"), destination = join(root, "agent-probe");
   await mkdir(compilerRoot, { recursive: true });
-  await writeFile(join(compilerRoot, "node.exe"), await readPinnedCompilerNode({ stagedNodePath: join(desktopRoot, "resources/app-compiler/node.exe") }));
+  await writeFile(join(compilerRoot, "node.exe"), await readPinnedCompilerNode({ platform: "win32", arch: "x64", stagedNodePaths: [join(desktopRoot, "resources/app-compiler/node.exe")] }));
   // Copies of the real stager read the C# and relay bytes from desktopRoot, so only the recipe differs.
   const stager = (await readFile(new URL("./stage-agent-probe.mjs", import.meta.url), "utf8"))
     .replace("\"./stage-app-compiler.mjs\"", JSON.stringify(new URL("./stage-app-compiler.mjs", import.meta.url).href));

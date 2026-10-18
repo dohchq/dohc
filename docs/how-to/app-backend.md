@@ -39,7 +39,7 @@ The new action preserves existing custom source and records. Existing apps requi
 Creating the action does not publish an app or add the action to existing app grants.
 
 The desktop compiles Collection actions on Windows x64, macOS, and Linux.
-Opening or publishing an app that uses them currently requires the Windows x64 desktop build.
+Opening or publishing an app that uses them requires the Windows x64 desktop build, or macOS 13.5 or later.
 
 For custom rules, copy [the fundraiser example](../../examples/fundraiser/README.md) into the workspace.
 Review its synthetic event details and payment instructions before using it.

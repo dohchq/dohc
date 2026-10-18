@@ -487,7 +487,6 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
         <IconButton aria-label="Close publication" disabled={committing} onClick={props.onClose}><X size={14} aria-hidden /></IconButton>
       </header>
       <p className="m-0 break-all font-mono text-[12px] text-muted">{props.appRoot}</p>
-      <p className="m-0 text-[12px] text-muted">Publishing apps currently requires Windows x64.</p>
       {responsesBusy ? <p role="status" className="m-0 text-[13px] text-muted">Updating responses. Wait before closing.</p> : null}
       {notice ? <p role="status" className="m-0 text-[13px] text-ink">{notice}</p> : null}
       {error ? <p role="alert" className="m-0 text-[13px] text-danger">{error}</p> : null}
