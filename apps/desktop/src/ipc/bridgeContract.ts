@@ -101,6 +101,7 @@ import {
   VIEW_IDS,
 } from "../renderer/workbench/workbenchState";
 import {
+  DROP_IMPORT_LIMITS,
   EXPLORER_MENU_COMMANDS,
   MENU_COMMANDS,
   ENGINE_YDOC_SESSION_ID_MAX_CHARS,
@@ -919,9 +920,10 @@ export const ImportWorkspaceFilesPayload = z.object({
   // OS drag-in: absolute source paths resolved by the PRELOAD
   // (webUtils.getPathForFile) from a drop event. TRUST DELTA vs the dialog
   // flow: these are renderer-supplied — main re-validates every one through
-  // the picker-grade import path (importDroppedPaths: regular files only,
-  // never a registered workspace's .dohc) and the count is capped here.
-  droppedPaths: z.array(PATH_STRING).max(100).optional(),
+  // the picker-grade import path (importDroppedPaths: regular files and
+  // folders, never a link or a registered workspace's .dohc) and the count is
+  // capped here.
+  droppedPaths: z.array(PATH_STRING).max(DROP_IMPORT_LIMITS.items).optional(),
   // Destination folder for the import, workspace-relative ("" / absent =
   // root — the empty string is legal here, unlike PATH_STRING). Files land
   // where the user aimed: the folder that was dropped on, or the folder
@@ -947,6 +949,9 @@ export const ImportWorkspaceFilesResult = z.object({
   // retry, and importing the same sources again would copy the landed files
   // a second time.
   interrupted: z.literal(true).optional(),
+  // Folders the import created, present only when it created any. A drop of
+  // empty folders lands folders and no file, and the summary says so.
+  folders: z.number().int().min(1).optional(),
   // An ordinary import stopped at a failed copy: the source file's name, and
   // either the filesystem's error code or a refusal dohc makes itself
   // (`refusal`), with raw text that only goes into copied details.
@@ -955,7 +960,7 @@ export const ImportWorkspaceFilesResult = z.object({
       file: z.string().min(1).max(4096),
       code: z.string().min(1).max(64).optional(),
       detail: z.string().min(1).max(500).optional(),
-      refusal: z.enum(["dangling-link"]).optional(),
+      refusal: z.enum(["dangling-link", "changed"]).optional(),
     })
     .optional(),
 });

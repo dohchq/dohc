@@ -31,6 +31,14 @@ export interface ExplorerMenuScope {
   shareView: ShareViewWriteScope | null;
 }
 
+// Each platform's own name for its file manager, as its own apps word the
+// command. The Explorer menu and the workspace manager both show it.
+export function revealInFileManagerLabel(platform: string | undefined): string {
+  if (platform === "darwin") return "Show in Finder";
+  if (platform === "win32") return "Show in File Explorer";
+  return "Show in file manager";
+}
+
 const item = (label: string, id: ExplorerMenuCommand): ExplorerMenuEntry => ({
   kind: "item",
   label,
@@ -38,8 +46,9 @@ const item = (label: string, id: ExplorerMenuCommand): ExplorerMenuEntry => ({
 });
 const separator: ExplorerMenuEntry = { kind: "separator" };
 
-export function explorerMenuEntries(scope: ExplorerMenuScope): ExplorerMenuEntry[] {
+export function explorerMenuEntries(scope: ExplorerMenuScope, platform: string): ExplorerMenuEntry[] {
   const isSharedView = scope.shareView !== null;
+  const reveal = item(revealInFileManagerLabel(platform), "open-externally");
   // The four routed operations — create, rename, delete, import — offered
   // exactly where their handlers accept them. One rule, asked once, by the
   // menu, the command rows and the handlers.
@@ -61,7 +70,7 @@ export function explorerMenuEntries(scope: ExplorerMenuScope): ExplorerMenuEntry
       scope.pinned ? item("Unpin", "unpin") : item("Pin", "pin"),
       separator,
       item("Export as Zip…", "export-zip"),
-      item("Reveal in File Manager", "open-externally"),
+      reveal,
     ];
   }
 
@@ -101,6 +110,6 @@ export function explorerMenuEntries(scope: ExplorerMenuScope): ExplorerMenuEntry
     scope.pinned ? item("Unpin", "unpin") : item("Pin", "pin"),
     separator,
     item("Export as Zip…", "export-zip"),
-    item("Reveal in File Manager", "open-externally"),
+    reveal,
   ];
 }

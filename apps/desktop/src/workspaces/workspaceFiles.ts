@@ -29,14 +29,18 @@ import {
   lstat,
   mkdir,
   open,
+  opendir,
   readdir,
   realpath,
   rename,
   rmdir,
   stat,
+  unlink,
   writeFile,
+  type FileHandle,
 } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, relative } from "node:path";
+import { basename, dirname, isAbsolute, join, parse, relative, sep } from "node:path";
+import { DROP_IMPORT_LIMITS, DROP_IMPORT_REFUSALS } from "../ipc/channels";
 import { isInside } from "../security/pathContainment";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
@@ -380,6 +384,8 @@ export interface ImportCopyOutcome {
   skipped: number;
   interrupted?: true;
   stop?: ImportStop;
+  // Folders the import created, when it created any.
+  folders?: number;
 }
 
 // Which file stopped an import, and why. A filesystem failure carries its
@@ -390,7 +396,7 @@ export interface ImportStop {
   file: string;
   code?: string;
   detail?: string;
-  refusal?: "dangling-link";
+  refusal?: "dangling-link" | "changed";
 }
 
 // The longest error text an import result carries; the IPC contract holds
@@ -431,10 +437,12 @@ export async function resolveImportDestination(
       throw new Error(`Import destination is not a workspace folder: ${validated.normalized}`);
     }
   }
-  if (!isInside(realRoot, await realpath(absDir))) {
+  const realDir = await realpath(absDir);
+  if (!isInside(realRoot, realDir)) {
     throw new Error(`Import destination escapes the workspace: ${validated.normalized}`);
   }
-  return { absDir, relDir: validated.normalized };
+  // The real spelling, so each create can check its folder is still this one.
+  return { absDir: realDir, relDir: validated.normalized };
 }
 
 // Collision budget: past this many "name (N).ext" variants the source counts
@@ -669,10 +677,14 @@ function ladderStopReason(name: string, stop: LadderStop): string {
 // IO failure is a real error, not a skip — with one exception: a name the
 // filesystem cannot hold (ENAMETOOLONG, e.g. an extension longer than the
 // variant budget) skips that source instead of aborting the whole batch.
+// A dropped folder lands through the same ladder with `place` making the
+// folder, so "Photos" collides into "Photos (2)" as a file would.
 async function copyWithoutOverwrite(
   source: string,
   absDir: string,
   name: string,
+  place: (target: string) => Promise<unknown> = (target) =>
+    copyFile(source, target, constants.COPYFILE_EXCL),
 ): Promise<string | null> {
   // One budget, used both to shape the candidates and to classify a failure.
   // Two copies of this fact can disagree, and did.
@@ -683,8 +695,10 @@ async function copyWithoutOverwrite(
     const candidates =
       attempt === 1 ? [name] : collisionVariants(name, attempt, maxEntryChars);
     for (const [rung, candidate] of candidates.entries()) {
+      const target = join(absDir, candidate);
+      await assertRealParent(target);
       try {
-        await copyFile(source, join(absDir, candidate), constants.COPYFILE_EXCL);
+        await place(target);
         return candidate;
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
@@ -716,30 +730,61 @@ async function copyWithoutOverwrite(
 // the workspace (default: the root). Existing files are never overwritten;
 // a name collision retries as "name (2).ext" so imports are additive and
 // lossless — a source only counts as skipped when its basename is invalid or
-// the collision budget runs out.
-// Trusts its caller: copyFile follows symlinks and this does no lstat. Its only
-// trusted entrypoint is the main-process file-dialog import (paths the user
+// the collision budget runs out. A dropped file or folder lands the same way,
+// and is copied only while it is still what the drag-in screen saw.
+// Trusts a path string: copyFile follows symlinks and this does no lstat.
+// Strings come only from the main-process file-dialog import (paths the user
 // picked in a native dialog). The UNtrusted entrypoint (renderer-supplied OS
-// drag-in) is importDroppedPaths, which lstat-screens sources first — never
-// wire renderer input straight into here.
+// drag-in) is importDroppedPaths, whose screen hands over DroppedSources —
+// never wire renderer input straight into here as strings.
 export async function copyIntoWorkspace(
   rootPath: string,
-  absolutePaths: string[],
+  sources: readonly ImportSource[],
   targetDir?: string,
 ): Promise<ImportCopyOutcome> {
   const { absDir, relDir } = await resolveImportDestination(rootPath, targetDir);
   const imported: string[] = [];
+  const landedPath = (path: string) => (relDir === "" ? path : `${relDir}/${path}`);
   let skipped = 0;
-  for (const source of absolutePaths) {
-    const name = basename(source);
-    const validated = validateUserMaterializePath(name, { platform: process.platform });
-    if (!validated.ok) {
+  let folders = 0;
+  const created = () => (folders > 0 ? { folders } : {});
+  for (const source of sources) {
+    const sourcePath = typeof source === "string" ? source : source.source;
+    const name = basename(sourcePath);
+    if (!landsAsNamed(landedPath(name))) {
       skipped += 1;
       continue;
     }
+    // The file a failure names: the dropped item, or the entry inside it.
+    let current = name;
     let landed: string | null;
     try {
-      landed = await copyWithoutOverwrite(source, absDir, validated.normalized);
+      if (typeof source === "string") {
+        landed = await copyWithoutOverwrite(sourcePath, absDir, name);
+      } else if (source.entries === null) {
+        landed = await copyWithoutOverwrite(sourcePath, absDir, name, (target) =>
+          copyDroppedFile(sourcePath, source.identity, target, undefined));
+      } else {
+        await verifyDroppedFolder(sourcePath, source.identity);
+        landed = await copyWithoutOverwrite(sourcePath, absDir, name, (target) => mkdir(target));
+        if (landed !== null) {
+          folders += 1;
+          // The folder is new, so nothing inside it can collide.
+          for (const entry of source.entries) {
+            current = `${landed}/${entry.path}`;
+            const from = join(sourcePath, entry.path);
+            if (entry.folder) {
+              await verifyDroppedFolder(from, entry.identity);
+              await assertRealParent(join(absDir, current));
+              await mkdir(join(absDir, current));
+              folders += 1;
+            } else {
+              await copyDroppedFile(from, entry.identity, join(absDir, current), droppedEntryParent(source, entry));
+              imported.push(landedPath(current));
+            }
+          }
+        }
+      }
     } catch (error) {
       // The import stops at the first failed copy. Files already copied
       // stay, and the result names them.
@@ -748,37 +793,179 @@ export async function copyIntoWorkspace(
         .trim()
         .slice(0, IMPORT_STOP_TEXT_MAX_CHARS);
       const stop: ImportStop = {
-        file: validated.normalized,
+        file: current,
         ...(error instanceof DanglingLinkError
           ? { refusal: "dangling-link" as const }
-          : typeof code === "string" && code
-            ? { code }
-            : {}),
+          : error instanceof ImportPathChangedError
+            ? { refusal: "changed" as const }
+            : typeof code === "string" && code
+              ? { code }
+              : {}),
         ...(text ? { detail: text } : {}),
       };
       return {
         imported,
         skipped,
-        ...(imported.length > 0 ? { interrupted: true as const } : {}),
+        // Folders that landed are progress too: the same drop again would
+        // land beside them.
+        ...(imported.length > 0 || folders > 0 ? { interrupted: true as const } : {}),
         stop,
+        ...created(),
       };
     }
     if (landed === null) {
       skipped += 1;
       continue;
     }
-    imported.push(relDir === "" ? landed : `${relDir}/${landed}`);
+    if (typeof source === "string" || source.entries === null) imported.push(landedPath(landed));
   }
-  return { imported, skipped };
+  return { imported, skipped, ...created() };
 }
 
-// Defense in depth beyond the zod cap (bridgeContract): the handler refuses an
-// over-long batch itself, so a code path that ever reaches here without the
-// schema (a future internal caller, a test) still cannot flood the import.
-const MAX_IMPORT_PATHS = 100;
+// A destination path the validator keeps as it is. A name it rewrites, such
+// as cfg%2fevil or cfg\evil into cfg/evil, would land somewhere other than
+// the folder dohc checked, through any link already there.
+export function landsAsNamed(path: string): boolean {
+  const validated = validateUserMaterializePath(path, { platform: process.platform });
+  return validated.ok && validated.normalized === path;
+}
+
+// An entry of a dropped folder: its path below the folder, and the identities
+// lstat gave it and the folder it sits in when the screen saw it.
+export interface DroppedEntry {
+  path: string;
+  folder: boolean;
+  identity: FsEntryIdentity;
+  parent: FsEntryIdentity;
+}
+
+// A dropped file or folder after the screen: its real path, the identity
+// lstat gave it, and for a folder the entries below it, each folder before
+// its contents. A file has no entries.
+export interface DroppedSource {
+  source: string;
+  identity: FsEntryIdentity;
+  entries: DroppedEntry[] | null;
+}
+
+// What an import copies: a path the file dialog picked, or a screened drop.
+export type ImportSource = string | DroppedSource;
+
+// A file or folder the import checked is no longer what it checked: a
+// dropped one replaced by a link, or a destination folder replaced the same
+// way. Nothing is copied from it or into it.
+export class ImportPathChangedError extends Error {
+  constructor(path: string, options?: { cause: unknown }) {
+    super(`${basename(path)} changed after dohc checked it.`, options);
+  }
+}
+
+// A screened folder: where it is and what the screen saw there.
+export interface DroppedFolderCheck {
+  path: string;
+  identity: FsEntryIdentity;
+}
+
+// The folder a dropped entry sits in.
+export function droppedEntryParent(source: DroppedSource, entry: DroppedEntry): DroppedFolderCheck {
+  const at = entry.path.lastIndexOf("/");
+  return { path: at < 0 ? source.source : join(source.source, entry.path.slice(0, at)), identity: entry.parent };
+}
+
+// A screened folder is still the folder the screen saw, at the real path the
+// screen joined, so no link stands in for it or for a folder inside the drop
+// above it. The dropped item's own real path is fixed when the screen first
+// sees it, after the check on the links that lead to it. Node has no openat,
+// so every check sits next to the step it guards: a folder swapped and put
+// back between two adjacent calls is the window left.
+export async function verifyDroppedFolder(path: string, identity: FsEntryIdentity): Promise<void> {
+  const now = await lstat(path, { bigint: true });
+  if (!now.isDirectory() || sameFsEntry(identity, now) !== "same" || !samePath(await realpath(path), path)) {
+    throw new ImportPathChangedError(path);
+  }
+}
+
+// The same path as this filesystem spells it. HFS+ stores names decomposed,
+// so on macOS a folder dohc made from a composed name such as Café reads back
+// as Cafe plus a combining accent.
+function samePath(real: string, expected: string): boolean {
+  return process.platform === "darwin" ? real.normalize("NFD") === expected.normalize("NFD") : real === expected;
+}
+
+// The folder a create lands in is still the real folder dohc made or checked.
+// The create resolves its path again, so a link put there would carry it out
+// of the workspace.
+async function assertRealParent(target: string): Promise<void> {
+  const parent = dirname(target);
+  if (!samePath(await realpath(parent), parent)) throw new ImportPathChangedError(parent);
+}
+
+// Opens a screened file only while it is still the file the screen saw.
+// O_NOFOLLOW refuses a link put in its place, O_NONBLOCK keeps a FIFO from
+// holding the open, and the identity of the open handle must match the scan.
+// The folder it sits in is checked again after the open, before any read.
+export async function openDroppedFile(
+  path: string,
+  identity: FsEntryIdentity,
+  parent: DroppedFolderCheck | undefined,
+): Promise<FileHandle> {
+  let handle: FileHandle;
+  try {
+    handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ELOOP") throw new ImportPathChangedError(path, { cause: error });
+    throw error;
+  }
+  try {
+    const now = await handle.stat({ bigint: true });
+    if (!now.isFile() || sameFsEntry(identity, now) !== "same") throw new ImportPathChangedError(path);
+    if (parent) await verifyDroppedFolder(parent.path, parent.identity);
+    return handle;
+  } catch (error) {
+    await handle.close();
+    throw error;
+  }
+}
+
+// Copies from the handle the identity check opened into a file this creates,
+// so nothing reopens the source path. The copy keeps the file's permissions.
+// A copy that fails removes the file it created, so no part of a file is left
+// for the person to find, and the failure stays the one reported.
+async function copyDroppedFile(
+  path: string,
+  identity: FsEntryIdentity,
+  target: string,
+  parent: DroppedFolderCheck | undefined,
+): Promise<void> {
+  const from = await openDroppedFile(path, identity, parent);
+  try {
+    await assertRealParent(target);
+    const to = await open(target, "wx");
+    const created = await to.stat({ bigint: true }).catch(() => null);
+    try {
+      const buffer = Buffer.allocUnsafe(1024 * 1024);
+      for (let read; (read = (await from.read(buffer, 0, buffer.length)).bytesRead) > 0;) {
+        // A write can take fewer bytes than it was given.
+        for (let written = 0; written < read;) {
+          written += (await to.write(buffer, written, read - written)).bytesWritten;
+        }
+      }
+      await to.chmod(Number((await from.stat()).mode) & 0o777);
+      await to.close();
+    } catch (error) {
+      await to.close().catch(() => undefined);
+      // Only the file this copy created, never one put at its path since.
+      const now = await lstat(target, { bigint: true }).catch(() => null);
+      if (created && now && sameFsEntry(created, now) === "same") await unlink(target).catch(() => undefined);
+      throw error;
+    }
+  } finally {
+    await from.close();
+  }
+}
 
 // OS drag-in import: the screen below, then the picker-grade copy — the
-// same basename-only, COPYFILE_EXCL `copyIntoWorkspace` the import dialog
+// same basename-only, never-overwriting `copyIntoWorkspace` the import dialog
 // uses. A share view runs the same screen and writes its engine store through
 // ShareViewFiles instead.
 export async function importDroppedPaths(
@@ -787,16 +974,18 @@ export async function importDroppedPaths(
   registeredRoots: string[],
   targetDir?: string,
 ): Promise<ImportCopyOutcome> {
-  const screened = await screenDroppedPaths(absolutePaths, registeredRoots);
+  const { relDir } = await resolveImportDestination(rootPath, targetDir);
+  const screened = await screenDroppedPaths(absolutePaths, registeredRoots, relDir);
   const outcome = await copyIntoWorkspace(rootPath, screened.usable, targetDir);
   return { ...outcome, skipped: outcome.skipped + screened.refused };
 }
 
 // The drag-in screen, exported because a share view's import needs the same
 // one before it writes its engine store — the destination differs, the trust
-// question does not. `refused` counts the sources it dropped: the user handed
-// them over and deserves to see they did not land, same as a collision-budget
-// skip inside the copy.
+// question does not. `relDir` is the validated destination folder, so each
+// name is checked where it will land. `refused` counts the sources it
+// dropped: the user handed them over and deserves to see they did not land,
+// same as a collision-budget skip inside the copy.
 //
 // TRUST DELTA vs copyIntoWorkspace's dialog path: these
 // absolute source paths are RENDERER-supplied (webUtils.getPathForFile in the
@@ -806,32 +995,41 @@ export async function importDroppedPaths(
 // inherent once file-write IPCs exist at all (renderer-compromise is already
 // game-over) and a genuine user drag may legitimately include any file the
 // user owns, so we do not gate by location. We DO bound it:
-//   - count is capped here (not just at the zod boundary);
-//   - only real regular files import — a FINAL-component symlink is refused
-//     before it is followed (lstat the original source, never realpath-then-
-//     isFile, which would promote a planted symlink-to-secret under the link's
-//     own innocuous name); directories and special files are skipped;
+//   - count is capped here (not just at the zod boundary), and larger caps
+//     count every entry inside a dropped folder, landed or left out;
+//   - only real regular files and folders import — a FINAL-component symlink
+//     is refused before it is followed (lstat the original source, never
+//     realpath-then-isFile, which would promote a planted symlink-to-secret
+//     under the link's own innocuous name); special files are skipped, and a
+//     folder's walk never follows a link inside it;
+//   - every entry keeps the identity lstat gave it, so a file or folder
+//     another process swaps for a link after the screen is never copied;
 //   - a source whose CANONICAL path is inside any registered workspace's.dohc
 //     is refused (the check runs on realpath(source), so an ancestor symlink
-//     cannot smuggle a metadata source past it).
-// Explicit residual: a real regular file reached
-// through a symlinked ANCESTOR (e.g. drop `/stage/link/id_rsa` where
-// `link -> ~/.ssh`) still imports — lstat refuses only the final component, and
-// realpath then canonicalizes to the secret. This grants a compromised renderer
-// nothing beyond the residual above (it could just name `~/.ssh/id_rsa`
-// directly), and the only general guard — refusing every symlinked ancestor —
-// would false-reject legitimate drags through SYSTEM symlinks (macOS
-// /tmp -> /private/tmp, /var -> /private/var), i.e. silent import loss for zero
-// security gain. The real defense if this matters is a visible import-confirm
-// quarantine (deferred — needs product sign-off); until then it is accepted and
-// named here.
+//     cannot smuggle a metadata source past it);
+//   - a link on the way to a dropped item decides where the item really is,
+//     so it must belong to root or to this user. Another user's link, such as
+//     `/Users/Shared/evil/proj -> /Users/victim`, could otherwise turn a drop
+//     of `evil/proj/Documents` into this user's own Documents, and every
+//     later check would verify that target. Root owns the system links, such
+//     as macOS /tmp -> /private/tmp, so legitimate drags through them import.
+// Residuals: a link this user or root owns still leads where it leads, which
+// grants a compromised renderer nothing beyond the residual above (it could
+// just name `~/.ssh/id_rsa` directly). Another user's link swapped in and out
+// around the screen's adjacent checks is the window left. Windows has no
+// owner to compare here.
+// The real defense if that matters is a visible import-confirm quarantine
+// (deferred — needs product sign-off); until then it is accepted and named
+// here.
 export async function screenDroppedPaths(
   absolutePaths: string[],
   registeredRoots: string[],
-): Promise<{ usable: string[]; refused: number }> {
-  if (absolutePaths.length > MAX_IMPORT_PATHS) {
-    throw new Error(`Too many files dropped at once (max ${MAX_IMPORT_PATHS})`);
-  }
+  relDir: string,
+): Promise<{ usable: DroppedSource[]; refused: number }> {
+  // Defense in depth beyond the zod cap (bridgeContract): the handler refuses
+  // an over-long batch itself, so a code path that ever reaches here without
+  // the schema (a future internal caller, a test) still cannot flood the import.
+  if (absolutePaths.length > DROP_IMPORT_LIMITS.items) throw new Error(DROP_IMPORT_REFUSALS.items);
   const realMetadataRoots: string[] = [];
   for (const root of registeredRoots) {
     try {
@@ -842,30 +1040,138 @@ export async function screenDroppedPaths(
       // metadata source.
     }
   }
-  const usable: string[] = [];
+  const usable: DroppedSource[] = [];
+  let refused = 0;
+  // What the drop would land, and what its folders hold that it leaves out.
+  // A drop over either cap is refused before anything is copied, never
+  // imported in part.
+  let landing = 0;
+  let leftOut = 0;
+  const count: DropCount = {
+    land: () => {
+      landing += 1;
+      if (landing > DROP_IMPORT_LIMITS.entries) throw new Error(DROP_IMPORT_REFUSALS.entries);
+    },
+    leaveOut: () => {
+      leftOut += 1;
+      if (leftOut > DROP_IMPORT_LIMITS.skipped) throw new Error(DROP_IMPORT_REFUSALS.skipped);
+    },
+  };
+  const prefix = relDir === "" ? "" : `${relDir}/`;
   for (const source of absolutePaths) {
-    if (!isAbsolute(source)) continue;
-    let real: string;
-    try {
-      // lstat the original source (not realpath(source)): lstat does not follow
-      // the final component, so a dropped symlink is observed AS a symlink and
-      // refused — never realpath-then-isFile, which would promote a planted
-      // symlink-to-secret. Only a real, regular file imports — directories,
-      // sockets, devices, FIFOs, and final-component symlinks all fall through.
-      // (Ancestor symlinks are the named residual above; realpath below
-      // canonicalizes for the .dohc-containment gate, which therefore holds
-      // even when an ancestor link was traversed.)
-      const linkStat = await lstat(source);
-      if (linkStat.isSymbolicLink() || !linkStat.isFile()) continue;
-      real = await realpath(source);
-    } catch {
+    const screened = isAbsolute(source) ? await screenDroppedSource(source, realMetadataRoots) : null;
+    const destination = screened ? `${prefix}${basename(screened.source)}` : "";
+    if (screened === null || !landsAsNamed(destination)) {
+      refused += 1;
       continue;
     }
-    const insideMetadata = realMetadataRoots.some((root) => isInside(root, real));
-    if (insideMetadata) continue;
-    usable.push(real);
+    count.land();
+    if (screened.entries !== null) {
+      refused += await screenDroppedFolder(screened.source, screened.identity, destination, "", screened.entries, count);
+    }
+    usable.push(screened);
   }
-  return { usable, refused: absolutePaths.length - usable.length };
+  return { usable, refused };
+}
+
+interface DropCount {
+  land(): void;
+  leaveOut(): void;
+}
+
+// A dropped regular file or folder at its real path, or null for anything else.
+async function screenDroppedSource(
+  source: string,
+  realMetadataRoots: string[],
+): Promise<DroppedSource | null> {
+  try {
+    // lstat the original source (not realpath(source)): lstat does not follow
+    // the final component, so a dropped symlink is observed AS a symlink and
+    // refused — never realpath-then-isFile, which would promote a planted
+    // symlink-to-secret. Only a real regular file or folder imports —
+    // sockets, devices, FIFOs, and final-component symlinks all fall through.
+    // Links above it must belong to root or this user, and the real path
+    // must read the same on both sides of that check: a link swapped in and
+    // out around those adjacent calls is the window left. realpath also
+    // canonicalizes for the .dohc-containment gate, which therefore holds
+    // even when an ancestor link was traversed.
+    const linkStat = await lstat(source, { bigint: true });
+    const folder = linkStat.isDirectory();
+    if (linkStat.isSymbolicLink() || (!linkStat.isFile() && !folder)) return null;
+    const real = await realpath(source);
+    if (!(await linksAreOwnedHere(source))) throw new ForeignDropLinkError(source);
+    if ((await realpath(source)) !== real) throw new ImportPathChangedError(source);
+    if (realMetadataRoots.some((root) => isInside(root, real))) return null;
+    return { source: real, identity: { dev: linkStat.dev, ino: linkStat.ino }, entries: folder ? [] : null };
+  } catch (error) {
+    if (error instanceof ForeignDropLinkError || error instanceof ImportPathChangedError) throw error;
+    return null;
+  }
+}
+
+// A dropped item reached through a link another user owns.
+class ForeignDropLinkError extends Error {
+  constructor(source: string) {
+    super(`dohc did not import ${basename(source)}, because a link another user owns leads to it. Drop it from a folder you own.`);
+  }
+}
+
+// Whether every link on the path as spelled belongs to root or to this user.
+// Each prefix keeps the spelling, so `..` resolves through links as the
+// system resolves it. Windows has no owner to compare here.
+async function linksAreOwnedHere(path: string): Promise<boolean> {
+  const uid = process.getuid?.();
+  if (uid === undefined) return true;
+  const { root } = parse(path);
+  let at = root;
+  for (const part of path.slice(root.length).split(sep).filter(Boolean)) {
+    at = at === root ? `${root}${part}` : `${at}${sep}${part}`;
+    const info = await lstat(at);
+    if (info.isSymbolicLink() && info.uid !== 0 && info.uid !== uid) return false;
+  }
+  return true;
+}
+
+// The folder's contents, as the workspace listing walks them: links are never
+// followed, and names the path floor excludes, such as .DS_Store and .git,
+// stay behind. Every entry left behind counts toward the drop's cap, but only
+// a link, a special file or a name that cannot land counts as skipped. Each
+// name is checked below `destination`, where it lands, so a nested
+// shared-with-me is an ordinary folder. Returns the skipped count.
+async function screenDroppedFolder(
+  dir: string,
+  identity: FsEntryIdentity,
+  destination: string,
+  prefix: string,
+  entries: DroppedEntry[],
+  count: DropCount,
+): Promise<number> {
+  await verifyDroppedFolder(dir, identity);
+  let refused = 0;
+  for await (const dirent of await opendir(dir)) {
+    if (hasEngineIgnoredSegment(dirent.name, process.platform)) {
+      count.leaveOut();
+      continue;
+    }
+    const path = prefix ? `${prefix}/${dirent.name}` : dirent.name;
+    const info = await lstat(join(dir, dirent.name), { bigint: true }).catch(() => null);
+    // The entry was seen through the folder the screen checked, not a link
+    // swapped in for it.
+    await verifyDroppedFolder(dir, identity);
+    const folder = info?.isDirectory() === true;
+    if (!info || info.isSymbolicLink() || (!info.isFile() && !folder) || !landsAsNamed(`${destination}/${path}`)) {
+      count.leaveOut();
+      refused += 1;
+      continue;
+    }
+    count.land();
+    const entry = { path, folder, identity: { dev: info.dev, ino: info.ino }, parent: identity };
+    entries.push(entry);
+    if (folder) {
+      refused += await screenDroppedFolder(join(dir, dirent.name), entry.identity, destination, path, entries, count);
+    }
+  }
+  return refused;
 }
 
 // Creates a folder with the createFile containment sandwich. Exclusive creates

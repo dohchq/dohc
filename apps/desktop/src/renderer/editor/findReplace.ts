@@ -1,5 +1,6 @@
 // In-document find & replace — Cmd/Ctrl+F opens a find bar, and ⌥⌘F on macOS
-// or Ctrl+H elsewhere opens it with the replace row expanded. Search state
+// or Ctrl+H elsewhere opens it with the replace row expanded. ⌘G on macOS or
+// F3 elsewhere finds the next match, with Shift the previous one. Search state
 // (query, case sensitivity, active-match index, the replace row's
 // open/value) lives entirely in a ProseMirror plugin, not React state: the
 // plugin is the single source of truth, `FindReplaceBar.tsx` just renders
@@ -24,6 +25,7 @@ import { Extension, type Editor } from '@tiptap/core'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { Plugin, PluginKey, type EditorState, type Transaction } from '@tiptap/pm/state'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
+import { matchesShortcut } from '../../shortcuts/shortcutRegistry'
 
 export const findReplaceKey = new PluginKey<FindReplaceState>('dohc-find-replace')
 
@@ -194,6 +196,16 @@ export function findReplaceReducer(
   }
 }
 
+/** ⌘G and ⇧⌘G on macOS, F3 and Shift+F3 elsewhere. */
+export function findStepForKey(
+  event: Pick<KeyboardEvent, 'key' | 'code' | 'metaKey' | 'ctrlKey' | 'shiftKey' | 'altKey'>,
+  platform = window.dohcDesktop?.platform,
+): 'next' | 'prev' | null {
+  if (matchesShortcut(event, 'find-again-next', platform)) return 'next'
+  if (matchesShortcut(event, 'find-again-previous', platform)) return 'prev'
+  return null
+}
+
 /** Build a replace-active transaction. Returns null when there's no active
  *  match. Plain `Transaction#insertText` replacement — it inherits marks
  *  from the replaced range the way ProseMirror normally does for a typed
@@ -257,6 +269,14 @@ export function makeFindReplacePlugin() {
     props: {
       decorations(state) {
         return buildFindDecorations(state)
+      },
+      // Find again works from the document while the bar has a query.
+      handleKeyDown(view, event) {
+        const step = findStepForKey(event)
+        const find = findReplaceKey.getState(view.state)
+        if (!step || !find?.open || !find.query) return false
+        view.dispatch(view.state.tr.setMeta(findReplaceKey, { type: step } satisfies FindReplaceAction))
+        return true
       },
     },
   })

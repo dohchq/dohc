@@ -18,6 +18,7 @@ import { Titlebar, workspaceName } from "./Titlebar";
 import { IconButton, SecondaryButton } from "./ui/controls";
 import { Menu } from "./ui/Menu";
 import { useCommitOnRelease } from "./workbench/useCommitOnRelease";
+import { revealInFileManagerLabel } from "../workspaces/explorerMenu";
 
 // The workspace manager. It is the first-run screen and the "manage
 // workspaces" screen in one: with nothing registered it is only the routes
@@ -167,7 +168,7 @@ function WorkspaceRow(props: {
             </IconButton>
           )}
           items={[
-            { id: "reveal", label: "Reveal in folder", onSelect: props.onReveal },
+            { id: "reveal", label: revealInFileManagerLabel(window.dohcDesktop?.platform), onSelect: props.onReveal },
             { id: "forget", label: "Forget", danger: true, onSelect: props.onForget },
           ]}
         />
