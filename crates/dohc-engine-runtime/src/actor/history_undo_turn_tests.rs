@@ -17,6 +17,15 @@ fn probes() -> &'static Mutex<std::collections::HashMap<String, Probe>> {
     static PROBES: OnceLock<Mutex<std::collections::HashMap<String, Probe>>> = OnceLock::new();
     PROBES.get_or_init(Mutex::default)
 }
+pub(super) fn record_plan(request: &str, elapsed: Duration) {
+    probes()
+        .lock()
+        .unwrap()
+        .entry(request.to_owned())
+        .or_default()
+        .times
+        .push(elapsed);
+}
 pub(super) fn record(request: &str, elapsed: Duration) {
     let (hook, notify) = {
         let mut probes = probes().lock().unwrap();

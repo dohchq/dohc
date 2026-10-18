@@ -235,11 +235,12 @@ impl ActorHandle {
                 .await?;
             drop((_sessions, _capture));
             let disk_root = root.clone();
-            let prepared = tokio::task::spawn_blocking(move || {
+            let (prepared, body) = tokio::task::spawn_blocking(move || {
                 for member in &prepared.members {
                     disk_check(&disk_root, member)?;
                 }
-                Ok::<_, RuntimeError>(prepared)
+                let body = serde_json::to_string(&prepared).map_err(|_| corrupt())?;
+                Ok::<_, RuntimeError>((prepared, body))
             })
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)??;
@@ -247,14 +248,18 @@ impl ActorHandle {
             let f = faults.clone();
             self.run(move |store,_| {
                 if let Some((plan,_,_)) = store.read_with(|conn| load(conn,&p.workspace,&p.operation,&p.request,p.author.as_deref()))? { return Ok(plan); }
-                let body = serde_json::to_string(&p).map_err(|_| corrupt())?;
-                match store.write_with(f.as_ref(),|tx| -> Result<(),RuntimeError> {
+                #[cfg(test)]
+                let started = Instant::now();
+                let outcome = store.write_with(f.as_ref(),|tx| -> Result<(),RuntimeError> {
                     let busy: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM engine_requests p JOIN engine_requests r ON r.request_id=json_extract(CASE WHEN p.kind='history-undo-plan' THEN p.payload_hash ELSE '{}' END,'$.request') WHERE p.kind='history-undo-plan' AND r.kind='history-undo-pending' AND json_extract(CASE WHEN p.kind='history-undo-plan' THEN p.payload_hash ELSE '{}' END,'$.workspace')=?1 AND json_extract(CASE WHEN p.kind='history-undo-plan' THEN p.payload_hash ELSE '{}' END,'$.operation')=?2)",params![p.workspace,p.operation],|r|r.get(0)).map_err(StorageError::corrupt_public)?;
                     if busy { return Err(DomainError::UndoRefused {path:p.operation.clone(),reason:"Undo in progress"}.into()); }
                     tx.execute("INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) VALUES(?1,?2,0,?3,'history-undo-pending')",params![p.request,undo_request_fingerprint(&p.workspace,&p.operation,p.author.as_deref()),now]).map_err(StorageError::persist_public)?;
                     tx.execute("INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) VALUES(?1,?2,0,?3,'history-undo-plan')",params![undo_progress_key(&p.request),body,now]).map_err(StorageError::persist_public)?;
                     Ok(())
-                })? { TxnOutcome::Committed(()) => Ok(p), TxnOutcome::Crashed {..} => Err(RuntimeError::OperationCrashed) }
+                });
+                #[cfg(test)]
+                tests::record_plan(&p.request,started.elapsed());
+                match outcome? { TxnOutcome::Committed(()) => Ok(p), TxnOutcome::Crashed {..} => Err(RuntimeError::OperationCrashed) }
             }).await?
         };
         let plan = Arc::new(plan);
