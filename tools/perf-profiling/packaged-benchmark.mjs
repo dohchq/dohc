@@ -4,7 +4,7 @@ import { acquireProfilingSlot } from './admission.mjs';
 import { summarize } from './summarize-packaged-benchmark.mjs';
 import { DEFAULT_MARGIN } from './compare-packaged-benchmark.mjs';
 import { compareDocumentSize, documentCaseBlocked, documentExtensionTarget } from './document-size-summary.mjs';
-import { documentFixture, documentMatrix, runtimeEstimate, pairsForCase, documentControlFiles, DOCUMENT_CONTROL_OPENS } from './document-size-fixtures.mjs';
+import { documentFixture, documentMatrix, runtimeEstimate, pairsForCase, documentControlFiles, DOCUMENT_CONTROLS, DOCUMENT_CONTROL_OPENS } from './document-size-fixtures.mjs';
 import { measurePackagedDocument } from './packaged-document-size.mjs';
 import { startWindowController, waitForVisibleWindow } from './window-controller.mjs';
 import { parseOptions, createEvidenceDirectory, benchmarkEnvironment, packagedLaunchArgs, usage } from './packaged-benchmark-options.mjs';
@@ -872,9 +872,9 @@ async function soak(instance, data, runDir) {
 
 // One cold open of each control per fresh launch, until each has its forty.
 async function documentControlOpens(page) {
-  receipt.documentControls ??= {legacyOpenMs:[],linksOpenMs:[]};
+  receipt.documentControls ??= Object.fromEntries(DOCUMENT_CONTROLS.map(([,key])=>[key,[]]));
   if(receipt.documentControls.legacyOpenMs.length>=DOCUMENT_CONTROL_OPENS) return;
-  for(const [name,key] of [['large.md','legacyOpenMs'],['links.md','linksOpenMs']]) {
+  for(const [name,key] of DOCUMENT_CONTROLS) {
     receipt.documentControls[key].push((await openDoc(page,name)).openObservedMs);
     await openDoc(page,'small.md');
   }

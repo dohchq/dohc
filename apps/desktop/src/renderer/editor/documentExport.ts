@@ -41,7 +41,9 @@ export function resolveDocumentTitle(markdown: string, fallbackTitle: string): s
 // Selectors mirror the class/data-attribute names the custom tiptap nodes in
 // dohc-markdown-extensions.ts actually render (dohc-wikilink-pill, dohc-callout,
 // dohc-highlight, [data-type="taskItem"]) so structure fidelity survives
-// the export.
+// the export. A wikilink keeps the editor's reference chip shape (ui/refElement.ts):
+// an inset with a hairline and a 4px radius, in the body face, without the
+// kind glyph.
 const EXPORT_STYLE_CSS = `
   :root {
     color-scheme: light;
@@ -128,14 +130,12 @@ const EXPORT_STYLE_CSS = `
     padding: 0 2px;
   }
   .dohc-wikilink-pill {
-    display: inline-flex;
-    align-items: center;
     border: 1px solid var(--line);
-    border-radius: 999px;
+    border-radius: 4px;
     background: var(--panel-2);
-    padding: 0 8px;
-    font-family: 'IBM Plex Mono', ui-monospace, Consolas, monospace;
-    font-size: 0.8em;
+    padding: 1px 7px;
+    font-size: 0.87em;
+    white-space: nowrap;
     color: var(--ink);
   }
   .dohc-callout {

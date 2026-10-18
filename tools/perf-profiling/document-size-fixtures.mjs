@@ -57,20 +57,31 @@ export function documentFixture(mib, shape, { structural = false } = {}) {
   };
 }
 
+// Each control document and the receipt key of its cold opens. links.md holds 500 Markdown links;
+// wikilinks.md holds the same 500 targets as wikilinks, which the editor draws as reference chips.
+export const DOCUMENT_CONTROLS = [
+  ['large.md', 'legacyOpenMs'],
+  ['links.md', 'linksOpenMs'],
+  ['wikilinks.md', 'wikilinkOpenMs'],
+];
+
 export function documentControlFiles() {
   const targets = Array.from({ length: 500 }, (_, n) => ({
     name: 'linked/target-' + n + '.md',
     text: '# Linked target ' + n + '\n',
   }));
-  const paragraphs = Array.from(
-    { length: 5000 },
-    (_, n) =>
-      'Paragraph ' +
-      n +
-      '. Performance text.' +
-      (n % 10 === 0 ? ' [Link ' + n / 10 + '](' + targets[n / 10].name + ')' : ''),
-  );
-  return [{ name: 'links.md', text: '# Workspace 0 large links\n\n' + paragraphs.join('\n\n') + '\n' }, ...targets];
+  const linked = (title, link) => {
+    const paragraphs = Array.from(
+      { length: 5000 },
+      (_, n) => 'Paragraph ' + n + '. Performance text.' + (n % 10 === 0 ? ' ' + link(n / 10) : ''),
+    );
+    return '# Workspace 0 large ' + title + '\n\n' + paragraphs.join('\n\n') + '\n';
+  };
+  return [
+    { name: 'links.md', text: linked('links', (n) => '[Link ' + n + '](' + targets[n].name + ')') },
+    { name: 'wikilinks.md', text: linked('wikilinks', (n) => '[[' + targets[n].name.slice(0, -3) + ']]') },
+    ...targets,
+  ];
 }
 
 export function documentMatrix(options) {

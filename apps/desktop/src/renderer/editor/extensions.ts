@@ -3,10 +3,12 @@ import {
   DohcImage,
   DohcMathBlock,
   DohcMathInline,
+  DohcWikilink,
   dohcMarkdownExtensions,
 } from '@dohc/ydoc-projection/markdown-extensions'
 import { makeImageNodeView, type ImageSrcContext } from './imageSrc'
 import { makeMathNodeView } from './mathRender'
+import { wikilinkNodeView } from './wikilinkPlugin'
 
 // Per-editor storage for the image node view. `resolveContext` is set by the
 // desktop editor (MarkdownEditor's onBeforeCreate) to the live workspace +
@@ -59,7 +61,15 @@ const DesktopMathBlock = DohcMathBlock.extend({
   },
 })
 
-/** The projection's Markdown extensions, with the desktop's image and math views. */
+// The pill the wikilink decorations also draw. The projection's renderHTML
+// stays the node's clipboard and export form.
+const DesktopWikilink = DohcWikilink.extend({
+  addNodeView() {
+    return ({ node }) => wikilinkNodeView(node)
+  },
+})
+
+/** The projection's Markdown extensions, with the desktop's image, math and wikilink views. */
 export const desktopMarkdownExtensions: AnyExtension[] = dohcMarkdownExtensions.map(
   (extension) =>
     extension === DohcImage
@@ -68,5 +78,7 @@ export const desktopMarkdownExtensions: AnyExtension[] = dohcMarkdownExtensions.
         ? DesktopMathInline
         : extension === DohcMathBlock
           ? DesktopMathBlock
-          : extension,
+          : extension === DohcWikilink
+            ? DesktopWikilink
+            : extension,
 )

@@ -1,21 +1,18 @@
 import { fileKindForPath, type FileKindRecord } from "@dohc/workspace-contracts/kinds";
 import { basenameOf, dirnameOf } from "../path";
 import { KindGlyph } from "./KindGlyph";
+import { REF_HOVER, REF_NAME, REF_SELECTED, refChipClass } from "./refElement";
 
 // One reference to a workspace file, the same chip wherever it appears: chat,
-// Linked mentions, Search, History and the link picker. The kind glyph, the
-// display name (a Markdown file's title when the caller knows it, otherwise
-// the basename with its extension), then the folder when the caller asks for
-// it. A dashed border marks a target that does not resolve.
+// Linked mentions, Search, History, the link picker and, through refElement,
+// the editor. The kind glyph, the display name (a Markdown file's title when
+// the caller knows it, otherwise the basename with its extension), then the
+// folder when the caller asks for it. A dashed border marks a target that
+// does not resolve.
 //
 // With `onOpen` the chip is a button named for what it opens. Without it the
 // chip is a plain span, so a row that is already a button can hold it and the
-// row stays the one control. Hover and selected lay the ink fills over the
-// inset surface instead of replacing it.
-const CHIP =
-  "inline-flex h-[22px] max-w-full min-w-0 items-center gap-[5px] whitespace-nowrap rounded border bg-panel-2 px-[7px] align-[1px] text-[13px] leading-none text-ink";
-const HOVER = "transition-colors duration-75 hover:bg-[image:linear-gradient(var(--color-hover),var(--color-hover))]";
-const SELECTED = "bg-[image:linear-gradient(var(--color-selected),var(--color-selected))]";
+// row stays the one control.
 
 export function Ref(props: {
   path: string;
@@ -43,13 +40,11 @@ export function Ref(props: {
   // words, the path stands in for the folder, so a title or a truncated name
   // loses nothing.
   const spelled = props.onOpen !== undefined || !props.path || (props.title === undefined && (dir === "" || props.folder));
-  const className = `${CHIP} ${props.missing ? "border-dashed border-subtle/50" : "border-line"} ${
-    props.selected ? SELECTED : ""
-  }`;
+  const className = `${refChipClass(props.missing)} ${props.selected ? REF_SELECTED : ""}`;
   const content = (
     <>
       <KindGlyph kind={props.kind ?? fileKindForPath(props.path)} size={13} className="text-muted" />
-      <span className="min-w-0 truncate">
+      <span className={REF_NAME}>
         {name}
         {heading ? <span className="text-muted">{heading}</span> : null}
       </span>
@@ -70,7 +65,7 @@ export function Ref(props: {
         aria-label={props.label ?? `Open ${props.path}${props.heading ? ` at #${props.heading}` : ""}`}
         title={target}
         onClick={props.onOpen}
-        className={`${className} ${HOVER} cursor-pointer`}
+        className={`${className} ${REF_HOVER}`}
       >
         {content}
       </button>

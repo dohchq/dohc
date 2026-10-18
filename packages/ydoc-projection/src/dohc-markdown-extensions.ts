@@ -282,7 +282,7 @@ const DohcEscapedPunctuation = Node.create({
     `\\${escapeMarkdownLineBreaks(String(node.attrs?.value ?? ''))}`,
 })
 
-const DohcWikilink = Node.create({
+export const DohcWikilink = Node.create({
   name: 'wikilink',
   priority: 1000,
   inline: true,

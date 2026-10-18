@@ -390,6 +390,14 @@ export function compareDocumentSize(baseline, candidate, margin, { includeSoak =
       p,
       DOCUMENT_CONTROL_OPENS,
     );
+    relative(
+      'control',
+      '500-wikilink open',
+      candidate.documentSize?.controls?.wikilinkOpenMs,
+      baseline.documentSize?.controls?.wikilinkOpenMs,
+      p,
+      DOCUMENT_CONTROL_OPENS,
+    );
   }
   for (const mib of DOCUMENT_SIZES) {
     const start = checks.length;

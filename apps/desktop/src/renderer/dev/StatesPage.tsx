@@ -35,6 +35,7 @@ import { BlockMenu } from "../editor/blockControls";
 import { UrlPasteOfferRow } from "../editor/UrlPasteOffer";
 import { SlashCommandMenu, type SlashCommandState } from "../editor/slashCommands";
 import { buildTableMenu, type TableMenuRow } from "../editor/tableControls";
+import { wikilinkPill } from "../editor/wikilinkPlugin";
 import { OverlayFrame } from "../Overlay";
 import { CollectionUnavailable } from "../TransactionalCollectionPage";
 import { CloudSyncSettings, ProtectedFilesRow, type CloudSettings } from "../settings/CloudSyncSettings";
@@ -50,6 +51,7 @@ import { ObjectGlyph, type ObjectKind } from "../ui/KindGlyph";
 import { MENU_FRAME, MENU_SEPARATOR, Menu, type MenuEntry } from "../ui/Menu";
 import { MoreMenu } from "../ui/MoreMenu";
 import { Ref } from "../ui/Ref";
+import { REF_SELECTED } from "../ui/refElement";
 import { SegmentedControl } from "../ui/SegmentedControl";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { SAVE_STATE, StateMark, type SaveStateKey } from "../ui/StateMark";
@@ -1171,6 +1173,38 @@ function TableMenuSpecimen(props: { menuId: string }) {
     return () => menu.remove();
   }, [props.menuId]);
   return <div ref={host} className={`${EDITOR_MENU_BOX} h-[300px] w-[260px]`} />;
+}
+
+// The editor's wikilink pills, built as the editor builds them, in a line at
+// the editor's face and size: a resolved link, a hovered one, a missing one,
+// and one the keyboard selected.
+function EditorRefSpecimen() {
+  const line = useRef<HTMLParagraphElement>(null);
+  useLayoutEffect(() => {
+    const element = line.current;
+    if (!element) return;
+    const hovered = wikilinkPill("data/funnel", "funnel", { path: "data/funnel.csv", missing: false });
+    hovered.dataset.forceState = "hover";
+    const selected = wikilinkPill("sketches/flow", "Flow", { path: null, missing: false });
+    selected.classList.add(REF_SELECTED);
+    element.replaceChildren(
+      "See ",
+      wikilinkPill("research/competitors", "Competitor landscape", { path: "research/competitors.md", missing: false }),
+      " and ",
+      hovered,
+      ", then ",
+      wikilinkPill("notes/gone", "notes/gone", { path: null, missing: true }),
+      " and ",
+      selected,
+      ".",
+    );
+  }, []);
+  return (
+    <p
+      ref={line}
+      className="m-0 w-[520px] font-[family-name:var(--dohc-editor-font)] text-[length:var(--dohc-editor-font-size)] leading-[1.65] text-ink"
+    />
+  );
 }
 
 // The section shows file text only. After `budget` is renamed `cost`, the
@@ -2772,6 +2806,9 @@ function Pane(props: { theme: "light" | "dark" }) {
               <Ref key={kind.displayKind} path={KIND_SAMPLES[kind.displayKind]} kind={kind} />
             ))}
           </div>
+        </Specimen>
+        <Specimen label="in the editor: resolved, hover, missing, keyboard-selected">
+          <EditorRefSpecimen />
         </Specimen>
       </Section>
     </section>

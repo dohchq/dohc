@@ -1,23 +1,18 @@
 import {
   AppWindow,
-  Database,
-  File,
-  FileCode,
   FileDiff,
-  FileSpreadsheet,
-  FileText,
   Hash,
   History,
-  Image,
   Layers,
   MessageCircle,
-  PenTool,
   Table2,
   Workflow,
+  createLucideIcon,
   type LucideIcon,
 } from "lucide-react";
 import { FILE_KIND_RECORDS, fileKindForPath, type FileKindRecord } from "@dohc/workspace-contracts/kinds";
 import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
+import { KIND_GLYPH_NODES } from "./kindGlyphs";
 
 // One kind, one glyph, one name: every surface draws a file's kind through
 // this part, so the glyph comes from the kind registry and never from a
@@ -29,17 +24,11 @@ import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
 // text, and a glyph label would rename it. A glyph standing alone asks for
 // `labelled`, and the kind's name becomes its accessible name.
 //
-// A `Record` over the registry's glyph ids, so a new glyph is a compile error
-// here until it has its icon.
-const GLYPHS: Record<FileKindRecord["glyphId"], LucideIcon> = {
-  file: File,
-  "file-text": FileText,
-  "file-spreadsheet": FileSpreadsheet,
-  "file-code": FileCode,
-  "pen-tool": PenTool,
-  image: Image,
-  database: Database,
-};
+// The icons are built from kindGlyphs.ts, which the editor's DOM chips also
+// draw from.
+const GLYPHS = Object.fromEntries(
+  Object.entries(KIND_GLYPH_NODES).map(([id, node]) => [id, createLucideIcon(id, node)]),
+) as Record<FileKindRecord["glyphId"], LucideIcon>;
 
 export function KindGlyph(props: {
   kind: FileKindRecord;
