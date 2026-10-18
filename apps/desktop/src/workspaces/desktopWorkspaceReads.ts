@@ -146,7 +146,8 @@ export function createDesktopWorkspaceReads(dependencies: DesktopWorkspaceReadsD
       includeContentIdentity: true,
       ...(under === undefined ? {} : { under }),
     });
-    // Engine subtree listings omit a file whose path equals the scope.
+    // Engine subtree listings omit a file whose path equals the scope. That
+    // file comes from a lookup, so it has no content identity or icon.
     if (under !== undefined && listed.files.length === 0) {
       const exact = await dependencies.shareViewFiles.lookup(target, [under]);
       listed.files.push(...exact.files);

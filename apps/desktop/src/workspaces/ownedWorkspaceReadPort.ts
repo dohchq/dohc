@@ -92,7 +92,7 @@ export function createOwnedWorkspaceReadPort(
       folders: (listed.folders ?? []).filter(allowed),
     });
     return {
-      listFiles: async scope => visible(scope === undefined ? await input.listFiles() : await input.listFiles(scope)),
+      listFiles: async scope => visible(await input.listFiles(scope)),
       lookupFiles: async paths => visible(await input.lookupFiles(paths.filter(allowed))),
     };
   }
