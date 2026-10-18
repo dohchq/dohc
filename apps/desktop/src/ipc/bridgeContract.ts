@@ -3295,7 +3295,7 @@ const SitePackageInfo = z
     ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "shared site roots must stay inside their authority mount root",
+        message: "Shared app folders must stay inside the shared folder.",
         path: ["root"],
       });
     }

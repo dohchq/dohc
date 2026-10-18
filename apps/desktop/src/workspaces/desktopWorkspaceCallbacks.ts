@@ -61,7 +61,7 @@ export function createDesktopWorkspaceCallbacks<State>(
         workspace.attachmentId !== undefined &&
         lease.binding.attachmentId !== workspace.attachmentId
       ) {
-        throw new Error("This callback belongs to a retired workspace authority.");
+        throw new Error("This workspace was closed. Open it again.");
       }
       return work(lease);
     });

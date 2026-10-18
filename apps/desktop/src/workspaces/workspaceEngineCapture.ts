@@ -2360,7 +2360,7 @@ export function createWorkspaceEngineCapture(
       options.onTypingCheckpointRecovered?.(input.path);
       if (!dead && current !== null) checkpointBase = null;
       if (checkpointTimer !== null) {clearTimeout(checkpointTimer); checkpointTimer = null;}
-      void checkpointWriter.flush(null).catch(error => onError("Typing checkpoint retirement", error));
+      void checkpointWriter.flush(null).catch(error => onError("Remove saved typing", error));
     };
     let queuedUpdateBytes = 0;
     let queuedUpdateCount = 0;
@@ -6993,7 +6993,7 @@ export function createWorkspaceEngineCapture(
           (input.createOnly && (input.expectedObjectId || input.recoverExistingText)) ||
           (input.expectedObjectId && input.recoverExistingText)
         ) {
-          throw new Error("Generated Markdown write authority is ambiguous.");
+          throw new Error("The document save request has conflicting options: createOnly, expectedObjectId, or recoverExistingText.");
         }
         if (input.createOnly && current) {
           throw new Error(`Generated Markdown destination already exists: ${path}`);
@@ -7087,7 +7087,7 @@ export function createWorkspaceEngineCapture(
         }
         if (Boolean(input.expectedObjectId) === Boolean(input.recoverExistingText)) {
           throw new Error(
-            "Generated Markdown archive requires exactly one ownership authority.",
+            "The document archive request requires exactly one of expectedObjectId or recoverExistingText.",
           );
         }
         await settleAndCloseLiveYDocSessions(

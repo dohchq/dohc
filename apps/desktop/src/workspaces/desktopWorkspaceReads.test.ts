@@ -220,7 +220,7 @@ describe("desktop workspace reads", () => {
     const release = deferred();
     test.beforeRead.run = async () => { entered.resolve(); await release.promise; };
     const reading = test.reads.readOwnedWorkspaceText(test.workspace, "note.md");
-    const outcome = expect(reading).rejects.toThrow("retired workspace authority");
+    const outcome = expect(reading).rejects.toThrow("This workspace was closed. Open it again.");
     await entered.promise;
     const retired = test.authority.invalidate("workspace-a");
     try { release.resolve(); await outcome; await retired; }

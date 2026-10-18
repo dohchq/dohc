@@ -359,7 +359,7 @@ describe("registered cloud handlers", () => {
     await reading.promise;
     const drained = h.authorities.invalidate("existing");
     secret.resolve("none");
-    await expect(result).rejects.toThrow("retired");
+    await expect(result).rejects.toThrow("This workspace was closed. Open it again.");
     await drained;
   });
 
@@ -673,7 +673,7 @@ it("releases the join transition lane before rollback drains a queued stop", asy
   await joinRefused;
   expect(h.cleanup).toHaveBeenCalledWith("joined");
   expect(h.registry.has("joined")).toBe(false);
-  expect(() => h.authorities.withOperation("joined", () => {})).toThrow("Unknown workspace");
+  expect(() => h.authorities.withOperation("joined", () => {})).toThrow("This workspace is not open. Open it again.");
 });
 
 it("exposes owned sync and pause state while signed out", async () => {
