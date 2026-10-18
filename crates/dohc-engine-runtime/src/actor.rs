@@ -974,7 +974,9 @@ fn drained<R>(store: &EngineStore, outcome: Result<R, RuntimeError>) -> Result<R
             path: store.database_path().to_string_lossy().into_owned(),
             kind: error.kind(),
             raw_os_error: error.raw_os_error(),
-            privacy_denied: dohc_engine_files::privacy_denied(&error, store.database_path()),
+            // macOS checks privacy when a path opens, and the drain uses a
+            // folder the store opened earlier.
+            privacy_denied: false,
         })
     });
     outcome.and_then(|value| drain.map(|()| value))
