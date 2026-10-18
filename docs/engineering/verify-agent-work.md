@@ -215,7 +215,7 @@ A full Rust job on every PR would take as long as the Windows one, and the host 
 The host names its WSL distro in `verification-linux` in the build slot root:
 
 ```powershell
-Set-Content C:w_lockserification-linux Ubuntu
+Set-Content C:\w\_locks\verification-linux Ubuntu
 ```
 
 Without that file, nothing runs on Linux. Other hosts and CI do not have it.

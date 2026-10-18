@@ -131,6 +131,18 @@ exec systemd-run --user --scope --quiet --collect --unit=${unit} -p RuntimeMaxSe
 `;
 }
 
+/** Stops the scope and confirms it is gone, killing what the stop leaves. Exits nonzero while it may still run. */
+export const stopScript = unit => `systemctl --user stop ${unit}.scope 2>/dev/null || true
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  state=$(systemctl --user show -p ActiveState --value ${unit}.scope 2>/dev/null) || state=unknown
+  case "$state" in inactive|failed) exit 0 ;; esac
+  systemctl --user kill --signal=SIGKILL ${unit}.scope 2>/dev/null || true
+  sleep 1
+done
+echo "${unit}.scope is still $state." >&2
+exit 1
+`;
+
 /**
  * Check `head` against `base` in `distro`: with `full`, the whole Rust job; otherwise the gate's clippy command,
  * which builds every target. Returns a receipt, the Linux verifier's when `full`, and the scope's memory use.
@@ -156,9 +168,11 @@ export async function linuxRustJob({ distro, head, base, output, full = false, s
   const unit = `${scopePrefix}${run}`;
   const ref = `refs/verification-linux/${run}`;
   const metadata = { purpose: full ? "Linux Rust gate" : "Linux clippy", checkout: repoRoot, commit: head, phase: request };
-  mkdirSync(output, { recursive: true });
+  try { mkdirSync(output, { recursive: true }); } catch (error) { environment("linux host")(error); }
   const slot = await acquireLinuxSlot({ root: budget.root, metadata, signal, waitMs: remaining() }).catch(environment("linux slot"));
   let cargo;
+  let result;
+  let failure;
   try {
     // Refs left by a run killed before its cleanup. None belongs to a live run, because this one holds the slot.
     for (const stale of gitRead(["for-each-ref", "--format=%(refname)", "refs/verification-linux/"]).split(/\r?\n/u).filter(Boolean)) gitRead(["update-ref", "-d", stale]);
@@ -178,9 +192,7 @@ export async function linuxRustJob({ distro, head, base, output, full = false, s
       for (const name of missing) try { gitRead(["update-ref", "-d", `${ref}/${name}`]); } catch { /* Not created. */ }
       if (bundle) rmSync(bundle, { force: true });
     }
-    // The Linux build counts against the host's disk floor, memory, and cargo lanes, like a build in another lane.
-    const free = freeDiskGb(repoRoot);
-    if (free === null || free < budget.diskFloorGb) throw Object.assign(new Error(`The Linux build needs ${budget.diskFloorGb} GB free; observed ${free ?? "unknown"}.`), { environment: "disk space" });
+    // The Linux build counts against the host's memory, cargo lanes, and disk floor, like a build in another lane.
     const needed = neededMemoryGb(parseTips(synced.stdout).cachedGb);
     // The cargo lane waits while memory is short, so the job starts only on memory measured at its admission.
     // A wait for a lane restarts its own limit after a hold, so the hold ends the whole wait at the deadline.
@@ -190,37 +202,40 @@ export async function linuxRustJob({ distro, head, base, output, full = false, s
       return available >= needed ? null : `The Linux job waits for ${needed.toFixed(1)} GB of free memory; ${available.toFixed(1)} GB is free.`;
     };
     cargo = await acquireBuildSlot({ ...budget, cooperativeCancellation: true, signal, metadata, waitMs: remaining(), hold }).catch(environment("linux slot"));
+    // Measured after the wait, which other builds can spend.
+    const free = freeDiskGb(repoRoot);
+    if (free === null || free < budget.diskFloorGb) throw Object.assign(new Error(`The Linux build needs ${budget.diskFloorGb} GB free; observed ${free ?? "unknown"}.`), { environment: "disk space" });
     const grant = { request, attempt, head, base };
-    const failure = await wsl("run", runScript({ unit, base, grant, output: wslPath(output), jobs: budget.jobs, full })).then(() => null, error => error);
-    if (failure && (signal?.aborted || failure.interrupted)) throw failure;
+    const exit = await wsl("run", runScript({ unit, base, grant, output: wslPath(output), jobs: budget.jobs, full })).then(() => null, error => error);
+    if (exit && (signal?.aborted || exit.interrupted)) throw exit;
     // The scope writes this after its command, so without it the command never ran.
     const scope = readJson(join(output, "scope.json"));
-    if (!scope) throw failure ?? new Error("The Linux scope recorded nothing.");
+    if (!scope) throw exit ?? new Error("The Linux scope recorded nothing.");
     let receipt;
     if (full) {
       receipt = readJson(join(output, "result.json"));
-      if (!receipt?.final) throw failure ?? new Error("The Linux verifier wrote no final receipt.");
+      if (!receipt?.final) throw exit ?? new Error("The Linux verifier wrote no final receipt.");
       if (receipt.failure?.kind === "environment") throw Object.assign(new Error(receipt.error ?? "The Linux host failed."), { environment: `linux ${receipt.failure.cause}` });
       if (receipt.commit !== head || receipt.baseCommit !== base) throw new Error(`The Linux verifier checked ${receipt.commit ?? "no commit"} against ${receipt.baseCommit ?? "no base"}, not ${head} against ${base}.`);
     } else {
       // cargo exits 101 on a build error or warning. 126 and 127, or wsl.exe's own failure, mean the shell could not run it.
-      if (failure && !(failure.exitCode >= 1 && failure.exitCode <= 125)) throw failure;
-      receipt = { version: 1, mode: "clippy", final: true, commit: head, baseCommit: base, verdict: failure ? "FAIL" : "PASS",
-        ...(failure ? { error: `cargo clippy failed on Linux. Read ${join(output, "wsl-run.log")}.` } : {}), failed: [], flaky: [] };
+      if (exit && !(exit.exitCode >= 1 && exit.exitCode <= 125)) throw exit;
+      receipt = { version: 1, mode: "clippy", final: true, commit: head, baseCommit: base, verdict: exit ? "FAIL" : "PASS",
+        ...(exit ? { error: `cargo clippy failed on Linux. Read ${join(output, "wsl-run.log")}.` } : {}), failed: [], flaky: [] };
       writeFileSync(join(output, "result.json"), JSON.stringify(receipt, null, 2) + "\n");
     }
     // A compiler or test killed at the run's memory limit says nothing about the change.
     if (receipt.verdict !== "PASS" && scope.oomKills > 0) throw Object.assign(new Error(`The Linux job failed after ${scope.oomKills} out-of-memory kills at its limit.`), { environment: "linux memory" });
-    return { receipt, scope };
-  } catch (error) {
-    // Only a stop or the host reaches here: a check's failure is a receipt.
-    return environment("linux host")(error);
-  } finally {
-    // The scope stops before the slots go, so no other build starts beside its last processes.
-    // A scope that would not stop is stopped by the next job, which refuses to start beside it.
-    await command("wsl.exe", ["-d", distro, "--exec", "systemctl", "--user", "stop", `${unit}.scope`], { quietStdout: true, timeoutMs: 60_000 })
-      .catch(error => console.log(`[verification] Could not stop ${unit}.scope: ${error.message}`));
-    cargo?.release();
-    slot.release();
-  }
+    result = { receipt, scope };
+  } catch (error) { failure = error; }
+  // The scope stops before the slots go, so no other build starts beside its last processes.
+  // This runs after a stop too, and it ignores the stop's signal.
+  const stopped = await wsl("stop", stopScript(unit), { signal: undefined, quietStdout: true, timeoutMs: 3 * 60_000 })
+    .then(() => true, error => { console.log(`[verification] ${unit}.scope may still run: ${error.message}`); return false; });
+  if (stopped) { cargo?.release(); slot.release(); }
+  // Otherwise the slots stay held until this verifier exits, so no build or Linux job starts beside the scope.
+  // Only a stop or the host reaches the catch: a check's failure is a receipt.
+  if (failure) environment("linux host")(failure);
+  if (!stopped) throw Object.assign(new Error(`${unit}.scope did not stop. Its processes may still run.`), { environment: "linux cleanup" });
+  return result;
 }

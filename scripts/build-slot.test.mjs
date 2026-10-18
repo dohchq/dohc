@@ -651,6 +651,18 @@ test("status CLI reads absent queues without creating or acquiring anything", t 
   assert.equal(existsSync(absent), false);
 });
 
+test("a hold that throws after its slot was created gives the slot back", async () => {
+  const root = slotRoot();
+  try {
+    // The first look admits; the look after the claim throws, as a deadline that passes in between does.
+    let looks = 0;
+    const hold = () => { looks += 1; if (looks > 1) throw new Error("the deadline passed"); return null; };
+    await assert.rejects(acquireBuildSlot({ root, slots: 1, waitMs: 5000, pollMs: 1, hold }), /the deadline passed/);
+    assert.equal(looks, 2);
+    assert.deepEqual(readdirSync(root).filter(name => /^build-slot-\d$/u.test(name)), []);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("status CLI reports the Linux slot only on a host that runs Linux jobs", t => {
   const root = slotRoot();
   t.after(() => rmSync(root, {recursive: true, force: true}));

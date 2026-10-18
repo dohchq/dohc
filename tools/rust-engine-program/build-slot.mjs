@@ -1029,9 +1029,14 @@ async function acquireSlot({
         } catch (error) {
           if (error.code !== "EEXIST") throw error;
         }
-        // A hold that began during this pass gets the slot back before anything runs in it.
-        if (created && hold?.()) { rmSync(dir, { recursive: true, force: true }); continue; }
-        if (created) return claimSlot(dir, `${kind}-${i}`, heartbeatMs, cooperativeCancellation, removeTicket, root, kind, metadata, identityDelayMs);
+        if (created) {
+          // A hold that began during this pass gets the slot back before anything runs in it, and so does a hold that throws.
+          let held;
+          try { held = hold?.(); }
+          catch (error) { rmSync(dir, { recursive: true, force: true }); throw error; }
+          if (held) { rmSync(dir, { recursive: true, force: true }); continue; }
+          return claimSlot(dir, `${kind}-${i}`, heartbeatMs, cooperativeCancellation, removeTicket, root, kind, metadata, identityDelayMs);
+        }
       }
     } catch (error) {
       if (error instanceof TicketEvidenceError || !transientFilesystemError(error, root, kind)) throw error;
