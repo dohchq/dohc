@@ -323,10 +323,7 @@ fn fresh_seed_does_not_queue_current_sources_again() {
         );
     }
     while seed_step(&mut s).unwrap() {}
-    while count(&s, "link_pending") > 0 {
-        let mut staged = parsed(&s);
-        while !staged.step(&mut s, &NoFaults).unwrap() {}
-    }
+    publish_pending(&mut s);
     assert_eq!(count(&s, "link_sources"), 1000);
     assert!(
         s.read_with(
@@ -440,13 +437,11 @@ fn authoritative_resolver_is_complete_during_deferred_and_partial_seed() {
 }
 
 #[test]
-fn populated_workspaces_and_edited_forks_keep_main_results_isolated() {
+fn edited_fork_keeps_main_results_isolated() {
     let scratch = ScratchDir::new().unwrap();
     let mut s = open(&engine_db_path(&scratch).unwrap());
     write(&mut s, "a", "source.md", "[[target]]", 1);
     write(&mut s, "t", "target.md", "", 2);
-    write_scoped(&mut s, "other", "main", "a", "source.md", "[[foreign]]");
-    write_scoped(&mut s, "other", "main", "t", "target.md", "");
     drain(&mut s);
     fork(&mut s);
     let before = lookup(&s, "target.md");
@@ -456,34 +451,15 @@ fn populated_workspaces_and_edited_forks_keep_main_results_isolated() {
     assert_eq!(before.sources, vec![("a".into(), "source.md".into())]);
     s.read_with(|c| {
         assert!(
-            incoming::candidates(c, "other", "main", "target.md")?
-                .sources
-                .is_empty()
-        );
-        assert!(
             incoming::candidates(c, "ws", "fork", "target.md")?
                 .sources
                 .is_empty()
-        );
-        assert_eq!(
-            incoming::candidates(c, "other", "main", "foreign.md")?
-                .sources
-                .len(),
-            1
         );
         assert_eq!(
             incoming::candidates(c, "ws", "fork", "fork-only.md")?
                 .sources
                 .len(),
             1
-        );
-        assert_eq!(
-            incoming::read_source(c, "other", "main", "a")?
-                .unwrap()
-                .parse()?
-                .occurrences[0]
-                .literal,
-            "foreign"
         );
         assert_eq!(
             incoming::read_source(c, "ws", "fork", "a")?
@@ -497,7 +473,7 @@ fn populated_workspaces_and_edited_forks_keep_main_results_isolated() {
     })
     .unwrap();
     assert_eq!(read(&s, "a").occurrences[0].literal, "target");
-    // A target rename in the fork must not alter either other resolver.
+    // A target rename in the fork must not alter the main resolver.
     s.write_with(&NoFaults, |tx| {
         tx.execute("UPDATE path_aliases SET path='renamed.md' WHERE workspace_id='ws' AND version_id='fork' AND object_id='t'", []).map_err(sql)?;
         Ok::<_, StorageError>(())
@@ -508,10 +484,6 @@ fn populated_workspaces_and_edited_forks_keep_main_results_isolated() {
     );
     assert_eq!(
         resolver_for(&s, "ws", "main").resolve("source.md", "target"),
-        Some("target.md")
-    );
-    assert_eq!(
-        resolver_for(&s, "other", "main").resolve("source.md", "target"),
         Some("target.md")
     );
 }
@@ -773,4 +745,97 @@ fn reseed_scan_bounds_include_current_sources_and_duplicate_aliases() {
     assert_eq!(count(&s, "link_pending"), 0);
     drain(&mut s);
     assert_eq!(lookup(&s, "target.md").sources.len(), 70);
+}
+
+#[test]
+fn incoming_read_model_isolates_populated_workspaces_with_colliding_ids() {
+    // Authoritative file_objects makes IDs globally unique. This SQL fixture
+    // tests the read boundary with collisions that normal writes cannot create.
+    let c = rusqlite::Connection::open_in_memory().unwrap();
+    c.execute_batch("CREATE TABLE path_aliases(workspace_id,version_id,object_id,path);
+        CREATE TABLE link_sources(workspace_id,version_id,object_id,index_key,status,parser_generation);
+        CREATE TABLE link_pending(workspace_id,version_id,object_id);
+        CREATE TABLE link_occurrence_keys(workspace_id,version_id,object_id,index_key,ordinal,key_kind,key);
+        CREATE INDEX link_occurrence_probe ON link_occurrence_keys(workspace_id,version_id,key_kind,key,object_id,ordinal);
+        CREATE TABLE links(workspace_id,version_id,object_id,index_key,ordinal,kind);
+        CREATE TABLE link_index_state(workspace_id,version_id,seed_phase,parser_generation);").unwrap();
+    for (ws, literal) in [("ws", "target"), ("other", "foreign")] {
+        for (object, path) in [("a", "source.md"), ("t", "target.md")] {
+            c.execute(
+                "INSERT INTO path_aliases VALUES(?1,'main',?2,?3)",
+                params![ws, object, path],
+            )
+            .unwrap();
+        }
+        c.execute(
+            "INSERT INTO link_sources VALUES(?1,'main','a','certified','indexed',?2)",
+            params![ws, PARSER_GENERATION],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO links VALUES(?1,'main','a','certified',0,'wikilink')",
+            [ws],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO link_occurrence_keys VALUES(?1,'main','a','certified',0,'stem',?2)",
+            params![ws, literal],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO link_index_state VALUES(?1,'main','ready',?2)",
+            params![ws, PARSER_GENERATION],
+        )
+        .unwrap();
+    }
+    // A second target alias makes only the foreign resolver ambiguous.
+    c.execute(
+        "INSERT INTO path_aliases VALUES('other','main','t','elsewhere/target.md')",
+        [],
+    )
+    .unwrap();
+    let main = Resolver::new(Resolver::paths_for_version(&c, "ws", "main").unwrap());
+    let other = Resolver::new(Resolver::paths_for_version(&c, "other", "main").unwrap());
+    assert_eq!(main.resolve("notes/source.md", "target"), Some("target.md"));
+    assert_eq!(other.resolve("notes/source.md", "target"), None);
+    assert_eq!(
+        incoming::candidates(&c, "ws", "main", "target.md")
+            .unwrap()
+            .sources,
+        vec![("a".into(), "source.md".into())]
+    );
+    assert!(
+        incoming::candidates(&c, "other", "main", "target.md")
+            .unwrap()
+            .sources
+            .is_empty()
+    );
+    assert_eq!(
+        incoming::candidates(&c, "other", "main", "foreign.md")
+            .unwrap()
+            .sources,
+        vec![("a".into(), "source.md".into())]
+    );
+    assert!(
+        incoming::candidates(&c, "ws", "main", "foreign.md")
+            .unwrap()
+            .sources
+            .is_empty()
+    );
+    // Changes to the foreign source cannot replace main's certification.
+    c.execute(
+        "UPDATE link_sources SET status='unindexed' WHERE workspace_id='other'",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        incoming::candidates(&c, "ws", "main", "target.md")
+            .unwrap()
+            .sources
+            .len(),
+        1
+    );
+    let other = incoming::candidates(&c, "other", "main", "target.md").unwrap();
+    assert!(other.sources.is_empty());
+    assert_eq!(other.unchecked, vec!["source.md"]);
 }
