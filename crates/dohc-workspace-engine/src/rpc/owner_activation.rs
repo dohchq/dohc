@@ -14,6 +14,8 @@ use std::time::Instant;
 
 struct ActivationOutputGuard {
     connection: ConnectionHandle,
+    /// The activation the capture names, once it has.
+    activation_id: Option<String>,
     cancel: CancelSignal,
     deadline: Option<Instant>,
     _reservation: Arc<dyn Send + Sync>,
@@ -21,6 +23,7 @@ struct ActivationOutputGuard {
 impl std::fmt::Debug for ActivationOutputGuard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ActivationOutputGuard")
+            .field("activation_id", &self.activation_id)
             .finish_non_exhaustive()
     }
 }
@@ -155,12 +158,13 @@ impl EngineService {
             ));
         }
         let reservation = admission.reserve()?;
-        let guard = Arc::new(ActivationOutputGuard {
+        let mut guard = ActivationOutputGuard {
             connection: connection.clone(),
+            activation_id: None,
             cancel: ctx.cancel.clone(),
             deadline: ctx.deadline,
             _reservation: reservation.clone(),
-        });
+        };
         let workspace = request
             .workspace
             .clone()
@@ -299,6 +303,7 @@ impl EngineService {
         let mut bytes = captured.baseline_bytes;
         bytes.extend_from_slice(&captured.full_state);
         let digest = dohc_engine_storage::hex_sha256(&bytes);
+        guard.activation_id = Some(captured.activation_id.clone());
         let result = json!({"status":"captured","activationId":captured.activation_id,"sessionId":session_id,
             "source":captured.source,"baselineByteLength":baseline_length,"streamId":request.id,"byteLength":bytes.len(),"digest":digest});
         Ok(ServiceResponse {
@@ -306,7 +311,7 @@ impl EngineService {
                 id: request.id,
                 result,
             },
-            output_guard: Some(guard),
+            output_guard: Some(Arc::new(guard)),
             blob_egress: Some(BlobEgress {
                 stream_id: request.id,
                 sha256: digest,
@@ -316,5 +321,121 @@ impl EngineService {
                 byte_permit: None,
             }),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dohc_engine_collab::DocKey;
+    use dohc_engine_collab::live_update_application::{
+        ImportedOwnerActivation, ImportedOwnerSource,
+    };
+    use dohc_engine_protocol::transport::RequestContext;
+
+    /// A release names the activation it ends. One naming another activation
+    /// than the session serves closes nothing and removes no source.
+    #[tokio::test]
+    async fn a_release_for_another_activation_leaves_the_session_and_its_source() {
+        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let configuration = serde_json::from_value(json!({
+            "version": 1, "relayNamespace": "release-test",
+            "host": {"hostId":"host","hostEpoch":1,"instanceId":"instance","connectionId":"connection"},
+            "workspaces": [{"root":scratch.path(),"workspaceId":"workspace","maxRegistrations":4,
+                "relay":{"baseUrl":"https://relay.invalid","bearerToken":"owner"}}],
+            "ingress": {"aggregateBytes":512*1024*1024,"applicationWorkingReserveBytes":8*1024*1024,"maxUploads":1,"uploadDeadlineMs":30_000}
+        }))
+        .unwrap();
+        let (service, owner, _ingress) = EngineService::configured_live_host(configuration)
+            .await
+            .unwrap();
+        let workspace = lock(&service.handles).keys().next().unwrap().clone();
+        let open = service.open(Some(&workspace)).unwrap();
+        let key = DocKey::new("workspace", "main", "document").unwrap();
+        let lineage = dohc_engine_storage::hex_sha256(b"lineage");
+        {
+            let conn = rusqlite::Connection::open(&open.db_path).unwrap();
+            conn.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+            for activation in ["tagged", "requested"] {
+                conn.execute(
+                    "INSERT INTO ydoc_owner_activation_sources VALUES (?1,'release-test','workspace','main','document',?2,'moment',?2,?2,'{}')",
+                    rusqlite::params![activation, lineage],
+                )
+                .unwrap();
+            }
+        }
+        let source = ImportedOwnerSource {
+            version: 1,
+            relay_database_namespace: "release-test".into(),
+            workspace_id: "workspace".into(),
+            main_version_id: "main".into(),
+            object_id: "document".into(),
+            lineage_claim_id: lineage.clone(),
+            current_path: "document.md".into(),
+            replication_epoch: "epoch".into(),
+            stream_identity: "stream".into(),
+            committed_cursor: 0,
+            base_origin_id: "origin".into(),
+            base_origin_seq: 0,
+            base_relay_seq: 0,
+            source_moment_id: "moment".into(),
+            source_digest: lineage.clone(),
+            source_byte_length: 0,
+            native_head_sequence: 0,
+            full_state_digest: lineage,
+            full_state_byte_length: 0,
+        };
+        let captured = ImportedOwnerActivation {
+            activation_id: "tagged".into(),
+            source,
+            baseline_bytes: Vec::new(),
+            full_state: Vec::new(),
+            restore_generation: None,
+        };
+        let lease = service.leases.scoped(&open.root).acquire(&key).unwrap();
+        let session = super::super::ydoc::YdocSession::imported_owner(
+            workspace.clone(),
+            key,
+            &captured,
+            lease,
+        )
+        .unwrap();
+        lock(&service.sessions).insert("ydoc-tagged".into(), session);
+        let release = |activation: &str| {
+            let mut ctx = RequestContext::unbounded();
+            ctx.connection = Some(owner.handle());
+            service.release_owner_activation(
+                ctx,
+                Request {
+                    id: 7,
+                    method: "liveApplication.releaseOwnerActivation".into(),
+                    workspace: Some(workspace.clone()),
+                    deadline_ms: None,
+                    idempotency_key: None,
+                    progress: false,
+                    params: json!({"activationId": activation, "sessionId": "ydoc-tagged"}),
+                },
+            )
+        };
+        let sources = || -> Vec<String> {
+            let conn = rusqlite::Connection::open(&open.db_path).unwrap();
+            conn.prepare(
+                "SELECT activation_id FROM ydoc_owner_activation_sources ORDER BY activation_id",
+            )
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+        };
+        assert!(release("requested").await.is_err());
+        assert!(
+            lock(&service.sessions).contains_key("ydoc-tagged"),
+            "the tagged session stays"
+        );
+        assert_eq!(sources(), ["requested", "tagged"], "no source goes");
+        release("tagged").await.unwrap();
+        assert!(!lock(&service.sessions).contains_key("ydoc-tagged"));
+        assert_eq!(sources(), ["requested"]);
     }
 }

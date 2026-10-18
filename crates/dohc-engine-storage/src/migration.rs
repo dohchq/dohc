@@ -3329,9 +3329,11 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
 /// A lineage keeps its one immutable adoption. Each activation that held the
 /// document since has a row: at most one unreleased per document lineage, at
 /// most one successor per activation, and both links stay on one lineage.
-/// An adopted activation carries every adoption fact; a released activation
-/// that never adopted carries none. Every adoption becomes its own current
-/// activation, and a binding names the activation of its lineage's adoption.
+/// An adopted activation carries every adoption fact and its baseline relay
+/// coordinate; a released activation that never adopted carries no adoption
+/// fact, and its baseline only if it had one. Every adoption becomes its own
+/// current activation, and a binding names the activation of its lineage's
+/// adoption.
 const V2_LIVE_OWNER_ACTIVATIONS_DDL: &str = "\
 CREATE UNIQUE INDEX live_owner_adoptions_lineage ON live_owner_adoptions
     (relay_database_namespace,adoption_id,workspace_id,main_version_id,object_id,lineage_claim_id);
@@ -3348,8 +3350,8 @@ CREATE TABLE live_owner_activations (
     source_moment_id TEXT NOT NULL,
     source_digest TEXT NOT NULL,
     source_byte_length INTEGER NOT NULL CHECK (source_byte_length BETWEEN 0 AND 9007199254740991),
-    baseline_moment_relay_sequence INTEGER NOT NULL CHECK (baseline_moment_relay_sequence BETWEEN 0 AND 9007199254740991),
-    baseline_registered_at_ms INTEGER NOT NULL CHECK (baseline_registered_at_ms BETWEEN 0 AND 9007199254740991),
+    baseline_moment_relay_sequence INTEGER CHECK (baseline_moment_relay_sequence BETWEEN 0 AND 9007199254740991),
+    baseline_registered_at_ms INTEGER CHECK (baseline_registered_at_ms BETWEEN 0 AND 9007199254740991),
     host_coordinate_json TEXT NOT NULL CHECK (json_valid(host_coordinate_json)),
     evidence_digest TEXT,
     coverage_digest TEXT,
@@ -3370,7 +3372,9 @@ CREATE TABLE live_owner_activations (
             AND max_pending_bytes IS NULL AND max_pending_age_ms IS NULL AND boundary_json IS NULL)
         OR (evidence_digest IS NOT NULL AND coverage_digest IS NOT NULL AND covered_outbox_sequence IS NOT NULL
             AND local_ydoc_sequence IS NOT NULL AND terminal_cursor IS NOT NULL AND terminal_receipt_json IS NOT NULL
-            AND max_pending_bytes IS NOT NULL AND max_pending_age_ms IS NOT NULL)),
+            AND max_pending_bytes IS NOT NULL AND max_pending_age_ms IS NOT NULL
+            AND baseline_moment_relay_sequence IS NOT NULL)),
+    CHECK ((baseline_moment_relay_sequence IS NULL) = (baseline_registered_at_ms IS NULL)),
     CHECK ((released_at_ms IS NULL AND released_restore_generation IS NULL AND released_accepted_cursor IS NULL
             AND released_boundary_json IS NULL AND carried_manifest_json IS NULL)
         OR (released_at_ms IS NOT NULL AND released_restore_generation IS NOT NULL AND released_accepted_cursor IS NOT NULL
@@ -3390,6 +3394,8 @@ CREATE UNIQUE INDEX live_owner_activations_current ON live_owner_activations
     (workspace_id,main_version_id,object_id,lineage_claim_id) WHERE released_at_ms IS NULL;
 CREATE UNIQUE INDEX live_owner_activations_successor ON live_owner_activations
     (relay_database_namespace,predecessor_activation_id) WHERE predecessor_activation_id IS NOT NULL;
+CREATE INDEX live_owner_activations_lineage ON live_owner_activations
+    (relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id);
 INSERT INTO live_owner_activations (relay_database_namespace,activation_id,workspace_id,main_version_id,
     object_id,lineage_claim_id,origin_adoption_id,binding_json,source_moment_id,source_digest,source_byte_length,
     baseline_moment_relay_sequence,baseline_registered_at_ms,host_coordinate_json,evidence_digest,coverage_digest,
@@ -4424,7 +4430,7 @@ mod tests {
             ),
             (
                 "v2-live-owner-activations",
-                "341d95507e8c0e23eddc72130811c5d66b72dce37a4a17aefe8192892cc436cf",
+                "7e7276ee73b199acdac92bb6f753a89fd1a1ecd925408f1d19fb9a65d9138ae1",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -4614,11 +4620,13 @@ mod tests {
             "a binding names the adoption of its own lineage only"
         );
 
+        // `baseline` is the relay sequence and registration time, each present or absent.
         let insert = |id: &str,
                       predecessor: Option<&str>,
                       object: &str,
                       released: bool,
-                      adopted: bool| {
+                      adopted: bool,
+                      baseline: (Option<i64>, Option<i64>)| {
             conn.execute(
                 "INSERT INTO live_owner_activations (relay_database_namespace,activation_id,workspace_id,main_version_id,
                     object_id,lineage_claim_id,origin_adoption_id,predecessor_activation_id,binding_json,source_moment_id,
@@ -4626,29 +4634,67 @@ mod tests {
                     host_coordinate_json,evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,
                     terminal_cursor,terminal_receipt_json,max_pending_bytes,max_pending_age_ms,released_at_ms,
                     released_restore_generation,released_accepted_cursor,released_boundary_json,carried_manifest_json)
-                 VALUES ('relay',?1,'ws','main',?3,?4,iif(?3='a','adoption-a',NULL),?2,'{}','moment',?5,0,0,0,'{}',
+                 VALUES ('relay',?1,'ws','main',?3,?4,iif(?3='a','adoption-a',NULL),?2,'{}','moment',?5,0,?8,?9,'{}',
                     iif(?7,'e',NULL),iif(?7,'c',NULL),iif(?7,0,NULL),iif(?7,0,NULL),iif(?7,0,NULL),iif(?7,'null',NULL),
                     iif(?7,1,NULL),iif(?7,1,NULL),iif(?6,9,NULL),iif(?6,1,NULL),iif(?6,0,NULL),iif(?6,'[]',NULL),iif(?6,'[]',NULL))",
-                rusqlite::params![id, predecessor, object, lineage, source, released, adopted],
+                rusqlite::params![id, predecessor, object, lineage, source, released, adopted, baseline.0, baseline.1],
             )
         };
+        let known = (Some(0), Some(0));
         assert!(
-            insert("second-current", None, "a", false, true).is_err(),
+            insert("second-current", None, "a", false, true, known).is_err(),
             "one unreleased activation per document lineage"
         );
         assert!(
-            insert("never-adopted", None, "a", false, false).is_err(),
+            insert("never-adopted", None, "a", false, false, known).is_err(),
             "an unreleased activation is adopted"
         );
-        insert("released", Some("adoption-a"), "a", true, false).expect("a released successor");
+        insert("released", Some("adoption-a"), "a", true, false, known)
+            .expect("a released successor");
         assert!(
-            insert("sibling", Some("adoption-a"), "a", true, false).is_err(),
+            insert("sibling", Some("adoption-a"), "a", true, false, known).is_err(),
             "one successor per activation"
         );
         assert!(
-            insert("elsewhere", Some("released"), "b", true, false).is_err(),
+            insert("elsewhere", Some("released"), "b", true, false, known).is_err(),
             "a predecessor stays on its lineage"
         );
+        insert(
+            "unregistered",
+            Some("released"),
+            "a",
+            true,
+            false,
+            (None, None),
+        )
+        .expect("a release that never adopted needs no baseline");
+        for (id, baseline) in [("half", (Some(1), None)), ("other-half", (None, Some(1)))] {
+            assert!(
+                insert(id, None, "c", true, false, baseline).is_err(),
+                "a baseline's sequence and time arrive together"
+            );
+        }
+        assert!(
+            insert(
+                "unanchored",
+                Some("unregistered"),
+                "a",
+                true,
+                true,
+                (None, None)
+            )
+            .is_err(),
+            "an adoption carries its baseline"
+        );
+        let unregistered: (Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT baseline_moment_relay_sequence,baseline_registered_at_ms
+                 FROM live_owner_activations WHERE activation_id='unregistered'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(unregistered, (None, None), "nothing invents a baseline");
         assert!(
             conn.execute(
                 "UPDATE live_owner_activations SET carried_manifest_json=NULL WHERE activation_id='released'",

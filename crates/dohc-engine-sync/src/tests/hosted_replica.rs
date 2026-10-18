@@ -5106,6 +5106,68 @@ fn a_document_parks_only_once_every_activation_is_adopted() {
     );
 }
 
+/// Only a source's own activation row keeps it. A released activation's
+/// source stays and parks with its document; a capture no activation records
+/// holds parking and goes on release, though another activation is current.
+#[test]
+fn only_its_own_activation_keeps_a_captured_source() {
+    use dohc_engine_collab::live_update_application::release_imported_owner_activation;
+    let (_scratch, _path, mut store, client) = departing_b();
+    let lineage = activate(&mut store, "doc-b");
+    adopt_activation(&mut store, "doc-b", &lineage, "relay");
+    store
+        .write_with(&NoFaults, |tx| {
+            for id in ["released", "unrecorded"] {
+                tx.execute(
+                    "INSERT INTO ydoc_owner_activation_sources VALUES \
+                     (?1,'relay','ws','main','doc-b',?2,'moment-owner-1',?3,?2,'{}')",
+                    params![id, lineage, text_sha("hosted b")],
+                )
+                .map_err(SyncError::persist)?;
+            }
+            tx.execute(
+                "INSERT INTO live_owner_activations (relay_database_namespace,activation_id, \
+                   workspace_id,main_version_id,object_id,lineage_claim_id,binding_json, \
+                   source_moment_id,source_digest,source_byte_length,host_coordinate_json, \
+                   released_at_ms,released_restore_generation,released_accepted_cursor, \
+                   released_boundary_json,carried_manifest_json) \
+                 VALUES ('relay','released','ws','main','doc-b',?1,'{}','moment-owner-1',?2,8,'{}', \
+                   1,0,0,'[]','[]')",
+                params![lineage, text_sha("hosted b")],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    client.transport().unshare("doc-b");
+    sync_parking(&client, &mut store);
+    assert!(
+        !is_parked(&store, "doc-b"),
+        "the current activation does not cover a capture it never recorded"
+    );
+    assert_eq!(departed_hosted_object_ids(&store, "ws").unwrap(), ["doc-b"]);
+    let sources = |store: &EngineStore| {
+        count(
+            store,
+            "SELECT COUNT(*) FROM ydoc_owner_activation_sources WHERE object_id='doc-b'",
+        )
+    };
+    for kept in ["activation", "released"] {
+        assert!(
+            release_imported_owner_activation(&mut store, "relay", "ws", kept, None, &NoFaults)
+                .is_err(),
+            "{kept}"
+        );
+    }
+    assert_eq!(sources(&store), 3);
+    release_imported_owner_activation(&mut store, "relay", "ws", "unrecorded", None, &NoFaults)
+        .unwrap();
+    assert_eq!(sources(&store), 2);
+    sync_parking(&client, &mut store);
+    assert!(is_parked(&store, "doc-b"));
+    assert_eq!(sources(&store), 2, "recorded sources stay for the return");
+}
+
 /// Parking keeps the existing restore check: a document whose restore has
 /// not resumed stays departed.
 #[test]

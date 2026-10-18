@@ -89,6 +89,43 @@ fn add_activation(f: &mut Fixture, id: &str, predecessor: &str, released: bool, 
         .unwrap();
 }
 
+/// A released activation of `object` in `namespace` that never adopted. It
+/// records no baseline, as a capture has none before its relay registers it.
+fn release_unadopted(
+    f: &mut Fixture,
+    namespace: &str,
+    object: &str,
+    id: &str,
+    predecessor: Option<&str>,
+) {
+    let binding = serde_json::to_string(&f.binding).unwrap();
+    let (moment, digest, length) = (
+        f.cut.source_moment_id.clone(),
+        f.cut.source_digest.clone(),
+        f.cut.source_byte_length,
+    );
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO live_owner_activations (relay_database_namespace,activation_id,workspace_id,
+                    main_version_id,object_id,lineage_claim_id,predecessor_activation_id,binding_json,
+                    source_moment_id,source_digest,source_byte_length,host_coordinate_json,released_at_ms,
+                    released_restore_generation,released_accepted_cursor,released_boundary_json,carried_manifest_json)
+                 VALUES (?1,?2,'workspace','main',?3,?4,?5,?6,?7,?8,?9,'{}',20,0,0,'[]','[]')",
+                params![namespace, id, object, f.binding.lineage_claim_id, predecessor, binding, moment, digest, length],
+            )
+            .map_err(write_sql)?;
+            Ok::<_, ApplicationError>(())
+        })
+        .unwrap();
+}
+
+fn chain_tail(f: &Fixture, namespace: &str) -> Result<Option<String>, ApplicationError> {
+    f.store.read_with(|conn| {
+        owner_activations::released_chain_tail(conn, namespace, &f.key, &f.binding.lineage_claim_id)
+    })
+}
+
 fn release(f: &mut Fixture, id: &str) {
     f.store
         .write_with(&NoFaults, |tx| {
@@ -283,4 +320,133 @@ fn a_registration_for_one_activation_refuses_to_adopt_another() {
     assert!(matches!(f.adopt(), Err(ApplicationError::Conflict)));
     assert_eq!(f.store.table_row_count("live_owner_adoptions").unwrap(), 0);
     assert_eq!(binding_activation(&f), (Some("pending".into()), 1));
+}
+
+#[test]
+fn a_successor_follows_the_released_tail_of_its_own_chain() {
+    let mut f = Fixture::new();
+    assert_eq!(chain_tail(&f, "namespace").unwrap(), None, "nothing activated yet");
+    f.adopt().unwrap();
+    assert_eq!(chain_tail(&f, "namespace").unwrap(), None, "the lineage is current");
+    release(&mut f, "adoption");
+    assert_eq!(chain_tail(&f, "namespace").unwrap().as_deref(), Some("adoption"));
+    release_unadopted(&mut f, "namespace", "object", "never-adopted", Some("adoption"));
+    add_activation(&mut f, "third", "never-adopted", true, 0);
+    // Released rows of another namespace, and of another document, are other chains.
+    release_unadopted(&mut f, "elsewhere", "object", "foreign", None);
+    release_unadopted(&mut f, "namespace", "other", "sibling", None);
+    assert_eq!(chain_tail(&f, "namespace").unwrap().as_deref(), Some("third"));
+    assert_eq!(chain_tail(&f, "elsewhere").unwrap().as_deref(), Some("foreign"));
+    release_unadopted(&mut f, "namespace", "object", "stray", None);
+    assert!(
+        matches!(chain_tail(&f, "namespace"), Err(ApplicationError::Corrupt)),
+        "a lineage has one chain"
+    );
+    add_activation(&mut f, "current", "third", false, 5);
+    assert_eq!(chain_tail(&f, "namespace").unwrap(), None, "the lineage is current again");
+}
+
+#[test]
+fn a_released_activation_never_resumes_though_its_bytes_match() {
+    let mut f = imported_fixture();
+    let captured = capture_imported(&mut f, 1_000_000).unwrap();
+    let id = captured.activation_id.clone();
+    resume_imported(&mut f, &id, 1_000_000).expect("a pending activation resumes");
+    release_unadopted(&mut f, "namespace", "object", &id, None);
+    assert!(
+        matches!(resume_imported(&mut f, &id, 1_000_000), Err(ApplicationError::Conflict)),
+        "a released activation that never adopted"
+    );
+
+    let mut f = imported_fixture();
+    let captured = capture_imported(&mut f, 1_000_000).unwrap();
+    let id = captured.activation_id.clone();
+    f.cut.adoption_id = id.clone();
+    f.adopt().unwrap();
+    resume_imported(&mut f, &id, 1_000_000).expect("the current activation resumes");
+    release(&mut f, &id);
+    assert!(
+        matches!(resume_imported(&mut f, &id, 1_000_000), Err(ApplicationError::Conflict)),
+        "a released activation that adopted"
+    );
+}
+
+#[test]
+fn historical_readers_prove_each_activations_own_source() {
+    use crate::owner_outbox::publication::{contains_in, PublicationContentKind, PublicationProof};
+    let mut f = Fixture::new();
+    f.edit(true);
+    f.adopt().unwrap();
+    release(&mut f, "adoption");
+    // The released predecessor adopted from its own source; the successor
+    // adopted from the fixture's.
+    let old = "Predecessor source.";
+    let old_digest = hex_sha256(old.as_bytes());
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO blobs(sha256,text,byte_length) VALUES (?1,?2,?3)",
+                params![old_digest, old, old.len() as i64],
+            )
+            .map_err(write_sql)?;
+            tx.execute(
+                "UPDATE live_owner_activations SET source_digest=?1,source_byte_length=?2 WHERE activation_id='adoption'",
+                params![old_digest, old.len() as i64],
+            )
+            .map_err(write_sql)?;
+            Ok::<_, ApplicationError>(())
+        })
+        .unwrap();
+    add_activation(&mut f, "successor", "adoption", false, 99);
+    let recorded = |f: &Fixture, id: &str| -> (String, i64, i64) {
+        f.store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT source_digest,terminal_cursor,local_ydoc_sequence FROM live_owner_activations WHERE activation_id=?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+            })
+            .unwrap()
+    };
+    let head = |f: &Fixture, id: &str| {
+        let held = f.handle.registration.lock().unwrap();
+        f.store.read_with(|conn| {
+            restore_resume::origin_head(
+                conn,
+                &held,
+                &RestoreDeliveryOrigin::Owner { id: id.into() },
+                &mut restore_content::Budget {
+                    remaining: 1_000_000,
+                },
+            )
+        })
+    };
+    assert_eq!(head(&f, "adoption").unwrap(), recorded(&f, "adoption"));
+    assert_eq!(head(&f, "successor").unwrap(), recorded(&f, "successor"));
+    assert_ne!(recorded(&f, "adoption"), recorded(&f, "successor"));
+    release_unadopted(&mut f, "namespace", "object", "unadopted", None);
+    assert!(head(&f, "unadopted").is_err(), "a fence origin is an adopted activation");
+
+    let proof = |f: &Fixture, digest: &str| {
+        f.store
+            .read_with(|conn| {
+                contains_in(
+                    conn,
+                    &f.key,
+                    &f.binding.current_path,
+                    None,
+                    PublicationContentKind::Projection,
+                    digest,
+                    &mut 4_000_000,
+                )
+            })
+            .unwrap()
+    };
+    assert_eq!(
+        proof(&f, &old_digest),
+        PublicationProof::Contained,
+        "the released predecessor still proves its source"
+    );
+    assert_eq!(proof(&f, &hex_sha256(b"Never a source.")), PublicationProof::NotContained);
 }

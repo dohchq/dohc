@@ -2566,6 +2566,22 @@ fn adoption_origin_refuses_a_redirected_binding_before_reading_its_source() {
         origin(cost(&binding) - 1).0,
         Err(ApplicationError::ConfiguredByteBudgetExceeded)
     ));
+    // The activation's other metadata is never read. Padded to a megabyte,
+    // and unreadable as text, it changes neither the origin nor its cost.
+    f.store
+        .read_with(|conn| {
+            conn.execute(
+                "UPDATE live_owner_activations SET
+                   host_coordinate_json='{}'||replace(hex(zeroblob(500000)),'00',' '),
+                   evidence_digest=replace(hex(zeroblob(500000)),'00','e')||CAST(x'ff' AS TEXT),
+                   coverage_digest=replace(hex(zeroblob(500000)),'00','c')||CAST(x'ff' AS TEXT)",
+                [],
+            )
+        })
+        .unwrap();
+    let (padded, left) = origin(cost(&binding));
+    assert!(matches!(padded, Ok(Some(_))), "{:?}", padded.err());
+    assert_eq!(left, 0);
     f.store
         .read_with(|conn| {
             conn.execute(

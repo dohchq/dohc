@@ -504,6 +504,12 @@ impl ActorLiveApplicationOwner {
 }
 
 impl ActorLiveApplicationHandle {
+    /// The activation this registration serves; see
+    /// [`ApplicationHandle::activation_id`].
+    pub fn activation_id(&self) -> Option<String> {
+        self.application.activation_id()
+    }
+
     pub async fn sync_open(
         &self,
         client_vector: Vec<u8>,

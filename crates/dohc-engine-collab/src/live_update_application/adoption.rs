@@ -1690,28 +1690,19 @@ pub(super) fn read_origin_with(
         ).map_err(read_sql)?;
         budget.charge(usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?)?;
     }
-    let key = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)?;
-    let Some((activation, adopted)) = owner_activations::current_activation(
-        conn,
-        Some(&held.namespace),
-        &key,
-        &b.lineage_claim_id,
-    )?
+    // Only the columns charged above.
+    let raw: Option<(String,String,String,i64,i64,String,String)> = conn.query_row(
+        &format!("SELECT binding_json,source_moment_id,source_digest,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,activation_id FROM {}
+         WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5", owner_activations::CURRENT_ACTIVATIONS),
+        params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional().map_err(read_sql)?;
+    let Some((binding, source_moment, source_digest, sequence, cursor, terminal, adoption_id)) =
+        raw
     else {
         return Ok(None);
     };
-    let (source_moment, source_digest, adoption_id) = (
-        activation.source_moment_id,
-        activation.source_digest,
-        activation.activation_id,
-    );
-    let (sequence, cursor, terminal) = (
-        adopted.local_ydoc_sequence,
-        adopted.terminal_cursor,
-        adopted.terminal_receipt_json,
-    );
     let binding: LiveObjectBinding =
-        serde_json::from_str(&activation.binding_json).map_err(|_| ApplicationError::Corrupt)?;
+        serde_json::from_str(&binding).map_err(|_| ApplicationError::Corrupt)?;
     // This document selected the row, and its decoded binding scopes the
     // source reads below. It must name this document before any of them.
     if binding.workspace_id != b.workspace_id

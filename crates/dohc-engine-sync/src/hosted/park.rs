@@ -699,7 +699,7 @@ fn parkable(conn: &Connection, workspace_id: &str, object_id: &str) -> Result<bo
                        WHERE o.workspace_id=a.workspace_id AND o.main_version_id=a.version_id \
                          AND o.object_id=a.object_id AND o.lineage_claim_id=a.lineage_claim_id \
                          AND o.relay_database_namespace=a.relay_database_namespace \
-                         AND (o.activation_id=a.activation_id OR o.released_at_ms IS NULL)))"
+                         AND o.activation_id=a.activation_id))"
             ),
             params![workspace_id, object_id],
             |row| row.get(0),

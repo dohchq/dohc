@@ -2501,6 +2501,21 @@ mod tests {
             .live_application_register(&ctx, Some(handle.clone()), json!({"binding":binding}))
             .await
             .unwrap();
+        let registered = |service: &EngineService| {
+            service
+                .live_application_registration(
+                    &connection.handle(),
+                    Some(&handle),
+                    registration["registrationId"].as_u64().unwrap(),
+                )
+                .unwrap()
+                .activation_id()
+        };
+        assert_eq!(
+            registered(&service),
+            None,
+            "a registration that named nothing serves no activation before its adoption"
+        );
         let cut = dohc_engine_collab::live_update_application::OwnerAdoptionCut {
             relay_database_namespace: "owner-source-relay".into(),
             adoption_id: "actual-owner".into(),
@@ -2543,7 +2558,13 @@ mod tests {
                 adopted.response.result["adoption"]["localYDocSequence"],
                 sequence
             );
-            assert!(adopted.output_guard.unwrap().is_current());
+            let guard = adopted.output_guard.unwrap();
+            assert!(guard.is_current());
+            assert_eq!(registered(&service).as_deref(), Some("actual-owner"));
+            assert!(
+                format!("{guard:?}").contains(r#"activation_id: Some("actual-owner")"#),
+                "the adoption's answer belongs to the activation it made: {guard:?}"
+            );
         }
         session = assert_adopted_owner_move_refused(
             &service,

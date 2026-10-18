@@ -1,7 +1,8 @@
 //! A document lineage's owner activations. `live_owner_adoptions` keeps the
 //! lineage's immutable origin. `live_owner_activations` has a row for each
 //! activation that held the document since, and at most one is current.
-//! Each reader names which of the three it means.
+//! Each reader names which it means: the origin, the current activation, an
+//! exact one, or the released tail a successor follows.
 use super::*;
 
 /// The current activation of each document lineage: its unreleased row.
@@ -160,6 +161,49 @@ pub fn activation_by_id(
     )
     .optional()
     .map_err(read_sql)
+}
+
+/// The released activation a successor in `namespace` follows: the one with
+/// no successor on this document lineage. None while the lineage is current
+/// there, or before it ever had an activation.
+pub fn released_chain_tail(
+    conn: &Connection,
+    namespace: &str,
+    key: &DocKey,
+    lineage_claim_id: &str,
+) -> Result<Option<String>, ApplicationError> {
+    let lineage = "relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3
+        AND object_id=?4 AND lineage_claim_id=?5";
+    let mut statement = conn
+        .prepare(&format!(
+            "SELECT activation_id FROM live_owner_activations v WHERE {lineage}
+               AND released_at_ms IS NOT NULL
+               AND NOT EXISTS(SELECT 1 FROM live_owner_activations s
+                 WHERE s.relay_database_namespace=v.relay_database_namespace
+                   AND s.predecessor_activation_id=v.activation_id)
+               AND NOT EXISTS(SELECT 1 FROM live_owner_activations WHERE {lineage} AND released_at_ms IS NULL)
+             LIMIT 2"
+        ))
+        .map_err(read_sql)?;
+    let mut tails = statement
+        .query_map(
+            params![
+                namespace,
+                key.workspace_id,
+                key.version_id,
+                key.object_id,
+                lineage_claim_id
+            ],
+            |row| row.get(0),
+        )
+        .map_err(read_sql)?
+        .collect::<Result<Vec<String>, _>>()
+        .map_err(read_sql)?;
+    // Each activation names the tail it follows, so a lineage has one chain.
+    if tails.len() > 1 {
+        return Err(ApplicationError::Corrupt);
+    }
+    Ok(tails.pop())
 }
 
 /// The activation a registration serves. A named one is the lineage's current

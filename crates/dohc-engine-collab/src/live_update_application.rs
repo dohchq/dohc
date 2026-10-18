@@ -944,6 +944,18 @@ pub struct ApplicationHandle {
     registration: Arc<Mutex<Registration>>,
 }
 
+impl ApplicationHandle {
+    /// The activation this registration serves: the one it resolved when it
+    /// registered, or the one its adoption made.
+    pub fn activation_id(&self) -> Option<String> {
+        self.registration
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .activation_id
+            .clone()
+    }
+}
+
 impl ApplicationOwner {
     pub fn new(workspace_id: String) -> Result<Self, ApplicationError> {
         identifier(&workspace_id, 512)?;

@@ -77,6 +77,14 @@ pub(crate) struct Registration {
     retired: CancelSignal,
 }
 
+impl Registration {
+    /// The activation this registration serves, as its native registration
+    /// resolved it, including one its adoption made.
+    pub(crate) fn activation_id(&self) -> Option<String> {
+        self.handle.activation_id()
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Registry {
     hosts: HashMap<WorkspaceHandle, Arc<Host>>,
@@ -146,6 +154,8 @@ pub(crate) enum LiveApplicationOperation {
 
 struct ApplicationOutputGuard {
     registration: Arc<Registration>,
+    /// The activation the guarded output belongs to.
+    activation_id: Option<String>,
     cancel: CancelSignal,
     deadline: Option<Instant>,
     _reservation: Arc<dyn Send + Sync>,
@@ -197,6 +207,7 @@ impl OutputGuard for RestoreFenceOutputGuard {
 impl std::fmt::Debug for ApplicationOutputGuard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ApplicationOutputGuard")
+            .field("activation_id", &self.activation_id)
             .finish_non_exhaustive()
     }
 }
@@ -306,6 +317,7 @@ impl EngineService {
             ));
         }
         let guard = Arc::new(ApplicationOutputGuard {
+            activation_id: registration.activation_id(),
             registration: registration.clone(),
             cancel: ctx.cancel.clone(),
             deadline: ctx.deadline,
@@ -441,12 +453,13 @@ impl EngineService {
         {
             return Err(workspace_unavailable());
         }
-        let guard = Arc::new(ApplicationOutputGuard {
+        let mut guard = ApplicationOutputGuard {
+            activation_id: registration.activation_id(),
             registration: registration.clone(),
             cancel: ctx.cancel,
             deadline: ctx.deadline,
             _reservation: reservation.clone(),
-        });
+        };
         if !guard.is_current() {
             return Err(workspace_unavailable());
         }
@@ -466,13 +479,15 @@ impl EngineService {
         if !guard.is_current() {
             return Err(workspace_unavailable());
         }
+        // The answer belongs to the activation this adoption made.
+        guard.activation_id = guard.registration.activation_id();
         Ok(ServiceResponse {
             response: Response {
                 id: request_id,
                 result: json!({"status":"adopted","adoption":result}),
             },
             blob_egress: None,
-            output_guard: Some(guard),
+            output_guard: Some(Arc::new(guard)),
         })
     }
     pub(super) async fn live_application_settle(
@@ -542,6 +557,7 @@ impl EngineService {
         let now_ms = super::request::now_ms()?;
         let token = cancellation.token();
         let guard = Arc::new(ApplicationOutputGuard {
+            activation_id: registration.activation_id(),
             registration: registration.clone(),
             cancel: ctx.cancel.clone(),
             deadline: ctx.deadline,
@@ -1244,6 +1260,7 @@ impl EngineService {
         }
         // The writer command holds the permit independently of this future.
         let guard = Arc::new(ApplicationOutputGuard {
+            activation_id: input.registration.activation_id(),
             registration: input.registration.clone(),
             cancel: ctx.cancel,
             deadline: ctx.deadline,

@@ -81,19 +81,18 @@ pub fn release_imported_owner_activation(
     session: Option<(&DocKey, &str)>,
     faults: &dyn FaultInjector,
 ) -> Result<(), ApplicationError> {
-    // A source stays while its lineage's current activation or its own
-    // activation, even a released one, records it.
+    // A source stays while its own activation, even a released one, records it.
     let outcome = store.write_with(faults, |tx| {
         let removed: Option<String> = tx
             .query_row(
                 "DELETE FROM ydoc_owner_activation_sources AS a WHERE a.activation_id=?1
              AND a.relay_database_namespace=?2 AND a.workspace_id=?3
              AND (?4 IS NULL OR (a.version_id=?4 AND a.object_id=?5 AND a.lineage_claim_id=?6))
-             AND NOT EXISTS(SELECT 1 FROM live_owner_activations adopted
-                 WHERE adopted.workspace_id=a.workspace_id AND adopted.main_version_id=a.version_id
-                 AND adopted.object_id=a.object_id AND adopted.lineage_claim_id=a.lineage_claim_id
-                 AND adopted.relay_database_namespace=a.relay_database_namespace
-                 AND (adopted.activation_id=a.activation_id OR adopted.released_at_ms IS NULL)) RETURNING full_state_digest",
+             AND NOT EXISTS(SELECT 1 FROM live_owner_activations recorded
+                 WHERE recorded.workspace_id=a.workspace_id AND recorded.main_version_id=a.version_id
+                 AND recorded.object_id=a.object_id AND recorded.lineage_claim_id=a.lineage_claim_id
+                 AND recorded.relay_database_namespace=a.relay_database_namespace
+                 AND recorded.activation_id=a.activation_id) RETURNING full_state_digest",
                 params![
                     activation_id,
                     namespace,
@@ -291,6 +290,10 @@ pub fn resume_imported_owner_activation(
             .and_then(|(_,_,_,_,source)|source).ok_or(ApplicationError::Corrupt)?;
         if verified!=source { return Err(ApplicationError::Corrupt); }
         if cursor<source.committed_cursor || epoch!=source.replication_epoch || stream!=source.stream_identity {
+            return Err(ApplicationError::Conflict);
+        }
+        // A released activation never resumes, even while its bytes still match.
+        if owner_activations::activation_by_id(conn,namespace,activation_id)?.is_some_and(|recorded|recorded.released) {
             return Err(ApplicationError::Conflict);
         }
         let adopted=owner_activations::current_activation(conn,None,key,&source.lineage_claim_id)?

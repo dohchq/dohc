@@ -141,9 +141,10 @@ fn prove(
                 Ok(!accepted.has_pending_dependencies() && bounded(accepted)? == before)
             }
             PublicationContentKind::Projection => {
-                // Native bootstrap/adoption sources and audited settlements retain
-                // exact projection digests even after accepted state advances.
-                let proved:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM live_device_bootstraps WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND projected_markdown_digest=?6 AND binding_json=?7) OR EXISTS(SELECT 1 FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND source_digest=?6 AND binding_json=?7) OR EXISTS(SELECT 1 FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND markdown_digest=?6 AND binding_json=?7)",params![namespace,key.workspace_id,key.version_id,key.object_id,binding.lineage_claim_id,digest,binding_json(binding)?],|r|r.get(0)).map_err(read_sql)?;
+                // Native bootstrap sources, every adopted activation's source, and
+                // audited settlements retain exact projection digests even after
+                // accepted state advances.
+                let proved:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM live_device_bootstraps WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND projected_markdown_digest=?6 AND binding_json=?7) OR EXISTS(SELECT 1 FROM live_owner_activations WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND evidence_digest IS NOT NULL AND source_digest=?6 AND binding_json=?7) OR EXISTS(SELECT 1 FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND markdown_digest=?6 AND binding_json=?7)",params![namespace,key.workspace_id,key.version_id,key.object_id,binding.lineage_claim_id,digest,binding_json(binding)?],|r|r.get(0)).map_err(read_sql)?;
                 if proved {
                     return Ok(true);
                 }
