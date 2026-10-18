@@ -141,9 +141,10 @@ impl EngineService {
     pub(crate) async fn dispatch_input(
         &self,
         ctx: RequestContext,
-        request: Request,
+        mut request: Request,
         input: crate::LiveApplicationInput,
     ) -> Result<ServiceResponse, WireError> {
+        self.guard_replica_request(&mut request)?;
         super::request::validate_request_ids(&request)?;
         self.ensure_configured_host_method(&ctx, &request)?;
         self.ensure_handle_allows_method(request.workspace.as_ref(), &request.method)?;
@@ -167,8 +168,9 @@ impl EngineService {
     pub(crate) async fn dispatch(
         &self,
         ctx: RequestContext,
-        request: Request,
+        mut request: Request,
     ) -> Result<ServiceResponse, WireError> {
+        self.guard_replica_request(&mut request)?;
         let id = request.id;
         super::request::validate_request_ids(&request)?;
         self.ensure_admissible_author(&request)?;
@@ -339,7 +341,13 @@ impl EngineService {
                 self.live_application_register(&ctx, request.workspace, request.params)
                     .await?
             }
-            "engine.ping" => engine_ping(),
+            "engine.ping" => {
+                if self.replica_mode.is_some() {
+                    json!({"ok":true, "mode":"replica", "sandboxLevel":"none"})
+                } else {
+                    engine_ping()
+                }
+            }
             "workspace.open" => Box::pin(self.workspace_open(&ctx, request.params)).await?,
             "files.resolve" => {
                 self.files_resolve(&ctx, request.workspace, request.params)

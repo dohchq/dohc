@@ -2,6 +2,9 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(unix)]
+mod unix_socket;
+
 use std::net::IpAddr;
 use std::time::Duration;
 
@@ -153,6 +156,42 @@ impl std::fmt::Debug for HttpRelayTransport {
 }
 
 impl HttpRelayTransport {
+    /// Local replica feed, with no TCP connector, proxy, TLS, or redirects.
+    pub fn new_unix_socket(
+        socket_path: &std::path::Path,
+        token: impl Into<String>,
+    ) -> Result<Self, RelayError> {
+        let token = token.into();
+        if !socket_path.is_absolute() || token.is_empty() {
+            return Err(RelayError::InvalidResponse);
+        }
+        #[cfg(unix)]
+        {
+            let config = Agent::config_builder()
+                .timeout_global(Some(Duration::from_secs(30)))
+                .http_status_as_error(false)
+                .https_only(false)
+                .max_redirects(0)
+                .proxy(None)
+                .middleware(name_relay_api_version)
+                .build();
+            Ok(Self {
+                base_url: "http://127.0.0.1".into(),
+                token,
+                hosted: false,
+                agent: Agent::with_parts(
+                    config,
+                    unix_socket::UnixConnector(socket_path.into()),
+                    unix_socket::UnixResolver,
+                ),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Err(RelayError::Local("relay-unix-socket-unavailable".into()))
+        }
+    }
+
     pub fn new(base_url: impl Into<String>, token: impl Into<String>) -> Result<Self, RelayError> {
         Self::build(base_url, token, false)
     }

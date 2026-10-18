@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 pub mod projection_stdio;
+mod replica_mode;
 
 mod automation_recovery;
 pub(crate) mod capture_driver;
@@ -62,6 +63,7 @@ use std::sync::MutexGuard;
 /// Read-intent opens get non-owning handles over that service's binding;
 /// cross-service or aliased attachments remain rejected so barriers cannot split.
 pub struct EngineService {
+    replica_mode: Option<replica_mode::ReplicaMode>,
     supervisor: &'static WorkspaceSupervisor,
     handles: Mutex<HashMap<WorkspaceHandle, Arc<OpenWorkspace>>>,
     live_applications: Arc<Mutex<rpc::live_application::Registry>>,
@@ -138,6 +140,20 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl EngineService {
+    /// Confine the relay child to passive RPCs and its startup store directory.
+    pub fn replica(store_dir: &std::path::Path) -> std::io::Result<Self> {
+        let mut service = Self::new();
+        service.replica_mode = Some(replica_mode::ReplicaMode::new(store_dir)?);
+        Ok(service)
+    }
+
+    pub(crate) fn guard_replica_request(&self, request: &mut Request) -> Result<(), WireError> {
+        if let Some(mode) = &self.replica_mode {
+            mode.guard(request)?;
+        }
+        Ok(())
+    }
+
     pub fn new() -> Self {
         Self::with_supervisor(WorkspaceSupervisor::global())
     }
@@ -153,6 +169,7 @@ impl EngineService {
 
     fn with_supervisor(supervisor: &'static WorkspaceSupervisor) -> Self {
         EngineService {
+            replica_mode: None,
             supervisor,
             handles: Mutex::new(HashMap::new()),
             live_applications: Arc::new(Mutex::new(rpc::live_application::Registry::default())),
