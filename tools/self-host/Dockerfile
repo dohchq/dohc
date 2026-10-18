@@ -1,5 +1,5 @@
 FROM rust:1.96.1-bookworm AS native
-ENV CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0
+ENV CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0
 WORKDIR /source
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
@@ -14,7 +14,7 @@ WORKDIR /source
 COPY . .
 RUN pnpm --filter @dohc/workspace-api... --filter @dohc/sync-relay... --filter @dohc/share-web... --filter @dohc/ydoc-projection... install --frozen-lockfile
 RUN pnpm --filter @dohc/app-backend-runtime build && pnpm --filter @dohc/workspace-api build && pnpm --filter @dohc/sync-relay build && pnpm --filter @dohc/share-web build
-RUN DOHC_READER_STAGE_RESOURCES=/opt/dohc-reader node apps/desktop/scripts/stage-engine-reader.mjs --self-host && chmod -R a+rX /opt/dohc-reader
+RUN mkdir -p /opt/dohc-reader && DOHC_READER_STAGE_RESOURCES=/opt/dohc-reader node apps/desktop/scripts/stage-engine-reader.mjs --self-host && chmod -R a+rX /opt/dohc-reader
 RUN mkdir -p /release/services/workspace-api/dist /release/services/sync-relay/dist /release/services/share-web/dist /release/services/share-web/viewer/dist /release/scripts/lib /release/packages/workspace-postgres/src/db /release/tools/self-host && \
     cp -a node_modules /release/node_modules && \
     cp -a packages/. /release/packages/ && \

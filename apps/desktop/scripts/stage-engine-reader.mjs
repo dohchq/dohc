@@ -1,10 +1,9 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, lstat, mkdir, mkdtemp, open, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { userInfo } from "node:os";
 import { buildEngineReader } from "../../../packages/ydoc-projection/scripts/build-engine-reader.mjs";
 import { NODE_VERSION, PINNED_NODE } from "./pinned-node.mjs";
 
@@ -12,37 +11,42 @@ const desktop = fileURLToPath(new URL("..", import.meta.url));
 const hash = bytes => createHash("sha256").update(bytes).digest("hex");
 const run = promisify(execFile);
 const identity = platform => ({ version: NODE_VERSION, platform, arch: "x64", unicode: "17.0", icu: "78.3" });
+const supported = (platform, arch) => ["win32", "linux"].includes(platform) && arch === "x64";
 
 async function regular(path) {
   if (!(await lstat(path)).isFile()) throw new Error(`Reader asset is not a regular file: ${path}`);
-  const file = await open(path, "r");
-  try {
-    const before = await file.stat();
-    const bytes = await file.readFile();
-    const after = await lstat(path);
-    if (!after.isFile() || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs) {
-      throw new Error(`Reader asset replaced: ${path}`);
-    }
-    return bytes;
-  } finally { await file.close(); }
+  return readFile(path);
 }
 
 /** Packaging fails closed; macOS deliberately has no closure until PR 4b. */
 export async function requireEngineReader(resources = join(desktop, "resources"), platform = process.platform, arch = process.arch, hostNode) {
-  if (platform === "darwin") return;
-  if (!["win32", "linux"].includes(platform) || arch !== "x64") throw new Error("Reader requires Windows or Linux x64.");
+  if (!supported(platform, arch)) return;
   const selection = JSON.parse(await regular(join(resources, "engine-reader/selection.json")));
-  if (!/^[a-f0-9]{64}$/.test(selection.generation)) throw new Error("Invalid reader generation.");
-  const root = join(resources, "engine-reader", selection.generation);
+  return verifyGeneration(resources, platform, selection.generation, hostNode);
+}
+
+async function verifyGeneration(resources, platform, generation, hostNode) {
+  if (!/^[a-f0-9]{64}$/.test(generation)) throw new Error("Invalid reader generation.");
+  const root = join(resources, "engine-reader", generation);
   const manifest = JSON.parse(await regular(join(root, "manifest.json")));
   const { sources, buildSha256, ...built } = manifest;
   const runtime = hostNode ?? (platform === "win32" ? join(resources, "app-compiler/node.exe") : join(root, "node"));
-  if (manifest.version !== 1 || buildSha256 !== selection.generation || hash(JSON.stringify(built)) !== buildSha256 ||
+  if (manifest.version !== 1 || buildSha256 !== generation || hash(JSON.stringify(built)) !== buildSha256 ||
       JSON.stringify(manifest.runtime) !== JSON.stringify({ ...identity(platform), sha256: manifest.runtime.sha256 }) ||
       manifest.runtime.sha256 !== (platform === "win32" ? PINNED_NODE["win32-x64"].sha256 : PINNED_NODE["linux-x64"].sha256)) throw new Error("Reader identity mismatch.");
   if (hash(await regular(runtime)) !== manifest.runtime.sha256 ||
       hash(await regular(join(root, "reader.cjs"))) !== manifest.bundleSha256) throw new Error("Reader asset hash mismatch.");
   return { node: resolve(runtime), bundle: resolve(root, "reader.cjs"), manifest: resolve(root, "manifest.json") };
+}
+
+async function discard(path) {
+  if ((await lstat(path)).isDirectory()) await chmod(path, 0o700);
+  await rm(path, { recursive: true, force: true });
+}
+async function prune(base, generation, selfHost) {
+  for (const entry of await readdir(base)) {
+    if (![generation, "selection.json", ...(selfHost ? ["startup.json"] : [])].includes(entry)) await discard(join(base, entry));
+  }
 }
 
 async function linuxNode(staging, fetchNode, resources) {
@@ -76,17 +80,27 @@ async function linuxNode(staging, fetchNode, resources) {
   return node;
 }
 
-/** New builds select a fresh immutable generation. Active generations are never rewritten. */
+/** Preparation verifies before selecting; packages retain only the selected generation. */
 export async function stageEngineReader(options = {}) {
   const platform = options.platform ?? process.platform, arch = options.arch ?? process.arch;
   const resources = resolve(options.resources ?? join(desktop, "resources"));
-  if (platform === "darwin") return { supported: false };
-  if (!["win32", "linux"].includes(platform) || arch !== "x64") throw new Error("Reader requires Windows or Linux x64.");
+  if (!supported(platform, arch)) return { supported: false };
   const base = join(resources, "engine-reader");
   await mkdir(base, { recursive: true, mode: 0o700 });
-  if (process.platform === "win32") {
-    const grants = [`${userInfo().username}:(OI)(CI)F`, "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"];
-    await run("icacls.exe", [resources, "/inheritance:r", "/grant:r", ...grants]);
+  if (platform === "linux") {
+    const config = await requireEngineReader(resources, platform, arch, options.selfHost ? process.execPath : undefined).then(async config => {
+      const manifest = JSON.parse(await regular(config.manifest));
+      const repo = resolve(desktop, "../..");
+      if (hash(await readFile(join(repo, "pnpm-lock.yaml"))) !== manifest.lockSha256) return null;
+      for (const source of manifest.sources) if (hash(await readFile(resolve(repo, source.path))) !== source.sha256) return null;
+      return config;
+    }).catch(() => null);
+    if (config) {
+      const generation = basename(dirname(config.bundle));
+      if (options.selfHost) await writeFile(join(base, "startup.json"), JSON.stringify(config) + "\n", { mode: 0o444 });
+      await prune(base, generation, options.selfHost);
+      return { supported: true, generation, ...config };
+    }
   }
   const staging = await mkdtemp(join(base, ".staging-"));
   try {
@@ -109,14 +123,19 @@ export async function stageEngineReader(options = {}) {
     }
     await chmod(staging, 0o555);
     const generation = manifest.buildSha256, destination = join(base, generation);
-    try { await rename(staging, destination); }
-    catch (error) { if (!["EEXIST", "ENOTEMPTY", "EPERM"].includes(error.code) || !(await lstat(destination)).isDirectory()) throw error; }
+    const hostNode = options.selfHost ? process.execPath : undefined;
+    const existing = await verifyGeneration(resources, platform, generation, hostNode).catch(() => null);
+    if (!existing) {
+      if (await lstat(destination).catch(() => null)) await discard(destination);
+      await rename(staging, destination);
+    }
+    const config = await verifyGeneration(resources, platform, generation, hostNode);
     const selected = join(base, "selection.json");
     const temporary = join(base, `.selection-${process.pid}.json`);
     await writeFile(temporary, JSON.stringify({ generation }) + "\n", { mode: 0o600 });
     await rename(temporary, selected);
-    const config = await requireEngineReader(resources, platform, arch, options.selfHost ? process.execPath : undefined);
     if (options.selfHost) await writeFile(join(base, "startup.json"), JSON.stringify(config) + "\n", { mode: 0o444 });
+    await prune(base, generation, options.selfHost);
     return { supported: true, generation, ...config };
   } finally {
     await chmod(staging, 0o700).catch(() => {});

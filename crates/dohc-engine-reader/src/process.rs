@@ -184,9 +184,14 @@ fn check_assets(
     assets: &[(std::path::PathBuf, File, std::fs::Metadata)],
 ) -> std::result::Result<(), Failure> {
     for (path, _file, held) in assets {
-        let current = crate::platform::open_asset(path)
-            .and_then(|f| f.metadata())
-            .map_err(|_| Failure::Unavailable)?;
+        let current_file = crate::platform::open_asset(path).map_err(|_| Failure::Unavailable)?;
+        let current = current_file.metadata().map_err(|_| Failure::Unavailable)?;
+        #[cfg(windows)]
+        if crate::platform::asset_identity(_file).map_err(|_| Failure::Unavailable)?
+            != crate::platform::asset_identity(&current_file).map_err(|_| Failure::Unavailable)?
+        {
+            return Err(Failure::Unavailable);
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
@@ -206,6 +211,33 @@ fn check_assets(
         }
     }
     Ok(())
+}
+#[cfg(all(test, windows))]
+#[test]
+fn equal_metadata_cannot_hide_a_different_file_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let held_path = directory.path().join("held");
+    let current_path = directory.path().join("current");
+    let modified =
+        std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    for path in [&held_path, &current_path] {
+        std::fs::write(path, "same bytes").unwrap();
+        File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+    }
+    let file = crate::platform::open_asset(&held_path).unwrap();
+    let held = file.metadata().unwrap();
+    let current = std::fs::metadata(&current_path).unwrap();
+    assert_eq!(held.len(), current.len());
+    assert_eq!(held.modified().unwrap(), current.modified().unwrap());
+    assert!(matches!(
+        check_assets(&[(current_path, file, held)]),
+        Err(Failure::Unavailable)
+    ));
 }
 impl Drop for Worker {
     fn drop(&mut self) {

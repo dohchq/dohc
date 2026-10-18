@@ -2,8 +2,8 @@ import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 /** Main-process installation paths only. Missing preparation disables the reader. */
-export function installedReaderConfig(resources: string | undefined, platform = process.platform): string | undefined {
-  if (!resources || !["win32", "linux"].includes(platform)) return;
+export function installedReaderConfig(resources: string | undefined, platform = process.platform, arch = process.arch): string | undefined {
+  if (!resources || !["win32", "linux"].includes(platform) || arch !== "x64") return;
   try {
     const { generation } = JSON.parse(readFileSync(join(resources, "engine-reader/selection.json"), "utf8"));
     if (typeof generation !== "string" || !/^[a-f0-9]{64}$/.test(generation)) return;

@@ -1,7 +1,38 @@
 use super::*;
 
-thread_local! { static REPLACE: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) }; }
+thread_local! {
+    static REPLACE: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
+    static START_REPLACE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    #[cfg(windows)]
+    static DIRECTORY_REPLACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+pub(super) fn started() {
+    if let Some(path) = START_REPLACE.take() {
+        fs::rename(&path, path.with_extension("old")).unwrap();
+        fs::copy(path.with_extension("old"), &path).unwrap();
+    }
+}
 pub(super) fn after_hash(config: &Config) {
+    #[cfg(windows)]
+    if DIRECTORY_REPLACE.replace(false) {
+        let directory = config.bundle.parent().unwrap();
+        let old = directory.with_extension("old");
+        if fs::rename(directory, &old).is_ok() {
+            fs::create_dir(directory).unwrap();
+            for name in fs::read_dir(&old).unwrap() {
+                let path = name.unwrap().path();
+                let replacement = directory.join(path.file_name().unwrap());
+                fs::copy(&path, &replacement).unwrap();
+                let modified = fs::metadata(path).unwrap().modified().unwrap();
+                fs::File::options()
+                    .write(true)
+                    .open(replacement)
+                    .unwrap()
+                    .set_times(fs::FileTimes::new().set_modified(modified))
+                    .unwrap();
+            }
+        }
+    }
     let index = REPLACE.replace(usize::MAX);
     if index == usize::MAX {
         return;
@@ -22,6 +53,91 @@ pub(super) fn after_hash(config: &Config) {
         } else {
             fs::write(path, "changed after hash").unwrap();
         }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn post_hello_asset_replacement_is_unavailable() {
+    let (_dir, c) = fixture("ok");
+    START_REPLACE.set(Some(c.manifest.clone()));
+    let worker = process::Worker::start(
+        &c,
+        Arc::new(Shared::default()),
+        Instant::now() + Duration::from_secs(30),
+    )
+    .unwrap();
+    START_REPLACE.with_borrow(|path| assert!(path.is_none(), "started hook must run"));
+    // The fake reader embeds its manifest, so replacing this file cannot break hello.
+    assert!(matches!(
+        worker.output.recv_timeout(Duration::from_secs(10)).unwrap(),
+        Err(Failure::Unavailable)
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn renamed_generation_or_compiler_directory_is_blocked_or_detected() {
+    for runtime in [false, true] {
+        let (dir, mut c) = fixture("ok");
+        let directory = dir.path().join(if runtime {
+            "app-compiler"
+        } else {
+            "generation"
+        });
+        fs::create_dir(&directory).unwrap();
+        if runtime {
+            let node = directory.join("node.exe");
+            fs::copy(&c.node, &node).unwrap();
+            c.node = node;
+            // The hook selects this parent, irrespective of which asset lives there.
+            fs::rename(&c.bundle, directory.join("fake.cjs")).unwrap();
+            c.bundle = directory.join("fake.cjs");
+        } else {
+            for path in [&mut c.bundle, &mut c.manifest] {
+                let target = directory.join(path.file_name().unwrap());
+                fs::rename(&*path, &target).unwrap();
+                *path = target;
+            }
+        }
+        DIRECTORY_REPLACE.set(true);
+        let result = process::Worker::start(
+            &c,
+            Arc::new(Shared::default()),
+            Instant::now() + Duration::from_secs(30),
+        );
+        assert!(!DIRECTORY_REPLACE.get());
+        if directory.with_extension("old").exists() {
+            assert!(matches!(result, Err(Failure::Unavailable)));
+        } else {
+            assert!(result.is_ok(), "OS denied directory replacement");
+        }
+        drop(result);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn writable_ancestor_is_refused_even_with_a_protected_generation() {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, mut c) = fixture("ok");
+    let generation = dir.path().join("generation");
+    fs::create_dir(&generation).unwrap();
+    for path in [&mut c.bundle, &mut c.manifest] {
+        let target = generation.join(path.file_name().unwrap());
+        fs::rename(&*path, &target).unwrap();
+        *path = target;
+    }
+    for mode in [0o770, 0o1770] {
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(mode)).unwrap();
+        assert!(matches!(
+            process::Worker::start(
+                &c,
+                Arc::new(Shared::default()),
+                Instant::now() + Duration::from_secs(30)
+            ),
+            Err(Failure::Unavailable)
+        ));
     }
 }
 

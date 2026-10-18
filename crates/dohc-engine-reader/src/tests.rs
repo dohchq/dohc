@@ -15,6 +15,8 @@ pub(super) fn started(shared: &Shared, pid: u32, cwd: &std::path::Path) {
     s.lifecycle.0 += 1;
     s.lifecycle.2 = Some((pid, cwd.into()));
     shared.wake.notify_all();
+    drop(s);
+    assets::started();
 }
 pub(super) fn reaped(shared: &Shared) {
     let mut s = shared.state.lock().unwrap();

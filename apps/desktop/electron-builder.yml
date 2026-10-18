@@ -132,6 +132,7 @@ mac:
   target: [dmg, zip]
   hardenedRuntime: true
 win:
+  signExts: ["!node.exe"]
   target: [nsis]
 linux:
   # Without its own icon, the Linux target falls back to mac.icon.

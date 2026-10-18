@@ -12,6 +12,8 @@ pub(super) fn open_asset(path: &std::path::Path) -> std::io::Result<std::fs::Fil
         if metadata.file_type().is_symlink() {
             return Err(io::ErrorKind::InvalidInput.into());
         }
+        #[cfg(unix)]
+        check_owner(&metadata, true)?;
         #[cfg(windows)]
         {
             use std::os::windows::fs::MetadataExt;
@@ -37,19 +39,7 @@ pub(super) fn open_asset(path: &std::path::Path) -> std::io::Result<std::fs::Fil
     let file = options.open(path)?;
     let metadata = file.metadata()?;
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        // SAFETY: geteuid has no pointer arguments or side effects.
-        let owner = unsafe { libc::geteuid() };
-        for metadata in [
-            &metadata,
-            &std::fs::metadata(path.parent().ok_or(io::ErrorKind::InvalidInput)?)?,
-        ] {
-            if metadata.mode() & 0o022 != 0 || (metadata.uid() != 0 && metadata.uid() != owner) {
-                return Err(io::ErrorKind::PermissionDenied.into());
-            }
-        }
-    }
+    check_owner(&metadata, false)?;
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
@@ -61,6 +51,37 @@ pub(super) fn open_asset(path: &std::path::Path) -> std::io::Result<std::fs::Fil
         return Err(io::ErrorKind::InvalidInput.into());
     }
     Ok(file)
+}
+#[cfg(unix)]
+fn check_owner(metadata: &std::fs::Metadata, directory: bool) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: geteuid has no pointer arguments or side effects.
+    let owner = unsafe { libc::geteuid() };
+    let sticky_root = directory && metadata.uid() == 0 && metadata.mode() & libc::S_ISVTX != 0;
+    if !sticky_root
+        && (metadata.mode() & 0o022 != 0 || (metadata.uid() != 0 && metadata.uid() != owner))
+    {
+        return Err(std::io::ErrorKind::PermissionDenied.into());
+    }
+    Ok(())
+}
+#[cfg(windows)]
+pub(super) fn asset_identity(file: &std::fs::File) -> std::io::Result<(u32, u32, u32)> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+    // SAFETY: the handle is live and the output is a correctly sized local struct.
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: the handle is live and info is a writable, correctly sized output.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok((
+        info.dwVolumeSerialNumber,
+        info.nFileIndexHigh,
+        info.nFileIndexLow,
+    ))
 }
 #[cfg(unix)]
 mod os {

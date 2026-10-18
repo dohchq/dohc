@@ -1,9 +1,37 @@
 // Startup configuration has no protocol reader caller.
 use super::*;
 
-#[test]
-fn library_host_defaults_to_no_reader() {
-    assert!(EngineService::new().reader.get().is_none());
+#[tokio::test]
+async fn library_host_requires_explicit_reader_configuration() {
+    let service = EngineService::new();
+    assert!(service.reader.get().is_none());
+    let missing = dohc_engine_testkit::ScratchDir::new().unwrap();
+    service.configure_reader(dohc_engine_reader::Config {
+        node: missing.path().join("node.exe"),
+        bundle: missing.path().join("reader.cjs"),
+        manifest: missing.path().join("manifest.json"),
+    });
+    let reader = service
+        .reader
+        .get()
+        .expect("explicit configuration installs the reader");
+    assert!(matches!(
+        reader
+            .request(dohc_engine_reader::Request {
+                method: dohc_engine_reader::Method::Construct,
+                document: dohc_engine_reader::Document {
+                    workspace_id: "w".into(),
+                    main_version_id: "v".into(),
+                    object_id: "o".into(),
+                    lineage_claim_id: "l".into(),
+                },
+                current_path: "note.md".into(),
+                source: vec![],
+                checkpoint: vec![],
+            })
+            .await,
+        Err(dohc_engine_reader::Failure::Unavailable)
+    ));
 }
 
 #[tokio::test]

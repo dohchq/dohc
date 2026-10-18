@@ -59,6 +59,7 @@ interface CollectionAutomationsLifecycle {
 }
 
 interface DesktopEngineDependencies<State extends EngineAuthorityState> {
+  resourcesBasePath(): string;
   onWorkspaceOpened?(workspaceId: string): void;
   onRefusalsChanged?: () => void;
   serverOwnerDelivery?: ServerOwnerDelivery;
@@ -444,7 +445,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       const ingress = hostIngress ?? peerIngress ?? (serverOwnerConfig && {configPath: serverOwnerConfig.nativeConfigPath, client: serverOwnerConfig.nativeClient});
       let publications = 0;
       rustEngineDaemon = createRustEngineDaemon({
-        readerConfig: installedReaderConfig(app.isPackaged ? process.resourcesPath : `${app.getAppPath()}/resources`),
+        readerConfig: installedReaderConfig(dependencies.resourcesBasePath()),
         ...(ingress ? {privateOwnerHost: ingress} : {}),
         startupSmoke: startupSmoke.promise,
         ...testEngineRestartOverrides(),
