@@ -40,6 +40,24 @@ const WORKSPACE = "workspace-handle-1";
 const VERSION = "version-1";
 const PATH = "notes/live.txt";
 
+it.each(["journal", "owner-outbox"])("reports the actual acknowledgement lane through the provider (%s)", async lane => {
+  const engine = seedPlaintextEngine("seed"), acknowledged = vi.fn();
+  const provider = await openEngineYdocProviderSession({
+    transport: {...forwardYdocBlobEgress(engine), onEvent: handler => engine.onEvent(handler),
+      async sendRequest(request) {
+        const response = await engine.sendRequest(request);
+        return lane === "owner-outbox" && request.method === YDOC_METHOD.recordUpdate ? {...response,
+          result: {lineageClaimId: "lineage", ownerDraft: {outboxId: "outbox", sequence: 1, deliveryId: "delivery",
+            updateDigest: "a".repeat(64), pendingBytes: 10, state: "active"}}} : response;
+      }}, workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind: "plaintext",
+    onRemoteUpdate: () => {}, onLocalUpdateAcknowledged: acknowledged, scheduleSettle: () => () => {},
+  });
+  try {
+    await provider.applyLocalUpdate(plaintextUpdate(provider.initialUpdate, text => text.insert(0, "edit ")), {idempotencyKey: "edit-key", armSettle: false});
+    expect(acknowledged).toHaveBeenCalledExactlyOnceWith("edit-key", lane);
+  } finally {await provider.evict();}
+});
+
 describe("server automation draft declarations", () => {
   it.each([false, true])("retains the explicit server declaration option (%s)", async trustedAutomationDraft => {
     const engine = seedPlaintextEngine("seed");

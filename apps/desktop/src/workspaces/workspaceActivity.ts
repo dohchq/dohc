@@ -442,7 +442,7 @@ export function createWorkspaceActivity(
           entry.inFlight = false;
           entry.lastSyncedAtMs = Date.now();
           entry.engine?.queueSync();
-          entry.engine?.queueWatchedUpload(paths);
+          entry.engine?.queueWatchedUpload();
           notify({ workspaceId: workspace.workspaceId, paths, pathSetChanged: false });
         },
         pulled(paths) {

@@ -2329,7 +2329,6 @@ function engineForWorkspace(
     // nobody touches this desktop: the relay answers a held read when the log
     // changes. The rare pull covers a change that answer missed.
     waitForChange: createRelayLogWait({ workspaceId: workspace.workspaceId, relay }),
-    retryOwnerDelivery: path => desktopEngine.retryOwnerDelivery(workspace.workspaceId, path),
     idlePullMs: 5 * 60_000,
     // A freshly joined workspace's engine is pull-first: no push before the
     // first successful pull (0P-C gate fix).

@@ -101,7 +101,7 @@ describe("workspaceActivity capture hooks", () => {
     expect(queueSync).not.toHaveBeenCalled();
     observation.captured();
     expect(queueSync).toHaveBeenCalledOnce();
-    expect(queueWatchedUpload).toHaveBeenCalledWith(undefined);
+    expect(queueWatchedUpload).toHaveBeenCalledExactlyOnceWith();
     await activity.stopAll();
   });
 
@@ -811,7 +811,7 @@ describe("workspaceActivity cloud sync nudge", () => {
           start: async () => undefined,
           queueSync: () => undefined,
           queueWatchedUpload: () => {},
-      queuePull: () => undefined,
+          queuePull: () => undefined,
           retryNow: async () => undefined,
           snapshot: () => ({
             syncFailure: null,
@@ -871,7 +871,7 @@ describe("workspaceActivity cloud sync nudge", () => {
           start: async () => undefined,
           queueSync: () => undefined,
           queueWatchedUpload: () => {},
-      queuePull: () => undefined,
+          queuePull: () => undefined,
           retryNow: async () => undefined,
           snapshot: () => ({
             syncFailure: null,
@@ -1042,7 +1042,7 @@ describe("workspaceActivity cloud sync nudge", () => {
         start: async () => undefined,
         queueSync: () => undefined,
         queueWatchedUpload: () => {},
-      queuePull: () => undefined,
+        queuePull: () => undefined,
         retryNow: async () => undefined,
         snapshot: () => ({
           syncFailure: null,

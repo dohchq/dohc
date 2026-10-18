@@ -35,37 +35,26 @@ export function startServerOwnerDelivery(options: {
   workspaceIds(): string[];
   attemptTimeoutMs: number;
   retryDelayMs: number;
-  runPass(workspaceId: string, documentIndex: number, signal: AbortSignal, path?: string): Promise<{documentCount: number; acknowledged: boolean}>;
+  runPass(workspaceId: string, documentIndex: number, signal: AbortSignal): Promise<{documentCount: number; acknowledged: boolean}>;
   onError(error: unknown): void;
 }) {
   const lifetime = new AbortController(), nextDocument = new Map<string, number>();
   const retries = Effect.runSync(Queue.sliding<void>(1));
   let nextWorkspace = 0;
   let retryWorkspace: string | undefined;
-  let retryPath: string | undefined;
-  let priorityLastPass = false;
   const pass = Effect.tryPromise({
     try: async () => {
-      const priority = retryPath !== undefined && !priorityLastPass;
-      const requested = retryPath === undefined || priority ? retryWorkspace : undefined;
-      const path = priority ? retryPath : undefined;
-      if (requested !== undefined) {retryWorkspace = undefined; retryPath = undefined;}
+      const requested = retryWorkspace; retryWorkspace = undefined;
       const workspaces = options.workspaceIds();
       for (const id of nextDocument.keys()) if (!workspaces.includes(id)) nextDocument.delete(id);
-      if (!workspaces.length) {
-        retryWorkspace = undefined; retryPath = undefined; priorityLastPass = false;
-        return {documentCount: 0, acknowledged: false};
-      }
-      const requestedIndex = requested ? workspaces.indexOf(requested) : -1;
-      if (!priority && requestedIndex >= 0) nextWorkspace = requestedIndex;
-      const workspaceId = workspaces[priority && requestedIndex >= 0 ? requestedIndex : nextWorkspace % workspaces.length]!;
-      const prioritized = priority && requestedIndex >= 0;
-      if (!prioritized) nextWorkspace = (nextWorkspace + 1) % workspaces.length;
+      if (!workspaces.length) return {documentCount: 0, acknowledged: false};
+      if (requested && workspaces.includes(requested)) nextWorkspace = workspaces.indexOf(requested);
+      const workspaceId = workspaces[nextWorkspace % workspaces.length]!;
+      nextWorkspace = (nextWorkspace + 1) % workspaces.length;
       const index = nextDocument.get(workspaceId) ?? 0;
-      priorityLastPass = prioritized;
-      const result = await options.runPass(workspaceId, index, AbortSignal.any([lifetime.signal, AbortSignal.timeout(options.attemptTimeoutMs)]), prioritized ? path : undefined);
+      const result = await options.runPass(workspaceId, index, AbortSignal.any([lifetime.signal, AbortSignal.timeout(options.attemptTimeoutMs)]));
       if (lifetime.signal.aborted) return {documentCount: 0, acknowledged: false};
-      if (!prioritized) nextDocument.set(workspaceId, result.documentCount ? (index + 1) % result.documentCount : 0);
+      nextDocument.set(workspaceId, result.documentCount ? (index + 1) % result.documentCount : 0);
       return {documentCount: result.documentCount, acknowledged: result.acknowledged || index + 1 < result.documentCount};
     },
     catch: error => error,
@@ -93,10 +82,9 @@ export function startServerOwnerDelivery(options: {
     }
   })), {signal: lifetime.signal});
   return {
-    retry(workspaceId: string, path?: string) {
+    retry(workspaceId: string) {
       if (lifetime.signal.aborted) return;
       retryWorkspace = workspaceId;
-      retryPath = path;
       Queue.offerUnsafe(retries, undefined);
     },
     async stop() {

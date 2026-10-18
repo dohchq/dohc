@@ -750,7 +750,9 @@ export interface WorkspaceEngineCapture {
   runRelaySync<T>(
     task: (materializePage: MaterializeRelayPullPage) => Promise<T>,
   ): Promise<T>;
+  // Journaled edits only. Owner-outbox acknowledgements use their live lane.
   onDurableLocalChange(handler: (path: string) => void): () => void;
+  readonly shuttingDown: boolean;
   // Resolves when everything enqueued so far has been captured.
   flush(): Promise<void>;
   // Stops accepting work and resolves once in-flight capture is durably
@@ -2273,6 +2275,7 @@ export function createWorkspaceEngineCapture(
       acknowledged: boolean;
       journalFinished?: boolean;
       durableNotified?: boolean;
+      ownerOutbox?: boolean;
       sent: boolean;
       uncertainFailures: number;
       lastUncertainFailureAt: number | null;
@@ -2289,7 +2292,7 @@ export function createWorkspaceEngineCapture(
       pendingUpdateBytes = 0;
     };
     const notifyDurable = (record: PendingRecord): void => {
-      if (!record.acknowledged || !record.journalFinished || record.durableNotified || stopped) return;
+      if (!record.acknowledged || !record.journalFinished || record.durableNotified || record.ownerOutbox || stopped || shuttingDown) return;
       record.durableNotified = true;
       for (const handler of durableLocalListeners) {
         try { handler(input.path); } catch (error) { onError("durable edit observer", error); }
@@ -2651,9 +2654,10 @@ export function createWorkspaceEngineCapture(
               }
             } : undefined,
             onLocalEditError: requestReconnect,
-            onLocalUpdateAcknowledged: (id) => {
+            onLocalUpdateAcknowledged: (id, lane) => {
               for (const record of pendingRecords) {
                 if (record.options.idempotencyKey === id) {
+                  record.ownerOutbox = lane === "owner-outbox";
                   if (canonicalDoc !== null) acknowledge(record, canonicalDoc);
                   recordedStateVector = Y.encodeStateVector(recordedDoc);
                 }
@@ -7558,10 +7562,11 @@ export function createWorkspaceEngineCapture(
     },
 
     onDurableLocalChange(handler) {
-      if (stopped) return () => {};
+      if (stopped || shuttingDown) return () => {};
       durableLocalListeners.add(handler);
       return () => { durableLocalListeners.delete(handler); };
     },
+    get shuttingDown() { return shuttingDown || stopped; },
     runRelaySync(task) {
       return enqueueResult("relay sync", async () => {
         // A joined daemon can pull before any capture task has opened the

@@ -77,7 +77,6 @@ export interface CloudSyncEngineOptions {
   // `signal` when it no longer needs the answer, and waits for the promise to
   // settle before it waits again or stops.
   waitForChange?: (since: number, signal: AbortSignal) => Promise<RelayLogChange>;
-  retryOwnerDelivery?: (path: string) => void;
   // How long the engine waits after a pass before it pulls again on its own:
   // the fallback for a change `waitForChange` missed. Omitted, the engine
   // pulls only when asked.
@@ -122,7 +121,7 @@ export interface CloudSyncEngine {
   start(): Promise<void>;
   queueSync(): void;
   queuePull(): void;
-  queueWatchedUpload(paths?: readonly string[]): void;
+  queueWatchedUpload(): void;
   // Runs a pass now instead of waiting out the backoff, and settles when it
   // ends. The outcome is in the next snapshot, not in the promise. A pass that
   // does not count as an attempt (a retry on reconnecting or waking) updates
@@ -185,7 +184,6 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   let watchedDirty = false;
   let watchedPushPaused = false;
   let lastWatchedStart = -Infinity;
-  const editedPaths = new Set<string>();
   // The wait on the relay for a change past the last pull.
   const watch = options.waitForChange && startRelayWatch({
     wait: options.waitForChange,
@@ -260,30 +258,29 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     if (watched === value) return;
     watched = value;
     if (value && !stopped) {
-      detachDurable = options.capture.onDurableLocalChange(path => queueWatchedUpload([path]));
+      detachDurable = options.capture.onDurableLocalChange(queueWatchedUpload);
     } else {
       detachDurable?.();
       detachDurable = undefined;
       cancelWatchedTimer();
       watchedDirty = false;
-      editedPaths.clear();
     }
   }
 
-  function queueWatchedUpload(paths?: readonly string[]): void {
+  function queueWatchedUpload(): void {
     if (!watched || stopped) return;
     watchedDirty = true;
-    for (const path of paths ?? []) editedPaths.add(path);
+    watchedPushPaused = false;
     scheduleWatchedUpload();
   }
 
   function canUploadWatched(): boolean {
-    return watched && !stopped && !authExpired && !claimRefusal && !bootstrapPullPending &&
+    return watched && !stopped && !options.capture.shuttingDown && !authExpired && !claimRefusal && !bootstrapPullPending &&
       !syncFailure && backoffTimer === undefined && passesPending === 0;
   }
 
   function scheduleWatchedUpload(): void {
-    if ((!watchedDirty && editedPaths.size === 0) || watchedQueued || watchedTimer !== undefined || !canUploadWatched()) return;
+    if (!watchedDirty || watchedPushPaused || watchedQueued || watchedTimer !== undefined || !canUploadWatched()) return;
     const delay = Math.max(0, lastWatchedStart + 250 - Date.now());
     if (delay === 0) runWatchedUpload();
     else watchedTimer = setTimeout(() => {
@@ -296,29 +293,24 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   function runWatchedUpload(): void {
     watchedQueued = true;
     const result = chain.then(async () => {
-      if ((!watchedDirty && editedPaths.size === 0) || !canUploadWatched()) return;
-      const pushPending = watchedDirty;
-      watchedDirty = false;
-      lastWatchedStart = Date.now();
-      const paths = [...editedPaths];
-      editedPaths.clear();
-      for (const path of paths) options.retryOwnerDelivery?.(path);
-      if (!pushPending || watchedPushPaused) return;
+      if (!watchedDirty || watchedPushPaused || !canUploadWatched()) return;
       const before = visibleState();
       const eventsBefore = changeEvents;
       try {
         const pushed = await options.capture.runRelaySync(async () => {
+          if (!watchedDirty || !canUploadWatched()) return;
+          watchedDirty = false;
+          lastWatchedStart = Date.now();
           const result = await pushWithIdentity({
             push: () => operations.push(),
-            claim: () => operations.claim(),
+            claim,
           });
-          // A push can drain edits recorded during its I/O. Clear their wake
-          // before releasing capture, so a later durable edit keeps its wake.
-          watchedDirty = result.pushed > 0 && result.hasMore;
+          watchedDirty ||= result.pushed > 0 && result.hasMore;
           return result;
         });
-        watchedPushPaused = pushed.pushed === 0;
-        sharingDeclined = pushed.sharingDeclined;
+        if (!pushed) return;
+        watchedPushPaused = pushed.pushed === 0 && !watchedDirty;
+        sharingDeclined = mergeSharingDeclined([...sharingDeclined, ...pushed.sharingDeclined]);
         ownerAdmissionPending = pushed.ownerAdmissionPending;
         if (ownerAdmissionPending.length > 0 && !pushed.hasMore) scheduleBackoff();
       } catch (error) {
@@ -443,6 +435,21 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     );
   }
 
+  async function claim(): Promise<void> {
+    claimingIdentity = true;
+    emitChange();
+    try {
+      // The daemon reuses its durable identity if a previous claim lost its response.
+      await operations.claim();
+    } catch (error) {
+      if (error instanceof RelayClaimRefusedError) claimRefusal = error;
+      throw error;
+    } finally {
+      claimingIdentity = false;
+      emitChange();
+    }
+  }
+
   // Resolves true when the workspace pull or the shared-channel pass applied
   // ops. The shared-channel pass tells the renderer itself, and the renderer
   // then reads `syncing`, so a quiet pass must announce that it ended.
@@ -455,20 +462,6 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     changeReported = undefined;
     let passOwnerPending = ownerAdmissionPending;
     let pushHasMore = false;
-    const claim = async () => {
-      claimingIdentity = true;
-      emitChange();
-      try {
-        // The daemon reuses its durable identity if a previous claim lost its response.
-        await operations.claim();
-      } catch (error) {
-        if (error instanceof RelayClaimRefusedError) claimRefusal = error;
-        throw error;
-      } finally {
-        claimingIdentity = false;
-        emitChange();
-      }
-    };
     const push = async () => {
       if (retryClaim) {
         retryClaim = false;
@@ -478,7 +471,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       passSharingDeclined.push(...result.sharingDeclined);
       passOwnerPending = result.ownerAdmissionPending;
       pushHasMore = result.hasMore;
-      if (watched) watchedDirty = result.hasMore;
+      if (watched) watchedDirty ||= result.hasMore;
     };
     const passSharingDeclined: PushWorkspaceToRelayResult["sharingDeclined"] = [];
     const pullResult = await options.capture.runRelaySync(
@@ -545,17 +538,10 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       }
     }
     passSharingDeclined.push(...(pullResult.sharingDeclined ?? []));
-    const declinedByVersionAndObject = new Map<string, SharingDeclined>();
-    for (const declined of passSharingDeclined) {
-      declinedByVersionAndObject.set(JSON.stringify([declined.versionId, declined.objectId]), declined);
-    }
-    const nextSharingDeclined = [...declinedByVersionAndObject.values()].sort((a, b) =>
-      a.path.localeCompare(b.path),
-    );
     conflictCount = options.countOpenConflicts
       ? await options.countOpenConflicts()
       : conflictCount + pullResult.conflictsOpened;
-    sharingDeclined = nextSharingDeclined;
+    sharingDeclined = mergeSharingDeclined(passSharingDeclined);
     ownerAdmissionPending = passOwnerPending;
     pendingChangeCount = Math.max(
       ownerAdmissionPending.length,
@@ -581,6 +567,14 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   // every pass, so they do not count.
   function visibleState(): string {
     return JSON.stringify([pendingChangeCount, conflictCount, sharingDeclined, ownerAdmissionPending]);
+  }
+
+  function mergeSharingDeclined(declines: readonly SharingDeclined[]): SharingDeclined[] {
+    const byObject = new Map<string, SharingDeclined>();
+    for (const declined of declines) {
+      byObject.set(JSON.stringify([declined.versionId, declined.objectId]), declined);
+    }
+    return [...byObject.values()].sort((a, b) => a.path.localeCompare(b.path));
   }
 
   // A quiet pass serves queuePull. Each change event refreshes Chats, so a
@@ -620,7 +614,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         // here, in the serialized lifecycle, so a pass that ends before this
         // one starts cannot leave its backoff behind.
         clearPassTimers();
-        // Its push covers edits already queued. Keep their owner-delivery hints.
+        // Its push covers edits already queued.
         if (!bootstrapPullPending) watchedDirty = false;
         watchedPushPaused = false;
         retryQueued = false;

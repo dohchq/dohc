@@ -109,7 +109,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   let ownerHostModule: typeof import("./desktopOwnerHost") | undefined;
   let ownerHostGeneration = 0;
   let ownerWorkspaceCloses = 0;
-  let ownerDelivery: (ReturnType<typeof startDesktopOwnerDelivery> & {retry?(workspaceId: string, path?: string): void}) | undefined;
+  let ownerDelivery: (ReturnType<typeof startDesktopOwnerDelivery> & {retry?(workspaceId: string): void}) | undefined;
   let ownerDeliveryConfig: DesktopOwnerDeliveryConfig | undefined;
   let ownerDeliveryModule: typeof import("./desktopOwnerDelivery") | undefined;
   let nativeOwnerDeliveryModule: typeof import("./nativeOwnerDelivery") | undefined;
@@ -209,7 +209,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                 setOwnerDeliveryStatus(workspaceId, unavailable ? "retrying" : preparing ? "preparing" : undefined, reason);
                 return {documentCount: 0, acknowledged: false};
               }
-              const document = documents.find(document => document.binding.currentPath === path) ?? documents[index % documents.length]!;
+              const document = documents[index % documents.length]!;
               nativeOwnerDeliveryModule ??= await import("./nativeOwnerDelivery");
               check();
               const native = nativeOwnerDeliveryModule;
@@ -594,8 +594,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   }
 
   return {
-    retryOwnerDelivery(workspaceId: string, path?: string): void {
-      if (dependencies.serverOwnerDelivery?.workspaceIds().includes(workspaceId)) ownerDelivery?.retry?.(workspaceId, path);
+    retryOwnerDelivery(workspaceId: string): void {
+      if (dependencies.serverOwnerDelivery?.workspaceIds().includes(workspaceId)) ownerDelivery?.retry?.(workspaceId);
     },
     ownerLiveDeliveryStatus(workspaceId: string): OwnerLiveDeliveryStatus | undefined {
       return dependencies.serverOwnerDelivery?.workspaceIds().includes(workspaceId) ? serverOwnerUnavailable ? "retrying" : ownerDeliveryStatus.get(workspaceId) : undefined;
