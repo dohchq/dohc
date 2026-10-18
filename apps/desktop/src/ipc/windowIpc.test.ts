@@ -21,7 +21,7 @@ function sender(id: number) {
 type Sender = ReturnType<typeof sender>;
 type Event = { sender: Sender; senderFrame?: { url: string } | null };
 
-async function harness(isPackaged = false) {
+async function harness(isPackaged = false, platform: NodeJS.Platform = "darwin") {
   const first = sender(1), second = sender(2);
   let retirement = Promise.resolve();
   const retiring = vi.fn(() => ({ requiredForAdmission: retirement, detachedFromAdmission: Promise.resolve() }));
@@ -74,7 +74,7 @@ async function harness(isPackaged = false) {
     assertTrustedSender: event => { if (!isTrustedFrame(event.senderFrame?.url ?? "")) throw new Error("untrusted"); },
     prepareForRendererReload, shell, BrowserWindow, rememberChromeTheme,
     titleBarOverlayOptions, stepWindowZoom, exitRounds, quitGuard, isTrustedFrame,
-    launchMarks, desktopMarks, logLaunchMarksOnce, app: { isPackaged },
+    launchMarks, desktopMarks, logLaunchMarksOnce, app: { isPackaged }, platform,
   });
   return {
     ...capability, first, second, handlers, events, order, sessions, retiring,
@@ -104,7 +104,8 @@ describe("registered window IPC", () => {
     h.registerWindowControls(); h.order.push("ui-state", "updates");
     h.registerQuitAndMarks();
     expect(h.order).toEqual([
-      CHANNELS.reloadRenderer, "registry", CHANNELS.openExternalUrl, "handoff",
+      CHANNELS.reloadRenderer, "registry", CHANNELS.openExternalUrl,
+      CHANNELS.openSystemPrivacySettings, "handoff",
       CHANNELS.setTitlebarTheme, CHANNELS.stepWindowZoom,
       "ui-state", "updates", CHANNELS.exitRoundAnswer, CHANNELS.holdQuit,
       CHANNELS.resumeQuit, CHANNELS.firstPaint, CHANNELS.getLaunchMarks, CHANNELS.getDesktopMarks,
@@ -137,6 +138,17 @@ describe("registered window IPC", () => {
     expect(h.rememberChromeTheme).not.toHaveBeenCalled();
     expect(h.stepWindowZoom).not.toHaveBeenCalled();
     expect(h.shell.openExternal).not.toHaveBeenCalled();
+  });
+
+  it("opens only the fixed Files & Folders pane, and only on macOS", async () => {
+    const mac = await harness(false, "darwin"); mac.registerExternalUrl();
+    await mac.invoke(CHANNELS.openSystemPrivacySettings, { url: "https://example.com" });
+    expect(mac.shell.openExternal).toHaveBeenCalledExactlyOnceWith(
+      "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders",
+    );
+    const windows = await harness(false, "win32"); windows.registerExternalUrl();
+    await expect(windows.invoke(CHANNELS.openSystemPrivacySettings)).rejects.toThrow("Only macOS");
+    expect(windows.shell.openExternal).not.toHaveBeenCalled();
   });
 
   it("reloads only the captured sender after its real session retirement drains", async () => {

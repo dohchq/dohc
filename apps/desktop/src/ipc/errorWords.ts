@@ -20,6 +20,15 @@ const REINSTALL = "This copy of dohc is missing a file it needs. Reinstall dohc.
 // Trying again cannot help with this one; updating dohc can.
 const NEWER_DOHC = "It needs a newer version of dohc. Update dohc to open it.";
 
+/**
+ * The code of macOS refusing dohc a folder the person has not allowed in
+ * Privacy & Security. The engine sends it as a refusal's message; main sets
+ * it on a file system error (`privacyDenial.ts`).
+ */
+export const PRIVACY_DENIED = "privacy-denied";
+export const PRIVACY_DENIED_WORDS =
+  "macOS blocked dohc from this folder. Allow dohc in System Settings › Privacy & Security › Files & Folders. For a whole volume, turn on Full Disk Access.";
+
 // Every code the engine refuses with: `ErrorCode` in dohc-engine-protocol.
 const ENGINE_CODE_WORDS = {
   AUTH_FAILED: "The server did not accept your sign-in. Sign in again.",
@@ -230,6 +239,9 @@ export interface ReadError {
 
 export function readError(error: unknown): ReadError {
   const { text, name, code, message } = parse(error);
+  if (code === PRIVACY_DENIED || (name === "DaemonRefusalError" && message === PRIVACY_DENIED)) {
+    return { words: PRIVACY_DENIED_WORDS, mapped: true, cause: text };
+  }
   if (name === "DaemonRefusalError" && message.startsWith("capture-file-held: ")) {
     const path = message.slice("capture-file-held: ".length);
     return { words: captureHeldLiveMessage(path), mapped: false, cause: text };
@@ -273,6 +285,11 @@ export function readCollectionReopenWait(error: unknown): { words: string; waitM
   const { name, code, retryAfterMs, message } = parse(error);
   return name === "DatasetReopenWaitError" && code === "dataset_reopen_wait" && retryAfterMs !== undefined
     ? { words: message, waitMs: retryAfterMs } : null;
+}
+
+/** macOS refused dohc a folder: System Settings, not dohc, can fix it. */
+export function isPrivacyDenied(error: unknown): boolean {
+  return readError(error).words === PRIVACY_DENIED_WORDS;
 }
 
 /** A refusal only a newer dohc can get past, so Try again would do nothing. */

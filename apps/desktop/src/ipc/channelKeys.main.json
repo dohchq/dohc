@@ -145,6 +145,7 @@
   "openExternalUrl",
   "openFileExternally",
   "openSharedView",
+  "openSystemPrivacySettings",
   "openUserSettingsFile",
   "openWorkspace",
   "openWorkspaceManager",

@@ -4,7 +4,8 @@ import type { ShareUnconfirmedChanges } from "../../workspaces/shareViewInfo";
 import { CreationPartialError, creationPartialNotice } from "@dohc/cli/creation";
 import type { ReportKinds } from "../../ipc/bridgeContract";
 import type { ReportButtonError } from "../collections/useAutomationButtons";
-import { readError, UNKNOWN_ERROR_WORDS, withErrorWords } from "../../ipc/errorWords";
+import { isPrivacyDenied, readError, UNKNOWN_ERROR_WORDS, withErrorWords } from "../../ipc/errorWords";
+import { bridge } from "../bridge";
 import { SETTLEMENT_BINDING_CHANGED } from "../../notices/settlementRefusal";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
 import type { ErrorDetailField } from "./copyDetails";
@@ -112,6 +113,17 @@ export type ReportShellFailure = (failure: {
   retry?: (() => void) | null;
 }) => void;
 export const ShellErrorReporter = createContext<ReportShellFailure | null>(null);
+
+// The step a macOS privacy refusal offers: the pane where a person allows
+// dohc the folder.
+export const OPEN_SYSTEM_PRIVACY_SETTINGS: NonNullable<ShellError["action"]> = {
+  label: "Open System Settings",
+  run: () => {
+    bridge().openSystemPrivacySettings().catch((error: unknown) => {
+      console.error("[desktop] could not open System Settings:", error);
+    });
+  },
+};
 
 export function useShellError(workspaceId: string) {
   const [shellErrors, setShellErrors] = useState<readonly ShellError[]>([]);
@@ -279,6 +291,7 @@ export function useShellError(workspaceId: string) {
           : `form:${partial.created[0]!.split("/").slice(0, -1).join("/")}` } : identity !== undefined ? { identity } : {}),
         ...(details.length ? { details } : {}),
         retry,
+        ...(isPrivacyDenied(error) ? { action: OPEN_SYSTEM_PRIVACY_SETTINGS } : {}),
         ...(kind ? { kind } : {}),
       });
     },
@@ -316,6 +329,8 @@ export function useShellError(workspaceId: string) {
     }) => {
       const shown = readError(failure.message);
       const cause = failure.cause === undefined ? shown.cause : readError(failure.cause).cause;
+      const action = failure.action ??
+        (isPrivacyDenied(failure.message) || isPrivacyDenied(failure.cause) ? OPEN_SYSTEM_PRIVACY_SETTINGS : undefined);
       const details: ReadonlyArray<ErrorDetailField> = [
         ...(failure.details ?? []),
         ...(cause ? [["Cause", cause] as const] : []),
@@ -327,7 +342,7 @@ export function useShellError(workspaceId: string) {
         retry: failure.retry ?? null,
         ...(details.length ? { details } : {}),
         ...(failure.onDismiss ? { onDismiss: failure.onDismiss } : {}),
-        ...(failure.action ? { action: failure.action } : {}),
+        ...(action ? { action } : {}),
         ...(failure.kind ? { kind: failure.kind } : {}),
         ...(failure.identity !== undefined ? { identity: failure.identity } : {}),
       }, failure.quiet ? "quiet" : failure.repeat ? "repeat" : false);

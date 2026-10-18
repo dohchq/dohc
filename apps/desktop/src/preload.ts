@@ -238,6 +238,7 @@ const bridge: DohcDesktopBridge = {
     onEvent(CHANNELS.sitePreviewReplaced, SitePreviewReplacedEvent, listener),
   openExternalUrl: (payload) =>
     ipcRenderer.invoke(CHANNELS.openExternalUrl, payload),
+  openSystemPrivacySettings: () => ipcRenderer.invoke(CHANNELS.openSystemPrivacySettings),
   cloudLoginStart: (payload) =>
     ipcRenderer.invoke(CHANNELS.cloudLoginStart, payload),
   cloudLoginPoll: () => ipcRenderer.invoke(CHANNELS.cloudLoginPoll),

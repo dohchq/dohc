@@ -36,6 +36,10 @@ _Avoid_: usage report, telemetry, analytics
 A small count of events that a packaged build sends to its report service while the person's switch in Privacy allows it.
 _Avoid_: usage record (that stays on the computer)
 
+**Privacy denial**:
+macOS refusing dohc a folder the person has not allowed in System Settings › Privacy & Security, such as Documents or a removable volume. It has the code `privacy-denied`. It is not about dohc's own Privacy settings.
+_Avoid_: permission error (a file's own permissions)
+
 ### Offers
 
 **Offer**:

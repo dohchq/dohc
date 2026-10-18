@@ -12,10 +12,12 @@ import type { WorkspacePolicyPath } from "./bridgeContract";
 import {
   ERROR_WORDS,
   ipcWireError,
+  isPrivacyDenied,
   isShareReadOnlyRefusal,
   isSharedLiveFileRefusal,
   isWorkspaceUpdatingError,
   needsNewerDohc,
+  PRIVACY_DENIED_WORDS,
   readCollectionReopenWait,
   readError,
   shouldRecheckShareAccess,
@@ -143,6 +145,27 @@ describe("error words", () => {
     expect(needsNewerDohc(acrossIpc(newer))).toBe(true);
     expect(needsNewerDohc(acrossIpc(unreadable))).toBe(false);
     expect(needsNewerDohc(new ReservedWorkspaceIdError("link"))).toBe(false);
+  });
+
+  it("names a macOS privacy refusal the engine sends, after the caller's sentence", () => {
+    const engine = acrossIpc(refusal("INTERNAL", "privacy-denied"), "desktop:list-workspace-files");
+    expect(readError(engine)).toEqual({
+      words: PRIVACY_DENIED_WORDS,
+      mapped: true,
+      cause: "DaemonRefusalError [INTERNAL]: privacy-denied",
+    });
+    expect(isPrivacyDenied(engine)).toBe(true);
+    expect(withErrorWords("Could not refresh workspace files.", engine))
+      .toBe(`Could not refresh workspace files. ${PRIVACY_DENIED_WORDS}`);
+    for (const sentence of PRIVACY_DENIED_WORDS.split(/(?<=\.) /)) {
+      expect(sentence.split(" ").length, sentence).toBeLessThanOrEqual(20);
+    }
+  });
+
+  it("keeps an EPERM main did not name a privacy refusal as a permission problem", () => {
+    const eperm = acrossIpc(Object.assign(new Error("EPERM: operation not permitted, rename 'a' -> 'b'"), { code: "EPERM" }));
+    expect(isPrivacyDenied(eperm)).toBe(false);
+    expect(readError(eperm).words).toBe("dohc does not have permission to use this file or folder.");
   });
 
   it("has words, or the caller's words by decision, for every code the engine refuses with", () => {

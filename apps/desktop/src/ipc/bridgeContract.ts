@@ -6883,6 +6883,9 @@ export type EngineYDocLineageReplacementEvent = z.infer<
 export const ReadOnlyTransitionCause = z.enum(["access-ended", "reconnecting", "lineage-failure"]);
 export type ReadOnlyTransitionCause = z.infer<typeof ReadOnlyTransitionCause>;
 
+export const SaveFailureReason = z.enum(["read-only", "privacy-denied"]).nullable();
+export type SaveFailureReason = z.infer<typeof SaveFailureReason>;
+
 export const EngineYDocSaveStateEvent = z.object({
   typingUnresolved: z.boolean().optional(),
   readOnlyCause: ReadOnlyTransitionCause.optional(),
@@ -6900,9 +6903,10 @@ export const EngineYDocSaveStateEvent = z.object({
   path: z.string(),
   state: SaveStateSchema,
   access: z.enum(["read-only", "deleted", "object-changed"]).optional(),
-  // A settle failed to write the file. Absent for an edit refusal, an
-  // author-capacity refusal, and an error no settle reported.
-  saveFailure: z.object({ readOnly: z.boolean() }).optional(),
+  // A settle failed to write the file, and why when a check can tell. Absent
+  // for an edit refusal, an author-capacity refusal, and an error no settle
+  // reported.
+  saveFailure: z.object({ reason: SaveFailureReason }).optional(),
   // Sent while the session closes, after its editor has gone.
   closing: z.literal(true).optional(),
   seq: z.number().int().nonnegative(),
@@ -7104,6 +7108,8 @@ export interface DohcDesktopBridge
     listener: (event: SitePreviewReplacedEvent) => void,
   ): () => void;
   openExternalUrl(payload: OpenExternalUrlPayload): Promise<void>;
+  /** macOS only: opens Privacy & Security at Files & Folders. */
+  openSystemPrivacySettings(): Promise<void>;
   cloudLoginStart(payload: CloudLoginStartPayload): Promise<CloudLoginStartResult>;
   cloudLoginPoll(): Promise<CloudLoginPollResult>;
   cloudStatus(payload?: CloudStatusPayload): Promise<CloudStatusResult>;

@@ -10,6 +10,9 @@ import type { DesktopUserSettingsResult as UserSettingsResult, ZoomStep } from "
 import type { createExitRounds, createQuitGuard } from "../quitGuard";
 import type { rememberChromeTheme as RememberChromeTheme, titleBarOverlayOptions as TitleBarOverlayOptions } from "../window/createMainWindow";
 
+const MACOS_FILES_AND_FOLDERS_SETTINGS =
+  "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders";
+
 export function createWindowIpc<
   Sender extends { id: number; isDestroyed(): boolean; reload(): void },
   Event extends { sender: Sender },
@@ -31,12 +34,13 @@ export function createWindowIpc<
   desktopMarks: Pick<typeof import("../performance/desktopMarks").desktopMarks, "markOnce" | "snapshot">;
   logLaunchMarksOnce(): void;
   app: { readonly isPackaged: boolean };
+  platform: NodeJS.Platform;
 }) {
   const {
     registerHandler, registerEvent, assertTrustedSender, prepareForRendererReload,
     shell, BrowserWindow, rememberChromeTheme, titleBarOverlayOptions,
     stepWindowZoom, exitRounds, quitGuard, isTrustedFrame, launchMarks,
-    desktopMarks, logLaunchMarksOnce, app,
+    desktopMarks, logLaunchMarksOnce, app, platform,
   } = dependencies;
 
   function registerReload(): void {
@@ -62,6 +66,13 @@ export function createWindowIpc<
         throw new Error(`Refusing to open non-http(s) URL externally`);
       }
       await shell.openExternal(input.url);
+    });
+    // Where a person allows dohc a folder macOS refused. The URL is fixed
+    // here; the renderer names none.
+    registerHandler(CHANNELS.openSystemPrivacySettings, async (event) => {
+      assertTrustedSender(event);
+      if (platform !== "darwin") throw new Error("Only macOS has these privacy settings.");
+      await shell.openExternal(MACOS_FILES_AND_FOLDERS_SETTINGS);
     });
   }
 
