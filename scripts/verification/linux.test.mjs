@@ -65,13 +65,15 @@ test("the run script runs clippy for a PR and installs then verifies for a full 
   assert.match(script(true), new RegExp(`\npnpm install --frozen-lockfile --config\\.confirm-modules-purge=false && node scripts/verification/verify\\.mjs pr --base ${base} --job rust\n`));
   assert.match(script(false), /\ncargo clippy --locked --workspace --all-targets --all-features -- -D warnings\n/);
   assert.doesNotMatch(script(false), /verify\.mjs|pnpm/);
+  // Tests bind Unix sockets under the temp folder, whose paths must stay under SUN_LEN, so the job keeps /tmp.
+  assert.doesNotMatch(script(true), /TMPDIR/);
 });
 
 /**
  * Run the job against fakes. `verify` stands in for the scope's command: it writes the Linux
  * verifier's receipt and the scope's record, or throws for the command's failure.
  */
-async function job({ tips = `tip ${known}\n`, synced = "", verify, full = true, signal, gitRefs = [], gitFails, freeMemory = () => 64, waitMs, stopFails, diskFloorGb = 0 } = {}) {
+async function job({ tips = `tip ${known}\n`, synced = "", verify, full = true, signal, gitRefs = [], gitFails, freeMemory = () => 64, waitMs, stopFails, onStop, diskFloorGb = 0 } = {}) {
   const root = mkdtempSync(join(tmpdir(), "dohc-linux-job-"));
   const output = join(root, "output");
   const budget = { root: join(root, "slots"), slots: 4, jobs: 2, diskFloorGb };
@@ -96,6 +98,7 @@ async function job({ tips = `tip ${known}\n`, synced = "", verify, full = true, 
     if (script.endsWith("wsl-run.sh")) { await verify?.(output); return { stdout: "" }; }
     if (script.endsWith("wsl-stop.sh")) {
       cargoHeldAtStop = readdirSync(budget.root).some(name => /^build-slot-\d$/u.test(name));
+      onStop?.();
       if (stopFails) throw Object.assign(new Error("wsl.exe failed (1)."), { exitCode: 1 });
     }
     return { stdout: "" };
@@ -162,6 +165,10 @@ test("a scope that would not stop keeps both slots and fails the run as the host
   const verify = () => { stop.abort(stopReason()); throw Object.assign(new Error("wsl.exe failed (interrupted)."), { interrupted: true }); };
   const stopped = await job({ verify, signal: stop.signal, stopFails: true });
   assert.equal(stopped.error.stopped, true);
+  // A run that passed, then was stopped while its scope would not stop, keeps the stop too.
+  const late = new AbortController();
+  const stoppedInCleanup = await job({ verify: ends({ receipt: passed }), signal: late.signal, stopFails: true, onStop: () => late.abort(stopReason()) });
+  assert.equal(stoppedInCleanup.error.stopped, true);
 });
 
 test("an output folder that cannot be made is the host's failure, before any slot", windowsOnly, async () => {

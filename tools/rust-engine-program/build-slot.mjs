@@ -783,12 +783,25 @@ function claimSlot(dir, name, heartbeatMs, cooperativeCancellation, removeTicket
   function onSigterm() {
     interrupt(143);
   }
+  // Leave the slot as a holder that died leaves it: no heartbeat and no release at exit, so the reclaimer frees
+  // it only once this process is gone and its grace has passed. For work this process started but could not stop.
+  const abandon = () => {
+    if (released) return;
+    released = true;
+    clearInterval(beat);
+    clearTimeout(identify);
+    process.off("exit", release);
+    process.off("SIGINT", onSigint);
+    process.off("SIGTERM", onSigterm);
+    removeTicket();
+    historyEvent(root, { event: "abandon", kind, name, pid: process.pid, elapsedMs: Date.now() - startedAt, ...metadataFields(metadata) });
+  };
   process.once("exit", release);
   // Standalone gates release before exiting. Cooperative callers retain the
   // slot until their child cleanup finishes and finally releases it.
   process.once("SIGINT", onSigint);
   process.once("SIGTERM", onSigterm);
-  return { name, dir, release, update };
+  return { name, dir, release, update, abandon };
 }
 
 /**

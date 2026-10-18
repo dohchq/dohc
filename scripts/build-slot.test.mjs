@@ -663,6 +663,20 @@ test("a hold that throws after its slot was created gives the slot back", async 
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("an abandoned slot stays held, as a dead holder's does, without a release at exit", async () => {
+  const root = slotRoot();
+  try {
+    const exits = process.listenerCount("exit");
+    const slot = await acquireBuildSlot({ root, slots: 1, waitMs: 5000, pollMs: 1 });
+    assert.equal(process.listenerCount("exit"), exits + 1);
+    slot.abandon();
+    assert.equal(process.listenerCount("exit"), exits);
+    assert.equal(existsSync(join(root, "build-slot-1", "owner.json")), true);
+    slot.release();
+    assert.equal(existsSync(join(root, "build-slot-1")), true, "an abandoned slot is no longer this process's to release");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("status CLI reports the Linux slot only on a host that runs Linux jobs", t => {
   const root = slotRoot();
   t.after(() => rmSync(root, {recursive: true, force: true}));

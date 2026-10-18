@@ -93,8 +93,6 @@ if systemctl --user list-units --no-legend --plain --state=active,activating,dea
   echo "An earlier Linux job's scope is still running." >&2
   exit 1
 fi
-rm -rf "${home}/tmp"
-mkdir -p "${home}/tmp"
 cd "${home}/linux"
 ${bundle ? `git fetch -q --no-tags ${quote(bundle)} ${fetch.join(" ")}` : ""}
 git for-each-ref --sort=-creatordate --format='%(refname)' refs/dohc/ | { grep -v -e ${quote(head)} -e ${quote(base)} || true; } | tail -n +${keptCommits - 1} | xargs -r -n 1 git update-ref -d
@@ -125,7 +123,7 @@ printf '{"memoryPeak":%s,"oomKills":%s}\\n' "\${peak:-null}" "\${kills:-null}" >
 exit $status`;
   return `set -euo pipefail
 cd "${home}/linux"
-export TMPDIR="${home}/tmp" CARGO_BUILD_JOBS=${jobs} RUST_TEST_THREADS=${jobs} NEXTEST_TEST_THREADS=${jobs} CARGO_INCREMENTAL=0 RUSTUP_AUTO_INSTALL=0
+export CARGO_BUILD_JOBS=${jobs} RUST_TEST_THREADS=${jobs} NEXTEST_TEST_THREADS=${jobs} CARGO_INCREMENTAL=0 RUSTUP_AUTO_INSTALL=0
 export DOHC_VERIFICATION_GRANT=${quote(JSON.stringify(grant))} DOHC_VERIFICATION_OUTPUT=${quote(output)}
 exec systemd-run --user --scope --quiet --collect --unit=${unit} -p RuntimeMaxSec=${scopeLimitSeconds} ${scopeMemory} bash -c ${quote(verify)}
 `;
@@ -230,12 +228,15 @@ export async function linuxRustJob({ distro, head, base, output, full = false, s
   } catch (error) { failure = error; }
   // The scope stops before the slots go, so no other build starts beside its last processes.
   // This runs after a stop too, and it ignores the stop's signal.
-  const stopped = await wsl("stop", stopScript(unit), { signal: undefined, quietStdout: true, timeoutMs: 3 * 60_000 })
-    .then(() => true, error => { console.log(`[verification] ${unit}.scope may still run: ${error.message}`); return false; });
+  let stopped = true;
+  try { await wsl("stop", stopScript(unit), { signal: undefined, quietStdout: true, timeoutMs: 3 * 60_000 }); }
+  catch (error) { stopped = false; console.log(`[verification] ${unit}.scope may still run: ${error.message}`); }
   if (stopped) { cargo?.release(); slot.release(); }
-  // Otherwise the slots stay held until this verifier exits, so no build or Linux job starts beside the scope.
+  // A scope that may still run keeps its slots as a holder that died keeps them: they free only after their grace,
+  // 30 minutes for a cargo lane, once this verifier is gone. The next Linux job will not start beside the scope.
+  else { cargo?.abandon(); slot.abandon(); }
   // Only a stop or the host reaches the catch: a check's failure is a receipt.
   if (failure) environment("linux host")(failure);
-  if (!stopped) throw Object.assign(new Error(`${unit}.scope did not stop. Its processes may still run.`), { environment: "linux cleanup" });
+  if (!stopped) environment("linux cleanup")(new Error(`${unit}.scope did not stop. Its processes may still run.`));
   return result;
 }
