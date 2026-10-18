@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAppLifecycle, LAUNCH_SETTLED_MS } from "./appLifecycle";
 import { createExitRounds, createQuitGuard } from "./quitGuard";
-import { QUIT_ASK_TIMEOUT_MS, resolveShutdownDeadlineExitCode, WILL_QUIT_BUDGET_MS } from "./shutdownBudgets";
+import { DISPATCH_STOP_LIMIT_MS, QUIT_ASK_TIMEOUT_MS, resolveShutdownDeadlineExitCode, WILL_QUIT_BUDGET_MS } from "./shutdownBudgets";
 import { closeElectronApplication } from "../../../scripts/verification/close-electron.mjs";
 import { DESKTOP_CLOSE_GRACE_MS } from "../../../scripts/verification/desktop-close-policy.mjs";
 import { beginLaunch, finishLaunch, type MarkerFileSystem } from "./launch/launchMarker";
@@ -107,6 +107,7 @@ function fixture(configure?: (dependencies: Dependencies) => void) {
     },
     launch: {
       finished: vi.fn(() => { log.push("launch-finished"); }),
+      settled: vi.fn(() => { log.push("launch-settled"); }),
     },
     beforeQuit: vi.fn(),
     shutdown: {
@@ -366,6 +367,28 @@ describe("desktop bootstrap", () => {
     expect(f.dependencies.launch.finished).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
     expect(f.dependencies.launch.finished).toHaveBeenCalledOnce();
+    expect(f.dependencies.launch.settled).toHaveBeenCalledOnce();
+  });
+
+  // Settling starts the engine's startup check, which must not run on the
+  // way out: the timer can still fire during quit or after Windows ends the
+  // session, neither of which stops the process at once.
+  it.each(["quit", "session end"] as const)("does not settle the launch after a %s", async (ending) => {
+    vi.useFakeTimers();
+    const f = fixture();
+    await boot(f);
+    f.loaded.resolve(true);
+    await vi.advanceTimersByTimeAsync(5_000);
+    if (ending === "quit") {
+      f.app.emit("will-quit", event());
+    } else {
+      const window = new EventEmitter();
+      f.app.emit("browser-window-created", {}, window);
+      window.emit("session-end", {});
+    }
+    await vi.advanceTimersByTimeAsync(LAUNCH_SETTLED_MS);
+    expect(f.dependencies.launch.finished).toHaveBeenCalled();
+    expect(f.dependencies.launch.settled).not.toHaveBeenCalled();
   });
 
   it("finishes the launch at a clean quit before 30 s have passed", async () => {
@@ -885,6 +908,23 @@ describe("desktop shutdown", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(f.dependencies.shutdown.closeWorkspaces).toHaveBeenCalledOnce();
     expect(f.app.exit).toHaveBeenCalledOnce();
+  });
+
+  it("stops waiting on a dispatch stop at its limit and still closes within the budget", async () => {
+    vi.useFakeTimers();
+    const f = fixture((d) => {
+      d.shutdown.budgetMs = WILL_QUIT_BUDGET_MS;
+      d.shutdown.deadlineExitCode = 1;
+      d.services.dispatch.stop = () => new Promise<void>(() => undefined);
+    });
+    await boot(f);
+    f.app.emit("will-quit", event());
+    await vi.advanceTimersByTimeAsync(DISPATCH_STOP_LIMIT_MS - 1);
+    expect(f.dependencies.shutdown.closeWorkspaces).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.log.slice(-4)).toEqual(["workspaces-close", "database-stop", "relay-close", "engine-stop"]);
+    expect(f.app.exit).toHaveBeenCalledExactlyOnceWith(0);
+    expect(DISPATCH_STOP_LIMIT_MS).toBeLessThan(WILL_QUIT_BUDGET_MS);
   });
 
   it("sends reports alongside teardown and exits only once both finish", async () => {

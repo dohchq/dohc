@@ -326,6 +326,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   // settles; boot-time paths that need engine sessions await this first instead
   // of throwing the broken-invariant error at it.
   let engineDaemonStartup: Promise<boolean> = Promise.resolve(false);
+  // A workspace that opens proves the engine's workspace work, so the startup
+  // smoke runs only when none has opened by the time the launch settles.
+  const startupSmoke = Promise.withResolvers<"run" | "skip">();
   const relayTransportRoutes = new RelayTransportRouteGuard();
 
   // Narrowing for the engine-access gates. The invariant is real:
@@ -439,6 +442,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       let publications = 0;
       rustEngineDaemon = createRustEngineDaemon({
         ...(ingress ? {privateOwnerHost: ingress} : {}),
+        startupSmoke: startupSmoke.promise,
         ...testEngineRestartOverrides(),
         command: defaultEngineBinaryPath({
           isPackaged: app.isPackaged,
@@ -535,7 +539,10 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       // with headroom. The renderer names the wait.
       rustEngineWorkspaceSessions = new EngineWorkspaceSessions(relaySource, {
         workspaceOpenDeadlineMs: 120_000,
-        onOpened: workspace => dependencies.onWorkspaceOpened?.(workspace.workspaceId),
+        onOpened: workspace => {
+          startupSmoke.resolve("skip");
+          dependencies.onWorkspaceOpened?.(workspace.workspaceId);
+        },
       });
       const sessions = rustEngineWorkspaceSessions;
       rustEngineRelayClient = new EngineRelayClient({
@@ -549,9 +556,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       });
       startOwnerHost();
       startOwnerDelivery();
-      console.info(
-        "[desktop] Rust engine daemon handshake complete; startup smoke running.",
-      );
+      console.info("[desktop] Rust engine daemon handshake complete.");
       // Marked here, where the handshake actually completes — the bootstrap
       // gate's await also covers the cached-settings read, which would inflate
       // this mark.
@@ -621,6 +626,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     start() {
       engineDaemonStartup = startRustEngineDaemon();
       return engineDaemonStartup;
+    },
+    launchSettled() {
+      startupSmoke.resolve("run");
     },
   };
 }
