@@ -382,8 +382,11 @@ it("finishes a prefetched read under its own real authority lease after the page
     return list({ workspaceId: "workspace", object: { kind: "dataset", datasetId: remote }, cursor }, { ...f.reads, signal: operation.signal, assertCurrent: operation.assertCurrent });
   });
   const first = await owned(); await entered.promise;
-  expect(() => released!.assertCurrent()).toThrow("released");
-  reply.resolve();
+  try {
+    expect(() => released!.assertCurrent()).toThrow("This operation ended. Try again.");
+  } finally {
+    reply.resolve();
+  }
   const second = await owned("nextCursor" in first ? first.nextCursor! : undefined);
   expect(second).toMatchObject({ status: "ready", completeness: "complete" });
   if (!("entries" in second)) throw Error("Expected ready");
