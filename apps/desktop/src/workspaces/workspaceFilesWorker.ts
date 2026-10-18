@@ -2,8 +2,10 @@ import { Worker } from "node:worker_threads";
 import type { WorkspaceFileListingScope } from "./workspaceFileListingScope";
 import type { WorkspaceFileListingEntry } from "./workspaceFiles";
 
+type FileLookupScope = WorkspaceFileListingScope & { paths?: readonly string[] };
+
 export type FilesRequest =
-  | { kind: "list"; rootPath: string; scope?: WorkspaceFileListingScope }
+  | { kind: "list"; rootPath: string; scope?: FileLookupScope }
   | { kind: "metadata"; rootPath: string; paths: readonly string[] };
 export type FilesResult = { files: WorkspaceFileListingEntry[]; folders: string[] };
 
@@ -44,7 +46,7 @@ export function createWorkspaceFilesWorker() {
     return result;
   }
   return {
-    list: (rootPath: string, scope?: WorkspaceFileListingScope) => run({ kind: "list", rootPath, scope }),
+    list: (rootPath: string, scope?: FileLookupScope) => run({ kind: "list", rootPath, scope }),
     metadata: (rootPath: string, paths: readonly string[]) => run({ kind: "metadata", rootPath, paths }),
     async dispose() {
       disposed = true;

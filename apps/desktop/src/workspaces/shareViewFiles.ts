@@ -50,6 +50,7 @@ import {
 } from "./shareViewMarker";
 import { shareViewTakesLocalWrites } from "./shareWriteGate";
 import { isEngineTransportFailure } from "./shareViewEngineFailure";
+import { resolveEngineFileTargets } from "./resolveEngineFiles";
 import { createShareViewFileChanges } from "./shareViewFileChanges";
 import {
   type ShareViewFilesOwnerCapability,
@@ -193,9 +194,10 @@ export interface ShareViewFiles {
     target: ShareViewFilesTarget,
     request: ShareViewFileReadRequest,
   ): Promise<ShareViewFileReadOutcome>;
+  lookup(target: ShareViewFilesTarget, paths: readonly string[]): Promise<WorkspacePathListing>;
   list(
     target: ShareViewFilesTarget,
-    options?: { includeContentIdentity?: boolean },
+    options?: { includeContentIdentity?: boolean; under?: string },
   ): Promise<WorkspacePathListing>;
   projectionStatus(
     target: ShareViewFilesTarget,
@@ -1190,6 +1192,21 @@ export function createShareViewFiles(
       });
     },
 
+    async lookup(requested, paths) {
+      return withCurrentTarget(requested, target => withStore(target, async store => {
+        const main = await store.ensureMainVersion({ workspaceId: target.storeWorkspaceId });
+        const files: WorkspaceFileListingEntry[] = [];
+        const resolved = await resolveEngineFileTargets(store, target.storeWorkspaceId,
+          paths.map(path => ({ path })), undefined, main.id);
+        resolved.forEach((file, index) => {
+          if (file.status === "found" && file.path === paths[index] && classifyEngineFilePath(file.path).kind === "tracked") {
+            files.push({ path: file.path, kind: classifyPath(file.path).kind });
+          }
+        });
+        return { files, folders: [] };
+      }));
+    },
+
     async list(requested, options) {
       return withCurrentTarget(requested, async (target) => {
         const iconCache =
@@ -1201,6 +1218,7 @@ export function createShareViewFiles(
           const metadata = await store.listTextFileMetadata({
             workspaceId: target.storeWorkspaceId,
             versionId: main.id,
+            ...(options?.under === undefined ? {} : { under: options.under }),
           });
           const visible = metadata.filter(
             (entry) => classifyEngineFilePath(entry.path).kind === "tracked",
