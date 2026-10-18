@@ -1,15 +1,14 @@
-import { createHmac } from "node:crypto";
+import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DiscussionActivityHub, ownerLogWaitGroup } from "./discussionActivity";
 import { ReplicaWatches } from "./replicaWatches";
 import type { AuthorizedShareAction } from "./shareAuthorization";
 
-const key = "test-relay-watch-secret";
 const registries: ReplicaWatches[] = [];
 function registry(options: ConstructorParameters<typeof ReplicaWatches>[1] = {}) {
   const activity = new DiscussionActivityHub();
   const wake = vi.spyOn(activity, "wake");
-  const watches = new ReplicaWatches(activity, { key, ...options });
+  const watches = new ReplicaWatches(activity, options);
   registries.push(watches);
   return { watches, wake };
 }
@@ -59,6 +58,20 @@ describe("replica watches", () => {
     expect(watches.watched("b")).toBe(false);
   });
 
+  it("refreshes a reader and owner already at their workspace limits", async () => {
+    vi.useFakeTimers();
+    const { watches, wake } = registry({ maxWorkspacesPerOwner: 1, maxWorkspacesPerReader: 1 });
+    watches.holdReader(authorized());
+    await vi.advanceTimersByTimeAsync(10_000);
+    watches.holdReader(authorized());
+    await vi.advanceTimersByTimeAsync(25_000);
+    expect(watches.watched("a")).toBe(true);
+    expect(watches.stats()).toEqual({ workspaces: 1, holders: 1 });
+    expect(wake.mock.calls).toEqual([[ownerLogWaitGroup("a")]]);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(watches.watched("a")).toBe(false);
+  });
+
   it("limits one reader to 16 workspaces even across owners and grants", () => {
     const { watches } = registry();
     for (let i = 0; i < 17; i++) watches.holdReader(authorized(`w${i}`, "reader", `owner${i}`, `grant${i}`));
@@ -105,21 +118,21 @@ describe("replica watches", () => {
     expect(watches.watched("c")).toBe(true);
   });
 
-  it("uses fixed-length HMACs stable across grants and different across principals, workspaces, and secrets", () => {
+  it("hashes reader identities to fixed-length keys stable across grants and workspaces", () => {
     const { watches } = registry();
     watches.holdReader(authorized());
     const first = [...state(watches).get("a")!.holders.keys()][0];
-    expect(first).toBe(createHmac("sha256", key).update(JSON.stringify(["replica-watch-holder-v1", "user", "reader", "a"])).digest("base64url"));
+    expect(first).toBe(createHash("sha256").update(JSON.stringify(["user", "reader"])).digest("base64url"));
     watches.holdReader(authorized("a", "reader", "owner", "another-grant"));
     expect(watches.stats().holders).toBe(1);
     watches.holdReader(authorized("a", "two"));
     watches.holdReader(authorized("b"));
     const keys = [...state(watches).values()].flatMap(w => [...w.holders.keys()]);
-    expect(new Set(keys).size).toBe(3);
+    expect(new Set(keys).size).toBe(2);
+    expect([...state(watches).get("b")!.holders.keys()]).toEqual([first]);
     expect(keys.every(k => /^[A-Za-z0-9_-]{43}$/.test(k))).toBe(true);
-    const other = registry({ key: "another-secret" }).watches;
-    other.holdReader(authorized());
-    expect([...state(other).get("a")!.holders.keys()][0]).not.toBe(first);
+    watches.holdReader(authorized("a", "reader".repeat(1_000)));
+    expect([...state(watches).get("a")!.holders.keys()].every(k => k.length === 43)).toBe(true);
   });
 
   it("keys accountless readers by link grant, never by browser instance", () => {
@@ -132,44 +145,30 @@ describe("replica watches", () => {
     expect(watches.stats().holders).toBe(1);
     watches.holdReader({ ...link, grant: { ...link.grant, grantId: "other" } });
     expect(watches.stats().holders).toBe(2);
-    expect([...state(watches).get("a")!.holders.keys()][0]).toBe(createHmac("sha256", key)
-      .update(JSON.stringify(["replica-watch-holder-v1", "link", "grant", "a"])).digest("base64url"));
+    const linkKey = [...state(watches).get("a")!.holders.keys()][0];
+    expect(linkKey).toBe(createHash("sha256").update(JSON.stringify(["link", "grant"])).digest("base64url"));
+    watches.holdReader(authorized("a", "grant"));
+    expect(watches.stats().holders).toBe(3);
+    expect([...state(watches).get("a")!.holders.keys()][2]).not.toBe(linkKey);
   });
 
-  it("has no request-selected key, workspace, owner, quota identity, TTL, or leave", () => {
-    const { watches } = registry();
-    const incoming = { key: "chosen", holderKey: "chosen", workspaceId: "fake", owner: "fake", reader: "fake", ttlMs: 1 };
-    watches.holdReader({ ...authorized(), ...incoming });
+  it("accepts only an authorized grant record in its type contract", () => {
+    type Input = Parameters<ReplicaWatches["holdReader"]>[0];
     // @ts-expect-error The API rejects an explicit caller-selected key.
-    watches.holdReader({ ...authorized(), ...incoming, holderKey: "another" });
-    expect(watches.stats()).toEqual({ workspaces: 1, holders: 1 });
-    expect(watches.watched("fake")).toBe(false);
-    expect(state(watches).get("a")!.holders.has("chosen")).toBe(false);
-    expect(watches).not.toHaveProperty("release");
+    const cannotChooseKey: Input = { ...authorized(), holderKey: "chosen" };
     // @ts-expect-error A Request cannot substitute for an authorized grant record.
-    const cannotHoldRequest: Parameters<ReplicaWatches["holdReader"]>[0] = new Request("https://relay/read?holderKey=chosen");
+    const cannotHoldRequest: Input = new Request("https://relay/read?holderKey=chosen");
+    void cannotChooseKey;
     void cannotHoldRequest;
   });
 
-  it("leaves the read's status, headers, bytes and completion deadline unchanged on refusal", async () => {
-    vi.useFakeTimers();
-    const { watches } = registry({ maxWorkspaces: 1 });
-    watches.holdReader(authorized());
-    const read = (workspaceId: string) => {
-      watches.holdReader(authorized(workspaceId));
-      return new Promise<Response>(resolve => setTimeout(() => resolve(new Response("unchanged", { status: 206, headers: { "x-read": "same" } })), 100));
-    };
-    const results: Response[] = [];
-    const reads = [read("a"), read("b")].map(p => p.then(r => { results.push(r); return r; }));
-    await vi.advanceTimersByTimeAsync(99);
-    expect(results).toHaveLength(0);
-    await vi.advanceTimersByTimeAsync(1);
-    expect(results).toHaveLength(2);
-    for (const response of await Promise.all(reads)) {
-      expect(response.status).toBe(206);
-      expect([...response.headers]).toEqual([["content-type", "text/plain;charset=UTF-8"], ["x-read", "same"]]);
-      expect(await response.text()).toBe("unchanged");
-    }
+  it("returns nothing on refusal or acceptance", () => {
+    const { watches, wake } = registry({ maxWorkspaces: 1 });
+    expect(watches.holdReader(authorized())).toBeUndefined();
+    expect(watches.holdReader(authorized("b"))).toBeUndefined();
+    expect(watches.watched("b")).toBe(false);
+    expect(watches.stats()).toEqual({ workspaces: 1, holders: 1 });
+    expect(wake).toHaveBeenCalledTimes(1);
   });
 
   it("never counts the owner's own grant or a pending email invite", () => {

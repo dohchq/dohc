@@ -1,27 +1,20 @@
-import { createHmac, randomBytes, type BinaryLike } from "node:crypto";
+import { createHash } from "node:crypto";
 import { ownerLogWaitGroup, type DiscussionActivityHub } from "./discussionActivity";
 import type { AuthorizedShareAction } from "./shareAuthorization";
+import { MAX_DISCUSSION_ACTIVITY_HOLD_MS } from "./wireLimits";
 
-const HOLD_TTL_MS = 35_000;
+const HOLD_TTL_MS = MAX_DISCUSSION_ACTIVITY_HOLD_MS + 5_000;
 
 export interface ReplicaWatchesOptions {
-  key?: BinaryLike;
   maxWorkspaces?: number;
   maxHoldersPerWorkspace?: number;
   maxWorkspacesPerOwner?: number;
   maxWorkspacesPerReader?: number;
 }
 
-export class ReplicaWatchCapacityError extends Error {
-  constructor() {
-    super("replica watches are at capacity");
-    this.name = "ReplicaWatchCapacityError";
-  }
-}
-
 interface WorkspaceWatch {
   ownerId: string;
-  holders: Map<string, { readerKey: string; expiresAt: number }>;
+  holders: Map<string, number>;
   timer?: ReturnType<typeof setTimeout>;
 }
 
@@ -29,8 +22,7 @@ interface WorkspaceWatch {
 export class ReplicaWatches {
   private readonly workspaces = new Map<string, WorkspaceWatch>();
   private readonly owners = new Map<string, number>();
-  private readonly readers = new Map<string, Set<string>>();
-  private readonly key: BinaryLike;
+  private readonly readers = new Map<string, number>();
   private readonly maxWorkspaces: number;
   private readonly maxHoldersPerWorkspace: number;
   private readonly maxWorkspacesPerOwner: number;
@@ -40,8 +32,6 @@ export class ReplicaWatches {
     private readonly activity: Pick<DiscussionActivityHub, "wake">,
     options: ReplicaWatchesOptions = {},
   ) {
-    // Production supplies DOHC_RELAY_LINK_KEY; dev/test may use an ephemeral key.
-    this.key = options.key ?? randomBytes(32);
     this.maxWorkspaces = options.maxWorkspaces ?? 1_024;
     this.maxHoldersPerWorkspace = options.maxHoldersPerWorkspace ?? 64;
     this.maxWorkspacesPerOwner = options.maxWorkspacesPerOwner ?? 32;
@@ -59,34 +49,30 @@ export class ReplicaWatches {
     const principal = grant.principalKind === "user" ? grant.principalUserId
       : grant.principalKind === "link" ? grant.grantId : null;
     if (principal === null || (grant.principalKind === "user" && principal === share.granterUserId)) return;
-    const readerKey = JSON.stringify([grant.principalKind, principal]);
-    const holderKey = createHmac("sha256", this.key)
-      .update(JSON.stringify(["replica-watch-holder-v1", grant.principalKind, principal, share.workspaceId]))
+    // Stored principal IDs have no universal length bound. Keep retained keys fixed-size.
+    const readerKey = createHash("sha256")
+      .update(JSON.stringify([grant.principalKind, principal]))
       .digest("base64url");
-    try {
-      this.hold(share.workspaceId, share.granterUserId, readerKey, holderKey);
-    } catch (error) {
-      if (!(error instanceof ReplicaWatchCapacityError)) throw error;
-    }
+    this.hold(share.workspaceId, share.granterUserId, readerKey);
   }
 
-  private hold(workspaceId: string, ownerId: string, readerKey: string, holderKey: string): void {
+  private hold(workspaceId: string, ownerId: string, readerKey: string): boolean {
     let watch = this.workspaces.get(workspaceId);
     if (watch) {
       this.expire(workspaceId, watch);
       watch = this.workspaces.get(workspaceId);
     }
-    const readerWorkspaces = this.readers.get(readerKey);
+    const refresh = watch?.holders.has(readerKey) ?? false;
     // Check account quotas before inspecting relay-wide capacity.
     if (!watch && (this.owners.get(ownerId) ?? 0) >= this.maxWorkspacesPerOwner) {
-      throw new ReplicaWatchCapacityError();
+      return false;
     }
-    if (!readerWorkspaces?.has(workspaceId) && (readerWorkspaces?.size ?? 0) >= this.maxWorkspacesPerReader) {
-      throw new ReplicaWatchCapacityError();
+    if (!refresh && (this.readers.get(readerKey) ?? 0) >= this.maxWorkspacesPerReader) {
+      return false;
     }
-    if (!watch && this.workspaces.size >= this.maxWorkspaces) throw new ReplicaWatchCapacityError();
-    if (watch && !watch.holders.has(holderKey) && watch.holders.size >= this.maxHoldersPerWorkspace) {
-      throw new ReplicaWatchCapacityError();
+    if (!watch && this.workspaces.size >= this.maxWorkspaces) return false;
+    if (watch && !refresh && watch.holders.size >= this.maxHoldersPerWorkspace) {
+      return false;
     }
     const started = !watch;
     if (!watch) {
@@ -94,11 +80,11 @@ export class ReplicaWatches {
       this.workspaces.set(workspaceId, watch);
       this.owners.set(ownerId, (this.owners.get(ownerId) ?? 0) + 1);
     }
-    if (!readerWorkspaces) this.readers.set(readerKey, new Set([workspaceId]));
-    else readerWorkspaces.add(workspaceId);
-    watch.holders.set(holderKey, { readerKey, expiresAt: Date.now() + HOLD_TTL_MS });
+    if (!refresh) this.readers.set(readerKey, (this.readers.get(readerKey) ?? 0) + 1);
+    watch.holders.set(readerKey, Date.now() + HOLD_TTL_MS);
     this.schedule(workspaceId, watch);
     if (started) this.activity.wake(ownerLogWaitGroup(workspaceId));
+    return true;
   }
 
   watched(workspaceId: string): boolean {
@@ -121,12 +107,12 @@ export class ReplicaWatches {
 
   private expire(workspaceId: string, watch: WorkspaceWatch): void {
     const now = Date.now();
-    for (const [key, holder] of watch.holders) {
-      if (holder.expiresAt <= now) {
-        watch.holders.delete(key);
-        const readerWorkspaces = this.readers.get(holder.readerKey)!;
-        readerWorkspaces.delete(workspaceId);
-        if (readerWorkspaces.size === 0) this.readers.delete(holder.readerKey);
+    for (const [readerKey, expiresAt] of watch.holders) {
+      if (expiresAt <= now) {
+        watch.holders.delete(readerKey);
+        const reading = this.readers.get(readerKey)! - 1;
+        if (reading === 0) this.readers.delete(readerKey);
+        else this.readers.set(readerKey, reading);
       }
     }
     if (watch.holders.size === 0) this.remove(workspaceId, watch);
@@ -146,7 +132,7 @@ export class ReplicaWatches {
   private schedule(workspaceId: string, watch: WorkspaceWatch): void {
     if (watch.timer) clearTimeout(watch.timer);
     let earliest = Infinity;
-    for (const holder of watch.holders.values()) earliest = Math.min(earliest, holder.expiresAt);
+    for (const expiresAt of watch.holders.values()) earliest = Math.min(earliest, expiresAt);
     watch.timer = setTimeout(() => {
       this.expire(workspaceId, watch);
       if (watch.holders.size > 0) this.schedule(workspaceId, watch);

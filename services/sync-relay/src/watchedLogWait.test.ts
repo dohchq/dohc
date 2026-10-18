@@ -57,12 +57,12 @@ describe("owner watched held read", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(started).toBeDefined();
     expect(await (await start).json()).toMatchObject({ watched: true });
-    await vi.advanceTimersByTimeAsync(5_001);
+    await vi.advanceTimersByTimeAsync(10_000);
     let response: Response | undefined;
     const end = h(request("owner", "/sync/a/log?since=0&hold=30000&watched=1")).then(r => { response = r; return r; });
-    await vi.advanceTimersByTimeAsync(29_998);
+    await vi.advanceTimersByTimeAsync(24_000);
     expect(response).toBeUndefined();
-    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(1_000);
     expect(response).toBeDefined();
     expect(await (await end).text()).toBe('{"ok":true,"ops":[],"nextCursor":0,"hasMore":false}');
     expect(watches.stats()).toEqual({ workspaces: 0, holders: 0 });
