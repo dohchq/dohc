@@ -80,7 +80,7 @@ describe("ordinary admitted authorship", () => {
     const lookup = vi.fn(() => "Alice");
     const [admitted] = await parseAuthenticatedLogOps([{...update(payload), opKind}], "alice", lookup);
     expect(admitted?.admittedAuthorSnapshot).toBeUndefined();
-    expect(admitted?.payloadJson).toBe(stableJsonStringify(payload));
+    expect(admitted?.payloadJson).toBe(stableJsonStringify(opKind === "moment.append" ? {} : payload));
     expect(lookup).not.toHaveBeenCalled();
   });
 
@@ -139,7 +139,7 @@ describe("ordinary admitted authorship", () => {
     const lookup = vi.fn(() => "Alice");
     const [admitted] = await parseAuthenticatedLogOps([{...update(payload), opKind: "moment.append"}], "alice", lookup);
     expect(admitted?.admittedAuthorSnapshot).toBeUndefined();
-    expect(admitted?.payloadJson).toBe(stableJsonStringify(payload));
+    expect(admitted?.payloadJson).toBe(stableJsonStringify("authors" in fields ? fields : payload));
     expect(lookup).not.toHaveBeenCalled();
   });
 
@@ -177,7 +177,8 @@ describe("ordinary admitted authorship", () => {
       expect(response.status).toBe(200);
       expect(await response.json()).toMatchObject({inserted: 1});
       const row = storage.fetchLogCoordinate({workspaceId: "workspace", originId: "device", originSeq: 0});
-      expect(row?.payloadJson).toBe(stableJsonStringify(payload));
+      const {authorContext: _claim, ...content} = payload;
+      expect(row?.payloadJson).toBe(stableJsonStringify(opKind === "moment.append" ? content : payload));
       expect(row?.admittedAuthorSnapshot).toBeUndefined();
     }
   });

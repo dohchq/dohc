@@ -260,10 +260,7 @@ pub(crate) fn is_acknowledged_envelope(
             .optional()
             .map_err(SyncError::corrupt)?;
         match existing {
-            Some(row) => {
-                let canonical_payload = crate::relay::canonical_json_bytes(&envelope.payload)?;
-                coordinate_matches(&row, envelope, &canonical_payload)
-            }
+            Some(row) => coordinate_matches(&row, envelope),
             None => Ok(false),
         }
     })
@@ -323,8 +320,7 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
                 return Err(SyncError::SequenceGap);
             }
             if let Some(row) = journaled_coordinate(tx, envelope)? {
-                let canonical_payload = crate::relay::canonical_json_bytes(&envelope.payload)?;
-                if !coordinate_matches(&row, envelope, &canonical_payload)? {
+                if !coordinate_matches(&row, envelope)? {
                     return Err(SyncError::CoordinateDiverged);
                 }
                 ack_tx(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
@@ -616,8 +612,7 @@ fn redelivered<T>(
     journaled: Option<(String, String, i64)>,
 ) -> Result<Admission<T>, SyncError> {
     if let Some(row) = journaled {
-        let canonical_payload = crate::relay::canonical_json_bytes(&envelope.payload)?;
-        if !coordinate_matches(&row, envelope, &canonical_payload)? {
+        if !coordinate_matches(&row, envelope)? {
             return Err(SyncError::CoordinateDiverged);
         }
     }
@@ -631,14 +626,17 @@ fn redelivered<T>(
 fn coordinate_matches(
     existing: &(String, String, i64),
     envelope: &ReplicationEnvelope,
-    canonical_payload: &[u8],
 ) -> Result<bool, SyncError> {
     if existing.0 != envelope.op_kind || existing.2 != envelope.recorded_at_ms {
         return Ok(false);
     }
     let existing_payload: serde_json::Value =
         serde_json::from_str(&existing.1).map_err(|_| SyncError::CoordinateDiverged)?;
-    Ok(crate::relay::canonical_json_bytes(&existing_payload)? == canonical_payload)
+    crate::relay::replication_payloads_match(
+        &envelope.op_kind,
+        &existing_payload,
+        &envelope.payload,
+    )
 }
 
 /// R10's built-in `chat.*` receiver apply dispatch. Structural rows use

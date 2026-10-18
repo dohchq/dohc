@@ -99,7 +99,7 @@ it.each(["owner-1", "reader-2"])("binds service-host moment context %s to its au
   const f = await fixture();
   const payload = write(binding.objectId, "docs/a.md", A, {authorContext: {kind: "account", accountId}});
   expect((await f.push([["moment.append", payload]])).status).toBe(200);
-  expect(f.hostCoordinate(0)?.payloadJson).toBe(stableJsonStringify(payload));
+  expect(f.hostCoordinate(0)?.payloadJson).toBe(stableJsonStringify(write(binding.objectId, "docs/a.md", A)));
   expect(f.hostCoordinate(0)?.admittedAuthorSnapshot).toEqual(accountId === "owner-1"
     ? [{kind: "human", humanId: "owner-1", humanName: "Unnamed"}] : undefined);
 });

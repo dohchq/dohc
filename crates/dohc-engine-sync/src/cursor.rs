@@ -242,6 +242,7 @@ pub(crate) fn write_pushed_seq(
         pushed_seq,
         &[],
         &[],
+        &[],
         faults,
         leases,
         now_ms,
@@ -258,6 +259,7 @@ pub(crate) fn write_pushed_seq_with_refusals(
     pushed_seq: i64,
     refusals: &[crate::SettlementPublicationRefusal],
     hosted_refusals: &[crate::HostedPushRefusal],
+    batch: &[crate::ReplicationEnvelope],
     faults: &dyn FaultInjector,
     leases: &dyn crate::LeaseProbe,
     now_ms: i64,
@@ -272,6 +274,15 @@ pub(crate) fn write_pushed_seq_with_refusals(
         .write_with(faults, |tx| {
             crate::settlement_publication::push_refusals_in_tx(tx,workspace_id,refusals)?;
             crate::hosted::record_push_refusals_in_tx(tx, workspace_id, hosted_refusals)?;
+            // Commit the relay's consumed payload with the acknowledged cursor.
+            for op in batch {
+                if let Some(stored) = crate::relay::without_recording_claim(&op.op_kind, &op.payload) {
+                    let json = String::from_utf8(crate::relay::canonical_json_bytes(&stored)?)
+                        .map_err(SyncError::corrupt)?;
+                    tx.execute("UPDATE replication_log SET payload_json=?1 WHERE workspace_id=?2 AND origin_id=?3 AND origin_seq=?4",
+                        params![json, workspace_id, origin_id, op.origin_seq]).map_err(SyncError::persist)?;
+                }
+            }
             let was_enrolled =
                 crate::workspace_replicates_with_relay_in_tx(tx, workspace_id)?;
             tx.execute(
