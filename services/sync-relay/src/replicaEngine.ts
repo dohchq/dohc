@@ -8,7 +8,7 @@ import { parseCanonicalAdmittedLiveUpdateMetadata } from "@dohc/live-session-con
 import type { ReplicaLiveJournalPage } from "./storage/liveUpdateJournal";
 import { replicaFrontiers, type ReplicaJournalRow, type ReplicaPageResult, EngineClient, DuplexEngineClientConnection } from "@dohc/workspace-engine-client/daemon";
 import type { ReplicaChild, ReplicaChildInput } from "./replicaSupervisor";
-import { serveReplicaRelay, readReplicaJournal } from "./replicaRelaySocket";
+import { serveReplicaRelay } from "./replicaRelaySocket";
 
 export interface ReplicaEngineOptions {
   readonly engineExecutable: string;
@@ -83,7 +83,12 @@ export function createReplicaEngineStarter(options: ReplicaEngineOptions) {
         }, async pull() {
         await pullOrdinary();
         const frontiers = replicaFrontiers(await request("replica.frontiers", {}));
-        await drainReplicaJournal(frontiers.journalCursor, after => readReplicaJournal(relay.socketPath, lease, after, deadlineMs), async (after, page) => {
+        await drainReplicaJournal(frontiers.journalCursor, async after => {
+          const response = await relayHandler(new Request(`http://localhost/sync/${encodeURIComponent(lease.workspaceId)}/live-journal?after=${after}&limit=500`, {
+            headers: {authorization: `Bearer ${lease.bearer}`}, signal: AbortSignal.timeout(deadlineMs)}));
+          if (response.status !== 200) throw new Error(`Replica journal read failed (${response.status}).`);
+          return await response.json() as ReplicaLiveJournalPage;
+        }, async (after, page) => {
           const rows: ReplicaJournalRow[] = page.rows.map(r => ({...r,
             admitted: {metadata: parseCanonicalAdmittedLiveUpdateMetadata(r.admitted.metadata), updateBytes: decodeJournalBytes(r.admitted.updateBytes)},
             restore: r.restore ? {operationId: r.restore.operationId, checkpointDigest: r.restore.checkpoint.digest,

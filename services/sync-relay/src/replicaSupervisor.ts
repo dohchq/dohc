@@ -1,7 +1,7 @@
 import {currentViewFileVisible, ReplicaCurrentViewRefused} from "./storage/replicaCurrentViews";
 import type {ReplicaCurrentView, ReplicaCurrentViewPage, ReplicaCurrentViewPosition, ReplicaCurrentViewCursor, ReplicaCurrentViewSelector} from "@dohc/workspace-engine-client/daemon";
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { SyncRelayStorage } from "./storage";
 import { observeRelayWrites } from "./relayWriteChanges";
@@ -61,6 +61,16 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
   // Leases and stores belong to this process. Finish the crash sweep before activation.
   // Only this supervisor's replica-* stores are removed; anything else under the root stays.
   const ready = mkdir(options.storeRoot, { recursive: true, mode: 0o700 })
+    .then(async () => {
+      if (process.platform === "win32") return;
+      const root = await lstat(options.storeRoot);
+      if (root.isSymbolicLink()) throw new Error("Replica store root must not be a symlink.");
+      if (!root.isDirectory() || root.uid !== process.getuid!()) throw new Error("Replica store root must be a directory owned by the process user.");
+      if (root.mode & 0o022) throw new Error("Replica store root must not be writable by group or others.");
+      const limit = process.platform === "darwin" ? 104 : 108;
+      const bytes = Buffer.byteLength(join(resolve(options.storeRoot), "replica-XXXXXX", "relay.sock"));
+      if (bytes >= limit) throw new Error(`Replica socket path requires ${bytes + 1} bytes; this host permits ${limit}. Use a shorter store root.`);
+    })
     .then(() => readdir(options.storeRoot, { withFileTypes: true }))
     .then(found => Promise.all(found.filter(item => item.isDirectory() && item.name.startsWith("replica-"))
       .map(item => rm(join(options.storeRoot, item.name), { recursive: true, force: true }))));
@@ -118,8 +128,16 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
       persist(entry);
       return;
     }
-    const flush = () => {
-      try {persist(entry);} catch (error) {report(entry, error); void retire(entry).catch(e => report(entry, e));}
+    const flush = async () => {
+      try {
+        const selectors = options.storage.replicaCurrentViewSelectors(entry.lease.workspaceId);
+        const pending = entry.newest;
+        // Restore can fence a pending view while the next journal page is in flight.
+        if (pending && [...pending.files, ...pending.omitted].some(file => !currentViewFileVisible(selectors, file))) {
+          await schedule(entry);
+        }
+        if (!entry.stopping) persist(entry);
+      } catch (error) {report(entry, error); void retire(entry).catch(e => report(entry, e));}
     };
     clearTimeout(entry.quiet); entry.quiet = setTimeout(flush, 2000); entry.quiet.unref();
     entry.ceiling ??= setTimeout(flush, 30_000); entry.ceiling.unref();

@@ -48,8 +48,8 @@ impl ReplicaMode {
             return Err(refused());
         }
         let relay = params
-            .get("relay")
-            .and_then(|v| v.as_object())
+            .get_mut("relay")
+            .and_then(|v| v.as_object_mut())
             .ok_or_else(refused)?;
         if relay
             .keys()
@@ -68,9 +68,31 @@ impl ReplicaMode {
         {
             return Err(refused());
         }
+        relay.insert("socketPath".into(), json!(self.root.join("relay.sock")));
+        params.insert("rootDir".into(), json!(self.root));
         params.insert("storeMode".into(), json!("passive"));
         params.insert("captureMode".into(), json!("none"));
         params.insert("recoverRunningDispatches".into(), json!(false));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guard_uses_canonical_startup_paths() {
+        let root = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let alias = root.path().join(".");
+        let mut request: Request = serde_json::from_value(json!({"id":1,"method":"workspace.open",
+            "params":{"rootDir":alias,"relay":{"socketPath":alias.join("relay.sock"),"bearerToken":"lease"}}})).unwrap();
+        let mode = ReplicaMode::new(root.path()).unwrap();
+        mode.guard(&mut request).unwrap();
+        assert_eq!(request.params["rootDir"], json!(mode.root));
+        assert_eq!(
+            request.params["relay"]["socketPath"],
+            json!(mode.root.join("relay.sock"))
+        );
     }
 }

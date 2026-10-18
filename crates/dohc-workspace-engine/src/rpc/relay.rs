@@ -63,6 +63,22 @@ pub(super) struct RelayOpenParams {
 }
 
 impl RelayOpenParams {
+    pub(super) fn validate_transport(&self, replica: bool) -> Result<(), WireError> {
+        if self.socket_path.is_some() && !replica {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "relay.socketPath requires replica mode",
+            ));
+        }
+        if self.socket_path.is_none() && self.base_url.is_empty() {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "relay.baseUrl is required",
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn configuration(&self) -> RelayConfiguration {
         RelayConfiguration {
             base_url: self.base_url.clone(),

@@ -182,7 +182,7 @@ impl HttpRelayTransport {
                 agent: Agent::with_parts(
                     config,
                     unix_socket::UnixConnector(socket_path.into()),
-                    ureq::unversioned::resolver::DefaultResolver::default(),
+                    unix_socket::UnixResolver,
                 ),
             })
         }

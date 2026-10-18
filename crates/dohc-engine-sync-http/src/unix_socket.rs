@@ -11,6 +11,27 @@ use ureq::{
 };
 
 #[derive(Debug)]
+pub(super) struct UnixResolver;
+
+impl ureq::unversioned::resolver::Resolver for UnixResolver {
+    fn resolve(
+        &self,
+        uri: &ureq::http::Uri,
+        _: &ureq::config::Config,
+        _: NextTimeout,
+    ) -> Result<ureq::unversioned::resolver::ResolvedSocketAddrs, Error> {
+        if uri.scheme_str() != Some("http")
+            || uri.authority().map(|a| a.as_str()) != Some("127.0.0.1")
+        {
+            return Err(Error::HostNotFound);
+        }
+        let mut addresses = self.empty();
+        addresses.push(std::net::SocketAddr::from(([127, 0, 0, 1], 80)));
+        Ok(addresses)
+    }
+}
+
+#[derive(Debug)]
 pub(super) struct UnixConnector(pub PathBuf);
 
 impl Connector for UnixConnector {

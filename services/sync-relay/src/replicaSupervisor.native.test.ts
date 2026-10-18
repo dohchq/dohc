@@ -115,6 +115,7 @@ it.skipIf(engineBinary.missing || process.platform === "win32")("supervised repl
       expect(db.prepare("SELECT COUNT(*) AS n FROM replication_log WHERE imported=0").get()!.n).toBe(0);
       expect(db.prepare("SELECT COUNT(*) AS n FROM conflicts WHERE status='open'").get()!.n).toBe(0);
     });
+    expect(requests.some(request => request.replica && request.method === "GET" && !request.path.endsWith("/live-journal"))).toBe(true);
     expect(requests.filter(request => request.replica && request.method !== "GET")).toEqual([]); expect(failures).toEqual([]);
   };
   const drain = async () => { await supervisor.settled(workspaceId); untouched(); };

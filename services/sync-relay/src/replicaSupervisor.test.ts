@@ -45,6 +45,45 @@ it("drains queued writes after a view loses a restore race",async()=>{
   finally{await supervisor.close();}
 });
 
+it("refreshes a fenced pending view after its in-flight drain", async () => {
+  const {storage} = await fixture();
+  vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
+  let release!: () => void, entered!: () => void, pulls = 0;
+  const held = new Promise<void>(resolve => {release = resolve;});
+  const started = new Promise<void>(resolve => {entered = resolve;});
+  const stored = vi.spyOn(storage, "storeReplicaCurrentView");
+  const db = inspectDatabase(storagePath(storage));
+  const selector = db.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE workspace_id='w'");
+  const errors: unknown[] = [];
+  const supervisor = createReplicaSupervisor({storage, storeRoot: await tempRoot("flush-during-drain"),
+    onError: (_, error) => errors.push(error), startChild: async input => ({
+      close: async () => {},
+      pull: async () => {if (++pulls === 3) {entered(); await held;}},
+      currentView: async () => {
+        const text = String(pulls), sha256 = createHash("sha256").update(text).digest("hex");
+        return {...await emptyCurrentView(input)(), files: [{versionId: "main", objectId: "a", path: "a.txt",
+          contentKind: "text" as const, sha256, byteLength: 1, lineageClaimId: null, restoreGeneration: null}],
+          texts: [{sha256, text}]};
+      },
+    })});
+  let draining: Promise<void> | undefined;
+  try {
+    await supervisor.activate("w");
+    await supervisor.activate("w");
+    expect(stored).toHaveBeenCalledTimes(1);
+    draining = supervisor.activate("w"); await started;
+    selector.run('{"paths":["blocked"],"versionId":"main"}');
+    vi.advanceTimersByTime(2000); await Promise.resolve();
+    expect(stored).toHaveBeenCalledTimes(1);
+    selector.run('{"paths":[],"versionId":"main"}');
+    release(); await draining; await Promise.resolve();
+    expect(stored).toHaveBeenCalledTimes(2);
+    expect(pulls).toBe(4);
+    expect(stored.mock.calls[1]![1].texts).toEqual([expect.objectContaining({text: "4"})]);
+    expect(errors).toEqual([]);
+  } finally {release(); await draining; await supervisor.close();}
+});
+
 async function fixture(workspaceId = "w") {
   const storage = await testStorage();
   const seed = (id: string) => {

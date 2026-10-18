@@ -3,13 +3,12 @@ import { PassThrough } from "node:stream";
 import { afterEach, expect, it, vi } from "vitest";
 import { createReplicaEngineStarter } from "./replicaEngine";
 
-const mocks = vi.hoisted(() => ({ spawn: vi.fn(), closeSocket: vi.fn(async () => {}), readJournal: vi.fn(async () => ({rows: [], nextCursor: 0, hasMore: false})) }));
+const mocks = vi.hoisted(() => ({ spawn: vi.fn(), closeSocket: vi.fn(async () => {}) }));
 vi.mock("node:child_process", () => ({ spawn: mocks.spawn }));
 vi.mock("./replicaRelaySocket", () => ({
   serveReplicaRelay: async (dir: string) => ({socketPath: `${dir}/relay.sock`, close: mocks.closeSocket}),
-  readReplicaJournal: mocks.readJournal,
 }));
-afterEach(() => { vi.useRealTimers(); mocks.spawn.mockReset(); mocks.closeSocket.mockClear(); mocks.readJournal.mockClear(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
+afterEach(() => { vi.useRealTimers(); mocks.spawn.mockReset(); mocks.closeSocket.mockClear(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 
 const frame = (row: unknown) => {
   const bytes = Buffer.from(JSON.stringify(row)), header = Buffer.alloc(12);
@@ -45,17 +44,17 @@ class Child extends EventEmitter {
   }
   finish() { this.stdout.end(); this.stderr.end(); this.emit("close", 0, "SIGKILL"); }
 }
-const input = () => ({ storeDir: process.cwd(), relayHandler: async () => new Response(), lease: { workspaceId: "w", ownerUserId: "owner", replicationEpoch: "epoch",
+const input = () => ({ storeDir: process.cwd(), relayHandler: vi.fn(async (_request: Request) => Response.json({rows: [], nextCursor: 0, hasMore: false})), lease: { workspaceId: "w", ownerUserId: "owner", replicationEpoch: "epoch",
   streamIdentity: "stream", epochLogFloor: 0, logSeq: 3, journalCursor: 0, shareGrantBindings: '[["grant",1]]', incarnation: "private", bearer: "dohc-replica-read-v1.test" } });
 async function fixture(child = new Child()) {
   mocks.spawn.mockReturnValue(child);
-  vi.stubGlobal("fetch", vi.fn(async () => ({ok: true, json: async () => ({rows: [], nextCursor: 0, hasMore: false})})));
   const start = createReplicaEngineStarter({ engineExecutable: process.execPath, allowUnisolatedDevelopment: true });
-  return { child, replica: await start(input()) };
+  const childInput = input();
+  return { child, childInput, replica: await start(childInput) };
 }
 
 it("gives the child only its private directory, fresh RPC token, and GET lease", async () => {
-  const { child, replica } = await fixture();
+  const { child, childInput, replica } = await fixture();
   try {
     expect(mocks.spawn.mock.calls[0]![1]).toEqual(["--replica"]);
     await replica.pull();
@@ -69,7 +68,10 @@ it("gives the child only its private directory, fresh RPC token, and GET lease",
     expect(command).toBe(process.execPath); expect(args).toEqual(["--replica"]); expect(options.cwd).toBe(input().storeDir);
     expect(Object.keys(options.env).sort()).toEqual(process.platform === "win32" ? ["DOHC_ENGINE_AUTH_TOKEN", "SystemRoot"] : ["DOHC_ENGINE_AUTH_TOKEN"]);
     expect(options.env.DOHC_ENGINE_AUTH_TOKEN).toMatch(/^[a-f0-9]{64}$/);
-    expect(mocks.readJournal).toHaveBeenCalledWith(`${input().storeDir}/relay.sock`, input().lease, 0, 120_000);
+    expect(childInput.relayHandler).toHaveBeenCalledOnce();
+    const journalRequest = childInput.relayHandler.mock.calls[0]![0] as Request;
+    expect(new URL(journalRequest.url).pathname).toBe("/sync/w/live-journal");
+    expect(journalRequest.headers.get("authorization")).toBe(`Bearer ${input().lease.bearer}`);
     expect(JSON.stringify(child.requests)).not.toContain("serviceHost"); expect(JSON.stringify(child.requests)).not.toContain("ownerSecret");
   } finally { await replica.close(); }
 });
@@ -122,7 +124,7 @@ it("gives a Windows development child SystemRoot without inheriting other enviro
 });
 
 it("exposes child exit while idle so the supervisor can retire it", async () => {
-  const { child, replica } = await fixture();
+  const { child, childInput, replica } = await fixture();
   try {
     const exited = (replica as { exited?: Promise<void> }).exited;
     expect(exited).toBeInstanceOf(Promise);

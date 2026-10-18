@@ -24,6 +24,24 @@ fn replica(root: &std::path::Path) -> EngineService {
 }
 
 #[tokio::test]
+async fn ordinary_open_refuses_socket_transport_and_requires_base_url() {
+    for relay in [
+        json!({"socketPath":"/private/relay.sock","bearerToken":"lease"}),
+        json!({"baseUrl":"https://relay.test","socketPath":"/private/relay.sock","bearerToken":"lease"}),
+        json!({"bearerToken":"owner"}),
+    ] {
+        let root = ScratchDir::new().unwrap();
+        let result = EngineService::new().call(RequestContext::unbounded(), request("workspace.open",
+            json!({"rootDir":root.path(),"workspaceId":"owner","captureMode":"none","relay":relay}))).await;
+        assert_eq!(
+            result.expect_err("ordinary transport must be refused").code,
+            ErrorCode::InvalidParams
+        );
+        assert!(!root.path().join(".dohc").exists());
+    }
+}
+
+#[tokio::test]
 async fn replica_refuses_every_other_rpc_before_dispatch() {
     let root = ScratchDir::new().unwrap();
     let service = replica(root.path());

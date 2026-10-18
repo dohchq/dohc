@@ -1,8 +1,9 @@
 import { chmod } from "node:fs/promises";
-import { createServer, request } from "node:http";
+import { createServer } from "node:http";
 import { join } from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import type { ReplicaReadLease } from "./replicaReadPrincipal";
-import type { ReplicaLiveJournalPage } from "./storage/liveUpdateJournal";
 
 /** Each listener admits only its child's lease. The public relay never mounts this handler. */
 export async function serveReplicaRelay(storeDir: string, lease: ReplicaReadLease,
@@ -19,14 +20,15 @@ export async function serveReplicaRelay(storeDir: string, lease: ReplicaReadLeas
       outgoing.on("close", () => abort.abort());
       const response = await handle(new Request(new URL(incoming.url!, "http://localhost"), {
         headers: incoming.headers as Record<string, string>, signal: abort.signal }));
-      const bytes = Buffer.from(await response.arrayBuffer());
-      outgoing.writeHead(response.status, {...Object.fromEntries(response.headers), "content-length": bytes.length});
-      outgoing.end(bytes);
+      outgoing.writeHead(response.status, Object.fromEntries(response.headers));
+      if (response.body) await pipeline(Readable.fromWeb(response.body as import("node:stream/web").ReadableStream<Uint8Array>), outgoing);
+      else outgoing.end();
     } catch {
       if (!outgoing.headersSent) outgoing.writeHead(500);
       outgoing.end();
     }
   });
+  server.maxConnections = 4;
   const close = () => new Promise<void>((resolve, reject) => {
     server.close(error => error ? reject(error) : resolve()); server.closeAllConnections();
   });
@@ -36,22 +38,4 @@ export async function serveReplicaRelay(storeDir: string, lease: ReplicaReadLeas
   });
   try { await chmod(socketPath, 0o600); } catch (error) { await close(); throw error; }
   return {socketPath, close};
-}
-
-export function readReplicaJournal(socketPath: string, lease: ReplicaReadLease, after: number, deadlineMs: number): Promise<ReplicaLiveJournalPage> {
-  return new Promise((resolve, reject) => {
-    const req = request({socketPath, path: `/sync/${encodeURIComponent(lease.workspaceId)}/live-journal?after=${after}&limit=500`,
-      headers: {authorization: `Bearer ${lease.bearer}`}, signal: AbortSignal.timeout(deadlineMs)}, response => {
-      const chunks: Buffer[] = [];
-      response.on("data", chunk => chunks.push(Buffer.from(chunk)));
-      response.on("error", reject);
-      response.on("end", () => {
-        try {
-          if (response.statusCode !== 200) throw new Error(`Replica journal read failed (${response.statusCode}).`);
-          resolve(JSON.parse(Buffer.concat(chunks).toString()) as ReplicaLiveJournalPage);
-        } catch (error) { reject(error); }
-      });
-    });
-    req.on("error", reject); req.end();
-  });
 }

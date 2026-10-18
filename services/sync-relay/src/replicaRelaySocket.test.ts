@@ -3,7 +3,7 @@ import { request } from "node:http";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { createReplicaReadPrincipal } from "./replicaReadPrincipal";
-import { serveReplicaRelay, readReplicaJournal } from "./replicaRelaySocket";
+import { serveReplicaRelay } from "./replicaRelaySocket";
 import { closeTestStorages, tempRoot, testHandler, testStorage } from "./testing";
 
 afterEach(closeTestStorages);
@@ -41,7 +41,7 @@ it.skipIf(process.platform === "win32")("serves only this lease through relay.so
   try {
     expect(listener.socketPath).toBe(join(root, "relay.sock"));
     expect(await read("/sync/w/bootstrap")).toBe(200);
-    expect(await readReplicaJournal(listener.socketPath, lease, 0, 1000)).toMatchObject({rows: [], nextCursor: 0, hasMore: false});
+    expect(await read("/sync/w/live-journal?after=0&limit=500")).toBe(200);
     expect(await read("/sync/w/bootstrap", "POST")).toBe(404);
     expect(await read("/sync/other/bootstrap", "GET", other.bearer)).toBe(404);
     expect(await read("/sync/other/bootstrap")).toBe(404);
