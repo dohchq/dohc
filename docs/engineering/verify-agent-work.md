@@ -223,7 +223,8 @@ Without that file, nothing runs on Linux. Other hosts and CI do not have it.
 - The verifier sends the commit and its base to the distro as a Git bundle. The distro checks out the commit in `~/.dohc-verification/linux`. A full run installs dependencies and runs `verify.mjs pr --job rust` there, with the same pinned tools as Windows.
 - The host runs one Linux job at a time. The job waits for the Linux slot, then takes a cargo lane, like a build in another lane, and builds with the same number of jobs.
 - The job runs in a systemd user scope with a memory limit of 11 GB, because all WSL distros share one VM with Docker. When the Windows side stops, the scope stops everything the job started.
-  The job frees its slots only after WSL confirms that the scope stopped. Otherwise the run is a machine failure, and the job leaves its slots as a holder that died leaves them: the cargo lane stays taken for its 30-minute grace after the verifier exits.
+  The job frees its slots only after WSL confirms that the scope stopped. Otherwise the run is a machine failure, and the job leaves its slots as a holder that died leaves them. Each slot frees once the verifier has exited and its grace has passed since the job gave it up: 30 minutes for the cargo lane, about 2 minutes for the Linux slot, so that the next Linux job can stop the scope.
+  If WSL's connection broke during a run, its Linux build can keep running beside other builds until the scope's two-hour limit.
   The next job stops a scope that a killed run left behind, and does not start while one still runs.
   The scope's peak memory and out-of-memory kills are in the job's `scope.json`. A failure after a kill at the limit is a machine failure.
 - Before it builds, the job waits until Windows has room for it. The VM's page cache already counts against Windows memory, so the job needs only the part of its limit that exceeds that cache, with 3 GB still free.
