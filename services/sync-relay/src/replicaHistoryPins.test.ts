@@ -46,6 +46,63 @@ function replacementEvidence(db: ReturnType<typeof inspectDatabase>, stream: str
     RETURNING journal_cursor`).get(`delivery-${object}-${db.prepare("SELECT count(*) AS n FROM sync_relay_live_update_journal").get()!.n}`,sha256("update"),object,sha256("lineage"),sha256("evidence"))!.journal_cursor);
 }
 
+it.each([
+  ["log","restore"],["journal","restore"],["log","quiet"],["journal","quiet"],
+])("keeps carried-state replacement evidence for a %s %s pin through a pending restore",async(stream,sampling)=>{
+  const f=await fixture(false),lineage=sha256("lineage"),patch={lineageClaimId:lineage,restoreGeneration:1};
+  f.db.exec(`INSERT INTO sync_relay_live_documents
+    (workspace_id,main_version_id,object_id,lineage_claim_id,current_path,lineage_state,admission_state,restore_fence_generation,registered_at_ms,
+    baseline_moment_relay_seq,baseline_projected_sha256,baseline_projected_byte_length,baseline_digest,baseline_bytes)
+    VALUES ('w','main','object','${lineage}','docs/a.md','current','open',1,1,1,'${lineage}',0,'${lineage}',x'01')`);
+  f.save(f.view("public",patch));
+  const entered=replacementEvidence(f.db,stream);f.at(101_000);f.save(f.view("private paragraph",patch));
+  expect(f.pins()).toHaveLength(0);
+  f.grant("before-delete");
+  const deleted=replacementEvidence(f.db,stream);f.at(102_000);
+  const table=stream==="log"?"sync_relay_log":"sync_relay_live_update_journal",cursor=stream==="log"?"relay_seq":"journal_cursor";
+  const authorColumn=stream==="log"?"admitted_author_snapshot_json":"author_snapshot_json";
+  const writer={kind:"human",humanId:"writer",humanName:"Writer"},deleter={kind:"human",humanId:"deleter",humanName:"Deleter"};
+  for(const [position,author] of [[entered,writer],[deleted,deleter]] as const)
+    f.db.prepare(`UPDATE ${table} SET ${authorColumn}=? WHERE ${cursor}=?`).run(JSON.stringify([author]),position);
+  f.db.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=2");
+  f.save(f.view("public",patch));
+  expect(f.storage.readReplicaCurrentView("w")!.files[0]!.sha256).toBe(sha256("private paragraph"));
+  expect(f.storage.readReplicaCurrentView("w")).toMatchObject({logCursor:stream==="log"?deleted:0,journalCursor:stream==="journal"?deleted:0});
+  f.grant("late");let quietId:unknown;
+  if(sampling==="quiet"){
+    f.at(131_000);f.save();quietId=f.pins()[0]!.pin_id;expect(f.pins()[0]).toMatchObject({reason:"quiet"});
+    f.restart();
+  }
+  replacementEvidence(f.db,stream);f.at(sampling==="quiet"?132_000:103_000);
+  f.save(f.view("public",{...patch,restoreGeneration:2}));
+  const pin=f.pins().find(p=>p.sha256===sha256("private paragraph"))!;
+  expect(f.read(String(pin.pin_id),{grantId:"late"})).toEqual({status:"not-found"});
+  expect(f.read(String(pin.pin_id))).toMatchObject({text:"private paragraph"});
+  expect(f.read(String(pin.pin_id),{grantId:"before-delete"})).toMatchObject({text:"private paragraph"});
+  expect(JSON.parse(String(pin.authors_json))).toEqual(expect.arrayContaining([writer,deleter]));
+  expect(pin).toMatchObject({reason:"restore",log_cursor:stream==="log"?deleted:0,journal_cursor:stream==="journal"?deleted:0,
+    replaced_log_position:stream==="log"?deleted:null,replaced_journal_position:stream==="journal"?deleted:null});
+  if(sampling==="quiet")expect(pin.pin_id).toBe(quietId);
+  // A newly observed state's entry excludes its own entering row from replacement evidence.
+  expect(entered).toBeLessThan(deleted);
+});
+
+it("does not carry snapshot.previous below the grant floor through a restore fence",async()=>{
+  const f=await fixture(false),lineage=sha256("lineage");
+  f.db.exec(`INSERT INTO sync_relay_live_documents
+    (workspace_id,main_version_id,object_id,lineage_claim_id,current_path,lineage_state,admission_state,restore_fence_generation,registered_at_ms,
+    baseline_moment_relay_seq,baseline_projected_sha256,baseline_projected_byte_length,baseline_digest,baseline_bytes)
+    VALUES ('w','main','object','${lineage}','docs/a.md','current','open',2,1,1,'${lineage}',0,'${lineage}',x'01')`);
+  const previous=f.view("private paragraph",{lineageClaimId:lineage,restoreGeneration:2});f.save(previous);
+  replacementEvidence(f.db,"log");f.grant("late");
+  const view=f.view("public",{lineageClaimId:lineage,restoreGeneration:1}),input={...f.input,grantId:"late",path:"docs/a.md"};
+  expect(f.storage.readReplicaCurrentViewFile(input,{currentReadView:()=>({view,previous})})).toEqual({status:"updating"});
+  expect(f.storage.listReplicaCurrentViewFiles(input,{currentReadView:()=>({view,previous})}))
+    .toMatchObject({files:[{path:"docs/a.md",status:"updating"}]});
+  expect(f.storage.readReplicaCurrentViewFile(input,{currentReadView:()=>({view,previous:{...previous,logCursor:view.logCursor}})}))
+    .toMatchObject({text:"private paragraph"});
+});
+
 it.each(["log","journal"])("position floor hides %s replacements admitted before a grant while collection is idle", async stream => {
   const f=await fixture();f.save(f.view("draft"));f.at(101_000);f.save(f.view("secret"));f.at(131_000);f.save();
   const id=String(f.pins().find(p=>p.sha256===sha256("secret"))!.pin_id);

@@ -198,8 +198,9 @@ export function withReplicaCurrentView<T>(storage: StorageContext, input: Replic
     const project = (path: string) => projection ? projection.projectPath(path) : path;
     const files = new Map<string, ReplicaCurrentViewFile>(), rows = new Map<string, ViewFile>();
     if (snapshot.previous && snapshot.previous.workspaceId !== workspace) return {status:"updating"};
-    const previous = snapshot.previous && indexView(snapshot.previous,index.files);
-    if (snapshot.previous && !previous) return {status:"updating"};
+    const previousView = snapshot.previous && (!floor || replicaViewReachesFloor(snapshot.previous,floor)) ? snapshot.previous : undefined;
+    const previous = previousView && indexView(previousView,index.files);
+    if (previousView && !previous) return {status:"updating"};
     // An open needs only the incoming row and a row that can carry the saved path.
     const direct = realPath === undefined ? undefined : index.files.get(version)?.get(realPath);
     const saved = realPath === undefined ? undefined : previous?.files.get(version)?.get(realPath);

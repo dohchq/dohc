@@ -48,6 +48,7 @@ export function initializeReplicaHistorySchema(db: SqliteDb) {
       changed_at_ms INTEGER NOT NULL, dirty_since_ms INTEGER, last_nonstructural_at_ms INTEGER,
       pin_log_cursor INTEGER NOT NULL DEFAULT 0, pin_journal_cursor INTEGER NOT NULL DEFAULT 0,
       state_key TEXT,
+      state_log_cursor INTEGER NOT NULL, state_journal_cursor INTEGER NOT NULL,
       PRIMARY KEY(workspace_id,version_id,object_id)
     ) STRICT;
     CREATE TRIGGER replica_history_pin_delete AFTER DELETE ON sync_relay_history_pins WHEN OLD.content_kind='text' BEGIN

@@ -32,11 +32,12 @@ export function pinReplicaHistory(storage: StorageContext, view: ReplicaCurrentV
   const clocks = new Map(statement(storage,"SELECT * FROM sync_relay_history_clocks WHERE workspace_id=?").all(workspace).map(c=>[JSON.stringify([c.version_id,c.object_id]),c]));
   const currentPins = new Map(statement(storage,"SELECT * FROM sync_relay_history_pins WHERE workspace_id=? AND superseded_at_ms IS NULL")
     .all(workspace).map(row=>[historyObjectKey(fromRow(row)),row]));
-  const saveClock = statement(storage,`INSERT INTO sync_relay_history_clocks VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(workspace_id,version_id,object_id)
+  const saveClock = statement(storage,`INSERT INTO sync_relay_history_clocks VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(workspace_id,version_id,object_id)
     DO UPDATE SET changed_at_ms=excluded.changed_at_ms,dirty_since_ms=excluded.dirty_since_ms,last_nonstructural_at_ms=excluded.last_nonstructural_at_ms,
-    pin_log_cursor=excluded.pin_log_cursor,pin_journal_cursor=excluded.pin_journal_cursor,state_key=excluded.state_key`);
-  const replacement = (file: File, log: number, journal: number) => replicaHistoryReplacement(storage,workspace,file.versionId,file.objectId,
-    log,view.logCursor,journal,view.journalCursor);
+    pin_log_cursor=excluded.pin_log_cursor,pin_journal_cursor=excluded.pin_journal_cursor,state_key=excluded.state_key,
+    state_log_cursor=excluded.state_log_cursor,state_journal_cursor=excluded.state_journal_cursor`);
+  const replacement = (file: File, clock: Record<string,unknown> | undefined) => clock ? replicaHistoryReplacement(storage,workspace,file.versionId,file.objectId,
+    Number(clock.state_log_cursor),view.logCursor,Number(clock.state_journal_cursor),view.journalCursor) : [null,null];
   const pin = (file: File, reason: string, clock: Record<string,unknown>, log: number, journal: number, superseded: number | null) => {
     const existing = currentPins.get(historyObjectKey(file));
     if (superseded !== null && existing && historyStateKey(fromRow(existing)) === historyStateKey(file)) {
@@ -48,7 +49,7 @@ export function pinReplicaHistory(storage: StorageContext, view: ReplicaCurrentV
     statement(storage,"INSERT INTO sync_relay_history_pins VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
       .run(randomUUID(),workspace,file.versionId,file.objectId,file.path,file.contentKind,file.sha256,file.byteLength,file.lineageClaimId,
         file.restoreGeneration,reason,now,superseded,log,journal,JSON.stringify(authors),
-        ...(superseded === null ? [null,null] : replacement(file,log,journal)));
+        ...(superseded === null ? [null,null] : replacement(file,clock)));
     if (file.contentKind === "text") references.set(file.sha256,(references.get(file.sha256) ?? 0)+1);
     clock.pin_log_cursor=log; clock.pin_journal_cursor=journal; clock.dirty_since_ms=null;
     if (reason === "quiet" || reason === "ceiling") clock.last_nonstructural_at_ms=now;
@@ -61,7 +62,7 @@ export function pinReplicaHistory(storage: StorageContext, view: ReplicaCurrentV
     if (unavailable?.path === file.path && unavailable.sha256 === file.sha256) continue;
     if (!after || historyStateKey(file) !== historyStateKey(after)) statement(storage,`UPDATE sync_relay_history_pins
       SET superseded_at_ms=?,replaced_log_position=?,replaced_journal_position=? WHERE pin_id=?`)
-      .run(observed.get(historyObjectKey(file))?.firstChangedAtMs ?? now,...replacement(file,Number(row.log_cursor),Number(row.journal_cursor)),row.pin_id);
+      .run(observed.get(historyObjectKey(file))?.firstChangedAtMs ?? now,...replacement(file,clocks.get(historyObjectKey(file))),row.pin_id);
   }
   for (const key of new Set([...previous.keys(),...next.keys()])) {
     if (omitted.has(key)) continue;
@@ -69,6 +70,7 @@ export function pinReplicaHistory(storage: StorageContext, view: ReplicaCurrentV
     const savedClock = clocks.get(key);
     const clock = {...(savedClock ?? {changed_at_ms:times?.changedAtMs ?? now,dirty_since_ms:null,
       last_nonstructural_at_ms:null,pin_log_cursor:header?.log_cursor ?? view.logCursor,pin_journal_cursor:header?.journal_cursor ?? view.journalCursor,
+      state_log_cursor:header?.log_cursor ?? view.logCursor,state_journal_cursor:header?.journal_cursor ?? view.journalCursor,
       state_key:old ? historyStateKey(old) : !header && file ? historyStateKey(file) : null})};
     const structural = old && historyStructuralReason(old,file);
     if (structural) pin(old,structural,clock,Number(header!.log_cursor),Number(header!.journal_cursor),times?.firstChangedAtMs ?? now);
@@ -77,6 +79,7 @@ export function pinReplicaHistory(storage: StorageContext, view: ReplicaCurrentV
       if (clock.dirty_since_ms === null) clock.dirty_since_ms=times?.firstChangedAtMs ?? now;
       clock.changed_at_ms=times?.changedAtMs ?? now;
       clock.state_key=state;
+      clock.state_log_cursor=view.logCursor; clock.state_journal_cursor=view.journalCursor;
     }
     if (file && clock.dirty_since_ms !== null) {
       const quiet = now-Number(clock.changed_at_ms) >= 30_000;
@@ -87,8 +90,8 @@ export function pinReplicaHistory(storage: StorageContext, view: ReplicaCurrentV
     }
     if (!file) clock.dirty_since_ms=null;
     const identity = file ?? old!;
-    if (!savedClock || ["changed_at_ms","dirty_since_ms","last_nonstructural_at_ms","pin_log_cursor","pin_journal_cursor","state_key"].some(k=>savedClock[k] !== clock[k]))
-      saveClock.run(workspace,identity.versionId,identity.objectId,clock.changed_at_ms,clock.dirty_since_ms,clock.last_nonstructural_at_ms,clock.pin_log_cursor,clock.pin_journal_cursor,clock.state_key);
+    if (!savedClock || ["changed_at_ms","dirty_since_ms","last_nonstructural_at_ms","pin_log_cursor","pin_journal_cursor","state_key","state_log_cursor","state_journal_cursor"].some(k=>savedClock[k] !== clock[k]))
+      saveClock.run(workspace,identity.versionId,identity.objectId,clock.changed_at_ms,clock.dirty_since_ms,clock.last_nonstructural_at_ms,clock.pin_log_cursor,clock.pin_journal_cursor,clock.state_key,clock.state_log_cursor,clock.state_journal_cursor);
   }
   return references;
 }
