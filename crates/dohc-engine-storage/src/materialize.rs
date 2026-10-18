@@ -1008,8 +1008,7 @@ pub(crate) fn record_retained_read(
     with_full_commit(conn, |tx| {
         let updated=tx.execute("UPDATE materialization_retained SET digest=?2,size=?3,mtime=?4,ctime=?5,changed_at_ms=?6,device=?9,inode=?10 WHERE displacement_id=?1 AND digest=?7 AND changed_at_ms=?8",rusqlite::params![old.displacement_id,new.digest,new.size,new.mtime,new.ctime,now_ms,old.digest,old.changed_at_ms,new.device,new.inode]).map_err(StorageError::persist)?;
         if updated == 1 && new.digest != old.digest {
-            crate::text::retain_displacement(tx, old, new, bytes, now_ms)
-                .map_err(StorageError::persist)?;
+            tx.execute("INSERT OR IGNORE INTO materialization_displacement_reads(workspace_id,displacement_id,job_id,target_path,sha256,bytes,observed_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7)",rusqlite::params![old.workspace_id,format!("retained:{}",old.displacement_id),old.job_id,old.target_path,new.digest,bytes,now_ms]).map_err(StorageError::persist)?;
         }
         Ok(())
     })

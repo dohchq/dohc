@@ -2408,7 +2408,7 @@ fn snapshot_from_row(
             return Ok(Err(SyncError::CoordinateDiverged));
         }
     };
-    let text: Option<String> = text::from_row(conn, row, 6)?;
+    let text: Option<String> = text::optional_from_row(conn, row, 6)?;
     let digest = match kind {
         ContentKind::Text => row.get::<_, Option<String>>(4)?,
         ContentKind::Binary => row.get::<_, Option<String>>(5)?,

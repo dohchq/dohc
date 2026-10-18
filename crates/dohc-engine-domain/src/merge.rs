@@ -951,7 +951,7 @@ fn select_snapshot(
             Ok((
                 row.get(0)?,
                 row.get(1)?,
-                text::from_row(conn, row, 2)?,
+                text::optional_from_row(conn, row, 2)?,
                 row.get(3)?,
                 row.get(4)?,
                 row.get(5)?,

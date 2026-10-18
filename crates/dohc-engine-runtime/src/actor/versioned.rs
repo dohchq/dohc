@@ -1700,7 +1700,13 @@ fn enqueue_discarded_delete_projection_in_tx(
          b.sha256, s.updated_at_ms FROM snapshots s LEFT JOIN blobs b ON b.sha256=s.blob_sha256 \
          WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.path=?3",
             params![workspace_id, version_id, path],
-            |row| Ok((row.get(0)?, text::from_row(tx, row, 1)?, row.get(2)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    text::optional_from_row(tx, row, 1)?,
+                    row.get(2)?,
+                ))
+            },
         )
         .optional()
         .map_err(StorageError::corrupt_public)?;

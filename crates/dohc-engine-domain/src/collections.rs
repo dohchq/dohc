@@ -2778,7 +2778,7 @@ pub fn collection_record_id_mismatch_in_tx(
             .query_row(params![workspace_id, version_id, path], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    text::from_row::<Option<String>, _>(conn, row, 1)?,
+                    text::optional_from_row(conn, row, 1)?,
                     row.get::<_, String>(2)?,
                 ))
             })
@@ -3777,7 +3777,7 @@ fn unindexed_or_conflicted_relation_targets_still_present(
         let mut matched_count = 0_usize;
         let rows = statement
             .query_map(params![workspace_id, version_id, collection_path], |row| {
-                text::from_row::<String, _>(conn, row, 0)
+                text::from_row(conn, row, 0)
             })
             .map_err(crate::DomainError::sql_corrupt)?;
         for text in rows {
@@ -3803,7 +3803,7 @@ fn load_collection_snapshots(
     version_id: &str,
 ) -> Result<Vec<CollectionSnapshot>, crate::DomainError> {
     let mut statement = conn
-        .prepare(
+        .prepare(&format!(
             "WITH collection_prefixes(prefix) AS MATERIALIZED (\
                SELECT substr(schema.path,1,length(schema.path)-length(?3)-1) \
                FROM snapshots schema \
@@ -3824,10 +3824,11 @@ fn load_collection_snapshots(
                        AND instr(substr(s.path,length(c.prefix)+2),'/')=0\
                    )))\
              ) \
-             SELECT s.path,s.object_id,b.sha256 FROM collection_snapshots s \
+             SELECT s.path,s.object_id,{body_b} FROM collection_snapshots s \
              JOIN blobs b ON b.sha256=s.blob_sha256 \
              ORDER BY s.path",
-        )
+            body_b = text::body_column("b")
+        ))
         .map_err(crate::DomainError::sql_corrupt)?;
     statement
         .query_map(
@@ -3836,7 +3837,7 @@ fn load_collection_snapshots(
                 Ok(CollectionSnapshot {
                     path: row.get(0)?,
                     object_id: row.get(1)?,
-                    text: text::from_row(conn, row, 2)?,
+                    text: row.get(2)?,
                 })
             },
         )
@@ -3898,7 +3899,7 @@ pub fn index_historical_record_owner_moment_in_tx(
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    text::from_row::<String, _>(tx, row, 3)?,
+                    text::from_row(tx, row, 3)?,
                 ))
             },
         )
@@ -3978,7 +3979,7 @@ fn ensure_historical_record_owners_backfilled(
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
-                text::from_row::<String, _>(tx, row, 3)?,
+                text::from_row(tx, row, 3)?,
             ))
         })
         .map_err(crate::DomainError::sql_corrupt)?

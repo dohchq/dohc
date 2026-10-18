@@ -25,17 +25,14 @@ fn bodies_keep_exact_bytes_and_existing_insert_semantics() {
         Err(rusqlite::Error::SqliteFailure(..))
     ));
     assert_eq!(
-        text::read::<String>(&conn, "key").unwrap().as_bytes(),
+        text::read(&conn, "key").unwrap().as_bytes(),
         body.as_bytes()
     );
     assert_eq!(
         text::with_length(&conn, "key").unwrap(),
         (body.len() as i64, body.into())
     );
-    assert_eq!(
-        text::read::<String>(&conn, "absent").optional().unwrap(),
-        None
-    );
+    assert_eq!(text::read(&conn, "absent").optional().unwrap(), None);
 }
 
 #[test]
@@ -64,13 +61,18 @@ fn joined_reads_preserve_nulls_and_binary_length_projections() {
     text::insert(&conn, "key", 4, "🦀", false).unwrap();
     conn.execute_batch("INSERT INTO heads VALUES(1,'key'),(2,NULL);")
         .unwrap();
-    let mut stmt = conn.prepare("SELECT b.sha256,CASE WHEN h.id=1 THEN b.sha256 ELSE 123 END FROM heads h LEFT JOIN blobs b ON b.sha256=h.sha ORDER BY h.id").unwrap();
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT b.sha256,123,{body} FROM heads h LEFT JOIN blobs b ON b.sha256=h.sha ORDER BY h.id",
+            body = text::body_column("b"),
+        ))
+        .unwrap();
     let values = stmt
         .query_map([], |row| {
             Ok((
-                text::from_row::<Option<String>, _>(&conn, row, 0)?,
-                text::length_from_row::<i64, _>(&conn, row, 1)?,
-                text::capped_from_row(&conn, row, 0, 3)?,
+                text::optional_from_row(&conn, row, 0)?,
+                text::length_from_row(&conn, row, 0, 1)?,
+                row.get::<_, Option<String>>(2)?,
             ))
         })
         .unwrap()
@@ -78,7 +80,7 @@ fn joined_reads_preserve_nulls_and_binary_length_projections() {
         .unwrap();
     assert_eq!(
         values,
-        vec![(Some("🦀".into()), 4, None), (None, 123, None)]
+        vec![(Some("🦀".into()), 4, Some("🦀".into())), (None, 123, None)]
     );
 }
 
@@ -112,4 +114,24 @@ fn character_prefixes_and_byte_ranges_match_sqlite_including_nul() {
             );
         }
     }
+}
+#[test]
+fn missing_body_in_selected_row_is_corruption_not_absence() {
+    use rusqlite::OptionalExtension;
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE blobs(sha256 TEXT PRIMARY KEY, byte_length INTEGER, text TEXT);",
+    )
+    .unwrap();
+    // The metadata row exists, but its body does not. Outer optional must
+    // distinguish this from a missing metadata row, including after chunking.
+    let result: rusqlite::Result<Option<Option<String>>> = conn
+        .query_row("SELECT 'missing'", [], |row| {
+            text::optional_from_row(&conn, row, 0)
+        })
+        .optional();
+    assert!(
+        matches!(result, Err(rusqlite::Error::SqliteFailure(ref e, _)) if e.code == rusqlite::ErrorCode::DatabaseCorrupt),
+        "{result:?}"
+    );
 }

@@ -3792,7 +3792,7 @@ fn local_snapshot_text(conn: &Connection, key: &DocKey) -> Result<Option<String>
          WHERE s.workspace_id = ?1 AND s.version_id = ?2 AND s.object_id = ?3 \
            AND s.content_kind = 'text'",
         params![key.workspace_id, key.version_id, key.object_id],
-        |row| text::from_row::<Option<String>, _>(conn, row, 0),
+        |row| text::optional_from_row(conn, row, 0),
     )
     .optional()
     .map(Option::flatten)
@@ -5621,7 +5621,7 @@ fn last_settled_text_in_tx(
            CASE WHEN d.settle_seq=0 THEN d.seed_source_sha256 END) \
          WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3",
         params![key.workspace_id, key.version_id, key.object_id],
-        |row| text::from_row::<Option<String>, _>(tx, row, 0),
+        |row| text::optional_from_row(tx, row, 0),
     )
     .optional()
     .map(Option::flatten)

@@ -1685,9 +1685,9 @@ pub fn load_text_conflict_in_tx(
 }
 
 const CONFLICT_SELECT: &str = "SELECT c.*,
-    base_blob.sha256 AS base_text,
-    current_blob.sha256 AS current_text,
-    incoming_blob.sha256 AS incoming_text,
+    base_blob.sha256 AS base_blob,
+    current_blob.sha256 AS current_blob,
+    incoming_blob.sha256 AS incoming_blob,
     base_binary.byte_length AS base_binary_byte_length,
     current_binary.byte_length AS current_binary_byte_length,
     incoming_binary.byte_length AS incoming_binary_byte_length
@@ -1798,7 +1798,7 @@ fn map_side(
                     .get(column("object_id").as_str())
                     .map_err(DomainError::sql_corrupt)?,
                 path: path.clone(),
-                text: text::from_row(conn, row, format!("{prefix}_text").as_str())
+                text: text::from_row(conn, row, format!("{prefix}_blob").as_str())
                     .map_err(DomainError::sql_corrupt)?,
                 blob_sha256: text_blob_sha256.ok_or(DomainError::StateCorrupt {
                     reason: "text conflict side is missing its blob reference",
@@ -1950,7 +1950,7 @@ pub fn select_snapshot_by_path_in_tx(
                 Ok((
                     row.get(0)?,
                     row.get(1)?,
-                    text::from_row(conn, row, 2)?,
+                    text::optional_from_row(conn, row, 2)?,
                     row.get(3)?,
                     row.get(4)?,
                     row.get(5)?,

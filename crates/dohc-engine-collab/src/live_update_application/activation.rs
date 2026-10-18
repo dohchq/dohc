@@ -199,7 +199,6 @@ pub fn capture_imported_owner_activation(
             .settled_markdown_source(&projection, || {
                 text::read(tx, &source_digest)
                     .optional()
-                    .map(Option::flatten)
                     .map_err(read_sql)
             })?
             .unwrap_or(projection);

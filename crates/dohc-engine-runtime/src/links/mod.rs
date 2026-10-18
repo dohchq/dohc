@@ -69,7 +69,7 @@ fn head(conn: &Connection, w: &Work, hydrate: bool) -> Result<Option<Head>, Stor
           FROM effective e LEFT JOIN blobs b ON b.sha256=e.blob_sha256
           WHERE EXISTS(SELECT 1 FROM link_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3) LIMIT 1",
         params![w.workspace,w.version,w.object,hydrate,MAX_DOCUMENT_BYTES as i64],
-        |r| Ok(Head {path:r.get(0)?,hash:r.get(1)?,kind:r.get(2)?,byte_length:r.get(3)?,text:text::from_row(conn, r, 4)?,aliases:Vec::new(),unindexed_reason:None}),
+        |r| Ok(Head {path:r.get(0)?,hash:r.get(1)?,kind:r.get(2)?,byte_length:r.get(3)?,text:text::optional_from_row(conn, r, 4)?,aliases:Vec::new(),unindexed_reason:None}),
     ).optional().map_err(sql)?;
     if let Some(h) = h.as_mut() {
         if h.kind == "text" && h.byte_length < 0 {

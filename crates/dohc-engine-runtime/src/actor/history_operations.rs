@@ -526,7 +526,14 @@ fn commit_history_undo_on_store(
                  FROM snapshots s LEFT JOIN blobs b ON b.sha256=s.blob_sha256
                  WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3",
                         params![ws, version_id, m.object_id],
-                        |r| Ok((r.get(0)?, text::from_row(tx, r, 1)?, r.get(2)?, r.get(3)?)),
+                        |r| {
+                            Ok((
+                                r.get(0)?,
+                                text::optional_from_row(tx, r, 1)?,
+                                r.get(2)?,
+                                r.get(3)?,
+                            ))
+                        },
                     )
                     .map_err(StorageError::corrupt_public)?;
                 let head = if kind == "text" {

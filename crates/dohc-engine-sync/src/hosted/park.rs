@@ -400,7 +400,7 @@ pub(crate) fn unpark_returned(
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
-                        text::from_row::<Option<String>, _>(tx, row, 3)?,
+                        text::optional_from_row(tx, row, 3)?,
                     ))
                 })
                 .map_err(SyncError::corrupt)?

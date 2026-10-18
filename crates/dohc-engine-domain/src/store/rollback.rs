@@ -773,14 +773,14 @@ fn select_moment_by_order(
 ) -> Result<Option<MomentRecord>, DomainError> {
     let row = conn
         .query_row(
-            concat!("SELECT moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
+            &format!(concat!("SELECT moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
              operation, after_blob_sha256, before_present, before_blob_sha256, \
              before_latest_moment_id, metadata_origin, metadata_summary, \
              metadata_correlation_id, author_json, sync_record_only, \
              COALESCE(after_content_kind, 'text'), after_binary.sha256, \
-             COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             after_text_blob.sha256, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             before_text_blob.sha256, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length), \
-             CASE WHEN after_text_blob.sha256 IS NOT NULL THEN after_text_blob.sha256 ELSE LENGTH(after_binary.bytes) END, \
-             CASE WHEN before_text_blob.sha256 IS NOT NULL THEN before_text_blob.sha256 ELSE LENGTH(before_binary.bytes) END, \
+             COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             CASE WHEN after_text_blob.byte_length <= 131072 AND LENGTH(CAST({body_after_text_blob} AS BLOB)) <= 131072 THEN {body_after_text_blob} END, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             CASE WHEN before_text_blob.byte_length <= 131072 AND LENGTH(CAST({body_before_text_blob} AS BLOB)) <= 131072 THEN {body_before_text_blob} END, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length), \
+             COALESCE(LENGTH(CAST({body_after_text_blob} AS BLOB)), LENGTH(after_binary.bytes)), \
+             COALESCE(LENGTH(CAST({body_before_text_blob} AS BLOB)), LENGTH(before_binary.bytes)), \
              m.payload_before_path \
              FROM moments m \
              LEFT JOIN binary_blobs after_binary ON after_binary.sha256 = m.after_binary_sha256 \
@@ -788,9 +788,9 @@ fn select_moment_by_order(
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
                AND moment_order <= ?4 AND (sync_record_only IS NULL OR sync_record_only = 0) \
                AND ", crate::exclude_capture_recovery_sql!("m"), " \
-             ORDER BY moment_order DESC LIMIT 1"),
+             ORDER BY moment_order DESC LIMIT 1"), body_after_text_blob = text::body_column("after_text_blob"), body_before_text_blob = text::body_column("before_text_blob")),
             params![workspace_id, version_id, object_id, max_order],
-            |row| map_moment_row(conn, row),
+            map_moment_row,
         )
         .optional()
         .map_err(DomainError::sql_corrupt)?;

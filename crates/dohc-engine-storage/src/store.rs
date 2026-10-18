@@ -558,7 +558,7 @@ impl EngineStore {
             }
             return Ok(Some(text.into_bytes()));
         }
-        crate::text::read_materialization_bytes(&self.conn, sha256)
+        crate::get_binary_blob(&self.conn, sha256)
     }
 
     /// Whether a binary blob with this key exists.

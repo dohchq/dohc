@@ -89,7 +89,7 @@ fn insert_file_index_row(
     path: &str,
     text: &str,
 ) -> Result<(), SearchError> {
-    text::index_file(conn, workspace_id, version_id, object_id, path, text)?;
+    conn.prepare_cached("INSERT INTO engine_search_files_fts (workspace_id,version_id,object_id,path,text) VALUES (?1,?2,?3,?4,?5)")?.execute(params![workspace_id,version_id,object_id,path,text])?;
     Ok(())
 }
 
@@ -355,10 +355,10 @@ fn rebuild_file_index_for_version(
         }
         let object_id: String = row.get(0)?;
         let path: String = row.get(1)?;
-        let text: String = text::from_row(conn, row, 2)?;
         if !path_is_search_indexed(policy, &path) {
             continue;
         }
+        let text = text::from_row(conn, row, 2)?;
         let search_text = extract_search_text(&path, &text);
         insert_file_index_row(
             conn,

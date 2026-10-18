@@ -516,7 +516,7 @@ fn verify_recovery(
                    AND moment.after_blob_sha256=?7 AND moment.after_binary_sha256 IS NULL
                    AND moment.metadata_origin='sync' AND moment.metadata_summary=?8
                    AND moment.metadata_correlation_id=?9
-                   AND moment.author_json IS ?12 AND moment.sync_record_only IS NULL
+                   AND moment.author_json IS ?11 AND moment.sync_record_only IS NULL
                    AND blob.byte_length=?10
              )",
             params![
@@ -530,7 +530,6 @@ fn verify_recovery(
                 identity.summary,
                 identity.correlation_id,
                 markdown.len() as i64,
-                markdown,
                 decision.recovery_author_json,
             ],
             |row| row.get(0),

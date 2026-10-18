@@ -19,7 +19,7 @@ use dohc_engine_files::{
 };
 use dohc_engine_storage::{
     EngineStore, FaultInjector, MaterializationJobSpec, MaterializationOperation, Preimage,
-    StorageError, TxnOutcome, hex_sha256, upsert_projection_job,
+    StorageError, TxnOutcome, hex_sha256, put_binary_blob, upsert_projection_job,
 };
 use rusqlite::{OptionalExtension, params};
 use std::collections::{HashMap, HashSet};
@@ -386,8 +386,7 @@ fn run_relay_batch(
         })?;
         for projection in &batch {
             if let Some(bytes) = projection.inline_content.as_deref()
-                && dohc_engine_storage::text::put_materialization(tx, bytes)?
-                    != projection.spec.content_sha256
+                && put_binary_blob(tx, bytes)? != projection.spec.content_sha256
             {
                 return Err(StorageError::corrupt_public(rusqlite::Error::InvalidQuery));
             }
@@ -895,7 +894,7 @@ pub(super) fn reconcile_active_plaintext_projection_on_store(
         })?;
         for projection in &projections {
             if let Some(content) = projection.inline_content.as_deref() {
-                let stored_sha = dohc_engine_storage::text::put_materialization(tx, content)?;
+                let stored_sha = put_binary_blob(tx, content)?;
                 if stored_sha != projection.spec.content_sha256 {
                     return Err(StorageError::corrupt_public(rusqlite::Error::InvalidQuery));
                 }
@@ -997,7 +996,7 @@ pub(super) fn switch_active_version_on_store(
         complete_held_switch_jobs(tx, workspace_id, &holds, now_ms, |_, _| true)?;
         for projection in &projections {
             if let Some(content) = projection.inline_content.as_deref() {
-                let stored_sha = dohc_engine_storage::text::put_materialization(tx, content)?;
+                let stored_sha = put_binary_blob(tx, content)?;
                 if stored_sha != projection.spec.content_sha256 {
                     return Err(StorageError::corrupt_public(rusqlite::Error::InvalidQuery));
                 }

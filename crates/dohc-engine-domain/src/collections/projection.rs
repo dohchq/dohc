@@ -1,4 +1,5 @@
 use super::*;
+use dohc_engine_storage::text;
 
 /// Disposable hashes and parsed schemas for a received share's local index.
 /// A new worker rebuilds the index from snapshots, including on existing stores.
@@ -211,4 +212,3 @@ pub fn project_collections_in_tx(
     projected_paths.dedup();
     Ok((next, projected_paths))
 }
-use dohc_engine_storage::text;

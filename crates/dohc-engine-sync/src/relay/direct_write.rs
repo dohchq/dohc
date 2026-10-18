@@ -189,7 +189,7 @@ pub fn read_record_creation_statuses(
                         "SELECT b.sha256 FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 \
                      WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.path=?3",
                         params![workspace_id, MAIN_VERSION_ID, path],
-                        |row| text::prefix_from_row::<String, _>(conn, row, 0),
+                        |row| text::prefix_from_row(conn, row, 0),
                     )
                     .optional()
                     .map_err(SyncError::corrupt)
@@ -1216,7 +1216,10 @@ fn preserve_refused_record_drafts(
              AND json_extract(log.payload_json,'$.payloadAfterPath')=?2 ORDER BY log.origin_seq DESC LIMIT 1",
             params![workspace_id,path], |row| text::from_row(tx, row, 0),
         ).optional().map_err(SyncError::corrupt)?;
-        let submitted: Option<String> = text::read(tx, &change.after_blob_sha256)
+        let Some(submitted_sha) = change.after_blob_sha256.as_deref() else {
+            continue;
+        };
+        let submitted: Option<String> = text::read(tx, submitted_sha)
             .optional()
             .map_err(SyncError::corrupt)?;
         let Some(submitted) = submitted else { continue };

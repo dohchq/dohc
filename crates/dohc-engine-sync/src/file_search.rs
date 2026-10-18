@@ -5,7 +5,6 @@ use dohc_engine_files::search_policy::{
 };
 use dohc_engine_files::search_text::extract_search_text;
 use dohc_engine_storage::EngineStore;
-use dohc_engine_storage::text;
 use rusqlite::{Transaction, params};
 
 use crate::SyncError;
@@ -62,13 +61,16 @@ pub(crate) fn upsert_file_search_index(
         && path_is_search_indexed(policy, path)
     {
         let search_text = extract_search_text(path, text);
-        text::index_file(
-            tx,
-            workspace_id,
-            version_id,
-            object_id,
-            path,
-            search_text.as_ref(),
+        tx.execute(
+            "INSERT INTO engine_search_files_fts (workspace_id,version_id,object_id,path,text) \
+             VALUES (?1,?2,?3,?4,?5)",
+            params![
+                workspace_id,
+                version_id,
+                object_id,
+                path,
+                search_text.as_ref()
+            ],
         )
         .map_err(SyncError::persist)?;
     }
