@@ -175,7 +175,11 @@ export class ServiceActivationDriver {
   }
   /** Whether the relay retains an activation of the document at the target's path. */
   retained(target:ServiceActivationTarget){
-    return this.#store.read(target.workspaceId,target.path,this.options.config.maxCaptureBytes)!==null;
+    return this.activationId(target)!==undefined;
+  }
+  /** The activation the relay retains at the target's path, which an unload of its document names. */
+  activationId(target:ServiceActivationTarget){
+    return this.#store.read(target.workspaceId,target.path,this.options.config.maxCaptureBytes)?.activationId;
   }
   restoreConsumer(document:LiveDocumentKey,lookup:StopRestoreLookup){
     const o=this.options,key=JSON.stringify(parseLiveDocumentKey(document));

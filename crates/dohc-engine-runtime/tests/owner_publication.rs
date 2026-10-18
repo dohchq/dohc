@@ -2490,6 +2490,7 @@ async fn unload_waits_for_an_owner_edit_adopted_before_its_first_settlement() {
     let unload = || {
         owner.unload(
             "object".into(),
+            Some("adoption".into()),
             vec![key.clone()],
             f.root.path().to_owned(),
             40,

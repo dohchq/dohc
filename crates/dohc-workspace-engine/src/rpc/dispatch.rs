@@ -116,6 +116,7 @@ impl EngineService {
                     | "liveApplication.attachWorkspace"
                     | "liveApplication.detachWorkspace"
                     | "liveApplication.unloadDocument"
+                    | "liveApplication.reconcileActivation"
                     | "liveApplication.register"
                     | "liveApplication.bootstrap"
                     | "liveApplication.apply"
@@ -333,6 +334,10 @@ impl EngineService {
             }
             "liveApplication.unloadDocument" => {
                 Box::pin(self.live_application_unload(&ctx, request.workspace, request.params))
+                    .await?
+            }
+            "liveApplication.reconcileActivation" => {
+                Box::pin(self.live_application_reconcile(&ctx, request.workspace, request.params))
                     .await?
             }
             "liveApplication.register" => {

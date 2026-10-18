@@ -423,10 +423,12 @@ export async function startServiceLiveHost(options: {
       activation!.removeTarget(hosted.get(key)!.target); hosted.delete(key); leaving.delete(key); recovering.delete(key); parking.delete(key); idle.delete(key); unloading.delete(key);
     };
     // The engine's reason while it holds unfinished work for the document, or undefined once nothing of it is loaded.
+    // The unload names the activation the relay retains, so it cannot end another one's state.
     const requestUnload = async (document: {target: ServiceActivationTarget; objectId: string}, joined: AbortSignal) => {
+      const activationId = activation!.activationId(document.target);
       try {
         const result = await membershipRequest("liveApplication.unloadDocument", members.get(document.target.workspaceId)!.handle,
-          {objectId: document.objectId}, joined);
+          {objectId: document.objectId, ...(activationId === undefined ? {} : {activationId})}, joined);
         const reply = result && typeof result === "object" ? result as Record<string, unknown> : {};
         if (reply.status === "pending") return typeof reply.reason === "string" ? reply.reason : "unload-pending";
         if (reply.status !== "unloaded") throw new Error("Invalid live document unload response.");

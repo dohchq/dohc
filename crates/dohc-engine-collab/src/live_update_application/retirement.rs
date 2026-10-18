@@ -47,6 +47,10 @@ pub struct JournalEvidence {
 pub enum Reconciliation {
     /// The journal must answer for these deliveries first.
     PendingDelivery(Vec<String>),
+    /// As [`PendingDelivery`](Self::PendingDelivery), and the activation's
+    /// own seed is among them in a quarantined outbox: delivery never
+    /// retries it, so only this retirement or recovery ends the hold.
+    SeedQuarantined(Vec<String>),
     Reconciled {
         adoption: Option<OwnerAdoptionAck>,
         applications: Vec<LiveUpdateHostApplicationAck>,
@@ -54,6 +58,28 @@ pub enum Reconciliation {
         /// Whether the activation applied past its last settlement.
         settle: bool,
     },
+}
+
+/// What a retirement may tear down, once its key validated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetirementTarget {
+    pub doc: DocKey,
+    /// A released activation's retirement replays; it tears nothing down.
+    pub released: bool,
+}
+
+/// Validate a retirement's key, before the caller changes any runtime state.
+pub fn check_retirement(
+    store: &EngineStore,
+    scope: &RetirementScope<'_>,
+    key: &RetirementKey,
+) -> Result<RetirementTarget, ApplicationError> {
+    store.read_with(|conn| {
+        validate_retirement(conn, scope, key).map(|retiring| RetirementTarget {
+            doc: retiring.doc,
+            released: retiring.released_through.is_some(),
+        })
+    })
 }
 
 /// The exact activation, or retained native source, a retirement names.
@@ -260,6 +286,8 @@ pub(crate) struct RetainedEntry {
     pub terminal_reason: Option<String>,
     pub update_blob: Option<String>,
     pub terminal_blob: Option<String>,
+    /// Its outbox is quarantined, so delivery never retries it.
+    pub quarantined: bool,
 }
 
 /// A native source names one binding and its origin. A larger one is corrupt.
@@ -277,7 +305,7 @@ fn unproven_entries(
         .prepare(
             "SELECT e.outbox_id,e.sequence,e.append_key,e.delivery_id,e.update_digest,e.native_source_json,
                 e.accepted_receipt_json,e.pending,e.terminal_reason,e.update_blob_digest,e.terminal_blob_digest,
-                length(CAST(e.native_source_json AS BLOB))
+                length(CAST(e.native_source_json AS BLOB)),o.state='quarantined'
              FROM owner_ydoc_outbox_entries e JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id
              WHERE o.workspace_id=?1 AND o.main_version_id=?2 AND o.object_id=?3 AND o.lineage_claim_id=?4
                AND e.native_source_json IS NOT NULL AND json_extract(e.native_source_json,'$.adoptionId')=?5
@@ -321,6 +349,7 @@ fn unproven_entries(
             terminal_reason: row.get(8).map_err(read_sql)?,
             update_blob: row.get(9).map_err(read_sql)?,
             terminal_blob: row.get(10).map_err(read_sql)?,
+            quarantined: row.get(12).map_err(read_sql)?,
         };
         let b = &entry.source.binding;
         if b.workspace_id != doc.workspace_id
@@ -503,6 +532,7 @@ fn reconcile_in_tx(
     // Outboxes whose next pending entry stays unproven or was never
     // delivered: nothing after it can be acknowledged.
     let mut stalled = BTreeSet::new();
+    let mut seed_quarantined = false;
     for entry in unproven_entries(tx, &retiring, through)? {
         if let Some(saved) = &entry.receipt {
             let saved: OwnerDeliveryReceipt =
@@ -548,6 +578,8 @@ fn reconcile_in_tx(
                     abandoned.push((entry.outbox_id, entry.sequence));
                 }
                 None => {
+                    seed_quarantined |= entry.quarantined
+                        && matches!(entry.source.origin, OwnerOutboxNativeOrigin::AdoptionSeed);
                     stalled.insert(entry.outbox_id);
                     unresolved.push(entry.delivery_id);
                 }
@@ -590,7 +622,11 @@ fn reconcile_in_tx(
     }
     if !unresolved.is_empty() {
         unresolved.truncate(scope.max_deliveries.max(1));
-        return Ok(Reconciliation::PendingDelivery(unresolved));
+        return Ok(if seed_quarantined {
+            Reconciliation::SeedQuarantined(unresolved)
+        } else {
+            Reconciliation::PendingDelivery(unresolved)
+        });
     }
     applications(tx, scope, &retiring, after, through)
 }

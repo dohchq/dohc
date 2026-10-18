@@ -1,6 +1,7 @@
 use super::error::{map_runtime, workspace_unavailable};
 use super::request::{OperationCancellation, parse};
 use crate::{EngineService, lock};
+use dohc_engine_collab::live_update_application::RetiredActivations;
 use dohc_engine_protocol::cancel::CancelSignal;
 use dohc_engine_protocol::error::{ErrorCode, WireError};
 use dohc_engine_protocol::transport::{
@@ -16,6 +17,8 @@ struct ActivationOutputGuard {
     connection: ConnectionHandle,
     /// The activation the capture names, once it has.
     activation_id: Option<String>,
+    /// The activations the workspace's host retired; an answer for one is withheld.
+    retired: Option<RetiredActivations>,
     cancel: CancelSignal,
     deadline: Option<Instant>,
     _reservation: Arc<dyn Send + Sync>,
@@ -30,6 +33,11 @@ impl std::fmt::Debug for ActivationOutputGuard {
 impl OutputGuard for ActivationOutputGuard {
     fn is_current(&self) -> bool {
         self.connection.is_current()
+            && !self.activation_id.as_deref().is_some_and(|id| {
+                self.retired
+                    .as_ref()
+                    .is_some_and(|retired| retired.contains(id))
+            })
             && !self.cancel.is_cancelled()
             && self.deadline.is_none_or(|limit| Instant::now() < limit)
     }
@@ -158,23 +166,32 @@ impl EngineService {
             ));
         }
         let reservation = admission.reserve()?;
-        let mut guard = ActivationOutputGuard {
-            connection: connection.clone(),
-            activation_id: None,
-            cancel: ctx.cancel.clone(),
-            deadline: ctx.deadline,
-            _reservation: reservation.clone(),
-        };
         let workspace = request
             .workspace
             .clone()
             .ok_or_else(workspace_unavailable)?;
+        let retired = lock(&self.live_applications).retired_activations(&workspace);
+        let mut guard = ActivationOutputGuard {
+            connection: connection.clone(),
+            activation_id: None,
+            retired: retired.clone(),
+            cancel: ctx.cancel.clone(),
+            deadline: ctx.deadline,
+            _reservation: reservation.clone(),
+        };
         let cancellation = OperationCancellation::new(&ctx);
         let open = self.open(Some(&workspace))?;
         let serial = tokio::select! {biased;
             ()=cancellation.token.cancelled()=>return Err(cancellation.interruption("ordinary activation capture")),
             serial=Arc::clone(&open.session_ops).lock_owned()=>serial,
         };
+        // A retired activation never loads here again.
+        let is_retired = |id: &str| retired.as_ref().is_some_and(|retired| retired.contains(id));
+        if params.activation_id.as_deref().is_some_and(is_retired) {
+            return Err(map_runtime(
+                dohc_engine_collab::live_update_application::ApplicationError::Conflict.into(),
+            ));
+        }
         let existing = lock(&self.sessions)
             .iter()
             .find(|(_, session)| {
@@ -258,6 +275,11 @@ impl EngineService {
             )
         })?;
         let captured = captured.map_err(map_runtime)?;
+        if is_retired(&captured.activation_id) {
+            return Err(map_runtime(
+                dohc_engine_collab::live_update_application::ApplicationError::Conflict.into(),
+            ));
+        }
         // The capture landed: install its session even for a cancelled
         // request. The writer withholds the answer once the guard lapses.
         if !connection.is_current() || !Arc::ptr_eq(&open, &self.open(Some(&workspace))?) {
@@ -338,6 +360,42 @@ mod tests {
         ImportedOwnerActivation, ImportedOwnerSource,
     };
     use dohc_engine_protocol::transport::RequestContext;
+
+    /// Opus's round 1 note: a capture's answer carries its activation, and
+    /// once a retirement tears that activation down the answer is withheld.
+    /// An answer for another activation stays current.
+    #[test]
+    fn a_capture_answer_for_a_retired_activation_is_withheld() {
+        let mut owner =
+            dohc_engine_collab::live_update_application::ApplicationOwner::new("workspace".into())
+                .unwrap();
+        let retired = owner.retired_activations();
+        let connection = dohc_engine_protocol::transport::ConnectionOwner::authenticated();
+        let guard = |activation_id: &str| ActivationOutputGuard {
+            connection: connection.handle(),
+            activation_id: Some(activation_id.into()),
+            retired: Some(retired.clone()),
+            cancel: CancelSignal::new(),
+            deadline: None,
+            _reservation: Arc::new(()),
+        };
+        let (retiring, other) = (guard("retiring"), guard("other"));
+        assert!(retiring.is_current() && other.is_current());
+        owner.retire_activation(
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "namespace",
+            &dohc_engine_collab::live_update_application::ApplicationHostCoordinate {
+                host_id: "host".into(),
+                host_epoch: 1,
+                instance_id: "instance".into(),
+                connection_id: "connection".into(),
+            },
+            &DocKey::new("workspace", "main", "document").unwrap(),
+            "retiring",
+        );
+        assert!(!retiring.is_current());
+        assert!(other.is_current());
+    }
 
     /// A release names the activation it ends. One naming another activation
     /// than the session serves closes nothing and removes no source. A

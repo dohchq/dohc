@@ -111,8 +111,12 @@ fn apply_event(f: &mut Fixture, event: AdmittedLiveUpdate) -> Result<Application
 }
 
 fn full_state(f: &Fixture) -> Vec<u8> {
+    full_state_of(f, &f.key)
+}
+
+fn full_state_of(f: &Fixture, key: &DocKey) -> Vec<u8> {
     f.store
-        .read_with(|conn| durable::load_doc_in(conn, &f.key))
+        .read_with(|conn| durable::load_doc_in(conn, key))
         .unwrap()
         .encode_full_state()
 }
@@ -509,13 +513,220 @@ fn a_seed_the_journal_never_accepted_is_abandoned_once_and_recognized_after() {
     write(&mut f, "UPDATE owner_ydoc_outbox_entries SET terminal_blob_digest=update_digest");
     assert!(matches!(reconcile(&mut f, 10, None, None), Err(ApplicationError::Conflict)));
     write(&mut f, "UPDATE owner_ydoc_outbox_entries SET terminal_blob_digest=NULL");
-    // Abandoned, it holds nothing back.
+    assert!(matches!(
+        reconcile(&mut f, 10, None, None).unwrap(),
+        Reconciliation::Reconciled { .. }
+    ));
+}
+
+/// Opus's round 2 F4: an application that races the abandonment lands only
+/// before it, and then abandonment refuses. After it, the activation applies
+/// nothing, not even the seed's own delivery, so every later pass still
+/// recognizes the seed it abandoned.
+#[test]
+fn an_abandoned_seed_holds_every_later_application() {
+    let (mut f, seed, full) = seeded();
+    let absent = JournalEvidence { receipts: vec![], absent: vec![seed.clone()] };
+    reconcile(&mut f, 10, None, Some(&absent)).unwrap();
     let event = remote_event(&mut f, 2);
-    assert!(matches!(apply_event(&mut f, event).unwrap(), ApplicationResult::Applied(..)));
-    assert!(
-        matches!(reconcile(&mut f, 10, None, None), Err(ApplicationError::Conflict)),
-        "a later application contradicts a seed never delivered"
+    let seed_event = native_tail_event(&f, full, seed, 1);
+    for held in [event, seed_event] {
+        assert!(matches!(
+            apply_event(&mut f, held).unwrap(),
+            ApplicationResult::Pending(ApplicationPending::ApplicabilityUnavailable)
+        ));
+    }
+    assert!(applied_deliveries(&f).is_empty());
+    assert!(matches!(
+        reconcile(&mut f, 10, None, None).unwrap(),
+        Reconciliation::Reconciled { .. }
+    ));
+}
+
+/// Opus's round 2 F2: a quarantined service seed is never retried, so its
+/// hold says so, and reconciliation reports it apart from ordinary pending
+/// delivery. The journal's answer still ends it as for any seed never delivered.
+#[test]
+fn a_quarantined_service_seed_is_reported_and_still_retires() {
+    let (mut f, seed, _) = seeded();
+    let outbox: String = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT outbox_id FROM owner_ydoc_outbox_entries WHERE delivery_id=?1",
+                [&seed],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    owner_outbox::quarantine(
+        &mut f.store,
+        "workspace",
+        owner_outbox::OwnerOutboxQuarantineInput {
+            outbox_id: outbox,
+            reason: "provenance-refused".into(),
+            observed_binding: None,
+        },
+        5,
+    )
+    .unwrap();
+    let held = remote_event(&mut f, 2);
+    assert!(matches!(
+        apply_event(&mut f, held).unwrap(),
+        ApplicationResult::Pending(ApplicationPending::SeedQuarantined)
+    ));
+    assert_eq!(
+        reconcile(&mut f, 10, None, None).unwrap(),
+        Reconciliation::SeedQuarantined(vec![seed.clone()])
     );
+    let absent = JournalEvidence { receipts: vec![], absent: vec![seed.clone()] };
+    assert!(matches!(
+        reconcile(&mut f, 10, None, Some(&absent)).unwrap(),
+        Reconciliation::Reconciled { .. }
+    ));
+    assert_eq!(
+        native_entries(&f),
+        vec![(seed, false, None, None, None, Some("activation-released".into()))]
+    );
+}
+
+/// Phase A ends one activation in its owner: only registrations tagged with
+/// it, and only its document's cache entry. Its binding row stays, and it
+/// never registers under this owner again.
+#[test]
+fn retiring_an_activation_ends_only_its_own_registrations_and_cache_entry() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let coordinate = ApplicationHostCoordinate {
+        host_id: "host".into(),
+        host_epoch: 1,
+        instance_id: "instance".into(),
+        connection_id: "connection".into(),
+    };
+    // Another document, which serves no activation, with its own cache entry.
+    let fixture: Value =
+        serde_json::from_str(include_str!("../../tests/owner-source/owner-source-seed.json"))
+            .unwrap();
+    let bytes: Vec<u8> = serde_json::from_value(fixture["bytes"].clone()).unwrap();
+    VersionedTextStore::new(&mut f.store)
+        .write_text(
+            &WriteText {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                object_id: "other".into(),
+                path: "other.md".into(),
+                text: fixture["markdown"].as_str().unwrap().to_owned(),
+                moment_id: "other-original".into(),
+                metadata_origin: "user".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 1,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    let other = DocKey::new("workspace", "main", "other").unwrap();
+    durable::claim_base(&mut f.store, &other, ContentKind::Richdoc, &bytes, &NoFaults, 2).unwrap();
+    let other_binding = LiveObjectBinding {
+        object_id: "other".into(),
+        current_path: "other.md".into(),
+        selector_paths: vec!["other.md".into()],
+        ..f.binding.clone()
+    };
+    let other_handle = f
+        ._owner
+        .register(&mut f.store, "namespace".into(), coordinate.clone(), other_binding)
+        .unwrap();
+    assert_eq!(other_handle.activation_id(), None);
+    let mut cache = WriterDocCache::new();
+    for key in [f.key.clone(), other.clone()] {
+        let doc = Ydoc::wire();
+        doc.apply(&full_state_of(&f, &key)).unwrap();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, "cached").unwrap();
+        crate::record_local_update(
+            &mut f.store,
+            &mut cache,
+            &key,
+            &doc.encode_full_state(),
+            crate::LocalAppend::default(),
+            &NoFaults,
+            4,
+            |_, _, _| Ok(()),
+        )
+        .unwrap();
+    }
+    assert!(cache.contains_for_test(&f.key) && cache.contains_for_test(&other));
+    let binding_row = |f: &Fixture| -> (i64, Option<String>) {
+        f.store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT available,activation_id FROM live_device_application_bindings WHERE object_id='object'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+            })
+            .unwrap()
+    };
+    let before = binding_row(&f);
+    let key = f.key.clone();
+    f._owner.retire_activation(&mut cache, "namespace", &coordinate, &key, "adoption");
+    assert!(!cache.contains_for_test(&f.key), "its document's entry goes");
+    assert!(cache.contains_for_test(&other), "another document's entry stays");
+    let live: Vec<(String, bool)> = f
+        ._owner
+        .current
+        .iter()
+        .map(|current| {
+            let held = current.lock().unwrap();
+            (held.binding.object_id.clone(), held.live)
+        })
+        .collect();
+    assert_eq!(live, [("other".to_owned(), true)]);
+    assert!(f._owner.retired_activations().contains("adoption"));
+    assert_eq!(binding_row(&f), before, "its binding stays");
+    let event = remote_event(&mut f, 2);
+    assert!(matches!(
+        apply_event(&mut f, event).unwrap(),
+        ApplicationResult::Pending(ApplicationPending::ApplicabilityUnavailable)
+    ));
+    // Neither an unnamed nor a named registration serves it again.
+    let binding = f.binding.clone();
+    for named in [None, Some("adoption".to_owned())] {
+        let result = match named {
+            None => f._owner.register(&mut f.store, "namespace".into(), coordinate.clone(), binding.clone()),
+            Some(id) => f._owner.register_activation(&mut f.store, "namespace".into(), coordinate.clone(), binding.clone(), id),
+        };
+        assert!(matches!(result, Err(ApplicationError::Conflict)));
+    }
+    assert!(matches!(
+        validate_registration_activation(&f.store, "namespace", &binding, None, &f._owner.retired_activations()),
+        Err(ApplicationError::Conflict)
+    ));
+    assert_eq!(f._owner.current.len(), 1);
+    assert_eq!(binding_row(&f), before);
+}
+
+/// N8: an unload names the activation it ends. A registration serving
+/// another, or any while the unload names none, refuses it; an ordinary
+/// registration serves none and goes with any unload of its document.
+#[test]
+fn an_unload_must_name_the_activation_its_registration_serves() {
+    let mut f = Fixture::new();
+    for named in [None, Some("adoption")] {
+        assert!(f._owner.require_unload_activation("object", named).is_ok());
+    }
+    f.adopt().unwrap();
+    for named in [None, Some("successor")] {
+        assert!(matches!(
+            f._owner.unregister(&mut f.store, "object", named),
+            Err(ApplicationError::Conflict)
+        ));
+        assert_eq!(f._owner.current.len(), 1, "{named:?}");
+    }
+    f._owner.unregister(&mut f.store, "object", Some("adoption")).unwrap();
+    assert!(f._owner.current.is_empty());
 }
 
 #[test]

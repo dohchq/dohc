@@ -4,8 +4,9 @@ use crate::{EngineService, lock};
 use dohc_engine_collab::DocKey;
 use dohc_engine_collab::live_object_binding::LiveObjectBinding;
 use dohc_engine_collab::live_update_application::{
-    AdmittedLiveUpdate, ApplicationHostCoordinate, ApplicationResult, BootstrapResult,
-    LiveApplicationBootstrap, NativeRestoreFence, UnloadPending,
+    AdmittedLiveUpdate, ApplicationError, ApplicationHostCoordinate, ApplicationResult,
+    BootstrapResult, LiveApplicationBootstrap, NativeRestoreFence, RetiredActivations,
+    UnloadPending,
 };
 use dohc_engine_protocol::cancel::CancelSignal;
 use dohc_engine_protocol::error::{ErrorCode, WireError};
@@ -38,6 +39,8 @@ pub(crate) struct Host {
     open: Arc<OpenWorkspace>,
     connection: ConnectionHandle,
     owner: ActorLiveApplicationOwner,
+    /// The activations a retirement tore down; shared with `owner`.
+    retired_activations: RetiredActivations,
     namespace: String,
     coordinate: ApplicationHostCoordinate,
     max_registrations: usize,
@@ -66,6 +69,10 @@ impl Host {
         self.connection.same_connection(connection)
             && self.connection.is_current()
             && self.owner.is_current()
+    }
+
+    fn retired_activations(&self) -> RetiredActivations {
+        self.retired_activations.clone()
     }
 }
 
@@ -100,6 +107,16 @@ impl Registry {
 
     pub(super) fn has_host(&self, workspace: &WorkspaceHandle) -> bool {
         self.hosts.contains_key(workspace)
+    }
+
+    /// The activations the workspace's host retired, once it has a host.
+    pub(super) fn retired_activations(
+        &self,
+        workspace: &WorkspaceHandle,
+    ) -> Option<RetiredActivations> {
+        self.hosts
+            .get(workspace)
+            .map(|host| host.retired_activations())
     }
 
     pub(crate) fn retire_workspace(&mut self, workspace: &Arc<OpenWorkspace>) {
@@ -231,10 +248,13 @@ impl OutputGuard for ApplicationOutputGuard {
         self.deadline
     }
     fn is_current(&self) -> bool {
-        self.registration
-            .host
-            .current(&self.registration.host.connection)
+        let host = &self.registration.host;
+        host.current(&host.connection)
             && !self.registration.retired.is_cancelled()
+            && !self
+                .activation_id
+                .as_deref()
+                .is_some_and(|id| host.retired_activations.contains(id))
             && !self.cancel.is_cancelled()
             && self
                 .deadline
@@ -807,6 +827,7 @@ impl EngineService {
             retired: CancelSignal::new(),
             open,
             connection: connection.clone(),
+            retired_activations: owner.retired_activations(),
             owner,
             namespace: config.namespace,
             coordinate: config.coordinate,
@@ -968,6 +989,8 @@ impl EngineService {
 
     /// Release one document's registrations, sessions, leases, and cache.
     /// Durable CRDT, adoption, and history stay, so the next capture reloads it.
+    /// The unload names the activation it ends: state serving another one,
+    /// or any while it names none, refuses it before anything is released.
     pub(super) async fn live_application_unload(
         &self,
         ctx: &RequestContext,
@@ -978,10 +1001,18 @@ impl EngineService {
         #[serde(rename_all = "camelCase", deny_unknown_fields)]
         struct Params {
             object_id: String,
+            activation_id: Option<String>,
         }
         self.configured_host_caller(ctx)?;
         let params: Params = serde_json::from_value(params)
-            .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid-live-unload"))?;
+            .ok()
+            .filter(|params: &Params| {
+                params
+                    .activation_id
+                    .as_ref()
+                    .is_none_or(|id| (1..=1024).contains(&id.len()))
+            })
+            .ok_or_else(|| WireError::new(ErrorCode::InvalidParams, "invalid-live-unload"))?;
         let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
         let workspace = workspace.ok_or_else(workspace_unavailable)?;
         let host = lock(&self.live_applications)
@@ -1001,13 +1032,23 @@ impl EngineService {
             return Err(workspace_unavailable());
         }
         let object_id = params.object_id;
-        let mut keys: Vec<DocKey> = lock(&self.sessions)
-            .values()
-            .filter(|session| session.workspace == workspace && session.key.object_id == object_id)
-            .map(|session| session.key.clone())
-            .collect();
+        let activation_id = params.activation_id;
+        // Untagged state is ordinary and goes with any unload of its document.
+        let ends = |tag: Option<&str>| tag.is_none_or(|tag| Some(tag) == activation_id.as_deref());
+        let mut keys = Vec::new();
+        for session in lock(&self.sessions).values() {
+            if session.workspace == workspace && session.key.object_id == object_id {
+                if !ends(session.activation_id.as_deref()) {
+                    return Err(map_runtime(ApplicationError::Conflict.into()));
+                }
+                keys.push(session.key.clone());
+            }
+        }
         for registration in lock(&self.live_applications).registrations.values() {
             if Arc::ptr_eq(&registration.host, &host) && registration.object_id == object_id {
+                if !ends(registration.activation_id().as_deref()) {
+                    return Err(map_runtime(ApplicationError::Conflict.into()));
+                }
                 let b = &registration.binding;
                 keys.push(
                     DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id).map_err(
@@ -1029,9 +1070,11 @@ impl EngineService {
         let task_host = host.clone();
         let operation = tokio::spawn(async move {
             let _serial = serial;
+            let ends =
+                |tag: Option<&str>| tag.is_none_or(|tag| Some(tag) == activation_id.as_deref());
             let pending = task_host
                 .owner
-                .unload(object_id.clone(), keys, root, now_ms)
+                .unload(object_id.clone(), activation_id.clone(), keys, root, now_ms)
                 .await?;
             if pending.is_none() {
                 {
@@ -1040,6 +1083,7 @@ impl EngineService {
                     registry.registrations.retain(|_, registration| {
                         if Arc::ptr_eq(&registration.host, &task_host)
                             && registration.object_id == object_id
+                            && ends(registration.activation_id().as_deref())
                         {
                             registration.retired.cancel();
                             false
@@ -1049,7 +1093,9 @@ impl EngineService {
                     });
                 }
                 lock(&sessions).retain(|_, session| {
-                    session.workspace != workspace || session.key.object_id != object_id
+                    session.workspace != workspace
+                        || session.key.object_id != object_id
+                        || !ends(session.activation_id.as_deref())
                 });
             }
             Ok::<_, dohc_engine_runtime::RuntimeError>(pending)
@@ -1066,6 +1112,121 @@ impl EngineService {
                 UnloadPending::Settlement => "settlement-pending",
                 UnloadPending::Materialization => "materialization-pending",
             }}),
+        })
+    }
+
+    /// `liveApplication.reconcileActivation`: prove what one activation the
+    /// relay fenced delivered and applied, so Stop can retire it exactly.
+    /// Its key validates first; an invalid one, and a released activation's
+    /// replay, tear nothing down. Otherwise Phase A ends the activation here
+    /// before the durable pass: its registrations, sessions, leases and cache
+    /// go, and nothing registers or answers for it again. Its binding and
+    /// retained input stay. One task runs both, so a caller that stops
+    /// waiting cannot leave Phase A half done, and a retry answers the same.
+    pub(super) async fn live_application_reconcile(
+        &self,
+        ctx: &RequestContext,
+        workspace: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        use dohc_engine_collab::live_update_application::{
+            JournalEvidence, LiveUpdateReceipt, Reconciliation, RetirementKey,
+        };
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Params {
+            object_id: String,
+            lineage_claim_id: String,
+            activation_id: String,
+            restore_fence_generation: i64,
+            accepted_through: i64,
+            after_receipt: Option<LiveUpdateReceipt>,
+            max_applications: usize,
+            journal: Option<JournalEvidence>,
+        }
+        self.configured_host_caller(ctx)?;
+        let invalid = || WireError::new(ErrorCode::InvalidParams, "invalid-live-reconciliation");
+        if params.get("afterReceipt").is_none() {
+            return Err(invalid());
+        }
+        let params: Params = serde_json::from_value(params).map_err(|_| invalid())?;
+        let scope = self.configured_retirement_scope(ctx, params.max_applications)?;
+        let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
+        let workspace = workspace.ok_or_else(workspace_unavailable)?;
+        let host = lock(&self.live_applications)
+            .hosts
+            .get(&workspace)
+            .cloned()
+            .ok_or_else(workspace_unavailable)?;
+        let key = RetirementKey {
+            object_id: params.object_id,
+            lineage_claim_id: params.lineage_claim_id,
+            activation_id: params.activation_id,
+            restore_fence_generation: params.restore_fence_generation,
+            accepted_through: params.accepted_through,
+        };
+        let cancellation = super::request::OperationCancellation::new(ctx);
+        let serial = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("live reconciliation (queued)"));
+            }
+            serial = Arc::clone(&host.open.session_ops).lock_owned() => serial,
+        };
+        if !host.current(connection) || !Arc::ptr_eq(&self.open(Some(&workspace))?, &host.open) {
+            return Err(workspace_unavailable());
+        }
+        let registry = Arc::clone(&self.live_applications);
+        let sessions = Arc::clone(&self.sessions);
+        let operation = tokio::spawn(async move {
+            let _serial = serial;
+            let target = host
+                .owner
+                .begin_retirement(scope.clone(), host.coordinate.clone(), key.clone())
+                .await?;
+            // Only state tagged with this activation, on this host, goes.
+            if !target.released {
+                let serves = |tag: Option<&str>| tag == Some(key.activation_id.as_str());
+                {
+                    let mut registry = lock(&registry);
+                    let _fence = lock(&host.output_fence);
+                    registry.registrations.retain(|_, registration| {
+                        if Arc::ptr_eq(&registration.host, &host)
+                            && serves(registration.activation_id().as_deref())
+                        {
+                            registration.retired.cancel();
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                }
+                lock(&sessions).retain(|_, session| {
+                    session.workspace != workspace || !serves(session.activation_id.as_deref())
+                });
+            }
+            host.owner
+                .reconcile_activation(scope, key, params.after_receipt, params.journal)
+                .await
+        });
+        let reconciliation = operation
+            .await
+            .map_err(|_| WireError::new(ErrorCode::Internal, "live-reconciliation-interrupted"))?
+            .map_err(map_runtime)?;
+        Ok(match reconciliation {
+            Reconciliation::PendingDelivery(deliveries) => {
+                json!({"status":"pending","reason":"delivery","deliveries":deliveries})
+            }
+            Reconciliation::SeedQuarantined(deliveries) => {
+                json!({"status":"pending","reason":"seed-quarantined","deliveries":deliveries})
+            }
+            Reconciliation::Reconciled {
+                adoption,
+                applications,
+                has_more_applications,
+                settle,
+            } => json!({"status":"reconciled","adoption":adoption,"applications":applications,
+                "hasMoreApplications":has_more_applications,"settle":settle}),
         })
     }
 
@@ -1345,6 +1506,7 @@ fn pending_result(
         ApplicationPending::BindingMismatch => "binding-mismatch",
         ApplicationPending::SettlementRequired => "settlement-required",
         ApplicationPending::DeliveryPending => "delivery-pending",
+        ApplicationPending::SeedQuarantined => "seed-quarantined",
     }})
 }
 
@@ -2581,6 +2743,62 @@ mod tests {
         }
     }
 
+    /// What a capture of `object_id` for `activation_id` retains.
+    fn captured(
+        object_id: &str,
+        activation_id: &str,
+    ) -> dohc_engine_collab::live_update_application::ImportedOwnerActivation {
+        let lineage = hex_sha256(&Ydoc::wire().encode_full_state());
+        dohc_engine_collab::live_update_application::ImportedOwnerActivation {
+            activation_id: activation_id.into(),
+            source: dohc_engine_collab::live_update_application::ImportedOwnerSource {
+                version: 1,
+                relay_database_namespace: "unload-test".into(),
+                workspace_id: "workspace".into(),
+                main_version_id: "main".into(),
+                object_id: object_id.into(),
+                lineage_claim_id: lineage.clone(),
+                current_path: format!("{object_id}.md"),
+                replication_epoch: "epoch".into(),
+                stream_identity: "stream".into(),
+                committed_cursor: 0,
+                base_origin_id: "origin".into(),
+                base_origin_seq: 0,
+                base_relay_seq: 0,
+                source_moment_id: "moment".into(),
+                source_digest: lineage.clone(),
+                source_byte_length: 0,
+                native_head_sequence: 0,
+                full_state_digest: lineage,
+                full_state_byte_length: 0,
+            },
+            baseline_bytes: Vec::new(),
+            full_state: Vec::new(),
+            restore_generation: None,
+        }
+    }
+
+    /// An imported session `ydoc-unload-<object_id>` serving `activation_id`,
+    /// holding the document's lease.
+    fn install_session(
+        service: &EngineService,
+        workspace: &WorkspaceHandle,
+        object_id: &str,
+        activation_id: &str,
+    ) {
+        let open = service.open(Some(workspace)).unwrap();
+        let key = DocKey::new("workspace", "main", object_id).unwrap();
+        let lease = service.leases.scoped(&open.root).acquire(&key).unwrap();
+        let session = super::super::ydoc::YdocSession::imported_owner(
+            workspace.clone(),
+            key,
+            &captured(object_id, activation_id),
+            lease,
+        )
+        .unwrap();
+        lock(&service.sessions).insert(format!("ydoc-unload-{object_id}"), session);
+    }
+
     /// A configured host with "document" and "sibling" registered, and an
     /// imported session holding the lease on "document".
     async fn unload_fixture() -> (
@@ -2596,7 +2814,8 @@ mod tests {
             "version": 1, "relayNamespace": "unload-test",
             "host": {"hostId":"host","hostEpoch":1,"instanceId":"instance","connectionId":"connection"},
             "workspaces": [{"root":scratch.path(),"workspaceId":"workspace","maxRegistrations":4}],
-            "ingress": {"aggregateBytes":512*1024*1024,"applicationWorkingReserveBytes":8*1024*1024,"maxUploads":1,"uploadDeadlineMs":30_000}
+            "ingress": {"aggregateBytes":512*1024*1024,"applicationWorkingReserveBytes":8*1024*1024,"maxUploads":1,"uploadDeadlineMs":30_000},
+            "settlement": {"maxApplicationsPerSettlement":4}
         }))
         .unwrap();
         let (service, owner, _ingress) = EngineService::configured_live_host(configuration)
@@ -2627,44 +2846,7 @@ mod tests {
                 .unwrap();
             registrations.push(registered["registrationId"].as_u64().unwrap());
         }
-        let key = DocKey::new("workspace", "main", "document").unwrap();
-        let lineage = hex_sha256(&Ydoc::wire().encode_full_state());
-        let captured = dohc_engine_collab::live_update_application::ImportedOwnerActivation {
-            activation_id: "activation".into(),
-            source: dohc_engine_collab::live_update_application::ImportedOwnerSource {
-                version: 1,
-                relay_database_namespace: "unload-test".into(),
-                workspace_id: "workspace".into(),
-                main_version_id: "main".into(),
-                object_id: "document".into(),
-                lineage_claim_id: lineage.clone(),
-                current_path: "document.md".into(),
-                replication_epoch: "epoch".into(),
-                stream_identity: "stream".into(),
-                committed_cursor: 0,
-                base_origin_id: "origin".into(),
-                base_origin_seq: 0,
-                base_relay_seq: 0,
-                source_moment_id: "moment".into(),
-                source_digest: lineage.clone(),
-                source_byte_length: 0,
-                native_head_sequence: 0,
-                full_state_digest: lineage,
-                full_state_byte_length: 0,
-            },
-            baseline_bytes: Vec::new(),
-            full_state: Vec::new(),
-            restore_generation: None,
-        };
-        let lease = service.leases.scoped(&open.root).acquire(&key).unwrap();
-        let session = super::super::ydoc::YdocSession::imported_owner(
-            workspace.clone(),
-            key,
-            &captured,
-            lease,
-        )
-        .unwrap();
-        lock(&service.sessions).insert("ydoc-unload-document".into(), session);
+        install_session(&service, &workspace, "document", "activation");
         (
             scratch,
             service,
@@ -2675,7 +2857,16 @@ mod tests {
         )
     }
 
-    fn unload_request(workspace: &WorkspaceHandle, object_id: &str) -> Request {
+    /// An unload of `object_id` that names `activation_id`.
+    fn unload_naming(
+        workspace: &WorkspaceHandle,
+        object_id: &str,
+        activation_id: Option<&str>,
+    ) -> Request {
+        let mut params = json!({"objectId": object_id});
+        if let Some(activation_id) = activation_id {
+            params["activationId"] = json!(activation_id);
+        }
         Request {
             id: 96,
             method: "liveApplication.unloadDocument".into(),
@@ -2683,8 +2874,13 @@ mod tests {
             deadline_ms: None,
             idempotency_key: None,
             progress: false,
-            params: json!({"objectId": object_id}),
+            params,
         }
+    }
+
+    /// An unload of `object_id` as the fixture's imported session serves it.
+    fn unload_request(workspace: &WorkspaceHandle, object_id: &str) -> Request {
+        unload_naming(workspace, object_id, Some("activation"))
     }
 
     #[tokio::test]
@@ -2993,6 +3189,650 @@ mod tests {
                 .is_ok()
         );
         assert!(!lock(&service.sessions).contains_key("ydoc-unload-document"));
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    fn host_context(owner: &dohc_engine_protocol::transport::ConnectionOwner) -> RequestContext {
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        ctx
+    }
+
+    /// Shape rows no engine path writes yet, as foreign keys allow none.
+    fn shape(service: &EngineService, workspace: &WorkspaceHandle, sql: &str) {
+        let open = service.open(Some(workspace)).unwrap();
+        let conn = rusqlite::Connection::open(&open.db_path).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+        conn.execute_batch(sql).unwrap();
+    }
+
+    fn lineage() -> String {
+        hex_sha256(&Ydoc::wire().encode_full_state())
+    }
+
+    /// Retain the document's captured source, as its capture did.
+    fn retain_source(service: &EngineService, workspace: &WorkspaceHandle) {
+        let source = captured("document", "activation").source;
+        let descriptor = serde_json::to_string(&source).unwrap();
+        let lineage = lineage();
+        shape(
+            service,
+            workspace,
+            &format!(
+                "INSERT INTO ydoc_owner_activation_sources VALUES ('activation','unload-test','workspace',
+                 'main','document','{lineage}','moment','{lineage}','{lineage}','{descriptor}')"
+            ),
+        );
+    }
+
+    /// An activation row of the document's lineage, as an adoption, or a
+    /// release after one that never adopted, leaves it.
+    fn record_activation(
+        service: &EngineService,
+        workspace: &WorkspaceHandle,
+        activation: &str,
+        predecessor: Option<&str>,
+        released: bool,
+    ) {
+        let lineage = lineage();
+        let binding = serde_json::to_string(&unload_binding("document")).unwrap();
+        let predecessor = predecessor.map_or("NULL".to_owned(), |id| format!("'{id}'"));
+        shape(
+            service,
+            workspace,
+            &if released {
+                format!(
+                "INSERT INTO live_owner_activations(relay_database_namespace,activation_id,workspace_id,
+                    main_version_id,object_id,lineage_claim_id,predecessor_activation_id,binding_json,
+                    source_moment_id,source_digest,source_byte_length,host_coordinate_json,released_at_ms,
+                    released_restore_generation,released_accepted_cursor,released_boundary_json,carried_manifest_json)
+                 VALUES ('unload-test','{activation}','workspace','main','document','{lineage}',{predecessor},
+                    '{binding}','moment','{lineage}',0,'{{}}',1,0,5,'{{}}','{{}}')"
+            )
+            } else {
+                format!(
+                "INSERT INTO live_owner_activations(relay_database_namespace,activation_id,workspace_id,
+                    main_version_id,object_id,lineage_claim_id,origin_adoption_id,predecessor_activation_id,
+                    binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,
+                    baseline_registered_at_ms,host_coordinate_json,evidence_digest,coverage_digest,
+                    covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,
+                    max_pending_bytes,max_pending_age_ms)
+                 VALUES ('unload-test','{activation}','workspace','main','document','{lineage}','activation',
+                    {predecessor},'{binding}','moment','{lineage}',0,0,0,'{{}}','{lineage}','{lineage}',0,0,0,
+                    'null',1,1)"
+            )
+            },
+        );
+    }
+
+    /// Register the document again, so its registration takes the
+    /// activation that now holds its lineage.
+    async fn register_document(
+        service: &EngineService,
+        owner: &dohc_engine_protocol::transport::ConnectionOwner,
+        workspace: &WorkspaceHandle,
+    ) -> u64 {
+        service
+            .live_application_register(
+                &host_context(owner),
+                Some(workspace.clone()),
+                json!({"binding": unload_binding("document")}),
+            )
+            .await
+            .unwrap()["registrationId"]
+            .as_u64()
+            .unwrap()
+    }
+
+    /// The fixture with the document's source retained and, when `adopted`,
+    /// its activation adopted and its registration serving it.
+    async fn retirement_fixture(
+        adopted: bool,
+    ) -> (
+        dohc_engine_testkit::ScratchDir,
+        Arc<EngineService>,
+        dohc_engine_protocol::transport::ConnectionOwner,
+        WorkspaceHandle,
+        u64,
+        u64,
+    ) {
+        let (scratch, service, owner, workspace, mut document, sibling) = unload_fixture().await;
+        retain_source(&service, &workspace);
+        if adopted {
+            record_activation(&service, &workspace, "activation", None, false);
+            document = register_document(&service, &owner, &workspace).await;
+            assert_eq!(
+                service
+                    .live_application_registration(&owner.handle(), Some(&workspace), document)
+                    .unwrap()
+                    .activation_id()
+                    .as_deref(),
+                Some("activation")
+            );
+        }
+        (scratch, service, owner, workspace, document, sibling)
+    }
+
+    /// What a retirement could tear down: whether the registration stays,
+    /// the document session's activation, its binding row, and whether the
+    /// host retired the activation.
+    type Teardown = (bool, Option<Option<String>>, (i64, Option<String>), bool);
+
+    fn teardown(
+        service: &EngineService,
+        owner: &dohc_engine_protocol::transport::ConnectionOwner,
+        workspace: &WorkspaceHandle,
+        registration: u64,
+    ) -> Teardown {
+        let registered = service
+            .live_application_registration(&owner.handle(), Some(workspace), registration)
+            .is_ok();
+        let session = lock(&service.sessions)
+            .get("ydoc-unload-document")
+            .map(|session| session.activation_id.clone());
+        let open = service.open(Some(workspace)).unwrap();
+        let store = dohc_engine_storage::EngineStore::open_read_only(&open.db_path).unwrap();
+        let binding = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT available,activation_id FROM live_device_application_bindings WHERE object_id='document'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .unwrap();
+        let retired = lock(&service.live_applications)
+            .retired_activations(workspace)
+            .unwrap()
+            .contains("activation");
+        (registered, session, binding, retired)
+    }
+
+    fn retirement_key(activation: &str) -> Value {
+        json!({"objectId":"document","lineageClaimId":lineage(),"activationId":activation,
+            "restoreFenceGeneration":0,"acceptedThrough":5,"afterReceipt":null,"maxApplications":4})
+    }
+
+    fn reconcile_request(workspace: &WorkspaceHandle, params: Value) -> Request {
+        Request {
+            id: 98,
+            method: "liveApplication.reconcileActivation".into(),
+            workspace: Some(workspace.clone()),
+            deadline_ms: None,
+            idempotency_key: None,
+            progress: false,
+            params,
+        }
+    }
+
+    #[tokio::test]
+    async fn reconciliation_is_only_for_the_configured_host_and_its_budget() {
+        let (_scratch, service, owner, workspace, document, _) = retirement_fixture(true).await;
+        let before = teardown(&service, &owner, &workspace, document);
+        let stranger = dohc_engine_protocol::transport::ConnectionOwner::authenticated();
+        let request = || reconcile_request(&workspace, retirement_key("activation"));
+        assert_eq!(
+            service
+                .call(host_context(&stranger), request())
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::SessionExpired
+        );
+        let ordinary = EngineService::new();
+        let mut unbound = request();
+        unbound.workspace = None;
+        assert_eq!(
+            ordinary
+                .call(host_context(&stranger), unbound)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Forbidden,
+            "an engine with no configured host has no retirement"
+        );
+        for budget in [0, 5] {
+            let mut key = retirement_key("activation");
+            key["maxApplications"] = json!(budget);
+            assert_eq!(
+                service
+                    .call(host_context(&owner), reconcile_request(&workspace, key))
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidParams,
+                "budget {budget}"
+            );
+        }
+        assert_eq!(teardown(&service, &owner, &workspace, document), before);
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    /// Every shared guard refuses before Phase A, for an adopted activation
+    /// and a never-adopted source alike: nothing it would tear down goes.
+    #[tokio::test]
+    async fn an_invalid_reconciliation_tears_nothing_down() {
+        let lineage = lineage();
+        for adopted in [false, true] {
+            let (_scratch, service, owner, workspace, document, _) =
+                retirement_fixture(adopted).await;
+            let before = teardown(&service, &owner, &workspace, document);
+            assert_eq!((before.0, before.3), (true, false));
+            let refused = |key: Value| {
+                let service = service.clone();
+                let request = reconcile_request(&workspace, key);
+                let ctx = host_context(&owner);
+                async move { service.call(ctx, request).await.unwrap_err().code }
+            };
+            for (case, field, value) in [
+                ("document", "objectId", json!("sibling")),
+                ("lineage", "lineageClaimId", json!("f".repeat(64))),
+                ("activation", "activationId", json!("unknown")),
+                ("generation", "restoreFenceGeneration", json!(1)),
+            ] {
+                let mut key = retirement_key("activation");
+                key[field] = value;
+                assert_eq!(
+                    refused(key).await,
+                    ErrorCode::Conflict,
+                    "{case} adopted={adopted}"
+                );
+                assert_eq!(
+                    teardown(&service, &owner, &workspace, document),
+                    before,
+                    "{case}"
+                );
+            }
+            let named = before
+                .2
+                .1
+                .as_ref()
+                .map_or("NULL".to_owned(), |id| format!("'{id}'"));
+            let table = if adopted {
+                "live_owner_activations"
+            } else {
+                "ydoc_owner_activation_sources"
+            };
+            let mut shaped = vec![
+                (
+                    "binding",
+                    "UPDATE live_device_application_bindings SET activation_id='elsewhere' WHERE object_id='document'".to_owned(),
+                    format!("UPDATE live_device_application_bindings SET activation_id={named} WHERE object_id='document'"),
+                ),
+                (
+                    "namespace",
+                    format!("UPDATE {table} SET relay_database_namespace='elsewhere'"),
+                    format!("UPDATE {table} SET relay_database_namespace='unload-test'"),
+                ),
+                (
+                    "active restore",
+                    format!(
+                        "INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,
+                            operation_id,input_json,receipt_json)
+                         VALUES ('workspace','main','document','unload-test','restore',
+                            json_object('oldBinding',json_object('lineageClaimId','{lineage}','restoreFenceGeneration',0),'newFence',1),'{{}}')"
+                    ),
+                    "DELETE FROM live_restore_fences".to_owned(),
+                ),
+                (
+                    "successor",
+                    String::new(),
+                    "DELETE FROM live_owner_activations WHERE activation_id='successor'".to_owned(),
+                ),
+            ];
+            if !adopted {
+                shaped.push((
+                    "another current activation",
+                    String::new(),
+                    "DELETE FROM live_owner_activations WHERE activation_id='other'".to_owned(),
+                ));
+            }
+            for (case, damage, repair) in shaped {
+                match case {
+                    "successor" => record_activation(
+                        &service,
+                        &workspace,
+                        "successor",
+                        Some("activation"),
+                        true,
+                    ),
+                    "another current activation" => {
+                        record_activation(&service, &workspace, "other", None, false)
+                    }
+                    _ => shape(&service, &workspace, &damage),
+                }
+                assert_eq!(
+                    refused(retirement_key("activation")).await,
+                    ErrorCode::Conflict,
+                    "{case} adopted={adopted}"
+                );
+                shape(&service, &workspace, &repair);
+                assert_eq!(
+                    teardown(&service, &owner, &workspace, document),
+                    before,
+                    "{case}"
+                );
+            }
+            // The same key, intact, retires the activation.
+            let reconciled = service
+                .call(
+                    host_context(&owner),
+                    reconcile_request(&workspace, retirement_key("activation")),
+                )
+                .await
+                .unwrap()
+                .response
+                .result;
+            assert_eq!(reconciled["status"], "reconciled", "adopted={adopted}");
+            assert_eq!(
+                reconciled["adoption"]["adoptionId"].as_str(),
+                adopted.then_some("activation")
+            );
+            // A registration made before adoption serves no activation, so it stays.
+            let after = teardown(&service, &owner, &workspace, document);
+            assert_eq!(after, (!adopted, None, before.2, true), "adopted={adopted}");
+            service.workspace_close(Some(workspace)).await.unwrap();
+        }
+    }
+
+    /// A released activation's replay tears nothing down, and a wrong F for
+    /// it is refused: its successor keeps its registration, session, cache
+    /// and binding.
+    #[tokio::test]
+    async fn a_released_replay_leaves_its_successor_alone() {
+        let (_scratch, service, owner, workspace, _, _) = retirement_fixture(true).await;
+        shape(
+            &service,
+            &workspace,
+            "UPDATE live_owner_activations SET released_at_ms=1,released_restore_generation=0,
+                released_accepted_cursor=5,released_boundary_json='{}',carried_manifest_json='{}'",
+        );
+        record_activation(&service, &workspace, "successor", Some("activation"), false);
+        let successor = register_document(&service, &owner, &workspace).await;
+        lock(&service.sessions)
+            .get_mut("ydoc-unload-document")
+            .unwrap()
+            .activation_id = Some("successor".into());
+        let open = service.open(Some(&workspace)).unwrap();
+        let cache = open.actor.ydoc_cache_stats_for_test().await.unwrap();
+        let before = teardown(&service, &owner, &workspace, successor);
+        assert_eq!(
+            before,
+            (
+                true,
+                Some(Some("successor".into())),
+                (1, Some("successor".into())),
+                false
+            )
+        );
+        let mut wrong = retirement_key("activation");
+        wrong["acceptedThrough"] = json!(4);
+        assert_eq!(
+            service
+                .call(host_context(&owner), reconcile_request(&workspace, wrong))
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Conflict
+        );
+        let replayed = service
+            .call(
+                host_context(&owner),
+                reconcile_request(&workspace, retirement_key("activation")),
+            )
+            .await
+            .unwrap()
+            .response
+            .result;
+        assert_eq!(replayed["status"], "reconciled");
+        assert_eq!(teardown(&service, &owner, &workspace, successor), before);
+        assert_eq!(
+            open.actor
+                .ydoc_cache_stats_for_test()
+                .await
+                .unwrap()
+                .removes,
+            cache.removes,
+            "no cache entry was evicted"
+        );
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    /// Phase A ends only the reconciled activation: its registration, output,
+    /// session and lease go; another document's registration, output and a
+    /// session serving another activation stay, and so does its binding.
+    /// Nothing registers for it again.
+    #[tokio::test]
+    async fn phase_a_ends_only_the_reconciled_activation() {
+        let (_scratch, service, owner, workspace, document, sibling) =
+            retirement_fixture(true).await;
+        install_session(&service, &workspace, "sibling", "sibling-activation");
+        let guard = |registration: u64| {
+            let registration = service
+                .live_application_registration(&owner.handle(), Some(&workspace), registration)
+                .unwrap();
+            ApplicationOutputGuard {
+                activation_id: registration.activation_id(),
+                registration,
+                cancel: CancelSignal::new(),
+                deadline: None,
+                _reservation: Arc::new(()),
+            }
+        };
+        let (document_output, sibling_output) = (guard(document), guard(sibling));
+        assert!(document_output.is_current() && sibling_output.is_current());
+        let reconciled = service
+            .call(
+                host_context(&owner),
+                reconcile_request(&workspace, retirement_key("activation")),
+            )
+            .await
+            .unwrap()
+            .response
+            .result;
+        assert_eq!(
+            reconciled,
+            json!({"status":"reconciled","adoption":{"adoptionId":"activation","localYDocSequence":0,
+                "terminalCursor":0,"adoptionReplayed":true},"applications":[],"hasMoreApplications":false,"settle":false})
+        );
+        assert_eq!(
+            teardown(&service, &owner, &workspace, document),
+            (false, None, (1, Some("activation".into())), true)
+        );
+        assert!(!document_output.is_current());
+        assert!(sibling_output.is_current());
+        assert!(
+            service
+                .live_application_registration(&owner.handle(), Some(&workspace), sibling)
+                .is_ok()
+        );
+        assert_eq!(
+            lock(&service.sessions)["ydoc-unload-sibling"]
+                .activation_id
+                .as_deref(),
+            Some("sibling-activation")
+        );
+        let open = service.open(Some(&workspace)).unwrap();
+        let key = DocKey::new("workspace", "main", "document").unwrap();
+        drop(service.leases.scoped(&open.root).acquire(&key).unwrap());
+        let registered = lock(&service.live_applications).registrations.len();
+        assert_eq!(
+            service
+                .live_application_register(
+                    &host_context(&owner),
+                    Some(workspace.clone()),
+                    json!({"binding": unload_binding("document")}),
+                )
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Conflict,
+            "the barrier refuses its registration"
+        );
+        assert_eq!(
+            lock(&service.live_applications).registrations.len(),
+            registered
+        );
+        assert_eq!(
+            teardown(&service, &owner, &workspace, document).2,
+            (1, Some("activation".into()))
+        );
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    /// A caller that drops a reconciliation once it started still gets its
+    /// Phase A and durable pass completed, and a retry, as after a reply
+    /// lost past the commit, answers the same.
+    #[tokio::test]
+    async fn a_dropped_reconciliation_finishes_and_a_retry_answers_the_same() {
+        let (_scratch, service, owner, workspace, document, _) = retirement_fixture(true).await;
+        let open = service.open(Some(&workspace)).unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let actor = open.actor.clone();
+        let blocker = tokio::spawn(async move {
+            actor
+                .ensure_main_version(
+                    "reconcile-blocker".into(),
+                    0,
+                    Arc::new(BlockWriter {
+                        started: Mutex::new(Some(started_tx)),
+                        release: Mutex::new(release_rx),
+                    }),
+                    dohc_engine_runtime::CancellationToken::new(),
+                )
+                .await
+        });
+        started_rx.await.unwrap();
+        let mut waiting = Box::pin(service.call(
+            host_context(&owner),
+            reconcile_request(&workspace, retirement_key("activation")),
+        ));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(waiting.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert!(
+            open.session_ops.try_lock().is_err(),
+            "it holds the session lock"
+        );
+        drop(waiting);
+        release_tx.send(()).unwrap();
+        blocker.await.unwrap().unwrap();
+        drop(Arc::clone(&open.session_ops).lock_owned().await);
+        assert_eq!(
+            teardown(&service, &owner, &workspace, document),
+            (false, None, (1, Some("activation".into())), true)
+        );
+        let mut answers = Vec::new();
+        for _ in 0..2 {
+            answers.push(
+                service
+                    .call(
+                        host_context(&owner),
+                        reconcile_request(&workspace, retirement_key("activation")),
+                    )
+                    .await
+                    .unwrap()
+                    .response
+                    .result,
+            );
+        }
+        assert_eq!(answers[0]["status"], "reconciled");
+        assert_eq!(answers[0], answers[1]);
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    /// N8: an unload names the activation it ends. Naming another, or none,
+    /// against state that serves one changes nothing.
+    #[tokio::test]
+    async fn an_unload_ends_only_the_activation_it_names() {
+        for adopted in [false, true] {
+            let (_scratch, service, owner, workspace, document, _) =
+                retirement_fixture(adopted).await;
+            let before = teardown(&service, &owner, &workspace, document);
+            for named in [None, Some("successor")] {
+                assert_eq!(
+                    service
+                        .call(
+                            host_context(&owner),
+                            unload_naming(&workspace, "document", named)
+                        )
+                        .await
+                        .unwrap_err()
+                        .code,
+                    ErrorCode::Conflict,
+                    "{named:?} adopted={adopted}"
+                );
+                assert_eq!(teardown(&service, &owner, &workspace, document), before);
+            }
+            let unloaded = service
+                .call(
+                    host_context(&owner),
+                    unload_naming(&workspace, "document", Some("activation")),
+                )
+                .await
+                .unwrap();
+            assert_eq!(unloaded.response.result, json!({"status":"unloaded"}));
+            let after = teardown(&service, &owner, &workspace, document);
+            assert_eq!((after.0, after.1, after.2.0), (false, None, 0));
+            service.workspace_close(Some(workspace)).await.unwrap();
+        }
+    }
+
+    /// N8: an unload queued for a predecessor before its successor took the
+    /// document reads the activation only once it holds the session lock,
+    /// and cannot end the successor.
+    #[tokio::test]
+    async fn a_stale_predecessor_unload_cannot_end_its_successor() {
+        let (_scratch, service, owner, workspace, document, _) = unload_fixture().await;
+        let open = service.open(Some(&workspace)).unwrap();
+        let serial = Arc::clone(&open.session_ops).lock_owned().await;
+        let mut waiting = Box::pin(service.call(
+            host_context(&owner),
+            unload_naming(&workspace, "document", Some("activation")),
+        ));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(waiting.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        // The successor's capture takes the session while the unload waits.
+        lock(&service.sessions)
+            .get_mut("ydoc-unload-document")
+            .unwrap()
+            .activation_id = Some("successor".into());
+        let before = teardown(&service, &owner, &workspace, document);
+        drop(serial);
+        assert_eq!(waiting.await.unwrap_err().code, ErrorCode::Conflict);
+        assert_eq!(teardown(&service, &owner, &workspace, document), before);
+        assert_eq!(before.1, Some(Some("successor".into())));
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    /// An ordinary registration serves no activation, so its unload names none.
+    #[tokio::test]
+    async fn an_ordinary_unload_names_no_activation() {
+        let (_scratch, service, owner, workspace, document, sibling) = unload_fixture().await;
+        let unloaded = service
+            .call(
+                host_context(&owner),
+                unload_naming(&workspace, "sibling", None),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unloaded.response.result, json!({"status":"unloaded"}));
+        assert!(
+            service
+                .live_application_registration(&owner.handle(), Some(&workspace), sibling)
+                .is_err()
+        );
+        assert!(
+            service
+                .live_application_registration(&owner.handle(), Some(&workspace), document)
+                .is_ok()
+        );
         service.workspace_close(Some(workspace)).await.unwrap();
     }
 }

@@ -52,7 +52,8 @@ pub(crate) mod restore_fence;
 mod restore_resume;
 mod retirement;
 pub use retirement::{
-    reconcile_activation, JournalEvidence, Reconciliation, RetirementKey, RetirementScope,
+    check_retirement, reconcile_activation, JournalEvidence, Reconciliation, RetirementKey,
+    RetirementScope, RetirementTarget,
 };
 mod settlement;
 pub use bootstrap::{
@@ -917,6 +918,10 @@ pub enum ApplicationPending {
     /// The current native service activation's adoption seed has no receipt
     /// yet. Only the seed's own delivery applies until it has one.
     DeliveryPending,
+    /// As [`DeliveryPending`](Self::DeliveryPending), but the seed's outbox is
+    /// quarantined, so delivery never retries it. The activation stays held
+    /// until recovery or retirement.
+    SeedQuarantined,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApplicationResult {
@@ -944,6 +949,21 @@ struct Registration {
 pub struct ApplicationOwner {
     workspace_id: String,
     current: Vec<Arc<Mutex<Registration>>>,
+    retired: RetiredActivations,
+}
+
+/// The activations a retirement tore down under one owner. None registers
+/// again under it, and output tagged with one is no longer current.
+#[derive(Clone, Default)]
+pub struct RetiredActivations(Arc<Mutex<std::collections::HashSet<String>>>);
+
+impl RetiredActivations {
+    pub fn contains(&self, activation_id: &str) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(activation_id)
+    }
 }
 /// A captured lifetime. Replacement invalidates every clone of the old handle.
 #[derive(Clone)]
@@ -969,7 +989,12 @@ impl ApplicationOwner {
         Ok(Self {
             workspace_id,
             current: Vec::new(),
+            retired: RetiredActivations::default(),
         })
+    }
+    /// The activations this owner retired, shared with its transport's output guards.
+    pub fn retired_activations(&self) -> RetiredActivations {
+        self.retired.clone()
     }
     pub fn register(
         &mut self,
@@ -1020,6 +1045,12 @@ impl ApplicationOwner {
                 requested.as_deref(),
             )
         })?;
+        if activation_id
+            .as_deref()
+            .is_some_and(|id| self.retired.contains(id))
+        {
+            return Err(ApplicationError::Conflict);
+        }
         let connection_changed = self.current.iter().any(|entry| {
             entry.lock().map_or(true, |r| {
                 r.namespace != namespace || r.coordinate != coordinate
@@ -1102,12 +1133,37 @@ impl ApplicationOwner {
         self.current.clear();
         Ok(())
     }
-    /// Release one document's registration. Its durable application state stays.
+    /// Refuse an unload naming `activation_id` while a registration of the
+    /// document serves another activation, or any while one serves an
+    /// activation and the unload names none.
+    pub fn require_unload_activation(
+        &self,
+        object_id: &str,
+        activation_id: Option<&str>,
+    ) -> Result<(), ApplicationError> {
+        for current in &self.current {
+            let held = current.lock().map_err(|_| ApplicationError::Interrupted)?;
+            if held.binding.object_id == object_id
+                && held
+                    .activation_id
+                    .as_deref()
+                    .is_some_and(|tagged| Some(tagged) != activation_id)
+            {
+                return Err(ApplicationError::Conflict);
+            }
+        }
+        Ok(())
+    }
+    /// Release one document's registration, once
+    /// [`require_unload_activation`](Self::require_unload_activation) allowed
+    /// it. Its durable application state stays.
     pub fn unregister(
         &mut self,
         store: &mut EngineStore,
         object_id: &str,
+        activation_id: Option<&str>,
     ) -> Result<(), ApplicationError> {
+        self.require_unload_activation(object_id, activation_id)?;
         let mut found = None;
         for (index, current) in self.current.iter().enumerate() {
             let held = current.lock().map_err(|_| ApplicationError::Interrupted)?;
@@ -1121,6 +1177,36 @@ impl ApplicationOwner {
             self.current.remove(index);
         }
         Ok(())
+    }
+    /// Phase A of a retirement: no registration serves `activation_id` under
+    /// this owner again. Only this host's registrations tagged with it retire,
+    /// in memory; their binding rows stay. The document's cache entry goes
+    /// without a close, settlement, or materialization.
+    pub fn retire_activation(
+        &mut self,
+        cache: &mut WriterDocCache,
+        namespace: &str,
+        coordinate: &ApplicationHostCoordinate,
+        key: &DocKey,
+        activation_id: &str,
+    ) {
+        self.retired
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(activation_id.to_owned());
+        self.current.retain(|current| {
+            let mut held = current.lock().unwrap_or_else(PoisonError::into_inner);
+            let retired = held.namespace == namespace
+                && held.coordinate == *coordinate
+                && held.activation_id.as_deref() == Some(activation_id);
+            if retired {
+                held.live = false;
+            }
+            !retired
+        });
+        cache.remove(key);
+        cache.unpin(key);
     }
     /// Retire one document's registration in memory only. Its handles stop
     /// applying and settling, and its binding row stays available, so the
@@ -1332,18 +1418,23 @@ pub fn validate_application_binding(
     store.read_with(|conn| require_binding_workspace(conn, workspace_id, binding))
 }
 
-/// Refuse an activation this binding's registration cannot serve before
-/// retiring an existing registration.
+/// Refuse an activation this binding's registration cannot serve, or one
+/// `retired` holds, before retiring an existing registration. Without a
+/// name, the registration would serve the current activation.
 pub fn validate_registration_activation(
     store: &EngineStore,
     namespace: &str,
     binding: &LiveObjectBinding,
-    activation_id: &str,
+    activation_id: Option<&str>,
+    retired: &RetiredActivations,
 ) -> Result<(), ApplicationError> {
-    store.read_with(|conn| {
-        owner_activations::registration_activation(conn, namespace, binding, Some(activation_id))
-            .map(|_| ())
-    })
+    let serves = store.read_with(|conn| {
+        owner_activations::registration_activation(conn, namespace, binding, activation_id)
+    })?;
+    if serves.is_some_and(|id| retired.contains(&id)) {
+        return Err(ApplicationError::Conflict);
+    }
+    Ok(())
 }
 
 fn require_binding_workspace(
@@ -1496,13 +1587,27 @@ pub fn apply_committed(
                     Vec::new(),
                 ));
             }
-            if pending_seed(tx, &held.namespace, b)?.is_some_and(|(delivery, digest)| {
-                let receipt = &event.metadata.accepted.receipt;
-                delivery != receipt.delivery_id || digest != receipt.update_digest
-            }) {
-                return Ok(ApplicationResult::Pending(
-                    ApplicationPending::DeliveryPending,
-                ));
+            let receipt = &event.metadata.accepted.receipt;
+            match seed_hold(tx, &held.namespace, b)? {
+                // Retirement proved the seed never delivered, which stays
+                // true only while nothing applies after the cut.
+                Some(SeedHold::Abandoned) => {
+                    return Ok(ApplicationResult::Pending(
+                        ApplicationPending::ApplicabilityUnavailable,
+                    ));
+                }
+                Some(SeedHold::Pending {
+                    delivery,
+                    digest,
+                    quarantined,
+                }) if delivery != receipt.delivery_id || digest != receipt.update_digest => {
+                    return Ok(ApplicationResult::Pending(if quarantined {
+                        ApplicationPending::SeedQuarantined
+                    } else {
+                        ApplicationPending::DeliveryPending
+                    }));
+                }
+                _ => {}
             }
             check_provenance(tx, &held.namespace, &event)?;
             if adoption::read_origin(tx, &held)?.is_some_and(|origin| {
@@ -1745,18 +1850,28 @@ struct OwnDraft {
     declaration: Option<AgentDeclaration>,
 }
 
-/// The delivery and digest of the current activation's adoption seed while
-/// the relay's receipt for it is outstanding. Only a native service
-/// activation, which keeps its imported source, delivers its seed before
-/// applying it; a device host applies its seed first.
-fn pending_seed(
+/// What the current activation's adoption seed holds back.
+enum SeedHold {
+    /// The relay's receipt for it is outstanding. Only its own delivery applies.
+    Pending {
+        delivery: String,
+        digest: String,
+        quarantined: bool,
+    },
+    /// Retirement abandoned it. Nothing applies.
+    Abandoned,
+}
+
+/// Only a native service activation, which keeps its imported source,
+/// delivers its seed before applying it; a device host applies its seed first.
+fn seed_hold(
     conn: &Connection,
     namespace: &str,
     b: &LiveObjectBinding,
-) -> Result<Option<(String, String)>, ApplicationError> {
-    conn.query_row(
+) -> Result<Option<SeedHold>, ApplicationError> {
+    let found: Option<(String, String, bool, bool)> = conn.query_row(
         &format!(
-            "SELECT e.delivery_id,e.update_digest FROM owner_ydoc_outbox_entries e
+            "SELECT e.delivery_id,e.update_digest,e.pending,o.state='quarantined' FROM owner_ydoc_outbox_entries e
              JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id
              JOIN {} v ON v.relay_database_namespace=?1 AND v.workspace_id=o.workspace_id
                AND v.main_version_id=o.main_version_id AND v.object_id=o.object_id
@@ -1766,8 +1881,10 @@ fn pending_seed(
                AND s.version_id=o.main_version_id AND s.object_id=o.object_id
                AND s.lineage_claim_id=o.lineage_claim_id
              WHERE o.workspace_id=?2 AND o.main_version_id=?3 AND o.object_id=?4 AND o.lineage_claim_id=?5
-               AND e.pending=1 AND json_extract(e.native_source_json,'$.origin.kind')='adoptionSeed'
-               AND json_extract(e.native_source_json,'$.adoptionId')=v.activation_id",
+               AND json_extract(e.native_source_json,'$.origin.kind')='adoptionSeed'
+               AND json_extract(e.native_source_json,'$.adoptionId')=v.activation_id
+               AND (e.pending=1 OR (e.terminal_reason=?6 AND e.accepted_receipt_json IS NULL
+                 AND e.update_blob_digest IS NULL AND e.terminal_blob_digest IS NULL))",
             owner_activations::CURRENT_ACTIVATIONS
         ),
         params![
@@ -1775,12 +1892,24 @@ fn pending_seed(
             b.workspace_id,
             b.main_version_id,
             b.object_id,
-            b.lineage_claim_id
+            b.lineage_claim_id,
+            crate::owner_outbox::ACTIVATION_RELEASED
         ],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     )
     .optional()
-    .map_err(read_sql)
+    .map_err(read_sql)?;
+    Ok(found.map(|(delivery, digest, pending, quarantined)| {
+        if pending {
+            SeedHold::Pending {
+                delivery,
+                digest,
+                quarantined,
+            }
+        } else {
+            SeedHold::Abandoned
+        }
+    }))
 }
 
 fn own_draft(

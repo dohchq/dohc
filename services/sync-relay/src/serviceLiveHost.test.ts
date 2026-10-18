@@ -891,8 +891,9 @@ it.each(["settlement-pending", "delivery-pending"])("settles a stopped last docu
   // It settled what the host applied and published that right before the unload.
   const methods = o.client().sendRequest.mock.calls.map(call => ((call as unknown[])[0] as {method: string}).method);
   expect(methods.slice(methods.lastIndexOf("liveApplication.settle"))).toEqual(["liveApplication.settle", "sync.push", "liveApplication.unloadDocument"]);
+  // The unload names the activation the relay retains for the document.
   const departure = [["liveApplication.register", {binding: current.binding}], ["liveApplication.settle", {registrationId: 7, terminalReceipt: tip}],
-    ["liveApplication.unloadDocument", {objectId: "object"}]];
+    ["liveApplication.unloadDocument", {objectId: "object", activationId: `ordinary-activation-${"a".repeat(64)}`}]];
   expect(o.ownerCalls().slice(sent)).toEqual(departure);
   // The engine answers pending, so the document stays, and the next pass settles and unloads it again.
   const second = o.park("liveApplication.unloadDocument");
@@ -959,7 +960,8 @@ it("leaves an accepted edit the engine never applied unapplied, and settles thro
   expect(o.client().readLiveApplicationAck).toHaveBeenLastCalledWith(expect.objectContaining({registrationId: 7}), edit, expect.any(AbortSignal));
   expect(o.tip()).toEqual(seed);
   expect(o.ownerCalls().slice(sent)).toEqual([["liveApplication.register", {binding: o.binding}],
-    ["liveApplication.settle", {registrationId: 7, terminalReceipt: seed}], ["liveApplication.unloadDocument", {objectId: "object"}]]);
+    ["liveApplication.settle", {registrationId: 7, terminalReceipt: seed}],
+    ["liveApplication.unloadDocument", {objectId: "object", activationId: `ordinary-activation-${"a".repeat(64)}`}]]);
 });
 
 // Proves: a departed delivery needs neither live authority nor the connection

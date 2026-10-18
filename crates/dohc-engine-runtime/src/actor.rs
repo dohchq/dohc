@@ -54,7 +54,9 @@ pub use capture::{
 };
 pub use collections::{CollectionCommitListener, CollectionReconciliation};
 pub use dohc_engine_sync::SharingDeclined;
-pub use live_application::{ActorLiveApplicationHandle, ActorLiveApplicationOwner};
+pub use live_application::{
+    ActorLiveApplicationHandle, ActorLiveApplicationOwner, OwnedRetirementScope,
+};
 pub use materialization::{PostCommitMaterializeOutcome, SelfWriteRecorder};
 pub use relay::{
     RelayConfiguration, RelayOperation, RelayOperationOutcome, ShareViewIdentityRecord,

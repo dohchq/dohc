@@ -625,6 +625,27 @@ impl EngineService {
         Ok(result)
     }
 
+    /// The namespace and budgets one retirement step runs under, from the
+    /// host's own configuration. A page holds what one settlement may cover.
+    pub(super) fn configured_retirement_scope(
+        &self,
+        ctx: &RequestContext,
+        max_applications: usize,
+    ) -> Result<dohc_engine_runtime::actor::OwnedRetirementScope, WireError> {
+        let discovery = self.configured_host_caller(ctx)?;
+        let (max, _) = discovery.settlement.as_ref().ok_or_else(|| {
+            WireError::new(ErrorCode::Forbidden, "live settlement is not configured")
+        })?;
+        if !(1..=*max).contains(&max_applications) {
+            return Err(invalid("invalid-live-reconciliation"));
+        }
+        Ok(dohc_engine_runtime::actor::OwnedRetirementScope {
+            namespace: discovery.namespace.clone(),
+            max_deliveries: *max,
+            max_applications,
+        })
+    }
+
     pub(super) fn configured_settlement_admission(
         &self,
         ctx: &RequestContext,
