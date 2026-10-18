@@ -193,7 +193,17 @@ function daemonSessions(): EngineWorkspaceSessions {
           setTimeout(resolve, recordUpdateDelayMs),
         );
       }
-      const answered = await daemon.sendRequest(request);
+      // A claimed lineage is this fixture's; the loopback keeps no claims. It
+      // refuses an edit made against any other claim, as the engine does.
+      if (claimedLineage && request.method === YDOC_METHOD.recordUpdate &&
+          params.expectedLineageClaimId !== "owner-claim") {
+        throw wireRefusal("ydoc-lineage-stale");
+      }
+      const answered = await daemon.sendRequest(
+        claimedLineage && request.method === YDOC_METHOD.recordUpdate
+          ? { ...request, params: { ...params, expectedLineageClaimId: null } }
+          : request,
+      );
       if (answered) {
         if (claimedLineage && (request.method === YDOC_METHOD.open || request.method === YDOC_METHOD.resync || request.method === YDOC_METHOD.recordUpdate)) {
           return { ...answered, result: { ...(answered.result as Record<string, JsonValue>),
@@ -401,14 +411,18 @@ it.each(["delayed notice", "pending resync", "unchanged"] as const)("settles rep
         resyncEntered.resolve();
         await finishResync.promise;
       }
+      if (request.method === YDOC_METHOD.recordUpdate) {
+        // The claim is this fixture's; the loopback keeps none.
+        const params = request.params as Record<string, JsonValue>;
+        if (params.expectedLineageClaimId !== "owner-claim") throw wireRefusal("ydoc-lineage-stale");
+        const response = await ydoc.sendRequest({ ...request, params: { ...params, expectedLineageClaimId: null } });
+        return { ...response, result: { ...(response.result as Record<string, JsonValue>),
+          lineageClaimId: "owner-claim", lineageOriginatedHere: true } };
+      }
       const response = await ydoc.sendRequest(request);
       if (request.method === YDOC_METHOD.open || request.method === YDOC_METHOD.resync) {
         return { ...response, result: { ...(response.result as Record<string, JsonValue>),
           lineageClaimId: "owner-claim", lineageOriginatedHere: true } };
-      }
-      if (request.method === YDOC_METHOD.recordUpdate) {
-        return { ...response, result: { ...(response.result as Record<string, JsonValue>),
-          lineageClaimId: "owner-claim" } };
       }
       return response;
     },

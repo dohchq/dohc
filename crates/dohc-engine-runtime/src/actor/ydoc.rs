@@ -2087,13 +2087,19 @@ pub(super) fn ydoc_record_update_on_store(
         },
     )? {
         TxnOutcome::Committed(outcome) => {
-            let lineage_claim_id = dohc_engine_collab::read_marker(store, key)?
-                .and_then(|marker| marker.lineage_claim_id);
+            let marker = dohc_engine_collab::read_marker(store, key)?;
+            let lineage_originated_here = match &marker {
+                Some(marker) => store.read_with(|conn| {
+                    dohc_engine_sync::lineage_originated_here(conn, key, marker)
+                })?,
+                None => false,
+            };
             Ok(YdocAppend {
                 settlement_requested: outcome.settlement_requested,
                 outcome,
                 sharing_declined,
-                lineage_claim_id,
+                lineage_claim_id: marker.and_then(|marker| marker.lineage_claim_id),
+                lineage_originated_here,
                 automation_claims,
             })
         }
@@ -2114,6 +2120,8 @@ pub struct YdocAppend {
     pub outcome: AppendOutcome,
     pub sharing_declined: Option<dohc_engine_sync::SharingDeclined>,
     pub lineage_claim_id: Option<String>,
+    /// See [`dohc_engine_sync::lineage_originated_here`].
+    pub lineage_originated_here: bool,
     /// Pending automation claims this append inserted (ADR 0008): one per
     /// subscribed automation, committed in the append's own transaction. The
     /// service emits `automation.claimed` for each, post-commit.

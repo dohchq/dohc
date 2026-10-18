@@ -268,7 +268,7 @@ it("preserves and delivers owner drafts across two real native replicas and auth
       return Y.encodeStateAsUpdate(local, before);
     }
     const divergent = append("Owner B offline edit");
-    await second.rpc("ydoc.recordUpdate", {sessionId: editor.sessionId, updateBase64: Buffer.from(divergent).toString("base64")});
+    await second.rpc("ydoc.recordUpdate", {sessionId: editor.sessionId, updateBase64: Buffer.from(divergent).toString("base64"), expectedLineageClaimId: editor.lineageClaimId});
     const captured = await second.client.ownerYDocPrepareEnrollment(second.request(), target);
     if (captured.status !== "capture") throw new Error("Fresh replica was already enrolled.");
     // No delivery runs yet. A restart must preserve the exact unenrolled local state.

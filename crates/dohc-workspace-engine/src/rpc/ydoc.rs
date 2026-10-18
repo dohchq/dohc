@@ -294,6 +294,11 @@ struct ArtifactAssetDescriptorResult {
 struct YdocRecordUpdateParams {
     session_id: String,
     update_base64: String,
+    /// The lineage claim the client's document was built on, as the client
+    /// last observed it from open, record, or resync. Required: `null`
+    /// expects an unclaimed lineage and never matches a claimed one.
+    #[serde(deserialize_with = "Option::deserialize")]
+    expected_lineage_claim_id: Option<String>,
     #[serde(default)]
     actor_origin_id: Option<String>,
     /// Declared write provenance: actor kind, `onBehalfOf` principal, and
@@ -334,6 +339,7 @@ struct YdocRecordUpdateResult {
     seq: i64,
     deduped: bool,
     lineage_claim_id: Option<String>,
+    lineage_originated_here: bool,
 }
 
 #[derive(Deserialize)]
@@ -1232,6 +1238,17 @@ impl EngineService {
             serial = Arc::clone(&open.session_ops).lock_owned() => serial,
         };
         let (open, session) = self.ydoc_session(handle.as_ref(), &params.session_id)?;
+        // A resync moves the session to a replacement claim before its reply
+        // reaches the client. An edit made on the earlier claim's document
+        // must not enter the replacement, so the client's claim decides.
+        if params.expected_lineage_claim_id != session.lineage_claim_id {
+            return Err(map_runtime(RuntimeError::Collab(
+                CollabError::LineageWriteStale {
+                    expected: params.expected_lineage_claim_id,
+                    observed: session.lineage_claim_id,
+                },
+            )));
+        }
         let update = base64::engine::general_purpose::STANDARD
             .decode(&params.update_base64)
             .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid update encoding"))?;
@@ -1310,6 +1327,7 @@ impl EngineService {
             .map_err(map_owner_outbox)?;
             return Ok(json!({
                 "lineageClaimId": session.lineage_claim_id,
+                "lineageOriginatedHere": false,
                 "ownerDraft": {
                     "outboxId": append.outbox_id,
                     "sequence": append.sequence,
@@ -1347,7 +1365,7 @@ impl EngineService {
                         update,
                         params.actor_origin_id,
                         params.attribution,
-                        session.lineage_claim_id,
+                        params.expected_lineage_claim_id,
                         require_empty,
                         seed_source,
                         idempotency_key,
@@ -1480,6 +1498,7 @@ impl EngineService {
             eprintln!("engine: {declined}");
         }
         let lineage_claim_id = outcome.lineage_claim_id;
+        let lineage_originated_here = outcome.lineage_originated_here;
         let automation_claims = outcome.automation_claims;
         let outcome = outcome.outcome;
         // Post-commit: the append transaction already holds the history rows
@@ -1493,6 +1512,7 @@ impl EngineService {
             seq: outcome.seq,
             deduped: outcome.deduped,
             lineage_claim_id,
+            lineage_originated_here,
         })
         .map_err(|_| WireError::new(ErrorCode::Internal, "response encode failed"))
     }
@@ -2017,7 +2037,7 @@ mod owner_draft_editor_tests;
 mod tests {
     #[test]
     fn desktop_automation_drafts_do_not_require_server_declarations() {
-        let value = serde_json::json!({"sessionId":"session","updateBase64":"AAA=","actorOriginId":"collection:Tasks#mark","attribution":{"actorKind":"automation","depth":1,"onBehalfOf":"presser"}});
+        let value = serde_json::json!({"sessionId":"session","updateBase64":"AAA=","expectedLineageClaimId":null,"actorOriginId":"collection:Tasks#mark","attribution":{"actorKind":"automation","depth":1,"onBehalfOf":"presser"}});
         let desktop: super::YdocRecordUpdateParams = serde_json::from_value(value.clone()).unwrap();
         assert!(desktop.automation_declaration().is_none());
         let mut server_value = value;
@@ -2029,6 +2049,23 @@ mod tests {
             declaration.attribution.on_behalf_of.as_deref(),
             Some("presser")
         );
+    }
+
+    #[test]
+    fn record_update_requires_the_expected_claim() {
+        let parse = |value| serde_json::from_value::<super::YdocRecordUpdateParams>(value);
+        let omitted = parse(serde_json::json!({"sessionId":"session","updateBase64":"AAA="}));
+        assert!(omitted.is_err(), "an omitted expectation is invalid");
+        let unclaimed = parse(serde_json::json!({
+            "sessionId":"session","updateBase64":"AAA=","expectedLineageClaimId":null
+        }))
+        .unwrap();
+        assert_eq!(unclaimed.expected_lineage_claim_id, None);
+        let claimed = parse(serde_json::json!({
+            "sessionId":"session","updateBase64":"AAA=","expectedLineageClaimId":"claim"
+        }))
+        .unwrap();
+        assert_eq!(claimed.expected_lineage_claim_id.as_deref(), Some("claim"));
     }
 
     use super::*;
@@ -2129,6 +2166,7 @@ mod tests {
         let params = |author: &str, update: &[u8]| {
             json!({
                 "sessionId":id,"updateBase64":base64::engine::general_purpose::STANDARD.encode(update),
+                "expectedLineageClaimId":session["lineageClaimId"],
                 "actorOriginId":author,"attribution":{"actorKind":"agent","onBehalfOf":"person","depth":0}
             })
         };
@@ -2311,7 +2349,8 @@ mod tests {
         let edit = doc.plaintext_insert(6, " dirty");
         for (seed_flag, bytes, request) in [(true, seed, "seed"), (false, edit, "edit")] {
             service.ydoc_record_update(&RequestContext::unbounded(),Some(handle.clone()),Some(request.into()),json!({
-                "sessionId":id,"updateBase64":base64::engine::general_purpose::STANDARD.encode(bytes),"seed":seed_flag
+                "sessionId":id,"updateBase64":base64::engine::general_purpose::STANDARD.encode(bytes),"seed":seed_flag,
+                "expectedLineageClaimId":session["lineageClaimId"]
             })).await.unwrap();
         }
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
@@ -2451,7 +2490,8 @@ mod tests {
         drop(egress);
         assert_eq!(session["seedContent"], markdown);
         service.ydoc_record_update(&RequestContext::unbounded(),Some(handle.clone()),Some("owner-source-seed".into()),json!({
-            "sessionId":session["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(&bytes),"seed":true
+            "sessionId":session["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(&bytes),"seed":true,
+            "expectedLineageClaimId":session["lineageClaimId"]
         })).await.unwrap();
         let (baseline, lineage, sequence) = {
             let db = rusqlite::Connection::open_with_flags(
@@ -2558,7 +2598,8 @@ mod tests {
             .unwrap();
         let queued_bytes = edited.encode_full_state();
         let edit_params = json!({
-            "sessionId":session["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(&queued_bytes)
+            "sessionId":session["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(&queued_bytes),
+            "expectedLineageClaimId":session["lineageClaimId"]
         });
         for _ in 0..2 {
             service
@@ -2584,7 +2625,8 @@ mod tests {
             .unwrap();
         let refused_bytes = edited.encode_full_state();
         let refusal = service.ydoc_record_update(&RequestContext::unbounded(),Some(handle.clone()),Some("after-seal".into()),json!({
-            "sessionId":session["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(&refused_bytes)
+            "sessionId":session["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(&refused_bytes),
+            "expectedLineageClaimId":session["lineageClaimId"]
         })).await.unwrap_err();
         assert_eq!(refusal.message, "owner-outbox-frozen");
         let refused_settlement = service
@@ -3466,6 +3508,285 @@ mod tests {
     #[tokio::test]
     async fn a_resync_without_egress_budget_keeps_its_session() {
         full_budget_after_the_pulled_edit_commits(true).await;
+    }
+
+    const REPLACED_PATH: &str = "lineage.txt";
+
+    /// An editor whose first edit, "base", claimed its lineage, after
+    /// replication replaced the durable lineage with another claim. The
+    /// session has not resynced, so it still holds the earlier claim.
+    struct ReplacedLineage {
+        _scratch: ScratchDir,
+        service: Arc<EngineService>,
+        handle: WorkspaceHandle,
+        db_path: std::path::PathBuf,
+        session: String,
+        earlier_claim: String,
+        replacement: String,
+        earlier: dohc_engine_collab::Ydoc,
+    }
+
+    impl ReplacedLineage {
+        async fn new(workspace_id: &'static str) -> Self {
+            let scratch = ScratchDir::new().expect("scratch");
+            let service = Arc::new(EngineService::new());
+            let opened = service
+                .workspace_open(
+                    &RequestContext::unbounded(),
+                    json!({
+                        "rootDir": scratch.path().to_string_lossy(),
+                        "workspaceId": workspace_id,
+                        "captureMode": "none"
+                    }),
+                )
+                .await
+                .expect("workspace open");
+            let handle: WorkspaceHandle =
+                serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+            let db_path = service.open(Some(&handle)).expect("open").db_path.clone();
+            let db = rusqlite::Connection::open(&db_path).expect("engine db");
+            db.execute_batch(&format!(
+                "INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+                 VALUES ('{workspace_id}','local-origin','epoch','stream',1); \
+                 INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) \
+                 VALUES ('{workspace_id}','local-origin',0);"
+            ))
+            .expect("enable sync");
+            let (opened, egress) = service
+                .ydoc_open(
+                    &RequestContext::unbounded(),
+                    Some(handle.clone()),
+                    json!({
+                        "versionId": "main", "path": REPLACED_PATH,
+                        "contentKind": "plaintext", "seedFromArtifact": false
+                    }),
+                    1,
+                )
+                .await
+                .expect("the editor's session");
+            drop(egress);
+            assert_eq!(opened["lineageClaimId"], Value::Null);
+            let mut fixture = Self {
+                _scratch: scratch,
+                session: opened["sessionId"].as_str().expect("session").to_owned(),
+                earlier_claim: String::new(),
+                replacement: String::new(),
+                earlier: dohc_engine_collab::Ydoc::wire(),
+                service,
+                handle,
+                db_path,
+            };
+            let base = fixture.earlier.plaintext_insert(0, "base");
+            let recorded = fixture
+                .record("base", None, &base)
+                .await
+                .expect("the first edit");
+            fixture.earlier_claim = recorded["lineageClaimId"]
+                .as_str()
+                .expect("the first edit claims the lineage")
+                .to_owned();
+            let foreign = dohc_engine_collab::Ydoc::wire();
+            foreign.plaintext_insert(0, "foreign base");
+            fixture.replacement = dohc_engine_storage::EngineStore::open(&fixture.db_path, 100)
+                .expect("store")
+                .put_binary_blob(&foreign.encode_full_state())
+                .expect("the replacement's base");
+            db.execute(
+                "UPDATE ydoc_docs SET lineage_claim_id=?1 WHERE path=?2",
+                rusqlite::params![&fixture.replacement, REPLACED_PATH],
+            )
+            .expect("replace the durable lineage claim");
+            fixture
+        }
+
+        fn record(
+            &self,
+            key: &str,
+            expected: Option<&str>,
+            update: &[u8],
+        ) -> impl std::future::Future<Output = Result<Value, WireError>> + use<> {
+            let service = Arc::clone(&self.service);
+            let handle = self.handle.clone();
+            let key = key.to_owned();
+            let params = json!({
+                "sessionId": self.session,
+                "updateBase64": base64::engine::general_purpose::STANDARD.encode(update),
+                "expectedLineageClaimId": expected,
+            });
+            async move {
+                service
+                    .ydoc_record_update(
+                        &RequestContext::unbounded(),
+                        Some(handle),
+                        Some(key),
+                        params,
+                    )
+                    .await
+            }
+        }
+
+        fn resync(
+            &self,
+        ) -> impl std::future::Future<Output = Result<(Value, BlobEgress), WireError>> + use<>
+        {
+            let service = Arc::clone(&self.service);
+            let handle = self.handle.clone();
+            let params = json!({ "sessionId": self.session });
+            async move {
+                service
+                    .ydoc_resync(&RequestContext::unbounded(), Some(handle), params, 2)
+                    .await
+            }
+        }
+
+        async fn hold_egress_budget(&self) -> tokio::sync::OwnedSemaphorePermit {
+            self.service
+                .blob_egress_budget
+                .reserve(
+                    i64::try_from(super::super::reads::BLOB_EGRESS_BYTE_BUDGET).expect("budget"),
+                    &OperationCancellation::new(&RequestContext::unbounded()),
+                    "test",
+                )
+                .await
+                .expect("hold the whole egress budget")
+        }
+
+        fn session_claim(&self) -> Option<String> {
+            lock(&self.service.sessions)
+                .get(&self.session)
+                .and_then(|session| session.lineage_claim_id.clone())
+        }
+
+        fn head(&self) -> i64 {
+            rusqlite::Connection::open_with_flags(
+                &self.db_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("engine db")
+            .query_row(
+                "SELECT head_update_seq FROM ydoc_docs WHERE path=?1",
+                [REPLACED_PATH],
+                |row| row.get(0),
+            )
+            .expect("the lineage head")
+        }
+
+        /// The earlier document's next edit is refused and records nothing.
+        fn assert_earlier_edit_refused(&self, before: i64, refused: Result<Value, WireError>) {
+            let refused = refused.expect_err("an edit on the earlier document");
+            assert_eq!(refused.code, ErrorCode::InvalidParams);
+            assert_eq!(refused.message, "ydoc-lineage-stale");
+            assert_eq!(self.head(), before, "the refusal records nothing");
+        }
+
+        async fn close(self) {
+            self.service
+                .workspace_close(Some(self.handle))
+                .await
+                .expect("workspace close");
+        }
+    }
+
+    /// The resync moves the session to the replacement, then cannot have
+    /// egress budget for its blob and answers OVERLOADED. The editor never
+    /// learned the replacement, so its next edit, which still expects the
+    /// earlier claim, is refused rather than taken as the replacement's. An
+    /// edit that expects no claim is refused too: the engine does not
+    /// substitute its own.
+    #[tokio::test]
+    async fn an_earlier_edit_after_an_overloaded_replacing_resync_is_refused() {
+        let fixture = ReplacedLineage::new("replaced-resync-overloaded").await;
+        let held = fixture.hold_egress_budget().await;
+        let refused = fixture.resync().await.expect_err("the blob has no budget");
+        assert_eq!(refused.code, ErrorCode::Overloaded);
+        assert_eq!(refused.message, "blob-egress-capacity");
+        assert_eq!(
+            fixture.session_claim().as_deref(),
+            Some(fixture.replacement.as_str())
+        );
+        drop(held);
+        let edit = fixture.earlier.plaintext_insert(4, " stale");
+        let before = fixture.head();
+        let refused = fixture
+            .record("earlier", Some(&fixture.earlier_claim), &edit)
+            .await;
+        fixture.assert_earlier_edit_refused(before, refused);
+        let refused = fixture.record("unclaimed", None, &edit).await;
+        fixture.assert_earlier_edit_refused(before, refused);
+        fixture.close().await;
+    }
+
+    /// An edit made on the earlier document waits behind the resync that
+    /// moves the session to the replacement. The resync succeeds; the edit
+    /// is still refused.
+    #[tokio::test]
+    async fn an_earlier_edit_queued_behind_a_replacing_resync_is_refused() {
+        let fixture = ReplacedLineage::new("replaced-resync-queued").await;
+        let held = fixture.hold_egress_budget().await;
+        let resync = tokio::spawn(fixture.resync());
+        // The resync holds the session while it waits for egress budget.
+        let waiting = std::time::Instant::now();
+        while fixture.session_claim().as_deref() != Some(fixture.replacement.as_str()) {
+            assert!(
+                waiting.elapsed() < Duration::from_secs(10),
+                "the resync never moved the session"
+            );
+            tokio::task::yield_now().await;
+        }
+        let edit = fixture.earlier.plaintext_insert(4, " stale");
+        let before = fixture.head();
+        let record = tokio::spawn(fixture.record("earlier", Some(&fixture.earlier_claim), &edit));
+        tokio::task::yield_now().await;
+        assert!(!record.is_finished(), "the edit waits behind the resync");
+        drop(held);
+        let (resynced, egress) = resync
+            .await
+            .expect("resync task")
+            .expect("the resync answers once its blob has budget");
+        drop(egress);
+        assert_eq!(resynced["lineageClaimId"], json!(fixture.replacement));
+        let refused = record.await.expect("record task");
+        fixture.assert_earlier_edit_refused(before, refused);
+        fixture.close().await;
+    }
+
+    /// Before any resync, the session still holds the earlier claim, so the
+    /// append's own lineage guard refuses the earlier edit. The editor then
+    /// resyncs onto the replacement and edits that document. The edit records
+    /// under the replacement and settles.
+    #[tokio::test]
+    async fn an_edit_on_the_replacement_records_and_settles() {
+        let fixture = ReplacedLineage::new("replaced-resync-continues").await;
+        let edit = fixture.earlier.plaintext_insert(4, " stale");
+        let before = fixture.head();
+        let refused = fixture
+            .record("earlier", Some(&fixture.earlier_claim), &edit)
+            .await;
+        fixture.assert_earlier_edit_refused(before, refused);
+        let (resynced, egress) = fixture.resync().await.expect("resync");
+        assert_eq!(resynced["lineageClaimId"], json!(fixture.replacement));
+        let winner = dohc_engine_collab::Ydoc::wire();
+        winner
+            .apply(&egress.bytes)
+            .expect("the replacement's state");
+        drop(egress);
+        let edit = winner.plaintext_insert(4, " fresh");
+        let recorded = fixture
+            .record("winner", Some(&fixture.replacement), &edit)
+            .await
+            .expect("an edit on the replacement records");
+        assert_eq!(recorded["lineageClaimId"], json!(fixture.replacement));
+        let settled = fixture
+            .service
+            .ydoc_settle(
+                &RequestContext::unbounded(),
+                Some(fixture.handle.clone()),
+                json!({ "sessionId": fixture.session }),
+            )
+            .await
+            .expect("the replacement settles");
+        assert_eq!(settled["content"], json!("base fresh"));
+        fixture.close().await;
     }
 
     #[test]

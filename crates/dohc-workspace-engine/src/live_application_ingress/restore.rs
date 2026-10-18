@@ -1621,13 +1621,14 @@ mod tests {
         // Restore fences its own document, while a sibling editor retains its lease.
         let opened = f.control("ydoc.open", json!({"versionId":"main","path":"tasks/sibling.md","contentKind":"richdoc","seedFromArtifact":false})).await;
         let session = opened.response.result["sessionId"].clone();
+        let claim = opened.response.result["lineageClaimId"].clone();
         drop(opened);
         let sibling = Ydoc::wire();
         sibling
             .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "# Sibling\n")
             .unwrap();
         drop(f.control("ydoc.recordUpdate", json!({
-            "sessionId":session,"seed":true,
+            "sessionId":session,"seed":true,"expectedLineageClaimId":claim,
             "updateBase64":base64::engine::general_purpose::STANDARD.encode(sibling.encode_full_state())
         })).await);
         let raw = rusqlite::Connection::open(&db).unwrap();

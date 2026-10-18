@@ -2349,7 +2349,7 @@ async fn held_return_interrupted_after_unparking_writes_its_file_after_a_restart
             .encode(dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "settled "));
         host.call(
             "ydoc.recordUpdate",
-            json!({"sessionId": session, "updateBase64": edit}),
+            json!({ "expectedLineageClaimId": null, "sessionId": session, "updateBase64": edit}),
         )
         .await;
         host.call("ydoc.settle", json!({"sessionId": session}))
@@ -2461,7 +2461,7 @@ async fn a_departed_document_keeps_its_head_until_its_session_settles() {
         .encode(dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "unsettled "));
     host.call(
         "ydoc.recordUpdate",
-        json!({"sessionId": session, "updateBase64": edit}),
+        json!({ "expectedLineageClaimId": null, "sessionId": session, "updateBase64": edit}),
     )
     .await;
     // Nothing waits for the relay, so only the session keeps doc-b.
@@ -2681,7 +2681,7 @@ async fn a_document_held_while_live_loses_its_registration_and_session_in_the_sa
         &host.handle,
         host.id,
         "ydoc.recordUpdate",
-        json!({"sessionId": sessions[0], "updateBase64": edit("closed ")}),
+        json!({ "expectedLineageClaimId": null, "sessionId": sessions[0], "updateBase64": edit("closed ")}),
     )
     .await;
 
@@ -2723,7 +2723,7 @@ async fn a_document_held_while_live_loses_its_registration_and_session_in_the_sa
         &host.handle,
         host.id,
         "ydoc.recordUpdate",
-        json!({"sessionId": reopened, "updateBase64": edit("closed ")}),
+        json!({ "expectedLineageClaimId": null, "sessionId": reopened, "updateBase64": edit("closed ")}),
     )
     .await;
     relay.relay().rename(
@@ -2746,7 +2746,7 @@ async fn a_document_held_while_live_loses_its_registration_and_session_in_the_sa
     assert!(live.registered(&registration_b).await);
     host.call(
         "ydoc.recordUpdate",
-        json!({"sessionId": sessions[1], "updateBase64": edit("still open ")}),
+        json!({ "expectedLineageClaimId": null, "sessionId": sessions[1], "updateBase64": edit("still open ")}),
     )
     .await;
 }
@@ -2861,7 +2861,7 @@ async fn a_commit_cancelled_after_it_lands_answers_committed_once_its_close_runs
         &host.handle,
         host.id,
         "ydoc.recordUpdate",
-        json!({"sessionId": session, "updateBase64": edit}),
+        json!({ "expectedLineageClaimId": null, "sessionId": session, "updateBase64": edit}),
     )
     .await;
 }

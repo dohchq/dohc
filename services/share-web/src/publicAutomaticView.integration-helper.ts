@@ -88,8 +88,8 @@ export async function runPublicAutomaticView(options: Options) {
     await pushAll();
     const written = await rpc<{object: {id: string}}>("versionedText.write", {workspaceId, versionId: mainVersionId, path, text: selected.baseline.markdown.toString(), origin: "api"}, randomUUID());
     const objectId = written.object.id as string;
-    const editor = await rpc<{sessionId: string}>("ydoc.open", {versionId: mainVersionId, path, expectedObjectId: objectId, contentKind: "richdoc"});
-    await rpc("ydoc.recordUpdate", {sessionId: editor.sessionId, updateBase64: selected.baseline.checkpoint.toString("base64"), seed: true});
+    const editor = await rpc<{sessionId: string; lineageClaimId: string | null}>("ydoc.open", {versionId: mainVersionId, path, expectedObjectId: objectId, contentKind: "richdoc"});
+    await rpc("ydoc.recordUpdate", {sessionId: editor.sessionId, updateBase64: selected.baseline.checkpoint.toString("base64"), seed: true, expectedLineageClaimId: editor.lineageClaimId});
     await rpc("ydoc.settle", {sessionId: editor.sessionId}); await rpc("ydoc.close", {sessionId: editor.sessionId});
     await pushAll();
     const link = await h.ownerRequest(`/sync/${workspaceId}/shares/links`, {paths: [path], access: "edit"});

@@ -132,6 +132,7 @@ async fn root_bound_replay_composes_real_domains_end_to_end() {
                 "ydoc.recordUpdate",
                 Some(handle.clone()),
                 json!({
+                    "expectedLineageClaimId": null,
                     "sessionId": session_id,
                     "updateBase64": base64::engine::general_purpose::STANDARD.encode(update)
                 }),

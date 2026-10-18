@@ -218,6 +218,7 @@ async fn replay_through_engine(scenario: &Scenario, ordinal: usize, force_cold: 
             request_id,
             "ydoc.recordUpdate",
             json!({
+                "expectedLineageClaimId": null,
                 "sessionId": session_id,
                 "updateBase64": update.update_base64,
                 "actorOriginId": update.author,
