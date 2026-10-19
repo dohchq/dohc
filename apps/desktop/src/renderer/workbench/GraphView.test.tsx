@@ -743,13 +743,17 @@ describe("GraphView", () => {
     ] }));
     const listChatFileMentions = vi.fn(async () => ({ mentions: [mention] }));
     vi.stubGlobal("dohcDesktop", { linksEdges, listChatFileMentions });
-    render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" onOpenPath={vi.fn()} chatMentionsAvailable />);
+    const { rerender } = render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" onOpenPath={vi.fn()} chatMentionsAvailable />);
     await screen.findAllByText("a.md");
     fireEvent.click(screen.getByTestId("graph-chat-mentions-toggle"));
     await screen.findAllByText("Picture discussion");
     expect(listChatFileMentions).toHaveBeenCalledOnce();
     expect(listChatFileMentions).toHaveBeenCalledWith({ workspaceId: "ws", paths: ["a.md", "picture.svg"] });
     expect(screen.getByTestId("graph-link-count").textContent).toBe("2 links");
+    // Opening another file that draws the same files asks for nothing new.
+    rerender(<GraphView workspaceId="ws" activePath="a.md" refreshKey="0" onOpenPath={vi.fn()} chatMentionsAvailable />);
+    await screen.findAllByText("Picture discussion");
+    expect(listChatFileMentions).toHaveBeenCalledOnce();
   });
 
   it("keeps the chat overlay while a refreshed file walk is pending", async () => {

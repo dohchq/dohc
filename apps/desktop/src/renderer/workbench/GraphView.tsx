@@ -842,6 +842,13 @@ export function GraphView(props: {
     return () => { active = false; clearTimeout(timer); if (frame !== undefined) cancelAnimationFrame(frame); resumePaint?.(); };
   }, [requestIdentity, load, props.workspaceId, chatMentionsEnabled]);
 
+  // Keyed on the drawn files, so switching to a file that draws the same set
+  // doesn't sync channels and ask for every mention again.
+  const mentionPathsKey = useMemo(() => {
+    const graph = state.workspaceId === props.workspaceId ? state.graph : null;
+    return JSON.stringify(graph ? visibleGraphNodes(graph, props.activePath, variant).filter(node => node.kind === "file").map(node => node.path) : []);
+  }, [state.graph, state.workspaceId, props.workspaceId, props.activePath, variant]);
+
   useEffect(() => {
     let active = true;
     const graph = state.workspaceId === props.workspaceId ? state.graph : null;
@@ -850,7 +857,7 @@ export function GraphView(props: {
     const retry = () => { if (requestIdentityRef.current === requestIdentity) load(); };
     void (async () => {
       try {
-        const paths = visibleGraphNodes(graph, props.activePath, variant).filter(node => node.kind === "file").map(node => node.path);
+        const paths = JSON.parse(mentionPathsKey) as string[];
         if (!paths.length) return;
         const result = await bridge().listChatFileMentions({ workspaceId: props.workspaceId, paths });
         if (!active || requestIdentityRef.current !== requestIdentity) return;
@@ -861,7 +868,7 @@ export function GraphView(props: {
       }
     })();
     return () => { active = false; };
-  }, [chatMentionsEnabled, walking, state.graph, state.workspaceId, props.workspaceId, props.activePath, variant, requestIdentity, load]);
+  }, [chatMentionsEnabled, walking, state.graph, state.workspaceId, props.workspaceId, mentionPathsKey, requestIdentity, load]);
 
   const scopedState: GraphState =
     state.workspaceId === props.workspaceId &&
