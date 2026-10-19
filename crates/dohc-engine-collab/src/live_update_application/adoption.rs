@@ -51,18 +51,28 @@ mod tests {
     }
     impl Fixture {
         fn new() -> Self {
+            Self::new_before_host(|_, _| {})
+        }
+        /// As [`new`](Self::new), with `before` run on the document before
+        /// its host registers it.
+        fn new_before_host(before: impl FnOnce(&mut EngineStore, &LiveObjectBinding)) -> Self {
             let fixture: Value = serde_json::from_str(include_str!(
                 "../../tests/owner-source/owner-source-seed.json"
             ))
             .unwrap();
             let text = fixture["markdown"].as_str().unwrap().to_owned();
             let bytes: Vec<u8> = serde_json::from_value(fixture["bytes"].clone()).unwrap();
-            Self::with_source(text, bytes)
+            Self::with_source_selectors(text, bytes, vec!["owner.md".into()], before)
         }
         fn with_source(text: String, bytes: Vec<u8>) -> Self {
-            Self::with_source_selectors(text, bytes, vec!["owner.md".into()])
+            Self::with_source_selectors(text, bytes, vec!["owner.md".into()], |_, _| {})
         }
-        fn with_source_selectors(text: String, bytes: Vec<u8>, selectors: Vec<String>) -> Self {
+        fn with_source_selectors(
+            text: String,
+            bytes: Vec<u8>,
+            selectors: Vec<String>,
+            before: impl FnOnce(&mut EngineStore, &LiveObjectBinding),
+        ) -> Self {
             let scratch = ScratchDir::new_named("existing-owner-adoption").unwrap();
             let mut store = EngineStore::open(&scratch.join("engine.db"), 0).unwrap();
             VersionedTextStore::new(&mut store)
@@ -117,6 +127,7 @@ mod tests {
                 selector_paths: selectors,
                 restore_fence_generation: 0,
             };
+            before(&mut store, &binding);
             let mut owner = ApplicationOwner::new("workspace".into()).unwrap();
             let handle = owner
                 .register(
@@ -1499,7 +1510,7 @@ pub fn adopt_owner_committed(
             }
             // A successor's coverage held when it adopted; its carried entries
             // apply after that. Its evidence binds the prefix it adopted.
-            if cut.retained_prefix.is_none() && outbox_coverage(tx,b,&cut.events,max_events,Some(saved.covered_outbox_sequence))? != (saved.coverage_digest,saved.covered_outbox_sequence) { return Err(ApplicationError::Corrupt); }
+            if cut.retained_prefix.is_none() && outbox_coverage(tx,&held,&key,&cut.events,max_events,Some(saved.covered_outbox_sequence))? != (saved.coverage_digest,saved.covered_outbox_sequence) { return Err(ApplicationError::Corrupt); }
             return Ok(OwnerAdoptionAck {adoption_id:cut.adoption_id.clone(),local_ydoc_sequence:sequence,terminal_cursor:cursor,adoption_replayed:true});
         }
         // Opus, round 3b: a retirement still settling the document decides
@@ -1549,7 +1560,7 @@ pub fn adopt_owner_committed(
                 if journal.has_missing_updates() {
                     return Err(invalid("owner adoption journal does not account for durable state"));
                 }
-                let (coverage,covered_sequence) = outbox_coverage(tx, b, &cut.events, max_events,None)?;
+                let (coverage,covered_sequence) = outbox_coverage(tx, &held, &key, &cut.events, max_events,None)?;
                 let seed = !crate::replay_parity::structurally_equal_v2(&local, &journal)?;
                 if seed {
                     let existing_outbox: bool = tx.query_row(
@@ -1692,13 +1703,19 @@ pub(super) fn require_local_replay_budget(
     usize::try_from(total).map_err(|_| ApplicationError::Corrupt)
 }
 
+/// A first adoption's coverage of the outbox at its binding: each entry
+/// through the terminal sequence either an Owner receipt from the cut, in
+/// journal order, or a strictly refused draft. A first adoption follows no
+/// adopted chain, so a refused native source refuses it.
 fn outbox_coverage(
     conn: &Connection,
-    b: &LiveObjectBinding,
+    held: &Registration,
+    key: &DocKey,
     events: &[AdmittedLiveUpdate],
     max_events: usize,
     replay_sequence: Option<i64>,
 ) -> Result<(String, i64), ApplicationError> {
+    let b = &held.binding;
     let parent: Option<(String,String,String,i64,i64)> = conn.query_row(
         "SELECT outbox_id,state,base_update_digest,pending_bytes,next_sequence FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND current_path=?5 AND restore_fence_generation=?6",
         params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.current_path,b.restore_fence_generation],
@@ -1725,7 +1742,7 @@ fn outbox_coverage(
         {
             return Err(invalid("owner adoption outbox is not drained"));
         }
-        let mut query = conn.prepare("SELECT sequence,delivery_id,update_digest,pending FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND sequence<=?2 ORDER BY sequence LIMIT ?3").map_err(read_sql)?;
+        let mut query = conn.prepare("SELECT sequence,delivery_id,update_digest,pending,terminal_reason IS NOT NULL OR terminal_blob_digest IS NOT NULL FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND sequence<=?2 ORDER BY sequence LIMIT ?3").map_err(read_sql)?;
         let rows = query
             .query_map(params![id, terminal, max_events as i64 + 1], |r| {
                 Ok((
@@ -1733,32 +1750,58 @@ fn outbox_coverage(
                     r.get::<_, String>(1)?,
                     r.get::<_, String>(2)?,
                     r.get::<_, i64>(3)?,
+                    r.get::<_, bool>(4)?,
                 ))
             })
             .map_err(read_sql)?;
+        let mut cursor = 0;
         for row in rows {
-            let (sequence, delivery, digest, pending) = row.map_err(read_sql)?;
+            let (sequence, delivery, digest, pending, terminal) = row.map_err(read_sql)?;
             if sequence != coverage.len() as i64 + 1 || pending != 0 {
                 return Err(ApplicationError::Conflict);
             }
-            let accepted = receipts
-                .get(&delivery)
+            let Some(accepted) = receipts.get(&delivery) else {
+                let refusal = retirement::refused_entry(
+                    conn,
+                    &held.namespace,
+                    key,
+                    &b.lineage_claim_id,
+                    &id,
+                    sequence,
+                )?
                 .ok_or(invalid("owner adoption receipt coverage missing"))?;
+                if refusal.source.is_some() {
+                    return Err(ApplicationError::Conflict);
+                }
+                coverage.push((
+                    sequence,
+                    retirement::Disposition::Refused {
+                        delivery_id: refusal.delivery_id,
+                        update_digest: refusal.update_digest,
+                        terminal_reason: refusal.terminal_reason,
+                    },
+                ));
+                continue;
+            };
             let receipt = &accepted.receipt;
-            if receipt.update_digest != digest
+            // Acceptance evidence beside terminal evidence contradicts itself.
+            if terminal
+                || receipt.update_digest != digest
                 || !matches!(
                     accepted.authority,
                     ServerDerivedLiveUpdateAuthority::Owner { .. }
                 )
-                || coverage
-                    .last()
-                    .is_some_and(|(_, previous): &(i64, LiveUpdateReceipt)| {
-                        previous.journal_cursor >= receipt.journal_cursor
-                    })
+                || receipt.journal_cursor <= cursor
             {
                 return Err(ApplicationError::Conflict);
             }
-            coverage.push((sequence, receipt.clone()));
+            cursor = receipt.journal_cursor;
+            coverage.push((
+                sequence,
+                retirement::Disposition::Receipt {
+                    receipt: receipt.clone(),
+                },
+            ));
         }
         if coverage.len() as i64 != terminal {
             return Err(invalid("owner adoption retained outbox coverage missing"));

@@ -519,8 +519,10 @@ pub(crate) struct Refusal {
 
 /// The one representation of a delivery a host refused, for release and
 /// succession alike: terminal with a valid reason, never acknowledged,
-/// accepted or applied in `namespace`, and keeping exactly its own bytes. Its
-/// reason alone proves nothing, and an abandoned seed's is never a refusal.
+/// accepted or applied in `namespace`, and keeping exactly its own bytes. A
+/// native update's journal row proves its source, and a seed's capture
+/// proves its. Its reason alone proves nothing, and an abandoned seed's is
+/// never a refusal.
 /// A refusal stays terminal: whoever reads it records it, and grants nothing.
 pub(super) fn refused_entry(
     conn: &Connection,
@@ -575,6 +577,11 @@ pub(super) fn refused_entry(
                 &update_digest,
             )?;
             source.verify_retained_row(conn).map_err(outbox_error)?;
+            if matches!(source.origin, OwnerOutboxNativeOrigin::AdoptionSeed)
+                && !captured_seed(conn, namespace, doc, lineage, &source)?
+            {
+                return Ok(None);
+            }
             Some(source)
         }
     };
@@ -586,10 +593,54 @@ pub(super) fn refused_entry(
     }))
 }
 
+/// Whether `source` is the adoption seed its activation queued: the
+/// activation it names adopted this lineage, and that activation's retained
+/// capture holds exactly the seed's native sequence and full state. A seed
+/// has no journal row, so its capture is its provenance.
+fn captured_seed(
+    conn: &Connection,
+    namespace: &str,
+    doc: &DocKey,
+    lineage: &str,
+    source: &OwnerOutboxNativeSource,
+) -> Result<bool, ApplicationError> {
+    if !matches!(source.origin, OwnerOutboxNativeOrigin::AdoptionSeed)
+        || !activation_by_id(conn, namespace, &source.adoption_id)?.is_some_and(|found| {
+            found.key == *doc && found.lineage_claim_id == lineage && found.adoption.is_some()
+        })
+    {
+        return Ok(false);
+    }
+    let captured: Option<(String, String)> = conn
+        .query_row(
+            "SELECT full_state_digest,descriptor_json FROM ydoc_owner_activation_sources
+             WHERE activation_id=?1 AND relay_database_namespace=?2 AND workspace_id=?3
+               AND version_id=?4 AND object_id=?5 AND lineage_claim_id=?6",
+            params![
+                source.adoption_id,
+                namespace,
+                doc.workspace_id,
+                doc.version_id,
+                doc.object_id,
+                lineage
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(read_sql)?;
+    let Some((captured_digest, descriptor)) = captured else {
+        return Ok(false);
+    };
+    let captured: ImportedOwnerSource =
+        serde_json::from_str(&descriptor).map_err(|_| ApplicationError::Corrupt)?;
+    Ok(captured_digest == source.update_digest
+        && captured.native_head_sequence == source.native_sequence)
+}
+
 /// Whether `entry` is the retiring activation's adoption seed, never
-/// delivered: its source matches the retained activation source, nothing
-/// accepted or applied its delivery, and nothing applied after the
-/// activation's cut, through its release fence once released.
+/// delivered: its capture proves it, nothing accepted or applied its
+/// delivery, and nothing applied after the activation's cut, through its
+/// release fence once released.
 fn undelivered_seed(
     conn: &Connection,
     namespace: &str,
@@ -603,38 +654,17 @@ fn undelivered_seed(
     else {
         return Ok(false);
     };
-    if !matches!(entry.source.origin, OwnerOutboxNativeOrigin::AdoptionSeed)
-        || entry.source.adoption_id != retiring.activation_id
+    let doc = &retiring.doc;
+    if entry.source.adoption_id != retiring.activation_id
         || entry.source.native_sequence != adopted.local_ydoc_sequence
         || entry.receipt.is_some()
-    {
-        return Ok(false);
-    }
-    let doc = &retiring.doc;
-    let captured: Option<(String, String)> = conn
-        .query_row(
-            "SELECT full_state_digest,descriptor_json FROM ydoc_owner_activation_sources
-             WHERE activation_id=?1 AND relay_database_namespace=?2 AND workspace_id=?3
-               AND version_id=?4 AND object_id=?5 AND lineage_claim_id=?6",
-            params![
-                retiring.activation_id,
-                namespace,
-                doc.workspace_id,
-                doc.version_id,
-                doc.object_id,
-                retiring.lineage_claim_id
-            ],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(read_sql)?;
-    let Some((captured_digest, descriptor)) = captured else {
-        return Ok(false);
-    };
-    let captured: ImportedOwnerSource =
-        serde_json::from_str(&descriptor).map_err(|_| ApplicationError::Corrupt)?;
-    if captured_digest != entry.update_digest
-        || captured.native_head_sequence != entry.source.native_sequence
+        || !captured_seed(
+            conn,
+            namespace,
+            doc,
+            &retiring.lineage_claim_id,
+            &entry.source,
+        )?
     {
         return Ok(false);
     }
@@ -1297,7 +1327,8 @@ fn delete_own_binding(
 
 /// A never-adopted source's release: a released row with its retained source
 /// identity, following its lineage's released tail and keeping that tail's
-/// boundary and carried deliveries.
+/// boundary and carried deliveries. A never-adopted release records release
+/// order; its predecessor may differ from the capture descriptor.
 fn release_unadopted(
     tx: &Transaction<'_>,
     scope: &RetirementScope<'_>,

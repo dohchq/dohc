@@ -1992,7 +1992,7 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
     let mut selectors = vec!["owner.md".into()];
     selectors.extend((0..99).map(|i| format!("z{i:02}{}", "x".repeat(1020))));
     selectors.sort();
-    let mut f = Fixture::with_source_selectors(source, baseline.clone(), selectors);
+    let mut f = Fixture::with_source_selectors(source, baseline.clone(), selectors, |_, _| {});
     f.adopt().unwrap();
     mark("fixture");
     let mut terminal = None;
