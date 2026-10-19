@@ -128,7 +128,7 @@ impl ActorHandle {
                     if aliases.first().is_none_or(|s| s.object != after.object || s.key != after.key) { return Err(corrupt()); }
                 }
                 let mut stmt = c.prepare_cached(&format!("{columns}a.path>?3 ORDER BY a.path LIMIT ?4")).map_err(sql)?;
-                aliases.extend(stmt.query_map(params![ws,version,after.path,101-aliases.len()],read_source).map_err(sql)?
+                aliases.extend(stmt.query_map(params![ws,version,after.path,(101-aliases.len()) as i64],read_source).map_err(sql)?
                     .collect::<Result<Vec<_>,_>>().map_err(sql)?);
                 let alias_count = aliases.len();
                 let mut sources = Vec::new();
@@ -139,7 +139,7 @@ impl ActorHandle {
                     if markdown(&source.path) && let Some(key) = &source.key {
                         let ordinal = if source.path == after.path && !after.finished { after.ordinal } else { -1 };
                         let mut stmt = c.prepare_cached("SELECT ordinal,literal,kind FROM links WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND index_key=?4 AND ordinal>?5 ORDER BY ordinal LIMIT ?6").map_err(sql)?;
-                        source.rows = stmt.query_map(params![ws,version,source.object,key,ordinal,remaining], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))
+                        source.rows = stmt.query_map(params![ws,version,source.object,key,ordinal,remaining as i64], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))
                             .map_err(sql)?.collect::<Result<Vec<_>,_>>().map_err(sql)?;
                         source.more = source.rows.len() == remaining;
                         remaining -= source.rows.len();

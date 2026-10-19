@@ -434,6 +434,7 @@ dependencies = [
  "file-id",
  "fs4",
  "rusqlite",
+ "serde",
  "serde_json",
  "thiserror",
  "tokio",
