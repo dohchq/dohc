@@ -103,8 +103,19 @@ function readKeychainStatus(path) {
 // own session has no terminal, so it reads the password from its input, which
 // no other program can see.
 function unlockWithPassword(keychain, password) {
-  const result = spawnSync("security", ["unlock-keychain", keychain], { input: `${password}\n`, detached: true, encoding: "utf8", timeout: 60_000 });
+  const result = spawnSync("security", ["unlock-keychain", keychain], { input: Buffer.concat([password, Buffer.from("\n")]), detached: true, encoding: "utf8", timeout: 60_000 });
   return { status: result.error ? null : result.status, stderr: result.error?.message ?? result.stderr ?? "" };
+}
+
+// -w prints a password with non-ASCII text or a control character as bare hex,
+// which a password of hex digits also looks like. -g marks that form with 0x
+// and quotes every other password.
+function savedPassword(output) {
+  const line = output.split("\n").find(entry => entry.startsWith("password: ")) ?? "";
+  const hex = /^password: 0x([0-9A-F]+) {2}"/.exec(line);
+  if (hex) return Buffer.from(hex[1], "hex");
+  const quoted = /^password: "(.*)"$/.exec(line);
+  return quoted ? Buffer.from(quoted[1]) : null;
 }
 
 /** Locks the release keychain, and returns why it could not, or null. */
@@ -293,10 +304,11 @@ export async function unlockReleaseKeychain(plan, purpose, {
     if (failure) throw new Error(failure);
   }
   // add-generic-password saves to the default keychain, so the search covers the keychain list, which excludes the release keychain.
-  const saved = run("security", ["find-generic-password", "-s", SAVED_PASSWORD_SERVICE, "-w"]);
+  const saved = run("security", ["find-generic-password", "-s", SAVED_PASSWORD_SERVICE, "-g"]);
   if (saved.status === 0) {
     console.log(`\n${purpose} unlocks the release keychain with the password saved in the login keychain.`);
-    const result = unlockWith(plan.keychain, saved.stdout.replace(/\n$/, ""));
+    const password = savedPassword(`${saved.stdout}\n${saved.stderr}`);
+    const result = password ? unlockWith(plan.keychain, password) : { status: null, stderr: "security printed no password." };
     if (result.status !== 0 || !unlocked()) {
       throw new Error(`The password saved as ${SAVED_PASSWORD_SERVICE} in the login keychain did not unlock the release keychain: ${result.stderr.trim()}\nSave the right one, or delete it, as docs/engineering/desktop-release.md describes. Nothing was signed or uploaded.`);
     }

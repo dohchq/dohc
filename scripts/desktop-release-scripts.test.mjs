@@ -1197,6 +1197,7 @@ test("the release keychain unlocks through security in a terminal, and otherwise
 test("a password saved in the login keychain unlocks the release keychain without anyone at the Mac", async () => {
   const plan = { keychain: KEYCHAIN };
   let open = false;
+  let saved = 'keychain: "/Users/maker/Library/Keychains/login.keychain-db"\npassword: "pass "word" %s"\n';
   const calls = [];
   const unlocks = [];
   const keychain = {
@@ -1205,17 +1206,17 @@ test("a password saved in the login keychain unlocks the release keychain withou
     run: (command, args) => {
       calls.push([command, ...args].join(" "));
       if (args[0] === "lock-keychain") open = false;
-      return { status: 0, stdout: 'pass "word" \\ %s\n', stderr: "" };
+      return { status: 0, stdout: "", stderr: saved };
     },
     interactive: true,
     cancelled: () => false,
     wait: async () => assert.fail("nothing waits for someone to unlock the keychain"),
-    unlockWith: (path, password) => { unlocks.push([path, password]); open = true; return { status: 0, stderr: "" }; },
+    unlockWith: (path, password) => { unlocks.push([path, password.toString()]); open = true; return { status: 0, stderr: "" }; },
   };
-  const lookup = `security find-generic-password -s ${SAVED_PASSWORD_SERVICE} -w`;
+  const lookup = `security find-generic-password -s ${SAVED_PASSWORD_SERVICE} -g`;
   await unlockReleaseKeychain(plan, "Checking the signing identity", keychain);
   assert.deepEqual(calls, [lookup]);
-  assert.deepEqual(unlocks, [[KEYCHAIN, 'pass "word" \\ %s']], "the password passes as saved, without its final newline");
+  assert.deepEqual(unlocks, [[KEYCHAIN, 'pass "word" %s']], "a quoted password passes as saved");
 
   // Before packaging, an open keychain is locked, then unlocked with the saved password again.
   calls.length = 0;
@@ -1224,7 +1225,20 @@ test("a password saved in the login keychain unlocks the release keychain withou
   assert.equal(unlocks.length, 2);
   assert.equal(open, true);
 
+  // security prints a password with a backslash, a control character, or non-ASCII text as hex.
   open = false;
+  saved = 'password: 0x70C3A4737377C3B67264  "p\\303\\244ssw\\303\\266rd"\n';
+  await unlockReleaseKeychain(plan, "Packaging", keychain);
+  assert.deepEqual(unlocks.at(-1), [KEYCHAIN, "pässwörd"]);
+  open = false;
+  saved = 'password: "0x41  "A""\n';
+  await unlockReleaseKeychain(plan, "Packaging", keychain);
+  assert.deepEqual(unlocks.at(-1), [KEYCHAIN, '0x41  "A"'], "a quoted password that looks like hex stays as typed");
+
+  open = false;
+  saved = 'keychain: "/Users/maker/Library/Keychains/login.keychain-db"\n';
+  await assert.rejects(unlockReleaseKeychain(plan, "Packaging", keychain), /did not unlock the release keychain: security printed no password/);
+  saved = 'password: "pass"\n';
   await assert.rejects(
     unlockReleaseKeychain(plan, "Packaging", { ...keychain, unlockWith: () => ({ status: 51, stderr: "The user name or passphrase you entered is not correct." }) }),
     /dohc-release-keychain-password in the login keychain did not unlock the release keychain: The user name or passphrase/,
@@ -1233,7 +1247,8 @@ test("a password saved in the login keychain unlocks the release keychain withou
     "a keychain that stays locked fails even when security reports success");
 });
 
-test("the saved password reaches security on its input, in a session of its own, and never in its arguments", async t => {
+// The fake security is a POSIX shell script. The unlock it stands in for runs only on macOS.
+test("the saved password reaches security on its input, in a session of its own, and never in its arguments", { skip: process.platform === "win32" }, async t => {
   const bin = await mkdtemp(join(tmpdir(), "dohc-security-"));
   const record = join(bin, "record");
   // A session leader's process group is its own process ID, and a new session has no terminal.
@@ -1248,7 +1263,7 @@ cat >> "${record}"
   const password = 'pass "word" \\ %s';
   await unlockReleaseKeychain({ keychain: KEYCHAIN }, "Packaging", {
     keychainStatus: () => (existsSync(record) ? 7 : 2),
-    run: () => ({ status: 0, stdout: `${password}\n`, stderr: "" }),
+    run: () => ({ status: 0, stdout: "", stderr: `password: 0x${Buffer.from(password).toString("hex").toUpperCase()}  "escaped"\n` }),
     step: async () => assert.fail("nobody is asked for the password"),
     interactive: true,
     cancelled: () => false,
