@@ -2,8 +2,7 @@ import { parseApprovalAgent } from "@dohc/security-contract/approval-provenance"
 import { readBoundedJson } from "@dohc/service-http";
 import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
 import { JournalError } from "@dohc/app-backend-runtime/journal";
-import { DatasetHostError } from "@dohc/app-backend-runtime/dataset-host";
-import { DatasetBindingPendingAttemptError } from "@dohc/app-backend-runtime/dataset-error";
+import { DatasetHostError, DatasetBindingPendingAttemptError } from "@dohc/app-backend-runtime/dataset-error";
 import { isDatasetReopenWaitError, isDatasetWorkerFailure } from "@dohc/app-backend-runtime/supervisor";
 import { parseDatasetRevision } from "@dohc/security-contract/dataset";
 import { parseDatasetAttemptRequest } from "@dohc/security-contract/dataset-attempts";

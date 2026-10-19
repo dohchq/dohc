@@ -492,9 +492,16 @@ it("binds another app while retaining a committed guest response attempt", async
   const attempts = createDatasetAttempts({db: f.db, transaction: f.transaction, account() {}});
   const selected = {...scope, appId: "form", principalKey: "friend", operationId: id(6), revisionSha256: prepared.revision.revisionSha256};
   attempts.request(selected, {action: "save", idempotencyKey: "request", input: {value: "saved"}}, () => {});
-  await f.invoke("friend", id(6), {value: "saved"}, "form");
+  const saved = await f.invoke("friend", id(6), {value: "saved"}, "form");
+  const receipts = f.db.prepare("SELECT * FROM dohc_dataset_receipts WHERE workspace_id=? AND dataset_id=?");
+  const savedReceipts = receipts.all(scope.workspaceId, scope.datasetId);
+  const events = f.db.prepare("SELECT * FROM dohc_dataset_events WHERE workspace_id=? AND dataset_id=? ORDER BY revision");
+  const savedEvents = events.all(scope.workspaceId, scope.datasetId);
   expect(f.host.pendingAttempts("owner", scope).entries).toMatchObject([{outcome: "committed"}]);
   expect(() => f.host.setBinding("owner", {...scope, appId: "dashboard", binding: f.binding([id(7)])})).not.toThrow();
+  expect(await f.invoke("friend", id(6), {value: "saved"}, "form")).toEqual({...saved, replayed: true});
+  expect(receipts.all(scope.workspaceId, scope.datasetId)).toEqual(savedReceipts);
+  expect(events.all(scope.workspaceId, scope.datasetId)).toEqual(savedEvents);
   expect(f.host.lifecycle("owner", scope).apps).toEqual(expect.arrayContaining([{appId: "dashboard", binding: f.binding([id(7)])}]));
   expect(f.host.pendingAttempts("owner", scope).entries).toHaveLength(1);
 });
