@@ -792,6 +792,15 @@ async fn repeating_member_errors_stop_after_three_attempts_across_opens() {
 }
 #[tokio::test(flavor = "multi_thread")]
 async fn parked_rename_after_restart_completes_and_allows_version_switch() {
+    parked_rename_after_restart(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn retry_held_after_parked_rename_captures_edit_and_places_selected_version() {
+    parked_rename_after_restart(true).await;
+}
+
+async fn parked_rename_after_restart(held: bool) {
     let (root, supervisor, actor) = setup(3);
     actor
         .create_named_version(
@@ -825,6 +834,33 @@ async fn parked_rename_after_restart_completes_and_allows_version_switch() {
         .open(&engine_db_path(&root).unwrap(), 20)
         .unwrap()
         .actor;
+    if held {
+        // Capture pins the outside observation to its source version before replay.
+        actor
+            .run(|store, _| {
+                store.write_with(&NoFaults, |tx| {
+                    dohc_engine_storage::capture_file_holds::record_in(
+                        tx,
+                        &dohc_engine_storage::capture_file_holds::CaptureFileHold {
+                            workspace_id: WS.into(),
+                            source_version_id: "main".into(),
+                            object_id: "mover".into(),
+                            path: "old.md".into(),
+                            observed_sha256: dohc_engine_storage::hex_sha256(b"outside edit"),
+                            observed_size: 12,
+                            reason: dohc_engine_storage::capture_file_holds::NOT_REPRESENTABLE
+                                .into(),
+                            observed_at_ms: 20,
+                            attempt_count: 1,
+                            retry_requested: false,
+                        },
+                    )
+                })?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
     let result = run(&actor, &root, "parked-resume", Arc::new(NoFaults))
         .await
         .unwrap();
@@ -847,7 +883,7 @@ async fn parked_rename_after_restart_completes_and_allows_version_switch() {
             |_| {},
         )
         .await;
-    assert!(!placed.materialized, "conflicting placement stays parked");
+    assert!(!placed.materialized, "held placement stays parked");
     assert_eq!(
         std::fs::read_to_string(root.join("old.md")).unwrap(),
         "outside edit"
@@ -864,12 +900,14 @@ async fn parked_rename_after_restart_completes_and_allows_version_switch() {
         .run(move |store, _| {
             let job = store.load_materialization_job(&expected_write)?.unwrap();
             assert_eq!(job.target_path, "old.md");
-            assert_ne!(
-                job.status,
-                JobStatus::Complete,
-                "rename placement remains for Retry held"
-            );
-            eprintln!("parked rename job: {job:?}");
+            assert_ne!(job.status, JobStatus::Complete);
+            if held {
+                assert_eq!(
+                    job.status,
+                    JobStatus::Pending,
+                    "held placement remains pending"
+                );
+            }
             Ok(())
         })
         .await
@@ -895,16 +933,16 @@ async fn parked_rename_after_restart_completes_and_allows_version_switch() {
         ),
         "{switched:?}"
     );
-    actor.run(move |store, _| {
+    let switch_job = actor.run(move |store, _| {
         let write = store.load_materialization_job(&parked_write)?.unwrap();
         assert_ne!(write.status, JobStatus::Complete);
         let incomplete: Vec<(String,String,String)> = store.read_with(|conn| {
             conn.prepare("SELECT job_id,target_path,status FROM materialization_jobs WHERE workspace_id=?1 AND status!='complete' AND job_id GLOB 'version-switch-*'")?.query_map([WS], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?.collect::<Result<_,_>>()
         }).map_err(StorageError::corrupt_public)?;
-        eprintln!("switch incomplete jobs: {incomplete:?}; parked rename write: {write:?}");
         assert_eq!(incomplete.len(), 1, "only the parked rename path remains incomplete");
         assert_eq!(incomplete[0].1, write.target_path, "the switch reports that same parked path");
-        Ok(())
+        assert_eq!(incomplete[0].2, "pending");
+        Ok(incomplete[0].0.clone())
     }).await.unwrap();
     assert_eq!(
         std::fs::read_to_string(root.join("old.md")).unwrap(),
@@ -914,6 +952,100 @@ async fn parked_rename_after_restart_completes_and_allows_version_switch() {
         actor.active_version(WS.into()).await.unwrap().version_id,
         "other"
     );
+
+    if !held {
+        close(supervisor).await;
+        return;
+    }
+    assert!(
+        actor
+            .retry_capture_file(WS.into(), "old.md".into())
+            .await
+            .unwrap()
+    );
+    let captured = actor
+        .capture_ingest(
+            dohc_engine_domain::CaptureIngest {
+                workspace_id: WS.into(),
+                version_id: "other".into(),
+                path: "old.md".into(),
+                text: "outside edit".into(),
+                metadata_origin: "capture".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 23,
+                request_id: None,
+                claim_foreign_head: true,
+            },
+            dohc_engine_collab::LeaseRegistry::new(),
+            Arc::new(NoFaults),
+            crate::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(captured.released_capture_hold);
+    assert_eq!(captured.snapshot.version_id, "main");
+    assert_eq!(captured.snapshot.text, "outside edit");
+    struct ExistingRoot;
+    impl WorkspaceRootGuard for ExistingRoot {
+        fn validate(&self, root: &Path) -> Result<(), RuntimeError> {
+            root.is_dir().then_some(()).ok_or(RuntimeError::Identity {
+                reason: "test workspace root disappeared",
+                source: None,
+            })
+        }
+    }
+    // Retry held captures the observation, then places the selected version's job.
+    actor
+        .finish_capture_pass(
+            WS.into(),
+            root.to_path_buf(),
+            CapturePassSettlement {
+                paths: vec![CapturePlacementPath {
+                    path: "old.md".into(),
+                    released_hold: captured.released_capture_hold,
+                }],
+                repair_recoveries: false,
+            },
+            Arc::new(()),
+            24,
+            Arc::new(ExistingRoot),
+        )
+        .await
+        .unwrap();
+    actor
+        .run(move |store, _| {
+            let placed = store.load_materialization_job(&switch_job)?.unwrap();
+            assert_eq!(placed.status, JobStatus::Complete);
+            assert_eq!(placed.target_path, "old.md");
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(
+        actor
+            .capture_file_holds(WS.into())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(!root.join("old.md").exists());
+    assert_eq!(
+        std::fs::read_to_string(root.join("new.md")).unwrap(),
+        "move body"
+    );
+    let retained = actor
+        .versioned_text_read(
+            WS.into(),
+            "main".into(),
+            "old.md".into(),
+            crate::CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.text, "outside edit");
     close(supervisor).await;
 }
 
