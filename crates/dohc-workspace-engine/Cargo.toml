@@ -8,6 +8,7 @@ publish.workspace = true
 description = "The workspace engine daemon the desktop app runs: composes the engine crates behind the framed stdio protocol."
 
 [dependencies]
+dohc-engine-reader = { path = "../dohc-engine-reader" }
 # Constant-time token comparison on the daemon handshake. Already in the
 # lockfile transitively; this makes it a direct dependency.
 subtle = { version = "2.6", default-features = false }

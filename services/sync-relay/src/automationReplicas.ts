@@ -132,7 +132,7 @@ export async function startAutomationReplicas(options: {
       const exited = new AbortController();
       const started = await createEngineClient({
         command: options.engineExecutable, authToken: randomBytes(32).toString("base64url"),
-        env: {DOHC_ENGINE_OWNER_HOST_CONFIG: configPath},
+        env: {DOHC_ENGINE_OWNER_HOST_CONFIG: configPath, DOHC_ENGINE_READER_CONFIG: process.env.DOHC_ENGINE_READER_CONFIG},
         privateLiveApplication: selfHostedLiveProfile.nativeClient,
         protocolVersion: 2, capabilities: ["blobs"], connectTimeoutMs: REQUEST_DEADLINE_MS, signal,
         onExit: () => {

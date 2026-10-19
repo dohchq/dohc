@@ -14,6 +14,8 @@ mod events;
 mod file_observation;
 #[doc(hidden)]
 pub mod live_application_ingress;
+#[cfg(test)]
+mod reader_runtime_tests;
 pub mod root_binding;
 mod rpc;
 
@@ -65,6 +67,7 @@ use std::sync::MutexGuard;
 /// cross-service or aliased attachments remain rejected so barriers cannot split.
 pub struct EngineService {
     replica_mode: Option<replica_mode::ReplicaMode>,
+    reader: std::sync::OnceLock<dohc_engine_reader::Reader>,
     supervisor: &'static WorkspaceSupervisor,
     handles: Mutex<HashMap<WorkspaceHandle, Arc<OpenWorkspace>>>,
     live_applications: Arc<Mutex<rpc::live_application::Registry>>,
@@ -155,6 +158,13 @@ impl EngineService {
         Ok(())
     }
 
+    /// Trusted host startup only. No protocol or workspace field configures the reader.
+    pub fn configure_reader(&self, config: dohc_engine_reader::Config) {
+        let _ = self
+            .reader
+            .set(dohc_engine_reader::Reader::new(Some(config)));
+    }
+
     pub fn new() -> Self {
         Self::with_supervisor(WorkspaceSupervisor::global())
     }
@@ -171,6 +181,7 @@ impl EngineService {
     fn with_supervisor(supervisor: &'static WorkspaceSupervisor) -> Self {
         EngineService {
             replica_mode: None,
+            reader: std::sync::OnceLock::new(),
             supervisor,
             handles: Mutex::new(HashMap::new()),
             live_applications: Arc::new(Mutex::new(rpc::live_application::Registry::default())),

@@ -564,6 +564,7 @@ dependencies = [
  "dohc-engine-domain",
  "dohc-engine-files",
  "dohc-engine-protocol",
+ "dohc-engine-reader",
  "dohc-engine-runtime",
  "dohc-engine-storage",
  "dohc-engine-sync",

@@ -57,6 +57,7 @@ const PARTS = [
   "frontmatter-as-written",
   "title-bar-status",
   "capture-recovery",
+  "recovery-row",
   "about",
   "sharing",
   "usage-record",

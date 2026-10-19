@@ -290,6 +290,11 @@ export function createDesktopCliServer<State>(
             ),
           );
         },
+        async collectionsWaiting() {
+          const waiting = await withEngineAdapter(workspace, async (adapter) => await adapter.collectionsWaiting());
+          if (waiting === null) throw new Error("The workspace engine is not running.");
+          return waiting;
+        },
       },
       // Engine-backed collection reads and writes for the CLI/MCP verbs.
       // withEngineAdapter derives the attachment (and share-view session mode)

@@ -573,12 +573,12 @@ describe("VersionComparePage paging", () => {
 
     view.rerender(<VersionComparePage workspaceId="ws-1" versionId="v-2" />);
     await settle();
-    screen.getByText("Second compared with Main");
+    screen.getByRole("heading", { name: "Second compared with Main" });
 
     resolveFirst({ files: [compareRow("first.md")], nextAfterPath: null });
     await settle();
 
-    screen.getByText("Second compared with Main");
+    screen.getByRole("heading", { name: "Second compared with Main" });
     expect(
       screen.getByTestId("version-compare-file").dataset.comparePath,
       "omit the response guard's cleanup invalidation. The first comparison replaces the second version's heading and file here.",
@@ -607,11 +607,11 @@ describe("VersionComparePage paging", () => {
     );
     render(<VersionComparePage workspaceId="ws-1" versionId="v-1" />);
     await settle();
-    screen.getByText("More than one file differs between Feature and Main.");
+    expect(screen.getByTestId("version-compare-count").textContent).toBe("1+ files");
 
     fireEvent.click(screen.getByTestId("version-compare-show-more"));
     await settle();
-    screen.getByText("2 files differ between Feature and Main.");
+    expect(screen.getByTestId("version-compare-count").textContent).toBe("2 files");
     expect(screen.getAllByTestId("version-compare-file")).toHaveLength(2);
     expect(screen.queryByTestId("version-compare-show-more")).toBeNull();
     expect(bridgeMock.compareWorkspaceVersions.mock.calls).toEqual([

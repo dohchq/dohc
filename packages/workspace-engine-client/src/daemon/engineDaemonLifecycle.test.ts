@@ -154,6 +154,16 @@ class SelfExitingClient extends FakeClient {
 
 const scratchPaths: string[] = [];
 
+it("passes explicit reader startup configuration to every engine launch", async () => {
+  const readerConfig = '{"node":"/installed/node","bundle":"/installed/reader.cjs","manifest":"/installed/manifest.json"}';
+  const launch = vi.fn(async () => new FakeClient());
+  const lifecycle = new EngineDaemonLifecycle({ command: fakeBinary(), readerConfig, launch });
+  try {
+    await lifecycle.start();
+    expect(launch).toHaveBeenCalledWith(expect.objectContaining({ env: expect.objectContaining({ DOHC_ENGINE_READER_CONFIG: readerConfig }) }));
+  } finally { await lifecycle.stop(); }
+});
+
 function fakeBinary(): string {
   const directory = mkdtempSync(join(tmpdir(), "dohc-engine-lifecycle-test-"));
   scratchPaths.push(directory);

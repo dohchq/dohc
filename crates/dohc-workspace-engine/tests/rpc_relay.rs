@@ -114,6 +114,8 @@ struct RelayState {
     workspace_log_delay: Option<Duration>,
     workspace_log_started: Option<Arc<AtomicBool>>,
     workspace_page_limit: Option<usize>,
+    // Refuse every claim for good.
+    refuse_claims: bool,
 }
 
 struct FakeRelay {
@@ -187,6 +189,12 @@ fn handle_request(state: &Arc<Mutex<RelayState>>, request: TestRequest) -> TestR
     state.requests.push((method.clone(), path.clone()));
 
     if method == "POST" && path == "/sync/workspaces" {
+        if state.refuse_claims {
+            return TestResponse {
+                status: 409,
+                ..TestResponse::json(json!({ "code": "stream_identity_mismatch" }))
+            };
+        }
         return TestResponse::json(json!({ "ok": true }));
     }
     if path.ends_with("/keys") {
@@ -3208,6 +3216,8 @@ async fn two_page_pull_keeps_relation_to_target_arriving_on_second_page() {
         }),
     )
     .await;
+    // The terminal commit ends the pull, and capture then reconciles.
+    flush_capture(&transport, &handle, &mut id).await;
 
     let source_record = call(
         &transport,
@@ -3236,6 +3246,90 @@ async fn two_page_pull_keeps_relation_to_target_arriving_on_second_page() {
             .all(|entry| entry["authorOriginId"] != "engine"),
         "a partial pull must not create an engine-authored relation drop"
     );
+}
+
+/// A watched workspace with an unfinished ordinary pull: capture saves a new
+/// record's file, and its Collections update waits. The relay then refuses a
+/// claim for good, which abandons the pull, and capture binds the record with
+/// no other edit or request to reconcile.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_final_claim_refusal_wakes_capture_for_the_update_the_pull_held_back() {
+    const RECORD_ID: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let workspace_id = "rpc-relay-claim-refusal-wakes-capture";
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    let db_path = engine_db_path(&scratch).expect("engine db path");
+    let mut store = EngineStore::open(&db_path, 1_000).expect("open store");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version(workspace_id, "main", 1, &NoFaults)
+        .expect("main version");
+    drop(store);
+    Connection::open(&db_path)
+        .expect("engine db")
+        .execute(
+            "INSERT INTO sync_identity \
+             (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms,ordinary_pull_token) \
+             VALUES (?1,'local-origin','epoch','stream',1,'unfinished')",
+            [workspace_id],
+        )
+        .expect("unfinished pull");
+    write_file(
+        scratch.path(),
+        "tasks/collection.yaml",
+        b"fields:\n  title:\n    type: text\n",
+    );
+    write_file(
+        scratch.path(),
+        "tasks/a.md",
+        format!("---\nid: {RECORD_ID}\ntitle: First\n---\n").as_bytes(),
+    );
+    let relay = FakeRelay::start(RelayState::default());
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, &relay, 1, workspace_id).await;
+    let mut id = 1;
+    flush_capture(&transport, &handle, &mut id).await;
+    let db = Connection::open(&db_path).expect("engine db");
+    let count = |query: &str| -> i64 {
+        db.query_row(query, [], |row| row.get(0))
+            .expect("count rows")
+    };
+    let bound = || count("SELECT COUNT(*) FROM collection_records WHERE file_path='tasks/a.md'");
+    assert_eq!(
+        count("SELECT COUNT(*) FROM snapshots WHERE path='tasks/a.md'"),
+        1,
+        "capture saved the file"
+    );
+    assert_eq!(bound(), 0, "the Collections update waits for the pull");
+
+    relay.state.lock().expect("relay state").refuse_claims = true;
+    id += 1;
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                id,
+                "sync.claim",
+                Some(handle.clone()),
+                json!({ "workspaceId": workspace_id }),
+            ),
+        )
+        .await
+        .expect_err("the claim answers with its refusal");
+    assert_eq!(
+        count("SELECT COUNT(*) FROM sync_identity WHERE ordinary_pull_token IS NULL"),
+        1,
+        "the refusal abandoned the pull"
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while bound() == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "capture never ran the woken update"
+        );
+        call(&transport, &handle, &mut id, "capture.flush", json!({})).await;
+    }
+    close(&transport, &handle, &mut id).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

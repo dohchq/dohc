@@ -306,6 +306,8 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
       pageLimit: number;
       afterThreadId?: string;
     }): Promise<CliUnreadFileThread[]>;
+    // Collection updates wait for an unfinished pull, as the engine answers.
+    collectionsWaiting(): Promise<boolean>;
   };
   // Absent when the workspace has no engine-backed collection access.
   collections?: CliCollectionsPort;
@@ -2881,6 +2883,13 @@ async function dispatchWorkspace(
         return mcpFailure(error, "failed to list kept copies");
       }
     }
+
+    case "collectionsWaiting":
+      try {
+        return { ok: true as const, waiting: await context.daemonReads.collectionsWaiting() };
+      } catch (error) {
+        return mcpFailure(error, "failed to read whether Collection updates wait");
+      }
 
     case "saveKeptCopy": {
       const keptCopies = context.keptCopies;
