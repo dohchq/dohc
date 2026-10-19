@@ -144,6 +144,14 @@ export function isWorkspaceUpdatingRefusal(error: unknown): boolean {
   );
 }
 
+// A degraded initial capture has not read the file a document open names. No
+// capture wake follows, so the open does not wait; it stays read-only until
+// the person opens it again.
+export function isYdocFileNotReadRefusal(error: unknown): boolean {
+  return refusalMessageOf(error, "OVERLOADED") ===
+    "dohc has not read this file yet. Open it again once dohc has read it.";
+}
+
 // The engine refused a request's input as its domain states it. The daemon
 // keeps the domain's reason to itself and sends only this discriminator, so
 // a caller reads it for a request whose only such refusal it knows.
@@ -197,6 +205,14 @@ export function isConflictStaleTargetRefusal(error: unknown): boolean {
 // is the wire's retry-after-backoff contract, and the message names the lock.
 export function isFileLockedRefusal(error: unknown): boolean {
   return refusalMessageOf(error, "OVERLOADED") === "file-locked";
+}
+
+// The volume gave a file the engine created sharing permissions it was
+// created without, so the engine refused to write a secret or a file's own
+// access there (`MaterializeError::VolumeSharesNewFiles`). Moving the
+// workspace fixes it; a retry alone does not.
+export function isVolumeSharesNewFilesRefusal(error: unknown): boolean {
+  return refusalMessageOf(error, "INTERNAL") === "volume-shares-new-files";
 }
 
 // The engine's own database was busy and its bounded retry budget ran out

@@ -3,6 +3,8 @@
 #![forbid(unsafe_code)]
 
 pub mod projection_stdio;
+mod replica_mode;
+pub mod replica_sandbox;
 
 mod automation_recovery;
 pub(crate) mod capture_driver;
@@ -12,6 +14,8 @@ mod events;
 mod file_observation;
 #[doc(hidden)]
 pub mod live_application_ingress;
+#[cfg(test)]
+mod reader_runtime_tests;
 pub mod root_binding;
 mod rpc;
 
@@ -19,6 +23,7 @@ mod rpc;
 pub use capture_driver::{CaptureApplyProbe, EARLY_IMPORT_MIN_ADDED_FILES};
 pub use capture_sink::{SelfWriteSuppression, StoreCaptureSink};
 pub use events::AUTOMATION_CLAIMED_EVENT;
+pub use events::CAPTURE_IMPORT_PROGRESS_EVENT;
 pub use events::CAPTURE_INITIAL_SETTLED_EVENT;
 pub use events::CAPTURE_MOMENT_RECORDED_EVENT;
 pub use events::CAPTURE_NO_ATOMIC_PLACEMENT_EVENT;
@@ -62,6 +67,8 @@ use std::sync::MutexGuard;
 /// Read-intent opens get non-owning handles over that service's binding;
 /// cross-service or aliased attachments remain rejected so barriers cannot split.
 pub struct EngineService {
+    replica_mode: Option<replica_mode::ReplicaMode>,
+    reader: std::sync::OnceLock<dohc_engine_reader::Reader>,
     supervisor: &'static WorkspaceSupervisor,
     handles: Mutex<HashMap<WorkspaceHandle, Arc<OpenWorkspace>>>,
     live_applications: Arc<Mutex<rpc::live_application::Registry>>,
@@ -138,6 +145,27 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl EngineService {
+    /// Confine the relay child to passive RPCs and its startup store directory.
+    pub fn replica(store_dir: &std::path::Path) -> std::io::Result<Self> {
+        let mut service = Self::new();
+        service.replica_mode = Some(replica_mode::ReplicaMode::new(store_dir)?);
+        Ok(service)
+    }
+
+    pub(crate) fn guard_replica_request(&self, request: &mut Request) -> Result<(), WireError> {
+        if let Some(mode) = &self.replica_mode {
+            mode.guard(request)?;
+        }
+        Ok(())
+    }
+
+    /// Trusted host startup only. No protocol or workspace field configures the reader.
+    pub fn configure_reader(&self, config: dohc_engine_reader::Config) {
+        let _ = self
+            .reader
+            .set(dohc_engine_reader::Reader::new(Some(config)));
+    }
+
     pub fn new() -> Self {
         Self::with_supervisor(WorkspaceSupervisor::global())
     }
@@ -153,6 +181,8 @@ impl EngineService {
 
     fn with_supervisor(supervisor: &'static WorkspaceSupervisor) -> Self {
         EngineService {
+            replica_mode: None,
+            reader: std::sync::OnceLock::new(),
             supervisor,
             handles: Mutex::new(HashMap::new()),
             live_applications: Arc::new(Mutex::new(rpc::live_application::Registry::default())),

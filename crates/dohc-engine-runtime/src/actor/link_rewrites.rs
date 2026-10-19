@@ -21,15 +21,17 @@ use tokio_util::sync::CancellationToken;
 
 struct Plan {
     version: String,
+    operation: String,
     rename: OperationMoment,
     paths: Vec<String>,
+    revision: i64,
     candidates: incoming::Candidates,
 }
 
 fn valid(conn: &Connection, ws: &str, plan: &Plan) -> Result<bool, RuntimeError> {
-    let mut paths = Resolver::paths_for_version(conn, ws, &plan.version)?;
-    paths.sort();
-    Ok(paths == plan.paths && conn.query_row(
+    let revision: i64 = conn.query_row("SELECT coalesce((SELECT revision FROM link_rewrite_revisions WHERE workspace_id=?1 AND version_id=?2),0)",params![ws,plan.version],|r|r.get(0)).map_err(StorageError::corrupt_public)?;
+    let undo: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM history_undo_plans WHERE workspace_id=?1 AND operation_id=?2)",params![ws,plan.operation],|r|r.get(0)).map_err(StorageError::corrupt_public)?;
+    Ok(!undo && revision == plan.revision && conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND path=?4)
          AND NOT EXISTS(SELECT 1 FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND path=?5)
          AND NOT EXISTS(SELECT 1 FROM moments WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND moment_order>?6 AND operation IN ('rename','delete'))",
@@ -111,14 +113,21 @@ impl ActorHandle {
             key: request,
             binding: hex_sha256(json!([workspace, operation, author]).to_string().as_bytes()),
         });
-        let (ws, op, r, f) = (
-            workspace.clone(),
-            operation.clone(),
-            receipt.clone(),
-            faults.clone(),
-        );
-        let (plan, mut result) = self
-            .run(move |store, _| {
+        let (ws, op, r) = (workspace.clone(), operation.clone(), receipt.clone());
+        let db = self
+            .run(|store, _| {
+                if store.is_passive() {
+                    return Err(DomainError::InvalidInput {
+                        reason: "link rewrites need the owner",
+                    }
+                    .into());
+                }
+                Ok(store.database_path().to_path_buf())
+            })
+            .await?;
+        let (plan, mut result) = tokio::task::spawn_blocking(move || {
+                let mut store = EngineStore::open_read_only(&db)?;
+                store.read_with(|conn| conn.execute_batch("BEGIN")).map_err(StorageError::corrupt_public)?;
                 #[cfg(test)]
                 let _turn = tests::Turn::start(&ws, "plan");
                 if store.is_passive() {
@@ -156,7 +165,7 @@ impl ActorHandle {
                     }
                     let mut paths = Resolver::paths_for_version(conn, &ws, &version)?;
                     paths.sort();
-                    let mut candidates = incoming::candidates(conn, &ws, &version, old)?;
+                    let mut candidates = incoming::candidates(conn, &ws, &version, old, &["wikilink"])?;
                     let written: HashSet<_> =
                         members.iter().map(|m| m.object_id.as_str()).collect();
                     candidates.sources.retain(|(object, path)| {
@@ -165,8 +174,9 @@ impl ActorHandle {
                     candidates.unchecked.retain(|path| {
                         path != &rename.path && !path.starts_with("shared-with-me/")
                     });
+                    let revision = conn.query_row("SELECT coalesce((SELECT revision FROM link_rewrite_revisions WHERE workspace_id=?1 AND version_id=?2),0)",params![ws,version],|r|r.get(0)).map_err(StorageError::corrupt_public)?;
                     let plan = Plan {
-                        version,
+                        version, operation: op.clone(), revision,
                         rename: (*rename).clone(),
                         paths,
                         candidates,
@@ -177,13 +187,15 @@ impl ActorHandle {
                     Ok(plan)
                 })?;
                 let result = prior.map_or(json!({"documents":0,"links":0}), |(_, result)| result);
-                save(store, &r, false, &result, f.as_ref())?;
+
                 Ok((Some(plan), result))
-            })
-            .await?;
+            }).await.map_err(|_| RuntimeError::ActorUnavailable)??;
         let Some(plan) = plan else {
             return Ok(result);
         };
+        let (r, f, initial) = (receipt.clone(), faults.clone(), result.clone());
+        self.run(move |store, _| save(store, &r, false, &initial, f.as_ref()))
+            .await?;
         let (plan, before, after) = tokio::task::spawn_blocking(move || {
             let old = plan.rename.before_path.as_deref().unwrap_or("");
             let before = Resolver::new(

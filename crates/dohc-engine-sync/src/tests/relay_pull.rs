@@ -144,9 +144,9 @@ fn open_document_pull_measurement() {
 }
 
 #[derive(Default)]
-struct ClaimRelay {
+pub(super) struct ClaimRelay {
     relay: FakeRelay,
-    refusal: Mutex<Option<RelayError>>,
+    pub(super) refusal: Mutex<Option<RelayError>>,
     claims: Mutex<Vec<ClaimRequest>>,
 }
 
@@ -1026,6 +1026,149 @@ fn fresh_coordinate_does_not_canonicalize_payload_for_a_comparison_that_cannot_e
 }
 
 #[test]
+fn ordinary_recording_claim_is_consumed_on_owner_echo_and_redelivery() {
+    for (kind, authors) in [
+        ("moment.append", None),
+        (
+            "moment.append",
+            Some(json!([{"kind":"agent", "agentId":"writer"}])),
+        ),
+        ("ydoc.update", None),
+    ] {
+        let (_scratch, _path, mut engine) = open_store();
+        let mut payload = json!({"content": "original", "isBaseState": false,
+            "actorOriginId": "owner", "attribution": {"actorKind": "human", "depth": 0},
+            "authorContext": {"kind": "account", "accountId": "owner"}});
+        if let Some(authors) = authors {
+            payload["authors"] = authors;
+        }
+        journal_local_replication_op(
+            &mut engine,
+            "ws",
+            "local",
+            "epoch-1",
+            "stream-1",
+            kind,
+            &payload,
+            2_000,
+            &NoFaults,
+        )
+        .expect("journal recording claim");
+        let mut stored = payload.clone();
+        stored.as_object_mut().unwrap().remove("authorContext");
+        let mut echo = envelope("local", 0, kind, stored);
+        for _ in 0..2 {
+            assert!(matches!(
+                apply_envelope_with(
+                    &mut engine,
+                    &echo,
+                    &NoFaults,
+                    |_, _| -> Result<(), SyncError> { panic!("owner echo must not apply twice") }
+                ),
+                Ok(ApplyOutcome {
+                    primary: ApplyDisposition::Skipped,
+                    ..
+                })
+            ));
+            assert!(
+                crate::apply::is_acknowledged_envelope(&engine, &echo).expect("acknowledged echo")
+            );
+        }
+        echo.payload["content"] = json!("changed");
+        assert!(matches!(
+            apply_envelope_with(&mut engine, &echo, &NoFaults, |_, _| Ok(())),
+            Err(SyncError::CoordinateDiverged)
+        ));
+        let journal = list_replication_ops(&engine, "ws", "local", -1, 10).unwrap();
+        assert_eq!(
+            journal[0].payload, payload,
+            "comparison does not rewrite the journal"
+        );
+        let mut changed_claim = envelope("local", 0, kind, payload.clone());
+        changed_claim.payload["authorContext"]["accountId"] = json!("someone-else");
+        assert!(matches!(
+            apply_envelope_with(&mut engine, &changed_claim, &NoFaults, |_, _| Ok(())),
+            Err(SyncError::CoordinateDiverged)
+        ));
+        crate::cursor::write_pushed_seq_with_refusals(
+            &mut engine,
+            "ws",
+            "local",
+            0,
+            &[],
+            &[],
+            &[envelope("local", 0, kind, payload)],
+            &NoFaults,
+            &NoLiveLeases,
+            2_001,
+        )
+        .expect("commit successful push");
+        let stored = list_replication_ops(&engine, "ws", "local", -1, 10).unwrap();
+        assert!(stored[0].payload.get("authorContext").is_none());
+    }
+}
+
+#[test]
+fn ordinary_recording_claim_preserves_live_agent_settlement_and_base_contexts() {
+    for (kind, fields, context) in [
+        (
+            "ydoc.update",
+            json!({}),
+            json!({"kind":"account", "accountId":"owner"}),
+        ),
+        (
+            "ydoc.update",
+            json!({"isBaseState":true}),
+            json!({"kind":"account", "accountId":"owner"}),
+        ),
+        (
+            "ydoc.update",
+            json!({"isBaseState":false, "actorOriginId":"owner", "attribution":{"actorKind":"human"}}),
+            json!({"kind":"account", "accountId":"owner", "agent":{"agentId":"writer"}}),
+        ),
+        (
+            "moment.append",
+            json!({"settlementReference":{}}),
+            json!({"kind":"account", "accountId":"owner"}),
+        ),
+        (
+            "moment.append",
+            json!({"authors":[{"kind":"agent", "agentId":"writer"}]}),
+            json!({"kind":"account", "accountId":"owner", "agent":{"agentId":"writer"}}),
+        ),
+        (
+            "moment.append",
+            json!({"momentId":"unavailable-moment", "attributionUnavailable":{"settlementId":"unavailable", "reason":"unproven-hosted-authors"}}),
+            json!({"kind":"account", "accountId":"owner"}),
+        ),
+        (
+            "other",
+            json!({}),
+            json!({"kind":"account", "accountId":"owner"}),
+        ),
+    ] {
+        let (_scratch, _path, mut engine) = open_store();
+        let mut original = envelope("peer", 0, kind, fields);
+        original.payload["authorContext"] = context;
+        apply_envelope_with(&mut engine, &original, &NoFaults, |_, _| Ok(())).unwrap();
+        let mut changed = original.clone();
+        changed
+            .payload
+            .as_object_mut()
+            .unwrap()
+            .remove("authorContext");
+        assert!(
+            matches!(
+                apply_envelope_with(&mut engine, &changed, &NoFaults, |_, _| Ok(())),
+                Err(SyncError::CoordinateDiverged)
+            ),
+            "{kind}: {}",
+            original.payload
+        );
+    }
+}
+
+#[test]
 fn pull_repairs_legacy_null_base_coordinates_only_from_exact_relay_answers() {
     for (label, content_kind, below_floor, mismatch, expected) in [
         (
@@ -1586,18 +1729,24 @@ fn base_repair_publication_blocked_pull_matches_main() {
             SyncPassOutcome::Complete { pushed: 0, .. }
         ));
         assert!(client.transport().pushes.lock().unwrap().is_empty());
-        assert_eq!(
-            client
-                .pull_chat_workspace(
-                    &mut engine,
-                    &mut dohc_engine_collab::WriterDocCache::new(),
-                    "ws",
-                    &NoFaults,
-                    &NoLiveLeases,
-                    1200,
-                )
-                .unwrap_err(),
-            RelayError::Local("retryable-state".into())
+        let refusal = client
+            .pull_chat_workspace(
+                &mut engine,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                "ws",
+                &NoFaults,
+                &NoLiveLeases,
+                1200,
+            )
+            .unwrap_err();
+        let detail = refusal.to_string();
+        assert!(
+            detail.contains("Y.Doc base is waiting for its authenticated relay position"),
+            "{detail}"
+        );
+        assert!(detail.contains("object blocked, origin "), "{detail}");
+        assert!(
+            matches!(refusal, RelayError::Local(code) if code.split(':').next() == Some("retryable-state"))
         );
         let lineage: String = engine
             .read_with(|conn| {
@@ -2108,7 +2257,8 @@ fn mixed_base_group_repairs_present_or_absent(present: bool) {
     let changes = engine
         .read_with(|conn| Ok::<_, rusqlite::Error>(conn.total_changes()))
         .unwrap();
-    assert_eq!(changes > revision, present);
+    // Every pass writes its own ordinary pull token.
+    assert_eq!(changes > revision + 1, present);
 }
 
 #[test]
@@ -2210,7 +2360,8 @@ fn base_repair_updates_foreign_deferred_coordinate_after_confirming_own_is_unsen
     assert_eq!(client.transport().pushes.lock().unwrap().len(), 1);
     engine
         .read_with(|conn| {
-            assert_eq!(conn.total_changes(), changes + 1);
+            // The repaired coordinate and the pass's own pull token.
+            assert_eq!(conn.total_changes(), changes + 2);
             let pending: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM ydoc_deferred_updates WHERE relay_seq IS NULL",
                 [],
@@ -4652,6 +4803,7 @@ fn persisted_relay_and_share_cursors_never_regress_within_the_same_stream() {
         replication_epoch: "epoch".to_owned(),
         stream_identity: "stream".to_owned(),
         settlement_report_id: None,
+        ordinary_pull: None,
     };
     assert!(matches!(
         commit_relay_cursor(&mut engine, "ws", &relay(10), &NoFaults, &crate::NoLiveLeases, 1_000),
@@ -5449,6 +5601,7 @@ fn relay_claim_does_not_consume_a_direct_rpc_refusal() {
         replication_epoch: "epoch".to_owned(),
         stream_identity: "stream".to_owned(),
         settlement_report_id: None,
+        ordinary_pull: None,
     };
     commit_relay_cursor(
         &mut engine,
@@ -5479,6 +5632,7 @@ fn relay_cursor_serializes_numeric_position_into_the_shipped_text_column() {
         replication_epoch: "epoch-1".to_owned(),
         stream_identity: "stream-1".to_owned(),
         settlement_report_id: None,
+        ordinary_pull: None,
     };
     assert!(matches!(
         commit_relay_cursor(&mut engine, "ws", &cursor, &NoFaults, &crate::NoLiveLeases, 1_000),

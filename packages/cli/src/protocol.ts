@@ -1,3 +1,4 @@
+import { LinksEdgesInput, LinksEdgesResult, LinksInInput, LinksResolveInput, LinksInResult, LinksResolveResult } from "@dohc/workspace-contracts/links";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import {
   COLLECTION_SCHEMA_REASON_CODES,
@@ -5,7 +6,7 @@ import {
 } from "@dohc/workspace-contracts/collection";
 import { z } from "zod";
 import { ShareCopyInput, ShareCopyResult } from "@dohc/workspace-contracts/share-copy";
-import { AccessAnswer, ObjectAccessInput, SharingAccessInput } from "@dohc/workspace-contracts/access";
+import { AccessAnswer, AccessRefreshResult, ObjectAccessInput, SharingAccessInput } from "@dohc/workspace-contracts/access";
 import { WORKSPACE_POLICY_PATHS } from "@dohc/security-contract/effective-policy";
 import type { AutomationDefinitionList, AutomationSwitchResult } from "@dohc/workspace-contracts/automation-controls";
 import { CreationPartial } from "./creation";
@@ -394,10 +395,14 @@ const accountDeletePreviewArgsSchema = z.object(argsBase).strict();
 const accountDeleteArgsSchema = ServerAccountDeleteRequest.extend(argsBase).strict();
 
 export const cliRequestSchema = z.discriminatedUnion("verb", [
+  z.object({ ...requestBase, verb: z.literal("linksEdges"), args: LinksEdgesInput.extend(argsBase).strict() }).strict(),
+  z.object({ ...requestBase, verb: z.literal("linksIn"), args: LinksInInput.extend(argsBase).strict() }).strict(),
+  z.object({ ...requestBase, verb: z.literal("linksResolve"), args: LinksResolveInput.extend(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("stopSync"), args: z.object({ ...argsBase, agent: documentAgentNameSchema.optional() }).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("shareCopy"), args: ShareCopyInput.extend(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("accountDeletePreview"), args: accountDeletePreviewArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("accountDelete"), args: accountDeleteArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("accessRefresh"), args: z.object(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("accessObject"), args: ObjectAccessInput.extend(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("accessSharing"), args: SharingAccessInput.extend(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("automationButtons"), args: z.object({ ...argsBase, collectionPath: collectionPathArg, table: z.string().min(1).max(256).optional() }).strict() }).strict(),
@@ -449,6 +454,7 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("fileDelete"), args: fileDeleteArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentRead"), args: documentReadArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("keptCopies"), args: keptCopiesArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("collectionsWaiting"), args: z.object(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("saveKeptCopy"), args: saveKeptCopyArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentEdit"), args: documentEditArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentCreate"), args: documentCreateArgsSchema }).strict(),
@@ -485,9 +491,13 @@ export const APP_RESPONSE_CAPABILITIES = {
 
 export const CLI_CAPABILITIES = {
   stopSync: ["workspace.sync.stop"],
+  linksEdges: ["links.edges"],
+  linksIn: ["links.in"],
+  linksResolve: ["links.resolve"],
   shareCopy: ["share.copy.read"],
   accountDeletePreview: ["account.delete.preview"],
   accountDelete: ["account.delete"],
+  accessRefresh: ["access.refresh"],
   accessObject: ["access.object.read"],
   accessSharing: ["access.sharing.read"],
   groups: ["group.list"],
@@ -515,6 +525,7 @@ export const CLI_CAPABILITIES = {
   fileDelete: ["file.delete"],
   documentRead: ["document.read"],
   keptCopies: ["file.kept.list"],
+  collectionsWaiting: ["workspace.status"],
   saveKeptCopy: ["file.kept.save"],
   documentEdit: ["document.edit"],
   documentCreate: ["document.create"],
@@ -1340,9 +1351,13 @@ export const cliResultSchemas = {
       syncPause: WorkspaceSyncPauseStatus.optional() }).strict(),
     rawFailureSchema,
   ]),
+  linksEdges: LinksEdgesResult,
+  linksIn: LinksInResult,
+  linksResolve: LinksResolveResult,
   shareCopy: ShareCopyResult,
   accountDeletePreview: ServerAccountDeletionPreview,
   accountDelete: ServerAccountDeleteResult,
+  accessRefresh: AccessRefreshResult,
   accessObject: AccessAnswer,
   accessSharing: AccessAnswer,
   automationList: z.discriminatedUnion("ok", [
@@ -1381,6 +1396,11 @@ export const cliResultSchemas = {
   collectionCreateRecord: collectionCreateRecordResultSchema,
   documentRead: documentReadResultSchema,
   keptCopies: keptCopiesResultSchema,
+  // The engine's answer: Collection updates wait for an unfinished pull.
+  collectionsWaiting: z.discriminatedUnion("ok", [
+    z.object({ ok: z.literal(true), waiting: z.boolean() }).strict(),
+    rawFailureSchema,
+  ]),
   saveKeptCopy: saveKeptCopyResultSchema,
   documentEdit: documentEditResultSchema,
   documentCreate: documentCreateResultSchema,

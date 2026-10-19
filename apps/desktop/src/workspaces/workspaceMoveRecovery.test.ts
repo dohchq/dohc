@@ -51,7 +51,7 @@ async function fixture() {
       }
       placed = true;
     }
-    return { operationId: input.operationId, versionId: "main", compensationOperationId: id, momentCount: members.length, deduped, materialized: !restoring };
+    return { operationId: input.operationId, versionId: "main", notRestored: [], compensationOperationId: id, momentCount: members.length, deduped, materialized: !restoring };
   });
   const history = { readHistoryPage, undoHistoryOperation };
   const options = { capture, requestId: "move", trashItem: async () => { throw new Error("OS trash refused"); }, markDeleted: vi.fn() };
@@ -85,6 +85,16 @@ async function queuedUndo(f: Awaited<ReturnType<typeof fixture>>, byAgent = fals
     release.resolve(); await holding;
     return { result: await undoing, follower: await follower };
   }
+it("keeps a skipped rename at its current path and replays the remaining result", async () => {
+  const f = await fixture(); await f.write("a.txt");
+  await f.move("a.txt", "b.txt");
+  f.history.undoHistoryOperation.mockResolvedValue({ operationId: id, versionId: "main", notRestored: ["b.txt"],
+    compensationOperationId: id, momentCount: 0, deduped: false, materialized: true });
+  const result = await f.undo();
+  expect(result).toMatchObject({ ok: true, restored: [], remaining: [{ path: "b.txt", retry: false }] });
+  expect(await readFile(join(f.rootPath, "b.txt"), "utf8")).toBe("a.txt");
+  expect(await f.undo()).toEqual(result);
+});
 it.each([false, true])("returns a person's rename operation through IPC and keeps later typing through agent=%s Undo", async byAgent => {
   const f = await fixture(); await f.write("a.txt", "before");
   const moved = await f.move("a.txt", "b.txt");
@@ -505,6 +515,6 @@ it("does not save an engine intent for rowless Undo before placement", async () 
   expect(await f.undo()).toEqual({ ok: false, reason: "crash after save" });
   const record = JSON.parse(await readFile(f.recordPath(), "utf8"));
   expect(record.engine).not.toHaveProperty("requested");
-  expect(record.engine).toEqual({ materialized: true, momentCount: 0 });
+  expect(record.engine).toEqual({ materialized: true, momentCount: 0, notRestored: [] });
   expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
 });

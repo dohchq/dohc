@@ -1517,6 +1517,7 @@ async fn deleting_a_crash_left_ydoc_before_enrollment_retires_the_lineage() {
         replication_epoch: "epoch-local".to_owned(),
         stream_identity: "stream-local".to_owned(),
         settlement_report_id: None,
+        ordinary_pull: None,
     };
     commit_relay_cursor(
         &mut store,
@@ -3659,6 +3660,7 @@ async fn oversized_close_decline_survives_prune_and_restart() {
         stream_identity: "stream-local".into(),
         bootstrap_complete: true,
         settlement_report_id: None,
+        ordinary_pull: None,
     };
     for now in [500, 600] {
         let declines = match commit_relay_cursor(
@@ -3853,6 +3855,7 @@ async fn oversized_declined_editor_settlements_export_only_latest_after_enrolmen
         stream_identity: "stream-local".into(),
         bootstrap_complete: true,
         settlement_report_id: None,
+        ordinary_pull: None,
     };
     let mut store = EngineStore::open(&db, 110).expect("open for enrolment");
     assert!(matches!(

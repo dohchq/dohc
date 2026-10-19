@@ -48,7 +48,6 @@ import {
   EngineWorkspaceSessions,
   type AttachedEngineWorkspace,
   type EngineWorkspaceBinding,
-  type EngineWorkspaceRunOptions,
   type ShareMountEngineWorkspace,
 } from "@dohc/workspace-engine-client/daemon";
 
@@ -149,6 +148,9 @@ export interface CaptureTextFileMetadata {
 
 export type CaptureVersionedTextStore = VersionedTextStore & {
   resolveFiles: VersionedLiveAdapter["resolveFiles"];
+  linkEdges: VersionedLiveAdapter["linkEdges"];
+  incomingLinks: VersionedLiveAdapter["incomingLinks"];
+  resolveLinks: VersionedLiveAdapter["resolveLinks"];
   listUnconfirmedSharePaths(input: { workspaceId: string; shareId: string; grantedSelector: ShareViewSelector }): Promise<ShareUnconfirmedChanges>;
   // Preflight the author of the following rename or delete.
   checkMove(input: { workspaceId: string; versionId: string; path: string; author?: MomentWriteAuthor }): Promise<void>;
@@ -657,12 +659,11 @@ export function createCaptureLiveStores(
   // one must not answer for.
   async function runRawRead<T>(
     operation: (adapter: VersionedLiveAdapter) => Promise<T>,
-    options?: EngineWorkspaceRunOptions,
   ): Promise<T> {
     return await sessions.run(
       workspace,
       async (binding) => await operation(adapterFor(binding)),
-      { ...options, retryTransportErrors: true },
+      { retryTransportErrors: true },
     );
   }
 
@@ -702,9 +703,8 @@ export function createCaptureLiveStores(
 
   async function runRead<T>(
     operation: (adapter: VersionedLiveAdapter) => Promise<T>,
-    options?: EngineWorkspaceRunOptions,
   ): Promise<T> {
-    return await withDomainErrors(async () => await runRawRead(operation, options));
+    return await withDomainErrors(async () => await runRawRead(operation));
   }
 
   async function runMutation<T>(
@@ -931,9 +931,7 @@ export function createCaptureLiveStores(
     getMainVersion: (input: { workspaceId: string }) =>
       runRead(async (adapter) => await adapter.getMainVersion(input)),
     getActiveVersion: (input: { workspaceId: string }) =>
-      runRead(async (adapter) => await adapter.getActiveVersion(input), {
-        retryInitialCapture: true,
-      }),
+      runRead(async (adapter) => await adapter.getActiveVersion(input)),
     setActiveVersion: (input: { workspaceId: string; versionId: string }) =>
       runMutation(async (adapter) => await adapter.setActiveVersion(input)),
     createNamedVersion: (input: {
@@ -956,6 +954,9 @@ export function createCaptureLiveStores(
     checkMove: ({ author, ...input }: { workspaceId: string; versionId: string; path: string; author?: MomentWriteAuthor }) =>
       runRead(async (adapter) => await adapter.checkMove({ ...input, ...(author ? { author: adapterAuthor(author) } : {}) })),
 
+    linkEdges: input => runRead(adapter => adapter.linkEdges(input)),
+    incomingLinks: input => runRead(adapter => adapter.incomingLinks(input)),
+    resolveLinks: input => runRead(adapter => adapter.resolveLinks(input)),
     async resolveFiles(input: Parameters<VersionedLiveAdapter["resolveFiles"]>[0]) {
       return await runRead(adapter => adapter.resolveFiles(input));
     },

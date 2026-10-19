@@ -1,9 +1,26 @@
 import {afterEach, expect, it, vi} from "vitest";
 import {LiveAuthorityUnavailableError} from "@dohc/ydoc-projection/named-live-browser-transport";
 import {LINK_REFUSALS, linkRefusalBody, type LinkRefusalCode} from "@dohc/security-contract/link-refusal";
-import {namedRequest, ShareAccessRemovedError} from "./namedRecipient";
+import {AccountSetupRequiredError, namedRequest, ShareAccessRemovedError} from "./namedRecipient";
 
 afterEach(() => vi.unstubAllGlobals());
+
+it("recognises the minimal unverified sign-in refusal", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ok: false, code: "EMAIL_NOT_VERIFIED"}, {status: 403})));
+  await expect(namedRequest("/api/account/sign-in", new AbortController().signal, {})).rejects.toBeInstanceOf(AccountSetupRequiredError);
+});
+
+it.each([
+  ["/api/account/sign-in", 401, {ok: false, code: "EMAIL_NOT_VERIFIED"}],
+  ["/api/account/session", 403, {ok: false, code: "EMAIL_NOT_VERIFIED"}],
+  ["/api/account/sign-in", 403, {ok: false, code: "OTHER_REFUSAL"}],
+  ["/api/account/sign-in", 403, {ok: true, code: "EMAIL_NOT_VERIFIED"}],
+  ["/api/account/sign-in", 403, {code: "EMAIL_NOT_VERIFIED"}],
+  ["/api/account/sign-in", 403, {ok: false, code: "EMAIL_NOT_VERIFIED", message: "upstream-secret"}],
+])("keeps other account refusals opaque (%s, %s, %j)", async (path, status, body) => {
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json(body, {status})));
+  await expect(namedRequest(path, new AbortController().signal, {})).rejects.toBeInstanceOf(LiveAuthorityUnavailableError);
+});
 
 it.each(Object.keys(LINK_REFUSALS) as LinkRefusalCode[])("preserves the verified link refusal %s", async code => {
   vi.stubGlobal("fetch", vi.fn(async () => Response.json(linkRefusalBody(code), {status: LINK_REFUSALS[code].status})));

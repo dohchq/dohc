@@ -46,7 +46,7 @@ Returns `{ ok: true, definitions } | { ok: false, reason }`.
 
 ### `dohc_publish_app`
 
-Create a share link, prepare an immutable app revision, and approve publication with local owner authority. createLink requires a stable operationId; retries return the existing grant, never another link. Paths default to the app root at View access. A URL is a bearer credential at its stated access level, usable by anyone holding it. Keep its secret yourself. Append the returned appQuery before the fragment of any link URL, including one returned by createLink. Never send its secret to dohc. Rotation remains in the desktop. Agent labels are agent-declared provenance.
+Create a share link, prepare an immutable app revision, and approve publication as its owner on this computer. createLink requires a stable operationId; retries return the existing grant, never another link. Paths default to the app root at View access. A URL is a bearer credential at its stated access level, usable by anyone holding it. Keep its secret yourself. Append the returned appQuery before the fragment of any link URL, including one returned by createLink. Never send its secret to dohc. Rotation remains in the desktop. Agent labels are agent-declared provenance.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -78,7 +78,7 @@ Report whether this workspace is local-only or cloud-synced.
 
 No arguments.
 
-Returns `{ synced, scope, cloudConnected, credentialStatus, workspaceId?, serverUrl?, syncPause? }`. `scope` is `"local"` or `"cloud"`.
+Returns `{ synced, scope, cloudConnected, credentialStatus, collectionsWaiting?, workspaceId?, serverUrl?, syncPause? }`. `scope` is `"local"` or `"cloud"`. `collectionsWaiting` is `true` while Collection updates wait for a sync that has not finished. Files and documents still save. To continue offline, stop sync. The field is absent when the dohc app cannot answer.
 
 ### `dohc_stop_workspace_sync`
 
@@ -89,6 +89,32 @@ Changes the workspace, so a shared view does not offer it.
 No arguments.
 
 Returns `{ ok: true, workspaceId, workspaceSynced: false, syncPause?: { atMs, author } } | { ok: false, reason }`.
+
+### `dohc_links_edges`
+
+Read a bounded page of file links and isolated Markdown files. Continue nextCursor until null. indexBuilding reports active indexing; unchecked names uncertified sources; mountsCovered reports mount coverage.
+
+- `cursor`: `string`
+
+Returns `{ versionId, files: { objectId, path, title }[], entries: { kind, source, target, ordinal }[], unchecked, complete, indexBuilding, mountsCovered, nextCursor }`.
+
+### `dohc_links_in`
+
+Read a bounded page of documents linking to a file. indexBuilding reports active indexing; unchecked names omitted sources. complete excludes mount coverage, reported by mountsCovered. Cursors carry index state across pages.
+
+- `subject`: `{ path: string } | { objectId: string }`. Required.
+- `cursor`: `string`
+
+Returns `{ versionId, subject: { path, objectId }, entries: { source, title, ordinal, span, line, highlightStart, highlightEnd, snippet }[], unchecked, complete, indexBuilding, mountsCovered, nextCursor } | null`.
+
+### `dohc_links_resolve`
+
+Resolve wikilink or Markdown literals from one source document using the engine's link rules.
+
+- `source`: `string`. Required.
+- `literals`: `({ kind: "wikilink" | "markdown", literal: string })[]`. Required.
+
+Returns `{ versionId, results: ({ path, fragment } | { path, create, fragment } | null)[], mountsCovered }`.
 
 ### `dohc_read_operation`
 
@@ -527,6 +553,46 @@ Two environment variables also change what the CLI does:
 - `DOHC_RUN_ID` links the messages that `post` and `reply` write to a local agent run.
 - `DOHC_STATE_DIR` names the app's state folder when the CLI cannot find the running app in its default place.
 
+### `dohc links`
+
+Read and resolve document links.
+
+`indexBuilding` is true while the link index is being built: seed work, pending updates, or eligible files without an index row. It carries across cursor pages; start a fresh walk to observe completion. `unchecked` names sources that could not be checked, including oversized files. These can keep `complete` false after building stops. `complete` describes the local index; `mountsCovered` separately reports mounted-share coverage. IPC, CLI, and MCP return these same fields.
+
+#### `dohc links edges`
+
+```sh
+dohc links edges [options]
+```
+
+Read a bounded page of file links.
+
+- `--cursor <cursor>`: Continue the previous page.
+
+With `--json`, prints `{ schemaVersion, versionId, files: { objectId, path, title }[], entries: { kind, source, target, ordinal }[], unchecked, complete, indexBuilding, mountsCovered, nextCursor }`.
+
+#### `dohc links in`
+
+```sh
+dohc links in <subject-json> [options]
+```
+
+Read documents that link to a file.
+
+- `--cursor <cursor>`: Continue the previous page.
+
+With `--json`, prints `{ schemaVersion, versionId, subject: { path, objectId }, entries: { source, title, ordinal, span, line, highlightStart, highlightEnd, snippet }[], unchecked, complete, indexBuilding, mountsCovered, nextCursor }` or `null`.
+
+#### `dohc links resolve`
+
+```sh
+dohc links resolve <source> <literals-json> [options]
+```
+
+Resolve links from one document.
+
+With `--json`, prints `{ schemaVersion, versionId, results: ({ path, fragment } | { path, create, fragment } | null)[], mountsCovered }`.
+
 ### `dohc sync`
 
 Stop syncing this workspace on this computer.
@@ -549,19 +615,31 @@ With `--json`, prints `{ schemaVersion, ok: true, workspaceId, workspaceSynced: 
 
 ### `dohc access`
 
-Read observed object grants and Sharing inventories.
+Read observed grants and request fresh Sharing inventories.
 
 Answers describe observed grants, not authorization. An empty page means no matching grants within its coverage. Paths resolve from your current folder. Received selectors use their source workspace's coordinates.
 
-Both verbs return only the allowlisted AccessAnswer fields shown below, with at most 100 rows per page. They never return credentials, bearer URLs, invitation URLs, share codes, or link URLs.
+The object and sharing verbs return only the allowlisted AccessAnswer fields shown below, with at most 100 rows per page. They never return credentials, bearer URLs, invitation URLs, share codes, or link URLs.
 
-Share answers use the current observation; the CLI never refreshes share inventories. `freshness` is `fresh`, `stale`, or `unknown`; `checkedAtMs` is the observation timestamp in milliseconds, or null when unknown. `coverage` names the observed scope and whether it is complete. Its `observation` is `interval`: pages do not form an atomic snapshot. `nextCursor` continues the answer, or is null at the end.
+Share queries use the current observation. Use `dohc access refresh` to request fresh Sharing inventories through the same paced owner as opening Sharing. Its `status` is `requested`, `joined`, `paced`, or `unavailable`. Unavailable answers include `reason`: `signed-out` or `unreadable`. Requested and joined wait for started or existing attempts to settle, without promising success. Paced follows the existing refresh schedule. Read `dohc access sharing` afterward to inspect observations. `freshness` is `fresh`, `stale`, or `unknown`; `checkedAtMs` is the observation timestamp in milliseconds, or null when unknown. `coverage` names the observed scope and whether it is complete. Its `observation` is `interval`: pages do not form an atomic snapshot. `nextCursor` continues the answer, or is null at the end.
 
 `unknownReason` is null when coverage is known. When visibility is `hidden` or `missing`, it is null because visibility states why the answer is unavailable. Every other answer with `coverage.kind` set to `unavailable` requires one reason. Its closed values are `signed-out`, `not-synced`, `other-account`, `other-server`, `not-listed-yet`, `changed`, and `unreadable`. Reasons describe only this device's records and account. They contain no account identity, email, server URL, share id, or path.
 
 Queries use only the CLI's registered workspace, with no workspace enumeration. The granted lane contains that workspace owner's grants; the received lane contains the signed-in account's received shares. A received object's answer shows only the recipient's own grant.
 
-Collection answers read current Collection authority and return capability facts, not share grants.
+Collection answers report current access and capabilities, not share grants.
+
+#### `dohc access refresh`
+
+```sh
+dohc access refresh [options]
+```
+
+Request fresh Sharing observations with the same pacing as opening Sharing.
+
+Reports requested, joined, paced, or unavailable. Requested and joined wait for started or existing attempts to settle, without promising success. Paced follows the existing refresh schedule. Read access sharing afterward to inspect observations.
+
+With `--json`, prints `{ schemaVersion, status }` or `{ schemaVersion, status: "unavailable", reason }`. Uses socket verb `accessRefresh`.
 
 #### `dohc access object`
 

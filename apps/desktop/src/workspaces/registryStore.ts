@@ -482,7 +482,7 @@ export function createRegistryStore(registryFile: string) {
   function updateWorkspaceEntry(
     workspaceId: string,
     update: (entry: Readonly<RegistryEntry>) => RegistryEntry | undefined,
-    missingMessage = `Unknown workspace: ${workspaceId}`,
+    missingMessage = "This workspace is not open. Open it again.",
   ): void {
     // Entry writers receive a read-only current value and return a replacement.
     // Only write() can publish that replacement to the cache, after rename.
@@ -536,7 +536,7 @@ export function createRegistryStore(registryFile: string) {
 
     setRemote(workspaceId: string, remote: RemoteIdentity): void {
       const entry = read().workspaces.find(entry => entry.workspaceId === workspaceId);
-      if (!entry) throw new Error(`Unknown workspace: ${workspaceId}`);
+      if (!entry) throw new Error("This workspace is not open. Open it again.");
       const previous = entry.remote ?? entry.pausedRemote;
       const next = { ...entry, remote };
       delete next.pausedRemote;
@@ -631,7 +631,7 @@ export function createRegistryStore(registryFile: string) {
     setShareRoster(workspaceId: string, listing: RosterListing, pulledAfter: boolean, listedAtMs = Date.now()): void {
       const registry = read();
       const entry = registry.workspaces.find(entry => entry.workspaceId === workspaceId);
-      if (!entry) throw new Error(`Unknown workspace: ${workspaceId}`);
+      if (!entry) throw new Error("This workspace is not open. Open it again.");
       rosters.save(entry, listing, pulledAfter, listedAtMs);
     },
 
@@ -639,7 +639,7 @@ export function createRegistryStore(registryFile: string) {
     markShareRosterPulled(workspaceId: string): void {
       const registry = read();
       const entry = registry.workspaces.find(entry => entry.workspaceId === workspaceId);
-      if (!entry) throw new Error(`Unknown workspace: ${workspaceId}`);
+      if (!entry) throw new Error("This workspace is not open. Open it again.");
       rosters.markPulled(entry);
     },
 

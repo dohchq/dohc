@@ -3,11 +3,14 @@ mod common;
 use common::Scratch;
 use dohc_engine_files::{
     BatchIngestResult, CancellationToken, CaptureError, CaptureOp, CaptureSink, FilesError,
-    IngestOutcome, IngestReason, ReconcileController, ReconcileRun, RespelledRetire, Respelling,
-    ScanBounds, Scanner, apply_reconcile_plan_cancellable, apply_then_ack,
+    ImportPriority, IngestOutcome, IngestReason, ReconcileController, ReconcileRun,
+    RespelledRetire, Respelling, ScanBounds, Scanner, apply_reconcile_plan_cancellable,
+    apply_then_ack,
 };
 use dohc_engine_storage::NoFaults;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 
 #[derive(Default)]
 struct IdempotentSink {
@@ -279,8 +282,13 @@ fn uncertain_batch_prefix_stays_failed_and_the_suffix_continues() {
         ordinary_calls: Vec::new(),
     };
 
-    let result =
-        apply_reconcile_plan_cancellable(&plan, &mut sink, &NoFaults, &CancellationToken::new());
+    let result = apply_reconcile_plan_cancellable(
+        &plan,
+        &mut sink,
+        &NoFaults,
+        &CancellationToken::new(),
+        None,
+    );
 
     assert_eq!(result.failed_applies, ["a.md", "b.md"]);
     assert_eq!(result.applied_paths, ["c.md"]);
@@ -318,6 +326,7 @@ fn invalid_batch_prefix_reports_fail_closed_without_ordinary_apply() {
             &mut sink,
             &NoFaults,
             &CancellationToken::new(),
+            None,
         );
         assert_eq!(result.failed_applies, ["a.md", "b.md"]);
         assert!(result.applied_paths.is_empty());
@@ -357,8 +366,13 @@ fn batch_prefix_that_contains_a_retire_is_rejected() {
         ordinary_calls: Vec::new(),
     };
 
-    let result =
-        apply_reconcile_plan_cancellable(&plan, &mut sink, &NoFaults, &CancellationToken::new());
+    let result = apply_reconcile_plan_cancellable(
+        &plan,
+        &mut sink,
+        &NoFaults,
+        &CancellationToken::new(),
+        None,
+    );
 
     assert_eq!(result.failed_applies, ["a.md"]);
     assert!(result.applied_paths.is_empty());
@@ -698,6 +712,7 @@ fn uncertain_batch_prefix_does_not_poll_the_post_commit_crash_seam() {
         &mut sink,
         faults.as_ref(),
         &CancellationToken::new(),
+        None,
     );
 
     assert_eq!(result.failed_applies, ["a.md", "b.md"]);
@@ -726,7 +741,7 @@ fn plan_of(
         from_generation: dohc_engine_files::ScanGeneration(0),
         to_generation: dohc_engine_files::ScanGeneration(1),
         ops,
-        retained_over_cap: Vec::new(),
+        retained_unread: Vec::new(),
         unconfirmed_removed: unconfirmed_removed
             .iter()
             .map(|path| (*path).to_owned())
@@ -801,7 +816,7 @@ fn apply(
     plan: &dohc_engine_files::ReconcilePlan,
     sink: &mut dyn CaptureSink,
 ) -> dohc_engine_files::CaptureApplyResult {
-    apply_reconcile_plan_cancellable(plan, sink, &NoFaults, &CancellationToken::new())
+    apply_reconcile_plan_cancellable(plan, sink, &NoFaults, &CancellationToken::new(), None)
 }
 
 /// A peer must receive a respelled path's retire before its ingest, or a
@@ -834,8 +849,8 @@ fn an_ingest_waits_for_the_waiting_retire_of_its_old_spelling() {
     assert_eq!(result.failed_applies, ["notes.md", "Notes.md"]);
 }
 
-/// Where the disk cannot show the stored spelling, as on Windows, the old
-/// spelling's removal stays unconfirmed every pass. The new spelling is
+/// Where the disk cannot prove the stored spelling, the old spelling's
+/// removal stays unconfirmed every pass. The new spelling is
 /// captured as it is without the respell fix, never held back for good.
 #[test]
 fn an_unproven_respell_never_holds_back_an_ingest() {
@@ -861,4 +876,85 @@ fn a_failed_respelled_retire_never_holds_back_an_ingest() {
     assert_eq!(sink.inner.0.calls, ["notes.md", "Notes.md"]);
     assert_eq!(result.failed_applies, ["notes.md"]);
     assert_eq!(result.applied_paths, ["Notes.md"]);
+}
+
+/// A request made while a batch commits sends that path next, alone, ahead
+/// of the lexically earlier remainder. Every durable unit wakes the caller.
+#[test]
+fn a_requested_path_is_captured_alone_before_the_rest_of_a_new_file_import() {
+    let plan = plan_of(
+        ["a.md", "b.md", "c.md", "d.md", "e.md", "z.md"]
+            .into_iter()
+            .map(ingest)
+            .collect(),
+        &[],
+        &[],
+    );
+    let priority: Arc<OnceLock<Arc<ImportPriority>>> = Arc::new(OnceLock::new());
+    let commits = Arc::new(AtomicUsize::new(0));
+    let requester = Arc::clone(&priority);
+    let counter = Arc::clone(&commits);
+    let import = Arc::new(ImportPriority::new(move || {
+        if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+            requester.get().expect("priority installed").request("z.md");
+        }
+    }));
+    assert!(priority.set(Arc::clone(&import)).is_ok());
+    let mut sink = TwoAtATimeSink::default();
+
+    let result = apply_reconcile_plan_cancellable(
+        &plan,
+        &mut sink,
+        &NoFaults,
+        &CancellationToken::new(),
+        Some(&import),
+    );
+
+    assert_eq!(
+        sink.0.calls,
+        ["a.md", "b.md", "z.md", "c.md", "d.md", "e.md"]
+    );
+    // a+b, z alone, c+d, then e alone once the batch has one op left.
+    assert_eq!(commits.load(Ordering::SeqCst), 4);
+    assert!(result.failed_applies.is_empty());
+    let mut applied = result.applied_paths.clone();
+    applied.sort();
+    assert_eq!(applied, ["a.md", "b.md", "c.md", "d.md", "e.md", "z.md"]);
+}
+
+/// A plan with retires keeps its order: a respelled path's retire must still
+/// run before its new spelling's ingest. A request for a path the plan does
+/// not hold changes nothing.
+#[test]
+fn a_request_never_reorders_a_plan_with_retires() {
+    let plan = plan_of(
+        vec![retire("notes.md"), ingest("Notes.md"), ingest("a.md")],
+        &[],
+        &[("notes.md", "Notes.md")],
+    );
+    let import = ImportPriority::new(|| {});
+    import.request("a.md");
+    let mut sink = WaitingSink::default();
+    let result = apply_reconcile_plan_cancellable(
+        &plan,
+        &mut sink,
+        &NoFaults,
+        &CancellationToken::new(),
+        Some(&import),
+    );
+    assert_eq!(sink.inner.0.calls, ["notes.md", "Notes.md", "a.md"]);
+    assert!(result.failed_applies.is_empty());
+
+    let plan = plan_of(vec![ingest("a.md"), ingest("b.md")], &[], &[]);
+    let import = ImportPriority::new(|| {});
+    import.request("missing.md");
+    let mut sink = TwoAtATimeSink::default();
+    apply_reconcile_plan_cancellable(
+        &plan,
+        &mut sink,
+        &NoFaults,
+        &CancellationToken::new(),
+        Some(&import),
+    );
+    assert_eq!(sink.0.calls, ["a.md", "b.md"]);
 }

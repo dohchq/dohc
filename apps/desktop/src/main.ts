@@ -1,3 +1,5 @@
+import { createWorkspaceLinksReader } from "./workspaces/workspaceLinks";
+import { linksOperations } from "./ipc/linksOperations";
 import { shareHandoffOperations, shareMountOperations, shareProposalOperations, sharedChannelOperations, relayShareOperations } from "./ipc/shareOperations";
 import { createOperationHistory } from "./workspaces/workspaceHistoryOperations";
 import { createReceivedFileReferenceScopes } from "./workspaces/workspaceFileReferenceScopes";
@@ -88,7 +90,12 @@ import { workspaceVersionHandlers } from "./ipc/workspaceVersionsIpc";
 import { createShareProposalsIpc } from "./ipc/shareProposalsIpc";
 import { createShareDirectWriteDelivery } from "./ipc/shareDirectWriteDelivery";
 import { registerSharedViewsIpcHandlers } from "./ipc/sharedViewsIpc";
-import { createWorkspaceSyncStop } from "./workspaces/stopWorkspaceSync";
+import {
+  createWorkspaceSyncStop,
+  reopenWithoutSync,
+  withWorkspaceSyncTransition,
+  type SyncPauseReopen,
+} from "./workspaces/stopWorkspaceSync";
 import { registerCloudIpcHandlers } from "./ipc/cloudIpc";
 import { createSharedChannelsIpc } from "./ipc/sharedChannelsIpc";
 import { createShareHandoffIpcHandlers } from "./ipc/shareHandoffIpc";
@@ -96,7 +103,7 @@ import { createDesktopSharedChannelSync } from "./workspaces/desktopSharedChanne
 import { createWorkspaceFilesIpc } from "./ipc/workspaceFilesIpc";
 import { settingsOperations } from "./ipc/settingsOperations";
 import { workspaceFileOperations } from "./ipc/workspaceFileOperations";
-import { registerWorkspaceGraphIpcHandlers } from "./ipc/workspaceGraphIpc";
+import { registerWorkspaceHeadingsIpcHandlers } from "./ipc/workspaceFilesIpc";
 import { registerNativeMenusIpcHandlers } from "./ipc/nativeMenusIpc";
 import {
   createWorkspaceRootApproval,
@@ -110,7 +117,7 @@ import { createWorkspaceFileOpens } from "./window/workspaceFileOpens";
 import { confirmOpenPathWorkspace, createOpenPathOpener } from "./workspaces/openPathTarget";
 import { runInWorkspaceAuthorityLane } from "./workspaces/workspaceAuthorityLane";
 import { randomUUID } from "node:crypto";
-import { accessCliQueries, createAccessAcquisition, createAccessOwner, ownerAccessRoster } from "./access/accessOwner";
+import { accessCliQueries, createAccessAcquisition, createAccessOwner, ownerAccessRoster, refreshAccessObservations } from "./access/accessOwner";
 import { hasAccessChat, locateAccessVersionPath, resolveAccessFileObject, resolveAccessObject } from "./access/accessObjectResolution";
 import { createShareCopyHandler, createShareCopyReader } from "./ipc/shareCopyHandler";
 import { shareCopyOperations } from "./ipc/shareCopyOperations";
@@ -514,7 +521,6 @@ import {
   createWorkspaceDatabaseAccess,
 } from "./workspaces/workspaceDatabase";
 import { registerDesktopDatabaseIpcHandlers } from "./ipc/desktopDatabaseIpc";
-import { WorkspaceGraphIndex } from "./workspaces/workspaceGraph";
 
 import { createDesktopChatBookmarks, type DesktopChatBookmarkProjectionState } from "./workspaces/desktopChatBookmarks";
 import { readCachedUserSettingsFile } from "./settings/userSettingsStore";
@@ -663,6 +669,7 @@ const {
   readOwnedWorkspaceAsset,
   readOwnedWorkspaceAssetFor,
   listOwnedWorkspaceFilesFor,
+  lookupOwnedWorkspaceFilesFor,
   ownedWorkspaceReadsFor,
 } = createDesktopWorkspaceReads({
   listDiskFiles: (rootPath, scope) => workspaceFilesWorker.list(rootPath, scope),
@@ -687,7 +694,7 @@ protocol.registerSchemesAsPrivileged([
 
 function requireWorkspace(workspaceId: string) {
   const workspace = findWorkspace(workspaceId);
-  if (!workspace) throw new Error(`Unknown workspace: ${workspaceId}`);
+  if (!workspace) throw new Error("This workspace is not open. Open it again.");
   return workspace;
 }
 
@@ -900,7 +907,6 @@ function sendRendererActivity(scope?: WorkspaceActivityScope): void {
   const activityEvent = workspaceActivityPayload(scope);
   workspaceFileListings.invalidate(activityEvent);
   invalidateDatasetAddresses(activityEvent);
-  invalidateWorkspaceGraphIndexes(activityEvent);
   broadcastWorkspaceActivity({
     windows: BrowserWindow.getAllWindows(),
     activeWorkspaceIdOf: (webContentsId) => {
@@ -964,7 +970,7 @@ const {
   targetWindow,
   sendWorkspaceActivated,
   applyZoomLevelToWindows,
-  broadcastUserSettings,
+  broadcastUserSettings, broadcastAgentColor,
   refreshApplicationMenu,
   refreshNativeWorkspaceSurfaces,
   prepareForRendererReload,
@@ -1373,7 +1379,7 @@ async function labelsForOwnerShare(workspace: EngineWorkspace, credentials: Clou
   try {
     lease.assertCurrent();
     if (cachedCredentials?.token !== credentials.token || cachedCredentials.userId !== credentials.userId) throw new Error("Your server session changed. Try again.");
-    if (workspace.attachmentId !== undefined && workspace.attachmentId !== lease.binding.attachmentId) throw new Error("This share belongs to a retired workspace.");
+    if (workspace.attachmentId !== undefined && workspace.attachmentId !== lease.binding.attachmentId) throw new Error("This workspace was closed. Open it again.");
     const lookup = async <T>(read: () => Promise<T>): Promise<T | null> => {
       try {return await read();} catch (error) {if (options.refresh) throw error; return null;}
     };
@@ -1595,11 +1601,7 @@ const accessOwner = createAccessOwner<AccessWorkspaceOperation>({
     relayUrl: cachedCredentials.relayUrl, generation: credentialCacheGeneration } : null,
   roster: ({ workspace }) => ownerAccessRoster(workspace, cachedCredentials, shareRosters.observation),
   received: () => receivedShareAcquisition.observation(),
-  refresh: async operation => {
-    await warmCredentialCache().catch(() => undefined);
-    operation.assertCurrent();
-    await accessAcquisition.request(operation.workspace.workspaceId);
-  },
+  refresh: operation => refreshAccessObservations(operation, warmCredentialCache, accessAcquisition),
   resolve: async (operation, ref) => {
     const workspace = operation.workspace;
     return resolveAccessObject(workspace, ref, {
@@ -1680,7 +1682,6 @@ interface DesktopWorkspaceAuthorityState extends DesktopChatBookmarkProjectionSt
   // Takes Button presses from shared views while this computer runs the
   // workspace's schedules.
   relayedPresses: RelayedPressHost;
-  workspaceGraph: WorkspaceGraphIndex;
   sitePreviews: ReturnType<typeof createSitePreviewLifecycle<SitePreviewResultBody>>;
   tryInVersionSessions: ReturnType<typeof createTryInVersionSessions>;
   shareMountCommands: ReturnType<typeof createShareMountCommandsFor>;
@@ -1729,7 +1730,6 @@ function createDesktopWorkspaceAuthorityState(
     collectionAutomations,
     datasetHost,
     relayedPresses: createRelayedPressHostFor(binding.workspaceId),
-    workspaceGraph: new WorkspaceGraphIndex(),
     sitePreviews: createSitePreviewLifecycle<SitePreviewResultBody>({
       allowOrigin: allowLoopbackFrameOrigin,
       notifyReplaced: (senderId, replacement) => {
@@ -1879,22 +1879,6 @@ function withCurrentWorkspaceAttachmentOperation<Result>(
   }
 }
 
-function invalidateWorkspaceGraphIndexes(event: {
-  workspaceId?: string;
-  paths?: readonly string[];
-}): void {
-  const invalidate = (workspaceId: string) =>
-    withWorkspaceAttachment({ workspaceId }, (lease) =>
-      lease.state.workspaceGraph.invalidate(event.paths),
-    );
-  if (event.workspaceId) {
-    invalidate(event.workspaceId);
-    return;
-  }
-  for (const workspaceId of workspaceAuthorities.workspaceIds()) {
-    invalidate(workspaceId);
-  }
-}
 
 type SitePreviewLifecycle = Omit<
   ReturnType<typeof createSitePreviewLifecycle<SitePreviewResultBody>>,
@@ -2235,7 +2219,7 @@ function engineForWorkspace(
   if (!remote || !credentials) return null;
   if (!capture || !credentials.relayUrl) return null;
   if (!workspace.attachmentId) {
-    throw new Error("Cloud sync requires a registered workspace attachment.");
+    throw new Error("Open this workspace again to start cloud sync.");
   }
   // Only sync when the session belongs to the server this workspace is bound
   // to; a mismatch keeps it local-only (no token leak, no mass-delete).
@@ -2291,6 +2275,11 @@ function engineForWorkspace(
       },
       recoverOrigin: () => daemonRelay.recoverOrigin(),
     },
+    // Workspace activity keeps the Collections wait, so it outlasts this
+    // engine when the person signs out.
+    afterPass: ({ failed }) =>
+      withWorkspaceAttachment(workspace, lease => workspaceActivity.syncPassEnded(canonicalWorkspaceFor(lease),
+        lease.state.activity, failed, () => daemonRelay.collectionsWaiting())) ?? Promise.resolve(false),
     capture,
     onChange: createRelayOnChange(workspace),
     // MU-C4: joined shared channels refresh on the same cadence as the
@@ -2397,6 +2386,11 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
     };
   },
   engineFor: engineForWorkspace,
+  collectionsWaitingFor: async workspace => {
+    const waiting = await withEngineAdapter(workspace, adapter => adapter.collectionsWaiting());
+    if (waiting === null) throw new Error("The workspace engine is not running.");
+    return waiting;
+  },
   // The engine capture gate (engineCaptureGate.ts) owns the shared-view rule:
   // main only states whether the workspace is one, and the decision
   // carries the cause.
@@ -2516,6 +2510,14 @@ const activity = {
     workspaceAuthorities.withAuthority(workspace.workspaceId, lease =>
       workspaceActivity.prepareSyncPause(canonicalWorkspaceFor(lease), lease.state.activity),
     ),
+  recordSyncPauseReopenFailed: (workspaceId: string): void =>
+    withWorkspaceActivityState(workspaceId, (lease, workspace) =>
+      workspaceActivity.recordSyncPauseReopenFailed(workspace, lease.state.activity),
+    ),
+  readCollectionsWaiting: (workspace: RegistryEntry): Promise<boolean> =>
+    workspaceAuthorities.withAuthority(workspace.workspaceId, lease =>
+      workspaceActivity.readCollectionsWaiting(canonicalWorkspaceFor(lease), lease.state.activity),
+    ),
   reconcileCloud: (): void => {
     for (const workspaceId of workspaceAuthorities.workspaceIds()) {
       withWorkspaceActivityState(workspaceId, (lease) =>
@@ -2572,14 +2574,27 @@ const activity = {
     );
   },
   // Starts the pass under the lease and waits for it outside, so a pass that
-  // waits on an unreachable server holds no workspace authority.
+  // waits on an unreachable server holds no workspace authority. After a
+  // pause there is no sync to retry: Try again repeats the reopen that ends
+  // the Collections wait.
   retryCloudSync: (
     workspaceId: string,
     reason: "person" | "reconnect",
-  ): Promise<void> =>
-    withWorkspaceActivityState(workspaceId, (lease) =>
+  ): Promise<void> => {
+    const reopen = withWorkspaceActivityState(workspaceId, (lease, workspace) =>
+      workspaceActivity.getStatus(workspace, lease.state.activity).collectionsWaitingForSync === "reopen");
+    if (reopen) {
+      if (reason !== "person") return Promise.resolve();
+      const workspace = requireWorkspace(workspaceId);
+      return withWorkspaceSyncTransition(workspaceId, () => desktopEngine.withOwnerHostPaused(async () => {
+        const { failure } = await reopenWithoutSync(syncPauseReopen, workspace);
+        if (failure) throw failure.error;
+      }));
+    }
+    return withWorkspaceActivityState(workspaceId, (lease) =>
       workspaceActivity.retryCloudSync(lease.state.activity, reason),
-    ),
+    );
+  },
   retryFileObservation: (workspaceId: string): Promise<void> =>
     withWorkspaceActivityState(workspaceId, lease => workspaceActivity.retryFileObservation(lease.state.activity)),
   syncNow: (workspaceId: string): Promise<void> =>
@@ -2844,7 +2859,7 @@ function linkedChatStoreFor(
       workspaceOrLease.attachmentId !== undefined &&
       workspaceOrLease.attachmentId !== lease.binding.attachmentId
     ) {
-      throw new Error("This chat store request belongs to a retired workspace.");
+      throw new Error("This workspace was closed. Open it again.");
     }
   const existing = lease.state.linkedChatStore;
   if (existing) return existing;
@@ -2853,7 +2868,7 @@ function linkedChatStoreFor(
   }
   const current = findWorkspace(lease.binding.workspaceId);
     if (!current) {
-      throw new Error(`Unknown workspace: ${lease.binding.workspaceId}`);
+      throw new Error("This workspace is not open. Open it again.");
     }
     const binding = lease.binding;
     const engineWorkspace = receivedShareEngine.workspaceForRegistered({
@@ -2885,7 +2900,7 @@ function agentDispatchStoreHandleFor(workspace: {
       workspace.attachmentId !== undefined &&
       workspace.attachmentId !== lease.binding.attachmentId
     ) {
-      throw new Error("This dispatch store request belongs to a retired workspace.");
+      throw new Error("This workspace was closed. Open it again.");
     }
     const existing = lease.state.agentDispatchStoreHandle;
   if (existing) return existing;
@@ -2939,7 +2954,7 @@ async function withEngineAdapter<T>(
     registered.rootPath !== workspace.rootPath
   ) {
     throw new Error(
-      "The engine workspace belongs to a replaced physical attachment.",
+      "This workspace changed while this ran. Try again.",
     );
   }
   return await withWorkspaceAttachmentAsync(workspace, async (lease) =>
@@ -2947,6 +2962,7 @@ async function withEngineAdapter<T>(
   );
 }
 
+const workspaceLinks = createWorkspaceLinksReader(withEngineAdapter, () => shareViewFiles);
 const resolveEngineFiles = createEngineFileResolver(withEngineAdapter, createReceivedFileReferenceScopes<EngineWorkspace>({
   findWorkspace,
   currentAttachment: workspaceId => workspaceAuthorities.currentBinding(workspaceId).attachmentId,
@@ -3068,7 +3084,7 @@ function canonicalWorkspaceFor(
   lease.assertCurrent();
 const workspace = findWorkspace(lease.binding.workspaceId);
   if (!workspace) {
-    throw new Error(`Unknown workspace: ${lease.binding.workspaceId}`);
+    throw new Error("This workspace is not open. Open it again.");
   }
   return {
     ...workspace,
@@ -3123,7 +3139,7 @@ async function syncWorkspaceForDispatch(
               activity.workspaceRootPath(workspaceId) !== workspace.rootPath
             ) {
               throw new Error(
-                "This sync belongs to a retired workspace authority.",
+                "This workspace was closed. Open it again.",
               );
             }
             activity.queueCloudSync(workspaceId);
@@ -4341,7 +4357,7 @@ function createRelayedPressHostFor(workspaceId: string): RelayedPressHost {
     },
     heldClaim: async (press) => {
       const executor = collectionAutomationsOf(workspaceId);
-      if (!executor) throw new Error("This workspace was closed.");
+      if (!executor) throw new Error("This workspace was closed. Open it again.");
       return await executor.relayedClaim({ automationId: press.automationId, collectionPath: press.collectionPath, definitionHash: press.definitionHash, pressId: press.hostPressId });
     },
     inspect: async (inspectionIds, signal) => {
@@ -4350,7 +4366,7 @@ function createRelayedPressHostFor(workspaceId: string): RelayedPressHost {
     },
     press: async (input, watch) => {
       const executor = collectionAutomationsOf(workspaceId);
-      if (!executor) throw new Error("This workspace was closed.");
+      if (!executor) throw new Error("This workspace was closed. Open it again.");
       return await executor.pressRelayed(input, (claimId) => watch(claimId));
     },
     notifyFailure: async (failure) => {
@@ -4383,7 +4399,7 @@ function createCollectionAutomationsFor(
     const person = await localPerson();
     return await withPhysicalWorkspaceOperation(workspaceId, async (operation) => {
       if (operation.workspace.attachmentId !== attachmentId) {
-        throw new Error("This workspace was closed.");
+        throw new Error("This workspace was closed. Open it again.");
       }
       const capture = activity.engineCaptureFor(workspaceId);
       if (!capture) throw new Error(captureRefusal("Automations"));
@@ -4398,7 +4414,7 @@ function createCollectionAutomationsFor(
     readText: (path) => readWorkspaceTextIfPresent(rootPath, path),
     writeText: async (path, text, expectedContentHash, automationId) => {
       return withPhysicalWorkspaceOperation(workspaceId, async operation => {
-        if (operation.workspace.attachmentId !== attachmentId) throw new Error("This workspace was closed.");
+        if (operation.workspace.attachmentId !== attachmentId) throw new Error("This workspace was closed. Open it again.");
         const capture = activity.engineCaptureFor(workspaceId);
         if (!capture || operation.workspace.shareView !== undefined) return writeWorkspaceText(rootPath, path, text, expectedContentHash);
         const result = await writeWorkspaceFilesAs(operation, [{ path, contentBase64: Buffer.from(text).toString("base64"), expectedSha256: expectedContentHash }],
@@ -4415,7 +4431,7 @@ function createCollectionAutomationsFor(
     cachedRoster: () => shareRosters.cached(workspaceId),
     evaluator: automationEvaluator.forWorkspace(workspaceId),
     store: createAutomationRunStore(rootPath, resolveWorkspaceMetadataDir, () => {
-      if (!workspaceAuthorities.isCurrentAttachment(workspaceId, attachmentId)) throw new Error("This workspace was closed.");
+      if (!workspaceAuthorities.isCurrentAttachment(workspaceId, attachmentId)) throw new Error("This workspace was closed. Open it again.");
     }),
     onRunsChanged: () => notifyAutomationRunsChanged(workspaceId),
     onUsageSuccess: invocation => { usageStore?.recordSuccess(invocation); },
@@ -4508,7 +4524,7 @@ function createCollectionAutomationsFor(
       if (opened) return await work((await opened).automations);
       if (!open) return null;
       return await withPhysicalWorkspaceOperation(workspaceId, async (operation) => {
-        if (operation.workspace.attachmentId !== attachmentId) throw new Error("This workspace was closed.");
+        if (operation.workspace.attachmentId !== attachmentId) throw new Error("This workspace was closed. Open it again.");
         // A workspace that never approved a dataset has no dataset store to open.
         if (!(await localDatasetStoreExists(rootPath))) return null;
         const host = await localDatasetHostFor(operation.workspace, operation.signal);
@@ -4564,7 +4580,7 @@ const datasetRuntimePath = () => join(app.isPackaged ? process.resourcesPath : j
 const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: string }, signal: AbortSignal) =>
   workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
     signal.throwIfAborted(); operation.assertCurrent();
-    if (operation.workspace.rootPath !== workspace.rootPath) throw new Error("The Collection workspace attachment changed.");
+    if (operation.workspace.rootPath !== workspace.rootPath) throw new Error("This workspace changed while this ran. Try again.");
     const slot = operation.state.datasetHost;
     let pending = slot.pending;
     if (!pending) {
@@ -4580,7 +4596,7 @@ const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: s
         // refuses the invocation rather than write as the owner at depth 0.
         agentRun: () => {
           const run = withWorkspaceAttachment(attachment, lease => workspaceActivity.agentRun(lease.state.activity));
-          if (run === undefined) throw new Error("The Collection workspace attachment changed.");
+          if (run === undefined) throw new Error("This workspace is no longer available for this Collection operation.");
           return run;
         },
         // A commit that made failed claims, as a chain stop does, sends their notices now.
@@ -4602,7 +4618,7 @@ const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: s
         },
         collectionAuthor: async () => {
           const run = withWorkspaceAttachment(attachment, lease => workspaceActivity.agentRun(lease.state.activity));
-          if (run === undefined) throw new Error("The Collection workspace attachment changed.");
+          if (run === undefined) throw new Error("This workspace is no longer available for this Collection operation.");
           return run ? { kind: "agent", agentId: run.agentId, onBehalfOf: run.onBehalfOf, agentRunId: run.agentRunId, ...(run.depth > 0 ? { depth: run.depth } : {}) } : await localPerson();
         },
       });
@@ -4688,7 +4704,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
   automations: (workspace) => {
     const opened = async () => {
       const automations = collectionAutomationsOf(workspace.workspaceId);
-      if (!automations) throw new Error("This workspace was closed.");
+      if (!automations) throw new Error("This workspace was closed. Open it again.");
       await automations.open();
       return automations;
     };
@@ -4742,6 +4758,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
       return { result, waiting };
     },
   }),
+  links: workspaceLinks,
   findWorkspace,
   listWorkspaces,
   openWorkspaceActivity,
@@ -4928,6 +4945,7 @@ const { refreshDispatchTray, refreshSystemThemeDesktopIcons, dispatchKeepsRunnin
 });
 
 const desktopEngine = createDesktopEngine({
+  resourcesBasePath,
   onWorkspaceOpened: workspaceId => {
     const workspace = findWorkspace(workspaceId);
     if (workspace) void withWorkspaceAttachment({workspaceId}, lease => recoverOutageTyping(canonicalWorkspaceFor(lease)));
@@ -5085,7 +5103,7 @@ function createShareViewFilesForOperation(
         target.schedulingRootPath !== operation.workspace.rootPath
       ) {
         throw new Error(
-          "Share file cache request belongs to a retired workspace.",
+          "This workspace was closed. Open it again.",
         );
       }
       return operation.state.shareViewFiles;
@@ -5229,6 +5247,9 @@ function withShareViewFilesOperation<Result>(
 }
 
 shareViewFiles = {
+  linksEdges: (target, input) => withShareViewFilesOperation(target, files => files.linksEdges(target, input)),
+  linksIn: (target, input) => withShareViewFilesOperation(target, files => files.linksIn(target, input)),
+  linksResolve: (target, input) => withShareViewFilesOperation(target, files => files.linksResolve(target, input)),
   narrow: (lease, target, assertCurrent, commit) =>
     withShareViewFilesOperation(target, files => files.narrow(lease, target, assertCurrent, commit)),
   end: (lease, target, assertCurrent) =>
@@ -5241,8 +5262,10 @@ shareViewFiles = {
     ),
   read: (target, request) =>
     withShareViewFilesOperation(target, (files) => files.read(target, request)),
-  list: (target) =>
-    withShareViewFilesOperation(target, (files) => files.list(target)),
+  lookup: (target, paths) =>
+    withShareViewFilesOperation(target, files => files.lookup(target, paths)),
+  list: (target, options) =>
+    withShareViewFilesOperation(target, (files) => files.list(target, options)),
   projectionStatus: (target) =>
     withShareViewFilesOperation(target, (files) =>
       files.projectionStatus(target),
@@ -5663,7 +5686,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     updateAfterStartupFailure: () => updateAfterFailure("startup"),
     updateAfterWindowLoadFailure: () => updateAfterFailure("window-load"),
   },
-  launch: { finished: finishLaunch },
+  launch: { finished: finishLaunch, settled: () => desktopEngine.launchSettled() },
   beforeQuit: beforeQuitWithTypingRecovery,
   beforeQuitWithoutWindows: beforeQuitWithTypingRecovery,
   shutdown: {
@@ -5680,6 +5703,8 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       desktopEngine.sessions?.beginShutdown();
       desktopChatBookmarks.stop();
     },
+    stopNoticeRefusals: () => noticeStore().stopWorkspaceRefusals(),
+    stopAutomationWakes: () => automationWakeConsumer.stop(),
     stopSearch: () => workspaceSearchOwner.dispose(),
     stopSitePreviews: stopAllSitePreviews,
     settleYDocs: async () => {
@@ -5942,6 +5967,7 @@ const settingsIpc = createSettingsIpc<WebContents, IpcMainInvokeEvent, DesktopRe
   applyZoomLevelToWindows, applyThemeMode, refreshDispatchTray, openDispatchWorkspaces,
   setSpellCheckerEnabled: (enabled) => session.defaultSession.setSpellCheckerEnabled(enabled),
   chatDispatchService, withRendererWorkspaceOperation, notifyRenderer,
+  broadcastAgentColor,
   broadcastUserSettings: (settings) => {
     // Reports follow the switches before any window learns of them.
     telemetry.setPrivacy(privacyInEffect(settings));
@@ -5965,19 +5991,25 @@ function pauseStatus(pause: WorkspaceSyncPause) {
   return workspaceSyncPauseStatus(pause, localInstallationId());
 }
 
+const syncPauseReopen: SyncPauseReopen = {
+  closeActivity: workspaceId => activity.close(workspaceId, { notify: false, preserveAgentRun: true }),
+  closeRelay: workspace => closeRelayTransportWorkspace(workspace),
+  openActivity: workspace => activity.open(workspace),
+  collectionsWaiting: workspace => activity.readCollectionsWaiting(workspace),
+  notify: workspaceId => notifyRenderer({ workspaceId }),
+};
+
 const stopWorkspaceSync = createWorkspaceSyncStop({
+  ...syncPauseReopen,
   person: async () => ({ kind: "person", personId: localInstallationId() }),
   pauseStatus,
   withOwnerHostPaused: work => desktopEngine.withOwnerHostPaused(work),
   prepare: workspace => activity.prepareSyncPause(workspace),
   resume: workspace => activity.enableCloud(workspace),
   pauseRemote: pauseWorkspaceRemote,
-  closeActivity: workspaceId => activity.close(workspaceId, { notify: false, preserveAgentRun: true }),
-  closeRelay: workspace => closeRelayTransportWorkspace(workspace),
-  openActivity: workspace => activity.open(workspace),
   status: workspaceId => activity.getStatus(workspaceId),
-  notify: workspaceId => notifyRenderer({ workspaceId }),
   cleanupFailed: (workspaceId, error) => console.error("[desktop] sync pause cleanup:", workspaceId, error),
+  reopenFailed: workspace => activity.recordSyncPauseReopenFailed(workspace.workspaceId),
 });
 
 function registerIpcHandlers(): void {
@@ -5991,13 +6023,18 @@ function registerIpcHandlers(): void {
     currentCredentialGeneration: () => credentialCacheGeneration,
     relayJson: (credentials, path) => relayShareJsonWithCredentials(credentials, path),
   });
+  registerOperations(operationBoundary, linksOperations, {
+    linksEdges: ({ workspaceId: _workspaceId, ...input }, { operation }) => workspaceLinks.edges(operation.workspace, input),
+    linksIn: ({ workspaceId: _workspaceId, ...input }, { operation }) => workspaceLinks.incoming(operation.workspace, input),
+    linksResolve: ({ workspaceId: _workspaceId, ...input }, { operation }) => workspaceLinks.resolve(operation.workspace, input),
+  });
   registerOperations(operationBoundary, shareCopyOperations, {
     getShareCopyDetails: (input, { event }) => shareCopyHandler(event.sender, input),
   });
   registerOperations(operationBoundary, accessOperations, {
     getObjectAccess: (input, { operation }) => accessOwner.object(operation!, input),
     listSharingAccess: (input, { operation }) => accessOwner.sharing(operation!, input),
-    requestAccessRefresh: (_input, { operation }) => accessOwner.refresh(operation!),
+    requestAccessRefresh: async (_input, { operation }) => { await accessOwner.refresh(operation!); },
   });
   const windowIpc = createWindowIpc<WebContents, IpcMainInvokeEvent, IpcMainEvent>({
     registerHandler: handleIpc,
@@ -6057,6 +6094,7 @@ function registerIpcHandlers(): void {
     withRendererWorkspaceOperation,
     exactRendererWorkspaceReferences,
     workspaceFileListings,
+    lookupOwnedWorkspaceFilesFor,
     workspaceFileMutations,
     listOwnedWorkspaceFilesFor,
     readOwnedWorkspaceTextFor,
@@ -6081,7 +6119,7 @@ function registerIpcHandlers(): void {
     assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine,
     withEngineAdapter, requireEngineCapture, readWorkspaceEnginePolicy, readSyncHistory, localAgentDisplayName: () => cachedAgentName ?? "Agent", localPersonId: localUserId,
     localPersonName: localUserDisplayName, localPerson,
-    localInstallationId, warmCredentialCache, currentCredentials: () => cachedCredentials,
+    stateDir, localInstallationId, warmCredentialCache, currentCredentials: () => cachedCredentials,
     historyCollections: async operation => {
       const { workspace } = operation;
       const local = await localDatasetHostFor(workspace, operation.signal);
@@ -6168,22 +6206,8 @@ function registerIpcHandlers(): void {
     shell,
   });
 
-  registerWorkspaceGraphIpcHandlers<
-    WebContents,
-    IpcMainInvokeEvent,
-    DesktopRendererWorkspaceOperation["workspace"],
-    DesktopRendererWorkspaceOperation
-  >({
-    registerHandler: handleIpc,
-    assertTrustedSender,
-    withRendererWorkspaceOperation,
-    workspaceFileListings,
-    listOwnedWorkspaceFilesFor,
-    readOwnedWorkspaceTextFor,
-    requireEngineCapture,
-    syncWorkspaceSharedChannels,
-    linkedChatStoreFor,
-    resolveEngineFiles,
+  registerWorkspaceHeadingsIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation>({
+    registerHandler: handleIpc, assertTrustedSender, withRendererWorkspaceOperation, readOwnedWorkspaceTextFor,
   });
 
   windowIpc.registerExternalUrl();
@@ -6273,7 +6297,7 @@ function registerIpcHandlers(): void {
     },
     withAdapter: withEngineAdapter,
     compile: async (request, signal) => {
-      installedAppCompiler ??= createInstalledAppCompiler(resourcesBasePath(), app.runningUnderARM64Translation);
+      installedAppCompiler ??= createInstalledAppCompiler(resourcesBasePath());
       const compile = await installedAppCompiler;
       signal.throwIfAborted();
       return compile(request, { timeoutMs: 60_000, maxMemoryBytes: 1024 * 1024 * 1024, maxProcesses: 8,
@@ -6325,7 +6349,7 @@ function registerIpcHandlers(): void {
           const ownerKey = datasetCopyOwnerKey(remote.credentials);
           const copy = await workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
             signal.throwIfAborted(); operation.assertCurrent();
-            if (operation.workspace.rootPath !== workspace.rootPath) throw new Error("The Collection workspace attachment changed.");
+            if (operation.workspace.rootPath !== workspace.rootPath) throw new Error("This workspace changed while this ran. Try again.");
             return ownerDatasetCopies.get({ workspaceId: workspace.workspaceId, rootPath: workspace.rootPath,
               datasetId, origin: targetOrigin, ownerKey, lifetime: operation.signal,
               assertOwner: () => {
@@ -6915,7 +6939,7 @@ function registerIpcHandlers(): void {
   registerChatsIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
     registerHandler: handleIpc,
     assertTrustedSender, chatScope, requireEngineCapture, linkedChatStoreFor, chatWrites,
-    assertWritableWorkspace, warmCredentialCache, localUserId,
+    stateDir, assertWritableWorkspace, warmCredentialCache, localUserId,
     localInstallationId, currentCredentials: () => cachedCredentials, chatRelayIdentityFor,
     readWorkspace: findWorkspace,
     syncWorkspaceSharedChannels, syncSharedChannelsForChatTarget,

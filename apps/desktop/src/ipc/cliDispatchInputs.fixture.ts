@@ -28,7 +28,11 @@ const jsonFields: Readonly<Record<string, unknown>> = {
 };
 
 export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>> = {
+  "links edges": [],
+  "links in": ['{"path":"a.md"}'],
+  "links resolve": ["a.md", '[{"kind":"wikilink","literal":"b"}]'],
   "sync stop": [],
+  "access refresh": [],
   "access object": ['{"kind":"path","path":"Notes/a.md"}'],
   "access sharing": ["received"],
   "share copy": ["share", "grant"],

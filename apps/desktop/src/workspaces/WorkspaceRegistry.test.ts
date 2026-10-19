@@ -87,9 +87,9 @@ describe("the registry and the folder's sync record", () => {
     let passes = 0;
     await expect(updateWorkspaceShareMounts(received.workspaceId, mounts => {
       passes += 1;
-      if (passes === 2) throw new Error("This work belongs to a retired workspace authority.");
+      if (passes === 2) throw new Error("This workspace was closed. Open it again.");
       return [...mounts, mount("s-mount")];
-    })).rejects.toThrow("retired");
+    })).rejects.toThrow("This workspace was closed. Open it again.");
     expect(findWorkspace(received.workspaceId)?.shareMounts).toBeUndefined();
   });
 });

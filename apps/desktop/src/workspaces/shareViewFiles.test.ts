@@ -3067,3 +3067,49 @@ describe("ShareViewFiles", () => {
   });
 
 });
+
+it("keeps link reads inside the share target gate and tracked-path floor, including ended local shares", async () => {
+  const rootPath = await workspaceRoot();
+  const requested = { kind: "standalone" as const, workspaceId: "workspace-a" };
+  let current: ResolvedShareViewFilesTarget | null = { ...target(rootPath), ended: true };
+  const page = { versionId: "main", subject: { path: "notes/a.md", objectId: "a" }, entries: [
+    { source: "notes/b.md", title: "B", ordinal: 0, span: [0, 5] as [number, number], line: 1, snippet: "[[a]]", highlightStart: 0, highlightEnd: 5 },
+    { source: ".env", title: "secret", ordinal: 0, span: [0, 5] as [number, number], line: 1, snippet: "[[a]]", highlightStart: 0, highlightEnd: 5 },
+  ], unchecked: ["notes/c.md", ".env"], nextCursor: null, complete: false, indexBuilding: false, mountsCovered: true };
+  const store = Object.assign(readStore({ text: "" }), {
+    incomingLinks: vi.fn(async () => page),
+    resolveLinks: vi.fn(async () => ({ versionId: "main", results: [{ path: "notes/a.md", fragment: null }, { path: ".env", fragment: null }, { path: null, create: "notes/new.md", fragment: null }, { path: null, create: ".env.local", fragment: null }], mountsCovered: true })),
+  });
+  const openStore = vi.fn(() => store);
+  const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => current, openStore });
+  expect(await files.linksIn(requested, { subject: { path: "notes/a.md" } })).toMatchObject({ entries: [page.entries[0]], unchecked: ["notes/c.md"] });
+  expect(await files.linksResolve(requested, { source: "notes/b.md", literals: [{ kind: "wikilink", literal: "a" }, { kind: "wikilink", literal: ".env" }] })).toMatchObject({ results: [{ path: "notes/a.md", fragment: null }, null, { path: null, create: "notes/new.md", fragment: null }, null] });
+  await expect(files.linksResolve(requested, { source: ".env", literals: [] })).rejects.toBeInstanceOf(SharedFileReadOnlyError);
+  await withShareViewRefreshLifecycleLock(rootPath, async () => {
+    const pending = files.linksIn(requested, { subject: { path: "notes/a.md" } });
+    current = null;
+    return { pending };
+  }).then(async ({ pending }) => { await expect(pending).rejects.toThrow(); });
+  expect(openStore).toHaveBeenCalledTimes(3);
+});
+
+it("filters edge file metadata, both endpoints, and unchecked paths through the projected share lease", async () => {
+  const rootPath=await workspaceRoot();
+  const requested={kind:"standalone" as const,workspaceId:"workspace-a"};
+  let current: ResolvedShareViewFilesTarget | null={...target(rootPath),ended:true};
+  const page={versionId:"main",files:[{objectId:"a",path:"notes/a.md",title:"A"},{objectId:"secret",path:".env",title:"Secret"}],
+    entries:[{source:"notes/a.md",target:"notes/b.md",kind:"markdown" as const,ordinal:0},
+      {source:"notes/a.md",target:".env",kind:"markdown" as const,ordinal:1},
+      {source:".env",target:"notes/a.md",kind:"markdown" as const,ordinal:2}],
+    unchecked:["notes/pending.md",".env"],complete:false,indexBuilding:false,mountsCovered:true,nextCursor:"sealed"};
+  const store=Object.assign(readStore({text:""}),{linkEdges:vi.fn(async()=>page)});
+  const openStore=vi.fn(()=>store);
+  const files=createShareViewFiles({...unusedReconcilePorts,resolveTarget:()=>current,openStore});
+  expect(await files.linksEdges(requested,{})).toEqual({...page,files:[page.files[0]],entries:[page.entries[0]],unchecked:["notes/pending.md"]});
+  await withShareViewRefreshLifecycleLock(rootPath,async()=>{
+    const pending=files.linksEdges(requested,{cursor:"sealed"});
+    current=null;
+    return {pending};
+  }).then(async({pending})=>{await expect(pending).rejects.toThrow();});
+  expect(openStore).toHaveBeenCalledOnce();
+});

@@ -1,3 +1,4 @@
+import { linksOperations } from "./linksOperations";
 import { WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 import { SharedDocumentOpenState } from "./sharedDocumentOpenState";
 import { shareCopyOperations } from "./shareCopyOperations";
@@ -448,6 +449,7 @@ export const RetryOwnerLiveSharePayload = WorkspaceIdPayload.extend({shareId: OW
 export type RetryOwnerLiveSharePayload = z.infer<typeof RetryOwnerLiveSharePayload>;
 
 export const ListWorkspaceFilesPayload = WorkspaceIdPayload.extend({
+  filePath: PATH_STRING.optional(),
   // Activity refreshes may reuse main's last complete listing. Every other
   // caller omits this and forces a disk/share walk, so direct mutations and
   // the Explorer's explicit refresh cannot observe a pre-watcher cache.
@@ -1105,113 +1107,6 @@ export const WriteWorkspaceTextResult = z.discriminatedUnion("status", [
 ]);
 export type WriteWorkspaceTextResult = z.infer<typeof WriteWorkspaceTextResult>;
 
-const WorkspaceGraphNodeBase = z.object({
-  path: PATH_STRING,
-  title: z.string().max(120),
-  outgoing: z.number().int().nonnegative(),
-  incoming: z.number().int().nonnegative(),
-});
-const WorkspaceGraphFileNode = WorkspaceGraphNodeBase.extend({
-  // Legacy file graphs predate `kind`; accepting its absence keeps the base
-  // graph contract compatible while still rejecting chat/heading metadata.
-  kind: z.literal("file").optional(),
-  filePath: PATH_STRING.optional(),
-  threadId: z.never().optional(),
-  channelId: z.never().optional(),
-  channelWireId: z.never().optional(),
-  channelName: z.never().optional(),
-  channelSlug: z.never().optional(),
-  channelKind: z.never().optional(),
-  headingAnchor: z.never().optional(),
-}).strict();
-const WorkspaceGraphHeadingNode = WorkspaceGraphNodeBase.extend({
-  kind: z.literal("heading"),
-  filePath: PATH_STRING,
-  headingAnchor: z.string().min(1).max(400),
-  threadId: z.never().optional(),
-  channelId: z.never().optional(),
-  channelWireId: z.never().optional(),
-  channelName: z.never().optional(),
-  channelSlug: z.never().optional(),
-  channelKind: z.never().optional(),
-}).strict();
-const WorkspaceGraphChatThreadNode = WorkspaceGraphNodeBase.extend({
-  kind: z.literal("chat-thread"),
-  threadId: OPAQUE_ID,
-  channelId: OPAQUE_ID.optional(),
-  channelWireId: z.string().min(1).max(256).optional(),
-  channelName: z.string().min(1).max(100).optional(),
-  channelSlug: CHAT_CHANNEL_SLUG.optional(),
-  channelKind: z.enum(["channel", "dm", "agent"]).optional(),
-  filePath: z.never().optional(),
-  headingAnchor: z.never().optional(),
-}).strict();
-const WorkspaceGraphNode = z.union([
-  WorkspaceGraphHeadingNode,
-  WorkspaceGraphChatThreadNode,
-  WorkspaceGraphFileNode,
-]);
-
-const WorkspaceGraphEdge = z.object({
-  source: PATH_STRING,
-  target: PATH_STRING,
-  kind: z.enum([
-    "wikilink",
-    "markdown",
-    "chat-mentions-file",
-    "chat-mentions-heading",
-    "heading-in-file",
-  ]),
-});
-
-export const ReadWorkspaceGraphPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  includeChatMentions: z.boolean().optional(),
-});
-export type ReadWorkspaceGraphPayload = z.infer<typeof ReadWorkspaceGraphPayload>;
-
-export const WorkspaceGraphResult = z.object({
-  // Partial-freshness marker; see ListChatFileMentionsResult.
-  sharedChannelRowsUncovered: z.number().int().positive().optional(),
-  nodes: z.array(WorkspaceGraphNode).max(2000),
-  edges: z.array(WorkspaceGraphEdge).max(10000),
-  unresolvedLinks: z.number().int().nonnegative(),
-  scannedFileCount: z.number().int().nonnegative(),
-  omittedFileCount: z.number().int().nonnegative(),
-  truncatedFileCount: z.number().int().nonnegative(),
-});
-export type WorkspaceGraphResult = z.infer<typeof WorkspaceGraphResult>;
-
-// Backlinks ("Linked mentions"): the open document's inbound links, derived
-// read-only in main from the same source graph. `path` is the open file; the
-// result lists every other file that links to it with a highlighted snippet per
-// mention. Bounds mirror workspaceGraph's MAX_BACKLINK_* caps (kept as literals
-// here so this shared contract never imports the main-only fs module).
-export const GetBacklinksPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  path: PATH_STRING,
-});
-export type GetBacklinksPayload = z.infer<typeof GetBacklinksPayload>;
-
-const BacklinkSnippet = z.object({
-  // A single source line, trimmed/windowed to ~160 chars (+ ellipses).
-  text: z.string().max(400),
-  line: z.number().int().positive(),
-  // [start, end) of the link within `text`; the UI marks this range.
-  highlightStart: z.number().int().nonnegative(),
-  highlightEnd: z.number().int().nonnegative(),
-});
-
-const BacklinkSource = z.object({
-  sourcePath: PATH_STRING,
-  sourceTitle: z.string().max(120),
-  snippets: z.array(BacklinkSnippet).max(20),
-});
-
-export const GetBacklinksResult = z.object({
-  sources: z.array(BacklinkSource).max(500),
-});
-export type GetBacklinksResult = z.infer<typeof GetBacklinksResult>;
 
 export const ListWorkspaceHeadingsPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -1390,6 +1285,12 @@ const SYNC_STATUS_BASE_FIELDS = {
   recoveryUnavailable: z.boolean().optional(),
   keptFiles: z.array(z.tuple([z.string(), z.string()])).optional(),
   heldFiles: z.array(CaptureFileHold).optional(),
+  // Collection updates wait for a pull that has not finished, as the engine
+  // answers. "sync" while ordinary sync is on, signed in or not, so a pass
+  // that finishes the pull ends it. "reopen" after sync paused but the
+  // workspace did not reopen, which is what ends the wait. Local writes are
+  // saved either way.
+  collectionsWaitingForSync: z.enum(["sync", "reopen"]).optional(),
   // Why the last sync pass failed, present until a pass succeeds. Local work
   // is saved either way. A refused claim waits for Try again; network failures back off.
   syncFailure: z
@@ -1600,10 +1501,17 @@ const SHARED_AUTHOR_ID = z.string().min(1).refine(
 // Display only. This token grants no workspace or author authority.
 export const ActorPresentation = z.object({
   group: z.string(),
-  hue: z.enum(["rust", "amber", "teal", "blue", "indigo", "plum", "rose", "olive"]).nullable(),
+  hue: z.enum(["rust", "amber", "teal", "blue", "indigo", "plum", "rose"]).nullable(),
   self: z.boolean(),
 });
 export type ActorPresentation = z.infer<typeof ActorPresentation>;
+export const AgentColorChangedEvent = z.object({
+  workspaceId: WorkspaceIdPayload.shape.workspaceId,
+  group: z.string(),
+  hue: ActorPresentation.shape.hue,
+}).strict();
+export type AgentColorChangedEvent = z.infer<typeof AgentColorChangedEvent>;
+export const SetAgentColorPayload = AgentColorChangedEvent;
 
 // A Collection automation's name or its Collection's, as History reads it.
 export const AUTOMATION_AUTHOR_TEXT_MAX = 4096;
@@ -1977,7 +1885,10 @@ export type ChatMessageRecord = z.infer<typeof ChatMessageRecord>;
 
 export const ListChatFileMentionsPayload = z.object({
   workspaceId: WORKSPACE_ID,
-  path: PATH_STRING,
+  path: PATH_STRING.optional(),
+  paths: z.array(PATH_STRING).min(1).max(500).optional(),
+}).refine(input => (input.path !== undefined) !== (input.paths !== undefined), {
+  message: "Choose a file or a batch of files.",
 });
 export type ListChatFileMentionsPayload = z.infer<
   typeof ListChatFileMentionsPayload
@@ -3295,7 +3206,7 @@ const SitePackageInfo = z
     ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "shared site roots must stay inside their authority mount root",
+        message: "Shared app folders must stay inside the shared folder.",
         path: ["root"],
       });
     }
@@ -6883,7 +6794,7 @@ export type EngineYDocLineageReplacementEvent = z.infer<
 export const ReadOnlyTransitionCause = z.enum(["access-ended", "reconnecting", "lineage-failure"]);
 export type ReadOnlyTransitionCause = z.infer<typeof ReadOnlyTransitionCause>;
 
-export const SaveFailureReason = z.enum(["read-only", "privacy-denied"]).nullable();
+export const SaveFailureReason = z.enum(["read-only", "privacy-denied", "volume-shares-new-files"]).nullable();
 export type SaveFailureReason = z.infer<typeof SaveFailureReason>;
 
 export const EngineYDocSaveStateEvent = z.object({
@@ -7007,6 +6918,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof sharedChannelOperations>,
     OperationBridge<typeof relayShareOperations>,
     OperationBridge<typeof shareCopyOperations>,
+    OperationBridge<typeof linksOperations>,
     OperationBridge<typeof systemMotionOperations>,
     OperationBridge<typeof systemPrivacySettingsOperations>,
     OperationBridge<typeof serverAccountOperations>,
@@ -7083,10 +6995,6 @@ export interface DohcDesktopBridge
   // File.path since Electron 32). The paths feed importWorkspaceFiles'
   // droppedPaths — see the trust-delta note on that payload.
   getDroppedFilePaths(files: File[]): string[];
-  readWorkspaceGraph(
-    payload: ReadWorkspaceGraphPayload,
-  ): Promise<WorkspaceGraphResult>;
-  getBacklinks(payload: GetBacklinksPayload): Promise<GetBacklinksResult>;
   listWorkspaceHeadings(
     payload: ListWorkspaceHeadingsPayload,
   ): Promise<ListWorkspaceHeadingsResult>;
@@ -7215,6 +7123,7 @@ export interface DohcDesktopBridge
   detectAgentTools(payload: AgentRunPayload): Promise<AgentToolsResult>;
   setTitlebarTheme(payload: SetTitlebarThemePayload): Promise<void>;
   onWindowFullScreen(listener: (event: WindowFullScreenEvent) => void): () => void;
+  onAgentColorChanged(listener: (event: AgentColorChangedEvent) => void): () => void;
   onUserSettingsChanged(
     listener: (result: DesktopUserSettingsResult) => void,
   ): () => void;

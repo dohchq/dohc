@@ -23,6 +23,7 @@ const iconButtonClass =
 
 type ActionButtonProps = NativeButtonProps & { size?: "default" | "compact" };
 type SecondaryButtonProps = NativeButtonProps & { size?: "default" | "compact" | "row" };
+type DangerButtonProps = NativeButtonProps & { size?: "default" | "compact" | "row" };
 const compactPrimaryButtonClass =
   "h-7 cursor-pointer rounded-md bg-accent px-2.5 text-[11px] font-semibold text-bg hover:opacity-90 dohc-focus-visible focus-visible:outline-offset-1 disabled:cursor-wait disabled:opacity-50";
 // The secondary recipe at a table row's height, for a control inside a
@@ -39,6 +40,10 @@ const dangerButtonClass =
   "rounded-lg bg-danger px-3 py-2 text-sm font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-50";
 const compactDangerButtonClass =
   "h-7 cursor-pointer rounded-md bg-danger px-2.5 text-[11px] font-semibold text-bg hover:opacity-90 dohc-focus-visible focus-visible:outline-offset-1 disabled:cursor-wait disabled:opacity-50";
+// The danger confirm at the secondary row button's height, so a row's
+// confirm takes its place without the row growing.
+const rowDangerButtonClass =
+  "inline-flex h-6 cursor-pointer items-center rounded-md bg-danger px-2 text-xs font-semibold text-bg hover:opacity-90 dohc-focus-visible focus-visible:outline-offset-1 disabled:cursor-wait disabled:opacity-50";
 
 /** Filled brand-accent CTA — at most one per surface. */
 export const PrimaryButton = forwardRef<HTMLButtonElement, ActionButtonProps>(
@@ -56,16 +61,10 @@ export const PrimaryButton = forwardRef<HTMLButtonElement, ActionButtonProps>(
 
 /** Filled danger confirm for an action that removes or revokes something.
  * Ordinary confirms keep PrimaryButton. */
-export const DangerButton = forwardRef<HTMLButtonElement, ActionButtonProps>(
+export const DangerButton = forwardRef<HTMLButtonElement, DangerButtonProps>(
   function DangerButton({ className, type, size, ...rest }, ref) {
-    return (
-      <button
-        ref={ref}
-        type={type ?? "button"}
-        className={cx(size === "compact" ? compactDangerButtonClass : dangerButtonClass, className)}
-        {...rest}
-      />
-    );
+    const sized = size === "compact" ? compactDangerButtonClass : size === "row" ? rowDangerButtonClass : dangerButtonClass;
+    return <button ref={ref} type={type ?? "button"} className={cx(sized, className)} {...rest} />;
   },
 );
 
@@ -124,7 +123,7 @@ export function SectionLabel({
   children,
   ...rest
 }: {
-  as?: "span" | "p" | "div" | "header" | "h3";
+  as?: "span" | "p" | "div" | "header" | "h3" | "h4";
   children: ReactNode;
 } & HTMLAttributes<HTMLElement>) {
   return (

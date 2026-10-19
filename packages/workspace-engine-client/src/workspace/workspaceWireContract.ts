@@ -62,6 +62,7 @@ export const WORKSPACE_METHOD = {
   automationsClaimSchedule: "automations.claimSchedule",
   automationsScheduleMarks: "automations.scheduleMarks",
   syncRemoteChanges: "sync.remoteChanges",
+  syncCollectionsWaiting: "sync.collectionsWaiting",
   automationsRunNow: "automations.runNow",
 } as const;
 
@@ -94,6 +95,8 @@ export type WorkspaceOpenParams = WorkspaceJsonObject & {
   captureMode?: "none";
   storeMode?: "passive";
   recoverRunningDispatches?: boolean;
+  /** Full owner opens without relay only: an unfinished ordinary pull's pages become local truth. */
+  abandonOrdinaryPull?: boolean;
 };
 export type CaptureRecoveryImportParams = WorkspaceJsonObject & {
   versionId: string; objectId: string; path: string;
@@ -441,7 +444,7 @@ type CaptureSetAuthorParams = WorkspaceJsonObject & {
 };
 
 export type WorkspaceMethodParamsMap = {
-  [WORKSPACE_METHOD.replicaCut]: WorkspaceJsonObject & { selectors: Array<{versionId: string | null; paths: string[]}>; knownTextShas?: string; position?: {revision:number;logCursor:number;journalCursor:number} | null; cursor?: {path:string;objectId:string;versionId:string} | null };
+  [WORKSPACE_METHOD.replicaCut]: WorkspaceJsonObject & { selectors: Array<{versionId: string | null; paths: string[]}>; knownTextShas?: string; since?: {revision:number;logCursor:number;journalCursor:number} | null; incarnation: string; position?: {revision:number;logCursor:number;journalCursor:number} | null; cursor?: {path:string;objectId:string;versionId:string;removed?:number} | null };
   [WORKSPACE_METHOD.open]: WorkspaceOpenParams;
   [WORKSPACE_METHOD.close]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.conflictsList]: ConflictListParams;
@@ -485,6 +488,7 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.automationsClaimSchedule]: AutomationClaimScheduleParams;
   [WORKSPACE_METHOD.automationsScheduleMarks]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.syncRemoteChanges]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.syncCollectionsWaiting]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.automationsRunNow]: AutomationRunNowParams;
 };
 
@@ -1259,7 +1263,9 @@ const WorkspaceResultSchemas = {
       lineageClaimId: NullableString, restoreGeneration: NullableInt}))),
     texts: Schema.mutable(Schema.Array(mutableStruct({sha256: Schema.String, text: Schema.String}))),
     moved: Schema.Boolean,
-    nextCursor: Schema.NullOr(mutableStruct({path: Schema.String, objectId: Schema.String, versionId: Schema.String})),
+    delta: Schema.Boolean,
+    removed: Schema.mutable(Schema.Array(mutableStruct({versionId:Schema.String,objectId:Schema.String}))),
+    nextCursor: Schema.NullOr(mutableStruct({path: Schema.String, objectId: Schema.String, versionId: Schema.String, removed:Schema.optional(Schema.Int)})),
     refusedFiles: Schema.mutable(Schema.Array(mutableStruct({path: Schema.String, objectId: Schema.String, versionId: Schema.String, sha256: Schema.String, reason: Schema.Literal("text-frame-limit")}))),
   }),
   [WORKSPACE_METHOD.open]: mutableStruct({ workspace: Schema.String }),
@@ -1448,6 +1454,10 @@ const WorkspaceResultSchemas = {
   [WORKSPACE_METHOD.syncRemoteChanges]: mutableStruct({
     applied: Schema.Int,
   }),
+  /** Collections updates wait for an ordinary pull to commit its last page. */
+  [WORKSPACE_METHOD.syncCollectionsWaiting]: mutableStruct({
+    waiting: Schema.Boolean,
+  }),
   [WORKSPACE_METHOD.automationsRunNow]: mutableStruct({
     claim: AutomationClaimSummarySchema,
   }),
@@ -1584,7 +1594,7 @@ export function decodeWorkspaceResult<M extends WorkspaceMethod>(
 }
 
 export type ReplicaCurrentViewPage = WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.replicaCut];
-export type ReplicaCurrentView = Omit<ReplicaCurrentViewPage, "moved" | "nextCursor" | "refusedFiles"> & {omitted: ReplicaCurrentViewPage["refusedFiles"]};
+export type ReplicaCurrentView = Omit<ReplicaCurrentViewPage, "moved" | "nextCursor" | "refusedFiles" | "delta" | "removed"> & {omitted: ReplicaCurrentViewPage["refusedFiles"]};
 export type ReplicaCurrentViewPosition = Pick<ReplicaCurrentView, "revision" | "logCursor" | "journalCursor">;
 export type ReplicaCurrentViewCursor = NonNullable<ReplicaCurrentViewPage["nextCursor"]>;
 export type ReplicaCurrentViewSelector = WorkspaceMethodParamsMap[typeof WORKSPACE_METHOD.replicaCut]["selectors"][number];

@@ -296,7 +296,14 @@ describe("metadata-only History pages", () => {
 
 const operationResult = {operationId:"dohc-operation:minted", versionId:"main", momentCount:15000};
 it.each([VERSIONED_METHOD.historyOperations, VERSIONED_METHOD.historyUndo])("decodes %s as a bounded summary", method => {
-  const result = method===VERSIONED_METHOD.historyUndo ? {...operationResult,compensationOperationId:"dohc-operation:undo:committed",deduped:true,materialized:false} : operationResult;
+  const result = method===VERSIONED_METHOD.historyUndo ? {...operationResult,notRestored: [], compensationOperationId:"dohc-operation:undo:committed",deduped:true,materialized:false} : operationResult;
   expect(decodeVersionedResult(method,result)).toEqual(result);
   expect(()=>decodeVersionedResult(method,{...result,moments:[]})).toThrow(ProtocolShapeError);
+});
+it("requires and preserves Undo members that were not restored", () => {
+  const reply = { ...operationResult, compensationOperationId: "dohc-operation:undo:committed", deduped: true,
+    materialized: true, notRestored: ["moved/source.md"] };
+  expect(decodeVersionedResult(VERSIONED_METHOD.historyUndo, reply)).toEqual(reply);
+  const { notRestored: _omitted, ...missing } = reply;
+  expect(() => decodeVersionedResult(VERSIONED_METHOD.historyUndo, missing)).toThrow(ProtocolShapeError);
 });

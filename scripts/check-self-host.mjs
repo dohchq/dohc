@@ -7,6 +7,7 @@ const { values } = parseArgs({ options: { start: { type: 'boolean' }, 'first-sta
 const envFile = values['env-file'];
 const docker = args => spawnSync('docker', args, { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
 const checks = [];
+console.log('Development read replicas require Linux 5.19 or later with Landlock ABI 2 or later enabled. Replicas are disabled by default.');
 const record = (name, ok, detail = '') => { checks.push(ok); console.log(`[${ok ? 'ok' : 'missing'}] ${name}${detail ? ` - ${detail}` : ''}`); };
 const version = spawnSync('docker', ['compose', 'version', '--short'], { encoding: 'utf8' });
 const supportedCompose = version.status === 0 && supportedComposeVersion(version.stdout ?? '');
@@ -74,6 +75,9 @@ else {
         if(value.version!==1||value.relayUrl!==process.env.DOHC_RELAY_PUBLIC_ORIGIN)throw Error('Unexpected descriptor');})().catch(()=>{console.error('Relay cannot verify its public HTTPS origin. Check DNS, TLS, and host routing.');process.exitCode=1;});`;
       const hairpin = spawnSync('docker', composeArgs(envFile, settings, 'exec', '-T', 'sync-relay', 'node', '-e', hairpinScript), {stdio: 'inherit'});
       record('native executable and relay HTTPS reachability', hairpin.status === 0);
+      const sandbox = spawnSync('docker', composeArgs(envFile, settings, 'exec', '-T', 'sync-relay',
+        '/app/bin/dohc-workspace-engine', '--replica-sandbox-check'), {encoding: 'utf8'});
+      console.log(`[${sandbox.status === 0 ? 'available' : 'unavailable'}] development read replicas - ${sandbox.status === 0 ? sandbox.stdout.trim() : 'Use Linux 5.19 or later with Landlock ABI 2 or later enabled; permit landlock_* in the container seccomp profile.'}`);
       // Replica sync uses the gateway, so check it after Compose has started every service.
       const automations = spawnSync('docker', composeArgs(envFile, settings, 'exec', '-T', 'sync-relay',
         'node', '/app/tools/self-host/health.mjs', 'sync-relay', '--automations'), {stdio: 'inherit'});

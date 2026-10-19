@@ -16,6 +16,7 @@
 //! peer bootstraps from the persisted lineage.
 
 use dohc_engine_domain::ChangeAttribution;
+use dohc_engine_storage::text;
 use dohc_engine_storage::{
     enqueue_job, put_binary_blob, put_binary_blob_with_sha, EngineStore, FaultInjector,
     MaterializationJobSpec, Preimage, StorageError, TxnOutcome,
@@ -2530,7 +2531,7 @@ pub fn settle(
         // Persist the content and its provenance state vector as blobs. The
         // content digest was computed once above; the settle rows below reuse
         // it too.
-        put_binary_blob_with_sha(tx, &content_bytes, &content_sha)?;
+        text::put_projection(tx, &content_bytes, &content_sha)?;
         put_binary_blob(tx, &sv_bytes)?;
 
         // Durable per-doc settle counter + last-materialized content.

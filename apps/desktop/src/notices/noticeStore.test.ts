@@ -30,6 +30,7 @@ import { ListNoticesResult, RetryAutomationNoticeResult } from "../ipc/bridgeCon
 import { FAILED_ELSEWHERE_BODY, AUTOMATION_SWITCHED_OFF_BODY, AUTOMATION_SWITCHED_OFF_VIEW_BODY } from "@dohc/automation-executor/automation-failed-notice";
 import {
   RETRY_ELSEWHERE,
+  RETRY_NO_RUN,
   retryAutomationRun,
   retryFromFailureNotice,
   sendFailureNotices,
@@ -252,6 +253,8 @@ interface Computer {
   onReach?: () => void;
   // Runs when the store reads which account a session belongs to.
   onAccountRead?: () => void;
+  // Runs after each change the store publishes, as main's listeners do.
+  onChanged?: () => void;
 }
 
 function switchTo(computer: Computer, signedIn: NoticeAccount | null): void {
@@ -290,7 +293,7 @@ async function computer(
       };
     },
     installId: () => options.installId ?? "install-a",
-    onChanged: () => { state.changes += 1; },
+    onChanged: () => { state.changes += 1; state.onChanged?.(); },
     nowMs: () => clock,
     refusalNotices: options.refusalNotices,
     dismissRefusal: options.dismissRefusal,
@@ -1435,6 +1438,174 @@ it("lists cached, local, and account Notices when the refusal reader fails", asy
   ]));
 });
 
+describe("refusal work after quit stops it", () => {
+  const first = { originId: "peer", originSeq: 1 };
+  const second = { originId: "peer", originSeq: 2 };
+  const hold = () => ({ started: deferred(), release: deferred() });
+
+  // One workspace's engine with one refusal Notice. Null coordinates mean the
+  // workspace could not be read.
+  function engine() {
+    const state = {
+      coordinates: [first] as (typeof first)[] | null,
+      read: null as ReturnType<typeof hold> | null,
+      dismissal: null as ReturnType<typeof hold> | null,
+      events: [] as string[],
+    };
+    const refusalNotices = vi.fn(async () => {
+      const held = state.read;
+      state.read = null;
+      if (held) { held.started.resolve(); await held.release.promise; }
+      const coordinates = state.coordinates;
+      return [{ workspaceId: WORKSPACE, notices: coordinates && [{ noticeId: "refusal", ...coordinates.at(-1)!,
+        refusalCoordinates: coordinates, reason: "Review this file", document: null }] }];
+    });
+    const dismissRefusal = vi.fn(async () => {
+      const held = state.dismissal;
+      state.dismissal = null;
+      if (held) { held.started.resolve(); await held.release.promise; }
+      state.events.push("dismissed");
+    });
+    return Object.assign(state, {
+      refusalNotices,
+      dismissRefusal,
+      holdRead: () => state.read = hold(),
+      holdDismissal: () => state.dismissal = hold(),
+    });
+  }
+
+  // Leaves a refusal with a dismissal queued for its first coordinate and a
+  // newer second coordinate still shown.
+  async function withQueuedDismissal(refusals: ReturnType<typeof engine>, options: { directory?: string } = {}) {
+    const each = await computer(null, { ...options, refusalNotices: refusals.refusalNotices, dismissRefusal: refusals.dismissRefusal });
+    const [shown] = (await each.store.list()).notices;
+    refusals.coordinates = null;
+    await each.store.mark([shown!], "dismissed", null);
+    refusals.coordinates = [first, second];
+    const [row] = (await each.store.list()).notices;
+    expect(row).toMatchObject({ noticeId: "refusal", refusalCoordinates: [second] });
+    return { each, row: row! };
+  }
+
+  const localFile = (each: Computer) => readFile(join(each.directory, "local.json"), "utf8");
+
+  it("finishes the refresh already running, skips queued ones, and returns one drain", async () => {
+    const refusals = engine();
+    const { each } = await withQueuedDismissal(refusals);
+    const reads = refusals.refusalNotices.mock.calls.length;
+    const changes = each.changes;
+    refusals.coordinates = [first, second, { originId: "peer", originSeq: 3 }];
+    const read = refusals.holdRead();
+    const dismissal = refusals.holdDismissal();
+    const running = each.store.refreshRefusals(WORKSPACE);
+    await read.started.promise;
+    const queued = each.store.refreshRefusals();
+    const listed = each.store.list();
+    const drain = each.store.stopWorkspaceRefusals();
+    expect(each.store.stopWorkspaceRefusals()).toBe(drain);
+    void drain.then(() => refusals.events.push("drained"));
+    read.release.resolve();
+    // The running refresh replays the queued dismissal before it saves.
+    await dismissal.started.promise;
+    expect(refusals.events).toEqual(["dismissed", "dismissed"]);
+    dismissal.release.resolve();
+    await drain;
+    expect(refusals.events.slice(-2)).toEqual(["dismissed", "drained"]);
+    await expect(running).resolves.toBeUndefined();
+    await expect(queued).resolves.toBeUndefined();
+    expect((await listed).notices).toEqual([expect.objectContaining({ refusalCoordinates: [second, { originId: "peer", originSeq: 3 }] })]);
+    expect(refusals.refusalNotices).toHaveBeenCalledTimes(reads + 1);
+    expect(each.changes).toBe(changes + 1);
+    // The running refresh's save reached the file before the drain settled.
+    const restarted = await computer(null, { directory: each.directory });
+    expect((await restarted.store.list()).notices).toEqual([expect.objectContaining({
+      noticeId: "refusal", refusalCoordinates: [second, { originId: "peer", originSeq: 3 }] })]);
+    expect(JSON.parse(await localFile(each)).rows[0].pendingRefusalDismissals).toEqual([first]);
+  });
+
+  it("skips a refresh queued behind a running dismissal, which finishes first", async () => {
+    const refusals = engine();
+    const each = await computer(null, { refusalNotices: refusals.refusalNotices, dismissRefusal: refusals.dismissRefusal });
+    const [shown] = (await each.store.list()).notices;
+    const changes = each.changes;
+    const dismissal = refusals.holdDismissal();
+    const marking = each.store.mark([shown!], "dismissed", null);
+    await dismissal.started.promise;
+    const queued = each.store.refreshRefusals(WORKSPACE);
+    const drain = each.store.stopWorkspaceRefusals();
+    void drain.then(() => refusals.events.push("drained"));
+    refusals.coordinates = [second];
+    dismissal.release.resolve();
+    await drain;
+    expect(refusals.events).toEqual(["dismissed", "drained"]);
+    await expect(marking).resolves.toBeUndefined();
+    await expect(queued).resolves.toBeUndefined();
+    expect(refusals.refusalNotices).toHaveBeenCalledOnce();
+    expect(each.changes).toBe(changes + 1);
+    expect(JSON.parse(await localFile(each)).rows).toEqual([expect.objectContaining({
+      noticeId: "refusal", refusalCoordinates: [], pendingRefusalDismissals: [first], dismissedAtMs: clock })]);
+  });
+
+  it("keeps rows when refresh, list, or a run retry asks after the stop", async () => {
+    const server = await relay();
+    const refusals = engine();
+    const each = await computer(account(server, "owner"), { refusalNotices: refusals.refusalNotices });
+    await each.store.postNotice(notice());
+    await each.store.sync();
+    const refusal = (await each.store.list()).notices.find(row => row.kind === "sync-refusal")!;
+    await each.store.mark([refusal], "read", null);
+    const before = await each.store.list();
+    expect(before.notices).toEqual(expect.arrayContaining([
+      expect.objectContaining({ noticeId: "agent-run:1", store: "account" }),
+      expect.objectContaining({ noticeId: "refusal", store: "local", readAtMs: clock }),
+    ]));
+    const reads = refusals.refusalNotices.mock.calls.length;
+    await each.store.stopWorkspaceRefusals();
+    // An engine read now would remove the row; the stop must not read it as empty.
+    refusals.coordinates = [second];
+    await expect(each.store.refreshRefusals(WORKSPACE)).resolves.toBeUndefined();
+    await expect(each.store.refreshRefusals()).resolves.toBeUndefined();
+    expect(await each.store.list()).toEqual(before);
+    const retry = vi.fn();
+    await expect(retryFromFailureNotice({ notices: each.store, retry },
+      { notice: { store: "local", noticeId: "refusal" }, account: before.account, startOver: false }))
+      .resolves.toEqual({ status: "refused", reason: RETRY_NO_RUN });
+    expect(retry).not.toHaveBeenCalled();
+    expect(refusals.refusalNotices).toHaveBeenCalledTimes(reads);
+  });
+
+  it("rejects a refusal dismissal queued before or sent after the stop, keeping rows and queued coordinates", async () => {
+    const refusals = engine();
+    const { each, row } = await withQueuedDismissal(refusals);
+    await each.store.postNotice(notice({ onlyHere: true }));
+    const read = refusals.holdRead();
+    const running = each.store.refreshRefusals(WORKSPACE);
+    await read.started.promise;
+    const queuedMark = expect(each.store.mark([row], "dismissed", null)).rejects.toMatchObject({ name: "AbortError" });
+    const drain = each.store.stopWorkspaceRefusals();
+    read.release.resolve();
+    await drain;
+    await running;
+    const dismissals = refusals.dismissRefusal.mock.calls.length;
+    const saved = await localFile(each);
+    const changes = each.changes;
+    await queuedMark;
+    // The whole batch stops, so the other Notice in it stays too.
+    await expect(each.store.mark([row, { store: "local", noticeId: "agent-run:1" }], "dismissed", null))
+      .rejects.toMatchObject({ name: "AbortError" });
+    expect(refusals.dismissRefusal).toHaveBeenCalledTimes(dismissals);
+    expect(await localFile(each)).toBe(saved);
+    expect(each.changes).toBe(changes);
+    expect(JSON.parse(saved).rows).toEqual(expect.arrayContaining([expect.objectContaining({
+      noticeId: "refusal", refusalCoordinates: [second], pendingRefusalDismissals: [first], dismissedAtMs: null })]));
+    expect((await each.store.list()).notices.map(listed => listed.noticeId).sort()).toEqual(["agent-run:1", "refusal"]);
+    // Marking read reaches no engine, so it still works.
+    await each.store.mark([row], "read", null);
+    expect((await each.store.list()).notices.find(listed => listed.noticeId === "refusal")?.readAtMs).toBe(clock);
+    expect(refusals.dismissRefusal).toHaveBeenCalledTimes(dismissals);
+  });
+});
+
 describe("automation notices reach the people involved", () => {
   const AUTOMATION = "collection:object-tasks#stamp";
   const failure = (generation: number, claimId = "atc_1") => ({
@@ -1966,5 +2137,116 @@ describe("the relay hands an agent wake to one owner computer", () => {
     server.online = false;
     await laptop.store.mark([{ store: "account", noticeId: id }], "dismissed", laptop.signedIn!.key);
     expect(await laptop.store.pendingAutomationWakes()).toEqual([]);
+  });
+
+  describe("when a computer quits", () => {
+    const wakesOn = (c: Computer, ran: string[], errors: unknown[], overrides: Partial<Parameters<typeof createAutomationWakeConsumer>[0]> = {}) =>
+      createAutomationWakeConsumer({
+        intents: createAutomationWakeIntents(join(c.directory, "wakes.json")),
+        pending: () => c.store.pendingAutomationWakes(),
+        ready: async (intent) => c.signedIn?.key === intent.account,
+        enabled: async () => true,
+        enabledIfOpen: async () => true,
+        dismiss: (intent) => c.store.dismissFirst({ store: "account", noticeId: intent.noticeId }, intent.account),
+        wake: async () => { ran.push(c.directory); },
+        onError: (error) => errors.push(error),
+        ...overrides,
+      });
+
+    it("leaves a wake it has not claimed for another computer", async () => {
+      const server = await relay();
+      const id = postWake(server);
+      const laptop = await computer(account(server, "owner"), { installId: "laptop" });
+      const desktop = await computer(account(server, "owner"), { installId: "desktop" });
+      await Promise.all([laptop.store.sync(), desktop.store.sync()]);
+      const ran: string[] = [];
+      const errors: unknown[] = [];
+      const listed = deferred();
+      const quit = deferred();
+      const quitting = wakesOn(laptop, ran, errors, {
+        pending: async () => {
+          const rows = await laptop.store.pendingAutomationWakes();
+          listed.resolve();
+          await quit.promise;
+          return rows;
+        },
+      });
+      void quitting.resume();
+      await listed.promise;
+      const drain = quitting.stop();
+      quit.resolve();
+      await drain;
+      expect(await createAutomationWakeIntents(join(laptop.directory, "wakes.json")).list()).toEqual([]);
+      expect(await laptop.store.pendingAutomationWakes()).toEqual([expect.objectContaining({ noticeId: id })]);
+
+      await wakesOn(desktop, ran, errors).resume();
+      expect(ran).toEqual([desktop.directory]);
+      await laptop.store.sync();
+      await wakesOn(laptop, ran, errors).resume();
+      expect(ran).toEqual([desktop.directory]);
+      expect(errors).toEqual([]);
+    });
+
+    it("settles a claim it admitted, and after restart wakes the saved winner without dismissing again", async () => {
+      const server = await relay();
+      postWake(server);
+      const laptop = await computer(account(server, "owner"), { installId: "laptop" });
+      const desktop = await computer(account(server, "owner"), { installId: "desktop" });
+      await Promise.all([laptop.store.sync(), desktop.store.sync()]);
+      const ran: string[] = [];
+      const errors: unknown[] = [];
+      const dismiss = vi.fn((intent: { account: string; noticeId: string }) =>
+        laptop.store.dismissFirst({ store: "account", noticeId: intent.noticeId }, intent.account));
+      const answered = deferred();
+      const reply = deferred();
+      const quitting = wakesOn(laptop, ran, errors, {
+        // The relay has named this computer first; its saved intent is not claimed yet.
+        dismiss: async (intent) => {
+          const result = await dismiss(intent);
+          answered.resolve();
+          await reply.promise;
+          return result;
+        },
+        // The wake fails at quit, so the claimed winner parks.
+        wake: async () => { throw new Error("dohc is quitting"); },
+      });
+      void quitting.resume();
+      await answered.promise;
+      const drain = quitting.stop();
+      reply.resolve();
+      await drain;
+      const journal = createAutomationWakeIntents(join(laptop.directory, "wakes.json"));
+      expect(await journal.list()).toEqual([expect.objectContaining({ claimed: true })]);
+      expect(errors).toHaveLength(1);
+
+      await desktop.store.sync();
+      await wakesOn(desktop, ran, errors).resume();
+      await wakesOn(laptop, ran, errors, { dismiss }).resume();
+      expect(ran).toEqual([laptop.directory]);
+      expect(dismiss).toHaveBeenCalledOnce();
+      expect(await journal.list()).toEqual([]);
+      expect(errors).toHaveLength(1);
+    });
+
+    it("keeps syncing Notices after its wakes stop, and a Notice change starts no wake work", async () => {
+      const server = await relay();
+      const laptop = await computer(account(server, "owner"));
+      const ready = vi.fn(async () => true);
+      const ran: string[] = [];
+      const errors: unknown[] = [];
+      const wakes = wakesOn(laptop, ran, errors, { ready });
+      laptop.onChanged = () => { void wakes.resume(); };
+      await wakes.stop();
+      const id = postWake(server);
+      const changes = laptop.changes;
+      await laptop.store.sync();
+      expect(laptop.changes).toBeGreaterThan(changes);
+      expect((await file(laptop, "account")).rows).toContainEqual(expect.objectContaining({ noticeId: id }));
+      expect(await laptop.store.pendingAutomationWakes()).toEqual([expect.objectContaining({ noticeId: id })]);
+      expect(ready).not.toHaveBeenCalled();
+      expect(ran).toEqual([]);
+      expect(errors).toEqual([]);
+      expect(await createAutomationWakeIntents(join(laptop.directory, "wakes.json")).list()).toEqual([]);
+    });
   });
 });

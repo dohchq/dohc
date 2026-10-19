@@ -773,7 +773,7 @@ it("settles live edits into Markdown before stopping sync and permits local edit
     await sessions.closeWorkspace({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: ATTACHMENT_ID });
   });
   const stop = createWorkspaceSyncStop({
-    person: async () => ({ kind: "person", personId: "local" }), cleanupFailed: vi.fn(),
+    person: async () => ({ kind: "person", personId: "local" }), cleanupFailed: vi.fn(), reopenFailed: vi.fn(),
     pauseStatus: pause => workspaceSyncPauseStatus(pause, "local"),
     withOwnerHostPaused: work => work(), prepare: () => capture.settleAndCloseLiveSessionsForSyncPause(), resume: async () => {},
     pauseRemote: (id, pause) => registry.pauseRemote(id, pause), closeActivity: async () => {
@@ -784,7 +784,7 @@ it("settles live edits into Markdown before stopping sync and permits local edit
     openActivity: async () => {
       capture = createWorkspaceEngineCapture({ workspaceId: WORKSPACE_ID, rootPath: root,
         attachmentId: ATTACHMENT_ID, rustEngineSessions: sessions, onError: context => captureErrors.push(context) });
-    }, notify: () => {},
+    }, collectionsWaiting: async () => false, notify: () => {},
     status: () => ({ state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null,
       historyRecordingUnavailable: false, historyShareView: false, liveSessionsGeneration: 1,
       ...(registry.find(WORKSPACE_ID)?.syncPause ? { syncPause: workspaceSyncPauseStatus(registry.find(WORKSPACE_ID)!.syncPause!, "local") } : {}) }),

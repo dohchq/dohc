@@ -208,6 +208,7 @@ pub struct WorkspaceActor {
     link_drain_holds: Arc<AtomicU64>,
     link_rewrite_gate: Arc<tokio::sync::Mutex<()>>,
     current_views: Arc<std::sync::Mutex<dohc_engine_sync::replica_cut::CurrentViewCache>>,
+    pub(crate) link_resolvers: Arc<std::sync::Mutex<crate::links::cache::Cache>>,
 }
 
 impl WorkspaceActor {
@@ -371,6 +372,7 @@ impl WorkspaceActor {
                     link_drain_holds,
                     link_rewrite_gate: Arc::default(),
                     current_views: Arc::default(),
+                    link_resolvers: Arc::default(),
                 };
                 #[cfg(unix)]
                 if matches!(mode, ActorOpenMode::ReadWrite) {
@@ -405,6 +407,7 @@ impl WorkspaceActor {
             link_drain_holds: Arc::clone(&self.link_drain_holds),
             link_rewrite_gate: Arc::clone(&self.link_rewrite_gate),
             current_views: Arc::clone(&self.current_views),
+            link_resolvers: Arc::clone(&self.link_resolvers),
         }
     }
 
@@ -469,6 +472,7 @@ impl WorkspaceActor {
                 let _ = self.tx.try_send(Command::Close);
             }
         }
+        self.link_resolvers.lock().unwrap().close();
         match worker.join() {
             Ok(()) => Ok(()),
             Err(_) => Err(RuntimeError::WorkerPanicked),
@@ -498,6 +502,7 @@ pub struct ActorHandle {
     link_drain_holds: Arc<AtomicU64>,
     link_rewrite_gate: Arc<tokio::sync::Mutex<()>>,
     current_views: Arc<std::sync::Mutex<dohc_engine_sync::replica_cut::CurrentViewCache>>,
+    pub(crate) link_resolvers: Arc<std::sync::Mutex<crate::links::cache::Cache>>,
 }
 
 /// Keeps derived link writes behind capture, including its queued commands.
@@ -607,7 +612,7 @@ impl ActorHandle {
         .await
     }
 
-    async fn run<R: Send + 'static>(
+    pub(crate) async fn run<R: Send + 'static>(
         &self,
         work: impl FnOnce(&mut EngineStore, &mut WriterDocCache) -> Result<R, RuntimeError>
         + Send
@@ -1094,6 +1099,7 @@ mod saturation_tests {
             link_metrics: metrics,
             link_drain_holds: holds,
             current_views: Arc::default(),
+            link_resolvers: Arc::default(),
             link_rewrite_gate: Arc::default(),
         };
         prepare(&actor.handle());

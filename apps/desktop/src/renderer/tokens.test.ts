@@ -14,7 +14,7 @@ import {
 import { contrastRatio as contrast, luminance, mixHex as mix } from "./accentColor";
 import { MENU_FRAME } from "./ui/Menu";
 
-import { presentationColor } from "./workbench/actorPresentation";
+import { agentTextClass, presentationColor, presentationClasses } from "./workbench/actorPresentation";
 
 const SURFACES = ["bg", "panel", "panel2"] as const;
 
@@ -304,6 +304,24 @@ it("keeps document caret labels at AA for every hue and neutral in both themes",
   for (const hue of [null, ...IDENTITY_HUES]) {
     for (const mode of ["light", "dark"] as const) {
       expect(contrast(palette[mode].bg, presentationColor({ group: "label", hue, self: false }, "human", mode).stroke), `${hue ?? "neutral"} label (${mode})`).toBeGreaterThanOrEqual(4.5);
+    }
+  }
+});
+
+
+it("keeps agent name, glyph and opaque border contrast on every surface in both themes", () => {
+  for (const mode of ["light", "dark"] as const) {
+    for (const hue of [null, ...IDENTITY_HUES]) {
+      const token = { group: "contrast", hue, self: false };
+      const color = presentationColor(token, "agent", mode).stroke;
+      for (const surface of SURFACES) {
+        expect(contrast(color, palette[mode][surface]), String(hue) + "/" + surface).toBeGreaterThanOrEqual(4.5);
+      }
+      // The name and sparkle beside the avatar take the hue measured above.
+      expect(agentTextClass(token)).toBe(hue ? "text-hue-" + hue : "text-agent");
+      const classes = presentationClasses(token, "agent");
+      expect(classes).toContain(hue ? "border-hue-" + hue : "border-agent");
+      expect(classes).not.toContain("/50");
     }
   }
 });

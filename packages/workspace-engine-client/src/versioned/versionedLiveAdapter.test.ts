@@ -2193,7 +2193,7 @@ it("sends Undo retry identity in the request envelope and reads body-free operat
   const requests: Request[]=[];
   const client:MinimalDaemonClient={close:()=>undefined,sendRequest:async request=>{
     requests.push(request);
-    return {id:request.id,result:{operationId:"dohc-operation:minted",versionId:"main",momentCount:0,...(request.method===VERSIONED_METHOD.historyUndo?{compensationOperationId:"dohc-operation:undo:replayed",deduped:true,materialized:false}:{})}};
+    return {id:request.id,result:{operationId:"dohc-operation:minted",versionId:"main",momentCount:0,...(request.method===VERSIONED_METHOD.historyUndo?{notRestored: [], compensationOperationId:"dohc-operation:undo:replayed",deduped:true,materialized:false}:{})}};
   }};
   const adapter=new VersionedLiveAdapter(client,WORKSPACE,{workspaceId:WORKSPACE});
   await adapter.holdCapture({operationId:"dohc-operation:minted"}).catch(()=>undefined);
@@ -2203,4 +2203,29 @@ it("sends Undo retry identity in the request envelope and reads body-free operat
   expect(requests[1]).toMatchObject({method:"history.operations",params:{operationId:"dohc-operation:minted"}});
   expect(requests[2]).toMatchObject({method:"history.undo",idempotencyKey:"retry",params:{operationId:"dohc-operation:minted"}});
   expect(requests[2]?.params).not.toHaveProperty("requestId");
+});
+
+it("forwards link batches through the workspace handle and rejects malformed replies", async () => {
+  const requests: Request[] = [];
+  let result: JsonValue = { versionId: "main", results: [{ path: "target.md", fragment: null }], mountsCovered: true };
+  const adapter = new VersionedLiveAdapter({ close() {}, async sendRequest(request) { requests.push(request); return { id: request.id, result }; } }, WORKSPACE, { workspaceId: WORKSPACE });
+  const input = { source: "source.md", literals: [{ kind: "wikilink" as const, literal: "target" }] };
+  expect(await adapter.resolveLinks(input)).toEqual(result);
+  expect(requests[0]).toMatchObject({ method: "links.resolve", workspace: WORKSPACE, params: input });
+  result = { versionId: "main", results: [], mountsCovered: true };
+  await expect(adapter.resolveLinks(input)).rejects.toThrow("different literal count");
+  result = null;
+  expect(await adapter.incomingLinks({ subject: { objectId: "absent" } })).toBeNull();
+  result = { entries: [] };
+  await expect(adapter.incomingLinks({ subject: { path: "target.md" } })).rejects.toThrow();
+});
+
+it("binds edge pages to the workspace handle and validates the shared record budget", async () => {
+  const requests: Request[] = [];
+  let result: JsonValue = {versionId:"main",files:[{objectId:"a",path:"a.md",title:"A"}],entries:[],unchecked:[],complete:false,indexBuilding:true,mountsCovered:false,nextCursor:"sealed"};
+  const adapter = new VersionedLiveAdapter({close(){},async sendRequest(request){requests.push(request);return {id:request.id,result};}}, WORKSPACE, {workspaceId:WORKSPACE});
+  expect(await adapter.linkEdges({cursor:"previous"})).toEqual(result);
+  expect(requests[0]).toMatchObject({method:"links.edges",workspace:WORKSPACE,params:{cursor:"previous"}});
+  result = {...result,unchecked:Array.from({length:100},()=> "pending.md")};
+  await expect(adapter.linkEdges({})).rejects.toThrow("100 records");
 });

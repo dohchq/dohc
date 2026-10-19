@@ -1,5 +1,6 @@
 use super::{get_moment, next_moment_order, validate_identifier};
 use crate::{DomainError, TextSnapshot};
+use dohc_engine_storage::text;
 use rusqlite::{Connection, Transaction, params};
 use serde::Serialize;
 
@@ -83,11 +84,8 @@ pub fn record_keyed_capture_recovery_in_tx(
     if get_moment(tx, workspace_id, moment_id)?.is_some() {
         return Ok(None);
     }
-    tx.execute(
-        "INSERT OR IGNORE INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
-        params![typing_sha, typing.len() as i64, typing],
-    )
-    .map_err(DomainError::sql_persist)?;
+    text::insert(tx, &typing_sha, typing.len() as i64, typing, true)
+        .map_err(DomainError::sql_persist)?;
     let order = next_moment_order(tx)?;
     tx.execute(
         "INSERT INTO moments (workspace_id,moment_order,moment_id,version_id,object_id,path,recorded_at_ms,operation,
@@ -166,17 +164,10 @@ pub fn record_deleted_capture_recovery_in_tx(
         return Ok(false);
     }
     let typing_sha = dohc_engine_storage::hex_sha256(typing.as_bytes());
-    tx.execute(
-        "INSERT OR IGNORE INTO blobs(sha256,byte_length,text) VALUES(?1,?2,?3)",
-        params![typing_sha, typing.len() as i64, typing],
-    )
-    .map_err(DomainError::sql_persist)?;
+    text::insert(tx, &typing_sha, typing.len() as i64, typing, true)
+        .map_err(DomainError::sql_persist)?;
     let empty_sha = dohc_engine_storage::hex_sha256(b"");
-    tx.execute(
-        "INSERT OR IGNORE INTO blobs(sha256,byte_length,text) VALUES(?1,0,'')",
-        [&empty_sha],
-    )
-    .map_err(DomainError::sql_persist)?;
+    text::insert(tx, &empty_sha, 0, "", true).map_err(DomainError::sql_persist)?;
     let order = next_moment_order(tx)?;
     tx.execute("INSERT INTO moments(workspace_id,moment_order,moment_id,version_id,object_id,path,recorded_at_ms,operation,after_blob_sha256,before_present,before_blob_sha256,metadata_origin,metadata_correlation_id,author_json,before_content_kind,payload_before_path,payload_before_content_kind,payload_before_blob_sha256,after_content_kind,payload_after_path,payload_after_content_kind,payload_after_blob_sha256) VALUES(?1,?2,?3,?4,?5,?6,?7,'write',?12,2,?8,?9,?10,?11,'text',?6,'text',?8,'text',?6,'text',?12)",
         params![workspace_id,order,moment_id,version_id,object_id,path,now_ms,typing_sha,CAPTURE_RECOVERY_ORIGIN,delete_id,author_json,empty_sha]).map_err(DomainError::sql_persist)?;

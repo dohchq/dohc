@@ -1,25 +1,30 @@
 import type { BrowserWindow, MenuItemConstructorOptions } from "electron";
 import { SHORTCUTS, shortcutAccelerators, type ShortcutId } from "../shortcuts/shortcutRegistry";
+import { shortcutName } from "../shortcuts/shortcutNames";
 import { basename } from "node:path";
 import type { MenuCommand, WorkspaceSummary } from "../ipc/bridgeContract";
-import { COMMAND_ROWS, type StaticCommandId } from "../renderer/commands/commandRows";
+import { COMMAND_ROWS, isStaticCommandId, type StaticCommandId } from "../renderer/commands/commandRows";
 import type { ZoomStep } from "../settings/userSettings";
 
 // Each item's label is its palette row's label, so the menu and the palette
 // cannot disagree. The menu already groups by category, so "View: Chats" shows
-// as "Chats". The palette does not list itself, so it has no row. macOS's app
-// menu adds the ellipsis of Settings…, a command that opens a window.
+// as "Chats". The palette does not list itself, and macOS's Edit > Find items
+// act on the editor that has focus, which the palette would take, so neither
+// has a row: they take their shortcut's name. macOS adds the ellipsis of a
+// command that asks for more: Settings… in the app menu, and Find… and Find
+// and replace…, which open the find bar.
 function menuLabel(id: MenuCommand | StaticCommandId): string {
-  if (id === "command-palette") return "Command palette";
-  return COMMAND_ROWS[id].label.replace(/^View: /, "");
+  if (isStaticCommandId(id)) return COMMAND_ROWS[id].label.replace(/^View: /, "");
+  return id === "editor-find" || id === "editor-replace" ? `${shortcutName(id)}…` : shortcutName(id);
 }
 
 // Real application menu (File/Edit/View/Go/Help on Windows and Linux; the
 // app menu, File/Edit/View/Window/Help on macOS). Custom items send a
 // MenuCommand to the focused window's renderer, where the shell routes it
-// through the same command registry the palette uses — the menu owns no
-// action logic of its own. Pure template builder so the structure is
-// unit-testable without Electron.
+// through the same command registry the palette uses, or hands an Edit >
+// Find item to the editor that has focus — the menu owns no action logic of
+// its own. Pure template builder so the structure is unit-testable without
+// Electron.
 //
 // registerAccelerator:false on renderer-owned shortcuts lets Windows/Linux
 // display the accelerator without registering a second owner. Electron treats
@@ -55,7 +60,7 @@ export function buildMenuTemplate(options: {
       enabled,
       ...(index > 0 ? { visible: false } : {}),
       ...(accelerator ? { accelerator } : {}),
-      ...(accelerator && SHORTCUTS[name as ShortcutId]?.owner === "shell"
+      ...(accelerator && !["main", "native"].includes(SHORTCUTS[name as ShortcutId]?.owner)
         ? { registerAccelerator: false } : {}),
       click: (_item, window) =>
         options.sendCommand(window as BrowserWindow | undefined, name),
@@ -93,6 +98,29 @@ export function buildMenuTemplate(options: {
       { role: "quit", label: "Quit dohc" },
     ],
   };
+  const macEditItems: MenuItemConstructorOptions[] = [
+    { type: "separator" },
+    {
+      label: "Find",
+      submenu: [
+        ...command("editor-find"),
+        ...command("editor-replace"),
+        ...command("find-again-next"),
+        ...command("find-again-previous"),
+      ],
+    },
+    {
+      label: "Substitutions",
+      submenu: [
+        { role: "showSubstitutions" },
+        { type: "separator" },
+        { role: "toggleSmartQuotes" },
+        { role: "toggleSmartDashes" },
+        { role: "toggleTextReplacement" },
+      ],
+    },
+    { label: "Speech", submenu: [{ role: "startSpeaking" }, { role: "stopSpeaking" }] },
+  ];
   // The standard macOS Window menu, with Safari's tab commands. AppKit
   // appends the window list.
   const windowMenu: MenuItemConstructorOptions = {
@@ -144,9 +172,10 @@ export function buildMenuTemplate(options: {
         { role: "close", label: "Close window", accelerator: shortcutAccelerators("close-window", options.platform)[0] },
       ],
     },
-    // macOS: Electron's standard Edit menu, which adds Paste and Match
-    // Style, Delete, and Speech. The editor answers its Undo and Redo.
-    isMac ? { role: "editMenu" } : {
+    // The editor answers Undo and Redo. macOS adds the items of Electron's
+    // editMenu role, with Find before Substitutions as in TextEdit, and the
+    // system appends AutoFill, Dictation, and Emoji & Symbols.
+    {
       label: "Edit",
       submenu: [
         { role: "undo" },
@@ -155,7 +184,9 @@ export function buildMenuTemplate(options: {
         { role: "cut" },
         { role: "copy" },
         { role: "paste" },
+        ...(isMac ? [{ role: "pasteAndMatchStyle" }, { role: "delete" }] as const : []),
         { role: "selectAll" },
+        ...(isMac ? macEditItems : []),
       ],
     },
     {

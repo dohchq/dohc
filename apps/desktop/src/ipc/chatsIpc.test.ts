@@ -2,7 +2,7 @@ import { chatOperations } from "./chatOperations";
 import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createDesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
-import { createTestScratch } from "../workspaces/testTemp";
+import { createTestScratch, createTestScratchSync } from "../workspaces/testTemp";
 import { StartChannelThreadResult, SendChatMessageResult, ListChatMessagesResult, ListChatThreadDecisionsResult } from "./bridgeContract";
 import { workspaceFileRefs } from "../workspaces/workspaceFileReferenceScopes";
 import { createEngineFileResolver, workspaceFileRef } from "../workspaces/resolveEngineFiles";
@@ -29,6 +29,7 @@ type Event = { sender: { trusted: boolean } };
 type Operation = { workspace: RegistryEntry; assertCurrent(): void };
 
 function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatStore) {
+  const stateDirectory = createTestScratchSync("chats-ipc-settings-");
   const workspace: RegistryEntry = {
     workspaceId: "workspace", rootPath: "/workspace", kind: "personal", mode: "local-first",
   };
@@ -176,6 +177,7 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
     assertTrustedSender, chatScope, requireEngineCapture, linkedChatStoreFor, chatWrites,
     assertWritableWorkspace: value => { if (shareViewIsPresent(value.shareView)) throw new Error("Read-only workspace"); },
     readWorkspace: () => workspace,
+    stateDir: () => stateDirectory,
     warmCredentialCache, localUserId: () => "owner",
     localInstallationId: () => "local-owner", currentCredentials: () => null,
     chatRelayIdentityFor,
@@ -194,7 +196,7 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
     if (!handler) throw new Error(`Missing chat handler: ${channel}`);
     return await handler(event, payload);
   }
-  return { invoke, workspace, thread, message, bookmark, storeMethods, captureMethods, capture, ensureGroupFolder,
+  return { invoke, workspace, thread, message, bookmark, syncWorkspaceSharedChannels, storeMethods, captureMethods, capture, ensureGroupFolder,
     authorities, chatScope, requireEngineCapture, linkedChatStoreFor, openWorkspaceActivity,
     activity, syncSharedChannelsForChatTarget, resolveEngineFiles, readOwnedWorkspaceText,
     warmCredentialCache, chatRelayIdentityFor, scanChatDispatch, projectChatBookmarks, desktopChatBookmarks,
@@ -251,6 +253,7 @@ describe("chat sender binding", () => {
     ...mutations.map(({ channel, payload }) => ({ channel, payload })),
     { channel: chatOperations.listFileChats.channel, payload: { path: "notes/a.md" } },
     { channel: chatOperations.listChatFileMentions.channel, payload: { path: "notes/a.md" } },
+    { channel: chatOperations.listChatFileMentions.channel, payload: { paths: ["notes/a.md", "image.svg"] } },
     { channel: chatOperations.listChatBookmarks.channel, payload: {} },
     { channel: chatOperations.saveChatBookmark.channel, payload: { target: { kind: "thread", threadId: "thread" }, mode: "live" } },
     { channel: chatOperations.archiveChatBookmark.channel, payload: { bookmarkId: "bookmark" } },
@@ -449,7 +452,7 @@ describe("registered chat reads and reader-local state", () => {
     const entered = deferred();
     test.openWorkspaceActivity.mockImplementationOnce(() => { entered.resolve(); return opened.promise; });
     const read = test.invoke(chatOperations.listChatMessages.channel, { workspaceId: "workspace", threadId: "thread" });
-    const rejected = expect(read).rejects.toThrow("retired workspace authority");
+    const rejected = expect(read).rejects.toThrow("This workspace was closed. Open it again.");
     await entered.promise;
     const retired = test.authorities.invalidate("workspace");
     opened.resolve();
@@ -464,7 +467,7 @@ describe("registered chat reads and reader-local state", () => {
     await test.authorities.invalidate("workspace");
     const successor = test.authorities.acquire("workspace");
     successor.release();
-    await expect(test.chatScope.chatFileObjectId(scope, "notes/a.md")).rejects.toThrow("retired workspace authority");
+    await expect(test.chatScope.chatFileObjectId(scope, "notes/a.md")).rejects.toThrow("This workspace changed while this ran. Try again.");
     expect(test.resolveEngineFiles).not.toHaveBeenCalled();
   });
 });
@@ -579,6 +582,28 @@ describe("targeted file resolution", () => {
     expect(await test.invoke(chatOperations.listChatChannels.channel, { workspaceId: "workspace" })).toMatchObject({
       fileThreads: [{ id: "thread", path: "notes/a.md" }],
     });
+  });
+
+  it("syncs shared channels once for a drawn-file batch and retains subject identity", async () => {
+    const test = fixture();
+    test.resolveEngineFiles.mockResolvedValue([
+      { status: "found", objectId: "a", path: "a.md" },
+      { status: "found", objectId: "image", path: "image.svg" },
+    ]);
+    test.storeMethods.listFileMentions.mockImplementation(async ({ objectId }) => [{
+      attachment: { attachmentId: objectId!, threadId: test.thread.id, messageId: test.message.id,
+        targetKind: "file", objectId, pathHint: "old.md", createdAtMs: 1 },
+      thread: test.thread, message: test.message,
+    }]);
+    const result = await test.invoke(chatOperations.listChatFileMentions.channel, {
+      workspaceId: "workspace", paths: ["a.md", "image.svg"],
+    });
+    expect(result).toMatchObject({ mentions: [
+      { attachment: { objectId: "a", pathHint: "a.md" } },
+      { attachment: { objectId: "image", pathHint: "image.svg" } },
+    ] });
+    expect(test.syncWorkspaceSharedChannels).toHaveBeenCalledTimes(1);
+    expect(test.resolveEngineFiles).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({workspaceId:"workspace"}), [{path:"a.md"},{path:"image.svg"}]);
   });
 
   it("keeps mention attachment identity when a path is reused", async () => {
@@ -774,7 +799,7 @@ describe("registered chat channel and read-state boundaries", () => {
   it.each([
     { name: "untrusted sender", payload: { workspaceId: "workspace", threadId: "thread", upToSequence: 4 }, untrusted: true, error: "Untrusted sender" },
     { name: "invalid payload", payload: { workspaceId: "workspace" }, untrusted: false, error: /Invalid input/u },
-    { name: "missing workspace", payload: { workspaceId: "missing-workspace", threadId: "thread", upToSequence: 4 }, untrusted: false, error: "Unknown workspace: missing-workspace" },
+    { name: "missing workspace", payload: { workspaceId: "missing-workspace", threadId: "thread", upToSequence: 4 }, untrusted: false, error: "This workspace is not open. Open it again." },
   ])("refuses reader-local state for $name before accessing chat scope", async ({ payload, untrusted, error }) => {
     const test = fixture("view");
     const result = untrusted

@@ -754,6 +754,12 @@ describe("automations wire schemas", () => {
     expect(() =>
       decodeWorkspaceResult(WORKSPACE_METHOD.syncRemoteChanges, { applied: 1.5 }),
     ).toThrow(ProtocolShapeError);
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.syncCollectionsWaiting, { waiting: true }),
+    ).toEqual({ waiting: true });
+    expect(() =>
+      decodeWorkspaceResult(WORKSPACE_METHOD.syncCollectionsWaiting, { waiting: "yes" }),
+    ).toThrow(ProtocolShapeError);
     expect(() =>
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsSettle, claim),
     ).toThrow(ProtocolShapeError);
@@ -1029,7 +1035,7 @@ for (const [method, base] of holdReplies) {
 
 it("decodes the passive current view manifest and rejects a frontier-only placeholder",()=>{
   const file={versionId:"main",objectId:"a",path:"docs/a.md",contentKind:"text",sha256:"a".repeat(64),byteLength:4,lineageClaimId:null,restoreGeneration:null};
-  const view={workspaceId:"w",revision:1,logCursor:3,journalCursor:5,moved:false,nextCursor:null,refusedFiles:[],files:[file],texts:[{sha256:file.sha256,text:"text"}]};
+  const view={workspaceId:"w",revision:1,logCursor:3,journalCursor:5,delta:false,removed:[],moved:false,nextCursor:null,refusedFiles:[],files:[file],texts:[{sha256:file.sha256,text:"text"}]};
   expect(decodeWorkspaceResult(WORKSPACE_METHOD.replicaCut,view)).toEqual(view);
   expect(()=>decodeWorkspaceResult(WORKSPACE_METHOD.replicaCut,{revision:1,logCursor:3,journalCursor:5})).toThrow(ProtocolShapeError);
 });

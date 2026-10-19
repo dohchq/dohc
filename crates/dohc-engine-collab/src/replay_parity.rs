@@ -1978,9 +1978,17 @@ fn scan(bytes: &[u8], version: ScanVersion) -> Result<WireStructure, CollabError
     let mut decoder = DecoderV1::from(bytes);
     let mut structure = WireStructure::default();
     let clients_len: u32 = decoder.read_var().map_err(parity_decode_error)?;
+    // yrs' decode appends a repeated client's blocks to its first section,
+    // while yjs keeps only the last. No honest encoder repeats a client, so
+    // a repeat is rejected rather than mirrored either way.
     for _ in 0..clients_len {
         let blocks_len: u32 = decoder.read_var().map_err(parity_decode_error)?;
         let client = safe_read_client(&mut decoder)?;
+        if structure.claimed_clocks.contains_key(&client) {
+            return Err(CollabError::ReplayParityViolation {
+                reason: "the update repeats a client's block section".to_owned(),
+            });
+        }
         let mut clock: u32 = decoder.read_var().map_err(parity_decode_error)?;
         for _ in 0..blocks_len {
             let id = ID::new(client, clock);
@@ -2043,11 +2051,7 @@ fn scan(bytes: &[u8], version: ScanVersion) -> Result<WireStructure, CollabError
                 .checked_add(scanned.len)
                 .ok_or_else(parity_clock_overflow)?;
         }
-        structure
-            .claimed_clocks
-            .entry(client)
-            .and_modify(|claimed| *claimed = (*claimed).max(clock))
-            .or_insert(clock);
+        structure.claimed_clocks.insert(client, clock);
     }
     // The delete-set. Replaces `IdSet::decode`, which constructs `ClientID`
     // from the raw wire value with no range check (see [`safe_read_client`])
@@ -3143,6 +3147,48 @@ mod tests {
         ];
         let error = scan_err(&bytes);
         assert!(matches!(error, CollabError::ReplayParityViolation { .. }));
+    }
+
+    #[test]
+    fn rejects_duplicate_block_client_section() {
+        let bytes: Vec<u8> = vec![
+            0x02, // clients_len
+            0x01, // blocks_len
+            0x09, // client
+            0x00, // clock
+            0x00, // info: GC
+            0x01, // len
+            0x01, // blocks_len
+            0x09, // the same client again (yrs appends, yjs keeps only this one)
+            0x01, // clock
+            0x00, // info: GC
+            0x01, // len
+            0x00, // delete-set client sections
+        ];
+        let error = scan_err(&bytes);
+        assert!(matches!(
+            error,
+            CollabError::ReplayParityViolation { ref reason }
+                if reason == "the update repeats a client's block section"
+        ));
+    }
+
+    #[test]
+    fn accepts_honest_two_client_update() {
+        let first = Ydoc::with_client_id(1);
+        let second = Ydoc::with_client_id(9);
+        let a = first.plaintext_insert(0, "first");
+        let b = second.plaintext_insert(0, "second");
+        let doc = Ydoc::wire();
+        doc.apply(&a).expect("client one update");
+        doc.apply(&b).expect("client nine update");
+        for bytes in [
+            doc.encode_full_state(),
+            crate::merge_updates(&[a, b]).expect("merge"),
+        ] {
+            let structure = scan_v1(&bytes).expect("honest two-client update must scan");
+            assert_eq!(structure.claimed_clocks.len(), 2);
+        }
     }
 
     /// [`normalize_ranges`] + [`normalized_ranges_cover`] must answer

@@ -264,6 +264,9 @@ export interface OpenYdocAdapterSessionInput {
   // into a populated doc appends a second copy of the file instead of
   // resuming it. Callers that pass false own re-establishing the content.
   seedAbsentLineage?: boolean;
+  // An earlier session on this document had its file. A settle then never
+  // creates the file, so a file deleted outside dohc stays deleted.
+  fileExisted?: boolean;
 }
 
 export interface ApplyLocalUpdateOptions {
@@ -660,7 +663,7 @@ export class YdocAdapterSession {
   ownerDraft: YdocOwnerDraft | undefined;
   private readonly remoteUpdateListeners = new Set<(update: Uint8Array) => void>();
   private readonly durableLocalChangeListeners = new Set<() => void>();
-  private readonly localUpdateAcknowledgedListeners = new Set<(id: string) => void>();
+  private readonly localUpdateAcknowledgedListeners = new Set<(id: string, lane: "journal" | "owner-outbox") => void>();
   private readonly localUpdateRefusedListeners = new Set<(id: string, error: unknown) => void>();
   private readonly ownerDraftChangedListeners = new Set<() => void>();
   private readonly remoteApplyErrorListeners = new Set<
@@ -1028,7 +1031,13 @@ export class YdocAdapterSession {
     if (!this.continuesLineage(result)) throw this.refuseGeneration(generation, LINEAGE_CHANGED_WHILE_RECORDING);
     Y.applyUpdate(this.acknowledgedDoc, base64ToBytes(record.updateBase64));
     this.removePendingRecord(record);
-    if (!record.seed) this.notifyListeners(this.localUpdateAcknowledgedListeners, record.idempotencyKey);
+    if (!record.seed) {
+      const lane = "ownerDraft" in result ? "owner-outbox" : "journal";
+      for (const listener of this.localUpdateAcknowledgedListeners) {
+        try { listener(record.idempotencyKey, lane); }
+        catch (error) { this.surfaceSessionError(error); }
+      }
+    }
     if ("ownerDraft" in result && this.ownerDraft) {
       this.ownerDraft = { ...this.ownerDraft, outboxId: result.ownerDraft.outboxId,
         pendingBytes: result.ownerDraft.pendingBytes, state: result.ownerDraft.state };
@@ -1161,7 +1170,7 @@ export class YdocAdapterSession {
     return () => this.durableLocalChangeListeners.delete(handler);
   }
 
-  onLocalUpdateAcknowledged(handler: (id: string) => void): () => void {
+  onLocalUpdateAcknowledged(handler: (id: string, lane: "journal" | "owner-outbox") => void): () => void {
     this.localUpdateAcknowledgedListeners.add(handler);
     return () => this.localUpdateAcknowledgedListeners.delete(handler);
   }
@@ -1375,19 +1384,24 @@ export class YdocAdapterSession {
     };
   }
 
-  async close(options?: { settle?: boolean; summary?: string }): Promise<void> {
-    if (this.closed) return;
+  // Answers whether the file holds the settled bytes after this close's own settle.
+  async close(
+    options?: { settle?: boolean; summary?: string },
+  ): Promise<{ materialized: boolean }> {
+    if (this.closed) return { materialized: false };
     await this.recordChain.catch(() => undefined);
     const params: YdocCloseParams = {
       sessionId: this.sessionId,
       ...(options?.settle !== undefined ? { settle: options.settle } : {}),
       ...(options?.summary ? { summary: options.summary } : {}),
     };
+    let materialized = false;
     try {
-      decodeYdocResult(
+      const closed = decodeYdocResult(
         YDOC_METHOD.close,
         await this.adapter.request(this.workspace, YDOC_METHOD.close, params),
       );
+      materialized = closed.materialized === true;
     } catch (error) {
       if (!isYdocSessionNotFoundRefusal(error)) throw error;
     }
@@ -1401,6 +1415,7 @@ export class YdocAdapterSession {
     for (const retired of this.retiredDocs) retired.destroy();
     this.retiredDocs.clear();
     this.adapter.releaseSession(this.sessionId);
+    return { materialized };
   }
 
   // End the session without settling and without pruning. The daemon drops
@@ -1574,6 +1589,7 @@ export class YdocLiveAdapter {
       ...(input.contentKind === "scene"
         ? { seedFromArtifact: input.seedAbsentLineage !== false }
         : {}),
+      ...(input.fileExisted ? { fileExisted: true } : {}),
     };
     const startedAtMs = performance.now();
     let delivery: Awaited<ReturnType<YdocLiveAdapter["requestWithBlob"]>>;

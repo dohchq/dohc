@@ -29,9 +29,13 @@ function capability(description: string, exposure: {
 }
 
 export const CAPABILITIES = {
+  "links.edges": capability("Read a bounded page of file links.", { ipc: ["linksEdges"], mcp: { owner: ["dohc_links_edges"], view: ["dohc_links_edges"], comment: ["dohc_links_edges"], edit: ["dohc_links_edges"] } }),
+  "links.in": capability("Read documents that link to a file.", { ipc: ["linksIn"], mcp: { owner: ["dohc_links_in"], view: ["dohc_links_in"], comment: ["dohc_links_in"], edit: ["dohc_links_in"] } }),
+  "links.resolve": capability("Resolve links from one document.", { ipc: ["linksResolve"], mcp: { owner: ["dohc_links_resolve"], view: ["dohc_links_resolve"], comment: ["dohc_links_resolve"], edit: ["dohc_links_resolve"] } }),
   "settings.user.read": capability("Read this computer's user settings.", {ipc: ["getUserSettings"]}),
   "settings.user.reload": capability("Reload and apply this computer's user settings file.", {ipc: ["reloadUserSettings"]}),
   "settings.user.write": capability("Save changes to this computer's user settings.", {ipc: ["setUserSettings"]}),
+  "agent.color.set": capability("Choose a personal color for an agent shown in the admitted workspace.", {ipc: ["setAgentColor"]}),
   "app.pin.set": capability("Pin or unpin an app in this computer's sidebar.", {ipc: ["setAppPinned"]}),
   "settings.user.reset": capability("Reset this computer's user settings.", {ipc: ["resetUserSettings"]}),
   "settings.user.path.read": capability("Read the path of this computer's user settings file.", {ipc: ["getUserSettingsFilePath"]}),
@@ -53,7 +57,7 @@ export const CAPABILITIES = {
   "file.external.open": capability("Open a contained workspace file with its system application.", {ipc: ["openFileExternally"]}),
   "access.object.read": capability("Read observed grants covering an object.", {ipc: ["getObjectAccess"]}),
   "access.sharing.read": capability("Page observed granted and received shares.", {ipc: ["listSharingAccess"]}),
-  "access.refresh": capability("Request paced observations when Sharing opens or Access expands.", {ipc: ["requestAccessRefresh"]}),
+  "access.refresh": capability("Request paced Sharing observations through the desktop or CLI.", {ipc: ["requestAccessRefresh"], mcpReason: "Available through dohc access refresh; no desktop MCP tool."}),
   "share.handoff.status.read": capability("Read the pending dohc://open handoff status on this computer.", {ipc: ["getShareHandoffStatus"]}),
   "share.handoff.accept": capability("Accept the pending dohc://open handoff on this computer.", {ipc: ["acceptShareHandoff"]}),
   "share.handoff.retry": capability("Retry the pending dohc://open handoff on this computer.", {ipc: ["retryShareHandoff"]}),

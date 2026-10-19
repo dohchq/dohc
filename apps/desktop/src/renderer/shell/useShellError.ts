@@ -46,6 +46,7 @@ export type ShellErrorKind =
   | "tab-limit"
   | "workspace-search"
   | "cloud-sync"
+  | "collections-waiting"
   | "sync-refusal"
   | "import-files"
   | "share-refresh"
@@ -387,6 +388,24 @@ export function useShellError(workspaceId: string) {
     [push],
   );
   const clearSyncFailure = useCallback(() => clearKind("cloud-sync"), [clearKind]);
+  // One row while Collection updates wait for an unfinished pull. A newer
+  // report replaces it, keeping its toast unless the report toasts. The wait
+  // itself is a warning; a reopen that failed is a failure.
+  const reportCollectionsWaiting = useCallback(
+    (notice: { message: string; toast: boolean; failed: boolean }, retry: () => void, openSyncSettings: () => void) =>
+      push(
+        {
+          ...(notice.failed ? {} : { tone: "warning" as const }),
+          message: notice.message,
+          retry,
+          action: { label: "Sync settings", run: openSyncSettings },
+          kind: "collections-waiting",
+        },
+        notice.toast ? false : "keep",
+      ),
+    [push],
+  );
+  const clearCollectionsWaiting = useCallback(() => clearKind("collections-waiting"), [clearKind]);
   const showSyncRefusals = useCallback((notices: readonly import("../../ipc/bridgeContract").NoticeRow[], retry: () => void, openFile?: (path: string) => void) => {
     setShellErrors(current => [
       ...current.filter(error => error.kind !== "sync-refusal"),
@@ -698,6 +717,8 @@ export function useShellError(workspaceId: string) {
     reportSyncFailure,
     showSyncRefusals,
     clearSyncFailure,
+    reportCollectionsWaiting,
+    clearCollectionsWaiting,
     reportDriveLimit,
     reportKeptFiles,
     reportRecoveryUnavailable,

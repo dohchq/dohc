@@ -507,9 +507,12 @@ async function writeBody(request, waitMs) {
   return { body };
 }
 
-/** Serve the dashboard and its data on this host. Returns the server; `close()` stops it and its sampler. */
+/**
+ * Serve the dashboard and its data on this host. Returns the server; `close()` stops it and its sampler.
+ * `oneLane` refuses the lane switch: a Mac has one display, and Electron runs cannot share it.
+ */
 export function startMonitor({ root, port = monitorPort, host = "127.0.0.1", log = () => {}, sampleEveryMs, writeWaitMs = 10_000,
-  threadOf = threadDirectory(), slotRoot = verificationSlotRoot() }) {
+  threadOf = threadDirectory(), slotRoot = verificationSlotRoot(), oneLane = process.platform === "darwin" }) {
   const finished = new Map();
   const history = historyReader(root);
   // The verification slots live beside the build slots. A held slot above the setting is a lane still finishing its gate, so it is shown too.
@@ -533,6 +536,7 @@ export function startMonitor({ root, port = monitorPort, host = "127.0.0.1", log
     const host = request.headers.host;
     let answer;
     if (action === "lanes") {
+      if (oneLane) return send(409, "text/plain", "This Mac runs one lane: Electron runs cannot share its display.");
       if (!switchLanes.includes(body.lanes)) return send(400, "text/plain", "Choose 2 or 3 lanes.");
       if (!slotRoot) return send(409, "text/plain", "This host has no verification lane setting.");
       const { previous, changed } = await setLanes({ root, slotRoot, lanes: body.lanes, by: { name: "dashboard", host } });
@@ -577,7 +581,8 @@ export function startMonitor({ root, port = monitorPort, host = "127.0.0.1", log
       if (asset) return send(200, asset[1], readFileSync(assetPath(asset[0])));
       if (url.pathname === "/api/state") return send(200, "application/json", snapshot().body);
       if (url.pathname === "/api/run") return json(runDetails(root, query("id"), query("attempt")));
-      if (url.pathname === "/api/log") return json(query("slot") ? slotLog(slots(maxVerificationLanes), query("slot"), query("file")) : runLog(root, query("id"), query("attempt"), query("file")));
+      // Not /api/log: uBlock Origin's default EasyPrivacy list blocks any URL containing /log?id=.
+      if (url.pathname === "/api/output") return json(query("slot") ? slotLog(slots(maxVerificationLanes), query("slot"), query("file")) : runLog(root, query("id"), query("attempt"), query("file")));
       if (url.pathname === "/api/load") return json({ samples: load.read(query("days") === "7" ? 7 : 1, 288, listRequests(root, finished)) });
       return send(404, "text/plain", "Not found.");
     } catch (error) { failed(error); }

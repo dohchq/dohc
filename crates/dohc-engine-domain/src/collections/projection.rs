@@ -1,4 +1,5 @@
 use super::*;
+use dohc_engine_storage::text;
 
 /// Disposable hashes and parsed schemas for a received share's local index.
 /// A new worker rebuilds the index from snapshots, including on existing stores.
@@ -83,10 +84,7 @@ pub fn project_collections_in_tx(
         .map(|path| parent_path(path).to_owned())
         .collect();
     let read_text = |hash: &str| -> Result<String, crate::DomainError> {
-        tx.query_row("SELECT text FROM blobs WHERE sha256=?1", [hash], |row| {
-            row.get(0)
-        })
-        .map_err(crate::DomainError::sql_corrupt)
+        text::read(tx, hash).map_err(crate::DomainError::sql_corrupt)
     };
     for collection_path in &changed_schemas {
         let schema_path = if collection_path.is_empty() {

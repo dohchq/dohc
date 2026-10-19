@@ -1209,10 +1209,14 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     workspaceId: string,
     expectedAttachmentId?: symbol,
   ): Promise<void> {
+    // After stop, a scan neither queues nor looks up its workspace: quit may
+    // already be closing workspace authority.
+    if (stopped) return Promise.resolve();
     let scannedWorkspace: ChatDispatchWorkspace | null = null;
     const scan = enqueue(workspaceId, async () => {
+      if (stopped) return;
       const workspace = options.workspaceFor(workspaceId);
-      if (!workspace || stopped) return;
+      if (!workspace) return;
       if (
         expectedAttachmentId !== undefined &&
         workspace.attachmentId !== expectedAttachmentId
@@ -1343,7 +1347,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   ): Promise<void> {
     await enqueue(workspaceId, async () => {
       const workspace = options.workspaceFor(workspaceId);
-      if (!workspace) throw new Error(`Unknown workspace: ${workspaceId}`);
+      if (!workspace) throw new Error("This workspace is not open. Open it again.");
       await options.dispatchStoreFor(workspace).setThreadDispatchPaused({
         workspaceId,
         threadId,
@@ -1360,7 +1364,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     threadId: string,
   ): Promise<ChatDispatchThreadState> {
     const workspace = options.workspaceFor(workspaceId);
-    if (!workspace) throw new Error(`Unknown workspace: ${workspaceId}`);
+    if (!workspace) throw new Error("This workspace is not open. Open it again.");
     const dispatch = options.dispatchStoreFor(workspace);
     const [pauseState, pending] = await Promise.all([
       dispatch.getThreadDispatchPauseState(workspaceId, threadId),

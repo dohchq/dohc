@@ -8,7 +8,7 @@ const DATE_PATTERN = /^\d{8}$/;
 const SHA_PATTERN = /^[0-9a-f]{7,40}$/i;
 const STABLE_VERSION_PATTERN = /^\d+\.\d+\.\d+$/;
 
-export function desktopReleaseTargets(platforms = "windows") {
+export function desktopReleaseTargets(platforms = "windows-linux") {
   const targets = [
     {
       label: "Windows x64",
@@ -17,24 +17,6 @@ export function desktopReleaseTargets(platforms = "windows") {
       runner: ["self-hosted", "windows", "x64"],
       arch: "x64",
       target: "x86_64-pc-windows-msvc",
-      require_signing: "1",
-    },
-    {
-      label: "macOS x64",
-      os: "macOS",
-      artifact_platform: "mac",
-      runner: ["self-hosted", "macos", "arm64"],
-      arch: "x64",
-      target: "x86_64-apple-darwin",
-      require_signing: "1",
-    },
-    {
-      label: "macOS arm64",
-      os: "macOS",
-      artifact_platform: "mac",
-      runner: ["self-hosted", "macos", "arm64"],
-      arch: "arm64",
-      target: "aarch64-apple-darwin",
       require_signing: "1",
     },
     {
@@ -49,9 +31,8 @@ export function desktopReleaseTargets(platforms = "windows") {
   ];
   if (platforms === "windows") return targets.filter((target) => target.os === "Windows");
   if (platforms === "linux") return targets.filter((target) => target.os === "Linux");
-  if (platforms === "windows-linux") return targets.filter((target) => target.os !== "macOS");
-  if (platforms === "all") return targets;
-  throw new Error(`Invalid release platforms '${platforms}'. Expected windows, linux, windows-linux, or all.`);
+  if (platforms === "windows-linux") return targets;
+  throw new Error(`Invalid release platforms '${platforms}'. Expected windows, linux, or windows-linux.`);
 }
 
 export function repoRootFromScript() {

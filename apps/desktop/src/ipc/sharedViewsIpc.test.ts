@@ -693,7 +693,7 @@ describe("background share pulls", () => {
     await h.authorities.retireBinding(h.authorities.currentBinding("existing"), { removeBinding: () => { h.registry.delete("existing"); } });
     if (rejected) await rejected;
     expect(h.closed.size).toBe(0);
-    await expect(h.invoke(channel, payload)).rejects.toThrow("retired");
+    await expect(h.invoke(channel, payload)).rejects.toThrow("This workspace was closed. Open it again.");
     noLocalWork(h);
   });
   it("aborts a hung probe and releases its timeout when the sender closes", async () => {

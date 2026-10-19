@@ -1,5 +1,6 @@
+import { readFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
-import { operatorSocketPath, parseDisableRequest } from "./appPublicationOperatorProtocol";
+import { operatorSecretPath, operatorSocketPath, parseDisableRequest } from "./appPublicationOperatorProtocol";
 import { requestPublicationTakedown } from "./appPublicationOperatorClient";
 
 const usage = `Run inside the running relay container with host operator access:
@@ -16,7 +17,7 @@ async function main(args: string[]): Promise<void> {
     request = parseDisableRequest({type: "disable-publication", publicationId: values["publication-id"], reason: values.reason});
   } catch {console.error("Invalid takedown arguments. Use --help for the required publication ID and reason."); process.exitCode = 2; return;}
   try {
-    const result = await requestPublicationTakedown(operatorSocketPath(), request);
+    const result = await requestPublicationTakedown(operatorSocketPath(), request, await readFile(operatorSecretPath(), "utf8"));
     if (result.code === 0) {console.log(result.message); console.log(JSON.stringify(result));}
     else console.error(result.message);
     process.exitCode = result.code;

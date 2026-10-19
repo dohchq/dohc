@@ -1,5 +1,6 @@
 {
   "socket": {
+    "accessRefresh": ["access.refresh"],
     "accessObject": [
       "access.object.read"
     ],
@@ -74,6 +75,9 @@
     ],
     "keptCopies": [
       "file.kept.list"
+    ],
+    "collectionsWaiting": [
+      "workspace.status"
     ],
     "saveKeptCopy": [
       "file.kept.save"
@@ -178,9 +182,19 @@
     ],
     "historyUndo": [
       "history.operation.undo"
+    ],
+    "linksIn": [
+      "links.in"
+    ],
+    "linksResolve": [
+      "links.resolve"
+    ],
+    "linksEdges": [
+      "links.edges"
     ]
   },
   "public": {
+    "access refresh": "access.refresh",
     "access object": "access.object.read",
     "access sharing": "access.sharing.read",
     "document read": "document.read",
@@ -258,6 +272,9 @@
     "account deletePreview": "account.delete.preview",
     "account delete": "account.delete",
     "history operation": "history.operation.read",
-    "history undo": "history.operation.undo"
+    "history undo": "history.operation.undo",
+    "links in": "links.in",
+    "links resolve": "links.resolve",
+    "links edges": "links.edges"
   }
 }

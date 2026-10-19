@@ -1439,9 +1439,7 @@ describe("shared view chats surface", () => {
   // The graph's chat-mentions toggle, on its own. The test above proves the
   // panel is gone, and the panel's own gate hides it whatever this toggle
   // reads — so reverting this gate alone changed nothing any pin could see.
-  // It is the most expensive one to lose: `includeChatMentions: true` is what
-  // sends readWorkspaceGraph through requireEngineCapture, so an ungated
-  // toggle fails the whole graph — a surface a shared view legitimately has.
+  // Chat access stays independent of the file graph.
   it("offers no chat mentions in the graph on a shared view", async () => {
     const bridge = makeShareBridge(Promise.resolve(STORED_STATE));
     const user = userEvent.setup();
@@ -1453,13 +1451,10 @@ describe("shared view chats surface", () => {
     // The graph itself still works — that is the point.
     expect((await screen.findAllByTestId("graph-file-row")).length).toBeGreaterThan(0);
     expect(screen.queryByTestId("graph-chat-mentions-toggle")).toBeNull();
-    expect(bridge.readWorkspaceGraph).toHaveBeenCalledWith({
+    expect(bridge.linksEdges).toHaveBeenCalledWith({
       workspaceId: WORKSPACE.workspaceId,
-      includeChatMentions: false,
     });
-    expect(bridge.readWorkspaceGraph).not.toHaveBeenCalledWith(
-      expect.objectContaining({ includeChatMentions: true }),
-    );
+    expect(bridge.listChatFileMentions).not.toHaveBeenCalled();
   });
 
   // Ctrl+Alt+B, on its own: whether the shell claims the chord from whatever
@@ -1564,7 +1559,7 @@ describe("shared view chats surface", () => {
     // The premise: the file really opened, so the panel that issues the call
     // really mounted.
     await screen.findByTestId("tab-b.md");
-    await waitFor(() => expect(bridge.getBacklinks).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.linksIn).toHaveBeenCalled());
     expect(bridge.listChatFileMentions).not.toHaveBeenCalled();
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
@@ -1582,13 +1577,7 @@ describe("shared view chats surface", () => {
     );
   });
 
-  // The ordering interaction #626 found, on this surface. A shared view's
-  // status also says no recorder, so once one lands the status clause alone
-  // would produce the same result and the share clause would survive
-  // deletion. Holding the status pending is what isolates it: `isShareView`
-  // is a synchronous registry fact, and it is the only thing that can answer
-  // in this window.
-  it("states the shared-view fact for a persisted Chats tab before any status arrives", async () => {
+  it("waits for admission before restoring a shared view's persisted Chats tab", async () => {
     const status = deferred<typeof SHARE_STATUS>();
     const bridge = makeShareBridge(
       Promise.resolve(storedStateWithTabs([CHATS_TAB_PATH], CHATS_TAB_PATH)),
@@ -1597,8 +1586,15 @@ describe("shared view chats surface", () => {
     bridge.getSyncStatus = vi.fn(() => status.promise);
     renderShell(bridge, SHARE_VIEW);
 
-    const placeholder = await screen.findByTestId("chats-page-share-view");
+    await waitFor(() => expect(bridge.openWorkspace).toHaveBeenCalledOnce());
     expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
+    expect(screen.getByTestId("workspace-preparing")).toBeTruthy();
+    expect(bridge.getWorkspaceUiState).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("chats-page-share-view")).toBeNull();
+    expect(bridge.listChatChannels).not.toHaveBeenCalled();
+
+    await act(async () => status.resolve(SHARE_STATUS));
+    const placeholder = await screen.findByTestId("chats-page-share-view");
     expect(placeholder.textContent).toContain("A shared view lists no chats.");
     expect(bridge.listChatChannels).not.toHaveBeenCalled();
   });
@@ -1690,7 +1686,7 @@ describe("chats surface after a failed capture build", () => {
     // The premise: the file really opened, so the panel that issues the call
     // really mounted.
     await screen.findByTestId("tab-b.md");
-    await waitFor(() => expect(bridge.getBacklinks).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.linksIn).toHaveBeenCalled());
     expect(bridge.listChatFileMentions).not.toHaveBeenCalled();
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
@@ -1728,10 +1724,11 @@ describe("chats surface after a failed capture build", () => {
     await screen.findByTestId("titlebar-about-sidebar");
     expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
     expect(bridge.listChatChannels).not.toHaveBeenCalled();
-    // Both sidebars are mounted and state nothing: neither read the shell has
-    // done proves anything about what main decided.
-    expect(screen.getByTestId("about-rail")).toBeTruthy();
-    expect(screen.getByTestId("activity-chats").getAttribute("aria-current")).toBe("page");
+    // The saved sidebars wait for admission, even when the earlier status
+    // read says capture is available.
+    expect(bridge.getWorkspaceUiState).not.toHaveBeenCalled();
+    expect(screen.getByTestId("workspace-preparing")).toBeTruthy();
+    expect(screen.getByTestId("workspace-workbench").hasAttribute("inert")).toBe(true);
     expect(screen.queryByTestId("chats-off")).toBeNull();
     expect(screen.queryByTestId("about-rail-off")).toBeNull();
 

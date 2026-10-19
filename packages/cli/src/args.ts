@@ -1,3 +1,4 @@
+import { LinksEdgesInput, type LinksEdgesInput as EdgesInput, LinksInInput, LinksResolveInput, type LinksInInput as InInput, type LinksResolveInput as ResolveInput } from "@dohc/workspace-contracts/links";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import type { z } from "zod";
 import { APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, type CliActor } from "./protocol";
@@ -19,11 +20,15 @@ type ExportScope =
   | { kind: "thread"; thread: string };
 
 type CliCommandBody =
+  | ({ verb: "linksEdges" } & EdgesInput)
+  | ({ verb: "linksIn" } & InInput)
+  | ({ verb: "linksResolve" } & ResolveInput)
   | { verb: "stopSync"; agent?: string }
   | { verb: "shareCopy"; shareId: string; grantId: string }
   | { verb: "accountDeletePreview" }
   | { verb: "accountDelete"; server: string; previewToken: string }
   | { verb: "accessObject"; ref: AccessObjectRef; cursor?: string }
+  | { verb: "accessRefresh" }
   | { verb: "accessSharing"; lane: "granted" | "received"; cursor?: string }
   | { verb: "documentRead" | "fileChats"; path: string }
   | { verb: "fileChatStart"; path: string; title: string; body: string; stdin: boolean; agent?: string; requestId?: string; runId?: string }
@@ -1028,6 +1033,20 @@ const APP_VERBS: Record<string, CliVerbSpec> = Object.fromEntries([
 
 /** Every command and verb the CLI dispatches. Help reads this table too. */
 export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
+  links: { summary: "Read and resolve document links.", notes: [], verbs: {
+    edges: { capabilityId: "links.edges", summary: "Read a bounded page of file links.", operands: "", flags: [{ name: "--cursor", value: "cursor", text: "Continue the previous page." }], parse: input => {
+      noExtraArgs(input.operands, "links edges");
+      return { verb: "linksEdges", ...LinksEdgesInput.parse({ cursor: lastValue(input, "--cursor") }) };
+    } },
+    in: { capabilityId: "links.in", summary: "Read documents that link to a file.", operands: "<subject-json>", flags: [{ name: "--cursor", value: "cursor", text: "Continue the previous page." }], parse: input => {
+      const [subject, ...extra] = input.operands; noExtraArgs(extra, "links in");
+      try { return { verb: "linksIn", ...LinksInInput.parse({ subject: JSON.parse(subject ?? "null"), cursor: lastValue(input, "--cursor") }) }; } catch { return fail('Use a subject JSON object with path or objectId.'); }
+    } },
+    resolve: { capabilityId: "links.resolve", summary: "Resolve links from one document.", operands: "<source> <literals-json>", parse: input => {
+      const [source, literals, ...extra] = input.operands; noExtraArgs(extra, "links resolve");
+      try { return { verb: "linksResolve", ...LinksResolveInput.parse({ source, literals: JSON.parse(literals ?? "null") }) }; } catch { return fail('Use a source path and a JSON array of kind and literal objects.'); }
+    } },
+  } },
   sync: {
     summary: "Stop syncing this workspace on this computer.",
     notes: ["Local files, documents, records, and history stay here. Shares and protected-file keys are retained.",
@@ -1047,10 +1066,15 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
     },
   },
   access: {
-    summary: "Read observed object grants and Sharing inventories.",
+    summary: "Read observed grants and request fresh Sharing inventories.",
     notes: ["Answers describe observed grants, not authorization. An empty page means no matching grants within its coverage.",
       "Paths resolve from your current folder. Received selectors use their source workspace's coordinates."],
     verbs: {
+      refresh: {
+        capabilityId: "access.refresh", operands: "", summary: "Request fresh Sharing observations with the same pacing as opening Sharing.",
+        notes: ["Reports requested, joined, paced, or unavailable. Requested and joined wait for started or existing attempts to settle, without promising success. Paced follows the existing refresh schedule. Read access sharing afterward to inspect observations."],
+        parse: input => { noExtraArgs(input.operands, "access refresh"); return { verb: "accessRefresh" }; },
+      },
       object: {
         capabilityId: "access.object.read", summary: "Read the grants covering an object.", operands: "<reference-json>",
         flags: [{ name: "--cursor", value: "cursor", text: "Continue the previous answer." }],

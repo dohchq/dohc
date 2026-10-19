@@ -73,6 +73,9 @@ fn should_crash(_faults: &dyn FaultInjector, _point: FaultPoint) -> bool {
 }
 
 pub(crate) fn install_passive_guards(conn: &Connection) -> Result<(), StorageError> {
+    // Keep replica change keys within the child's address-space limit, without temporary disk files.
+    conn.pragma_update(None, "temp_store", "MEMORY")
+        .map_err(StorageError::persist)?;
     conn.execute_batch(
         "CREATE TEMP TRIGGER IF NOT EXISTS passive_no_file_jobs BEFORE INSERT ON main.materialization_jobs
          BEGIN SELECT RAISE(IGNORE); END;
@@ -87,6 +90,16 @@ pub(crate) fn install_passive_guards(conn: &Connection) -> Result<(), StorageErr
 }
 
 impl EngineStore {
+    /// A bounded wait for the next checkpoint cycle, run off the writer.
+    pub fn checkpoint_cycle(&self) -> impl Fn() + Send + Sync + use<> {
+        let wait = self.checkpoints.as_ref().map(|c| c.next_cycle());
+        move || {
+            if let Some(wait) = &wait {
+                wait();
+            }
+        }
+    }
+
     /// Open a passive store; existing owner stores are refused.
     pub fn open_passive(
         path: &Path,
@@ -254,6 +267,9 @@ impl EngineStore {
 
     /// Request background work and finish only bounded writer-side tails.
     pub fn request_checkpoint(&mut self) {
+        self.request_checkpoint_mode(false);
+    }
+    fn request_checkpoint_mode(&mut self, background: bool) {
         #[cfg(feature = "fault-injection")]
         let _checkpoint = crate::capture_phase::Measure::new("writer_checkpoint_and_request");
         let changes = self.conn.total_changes();
@@ -262,10 +278,12 @@ impl EngineStore {
         }
         self.checkpoint_changes = changes;
         if let Some(checkpoints) = &self.checkpoints {
-            checkpoints.checkpoint_on_writer_if_needed(&self.conn);
-        }
-        if let Some(checkpoints) = &self.checkpoints {
-            checkpoints.request();
+            if background {
+                checkpoints.request_full();
+            } else {
+                checkpoints.checkpoint_on_writer_if_needed(&self.conn);
+                checkpoints.request();
+            }
         }
     }
 
@@ -299,7 +317,7 @@ impl EngineStore {
             .wait_for_completion_for_test(before);
     }
 
-    fn prepare_write(&mut self) -> Result<(), StorageError> {
+    fn prepare_write(&mut self, background: bool) -> Result<(), StorageError> {
         #[cfg(feature = "fault-injection")]
         let _admission = crate::capture_phase::Measure::new("prepare_write");
         if self.checkpoints.as_ref().is_some_and(|c| c.has_stopped()) {
@@ -308,7 +326,7 @@ impl EngineStore {
             self.checkpoints.replace(replacement);
         }
         if let Some(checkpoints) = &self.checkpoints {
-            checkpoints.prepare_for_write(&self.conn)?;
+            checkpoints.prepare_for_write(&self.conn, background)?;
         }
 
         Ok(())
@@ -322,7 +340,7 @@ impl EngineStore {
     where
         E: From<StorageError>,
     {
-        self.prepare_write().map_err(E::from)?;
+        self.prepare_write(false).map_err(E::from)?;
         let result = f(&self.conn);
         self.request_checkpoint();
         result
@@ -463,9 +481,9 @@ impl EngineStore {
         let changes = self.conn.total_changes();
         #[cfg(feature = "fault-injection")]
         crate::capture_phase::wal(&self.conn, &mut phase, true);
-        self.prepare_write().map_err(E::from)?;
+        self.prepare_write(false).map_err(E::from)?;
         let outcome = Self::write_on_connection(&self.conn, faults, f)?;
-        self.record_write_outcome(&outcome);
+        self.record_write_outcome(&outcome, false);
         #[cfg(feature = "fault-injection")]
         {
             crate::capture_phase::wal(&self.conn, &mut phase, false);
@@ -482,6 +500,22 @@ impl EngineStore {
         Ok(outcome)
     }
 
+    /// Commit atomically, with WAL backfill on the checkpoint worker. A full
+    /// WAL refuses before BEGIN; an async caller can retry between actor turns.
+    pub fn write_background_with<T, E>(
+        &mut self,
+        faults: &dyn FaultInjector,
+        f: impl FnOnce(&Transaction<'_>) -> Result<T, E>,
+    ) -> Result<TxnOutcome<T>, E>
+    where
+        E: From<StorageError>,
+    {
+        self.prepare_write(true).map_err(E::from)?;
+        let outcome = Self::write_on_connection(&self.conn, faults, f)?;
+        self.record_write_outcome(&outcome, true);
+        Ok(outcome)
+    }
+
     /// One FULL commit syncs this transaction and every earlier WAL commit.
     pub fn write_durable_with<T, E>(
         &mut self,
@@ -491,20 +525,20 @@ impl EngineStore {
     where
         E: From<StorageError>,
     {
-        self.prepare_write().map_err(E::from)?;
+        self.prepare_write(false).map_err(E::from)?;
         let outcome = crate::durability::with_full_synchronous(&self.conn, |conn| {
             Self::write_on_connection(conn, faults, f)
         })?;
-        self.record_write_outcome(&outcome);
+        self.record_write_outcome(&outcome, false);
         Ok(outcome)
     }
 
-    fn record_write_outcome<T>(&mut self, outcome: &TxnOutcome<T>) {
+    fn record_write_outcome<T>(&mut self, outcome: &TxnOutcome<T>, background: bool) {
         if matches!(
             outcome,
             TxnOutcome::Committed(_) | TxnOutcome::Crashed { committed: true }
         ) {
-            self.request_checkpoint();
+            self.request_checkpoint_mode(background);
             #[cfg(feature = "fault-injection")]
             {
                 self.harness_commits += 1;
@@ -602,13 +636,7 @@ impl EngineStore {
 
     /// Read a materialization payload from its existing text or binary blob.
     pub fn get_materialization_blob(&self, sha256: &str) -> Result<Option<Vec<u8>>, StorageError> {
-        let row: Option<(i64, String)> = self
-            .conn
-            .query_row(
-                "SELECT byte_length, text FROM blobs WHERE sha256 = ?1",
-                [sha256],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
+        let row: Option<(i64, String)> = crate::text::with_length(&self.conn, sha256)
             .optional()
             .map_err(StorageError::corrupt)?;
         if let Some((byte_length, text)) = row {
@@ -622,7 +650,7 @@ impl EngineStore {
             }
             return Ok(Some(text.into_bytes()));
         }
-        self.get_binary_blob(sha256)
+        crate::get_binary_blob(&self.conn, sha256)
     }
 
     /// Whether a binary blob with this key exists.
@@ -1096,3 +1124,7 @@ impl Drop for EngineStore {
         self.checkpoints.take();
     }
 }
+
+#[cfg(test)]
+#[path = "store/background_checkpoint_tests.rs"]
+mod background_checkpoint_tests;

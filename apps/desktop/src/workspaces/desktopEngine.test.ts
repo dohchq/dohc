@@ -1,5 +1,6 @@
 import {LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES} from "@dohc/live-session-contract/live-frame";
 import { resolve } from "node:path";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
 import type { Event, Request, Response } from "@dohc/workspace-engine-client";
 import {
@@ -23,6 +24,11 @@ vi.mock("./desktopOwnerHost", () => ({ readDesktopOwnerHostConfig: ownerHostMock
 const ownerDeliveryMock = vi.hoisted(() => ({read: vi.fn(), start: vi.fn(), pass: vi.fn()}));
 vi.mock("./desktopOwnerDelivery", () => ({readDesktopOwnerDeliveryConfig: ownerDeliveryMock.read, startDesktopOwnerDelivery: ownerDeliveryMock.start}));
 vi.mock("./nativeOwnerDelivery", () => ({runNativeOwnerDeliveryPass: ownerDeliveryMock.pass}));
+// Only Windows and Linux x64 install a reader, so these tests state Linux x64 on any host.
+vi.mock("./installedReaderConfig", async importOriginal => {
+  const { installedReaderConfig } = await importOriginal<typeof import("./installedReaderConfig")>();
+  return { installedReaderConfig: (resources: string | undefined) => installedReaderConfig(resources, "linux", "x64") };
+});
 
 type State = {
   collectionAutomations: { notifyClaimed: Mock<() => void>; failuresChanged: Mock<() => void>; pauseForEngineRestart: Mock<() => void>; resumeAfterEngineRestart: Mock<() => void> };
@@ -84,6 +90,7 @@ function fixture() {
   const spawns: EngineClientSpawnOptions[] = [];
   let quitting = false;
   const dependencies: Dependencies = {
+    resourcesBasePath: () => "resources",
     findWorkspace: id => rows.get(id) ?? null,
     app: { isPackaged: false, getAppPath: vi.fn(() => "app-root") },
     dialog: { showErrorBox: vi.fn() },
@@ -135,6 +142,20 @@ function fixture() {
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe("desktop engine construction", () => {
+  it("derives reader paths from main's resources base when getAppPath points at dist/main", async () => {
+    const f = fixture(), resources = await createTestScratch("reader-resources-");
+    const generation = "a".repeat(64);
+    mkdirSync(resolve(resources, "engine-reader"));
+    writeFileSync(resolve(resources, "engine-reader/selection.json"), JSON.stringify({ generation }));
+    f.dependencies.resourcesBasePath = () => resources;
+    vi.mocked(f.dependencies.app.getAppPath).mockReturnValue(resolve("unrelated/dist/main"));
+    try {
+      await f.engine.start();
+      const config = JSON.parse(f.options().readerConfig!);
+      expect(config.bundle).toBe(resolve(resources, "engine-reader", generation, "reader.cjs"));
+      expect(config.manifest).toBe(resolve(resources, "engine-reader", generation, "manifest.json"));
+    } finally { await f.close(); }
+  });
   it("notifies after a workspace binding opens, including reopening", async () => {
     const f = fixture();
     const opened = vi.fn();
@@ -151,6 +172,47 @@ describe("desktop engine construction", () => {
       await sessions.closeWorkspace(workspace);
       await sessions.run(workspace, async () => undefined);
       expect(opened).toHaveBeenCalledTimes(2);
+    } finally { await f.close(); }
+  });
+
+  const remote = { serverUrl: "https://server.test", ownerUserId: "owner" };
+  it.each<[string, Partial<RegistryEntry>, boolean]>([
+    ["a saved pause", { pausedRemote: remote }, true],
+    ["a folder reopened as local work", {}, true],
+    ["ordinary sync with no session", { remote }, false],
+    ["a join still bootstrapping", { joinBootstrapPending: true }, false],
+    ["a received share", { shareView: { shareId: "share", granterEmail: null, genericChatWritable: false,
+      grantedSelector: { paths: ["docs"], versionId: null, access: "view" } } }, false],
+  ])("owner opens with %s ask to abandon an unfinished pull: %s", async (_case, entry, abandons) => {
+    const f = fixture();
+    const workspace = { workspaceId: "local-only", rootPath: await createTestScratch("abandon-open-") };
+    f.rows.set(workspace.workspaceId, { ...workspace, kind: "personal", mode: "local-first", ...entry });
+    try {
+      await f.engine.start();
+      const sessions = f.engine.sessions!;
+      await sessions.run(workspace, async () => undefined);
+      await sessions.closeWorkspace(workspace);
+      // A capture-free open is temporary and never asks.
+      await sessions.run({ ...workspace, captureMode: "none" }, async () => undefined);
+      const opens = f.client.requests
+        .filter(request => request.method === "workspace.open" && workspaceIdOf(request) === "local-only")
+        .map(request => request.params);
+      expect(opens).toHaveLength(2);
+      if (abandons) expect(opens[0]).toMatchObject({ abandonOrdinaryPull: true });
+      else expect(opens[0]).not.toHaveProperty("abandonOrdinaryPull");
+      expect(opens[1]).not.toHaveProperty("abandonOrdinaryPull");
+    } finally { await f.close(); }
+  });
+
+  it.each(["opens a workspace", "settles idle"] as const)("runs the startup smoke only when the launch %s", async (launch) => {
+    const f = fixture();
+    const workspace = { workspaceId: "smoke-gate-workspace", rootPath: await createTestScratch("smoke-gate-") };
+    try {
+      await f.engine.start();
+      if (launch === "opens a workspace") await f.engine.sessions!.run(workspace, async () => undefined);
+      f.engine.launchSettled();
+      await expect(f.options().startupSmoke).resolves.toBe(launch === "settles idle" ? "run" : "skip");
+      if (launch === "settles idle") await f.client.smokeClosed.promise;
     } finally { await f.close(); }
   });
 
@@ -283,7 +345,7 @@ describe("desktop engine construction", () => {
       const priorStop = stops.at(-1)!;
       request = relay.probe();
       await closeEntered.promise;
-      expect(() => discovered.assertCurrent()).toThrow("Owner host daemon retired.");
+      expect(() => discovered.assertCurrent()).toThrow("This live editing session ended.");
       expect(priorStop).toHaveBeenCalledOnce();
       const startsBeforeClose = ownerHostMock.start.mock.calls.length;
       if (mode === "quitting") f.setQuitting(true);
@@ -337,7 +399,7 @@ describe("desktop engine construction", () => {
       const close = mode === "cloud" ? f.engine.closeAllRelayTransportWorkspaces() : f.engine.closeRelayTransportWorkspace(workspace);
       await closeEntered.promise;
       expect(stopped[0]).toHaveBeenCalledOnce();
-      expect(() => first.assertCurrent()).toThrow("Owner host daemon retired.");
+      expect(() => first.assertCurrent()).toThrow("This live editing session ended.");
       if (mode === "shutdown") f.setQuitting(true);
       const shutdownDone = mode === "shutdown" || mode === "overlapping-cloud" ? f.engine.closeAllRelayTransportWorkspaces() : Promise.resolve();
       f.options().onLaunch?.();
@@ -355,7 +417,7 @@ describe("desktop engine construction", () => {
       expect(() => next.assertCurrent()).not.toThrow();
       expect(next.client).toBe(first.client);
       await f.engine.closeAllRelayTransportWorkspaces();
-      expect(() => next.assertCurrent()).toThrow("Owner host daemon retired.");
+      expect(() => next.assertCurrent()).toThrow("This live editing session ended.");
       const reopened = await ownerHostMock.start.mock.calls.at(-1)![0].bindings();
       expect(reopened.workspaces).toEqual([{ workspaceId: "owner", workspaceHandle: "owner-3" }]);
       expect(() => reopened.assertCurrent()).not.toThrow();
@@ -482,7 +544,7 @@ describe("desktop engine restart coordination", () => {
     const f = fixture(); const relaunched = deferred();
     await f.addWorkspace("workspace");
     try {
-      await f.engine.start(); await f.client.smokeClosed.promise;
+      await f.engine.start(); f.engine.launchSettled(); await f.client.smokeClosed.promise;
       const sessions = f.engine.sessions; const relay = f.engine.relayClient; const daemon = f.engine.daemon;
       const replacement = new Client();
       f.setLaunch(async () => replacement);
@@ -529,6 +591,7 @@ describe("desktop engine restart coordination", () => {
     try {
       vi.useFakeTimers();
       await f.engine.start();
+      f.engine.launchSettled();
       await opened.promise;
       await vi.advanceTimersByTimeAsync(11_000);
       expect(cancel).not.toHaveBeenCalled();
@@ -630,7 +693,7 @@ describe("desktop engine composed sessions and events", () => {
     const workspace = { workspaceId: "workspace", rootPath: await createTestScratch("dohc-desktop-engine-") };
     let closing: Promise<void> | undefined;
     try {
-      await f.engine.start(); await f.client.smokeClosed.promise;
+      await f.engine.start(); f.engine.launchSettled(); await f.client.smokeClosed.promise;
       f.engine.relayClient!.bind({ ...workspace, relay: { baseUrl: "https://relay.test", token: "token" } });
       await f.engine.sessions!.run(workspace, async () => undefined);
       f.client.respond = async (request) => {
@@ -645,7 +708,7 @@ describe("desktop engine composed sessions and events", () => {
     } finally { held.resolve(); await closing; await f.close(); }
   });
 
-  it("routes automation events to the current workspace and Collection projections to the renderer", async () => {
+  it("routes automation events to the current workspace, and Collection projections and a finished first read to the renderer", async () => {
     const f = fixture(); await f.addWorkspace("workspace");
     try {
       await f.engine.start();
@@ -669,6 +732,12 @@ describe("desktop engine composed sessions and events", () => {
       f.client.emit("collections.projected", { workspaceId: "workspace", paths: ["Log/a.md"], projectedCount: 1 });
       await vi.advanceTimersByTimeAsync(100);
       expect(f.dependencies.notifyRenderer).toHaveBeenCalledWith({ workspaceId: "workspace", paths: ["Log/a.md"], pathSetChanged: false });
+      // The engine answers what it refused while it read a new workspace's
+      // files, so the whole workspace reads again.
+      vi.mocked(f.dependencies.notifyRenderer).mockClear();
+      f.client.emit("capture.initialSettled", { workspaceId: "workspace" });
+      await vi.advanceTimersByTimeAsync(100);
+      expect(f.dependencies.notifyRenderer).toHaveBeenCalledExactlyOnceWith({ workspaceId: "workspace", pathSetChanged: false });
     } finally { vi.useRealTimers(); await f.close(); }
   });
 });

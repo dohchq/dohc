@@ -1,7 +1,7 @@
 import { createSyncDemo } from './src/sync-demo.js';
 import { createReaderFlip } from './src/reader-flip.js';
 import { createGraphFlow } from './src/graph-flow.js';
-import { releaseAssets } from './release-assets.ts';
+import { matchesBuild, releaseAssets } from './release-assets.ts';
 
 // dohc marketing site: downloads, theme toggle, and scroll reveals.
 
@@ -33,11 +33,6 @@ syncThemeToggle();
 
 const RELEASES_URL = 'https://github.com/dohchq/dohc/releases';
 
-function matchesBuild(extension, architecture) {
-  const architecturePattern = new RegExp(`(?:^|[-_])${architecture}(?:[-_.]|$)`, 'i');
-  return (name) => name.toLowerCase().endsWith(extension) && architecturePattern.test(name);
-}
-
 const downloadBuilds = {
   'windows-x64': {
     platform: 'windows', label: 'Windows', detail: 'x64, .exe', icon: 'windows',
@@ -47,13 +42,15 @@ const downloadBuilds = {
     platform: 'mac', label: 'macOS', detail: 'Apple silicon, .dmg', icon: 'apple',
     matches: matchesBuild('.dmg', 'arm64'),
   },
-  'mac-x64': {
-    platform: 'mac', label: 'macOS', detail: 'Intel, .dmg', icon: 'apple',
-    matches: matchesBuild('.dmg', 'x64'),
-  },
   'linux-x64': {
+    platform: 'linux', label: 'Linux', detail: 'x64, .deb', icon: 'linux',
+    matches: matchesBuild('.deb', 'amd64'),
+  },
+  // Ubuntu 24.04 and later refuse to start the AppImage, so it is the
+  // secondary Linux download, for other distributions.
+  'linux-appimage': {
     platform: 'linux', label: 'Linux', detail: 'x64, AppImage', icon: 'linux',
-    matches: matchesBuild('.appimage', 'x64'),
+    matches: matchesBuild('.appimage', 'x86_64'),
   },
 };
 
@@ -80,7 +77,6 @@ async function preferredDownloadKey() {
   try {
     const values = await navigator.userAgentData?.getHighEntropyValues?.(['architecture']);
     if (/arm/i.test(values?.architecture ?? '')) return 'mac-arm64';
-    if (/x86/i.test(values?.architecture ?? '')) return 'mac-x64';
   } catch {
     // Safari and privacy-hardened browsers do not expose architecture.
   }
@@ -89,10 +85,16 @@ async function preferredDownloadKey() {
 
 const downloadControls = Array.from(document.querySelectorAll('[data-download-control]'));
 const standaloneDownloadLinks = Array.from(document.querySelectorAll('[data-download-card]'));
+// A plain link to one build. It never becomes the card for this device.
+const assetDownloadLinks = Array.from(document.querySelectorAll('[data-download-asset]'));
 
 function updateStandaloneDownloadLinks() {
   standaloneDownloadLinks.forEach((link) => {
     const build = downloadBuilds[link.dataset.downloadCard];
+    if (build) link.href = build.url;
+  });
+  assetDownloadLinks.forEach((link) => {
+    const build = downloadBuilds[link.dataset.downloadAsset];
     if (build) link.href = build.url;
   });
 }
@@ -147,8 +149,8 @@ const resolveDownloads = () => resolvingDownloads ??= releaseAssets().then((asse
   updateStandaloneDownloadLinks();
   downloadControls.forEach(control => control.updateResolvedDownloads?.());
 });
-for (const link of document.querySelectorAll('[data-download-primary], [data-download-card]')) {
-  const canResolve = () => Boolean(downloadBuilds[link.dataset.downloadCard ?? link.dataset.downloadBuild]);
+for (const link of document.querySelectorAll('[data-download-primary], [data-download-card], [data-download-asset]')) {
+  const canResolve = () => Boolean(downloadBuilds[link.dataset.downloadCard ?? link.dataset.downloadBuild ?? link.dataset.downloadAsset]);
   const prepare = () => { if (canResolve()) void resolveDownloads(); };
   link.addEventListener('pointerenter', prepare, { once: true });
   link.addEventListener('focus', prepare, { once: true });

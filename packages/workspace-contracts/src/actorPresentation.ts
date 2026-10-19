@@ -1,4 +1,4 @@
-// Frozen relay slots. Olive remains available for a chosen display hue.
+// Frozen relay slots. Olive belongs to the agent default.
 export const ACTOR_HUES = ["rust", "amber", "teal", "blue", "indigo", "plum", "rose"] as const;
 
 /** Unsigned FNV-1a32 over code points, without normalization. */

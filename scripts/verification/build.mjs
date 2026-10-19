@@ -254,7 +254,7 @@ export function directoryFingerprint(path) {
 
 // The Windows x64 probe owner and relay run on the compiler's pinned Node, so both trees are desktop artifacts.
 // macOS and Linux stage only the Collection compiler's esbuild binary.
-const compilerTargets = ["win32-x64", "darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"];
+const compilerTargets = ["win32-x64", "darwin-arm64", "linux-arm64", "linux-x64"];
 export function artifactFingerprint(kind, root = repoRoot, platform = process.platform, arch = process.arch) {
   if (kind === "engine") return hashFile(enginePath);
   return createHash("sha256").update(JSON.stringify([

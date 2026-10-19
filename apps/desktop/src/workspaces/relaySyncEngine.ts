@@ -16,6 +16,7 @@ import {
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { pushWithIdentity } from "./pushWithIdentity";
 import { startRelayWatch } from "./relayWatch";
+import type {RelayLogChange} from "./relayLogWait";
 
 export interface RelaySyncOperations {
   claim(): Promise<void>;
@@ -64,6 +65,11 @@ export interface CloudSyncEngineOptions {
   // `recovered` is true for the first successful pass after a failed one,
   // which is when the relay answers again.
   afterSuccessfulPull?: (pass: { recovered: boolean }) => Promise<void>;
+  // Runs as every pass ends, while the snapshot still says it is syncing, so
+  // the owner can read what the pass left behind, such as a pull it did not
+  // finish. Resolves whether that changed what the status shows. A failure
+  // is logged and never fails the pass.
+  afterPass?: (pass: { failed: boolean }) => Promise<boolean>;
   // Runs before each pull request is sent, and must finish any durable write
   // it needs before it returns. The function it returns runs when that pull
   // ends, whatever the outcome.
@@ -75,7 +81,7 @@ export interface CloudSyncEngineOptions {
   // without polling. A rejection backs the next wait off. The engine aborts
   // `signal` when it no longer needs the answer, and waits for the promise to
   // settle before it waits again or stops.
-  waitForChange?: (since: number, signal: AbortSignal) => Promise<boolean>;
+  waitForChange?: (since: number, signal: AbortSignal) => Promise<RelayLogChange>;
   // How long the engine waits after a pass before it pulls again on its own:
   // the fallback for a change `waitForChange` missed. Omitted, the engine
   // pulls only when asked.
@@ -120,6 +126,7 @@ export interface CloudSyncEngine {
   start(): Promise<void>;
   queueSync(): void;
   queuePull(): void;
+  queueWatchedUpload(): void;
   // Runs a pass now instead of waiting out the backoff, and settles when it
   // ends. The outcome is in the next snapshot, not in the promise. A pass that
   // does not count as an attempt (a retry on reconnecting or waking) updates
@@ -175,15 +182,23 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   // `syncing` while it ran.
   let changeEvents = 0;
   let chain: Promise<void> = Promise.resolve();
+  let watched = false;
+  let detachDurable: (() => void) | undefined;
+  let watchedTimer: ReturnType<typeof setTimeout> | undefined;
+  let watchedQueued = false;
+  let watchedDirty = false;
+  let watchedPushPaused = false;
+  let lastWatchedStart = -Infinity;
   // The wait on the relay for a change past the last pull.
   const watch = options.waitForChange && startRelayWatch({
     wait: options.waitForChange,
     initialDelayMs: initialBackoffMs,
     maxDelayMs: maxBackoffMs,
+    watched: setWatched,
     changed: (since) => {
       // The pass that pulls this change restarts the wait.
       changeReported = since;
-      queuePull();
+      queuePull(true);
     },
     failed: (error) => {
       // The sign-in expired: the engine stops, and the status says so.
@@ -208,6 +223,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
 
   // Settles once the wait on the relay has ended.
   function clearTimers(): Promise<void> {
+    setWatched(false);
     clearPassTimers();
     return watch?.stop() ?? Promise.resolve();
   }
@@ -215,6 +231,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   // The timers that would start another pass. A pass leaves the wait on the
   // relay running.
   function clearPassTimers(): void {
+    cancelWatchedTimer();
     if (continuationTimer !== undefined) {
       clearTimeout(continuationTimer);
       continuationTimer = undefined;
@@ -237,6 +254,86 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     }
   }
 
+  function cancelWatchedTimer(): void {
+    if (watchedTimer !== undefined) clearTimeout(watchedTimer);
+    watchedTimer = undefined;
+  }
+
+  function setWatched(value: boolean): void {
+    if (watched === value) return;
+    watched = value;
+    if (value && !stopped) {
+      detachDurable = options.capture.onDurableLocalChange(queueWatchedUpload);
+    } else {
+      detachDurable?.();
+      detachDurable = undefined;
+      cancelWatchedTimer();
+      watchedDirty = false;
+    }
+  }
+
+  function queueWatchedUpload(): void {
+    if (!watched || stopped) return;
+    watchedDirty = true;
+    watchedPushPaused = false;
+    scheduleWatchedUpload();
+  }
+
+  function canUploadWatched(): boolean {
+    return watched && !stopped && !options.capture.shuttingDown && !authExpired && !claimRefusal && !bootstrapPullPending &&
+      !syncFailure && backoffTimer === undefined && passesPending === 0;
+  }
+
+  function scheduleWatchedUpload(): void {
+    if (!watchedDirty || watchedPushPaused || watchedQueued || watchedTimer !== undefined || !canUploadWatched()) return;
+    const delay = Math.max(0, lastWatchedStart + 250 - Date.now());
+    if (delay === 0) runWatchedUpload();
+    else watchedTimer = setTimeout(() => {
+      watchedTimer = undefined;
+      runWatchedUpload();
+    }, delay);
+  }
+
+  // Share the ordinary pass and capture chains; this pass only pushes.
+  function runWatchedUpload(): void {
+    watchedQueued = true;
+    const result = chain.then(async () => {
+      if (!watchedDirty || watchedPushPaused || !canUploadWatched()) return;
+      const before = visibleState();
+      const eventsBefore = changeEvents;
+      try {
+        const pushed = await options.capture.runRelaySync(async () => {
+          if (!watchedDirty || !canUploadWatched()) return;
+          watchedDirty = false;
+          lastWatchedStart = Date.now();
+          const result = await pushWithIdentity({
+            push: () => operations.push(),
+            claim,
+          });
+          watchedDirty ||= result.pushed > 0 && result.hasMore;
+          return result;
+        });
+        if (!pushed) return;
+        watchedPushPaused = pushed.pushed === 0 && !watchedDirty;
+        sharingDeclined = mergeSharingDeclined([...sharingDeclined, ...pushed.sharingDeclined]);
+        ownerAdmissionPending = pushed.ownerAdmissionPending;
+        if (ownerAdmissionPending.length > 0 && !pushed.hasMore) scheduleBackoff();
+      } catch (error) {
+        cancelWatchedTimer();
+        if (error instanceof RelayOriginDivergedError) {
+          watchedPushPaused = true;
+          queuePull();
+        } else handleFailure(error, undefined, true);
+      } finally {
+        if (visibleState() !== before && changeEvents === eventsBefore) emitChange();
+      }
+    }).finally(() => {
+      watchedQueued = false;
+      scheduleWatchedUpload();
+    });
+    chain = result.catch(() => undefined);
+  }
+
   // Wait past the cursor a successful pull reached. A pull that served a
   // reported change and did not move past it would see the same change at
   // once, so that wait backs off instead of turning into a loop of passes.
@@ -250,10 +347,13 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   // because those pull too. Each local write restarts the debounce, so the
   // pull keeps its own deadline: steady writes cannot postpone it past one
   // debounce interval.
-  function queuePull(): void {
+  function queuePull(fromWatch = false): void {
     if (authExpired || stopped) return;
     if (passesPending > 0 || backoffTimer !== undefined || pullTimer !== undefined) return;
-    if (debounceTimer === undefined) {
+    // Our own append wakes the held read too. Give queued durable uploads the
+    // same fixed pull deadline as local writes waiting on the settle debounce.
+    const uploading = fromWatch && watched && (watchedQueued || watchedDirty || watchedTimer !== undefined);
+    if (debounceTimer === undefined && !uploading) {
       void runPass(false, true);
       return;
     }
@@ -340,6 +440,21 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     );
   }
 
+  async function claim(): Promise<void> {
+    claimingIdentity = true;
+    emitChange();
+    try {
+      // The daemon reuses its durable identity if a previous claim lost its response.
+      await operations.claim();
+    } catch (error) {
+      if (error instanceof RelayClaimRefusedError) claimRefusal = error;
+      throw error;
+    } finally {
+      claimingIdentity = false;
+      emitChange();
+    }
+  }
+
   // Resolves true when the workspace pull or the shared-channel pass applied
   // ops. The shared-channel pass tells the renderer itself, and the renderer
   // then reads `syncing`, so a quiet pass must announce that it ended.
@@ -352,20 +467,6 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     changeReported = undefined;
     let passOwnerPending = ownerAdmissionPending;
     let pushHasMore = false;
-    const claim = async () => {
-      claimingIdentity = true;
-      emitChange();
-      try {
-        // The daemon reuses its durable identity if a previous claim lost its response.
-        await operations.claim();
-      } catch (error) {
-        if (error instanceof RelayClaimRefusedError) claimRefusal = error;
-        throw error;
-      } finally {
-        claimingIdentity = false;
-        emitChange();
-      }
-    };
     const push = async () => {
       if (retryClaim) {
         retryClaim = false;
@@ -375,6 +476,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       passSharingDeclined.push(...result.sharingDeclined);
       passOwnerPending = result.ownerAdmissionPending;
       pushHasMore = result.hasMore;
+      if (watched) watchedDirty ||= result.hasMore;
     };
     const passSharingDeclined: PushWorkspaceToRelayResult["sharingDeclined"] = [];
     const pullResult = await options.capture.runRelaySync(
@@ -441,17 +543,10 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       }
     }
     passSharingDeclined.push(...(pullResult.sharingDeclined ?? []));
-    const declinedByVersionAndObject = new Map<string, SharingDeclined>();
-    for (const declined of passSharingDeclined) {
-      declinedByVersionAndObject.set(JSON.stringify([declined.versionId, declined.objectId]), declined);
-    }
-    const nextSharingDeclined = [...declinedByVersionAndObject.values()].sort((a, b) =>
-      a.path.localeCompare(b.path),
-    );
     conflictCount = options.countOpenConflicts
       ? await options.countOpenConflicts()
       : conflictCount + pullResult.conflictsOpened;
-    sharingDeclined = nextSharingDeclined;
+    sharingDeclined = mergeSharingDeclined(passSharingDeclined);
     ownerAdmissionPending = passOwnerPending;
     pendingChangeCount = Math.max(
       ownerAdmissionPending.length,
@@ -477,6 +572,24 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   // every pass, so they do not count.
   function visibleState(): string {
     return JSON.stringify([pendingChangeCount, conflictCount, sharingDeclined, ownerAdmissionPending]);
+  }
+
+  async function afterPass(failed: boolean): Promise<boolean> {
+    if (!options.afterPass) return false;
+    try {
+      return await options.afterPass({ failed });
+    } catch (error) {
+      console.error(`[desktop] after-pass check failed for ${options.rootDir}:`, error);
+      return false;
+    }
+  }
+
+  function mergeSharingDeclined(declines: readonly SharingDeclined[]): SharingDeclined[] {
+    const byObject = new Map<string, SharingDeclined>();
+    for (const declined of declines) {
+      byObject.set(JSON.stringify([declined.versionId, declined.objectId]), declined);
+    }
+    return [...byObject.values()].sort((a, b) => a.path.localeCompare(b.path));
   }
 
   // A quiet pass serves queuePull. Each change event refreshes Chats, so a
@@ -516,22 +629,29 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         // here, in the serialized lifecycle, so a pass that ends before this
         // one starts cannot leave its backoff behind.
         clearPassTimers();
+        // Its push covers edits already queued.
+        if (!bootstrapPullPending) watchedDirty = false;
+        watchedPushPaused = false;
         retryQueued = false;
         const eventsBefore = changeEvents;
         const stateBefore = visibleState();
         let applied = false;
+        let failed = false;
+        let statusChanged = false;
         syncing = true;
         retrying = retry !== undefined;
         if (!quiet) emitChange();
         try {
           applied = await doPass(retryClaim);
         } catch (error) {
+          failed = true;
           handleFailure(error, displacedDueAtMs, retry?.countsAsAttempt ?? true);
           if (rethrow) throw error;
         } finally {
+          statusChanged = await afterPass(failed);
           syncing = false;
           retrying = false;
-          if (!quiet || applied || changeEvents !== eventsBefore || visibleState() !== stateBefore) {
+          if (!quiet || applied || statusChanged || changeEvents !== eventsBefore || visibleState() !== stateBefore) {
             emitChange();
           }
         }
@@ -543,6 +663,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
           watchPast(cursor, servedChange);
         }
         scheduleIdlePull();
+        scheduleWatchedUpload();
       }
     });
     chain = result.catch(() => undefined);
@@ -570,6 +691,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     },
 
     queuePull,
+    queueWatchedUpload,
 
     retryNow(options) {
       if (authExpired || stopped) return Promise.resolve();

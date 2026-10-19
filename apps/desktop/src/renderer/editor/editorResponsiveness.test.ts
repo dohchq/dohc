@@ -3,7 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { EditorState, PluginKey, TextSelection, type Plugin } from "@tiptap/pm/state";
 import { DecorationSet, EditorView } from "@tiptap/pm/view";
 import { history, undo, redo } from "@tiptap/pm/history";
-import { Node as PMNode } from "@tiptap/pm/model";
+import { splitBlock } from "@tiptap/pm/commands";
+import { Fragment, Node as PMNode } from "@tiptap/pm/model";
 import { boldText, codeBlock, codeMarkText, doc, hardBreak, paragraph, schema } from "./testDocs";
 import { detectAutocomplete, makeWikilinkPlugin, wikilinkPluginKey, type WikilinkFile } from "./wikilinkPlugin";
 import { detectMentionAutocomplete } from "./mentionTrigger";
@@ -41,6 +42,16 @@ function chromePlugins(): Plugin[] {
 function expectSameElements(actual: NodeListOf<Element>, expected: Element[]) {
   expect(actual).toHaveLength(expected.length);
   actual.forEach((node, index) => expect(node).toBe(expected[index]));
+}
+/** How often `run` calls `object[method]`. A spy would keep every call, and a
+ * quadratic path makes millions of them. */
+function countCalls<T extends object, K extends keyof T>(object: T, method: K, run: () => void): number {
+  const original = object[method];
+  if (typeof original !== "function") throw new Error(`${String(method)} is not a method`);
+  let calls = 0;
+  object[method] = function (this: unknown, ...args: unknown[]) { calls++; return original.apply(this, args); } as T[K];
+  try { run(); } finally { object[method] = original; }
+  return calls;
 }
 function mount(document: PMNode, plugins: Plugin[]) {
   const host = window.document.createElement("div");
@@ -191,8 +202,8 @@ describe("editor chrome reuse", () => {
     const assertControls = () => {
       expectSameElements(view.dom.querySelectorAll(".dohc-block-affordance"), controls);
       view.state.doc.forEach((node, position, index) => {
-        expect(controls[index].getAttribute("data-dohc-block-index")).toBe(String(index));
-        expect((view.nodeDOM(position) as HTMLElement).getAttribute("data-dohc-block-index")).toBe(String(index));
+        view.nodeDOM(position)!.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
+        expectSameElements(view.dom.querySelectorAll(".dohc-block-affordance.is-visible"), [controls[index]]);
         (controls[index].querySelector(".dohc-block-plus") as HTMLButtonElement).click();
         expect(insert).toHaveBeenLastCalledWith(position);
       });
@@ -226,8 +237,53 @@ describe("editor chrome reuse", () => {
     const view = mount(doc(duplicate, duplicate, paragraph("last")), [blockControls()]);
     view.dispatch(view.state.tr.insertText("joined", 2, duplicate.nodeSize + 3));
     expect(view.state.doc.childCount).toBe(2);
-    expect(view.dom.querySelectorAll(".dohc-block-affordance")).toHaveLength(2);
-    expect([...view.dom.querySelectorAll(".dohc-block-affordance")].map((control) => control.getAttribute("data-dohc-block-index"))).toEqual(["0", "1"]);
+    const controls = [...view.dom.querySelectorAll(".dohc-block-affordance")];
+    expect(controls).toHaveLength(2);
+    view.state.doc.forEach((_node, position, index) => {
+      view.nodeDOM(position)!.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
+      expectSameElements(view.dom.querySelectorAll(".dohc-block-affordance.is-visible"), [controls[index]]);
+    });
+  });
+
+  it("types into a 5,000-block document with work linear in its blocks", () => {
+    const blocks = 5000;
+    const plugin = blockControls();
+    const view = mount(doc(...Array.from({ length: blocks }, (_, i) => paragraph(`Paragraph ${i}`))), [history(), plugin]);
+    view.setProps({ handleScrollToSelection: () => true });
+    // One widget per block and no node decorations: ProseMirror checks each
+    // node decoration it maps with a scan from the document's first block.
+    expect((plugin.getState(view.state) as DecorationSet).find()).toHaveLength(blocks);
+    const middle = view.state.doc.child(0).nodeSize * (blocks / 2) + 3;
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, middle)));
+    // Before this bound, one character read a top-level block 12.5 million times.
+    expect(countCalls(Fragment.prototype, "child", () => view.dispatch(view.state.tr.insertText("x")))).toBeLessThan(blocks * 4);
+    expect((plugin.getState(view.state) as DecorationSet).find()).toHaveLength(blocks);
+  });
+
+  it("presses Enter in a 5,000-block document with work linear in its blocks", () => {
+    const blocks = 5000;
+    const plugin = blockControls();
+    const view = mount(doc(...Array.from({ length: blocks }, (_, i) => paragraph(`Paragraph ${i}`))), [history(), plugin]);
+    view.setProps({ handleScrollToSelection: () => true });
+    const middle = view.state.doc.child(0).nodeSize * (blocks / 2) + 3;
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, middle)));
+    // DecorationSet.create checks each decoration against each block of the
+    // document it is given.
+    let checks = 0;
+    const create = DecorationSet.create;
+    vi.spyOn(DecorationSet, "create").mockImplementation((document, decorations) => {
+      checks += document.childCount * decorations.length;
+      return create(document, decorations);
+    });
+    const reads = countCalls(Fragment.prototype, "child", () => splitBlock(view.state, view.dispatch));
+    // Before this bound, one Enter made 25 million of these checks.
+    expect(checks).toBeLessThan(blocks * 4);
+    // ProseMirror itself reads each block about six times to split one.
+    expect(reads).toBeLessThan(blocks * 8);
+    expect(view.state.doc.childCount).toBe(blocks + 1);
+    const starts: number[] = [];
+    view.state.doc.forEach((_node, position) => starts.push(position));
+    expect((plugin.getState(view.state) as DecorationSet).find().map((widget) => widget.from)).toEqual(starts);
   });
 
   it("does not reconcile callout titles during selection-only or metadata updates", () => {

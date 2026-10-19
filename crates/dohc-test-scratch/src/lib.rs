@@ -11,7 +11,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::{Duration, SystemTime};
 
+/// The shared parent on Windows, inside that user's own temp directory.
 const SCRATCH_PARENT: &str = "dohc-test-scratch";
+/// The parent on macOS and Linux is `dohc-scratch-<uid>` in the shared `/tmp`.
+/// The name is short because a macOS socket path must stay under 104 bytes;
+/// `the_longest_socket_path_the_gate_can_produce_fits_on_macos` holds it.
+const USER_SCRATCH_PREFIX: &str = "dohc-scratch-";
+/// Hex digits of the nonce in a scratch directory's name. `create_dir` refuses
+/// a name that exists, so the nonce only makes a retry rare: two live
+/// directories with the same sequence share a nonce once in 65,536 tries, and
+/// each of the 16 attempts takes a new sequence and nonce.
+const SCRATCH_NONCE_HEX: usize = 4;
 /// The nonce every run root's name ends in: `{:016x}` here, and
 /// `randomBytes(8).toString("hex")` in the JS twin and in the Rust gate that
 /// hands a root down (`tools/rust-engine-program/run-rust-checks.mjs`).
@@ -64,7 +74,7 @@ impl ScratchDir {
         for _ in 0..16 {
             let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
             let nonce = RandomState::new().build_hasher().finish();
-            let path = run_root.join(format!("{name}-{sequence}-{nonce:016x}"));
+            let path = run_root.join(scratch_dir_name(&name, sequence, nonce));
             let created = {
                 let _root = RUN_ROOT_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
                 fs::create_dir_all(&run_root)?;
@@ -131,6 +141,15 @@ impl Drop for ScratchDir {
     }
 }
 
+/// The name of a scratch directory inside its run root.
+fn scratch_dir_name(name: &str, sequence: u64, nonce: u64) -> String {
+    let nonce = nonce & ((1 << (4 * SCRATCH_NONCE_HEX)) - 1);
+    format!(
+        "{name}-{sequence}-{nonce:0width$x}",
+        width = SCRATCH_NONCE_HEX
+    )
+}
+
 /// The path with every link resolved. macOS temp directories are links into
 /// `/private`, and code that refuses a path resolving elsewhere, such as the
 /// relay deployment, must receive the real one. Windows keeps the path as
@@ -158,15 +177,118 @@ fn real_path(path: &Path) -> io::Result<PathBuf> {
 fn current_run_root() -> io::Result<(PathBuf, bool)> {
     let root = std::env::var("DOHC_TEST_SCRATCH_ROOT").ok();
     let run_id = std::env::var("DOHC_TEST_SCRATCH_RUN").ok();
-    let path = resolve_run_root(root.as_deref(), run_id.as_deref(), &std::env::temp_dir())?;
+    let handed_down = root.as_deref().is_some_and(|value| !value.is_empty());
+    let parent = if handed_down {
+        PathBuf::new()
+    } else {
+        private_scratch_parent()?
+    };
+    let path = resolve_run_root(root.as_deref(), run_id.as_deref(), &parent)?;
     Ok((path, generates_run_root(root.as_deref(), run_id.as_deref())))
+}
+
+/// This user's scratch parent, made private when absent.
+///
+/// Every account shares `/tmp`, so on macOS and Linux the parent carries the
+/// user's id, and a parent another account owns or can enter is refused before
+/// anything is written in it. `/tmp`, not `$TMPDIR`: a macOS socket path must
+/// fit in 104 bytes, and `$TMPDIR` there is a long `/var/folders` path. The JS
+/// twin's `testScratchParent` and the Rust gate derive the same path. Windows
+/// keeps the shared parent in its per-user temp directory.
+fn private_scratch_parent() -> io::Result<PathBuf> {
+    static PARENT: OnceLock<PathBuf> = OnceLock::new();
+    if let Some(parent) = PARENT.get() {
+        return Ok(parent.clone());
+    }
+    let parent = derive_private_parent()?;
+    Ok(PARENT.get_or_init(|| parent).clone())
+}
+
+#[cfg(windows)]
+fn derive_private_parent() -> io::Result<PathBuf> {
+    Ok(std::env::temp_dir().join(SCRATCH_PARENT))
+}
+
+#[cfg(unix)]
+fn derive_private_parent() -> io::Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    let tmp = Path::new("/tmp");
+    let base = if tmp.exists() {
+        tmp.to_path_buf()
+    } else {
+        std::env::temp_dir()
+    };
+    let uid = current_uid(&base)?;
+    let parent = base.join(user_scratch_parent_name(uid));
+    match fs::DirBuilder::new().mode(0o700).create(&parent) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    match parent_problem(&parent, &fs::symlink_metadata(&parent)?, uid) {
+        Some(problem) => Err(io::Error::new(io::ErrorKind::PermissionDenied, problem)),
+        None => Ok(parent),
+    }
+}
+
+#[cfg(unix)]
+fn user_scratch_parent_name(uid: u32) -> String {
+    format!("{USER_SCRATCH_PREFIX}{uid}")
+}
+
+/// This process's user id, read from a directory it creates. The workspace
+/// forbids `unsafe`, and the standard library has no safe `getuid`.
+#[cfg(unix)]
+fn current_uid(base: &Path) -> io::Result<u32> {
+    use std::os::unix::fs::MetadataExt;
+    let probe = base.join(format!(
+        ".dohc-scratch-uid-{}-{:016x}",
+        std::process::id(),
+        RandomState::new().build_hasher().finish()
+    ));
+    fs::create_dir(&probe)?;
+    let uid = fs::symlink_metadata(&probe).map(|metadata| metadata.uid());
+    let removed = fs::remove_dir(&probe);
+    let uid = uid?;
+    removed?;
+    Ok(uid)
+}
+
+/// Why this user must not write into a scratch parent, or `None` when it may.
+/// Another account could otherwise read or replace this user's test files.
+#[cfg(unix)]
+fn parent_problem(path: &Path, metadata: &fs::Metadata, uid: u32) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let path = path.display();
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Some(format!(
+            "test scratch parent {path} is not a directory. Remove it, then run the tests again."
+        ));
+    }
+    if metadata.uid() != uid {
+        return Some(format!(
+            "test scratch parent {path} belongs to user {}, not {uid}. Remove it as its owner, then run the tests again.",
+            metadata.uid()
+        ));
+    }
+    if metadata.mode() & 0o077 != 0 {
+        return Some(format!(
+            "test scratch parent {path} has mode {:o}, which lets other accounts in. Run chmod 700 on it, then run the tests again.",
+            metadata.mode() & 0o777
+        ));
+    }
+    None
 }
 
 fn generates_run_root(root: Option<&str>, run_id: Option<&str>) -> bool {
     root.is_none_or(str::is_empty) && run_id.is_none_or(str::is_empty)
 }
 
-fn resolve_run_root(root: Option<&str>, run_id: Option<&str>, temp: &Path) -> io::Result<PathBuf> {
+fn resolve_run_root(
+    root: Option<&str>,
+    run_id: Option<&str>,
+    parent: &Path,
+) -> io::Result<PathBuf> {
     if let Some(root) = root.filter(|value| !value.is_empty()) {
         let root = PathBuf::from(root);
         if !root.is_absolute() {
@@ -189,7 +311,7 @@ fn resolve_run_root(root: Option<&str>, run_id: Option<&str>, temp: &Path) -> io
             })
             .clone(),
     };
-    Ok(temp.join(SCRATCH_PARENT).join(run_id))
+    Ok(parent.join(run_id))
 }
 
 fn safe_component_checked(value: &str) -> io::Result<String> {
@@ -254,7 +376,18 @@ fn sweep_managed_parent(current_run: &Path, now: SystemTime) {
 fn managed_parent(current_run: &Path) -> Option<&Path> {
     current_run
         .parent()
-        .filter(|parent| parent.file_name() == Some(OsStr::new(SCRATCH_PARENT)))
+        .filter(|parent| parent.file_name().is_some_and(is_managed_parent_name))
+}
+
+/// `dohc-test-scratch` on Windows, and `dohc-scratch-<uid>` elsewhere.
+fn is_managed_parent_name(name: &OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    name == SCRATCH_PARENT
+        || name
+            .strip_prefix(USER_SCRATCH_PREFIX)
+            .is_some_and(|uid| !uid.is_empty() && uid.chars().all(|c| c.is_ascii_digit()))
 }
 
 /// Whether a name has the shape this crate gives a run root.
@@ -393,6 +526,74 @@ mod tests {
     /// every other entry is about that entry, never about the current run's
     /// name.
     const THIS_RUN: &str = "current-run-4821-0000000000000003";
+
+    /// Every account shares `/tmp`, so each user gets a parent of their own
+    /// that no other account may enter.
+    #[cfg(unix)]
+    #[test]
+    fn the_default_parent_is_named_for_this_user_and_private() {
+        use std::os::unix::fs::MetadataExt;
+        let parent = private_scratch_parent().expect("this user's parent");
+        let metadata = fs::symlink_metadata(&parent).expect("the parent exists");
+        let name = parent.file_name().and_then(OsStr::to_str).expect("named");
+        assert_eq!(name, user_scratch_parent_name(metadata.uid()));
+        assert_eq!(
+            metadata.mode() & 0o077,
+            0,
+            "only this user may enter {name}"
+        );
+        assert!(
+            is_managed_parent_name(OsStr::new(name)),
+            "the sweep must own {name}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_parent_another_user_owns_or_can_enter_is_refused() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let harness = ScratchDir::new_named("parent-check").expect("harness");
+        let parent = harness.join("parent");
+        fs::create_dir(&parent).expect("parent");
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).expect("private");
+        let uid = fs::symlink_metadata(&parent).expect("metadata").uid();
+        let metadata = || fs::symlink_metadata(&parent).expect("metadata");
+        assert_eq!(parent_problem(&parent, &metadata(), uid), None);
+
+        let other =
+            parent_problem(&parent, &metadata(), uid + 1).expect("another owner is refused");
+        assert!(other.contains("belongs to user"), "got: {other}");
+
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).expect("loose");
+        let loose = parent_problem(&parent, &metadata(), uid).expect("a loose mode is refused");
+        assert!(loose.contains("mode 755"), "got: {loose}");
+
+        let link = harness.join("link");
+        std::os::unix::fs::symlink(&parent, &link).expect("link");
+        let linked = parent_problem(
+            &link,
+            &fs::symlink_metadata(&link).expect("link metadata"),
+            uid,
+        )
+        .expect("a link is refused");
+        assert!(linked.contains("is not a directory"), "got: {linked}");
+    }
+
+    #[test]
+    fn only_a_managed_parent_name_is_swept() {
+        for managed in [SCRATCH_PARENT, "dohc-scratch-501", "dohc-scratch-0"] {
+            assert!(is_managed_parent_name(OsStr::new(managed)), "{managed}");
+        }
+        for other in [
+            "dohc-scratch-",
+            "dohc-scratch-ice",
+            "dohc-scratchy",
+            "dohc-test-scratch-501",
+            "tmp",
+        ] {
+            assert!(!is_managed_parent_name(OsStr::new(other)), "{other}");
+        }
+    }
 
     #[test]
     fn only_a_generated_run_root_is_this_process_to_remove() {
@@ -624,7 +825,7 @@ mod tests {
         );
     }
 
-    /// The gate hands down `<temp>/dohc-test-scratch/rust-gate-...`, so the
+    /// The gate hands down `/tmp/dohc-scratch-<uid>/rust-gate-...`, so the
     /// guard above must not stop the sweep the crate is for.
     #[test]
     fn a_run_root_under_the_managed_parent_still_sweeps() {
@@ -766,6 +967,32 @@ mod tests {
         );
         let bytes: usize = bytes.parse().expect("the nonce width is a number");
         format!("rust-gate-4821-{}", "0".repeat(bytes * 2))
+    }
+
+    /// `std`'s `UnixListener::bind` refuses a path that does not fit in
+    /// macOS's 104-byte `sun_path`, terminator included. Tests bind sockets
+    /// straight into a scratch directory, so the longest path the gate's
+    /// layout can produce must stay under that. The worst case is a 10-digit
+    /// uid, a 7-digit gate PID, a four-digit sequence, and the longest socket
+    /// name a test binds: `occupied.sock`, beside `relay.sock` and
+    /// `other.sock`. macOS resolves `/tmp` to `/private/tmp`.
+    #[cfg(unix)]
+    #[test]
+    fn the_longest_socket_path_the_gate_can_produce_fits_on_macos() {
+        const MACOS_SUN_PATH: usize = 104;
+        let gate = gate_run_root_name().replacen("-4821-", "-1234567-", 1);
+        assert!(is_run_root_name(OsStr::new(&gate)), "{gate}");
+        let worst = Path::new("/private/tmp")
+            .join(user_scratch_parent_name(u32::MAX))
+            .join(&gate)
+            .join(scratch_dir_name("scratch", 9_999, u64::MAX))
+            .join("occupied.sock");
+        let length = worst.as_os_str().len();
+        assert!(
+            length < MACOS_SUN_PATH,
+            "{} is {length} bytes; a macOS socket path must be under {MACOS_SUN_PATH}",
+            worst.display()
+        );
     }
 
     /// The guard is only as good as its agreement with the names this crate and

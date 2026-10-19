@@ -28,8 +28,8 @@ describe("held relay log reads", () => {
     ]);
     const wait = createRelayLogWait({ workspaceId: "work space", ...relay, holdMs: 25_000 });
     const signal = new AbortController().signal;
-    await expect(wait(4, signal)).resolves.toBe(true);
-    await expect(wait(9, signal)).resolves.toBe(false);
+    await expect(wait(4, signal)).resolves.toEqual({hasMore: true, watched: false});
+    await expect(wait(9, signal)).resolves.toEqual({hasMore: false, watched: false});
     expect(relay.urls).toEqual([
       "http://relay.test/sync/work%20space/bootstrap",
       "http://relay.test/sync/work%20space/log?since=4&hold=25000&replicationEpoch=epoch-1&streamIdentity=stream-1",
@@ -53,7 +53,7 @@ describe("held relay log reads", () => {
     const wait = createRelayLogWait({ workspaceId: "workspace", ...relay, holdMs: 25_000 });
     const signal = new AbortController().signal;
     await expect(wait(4, signal)).rejects.toThrow(/coordinate/u);
-    await expect(wait(4, signal)).resolves.toBe(true);
+    await expect(wait(4, signal)).resolves.toEqual({hasMore: true, watched: false});
     expect(relay.urls.filter((url) => url.endsWith("/bootstrap"))).toHaveLength(2);
   });
 
@@ -72,7 +72,7 @@ describe("held relay log reads", () => {
       holdMs: 25_000,
     });
     const caller = new AbortController();
-    await expect(wait(4, caller.signal)).resolves.toBe(true);
+    await expect(wait(4, caller.signal)).resolves.toEqual({hasMore: true, watched: false});
     expect(timeout.mock.calls).toEqual([[40_000]]);
     expect(signals).toHaveLength(2);
     expect(signals[0]).toBe(signals[1]);

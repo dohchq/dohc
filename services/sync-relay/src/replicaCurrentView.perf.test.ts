@@ -60,8 +60,9 @@ it.skipIf(process.env.DOHC_REPLICA_MEASURE!=="1")("round4 measures accepted disc
     const grant=context.db.prepare("INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,access,generation,status,created_at_ms) VALUES (?,?,'user','reader','view',1,'active',1)");
     const header=context.db.prepare("INSERT INTO sync_relay_replica_cuts(workspace_id,replication_epoch,stream_identity,incarnation,cut_seq,revision,log_cursor,journal_cursor) VALUES (?,'epoch','stream','test',1,0,0,0)");
     const file=context.db.prepare("INSERT INTO sync_relay_replica_cut_files VALUES (?,'main','a','docs/a.txt','text',?,6,NULL,NULL)");
-    const blob=context.db.prepare("INSERT INTO sync_relay_replica_cut_texts VALUES (?,?,0,?,1)");
-    for(let i=0;i<1000;i++){const id=i?`message-${i}`:"w";if(i){workspace.run(id);share.run(id,id);grant.run(id,id);}header.run(id);file.run(id,sha);blob.run(id,sha,Buffer.from(text));}
+    const blob=context.db.prepare("INSERT INTO sync_relay_replica_cut_texts VALUES (?,?,0,?)");
+    const reference=context.db.prepare("INSERT INTO sync_relay_replica_cut_text_refs VALUES (?,?,1)");
+    for(let i=0;i<1000;i++){const id=i?`message-${i}`:"w";if(i){workspace.run(id);share.run(id,id);grant.run(id,id);}header.run(id);file.run(id,sha);blob.run(id,sha,Buffer.from(text));reference.run(id,sha);}
     context.db.exec("COMMIT");
   }catch(e){context.db.exec("ROLLBACK");throw e;}
   const samples:number[]=[];measured.confirmations.length=0;const cpu=process.cpuUsage();
@@ -92,7 +93,7 @@ async function fixture() {
     grant:{grantId:"g",shareId:"s",principalKind:"user",principalUserId:"reader",principalEmail:null,access:"view",generation:1,status:"active",createdAtMs:1,revokedAtMs:null,parentGrantId:null}});
   return storage;
 }
-it.skipIf(binary.missing||process.env.DOHC_REPLICA_MEASURE!=="1")("pairs owner push costs with cuts enabled and disabled",async()=>{
+it.skipIf(process.platform!=="linux"||binary.missing||process.env.DOHC_REPLICA_MEASURE!=="1")("pairs owner push costs with cuts enabled and disabled",async()=>{
   const results=[],revisions=Number(process.env.DOHC_REPLICA_MEASURE_REVISIONS??100),hz=Number(process.env.DOHC_REPLICA_MEASURE_HZ??10);
   for(const bytes of process.env.DOHC_REPLICA_MEASURE_BYTES?[Number(process.env.DOHC_REPLICA_MEASURE_BYTES)]:[50_000,1_000_000])for(let pair=Number(process.env.DOHC_REPLICA_MEASURE_PAIR_START??0);pair<Number(process.env.DOHC_REPLICA_MEASURE_PAIRS??8);pair++)for(const enabled of process.env.DOHC_REPLICA_OFF_ONLY==="1"?[false]:process.env.DOHC_REPLICA_ON_ONLY==="1"?[true]:pair%2?[true,false]:[false,true]) {
     const root=await tempRoot("view-perf-relay");
@@ -183,7 +184,7 @@ it.skipIf(process.env.DOHC_REPLICA_MEASURE!=="1")("measures relay parse, stage c
     measured.confirmations.length=0;
     const walBefore=statSync(wal).size,sideBefore=statSync(sideWal).size;
     try {for(let i=0;i<21;i++) {
-      const text=String(i).padStart(8,"0")+"x".repeat(size-8),sha256=hash(text),wire=JSON.stringify({workspaceId:"w",revision:i,logCursor:0,journalCursor:0,moved:false,nextCursor:null,refusedFiles:[],
+      const text=String(i).padStart(8,"0")+"x".repeat(size-8),sha256=hash(text),wire=JSON.stringify({workspaceId:"w",revision:i,logCursor:0,journalCursor:0,delta:false,removed:[],moved:false,nextCursor:null,refusedFiles:[],
         files:[{versionId:"main",objectId:"a",path:"docs/a.md",contentKind:"text",sha256,byteLength:size,lineageClaimId:hash("measurement-lineage"),restoreGeneration:1}],texts:[{sha256,text}]});
       transactionMs=0;
       const start=performance.now(),view=decodeReplicaCurrentView(JSON.parse(wire)),parsed=performance.now();const staged=storage.stageReplicaCurrentView(lease,{...view,omitted:[]}),checked=performance.now(),stageChecks=checked-parsed-transactionMs;
@@ -204,7 +205,7 @@ it.skipIf(process.env.DOHC_REPLICA_MEASURE!=="1")("measures main-cadence staging
   for(const size of [50_000,1_000_000]) {
     const storage=await fixture(),measured=measurements.get(storage)!,context=storage as unknown as StorageContext;
     context.db.exec("PRAGMA wal_autocheckpoint=0");
-    const page=(revision:number)=>{const text=String(revision).padStart(8,"0")+"x".repeat(size-8),sha256=hash(text);return {workspaceId:"w",omitted:[],revision,logCursor:0,journalCursor:0,moved:false,nextCursor:null,refusedFiles:[],
+    const page=(revision:number)=>{const text=String(revision).padStart(8,"0")+"x".repeat(size-8),sha256=hash(text);return {workspaceId:"w",omitted:[],revision,logCursor:0,journalCursor:0,delta:false,removed:[],moved:false,nextCursor:null,refusedFiles:[],
       files:[{versionId:"main",objectId:"a",path:"docs/a.md",contentKind:"text" as const,sha256,byteLength:size,lineageClaimId:hash("measurement-lineage"),restoreGeneration:1}],texts:[{sha256,text}]};};
     let latest=page(0);
     vi.useFakeTimers({toFake:["setTimeout","clearTimeout","Date"]});
@@ -240,7 +241,7 @@ it.skipIf(process.platform!=="win32"||process.env.DOHC_REPLICA_MEASURE!=="1")("m
       if(mode==="main") {
         vi.useFakeTimers({toFake:["setTimeout","clearTimeout","Date"]});
         supervisor=createReplicaSupervisor({storage,storeRoot:await tempRoot("physical-view"),idleMs:120_000,
-          startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...latest,moved:false,nextCursor:null,refusedFiles:[]})})});
+          startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...latest,delta:false,removed:[],moved:false,nextCursor:null,refusedFiles:[]})})});
         await supervisor.activate("w");
       }
       const lease=mode==="forced-4Hz"?createReplicaReadPrincipal(storage).issue("w","physical"):undefined;
@@ -265,7 +266,7 @@ it.skipIf(process.env.DOHC_REPLICA_MEASURE!=="1")("measures twenty-thousand-file
   const files=Array.from({length:20_000},(_,i)=>({versionId:"main",objectId:`object-${i}`,path:`docs/${String(i).padStart(6,"0")}.md`,contentKind:"text" as const,sha256:hash(""),byteLength:0,lineageClaimId:null,restoreGeneration:null}));
   const view={workspaceId:"w",omitted:[],revision:1,logCursor:0,journalCursor:0,files,texts:[{sha256:hash(""),text:""}]};
   let latest=view,parseMs=0;
-  const wires=()=>[0,10_000].map(offset=>JSON.stringify({workspaceId:latest.workspaceId,revision:latest.revision,logCursor:latest.logCursor,journalCursor:latest.journalCursor,files:latest.files.slice(offset,offset+10_000),texts:offset?[]:latest.texts,moved:false,refusedFiles:[],nextCursor:offset?null:{path:files[9999]!.path,objectId:files[9999]!.objectId,versionId:"main"}}));
+  const wires=()=>[0,10_000].map(offset=>JSON.stringify({workspaceId:latest.workspaceId,revision:latest.revision,logCursor:latest.logCursor,journalCursor:latest.journalCursor,files:latest.files.slice(offset,offset+10_000),texts:offset?[]:latest.texts,delta:false,removed:[],moved:false,refusedFiles:[],nextCursor:offset?null:{path:files[9999]!.path,objectId:files[9999]!.objectId,versionId:"main"}}));
   let pages=wires();const samples:number[]=[],parses:number[]=[],persists:number[]=[];
   const store=storage.storeReplicaCurrentView.bind(storage);storage.storeReplicaCurrentView=(...args)=>{const start=performance.now();try{return store(...args);}finally{persists.push(performance.now()-start);}};
   const supervisor=createReplicaSupervisor({storage,storeRoot:await tempRoot("wide-view"),startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async(_s,_k,_p,cursor)=>{

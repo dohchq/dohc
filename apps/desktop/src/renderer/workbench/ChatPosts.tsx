@@ -17,7 +17,8 @@ import { Ref } from "../ui/Ref";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { formatChatTime, formatClockDigits, formatShortTime } from "../time";
 import { CopyButton } from "../ui/CopyButton";
-import { ChatAvatar } from "./ChatAvatar";
+import { AgentName, ChatAvatar } from "./ChatAvatar";
+import { AgentColorAvatar, AgentColorName, AgentColorScope } from "./AgentColorPicker";
 import {
   MentionText,
   MessageReactions,
@@ -520,6 +521,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             ↳ replying to {chatAuthorLabel(parent)}
           </button>
         ) : null}
+        <AgentColorScope name={chatAuthorLabel(comment)} kind={comment.authorKind} presentation={comment.presentation}>
         <div
           data-testid="chats-comment-bubble"
           className="group relative -ml-[46px] -mr-2 rounded-lg py-1 pl-[46px] pr-2 transition-colors duration-75 hover:bg-hover"
@@ -541,11 +543,13 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                 {formatClockDigits(comment.createdAtMs)}
               </time>
             ) : (
-              <ChatAvatar presentation={comment.presentation}
-                name={comment.authorDisplayName}
-                kind={comment.authorKind}
-                size="comment"
-              />
+              <AgentColorAvatar>
+                <ChatAvatar presentation={comment.presentation}
+                  name={comment.authorDisplayName}
+                  kind={comment.authorKind}
+                  size="comment"
+                />
+              </AgentColorAvatar>
             )}
           </span>
           {/* A continued comment keeps its author and time for screen
@@ -554,13 +558,13 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             <span
               data-testid="chats-message-author"
               data-author-kind={comment.authorKind}
-              className={`text-[13px] font-semibold ${
-                isAgent ? "text-agent" : "text-ink"
-              }`}
+              className="text-[13px] font-semibold text-ink"
             >
-              {chatAuthorLabel(comment)}
+              <AgentName kind={comment.authorKind} presentation={comment.presentation}>
+                <AgentColorName>{chatAuthorLabel(comment)}</AgentColorName>
+              </AgentName>
             </span>
-            {isAgent && !continues ? <AgentBadge testIdPrefix="chats-comment" author={comment} viewerAuthorId={reactionControls.viewerAuthorId} /> : null}
+            {isAgent && !continues ? <AgentBadge testIdPrefix="chats-comment" author={comment} viewerAuthorId={reactionControls.viewerAuthorId} presentation={comment.presentation} /> : null}
             {comment.authorKind === "automation" && !continues ? (
               <AutomationBadge
                 testIdPrefix="chats-comment"
@@ -667,6 +671,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             }
           />
         </div>
+        </AgentColorScope>
         {runRecords[comment.id] ? (
           <RunLine
             run={runRecords[comment.id]}
@@ -691,6 +696,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   };
   return (
     <>
+      <AgentColorScope name={chatAuthorLabel(openingMessage)} kind={openingMessage.authorKind} presentation={openingMessage.presentation}>
       <article
         ref={(node) => setMessageNode(openingMessage.id, node)}
         data-testid="chats-message"
@@ -710,23 +716,25 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             ? "My agent · thread"
             : `#${nav.channel.name} · thread`}
         </p>
-        <ChatAvatar presentation={openingMessage.presentation}
-          name={openingMessage.authorDisplayName}
-          kind={openingMessage.authorKind}
-          size="row"
-        />
+        <AgentColorAvatar>
+          <ChatAvatar presentation={openingMessage.presentation}
+            name={openingMessage.authorDisplayName}
+            kind={openingMessage.authorKind}
+            size="row"
+          />
+        </AgentColorAvatar>
         <div className="min-w-0 flex-1">
           <span className="flex items-baseline gap-1.5 leading-[18px]">
             <span
               data-testid="chats-message-author"
               data-author-kind={openingMessage.authorKind}
-              className={`truncate text-[13px] font-semibold ${
-                openingIsAgent ? "text-agent" : "text-ink"
-              }`}
+              className="truncate text-[13px] font-semibold text-ink"
             >
-              {chatAuthorLabel(openingMessage)}
+              <AgentName kind={openingMessage.authorKind} presentation={openingMessage.presentation}>
+                <AgentColorName>{chatAuthorLabel(openingMessage)}</AgentColorName>
+              </AgentName>
             </span>
-            {openingIsAgent ? <AgentBadge testIdPrefix="chats-message" author={openingMessage} viewerAuthorId={reactionControls.viewerAuthorId} /> : null}
+            {openingIsAgent ? <AgentBadge testIdPrefix="chats-message" author={openingMessage} viewerAuthorId={reactionControls.viewerAuthorId} presentation={openingMessage.presentation} /> : null}
             {openingMessage.authorKind === "automation" ? (
               <AutomationBadge
                 testIdPrefix="chats-message"
@@ -836,6 +844,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
           />
         </div>
       </article>
+      </AgentColorScope>
 
       <div
         data-testid="chats-comments-divider"

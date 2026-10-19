@@ -19,9 +19,9 @@ import { equalRecoveryCursor } from "./recovery-record.js";
 import type { CheckpointStageAllocation } from "./checkpoint-storage.js";
 import { createDatasetReplicaHost } from "./replica-host.js";
 import { datasetHistoryLineage, historyStatement, readDatasetHistory, readDatasetHistoryRevision } from "./dataset-history.js";
-import { initializeDatasetAttempts, reviewDatasetAttempts, reconcileDatasetAttempt, cancelDatasetAttempt, assertDatasetAttemptsCommitted, assertDatasetAttemptNotCancelled } from "./dataset-attempts.js";
+import { initializeDatasetAttempts, reviewDatasetAttempts, reconcileDatasetAttempt, cancelDatasetAttempt, assertDatasetAttemptsCommitted, assertDatasetAttemptNotCancelled, hasUncommittedDatasetAttempts } from "./dataset-attempts.js";
 import { createDatasetAutomationClaims, DATASET_AUTOMATION_CHAIN_DEPTH, type DatasetActor, type DatasetPressed, type DatasetPressInput } from "./dataset-automation-claims.js";
-import { DatasetHostError } from "@dohc/app-backend-runtime/dataset-error";
+import { DatasetHostError, DatasetBindingPendingAttemptError } from "@dohc/app-backend-runtime/dataset-error";
 export { DatasetHostError } from "@dohc/app-backend-runtime/dataset-error";
 
 export type DatasetAccess = { kind: "data" } | { kind: "app"; appId: string };
@@ -674,8 +674,8 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
           db.prepare("DELETE FROM dohc_dataset_bindings WHERE workspace_id=? AND dataset_id=? AND app_id=?").run(key.workspaceId, key.datasetId, appId);
         }
         else {
-          if (!existing && db.prepare("SELECT 1 FROM dohc_dataset_attempts WHERE workspace_id=? AND dataset_id=? AND app_id!=? LIMIT 1").get(key.workspaceId, key.datasetId, appId)) {
-            throw new DatasetHostError("conflict", "A response is pending in another app. Confirm it there before publishing this app.");
+          if (!existing && hasUncommittedDatasetAttempts(db, key, appId)) {
+            throw new DatasetBindingPendingAttemptError();
           }
           const binding = parseDatasetBinding(raw.binding, approved, generatedRevision);
           const json = JSON.stringify(binding);

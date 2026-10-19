@@ -162,8 +162,9 @@ async function harness() {
     pauseStatus,
     withOwnerHostPaused: work => work(), prepare: preparePause, resume: enable,
     pauseRemote: (id, syncPause) => { const entry = registry.get(id)!; entry.pausedRemote = entry.remote; delete entry.remote; entry.syncPause = syncPause; },
-    closeActivity: async () => {}, closeRelay: async () => {}, openActivity: async () => {},
+    closeActivity: async () => {}, closeRelay: async () => {}, openActivity: async () => {}, collectionsWaiting: async () => false,
     status: id => ({ ...status, ...(registry.get(id)?.syncPause ? { syncPause: pauseStatus(registry.get(id)!.syncPause!) } : {}) }), notify: () => {}, cleanupFailed: vi.fn(),
+    reopenFailed: vi.fn(),
   });
   stopWorkspaceSync.mockImplementation(stopOperation);
   const openActivity = vi.fn<Dependencies["openWorkspaceActivity"]>(async (_entry, options) => { steps.push("open"); await options.afterActivityOpen(); });
@@ -359,7 +360,7 @@ describe("registered cloud handlers", () => {
     await reading.promise;
     const drained = h.authorities.invalidate("existing");
     secret.resolve("none");
-    await expect(result).rejects.toThrow("retired");
+    await expect(result).rejects.toThrow("This workspace was closed. Open it again.");
     await drained;
   });
 
@@ -635,8 +636,8 @@ it("queues a stop during join until the joined workspace is enabled", async () =
     pauseStatus: pause => workspaceSyncPauseStatus(pause, "local"),
     withOwnerHostPaused: work => work(), prepare: h.preparePause, resume: h.enable,
     pauseRemote: id => { const entry = h.registry.get(id)!; entry.pausedRemote = entry.remote; delete entry.remote; },
-    closeActivity: async () => {}, closeRelay: async () => {}, openActivity: async () => {},
-    status: () => status, notify: () => {}, cleanupFailed: vi.fn(),
+    closeActivity: async () => {}, closeRelay: async () => {}, openActivity: async () => {}, collectionsWaiting: async () => false,
+    status: () => status, notify: () => {}, cleanupFailed: vi.fn(), reopenFailed: vi.fn(),
   })(operation));
   expect(h.preparePause).not.toHaveBeenCalled();
   held.resolve(); await joining;
@@ -673,7 +674,7 @@ it("releases the join transition lane before rollback drains a queued stop", asy
   await joinRefused;
   expect(h.cleanup).toHaveBeenCalledWith("joined");
   expect(h.registry.has("joined")).toBe(false);
-  expect(() => h.authorities.withOperation("joined", () => {})).toThrow("Unknown workspace");
+  expect(() => h.authorities.withOperation("joined", () => {})).toThrow("This workspace is not open. Open it again.");
 });
 
 it("exposes owned sync and pause state while signed out", async () => {

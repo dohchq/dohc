@@ -46,7 +46,7 @@ it.skipIf(process.env.DOHC_REPLICA_READ_PERF !== "1")("measures authorized curre
   storage.storeReplicaCurrentView(lease,view);
   let liveView = view;
   const supervisor = createReplicaSupervisor({storage,storeRoot:await tempRoot("read-perf"),startChild:async()=>({
-    pull:async()=>{},close:async()=>{},currentView:async()=>({...liveView,moved:false,nextCursor:null,refusedFiles:[]})})});
+    pull:async()=>{},close:async()=>{},currentView:async()=>({...liveView,delta:false,removed:[],moved:false,nextCursor:null,refusedFiles:[]})})});
   const queries = createShareReadQueries(storage,500);
   const authorize = () => {
     const result = authorizeShareGrantAction({storage,...input,action:"read"});

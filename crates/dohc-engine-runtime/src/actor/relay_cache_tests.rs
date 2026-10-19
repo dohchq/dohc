@@ -536,6 +536,7 @@ fn cycle_cursor() -> RelayCursor {
         stream_identity: "stream".into(),
         bootstrap_complete: true,
         settlement_report_id: None,
+        ordinary_pull: None,
     }
 }
 async fn commit_cycle(

@@ -169,7 +169,7 @@ async function harness(options: {
   });
   const requireWorkspace = vi.fn((workspaceId: string) => {
     if (workspaceId !== workspace.workspaceId) {
-      throw new Error(`Unknown workspace: ${workspaceId}`);
+      throw new Error("This workspace is not open. Open it again.");
     }
     return workspace;
   });

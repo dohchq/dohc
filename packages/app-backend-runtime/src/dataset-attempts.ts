@@ -96,17 +96,21 @@ export function initializeDatasetAttempts(db: JournalDb): void {
     workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,retry_sha256 TEXT NOT NULL,reference_sha256 TEXT NOT NULL,storage_bytes INTEGER NOT NULL,
     PRIMARY KEY(workspace_id,dataset_id,retry_sha256),UNIQUE(workspace_id,dataset_id,reference_sha256)) STRICT;`);
 }
-/** Runs within the same transaction as the source fence. Uncommitted uploads still belong to that source. */
-export function assertDatasetAttemptsCommitted(db: JournalDb, scope: DatasetScope): void {
+export function hasUncommittedDatasetAttempts(db: JournalDb, scope: DatasetScope, excludeAppId?: string): boolean {
   let after = 0;
   for (;;) {
-    const rows = db.prepare("SELECT rowid,* FROM dohc_dataset_attempts WHERE workspace_id=? AND dataset_id=? AND rowid>? ORDER BY rowid LIMIT 64").all(scope.workspaceId, scope.datasetId, after);
-    if (!rows.length) return;
+    const rows = db.prepare("SELECT rowid,* FROM dohc_dataset_attempts WHERE workspace_id=? AND dataset_id=? AND rowid>? AND (? IS NULL OR app_id!=?) ORDER BY rowid LIMIT 64")
+      .all(scope.workspaceId, scope.datasetId, after, excludeAppId ?? null, excludeAppId ?? null);
+    if (!rows.length) return false;
     for (const row of rows) {
-      if (!committedAttempt(db, scope, row)) throw new Error("A submission is unconfirmed. Retry it in the current app or cancel it in Pending responses.");
+      if (!committedAttempt(db, scope, row)) return true;
       after = Number(row.rowid);
     }
   }
+}
+/** Runs within the same transaction as the source fence. Uncommitted uploads still belong to that source. */
+export function assertDatasetAttemptsCommitted(db: JournalDb, scope: DatasetScope): void {
+  if (hasUncommittedDatasetAttempts(db, scope)) throw new Error("A submission is unconfirmed. Retry it in the current app or cancel it in Pending responses.");
 }
 function sync<T>(run: () => T): T {
   if (run.constructor.name === "AsyncFunction") throw new Error("Pending submission callbacks must be synchronous.");

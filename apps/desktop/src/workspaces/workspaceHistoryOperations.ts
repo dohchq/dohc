@@ -98,6 +98,7 @@ function personFloor(rootPath: string, word = "delete"): Floor {
 }
 async function recoveryFloor(record: Readonly<RecoveryRecord>, staged: string | undefined, floor: Floor): Promise<void> {
   await floor(record.base, undefined, true);
+  for (const path of record.engine?.notRestored ?? []) await floor(path);
   for (const path of new Set([...record.paths, ...record.emptyFolders, ...(record.copies?.map(copy => copy.path) ?? []), ...(record.progress?.restored ?? []), ...(record.progress?.remaining.map(item => item.path) ?? []), ...(record.result?.restored ?? []), ...(record.result?.remaining.map(item => item.path) ?? [])])) await floor(path);
   if (!staged) return;
   const walk = async (source: string, path: string): Promise<void> => {
@@ -111,9 +112,9 @@ async function recoveryFloor(record: Readonly<RecoveryRecord>, staged: string | 
 async function moveRecoveryFloor(record: MoveRecoveryRecord, floor: Floor): Promise<void> {
   const invalid = () => new Error(`Cannot undo the ${moveWord(record.from, record.to)}. Its recovery paths are invalid.`);
   if (record.from === record.to || record.from.startsWith(record.to + "/") || record.to.startsWith(record.from + "/")) throw invalid();
-  const paths = "noUndo" in record ? [] : [...record.entries, ...(record.pending ?? []), ...[record.progress, record.result].flatMap(result =>
-    [...(result?.restored ?? []), ...(result?.remaining.map(item => item.path) ?? [])])];
+  const paths = "noUndo" in record ? [] : [...record.entries, ...(record.pending ?? []), ...[record.progress, record.result].flatMap(result => result?.restored ?? [])];
   for (const path of paths) if (path !== record.from) throw invalid();
+  if (!("noUndo" in record)) for (const path of new Set([...(record.engine && "notRestored" in record.engine ? record.engine.notRestored ?? [] : []), ...[record.progress, record.result].flatMap(result => result?.remaining.map(item => item.path) ?? [])])) await floor(path);
   await floor(record.from, undefined, true);
   await floor(record.to, undefined, true);
   if ("entries" in record && record.entries.length) { await floor(record.from); await floor(record.to); }
@@ -184,13 +185,19 @@ export async function undoWorkspaceHistoryOperation(operation: Operation & { sig
         }
         cursor = result.nextCursor ?? undefined;
       } while (cursor && (floor || !deleted));
-      if (move) return undoMoveRecovery(rootPath, move, author, options.history, workspaceId, () => writable(operation), markChanged, (root, from, to) => placeBack(root, from, to, "", true));
+      const history: OperationHistory = { ...options.history, undoHistoryOperation: async input => {
+        const result = await options.history.undoHistoryOperation(input);
+        try { if (floor) for (const path of result.notRestored) await floor(path); }
+        catch (error) { markChanged(); throw error; }
+        return result;
+      } };
+      if (move) return undoMoveRecovery(rootPath, move, author, history, workspaceId, () => writable(operation), markChanged, (root, from, to) => placeBack(root, from, to, "", true));
       if (!record) {
         const rename = members.find(member => member.operation === "rename");
         throw new Error(deleted ? missingDeleteRecoveryReason : rename
           ? missingMoveRecoveryReason(moveWord(rename.beforePath ?? rename.path, rename.path)) : "This operation is not in History.");
       }
-      return undoDeleteRecovery(rootPath, record, author, options.history, workspaceId, () => writable(operation), markChanged);
+      return undoDeleteRecovery(rootPath, record, author, history, workspaceId, () => writable(operation), markChanged);
     }, { markOnSuccess: false });
   } catch (error) {
     // Refuse through the authority wrapper before its final currentness check.

@@ -1,3 +1,4 @@
+import { agentColorsForPresentation } from "../settings/userSettingsStore";
 import { chatOperations } from "./chatOperations";
 import { isReceivedObject } from "@dohc/workspace-contracts/workspace-ref";
 import { workspaceFileRefs } from "../workspaces/workspaceFileReferenceScopes";
@@ -161,6 +162,7 @@ export function registerChatsIpcHandlers<
   linkedChatStoreFor(workspace: RegistryEntry): DesktopLinkedChatStore;
   chatWrites: ChatWrites;
   assertWritableWorkspace(workspace: RegistryEntry): void;
+  stateDir(): string;
   warmCredentialCache(): Promise<void>;
   localUserId(): string;
   localInstallationId(): string;
@@ -210,7 +212,9 @@ export function registerChatsIpcHandlers<
   async function presentationRequest(workspace: RegistryEntry, store: DesktopLinkedChatStore, assertCurrent: () => void) {
     await warmCredentialCache();
     assertCurrent();
-    return createActorPresentationRequest({
+    const agentColors = await agentColorsForPresentation(dependencies.stateDir());
+    assertCurrent();
+    return createActorPresentationRequest({ agentColors,
       readWorkspace: () => dependencies.readWorkspace(workspace.workspaceId), store, assertCurrent,
       installationId: localInstallationId(), credentials: currentCredentials(),
     });
@@ -271,16 +275,42 @@ export function registerChatsIpcHandlers<
     const rowsUncovered = await syncWorkspaceSharedChannels(
       workspace.workspaceId,
     );
-    const requestedFile = await capture.resolveFileForPath(input.path);
-    const objectId = requestedFile?.objectId ?? null;
     const store = linkedChatStoreFor(workspace);
     const presentation = await presentationRequest(workspace, store, operation.assertCurrent);
-    const mentions = await store.listFileMentions({
-      workspaceId: workspace.workspaceId,
-      ...(objectId ? { objectId } : { pathHint: input.path }),
+    const paths = [...new Set(input.paths ?? [input.path!])];
+    const resolved = input.paths
+      ? await resolveEngineFiles(workspace, paths.map(path => ({ path })))
+      : [await capture.resolveFileForPath(input.path!)].map(file => file ? { status: "found" as const, ...file } : { status: "absent" as const });
+    operation.assertCurrent();
+    const subjects = paths.map((path, index) => {
+      const file = resolved[index];
+      return { path, objectId: file?.status === "found" ? file.objectId : null,
+        currentPath: file?.status === "found" ? file.path : path };
     });
-    const pathByObjectId = new Map<string, string>();
-    if (requestedFile) pathByObjectId.set(requestedFile.objectId, requestedFile.path);
+    const pathByObjectId = new Map(subjects.flatMap(file => file.objectId ? [[file.objectId, file.currentPath] as const] : []));
+    // Keep the existing subject query and authority; sync and present the batch once.
+    const mentions = [];
+    const seen = new Set<string>();
+    for (const subject of subjects) {
+      operation.assertCurrent();
+      const rows = await store.listFileMentions({
+        workspaceId: workspace.workspaceId,
+        ...(subject.objectId ? { objectId: subject.objectId } : { pathHint: subject.path }),
+      });
+      for (const mention of rows) {
+        const currentPath = resolveChatFileMentionPath({
+          requestedObjectId: subject.objectId,
+          attachmentObjectId: mention.attachment.objectId,
+          attachmentPathHint: mention.attachment.pathHint,
+          pathByObjectId,
+        });
+        if (!currentPath || seen.has(mention.attachment.attachmentId)) continue;
+        seen.add(mention.attachment.attachmentId);
+        mentions.push({ ...mention, attachment: { ...mention.attachment, pathHint: currentPath } });
+        if (mentions.length === 2000) break;
+      }
+      if (mentions.length === 2000) break;
+    }
     const mentionChannelWireIds = new Map(
       await Promise.all(
         [
@@ -306,23 +336,9 @@ export function registerChatsIpcHandlers<
         ? { sharedChannelRowsUncovered: rowsUncovered }
         : {}),
       mentions: (await Promise.all(mentions.map(async (mention) => {
-        const currentPath = resolveChatFileMentionPath({
-          requestedObjectId: objectId,
-          ...(mention.attachment.objectId
-            ? { attachmentObjectId: mention.attachment.objectId }
-            : {}),
-          ...(mention.attachment.pathHint
-            ? { attachmentPathHint: mention.attachment.pathHint }
-            : {}),
-          pathByObjectId,
-        });
-        if (!currentPath) return [];
         return [
           {
-            attachment: chatAttachmentForIpc({
-              ...mention.attachment,
-              pathHint: currentPath,
-            }),
+            attachment: chatAttachmentForIpc(mention.attachment),
             message: chatMessageForIpc(mention.message, automationCollectionOf(workspace.workspaceId), await presentation(mention.message, mention.message.threadId)),
             thread: chatThreadForIpc(mention.thread),
             ...(mention.channel

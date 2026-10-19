@@ -1,4 +1,4 @@
-import { bindOwnPresentation } from "./workbench/actorPresentation";
+import { bindOwnPresentation, bindAgentColorUpdates, clearAgentColorOverrides } from "./workbench/actorPresentation";
 import { useRequestSequence } from "./useRequestSequence";
 import { lazy, Suspense, useCallback, useContext, useEffect, useRef, useState } from "react";
 import {
@@ -216,6 +216,11 @@ export function DesktopRoot() {
   const activeWorkspaceId = useRef(workspace?.workspaceId);
   // A committed shell can emit before passive effects run after a switch.
   activeWorkspaceId.current = workspace?.workspaceId;
+  useEffect(() => bindAgentColorUpdates(bridge(), () => activeWorkspaceId.current), []);
+  useEffect(() => {
+    const closingWorkspaceId = workspace?.workspaceId;
+    return () => { if (closingWorkspaceId !== undefined) clearAgentColorOverrides(closingWorkspaceId); };
+  }, [workspace?.workspaceId]);
   useEffect(() => {
     return bridge().onWorkspaceActivity((event) => {
       if (event.workspaceId !== undefined && (!event.summaryChanged || event.workspaceId !== activeWorkspaceId.current)) return;

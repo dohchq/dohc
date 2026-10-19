@@ -2,7 +2,7 @@ use super::*;
 use crate::links::{incoming, resolver::Resolver};
 
 fn lookup(s: &EngineStore, target: &str) -> incoming::Candidates {
-    s.read_with(|c| incoming::candidates(c, "ws", "main", target))
+    s.read_with(|c| incoming::candidates(c, "ws", "main", target, &["wikilink"]))
         .unwrap()
 }
 
@@ -178,18 +178,18 @@ fn resolver_and_candidates_are_scoped_to_workspace_and_version() {
         let foreign = Resolver::new(Resolver::paths_for_version(c, "other", "main")?);
         assert_eq!(foreign.resolve("source.md", "target"), None);
         assert_eq!(
-            incoming::candidates(c, "ws", "fork", "target.md")?
+            incoming::candidates(c, "ws", "fork", "target.md", &["wikilink"])?
                 .sources
                 .len(),
             1
         );
         assert!(
-            incoming::candidates(c, "other", "main", "target.md")?
+            incoming::candidates(c, "other", "main", "target.md", &["wikilink"])?
                 .sources
                 .is_empty()
         );
         assert!(
-            incoming::candidates(c, "ws", "other", "target.md")?
+            incoming::candidates(c, "ws", "other", "target.md", &["wikilink"])?
                 .sources
                 .is_empty()
         );
@@ -451,12 +451,12 @@ fn edited_fork_keeps_main_results_isolated() {
     assert_eq!(before.sources, vec![("a".into(), "source.md".into())]);
     s.read_with(|c| {
         assert!(
-            incoming::candidates(c, "ws", "fork", "target.md")?
+            incoming::candidates(c, "ws", "fork", "target.md", &["wikilink"])?
                 .sources
                 .is_empty()
         );
         assert_eq!(
-            incoming::candidates(c, "ws", "fork", "fork-only.md")?
+            incoming::candidates(c, "ws", "fork", "fork-only.md", &["wikilink"])?
                 .sources
                 .len(),
             1
@@ -629,14 +629,14 @@ fn fork_mid_reseed_copies_cursor_and_work_and_resumes_independently() {
         let current: i64 = s.read_with(|c| c.query_row("SELECT COUNT(*) FROM link_sources WHERE version_id=?1 AND parser_generation=?2",params![version,PARSER_GENERATION],|r|r.get(0))).unwrap();
         assert_eq!(current, 70);
         assert_eq!(
-            s.read_with(|c| incoming::candidates(c, "ws", version, "target.md"))
+            s.read_with(|c| incoming::candidates(c, "ws", version, "target.md", &["wikilink"]))
                 .unwrap()
                 .sources
                 .len(),
             70
         );
         assert!(
-            s.read_with(|c| incoming::candidates(c, "ws", version, "absent.md"))
+            s.read_with(|c| incoming::candidates(c, "ws", version, "absent.md", &["wikilink"]))
                 .unwrap()
                 .sources
                 .is_empty()
@@ -799,25 +799,25 @@ fn incoming_read_model_isolates_populated_workspaces_with_colliding_ids() {
     assert_eq!(main.resolve("notes/source.md", "target"), Some("target.md"));
     assert_eq!(other.resolve("notes/source.md", "target"), None);
     assert_eq!(
-        incoming::candidates(&c, "ws", "main", "target.md")
+        incoming::candidates(&c, "ws", "main", "target.md", &["wikilink"])
             .unwrap()
             .sources,
         vec![("a".into(), "source.md".into())]
     );
     assert!(
-        incoming::candidates(&c, "other", "main", "target.md")
+        incoming::candidates(&c, "other", "main", "target.md", &["wikilink"])
             .unwrap()
             .sources
             .is_empty()
     );
     assert_eq!(
-        incoming::candidates(&c, "other", "main", "foreign.md")
+        incoming::candidates(&c, "other", "main", "foreign.md", &["wikilink"])
             .unwrap()
             .sources,
         vec![("a".into(), "source.md".into())]
     );
     assert!(
-        incoming::candidates(&c, "ws", "main", "foreign.md")
+        incoming::candidates(&c, "ws", "main", "foreign.md", &["wikilink"])
             .unwrap()
             .sources
             .is_empty()
@@ -829,13 +829,13 @@ fn incoming_read_model_isolates_populated_workspaces_with_colliding_ids() {
     )
     .unwrap();
     assert_eq!(
-        incoming::candidates(&c, "ws", "main", "target.md")
+        incoming::candidates(&c, "ws", "main", "target.md", &["wikilink"])
             .unwrap()
             .sources
             .len(),
         1
     );
-    let other = incoming::candidates(&c, "other", "main", "target.md").unwrap();
+    let other = incoming::candidates(&c, "other", "main", "target.md", &["wikilink"]).unwrap();
     assert!(other.sources.is_empty());
     assert_eq!(other.unchecked, vec!["source.md"]);
 }

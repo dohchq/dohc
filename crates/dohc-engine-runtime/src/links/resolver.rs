@@ -90,6 +90,61 @@ pub(super) fn target(raw: &str) -> Option<String> {
     Some(decode(raw))
 }
 
+/// The path a click opens when no unique alias exists.
+pub(super) fn creation_path(source: &str, raw: &str, kind: &str) -> Option<String> {
+    let target = target(raw)?;
+    let relative = target.trim_start_matches('/');
+    if target.contains('\\')
+        || target.chars().any(char::is_control)
+        || target.starts_with("//")
+        || relative.as_bytes().get(1) == Some(&b':')
+    {
+        return None;
+    }
+    let directory = source.rsplit_once('/').map_or("", |(dir, _)| dir);
+    let rooted_wikilink = kind == "wikilink"
+        && target.contains('/')
+        && !target.starts_with("./")
+        && !target.starts_with("../");
+    let candidate = if target.starts_with('/') || directory.is_empty() || rooted_wikilink {
+        target.trim_start_matches('/').to_owned()
+    } else {
+        format!("{directory}/{target}")
+    };
+    let mut prefix = String::new();
+    for part in candidate
+        .split('/')
+        .filter(|part| !matches!(*part, "" | "." | ".."))
+    {
+        if !prefix.is_empty() {
+            prefix.push('/');
+        }
+        prefix.push_str(part);
+        if !dohc_engine_files::materialize::creation_segment_is_safe(part)
+            || dohc_engine_files::policy::classify_engine_file_path(&prefix)
+                != dohc_engine_files::policy::PathClassification::Tracked
+        {
+            return None;
+        }
+    }
+    let mut path = super::normalize_path(&candidate)?;
+    if path.is_empty() {
+        return None;
+    }
+    if (kind == "wikilink" || without_extension(&path) == path) && !markdown_extension(&path) {
+        path.push_str(".md");
+    }
+    if !path
+        .split('/')
+        .all(dohc_engine_files::materialize::creation_segment_is_safe)
+        || dohc_engine_files::policy::classify_engine_file_path(&path)
+            != dohc_engine_files::policy::PathClassification::Tracked
+    {
+        return None;
+    }
+    Some(path)
+}
+
 impl Resolver {
     pub(crate) fn paths_for_version(
         conn: &rusqlite::Connection,
@@ -159,6 +214,21 @@ impl Resolver {
             .and_then(|value| value.as_deref())
     }
 
+    pub(super) fn resolve_markdown(&self, source: &str, raw: &str) -> Option<&str> {
+        let target = target(raw)?;
+        let directory = source.rsplit_once('/').map_or("", |(dir, _)| dir);
+        let candidate = if target.starts_with('/') || directory.is_empty() {
+            target.trim_start_matches('/').to_owned()
+        } else {
+            format!("{directory}/{target}")
+        };
+        let mut normalized = super::normalize_path(&candidate)?;
+        if target.ends_with('/') {
+            normalized.push('/');
+        }
+        self.family(&normalized)
+    }
+
     pub(super) fn resolve(&self, source: &str, raw: &str) -> Option<&str> {
         let target = target(raw)?;
         let directory = source.rsplit_once('/').map_or("", |(dir, _)| dir);
@@ -197,12 +267,150 @@ mod tests {
     use super::*;
 
     #[test]
+    fn creation_rejects_decoded_wikilink_drive() {
+        assert_eq!(
+            creation_path("source.md", "C%3A/Windows/x", "wikilink"),
+            None
+        );
+    }
+
+    #[test]
+    fn creation_rejects_decoded_markdown_drive() {
+        assert_eq!(
+            creation_path("source.md", "/C%3A/Windows/run.bat", "markdown"),
+            None
+        );
+    }
+
+    #[test]
+    fn creation_rejects_decoded_unc_backslashes() {
+        assert_eq!(
+            creation_path("source.md", "%5C%5Chost%5Cshare%5Cx.bat", "markdown"),
+            None
+        );
+    }
+
+    #[test]
+    fn creation_rejects_decoded_nul() {
+        assert_eq!(creation_path("source.md", "x%00y", "wikilink"), None);
+    }
+
+    #[test]
+    fn creation_rejects_decoded_control() {
+        assert_eq!(creation_path("source.md", "x%01y", "wikilink"), None);
+    }
+
+    #[test]
+    fn creation_rejects_decoded_delete_control() {
+        assert_eq!(creation_path("source.md", "x%7Fy", "markdown"), None);
+    }
+
+    #[test]
+    fn creation_rejects_decoded_unc_slashes() {
+        assert_eq!(
+            creation_path("source.md", "%2F%2Fhost/share/x", "wikilink"),
+            None
+        );
+    }
+
+    #[test]
+    fn creation_rejects_reserved_directory() {
+        assert_eq!(
+            creation_path("source.md", ".dohc/engine/x", "wikilink"),
+            None
+        );
+    }
+
+    #[test]
+    fn creation_rejects_decoded_reserved_segment() {
+        assert_eq!(
+            creation_path("source.md", "notes/%2Edohc/engine/x", "markdown"),
+            None
+        );
+    }
+
+    #[test]
+    fn creation_rejects_secret_segment() {
+        assert_eq!(creation_path("source.md", "notes/.env/x", "wikilink"), None);
+    }
+
+    #[test]
+    fn creation_rejects_decoded_secret_segment() {
+        assert_eq!(
+            creation_path("source.md", "notes/%2Eenv/x", "markdown"),
+            None
+        );
+    }
+
+    #[test]
+    fn creation_rejects_colon_segments() {
+        assert_eq!(creation_path("source.md", "x.md:evil", "wikilink"), None);
+        assert_eq!(
+            creation_path("source.md", "notes/x.md%3Aevil", "markdown"),
+            None
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn creation_rejects_windows_device_and_short_names() {
+        for literal in [
+            "CON.txt",
+            "NUL .txt",
+            "COM¹.md",
+            "report~1.pdf",
+            "ab~1.x~y",
+            "ab~x~1.md",
+            "😀😀😀😀~1.md",
+            "notes/LPT9/new.md",
+        ] {
+            assert_eq!(
+                creation_path("source.md", literal, "markdown"),
+                None,
+                "{literal}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn creation_allows_names_outside_the_desktop_short_name_pattern() {
+        for literal in [
+            "abcdefghi~1.md",
+            "ab~1.long",
+            "ab~1.x.y",
+            "ab~x.md",
+            "😀😀😀😀a~1.md",
+            "ab~1.x\u{feff}y",
+        ] {
+            assert_eq!(
+                creation_path("source.md", literal, "markdown"),
+                Some(literal.into()),
+                "{literal}"
+            );
+        }
+    }
+
+    #[test]
+    fn creation_allows_nested_shared_with_me() {
+        assert_eq!(
+            creation_path("source.md", "notes/shared-with-me/new", "wikilink"),
+            Some("notes/shared-with-me/new.md".into())
+        );
+        assert_eq!(
+            creation_path("notes/source.md", "./shared-with-me/new", "markdown"),
+            Some("notes/shared-with-me/new.md".into())
+        );
+        assert_eq!(
+            creation_path("source.md", "shared-with-me/new", "wikilink"),
+            None
+        );
+    }
+
+    #[test]
     fn shared_resolver_cases() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!("parity.json")).unwrap();
         for case in fixture["resolve"].as_array().unwrap() {
-            if case["kind"].as_str() != Some("wikilink") {
-                continue;
-            }
             let paths = case["paths"]
                 .as_array()
                 .map(|paths| {
@@ -219,8 +427,14 @@ mod tests {
                     paths
                 });
             let index = Resolver::new(paths);
+            let resolve = if case["kind"] == "markdown" {
+                Resolver::resolve_markdown
+            } else {
+                Resolver::resolve
+            };
             assert_eq!(
-                index.resolve(
+                resolve(
+                    &index,
                     case["source"].as_str().unwrap(),
                     case["literal"].as_str().unwrap()
                 ),

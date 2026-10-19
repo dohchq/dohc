@@ -1,3 +1,4 @@
+import type { LinksEdgesInput, LinksEdgesResult, LinksInInput, LinksInResult, LinksResolveInput, LinksResolveResult } from "@dohc/workspace-contracts/links";
 import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
 import { creationPartialMessage } from "@dohc/cli/creation";
 import { atomicReplaceFileSync } from "../atomicReplaceFile";
@@ -280,6 +281,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   stopSync?(author?: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor): Promise<CliResultByVerb["stopSync"]>;
   shareCopy?(input: import("@dohc/workspace-contracts/share-copy").ShareCopyInput): Promise<import("@dohc/workspace-contracts/share-copy").ShareCopyResult>;
   access?: {
+    refresh(): Promise<import("@dohc/workspace-contracts/access").AccessRefreshResult>;
     object(input: import("zod").infer<typeof import("@dohc/workspace-contracts/access").ObjectAccessInput>): Promise<import("@dohc/workspace-contracts/access").AccessAnswer>;
     sharing(input: import("zod").infer<typeof import("@dohc/workspace-contracts/access").SharingAccessInput>): Promise<import("@dohc/workspace-contracts/access").AccessAnswer>;
   };
@@ -305,6 +307,8 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
       pageLimit: number;
       afterThreadId?: string;
     }): Promise<CliUnreadFileThread[]>;
+    // Collection updates wait for an unfinished pull, as the engine answers.
+    collectionsWaiting(): Promise<boolean>;
   };
   // Absent when the workspace has no engine-backed collection access.
   collections?: CliCollectionsPort;
@@ -334,6 +338,11 @@ export interface CliServerOptions {
   stateDir: string;
   listWorkspaces(): readonly CliRegistryWorkspace[];
   openWorkspace(workspace: CliRegistryWorkspace): Promise<CliWorkspaceContext>;
+  links?: {
+    edges(workspace: CliRegistryWorkspace, input: LinksEdgesInput): Promise<LinksEdgesResult>;
+    incoming(workspace: CliRegistryWorkspace, input: LinksInInput): Promise<LinksInResult>;
+    resolve(workspace: CliRegistryWorkspace, input: LinksResolveInput): Promise<LinksResolveResult>;
+  };
   // Messages, reactions, and decisions go through the same module renderer
   // chat uses, so a CLI or MCP write gets the same checks and effects.
   chatWrites: ChatWrites;
@@ -2301,6 +2310,9 @@ async function dispatchWorkspace(
     case "shareCopy":
       if (context.readOnly || !context.shareCopy) throw new CliCommandError("Share copy details require the owning workspace.");
       return context.shareCopy({ shareId: request.args.shareId, grantId: request.args.grantId });
+    case "accessRefresh":
+      if (!context.access) throw new CliCommandError("Access observations are unavailable.");
+      return context.access.refresh();
     case "accessObject":
       if (!context.access) throw new CliCommandError("Access observations are unavailable.");
       return context.access.object(request.args);
@@ -2877,6 +2889,13 @@ async function dispatchWorkspace(
       }
     }
 
+    case "collectionsWaiting":
+      try {
+        return { ok: true as const, waiting: await context.daemonReads.collectionsWaiting() };
+      } catch (error) {
+        return mcpFailure(error, "failed to read whether Collection updates wait");
+      }
+
     case "saveKeptCopy": {
       const keptCopies = context.keptCopies;
       if (!keptCopies) return keptCopiesUnavailable();
@@ -3438,6 +3457,19 @@ async function dispatchWorkspace(
   }
 }
 
+async function dispatchLinks(
+  request: Extract<CliRequest, { verb: "linksIn" | "linksResolve" | "linksEdges" }>,
+  options: CliServerOptions,
+): Promise<unknown> {
+  const workspace = await resolveCliWorkspace(request.args.cwd, options.listWorkspaces());
+  if (!workspace) throw new CliCommandError("not inside a dohc workspace");
+  if (!options.links) throw new CliCommandError("Workspace links are unavailable.");
+  if (request.verb === "linksEdges") return options.links.edges(workspace, { cursor: request.args.cursor });
+  return request.verb === "linksIn"
+    ? options.links.incoming(workspace, { subject: request.args.subject, cursor: request.args.cursor })
+    : options.links.resolve(workspace, { source: request.args.source, literals: request.args.literals });
+}
+
 async function dispatchAccount(
   request: Extract<CliRequest, { verb: "accountDeletePreview" | "accountDelete" }>,
   options: CliServerOptions,
@@ -3538,7 +3570,9 @@ export async function handleCliRequestLine(
     const completion = { replayed: false };
     const unvalidated = request.verb === "accountDeletePreview" || request.verb === "accountDelete"
       ? await dispatchAccount(request, options)
-      : await dispatch(request, await workspaceContextForRequest(request, options), options, completion);
+      : request.verb === "linksEdges" || request.verb === "linksIn" || request.verb === "linksResolve"
+        ? await dispatchLinks(request, options)
+        : await dispatch(request, await workspaceContextForRequest(request, options), options, completion);
     const result = parseCliResult(parsed.data.verb, unvalidated);
     const response = cliTransportResponseSchema.parse({
       protocolVersion: CLI_PROTOCOL_VERSION,

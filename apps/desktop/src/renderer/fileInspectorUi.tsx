@@ -2,7 +2,7 @@ import type { SaveState } from "@dohc/workspace-contracts/save-state";
 import { createPortal } from "react-dom";
 import { CopyButton } from "./ui/CopyButton";
 import { restoreRecoveryDraftText } from "./collab/recoverySnapshot";
-import { dismissOrphanedDraft, useOrphanedDrafts } from "./orphanedDrafts";
+import { dismissOrphanedDraft, isOrphanedDraftStored, useOrphanedDrafts } from "./orphanedDrafts";
 import { DismissDraftControls } from "./RecoveryList";
 import { Play, Share2 } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
@@ -260,7 +260,8 @@ export function OrphanedDraftNotices(props: {
         >
           <span className="text-danger">
             {(props.messageDraftId === undefined || props.messageDraftId === draft.id ? props.message : undefined) ??
-              (props.replacedDraftIds?.includes(draft.id)
+              // Until storage keeps the draft, a copy is still the way to keep it.
+              (props.replacedDraftIds?.includes(draft.id) && isOrphanedDraftStored(draft.id)
                 ? REPLACED_HISTORY_DRAFT_NOTICE
                 : "This document reopened before your last edit saved. Copy your text to keep it.")}
           </span>

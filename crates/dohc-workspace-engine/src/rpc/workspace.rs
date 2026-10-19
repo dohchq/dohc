@@ -80,6 +80,7 @@ pub(crate) struct OpenWorkspace {
     collection_projection:
         Arc<Mutex<Option<crate::collection_projection::CollectionProjectionWorker>>>,
     automation_recovery: Arc<Mutex<Option<automation_recovery::AutomationRecovery>>>,
+    undo_recovery: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// Held by every capture reconcile+apply and by versions.setActive across
     /// its forced full scan plus switch transaction. This drains an in-flight
     /// apply and prevents a new one from resolving the destination version
@@ -100,9 +101,6 @@ pub(crate) struct OpenWorkspace {
     /// update has not run yet. The next text write, push, or terminal page's
     /// commit runs it.
     pub(super) collections_owed: std::sync::atomic::AtomicBool,
-    /// A pull applied a page and its terminal page has not committed, so
-    /// the Collections may hold half a pull. Owed work waits for that commit.
-    pub(super) pull_between_pages: std::sync::atomic::AtomicBool,
     /// Pulls that may be placing a page, counted from under the capture gate
     /// before their first relay step until they are between pages, finish,
     /// or fail.
@@ -156,21 +154,19 @@ impl OpenWorkspace {
             projects_collections: self.projects_collections,
             collection_projection: Arc::clone(&self.collection_projection),
             automation_recovery: Arc::clone(&self.automation_recovery),
+            undo_recovery: Arc::clone(&self.undo_recovery),
             capture_apply_gate: Arc::clone(&self.capture_apply_gate),
             capture_holds: Arc::clone(&self.capture_holds),
             session_ops: Arc::clone(&self.session_ops),
             cursors_issued: Default::default(),
             collections_owed: Default::default(),
-            pull_between_pages: Default::default(),
             pulls_in_flight: Default::default(),
         }
     }
 
-    /// The Collections may hold half a pull, or a pull may place a page
-    /// before an update started now would run.
+    /// A pull may place a page before an update started now would run.
     fn mid_pull(&self) -> bool {
-        self.pull_between_pages.load(Ordering::SeqCst)
-            || self.pulls_in_flight.load(Ordering::SeqCst) > 0
+        self.pulls_in_flight.load(Ordering::SeqCst) > 0
     }
 
     pub(super) fn request_collection_reconcile(&self) {
@@ -201,7 +197,7 @@ impl OpenWorkspace {
     /// Take and cancel the background tasks without an await point, so an
     /// aborted RPC future cannot leave them running. Return
     /// the join handles for callers that must await the full drain.
-    fn begin_capture_shutdown(&self) -> [Option<tokio::task::JoinHandle<()>>; 4] {
+    fn begin_capture_shutdown(&self) -> [Option<tokio::task::JoinHandle<()>>; 5] {
         self.observation.request_shutdown();
         let projection = lock(&self.collection_projection)
             .take()
@@ -212,7 +208,11 @@ impl OpenWorkspace {
         let recovery = lock(&self.automation_recovery)
             .take()
             .and_then(automation_recovery::AutomationRecovery::begin_shutdown);
+        let undo = lock(&self.undo_recovery)
+            .take()
+            .inspect(|task| task.abort());
         [
+            undo,
             capture,
             recovery,
             projection,
@@ -392,6 +392,11 @@ struct WorkspaceOpenParams {
     project_collections: bool,
     #[serde(default)]
     relay: Option<RelayOpenParams>,
+    /// The workspace has no ordinary sync configured, so an unfinished
+    /// ordinary pull's applied pages become local truth before anything can
+    /// reconcile them.
+    #[serde(default)]
+    abandon_ordinary_pull: bool,
 }
 
 #[derive(Deserialize)]
@@ -548,11 +553,12 @@ impl EngineService {
     /// forever, so the wait for it is bounded. An update that cannot run now
     /// stays owed to the next text write, push, or terminal page's commit. The
     /// update reconciles the whole workspace, so whichever step runs it
-    /// repairs every change still owed. While a pull is between pages it
-    /// stays owed: dangling-link cleanup would remove a relation whose target
-    /// a later page brings back. A pull counts itself under the gate before
-    /// it places a page, so the check under the gate admits no update that a
-    /// page could overtake.
+    /// repairs every change still owed. Until an ordinary pull commits its
+    /// terminal page it stays owed: dangling-link cleanup would remove a
+    /// relation whose target a later page brings back. The store refuses the
+    /// update while the pull's token stands. A pull counts itself under the
+    /// gate before it places a page, so the check under the gate admits no
+    /// update that a page could overtake.
     pub(super) async fn settle_owed_collections(&self, ctx: &RequestContext, open: &OpenWorkspace) {
         if !open.collections_owed.load(Ordering::SeqCst) || open.mid_pull() {
             return;
@@ -614,6 +620,10 @@ impl EngineService {
             )
             .await
             .map_err(map_runtime)?;
+        if reconciliation.waits_for_pull {
+            open.collections_owed.store(true, Ordering::SeqCst);
+            return Ok(());
+        }
         crate::events::emit_automation_claimed(
             &self.events,
             &open.workspace_id,
@@ -668,6 +678,9 @@ impl EngineService {
             .as_object()
             .is_some_and(|object| object.contains_key("captureAuthor"));
         let params: WorkspaceOpenParams = parse(params)?;
+        if let Some(relay) = &params.relay {
+            relay.validate_transport(self.replica_mode.is_some())?;
+        }
         let capture_author_json = if capture_author_supplied {
             Some(validated_author(params.capture_author.as_ref())?)
         } else {
@@ -706,6 +719,14 @@ impl EngineService {
             return Err(WireError::new(
                 ErrorCode::InvalidParams,
                 "passive store configuration is incompatible",
+            ));
+        }
+        if params.abandon_ordinary_pull
+            && (passive || params.skip_startup_maintenance || params.relay.is_some())
+        {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "abandonOrdinaryPull needs a full owner open without relay",
             ));
         }
         let cancellation = OperationCancellation::new(ctx);
@@ -813,6 +834,18 @@ impl EngineService {
                         )
                     })?;
                     driver.set_author_json(author_json);
+                }
+                if params.abandon_ordinary_pull
+                    && Self::read_under_ctx(
+                        &cancellation,
+                        "workspace.open (abandon ordinary pull)",
+                        open.actor
+                            .abandon_ordinary_pull(params.workspace_id.clone()),
+                    )
+                    .await?
+                {
+                    // The update the pull held back can run now.
+                    self.collections_changed(ctx, &open).await;
                 }
                 return Ok(json!({ "workspace": handle }));
             }
@@ -1006,6 +1039,16 @@ impl EngineService {
         {
             return Err(bound_to_another_workspace());
         }
+        // Before startup maintenance, capture or a Collections worker can
+        // reconcile against what the pull left. Capture reconciles once it
+        // starts; a workspace that keeps its Collections itself owes it.
+        let abandoned_pull = params.abandon_ordinary_pull
+            && Self::read_under_ctx(
+                &cancellation,
+                "workspace.open (abandon ordinary pull)",
+                actor.abandon_ordinary_pull(params.workspace_id.clone()),
+            )
+            .await?;
         if requested_mode == WorkspaceOpenMode::Passive {
             Self::read_under_ctx(
                 &cancellation,
@@ -1229,6 +1272,7 @@ impl EngineService {
         } else {
             None
         };
+        let session_ops = Arc::new(tokio::sync::Mutex::new(()));
         lock(&self.handles).insert(
             handle.clone(),
             Arc::new(OpenWorkspace {
@@ -1249,16 +1293,62 @@ impl EngineService {
                 projects_collections: params.project_collections,
                 collection_projection: Arc::new(Mutex::new(collection_projection)),
                 automation_recovery: Arc::new(Mutex::new(automation_recovery)),
+                undo_recovery: Arc::new(Mutex::new(None)),
                 capture_apply_gate,
                 capture_holds: CaptureHolds::default(),
-                session_ops: Arc::new(tokio::sync::Mutex::new(())),
+                session_ops,
                 cursors_issued: Default::default(),
                 collections_owed: Default::default(),
-                pull_between_pages: Default::default(),
                 pulls_in_flight: Default::default(),
             }),
         );
+        if requested_mode == WorkspaceOpenMode::Full {
+            let open = self.open(Some(&handle))?;
+            let recovery = open.clone();
+            let fence = self.version_fence();
+            let recovery_handle = handle.clone();
+            *lock(&open.undo_recovery) = Some(tokio::spawn(async move {
+                let outcome = async {
+                    let pending = recovery
+                        .actor
+                        .pending_history_undos(recovery.workspace_id.clone())
+                        .await
+                        .map_err(map_runtime)?;
+                    for (operation_id, request_id, author_json) in pending {
+                        let cancellation = OperationCancellation::new(&RequestContext::unbounded());
+                        if let Err(error) = fence
+                            .fence_version_snapshot(
+                                &cancellation,
+                                recovery.clone(),
+                                &recovery_handle,
+                                "history.undo",
+                                "Undo settlement",
+                                super::versions::VersionFenceIntent::Undo {
+                                    operation_id,
+                                    request_id,
+                                    author_json,
+                                },
+                            )
+                            .await
+                        {
+                            eprintln!("engine: Undo recovery will retry on open: {error:?}");
+                        }
+                    }
+                    Ok::<_, WireError>(())
+                }
+                .await;
+                if let Err(error) = outcome {
+                    eprintln!("engine: Undo recovery will retry on open: {error:?}");
+                }
+            }));
+        }
         open_guard.disarm();
+        if abandoned_pull
+            && let Ok(opened) = self.open(Some(&handle))
+            && self.reconciles_collections_itself(&opened)
+        {
+            self.collections_changed(ctx, &opened).await;
+        }
         Ok(json!({ "workspace": handle }))
     }
 
@@ -1419,6 +1509,10 @@ impl EngineService {
 }
 
 #[cfg(test)]
+#[path = "history_undo_recovery_tests.rs"]
+mod history_undo_recovery_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::rpc::relay::IssuedCursor;
@@ -1429,6 +1523,100 @@ mod tests {
     use dohc_engine_testkit::ScratchDir;
     use dohc_engine_testkit::ScriptedFaults;
     use std::time::Duration;
+
+    fn engine_db(root: &std::path::Path) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open(root.join(".dohc").join("engine").join("engine.db"))
+            .unwrap();
+        conn.busy_timeout(Duration::from_secs(5)).unwrap();
+        conn
+    }
+
+    fn leave_pull_unfinished(root: &std::path::Path) {
+        engine_db(root)
+            .execute(
+                "INSERT INTO sync_identity \
+                 (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms,ordinary_pull_token) \
+                 VALUES ('local-only','origin','epoch','stream',1,'unfinished') \
+                 ON CONFLICT(workspace_id) DO UPDATE SET ordinary_pull_token='unfinished'",
+                [],
+            )
+            .unwrap();
+    }
+
+    fn pull_token(root: &std::path::Path) -> Option<String> {
+        engine_db(root)
+            .query_row(
+                "SELECT ordinary_pull_token FROM sync_identity WHERE workspace_id='local-only'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn abandoning_an_ordinary_pull_needs_a_full_owner_open_without_relay() {
+        let scratch = ScratchDir::new().unwrap();
+        let service = EngineService::new();
+        let base = json!({"rootDir":scratch.path(), "workspaceId":"local-only",
+            "captureMode":"none", "abandonOrdinaryPull":true});
+        for (key, value) in [
+            ("storeMode", json!("passive")),
+            ("skipStartupMaintenance", json!(true)),
+            (
+                "relay",
+                json!({"baseUrl":"https://relay.test", "bearerToken":"token"}),
+            ),
+        ] {
+            let mut params = base.clone();
+            params[key] = value;
+            let refused = service
+                .workspace_open(&RequestContext::unbounded(), params)
+                .await
+                .expect_err(key);
+            assert_eq!(refused.code, ErrorCode::InvalidParams, "{key}");
+            assert_eq!(
+                refused.message, "abandonOrdinaryPull needs a full owner open without relay",
+                "{key}"
+            );
+        }
+        assert!(lock(&service.handles).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_local_only_owner_open_abandons_the_unfinished_ordinary_pull() {
+        let scratch = ScratchDir::new().unwrap();
+        let service = EngineService::new();
+        let plain =
+            json!({"rootDir":scratch.path(), "workspaceId":"local-only", "captureMode":"none"});
+        let mut abandoning = plain.clone();
+        abandoning["abandonOrdinaryPull"] = json!(true);
+        let open = |params: Value| {
+            let service = &service;
+            async move {
+                let opened = service
+                    .workspace_open(&RequestContext::unbounded(), params)
+                    .await
+                    .unwrap();
+                serde_json::from_value::<WorkspaceHandle>(opened["workspace"].clone()).unwrap()
+            }
+        };
+        let handle = open(plain.clone()).await;
+        service.workspace_close(Some(handle)).await.unwrap();
+        leave_pull_unfinished(scratch.path());
+
+        // A transport failure, sign-out or detach reopens without it.
+        let handle = open(plain).await;
+        assert_eq!(pull_token(scratch.path()).as_deref(), Some("unfinished"));
+        // The open binding takes it too.
+        assert_eq!(open(abandoning.clone()).await, handle);
+        assert_eq!(pull_token(scratch.path()), None);
+        service.workspace_close(Some(handle)).await.unwrap();
+
+        leave_pull_unfinished(scratch.path());
+        let handle = open(abandoning).await;
+        assert_eq!(pull_token(scratch.path()), None);
+        service.workspace_close(Some(handle)).await.unwrap();
+    }
 
     #[tokio::test]
     async fn passive_store_refuses_read_only_attach() {
@@ -2215,6 +2403,7 @@ mod tests {
                 lock(&open.automation_recovery).is_some(),
                 seed_claim && !read_only
             );
+            assert_eq!(lock(&open.undo_recovery).is_some(), !read_only);
 
             // The synchronous cleanup fallback has no Tokio runtime. Taking
             // background tasks must cancel through their captured runtime handle.
@@ -2223,15 +2412,24 @@ mod tests {
                 .expect("background cancellation needs no runtime");
             assert_eq!(
                 tasks.iter().flatten().count(),
-                usize::from(capture_enabled) + usize::from(seed_claim && !read_only) + 1,
+                usize::from(capture_enabled)
+                    + usize::from(seed_claim && !read_only)
+                    + usize::from(!read_only)
+                    + 1,
             );
-            for task in tasks.into_iter().flatten() {
-                task.await
-                    .expect("background task joins after cancellation");
+            for (index, task) in tasks.into_iter().enumerate() {
+                let Some(task) = task else { continue };
+                if let Err(error) = task.await {
+                    assert!(
+                        index == 0 && error.is_cancelled(),
+                        "background task joins after cancellation: {error}"
+                    );
+                }
             }
             let open = service.open(Some(&handle)).expect("binding still open");
             assert!(lock(&open.capture).is_none());
             assert!(lock(&open.automation_recovery).is_none());
+            assert!(lock(&open.undo_recovery).is_none());
             if capture_enabled {
                 let attached = service
                     .workspace_open(
@@ -3651,6 +3849,7 @@ mod tests {
                     replication_epoch: "epoch".to_owned(),
                     stream_identity: "stream".to_owned(),
                     settlement_report_id: None,
+                    ordinary_pull: None,
                 }),
             },
         );

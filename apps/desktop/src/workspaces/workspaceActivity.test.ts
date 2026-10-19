@@ -89,10 +89,11 @@ describe("workspaceActivity capture hooks", () => {
   it("attaches observation after capture fails and queues sync only for capture announcements", async () => {
     let observation!: WorkspaceObservationCallbacks;
     const queueSync = vi.fn();
+    const queueWatchedUpload = vi.fn();
     const activity = createWorkspaceActivity(vi.fn(), {
       observationFor: (w, callbacks) => { observation = callbacks; return idleObservation(w, callbacks); },
       captureFor: () => { throw new Error("capture failed"); },
-      engineFor: () => ({ start: async () => {}, stop: async () => {}, queueSync, snapshot: () => ({}) }) as never,
+      engineFor: () => ({ start: async () => {}, stop: async () => {}, queueSync, queueWatchedUpload, snapshot: () => ({}) }) as never,
     });
     const status = await activity.open(workspace());
     expect(status.historyRecordingUnavailable).toBe(true);
@@ -100,6 +101,7 @@ describe("workspaceActivity capture hooks", () => {
     expect(queueSync).not.toHaveBeenCalled();
     observation.captured();
     expect(queueSync).toHaveBeenCalledOnce();
+    expect(queueWatchedUpload).toHaveBeenCalledExactlyOnceWith();
     await activity.stopAll();
   });
 
@@ -610,6 +612,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       queueSync: () => {
         queued += 1;
       },
+      queueWatchedUpload: () => {},
       queuePull: () => {},
       retryNow: async () => undefined,
       snapshot: () => ({
@@ -650,12 +653,174 @@ describe("workspaceActivity cloud sync nudge", () => {
     await activity.stopAll();
   });
 
+  describe("the Collections wait across signing in and out", () => {
+    // Signing in attaches this engine; it knows nothing about the wait.
+    const syncEngine = () => ({
+      start: async () => {}, queueSync: () => {}, queuePull: () => {}, queueWatchedUpload: () => {}, retryNow: async () => undefined, stop: async () => {},
+      snapshot: () => ({
+        syncFailure: null, retrying: false, syncing: true, lastSyncedAtMs: null, pendingChangeCount: 0,
+        conflictCount: 0, authExpired: false, sharingDeclined: [],
+      }),
+    });
+
+    async function opened(input: { signedIn: boolean; atOpen: boolean }) {
+      let signedIn = input.signedIn;
+      const atOpen = Promise.resolve(input.atOpen);
+      const service = createPhysicalWorkspaceActivity(() => {}, {
+        observationFor: idleObservation,
+        cloudStateFor: () => ({ enabled: true, connected: signedIn }),
+        engineFor: () => (signedIn ? syncEngine() : null),
+        collectionsWaitingFor: () => atOpen,
+      });
+      const state = new WorkspaceActivityState();
+      await service.open(workspace(), state);
+      // The same promise the activity awaits, so its answer lands first.
+      await atOpen;
+      return {
+        service, state,
+        waiting: () => service.getStatus(workspace(), state).collectionsWaitingForSync,
+        signIn: () => { signedIn = true; service.reconcileCloud(state, () => syncEngine(), false); },
+        signOut: async () => { signedIn = false; await service.stopEngine(state, false); },
+        passEnded: (failed: boolean, answer: boolean) => service.syncPassEnded(workspace(), state, failed, async () => answer),
+      };
+    }
+
+    it("keeps the wait read while signed out through signing in, until a pass finishes the pull", async () => {
+      const h = await opened({ signedIn: false, atOpen: true });
+      expect(h.waiting()).toBe("sync");
+      h.signIn();
+      expect(h.waiting()).toBe("sync");
+      await expect(h.passEnded(true, true)).resolves.toBe(false);
+      expect(h.waiting()).toBe("sync");
+      await expect(h.passEnded(false, false)).resolves.toBe(true);
+      expect(h.waiting()).toBeUndefined();
+      await h.service.stop(h.state);
+    });
+
+    it("keeps the wait a failed pull left through signing out", async () => {
+      const h = await opened({ signedIn: true, atOpen: false });
+      expect(h.waiting()).toBeUndefined();
+      await expect(h.passEnded(true, true)).resolves.toBe(true);
+      await h.signOut();
+      expect(h.waiting()).toBe("sync");
+      await h.service.stop(h.state);
+    });
+
+    it("keeps the end of a wait through signing out, and asks nothing after a pass that waited for nothing", async () => {
+      const h = await opened({ signedIn: true, atOpen: true });
+      expect(h.waiting()).toBe("sync");
+      await h.passEnded(false, false);
+      await h.signOut();
+      expect(h.waiting()).toBeUndefined();
+      const read = vi.fn(async () => true);
+      await h.service.syncPassEnded(workspace(), h.state, false, read);
+      expect(read).not.toHaveBeenCalled();
+      expect(h.waiting()).toBeUndefined();
+      await h.service.stop(h.state);
+    });
+  });
+
+  it("keeps a newer Collections answer over an older read that resolves after it", async () => {
+    const atOpen = Promise.withResolvers<boolean>();
+    const service = createPhysicalWorkspaceActivity(() => {}, {
+      observationFor: idleObservation,
+      collectionsWaitingFor: () => atOpen.promise,
+    });
+    const state = new WorkspaceActivityState();
+    await service.open(workspace(), state);
+    await service.syncPassEnded(workspace(), state, true, async () => true);
+    expect(service.getStatus(workspace(), state).collectionsWaitingForSync).toBe("sync");
+    atOpen.resolve(false);
+    await atOpen.promise;
+    expect(service.getStatus(workspace(), state).collectionsWaitingForSync).toBe("sync");
+    await service.stop(state);
+  });
+
+  it("never lets a slow Collections answer for one workspace change another", async () => {
+    const notify = vi.fn();
+    const slow = Promise.withResolvers<boolean>();
+    const other: ActivityWorkspace = { ...workspace(), workspaceId: "activity-other", attachmentId: Symbol("other") };
+    const service = createPhysicalWorkspaceActivity(notify, {
+      observationFor: idleObservation,
+      collectionsWaitingFor: target => (target.workspaceId === "activity-test" ? slow.promise : Promise.resolve(false)),
+    });
+    const a = new WorkspaceActivityState();
+    const b = new WorkspaceActivityState();
+    await service.open(workspace(), a);
+    await service.open(other, b);
+    notify.mockClear();
+    slow.resolve(true);
+    await slow.promise;
+    expect(service.getStatus(workspace(), a).collectionsWaitingForSync).toBe("sync");
+    expect(service.getStatus(other, b).collectionsWaitingForSync).toBeUndefined();
+    await vi.waitFor(() => expect(notify).toHaveBeenCalled());
+    expect(notify.mock.calls).toEqual([[{ workspaceId: "activity-test" }]]);
+    await service.stop(a);
+    await service.stop(b);
+  });
+
+  it("asks the engine at open when no sync engine runs, as when signed out", async () => {
+    let pullUnfinished = true;
+    const reads: Promise<boolean>[] = [];
+    const activity = createWorkspaceActivity(() => {}, {
+      engineFor: () => null,
+      cloudStateFor: () => ({ enabled: true, connected: false }),
+      // The same promise the test awaits, so the activity's answer lands first.
+      collectionsWaitingFor: () => {
+        const read = Promise.resolve(pullUnfinished);
+        reads.push(read);
+        return read;
+      },
+    });
+    await activity.open(workspace());
+    await reads[0];
+    expect(activity.getStatus("activity-test").collectionsWaitingForSync).toBe("sync");
+    // Abandoning the pull ends the wait the next open reads.
+    await activity.close("activity-test");
+    pullUnfinished = false;
+    await activity.open(workspace());
+    await reads[1];
+    expect(activity.getStatus("activity-test").collectionsWaitingForSync).toBeUndefined();
+    await activity.stopAll();
+  });
+
+  it("keeps a failed reopen after a pause until the engine answers that nothing waits", async () => {
+    const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+    const answers: Array<() => Promise<boolean>> = [
+      async () => { throw new Error("workspace-open-failed"); },
+      async () => false,
+    ];
+    const reads: Promise<boolean>[] = [];
+    const service = createPhysicalWorkspaceActivity(() => {}, {
+      observationFor: idleObservation,
+      collectionsWaitingFor: () => {
+        const read = answers.shift()!();
+        reads.push(read);
+        return read;
+      },
+    });
+    const state = new WorkspaceActivityState();
+    try {
+      service.recordSyncPauseReopenFailed(workspace(), state);
+      // The activity opens though the engine refused the owner open.
+      await service.open(workspace(), state);
+      await reads[0]!.catch(() => undefined);
+      expect(service.getStatus(workspace(), state).collectionsWaitingForSync).toBe("reopen");
+      await expect(service.readCollectionsWaiting(workspace(), state)).resolves.toBe(false);
+      expect(service.getStatus(workspace(), state).collectionsWaitingForSync).toBeUndefined();
+    } finally {
+      await service.stop(state);
+      quiet.mockRestore();
+    }
+  });
+
   it("syncs now only when the pass ends without a failure, whatever the status shows first", async () => {
     let failure: CloudSyncFailure | null = null;
     let passes = 0;
     const engine = {
       start: async () => {},
       queueSync: () => {},
+      queueWatchedUpload: () => {},
       queuePull: () => {},
       retryNow: async () => { passes += 1; },
       snapshot: () => ({
@@ -681,6 +846,7 @@ describe("workspaceActivity cloud sync nudge", () => {
     const engine = {
       start: async () => {},
       queueSync: () => {},
+      queueWatchedUpload: () => {},
       queuePull: () => {},
       retryNow: async () => undefined,
       snapshot: () => ({
@@ -716,6 +882,7 @@ describe("workspaceActivity cloud sync nudge", () => {
     const engine = {
       start: async () => {},
       queueSync: () => {},
+      queueWatchedUpload: () => {},
       queuePull: () => {},
       retryNow: async () => undefined,
       snapshot: () => ({
@@ -750,6 +917,7 @@ describe("workspaceActivity cloud sync nudge", () => {
     const engine = {
       start: async () => {},
       queueSync: () => {},
+      queueWatchedUpload: () => {},
       queuePull: () => {},
       retryNow: async () => undefined,
       snapshot: () => ({
@@ -803,6 +971,7 @@ describe("workspaceActivity cloud sync nudge", () => {
         return {
           start: async () => undefined,
           queueSync: () => undefined,
+          queueWatchedUpload: () => {},
           queuePull: () => undefined,
           retryNow: async () => undefined,
           snapshot: () => ({
@@ -862,6 +1031,7 @@ describe("workspaceActivity cloud sync nudge", () => {
         engineFor: () => ({
           start: async () => undefined,
           queueSync: () => undefined,
+          queueWatchedUpload: () => {},
           queuePull: () => undefined,
           retryNow: async () => undefined,
           snapshot: () => ({
@@ -1032,6 +1202,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       engineFor: () => ({
         start: async () => undefined,
         queueSync: () => undefined,
+        queueWatchedUpload: () => {},
         queuePull: () => undefined,
         retryNow: async () => undefined,
         snapshot: () => ({

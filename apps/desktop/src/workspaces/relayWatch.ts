@@ -1,18 +1,20 @@
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import type {RelayLogChange} from "./relayLogWait";
 
 // The engine's wait on the relay for a change past the cursor its last pull
 // reached. One read runs at a time. A new cursor aborts the current read at
 // once, and the next read starts only after that one has ended, so a read that
 // ignores its signal never overlaps its successor or outlives stop().
 export function startRelayWatch(input: {
-  wait: (since: number, signal: AbortSignal) => Promise<boolean>;
+  wait: (since: number, signal: AbortSignal) => Promise<RelayLogChange>;
   initialDelayMs: number;
   maxDelayMs: number;
   // The log moved past `since`. The watch waits for the next cursor.
   changed: (since: number) => void;
   // A read failed. The watch backs off and reads again, unless this stops it.
   failed: (error: unknown) => void;
+  watched: (value: boolean) => void;
 }) {
   const lifetime = new AbortController();
   // The newest cursor, until the worker takes it. A stuck one backs off first.
@@ -21,6 +23,12 @@ export function startRelayWatch(input: {
   let watching: number | undefined;
   let read: AbortController | undefined;
   let wake: (() => void) | undefined;
+  let watched = false;
+  const reportWatch = (value: boolean) => {
+    if (watched === value) return;
+    watched = value;
+    input.watched(value);
+  };
 
   // Resumes when a new cursor arrives, or after `delayMs`.
   const untilNext = (delayMs?: number) => Effect.callback<void>((resume) => {
@@ -68,15 +76,19 @@ export function startRelayWatch(input: {
         catch: (error) => error,
       })));
       read = undefined;
-      // A newer cursor replaced this read.
+      // Replacing our own read does not invalidate its last watch report.
       if (controller.signal.aborted) continue;
       if (result._tag === "Failure") {
+        reportWatch(false);
         backoff = true;
         input.failed(Cause.squash(result.cause));
-      } else if (result.value) {
-        since = undefined;
-        watching = undefined;
-        input.changed(from);
+      } else {
+        reportWatch(result.value.watched);
+        if (result.value.hasMore) {
+          since = undefined;
+          watching = undefined;
+          input.changed(from);
+        }
       }
     }
   }), { signal: lifetime.signal }).then((exit) => {
@@ -96,6 +108,7 @@ export function startRelayWatch(input: {
     },
     // Aborts at once, and settles when the current read has ended.
     stop(): Promise<void> {
+      reportWatch(false);
       lifetime.abort();
       read?.abort();
       return finished;

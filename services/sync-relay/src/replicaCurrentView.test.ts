@@ -8,6 +8,24 @@ import {createReplicaReadPrincipal} from "./replicaReadPrincipal";
 
 afterEach(async()=>{vi.useRealTimers();cleanupLiveDeliveryFixtures();await closeTestStorages();});
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+it("fix1: a fence-adjusted store forces a full child cut before advancing its header",async()=>{
+  const f=registered({deployment:true});let supervisor:ReturnType<typeof createReplicaSupervisor>|undefined;
+  try {
+    f.storage.claimWorkspaceIdentity({workspaceId:"workspace",replicationEpoch:"e",streamIdentity:"s"});
+    const file={versionId:"main",objectId:"object",path:f.input.evidence.currentPath,contentKind:"text" as const,sha256:sha("old"),byteLength:3,lineageClaimId:f.input.evidence.document.lineageClaimId,restoreGeneration:1};
+    let revision=1;
+    supervisor=createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("adjusted-base"),startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async(_s,_known,_p,_c,since)=>{
+      if(revision===3)expect(since).toBeUndefined();
+      return {workspaceId:"workspace",revision,logCursor:0,journalCursor:0,files:[revision===1?file:{...file,path:file.path.replace(/[^/]+$/,"renamed.md"),restoreGeneration:revision===3?2:1}],texts:revision===1?[{sha256:file.sha256,text:"old"}]:[],refusedFiles:[],delta:revision===2,removed:[],moved:false,nextCursor:null};
+    }})});
+    await supervisor.activate("workspace");
+    f.write(db=>db.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=2"));
+    revision=2;await supervisor.activate("workspace");
+    expect(f.storage.readReplicaCurrentView("workspace")!.files[0]!.path).toBe(file.path);
+    revision=3;await supervisor.activate("workspace");
+    expect(f.storage.readReplicaCurrentView("workspace")!.files[0]).toMatchObject({path:file.path.replace(/[^/]+$/,"renamed.md"),restoreGeneration:2});
+  } finally {await supervisor?.close();f.close();}
+});
 it.each([false, true])("round6: omitted current paths win over carried restore rows (reverse=%s)", reverse => {
   const f = registered({deployment:true});
   try {
@@ -137,7 +155,35 @@ async function fixture() {
     texts:[{sha256:sha(text),text}]});
   return {storage,lease,db,view};
 }
-it("stages privately, flips one complete view, and retains no superseded texts",async()=>{
+it("staging looks up incoming texts without enumerating retained pin bodies",async()=>{
+  const f=await fixture();
+  const context=f.storage as unknown as import("./storage/context").StorageContext;
+  const prepare=context.db.prepare.bind(context.db);
+  let returnedTexts=0;
+  vi.spyOn(context.db,"prepare").mockImplementation(query=>{
+    const statement=prepare(query);
+    if(!/^SELECT .*FROM sync_relay_replica_cut_texts /s.test(query))return statement;
+    return new Proxy(statement,{get(target,key){
+      const value=Reflect.get(target,key,target);
+      if(typeof value!=="function")return value;
+      return (...args:unknown[])=>{
+        const result=value.apply(target,args);
+        returnedTexts+=Array.isArray(result)?result.length:result?1:0;
+        return result;
+      };
+    }});
+  });
+  for(let index=0;index<40;index++)f.storage.storeReplicaCurrentView(f.lease,f.view(`body ${index}`,`docs/${index}.md`));
+  expect(f.db.prepare("SELECT count(*) AS n FROM sync_relay_history_pins").get()!.n).toBe(39);
+  returnedTexts=0;
+  const view=f.view("a new body");
+  const staged=f.storage.stageReplicaCurrentView(f.lease,view);
+  expect(returnedTexts).toBeLessThanOrEqual(view.texts.length);
+  f.storage.flipReplicaCurrentView(f.lease,staged);
+  expect(f.storage.readReplicaCurrentViewText("w",sha("body 0"))).toBeNull();
+  expect(f.storage.readReplicaCurrentViewText("w",sha("a new body"))).toBe("a new body");
+});
+it("stages privately, flips one complete view, and retains the pre-rename pin",async()=>{
   const f=await fixture();
   f.storage.storeReplicaCurrentView(f.lease,f.view());
   const before=f.db.prepare("SELECT * FROM sync_relay_replica_cut_files").all();
@@ -145,7 +191,9 @@ it("stages privately, flips one complete view, and retains no superseded texts",
   expect(f.db.prepare("SELECT * FROM sync_relay_replica_cut_files").all()).toEqual(before);
   f.storage.flipReplicaCurrentView(f.lease,staged);
   expect(f.db.prepare("SELECT path,sha256 FROM sync_relay_replica_cut_files").all()).toEqual([{path:"docs/renamed.md",sha256:sha("new")}]);
-  expect(f.db.prepare("SELECT sha256,ref_count FROM sync_relay_replica_cut_texts").all()).toEqual([{sha256:sha("new"),ref_count:1}]);
+  expect(f.db.prepare("SELECT sha256,ref_count FROM sync_relay_replica_cut_text_refs ORDER BY sha256").all()).toEqual(
+    [sha("new"),sha("old")].sort().map(sha256=>({sha256,ref_count:1})));
+  expect(f.db.prepare("SELECT reason,sha256 FROM sync_relay_history_pins").all()).toEqual([{reason:"rename",sha256:sha("old")}]);
 });
 it("rejects a stale incarnation and paths outside current selectors",async()=>{
   const f=await fixture();
@@ -153,6 +201,12 @@ it("rejects a stale incarnation and paths outside current selectors",async()=>{
   f.storage.storeReplicaCurrentView(f.lease,f.view());
   f.storage.bindReplicaCurrentView({...f.lease,incarnation:"replacement"});
   expect(()=>f.storage.storeReplicaCurrentView(f.lease,f.view("new"))).toThrow();
+});
+it("header-only fallback keeps full-store text length validation",async()=>{
+  const f=await fixture(),view=f.view();f.storage.storeReplicaCurrentView(f.lease,view);
+  const wrong={...view,files:view.files.map(file=>({...file,byteLength:file.byteLength+1}))};
+  expect(()=>f.storage.storeReplicaCurrentView(f.lease,wrong)).toThrow();
+  expect(f.storage.readReplicaCurrentView("w")!.files).toEqual(view.files);
 });
 it("deletes views when the last share ends or the epoch changes",async()=>{
   const f=await fixture();f.storage.storeReplicaCurrentView(f.lease,f.view());
@@ -186,16 +240,18 @@ it("keeps every file and text from one position across rename, edit, delete, and
     expect(read()).toEqual(next.files.map(row=>[row.path,next.texts.find(t=>t.sha256===row.sha256)!.text]));
   }
 });
-it("keeps owner responses and all non-view tables byte-identical",async()=>{
+it("keeps owner responses and all non-replica tables byte-identical with cuts and pins",async()=>{
   const f=await fixture(), handler=testHandler(f.storage);
   const blob=Buffer.from("owner blob"), blobSha=sha(blob.toString());
   f.storage.putBlob({workspaceId:"w",sha256:blobSha,content:blob,createdAtMs:1});
   const paths=["bootstrap","log?after=0",`blobs/${blobSha}`,`blobs/${sha("current text")}`];
   const responses=async()=>Promise.all(paths.map(async p=>{const r=await handler(new Request(`https://relay.test/sync/w/${p}`,{headers:{authorization:"Bearer user:owner"}}));return {status:r.status,bytes:Buffer.from(await r.arrayBuffer()).toString("hex")};}));
-  const tables=f.db.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sync_relay_replica_cut%' ORDER BY name").all().map(r=>String(r.name));
+  const tables=f.db.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sync_relay_replica_cut%' AND name NOT LIKE 'sync_relay_history_%' ORDER BY name").all().map(r=>String(r.name));
   const digest=()=>JSON.stringify(tables.map(t=>[t,f.db.prepare(`SELECT * FROM "${t}"`).all()]));
   const before=await responses(),saved=digest();
   f.storage.storeReplicaCurrentView(f.lease,f.view("current text"));
+  f.storage.storeReplicaCurrentView(f.lease,f.view("renamed text","docs/renamed.md"));
+  expect(f.db.prepare("SELECT count(*) AS n FROM sync_relay_history_pins").get()!.n).toBe(1);
   expect(await responses()).toEqual(before);expect((await responses())[3]!.status).toBe(404);
   expect(digest()).toBe(saved);expect(f.db.prepare("SELECT count(*) AS n FROM sync_relay_log").get()!.n).toBe(0);
 });
@@ -211,7 +267,7 @@ it("stages text larger than 8 MiB in bounded chunks and shares references",async
   const f=await fixture(),text="x".repeat(8*1024*1024+17),view=f.view(text);
   view.files.push({...view.files[0]!,objectId:"b",path:"docs/b.md"});
   f.storage.storeReplicaCurrentView(f.lease,view);
-  const chunks=f.db.prepare("SELECT length(bytes) AS n,ref_count FROM sync_relay_replica_cut_texts ORDER BY ordinal").all();
+  const chunks=f.db.prepare("SELECT length(bytes) AS n,ref_count FROM sync_relay_replica_cut_texts JOIN sync_relay_replica_cut_text_refs USING(workspace_id,sha256) ORDER BY ordinal").all();
   expect(chunks).toEqual([{n:8*1024*1024,ref_count:2},{n:17,ref_count:2}]);
 });
 
@@ -235,7 +291,7 @@ it("refuses decreasing generations and a restore not yet applied through the jou
 it("persists on quiet, at the edit ceiling, on structural change, and before idle retirement",async()=>{
   const f=await fixture(),root=await tempRoot("view-policy");let latest=f.view();
   const supervisor=createReplicaSupervisor({storage:f.storage,storeRoot:root,idleMs:60_000,
-    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...structuredClone(latest),moved:false,nextCursor:null,refusedFiles:[]})})});
+    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...structuredClone(latest),delta:false,removed:[],moved:false,nextCursor:null,refusedFiles:[]})})});
   const seq=()=>Number(f.db.prepare("SELECT cut_seq FROM sync_relay_replica_cuts").get()?.cut_seq);
   try {
     await supervisor.activate("w");expect(seq()).toBe(1);
@@ -266,9 +322,9 @@ it("collects pages in memory, restarts moved collections, and flips only the com
     pull:async()=>{pulls++;},close:async()=>{},currentView:async(_selectors,_known,position,cursor)=>{
       calls++;expect(pulls).toBe(1);expect(f.db.prepare("SELECT count(*) AS n FROM sync_relay_replica_cuts").get()!.n).toBe(0);
       expect(f.db.prepare("SELECT count(*) AS n FROM sync_relay_replica_cut_texts").get()!.n).toBe(0);
-      if(calls===1) {expect(position).toBeUndefined();return {...first,moved:false,refusedFiles:[],nextCursor:{path:"docs/a.md",objectId:"a",versionId:"main"}};}
-      if(calls===2) {expect(position?.revision).toBe(first.revision);expect(cursor?.path).toBe("docs/a.md");return {...first,files:[],texts:[],moved:true,refusedFiles:[],nextCursor:null};}
-      expect(position).toBeUndefined();return {...final,moved:false,refusedFiles:[],nextCursor:null};
+      if(calls===1) {expect(position).toBeUndefined();return {...first,delta:false,removed:[],moved:false,refusedFiles:[],nextCursor:{path:"docs/a.md",objectId:"a",versionId:"main"}};}
+      if(calls===2) {expect(position?.revision).toBe(first.revision);expect(cursor?.path).toBe("docs/a.md");return {...first,files:[],texts:[],delta:false,removed:[],moved:true,refusedFiles:[],nextCursor:null};}
+      expect(position).toBeUndefined();return {...final,delta:false,removed:[],moved:false,refusedFiles:[],nextCursor:null};
     }
   })});
   try {await supervisor.activate("w");expect(calls).toBe(3);expect(f.db.prepare("SELECT sha256 FROM sync_relay_replica_cut_files").get()!.sha256).toBe(sha("current"));expect(f.db.prepare("SELECT DISTINCT sha256 FROM sync_relay_replica_cut_texts").all()).toEqual([{sha256:sha("current")}]);}finally{await supervisor.close();}
@@ -277,7 +333,7 @@ it("collects pages in memory, restarts moved collections, and flips only the com
 it("writes only at persistence points and exposes the newer in-memory view",async()=>{
   const f=await fixture();let latest=f.view();
   const supervisor=createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("memory-view"),
-    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...latest,moved:false,nextCursor:null,refusedFiles:[]})})});
+    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...latest,delta:false,removed:[],moved:false,nextCursor:null,refusedFiles:[]})})});
   try {
     await supervisor.activate("w");const stage=vi.spyOn(f.storage,"stageReplicaCurrentView");
     const before=JSON.stringify(f.db.prepare("SELECT * FROM sync_relay_replica_cut_texts").all());
@@ -296,10 +352,10 @@ it("spills a bounded collection by pages, retains the old view until flip, and r
   const one=f.view("1234567890"),two=f.view("abcdefghij","docs/b.md");two.files[0]!.objectId="b";
   const supervisor=createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("spill-view"),maxViewTextBytes:15,
     startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>{
-      calls++;if(calls===1)return {...f.view(),nextCursor:null,moved:false,refusedFiles:[]};
-      if(calls===2)return {...one,nextCursor:{path:"docs/a.md",objectId:"a",versionId:"main"},moved:false,refusedFiles:[]};
+      calls++;if(calls===1)return {...f.view(),nextCursor:null,delta:false,removed:[],moved:false,refusedFiles:[]};
+      if(calls===2)return {...one,nextCursor:{path:"docs/a.md",objectId:"a",versionId:"main"},delta:false,removed:[],moved:false,refusedFiles:[]};
       expect(supervisor.currentView("w")!.readText(sha("old"))).toBe("old");
-      return {...two,nextCursor:null,moved:false,refusedFiles:[]};
+      return {...two,nextCursor:null,delta:false,removed:[],moved:false,refusedFiles:[]};
     }})});
   try {
     await supervisor.activate("w");
@@ -308,14 +364,14 @@ it("spills a bounded collection by pages, retains the old view until flip, and r
     await supervisor.activate("w");const current=supervisor.currentView("w")!;
     expect(current.view.files).toHaveLength(2);expect(current.view.texts).toEqual([]);
     expect(current.readText(sha(one.texts[0]!.text))).toBe(one.texts[0]!.text);expect(current.readText(sha(two.texts[0]!.text))).toBe(two.texts[0]!.text);
-    expect(f.db.prepare("SELECT count(*) AS n FROM sync_relay_replica_cut_texts WHERE ref_count=0").get()!.n).toBe(0);
+    expect(f.db.prepare("SELECT count(*) AS n FROM sync_relay_replica_cut_text_refs WHERE ref_count=0").get()!.n).toBe(0);
   }finally{await supervisor.close();}
 });
 
 it("does not delay quiet persistence when only the applied position changes",async()=>{
   const f=await fixture();let latest=f.view();
   const supervisor=createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("position-quiet"),
-    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...latest,moved:false,nextCursor:null,refusedFiles:[]})})});
+    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...latest,delta:false,removed:[],moved:false,nextCursor:null,refusedFiles:[]})})});
   try {
     await supervisor.activate("w");vi.useFakeTimers({toFake:["setTimeout","clearTimeout"]});
     latest={...f.view("edited"),revision:2};await supervisor.activate("w");await vi.advanceTimersByTimeAsync(1000);
@@ -331,22 +387,22 @@ it("round4: an empty null-version selector collects and grants nothing", async (
   expect(() => f.storage.storeReplicaCurrentView(f.lease, f.view())).toThrow();
 });
 
-it("round4: ending one of two shares removes its stored and cached text", async () => {
+it("round4: ending one of two shares hides its cached text and preserves the surviving cut", async () => {
   const f = await fixture();
   f.storage.createShare({share:{shareId:"other",workspaceId:"w",granterUserId:"owner",selectorJson:'{"paths":["other"],"versionId":null}',createdAtMs:1},
     grant:{grantId:"other-g",shareId:"other",principalKind:"user",principalUserId:"reader",principalEmail:null,access:"view",generation:1,status:"active",createdAtMs:1,revokedAtMs:null,parentGrantId:null}});
   const lease = createReplicaReadPrincipal(f.storage).issue("w", "two");
   f.storage.bindReplicaCurrentView(lease);
   const supervisor = createReplicaSupervisor({storage:f.storage, storeRoot:await tempRoot("ended-selector"),
-    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...f.view(),moved:false,nextCursor:null,refusedFiles:[]})})});
+    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...f.view(),delta:false,removed:[],moved:false,nextCursor:null,refusedFiles:[]})})});
   try {
     await supervisor.activate("w");
     const cached = supervisor.currentView("w")!;
     f.storage.revokeShareGrant({shareId:"s",grantId:"g",revokedAtMs:2});
     expect(cached.readText(sha("old"))).toBeNull();
     expect(supervisor.currentView("w")?.view.files ?? []).toEqual([]);
-    expect(f.db.prepare("SELECT * FROM sync_relay_replica_cuts").all()).toEqual([]);
-    expect(f.db.prepare("SELECT * FROM sync_relay_replica_cut_texts").all()).toEqual([]);
+    expect(f.db.prepare("SELECT * FROM sync_relay_replica_cuts").all()).toHaveLength(1);
+    expect(f.storage.readReplicaCurrentViewText("w",sha("old"))).toBeNull();
   } finally { await supervisor.close(); }
 });
 
@@ -356,11 +412,11 @@ it("round4: a spill flushes older pending text before staging across timer await
   const supervisor = createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("spill-timer"),maxViewTextBytes:15,onError:(_w,e)=>errors.push(e),
     startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>{
       calls++;
-      if(calls<=2)return {...f.view(calls===1?"old":"pending"),moved:false,nextCursor:null,refusedFiles:[]};
-      if(calls===3)return {...f.view("1234567890"),moved:false,nextCursor:{path:"docs/a.md",objectId:"a",versionId:"main"},refusedFiles:[]};
+      if(calls<=2)return {...f.view(calls===1?"old":"pending"),delta:false,removed:[],moved:false,nextCursor:null,refusedFiles:[]};
+      if(calls===3)return {...f.view("1234567890"),delta:false,removed:[],moved:false,nextCursor:{path:"docs/a.md",objectId:"a",versionId:"main"},refusedFiles:[]};
       await vi.advanceTimersByTimeAsync(2000);
       const page=f.view("abcdefghij","docs/b.md");page.files[0]!.objectId="b";
-      return {...page,moved:false,nextCursor:null,refusedFiles:[]};
+      return {...page,delta:false,removed:[],moved:false,nextCursor:null,refusedFiles:[]};
     }})});
   try {
     await supervisor.activate("w");vi.useFakeTimers({toFake:["setTimeout","clearTimeout"]});
@@ -391,7 +447,7 @@ it("round4: pending memory reads carry the restoring row and advance another fil
     const file={versionId:"main",objectId:"object",path:f.input.evidence.currentPath,contentKind:"text" as const,sha256:sha("old"),byteLength:3,lineageClaimId:f.input.evidence.document.lineageClaimId,restoreGeneration:1};
     const other={...file,objectId:"other",path:file.path.replace(/[^/]+$/,"other.md"),lineageClaimId:null,restoreGeneration:null};
     let latest={workspaceId:"workspace",omitted:[],revision:1,logCursor:0,journalCursor:0,files:[file,other],texts:[{sha256:sha("old"),text:"old"}]};
-    supervisor=createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("memory-fence"),startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...latest,moved:false,nextCursor:null,refusedFiles:[]})})});
+    supervisor=createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("memory-fence"),startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...latest,delta:false,removed:[],moved:false,nextCursor:null,refusedFiles:[]})})});
     await supervisor.activate("workspace");
     f.write(db=>db.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=2"));
     latest={...latest,revision:2,files:[{...file,sha256:sha("changed"),byteLength:7},{...other,sha256:sha("new"),byteLength:3}],texts:[{sha256:sha("changed"),text:"changed"},{sha256:sha("new"),text:"new"}]};
@@ -419,7 +475,7 @@ it("round4: a replacement lineage starts at its own generation", () => {
 it("round4: grant generation changes preserve pending text on retirement", async () => {
   const f=await fixture();let latest=f.view();
   const supervisor=createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("grant-flush"),
-    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...latest,moved:false,nextCursor:null,refusedFiles:[]})})});
+    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...latest,delta:false,removed:[],moved:false,nextCursor:null,refusedFiles:[]})})});
   try {
     await supervisor.activate("w");latest=f.view("pending");await supervisor.activate("w");
     f.db.exec("UPDATE sync_relay_share_grants SET generation=generation+1");
@@ -432,13 +488,13 @@ it("round4: a refused stage cleans earlier unreferenced chunks", async () => {
   const f=await fixture();f.storage.storeReplicaCurrentView(f.lease,f.view());
   f.storage.stageReplicaCurrentView(f.lease,f.view("first page"));
   expect(()=>f.storage.stageReplicaCurrentView(f.lease,{...f.view("second page"),texts:[{sha256:sha("second page"),text:"bad"}]})).toThrow();
-  expect(f.db.prepare("SELECT * FROM sync_relay_replica_cut_texts WHERE ref_count=0").all()).toEqual([]);
+  expect(f.db.prepare("SELECT * FROM sync_relay_replica_cut_text_refs WHERE ref_count=0").all()).toEqual([]);
 });
 
 it("round4: persist refusals reach onError", async () => {
   const f=await fixture();const errors:unknown[]=[];let latest=f.view();
   const supervisor=createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("reported-refusal"),onError:(_w,e)=>errors.push(e),
-    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...latest,moved:false,nextCursor:null,refusedFiles:[]})})});
+    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...latest,delta:false,removed:[],moved:false,nextCursor:null,refusedFiles:[]})})});
   try {
     await supervisor.activate("w");vi.useFakeTimers({toFake:["setTimeout","clearTimeout"]});
     latest=f.view("pending");await supervisor.activate("w");
@@ -449,16 +505,16 @@ it("round4: persist refusals reach onError", async () => {
 });
 
 it("round4: retirement revokes the bearer before waiting for a drain", async () => {
-  const f=await fixture();let bearer="",pulls=0,release!:()=>void,entered!:()=>void;
+  const f=await fixture();let bearer="",pulls=0,release!:()=>void,entered!:()=>void,relayHandler!: (request: Request) => Promise<Response>;
   const blocked=new Promise<void>(resolve=>{release=resolve;}),started=new Promise<void>(resolve=>{entered=resolve;});
   const supervisor=createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("retire-bearer"),startChild:async input=>{
-    bearer=input.lease.bearer;
-    return {pull:async()=>{if(++pulls===2){entered();await blocked;}},close:async()=>{},currentView:async()=>({...f.view(),moved:false,nextCursor:null,refusedFiles:[]})};
+    bearer=input.lease.bearer;relayHandler=input.relayHandler;
+    return {pull:async()=>{if(++pulls===2){entered();await blocked;}},close:async()=>{},currentView:async()=>({...f.view(),delta:false,removed:[],moved:false,nextCursor:null,refusedFiles:[]})};
   }});
   try {
     await supervisor.activate("w");const draining=supervisor.activate("w");void draining.catch(()=>{});await started;
     const retiring=supervisor.evict("w");
-    try {expect((await supervisor.handle(new Request("https://relay.test/sync/w/bootstrap",{headers:{authorization:`Bearer ${bearer}`}}))).status).toBe(404);}
+    try {expect((await relayHandler(new Request("https://relay.test/sync/w/bootstrap",{headers:{authorization:`Bearer ${bearer}`}}))).status).toBe(404);}
     finally {release();await retiring;await draining.catch(()=>{});}
   }finally{release();await supervisor.close();}
 });
@@ -470,7 +526,7 @@ it("round4: stores omissions and reports each object and digest once", async () 
     grant:{grantId:"draft-g",shareId:"draft",principalKind:"user",principalUserId:"reader",principalEmail:null,access:"view",generation:1,status:"active",createdAtMs:1,revokedAtMs:null,parentGrantId:null}});
   const omissions=[omitted,{...omitted,versionId:"draft"}];
   const supervisor=createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("omitted-view"),onError:(_w,e)=>errors.push(e),
-    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...f.view(),moved:false,nextCursor:null,refusedFiles:omissions})})});
+    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...f.view(),delta:false,removed:[],moved:false,nextCursor:null,refusedFiles:omissions})})});
   try {
     await supervisor.activate("w");await supervisor.activate("w");
     expect(supervisor.currentView("w")!.view.omitted).toEqual(omissions);
@@ -492,7 +548,7 @@ it("round4: stages new digests in one bounded transaction and skips stored diges
 it("round4: spilled workspaces suppress known bytes and regain edit persistence policy", async () => {
   const f=await fixture();let revision=0;const knownRequests:string[][]=[];
   const unchanged="unchanged".repeat(3);
-  const page=()=>{const text=revision===0?"0abcdefghij":String(revision),view=f.view(text);return {...view,files:[...view.files,{...f.view(unchanged,"docs/b.md").files[0]!,objectId:"b"}],texts:[...view.texts,{sha256:sha(unchanged),text:unchanged}],moved:false,nextCursor:null,refusedFiles:[]};};
+  const page=()=>{const text=revision===0?"0abcdefghij":String(revision),view=f.view(text);return {...view,files:[...view.files,{...f.view(unchanged,"docs/b.md").files[0]!,objectId:"b"}],texts:[...view.texts,{sha256:sha(unchanged),text:unchanged}],delta:false,removed:[],moved:false,nextCursor:null,refusedFiles:[]};};
   const supervisor=createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("spill-followup"),maxViewTextBytes:15,
     startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async(_s,known)=>{knownRequests.push(known);const result=page();return {...result,texts:result.texts.filter(t=>!known.includes(t.sha256))};}})});
   try {

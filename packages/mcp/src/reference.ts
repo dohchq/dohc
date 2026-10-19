@@ -114,16 +114,17 @@ export const SYNC_RESULTS: Record<string, CliSocketVerb> = { stop: "stopSync" };
 const SHARE_RESULTS: Record<string, CliSocketVerb> = { copy: "shareCopy" };
 
 export const ACCESS_RESULTS: Record<string, CliSocketVerb> = {
+  refresh: "accessRefresh",
   object: "accessObject",
   sharing: "accessSharing",
 };
 
 const ACCESS_NOTES = [
-  "Both verbs return only the allowlisted AccessAnswer fields shown below, with at most 100 rows per page. They never return credentials, bearer URLs, invitation URLs, share codes, or link URLs.",
-  "Share answers use the current observation; the CLI never refreshes share inventories. `freshness` is `fresh`, `stale`, or `unknown`; `checkedAtMs` is the observation timestamp in milliseconds, or null when unknown. `coverage` names the observed scope and whether it is complete. Its `observation` is `interval`: pages do not form an atomic snapshot. `nextCursor` continues the answer, or is null at the end.",
+  "The object and sharing verbs return only the allowlisted AccessAnswer fields shown below, with at most 100 rows per page. They never return credentials, bearer URLs, invitation URLs, share codes, or link URLs.",
+  "Share queries use the current observation. Use `dohc access refresh` to request fresh Sharing inventories through the same paced owner as opening Sharing. Its `status` is `requested`, `joined`, `paced`, or `unavailable`. Unavailable answers include `reason`: `signed-out` or `unreadable`. Requested and joined wait for started or existing attempts to settle, without promising success. Paced follows the existing refresh schedule. Read `dohc access sharing` afterward to inspect observations. `freshness` is `fresh`, `stale`, or `unknown`; `checkedAtMs` is the observation timestamp in milliseconds, or null when unknown. `coverage` names the observed scope and whether it is complete. Its `observation` is `interval`: pages do not form an atomic snapshot. `nextCursor` continues the answer, or is null at the end.",
   "`unknownReason` is null when coverage is known. When visibility is `hidden` or `missing`, it is null because visibility states why the answer is unavailable. Every other answer with `coverage.kind` set to `unavailable` requires one reason. Its closed values are `signed-out`, `not-synced`, `other-account`, `other-server`, `not-listed-yet`, `changed`, and `unreadable`. Reasons describe only this device's records and account. They contain no account identity, email, server URL, share id, or path.",
   "Queries use only the CLI's registered workspace, with no workspace enumeration. The granted lane contains that workspace owner's grants; the received lane contains the signed-in account's received shares. A received object's answer shows only the recipient's own grant.",
-  "Collection answers read current Collection authority and return capability facts, not share grants.",
+  "Collection answers report current access and capabilities, not share grants.",
 ].join("\n\n");
 
 export const ACCOUNT_RESULTS: Record<string, CliSocketVerb> = {
@@ -170,12 +171,15 @@ export const CHAT_EXAMPLES: Record<string, string[][]> = {
 // What each MCP tool returns. A CLI verb means the tool passes on that
 // verb's result schema; a string is written from the tool in tools.ts.
 export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
+  dohc_links_edges: { cli: "linksEdges" },
+  dohc_links_in: { cli: "linksIn" },
+  dohc_links_resolve: { cli: "linksResolve" },
   dohc_read_share_copy: { cli: "shareCopy" },
   dohc_dataset: "what that verb returns, listed under [`dohc dataset`](#dohc-dataset).",
   dohc_publish_app: "the requested action's result, listed under [`dohc app`](#dohc-app). Only `createLink` returns a bearer link `url` once, in `linkCreated`. `urlUnavailable` includes `grantId` so the owner can end it in dohc. Shared approval returns `published` with `appQuery` (`?app=<publicationId>`), never the link URL. Append `appQuery` before the fragment of any link URL, including one returned by `createLink`. Keep the link secret yourself.",
   dohc_list_workspaces: "`{ workspaces: { workspaceId, rootPath, kind, remote? }[] }`",
   dohc_stop_workspace_sync: { cli: "stopSync" },
-  dohc_workspace_status: "`{ synced, scope, cloudConnected, credentialStatus, workspaceId?, serverUrl?, syncPause? }`. `scope` is `\"local\"` or `\"cloud\"`.",
+  dohc_workspace_status: "`{ synced, scope, cloudConnected, credentialStatus, collectionsWaiting?, workspaceId?, serverUrl?, syncPause? }`. `scope` is `\"local\"` or `\"cloud\"`. `collectionsWaiting` is `true` while Collection updates wait for a sync that has not finished. Files and documents still save. To continue offline, stop sync. The field is absent when the dohc app cannot answer.",
   dohc_list_changes: { cli: "moments" },
   dohc_read_change: { cli: "moment" },
   dohc_read_operation: { cli: "historyOperation" },
@@ -438,7 +442,9 @@ function shellBlock(line: string): string {
 // result; the JSON verbs of `dataset` and `app` return the result kinds
 // listed above.
 function verbReturns(command: string, name: string): string {
-  const socketVerb = command === "chat"
+  const socketVerb = command === "links"
+    ? ({ edges: "linksEdges", in: "linksIn", resolve: "linksResolve" } as const)[name as "edges" | "in" | "resolve"]
+    : command === "chat"
     ? name
     : command === "history"
       ? HISTORY_RESULTS[name]
@@ -504,6 +510,7 @@ function commandSection(name: string, command: CliCommandSpec): string {
     command.summary,
     command.notes.join(" "),
     name === "access" ? ACCESS_NOTES : "",
+    name === "links" ? "`indexBuilding` is true while the link index is being built: seed work, pending updates, or eligible files without an index row. It carries across cursor pages; start a fresh walk to observe completion. `unchecked` names sources that could not be checked, including oversized files. These can keep `complete` false after building stops. `complete` describes the local index; `mountsCovered` separately reports mounted-share coverage. IPC, CLI, and MCP return these same fields." : "",
     name === "sync" ? "The pause result records who paused and when. A person author has kind person, personId, and self. Show you when self is true. Person pause labels do not use profile names. An agent author has kind agent, agentId, onBehalfOf, and depth. Agent names are provenance and grant no authority." : "",
     ...verbs.map(([verbName, verb]) => verbSection(name, verbName, verb)),
   ].filter(Boolean).join("\n\n");

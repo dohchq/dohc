@@ -15,8 +15,9 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { parseOptions, createEvidenceDirectory, benchmarkEnvironment, packagedLaunchArgs } from './packaged-benchmark-options.mjs';
 import { startWindowController, waitForVisibleWindow } from './window-controller.mjs';
 import { closeOwnedPackage, observeExit, benchmarkCancellation, verifyRestartInput } from './packaged-process.mjs';
+import { parseCpuTime, parseMacProcessSnapshot } from './packaged-process-snapshot.mjs';
 import { summarize } from './summarize-packaged-benchmark.mjs';
-import { compareSummaries, DEFAULT_MARGIN } from './compare-packaged-benchmark.mjs';
+import { compareSummaries, DEFAULT_MARGIN, METRIC_VERSION } from './compare-packaged-benchmark.mjs';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { observeStartupReadiness, startupTargetFromRegistry } from './startup-readiness.mjs';
 import { observeSurface, observeSearchSubmit, seededPostThreadId, collectionFixtureFiles, recordId, classifyProcess, aggregateByKind } from './packaged-surfaces.mjs';
@@ -413,6 +414,42 @@ test('strict release CLI rejects typos, duplicates, missing provenance and ambig
   assert.throws(() => parseOptions(required.filter((_, i) => i !== 2 && i !== 3)), /package-commit/);
   assert.throws(() => parseOptions([...required, '--scenario', 'go-to']), /at least 4243/);
 });
+test('traced typing is a full-scenario option', () => {
+  assert.equal(parseOptions(required).typingTrace, false);
+  assert.equal(parseOptions([...required, '--typing-trace', 'true']).typingTrace, true);
+  assert.throws(() => parseOptions([...required, '--typing-trace', 'true', '--scenario', 'startup']), /requires --scenario full/);
+  assert.throws(() => parseOptions([...required, '--typing-trace', 'yes']), /typing-trace/);
+});
+test('a package directory names the platform executable', () => {
+  const options = parseOptions(['--package-dir', '/packages/dohc', '--package-commit', 'a'.repeat(40), '--output', '/perf/out', '--label', 'baseline']);
+  assert.equal(options.binary, resolve(process.platform === 'darwin' ? '/packages/dohc/Contents/MacOS/dohc' : '/packages/dohc/dohc.exe'));
+});
+test('the macOS sampler keeps the app tree with CPU time and physical footprint', () => {
+  assert.equal(parseCpuTime('0:01.50'), 1500);
+  assert.equal(parseCpuTime('1:02:03.04'), 3723040);
+  assert.equal(parseCpuTime('2-00:00:01.00'), 172801000);
+  const ps = [
+    '    1     0   1:00.00  1000 Mon Oct 19 06:00:00 2026  ',
+    '  100     1   0:02.50 20000 Mon Oct 19 06:01:00 2026  ',
+    '  101   100   0:01.25 10000 Mon Oct 19 06:01:01 2026  ',
+    '  102   101   0:00.10  5000 Mon Oct  5 06:01:02 2026  ',
+    '  200     1   0:09.00  9000 Mon Oct 19 06:02:00 2026  ',
+  ].join('\n');
+  const snapshot = parseMacProcessSnapshot({ ps, appPid: 100, startedAtMs: 1, completedAtMs: 2,
+    commands: '  100 /Apps/dohc.app/Contents/MacOS/dohc --user-data-dir=/p\n  101 /Apps/dohc.app/Contents/Frameworks/dohc Helper (Renderer).app/Contents/MacOS/dohc Helper (Renderer) --type=renderer\n',
+    executables: '  100 /Apps/dohc.app/Contents/MacOS/dohc\n  101 /Apps/dohc.app/Contents/Frameworks/dohc Helper (Renderer).app/Contents/MacOS/dohc Helper (Renderer)\n  102 /Apps/dohc.app/Contents/Resources/workspace-engine/dohc-workspace-engine\n',
+    footprint: 'dohc [100]: 64-bit    Footprint: 2000 B (16384 bytes per page)\ndohc Helper (Renderer) [101]: 64-bit    Footprint: 3000 B (16384 bytes per page)\n' });
+  assert.deepEqual(snapshot.processes.map(p => [p.pid, p.parentPid, p.cpuMs, p.workingSetBytes, p.privateBytes, p.name]), [
+    [100, 1, 2500, 20480000, 2000, 'dohc'],
+    [101, 100, 1250, 10240000, 3000, 'dohc Helper (Renderer)'],
+    [102, 101, 100, 5120000, null, 'dohc-workspace-engine'],
+  ]);
+  assert.deepEqual(aggregateByKind(snapshot, 100).kinds, {
+    main: { count: 1, workingSetBytes: 20480000, privateBytes: 2000 },
+    renderer: { count: 1, workingSetBytes: 10240000, privateBytes: 3000 },
+    engine: { count: 1, workingSetBytes: 5120000, privateBytes: 0 },
+  });
+});
 test('surface scenarios parse with their own sizes and defaults', () => {
   for (const scenario of ['go-to', 'go-to-mixed', 'command-palette', 'search', 'chat-history', 'collection', 'soak']) {
     const options = parseOptions([...required, '--scenario', scenario, '--files', '5000']);
@@ -437,6 +474,33 @@ test('evidence directory is exclusive even for concurrent starts', async t => {
   await writeFile(join(output, 'keep.txt'), 'evidence');
   await assert.rejects(createEvidenceDirectory(output), { code: 'EEXIST' });
   assert.equal(await readFile(join(output, 'keep.txt'), 'utf8'), 'evidence');
+});
+test('a scenario that seeds through the Windows job object refuses on a Mac', { skip: process.platform !== 'darwin' }, async t => {
+  const root = await mkdtemp(join(tmpdir(), 'dohc-release-mac-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const result = spawnSync(process.execPath, ['tools/perf-profiling/packaged-benchmark.mjs', '--binary', join(root, 'dohc'), '--package-commit', 'a'.repeat(40),
+    '--output', join(root, 'run'), '--label', 'baseline', '--scenario', 'chat-history'], { encoding: 'utf8', timeout: 20_000 });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /--scenario chat-history requires Windows/);
+  await assert.rejects(readFile(join(root, 'run', 'result.json')), { code: 'ENOENT' });
+});
+test('a Mac app bundle resolves its executable and Resources', { skip: process.platform !== 'darwin' }, async t => {
+  const root = await mkdtemp(join(tmpdir(), 'dohc-release-mac-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const bundle = join(root, 'dohc.app');
+  await mkdir(join(bundle, 'Contents/MacOS'), { recursive: true });
+  await mkdir(join(bundle, 'Contents/Resources'), { recursive: true });
+  await writeFile(join(bundle, 'Contents/MacOS/dohc'), 'app');
+  await writeFile(join(bundle, 'Contents/Resources/app.asar'), 'asar');
+  const output = join(root, 'run');
+  const result = spawnSync(process.execPath, ['tools/perf-profiling/packaged-benchmark.mjs', '--package-dir', bundle, '--package-commit', 'a'.repeat(40),
+    '--output', output, '--label', 'baseline'], { encoding: 'utf8', timeout: 20_000 });
+  assert.equal(result.status, 1, result.stderr);
+  const failed = JSON.parse(await readFile(join(output, 'result.json'), 'utf8'));
+  assert.equal(failed.binary, join(bundle, 'Contents/MacOS/dohc'));
+  assert.equal(failed.settings.metricVersion, METRIC_VERSION);
+  // The engine is the first missing file, at the bundle's Resources path and without .exe.
+  assert.match(failed.error, /ENOENT.*dohc\.app\/Contents\/Resources\/workspace-engine\/dohc-workspace-engine'/);
 });
 test('missing package binary finalizes a CLI failure receipt', { skip: process.platform !== 'win32' }, async t => {
   const root = await mkdtemp(join(tmpdir(), 'dohc-release-setup-'));
@@ -1309,6 +1373,17 @@ const receipt = ({ status = 'complete', open = [100, 105, 110, 115, 120], typed 
 });
 const compared = async (baseline, candidate, margin) => compareSummaries(await summarize(receipt(baseline)), await summarize(receipt(candidate)), margin);
 
+test('the comparison refuses receipts from another metric version or typing timing', async () => {
+  const withSettings = async settings => { const data = receipt(); Object.assign(data.settings, settings); return summarize(data); };
+  const current = await withSettings({ metricVersion: METRIC_VERSION, typingTrace: false });
+  assert.equal(compareSummaries(current, current).pass, true);
+  const older = compareSummaries(await withSettings({}), current);
+  assert.equal(older.pass, false);
+  assert.ok(older.problems.includes(`The baseline uses metric version 1 and the candidate version ${METRIC_VERSION}. Measure both packages with the same harness.`), older.problems.join('\n'));
+  const traced = compareSummaries(current, await withSettings({ metricVersion: METRIC_VERSION, typingTrace: true }));
+  assert.equal(traced.pass, false);
+  assert.deepEqual(traced.problems, ['The receipts differ in typingTrace.']);
+});
 test('automation comparison uses the median at 25% despite a slower p95', async () => {
   assert.deepEqual(DEFAULT_MARGIN, { percent: 10, automationPercent: 25, floorMs: 17 });
   const same = await compared({}, {});

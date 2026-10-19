@@ -13,7 +13,7 @@ const Roots = z.object({ operationId: HistoryOperationId, from: z.string(), to: 
 const FileRecord = Roots.extend({
   entries: z.array(z.string()),
   tracked: z.boolean(), pending: z.array(z.string()).optional(), replaced: z.boolean().optional(),
-  engine: z.union([z.object({ requested: z.literal(true) }).strict(), z.object({ materialized: z.boolean(), momentCount: z.number() }).strict()]).optional(),
+  engine: z.union([z.object({ requested: z.literal(true) }).strict(), z.object({ materialized: z.boolean(), momentCount: z.number(), notRestored: z.array(z.string()).optional() }).strict()]).optional(),
   progress: HistoryOperationUndoResult.options[1].optional(), result: HistoryOperationUndoResult.options[1].optional(),
 }).strict();
 const FolderRecord = Roots.extend({ kind: z.literal("folder"), noUndo: z.string() }).strict();
@@ -114,17 +114,22 @@ export async function undoMoveRecovery(root: string, record: FileMoveRecoveryRec
     if (record.tracked) await saveRecoveryRecord(root, record, "move");
   }
   if ("requested" in record.engine) {
-    const receipt = record.tracked ? await engineUndo() : { materialized: true, momentCount: 0 };
+    const receipt = record.tracked ? await engineUndo() : { materialized: true, momentCount: 0, notRestored: [] };
     if (record.tracked) markChanged();
-    record.engine = { materialized: receipt.materialized, momentCount: receipt.momentCount };
+    record.engine = { materialized: receipt.materialized, momentCount: receipt.momentCount, notRestored: [...receipt.notRestored] };
     record.pending = [...record.entries];
     if (record.entries.length) await saveRecoveryRecord(root, record, "move");
   }
   const result: z.infer<typeof HistoryOperationUndoResult.options[1]> = { ok: true,
     tracked: { state: record.engine.materialized ? "restored" : "restoring", momentCount: record.engine.momentCount },
-    restored: record.progress?.restored ?? [], remaining: [] };
+    restored: record.progress?.restored ?? [], remaining: (record.engine.notRestored ?? []).map(path => ({ path,
+      retry: false, reason: "dohc could not restore this file. Restore it from History." })) };
   for (const path of [...(record.pending ?? record.entries)]) {
     assertCurrent();
+    if (record.engine.notRestored?.some(skipped => skipped === path || skipped === record.to)) {
+      record.pending = record.pending?.filter(item => item !== path);
+      continue;
+    }
     const source = moveEntryTarget(record, path), entry = await info(join(root, source));
     const before = await info(join(root, path));
     const left = entry ? await placeBack(root, join(root, source), join(root, path)) : [];

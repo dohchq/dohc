@@ -1,9 +1,10 @@
 import { createHmac, randomBytes } from "node:crypto";
-import { actorHueInput, createActorIssuer, deriveLocalActor, deriveMomentActor, deriveRelayChatActor, serializeActorKey } from "@dohc/workspace-contracts/actor-identity";
+import { actorHueInput, createActorIssuer, deriveLocalActor, deriveMomentActor, deriveRelayChatActor, parseActorKey, serializeActorKey } from "@dohc/workspace-contracts/actor-identity";
 import type { ActorIssuer, ActorRef, ActorKey, LocalActorIdentity } from "@dohc/workspace-contracts/actor-identity";
 import { ACTOR_HUES, actorHueSlot } from "@dohc/workspace-contracts/actor-presentation";
 import type { ChatMessage, MomentAuthor } from "@dohc/workspace-contracts/engine";
 import type { ActorPresentation } from "../ipc/bridgeContract";
+import type { AgentColors } from "../settings/userSettings";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import { readLocalChatActor, resolveThreadActorIssuer } from "./chatRelayIdentity";
 
@@ -26,6 +27,45 @@ function groupFor(workspaceId: string, identity: string, unknown: boolean): stri
   if (group === undefined) { group = String(nextGroup++); workspace.known.set(identity, group); }
   return group;
 }
+type AgentColorSource = () => AgentColors | undefined;
+function agentColorsReader(source: AgentColorSource | undefined) {
+  let previous: AgentColors | undefined;
+  let colors = admittedAgentColors();
+  return () => {
+    const current = source?.();
+    if (current !== previous) { previous = current; colors = admittedAgentColors(current); }
+    return colors;
+  };
+}
+function admittedAgentColors(colors: AgentColors = {}): Map<string, ActorPresentation["hue"]> {
+  const admitted = new Map<string, ActorPresentation["hue"]>();
+  for (const [serialized, hue] of Object.entries(colors)) {
+    const key = parseActorKey(serialized);
+    if (key?.kind === "agent" && serializeActorKey(key) === serialized) admitted.set(serialized, hue);
+  }
+  return admitted;
+}
+
+export function agentKeyForGroup(workspaceId: string, group: string): string {
+  const serialized = [...(groups.get(workspaceId)?.known ?? [])].find(([, issued]) => issued === group)?.[0];
+  if (serialized === undefined || parseActorKey(serialized)?.kind !== "agent") {
+    throw new Error("Choose an agent shown in this workspace.");
+  }
+  return serialized;
+}
+
+export function agentColorChanges(previous: AgentColors = {}, next: AgentColors = {}) {
+  const before = admittedAgentColors(previous), after = admittedAgentColors(next);
+  const changes: Array<{ workspaceId: string; group: string; hue: ActorPresentation["hue"] }> = [];
+  for (const [workspaceId, workspace] of groups) {
+    for (const [key, group] of workspace.known) {
+      const hue = after.get(key) ?? null;
+      if ((before.get(key) ?? null) !== hue) changes.push({ workspaceId, group, hue });
+    }
+  }
+  return changes;
+}
+
 function humanHue(key: ActorKey): ActorPresentation["hue"] {
   const human = key.kind === "account" || key.kind === "installation" || key.kind === "legacy-human";
   const input = human ? actorHueInput(key) : null;
@@ -44,14 +84,14 @@ function localPersonKey(installationId: string, account: LocalActorIdentity["acc
 function localPersonKeys(installationId: string, account: LocalActorIdentity["account"]): string[] {
   return [localPersonKey(installationId, null), ...(account ? [localPersonKey(installationId, account)] : [])].map(serializeActorKey);
 }
-// Chat and History share one rule: a group per key, a hue for people only, and self for this computer's person and their agents.
-function presentationFor(workspaceId: string, key: ActorKey, unknownIdentity: () => string, own: readonly string[]): ActorPresentation {
+// Chat and History share one rule: a group per key, a personal agent hue or a human hash, and self for this computer's person and their agents.
+function presentationFor(workspaceId: string, key: ActorKey, unknownIdentity: () => string, own: readonly string[], colors: Map<string, ActorPresentation["hue"]>): ActorPresentation {
   const serialized = serializeActorKey(key);
   const unknown = key.kind === "unknown";
   const group = groupFor(workspaceId, unknown ? unknownIdentity() : serialized, unknown);
   const ownerKey = key.kind === "agent" ? serializeActorKey(key.ownerKey) : serialized;
   const human = key.kind === "account" || key.kind === "installation" || key.kind === "legacy-human";
-  return { group, hue: humanHue(key), self: (human || key.kind === "agent") && own.includes(ownerKey) };
+  return { group, hue: key.kind === "agent" ? colors.get(serialized) ?? null : humanHue(key), self: (human || key.kind === "agent") && own.includes(ownerKey) };
 }
 export function ownActorPresentation(installationId: string, credentials: CloudCredentials | null): ActorPresentation {
   return { group: "own", hue: humanHue(localPersonKey(installationId, localAccount(credentials))), self: true };
@@ -71,7 +111,9 @@ export function chatActorForPresentation(message: DisplayMessage, issuer: ActorI
 export function createActorPresentationRequest(input: Omit<Parameters<typeof resolveThreadActorIssuer>[0], "threadId"> & {
   installationId: string;
   credentials: CloudCredentials | null;
+  agentColors?: AgentColorSource;
 }) {
+  const colors = agentColorsReader(input.agentColors);
   const issuers = new Map<string, Promise<ActorIssuer | null>>();
   const own = localPersonKeys(input.installationId, localAccount(input.credentials));
   const issuerFor = (threadId: string) => {
@@ -92,7 +134,7 @@ export function createActorPresentationRequest(input: Omit<Parameters<typeof res
     const workspaceId = input.readWorkspace()?.workspaceId;
     if (workspaceId === undefined) throw new Error("Chat workspace closed.");
     return presentationFor(workspaceId, key,
-      () => JSON.stringify(["unknown", threadId, message.authorUserId ?? null, message.author.displayName]), own);
+      () => JSON.stringify(["unknown", threadId, message.authorUserId ?? null, message.author.displayName]), own, colors());
   };
 }
 
@@ -101,10 +143,11 @@ export function createActorPresentationRequest(input: Omit<Parameters<typeof res
  * and the current account on the workspace's server, and make the named-author issuer from that server once.
  * Received authors get no issuer and never borrow credentials, so they stay owner-asserted and never self.
  */
-export function createHistoryPresentationRequest(input: { workspaceId: string; assertCurrent(): void } & (
+export function createHistoryPresentationRequest(input: { workspaceId: string; assertCurrent(): void; agentColors?: AgentColorSource } & (
   | { source: "own-store"; serverUrl: string | undefined; synced: boolean; installationId: string; credentials: CloudCredentials | null }
   | { source: "received" }
 )): (authors: readonly MomentAuthor[]) => ActorPresentation[] {
+  const colors = agentColorsReader(input.agentColors);
   let context: Parameters<typeof deriveMomentActor>[1] = { source: "received" };
   let own: string[] = [];
   if (input.source === "own-store") {
@@ -123,6 +166,6 @@ export function createHistoryPresentationRequest(input: { workspaceId: string; a
   return (authors) => {
     input.assertCurrent();
     return authors.map(author => presentationFor(input.workspaceId, deriveMomentActor(author, context, "").key,
-      () => JSON.stringify(["unknown", author]), own));
+      () => JSON.stringify(["unknown", author]), own, colors()));
   };
 }

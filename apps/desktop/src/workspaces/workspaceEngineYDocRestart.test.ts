@@ -73,6 +73,11 @@ async function pastRetryRungs(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, total + cap + 50));
 }
 
+// A clock that never moves: a session's open, a delete and a settle's start
+// all land in one millisecond, as they often do on a fast machine. Only the
+// order the capture saw them in can say which came first.
+const frozenClock = (): number => 1_000_000;
+
 function createWorkspaceEngineCapture(
   options: Omit<WorkspaceEngineCaptureOptions, "attachmentId">,
 ) {
@@ -1094,6 +1099,227 @@ it("refuses to reopen onto another object that moved onto the path", async () =>
   expect(typed.reopenObjectIds).toHaveLength(1);
   expect(typed.objectChanges()).toBe(1);
   await typed.close();
+});
+
+// dohc#2301. What a generation expects of its file dies with the daemon, and
+// a replacement can find no head and no file: New File's head was never
+// recorded, or capture retired a deleted file's head while no session held
+// it. The engine then creates the file unless the replacement says the file
+// existed. Each case returns what every generation's open said.
+async function fileExistedAcrossRestart(input: {
+  head: "present" | "absent";
+  lineage: "existing" | "absent";
+  disk: string | null;
+  settleFirst: boolean;
+}): Promise<Array<boolean | undefined>> {
+  const rootPath = await createTestScratch("dohc-ydoc-file-existed-");
+  if (input.disk !== null) await writeFile(join(rootPath, "note.md"), input.disk);
+  const loopback = new VersionedLoopbackEngine();
+  const client = (): EngineDaemonClient & EngineTransport => ({
+    close: () => undefined,
+    onEvent: () => () => undefined,
+    async sendRequest(request: Request): Promise<Response> {
+      if (request.method === "workspace.open") {
+        return { id: request.id, result: { workspace: "file-existed" } };
+      }
+      if (request.method === "workspace.close") {
+        return { id: request.id, result: { closed: true } };
+      }
+      const lifecycle = daemonCaptureLifecycleAnswer(request);
+      if (lifecycle) return lifecycle;
+      return await loopback.sendRequest(request);
+    },
+  });
+  const firstClient = client();
+  const restartedClient = client();
+  let currentClient = firstClient;
+  const sessions = new EngineWorkspaceSessions(
+    { currentClient: () => currentClient },
+    { sleep: async () => undefined },
+  );
+  const opens: Array<boolean | undefined> = [];
+  let daemonExits = false;
+  // The lineage the engine keeps across the restart.
+  const recorded = new Y.Doc();
+  const openProvider = async (
+    options: EngineYdocProviderSessionOptions,
+  ): Promise<EngineYdocProviderSession> => {
+    opens.push(options.fileExisted);
+    const first = options.transport === firstClient;
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, Y.encodeStateAsUpdate(recorded));
+    let tokens = 0;
+    return {
+      doc,
+      initialUpdate: Y.encodeStateAsUpdate(doc),
+      objectId: "note-object",
+      lineageClaimId: null,
+      contentKind: "plaintext",
+      path: options.path,
+      head: first ? input.head : "absent",
+      lineage: first ? input.lineage : "existing",
+      unsettled: false,
+      evict: async () => undefined,
+      async applyLocalUpdate(update) {
+        if (first && daemonExits) {
+          currentClient = restartedClient;
+          throw Object.assign(new Error("daemon exited"), { code: "transport-error" });
+        }
+        Y.applyUpdate(doc, update);
+        Y.applyUpdate(recorded, update);
+      },
+      async settleNow() {
+        const token = ++tokens;
+        options.onSettleStart?.(token);
+        const markdown = doc.getText("plainText").toString();
+        await writeFile(join(rootPath, options.path), markdown);
+        const result = {
+          momentId: `moment-${token}`,
+          path: options.path,
+          content: markdown,
+          sha256: createHash("sha256").update(markdown).digest("hex"),
+          materialized: true,
+          projection: {
+            contentKind: "plaintext" as const,
+            sourceStateVectorSha256: "a".repeat(64),
+            destructive: false,
+          },
+        };
+        await options.onSettled?.(result, token);
+        return result;
+      },
+      async close() {
+        return;
+      },
+    };
+  };
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "file-existed",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const renderer = new Y.Doc();
+  Y.applyUpdate(renderer, session.initialUpdate);
+  const type = (text: string): void => {
+    const before = Y.encodeStateVector(renderer);
+    renderer.getText("plainText").insert(0, text);
+    session.applyLocalUpdate(Y.encodeStateAsUpdate(renderer, before));
+  };
+  if (input.settleFirst) {
+    type("saved ");
+    await session.settleNow();
+  }
+  daemonExits = true;
+  type("typed ");
+  await session.settleNow();
+  await session.close({ settle: false });
+  await capture.stop();
+  return opens;
+}
+
+it.each([
+  { name: "New File's empty file", head: "absent", lineage: "absent", disk: "", settleFirst: false, said: true },
+  { name: "a recorded file", head: "present", lineage: "existing", disk: "recorded", settleFirst: false, said: true },
+  { name: "a draft with no file that saved one", head: "absent", lineage: "existing", disk: null, settleFirst: true, said: true },
+  { name: "a draft with no file", head: "absent", lineage: "existing", disk: null, settleFirst: false, said: undefined },
+] as const)("a replacement after a restart says whether $name existed", async (input) => {
+  expect(await fileExistedAcrossRestart(input)).toEqual([undefined, input.said]);
+});
+
+// dohc#2301. A replacement that opens over a file records it, even when
+// nothing settles. A draft with no file meets an empty file at its first
+// reconnect, the file is deleted, and the second reconnect must still say the
+// file existed.
+it("a replacement that opens over a file records it for the next replacement", async () => {
+  const rootPath = await createTestScratch("dohc-ydoc-file-seen-on-reopen-");
+  const loopback = new VersionedLoopbackEngine();
+  const client = (): EngineDaemonClient & EngineTransport => ({
+    close: () => undefined,
+    onEvent: () => () => undefined,
+    async sendRequest(request: Request): Promise<Response> {
+      if (request.method === "workspace.open") {
+        return { id: request.id, result: { workspace: "file-seen-on-reopen" } };
+      }
+      if (request.method === "workspace.close") {
+        return { id: request.id, result: { closed: true } };
+      }
+      return daemonCaptureLifecycleAnswer(request) ?? (await loopback.sendRequest(request));
+    },
+  });
+  let currentClient = client();
+  const sessions = new EngineWorkspaceSessions(
+    { currentClient: () => currentClient },
+    { sleep: async () => undefined },
+  );
+  const opens: Array<boolean | undefined> = [];
+  // A crash kept this draft's edits in its lineage. No file was written.
+  const recorded = new Y.Doc();
+  recorded.getText("plainText").insert(0, "kept ");
+  let daemonExits = false;
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "file-seen-on-reopen",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: async (options) => {
+      opens.push(options.fileExisted);
+      const doc = new Y.Doc();
+      Y.applyUpdate(doc, Y.encodeStateAsUpdate(recorded));
+      return {
+        doc,
+        initialUpdate: Y.encodeStateAsUpdate(doc),
+        objectId: "note-object",
+        lineageClaimId: null,
+        contentKind: "plaintext",
+        path: options.path,
+        head: "absent",
+        lineage: "existing",
+        unsettled: false,
+        evict: async () => undefined,
+        async applyLocalUpdate(update) {
+          if (daemonExits) {
+            daemonExits = false;
+            currentClient = client();
+            throw Object.assign(new Error("daemon exited"), { code: "transport-error" });
+          }
+          Y.applyUpdate(doc, update);
+          Y.applyUpdate(recorded, update);
+        },
+        async settleNow() {
+          throw new Error("nothing settles in this test");
+        },
+        async close() {
+          return;
+        },
+      };
+    },
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const renderer = new Y.Doc();
+  Y.applyUpdate(renderer, session.initialUpdate);
+  const typeThroughRestart = async (text: string, reopens: number): Promise<void> => {
+    daemonExits = true;
+    const before = Y.encodeStateVector(renderer);
+    renderer.getText("plainText").insert(0, text);
+    session.applyLocalUpdate(Y.encodeStateAsUpdate(renderer, before));
+    await expect.poll(() => opens.length, { timeout: 15_000 }).toBe(reopens);
+  };
+
+  await writeFile(join(rootPath, "note.md"), "");
+  await typeThroughRestart("one ", 2);
+  await rm(join(rootPath, "note.md"));
+  await typeThroughRestart("two ", 3);
+
+  expect(opens).toEqual([undefined, undefined, true]);
+  await session.close({ settle: false });
+  await capture.stop();
 });
 
 // The session recorded a word, and sync turned on before its settle ran. The
@@ -4296,7 +4522,7 @@ it("announces a recovered edit exactly once when both arm points run", async () 
 async function lockedRebindCapture(
   prefix: string,
   options?: {
-    now?: () => number;
+    monotonic?: () => number;
     teardownRetryMs?: WorkspaceEngineCaptureOptions["teardownRetryMs"];
     // Wraps the base provider open for one test's own generation, so it
     // can override a single method (e.g. `settleNow`'s timing) while
@@ -4572,7 +4798,7 @@ async function lockedRebindCapture(
         error instanceof Error ? error.message : String(error),
       );
     },
-    ...(options?.now ? { now: options.now } : {}),
+    ...(options?.monotonic ? { monotonic: options.monotonic } : {}),
     ...(options?.teardownRetryMs ? { teardownRetryMs: options.teardownRetryMs } : {}),
   });
   return { capture, state, loopback, workspaceId, rootPath };
@@ -5013,6 +5239,109 @@ it("pays a busy close debt too, which is what lets the chip say settling", async
   await capture.stop();
 });
 
+// A document open with a close debt left by a store-busy close. A draft is
+// one a crash kept: its lineage holds edits, and no file was ever written.
+// `closeWrites` makes the closing session's own close write the file, as when
+// the release the daemon refuses escalates to a settling close.
+async function closeWithDebt(prefix: string, draft: boolean, closeWrites = false) {
+  let opens = 0;
+  const locked = await lockedRebindCapture(prefix, {
+    wrapProvider: (base) => async (options) => {
+      const provider = await base(options);
+      opens += 1;
+      const writesOnClose = closeWrites && opens === 1;
+      return {
+        ...provider,
+        ...(draft ? { head: "absent" as const } : {}),
+        ...(writesOnClose
+          ? {
+              async close(closeOptions) {
+                options.onCloseMaterialized?.();
+                await provider.close(closeOptions);
+              },
+            }
+          : {}),
+      };
+    },
+  });
+  if (draft) {
+    const kept = new Y.Doc();
+    kept.getText("plainText").insert(0, "kept ");
+    locked.state.journal.push(Y.encodeStateAsUpdate(kept));
+  }
+  const { session } = await openWithOneEdit(locked.capture, "busy edit");
+  locked.state.replicated = true;
+  locked.state.closeSettleFailure = busyRefusal();
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+  return locked;
+}
+
+// dohc#2301. A close debt's payment opens a fresh session, which knows nothing
+// of the file the closed one had. It carries the closed session's answer: yes
+// for a document that had its file, so the engine keeps a deleted file
+// deleted, and nothing for a draft that never had one, which it may create.
+it.each([
+  { name: "a document that had its file", draft: false, said: true },
+  { name: "a draft that never had a file", draft: true, said: undefined },
+] as const)("a close debt's retry passes on whether the file existed: $name", async ({ draft, said }) => {
+  const { capture, state } = await closeWithDebt("dohc-ydoc-debt-file-existed-", draft);
+  state.closeSettleFailure = null;
+  await expect.poll(() => state.settledContents.length, { timeout: 15_000 }).toBe(1);
+
+  expect(state.generationOptions.map((options) => options.fileExisted)).toEqual([undefined, said]);
+  await capture.stop();
+});
+
+// dohc#2301. Once a payment writes a draft's file, the file has existed. A
+// peer update that outruns that settle keeps the debt armed, and the next
+// payment must say so: a delete outside dohc and a daemon restart before
+// either is observed would otherwise let it write the deleted file back.
+it("a close debt's next payment says the file existed once an earlier payment wrote it", async () => {
+  const { capture, state } = await closeWithDebt("dohc-ydoc-debt-paid-file-", true);
+  state.emitUpdateAfterSettle = true;
+  state.closeSettleFailure = null;
+  await expect.poll(() => state.settledContents.length, { timeout: 15_000 }).toBe(2);
+
+  expect(state.generationOptions.map((options) => options.fileExisted)).toEqual([undefined, undefined, true]);
+  await capture.stop();
+});
+
+// dohc#2301. The close that leaves a debt can write the file itself: its
+// pre-close settle fails, the release the daemon refuses escalates to a
+// settling close, and that close writes. The provider reports the write, so
+// the debt's payment says the file existed.
+it("a close debt's payment says the file existed when the closing session's own close wrote it", async () => {
+  const { capture, state } = await closeWithDebt("dohc-ydoc-debt-close-file-", true, true);
+  state.closeSettleFailure = null;
+  await expect.poll(() => state.settledContents.length, { timeout: 15_000 }).toBe(1);
+
+  expect(state.generationOptions.map((options) => options.fileExisted)).toEqual([undefined, true]);
+  await capture.stop();
+});
+
+// dohc#2301. A document reopened while its close debt is still owed is the
+// same document. Every open after the first, the reopen included, says the
+// file existed, because they all continue the one file fact.
+it("a reopen while a close debt is owed says the file existed", async () => {
+  const { capture, state } = await closeWithDebt("dohc-ydoc-debt-reopen-file-", false);
+  // Payments keep failing, so the debt is still owed when the reopen lands.
+  state.locked = true;
+  const reopened = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+
+  const later = state.generationOptions.slice(1).map((options) => options.fileExisted);
+  expect(later.length).toBeGreaterThan(0);
+  expect(later.every((said) => said === true)).toBe(true);
+  state.locked = false;
+  state.closeSettleFailure = null;
+  await reopened.close();
+  await capture.stop();
+});
+
 it("pays a locked close debt even when a replicated release succeeds", async () => {
   // A replicated lineage compacts on release without the
   // local-only pending-job guard, so the close releases over the locked
@@ -5307,6 +5636,7 @@ it("an external delete observed before a debt registers cancels it at the door i
   // order once that order stopped matching what the fix actually checks.
   const { capture, state } = await lockedRebindCapture(
     "dohc-ydoc-late-registration-",
+    { monotonic: frozenClock },
   );
   const { session } = await openWithOneEdit(capture, "would resurrect this");
 
@@ -5491,7 +5821,7 @@ it("expires an expected removal and honors its cancellation", async () => {
   let nowMs = 1_000_000;
   const { capture, state } = await lockedRebindCapture(
     "dohc-ydoc-expected-expiry-",
-    { now: () => nowMs },
+    { monotonic: () => nowMs },
   );
   const { session } = await openWithOneEdit(capture, "would resurrect this");
 
@@ -5538,6 +5868,46 @@ it("a cancelled expected removal reads as an external delete again", async () =>
     "ignore the cancel -> this cancellation names dohc's own removal for a registration the caller withdrew.",
   ).toBe(true);
   state.locked = false;
+  await capture.stop();
+});
+
+it("a forward jump of the wall clock expires no delete record, so a stale session still stands down", async () => {
+  // Delete records and expected removals expire on the monotonic clock. A
+  // wall clock that steps forward, as when the system clock is corrected,
+  // must not expire either early: the stale session's late debt would arm
+  // and write the deleted file back, under an external delete's name.
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-wall-clock-jump-",
+    { monotonic: frozenClock },
+  );
+  const { session } = await openWithOneEdit(capture, "would resurrect this");
+  const realDateNow = Date.now.bind(Date);
+  let wallClockJumpMs = 0;
+  const wallClock = vi.spyOn(Date, "now").mockImplementation(() => realDateNow() + wallClockJumpMs);
+  onTestFinished(() => wallClock.mockRestore());
+  const hourMs = 60 * 60_000;
+
+  capture.registerExpectedEngineEvents([{ path: "note.md" }]);
+  wallClockJumpMs += hourMs;
+  capture.observeFileEvents([{ path: "note.md", operation: "delete" }]);
+  await capture.flush();
+  wallClockJumpMs += hourMs;
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+  state.locked = false;
+  expect(
+    state.errorMessages.some((message) =>
+      message.includes("dohc's own removal of note.md removed the path"),
+    ),
+    "expire on the wall clock -> the delete record is gone and the debt arms.",
+  ).toBe(true);
+  await pastRetryRungs();
+  expect(state.generation).toBe(1);
+  expect(state.settledContents).toEqual([]);
   await capture.stop();
 });
 
@@ -5654,8 +6024,7 @@ it("a retry whose own opts already carry settle:false still consults the tombsto
 });
 
 it("delete then immediate quit drains suppression before retrying a failing close", async () => {
-  let clock = 1_000_000;
-  const { capture, state } = await lockedRebindCapture("dohc-file-feed-quit-", { now: () => ++clock });
+  const { capture, state } = await lockedRebindCapture("dohc-file-feed-quit-");
   const { session } = await openWithOneEdit(capture, "must stay deleted");
   state.locked = true;
   await expect(session.close()).rejects.toThrow("file-locked");
@@ -5667,8 +6036,7 @@ it("delete then immediate quit drains suppression before retrying a failing clos
 });
 
 it.each(["quit", "close"] as const)("a failed observation drain probes deletion before %s settles live sessions", async mode => {
-  let clock = 1_000_000;
-  const { capture, state, rootPath, workspaceId } = await lockedRebindCapture("dohc-file-feed-failed-drain-", { now: () => ++clock });
+  const { capture, state, rootPath, workspaceId } = await lockedRebindCapture("dohc-file-feed-failed-drain-");
   await writeFile(join(rootPath, "note.md"), "Original.");
   const activityState = new WorkspaceActivityState();
   const workspace = { workspaceId, rootPath, attachmentId: Symbol("failed-drain"), kind: "personal" as const, mode: "local-first" as const };
@@ -5841,7 +6209,7 @@ it("a delete landing past the tombstone's own TTL still suppresses an active ret
   let virtualNowMs = 1_000_000;
   const { capture, state } = await lockedRebindCapture(
     "dohc-ydoc-close-retry-ttl-boundary-",
-    { now: () => virtualNowMs },
+    { monotonic: () => virtualNowMs },
   );
   const { session } = await openWithOneEdit(
     capture,
@@ -5850,12 +6218,6 @@ it("a delete landing past the tombstone's own TTL still suppresses an active ret
 
   state.locked = true;
   await expect(session.close()).rejects.toThrow("file-locked");
-
-  // Virtual time must actually move past the session's own open time
-  // before the delete lands — the age discrimination (recreation vs. the
-  // stale incarnation a delete orphaned) reads an equal timestamp as "not
-  // before the delete", same as the map-based door does.
-  virtualNowMs += 500;
 
   // The delete lands — `armRemovalSuppression` sees it immediately, at
   // this virtual time. Only afterward does virtual time jump past the
@@ -5895,13 +6257,10 @@ it("a delete landing after a settle's write but before its late onSettled callba
   const settleGate = new Promise<void>((resolve) => {
     releaseSettled = resolve;
   });
-  // A clock that moves on every read, so the delete below lands strictly
-  // after the session opened even when both fall in one real millisecond.
-  let clockMs = 1_000_000;
   const { capture, state } = await lockedRebindCapture(
     "dohc-ydoc-settle-clear-race-",
     {
-      now: () => ++clockMs,
+      monotonic: frozenClock,
       wrapProvider: (base) => async (openOptions) => {
         const inner = await base(openOptions);
         let token = 0;

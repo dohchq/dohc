@@ -16,7 +16,6 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { CHATS_TAB_PATH, chatTabPath } from "../workbench/workbenchState";
 import type { DohcDesktopBridge } from "../../ipc/bridgeContract";
-import { deferred } from "../../testing/deferred";
 import {
   WORKSPACE,
   STORED_STATE,
@@ -262,9 +261,11 @@ describe("About rail (right side)", () => {
   it("drops a hit not yet read when focus moves while About is closed", async () => {
     const bridge = makeBridge(Promise.resolve({ ...storedStateWithTabs(["a.md", "b.md"], "a.md"), aboutVisible: false }));
     bridge.listFileChats.mockResolvedValue({ fileObjectId: "object-a", threads: [] });
-    // Main has not decided capture, so About cannot read the hit yet.
-    const admission = deferred<typeof SYNC_STATUS>();
-    bridge.openWorkspace.mockImplementation(() => admission.promise);
+    // Admit the workspace so its saved tabs can restore. Capture is
+    // unavailable, so About still cannot consume the search hit.
+    const unavailable = { ...SYNC_STATUS, historyRecordingUnavailable: true };
+    bridge.openWorkspace.mockResolvedValue(unavailable);
+    bridge.getSyncStatus.mockResolvedValue(unavailable);
     const user = userEvent.setup();
     renderShell(bridge);
     await screen.findByTestId("tab-a.md");
@@ -285,13 +286,14 @@ describe("About rail (right side)", () => {
       });
     });
     await user.click(await screen.findByTestId("search-result-row"));
-    expect(within(await screen.findByTestId("about-rail")).getByText("Loading About...")).toBeTruthy();
+    expect(await within(await screen.findByTestId("about-rail")).findByTestId("about-rail-off")).toBeTruthy();
 
-    // Close About, move to b.md, open About again, and let main decide.
+    // Close About, move to b.md, open About again, and restore capture.
     await user.click(screen.getByTestId("titlebar-about-sidebar"));
     await user.click(screen.getByTestId("tab-b.md"));
     await user.click(screen.getByTestId("titlebar-about-sidebar"));
-    await act(async () => admission.resolve(SYNC_STATUS));
+    bridge.getSyncStatus.mockResolvedValue(SYNC_STATUS);
+    act(() => bridge.emitWorkspaceActivity());
     const rail = await screen.findByTestId("about-rail");
     expect((await within(rail).findByTestId("about-header")).textContent).toBe("b.md");
     expect(within(rail).queryByTestId("linked-chat-thread")).toBeNull();

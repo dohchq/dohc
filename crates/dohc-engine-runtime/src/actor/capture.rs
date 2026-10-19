@@ -642,16 +642,15 @@ mod capture_file_hold_tests {
     fn operation_undo(
         store: &mut EngineStore,
         root: &std::path::Path,
-        faults: &dyn FaultInjector,
+        faults: Arc<dyn FaultInjector>,
     ) -> Result<super::super::history_operations::HistoryUndoResult, RuntimeError> {
-        super::super::history_operations::history_undo_on_store(
+        super::super::history_operations::test_undo_in_turns(
             store,
             "hold-proof",
             "dohc-operation:hold-proof",
             "undo-hold-proof",
             None,
             root,
-            &(),
             faults,
             10,
         )
@@ -674,7 +673,7 @@ mod capture_file_hold_tests {
             .read_with(|conn| conn.query_row("SELECT COUNT(*) FROM moments", [], |r| r.get(0)))
             .unwrap();
         assert!(
-            matches!(operation_undo(&mut store,scratch.path(),&NoFaults),Err(RuntimeError::Domain(DomainError::UndoRefused {path,reason:"capture hold"})) if path=="moved.md")
+            matches!(operation_undo(&mut store,scratch.path(),Arc::new(NoFaults)),Err(RuntimeError::Domain(DomainError::UndoRefused {path,reason:"capture hold"})) if path=="moved.md")
         );
         assert_eq!(
             store
@@ -724,7 +723,7 @@ mod capture_file_hold_tests {
             .read_with(|conn| capture_file_holds::list_in(conn, "hold-proof"))
             .unwrap();
         assert!(
-            matches!(operation_undo(&mut store,scratch.path(),&NoFaults),Err(RuntimeError::Domain(DomainError::UndoRefused {path,reason:"capture hold"})) if path=="held.md")
+            matches!(operation_undo(&mut store,scratch.path(),Arc::new(NoFaults)),Err(RuntimeError::Domain(DomainError::UndoRefused {path,reason:"capture hold"})) if path=="held.md")
         );
         assert_eq!(
             store
@@ -776,7 +775,7 @@ mod capture_file_hold_tests {
             .unwrap();
         std::fs::write(scratch.path().join("renamed.txt"), "Other").unwrap();
         assert!(
-            operation_undo(&mut store, scratch.path(), &NoFaults)
+            operation_undo(&mut store, scratch.path(), Arc::new(NoFaults))
                 .unwrap()
                 .materialized
         );
@@ -797,10 +796,13 @@ mod capture_file_hold_tests {
     }
     #[test]
     fn history_operation_pending_inverse_defers_capture_at_both_endpoints() {
-        struct Crash;
+        #[derive(Default)]
+        struct Crash(std::sync::atomic::AtomicUsize);
         impl FaultInjector for Crash {
             fn poll(&self, p: dohc_engine_storage::FaultPoint) -> dohc_engine_storage::FaultAction {
-                if p == dohc_engine_storage::FaultPoint::StorageAfterCommitBeforeAck {
+                if p == dohc_engine_storage::FaultPoint::StorageAfterCommitBeforeAck
+                    && self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1
+                {
                     dohc_engine_storage::FaultAction::Crash
                 } else {
                     dohc_engine_storage::FaultAction::Continue
@@ -811,7 +813,7 @@ mod capture_file_hold_tests {
         operation_rename(&mut store);
         std::fs::write(scratch.path().join("moved.md"), "Before.\n").unwrap();
         assert!(matches!(
-            operation_undo(&mut store, scratch.path(), &Crash),
+            operation_undo(&mut store, scratch.path(), Arc::new(Crash::default())),
             Err(RuntimeError::OperationCrashed)
         ));
         let count = store
@@ -873,7 +875,7 @@ mod capture_file_hold_tests {
         );
         assert!(!scratch.path().join("held.md").exists());
         assert!(
-            operation_undo(&mut store, scratch.path(), &NoFaults)
+            operation_undo(&mut store, scratch.path(), Arc::new(NoFaults))
                 .unwrap()
                 .materialized
         );
@@ -881,10 +883,13 @@ mod capture_file_hold_tests {
 
     #[test]
     fn history_operation_restart_parked_placement_never_reports_restored() {
-        struct Crash;
+        #[derive(Default)]
+        struct Crash(std::sync::atomic::AtomicUsize);
         impl FaultInjector for Crash {
             fn poll(&self, p: dohc_engine_storage::FaultPoint) -> dohc_engine_storage::FaultAction {
-                if p == dohc_engine_storage::FaultPoint::StorageAfterCommitBeforeAck {
+                if p == dohc_engine_storage::FaultPoint::StorageAfterCommitBeforeAck
+                    && self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1
+                {
                     dohc_engine_storage::FaultAction::Crash
                 } else {
                     dohc_engine_storage::FaultAction::Continue
@@ -896,7 +901,7 @@ mod capture_file_hold_tests {
         operation_rename(&mut store);
         std::fs::write(scratch.path().join("moved.md"), "Before.\n").unwrap();
         assert!(matches!(
-            operation_undo(&mut store, scratch.path(), &Crash),
+            operation_undo(&mut store, scratch.path(), Arc::new(Crash::default())),
             Err(RuntimeError::OperationCrashed)
         ));
         drop(store);
@@ -909,7 +914,7 @@ mod capture_file_hold_tests {
         let before = store
             .read_with(|conn| capture_file_holds::list_in(conn, "hold-proof"))
             .unwrap();
-        let result = operation_undo(&mut store, scratch.path(), &NoFaults).unwrap();
+        let result = operation_undo(&mut store, scratch.path(), Arc::new(NoFaults)).unwrap();
         assert!(result.deduped && !result.materialized);
         assert_eq!(
             store

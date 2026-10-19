@@ -159,10 +159,10 @@ export function DocumentMenu(props: {
       action,
       attempt,
     );
-    if (!serialized || !actions.isCurrent(action)) return;
+    // Copy stays open for feedback; dismissal cancels pending serialization.
+    if (!serialized || !actions.isCurrent(action) || !attempts.isCurrent(attempt)) return;
     const markdown = serialized.markdown;
     if (markdown === null) {
-      if (!attempts.isCurrent(attempt)) return;
       showFeedback(
         "copy-markdown",
         REFUSAL_LABEL,

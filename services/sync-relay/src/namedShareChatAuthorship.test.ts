@@ -32,6 +32,20 @@ function message(authorKind: "human" | "agent" | "automation", extra: Record<str
 }
 
 describe("named share chat author names", () => {
+  it("refuses a recipient-context moment without storing any of its batch", async () => {
+    const f = await fixture();
+    const before = f.storage.fetchLogPage({workspaceId: "workspace", sinceRelaySeq: 0, limit: 100});
+    const response = await f.push(sequenced([message("human"), {opKind: "moment.append", payload: {
+      authorContext: {kind: "account", accountId: "recipient"}, momentId: "forbidden", versionId: "main",
+      objectId: "doc", path: "doc.md", operation: "write",
+    }}]));
+    expect(response.status).toBe(403);
+    expect(await json(response)).toMatchObject({code: "share_op_rejected"});
+    expect(f.storage.fetchLogPage({workspaceId: "workspace", sinceRelaySeq: 0, limit: 100})).toEqual(before);
+    expect(f.coordinate(0)).toBeNull();
+    expect(f.coordinate(1)).toBeNull();
+  });
+
   it.each(["human", "agent", "automation"] as const)("stores and serves the account behind a %s post", async authorKind => {
     const f = await fixture();
     const payload = message(authorKind, authorKind === "automation" ? {chainDepth: 2} : {}).payload;

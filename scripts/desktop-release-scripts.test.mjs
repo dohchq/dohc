@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import {
+  chmod,
   mkdir,
   mkdtemp as createTemporaryDirectory,
   readFile,
@@ -10,8 +11,8 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { basename, join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
@@ -35,17 +36,18 @@ import {
   writeGithubOutput,
 } from "./resolve-desktop-release.mjs";
 import { updateDesktopPackageVersion } from "./update-desktop-package-version.mjs";
-import { checkDesktopReleasePlatforms } from "./check-desktop-release-platforms.mjs";
-import {
-  mergeUpdateManifests,
-  parseUpdateManifest,
-  serializeUpdateManifest,
-} from "./merge-update-manifests.mjs";
+import { checkDesktopReleasePublication } from "./check-desktop-release-publication.mjs";
+import { LEGACY_NIGHTLIES, selectUpgradeNightly } from "./select-upgrade-nightly.mjs";
 import {
   createMockUpdateServer,
   resolveServablePath,
 } from "./mock-update-server.mjs";
 import { scriptsWithoutChunkIds, sourceMapUpload, uploadSourceMaps } from "./upload-desktop-source-maps.mjs";
+import {
+  DEFAULT_KEYCHAIN, PUBLISH_JOB, UNLOCK_WAIT_MS, assertWorkflowVersion, confirmUploaded, electronBuilderArgs, filesToUpload, macAssetNames,
+  macFileNames, macUploadPlan, parseMacReleaseArgs, preflightMacRelease, publishMacFiles, releaseEnvironment, signatureChecks,
+  signingEnvironment, unlockReleaseKeychain, unlockedSigning, uploadCommands, verifyKeptFiles, withReleaseKeychain, RELEASE_REPOSITORY, releaseMac,
+} from "./release-desktop-macos.mjs";
 
 async function fixtureRoot(version = "0.1.0") {
   const root = await mkdtemp(join(tmpdir(), "dohc-release-"));
@@ -82,29 +84,22 @@ test("resolves stable and nightly desktop release metadata", async () => {
   assert.equal(nightly.version, "0.1.1-nightly.20260621.12.2");
   assert.equal(nightly.release_channel, "nightly");
   assert.equal(nightly.make_latest, "false");
-  assert.deepEqual(JSON.parse(nightly.matrix).map((target) => target.os), ["Windows"]);
+  assert.deepEqual(JSON.parse(nightly.matrix).map((target) => target.os), ["Windows", "Linux"]);
 });
 
-test("release platform selection defaults to Windows and keeps every native target available", () => {
-  const windows = desktopReleaseTargets();
-  assert.equal(windows.length, 1);
-  assert.deepEqual(windows[0].runner, ["self-hosted", "windows", "x64"]);
-  assert.equal(windows[0].target, "x86_64-pc-windows-msvc");
-  const linux = desktopReleaseTargets("linux");
-  assert.equal(linux.length, 1);
-  assert.deepEqual(linux[0].runner, ["self-hosted", "linux", "x64"]);
-  assert.equal(linux[0].target, "x86_64-unknown-linux-gnu");
-  assert.equal(linux[0].require_signing, "0");
-  assert.deepEqual(desktopReleaseTargets("windows-linux"), [windows[0], linux[0]]);
-  const all = desktopReleaseTargets("all");
-  assert.deepEqual(all.map((target) => [target.arch, target.target]), [
-    ["x64", "x86_64-pc-windows-msvc"],
-    ["x64", "x86_64-apple-darwin"],
-    ["arm64", "aarch64-apple-darwin"],
-    ["x64", "x86_64-unknown-linux-gnu"],
-  ]);
-  for (const target of all) assert.equal(target.runner[0], "self-hosted");
-  assert.throws(() => desktopReleaseTargets("mac"), /Invalid release platforms/);
+test("release platform selection defaults to every workflow platform and leaves macOS to the Mac release command", () => {
+  const both = desktopReleaseTargets();
+  assert.deepEqual(desktopReleaseTargets("windows-linux"), both);
+  const [windows, linux] = both;
+  assert.deepEqual(desktopReleaseTargets("windows"), [windows]);
+  assert.deepEqual(windows.runner, ["self-hosted", "windows", "x64"]);
+  assert.equal(windows.target, "x86_64-pc-windows-msvc");
+  assert.deepEqual(desktopReleaseTargets("linux"), [linux]);
+  assert.deepEqual(linux.runner, ["self-hosted", "linux", "x64"]);
+  assert.equal(linux.target, "x86_64-unknown-linux-gnu");
+  assert.equal(linux.require_signing, "0");
+  for (const target of both) assert.equal(target.runner[0], "self-hosted");
+  for (const platforms of ["mac", "macos", "all"]) assert.throws(() => desktopReleaseTargets(platforms), /Invalid release platforms/);
 });
 
 test("Linux nightly metadata keeps the version generator and selects only Linux", async () => {
@@ -118,54 +113,71 @@ test("Linux nightly metadata keeps the version generator and selects only Linux"
   }
 });
 
-test("Linux and combined publication preserve previously shipped platform feeds", () => {
-  for (const channel of ["nightly", "latest"]) {
-    const release = (names) => [{ draft: false, assets: names.map((name) => ({ name })) }];
-    const linuxOnly = release([`${channel}-linux.yml`]);
-    const windowsAndLinux = release([`${channel}.yml`, `${channel}-linux.yml`]);
-    assert.doesNotThrow(() => checkDesktopReleasePlatforms({ channel, platforms: "linux", releases: linuxOnly }));
-    assert.throws(() => checkDesktopReleasePlatforms({ channel, platforms: "linux", releases: windowsAndLinux }), /win update manifests/);
-    assert.doesNotThrow(() => checkDesktopReleasePlatforms({ channel, platforms: "windows-linux", releases: windowsAndLinux }));
-    for (const platforms of ["linux", "windows-linux"]) {
-      assert.throws(() => checkDesktopReleasePlatforms({ channel, platforms, releases: release([`${channel}-mac.yml`]) }), /mac update manifests/);
+const publishedRelease = (tag_name, names = [], published_at = "2026-10-18T10:00:00Z") => ({ draft: false, tag_name, published_at, assets: names.map((name) => ({ name })) });
+const draftRelease = (tag_name, names = []) => ({ draft: true, tag_name, published_at: null, assets: names.map((name) => ({ name })) });
+
+test("stable publication preserves every platform previously published on its channel", () => {
+  const check = (platforms, releases) => checkDesktopReleasePublication({ channel: "latest", platforms, releases });
+  const linuxOnly = [publishedRelease("v0.0.9", ["latest-linux.yml"])];
+  const windowsAndLinux = [publishedRelease("v0.0.9", ["latest.yml", "latest-linux.yml"])];
+  assert.doesNotThrow(() => check("linux", linuxOnly));
+  assert.throws(() => check("linux", windowsAndLinux), /win update manifests/);
+  assert.throws(() => check("windows", windowsAndLinux), /linux update manifests.*Select platforms=windows-linux/);
+  assert.doesNotThrow(() => check("windows-linux", windowsAndLinux));
+  // The Mac release command adds the macOS manifest after the workflow publishes.
+  for (const platforms of ["windows", "linux", "windows-linux"]) assert.doesNotThrow(() => check(platforms, [publishedRelease("v0.0.9", ["latest-mac.yml"])]));
+  // A draft and the other channel's manifests deliver no update to this channel.
+  for (const releases of [[], [draftRelease("v0.0.9", ["latest-linux.yml"])], [publishedRelease("v0.1.1-nightly.20261018.37.1", ["nightly.yml", "nightly-linux.yml"])]]) {
+    assert.doesNotThrow(() => check("windows", releases));
+  }
+});
+
+test("a nightly publishes every platform the workflow builds", () => {
+  for (const platforms of ["windows", "linux"]) {
+    assert.throws(() => checkDesktopReleasePublication({ channel: "nightly", platforms, releases: [] }), /A nightly publishes every platform this workflow builds\. Select platforms=windows-linux/);
+  }
+  assert.doesNotThrow(() => checkDesktopReleasePublication({ channel: "nightly", platforms: "windows-linux", releases: [] }));
+});
+
+test("at most one nightly publishes per UTC day, counted by when it published", () => {
+  const now = new Date("2026-10-19T09:00:00Z");
+  const check = (releases, at = now) => checkDesktopReleasePublication({ channel: "nightly", platforms: "windows-linux", releases, now: at });
+  // A run that started before midnight and published after it holds the day it published on.
+  const lateRun = publishedRelease("v0.1.1-nightly.20261018.37.1", ["nightly.yml"], "2026-10-19T00:30:00Z");
+  assert.throws(() => check([lateRun]), (error) => error.message.startsWith("v0.1.1-nightly.20261018.37.1 published at 2026-10-19T00:30:00Z, so 2026-10-19 (UTC) already has its nightly."));
+  assert.throws(() => check([publishedRelease("v0.2.1-nightly.20261019.38.2", ["nightly.yml"], "2026-10-19T08:59:00+00:00")]), /2026-10-19 \(UTC\) already has its nightly/);
+  // A draft never reached an updater, and earlier days and stable releases do not count.
+  assert.doesNotThrow(() => check([
+    draftRelease("v0.1.1-nightly.20261019.39.1", ["nightly.yml"]),
+    publishedRelease("v0.1.1-nightly.20261018.36.1", ["nightly.yml", "nightly-linux.yml"], "2026-10-18T23:59:59Z"),
+    publishedRelease("v0.1.0", ["latest.yml"], "2026-10-19T08:00:00Z"),
+  ]));
+  assert.doesNotThrow(() => check([lateRun], new Date("2026-10-20T00:00:01Z")));
+});
+
+test("publication history fails closed on incomplete input", () => {
+  for (const releases of [null, {}, [{}], [{ draft: false, assets: [] }], [{ draft: false, tag_name: "v0.1.0", assets: [] }],
+    [{ draft: false, tag_name: "v0.1.0", published_at: "2026-10-18T10:00:00Z", assets: [{}] }], [[[]]]]) {
+    for (const channel of ["nightly", "latest"]) {
+      assert.throws(() => checkDesktopReleasePublication({ channel, platforms: "windows-linux", releases }), /Release history/);
     }
   }
 });
 
-test("publication preserves every platform previously published on its channel", () => {
-  const release = (names, draft = false) => ({ draft, assets: names.map((name) => ({ name })) });
-  for (const channel of ["nightly", "latest"]) {
-    for (const platform of ["mac", "linux"]) {
-      const releases = [release([`${channel}.yml`]), release([`${channel}-${platform}.yml`])];
-      assert.throws(() => checkDesktopReleasePlatforms({ channel, platforms: "windows", releases }), /Select platforms=all/);
-      assert.doesNotThrow(() => checkDesktopReleasePlatforms({ channel, platforms: "all", releases }));
-    }
-    const other = channel === "nightly" ? "latest" : "nightly";
-    for (const releases of [[], [release([`${channel}.yml`])], [release([`${channel}-mac.yml`, `${channel}-linux.yml`], true)], [release([`${other}-mac.yml`, `${other}-linux.yml`])]]) {
-      assert.doesNotThrow(() => checkDesktopReleasePlatforms({ channel, platforms: "windows", releases }));
-    }
-  }
-});
-
-test("publication platform history fails closed on incomplete input", () => {
-  for (const releases of [null, {}, [{}], [{ draft: false, assets: [{}] }], [[[]]]]) {
-    assert.throws(() => checkDesktopReleasePlatforms({ channel: "nightly", platforms: "windows", releases }), /Release history/);
-  }
-});
-
-test("publication platform check exits unsuccessfully when a channel would lose updates", async () => {
+test("the publication check exits unsuccessfully when a release breaks a rule", async () => {
   const root = await fixtureRoot();
   const history = join(root, "releases.jsonl");
-  await writeFile(history, [
-    { draft: false, assets: [{ name: "nightly.yml" }] },
-    { draft: false, assets: [{ name: "nightly-mac.yml" }] },
-  ].map((release) => JSON.stringify(release)).join("\n") + "\n");
-  const script = fileURLToPath(new URL("./check-desktop-release-platforms.mjs", import.meta.url));
+  const writeHistory = (publishedAt) => writeFile(history,
+    JSON.stringify(publishedRelease("v0.1.1-nightly.20261018.37.1", ["nightly.yml", "nightly-linux.yml", "nightly-mac.yml"], publishedAt)) + "\n");
+  await writeHistory(new Date(Date.now() - 36 * 60 * 60 * 1000).toISOString());
+  const script = fileURLToPath(new URL("./check-desktop-release-publication.mjs", import.meta.url));
   const args = [script, "--channel", "nightly", "--platforms", "windows", "--releases", history];
-  await assert.rejects(promisify(execFile)(process.execPath, args), (error) => error.code === 1 && /Select platforms=all/.test(error.stderr));
-  args[4] = "all";
+  await assert.rejects(promisify(execFile)(process.execPath, args), (error) => error.code === 1 && /Select platforms=windows-linux/.test(error.stderr));
+  args[4] = "windows-linux";
   const { stdout } = await promisify(execFile)(process.execPath, args);
-  assert.match(stdout, /keeps every previously published platform/);
+  assert.match(stdout, /meets the publication rules/);
+  await writeHistory(new Date().toISOString());
+  await assert.rejects(promisify(execFile)(process.execPath, args), (error) => error.code === 1 && /already has its nightly/.test(error.stderr));
 });
 
 test("release metadata requires a real commit sha", async () => {
@@ -271,61 +283,6 @@ test("writes GitHub output in action-compatible key value form", async () => {
   );
 });
 
-test("merges Electron updater manifests by version and unique file URL", () => {
-  const primary = parseUpdateManifest(`
-version: 0.1.0
-files:
-  - url: dohc-0.1.0-mac-arm64.zip
-    sha512: arm
-    size: 12
-path: dohc-0.1.0-mac-arm64.zip
-sha512: arm
-releaseDate: 2026-06-21T00:00:00.000Z
-`);
-  const secondary = parseUpdateManifest(`
-version: 0.1.0
-files:
-  - url: dohc-0.1.0-mac-x64.zip
-    sha512: x64
-    size: 13
-path: dohc-0.1.0-mac-x64.zip
-sha512: x64
-`);
-  const merged = mergeUpdateManifests(primary, secondary, "mac");
-  const serialized = serializeUpdateManifest(merged);
-
-  assert.deepEqual(
-    merged.files.map((file) => file.url),
-    ["dohc-0.1.0-mac-arm64.zip", "dohc-0.1.0-mac-x64.zip"],
-  );
-  assert.equal(merged.files[0].sha512, "arm");
-  assert.equal(merged.files[0].size, 12);
-  assert.equal(merged.files[1].sha512, "x64");
-  assert.equal(merged.files[1].size, 13);
-  assert.match(serialized, /releaseDate: 2026-06-21T00:00:00.000Z/);
-  assert.throws(
-    () =>
-      mergeUpdateManifests(
-        primary,
-        { ...secondary, version: "0.2.0" },
-        "mac",
-      ),
-    /different versions/,
-  );
-  assert.throws(
-    () =>
-      mergeUpdateManifests(
-        primary,
-        {
-          ...secondary,
-          files: [{ url: "dohc-0.1.0-mac-arm64.zip", sha512: "different", size: 12 }],
-        },
-        "mac",
-      ),
-    /Conflicting entries/,
-  );
-});
-
 test("mock update server serves files and blocks traversal/directory-link escapes", async () => {
   const root = await mkdtemp(join(tmpdir(), "dohc-update-server-"));
   const outside = await mkdtemp(join(tmpdir(), "dohc-outside-"));
@@ -409,32 +366,6 @@ test("update-desktop-package-version stamps the version when run as a command", 
   assert.equal(packageJson.version, "0.1.1-nightly.20260621.2.1");
 });
 
-test("merge-update-manifests writes the merged manifest when run as a command", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "dohc-merge-command-"));
-  const manifest = (arch) =>
-    [
-      "version: 0.1.0",
-      "files:",
-      `  - url: dohc-0.1.0-mac-${arch}.zip`,
-      `    sha512: ${arch}`,
-      "    size: 1",
-      `path: dohc-0.1.0-mac-${arch}.zip`,
-      `sha512: ${arch}`,
-      "",
-    ].join("\n");
-  await writeFile(join(directory, "arm64.yml"), manifest("arm64"));
-  await writeFile(join(directory, "x64.yml"), manifest("x64"));
-  await runReleaseScript("merge-update-manifests.mjs", [
-    "--platform", "mac",
-    join(directory, "arm64.yml"), join(directory, "x64.yml"), join(directory, "merged.yml"),
-  ]);
-  const merged = parseUpdateManifest(await readFile(join(directory, "merged.yml"), "utf8"));
-  assert.deepEqual(
-    merged.files.map((file) => file.url).sort(),
-    ["dohc-0.1.0-mac-arm64.zip", "dohc-0.1.0-mac-x64.zip"],
-  );
-});
-
 test("mock-update-server serves its root when run as a command", async () => {
   const root = await mkdtemp(join(tmpdir(), "dohc-update-command-"));
   await writeFile(join(root, "latest.yml"), "version: 0.1.0\n");
@@ -489,13 +420,13 @@ function workflowValues(value) {
   return [value];
 }
 
-function releaseExpression(expression, needs, secrets = {}, inputs = {}) {
+function releaseExpression(expression, needs, secrets = {}, inputs = {}, matrix = {}) {
   // These release guards use string comparisons and operators shared by Actions and JavaScript.
   assert.match(expression, /^\$\{\{[\s\S]*\}\}$/u);
-  return Function("needs", "secrets", "inputs", "fromJSON", `return (${expression.slice(3, -2)});`)(needs, secrets, inputs, JSON.parse);
+  return Function("needs", "secrets", "inputs", "matrix", "fromJSON", `return (${expression.slice(3, -2)});`)(needs, secrets, inputs, matrix, JSON.parse);
 }
 
-test("desktop releases start only by dispatch, run on self-hosted runners, and preserve unsigned package smoke", () => {
+test("desktop releases start only by dispatch, run on self-hosted Windows and Linux runners, and preserve unsigned package smoke", () => {
   const { jobs } = releaseWorkflow;
   assert.deepEqual(Object.keys(releaseWorkflow.on), ["workflow_dispatch"], "only a dispatch can start a release");
   assert.equal(releaseWorkflow.concurrency["cancel-in-progress"], false, "a publish in progress must finish");
@@ -514,7 +445,7 @@ test("desktop releases start only by dispatch, run on self-hosted runners, and p
   const dispatchPlatforms = releaseWorkflow.on.workflow_dispatch.inputs.platforms.options;
   for (const [name, job] of Object.entries(jobs)) {
     const runners = name === "build"
-      ? desktopReleaseTargets("all").map(target => target.runner)
+      ? desktopReleaseTargets("windows-linux").map(target => target.runner)
       : dispatchPlatforms.map(platforms => releaseExpression(job["runs-on"], {}, {}, { platforms }));
     if (name !== "build") {
       assert.deepEqual(runners, dispatchPlatforms.map(platforms => ["self-hosted", platforms === "linux" ? "linux" : "windows", "x64"]),
@@ -524,8 +455,8 @@ test("desktop releases start only by dispatch, run on self-hosted runners, and p
     for (const runner of runners) {
       assert.ok(Array.isArray(runner), `${name} has explicit runner labels`);
       assert.ok(runner.includes("self-hosted"));
-      assert.ok(runner.some(label => ["linux", "windows", "macos"].includes(label)));
-      assert.ok(runner.some(label => ["x64", "arm64"].includes(label)));
+      assert.ok(runner.some(label => ["linux", "windows"].includes(label)));
+      assert.ok(runner.includes("x64"));
     }
   }
 
@@ -541,14 +472,23 @@ test("desktop releases start only by dispatch, run on self-hosted runners, and p
   // Draft and published versions must both be refused before packaging.
   assert.ok([jobs["unused-version"].needs].flat().includes("preflight"));
   assert.equal(jobs["unused-version"].permissions.contents, "write");
-  // A channel keeps every platform it has published, unless the dispatch selects them all.
-  const keepPlatforms = releaseStep(jobs["unused-version"], "check-desktop-release-platforms.mjs");
-  assert.equal(keepPlatforms.if, "needs.preflight.outputs.dry_run != 'true'");
-  assert.match(keepPlatforms.run, /set -euo pipefail/);
-  assert.match(keepPlatforms.run, /gh api --paginate/);
-  assert.match(keepPlatforms.run, /--releases release-history\.jsonl/);
-  assert.equal(keepPlatforms.env.RELEASE_CHANNEL, "${{ needs.preflight.outputs.release_channel }}");
-  assert.equal(keepPlatforms.env.RELEASE_PLATFORMS, "${{ inputs.platforms }}");
+  // Publishing checks the release history: a nightly ships every workflow platform at
+  // most once a UTC day, and a channel keeps every platform it has published. The check
+  // runs before packaging, and again in Publish, because a run can publish after midnight.
+  const rulesBeforePackaging = releaseStep(jobs["unused-version"], "check-desktop-release-publication.mjs");
+  const rulesBeforePublishing = releaseStep(jobs.publish, "check-desktop-release-publication.mjs");
+  assert.equal(rulesBeforePackaging.if, "needs.preflight.outputs.dry_run != 'true'");
+  for (const publicationRules of [rulesBeforePackaging, rulesBeforePublishing]) {
+    assert.match(publicationRules.run, /set -euo pipefail/);
+    assert.match(publicationRules.run, /gh api --paginate/);
+    assert.match(publicationRules.run, /\{draft, tag_name, published_at, assets: /);
+    assert.match(publicationRules.run, /--releases release-history\.jsonl/);
+    assert.equal(publicationRules.env.RELEASE_CHANNEL, "${{ needs.preflight.outputs.release_channel }}");
+    assert.equal(publicationRules.env.RELEASE_PLATFORMS, "${{ inputs.platforms }}");
+  }
+  assert.ok(jobs.publish.steps.indexOf(rulesBeforePublishing) < jobs.publish.steps.indexOf(releaseStep(jobs.publish, "softprops/action-gh-release@")),
+    "Publish checks the rules before it creates the release");
+  assert.equal(releaseWorkflow.on.workflow_dispatch.inputs.platforms.default, "windows-linux");
   // Both steps list releases, so the refusal is found by its tag lookup.
   const refuseUsedVersion = releaseStep(jobs["unused-version"], "git/matching-refs/tags/").run;
   assert.match(refuseUsedVersion, /repos\/\$\{GITHUB_REPOSITORY\}\/releases\?per_page=100/);
@@ -576,8 +516,7 @@ test("desktop releases start only by dispatch, run on self-hosted runners, and p
   assert.equal(packageSteps[0], packageDesktop);
   assert.match(packageDesktop.run, /builder_args=\(--publish never/, "packaging cannot publish directly");
   assert.match(packageDesktop.run, /builder_args\+=\(-c\.forceCodeSigning=true\)/, "required signing must fail without an identity");
-  assert.match(packageDesktop.run, /CSC_IDENTITY_AUTO_DISCOVERY=false/, "unsigned macOS runs disable signing discovery");
-  assert.match(packageDesktop.run, /builder_args\+=\(-c\.mac\.identity=null\)/, "unsigned macOS runs disable electron-builder signing");
+  assert.match(packageDesktop.run, /CSC_IDENTITY_AUTO_DISCOVERY=false/, "unsigned runs disable signing discovery");
   releaseStep(jobs.build, "verify-desktop-release-artifacts.mjs");
   const fuseSmoke = releaseStep(jobs.build, "smoke:fuses:desktop");
   assert.equal(fuseSmoke.if, "runner.os == 'Linux'");
@@ -587,33 +526,79 @@ test("desktop releases start only by dispatch, run on self-hosted runners, and p
   const windowsSmoke = releaseStep(jobs.build, "--binary apps/desktop/release/win-unpacked/dohc.exe");
   assert.equal(windowsSmoke.if, "runner.os == 'Windows'");
   assert.match(windowsSmoke.run, /--package-commit '\$\{\{ github\.sha \}\}'/);
-  const macSmoke = jobs.build.steps.find(step => step.if === "runner.os == 'macOS'" && step.run === "pnpm smoke:fuses:desktop");
-  assert.ok(macSmoke, "the macOS package's signature, fuses and boot are checked");
-  const macDirectory = macSmoke.env.DOHC_SMOKE_PACKAGE_DIRECTORY
-    .match(/^\$\{\{ github\.workspace \}\}\/apps\/desktop\/release\/(\$\{\{ .+ \}\})\/dohc\.app$/u)?.[1];
-  assert.ok(macDirectory, "the macOS smoke boots a bundle electron-builder wrote under apps/desktop/release");
-  for (const [arch, directory] of [["arm64", "mac-arm64"], ["x64", "mac"]]) {
-    assert.equal(Function("matrix", `return (${macDirectory.slice(3, -2)});`)({ arch }), directory, `the ${arch} smoke boots its own bundle`);
-  }
   const upload = releaseStep(jobs.build, "actions/upload-artifact@");
   const order = step => jobs.build.steps.indexOf(step);
   assert.ok(order(packageDesktop) < order(fuseSmoke), "the Linux fuse smoke boots the package electron-builder wrote");
-  assert.ok(order(packageDesktop) < order(macSmoke), "the macOS smoke boots the package electron-builder wrote");
-  for (const smoke of [fuseSmoke, windowsSmoke, macSmoke]) assert.ok(order(smoke) < order(upload), "the packaged smoke runs before the upload");
-  // Package smoke fails a required-signing Mac run that would skip notarization.
+  for (const smoke of [fuseSmoke, windowsSmoke]) assert.ok(order(smoke) < order(upload), "the packaged smoke runs before the upload");
+  // Package smoke fails a required-signing Windows run without the certificate packaging uses.
   const packageSmoke = releaseStep(jobs.build, "smoke:package:desktop");
-  for (const name of ["APPLE_ID", "APPLE_APP_SPECIFIC_PASSWORD", "APPLE_TEAM_ID"]) {
-    assert.ok(packageDesktop.env[name], `packaging notarizes with ${name}`);
-    assert.equal(packageSmoke.env[name], packageDesktop.env[name], `Package smoke sees the ${name} that packaging uses`);
-  }
+  assert.equal(packageSmoke.env.WIN_CSC_LINK, packageDesktop.env.WIN_CSC_LINK, "Package smoke sees the certificate that packaging uses");
 
+  // The Mac release command builds macOS with this Mac's keychain, so the
+  // workflow holds no macOS target, job, or credential.
+  assert.doesNotMatch(releaseWorkflowSource, /secrets\.(MACOS|APPLE)_|== 'macOS'|mac\.identity|mac-arm64/u, "the workflow builds no macOS package");
   const secretExpressions = workflowValues(releaseWorkflow).filter(value => typeof value === "string" && value.includes("secrets."));
   assert.ok(secretExpressions.length > 0, "the workflow still declares release secrets");
   for (const expression of secretExpressions) {
     const secrets = Object.fromEntries([...expression.matchAll(/secrets\.(\w+)/gu)].map(([, name]) => [name, `configured-${name}`]));
-    assert.equal(releaseExpression(expression, { preflight: { outputs: { dry_run: "true" } } }, secrets), "", "dry runs receive no release secrets");
-    assert.ok(releaseExpression(expression, { preflight: { outputs: { dry_run: "false" } } }, secrets), "publishing can use configured secrets");
+    // Signing secrets belong to one platform. Every other secret serves all targets.
+    const owner = /secrets\.WIN_/u.test(expression) ? "Windows" : null;
+    for (const target of desktopReleaseTargets("windows-linux")) {
+      const matrix = { os: target.os };
+      assert.equal(releaseExpression(expression, { preflight: { outputs: { dry_run: "true" } } }, secrets, {}, matrix), "", "dry runs receive no release secrets");
+      const published = releaseExpression(expression, { preflight: { outputs: { dry_run: "false" } } }, secrets, {}, matrix);
+      if (owner && target.os !== owner) assert.equal(published, "", `${target.label} receives no ${owner} signing secret`);
+      else assert.ok(published, `${target.label} publishing can use configured secrets`);
+    }
   }
+});
+
+test("the upgrade check opens the newest published nightly, and only legacy nightlies skip it", () => {
+  const nightly = (tag_name, published_at, names = [`dohc-${tag_name}-linux-x86_64.AppImage`], draft = false) =>
+    ({ tag_name, published_at, draft, assets: names.map((name) => ({ name })) });
+  const older = nightly("v0.1.2-nightly.20261017.40.1", "2026-10-17T04:00:00Z");
+  const newer = nightly("v0.1.2-nightly.20261018.41.1", "2026-10-18T04:00:00Z");
+  const stable = nightly("v0.1.2", "2026-10-19T04:00:00Z");
+  const draft = nightly("v0.1.2-nightly.20261019.42.1", "2026-10-19T05:00:00Z", undefined, true);
+  assert.deepEqual(selectUpgradeNightly([older, newer, stable, draft]), { tag: newer.tag_name }, "drafts and stable releases are not nightlies");
+  assert.match(selectUpgradeNightly([stable]).notice, /No nightly is published yet/u);
+  assert.equal(selectUpgradeNightly([]).tag, null);
+  assert.deepEqual(LEGACY_NIGHTLIES, ["v0.1.1-nightly.20260622.15.1"]);
+  const legacy = nightly(LEGACY_NIGHTLIES[0], "2026-06-22T09:42:56Z");
+  assert.equal(selectUpgradeNightly([legacy]).tag, null, "a nightly from before the packaged engine skips the check");
+  assert.equal(selectUpgradeNightly([legacy, older]).tag, older.tag_name, "a later nightly replaces the legacy one");
+  // A newer nightly without an AppImage must not hand the check to an older one.
+  const windowsOnly = nightly("v0.1.2-nightly.20261019.43.1", "2026-10-19T06:00:00Z", ["dohc-setup.exe"]);
+  assert.throws(() => selectUpgradeNightly([older, windowsOnly]), /v0\.1\.2-nightly\.20261019\.43\.1, the newest published nightly, has no Linux AppImage/u);
+  assert.throws(() => selectUpgradeNightly([{ ...older, published_at: null }]), /no publication time/u);
+});
+
+test("the Linux package opens a workspace from the previous nightly before anything uploads it", () => {
+  const { build } = releaseWorkflow.jobs;
+  const choose = releaseStep(build, "scripts/select-upgrade-nightly.mjs");
+  assert.equal(choose.id, "previous-nightly");
+  assert.equal(choose.if, "runner.os == 'Linux'");
+  assert.equal(choose.env.GH_TOKEN, "${{ github.token }}", "the step reads releases with the job token");
+  assert.match(choose.run, /--jq '\.\[\] \| \{tag_name, draft, published_at, assets: \[\.assets\[\] \| \{name\}\]\}'/u, "the helper sees every release and decides");
+  assert.match(choose.run, /--github-output$/mu);
+  const upgrade = releaseStep(build, "src/workspaces/engineUpgrade.e2e.test.ts");
+  assert.equal(upgrade.if, "runner.os == 'Linux' && steps.previous-nightly.outputs.tag != ''", "only the helper's skip skips the check");
+  assert.equal(upgrade.env.PREVIOUS_NIGHTLY, "${{ steps.previous-nightly.outputs.tag }}");
+  assert.equal(upgrade.env.GH_TOKEN, "${{ github.token }}");
+  assert.equal(upgrade.env.DOHC_REQUIRE_UPGRADE_E2E, "1", "a missing engine fails the check instead of skipping it");
+  assert.equal(upgrade.env.DOHC_TEST_ENGINE_BINARY,
+    "${{ github.workspace }}/apps/desktop/release/linux-unpacked/resources/workspace-engine/dohc-workspace-engine",
+    "the check opens the workspace with the engine this run packaged");
+  assert.match(upgrade.run, /--appimage-extract/u, "the AppImage is extracted without FUSE");
+  assert.match(upgrade.run, /download="\$\{RUNNER_TEMP\}\/previous-nightly"/u, "the previous nightly stays out of apps/desktop/release");
+  assert.match(upgrade.run, /gh release download "\$PREVIOUS_NIGHTLY" .*--dir "\$download"/u);
+  assert.match(upgrade.run, /export DOHC_UPGRADE_PREVIOUS_ENGINE="\$download\/squashfs-root\/resources\/workspace-engine\/dohc-workspace-engine"/u);
+  assert.match(upgrade.run, /if \[\[ ! -x "\$DOHC_UPGRADE_PREVIOUS_ENGINE" \]\]; then\n\s+echo "::error::[^\n]+"\n\s+exit 1/u, "a nightly without an executable engine fails the check");
+  assert.doesNotMatch(upgrade.run, /exit 0/u, "the check step itself never skips");
+  const order = step => build.steps.indexOf(step);
+  assert.ok(order(releaseStep(build, "smoke:fuses:desktop")) < order(choose), "the check runs after the fuse smoke");
+  assert.equal(order(upgrade), order(choose) + 1);
+  assert.ok(order(upgrade) < order(releaseStep(build, "actions/upload-artifact@")), "the check runs before the upload");
 });
 
 test("desktop release stages the Rust engine and Collection compiler for the packaged architecture", async () => {
@@ -723,9 +708,7 @@ test("desktop release stages the Rust engine and Collection compiler for the pac
 
   const build = releaseWorkflow.jobs.build;
   assert.equal(build.strategy.matrix.include, "${{ fromJSON(needs.preflight.outputs.matrix) }}", "preflight selects the package matrix");
-  assert.deepEqual(desktopReleaseTargets("all").map(({ artifact_platform, arch, target }) => [artifact_platform, arch, target]).sort(), [
-    ["mac", "x64", "x86_64-apple-darwin"],
-    ["mac", "arm64", "aarch64-apple-darwin"],
+  assert.deepEqual(desktopReleaseTargets("windows-linux").map(({ artifact_platform, arch, target }) => [artifact_platform, arch, target]).sort(), [
     ["win", "x64", "x86_64-pc-windows-msvc"],
     ["linux", "x64", "x86_64-unknown-linux-gnu"],
   ].sort());
@@ -737,17 +720,13 @@ test("desktop release stages the Rust engine and Collection compiler for the pac
     .replace('"${{ matrix.target }}"', target)
     .trim().split(/\s+/);
   assert.equal(buildModule.parseTargetArgument(engineArgs), target);
-  // The Apple silicon runner packages macOS x64 with the x64 Collection compiler.
+  // Each target packages on a runner of its own architecture, so the install
+  // needs no --cpu and packaging checks the compiler the desktop build staged.
   const installs = build.steps.filter(step => /\bpnpm (install|i)\b/.test(step.run ?? ""));
-  assert.deepEqual(installs.map(step => step.run), ["pnpm install --frozen-lockfile --cpu=current --cpu=${{ matrix.arch }}"]);
-  // A later pnpm run or exec would otherwise reinstall without --cpu.
-  assert.equal(build.env.pnpm_config_verify_deps_before_run, "false");
-  for (const step of build.steps) assert.equal(step.env?.pnpm_config_verify_deps_before_run, undefined, `${step.name} keeps the install`);
-  const stageCompiler = releaseStep(build, "stage-app-compiler.mjs");
-  assert.equal(stageCompiler.run, "node apps/desktop/scripts/stage-app-compiler.mjs --arch=${{ matrix.arch }}");
+  assert.deepEqual(installs.map(step => step.run), ["pnpm install --frozen-lockfile"]);
+  assert.ok(!build.steps.some(step => step.run?.includes("stage-app-compiler.mjs")), "the desktop build stages the compiler");
   const order = step => build.steps.indexOf(step);
-  assert.ok(order(releaseStep(build, "pnpm build:desktop")) < order(stageCompiler), "target staging replaces the build's runner staging");
-  assert.ok(order(stageCompiler) < order(releaseStep(build, "electron-builder")), "packaging checks the target's compiler");
+  assert.ok(order(releaseStep(build, "pnpm build:desktop")) < order(releaseStep(build, "electron-builder")), "packaging checks the staged compiler");
 });
 
 test("desktop release workflow uploads only distributable release assets", () => {
@@ -760,12 +739,12 @@ test("desktop release workflow uploads only distributable release assets", () =>
   );
   assert.match(
     prepareReleaseUpload,
-    /\*\/\*\.app\/\*\|.*\*\/win-unpacked\/\*\|.*\*\/linux-unpacked\/\*/,
+    /\*\/win-unpacked\/\*\|\*\/linux-unpacked\/\*/,
     "release upload step must skip unpacked app internals that contain duplicate basenames",
   );
   assert.match(
     prepareReleaseUpload,
-    /latest\*\.yml\|nightly\*\.yml\|\*\.dmg\|\*\.zip\|\*\.exe\|\*\.AppImage\|\*\.blockmap/,
+    /latest\*\.yml\|nightly\*\.yml\|\*\.exe\|\*\.AppImage\|\*\.deb\|\*\.blockmap/,
     "release upload step must allow update manifests and configured installer artifacts",
   );
   assert.match(
@@ -899,6 +878,19 @@ test("the installer leaves out every source map", async () => {
   assert.ok(builder.files.includes("dist/**"));
   assert.ok(builder.files.includes("!dist/**/*.map"));
 });
+// Writes the update manifest fields the verifier reads, as electron-builder lays them out.
+function updateManifest({ version, files, path, sha512 }) {
+  const quote = JSON.stringify;
+  return [
+    `version: ${quote(version)}`,
+    "files:",
+    ...files.flatMap(file => [`  - url: ${quote(file.url)}`, `    sha512: ${quote(file.sha512)}`, `    size: ${file.size}`]),
+    `path: ${quote(path)}`,
+    `sha512: ${quote(sha512)}`,
+    "",
+  ].join("\n");
+}
+
 async function artifactFixture(platform = "win", arch = "x64") {
   const directory = await mkdtemp(join(tmpdir(), "dohc-artifact-test-"));
   const version = "0.1.0";
@@ -909,28 +901,42 @@ async function artifactFixture(platform = "win", arch = "x64") {
   const sha512 = createHash("sha512").update(bytes).digest("base64");
   await writeFile(join(directory, name), bytes);
   if (platform === "mac") await writeFile(join(directory, `dohc-${version}-mac-${arch}.dmg`), "dmg fixture");
-  const manifest = { version, files: [{ url: name, sha512, size: bytes.length }], path: name, sha512 };
+  const files = [{ url: name, sha512, size: bytes.length }];
+  // electron-builder lists both Linux packages in one manifest, the .deb under amd64.
+  if (platform === "linux") {
+    const deb = Buffer.from("deb package fixture");
+    const debName = `dohc-${version}-linux-amd64.deb`;
+    await writeFile(join(directory, debName), deb);
+    files.push({ url: debName, sha512: createHash("sha512").update(deb).digest("base64"), size: deb.length });
+  }
+  const manifest = { version, files, path: name, sha512 };
   const manifestPath = join(directory, `latest${platform === "win" ? "" : `-${platform}`}.yml`);
-  await writeFile(manifestPath, serializeUpdateManifest(manifest));
+  await writeFile(manifestPath, updateManifest(manifest));
   return { options: { directory, platform, arch, version, channel: "latest" }, name, manifest, manifestPath };
 }
 
 test("release verification hashes distributable files for each configured platform", async () => {
-  for (const [platform, arch] of [["win", "x64"], ["linux", "x64"], ["mac", "x64"], ["mac", "arm64"]]) {
+  for (const [platform, arch] of [["win", "x64"], ["linux", "x64"], ["mac", "arm64"]]) {
     const { options } = await artifactFixture(platform, arch);
     const result = await verifyDesktopReleaseArtifacts(options);
     assert.equal(result.status, "passed");
-    assert.equal(result.artifacts.length, platform === "mac" ? 2 : 1);
+    assert.equal(result.artifacts.length, platform === "win" ? 1 : 2);
     assert.ok(result.excludes.includes("installation"));
   }
+  // A Linux manifest that leaves out the .deb strands every .deb install on its version.
+  const linux = await artifactFixture("linux", "x64");
+  await writeFile(linux.manifestPath, updateManifest({ ...linux.manifest, files: linux.manifest.files.slice(0, 1) }));
+  await assert.rejects(verifyDesktopReleaseArtifacts(linux.options), /does not list the x64 update artifact: dohc-0\.1\.0-linux-amd64\.deb/);
+  const intel = await artifactFixture("mac", "x64");
+  await assert.rejects(verifyDesktopReleaseArtifacts(intel.options), /Unsupported release target: mac-x64/);
 });
 
 test("release verification rejects changed bytes, version, and legacy updater metadata", async () => {
   const { options, name, manifest, manifestPath } = await artifactFixture();
   await assert.rejects(verifyDesktopReleaseArtifacts({ ...options, version: "0.2.0" }), /Manifest version/);
-  await writeFile(manifestPath, serializeUpdateManifest({ ...manifest, sha512: "incorrect" }));
+  await writeFile(manifestPath, updateManifest({ ...manifest, sha512: "incorrect" }));
   await assert.rejects(verifyDesktopReleaseArtifacts(options), /Manifest path and SHA-512/);
-  await writeFile(manifestPath, serializeUpdateManifest(manifest));
+  await writeFile(manifestPath, updateManifest(manifest));
   await writeFile(join(options.directory, name), "different package bytes!");
   await assert.rejects(verifyDesktopReleaseArtifacts(options), /size or SHA-512/);
 });
@@ -959,14 +965,14 @@ test("release verification rejects missing installers and wrong update architect
   const alternate = "other.exe";
   await writeFile(join(win.options.directory, alternate), await readFile(join(win.options.directory, win.name)));
   const manifest = { ...win.manifest, files: [{ ...win.manifest.files[0], url: alternate }], path: alternate };
-  await writeFile(win.manifestPath, serializeUpdateManifest(manifest));
+  await writeFile(win.manifestPath, updateManifest(manifest));
   await assert.rejects(verifyDesktopReleaseArtifacts(win.options), /does not list the x64 update artifact/);
 });
 
 test("release verification rejects artifact paths outside the release directory", async () => {
   const { options, name, manifest, manifestPath } = await artifactFixture();
   for (const url of ["../outside.exe", "https://example.com/installer.exe", "..%2Foutside.exe"]) {
-    await writeFile(manifestPath, serializeUpdateManifest({ ...manifest, files: [{ ...manifest.files[0], url }] }));
+    await writeFile(manifestPath, updateManifest({ ...manifest, files: [{ ...manifest.files[0], url }] }));
     await assert.rejects(verifyDesktopReleaseArtifacts(options), /local filename/);
   }
   const outside = await mkdtemp(join(tmpdir(), "dohc-artifact-outside-"));
@@ -974,6 +980,498 @@ test("release verification rejects artifact paths outside the release directory"
   await rm(join(options.directory, name));
   // Containment must fail before the file-type check; Windows junctions need no symlink privilege.
   await symlink(outside, join(options.directory, name), process.platform === "win32" ? "junction" : "dir");
-  await writeFile(manifestPath, serializeUpdateManifest(manifest));
+  await writeFile(manifestPath, updateManifest(manifest));
   await assert.rejects(verifyDesktopReleaseArtifacts(options), /escapes its directory/);
+});
+
+const RELEASE_COMMIT = "0123456789abcdef0123456789abcdef01234567";
+const MAIN_COMMIT = "9".repeat(40);
+const HEAD_COMMIT = "e".repeat(40);
+const IDENTITY = "Developer ID Application: Example Maker (TEAM123456)";
+const KEYCHAIN = "/Users/maker/Library/Keychains/dohc-release.keychain-db";
+const NIGHTLY_TAG = "v0.1.1-nightly.20261019.42.1";
+const lines = values => values.map(value => JSON.stringify(value)).join("\n") + "\n";
+const publishJobs = (overrides = {}) => ({
+  "gh api --paginate repos/dohchq/dohc/actions/runs/7/jobs": { stdout: lines([
+    { name: "Preflight", conclusion: "success", run_attempt: 1, head_sha: RELEASE_COMMIT },
+    { name: "Publish", conclusion: "success", run_attempt: 1, head_sha: RELEASE_COMMIT, ...overrides },
+  ]) },
+});
+
+// Answers the commands the Mac release preflight runs, by longest matching prefix.
+function fakeMac(answers = {}) {
+  const calls = [];
+  const table = {
+    "gh release view": { stdout: JSON.stringify({ isDraft: false, isPrerelease: true, assets: [{ name: "nightly.yml" }, { name: "nightly-linux.yml" }] }) },
+    "gh api repos/dohchq/dohc/commits/refs/tags/": { stdout: `${RELEASE_COMMIT}\n` },
+    "gh api repos/dohchq/dohc/git/ref/heads/main": { stdout: `${MAIN_COMMIT}\n` },
+    "gh api --paginate repos/dohchq/dohc/actions/workflows/desktop-release.yml/runs": { stdout: lines([{ id: 7, run_number: 42, event: "workflow_dispatch" }]) },
+    ...publishJobs(),
+    "gh api repos/dohchq/dohc/compare/": { stdout: "ahead\n" },
+    "gh api repos/dohchq/dohc --jq .permissions.push": { stdout: "true\n" },
+    "git rev-parse HEAD": { stdout: `${HEAD_COMMIT}\n` },
+    "git status --porcelain": { stdout: "" },
+    "security find-certificate -a -c Developer ID Application -Z": { stdout: `SHA-256 hash: ${"C".repeat(64)}\nSHA-1 hash: ${"A".repeat(40)}\nkeychain: "${KEYCHAIN}"\n` },
+    "security find-generic-password -a com.apple.gke.notary.tool.saved-creds.": { stdout: "" },
+    "gh variable list": { stdout: JSON.stringify([{ name: "DOHC_POSTHOG_KEY", value: "phc_abcdefghij0123456789" }, { name: "POSTHOG_CLI_PROJECT_ID", value: "42" }]) },
+    "security find-generic-password -s dohc-posthog-cli-api-key": { stdout: "" },
+    "security find-generic-password -s dohc-posthog-cli-api-key -w": { stdout: "phx_fixture\n" },
+    "security find-identity -v -p codesigning": { stdout: `  1) ${"A".repeat(40)} "${IDENTITY}"\n     1 valid identities found\n` },
+    "xcrun notarytool history --keychain-profile": { stdout: "{\"history\":[]}" },
+    ...answers,
+  };
+  const run = (command, args) => {
+    const line = [command, ...args].join(" ");
+    calls.push(line);
+    const prefix = Object.keys(table).filter(candidate => line.startsWith(candidate)).sort((a, b) => b.length - a.length)[0];
+    if (!prefix) throw new Error(`The release ran an unexpected command: ${line}`);
+    return { status: 0, stdout: "", stderr: "", ...table[prefix] };
+  };
+  return { run, calls };
+}
+
+const nightlyArgs = ["--version", NIGHTLY_TAG, "--channel", "nightly", "--keychain", KEYCHAIN];
+const releaseWith = (assets, extra = {}) => ({ "gh release view": { stdout: JSON.stringify({ isDraft: false, isPrerelease: true, assets: assets.map(name => ({ name })), ...extra }) } });
+const macHost = (extra = {}) => ({ platform: "darwin", arch: "arm64", keychainStatus: () => 2, ...extra });
+const stableRelease = { ...releaseWith(["latest.yml"], { isPrerelease: false }), "gh api --paginate repos/dohchq/dohc/actions/workflows/desktop-release.yml/runs": { stdout: lines([{ id: 7, run_number: 3, event: "workflow_dispatch" }]) } };
+
+test("the Mac release command reads its release from a version or tag and a channel", () => {
+  assert.deepEqual(parseMacReleaseArgs(["--", "--version", NIGHTLY_TAG, "--channel", "nightly"]), {
+    version: "0.1.1-nightly.20261019.42.1", channel: "nightly", keychain: DEFAULT_KEYCHAIN, keychainProfile: "dohc-notary", dryRun: false, rehearse: false,
+  });
+  assert.equal(DEFAULT_KEYCHAIN, join(homedir(), "Library/Keychains/dohc-release.keychain-db"));
+  assert.equal(parseMacReleaseArgs(["--version", "0.1.0", "--channel", "latest", "--keychain-profile", "notary"]).keychainProfile, "notary");
+  for (const args of [[], ["--version", "0.1.0"], ["--version", "0.1.0", "--channel", "stable"], [...nightlyArgs, "--sign"]]) {
+    assert.throws(() => parseMacReleaseArgs(args), /pnpm release:macos/);
+  }
+  assert.throws(() => parseMacReleaseArgs([...nightlyArgs, "--rehearse"]), /needs --dry-run/);
+});
+
+test("the Mac release relies on the workflow's Publish job running only after Preflight passes on refs/heads/main", () => {
+  const { jobs } = releaseWorkflow;
+  assert.equal(jobs.publish.name, PUBLISH_JOB);
+  assert.equal(jobs.preflight.if, "github.ref == 'refs/heads/main'");
+  for (const job of [jobs.publish, jobs.build]) assert.ok([job.needs].flat().includes("preflight"), "Publish runs only after Preflight");
+  assert.ok([jobs.publish.needs].flat().includes("build"));
+});
+
+test("the Mac release preflight ties the tag to a dispatched run's Publish job on the main branch, and leaves the keychain locked", async () => {
+  const fake = fakeMac();
+  const plan = await preflightMacRelease(parseMacReleaseArgs(nightlyArgs), { run: fake.run, ...macHost() });
+  assert.equal(plan.commit, RELEASE_COMMIT);
+  assert.equal(plan.buildCommit, RELEASE_COMMIT, "a release builds the commit its run published");
+  assert.equal(plan.state.kind, "fresh");
+  assert.equal(plan.signs, true, "a locked release keychain is ready for a release");
+  assert.equal(plan.reporting.POSTHOG_CLI_API_KEY, undefined, "the PostHog key is read only after unlocking");
+  for (const call of [
+    `gh api --paginate repos/dohchq/dohc/actions/workflows/desktop-release.yml/runs?head_sha=${RELEASE_COMMIT}&event=workflow_dispatch&per_page=100 --jq .workflow_runs[] | {id, run_number, event}`,
+    "gh api --paginate repos/dohchq/dohc/actions/runs/7/jobs?filter=all&per_page=100 --jq .jobs[] | {name, conclusion, run_attempt, head_sha}",
+    `gh api repos/dohchq/dohc/compare/${RELEASE_COMMIT}...${MAIN_COMMIT} --jq .status`,
+    `gh api repos/dohchq/dohc/compare/${HEAD_COMMIT}...${MAIN_COMMIT} --jq .status`,
+    `security find-certificate -a -c Developer ID Application -Z ${KEYCHAIN}`,
+    `security find-generic-password -a com.apple.gke.notary.tool.saved-creds.dohc-notary ${KEYCHAIN}`,
+    `security find-generic-password -s dohc-posthog-cli-api-key ${KEYCHAIN}`,
+  ]) assert.ok(fake.calls.includes(call), call);
+  assert.ok(!fake.calls.some(call => /find-identity|notarytool|-w /.test(call)), "nothing that needs the unlocked keychain runs before the build");
+  assert.ok(!fake.calls.some(call => /compare\/[0-9a-f]+\.\.\.main/.test(call)), "a tag named main cannot stand in for the branch");
+
+  const stable = await preflightMacRelease(parseMacReleaseArgs(["--version", "v0.1.0", "--channel", "latest", "--keychain", KEYCHAIN]), {
+    run: fakeMac({ ...stableRelease, ...publishJobs({ run_attempt: 2 }) }).run, ...macHost(),
+  });
+  assert.equal(stable.version, "0.1.0");
+});
+
+test("the Mac release preflight refuses another host, a release it cannot read, and a tag no dispatched run on main published", async () => {
+  const preflight = (answers = {}, host = {}, args = nightlyArgs) =>
+    preflightMacRelease(parseMacReleaseArgs(args), { run: fakeMac(answers).run, ...macHost(host) });
+  for (const host of [{ arch: "x64" }, { platform: "linux" }]) {
+    await assert.rejects(preflight({}, { ...host, run: () => assert.fail("no command runs on another host") }), /Apple silicon with arm64 Node/);
+  }
+  await assert.rejects(preflight({ "gh release view": { status: 1, stderr: "release not found" } }), /has no release v0\.1\.1-nightly\.20261019\.42\.1: release not found/);
+  await assert.rejects(preflight(releaseWith([], { isDraft: true })), /still a draft/);
+  await assert.rejects(preflight(releaseWith([], { isPrerelease: false })), /not on the nightly channel/);
+  await assert.rejects(preflight({}, {}, ["--version", NIGHTLY_TAG, "--channel", "latest"]), /not a latest version/);
+  const unpublished = /no dispatched Desktop Release run 42, attempt 1, published that commit from main/;
+  // A run dispatched on a tag named main reports head_branch main, but skips Preflight and so Publish.
+  await assert.rejects(preflight(publishJobs({ conclusion: "skipped" })), unpublished);
+  await assert.rejects(preflight({ "gh api --paginate repos/dohchq/dohc/actions/workflows/desktop-release.yml/runs": { stdout: lines([{ id: 7, run_number: 42, event: "push" }]) } }), unpublished);
+  await assert.rejects(preflight({ "gh api --paginate repos/dohchq/dohc/actions/workflows/desktop-release.yml/runs": { stdout: lines([{ id: 7, run_number: 41, event: "workflow_dispatch" }]) } }), unpublished);
+  await assert.rejects(preflight(publishJobs({ run_attempt: 2 })), unpublished);
+  await assert.rejects(preflight(publishJobs({ head_sha: "f".repeat(40) })), unpublished);
+  await assert.rejects(preflight({ ...stableRelease, ...publishJobs({ conclusion: "skipped" }) }, {}, ["--version", "0.1.0", "--channel", "latest"]),
+    /no dispatched Desktop Release run published that commit from main/);
+  await assert.rejects(preflight({ [`gh api repos/dohchq/dohc/compare/${RELEASE_COMMIT}`]: { stdout: "diverged\n" } }), new RegExp(`${RELEASE_COMMIT}, the commit of ${NIGHTLY_TAG.replaceAll(".", "\\.")}, is not on main at ${MAIN_COMMIT}`));
+});
+
+test("a real Mac release runs only from a clean checkout on main, and a dry run says where it runs from", async () => {
+  const preflight = (answers, args = nightlyArgs) => preflightMacRelease(parseMacReleaseArgs(args), { run: fakeMac(answers).run, ...macHost() });
+  await assert.rejects(preflight({ "git status --porcelain": { stdout: " M scripts/release-desktop-macos.mjs\n" } }), /uncommitted changes:\n M scripts\/release-desktop-macos\.mjs\nA real release runs from a clean checkout on main/);
+  const unpushed = { [`gh api repos/dohchq/dohc/compare/${HEAD_COMMIT}`]: { status: 1, stderr: "Not Found" } };
+  await assert.rejects(preflight(unpushed), new RegExp(`is at ${HEAD_COMMIT}, which is not on main`));
+  await assert.rejects(preflight({ "gh api repos/dohchq/dohc --jq .permissions.push": { stdout: "false\n" } }), /cannot upload/);
+  const dry = await preflight({ ...unpushed, "git status --porcelain": { stdout: "?? notes.md\n" } }, [...nightlyArgs, "--dry-run"]);
+  assert.deepEqual(dry.notices, [`A dry run runs from any checkout. This one is at ${HEAD_COMMIT}, not on main, with uncommitted changes.`]);
+});
+
+test("the Mac release preflight finishes only an upload it can prove, and refuses other Mac files with the commands that clear them", async () => {
+  const workRoot = await mkdtemp(join(tmpdir(), "dohc-mac-release-work-"));
+  const names = macFileNames("0.1.1-nightly.20261019.42.1", "nightly");
+  const preflight = (assets, host = {}) => preflightMacRelease(parseMacReleaseArgs(nightlyArgs), { workRoot, run: fakeMac(releaseWith(assets)).run, ...macHost(host) });
+  // A release whose Mac manifest is out may already update Macs, so the command never suggests deleting its files.
+  for (const assets of [[names.zip, names.dmg, names.blockmap, names.manifest], [names.manifest, "dohc-0.1.1-nightly.20261019.42.1-mac-x64.zip"]]) {
+    await assert.rejects(preflight(["nightly.yml", ...assets]), (error) => /already has its macOS files, including nightly-mac\.yml\. There is nothing to add/.test(error.message) && !/delete-asset/.test(error.message));
+  }
+  const x64 = "dohc-0.1.1-nightly.20261019.42.1-mac-x64.dmg";
+  await assert.rejects(preflight([names.zip, x64]), new RegExp(`cannot finish[\\s\\S]*gh release delete-asset ${NIGHTLY_TAG} ${names.zip.replaceAll(".", "\\.")} -R dohchq/dohc --yes\\n  gh release delete-asset ${NIGHTLY_TAG} ${x64.replaceAll(".", "\\.")}`));
+  await assert.rejects(preflight([names.zip, names.dmg]), /part of an upload[\s\S]*does not hold the files that run built[\s\S]*delete-asset/);
+
+  const saved = join(workRoot, NIGHTLY_TAG, "files");
+  await mkdir(saved, { recursive: true });
+  for (const name of Object.values(names)) await writeFile(join(saved, name), name);
+  // Finishing an upload signs nothing, so it does not need the release keychain.
+  const plan = await preflight([names.zip, names.dmg], { keychainStatus: () => assert.fail("finishing an upload reads no keychain") });
+  assert.deepEqual(plan.state, { kind: "resume", present: [names.zip, names.dmg] });
+  assert.equal(plan.signs, false);
+});
+
+test("a new Mac release refuses a missing release keychain, or one without one certificate, the notarytool profile, or the PostHog key", async () => {
+  const preflight = (answers = {}, host = {}, args = nightlyArgs) =>
+    preflightMacRelease(parseMacReleaseArgs(args), { run: fakeMac(answers).run, ...macHost(host) });
+  await assert.rejects(preflight({}, { keychainStatus: () => -25294 }), new RegExp(`release keychain ${KEYCHAIN} does not exist`));
+  const certificates = count => ({ "security find-certificate -a -c Developer ID Application -Z": { stdout: `SHA-1 hash: ${"A".repeat(40)}\n`.repeat(count) } });
+  for (const count of [0, 2]) await assert.rejects(preflight(certificates(count)), new RegExp(`holds ${count} Developer ID Application certificates`));
+  await assert.rejects(preflight({ "security find-generic-password -a com.apple.gke.notary.tool.saved-creds.": { status: 44 } }, {}, [...nightlyArgs, "--keychain-profile", "other"]),
+    /no notarytool profile other/);
+  await assert.rejects(preflight({ "security find-generic-password -s dohc-posthog-cli-api-key": { status: 44 } }), /dohc-posthog-cli-api-key in the release keychain/);
+  const unreported = fakeMac({ "gh variable list": { stdout: "[]" } });
+  await preflightMacRelease(parseMacReleaseArgs(nightlyArgs), { run: unreported.run, ...macHost() });
+  assert.ok(!unreported.calls.some(call => call.startsWith("security find-generic-password -s")), "a release that reports nothing needs no PostHog key");
+
+  // A dry run builds unsigned and reports nothing, so a locked or missing keychain cannot stop it.
+  const dry = fakeMac();
+  const dryPlan = await preflightMacRelease(parseMacReleaseArgs([...nightlyArgs, "--dry-run"]), {
+    run: dry.run, ...macHost({ keychainStatus: () => assert.fail("a dry run reads no keychain") }),
+  });
+  assert.deepEqual(signingEnvironment(dryPlan), { CSC_IDENTITY_AUTO_DISCOVERY: "false" });
+  assert.ok(!dry.calls.some(call => /^(security|xcrun|gh variable)/.test(call)), "a dry run reads no signing, notarization, or reporting credential");
+});
+
+test("the release keychain unlocks through security in a terminal, and otherwise the command waits up to 30 minutes", async () => {
+  const plan = { keychain: KEYCHAIN };
+  const statuses = values => () => values.length > 1 ? values.shift() : values[0];
+  const steps = [];
+  const step = async (command, args) => { steps.push([command, ...args].join(" ")); };
+  const locks = [];
+  const run = (command, args) => { locks.push([command, ...args].join(" ")); return { status: 0, stdout: "", stderr: "" }; };
+  const unlock = (keychainStatus, options = {}, relock = false) =>
+    unlockReleaseKeychain(plan, "Packaging", { keychainStatus, step, run, interactive: true, cancelled: () => false, ...options }, { relock });
+  await unlock(statuses([7]));
+  assert.deepEqual(steps, [], "an open keychain needs nothing before the build");
+  await unlock(statuses([2, 7]));
+  assert.deepEqual(steps, [`security unlock-keychain ${KEYCHAIN}`]);
+  await assert.rejects(unlock(statuses([2])), /still locked/);
+
+  // Before packaging, a keychain someone opened early was open while other code ran.
+  steps.length = 0;
+  await unlock(statuses([7, 7]), {}, true);
+  assert.deepEqual(locks, [`security lock-keychain ${KEYCHAIN}`]);
+  assert.deepEqual(steps, [`security unlock-keychain ${KEYCHAIN}`], "it locks the keychain, then unlocks it the usual way");
+  await assert.rejects(unlockReleaseKeychain(plan, "Packaging", { keychainStatus: statuses([7]), step, run: () => ({ status: 1, stdout: "", stderr: "denied" }), interactive: true, cancelled: () => false }, { relock: true }),
+    /Could not lock the release keychain: denied/);
+
+  let clock = 0;
+  const waits = [];
+  const wait = async ms => { waits.push(ms); clock += ms; };
+  await unlock(statuses([2, 2, 2, 7]), { interactive: false, wait, now: () => clock });
+  assert.deepEqual(waits, [5000, 5000]);
+  clock = 0;
+  await assert.rejects(unlock(statuses([2]), { interactive: false, wait, now: () => clock }), /stayed locked for 30 minutes/);
+  assert.equal(clock, UNLOCK_WAIT_MS);
+  await assert.rejects(unlock(statuses([2]), { interactive: false, cancelled: () => true, wait, now: () => 0 }), /Stopped while waiting/);
+});
+
+test("the Mac release command loads only tracked files and Node's own modules, and uploads to the repository the updater reads", async () => {
+  const seen = new Set();
+  const visit = async path => {
+    if (seen.has(path)) return;
+    seen.add(path);
+    for (const [, specifier] of (await readFile(path, "utf8")).matchAll(/^\s*import\s(?:[^;]*?\sfrom\s)?"([^"]+)"/gm)) {
+      if (specifier.startsWith(".")) await visit(fileURLToPath(new URL(specifier, pathToFileURL(path))));
+      else assert.match(specifier, /^node:/, `${path} imports ${specifier} from node_modules`);
+    }
+  };
+  await visit(fileURLToPath(new URL("./release-desktop-macos.mjs", import.meta.url)));
+  assert.ok(seen.size > 1);
+  const { publish } = load(await readFile(new URL("../apps/desktop/electron-builder.yml", import.meta.url), "utf8"));
+  assert.equal(RELEASE_REPOSITORY, `${publish.owner}/${publish.repo}`);
+});
+
+test("after unlocking, signing needs one valid identity, a profile that signs in, and the PostHog key", async () => {
+  const plan = { keychain: KEYCHAIN, keychainProfile: "dohc-notary", signs: true, reporting: { DOHC_POSTHOG_KEY: "phc_abcdefghij0123456789" } };
+  const signing = unlockedSigning(plan, fakeMac().run);
+  assert.deepEqual(signingEnvironment(signing), {
+    CSC_KEYCHAIN: KEYCHAIN, CSC_NAME: "Example Maker (TEAM123456)", APPLE_KEYCHAIN: KEYCHAIN, APPLE_KEYCHAIN_PROFILE: "dohc-notary",
+  });
+  assert.equal(signing.reporting.POSTHOG_CLI_API_KEY, "phx_fixture");
+  const two = `  1) ${"A".repeat(40)} "${IDENTITY}"\n  2) ${"B".repeat(40)} "Developer ID Application: Other (TEAM654321)"\n`;
+  for (const stdout of ["     0 valid identities found\n", two]) {
+    assert.throws(() => unlockedSigning(plan, fakeMac({ "security find-identity -v -p codesigning": { stdout } }).run), /valid Developer ID Application identities/);
+  }
+  assert.throws(() => unlockedSigning(plan, fakeMac({ "xcrun notarytool history --keychain-profile": { status: 69 } }).run), /dohc-notary cannot sign in/);
+});
+
+test("the Mac release stamps the version the workflow stamped for the commit's package version", async () => {
+  await assertWorkflowVersion({ version: "0.1.1-nightly.20261019.42.1", channel: "nightly", commit: RELEASE_COMMIT }, "0.1.0");
+  await assert.rejects(assertWorkflowVersion({ version: "0.1.1-nightly.20261019.42.1", channel: "nightly", commit: RELEASE_COMMIT }, "0.2.0"), /stamps 0\.2\.1-nightly\.20261019\.42\.1, not 0\.1\.1/);
+  await assertWorkflowVersion({ version: "0.1.0", channel: "latest", commit: RELEASE_COMMIT }, "0.1.0");
+  await assert.rejects(assertWorkflowVersion({ version: "0.1.0", channel: "latest", commit: RELEASE_COMMIT }, "0.1.1"), /must match apps\/desktop\/package\.json/);
+});
+
+test("Mac packaging signs and notarizes only a real release, from the release keychain alone, and keeps the DMG out of the update manifest", () => {
+  const real = electronBuilderArgs({ channel: "nightly", signs: true });
+  const dry = electronBuilderArgs({ channel: "nightly", signs: false });
+  for (const args of [real, dry]) {
+    for (const arg of ["--mac", "--arm64", "-c.publish.channel=nightly", "-c.dmg.writeUpdateInfo=false"]) assert.ok(args.includes(arg), arg);
+    assert.equal(args[args.indexOf("--publish") + 1], "never", "packaging cannot publish directly");
+  }
+  for (const arg of ["-c.forceCodeSigning=true", "-c.dmg.sign=true"]) {
+    assert.ok(real.includes(arg), `a release passes ${arg}`);
+    assert.ok(!dry.includes(arg), `a dry run leaves out ${arg}`);
+  }
+  assert.ok(dry.includes("-c.mac.identity=null"));
+  assert.ok(!real.includes("-c.mac.identity=null"));
+
+  const inherited = { PATH: "/usr/bin", CSC_LINK: "cert.p12", CSC_KEY_PASSWORD: "x", APPLE_ID: "a@b", APPLE_APP_SPECIFIC_PASSWORD: "x", APPLE_TEAM_ID: "T", WIN_CSC_LINK: "w", POSTHOG_CLI_API_KEY: "k", DOHC_POSTHOG_KEY: "phc" };
+  assert.deepEqual(releaseEnvironment(inherited, { CSC_NAME: "Example Maker (TEAM123456)" }), { PATH: "/usr/bin", CSC_NAME: "Example Maker (TEAM123456)" });
+
+  const paths = { app: "/r/mac-arm64/dohc.app", dmg: "/r/dohc.dmg" };
+  const line = ([command, args]) => [command, ...args].join(" ");
+  assert.deepEqual(signatureChecks({ ...paths, signs: true }).map(line), [
+    "codesign --verify --deep --strict --verbose=2 /r/mac-arm64/dohc.app",
+    "spctl --assess --type execute --verbose=4 /r/mac-arm64/dohc.app",
+    "xcrun stapler validate /r/mac-arm64/dohc.app",
+    "xcrun stapler validate /r/dohc.dmg",
+  ]);
+  assert.deepEqual(signatureChecks({ ...paths, signs: false }).map(line), ["codesign --verify --deep --strict --verbose=2 /r/mac-arm64/dohc.app"]);
+});
+
+// The four files a Mac release uploads, as electron-builder lays them out, and the plan that uploads them.
+async function macReleaseFiles() {
+  const fixture = await artifactFixture("mac", "arm64");
+  const { directory } = fixture.options;
+  await writeFile(join(directory, `${fixture.name}.blockmap`), "blockmap fixture");
+  const names = macFileNames("0.1.0", "latest");
+  const workDir = await mkdtemp(join(tmpdir(), "dohc-mac-release-run-"));
+  const plan = { tag: "v0.1.0", version: "0.1.0", repo: "dohchq/dohc", channel: "latest", names, savedFiles: directory, workDir, dryRun: false };
+  return { plan, directory, names, files: await macUploadPlan(directory, names), manifestPath: fixture.manifestPath, manifest: fixture.manifest };
+}
+const uploaded = files => files.map(file => ({ name: file.name, state: "uploaded", size: file.size, digest: `sha256:${file.sha256}` }));
+
+test("a Mac release uploads its update manifest after every file it names, and confirms GitHub's sizes and digests", async () => {
+  const { plan, files, names } = await macReleaseFiles();
+  assert.deepEqual(files.map(file => file.name), [names.zip, names.dmg, names.blockmap, names.manifest]);
+  const [binaries, manifest] = uploadCommands(plan, files);
+  assert.deepEqual(binaries, ["gh", ["release", "upload", "v0.1.0", "-R", "dohchq/dohc", ...files.slice(0, -1).map(file => file.path)]]);
+  assert.deepEqual(manifest, ["gh", ["release", "upload", "v0.1.0", "-R", "dohchq/dohc", files[3].path]]);
+  assert.deepEqual(uploadCommands(plan, files.slice(2)).map(([, args]) => args.slice(5)), [[files[2].path], [files[3].path]]);
+  assert.deepEqual(macAssetNames(files.map(({ name }) => ({ name }))), files.map(file => file.name));
+  assert.deepEqual(macAssetNames([{ name: "latest.yml" }, { name: "latest-linux.yml" }, { name: "dohc-0.1.0-win-x64.exe" }]), []);
+
+  assert.doesNotThrow(() => confirmUploaded([{ name: "latest.yml" }, ...uploaded(files)], files));
+  assert.throws(() => confirmUploaded(uploaded(files).slice(1), files), /dohc-0\.1\.0-mac-arm64\.zip\./);
+  assert.throws(() => confirmUploaded(uploaded(files).map((asset, index) => index === 3 ? { ...asset, digest: "sha256:00" } : asset), files), /latest-mac\.yml/);
+});
+
+test("a rerun finishes a stopped Mac upload only when the uploaded files are the ones it kept", async () => {
+  const { plan, files, names, directory } = await macReleaseFiles();
+  const download = async () => join(directory, names.zip);
+  assert.deepEqual(await filesToUpload(plan, [{ name: "latest.yml" }], files, download), files);
+  const partial = uploaded(files).slice(0, 2);
+  assert.deepEqual((await filesToUpload(plan, partial, files, download)).map(file => file.name), [names.blockmap, names.manifest]);
+
+  const recovery = /To start again, delete them[\s\S]*gh release delete-asset v0\.1\.0 dohc-0\.1\.0-mac-arm64\.zip -R dohchq\/dohc --yes/;
+  for (const asset of [{ digest: "sha256:00" }, { size: 1 }, { state: "starter" }]) {
+    await assert.rejects(filesToUpload(plan, [{ ...partial[0], ...asset }, partial[1]], files, download), recovery);
+  }
+  const other = join(directory, "other.zip");
+  await writeFile(other, "other bytes");
+  await assert.rejects(filesToUpload(plan, partial, files, async () => other), /ZIP on release v0\.1\.0 does not have the SHA-512 that latest-mac\.yml names/);
+  await assert.rejects(filesToUpload(plan, uploaded(files), files, download), /already has its macOS files/);
+});
+
+test("a rerun checks the kept files as the stopped run did: the artifact verifier, then the signatures and tickets", async () => {
+  const { plan, directory, names, manifestPath, manifest } = await macReleaseFiles();
+  const steps = [];
+  await verifyKeptFiles(plan, async (command, args) => { steps.push([command, ...args].join(" ")); });
+  const app = join(plan.workDir, "kept-app/dohc.app");
+  assert.deepEqual(steps, [
+    `ditto -x -k ${join(directory, names.zip)} ${join(plan.workDir, "kept-app")}`,
+    `codesign --verify --deep --strict --verbose=2 ${app}`,
+    `spctl --assess --type execute --verbose=4 ${app}`,
+    `xcrun stapler validate ${app}`,
+    `xcrun stapler validate ${join(directory, names.dmg)}`,
+  ]);
+  await writeFile(manifestPath, updateManifest({ ...manifest, version: "0.1.1" }));
+  await assert.rejects(verifyKeptFiles(plan, async () => assert.fail("no signature check runs on files the verifier rejects")), /Manifest version 0\.1\.1 does not match 0\.1\.0/);
+});
+
+// Publishes with a release whose assets the queue gives, view by view, and records each upload.
+async function publishWith({ plan, directory }, { cancelled = () => false, views }) {
+  const steps = [];
+  const run = () => ({ status: 0, stderr: "", stdout: JSON.stringify({ isDraft: false, isPrerelease: false, assets: views.shift() }) });
+  const step = async (command, args) => { steps.push(args.slice(5)); };
+  const result = publishMacFiles(plan, directory, { run, step, cancelled: () => cancelled(steps), download: async () => join(directory, plan.names.zip) });
+  return { steps, result };
+}
+
+test("a Mac release uploads the manifest only after the release holds every file, and starts no upload after a cancellation", async () => {
+  const release = await macReleaseFiles();
+  const { files, directory } = release;
+  const paths = files.map(file => file.path);
+  const done = uploaded(files);
+
+  const finished = await publishWith(release, { views: [[], done.slice(0, 3), done] });
+  await finished.result;
+  assert.deepEqual(finished.steps, [paths.slice(0, 3), [paths[3]]]);
+  const resumed = await publishWith(release, { views: [done.slice(0, 2), done.slice(0, 3), done] });
+  await resumed.result;
+  assert.deepEqual(resumed.steps, [[paths[2]], [paths[3]]], "a rerun uploads only what the release lacks");
+
+  const keep = new RegExp(`\\nThe built files stay in ${RegExp.escape(directory)}\\. Run the same command again`);
+  const lacking = await publishWith(release, { views: [[], done.slice(0, 2)] });
+  await assert.rejects(lacking.result, /does not hold these files as built: dohc-0\.1\.0-mac-arm64\.zip\.blockmap\./);
+  assert.deepEqual(lacking.steps, [paths.slice(0, 3)], "the manifest does not upload while a file it needs is missing");
+  const stopped = await publishWith(release, { cancelled: () => true, views: [[]] });
+  await assert.rejects(stopped.result, new RegExp(`Stopped before the next upload\\.${keep.source}`));
+  assert.deepEqual(stopped.steps, []);
+  const midway = await publishWith(release, { cancelled: steps => steps.length > 0, views: [[]] });
+  await assert.rejects(midway.result, /Stopped before the next upload/);
+  assert.deepEqual(midway.steps, [paths.slice(0, 3)], "the binaries upload, the manifest does not");
+
+  const rehearsal = publishMacFiles({ ...release.plan, dryRun: true, rehearse: true }, directory, { run: () => assert.fail("a rehearsal reads no release"), step: () => assert.fail("a rehearsal uploads nothing"), cancelled: () => false });
+  assert.equal((await rehearsal).length, 2, "a rehearsal shows the plan for a release with no macOS files");
+});
+
+test("a Mac release never uploads a manifest that names a file it does not upload", async () => {
+  const release = await macReleaseFiles();
+  const { manifestPath, manifest } = release;
+  await writeFile(manifestPath, updateManifest({ ...manifest, files: [...manifest.files, { url: "dohc-0.1.0-mac-x64.zip", sha512: "x", size: 1 }] }));
+  const stray = await publishWith(release, { views: [[]] });
+  await assert.rejects(stray.result, /latest-mac\.yml in [\s\S]* names dohc-0\.1\.0-mac-x64\.zip, which this command does not upload\. Nothing was uploaded\./);
+  assert.deepEqual(stray.steps, []);
+});
+
+test("a real Mac release locks the release keychain however it ends, reports a lock that fails, and a dry run leaves it alone", async () => {
+  const keychain = join(await mkdtemp(join(tmpdir(), "dohc-keychain-")), "dohc-release.keychain-db");
+  await writeFile(keychain, "");
+  const locker = status => {
+    const calls = [];
+    return { calls, run: (command, args) => { calls.push([command, ...args].join(" ")); return { status, stdout: "", stderr: status ? "locking failed" : "" }; } };
+  };
+  for (const dryRun of [false, true]) {
+    const lock = locker(0);
+    await assert.rejects(withReleaseKeychain({ dryRun, keychain }, async () => { throw new Error("build failed"); }, lock.run), /build failed/);
+    assert.deepEqual(lock.calls, dryRun ? [] : [`security lock-keychain ${keychain}`]);
+  }
+  // A failed lock keeps the build's own error, and fails a run that otherwise succeeded.
+  await assert.rejects(withReleaseKeychain({ dryRun: false, keychain }, async () => { throw new Error("build failed"); }, locker(1).run), /^Error: build failed$/);
+  await assert.rejects(withReleaseKeychain({ dryRun: false, keychain }, async () => "uploaded", locker(1).run), /Could not lock the release keychain: locking failed\nLock it now with: security lock-keychain/);
+});
+
+test("a real Mac release opens the release keychain only to check signing and to package, never while third-party code runs", async () => {
+  const workRoot = await mkdtemp(join(tmpdir(), "dohc-mac-release-order-"));
+  const names = macFileNames("0.1.0", "latest");
+  const checkout = join(workRoot, "v0.1.0", "checkout");
+  const plan = {
+    tag: "v0.1.0", version: "0.1.0", channel: "latest", repo: "dohchq/dohc", commit: RELEASE_COMMIT, buildCommit: RELEASE_COMMIT, names,
+    workRoot, workDir: join(workRoot, "v0.1.0"), savedFiles: join(workRoot, "v0.1.0", "files"), state: { kind: "fresh" },
+    signs: true, dryRun: false, rehearse: false, keychain: KEYCHAIN, keychainProfile: "dohc-notary",
+    reporting: { DOHC_POSTHOG_KEY: "phc_abcdefghij0123456789", DOHC_POSTHOG_HOST: "", POSTHOG_CLI_PROJECT_ID: "42", POSTHOG_CLI_HOST: "" },
+  };
+  let open = false;
+  const steps = [];
+  const uploads = new Map();
+  const asset = path => {
+    const bytes = readFileSync(path);
+    return { name: basename(path), state: "uploaded", size: bytes.length, digest: `sha256:${createHash("sha256").update(bytes).digest("hex")}` };
+  };
+  const step = async (command, args, env) => {
+    const line = [command, ...args].join(" ");
+    steps.push({ line, open, key: env?.POSTHOG_CLI_API_KEY });
+    if (line === `security unlock-keychain ${KEYCHAIN}`) open = true;
+    if (line.startsWith("git worktree add")) {
+      mkdirSync(join(checkout, "apps/desktop"), { recursive: true });
+      writeFileSync(join(checkout, "apps/desktop/package.json"), JSON.stringify({ name: "@dohc/desktop", version: "0.1.0" }));
+    }
+    if (line.includes("exec electron-builder")) {
+      const release = join(checkout, "apps/desktop/release");
+      mkdirSync(join(release, "mac-arm64/dohc.app"), { recursive: true });
+      for (const name of [names.zip, names.dmg, names.blockmap]) writeFileSync(join(release, name), `${name} bytes`);
+      const zip = readFileSync(join(release, names.zip));
+      const sha512 = createHash("sha512").update(zip).digest("base64");
+      writeFileSync(join(release, names.manifest), updateManifest({ version: "0.1.0", files: [{ url: names.zip, sha512, size: zip.length }], path: names.zip, sha512 }));
+    }
+    if (command === "gh" && args[1] === "upload") for (const path of args.slice(5)) uploads.set(basename(path), asset(path));
+  };
+  const run = (command, args) => {
+    const line = [command, ...args].join(" ");
+    steps.push({ line, open });
+    if (line === `security lock-keychain ${KEYCHAIN}`) open = false;
+    if (line.startsWith("gh release view")) return { status: 0, stderr: "", stdout: JSON.stringify({ isDraft: false, isPrerelease: false, assets: [...uploads.values()] }) };
+    if (line.startsWith("xcrun notarytool submit")) return { status: 0, stderr: "", stdout: JSON.stringify({ id: "1", status: "Accepted" }) };
+    if (line.startsWith("git worktree") || line.startsWith("security lock-keychain")) return { status: 0, stderr: "", stdout: "" };
+    return fakeMac().run(command, args);
+  };
+  await releaseMac(plan, { root: workRoot, run, step, keychainStatus: () => (open ? 7 : 2), interactive: true });
+
+  const at = text => steps.find(entry => entry.line.includes(text));
+  for (const text of ["pnpm install", "pnpm build:desktop", "run build:engine", "upload-desktop-source-maps.mjs", "smoke:package:desktop", "stapler staple", "smoke:fuses:desktop", "gh release upload"]) {
+    assert.equal(at(text).open, false, `${text} runs with the release keychain locked`);
+  }
+  for (const text of ["security find-identity", "xcrun notarytool history", "find-generic-password -s dohc-posthog-cli-api-key -w", "exec electron-builder", "xcrun notarytool submit"]) {
+    assert.equal(at(text).open, true, `${text} runs with the release keychain unlocked`);
+  }
+  assert.equal(steps.filter(entry => entry.line === `security unlock-keychain ${KEYCHAIN}`).length, 2, "one unlock checks signing, and one packages");
+  assert.equal(open, false, "the release keychain ends locked");
+  assert.equal(at("upload-desktop-source-maps.mjs").key, "phx_fixture", "the source map upload sees the PostHog key");
+  assert.deepEqual(steps.filter(entry => entry.key && !entry.line.includes("upload-desktop-source-maps.mjs")), [], "no other step sees the PostHog key");
+  assert.deepEqual([...uploads.keys()], [names.zip, names.dmg, names.blockmap, names.manifest]);
+  assert.equal(existsSync(checkout), false, "the throwaway worktree is gone");
+  assert.equal(existsSync(join(workRoot, "v0.1.0")), false, "a finished upload keeps no files");
+});
+
+test("release-desktop-macos refuses incomplete arguments when run as a command", async () => {
+  await assert.rejects(
+    runReleaseScript("release-desktop-macos.mjs", ["--channel", "nightly"]),
+    (error) => error.code === 1 && /Usage: pnpm release:macos/.test(error.stderr),
+  );
+});
+
+// A Linux desktop build leaves apps/desktop/resources/engine-reader/<generation>
+// read-only (stage-engine-reader.mjs), and checkout cannot clean a workspace
+// that holds it. Every job can land on the Linux runner, so each one makes it
+// writable before checkout.
+test("every release job lets checkout remove an earlier build's read-only reader folder", async () => {
+  for (const [name, job] of Object.entries(releaseWorkflow.jobs)) {
+    const checkout = job.steps.findIndex(step => step.uses?.startsWith("actions/checkout@"));
+    assert.ok(checkout > 0, `${name} prepares its workspace before checkout`);
+    const prepare = job.steps[checkout - 1];
+    assert.equal(prepare.if, "runner.os != 'Windows'", `${name} skips the step on Windows, where the folder stays writable`);
+    assert.equal(prepare.shell, "bash");
+    assert.match(prepare.run, /reader="\$\{GITHUB_WORKSPACE\}\/apps\/desktop\/resources\/engine-reader"/);
+  }
+  if (process.platform === "win32") return;
+  // Run the step itself against a workspace an earlier build left behind.
+  const workspace = await createTemporaryDirectory(join(tmpdir(), "dohc-release-workspace-"));
+  const generation = join(workspace, "apps/desktop/resources/engine-reader/generation");
+  await mkdir(generation, { recursive: true });
+  await writeFile(join(generation, "reader.cjs"), "reader");
+  await chmod(join(generation, "reader.cjs"), 0o444);
+  await chmod(generation, 0o555);
+  const step = releaseWorkflow.jobs.build.steps.find(candidate => candidate.name === "Let checkout remove an earlier build's reader folder");
+  await promisify(execFile)("bash", ["-euo", "pipefail", "-c", step.run], { env: { ...process.env, GITHUB_WORKSPACE: workspace } });
+  await rm(workspace, { recursive: true });
+  assert.equal(existsSync(workspace), false, "the workspace and the reader folder in it are removable");
+  // A fresh runner has no workspace yet.
+  await promisify(execFile)("bash", ["-euo", "pipefail", "-c", step.run], { env: { ...process.env, GITHUB_WORKSPACE: workspace } });
 });

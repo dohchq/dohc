@@ -30,6 +30,7 @@ use relay_push_tests::cache_tests::CursorFaults;
 #[derive(Clone, PartialEq, Eq)]
 pub struct RelayConfiguration {
     pub base_url: String,
+    pub socket_path: Option<std::path::PathBuf>,
     pub bearer_token: String,
     #[cfg(debug_assertions)]
     pub allow_insecure_loopback_for_tests: bool,
@@ -1910,6 +1911,34 @@ impl ActorHandle {
         .await
     }
 
+    /// Make an unfinished ordinary pull's applied pages local truth, for a
+    /// workspace that opens with no ordinary sync configured. Answers whether
+    /// a pull was unfinished.
+    pub async fn abandon_ordinary_pull(&self, workspace_id: String) -> Result<bool, RuntimeError> {
+        self.run(move |store, _cache| {
+            match dohc_engine_sync::abandon_ordinary_pull(store, &workspace_id, &NoFaults)? {
+                TxnOutcome::Committed(abandoned) => Ok(abandoned),
+                TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+            }
+        })
+        .await
+    }
+
+    /// Collections updates wait for an unfinished ordinary pull.
+    pub async fn ordinary_pull_unfinished(
+        &self,
+        workspace_id: String,
+    ) -> Result<bool, RuntimeError> {
+        self.run(move |store, _cache| {
+            store
+                .read_with(|conn| {
+                    dohc_engine_sync::ordinary_pull_unfinished_in(conn, &workspace_id)
+                })
+                .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
     /// How many changes that did not originate on this computer the engine
     /// has applied to the workspace; 0 before the first.
     pub async fn remote_changes_applied(&self, workspace_id: String) -> Result<i64, RuntimeError> {
@@ -2074,6 +2103,12 @@ impl ActorHandle {
 fn build_http_transport(
     configuration: RelayConfiguration,
 ) -> Result<HttpRelayTransport, RelayError> {
+    if let Some(path) = &configuration.socket_path {
+        if !configuration.base_url.is_empty() {
+            return Err(RelayError::InvalidResponse);
+        }
+        return HttpRelayTransport::new_unix_socket(path, configuration.bearer_token);
+    }
     #[cfg(debug_assertions)]
     {
         let test_ca = test_relay_ca(
@@ -2124,6 +2159,7 @@ fn build_debug_http_transport(
 ) -> Result<HttpRelayTransport, RelayError> {
     let RelayConfiguration {
         base_url,
+        socket_path: _,
         bearer_token: token,
         allow_insecure_loopback_for_tests: insecure,
     } = configuration;
@@ -3371,6 +3407,7 @@ mod hosted_refusal_tests {
                     stream_identity: "stream".into(),
                     bootstrap_complete: true,
                     settlement_report_id: None,
+                    ordinary_pull: None,
                 },
                 now_ms: 2_000,
             },
@@ -3801,6 +3838,7 @@ mod test_relay_ca_tests {
     fn configuration(base_url: &str, insecure: bool) -> RelayConfiguration {
         RelayConfiguration {
             base_url: base_url.to_owned(),
+            socket_path: None,
             bearer_token: "token".to_owned(),
             allow_insecure_loopback_for_tests: insecure,
         }

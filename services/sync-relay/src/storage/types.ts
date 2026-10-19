@@ -787,14 +787,19 @@ export interface SyncRelayStorage {
   releaseReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease): void;
   bindReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease): void;
   replicaCurrentViewSelectors(workspaceId: string): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentViewSelector[];
-  stageReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease, view: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView): import("./replicaCurrentViews").StagedCurrentView;
+  stageReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease, view: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView, observations?: import("./replicaHistoryPins").ReplicaHistoryObservation[]): import("./replicaCurrentViews").StagedCurrentView;
   flipReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease, staged: import("./replicaCurrentViews").StagedCurrentView): void;
-  storeReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease, view: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView;
+  advanceReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease, view: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView, previous: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView;
+  storeReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease, view: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView, observations?: import("./replicaHistoryPins").ReplicaHistoryObservation[]): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView;
+  nextReplicaHistoryPinAt(workspaceId: string): number | null;
+  sampleReplicaHistory(lease: import("../replicaReadPrincipal").ReplicaReadLease): void;
+  listReplicaHistoryPins(input: import("../replicaCurrentViewReads").ReplicaCurrentViewReadInput, source?: import("../replicaCurrentViewReads").ReplicaCurrentViewSource): import("../replicaHistoryReads").ReplicaHistoryList;
+  readReplicaHistoryPin(input: import("../replicaCurrentViewReads").ReplicaCurrentViewReadInput & {pinId: string}, source?: import("../replicaCurrentViewReads").ReplicaCurrentViewSource): import("../replicaHistoryReads").ReplicaHistoryRead;
   readReplicaCurrentView(workspaceId: string): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView | null;
   currentViewFilesAtFences(workspaceId: string, files: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView["files"], previous: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView["files"], omitted: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView["omitted"]): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView["files"];
   readReplicaCurrentViewText(workspaceId: string,sha: string): string | null;
   readReplicaStanding(workspaceId: string, shareGrantBindings?: string): ReturnType<typeof import("./replicaReads").readReplicaStanding>;
-  listReplicaCurrentViewFiles(input: import("../replicaCurrentViewReads").ReplicaCurrentViewReadInput, source?: import("../replicaCurrentViewReads").ReplicaCurrentViewSource): import("../replicaCurrentViewReads").ReplicaCurrentViewList;
+  listReplicaCurrentViewFiles(input: Parameters<typeof import("../replicaCurrentViewReads").listReplicaCurrentViewFiles>[1], source?: import("../replicaCurrentViewReads").ReplicaCurrentViewSource): import("../replicaCurrentViewReads").ReplicaCurrentViewList;
   readReplicaCurrentViewFile(input: import("../replicaCurrentViewReads").ReplicaCurrentViewReadInput & {path: string}, source?: import("../replicaCurrentViewReads").ReplicaCurrentViewSource): import("../replicaCurrentViewReads").ReplicaCurrentViewRead;
   putBlob(input: {
     workspaceId: string;

@@ -7,7 +7,7 @@ mod common;
 
 use common::*;
 use dohc_engine_protocol::{
-    ErrorCode,
+    ErrorCode, Retryability,
     transport::{EngineTransport, InProcessTransport, RequestContext},
     wire::WorkspaceHandle,
 };
@@ -15,9 +15,9 @@ use dohc_engine_storage::{EngineStore, NoFaults};
 use dohc_engine_sync::list_replication_ops;
 use dohc_engine_testkit::ScratchDir;
 use dohc_workspace_engine::{
-    CAPTURE_INITIAL_SETTLED_EVENT, CAPTURE_MOMENT_RECORDED_EVENT, CaptureApplyProbe,
-    EARLY_IMPORT_MIN_ADDED_FILES, EngineEventNotice, EngineService,
-    root_binding::write_root_binding,
+    CAPTURE_IMPORT_PROGRESS_EVENT, CAPTURE_INITIAL_SETTLED_EVENT, CAPTURE_MOMENT_RECORDED_EVENT,
+    CaptureApplyProbe, EARLY_IMPORT_MIN_ADDED_FILES, EngineEventNotice, EngineEventReceiver,
+    EngineService, root_binding::write_root_binding,
 };
 use serde_json::{Value, json};
 use std::path::Path;
@@ -843,7 +843,7 @@ async fn a_policy_retire_pass_emits_a_moment_event() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_over_cap_policy_retire_keeps_the_pass_provenance_and_emits() {
-    // codex re-review P2s: the retained-over-cap retire runs through its own
+    // codex re-review P2s: the retained-unread retire runs through its own
     // sink and reports via not_owned_paths. With default provenance its
     // delete moment carried a NULL correlation id (splitting the reconcile
     // pass's history group), and gating the event on applied_paths
@@ -1528,6 +1528,14 @@ async fn fresh_import_opens_early_fences_partial_reads_and_preserves_foreign_hea
         .expect("idempotent main bootstrap stays available while importing");
     assert_eq!(main.result["id"], json!("main"));
     assert_eq!(main.result["kind"], json!("main"));
+    let active = transport
+        .call(
+            RequestContext::unbounded(),
+            request(58, "versions.active", Some(handle.clone()), json!({})),
+        )
+        .await
+        .expect("a document open reads the active version while importing");
+    assert_eq!(active.result["id"], json!("main"));
 
     for (id, method) in [
         (5, "history.page"),
@@ -1634,6 +1642,7 @@ async fn fresh_import_opens_early_fences_partial_reads_and_preserves_foreign_hea
         .await
         .expect_err("a scanned artifact must not mint an absent lease");
     assert_eq!(existing_ydoc.code, ErrorCode::Overloaded);
+    assert_eq!(existing_ydoc.retry, Retryability::AfterBackoff);
 
     let absent_ydoc = transport
         .call(
@@ -1802,6 +1811,186 @@ async fn fresh_import_opens_early_fences_partial_reads_and_preserves_foreign_hea
         .expect("close");
 }
 
+async fn wait_for_wake(events: &mut EngineEventReceiver, name: &str) {
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let notice = events.recv().await.expect("event channel stays open");
+            if notice.name == name {
+                assert_eq!(notice.payload, json!({ "workspaceId": WORKSPACE_ID }));
+                return;
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {name}"));
+}
+
+/// The restored document of a new folder opens once its own file is
+/// captured, not once the whole import is. Its refused open moves the file
+/// ahead of the lexically earlier remainder, and the import's progress wake
+/// tells the caller to open again. An edit saved while the import still runs
+/// survives the rest of the import.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_document_is_captured_next_and_opens_while_the_import_runs() {
+    use base64::Engine as _;
+
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    for index in 0..EARLY_IMPORT_MIN_ADDED_FILES {
+        write_file(scratch.path(), &format!("bulk/seed-{index:04}.md"), b"seed");
+    }
+    // Sorts after every other file, like the benchmark's restored small.md.
+    write_file(scratch.path(), "zz-restored.md", b"restored text");
+
+    let probe = CaptureApplyProbe::default();
+    probe.pause_after_next_import_commit();
+    let service = Arc::new(EngineService::with_capture_apply_probe_for_harness(
+        probe.clone(),
+    ));
+    let mut events = service.events().subscribe_with_wakes();
+    let transport = InProcessTransport::new(service);
+    let handle = tokio::time::timeout(WAIT, open_workspace(&transport, &scratch, 1))
+        .await
+        .expect("a fresh open must not wait for its import");
+    tokio::time::timeout(WAIT, probe.wait_until_import_commit_paused())
+        .await
+        .expect("the first import batch commits");
+    wait_for_wake(&mut events, CAPTURE_IMPORT_PROGRESS_EVENT).await;
+
+    let open_document = |id: u64, path: &str| {
+        request(
+            id,
+            "ydoc.open",
+            Some(handle.clone()),
+            json!({ "versionId": "main", "path": path, "contentKind": "plaintext" }),
+        )
+    };
+    let refused = transport
+        .call(
+            RequestContext::unbounded(),
+            open_document(2, "zz-restored.md"),
+        )
+        .await
+        .expect_err("an uncaptured file must not mint an absent lease");
+    assert_eq!(refused.code, ErrorCode::Overloaded);
+    assert_eq!(refused.retry, Retryability::AfterBackoff);
+
+    probe.pause_after_next_import_commit();
+    probe.release_import_commit();
+    tokio::time::timeout(WAIT, probe.wait_until_import_commit_paused())
+        .await
+        .expect("the requested file commits as the next unit");
+    wait_for_wake(&mut events, CAPTURE_IMPORT_PROGRESS_EVENT).await;
+
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            open_document(3, "zz-restored.md"),
+        )
+        .await
+        .expect("a captured file opens while the import runs");
+    assert_eq!(opened.result["head"], json!("present"));
+    let last_seed = format!("bulk/seed-{:04}.md", EARLY_IMPORT_MIN_ADDED_FILES - 1);
+    let earlier = transport
+        .call(RequestContext::unbounded(), open_document(4, &last_seed))
+        .await
+        .expect_err("the lexically earlier remainder is still importing");
+    assert_eq!(earlier.code, ErrorCode::Overloaded);
+    let status = transport
+        .call(
+            RequestContext::unbounded(),
+            request(5, "watcher.status", Some(handle.clone()), json!({})),
+        )
+        .await
+        .expect("watcher.status");
+    assert_eq!(status.result["phase"], json!("importing"));
+
+    // Edit and save the document while the rest of the import still waits.
+    let session = opened.result["sessionId"].clone();
+    let doc = dohc_engine_collab::Ydoc::wire();
+    let record = |update: Vec<u8>, seed: bool| {
+        json!({
+            "expectedLineageClaimId": opened.result["lineageClaimId"],
+            "sessionId": session,
+            "updateBase64": base64::engine::general_purpose::STANDARD.encode(update),
+            "seed": seed,
+        })
+    };
+    let seed = doc.plaintext_insert(0, "restored text");
+    call(
+        &transport,
+        &handle,
+        6,
+        "ydoc.recordUpdate",
+        record(seed, true),
+    )
+    .await;
+    let edit = doc.plaintext_insert(13, " edited early");
+    call(
+        &transport,
+        &handle,
+        7,
+        "ydoc.recordUpdate",
+        record(edit, false),
+    )
+    .await;
+    let settled = call(
+        &transport,
+        &handle,
+        8,
+        "ydoc.settle",
+        json!({ "sessionId": session }),
+    )
+    .await;
+    assert_eq!(settled["materialized"], json!(true));
+    assert_eq!(settled["content"], json!("restored text edited early"));
+    let on_disk = || std::fs::read_to_string(scratch.path().join("zz-restored.md")).unwrap();
+    assert_eq!(on_disk(), "restored text edited early");
+    let status = transport
+        .call(
+            RequestContext::unbounded(),
+            request(9, "watcher.status", Some(handle.clone()), json!({})),
+        )
+        .await
+        .expect("watcher.status");
+    assert_eq!(status.result["phase"], json!("importing"));
+
+    probe.release_import_commit();
+    wait_for_wake(&mut events, CAPTURE_INITIAL_SETTLED_EVENT).await;
+    assert_eq!(
+        read_text(&transport, &handle, 10, &last_seed)
+            .await
+            .as_deref(),
+        Some("seed")
+    );
+    call(
+        &transport,
+        &handle,
+        11,
+        "ydoc.close",
+        json!({ "sessionId": session }),
+    )
+    .await;
+    // The rest of the import, and the watcher pass over the saved file, keep
+    // the saved text in the head and on disk.
+    let flush = call(&transport, &handle, 12, "capture.flush", json!({})).await;
+    assert_eq!(flush["settled"], json!(true));
+    assert_eq!(
+        read_text(&transport, &handle, 13, "zz-restored.md")
+            .await
+            .as_deref(),
+        Some("restored text edited early")
+    );
+    assert_eq!(on_disk(), "restored text edited early");
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(14, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stalled_fresh_import_retry_exits_importing_without_detaching_settle() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -1863,6 +2052,32 @@ async fn stalled_fresh_import_retry_exits_importing_without_detaching_settle() {
         probe.layer_start_count(),
         0,
         "the deadline must keep the layer future attached until its worker drains"
+    );
+    let uncaptured = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                4,
+                "ydoc.open",
+                Some(handle.clone()),
+                json!({
+                    "versionId": "main",
+                    "path": "bulk/seed-0000.md",
+                    "contentKind": "plaintext"
+                }),
+            ),
+        )
+        .await
+        .expect_err("a degraded import must not mint an absent lease over disk bytes");
+    assert_eq!(uncaptured.code, ErrorCode::Overloaded);
+    assert_eq!(
+        uncaptured.retry,
+        Retryability::No,
+        "no capture wake follows a degraded import, so waiting must not be offered"
+    );
+    assert_eq!(
+        uncaptured.message,
+        "dohc has not read this file yet. Open it again once dohc has read it."
     );
 
     probe.release_apply_worker();
@@ -2218,10 +2433,8 @@ async fn capture_reconcile_forces_a_full_manifest_rebuild() {
 /// changes only case or Unicode normalization (Finder, `mv`, `git mv`). The
 /// old spelling must retire, or a case-sensitive peer receives both files.
 /// That holds inside a folder too, and Finder metadata beside the files is
-/// never captured. Windows keeps the old
-/// behavior until the check passes a Windows run. Skips where the disk keeps
-/// case apart, since a rename there changes the stored name.
-#[cfg(not(windows))]
+/// never captured. Skips where the disk keeps case apart, since a rename
+/// there changes the stored name.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn outside_renames_that_only_respell_retire_the_old_spelling() {
     let scratch = ScratchDir::new().expect("scratch");

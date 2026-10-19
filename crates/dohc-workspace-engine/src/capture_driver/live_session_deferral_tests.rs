@@ -31,6 +31,7 @@ fn apply_context<'a>(
         provenance: CaptureProvenance::default(),
         events: EngineEvents::default(),
         apply_probe: None,
+        import_priority: None,
     }
 }
 
@@ -1922,11 +1923,18 @@ async fn a_lease_release_reoffers_quarantined_outside_writes() {
 // must receive them in that order: written first, `Notes.md` would be the
 // file the later retire of `notes.md` deletes. While an editor holds
 // `notes.md` open its retire waits, so the ingest of `Notes.md` waits with
-// it. Skips where the disk keeps case apart. Windows keeps the old behavior
-// until the respell check passes a Windows run.
-#[cfg(not(windows))]
+// it. Skips where the disk keeps case apart.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_respelled_file_waits_for_its_open_old_spelling_to_retire() {
+    respelled_file_waits_for_its_lease(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_quarantined_respell_is_ingested_once_after_the_old_spellings_lease_releases() {
+    respelled_file_waits_for_its_lease(true).await;
+}
+
+async fn respelled_file_waits_for_its_lease(quarantine: bool) {
     let store_scratch = ScratchDir::new().expect("store scratch");
     let capture_scratch = ScratchDir::new().expect("capture scratch");
     let root = capture_scratch.path().to_path_buf();
@@ -1971,6 +1979,14 @@ async fn a_respelled_file_waits_for_its_open_old_spelling_to_retire() {
     std::fs::rename(root.join("notes.md"), root.join("Notes.md")).expect("respell");
     files.handle().request_rescan();
     pass().await;
+    if quarantine {
+        for _ in 1..dohc_engine_files::DEGRADED_RESCAN_BACKOFF {
+            pass().await;
+        }
+        let parked = files.handle().stats().await.expect("parked stats");
+        assert!(!parked.dirty);
+        assert_eq!((parked.deferred, parked.quarantined), (0, 2));
+    }
     assert_eq!(
         head_count(&db, "notes.md"),
         1,
@@ -1981,9 +1997,14 @@ async fn a_respelled_file_waits_for_its_open_old_spelling_to_retire() {
     drop(lease);
     offer_unrecorded_after_release(&leases, WORKSPACE_ID, &mut releases_seen, &files.handle())
         .await;
+    assert!(files.handle().stats().await.expect("offered stats").dirty);
     pass().await;
     assert_eq!(head_count(&db, "notes.md"), 0);
     assert_eq!(head_count(&db, "Notes.md"), 1);
+    let recovered = files.handle().stats().await.expect("recovered stats");
+    assert_eq!((recovered.deferred, recovered.quarantined), (0, 0));
+    files.handle().request_rescan();
+    pass().await;
     let moments: Vec<(String, String)> = rusqlite::Connection::open(&db)
         .expect("open database observer")
         .prepare(
@@ -2013,9 +2034,7 @@ async fn a_respelled_file_waits_for_its_open_old_spelling_to_retire() {
 // retires it. A respell is not an absence: the file is still there under the
 // new spelling. Renamed only by case, the synced head retires at its old
 // spelling and the new spelling is captured, so peers keep one file instead
-// of two heads that share it. Skips where the disk keeps case apart. Windows
-// keeps the old behavior until the respell check passes a Windows run.
-#[cfg(not(windows))]
+// of two heads that share it. Skips where the disk keeps case apart.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_respelled_synced_file_leaves_one_head() {
     let store_scratch = ScratchDir::new().expect("store scratch");

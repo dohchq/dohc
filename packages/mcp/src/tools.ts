@@ -1,3 +1,4 @@
+import { LinksEdgesInput, LinksInInput, LinksResolveInput } from "@dohc/workspace-contracts/links";
 import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
 import { WorkspaceSyncPause, workspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 import { ShareCopyInput } from "@dohc/workspace-contracts/share-copy";
@@ -69,6 +70,9 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_list_changes: ["history.list"],
   dohc_list_kept_copies: ["file.kept.list"],
   dohc_save_kept_copy: ["file.kept.save"],
+  dohc_links_edges: ["links.edges"],
+  dohc_links_in: ["links.in"],
+  dohc_links_resolve: ["links.resolve"],
   dohc_read_change: ["history.read"],
   dohc_list_files: ["file.list"],
   dohc_read_file: ["file.read"],
@@ -1042,11 +1046,14 @@ export async function stopWorkspaceSync(ctx: ToolContext, agent?: string) {
 }
 
 export async function workspaceStatus(ctx: ToolContext) {
-  const [manifest, remote, credentials, entry] = await Promise.all([
+  // The engine answers from the pull's durable token, so this holds whether
+  // or not sync is running. Absent when the app cannot answer.
+  const [manifest, remote, credentials, entry, waiting] = await Promise.all([
     readSyncManifest(ctx),
     remoteForCurrentWorkspace(ctx),
     loadCloudCredentials(ctx),
     findWorkspaceEntry(ctx),
+    requestCli(ctx, "collectionsWaiting", {}),
   ]);
   const serverUrl = remote?.serverUrl ?? manifest?.serverUrl;
   const synced = !entry?.pausedRemote && (remote !== null || nonEmptyString(manifest?.serverUrl));
@@ -1067,6 +1074,7 @@ export async function workspaceStatus(ctx: ToolContext) {
     }} : {}),
     synced,
     ...(syncPause ? { syncPause } : {}),
+    ...(waiting.ok ? { collectionsWaiting: waiting.waiting } : {}),
     ...removedShareStatus(entry),
     scope: synced ? ("cloud" as const) : ("local" as const),
     ...credential,
@@ -1893,6 +1901,9 @@ async function requestCli<Verb extends CliVerb>(
   }
 }
 
+export async function linksIn(ctx: ToolContext, input: LinksInInput) { return requestCli(ctx, "linksIn", LinksInInput.parse(input)); }
+export async function linksResolve(ctx: ToolContext, input: LinksResolveInput) { return requestCli(ctx, "linksResolve", LinksResolveInput.parse(input)); }
+
 export async function readOperation(ctx: ToolContext, args: { operationId: string; cursor?: string }) {
   if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "History operations require the owning workspace. Open it to continue." };
   if (!HistoryOperationId.safeParse(args.operationId).success) return { ok: false as const, reason: "Use an operation id from history list: dohc-operation: followed by a UUID." };
@@ -2319,3 +2330,5 @@ export async function startFileChat(
 }
 
 export { safeResolve };
+
+export async function linksEdges(ctx: ToolContext, input: LinksEdgesInput) { return requestCli(ctx, "linksEdges", LinksEdgesInput.parse(input)); }

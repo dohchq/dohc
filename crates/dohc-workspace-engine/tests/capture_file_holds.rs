@@ -21,6 +21,16 @@ const WS: &str = "ws-file-holds";
 const HELD: &str = "held.md";
 const SEED: &str = "Before.\n";
 
+#[cfg(windows)]
+fn assert_stored_leaf(root: &std::path::Path, leaf: &str) {
+    assert!(
+        std::fs::read_dir(root)
+            .unwrap()
+            .any(|entry| entry.unwrap().file_name() == leaf),
+        "the selected version must publish its own spelling: {leaf}"
+    );
+}
+
 fn outside() -> String {
     format!("{} too deep\n", "> ".repeat(121))
 }
@@ -608,6 +618,8 @@ async fn switch_hold_rewrite_release(target_path: &str) {
         "Target version.\n"
     );
     let conn = rusqlite::Connection::open(engine_db_path(&f.scratch).unwrap()).unwrap();
+    #[cfg(windows)]
+    assert_stored_leaf(f.scratch.path(), target_path);
     let source: String = conn.query_row("SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.workspace_id=?1 AND s.version_id='main' AND s.path=?2", [WS,HELD], |r| r.get(0)).unwrap();
     let target: String = conn.query_row("SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.workspace_id=?1 AND s.version_id='later' AND s.path=?2", [WS,target_path], |r| r.get(0)).unwrap();
     assert_eq!(source, repaired);
@@ -663,6 +675,32 @@ async fn switch_hold_rewrite_release_preserves_both_versions() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn switch_hold_case_alias_release_preserves_both_versions() {
     switch_hold_rewrite_release("HELD.MD").await;
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn switching_versions_with_equal_bytes_preserves_the_selected_spelling() {
+    let mut f = Fixture::with_target(Some("HELD.MD")).await;
+    if !f.scratch.path().join("HELD.MD").exists() {
+        f.close().await;
+        return;
+    }
+    std::fs::write(f.scratch.path().join(HELD), "Target version.\n").unwrap();
+    f.scan().await;
+    assert_eq!(f.status().await["heldFiles"], json!([]));
+    for (version, path) in [("later", "HELD.MD"), ("main", HELD)] {
+        f.call(
+            "versions.setActive",
+            json!({"workspaceId":WS,"versionId":version}),
+        )
+        .await;
+        assert_stored_leaf(f.scratch.path(), path);
+        f.reopen().await;
+        let conn = rusqlite::Connection::open(engine_db_path(&f.scratch).unwrap()).unwrap();
+        let text: String = conn.query_row("SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.path=?3", [WS,version,path], |r| r.get(0)).unwrap();
+        assert_eq!(text, "Target version.\n");
+    }
+    f.close().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

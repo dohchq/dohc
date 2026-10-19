@@ -57,6 +57,7 @@ const PARTS = [
   "frontmatter-as-written",
   "title-bar-status",
   "capture-recovery",
+  "recovery-row",
   "about",
   "sharing",
   "usage-record",
@@ -66,6 +67,7 @@ const PARTS = [
   "settings-frame",
   "theme-picker",
   "zoom-stepper",
+  "settings-keyboard",
   "rails",
   "composer-sending",
   "about-conversation",
@@ -79,6 +81,7 @@ const PARTS = [
   "composer-poll",
   "chat-messages",
   "ref",
+  "agent-color",
 ];
 // A fixed instant for the page's clock. The capture pauses the clock an
 // hour past it, so the real time that passes between installing and

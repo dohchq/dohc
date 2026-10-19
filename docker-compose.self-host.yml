@@ -106,6 +106,7 @@ services:
       - dohc_self_host_sync_relay:/data
       - dohc_self_host_relay_continuity:/continuity
       - dohc_self_host_host_data:/host-data
+      - dohc_self_host_replicas:/replicas
     healthcheck:
       test: [CMD, node, /app/tools/self-host/health.mjs, sync-relay]
       interval: 5s
@@ -203,6 +204,9 @@ volumes:
   dohc_self_host_sync_relay:
   dohc_self_host_relay_continuity:
   dohc_self_host_host_data:
+  dohc_self_host_replicas:
+    labels:
+      dohc.backup: skip
   dohc_self_host_snapshots:
   dohc_self_host_tls:
   dohc_self_host_gateway_config:

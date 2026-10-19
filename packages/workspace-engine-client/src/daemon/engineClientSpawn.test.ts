@@ -44,3 +44,12 @@ it("rejects invalid private upload budgets before creating a process", async () 
     privateLiveApplication: { aggregateBytes: -1, maxUploads: 1 } })).rejects.toThrow();
   expect(spawning).not.toHaveBeenCalled();
 });
+
+it.each([undefined, '{"node":"/operator/node","bundle":"/operator/reader.cjs","manifest":"/operator/manifest.json"}'])("passes only explicit reader startup configuration: %s", async config => {
+  vi.stubEnv("DOHC_ENGINE_READER_CONFIG", "foreign-reader");
+  spawning.mockImplementation(child);
+  const client = await createEngineClient({ command: "owned-engine", authToken: "owned-token", protocolVersion: 2,
+    capabilities: ["core", "blobs"], env: config ? { DOHC_ENGINE_READER_CONFIG: config } : {} });
+  try { expect(spawning.mock.calls[0]![2].env.DOHC_ENGINE_READER_CONFIG).toBe(config); }
+  finally { client.close(); await client.waitForExit(); }
+});

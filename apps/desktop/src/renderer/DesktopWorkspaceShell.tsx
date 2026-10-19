@@ -1,9 +1,11 @@
+import type { GraphNode } from "./workbench/graphData";
 import { useTypingRecoveryNotices } from "./shell/useTypingRecoveryNotices";
 import { useFolderAppOffers } from "./offers/useFolderAppOffers";
 import { withClosedEngineDocSession } from "./collab/engineDocLease";
 import { CreationPartialError } from "@dohc/cli/creation";
 import {shareSenderLabel} from "@dohc/security-contract/share-labels";
 import { AgentSettingsProvider } from "./workbench/AgentBadge";
+import { AgentColorContext, saveAgentColor } from "./workbench/AgentColorPicker";
 import { EngineMomentDiffPage } from "./workbench/EngineMomentDiffPage";
 import { StopAndRestoreDialog, useStopAndRestore } from "./StopAndRestoreDialog";
 import { useRecordHistory } from "./collections/useRecordHistory";
@@ -40,7 +42,6 @@ import type {
   SyncStatusResult,
   TryInVersionRunState,
   WorkbenchMenuCommand,
-  WorkspaceGraphResult,
   WorkspaceFileEntry,
   WorkspaceActivityEvent,
   WorkspaceSummary,
@@ -52,7 +53,7 @@ import {
   engineStoreRefusalRecovery,
   engineStoreRefusalSentence,
 } from "../ipc/bridgeContract";
-import { DROP_IMPORT_LIMITS, DROP_IMPORT_REFUSALS } from "../ipc/channels";
+import { DROP_IMPORT_LIMITS, DROP_IMPORT_REFUSALS, isEditorMenuCommand } from "../ipc/channels";
 import { isPrivacyDenied, readError, shouldRecheckShareAccess } from "../ipc/errorWords";
 import {
   formatSize,
@@ -110,6 +111,7 @@ import { useChatDispatchNotices } from "./shell/useChatDispatchNotices";
 import { useWorkspacePathOpenFailures } from "./shell/workspacePathOpenFailures";
 import { useUsageRecordStops } from "./shell/usageRecordStops";
 import { useSyncFailureNotice } from "./shell/useSyncFailureNotice";
+import { useCollectionsWaitingNotice } from "./shell/useCollectionsWaitingNotice";
 import { useKeptFilesNotice } from "./shell/useKeptFilesNotice";
 import { useDriveLimitNotice } from "./shell/useDriveLimitNotice";
 import { fitImportMessage, importedPathDetails, importStopSentence, namedPaths } from "./shell/importStop";
@@ -147,6 +149,7 @@ import { FileInspector } from "./FileInspector";
 import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import type { HeadingTarget, ScrollTarget } from "./MarkdownView";
 import { preloadMarkdownEditor } from "./editor/LazyMarkdownEditor";
+import { sendToFocusedEditor } from "./editor/editorMenuCommands";
 import { NewFileDialog } from "./NewFileDialog";
 import { NewCollectionDialog } from "./collections/NewCollectionDialog";
 import { type ShareViewRefresh, useShareDirectWrites } from "./shell/useShareDirectWrites";
@@ -206,6 +209,7 @@ import type { SentNotices } from "./shell/useSentNotices";
 import { useWorkspaceSearch } from "./workbench/useWorkspaceSearch";
 import {
   EngineHistoryView,
+  fileMomentSteps,
   type HistoryCollections,
 } from "./workbench/EngineHistory";
 import { HistoryHiddenState } from "./workbench/HistoryPolicyStates";
@@ -239,7 +243,7 @@ import {
   createEditorGroupRight,
   focusEditorGroup,
   versionCompareTabPath,
-  momentDiffTabPath,
+  openMomentDiff,
   collectionTabPath,
   transactionalCollectionTabPath,
   defaultWorkbenchState,
@@ -666,7 +670,7 @@ export function DesktopWorkspaceShell(props: {
   // `openWorkspace` installs main's exact renderer session before it waits
   // for watcher readiness. Its response is the renderer's existing proof that
   // both happened; there is no separate admission IPC. Exact-session bootstrap
-  // reads that lose the admission race retry after that proof. The local
+  // reads wait for that proof before they reach main. The local
   // generation also keeps an A -> B -> A prop sequence from reusing A's earlier
   // proof (DesktopRoot normally gives each workspace a fresh keyed shell).
   const workspaceSelection = useRef({ workspaceId, generation: 0 });
@@ -815,6 +819,8 @@ export function DesktopWorkspaceShell(props: {
     reportSyncFailure,
     showSyncRefusals,
     clearSyncFailure,
+    reportCollectionsWaiting,
+    clearCollectionsWaiting,
     reportDriveLimit,
     reportKeptFiles,
     reportRecoveryUnavailable,
@@ -1095,9 +1101,12 @@ export function DesktopWorkspaceShell(props: {
     resolveMomentDiffPath,
   } = useTabTitles(workspaceId);
   const anyTabDirty = dirtyPaths.size > 0;
-  const activeDocumentPath = TAB_KINDS[parseTab(focusedTabPath)?.kind ?? "removed"].virtual
+  const focusedTab = parseTab(focusedTabPath);
+  const activeDocumentPath = TAB_KINDS[focusedTab?.kind ?? "removed"].virtual
     ? null
     : focusedTabPath;
+  // The change open in the focused group, which the timeline marks.
+  const openMomentId = focusedTab?.kind === "momentDiff" ? focusedTab.momentId : null;
   // Whether some tab holds what About covers, so its empty state says to
   // switch to that tab instead of to open one: any file, or a conversation
   // other than the focused one. A shared view has no conversations.
@@ -1187,11 +1196,12 @@ export function DesktopWorkspaceShell(props: {
     setSearchScrollTarget((current) => (current?.nonce === nonce ? null : current));
   }, []);
 
-  // Restore per-workspace workbench state from .dohc/ui-state.json. Defaults
-  // render immediately (launch budgets key off shell visibility); the stored
-  // state merges when the IPC resolves: it applies only if the user touched
-  // nothing in the meantime — a pre-load user action wins (and gets an
-  // immediate write, since wb may never change again to arm the debounced
+  // Restore per-workspace workbench state from .dohc/ui-state.json. The shell
+  // renders at once under the opening cover (launch budgets key off shell
+  // visibility); the cover lifts in the commit that applies the stored state,
+  // or the defaults when it is missing or unreadable. The stored state applies
+  // only if the user touched nothing in the meantime — a pre-load user action
+  // wins (and gets an immediate write, since wb may never change again to arm the debounced
   // one). The touched flag is a ref set synchronously inside every workbench
   // mutation (mutateWb below): comparing committed state against defaults
   // would race React's commit — a queued-but-uncommitted user action would
@@ -1209,6 +1219,10 @@ export function DesktopWorkspaceShell(props: {
     selectionGeneration: number;
     waitsForFile: boolean;
   } | null>(null);
+  // Lift the opening cover in the same commit as the saved layout or defaults.
+  // Admission and the saved-layout read never wait on this state.
+  const workbenchRestored =
+    restoredSurfaceCommit?.selectionGeneration === workspaceSelectionGeneration;
   // The tab paths the stored state restored — the only ones a file listing is
   // allowed to close. Empty until the load applies, and empty forever when the
   // user acted first and the stored tabs were discarded. STATE, not a ref: the
@@ -1327,6 +1341,10 @@ export function DesktopWorkspaceShell(props: {
     },
     [reportShellError, workspaceId],
   );
+  const setAgentColor = useMemo(
+    () => saveAgentColor(bridge(), workspaceId, reportShellError),
+    [reportShellError, workspaceId],
+  );
   const showPinnedAppMenu = useCallback(
     async (appRoot: string) => {
       try {
@@ -1345,13 +1363,11 @@ export function DesktopWorkspaceShell(props: {
 
   useAsyncResponseEffect(
     async () => {
-      try {
-        return await bridge().getWorkspaceUiState({ workspaceId });
-      } catch (error) {
-        await workspaceAdmission.promise;
-        if (workspaceAdmission.superseded) throw error;
-        return bridge().getWorkspaceUiState({ workspaceId });
+      await workspaceAdmission.promise;
+      if (workspaceAdmission.superseded) {
+        throw new DOMException("The workspace selection changed.", "AbortError");
       }
+      return bridge().getWorkspaceUiState({ workspaceId });
     },
     {
       onSuccess: (stored) => {
@@ -1686,6 +1702,9 @@ export function DesktopWorkspaceShell(props: {
     loadMore: loadMoreEngineHistory,
     observeVersion: observeEngineVersion,
   } = useHistoryPage(engineHistoryToken, workspaceId, markHistoryReady, !!shareView);
+  // Each loaded change's older and newer change to the same file, for the
+  // diff page's steps. One pass per History answer.
+  const momentSteps = useMemo(() => fileMomentSteps(engineHistory?.entries ?? []), [engineHistory]);
   // The sync and try snapshots ride the refresh response but are not the
   // timeline: no pagination competes for them, so they apply as soon as they
   // arrive. Each is its own lane with its own watermark, because a local
@@ -2690,7 +2709,7 @@ export function DesktopWorkspaceShell(props: {
     [openCanonicalDmInTab, openChatThreadInPanel, openChatsNavInTab, openChatsTab],
   );
   const openGraphChatThread = useCallback(
-    (node: WorkspaceGraphResult["nodes"][number]) => {
+    (node: GraphNode) => {
       const target = graphChatOpenTarget(node);
       if (target.surface === "file") {
         openChatThreadInPanel(target.thread);
@@ -2708,7 +2727,7 @@ export function DesktopWorkspaceShell(props: {
     },
     [openCanonicalDmInTab, openChatThreadInPanel, openChatsNavInTab, openChatsTab],
   );
-  // Engine history diff: one tab per moment.
+  // Engine history diff: one diff tab per group, pointed at each moment.
   const openMomentDiffTab = useCallback(
     (momentId: string, filePath: string) => {
       const targetGroupId = wbRef.current.activeEditorGroup;
@@ -2725,9 +2744,7 @@ export function DesktopWorkspaceShell(props: {
             return;
           }
           rememberMomentDiffPath(momentId, filePath);
-          mutateWb((state) =>
-            openTab(state, momentDiffTabPath(momentId), targetGroupId),
-          );
+          mutateWb((state) => openMomentDiff(state, momentId, targetGroupId));
         })
         .catch((error) => {
           if (!isCurrentRequest()) return;
@@ -3998,7 +4015,8 @@ export function DesktopWorkspaceShell(props: {
   useEffect(() => {
     return bridge().onMenuCommand((command) => {
       // App-menu commands originate outside the modal; only keydown is guarded.
-      if (command === "command-palette") setPaletteOpen(true);
+      if (isEditorMenuCommand(command)) sendToFocusedEditor(command);
+      else if (command === "command-palette") setPaletteOpen(true);
       else if (isCommandAvailable(command, commandContext)) commandHandlers[command]();
     });
   }, [commandContext, commandHandlers]);
@@ -4458,6 +4476,7 @@ export function DesktopWorkspaceShell(props: {
           )
         }
         onOpenMoment={openMomentDiffTab}
+        openMomentId={openMomentId}
         unavailableSources={engineHistory.unavailableSources}
         omittedSources={engineHistory.omittedSources}
         collections={historyCollections}
@@ -4847,6 +4866,21 @@ export function DesktopWorkspaceShell(props: {
     report: reportSyncFailure,
     clear: clearSyncFailure,
   });
+  const openSyncSettings = useCallback(() => openSettings("cloud"), [openSettings]);
+  const reportCollectionsWaitingRetryFailure = useCallback(
+    (message: string, error: unknown, retry: () => void) =>
+      reportShellError(message, error, retry, undefined, "collections-waiting-retry"),
+    [reportShellError],
+  );
+  const collectionsWaitingNotice = useCollectionsWaitingNotice({
+    workspaceId,
+    waiting: syncStatus === null ? undefined : (syncStatus.collectionsWaitingForSync ?? null),
+    retryCloudSync: retryCloudSyncCommand,
+    openSyncSettings,
+    report: reportCollectionsWaiting,
+    reportRetryFailure: reportCollectionsWaitingRetryFailure,
+    clear: clearCollectionsWaiting,
+  });
   const filedObservationFailure = useRef<SyncStatusResult["fileObservationFailure"]>(undefined);
   const observationFailure = syncStatus?.fileObservationFailure;
   const retryFileObservationRef = useRef<() => void>(() => {});
@@ -4941,6 +4975,7 @@ export function DesktopWorkspaceShell(props: {
         return;
       }
       if (kind === "cloud-sync") syncFailureNotice.noteDismissed();
+      if (kind === "collections-waiting") collectionsWaitingNotice.noteDismissed();
       if (kind === "drive-no-atomic-placement") driveLimitNotice.noteDismissed();
       if (kind === "kept-files") keptFilesNotice.noteDismissed();
       if (kind === "share-capture" && shareView?.shareId) {
@@ -4961,10 +4996,11 @@ export function DesktopWorkspaceShell(props: {
         });
       } else dismissShellError(id);
     },
-    [dismissShellError, driveLimitNotice, keptFilesNotice, shellErrors, shareView, syncFailureNotice, props.sentNotices, workspaceId, reportShellError, stopAndRestore],
+    [dismissShellError, driveLimitNotice, keptFilesNotice, shellErrors, shareView, syncFailureNotice, collectionsWaitingNotice, props.sentNotices, workspaceId, reportShellError, stopAndRestore],
   );
   return (
     <AgentSettingsProvider settings={props.userSettings?.settings ?? null}>
+    <AgentColorContext.Provider value={setAgentColor}>
     <CustomizeContext.Provider value={customizeContext}>
     <CollectionFieldMarksProvider workspaceId={workspaceId}>
     <ShellErrorReporter.Provider value={reportShellFailure}>
@@ -5266,7 +5302,7 @@ export function DesktopWorkspaceShell(props: {
         />
         <div
           data-testid="workspace-workbench"
-          inert={!workspaceIsReady || storeUpdateRequired ? true : undefined}
+          inert={!workbenchRestored || storeUpdateRequired ? true : undefined}
           className="flex min-w-0 flex-1"
         >
 
@@ -5412,6 +5448,7 @@ export function DesktopWorkspaceShell(props: {
                   onOpenChatThread={openGraphChatThread}
                   chatMentionsAvailable={captureAvailable}
                   variant="page"
+                  onError={reportShellError}
                 />
               </Suspense>
             );
@@ -5470,6 +5507,8 @@ export function DesktopWorkspaceShell(props: {
                     restoreRequest.momentId === groupTab.momentId
                   }
                   onRestoreRequestTaken={takeRestoreRequest}
+                  steps={groupTab.momentId === null ? undefined : momentSteps.get(groupTab.momentId)}
+                  onOpenMoment={openMomentDiffTab}
                 />
               )
             );
@@ -5920,7 +5959,7 @@ export function DesktopWorkspaceShell(props: {
             />
           </div>
         </div>
-      ) : !workspaceIsReady ? (
+      ) : !workbenchRestored ? (
         <div
           data-testid="workspace-preparing"
           role="status"
@@ -5929,7 +5968,9 @@ export function DesktopWorkspaceShell(props: {
         >
           <RefreshCw size={16} aria-hidden className="animate-spin text-subtle" />
           <p className="text-sm font-medium text-ink">Preparing this workspace</p>
-          <p className="text-xs text-muted">
+          {/* The check is over while the saved layout loads. Hidden, not
+              removed, so the heading does not move. */}
+          <p className={`text-xs text-muted ${workspaceIsReady ? "invisible" : ""}`}>
             dohc is checking your existing files before editing starts.
           </p>
         </div>
@@ -6389,6 +6430,7 @@ export function DesktopWorkspaceShell(props: {
     </ShellErrorReporter.Provider>
     </CollectionFieldMarksProvider>
     </CustomizeContext.Provider>
+    </AgentColorContext.Provider>
     </AgentSettingsProvider>
   );
 }
