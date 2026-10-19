@@ -820,6 +820,37 @@ describe("seeding an absent lineage", () => {
   });
 });
 
+it.each([undefined, true] as const)("tells the engine a replacement's file existed only when it did (%s)", async fileExisted => {
+  const engine = seedPlaintextEngine("seed");
+  const provider = await openEngineYdocProviderSession({
+    transport: {...forwardYdocBlobEgress(engine), onEvent: handler => engine.onEvent(handler),
+      sendRequest: request => engine.sendRequest(request)},
+    workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind: "plaintext",
+    ...(fileExisted ? {fileExisted} : {}),
+    onRemoteUpdate: () => {}, scheduleSettle: () => () => {},
+  });
+  await provider.evict();
+  const open = engine.requests.find(request => request.method === YDOC_METHOD.open);
+  expect(open?.params).toEqual({versionId: VERSION, path: PATH, contentKind: "plaintext", ...(fileExisted ? {fileExisted} : {})});
+});
+
+it.each([false, true])("reports a write by the settling close a refused release escalates to (settled first: %s)", async settledFirst => {
+  // The engine refuses to release a dirty local-only lineage, and the provider
+  // escalates to a settling close that writes the file. A settled lineage
+  // releases at once, and that close writes nothing.
+  const engine = seedPlaintextEngine("seed"), closeMaterialized = vi.fn();
+  const provider = await openEngineYdocProviderSession({
+    transport: {...forwardYdocBlobEgress(engine), onEvent: handler => engine.onEvent(handler),
+      sendRequest: request => engine.sendRequest(request)},
+    workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind: "plaintext",
+    onRemoteUpdate: () => {}, onCloseMaterialized: closeMaterialized, scheduleSettle: () => () => {},
+  });
+  await provider.applyLocalUpdate(plaintextUpdate(provider.initialUpdate, text => text.insert(0, "edit ")), {idempotencyKey: "edit-key", armSettle: false});
+  if (settledFirst) await provider.settleNow();
+  await provider.close({settle: false});
+  expect(closeMaterialized).toHaveBeenCalledTimes(settledFirst ? 0 : 1);
+});
+
 describe("scene artifact seed admission", () => {
   it("forwards the first-generation intent and disables it for a replay generation", async () => {
     const engine = new YdocLoopbackEngine();
@@ -1067,7 +1098,7 @@ describe("YdocLiveAdapter", () => {
     );
     expect(engine.activeSessionIds()).toHaveLength(1);
 
-    await expect(session.close()).resolves.toBeUndefined();
+    await expect(session.close()).resolves.toEqual({ materialized: false });
     expect(engine.activeSessionIds()).toHaveLength(0);
 
     const reopened = await adapter.openSession({
@@ -2354,7 +2385,7 @@ describe("YdocLiveAdapter", () => {
       message: expect.stringContaining(resyncFailure.message),
       cause: recordFailure,
     });
-    await expect(session.close({ settle: false })).resolves.toBeUndefined();
+    await expect(session.close({ settle: false })).resolves.toEqual({ materialized: false });
 
     expect(methods.at(-1)).toBe(YDOC_METHOD.close);
     expect(() =>
@@ -4827,7 +4858,7 @@ describe("the ydoc.open deadline", () => {
     });
     engine.markSessionReplicated(session.sessionId);
 
-    await expect(session.close({ settle: false })).resolves.toBeUndefined();
+    await expect(session.close({ settle: false })).resolves.toEqual({ materialized: false });
 
     const reopened = await adapter.openSession({
       workspace: WORKSPACE,
@@ -5010,7 +5041,7 @@ describe("the ydoc.open deadline", () => {
       insert: "typed content",
     });
     engine.markSessionReplicated(session.sessionId);
-    await expect(session.close({ settle: false })).resolves.toBeUndefined();
+    await expect(session.close({ settle: false })).resolves.toEqual({ materialized: false });
 
     const reopened = await adapter.openSession({
       workspace: WORKSPACE,
@@ -5057,7 +5088,7 @@ describe("the ydoc.open deadline", () => {
       "captured text",
     );
 
-    await expect(session.close({ settle: false })).resolves.toBeUndefined();
+    await expect(session.close({ settle: false })).resolves.toEqual({ materialized: false });
     adapter.dispose();
   });
 
@@ -5081,7 +5112,7 @@ describe("the ydoc.open deadline", () => {
       insert: "typed, closed with no settle flag at all: ",
     });
 
-    await expect(session.close()).resolves.toBeUndefined();
+    await expect(session.close()).resolves.toEqual({ materialized: true });
 
     const reopened = await adapter.openSession({
       workspace: WORKSPACE,
@@ -5307,7 +5338,7 @@ describe("the ydoc.open deadline", () => {
       objectId: session.objectId,
     });
 
-    await expect(session.close({ settle: false })).resolves.toBeUndefined();
+    await expect(session.close({ settle: false })).resolves.toEqual({ materialized: false });
     adapter.dispose();
   });
 
@@ -5403,7 +5434,7 @@ describe("the ydoc.open deadline", () => {
       objectId: OBJECT_ID,
     });
 
-    await expect(session.close({ settle: false })).resolves.toBeUndefined();
+    await expect(session.close({ settle: false })).resolves.toEqual({ materialized: false });
     adapter.dispose();
   });
 
@@ -5533,7 +5564,7 @@ describe("the ydoc.open deadline", () => {
       "captured content",
     );
 
-    await expect(session.close({ settle: true })).resolves.toBeUndefined();
+    await expect(session.close({ settle: true })).resolves.toEqual({ materialized: true });
     // The settle succeeds — and since the session's only update is the
     // declared seed of the untouched captured file, it succeeds without
     // rewriting the artifact.

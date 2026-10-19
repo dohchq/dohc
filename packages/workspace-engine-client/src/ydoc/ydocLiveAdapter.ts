@@ -264,6 +264,9 @@ export interface OpenYdocAdapterSessionInput {
   // into a populated doc appends a second copy of the file instead of
   // resuming it. Callers that pass false own re-establishing the content.
   seedAbsentLineage?: boolean;
+  // An earlier session on this document had its file. A settle then never
+  // creates the file, so a file deleted outside dohc stays deleted.
+  fileExisted?: boolean;
 }
 
 export interface ApplyLocalUpdateOptions {
@@ -1381,19 +1384,24 @@ export class YdocAdapterSession {
     };
   }
 
-  async close(options?: { settle?: boolean; summary?: string }): Promise<void> {
-    if (this.closed) return;
+  // Answers whether the file holds the settled bytes after this close's own settle.
+  async close(
+    options?: { settle?: boolean; summary?: string },
+  ): Promise<{ materialized: boolean }> {
+    if (this.closed) return { materialized: false };
     await this.recordChain.catch(() => undefined);
     const params: YdocCloseParams = {
       sessionId: this.sessionId,
       ...(options?.settle !== undefined ? { settle: options.settle } : {}),
       ...(options?.summary ? { summary: options.summary } : {}),
     };
+    let materialized = false;
     try {
-      decodeYdocResult(
+      const closed = decodeYdocResult(
         YDOC_METHOD.close,
         await this.adapter.request(this.workspace, YDOC_METHOD.close, params),
       );
+      materialized = closed.materialized === true;
     } catch (error) {
       if (!isYdocSessionNotFoundRefusal(error)) throw error;
     }
@@ -1407,6 +1415,7 @@ export class YdocAdapterSession {
     for (const retired of this.retiredDocs) retired.destroy();
     this.retiredDocs.clear();
     this.adapter.releaseSession(this.sessionId);
+    return { materialized };
   }
 
   // End the session without settling and without pruning. The daemon drops
@@ -1580,6 +1589,7 @@ export class YdocLiveAdapter {
       ...(input.contentKind === "scene"
         ? { seedFromArtifact: input.seedAbsentLineage !== false }
         : {}),
+      ...(input.fileExisted ? { fileExisted: true } : {}),
     };
     const startedAtMs = performance.now();
     let delivery: Awaited<ReturnType<YdocLiveAdapter["requestWithBlob"]>>;

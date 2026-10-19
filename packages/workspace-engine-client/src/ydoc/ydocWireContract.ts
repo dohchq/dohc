@@ -39,6 +39,9 @@ export type YdocOpenParams = JsonObject & {
   expectedObjectId?: string;
   contentKind?: YdocContentKind;
   seedFromArtifact?: boolean;
+  // An earlier session on this document opened over its file or wrote it.
+  // With no head, the engine then refuses a settle that would create it.
+  fileExisted?: boolean;
 };
 
 // Declared write provenance beside the actor origin: the kind of actor that
@@ -244,7 +247,13 @@ const SettleResultSchema = mutableStruct({
   materialized: Schema.Boolean,
   projection: ProjectionProvenanceSchema,
 });
-const CloseResultSchema = mutableStruct({ closed: Schema.Literal(true) });
+// `materialized` answers whether the file holds the settled bytes after the
+// close's own settle, written now or already there. It is absent when the
+// close did not settle.
+const CloseResultSchema = mutableStruct({
+  closed: Schema.Literal(true),
+  materialized: Schema.optionalKey(Schema.Boolean),
+});
 const EvictResultSchema = mutableStruct({ evicted: Schema.Literal(true) });
 const RemoteUpdatePayloadSchema = Schema.Union([
   mutableStruct({sessionId: Schema.String, updateBase64: Schema.String}),
