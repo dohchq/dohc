@@ -55,7 +55,8 @@ import { createWorkspaceBlobRoutes } from "./workspaceBlobRoutes";
 import { createWorkspaceReplicationRoutes } from "./workspaceReplicationRoutes";
 import { createLinkResponseStreams } from "./linkResponseStreams";
 import { createLinkCredentialRoutes } from "./linkCredentialRoutes";
-import { accountDisplayName, createDiscussionRoutes } from "./discussionRoutes";
+import { accountDisplayName } from "./accountDisplayName";
+import { createDiscussionRoutes } from "./discussionRoutes";
 import {shareSenderLabel as formatShareSender} from "@dohc/security-contract/share-labels";
 import { createShareReadQueries } from "./shareReadQueries";
 import { createLinkChatRoutes } from "./linkChatRoutes";
@@ -104,7 +105,7 @@ import { MAX_LOG_PAGE_SIZE } from "./wireLimits";
 
 export { MAX_BLOB_BYTES, MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
 export { MAX_KEY_ENVELOPE_BYTES } from "./keyEnvelopeRoutes";
-export { DISCUSSION_DISPLAY_NAME_LOOKUP_DEADLINE_MS } from "./discussionRoutes";
+export { ACCOUNT_NAME_LOOKUP_DEADLINE_MS } from "./accountDisplayName";
 export { LINK_FRESHNESS_PAGE_BUDGET, MAX_RAW_ROWS_PER_LINK_PAGE } from "./shareReadQueries";
 
 export type SyncRelayHandler = (request: Request) => Promise<Response>;
