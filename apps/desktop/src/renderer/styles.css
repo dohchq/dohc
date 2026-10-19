@@ -901,7 +901,9 @@ body {
   }
 }
 
-.dohc-block-node {
+/* Every top-level block positions its own chrome. The gutter widgets
+ * between the blocks are positioned against the editor instead. */
+.dohc-notion-editor.ProseMirror > :not(.ProseMirror-widget) {
   position: relative;
 }
 
@@ -1588,11 +1590,9 @@ body {
 /* ── table controls ──
  * Notion-style row/column handles, the table menu, and the append "+"
  * strips (tableControls.tsx). Each is a decoration widget nested one
- * position inside its target cell — same "widget-inside-node" technique as
- * the block gutter (.dohc-block-node / .dohc-block-affordance above), so
- * `td`/`th` needs `position: relative` exactly like `.dohc-block-node`
- * does. The chrome is then pushed into the table's OUTER margin with
- * negative offsets so it never overlaps cell text, while staying a DOM
+ * position inside its target cell, so `td`/`th` needs `position: relative`.
+ * The chrome is then pushed into the table's OUTER margin with negative
+ * offsets so it never overlaps cell text, while staying a DOM
  * descendant of the cell — which is what keeps every handle glued to its
  * column/row while a resize drag is live (see the comment at the top of
  * tableControls.tsx). Reveal is split: handles show per hovered row/column
