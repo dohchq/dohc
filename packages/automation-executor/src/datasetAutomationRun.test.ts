@@ -95,7 +95,8 @@ const claim: DatasetAutomationClaim = {
 const fromLedger = (claimed: DatasetAutomationClaim): DatasetRunClaim => ({ source: "dataset", claim: claimed });
 // A run with no chat step reads no chat and sends nothing.
 const sendsNothing = {
-  chat: {
+  makeDurable: async () => {},
+  chat: { hasMessage: async () => false,
     directory: async () => { throw new Error("This automation sends no messages."); },
     write: async () => { throw new Error("This automation sends no messages."); },
   },
@@ -136,7 +137,8 @@ function chatSpy(script: { write?: (message: AutomationChatMessage) => void; not
   const messages: AutomationChatMessage[] = [];
   const notices: AutomationNotice[] = [];
   const dependencies = {
-    chat: {
+    makeDurable: async () => {},
+    chat: { hasMessage: async () => false,
       directory: async (roster: Exclude<ReachRoster, { kind: "unknown" }>) => chatDirectoryOf([TEAM, DM_ANA], roster),
       write: async (_signal: AbortSignal, message: AutomationChatMessage) => { messages.push(message); script.write?.(message); },
     },
@@ -1056,6 +1058,83 @@ describe("a dataset action a run invokes", () => {
       return formulas.map(() => ({ ok: true as const, value: (scope.record?.id ?? null) as JsonValue }));
     },
   };
+
+  it("does not count an approved read-only action, while counting a later write action", async () => {
+    const calls: Array<{ capabilityId: string; door: string }> = [];
+    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-read-usage-"), testMetadataDir);
+    const host = actionHost(async () => ({ result: null, revision: 9, replayed: false }));
+    let readOnly = true;
+    host.surface.revision = () => ({ ...actionRevision, definition: { ...withAction,
+      operations: withAction.operations.map(operation => operation.operationId === MARK_PAID ? { ...operation, readOnly } : operation) } });
+    const run = (claimId: string) => runWithRoster({
+      withHost: async work => work(host.surface), evaluator, store, nowMs: () => 2_000, personName: userId => userId, ...sendsNothing,
+      onUsageSuccess: pair => { calls.push(pair); },
+    }, { held: fromLedger({ ...numbered, claimId }), automation: markPaid, collection: { path: "Budget", name: "Budget" },
+      roster: { kind: "owner", ownerUserId: null, grants: [] }, signal: new AbortController().signal, stopped: new AbortController().signal });
+    expect(await run("read")).toEqual({ kind: "done" });
+    expect(host.sent).toHaveLength(1);
+    expect(calls).toEqual([]);
+    readOnly = false;
+    expect(await run("write")).toEqual({ kind: "done" });
+    expect(calls).toEqual([{ capabilityId: "dataset.operation.invoke", door: "automation" }]);
+  });
+
+  it("counts a successful no-op invocation of a write-capable action once", async () => {
+    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-noop-usage-"), testMetadataDir);
+    const calls: Array<{ capabilityId: string; door: string }> = [];
+    const record = { id: 12, status: "Paid" };
+    const before = structuredClone(record);
+    const host = actionHost(async () => {
+      // Mark paid returns early for an already-paid record.
+      if (record.status === "Paid") return { result: { alreadyPaid: true }, revision: 9, replayed: false };
+      record.status = "Paid";
+      return { result: { alreadyPaid: false }, revision: 10, replayed: false };
+    });
+    const run = () => runWithRoster({
+      withHost: async work => work(host.surface), evaluator, store, nowMs: () => 2_000, personName: userId => userId, ...sendsNothing,
+      onUsageSuccess: pair => { calls.push(pair); },
+    }, { held: fromLedger(numbered), automation: markPaid, collection: { path: "Budget", name: "Budget" },
+      roster: { kind: "owner", ownerUserId: null, grants: [] }, signal: new AbortController().signal, stopped: new AbortController().signal });
+    expect(await run()).toEqual({ kind: "done" });
+    expect(record).toEqual(before);
+    expect(calls).toEqual([{ capabilityId: "dataset.operation.invoke", door: "automation" }]);
+    expect(await run()).toEqual({ kind: "done" });
+    expect(host.sent).toHaveLength(1);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("counts dataset.operation.invoke once on success, excluding refusal, failure and run replay", async () => {
+    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-usage-"), testMetadataDir);
+    const calls: Array<{ capabilityId: string; door: string }> = [];
+    let problem: "refused" | "failed" | null = "refused";
+    const host = actionHost(async () => {
+      if (problem === "refused") throw new AppBackendRuntimeError({ code: "already_paid", message: "Already paid" });
+      if (problem === "failed") throw Error("Host failed");
+      return { result: { id: 12 }, revision: 9, replayed: false };
+    });
+    const dependencies = {
+      withHost: async <T>(work: (host: DatasetRunHost) => T | Promise<T>) => work(host.surface),
+      evaluator, store, nowMs: () => 2_000, personName: (userId: string) => userId, ...sendsNothing,
+      onUsageSuccess: (pair: { capabilityId: string; door: string }) => { calls.push(pair); },
+    };
+    const run = (attempt: number) => runWithRoster(dependencies, {
+      held: fromLedger({ ...numbered, run: attempt }), automation: markPaid, collection: { path: "Budget", name: "Budget" },
+      roster: { kind: "owner", ownerUserId: null, grants: [] }, signal: new AbortController().signal, stopped: new AbortController().signal,
+    });
+    expect(await run(1)).toMatchObject({ kind: "failed" });
+    expect(calls).toEqual([]);
+    problem = "failed";
+    expect(await run(2)).toMatchObject({ kind: "failed" });
+    expect(calls).toEqual([]);
+    problem = null;
+    expect(await run(3)).toEqual({ kind: "done" });
+    expect(calls).toEqual([{ capabilityId: "dataset.operation.invoke", door: "automation" }]);
+    const sent = host.sent.length;
+    expect(await run(3)).toEqual({ kind: "done" });
+    expect(await run(4)).toEqual({ kind: "done" });
+    expect(host.sent).toHaveLength(sent);
+    expect(calls).toEqual([{ capabilityId: "dataset.operation.invoke", door: "automation" }]);
+  });
 
   it("sends the action its input once per claim, with the record's id as its operations take it, and resumes under the same key", async () => {
     const store = createAutomationRunStore(await createTestScratch("dohc-dataset-action-"), testMetadataDir);

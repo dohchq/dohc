@@ -45,11 +45,12 @@ pub use durable::{
     read_last_settled_sha, read_marker, read_marker_in, read_pristine_seed_lineage_source,
     read_seed_only_lineage_source, record_base_coordinate_in_tx, record_local_update,
     record_update_in_tx, replace_lineage_with_successor, replace_lineage_with_successor_in_tx,
-    replace_reviewed_lineage_with_successor_in_tx, rewrite_bare_marker_content_kind, settle,
-    validate_remote_update, AppendOutcome, BaseCoordinateRecord, BaseRelayCoordinate, ClaimOutcome,
-    CloseOutcome, CloseProjection, CompactOutcome, LineageClaimStatus, LineageGuard, LocalAppend,
-    Marker, MarkerCreation, OriginationBase, PersistedDoc, Regime, SettleOutcome,
-    SuccessorInstallOutcome, SuccessorReplacement,
+    replace_reviewed_lineage_with_successor_in_tx, rewrite_bare_marker_content_kind,
+    seed_only_lineage_source, settle, validate_remote_update, AppendOutcome, BaseCoordinateRecord,
+    BaseRelayCoordinate, ClaimOutcome, CloseOutcome, CloseProjection, CompactOutcome,
+    FileExportLane, LineageClaimStatus, LineageGuard, LocalAppend, Marker, MarkerCreation,
+    OriginationBase, PersistedDoc, Regime, SettleOutcome, SuccessorInstallOutcome,
+    SuccessorReplacement,
 };
 pub use error::CollabError;
 pub use lease::{Lease, LeaseRegistry};
@@ -68,8 +69,9 @@ pub use replay_parity::{
     ReplayBatch,
 };
 pub use replication::{
-    apply_remote_update, apply_remote_update_in_transaction_with_projection, RemoteApplyProjection,
-    RemoteUpdate, ReplicationApplyOutcome, UpdateOrigin,
+    apply_remote_update, apply_remote_update_in_transaction_with_projection,
+    apply_remote_update_with_guard, RemoteApplyProjection, RemoteUpdate, ReplicationApplyOutcome,
+    UpdateOrigin,
 };
 pub use scene::{
     encode_scene_asset_record, encode_scene_asset_records, fold_scene, import_portable_scene,
@@ -142,7 +144,7 @@ fn check_identifier(value: &str, reason: &'static str) -> Result<(), CollabError
     Ok(())
 }
 
-pub(crate) fn validate_actor_origin_id(value: &str) -> Result<(), CollabError> {
+pub fn validate_actor_origin_id(value: &str) -> Result<(), CollabError> {
     // Locally admitted authors appear in History and must contain no controls.
     if value.is_empty()
         || value.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES

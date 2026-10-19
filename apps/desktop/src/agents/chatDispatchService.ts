@@ -14,11 +14,10 @@ import {
 import type {
   AgentDispatchClaim,
   AgentRunRecord,
-  ChatChannelKind,
-  ChatMessage,
   LinkedChatStore,
 } from "@dohc/workspace-contracts/engine";
 import type { RunnerSettings } from "../settings/userSettings";
+import { UNNAMED_AGENT_ID, type AgentRunDispatch } from "./activeAgentRun";
 import {
   AGENT_DISPATCH_RPC_DEADLINE_MS,
   type AgentDispatchRequestOptions,
@@ -147,7 +146,7 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   // at the run's chain depth, for the person main names.
   setRunAttribution(
     workspace: ChatDispatchWorkspace,
-    run: { agentId: string; agentRunId: string; depth: number } | null,
+    run: { agentId: string; agentRunId: string; depth: number; dispatch: AgentRunDispatch } | null,
   ): void | Promise<void>;
   runSlotOccupied?(workspace: ChatDispatchWorkspace): boolean;
   publishPresence?(input: ChatDispatchPresenceInput): Promise<void>;
@@ -238,20 +237,6 @@ function buildRunnerPrompt(threadMarkdown: string, threadId: string): string {
 ## Report contract
 
 Work on the request represented by this thread. Reply in-thread with \`dohc chat reply ${threadId} --as-agent "<report>"\`. Report outcomes, not tool logs. On long tasks, post progress the way a teammate would. If blocked on the user, reply with \`--needs-decision\`. To ask them to pick, add \`--option "<choice>"\` once per choice; their answer arrives as the next message with the chosen option. Your final text is not shown anywhere; only messages you post through \`dohc chat\` are shown.`;
-}
-
-export function messageCanTrigger(
-  message: ChatMessage,
-  verifiedUserId: string | undefined,
-  context: {
-    channelKind: ChatChannelKind | undefined;
-    mentionsAgent: boolean;
-  },
-): boolean {
-  if (context.channelKind !== "agent" && !context.mentionsAgent) return false;
-  if (message.author.kind !== "human" || message.origin === "cli") return false;
-  if (message.authorUserId === undefined) return true;
-  return verifiedUserId !== undefined && message.authorUserId === verifiedUserId;
 }
 
 export function createChatDispatchService(options: ChatDispatchServiceOptions) {
@@ -381,7 +366,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     try {
       await options.publishPresence?.(input);
     } catch {
-      // Presence is cosmetic. The dispatch ledger and failure notes carry truth.
+      // Presence is cosmetic. The dispatch ledger and run records carry truth.
     }
   }
 
@@ -451,8 +436,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       run.runId,
       durableDispatchRequest,
     );
-    if (current?.failureNotePosted) return;
-    await dispatch.markFailureNotePosted(run.runId, durableDispatchRequest);
+    if (current?.failureHandled) return;
+    await dispatch.markFailureHandled(run.runId, durableDispatchRequest);
   }
 
   async function clearLiveAttribution(live: LiveRun): Promise<void> {
@@ -623,7 +608,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         let outcome: RunOutcome;
         if (saved !== "exited") {
           outcome = saved;
-        } else if (run.failureNotePosted) {
+        } else if (run.failureHandled) {
           // The no-reply check already handled this run.
           outcome = "no-reply";
         } else if (runMessageLinkPending(workspace, runId)) {
@@ -763,9 +748,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     try {
       const identity = await options.identityFor(workspace);
       await options.setRunAttribution(workspace, {
-        agentId: "dohc-chat-runner",
+        agentId: UNNAMED_AGENT_ID,
         agentRunId: claim.run.runId,
         depth: claim.chainDepth,
+        dispatch: "run",
       });
       const markdown = await buildRunnerThreadContext({
         dispatchStore: dispatch,
@@ -885,7 +871,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         try {
           options.onDispatchNotice?.(workspace, {
             reason: "no-runner", threadId,
-            message: `No agent could take this request. ${command ? "Agent dispatch is off." : "No agent runner is configured."} Set up agent dispatch in Settings → Agents & MCP.`,
+            message: `No agent could take this request. ${command ? "Agent dispatch is off." : "No agent runner is configured."} Set up agent dispatch in Settings → Agents.`,
           });
         } catch (error) {
           reportError(error);
@@ -1102,7 +1088,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         claim.run.runId,
         durableDispatchRequest,
       );
-      if (linked.length === 0 && !claim.run.failureNotePosted) {
+      if (linked.length === 0 && !claim.run.failureHandled) {
         await markRunFailureHandled(workspace, claim.run).catch(reportError);
       }
       await oweRunNotice(workspace, claim.run.runId);
@@ -1138,15 +1124,15 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         durableDispatchRequest,
       );
       if (linked.length > 0) {
-        if (!recovery.run.failureNotePosted) {
-          await dispatch.markFailureNotePosted(
+        if (!recovery.run.failureHandled) {
+          await dispatch.markFailureHandled(
             recovery.run.runId,
             durableDispatchRequest,
           );
         }
         continue;
       }
-      if (!recovery.run.failureNotePosted) {
+      if (!recovery.run.failureHandled) {
         await markRunFailureHandled(workspace, recovery.run).catch(reportError);
       }
       if (recovery.attemptCount < 2) {
@@ -1341,8 +1327,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         await markRunFailureHandled(live.workspace, live.claim.run);
       } catch (error) {
         reportError(error);
-        // Mark the stopped run handled so app-quit recovery never retries it.
-        await dispatch.markFailureNotePosted(
+        await dispatch.markFailureHandled(
           live.claim.run.runId,
           durableDispatchRequest,
         );
@@ -1358,7 +1343,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   ): Promise<void> {
     await enqueue(workspaceId, async () => {
       const workspace = options.workspaceFor(workspaceId);
-      if (!workspace) throw new Error(`Unknown workspace: ${workspaceId}`);
+      if (!workspace) throw new Error("This workspace is not open. Open it again.");
       await options.dispatchStoreFor(workspace).setThreadDispatchPaused({
         workspaceId,
         threadId,
@@ -1375,7 +1360,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     threadId: string,
   ): Promise<ChatDispatchThreadState> {
     const workspace = options.workspaceFor(workspaceId);
-    if (!workspace) throw new Error(`Unknown workspace: ${workspaceId}`);
+    if (!workspace) throw new Error("This workspace is not open. Open it again.");
     const dispatch = options.dispatchStoreFor(workspace);
     const [pauseState, pending] = await Promise.all([
       dispatch.getThreadDispatchPauseState(workspaceId, threadId),
@@ -1475,9 +1460,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           };
         }
         await options.setRunAttribution(workspace, {
-          agentId: "dohc-chat-runner-self-test",
+          agentId: UNNAMED_AGENT_ID,
           agentRunId: runId,
           depth: 0,
+          dispatch: "self-test",
         });
         const child = spawnConfiguredRunner({
           rootPath: workspace.rootPath,

@@ -1,15 +1,16 @@
+import { agentKeyForGroup, agentColorChanges } from "../workspaces/actorPresentation";
+import type { AgentColorChangedEvent } from "./bridgeContract";
 import { join } from "node:path";
 import { configuredRunnerCommand } from "../agents/agentToolCatalog";
-import {
-  DesktopUserSettingsResult, SetAppPinnedPayload, SetUserSettingsPayload, WorkspaceSettingsPayload,
-  SetWorkspaceSettingsPayload, WorkspaceSettingsResult, WorkspaceIdPayload,
-  GetWorkspaceUiStateResult, SetWorkspaceUiStatePayload,
-} from "./bridgeContract";
-import { CHANNELS } from "./channels";
+import { DesktopUserSettingsResult, WorkspaceSettingsResult, GetWorkspaceUiStateResult } from "./bridgeContract";
+import type { settingsOperations } from "./settingsOperations";
+import type { OperationHandlers } from "./operationTable";
 import {
   DEFAULT_USER_SETTINGS,
+  AgentColors, StoredUserSettingsResult, rendererUserSettingsResult,
   settingsDeepEqual,
   type DesktopUserSettings,
+  type ThemeMode,
   type ZoomStep,
 } from "../settings/userSettings";
 import { withAppPinned } from "../settings/pinnedApps";
@@ -31,26 +32,28 @@ const USER_SETTINGS_RELOAD_DEBOUNCE_MS = 150;
 
 type UserSettingsChange = {
   // What the file held before, whose effects were in place.
-  previous: DesktopUserSettings;
-  result: DesktopUserSettingsResult;
+  previous: StoredUserSettingsResult;
+  result: StoredUserSettingsResult;
 };
 
 export function createSettingsIpc<
   Sender,
   Event extends { sender: Sender },
-  Operation extends { readonly workspace: { readonly rootPath: string } },
+  Operation extends { readonly workspace: { readonly rootPath: string }; assertCurrent(): void },
 >(dependencies: {
-  registerHandler(channel: string, handler: (event: Event, payload: unknown) => unknown): void;
-  assertTrustedSender(event: Event): void;
   stateDir(): string;
   setCachedPreferredName(preferredName: string | undefined, agentName: string | undefined): void;
   applyZoomLevelToWindows(zoomLevel: number): void;
+  // The theme the OS draws dohc's menus, dialogs, and window background in.
+  applyThemeMode(themeMode: ThemeMode): void;
+  setSpellCheckerEnabled(enabled: boolean): void;
   refreshDispatchTray(): Promise<unknown>;
   openDispatchWorkspaces(): readonly { workspaceId: string }[];
   chatDispatchService: { scanWorkspace(workspaceId: string): Promise<unknown> };
   notifyRenderer(scope: { workspaceId: string }): void;
   // Tells every window the settings changed. The writer already has the
   // result; the other surfaces learn it here.
+  broadcastAgentColor(event: AgentColorChangedEvent): void;
   broadcastUserSettings(result: DesktopUserSettingsResult): void;
   withRendererWorkspaceOperation<Result>(
     sender: Sender, workspaceId: string, message: string,
@@ -62,10 +65,10 @@ export function createSettingsIpc<
   knownWorkspaceIds(): readonly string[];
 }) {
   const {
-    registerHandler, assertTrustedSender, stateDir,
-    setCachedPreferredName, applyZoomLevelToWindows, refreshDispatchTray,
+    stateDir,
+    setCachedPreferredName, applyZoomLevelToWindows, applyThemeMode, setSpellCheckerEnabled, refreshDispatchTray,
     openDispatchWorkspaces, chatDispatchService, withRendererWorkspaceOperation,
-    broadcastUserSettings, notifyRenderer, openPath, knownWorkspaceIds,
+    broadcastUserSettings, broadcastAgentColor, notifyRenderer, openPath, knownWorkspaceIds,
   } = dependencies;
 
   // Every change to the user settings file runs here, one at a time, and each
@@ -78,15 +81,22 @@ export function createSettingsIpc<
     return run;
   }
 
-  // The windows must match whatever zoom level is in the file, however it got
-  // there.
+  // The windows must match whatever zoom level, theme and spellcheck are in
+  // the file, however they got there.
   function takeEffect(settings: DesktopUserSettings): void {
     setCachedPreferredName(settings.profile.preferredName, settings.profile.agentName);
     applyZoomLevelToWindows(settings.appearance.zoomLevel);
+    applyThemeMode(settings.appearance.themeMode);
+    setSpellCheckerEnabled(settings.editor.spellcheck);
   }
 
   async function announce({ previous, result }: UserSettingsChange): Promise<void> {
-    broadcastUserSettings(result);
+    for (const event of agentColorChanges(previous.settings.appearance.agentColors, result.settings.appearance.agentColors)) {
+      broadcastAgentColor(event);
+    }
+    const publicResult = rendererUserSettingsResult(result);
+    if (settingsDeepEqual(rendererUserSettingsResult(previous), publicResult)) return;
+    broadcastUserSettings(publicResult);
     await refreshDispatchTray();
     const { runner, profile } = result.settings;
     if (!runner.enabled || !configuredRunnerCommand(runner)) return;
@@ -94,8 +104,8 @@ export function createSettingsIpc<
     // runner or to the agent's name can make one due, so a zoom step does not
     // scan every open workspace.
     if (
-      settingsDeepEqual(previous.runner, runner) &&
-      previous.profile.agentName === profile.agentName
+      settingsDeepEqual(previous.settings.runner, runner) &&
+      previous.settings.profile.agentName === profile.agentName
     ) {
       return;
     }
@@ -111,14 +121,14 @@ export function createSettingsIpc<
   // The one way the user settings change: a save from Settings, a zoom step,
   // a reset, or an edit in the file. `write` answers null when nothing changed.
   async function changeUserSettings(
-    write: () => Promise<DesktopUserSettingsResult | null>,
+    write: () => Promise<StoredUserSettingsResult | null>,
   ): Promise<UserSettingsChange | null> {
     const change = await enqueueUserSettingsWrite(async () => {
-      const previous = (await readCachedUserSettingsFile(stateDir())).settings;
+      const previous = await readCachedUserSettingsFile(stateDir());
       const written = await write();
       if (!written) return null;
-      const result = DesktopUserSettingsResult.parse(written);
-      takeEffect(result.settings);
+      const result = StoredUserSettingsResult.parse(written);
+      if (!settingsDeepEqual(previous, result)) takeEffect(result.settings);
       return { previous, result };
     });
     if (change) await announce(change);
@@ -126,11 +136,11 @@ export function createSettingsIpc<
   }
 
   async function saveUserSettings(
-    write: () => Promise<DesktopUserSettingsResult>,
+    write: () => Promise<StoredUserSettingsResult>,
   ): Promise<DesktopUserSettingsResult> {
     const change = await changeUserSettings(write);
     if (!change) throw new Error("dohc did not save settings.");
-    return change.result;
+    return rendererUserSettingsResult(change.result);
   }
 
   /**
@@ -141,9 +151,7 @@ export function createSettingsIpc<
    */
   async function reloadUserSettings(): Promise<DesktopUserSettingsResult> {
     const change = await changeUserSettings(() => reloadUserSettingsFile(stateDir()));
-    return change?.result ?? DesktopUserSettingsResult.parse(
-      await readCachedUserSettingsFile(stateDir()),
-    );
+    return rendererUserSettingsResult(change?.result ?? await readCachedUserSettingsFile(stateDir()));
   }
 
   // One zoom step, from the zoom level in the file as it is now.
@@ -180,61 +188,61 @@ export function createSettingsIpc<
     }
   }
 
-  function registerSettingsIpcHandlers(): void {
-    registerHandler(CHANNELS.getUserSettings, async (event) => {
-      assertTrustedSender(event);
-      return DesktopUserSettingsResult.parse(
-        await readCachedUserSettingsFile(stateDir()),
-      );
-    });
+  const handlers = {
+    getUserSettings: async () => {
+      return rendererUserSettingsResult(await readCachedUserSettingsFile(stateDir()));
+    },
 
-    registerHandler(CHANNELS.reloadUserSettings, async (event) => {
-      assertTrustedSender(event);
-      return reloadUserSettings();
-    });
+    reloadUserSettings,
 
-    registerHandler(CHANNELS.setUserSettings, async (event, payload) => {
-      assertTrustedSender(event);
-      const input = SetUserSettingsPayload.parse(payload);
+    setUserSettings: async (input) => {
       return saveUserSettings(() =>
         writeUserSettingsFile(stateDir(), input.settings, input.base));
-    });
+    },
 
     // One pin at a time, applied to the file as it is now, so two quick pins
     // both land.
-    registerHandler(CHANNELS.setAppPinned, async (event, payload) => {
-      assertTrustedSender(event);
-      const input = SetAppPinnedPayload.parse(payload);
+    setAppPinned: async (input) => {
       return saveUserSettings(() =>
         updateUserSettingsFile(stateDir(), (current) =>
           withAppPinned(current, input, knownWorkspaceIds())));
-    });
+    },
 
-    registerHandler(CHANNELS.resetUserSettings, async (event) => {
-      assertTrustedSender(event);
+    setAgentColor: async (input, { operation }) => {
+      const key = agentKeyForGroup(input.workspaceId, input.group);
+      await saveUserSettings(() => updateUserSettingsFile(stateDir(), current => {
+        operation.assertCurrent();
+        if ((current.appearance.agentColors?.[key] ?? null) === input.hue) return current;
+        const agentColors = { ...current.appearance.agentColors };
+        if (input.hue === null) delete agentColors[key];
+        else agentColors[key] = input.hue;
+        if (!AgentColors.safeParse(agentColors).success) {
+          throw new Error("dohc could not save this agent color within the settings limits. Use the default color for this agent.");
+        }
+        return { ...current, appearance: { ...current.appearance, agentColors } };
+      }));
+    },
+
+    resetUserSettings: async () => {
       return saveUserSettings(() => replaceUserSettingsFile(stateDir(), DEFAULT_USER_SETTINGS));
-    });
+    },
 
-    registerHandler(CHANNELS.getUserSettingsFilePath, (event) => {
-      assertTrustedSender(event);
+    getUserSettingsFilePath: () => {
       return join(stateDir(), USER_SETTINGS_FILE);
-    });
+    },
 
     // The file lives in dohc's own folder, outside every workspace, so it
     // opens in the person's editor rather than dohc's: dohc's editor writes
     // only inside a workspace. The watcher applies the save.
-    registerHandler(CHANNELS.openUserSettingsFile, async (event) => {
-      assertTrustedSender(event);
+    openUserSettingsFile: async () => {
       await openSettingsFile(
         await enqueueUserSettingsWrite(() => ensureUserSettingsFile(stateDir())),
       );
-    });
+    },
 
     // `.dohc` is dohc's own folder, which dohc's editor does not write, so
     // this file opens in the person's editor too.
-    registerHandler(CHANNELS.openWorkspaceSettingsFile, async (event, payload) => {
-      assertTrustedSender(event);
-      const input = WorkspaceSettingsPayload.parse(payload);
+    openWorkspaceSettingsFile: async (input, { event }) => {
       const path = await withRendererWorkspaceOperation(
         event.sender,
         input.workspaceId,
@@ -242,90 +250,40 @@ export function createSettingsIpc<
         (operation) => workspaceSettingsPath(operation.workspace.rootPath),
       );
       await openSettingsFile(path);
-    });
+    },
 
-    registerHandler(CHANNELS.getWorkspaceSettings, async (event, payload) => {
-      assertTrustedSender(event);
-      const input = WorkspaceSettingsPayload.parse(payload);
-      return withRendererWorkspaceOperation(
-        event.sender,
-        input.workspaceId,
-        "Workspace settings read stopped because this window changed workspaces.",
-        async (operation) =>
-          WorkspaceSettingsResult.parse(
-            await readWorkspaceSettingsFile(operation.workspace.rootPath),
-          ),
-      );
-    });
+    getWorkspaceSettings: async (_input, { operation }) =>
+      WorkspaceSettingsResult.parse(
+        await readWorkspaceSettingsFile(operation.workspace.rootPath),
+      ),
 
-    registerHandler(CHANNELS.setWorkspaceSettings, async (event, payload) => {
-      assertTrustedSender(event);
-      const input = SetWorkspaceSettingsPayload.parse(payload);
-      return withRendererWorkspaceOperation(
-        event.sender,
-        input.workspaceId,
-        "Workspace settings save stopped because this window changed workspaces.",
-        async (operation) =>
-          WorkspaceSettingsResult.parse(
-            await saveWorkspaceSettingsFile(
-              operation.workspace.rootPath,
-              input.patch,
-            ),
-          ),
-      );
-    });
+    setWorkspaceSettings: async (input, { operation }) =>
+      WorkspaceSettingsResult.parse(
+        await saveWorkspaceSettingsFile(operation.workspace.rootPath, input.patch),
+      ),
 
-    registerHandler(CHANNELS.resetWorkspaceSettings, async (event, payload) => {
-      assertTrustedSender(event);
-      const input = WorkspaceSettingsPayload.parse(payload);
-      return withRendererWorkspaceOperation(
-        event.sender,
-        input.workspaceId,
-        "Workspace settings reset stopped because this window changed workspaces.",
-        async (operation) =>
-          WorkspaceSettingsResult.parse(
-            await resetWorkspaceSettingsFile(operation.workspace.rootPath),
-          ),
-      );
-    });
-  }
+    resetWorkspaceSettings: async (_input, { operation }) =>
+      WorkspaceSettingsResult.parse(
+        await resetWorkspaceSettingsFile(operation.workspace.rootPath),
+      ),
 
-  function registerWorkspaceUiStateIpcHandlers(): void {
     // Per-workspace workbench UI state (.dohc/ui-state.json). The renderer
     // cannot write .dohc through writeWorkspaceText (reserved path) — this
     // narrow pair is the only writer, same pattern as agent-runs.json. Both
     // directions are zod-bounded; a corrupt/foreign on-disk file reads as null
     // ("no saved state"), never an error.
-    registerHandler(CHANNELS.getWorkspaceUiState, async (event, payload) => {
-      assertTrustedSender(event);
-      const input = WorkspaceIdPayload.parse(payload);
-      return withRendererWorkspaceOperation(
-        event.sender,
-        input.workspaceId,
-        "UI state read stopped because this window changed workspaces.",
-        async (operation) => {
-          const parsed = GetWorkspaceUiStateResult.safeParse(
-            await readUiStateFile(operation.workspace.rootPath),
-          );
-          return parsed.success ? parsed.data : null;
-        },
+    getWorkspaceUiState: async (_input, { operation }) => {
+      const parsed = GetWorkspaceUiStateResult.safeParse(
+        await readUiStateFile(operation.workspace.rootPath),
       );
-    });
+      return parsed.success ? parsed.data : null;
+    },
 
-    registerHandler(CHANNELS.setWorkspaceUiState, async (event, payload) => {
-      assertTrustedSender(event);
-      const input = SetWorkspaceUiStatePayload.parse(payload);
-      await withRendererWorkspaceOperation(
-        event.sender,
-        input.workspaceId,
-        "UI state write stopped because this window changed workspaces.",
-        (operation) => writeUiStateFile(operation.workspace.rootPath, input.state),
-      );
-    });
-  }
+    setWorkspaceUiState: async (input, { operation }) => writeUiStateFile(operation.workspace.rootPath, input.state),
+  } satisfies OperationHandlers<typeof settingsOperations, Event, Operation>;
 
   return {
-    registerSettingsIpcHandlers, registerWorkspaceUiStateIpcHandlers,
-    watchUserSettingsFile, reloadUserSettings, stepWindowZoom,
+    ...handlers,
+    watchUserSettingsFile, stepWindowZoom,
   };
 }

@@ -19,16 +19,20 @@ const Base = {
   sharerName: z.string().max(320).nullable().optional(),
   generation: z.number().int().positive(), createdAtMs: Timestamp,
   genericChatWritable: z.boolean(),
+  fileScope: z.enum(["served", "not-served"]).optional(),
 };
 const Row = z.union([
   z.object({ ...Base, selector: Selector, access: z.enum(["view", "comment", "edit", "read-only", "read-write"]), damaged: z.never().optional() })
     .refine(row => row.selector.kind === undefined
       ? ["view", "comment", "edit"].includes(row.access)
-      : ["read-only", "read-write"].includes(row.access)),
+      : ["read-only", "read-write"].includes(row.access))
+    .refine(row => row.selector.kind !== "group" || row.fileScope !== undefined),
   z.object({ ...Base, selector: z.null(), access: z.string().max(64), damaged: z.literal(true) }),
 ]);
 const Removed = z.object({ shareId: Id, grantId: Id, removedAtMs: Timestamp, message: z.string().min(1).max(500) });
 const Inventory = z.object({ received: z.array(Row).max(50_000), removed: z.array(Removed).max(50_000) });
+const InventoryPage = z.object({ ok: z.literal(true), received: z.array(Row).max(1_000), removed: z.array(Removed).max(1_000),
+  nextCursor: z.string().min(1).max(1_024).optional() });
 const Persisted = Inventory.extend({ listedAtMs: Timestamp });
 export type ReceivedInventory = z.infer<typeof Inventory>;
 export type ReceivedScope = { userId: string; relayUrl: string; generation: number };
@@ -47,6 +51,34 @@ export function parseReceivedInventory(body: unknown): ReceivedInventory | null 
     received: parsed.data.received.sort((a, b) => a.shareId < b.shareId ? -1 : a.shareId > b.shareId ? 1 : 0),
     removed: parsed.data.removed.sort((a, b) => a.shareId < b.shareId ? -1 : a.shareId > b.shareId ? 1 : 0),
   };
+}
+
+/** Publish only a complete account acquisition. Page cursors describe an interval, not a snapshot. */
+export async function listReceivedInventory(get: (path: string) => Promise<unknown>, assertCurrent: () => void): Promise<ReceivedInventory> {
+  const received: ReceivedInventory["received"] = [], removed: ReceivedInventory["removed"] = [];
+  const cursors = new Set<string>();
+  let cursor: string | undefined;
+  let lastShareId = "";
+  for (let pageNumber = 0; pageNumber < 50; pageNumber++) {
+    assertCurrent();
+    const page = InventoryPage.parse(await get(`/sync/shares?received=true${cursor === undefined ? "" : `&cursor=${encodeURIComponent(cursor)}`}`));
+    assertCurrent();
+    const ids = [...page.received, ...page.removed].map(row => row.shareId).sort();
+    for (const id of ids) {
+      if (id <= lastShareId) throw new Error("Received share pages are inconsistent.");
+      lastShareId = id;
+    }
+    received.push(...page.received); removed.push(...page.removed);
+    if (received.length + removed.length > 50_000) throw new Error("Received share inventory exceeds its limit.");
+    if (page.nextCursor === undefined) {
+      const inventory = parseReceivedInventory({ received, removed });
+      if (!inventory) throw new Error("Received share inventory is unusable.");
+      return inventory;
+    }
+    if (cursors.has(page.nextCursor)) throw new Error("Received share cursor repeated.");
+    cursors.add(page.nextCursor); cursor = page.nextCursor;
+  }
+  throw new Error("Received share inventory did not finish.");
 }
 
 export function createReceivedShareStore(directory: string) {

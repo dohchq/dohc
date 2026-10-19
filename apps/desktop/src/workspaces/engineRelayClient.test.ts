@@ -29,11 +29,11 @@ import {
 import {
   allowInsecureLoopbackRelayForTests,
   EngineRelayClient,
-  INSECURE_LOOPBACK_RELAY_TEST_ENV,
   MixedRelayTransportError,
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
+import { INSECURE_LOOPBACK_RELAY_TEST_ENV } from "./cloudConfiguration";
 import {
   mountRootFor,
   mountStoreWorkspaceIdFor,
@@ -1204,11 +1204,14 @@ describe("EngineRelayClient", () => {
       store,
       pinnedSelector: PINNED_SELECTOR,
       recordRefusals: async () => undefined,
-      pull: async (input) =>
-        await client.pullShareView({
+      pull: async (input) => {
+        const pull = await client.pullShareView({
           shareId: input.shareId,
           grantedSelector: input.grantedSelector,
-        }),
+        });
+        expect(pull.nextCursor).toBe(13);
+        return pull;
+      },
     });
 
     expect(outcome).toEqual({
@@ -1591,11 +1594,14 @@ describe("EngineRelayClient", () => {
         store,
         pinnedSelector: PINNED_SELECTOR,
         recordRefusals: async () => undefined,
-        pull: async (input) =>
-          await client.pullShareView({
+        pull: async (input) => {
+          const pull = await client.pullShareView({
             shareId: input.shareId,
             grantedSelector: input.grantedSelector,
-          }),
+          });
+          expect(pull.nextCursor).toBe(14);
+          return pull;
+        },
       }),
     ).resolves.toEqual({
       status: "updated",
@@ -1637,11 +1643,14 @@ describe("EngineRelayClient", () => {
           createCaptureLiveStores(workspace, sessions).store,
         pinnedSelector: PINNED_SELECTOR,
         recordRefusals: async () => undefined,
-        pull: async (input) =>
-          await mountRelay.pullShareView({
+        pull: async (input) => {
+          const pull = await mountRelay.pullShareView({
             shareId: input.shareId,
             grantedSelector: input.grantedSelector,
-          }),
+          });
+          expect(pull.nextCursor).toBe(13);
+          return pull;
+        },
       }),
     ).resolves.toEqual({
       status: "unchanged",

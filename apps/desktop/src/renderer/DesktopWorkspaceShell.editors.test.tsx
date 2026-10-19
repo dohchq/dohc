@@ -62,7 +62,7 @@ describe("editor groups", () => {
         activeEditorGroup: "right",
       }),
     );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
       files: ["race-a.md", "b.md", "c.md"].map((path) => ({
         path,
         kind: "file" as const,
@@ -134,7 +134,7 @@ describe("editor groups", () => {
         activeEditorGroup: "left",
       }),
     );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
       files: ["race-a.md", "b.md", "c.md"].map((path) => ({
         path,
         kind: "file" as const,
@@ -224,7 +224,7 @@ describe("editor groups", () => {
         activeEditorGroup: "left",
       }),
     );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
       files: ["race-a.md", "b.md", "c.md"].map((path) => ({
         path,
         kind: "file" as const,
@@ -460,7 +460,7 @@ describe("editor groups", () => {
         activeEditorGroup: "left",
       }),
     );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
       files: ["a.md", "b.md", "c.md"].map((path) => ({
         path,
         kind: "file" as const,
@@ -537,7 +537,7 @@ describe("editor groups", () => {
         activeEditorGroup: "left",
       }),
     );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
       files: ["a.md", "b.md"].map((path) => ({
         path,
         kind: "file" as const,
@@ -710,7 +710,7 @@ describe("editor groups", () => {
         activeEditorGroup: "right",
       }),
     );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
       files: ["race-a.md", "race-b.md", "race-c.md"].map((path) => ({
         path,
         kind: "file" as const,
@@ -813,7 +813,7 @@ describe("editor groups", () => {
           activeEditorGroup: "right",
         }),
       );
-      bridge.listWorkspaceFiles = vi.fn(async () => ({
+      bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
         files: ["race-a.md", "b.md", "c.md"].map((path) => ({
           path,
           kind: "file" as const,
@@ -896,6 +896,7 @@ describe("editor groups", () => {
       destination: "Chats",
       tabPath: "dohc://chats",
       navigate: async (user: ReturnType<typeof userEvent.setup>) => {
+        await user.click(screen.getByTestId("activity-chats"));
         await user.click(await screen.findByTestId("chats-open-tab"));
       },
     },
@@ -931,7 +932,7 @@ describe("editor groups", () => {
           activeEditorGroup: "right",
         }),
       );
-      bridge.listWorkspaceFiles = vi.fn(async () => ({
+      bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
         files: ["race-a.txt", "b.md"].map((path) => ({
           path,
           kind: "file" as const,
@@ -1039,7 +1040,7 @@ describe("editor groups", () => {
           activeEditorGroup: "right",
         }),
       );
-      bridge.listWorkspaceFiles = vi.fn(async () => ({
+      bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
         files: ["race-a.md", "b.md"].map((path) => ({
           path,
           kind: "file" as const,
@@ -1213,7 +1214,7 @@ describe("editor groups", () => {
     const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
     );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
       files: [
         { path: "a.md", kind: "file" as const },
         { path: "b.md", kind: "file" as const },
@@ -1293,20 +1294,32 @@ describe("editor groups", () => {
 });
 
 describe("application menu command routing", () => {
-  it("toggles the Chats panel when the command exists", async () => {
+  it("toggles the About rail when the command exists", async () => {
     const bridge = makeBridge(Promise.resolve(STORED_STATE));
     renderShell(bridge);
-    await screen.findByTestId("chats-panel");
+    await screen.findByTestId("about-rail");
     // Flush the commit's passive effects before emitting: the menu-command
     // listener subscribes in an effect, and under load the panel's DOM node
     // appears before that effect runs.
     await act(async () => {});
 
-    act(() => bridge.emitMenuCommand("toggle-chats"));
-    await waitFor(() => expect(screen.queryByTestId("chats-panel")).toBeNull());
+    act(() => bridge.emitMenuCommand("toggle-about"));
+    await waitFor(() => expect(screen.queryByTestId("about-rail")).toBeNull());
 
-    act(() => bridge.emitMenuCommand("toggle-chats"));
-    expect(await screen.findByTestId("chats-panel")).toBeTruthy();
+    act(() => bridge.emitMenuCommand("toggle-about"));
+    expect(await screen.findByTestId("about-rail")).toBeTruthy();
+  });
+
+  it("shows the Chats list in the side panel from the menu", async () => {
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    renderShell(bridge);
+    const panel = await screen.findByTestId("side-panel");
+    await act(async () => {});
+
+    act(() => bridge.emitMenuCommand("show-chats"));
+    expect(await within(panel).findByTestId("chats-view")).toBeTruthy();
+    expect(within(screen.getByTestId("about-rail")).queryByTestId("chats-view")).toBeNull();
+    expect(screen.getByTestId("activity-chats").getAttribute("aria-current")).toBe("page");
   });
 
 });
@@ -1442,7 +1455,7 @@ describe("ui-state merge-on-load", () => {
   // restored tabs against a pre-pull snapshot.
   it("prunes a restored tab on a listing that lands after the share pull", async () => {
     const listing = (...paths: string[]) =>
-      vi.fn(async () => ({
+      vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
         files: paths.map((path) => ({ path, kind: "file" as const })),
         folders: [] as string[],
       }));
@@ -2065,10 +2078,10 @@ describe("ui-state merge-on-load", () => {
     );
   });
 
-  // A refresh can record a refusal on an early page and then die on a later
+  // A manual refresh can record a refusal on an early page and die on a later
   // one. The evidence is already durable at that point — reading it only on
   // the success path would keep it invisible until a lucky refresh.
-  it("shows a refusal recorded by a refresh that then failed", async () => {
+  it("shows a refusal recorded by a failed manual refresh", async () => {
     const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs([])),
     );
@@ -2109,6 +2122,10 @@ describe("ui-state merge-on-load", () => {
       },
     });
 
+    await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledTimes(1));
+    await act(async () => undefined);
+    expect(bridge.getWorkspaceRegistry).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId("shared-view-refresh"));
     const refused = await screen.findByTestId("shared-view-refused");
     expect(
       refused.textContent,
@@ -2282,7 +2299,7 @@ describe("ui-state merge-on-load", () => {
   // requires the file, the write fails, the failure is swallowed — the draft
   // would be gone with no error and no way back.
   it("never closes a restored tab with an unsaved draft, and closes it once saved", async () => {
-    const listing = (...paths: string[]) => ({
+    const listing = (...paths: string[]) => ({ visibility: { status: "ready" as const, rules: [] },
       files: paths.map((path) => ({ path, kind: "file" as const })),
       folders: [] as string[],
     });
@@ -2319,11 +2336,11 @@ describe("ui-state merge-on-load", () => {
   // A provisional display-fill must not drive a destructive close: the pull
   // still in flight can carry back a file the older listing predates.
   it("defers closing a tab while a newer listing is still pending", async () => {
-    const older = deferred<{
+    const older = deferred<{ visibility: { status: "ready"; rules: [] };
       files: Array<{ path: string; kind: "file" }>;
       folders: string[];
     }>();
-    const newer = deferred<{
+    const newer = deferred<{ visibility: { status: "ready"; rules: [] };
       files: Array<{ path: string; kind: "file" }>;
       folders: string[];
     }>();
@@ -2331,7 +2348,7 @@ describe("ui-state merge-on-load", () => {
     const bridge = makeBridge(
       Promise.resolve({
         ...storedStateWithTabs(["b.md", "pulled.md"], "b.md"),
-        chatsVisible: false,
+        aboutVisible: false,
       }),
     );
     bridge.listWorkspaceFiles = vi.fn(() =>
@@ -2351,7 +2368,7 @@ describe("ui-state merge-on-load", () => {
 
     // The older listing lands first and does not know about pulled.md.
     await act(async () => {
-      older.resolve({ files: [{ path: "b.md", kind: "file" }], folders: [] });
+      older.resolve({ visibility: { status: "ready" as const, rules: [] }, files: [{ path: "b.md", kind: "file" }], folders: [] });
       await older.promise;
     });
     // It fills the display, but must not close anything: a newer answer is
@@ -2360,7 +2377,7 @@ describe("ui-state merge-on-load", () => {
 
     // The newer one carries the file back.
     await act(async () => {
-      newer.resolve({
+      newer.resolve({ visibility: { status: "ready" as const, rules: [] },
         files: [
           { path: "b.md", kind: "file" },
           { path: "pulled.md", kind: "file" },
@@ -2406,7 +2423,7 @@ describe("ui-state merge-on-load", () => {
   // successful listing re-enables it — and correctness beats eagerness for
   // work that cannot be undone.
   it("waits for a listing that succeeds after a failure before closing", async () => {
-    const older = deferred<{
+    const older = deferred<{ visibility: { status: "ready"; rules: [] };
       files: Array<{ path: string; kind: "file" }>;
       folders: string[];
     }>();
@@ -2414,7 +2431,7 @@ describe("ui-state merge-on-load", () => {
     const newer = new Promise<never>((_resolve, reject) => {
       failNewer = reject;
     });
-    const third = deferred<{
+    const third = deferred<{ visibility: { status: "ready"; rules: [] };
       files: Array<{ path: string; kind: "file" }>;
       folders: string[];
     }>();
@@ -2423,7 +2440,7 @@ describe("ui-state merge-on-load", () => {
     const bridge = makeBridge(
       Promise.resolve({
         ...storedStateWithTabs(["b.md", "gone.md"], "b.md"),
-        chatsVisible: false,
+        aboutVisible: false,
       }),
     );
     bridge.listWorkspaceFiles = vi.fn(() => {
@@ -2444,7 +2461,7 @@ describe("ui-state merge-on-load", () => {
 
     // The older listing commits, but a newer request is still in flight.
     await act(async () => {
-      older.resolve({ files: [{ path: "b.md", kind: "file" }], folders: [] });
+      older.resolve({ visibility: { status: "ready" as const, rules: [] }, files: [{ path: "b.md", kind: "file" }], folders: [] });
       await older.promise;
     });
     expect(await screen.findByTestId("tab-gone.md")).toBeTruthy();
@@ -2465,7 +2482,7 @@ describe("ui-state merge-on-load", () => {
     });
     await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(3));
     await act(async () => {
-      third.resolve({ files: [{ path: "b.md", kind: "file" }], folders: [] });
+      third.resolve({ visibility: { status: "ready" as const, rules: [] }, files: [{ path: "b.md", kind: "file" }], folders: [] });
       await third.promise;
     });
     await waitFor(() => {
@@ -2478,7 +2495,7 @@ describe("ui-state merge-on-load", () => {
   // have shown it is the one that failed. Closing on the pre-pull snapshot
   // would close a tab whose file exists.
   it("does not close on a pre-pull snapshot when the post-pull listing failed", async () => {
-    const prePull = deferred<{
+    const prePull = deferred<{ visibility: { status: "ready"; rules: [] };
       files: Array<{ path: string; kind: "file" }>;
       folders: string[];
     }>();
@@ -2486,20 +2503,21 @@ describe("ui-state merge-on-load", () => {
     const postPull = new Promise<never>((_resolve, reject) => {
       failPostPull = reject;
     });
-    const afterPull = deferred<{
+    const afterPull = deferred<{ visibility: { status: "ready"; rules: [] };
       files: Array<{ path: string; kind: "file" }>;
       folders: string[];
     }>();
     let issued = 0;
     // The subscriber count below pins the shell's listing refresh listener
-    // (notifications subscribes first). The Chats panel subscribes too, from
-    // a lazy chunk whose load time depends on whether an earlier test already
-    // imported it, so this stored state keeps the panel closed.
+    // (notifications subscribes first). The Chats view and About subscribe
+    // too, from lazy chunks whose load time depends on whether an earlier test
+    // already imported them, so this stored state shows Files and keeps About
+    // closed.
     const bridge = holdHistory(
       makeBridge(
         Promise.resolve({
           ...storedStateWithTabs(["b.md", "pulled.md"], "b.md"),
-          chatsVisible: false,
+          aboutVisible: false,
         }),
       ),
     );
@@ -2527,7 +2545,7 @@ describe("ui-state merge-on-load", () => {
 
     // The pre-pull snapshot commits; it predates the file coming back.
     await act(async () => {
-      prePull.resolve({ files: [{ path: "b.md", kind: "file" }], folders: [] });
+      prePull.resolve({ visibility: { status: "ready" as const, rules: [] }, files: [{ path: "b.md", kind: "file" }], folders: [] });
       await prePull.promise;
     });
     // The listing that would have carried the pulled file fails.
@@ -2543,7 +2561,7 @@ describe("ui-state merge-on-load", () => {
     });
     await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(3));
     await act(async () => {
-      afterPull.resolve({
+      afterPull.resolve({ visibility: { status: "ready" as const, rules: [] },
         files: [
           { path: "b.md", kind: "file" },
           { path: "pulled.md", kind: "file" },
@@ -2572,7 +2590,7 @@ describe("ui-state merge-on-load", () => {
       incoming: 1,
       outgoing: 0,
     };
-    const listing = deferred<{
+    const listing = deferred<{ visibility: { status: "ready"; rules: [] };
       files: Array<{ path: string; kind: "file" }>;
       folders: string[];
     }>();
@@ -2604,7 +2622,7 @@ describe("ui-state merge-on-load", () => {
     // Now the listing lands without the active tab's file, so the close runs
     // and hands over to the survivor.
     await act(async () => {
-      listing.resolve({ files: [{ path: "b.md", kind: "file" }], folders: [] });
+      listing.resolve({ visibility: { status: "ready" as const, rules: [] }, files: [{ path: "b.md", kind: "file" }], folders: [] });
       await listing.promise;
     });
     await waitFor(() => {
@@ -2700,10 +2718,10 @@ describe("ui-state merge-on-load", () => {
     await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
 
     // The user picks a different conversation. It has no channel metadata, so
-    // it opens in the panel — no tab moves.
+    // it opens in About — no tab moves.
     const afterNav = await screen.findAllByTestId("graph-file-row");
     await user.click(afterNav.find((row) => row.dataset.path === fileThreadNode.path)!);
-    expect(await screen.findByTestId("chats-panel")).toBeTruthy();
+    expect(await screen.findByTestId("about-rail")).toBeTruthy();
     expect(screen.queryByTestId(`tab-dohc://chats/dm/${encodeURIComponent(CANONICAL_DM.channelId)}`)).toBeNull();
 
     await act(async () => {
@@ -3018,7 +3036,7 @@ describe("ui-state merge-on-load", () => {
     const bridge = makeBridge(
       Promise.resolve({
         ...storedStateWithTabs([CHATS_TAB_PATH], CHATS_TAB_PATH),
-        chatsVisible: false,
+        aboutVisible: false,
       }),
     );
     bridge.onCloudSessionChanged = vi.fn(
@@ -3071,9 +3089,17 @@ describe("ui-state merge-on-load", () => {
 
     // Select a channel from the sidebar: presence engages in the editor.
     await screen.findByTestId("chats-personal-feed");
-    await user.click(screen.getByTestId("titlebar-chats-sidebar"));
+    await user.click(screen.getByTestId("activity-chats"));
     await user.click(await screen.findByTestId("chats-channel"));
     await waitFor(() => expect(presence.presencePublish).toHaveBeenCalled());
+    // The list stays mounted beside the live tab and holds no transport of
+    // its own: the channel topic has exactly one publisher, the page.
+    expect(screen.getByTestId("side-panel").querySelector('[data-testid="chats-view"]')).toBeTruthy();
+    const channelPublishes = (presence.presencePublish.mock.calls as unknown as [{ topic: string; incarnationId: string }][])
+      .map(([payload]) => payload)
+      .filter((payload) => payload.topic === "channel-team");
+    expect(channelPublishes.length).toBeGreaterThan(0);
+    expect(new Set(channelPublishes.map((payload) => payload.incarnationId)).size).toBe(1);
     const statusQueries = bridge.cloudStatus.mock.calls.length;
 
     // Sign out. The signal alone must tear presence down — the collaboration
@@ -3128,7 +3154,7 @@ describe("ui-state merge-on-load", () => {
       listPersonalChatFeed: vi.fn(async () => ({
         items: [
           {
-            message: {
+            message: { presentation: { group: "fixture", hue: null, self: false },
               id: "message-feed",
               threadId: "thread-team",
               authorKind: "human" as const,
@@ -3159,7 +3185,7 @@ describe("ui-state merge-on-load", () => {
       })),
       listChatMessages: vi.fn(async () => ({
         messages: [
-          {
+          { presentation: { group: "fixture", hue: null, self: false },
             id: "message-feed",
             threadId: "thread-team",
             authorKind: "human" as const,
@@ -3184,7 +3210,7 @@ describe("ui-state merge-on-load", () => {
 
   const CHATS_PAGE_STATE: WorkspaceUiState = {
     ...storedStateWithTabs([CHATS_TAB_PATH], CHATS_TAB_PATH),
-    chatsVisible: false,
+    aboutVisible: false,
   };
 
   it.each([false, true])("offers the local agent mention only after opting in (runner enabled: %s)", async (enabled) => {
@@ -3208,7 +3234,7 @@ describe("ui-state merge-on-load", () => {
       onSwitchWorkspace={() => {}}
     />);
     await screen.findByTestId("chats-personal-feed");
-    await user.click(screen.getByTestId("titlebar-chats-sidebar"));
+    await user.click(screen.getByTestId("activity-chats"));
     await user.click(await screen.findByTestId("chats-channel"));
     await user.type(await screen.findByTestId("chats-new-thread-composer"), "@");
     const options = await screen.findAllByTestId("chats-new-thread-mention-option");
@@ -3338,15 +3364,7 @@ describe("ui-state merge-on-load", () => {
     const bridge = chatsPageBridge(CHATS_PAGE_STATE);
     renderShell(bridge);
 
-    // New message lives in the sidebar; the editor holds only a destination.
     await screen.findByTestId("chats-personal-feed");
-    await user.click(screen.getByTestId("titlebar-chats-sidebar"));
-    await screen.findByTestId("chats-view");
-    await act(async () => {
-      for (const answer of bridge.syncAnswers) answer(dmSyncResult());
-      await Promise.resolve();
-    });
-    const newDmButton = await screen.findByTestId("chats-new-dm");
 
     // Start a canonical DM navigation from the graph and leave it in flight.
     await user.click(screen.getByTestId("activity-graph"));
@@ -3357,12 +3375,23 @@ describe("ui-state merge-on-load", () => {
     await waitFor(() =>
       expect(bridge.syncDms.mock.calls.length).toBe(dmCallsBefore + 1),
     );
-    await user.click(screen.getByTestId("activity-graph"));
+    const navigation = bridge.syncAnswers.at(-1)!;
+
+    // New message lives in the Chats view; the editor holds only a destination.
+    await user.click(screen.getByTestId("activity-chats"));
+    await screen.findByTestId("chats-view");
+    await act(async () => {
+      for (const answer of bridge.syncAnswers) {
+        if (answer !== navigation) answer(dmSyncResult());
+      }
+      await Promise.resolve();
+    });
+    const newDmButton = await screen.findByTestId("chats-new-dm");
 
     // The DM answers in the same tick the user clicks "New message".
     const overviewLoadsBefore = bridge.listChatChannels.mock.calls.length;
     await act(async () => {
-      bridge.syncAnswers.at(-1)!(dmSyncResult([CANONICAL_DM]));
+      navigation(dmSyncResult([CANONICAL_DM]));
       newDmButton.dispatchEvent(
         new MouseEvent("click", { bubbles: true, cancelable: true }),
       );
@@ -3419,7 +3448,7 @@ describe("ui-state merge-on-load", () => {
     // a comment on it, and a reply to that comment.
     bridge.listChatMessages = vi.fn(async () => ({
       messages: [
-        {
+        { presentation: { group: "fixture", hue: null, self: false },
           id: "message-feed",
           threadId: "thread-team",
           authorKind: "human" as const,
@@ -3427,7 +3456,7 @@ describe("ui-state merge-on-load", () => {
           body: "Feed update worth revisiting",
           createdAtMs: 1,
         },
-        {
+        { presentation: { group: "fixture", hue: null, self: false },
           id: "message-comment",
           threadId: "thread-team",
           parentMessageId: "message-feed",
@@ -3436,7 +3465,7 @@ describe("ui-state merge-on-load", () => {
           body: "A comment on it",
           createdAtMs: 2,
         },
-        {
+        { presentation: { group: "fixture", hue: null, self: false },
           id: "message-reply",
           threadId: "thread-team",
           parentMessageId: "message-comment",
@@ -3503,7 +3532,7 @@ describe("ui-state merge-on-load", () => {
     const bridge = makeBridge(
       Promise.resolve({
         ...storedStateWithTabs(["a.md"], "a.md"),
-        chatsVisible: false,
+        aboutVisible: false,
       }),
     );
     bridge.readWorkspaceGraph = vi.fn(async () => ({
@@ -3545,7 +3574,7 @@ describe("ui-state merge-on-load", () => {
   // request that fails never will. Superseding on ISSUE would drop the only
   // answer there is and leave the explorer empty with nothing to retry it.
   it("commits an older listing when the newer request failed", async () => {
-    const older = deferred<{
+    const older = deferred<{ visibility: { status: "ready"; rules: [] };
       files: Array<{ path: string; kind: "file" }>;
       folders: string[];
     }>();
@@ -3559,9 +3588,8 @@ describe("ui-state merge-on-load", () => {
     renderShell(bridge);
 
     await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1));
-    // Notifications subscribes immediately; the listing refresh listener is
-    // the second live subscription and waits for workspace readiness.
-    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(1));
+    // Both the listing refresh and typing recovery subscribe after readiness.
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
     vi.useFakeTimers();
     try {
       act(() => {
@@ -3584,7 +3612,7 @@ describe("ui-state merge-on-load", () => {
 
     // The older answer arrives — and it is the only answer there is.
     await act(async () => {
-      older.resolve({
+      older.resolve({ visibility: { status: "ready" as const, rules: [] },
         files: [
           { path: "a.md", kind: "file" },
           { path: "b.md", kind: "file" },
@@ -3603,7 +3631,7 @@ describe("ui-state merge-on-load", () => {
   // stale tree and, worse, make the reconciliation read a live file as
   // deleted and close its tab.
   it("ignores a listing that resolves after a newer one was issued", async () => {
-    type Listing = {
+    type Listing = { visibility: { status: "ready"; rules: [] };
       files: Array<{ path: string; kind: "file" }>;
       folders: string[];
     };
@@ -3613,7 +3641,7 @@ describe("ui-state merge-on-load", () => {
     const bridge = makeBridge(
       Promise.resolve({
         ...storedStateWithTabs(["b.md", "live.md"], "b.md"),
-        chatsVisible: false,
+        aboutVisible: false,
       }),
     );
     bridge.listWorkspaceFiles = vi.fn(() =>
@@ -3634,7 +3662,7 @@ describe("ui-state merge-on-load", () => {
 
     // The newer one lands first and knows about live.md.
     await act(async () => {
-      newer.resolve({
+      newer.resolve({ visibility: { status: "ready" as const, rules: [] },
         files: [
           { path: "a.md", kind: "file" },
           { path: "b.md", kind: "file" },
@@ -3648,7 +3676,7 @@ describe("ui-state merge-on-load", () => {
 
     // Then the stale one, which predates live.md, arrives last.
     await act(async () => {
-      older.resolve({
+      older.resolve({ visibility: { status: "ready" as const, rules: [] },
         files: [
           { path: "a.md", kind: "file" },
           { path: "b.md", kind: "file" },
@@ -3706,7 +3734,7 @@ describe("ui-state merge-on-load", () => {
     expect(await screen.findByTestId("tab-a.md")).toBeTruthy();
 
     // A listing that knows about neither file arrives.
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
       files: [] as Array<{ path: string; kind: "file" }>,
       folders: [] as string[],
     }));
@@ -3735,6 +3763,6 @@ describe("ui-state merge-on-load", () => {
     expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
     expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true");
     expect((await screen.findByTestId("side-panel")).style.width).toBe("320px");
-    expect(await screen.findByTestId("chats-panel")).toBeTruthy();
+    expect((await screen.findByTestId("about-rail")).style.width).toBe("360px");
   });
 });

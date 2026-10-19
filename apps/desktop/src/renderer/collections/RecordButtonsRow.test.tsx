@@ -219,6 +219,30 @@ describe("RecordButtonsRow", () => {
     act(() => (onError.mock.calls[0]![2] as () => void)());
     await waitFor(() => expect(bridge.listRecordButtons).toHaveBeenCalledTimes(2));
   });
+
+  it("shows and reports nothing while the workspace's files are still being read, then reads again when main says the read finished", async () => {
+    const bridge = stub({ record: invoice, collectionPath: "Invoices", buttons: [{ field: "Mark paid", state: { kind: "ready", automationId: "collection:Invoices#paid" } }] });
+    const updating = () => new Error(
+      "Error invoking remote method 'desktop:list-record-buttons': DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again.",
+    );
+    const opened = deferred<ListRecordButtonsResult>();
+    const pinged = deferred<ListRecordButtonsResult>();
+    bridge.listRecordButtons.mockReturnValueOnce(opened.promise).mockReturnValueOnce(pinged.promise);
+    const onError = vi.fn();
+    const { container } = render(<RecordButtonsRow workspaceId="ws-1" path="Invoices/12.md" onError={onError} onNotice={() => undefined} onOpenHistory={() => undefined} />);
+    await act(async () => opened.reject(updating()));
+    // A capture ping during the import reads while the engine still refuses.
+    // The engine sheds the pings after it from a full queue, so none arrive.
+    act(() => bridge.emitActivity({ workspaceId: "ws-1", pathSetChanged: false }));
+    await act(async () => pinged.reject(updating()));
+    expect(container.innerHTML).toBe("");
+    expect(onError).not.toHaveBeenCalled();
+    // What main sends for the engine's retained capture.initialSettled.
+    act(() => bridge.emitActivity({ workspaceId: "ws-1", pathSetChanged: false }));
+    await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
+    expect(bridge.listRecordButtons).toHaveBeenCalledTimes(3);
+    expect(onError).not.toHaveBeenCalled();
+  });
 });
 
 // What main says about a shared view's buttons, from the computer that runs the owner's automations.
@@ -330,8 +354,8 @@ describe("RecordButtonsRow in an Edit share view", () => {
     expect(checkAgain()).toBeNull();
     // The mark turns only where motion is allowed, so with reduced motion it stays still beside the words.
     const mark = loaderIn(button)!.getAttribute("class")!.split(/\s+/);
-    expect(mark).toContain("motion-safe:animate-spin");
-    expect(mark).not.toContain("animate-spin");
+    expect(mark).toContain("animate-spin");
+    expect(mark).not.toContain("motion-safe:animate-spin");
     bridge.listAutomationButtons.mockResolvedValue(bridge.listed([{ field: "Mark paid", state: READY }]));
     act(() => bridge.emitChanged({ workspaceId: "ws-2" }));
     expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(1);
@@ -467,7 +491,7 @@ function shellWith(
     return (
       <>
         {props.recordOpen ? (
-          <RecordButtonsRow workspaceId={props.workspaceId} path="Invoices/12.md" onError={notices.reportShellError} onNotice={() => undefined} onOpenHistory={recordHistory.open} />
+          <RecordButtonsRow workspaceId={props.workspaceId} path="Invoices/12.md" onError={notices.reportButtonError} onNotice={() => undefined} onOpenHistory={recordHistory.open} />
         ) : null}
         {session ? (
           <RecordHistoryDialog

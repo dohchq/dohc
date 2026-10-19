@@ -139,6 +139,12 @@ export interface OwnerDeliveryCapture {
   binding: LiveObjectBinding;
   assertCurrent(): void;
 }
+/** An adopted document's owner delivery after its owner lost live authority: the relay's tip, and the next row it accepted after it. */
+export interface DepartedOwnerDelivery {
+  readonly binding: LiveObjectBinding;
+  readonly tip: LiveUpdateReceipt | null;
+  readonly next: LiveUpdateReceipt | null;
+}
 export interface StopRestoreCutCapture {
   readonly binding: LiveObjectBinding;
   readonly deliveryKind: "bootstrap" | "owner";
@@ -285,26 +291,33 @@ export class LiveCommittedDeliveryStore {
     return {sourceMomentId: parseLiveUpdateIdentifier(source.moment_id,"source moment ID"), sourceDigest: authority.projectedDigest,
       sourceByteLength: authority.projectedLength, activation: null};
   }
+  // The owner row's adoption against the live document row: its baseline, its
+  // source and its original binding. Live authority is the caller's to check.
+  #ownerOrigin(document: LiveDocumentKey, owner: Record<string, unknown>) {
+    const origin = JSON.parse(String(owner.origin_json));
+    const row = this.#storage.db.prepare(`SELECT workspace_id,main_version_id,object_id,lineage_claim_id,current_path,restore_fence_generation,lineage_state,admission_state,baseline_digest,baseline_projected_sha256,baseline_projected_byte_length,baseline_moment_relay_seq,registered_at_ms FROM sync_relay_live_documents WHERE ${WHERE_DOCUMENT}`).get(...documentParams(document));
+    integrity(row && row.lineage_state === "current" && row.baseline_digest === document.lineageClaimId &&
+      row.baseline_moment_relay_seq === origin.baselineMomentRelaySequence && row.registered_at_ms === origin.baselineRegisteredAtMs);
+    const binding = parseLiveObjectBinding({...document,currentPath: row.current_path,selectorPaths: [row.current_path],restoreFenceGeneration: row.restore_fence_generation});
+    const source = this.#ownerSource(document,origin.adoptionId,{binding,baselineSequence: authorityInteger(row.baseline_moment_relay_seq,1),
+      projectedDigest: parseLiveUpdateDigest(row.baseline_projected_sha256),projectedLength: authorityInteger(row.baseline_projected_byte_length),
+      registeredAtMs: authorityInteger(row.registered_at_ms)});
+    integrity(source.sourceMomentId === origin.sourceMomentId && source.sourceDigest === origin.sourceDigest && source.sourceByteLength === origin.sourceByteLength &&
+      (!source.activation || source.activation.source.nativeHeadSequence === origin.expectedLocalSequence));
+    const originalBinding=parseLiveObjectBinding(origin.originalBinding);
+    integrity(createHash("sha256").update(JSON.stringify(originalBinding)).digest("hex")===origin.bindingDigest);
+    return {row,origin,binding,source,originalBinding};
+  }
   openOwnerDelivery(input: {host: LiveHostConnectionCoordinate;document: LiveDocumentKey;actor: import("./types").CurrentLiveBindingRequest["actor"]}): OwnerDeliveryCapture {
     const host = snapshotHostCoordinate(input.host), document = journalDocument(input.document);
     const read = () => {
       this.#standing(host);
       const owner = this.#ownerRow(host,document); integrity(owner);
-      const origin = JSON.parse(String(owner.origin_json));
-      const row = this.#storage.db.prepare(`SELECT workspace_id,main_version_id,object_id,lineage_claim_id,current_path,restore_fence_generation,lineage_state,admission_state,baseline_digest,baseline_projected_sha256,baseline_projected_byte_length,baseline_moment_relay_seq,registered_at_ms FROM sync_relay_live_documents WHERE ${WHERE_DOCUMENT}`).get(...documentParams(document));
-      integrity(row && row.lineage_state === "current" && row.admission_state === "open" && row.baseline_digest === document.lineageClaimId &&
-        row.baseline_moment_relay_seq === origin.baselineMomentRelaySequence && row.registered_at_ms === origin.baselineRegisteredAtMs);
-      const binding = parseLiveObjectBinding({...document,currentPath: row.current_path,selectorPaths: [row.current_path],restoreFenceGeneration: row.restore_fence_generation});
-      const source = this.#ownerSource(document,origin.adoptionId,{binding,baselineSequence: authorityInteger(row.baseline_moment_relay_seq,1),
-        projectedDigest: parseLiveUpdateDigest(row.baseline_projected_sha256),projectedLength: authorityInteger(row.baseline_projected_byte_length),
-        registeredAtMs: authorityInteger(row.registered_at_ms)});
-      integrity(source.sourceMomentId === origin.sourceMomentId && source.sourceDigest === origin.sourceDigest && source.sourceByteLength === origin.sourceByteLength &&
-        (!source.activation || source.activation.source.nativeHeadSequence === origin.expectedLocalSequence));
+      const {row,binding,source,originalBinding} = this.#ownerOrigin(document,owner);
+      integrity(row.admission_state === "open");
       const hostState = this.#storage.getLiveHostControl(); integrity(hostState);
       const current = authorizeLiveDocument(this.#storage,{document,actor: input.actor},hostState,{binding,current: true,open: true,baselineSequence: authorityInteger(row.baseline_moment_relay_seq,1)},this.activation);
       integrity(current.kind === "current" && isDeepStrictEqual(current.host,host));
-      const originalBinding=parseLiveObjectBinding(origin.originalBinding);
-      integrity(createHash("sha256").update(JSON.stringify(originalBinding)).digest("hex")===origin.bindingDigest);
       requireResumedBinding(this.#storage.db,this.#history.namespace,originalBinding,current.binding);
       return {row,origin: String(owner.origin_json),binding: current.binding,source};
     };
@@ -336,12 +349,71 @@ export class LiveCommittedDeliveryStore {
    */
   ownerDeliveryProgress(capture: OwnerDeliveryCapture): {terminal: LiveUpdateReceipt | null;sequence: number;adoptionId:string;adoptionSequence: number} {
     const {host,document} = this.#ownerDelivery(capture), row = this.#ownerRow(host,document); integrity(row);
-    const terminal = JSON.parse(String(row.tip_receipt_json)), parsed = terminal === null ? null : parseLiveUpdateReceipt(terminal);
-    integrity((parsed?.journalCursor ?? 0) === row.tip_cursor);
+    const parsed = this.#ownerTip(row);
     integrity(authorityInteger(row.tip_application_sequence) <= authorityInteger(row.tip_sequence));
     const origin = JSON.parse(String(row.origin_json));
     return {terminal: parsed,sequence: authorityInteger(row.tip_sequence),adoptionId:parseLiveUpdateIdentifier(origin.adoptionId),
       adoptionSequence: authorityInteger(origin.expectedLocalSequence)};
+  }
+  /**
+   * The adoption's owner delivery once its owner lost live authority, as after
+   * Stop or the loss of the last Edit grant. It needs this connection's standing
+   * and the adoption's exact binding, not the document's live authority, so
+   * what the host already applied can settle. Null when the host never adopted it.
+   */
+  departedOwnerDelivery(input: {host: LiveHostConnectionCoordinate; document: LiveDocumentKey; adoptionId: string}): DepartedOwnerDelivery | null {
+    const host = snapshotHostCoordinate(input.host), document = journalDocument(input.document);
+    const adoptionId = parseLiveUpdateIdentifier(input.adoptionId, "adoption ID");
+    return this.#storage.readTx(() => {
+      const departed = this.#departed(host,document,adoptionId);
+      return departed && {binding: departed.binding,tip: departed.tip,next: departed.next};
+    });
+  }
+  /**
+   * Records the host's ACK of the next row the journal accepted after the tip.
+   * It accepts nothing: the ACK must match that row's whole receipt. An ACK of
+   * the tip itself changes nothing. Returns the delivery after it.
+   */
+  recordDepartedApplication(input: {host: LiveHostConnectionCoordinate; document: LiveDocumentKey; adoptionId: string; binding: LiveObjectBinding},value: unknown): DepartedOwnerDelivery {
+    const host = snapshotHostCoordinate(input.host), document = journalDocument(input.document);
+    const adoptionId = parseLiveUpdateIdentifier(input.adoptionId, "adoption ID"), binding = parseLiveObjectBinding(input.binding);
+    const ack = parseLiveUpdateHostApplicationAck(value);
+    const acknowledged = {deliveryId: ack.deliveryId,updateDigest: ack.updateDigest,journalCursor: ack.journalCursor,acceptingHostEpoch: ack.acceptingHostEpoch};
+    return this.#storage.tx(() => {
+      let departed = this.#departed(host,document,adoptionId);
+      integrity(departed && isDeepStrictEqual(departed.binding,binding));
+      if (sameReceipt(departed.tip,acknowledged)) integrity(departed.owner.tip_application_sequence === ack.localYDocSequence);
+      else {
+        integrity(departed.next && sameReceipt(departed.next,acknowledged));
+        this.#advanceOwnerTip(host,document,departed.owner,departed.next,ack);
+        departed = this.#departed(host,document,adoptionId)!;
+      }
+      return {binding: departed.binding,tip: departed.tip,next: departed.next};
+    });
+  }
+  #departed(host: LiveHostConnectionCoordinate,document: LiveDocumentKey,adoptionId: string) {
+    this.#standing(host);
+    const owner = this.#ownerRow(host,document);
+    if (!owner) return null;
+    const {origin,row,originalBinding} = this.#ownerOrigin(document,owner);
+    integrity(origin.adoptionId === adoptionId);
+    // Without live authority the adoption's own binding stands, at the document's current restore generation.
+    const binding = parseLiveObjectBinding({...originalBinding,currentPath: row.current_path,restoreFenceGeneration: row.restore_fence_generation});
+    requireResumedBinding(this.#storage.db,this.#history.namespace,originalBinding,binding);
+    const tip = this.#ownerTip(owner);
+    const raw = this.#storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT} AND journal_cursor>? ORDER BY journal_cursor LIMIT 1`)
+      .get(...documentParams(document),tip?.journalCursor ?? 0);
+    let next: LiveUpdateReceipt | null = null;
+    if (raw) {
+      const decoded = decodeJournalRow(this.#storage.db,raw); assertJournalCheckpointPosition(this.#storage.db,decoded); verifyJournalRow(decoded);
+      next = decoded.admitted.metadata.accepted.receipt;
+    }
+    return {owner,binding,tip,next};
+  }
+  #ownerTip(row: Record<string, unknown>): LiveUpdateReceipt | null {
+    const terminal = JSON.parse(String(row.tip_receipt_json)), parsed = terminal === null ? null : parseLiveUpdateReceipt(terminal);
+    integrity((parsed?.journalCursor ?? 0) === row.tip_cursor);
+    return parsed;
   }
   nextOwnerApplication(capture: OwnerDeliveryCapture): AdmittedLiveUpdate | undefined {
     const {document,highWater} = this.#ownerDelivery(capture), progress = this.ownerDeliveryProgress(capture);
@@ -376,17 +448,22 @@ export class LiveCommittedDeliveryStore {
       const receipt = next.metadata.accepted.receipt;
       integrity(sameReceipt(receipt,acknowledged));
       const row = this.#ownerRow(host,document); integrity(row);
-      // Content dedupe reports the original native update sequence. Retain the
-      // greatest sequence already proved by an authenticated application ACK.
-      const sequence = Math.max(authorityInteger(row.tip_sequence),ack.localYDocSequence);
-      const tip = JSON.stringify(receipt), values = [this.#history.namespace,...documentParams(document),host.hostId,row.origin_json,tip,ack.journalCursor,sequence,ack.localYDocSequence];
-      const charge = Buffer.byteLength(JSON.stringify(values)), previousCharge = authorityInteger(row.accounted_bytes,1), delta = Math.max(1,charge-previousCharge);
-      consumeLiveDeliveryReservation(this.#storage,document,host.hostId,ack.journalCursor,delta,true);
-      const refund = previousCharge + delta - charge; if (refund) this.#refundOwner(document.workspaceId,refund);
-      const changed = this.#storage.db.prepare(`UPDATE ${OWNERS} SET tip_receipt_json=?,tip_cursor=?,tip_sequence=?,tip_application_sequence=?,accounted_bytes=? WHERE relay_database_namespace=? AND ${WHERE_DOCUMENT} AND host_id=?`)
-        .run(tip,ack.journalCursor,sequence,ack.localYDocSequence,charge,this.#history.namespace,...documentParams(document),host.hostId);
-      integrity(changed.changes === 1);
+      this.#advanceOwnerTip(host,document,row,receipt,ack);
     });
+  }
+  // Moves the owner tip to the next accepted receipt, whose ACK the caller matched.
+  #advanceOwnerTip(host: LiveHostConnectionCoordinate,document: LiveDocumentKey,row: Record<string, unknown>,receipt: LiveUpdateReceipt,
+    ack: ReturnType<typeof parseLiveUpdateHostApplicationAck>): void {
+    // Content dedupe reports the original native update sequence. Retain the
+    // greatest sequence already proved by an authenticated application ACK.
+    const sequence = Math.max(authorityInteger(row.tip_sequence),ack.localYDocSequence);
+    const tip = JSON.stringify(receipt), values = [this.#history.namespace,...documentParams(document),host.hostId,row.origin_json,tip,ack.journalCursor,sequence,ack.localYDocSequence];
+    const charge = Buffer.byteLength(JSON.stringify(values)), previousCharge = authorityInteger(row.accounted_bytes,1), delta = Math.max(1,charge-previousCharge);
+    consumeLiveDeliveryReservation(this.#storage,document,host.hostId,ack.journalCursor,delta,true);
+    const refund = previousCharge + delta - charge; if (refund) this.#refundOwner(document.workspaceId,refund);
+    const changed = this.#storage.db.prepare(`UPDATE ${OWNERS} SET tip_receipt_json=?,tip_cursor=?,tip_sequence=?,tip_application_sequence=?,accounted_bytes=? WHERE relay_database_namespace=? AND ${WHERE_DOCUMENT} AND host_id=?`)
+      .run(tip,ack.journalCursor,sequence,ack.localYDocSequence,charge,this.#history.namespace,...documentParams(document),host.hostId);
+    integrity(changed.changes === 1);
   }
   captureOwnerBinding(input: {host: LiveHostConnectionCoordinate; document: LiveDocumentKey;
     actor: import("./types").CurrentLiveBindingRequest["actor"]}) {

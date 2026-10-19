@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { parseAppPublicationCandidate, type AppDatasetCapability, type AppPublicationCandidate } from "@dohc/security-contract/app-publication";
+import { parseAppPublicationCandidate, type AppDatasetCapability } from "@dohc/security-contract/app-publication";
 import { verifyAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
 import { parseAppBackendInvokeRequest, parseAppBackendUploadRequest } from "@dohc/security-contract/app-backend";
 import type { AppDatasetBinding, DatasetRevision } from "@dohc/security-contract/dataset";
@@ -7,20 +7,21 @@ import { resolveCompatibleDatasetRevision, type DatasetAccess, type DatasetAutho
 import type { JournalDb } from "@dohc/app-backend-runtime/journal";
 import type { DatasetInvocationResult } from "@dohc/app-backend-runtime/supervisor";
 import { APP_PUBLICATION_LIMITS } from "./ownerAppPublication";
-import type { ClosedAppBuild } from "./closedAppCompiler";
+import type { ApprovalAgent } from "@dohc/security-contract/approval-provenance";
+import type { LocalAppStore, LocalAppRow, LocalAppPrepared, LocalAppStorage } from "./localAppStore";
+import type { LocalAppAction } from "./localAppLaunch";
 import type { LocalDatasetAgent, LocalDatasetUpload } from "./localDatasetHost";
 import { parseDatasetAttemptRequest, type DatasetAttemptRequest } from "@dohc/security-contract/dataset-attempts";
 
 /** One invocation's app authority, and the agent it writes as, read once when the invocation starts. */
 export interface LocalDatasetAppContext { readonly publicationId: string; readonly authorityRevision: number; readonly agent: LocalDatasetAgent | null }
-type Prepared = { candidate: AppPublicationCandidate; files: ClosedAppBuild["files"] };
-type Row = { publication_id: string; app_root: string; dataset_id: string; authority_revision: number; candidate: string; storage_bytes: number; active: number };
+
 const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 
 /** Uses the dataset authority database. No app gets the owner data API or source artifacts. */
 export function createLocalDatasetApps(options: {
-  db: JournalDb; workspaceId: string; ownerId: string;
-  assertCurrent(): void; charge(datasetId: string, bytes: number): void;
+  db: JournalDb; store: LocalAppStore; workspaceId: string; ownerId: string;
+  assertCurrent(): void;
   /** The agent run active in this workspace attachment now, or null. */
   agentRun(): LocalDatasetAgent | null;
   /** The person on this computer, whom a local app's commits are made for. */
@@ -33,32 +34,20 @@ export function createLocalDatasetApps(options: {
   attempt(context: LocalDatasetAppContext, input: Pick<InvokeDatasetInput, "workspaceId" | "datasetId" | "revision" | "revisionSha256" | "operationId" | "access">, request: DatasetAttemptRequest): unknown;
 }) {
   const { db } = options;
-  db.exec(`CREATE TABLE IF NOT EXISTS local_dataset_apps(
-    publication_id TEXT PRIMARY KEY, app_root TEXT NOT NULL UNIQUE, dataset_id TEXT NOT NULL,
-    authority_revision INTEGER NOT NULL, candidate TEXT NOT NULL, storage_bytes INTEGER NOT NULL, active INTEGER NOT NULL) STRICT;
-    CREATE TABLE IF NOT EXISTS local_dataset_app_artifacts(
-    publication_id TEXT NOT NULL REFERENCES local_dataset_apps(publication_id) ON DELETE CASCADE,
-    path TEXT NOT NULL, content BLOB NOT NULL, PRIMARY KEY(publication_id,path)) STRICT;`);
   const contexts = new WeakSet<LocalDatasetAppContext>();
-  function row(id: string, expected?: number): Row {
-    options.assertCurrent();
-    const result = db.prepare("SELECT * FROM local_dataset_apps WHERE publication_id=?").get(id) as Row | undefined;
-    if (!result || !result.active || (expected !== undefined && expected !== result.authority_revision)) throw new Error("This app approval changed. Prepare the app again.");
-    return result;
-  }
-  function capability(value: Row): AppDatasetCapability {
-    const candidate = parseAppPublicationCandidate(JSON.parse(value.candidate), APP_PUBLICATION_LIMITS);
-    const current = options.approved(value.dataset_id);
+  function capability(value: LocalAppRow): AppDatasetCapability {
+    const candidate = value.candidate;
+    const current = options.approved(value.resourceId);
     if (!current.active) throw new Error("This Collection is unavailable on this device.");
     const requested = candidate.capabilities[0];
     if (requested?.kind !== "dataset") throw new Error("Invalid app approval.");
-    return verifyAppDatasetCapability(requested, resolveCompatibleDatasetRevision(db,{workspaceId:options.workspaceId,datasetId:value.dataset_id},requested,current.revision));
+    return verifyAppDatasetCapability(requested, resolveCompatibleDatasetRevision(db,{workspaceId:options.workspaceId,datasetId:value.resourceId},requested,current.revision));
   }
-  function current(id: string, expected?: number) { const value = row(id, expected); return { row: value, capability: capability(value) }; }
+  function current(id: string, expected?: number) { const value = options.store.row(id, expected); return { row: value, capability: capability(value) }; }
   function resolveAuthority(context: LocalDatasetAppContext, request: { workspaceId: string; datasetId?: string; access: DatasetAccess }): DatasetAuthority {
     if (!contexts.has(context) || request.workspaceId !== options.workspaceId || request.access.kind !== "app" || request.access.appId !== context.publicationId) throw new Error("App access is not permitted.");
     const checked = current(context.publicationId, context.authorityRevision);
-    if (request.datasetId !== checked.row.dataset_id) throw new Error("App access is not permitted.");
+    if (request.datasetId !== checked.row.resourceId) throw new Error("App access is not permitted.");
     return { caller: { kind: "owner", userId: options.ownerId }, principalKey: `${options.ownerId}:app:${context.publicationId}`,
       appId: context.publicationId, authorityToken: String(context.authorityRevision), person: options.localPersonId(),
       ...(context.agent === null ? {} : { agent: { depth: context.agent.depth } }) };
@@ -74,7 +63,8 @@ export function createLocalDatasetApps(options: {
     finally { contexts.delete(context); }
   }
   const api = {
-    async activate(prepared: Prepared, signal: AbortSignal) {
+    current,
+    async activate(prepared: LocalAppPrepared, signal: AbortSignal, agent?: ApprovalAgent | null) {
       options.assertCurrent(); signal.throwIfAborted();
       const candidate = parseAppPublicationCandidate(prepared.candidate, APP_PUBLICATION_LIMITS);
       const declared = candidate.capabilities[0];
@@ -82,67 +72,27 @@ export function createLocalDatasetApps(options: {
       const approved = options.approved(declared.datasetId);
       if (!approved.active) throw new Error("This Collection is unavailable on this device.");
       const verified = verifyAppDatasetCapability(declared, approved.revision);
-      if (prepared.files.length !== candidate.files.length) throw new Error("App bundle files changed. Prepare the app again.");
-      const files = candidate.files.map(metadata => {
-        const matches = prepared.files.filter(file => file.path === metadata.path);
-        const file = matches[0];
-        if (matches.length !== 1 || !file || file.bytes.byteLength !== metadata.byteLength || hash(file.bytes) !== metadata.sha256) throw new Error("App bundle files changed. Prepare the app again.");
-        return { path: file.path, bytes: Uint8Array.from(file.bytes) };
-      });
-      const json = JSON.stringify(candidate), publicationId = hash(JSON.stringify(["dohc-local-dataset-app-v1", options.workspaceId, candidate]));
-      const existing = db.prepare("SELECT * FROM local_dataset_apps WHERE app_root=?").get(candidate.appRoot) as Row | undefined;
-      if (existing?.publication_id === publicationId && existing.active) return { publicationId, authorityRevision: existing.authority_revision };
-      if (!existing && Number(db.prepare("SELECT count(*) AS count FROM local_dataset_apps").get()!.count) >= 64) throw new Error("Remove an app before approving another one.");
-      const authorityRevision = (existing?.authority_revision ?? 0) + 1;
-      const storageBytes = Buffer.byteLength(json) + files.reduce((sum, file) => sum + file.bytes.byteLength, 0) + 512;
+      const publicationId = hash(JSON.stringify(["dohc-local-dataset-app-v1", options.workspaceId, candidate]));
       const { operations: _, name: _name, ...binding } = verified;
-      options.bind(verified.datasetId, publicationId, binding, () => {
-        signal.throwIfAborted(); options.assertCurrent();
-        if (existing) {
-          // Both binding changes and the replacement share this synchronous authority transaction.
-          if (existing.publication_id !== publicationId) options.bind(existing.dataset_id, existing.publication_id, null, () => {});
-          db.prepare("DELETE FROM local_dataset_app_artifacts WHERE publication_id=?").run(existing.publication_id);
-          db.prepare("DELETE FROM local_dataset_apps WHERE publication_id=?").run(existing.publication_id);
-        }
-        if (existing) options.charge(existing.dataset_id,-existing.storage_bytes);
-        options.charge(verified.datasetId,storageBytes);
-        db.prepare("INSERT INTO local_dataset_apps VALUES(?,?,?,?,?,?,1)").run(publicationId, candidate.appRoot, verified.datasetId, authorityRevision, json, storageBytes);
-        for (const file of files) db.prepare("INSERT INTO local_dataset_app_artifacts VALUES(?,?,?)").run(publicationId, file.path, file.bytes);
-      });
-      current(publicationId, authorityRevision);
-      return { publicationId, authorityRevision };
+      return options.store.activate({ kind: "dataset", resourceId: verified.datasetId, publicationId, prepared, agent }, signal,
+        (existing, _displaced, commit) => options.bind(verified.datasetId, publicationId, binding, () => {
+          if (existing && existing.publicationId !== publicationId) options.bind(existing.resourceId, existing.publicationId, null, () => {});
+          commit();
+        }));
     },
-    list(appRoot: string) {
-      options.assertCurrent();
-      return (db.prepare("SELECT * FROM local_dataset_apps WHERE app_root=?").all(appRoot) as Row[]).map(value => {
-        const candidate = parseAppPublicationCandidate(JSON.parse(value.candidate), APP_PUBLICATION_LIMITS);
-        const declared = candidate.capabilities[0];
-        if (declared?.kind !== "dataset") throw new Error("Invalid app approval.");
-        let active = false; try { current(value.publication_id, value.authority_revision); active = true; } catch {}
-        return { publicationId: value.publication_id, authorityRevision: value.authority_revision, appRoot: value.app_root,
-          sourceRevision: candidate.sourceRevision, datasetCapability: declared, active };
-      });
+    /** The store has checked the root's authority. The Dataset itself may no longer be approved. */
+    withdrawBinding(value: LocalAppRow, commit: () => void) {
+      options.bind(value.resourceId, value.publicationId, null, commit);
     },
-    has(publicationId: string) { options.assertCurrent(); return !!db.prepare("SELECT 1 FROM local_dataset_apps WHERE publication_id=?").get(publicationId); },
-    withdraw(publicationId: string, authorityRevision: number) {
-      const checked = current(publicationId, authorityRevision);
-      options.bind(checked.row.dataset_id, publicationId, null, () => {
-        row(publicationId, authorityRevision);
-        db.prepare("UPDATE local_dataset_apps SET active=0,authority_revision=authority_revision+1 WHERE publication_id=?").run(publicationId);
-      });
-      return { publicationId, authorityRevision: authorityRevision + 1 };
+    describe(value: LocalAppRow) {
+      const declared = value.candidate.capabilities[0];
+      if (declared?.kind !== "dataset") throw new Error("Invalid app approval.");
+      let active = false; try { current(value.publicationId, value.authorityRevision); active = true; } catch {}
+      return { publicationId: value.publicationId, authorityRevision: value.authorityRevision, appRoot: value.appRoot,
+        sourceRevision: value.candidate.sourceRevision, datasetCapability: declared, approved: options.store.held(value), active };
     },
-    browserPublication(publicationId: string) {
-      const checked = current(publicationId), candidate = parseAppPublicationCandidate(JSON.parse(checked.row.candidate), APP_PUBLICATION_LIMITS);
-      const files = candidate.files.map(metadata => {
-        const stored = db.prepare("SELECT content FROM local_dataset_app_artifacts WHERE publication_id=? AND path=?").get(publicationId, metadata.path);
-        if (!stored || !(stored.content instanceof Uint8Array) || stored.content.byteLength !== metadata.byteLength || hash(stored.content) !== metadata.sha256) throw new Error("App bundle integrity check failed.");
-        return { ...metadata, bytes: Uint8Array.from(stored.content) };
-      });
-      return { publicationId, authorityRevision: checked.row.authority_revision, appRoot: checked.row.app_root, files };
-    },
-    assertBrowserPublication(publicationId: string, authorityRevision: number) { current(publicationId, authorityRevision); },
-    request(publicationId: string, action: "invoke" | "upload" | "attempt", raw: unknown, signal?: AbortSignal): Promise<unknown> {
+    request(publicationId: string, action: LocalAppAction, raw: unknown, signal?: AbortSignal): Promise<unknown> {
+      if (action === "list" || action === "create") throw new Error("This app is not approved for document Collection access.");
       if (action === "attempt") {
         if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Invalid pending submission request.");
         const { authorityRevision, operation: operationName, ...request } = raw as Record<string, unknown>;
@@ -184,5 +134,18 @@ export function createLocalDatasetApps(options: {
       });
     },
   };
-  return { api, resolveAuthority };
+  return { ...api, resolveAuthority };
+}
+
+export function localDatasetAppStorage(db: JournalDb): LocalAppStorage {
+  return { kind: "dataset", publicationTable: "local_dataset_apps", artifactTable: "local_dataset_app_artifacts", resourceColumn: "dataset_id",
+    ensureSchema() {
+  db.exec(`CREATE TABLE IF NOT EXISTS local_dataset_apps(
+    publication_id TEXT PRIMARY KEY, app_root TEXT NOT NULL UNIQUE, dataset_id TEXT NOT NULL,
+    authority_revision INTEGER NOT NULL, candidate TEXT NOT NULL, storage_bytes INTEGER NOT NULL, active INTEGER NOT NULL) STRICT;
+    CREATE TABLE IF NOT EXISTS local_dataset_app_artifacts(
+    publication_id TEXT NOT NULL REFERENCES local_dataset_apps(publication_id) ON DELETE CASCADE,
+    path TEXT NOT NULL, content BLOB NOT NULL, PRIMARY KEY(publication_id,path)) STRICT;`);
+    },
+  };
 }

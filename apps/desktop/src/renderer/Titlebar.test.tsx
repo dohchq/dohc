@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Titlebar, workspaceName } from "./Titlebar";
 import type { Workspace } from "./DesktopWorkspaceShell";
+import { initWindowFullScreen } from "./windowFullScreen";
 
 const workspace: Workspace = {
   workspaceId: "ws-1",
@@ -16,6 +17,19 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+function stubFullScreen(platform: NodeJS.Platform): (fullScreen: boolean) => void {
+  let listener: ((event: { fullScreen: boolean }) => void) | undefined;
+  vi.stubGlobal("dohcDesktop", {
+    platform,
+    onWindowFullScreen: (next: typeof listener) => {
+      listener = next;
+      return () => undefined;
+    },
+  });
+  initWindowFullScreen();
+  return (fullScreen) => listener?.({ fullScreen });
+}
+
 describe("workspaceName", () => {
   it("uses the final path segment and ignores trailing separators", () => {
     expect(workspaceName({ ...workspace, rootPath: "/home/sam/dohc/" })).toBe("dohc");
@@ -25,9 +39,9 @@ describe("workspaceName", () => {
 });
 
 describe("Titlebar", () => {
-  it("describes agent activity without nesting the status inside the chats button", () => {
-    render(<Titlebar agentActive chatsSidebar={{ visible: true, onToggle: vi.fn() }} />);
-    const toggle = screen.getByRole("button", { name: "Toggle chats sidebar" });
+  it("describes agent activity without nesting the status inside the About button", () => {
+    render(<Titlebar agentActive aboutSidebar={{ visible: true, onToggle: vi.fn() }} />);
+    const toggle = screen.getByRole("button", { name: "Toggle About" });
     const status = screen.getByRole("status", { name: "Agent running" });
     expect(toggle.contains(status)).toBe(false);
     expect(toggle.getAttribute("aria-describedby")).toBe(status.id);
@@ -42,6 +56,31 @@ describe("Titlebar", () => {
     expect(screen.getByTestId("titlebar-quick-open").textContent).toContain("⌘P");
   });
 
+  // macOS draws the traffic lights over the title bar's left end and hides
+  // them in full screen. Main tells the window which state it is in.
+  it("starts 12px after the macOS traffic lights, or 12px from the edge in full screen", () => {
+    const sendFullScreen = stubFullScreen("darwin");
+    render(<Titlebar workspace={workspace} workspaces={[workspace]} onQuickOpen={() => undefined} />);
+    const titlebar = screen.getByTestId("titlebar");
+    expect(titlebar.style.paddingLeft).toBe("88px");
+
+    act(() => sendFullScreen(true));
+    expect(titlebar.style.paddingLeft).toBe("12px");
+    act(() => sendFullScreen(false));
+    expect(titlebar.style.paddingLeft).toBe("88px");
+  });
+
+  it("keeps the window-controls inset in full screen off macOS", () => {
+    const sendFullScreen = stubFullScreen("win32");
+    render(<Titlebar workspace={workspace} workspaces={[workspace]} onQuickOpen={() => undefined} />);
+    const titlebar = screen.getByTestId("titlebar");
+    const windowed = titlebar.getAttribute("style");
+
+    act(() => sendFullScreen(true));
+    expect(titlebar.getAttribute("style")).toBe(windowed);
+    act(() => sendFullScreen(false));
+  });
+
   it("shows Ctrl P quick-open shortcut off macOS", () => {
     vi.stubGlobal("dohcDesktop", { platform: "win32" });
 
@@ -50,28 +89,28 @@ describe("Titlebar", () => {
     expect(screen.getByTestId("titlebar-quick-open").textContent).toContain("Ctrl P");
   });
 
-  it("toggles the primary and chats sidebars from VS Code-style layout controls", () => {
+  it("toggles the primary sidebar and the About rail from VS Code-style layout controls", () => {
     const onTogglePrimary = vi.fn();
-    const onToggleChats = vi.fn();
+    const onToggleAbout = vi.fn();
 
     render(
       <Titlebar
         workspace={workspace}
         workspaces={[workspace]}
         primarySidebar={{ visible: true, onToggle: onTogglePrimary }}
-        chatsSidebar={{ visible: false, onToggle: onToggleChats }}
+        aboutSidebar={{ visible: false, onToggle: onToggleAbout }}
       />,
     );
 
     const primary = screen.getByRole("button", { name: "Toggle primary sidebar" });
-    const chats = screen.getByRole("button", { name: "Toggle chats sidebar" });
+    const about = screen.getByRole("button", { name: "Toggle About" });
     expect(primary.getAttribute("aria-pressed")).toBe("true");
-    expect(chats.getAttribute("aria-pressed")).toBe("false");
+    expect(about.getAttribute("aria-pressed")).toBe("false");
 
     fireEvent.click(primary);
-    fireEvent.click(chats);
+    fireEvent.click(about);
     expect(onTogglePrimary).toHaveBeenCalledOnce();
-    expect(onToggleChats).toHaveBeenCalledOnce();
+    expect(onToggleAbout).toHaveBeenCalledOnce();
   });
 
   // The quick-open button is centered on the window, so a long workspace name
@@ -95,6 +134,51 @@ describe("Titlebar", () => {
     expect(group.contains(screen.getByTestId("stub-status"))).toBe(true);
     // Absolutely positioned against the window, never inside the clamp.
     expect(group.contains(screen.getByTestId("titlebar-quick-open"))).toBe(false);
+  });
+
+  // The breadcrumb: the mark, the workspace's own name, then its version and
+  // one saved dot. The product word shows only before a workspace is open.
+  it("reads mark, workspace, version, then the saved dot, with no product word", () => {
+    render(
+      <Titlebar
+        workspace={workspace}
+        workspaces={[workspace]}
+        onSwitchWorkspace={() => undefined}
+        version={<button type="button" data-testid="stub-version">Main</button>}
+        workspaceStatus={<span data-testid="stub-status" role="status" aria-label="Local · saved" />}
+      />,
+    );
+    const group = screen.getByTestId("titlebar-left-group");
+    const name = screen.getByTestId("workspace-switcher");
+    const version = screen.getByTestId("stub-version");
+    const status = screen.getByTestId("stub-status");
+    expect(group.contains(version)).toBe(true);
+    expect(name.compareDocumentPosition(version) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(version.compareDocumentPosition(status) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // The switcher names the workspace and nothing else.
+    expect(name.textContent).toBe("dohc");
+    expect(group.textContent).toBe("dohcMain");
+    // The separator hides with its version while the picker has nothing to name.
+    expect(version.parentElement?.className).toContain("empty:hidden");
+    expect(version.parentElement?.className).toContain("before:content-['/']");
+  });
+
+  it("names the product only before a workspace is open", () => {
+    render(<Titlebar />);
+    expect(screen.getByTestId("titlebar-left-group").textContent).toBe("dohc");
+  });
+
+  it("draws no version separator when versions are off", () => {
+    render(
+      <Titlebar
+        workspace={{ ...workspace, rootPath: "/home/sam/trip" }}
+        workspaces={[workspace]}
+        onSwitchWorkspace={() => undefined}
+        workspaceStatus={<span data-testid="stub-status" />}
+      />,
+    );
+    expect(screen.getByTestId("titlebar-left-group").querySelector("[class*=\"before:content-['/']\"]")).toBeNull();
+    expect(screen.getByTestId("titlebar-left-group").textContent).toBe("trip");
   });
 
   it("shortens the workspace name rather than the status beside it", () => {
@@ -167,7 +251,7 @@ describe("Titlebar", () => {
     expect(document.documentElement.dataset.menuOpen).toBeUndefined();
   });
 
-  it("omits the chats layout control when the workspace has no chats sidebar", () => {
+  it("omits the About layout control when the workspace has no About rail", () => {
     render(
       <Titlebar
         workspace={workspace}
@@ -177,7 +261,7 @@ describe("Titlebar", () => {
     );
 
     expect(screen.getByTestId("titlebar-primary-sidebar")).toBeTruthy();
-    expect(screen.queryByTestId("titlebar-chats-sidebar")).toBeNull();
+    expect(screen.queryByTestId("titlebar-about-sidebar")).toBeNull();
   });
 });
 

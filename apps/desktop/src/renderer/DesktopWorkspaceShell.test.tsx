@@ -16,14 +16,18 @@ import { OPEN_EDITORS_DEFAULT_HEIGHT, OPEN_EDITORS_MIN_HEIGHT } from "./workbenc
 import { documentVersionKey } from "./documentVersionKey";
 import { basenameOf } from "./path";
 import { deferred } from "../testing/deferred";
-import { DesktopWorkspaceShell, WORKSPACE, STORED_STATE, storedStateWithTabs, CANONICAL_DM, dmSyncResult, recordDocUpdate, makeBridge, renderShell, holdHistory, shellBootstrapProps, SHARE_VIEW } from "./DesktopWorkspaceShell.testHarness";
+import { CollectionFieldWriteHost } from "./collections/recordFieldWrites";
+import { DesktopWorkspaceShell, WORKSPACE, STORED_STATE, STORED_CHATS_STATE, storedStateWithTabs, CANONICAL_DM, dmSyncResult, recordDocUpdate, makeBridge, renderShell, holdHistory, shellBootstrapProps, SHARE_VIEW } from "./DesktopWorkspaceShell.testHarness";
+
+import { useWorkspaceListing } from "./shell/useWorkspaceListing";
+vi.mock("./shell/useWorkspaceListing", { spy: true });
 
 // Count inspector and explorer work when the shell renders again.
 vi.mock("./documentVersionKey", { spy: true });
 vi.mock("./path", { spy: true });
 
 describe("workspace switch performance timeline", () => {
-  it("reuses the bootstrap agent-status read for initial history", async () => {
+  it("reads agent setup once and run state once when a workspace opens", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     renderShell(bridge);
 
@@ -32,6 +36,7 @@ describe("workspace switch performance timeline", () => {
     );
     await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalled());
     expect(bridge.getAgentRunStatus).toHaveBeenCalledTimes(1);
+    expect(bridge.readAgentRunState).toHaveBeenCalledExactlyOnceWith({ workspaceId: WORKSPACE.workspaceId });
   });
 
   it("records the existing shell readiness commits for a restored file", async () => {
@@ -66,7 +71,7 @@ describe("direct message workspace picker", () => {
 
   it("does not offer shared-view workspaces for acceptance", async () => {
     const user = userEvent.setup();
-    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    const bridge = makeBridge(Promise.resolve(STORED_CHATS_STATE));
     bridge.syncDms = vi.fn(async () => ({
       available: true,
       dms: [],
@@ -187,6 +192,16 @@ describe("global letter shortcut ownership", () => {
     expect(await screen.findByRole("textbox", { name: "File name" })).toBeTruthy();
   });
 
+  it("leaves New file closed when its shortcut is typed in a View share view", async () => {
+    renderShell(makeBridge(Promise.resolve(STORED_STATE)), SHARE_VIEW);
+    await screen.findByTestId("side-panel");
+
+    const event = dispatchShortcut("n");
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(screen.queryByRole("textbox", { name: "File name" })).toBeNull();
+  });
+
   it("routes uppercase K to the command palette", async () => {
     renderShell(makeBridge(Promise.resolve(STORED_STATE)));
     await screen.findByTestId("side-panel");
@@ -206,12 +221,12 @@ describe("global letter shortcut ownership", () => {
   });
 
   it.each([
-    ["Control", { ctrlKey: true, metaKey: false }],
-    ["Command", { ctrlKey: false, metaKey: true }],
+    ["Control", "linux", { ctrlKey: true, metaKey: false }],
+    ["Command", "darwin", { ctrlKey: false, metaKey: true }],
   ] as const)(
     "leaves unsupported %s+Alt letter chords unclaimed",
-    async (_name, modifier) => {
-      renderShell(makeBridge(Promise.resolve(STORED_STATE)));
+    async (_name, platform, modifier) => {
+      renderShell(makeBridge(Promise.resolve(STORED_STATE), platform));
       await screen.findByTestId("side-panel");
 
       for (const [key, shiftKey] of [
@@ -318,7 +333,7 @@ describe("collection folders", () => {
 
   it("reserves pending record names and retries the same partial identity", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listWorkspaceFiles = vi.fn(async () => ({ files: [], folders: ["tasks"] }));
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] }, files: [], folders: ["tasks"] }));
     bridge.listCollections = vi.fn(async () => ({ collections: [{ path: "tasks", objectId: "object-test", status: "valid" as const, reasons: [] }] }));
     const pending = deferred<Awaited<ReturnType<typeof bridge.createCollectionRecord>>>();
     bridge.createCollectionRecord.mockImplementationOnce(() => pending.promise);
@@ -347,7 +362,7 @@ describe("collection folders", () => {
 
   it("opens a collection folder as its views tab with the settled empty state", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
       files: [{ path: "tasks/one.md", kind: "file" as const }],
       folders: ["tasks"],
     }));
@@ -397,7 +412,7 @@ describe("collection folders", () => {
   it("keeps a queued record edit when a file opens while the first save is pending", async () => {
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
       files: [
         { path: "tasks/one.md", kind: "file" as const },
         { path: "tasks/two.md", kind: "file" as const },
@@ -564,20 +579,87 @@ describe("collection folders", () => {
     expect(await within(palette).findByText("New collection")).toBeTruthy();
   });
 
-  // assertWritableWorkspace refuses createWorkspaceFile on the share's
-  // presence alone, so New collection from a shared view is a dead click —
-  // the palette must not offer what it can never do.
-  it("does not offer New collection from a read-only shared view", async () => {
+  // A View share takes no writes, so every create or import would end in a
+  // refusal. Neither the palette nor the application menu offers one.
+  it("offers no create or import command from a read-only shared view", async () => {
     const bridge = makeBridge(Promise.resolve(STORED_STATE));
     const user = userEvent.setup();
-    renderShell(bridge, SHARE_VIEW);
+    const view = renderShell(bridge, SHARE_VIEW);
 
     await user.keyboard("{Control>}k{/Control}");
     const palette = await screen.findByTestId("command-palette");
-    // The palette renders and lists something, so the miss below is the
+    // The palette renders and lists something, so the misses below are the
     // gate working, not the palette failing to open.
     await within(palette).findByText("New editor group right");
-    expect(within(palette).queryByText("New collection")).toBeNull();
+    for (const label of ["New file", "New drawing", "New folder", "New collection", "Import files"]) {
+      expect(within(palette).queryByText(label)).toBeNull();
+    }
+    await user.keyboard("{Escape}");
+
+    for (const command of ["new-file", "new-folder", "new-collection", "import-files"] as const) {
+      act(() => bridge.emitMenuCommand(command));
+    }
+    await act(async () => {});
+    expect(screen.queryByRole("heading", { name: "New file" })).toBeNull();
+    expect(screen.queryByLabelText("New folder name")).toBeNull();
+    expect(bridge.createWorkspaceFile).not.toHaveBeenCalled();
+    expect(bridge.importWorkspaceFiles).not.toHaveBeenCalled();
+    // The Collection dialog stays hidden without Edit, so a New collection the
+    // menu let through would open only once a registry update grants Edit.
+    const editShare: Workspace = { ...SHARE_VIEW, shareView: { ...SHARE_VIEW.shareView!, access: "edit" } };
+    view.rerender(
+      <>
+        <CollectionFieldWriteHost />
+        <DesktopWorkspaceShell workspace={editShare} workspaces={[editShare]} {...shellBootstrapProps(bridge)} onSwitchWorkspace={() => {}} />
+      </>,
+    );
+    await act(async () => {});
+    expect(screen.queryByTestId("new-collection-dialog")).toBeNull();
+  });
+
+  it.each<[string, NonNullable<Workspace["shareView"]>]>([
+    ["a damaged", { ...SHARE_VIEW.shareView!, access: "edit", damaged: true }],
+    ["an ended", { ...SHARE_VIEW.shareView!, access: "edit", ended: true }],
+  ])("offers no create or import command from %s Edit share view", async (_name, shareView) => {
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    const user = userEvent.setup();
+    renderShell(bridge, { ...SHARE_VIEW, shareView });
+
+    await user.keyboard("{Control>}k{/Control}");
+    const palette = await screen.findByTestId("command-palette");
+    await within(palette).findByText("New editor group right");
+    for (const label of ["New file", "New drawing", "New folder", "New collection", "Import files"]) {
+      expect(within(palette).queryByText(label)).toBeNull();
+    }
+  });
+
+  it("offers an Edit share view's creates and imports, but not New folder", async () => {
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    const user = userEvent.setup();
+    renderShell(bridge, { ...SHARE_VIEW, shareView: { ...SHARE_VIEW.shareView!, access: "edit" } });
+
+    await user.keyboard("{Control>}k{/Control}");
+    const palette = await screen.findByTestId("command-palette");
+    for (const label of ["New file", "New drawing", "New collection", "Import files"]) {
+      expect(await within(palette).findByText(label)).toBeTruthy();
+    }
+    expect(within(palette).queryByText("New folder")).toBeNull();
+  });
+
+  it.each<[string, Workspace, boolean]>([
+    ["a local workspace", WORKSPACE, true],
+    ["a View share view", SHARE_VIEW, false],
+    ["a Comment share view", { ...SHARE_VIEW, shareView: { ...SHARE_VIEW.shareView!, access: "comment" } }, false],
+    ["an Edit share view", { ...SHARE_VIEW, shareView: { ...SHARE_VIEW.shareView!, access: "edit" } }, true],
+  ])("offers New file from the empty editor of %s only where the palette does", async (_name, workspace, offered) => {
+    renderShell(makeBridge(Promise.resolve(storedStateWithTabs([]))), workspace);
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+    const pane = within(screen.getByTestId("editor-group-primary"));
+
+    expect(pane.getByText(offered ? "Select a file, or create one" : "Select a file")).toBeTruthy();
+    expect(pane.queryByRole("button", { name: /· new file$/ }) !== null).toBe(offered);
+    expect(pane.getByRole("button", { name: /· commands$/ })).toBeTruthy();
+    expect(pane.getByRole("button", { name: /· go to$/ })).toBeTruthy();
   });
 });
 
@@ -804,7 +886,7 @@ describe("file tree drag preview", () => {
 
   it("highlights a hovered folder and its visible contents", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listWorkspaceFiles.mockResolvedValue({
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
       files: [
         { path: "docs/a.md", kind: "file" as const },
         { path: "docs/b.md", kind: "file" as const },
@@ -925,11 +1007,11 @@ describe("workbench resize commits", () => {
     renderShell(bridge);
 
     const sidebar = await screen.findByTestId("side-panel");
-    const chats = await screen.findByTestId("chats-panel");
+    const about = await screen.findByTestId("about-rail");
     const openEditors = await screen.findByTestId("open-editors-list");
     const editorLayout = await screen.findByTestId("editor-group-layout");
     await screen.findByTestId("editor-group-left");
-    Object.defineProperty(chats, "getBoundingClientRect", {
+    Object.defineProperty(about, "getBoundingClientRect", {
       configurable: true,
       value: () => ({ right: 1_000 }),
     });
@@ -964,24 +1046,24 @@ describe("workbench resize commits", () => {
       expect(sidebar.style.width).toBe("440px");
       expect(persistenceArms()).toBe(1);
 
-      const chatsHandle = screen.getByTestId("chats-panel-resize");
+      const aboutHandle = screen.getByTestId("about-rail-resize");
       timeoutSpy.mockClear();
-      fireEvent.pointerDown(chatsHandle, {
+      fireEvent.pointerDown(aboutHandle, {
         button: 0,
         buttons: 1,
         pointerId: 2,
       });
       for (const clientX of [620, 560, 500]) {
-        fireEvent.pointerMove(chatsHandle, {
+        fireEvent.pointerMove(aboutHandle, {
           buttons: 1,
           clientX,
           pointerId: 2,
         });
       }
-      expect(chats.style.width).toBe("500px");
+      expect(about.style.width).toBe("500px");
       expect(persistenceArms()).toBe(0);
-      fireEvent.pointerCancel(chatsHandle, { pointerId: 2 });
-      expect(chats.style.width).toBe("500px");
+      fireEvent.pointerCancel(aboutHandle, { pointerId: 2 });
+      expect(about.style.width).toBe("500px");
       expect(persistenceArms()).toBe(1);
 
       const openEditorsHandle = screen.getByTestId("open-editors-resize");
@@ -1090,7 +1172,7 @@ describe("open editors", () => {
 
   it("numbers untitled text files after case-insensitive file and folder matches", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listWorkspaceFiles.mockResolvedValue({
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
       files: [{ path: "untitled.txt", kind: "file" as const }],
       folders: ["UNTITLED 2.TXT"],
     });
@@ -1133,7 +1215,7 @@ describe("open editors", () => {
 
   it("creates files and folders from the files title actions at the focused tree context", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listWorkspaceFiles.mockResolvedValue({
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
       files: [{ path: "docs/a.md", kind: "file" as const }],
       folders: ["docs"],
     });
@@ -1166,7 +1248,7 @@ describe("open editors", () => {
 
   it("collapses all expanded folders from the files title action", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listWorkspaceFiles.mockResolvedValue({
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
       files: [{ path: "docs/a.md", kind: "file" as const }],
       folders: ["docs"],
     });
@@ -1392,26 +1474,72 @@ describe("native workbench context menus", () => {
     expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(1);
   });
 
-  it("opens the native editor context menu from the inspector area", async () => {
+  it("leaves a right-click in the editor to the text menu", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
     renderShell(bridge);
 
     await user.click(await screen.findByText("a.md"));
-    fireEvent.contextMenu(await screen.findByTestId("view-markdown"));
-
-    await waitFor(() => {
-      expect(bridge.showWorkbenchMenu).toHaveBeenCalledWith({
-        workspaceId: "ws-shell-test",
-        context: "editor",
-        path: "a.md",
-        groupId: "primary",
-      });
-    });
+    // An uncancelled event is what lets Electron open main's text menu.
+    expect(fireEvent.contextMenu(await screen.findByTestId("view-markdown"))).toBe(true);
+    expect(bridge.showWorkbenchMenu).not.toHaveBeenCalled();
   });
 });
 
 describe("settings entry points", () => {
+  it("shows Settings Agents as unavailable after the workspace fails to open", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.openWorkspace.mockRejectedValue(new Error("Workspace unavailable"));
+    renderShell(bridge);
+    await screen.findByTestId("workspace-open-failed");
+    const user = userEvent.setup();
+    await user.keyboard("{Control>},{/Control}");
+    await screen.findByTestId("settings-dialog");
+    await user.click(screen.getByRole("button", { name: "Agents" }));
+    expect(screen.getByText("Couldn’t open this workspace. Close Settings to try again.")).toBeTruthy();
+    expect(screen.queryByText("Loading settings...")).toBeNull();
+    expect(bridge.getMcpConfig).not.toHaveBeenCalled();
+    expect(bridge.getAgentRunStatus).not.toHaveBeenCalled();
+  });
+
+  it("holds Settings Agents before admission without a toast or Notice, then loads", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const admitted = deferred<Awaited<ReturnType<typeof bridge.openWorkspace>>>();
+    bridge.openWorkspace.mockReturnValue(admitted.promise);
+    const config = await bridge.getMcpConfig();
+    bridge.getMcpConfig.mockClear();
+    let ready = false;
+    bridge.getMcpConfig.mockImplementation(async () => {
+      if (!ready) throw new Error("This workspace is no longer active.");
+      return config;
+    });
+    bridge.getAgentRunStatus.mockImplementation(async () => {
+      if (!ready) throw new Error("This workspace is no longer active.");
+      return { activeRun: null, lastRun: null };
+    });
+    renderShell(bridge);
+    const user = userEvent.setup();
+    await user.keyboard("{Control>},{/Control}");
+    await screen.findByTestId("settings-dialog");
+    await user.click(screen.getByRole("button", { name: "Agents" }));
+    expect(bridge.getMcpConfig).not.toHaveBeenCalled();
+    expect(bridge.getAgentRunStatus).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(screen.queryByText(/no longer active/)).toBeNull();
+    await act(async () => {
+      ready = true;
+      admitted.resolve(await bridge.getSyncStatus());
+    });
+    await screen.findByTestId("settings-section-agents");
+    await waitFor(() => expect(bridge.getMcpConfig).toHaveBeenCalledOnce());
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(screen.queryByText(/no longer active/)).toBeNull();
+    await user.click(screen.getByLabelText("Close settings"));
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    expect(within(notices).queryByText(/agent settings|refresh agent runs|no longer active/)).toBeNull();
+  });
+
   it("opens settings from the activity bar", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
@@ -1502,8 +1630,8 @@ describe("customize", () => {
       onSwitchWorkspace={() => {}}
     />);
 
-    await user.click(await screen.findByTestId("titlebar-chats-sidebar"));
-    await user.click(await screen.findByRole("button", { name: "Chats actions" }));
+    await user.click(await screen.findByTestId("activity-chats"));
+    await user.click(await screen.findByRole("button", { name: "Sidebar actions" }));
     await user.click(screen.getByRole("menuitem", { name: "Customize…" }));
     const row = await screen.findByTestId("settings-row-your-color");
     expect(row.dataset.highlighted).toBe("true");
@@ -1549,7 +1677,7 @@ describe("drawing entry point", () => {
 
   it("numbers drawings after case-insensitive file and folder matches", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listWorkspaceFiles.mockResolvedValue({
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
       files: [{ path: "UNTITLED 2.EXCALIDRAW", kind: "file" as const }],
       folders: ["untitled.excalidraw"],
     });
@@ -1697,7 +1825,7 @@ describe("workbench render cost", () => {
     vi.useFakeTimers();
     try {
       const listings = bridge.listWorkspaceFiles.mock.calls.length;
-      const moments = bridge.listEngineMoments.mock.calls.length;
+      const moments = bridge.listHistory.mock.calls.length;
       const statuses = bridge.getSyncStatus.mock.calls.length;
       const agents = bridge.getAgentRunStatus.mock.calls.length;
       const tryStates = bridge.getTryInVersionState.mock.calls.length;
@@ -1705,7 +1833,8 @@ describe("workbench render cost", () => {
       act(() =>
         bridge.emitWorkspaceActivity({
           workspaceId: WORKSPACE.workspaceId,
-          paths: [".dohc/engine/index", "pkg/node_modules/cache.bin"],
+          paths: [".dohc/engine/index", ".dohc/files.toml", "pkg/node_modules/cache.bin"],
+          pathSetChanged: false,
         }),
       );
       await act(async () => {
@@ -1715,13 +1844,45 @@ describe("workbench render cost", () => {
       expect(bridge.listWorkspaceFiles, "refreshing files for every path-rich event makes the hidden engine and dependency churn pay for a disk walk it cannot change.").toHaveBeenCalledTimes(listings);
       // Path alone cannot prove history harmless. A deleted or retired path
       // may be absent from the current tree and still change these surfaces.
-      expect(bridge.listEngineMoments).toHaveBeenCalledTimes(moments + 1);
+      expect(bridge.listHistory).toHaveBeenCalledTimes(moments + 1);
       expect(bridge.getSyncStatus).toHaveBeenCalledTimes(statuses + 1);
-      expect(bridge.getAgentRunStatus).toHaveBeenCalledTimes(agents + 1);
+      // Run state arrives from main's pushes, so a refresh does not read it.
+      expect(bridge.getAgentRunStatus).toHaveBeenCalledTimes(agents);
+      expect(bridge.readAgentRunState).toHaveBeenCalledTimes(1);
       expect(bridge.getTryInVersionState).toHaveBeenCalledTimes(tryStates + 1);
+      act(() => bridge.emitWorkspaceActivity({
+        workspaceId: WORKSPACE.workspaceId, paths: [".dohc/visibility.toml"], pathSetChanged: false,
+      }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS); });
+      expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(listings + 1);
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it.each(["policy path", "path-less batch"])("withholds visibility through a %s refresh and rejects a pre-event answer", async mode => {
+    const bridge = makeBridge(Promise.resolve(null));
+    renderShell(bridge);
+    const visibility = () => vi.mocked(useWorkspaceListing).mock.results.at(-1)!.value.visibility.status;
+    await waitFor(() => expect(visibility()).toBe("ready"));
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
+    const old = deferred<Awaited<ReturnType<typeof bridge.listWorkspaceFiles>>>();
+    const fresh = deferred<Awaited<ReturnType<typeof bridge.listWorkspaceFiles>>>();
+    const initial = await bridge.listWorkspaceFiles({ workspaceId: WORKSPACE.workspaceId });
+    bridge.listWorkspaceFiles.mockReturnValueOnce(old.promise).mockReturnValueOnce(fresh.promise);
+    vi.useFakeTimers();
+    try {
+      act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId, paths: ["notes.md"] }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS); });
+      act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId,
+        ...(mode === "policy path" ? { paths: [".dohc/visibility.toml"], pathSetChanged: false } : {}) }));
+      expect(visibility()).toBe("unavailable");
+      await act(async () => { old.resolve(initial); });
+      expect(visibility()).toBe("unavailable");
+      await act(async () => { await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS); });
+      await act(async () => { fresh.resolve(initial); });
+      expect(visibility()).toBe("ready");
+    } finally { vi.useRealTimers(); }
   });
 
   it("coalesces a mixed path-rich window through main's complete-listing cache", async () => {
@@ -1731,7 +1892,7 @@ describe("workbench render cost", () => {
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
 
-    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(1));
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
 
     vi.useFakeTimers();
     try {
@@ -1769,7 +1930,7 @@ describe("workbench render cost", () => {
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
 
-    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(1));
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
 
     vi.useFakeTimers();
     try {
@@ -1801,7 +1962,7 @@ describe("workbench render cost", () => {
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
 
-    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(1));
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
 
     vi.useFakeTimers();
     try {
@@ -1828,7 +1989,7 @@ describe("workbench render cost", () => {
     await waitFor(() =>
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
-    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(1));
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
 
     vi.useFakeTimers();
     try {
@@ -1864,7 +2025,7 @@ describe("workbench render cost", () => {
     renderShell(bridge);
     await screen.findAllByTestId("tree-row");
 
-    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(1));
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
 
     vi.useFakeTimers();
     try {
@@ -1893,7 +2054,7 @@ describe("workbench render cost", () => {
   });
 
   it("does not skip an all-hidden window before the first listing commits", async () => {
-    const pending = deferred<{
+    const pending = deferred<{ visibility: { status: "ready"; rules: [] };
       files: { path: string; kind: "file" }[];
       folders: string[];
     }>();
@@ -1903,7 +2064,7 @@ describe("workbench render cost", () => {
     await waitFor(
       () => {
         expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1);
-        expect(bridge.workspaceActivitySubscriberCount()).toBe(1);
+        expect(bridge.workspaceActivitySubscriberCount()).toBe(2);
       },
     );
 
@@ -1926,7 +2087,7 @@ describe("workbench render cost", () => {
       });
     } finally {
       await act(async () => {
-        pending.resolve({
+        pending.resolve({ visibility: { status: "ready" as const, rules: [] },
           files: [{ path: "a.md", kind: "file" }],
           folders: [],
         });
@@ -1939,7 +2100,7 @@ describe("workbench render cost", () => {
   it("suspends the navigator's polling while a Chats tab is live", async () => {
     const user = userEvent.setup();
     const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs([], null)),
+      Promise.resolve({ ...storedStateWithTabs([], null), activeView: "chats" }),
     );
     renderShell(bridge);
     await waitFor(() =>
@@ -1969,7 +2130,7 @@ describe("workbench render cost", () => {
   it("does not sync DMs from the suspended navigator when an open channel thread refreshes", async () => {
     const user = userEvent.setup();
     const bridge = Object.assign(
-      makeBridge(Promise.resolve(storedStateWithTabs([], null))),
+      makeBridge(Promise.resolve({ ...storedStateWithTabs([], null), activeView: "chats" })),
       {
         listChatChannels: vi.fn(async () => ({
           channels: [
@@ -2008,7 +2169,7 @@ describe("workbench render cost", () => {
               messageCount: 1,
               lastReadSequence: 1,
               unreadCount: 0,
-              openingMessage: {
+              openingMessage: { presentation: { group: "fixture", hue: null, self: false },
                 id: "message-team",
                 authorKind: "human" as const,
                 authorDisplayName: "Alice",
@@ -2022,7 +2183,7 @@ describe("workbench render cost", () => {
         })),
         listChatMessages: vi.fn(async () => ({
           messages: [
-            {
+            { presentation: { group: "fixture", hue: null, self: false },
               id: "message-team",
               threadId: "thread-team",
               authorKind: "human" as const,
@@ -2081,14 +2242,14 @@ describe("workbench render cost", () => {
       let unreadCount = 1;
       const markRead = deferred<void>();
       const bridge = Object.assign(
-        makeBridge(Promise.resolve(storedStateWithTabs([], null))),
+        makeBridge(Promise.resolve({ ...storedStateWithTabs([], null), activeView: "chats" })),
         {
           syncDms: vi.fn(async () =>
             dmSyncResult([{ ...CANONICAL_DM, unreadCount }]),
           ),
           listChatMessages: vi.fn(async () => ({
             messages: [
-              {
+              { presentation: { group: "fixture", hue: null, self: false },
                 id: "dm-message",
                 threadId: CANONICAL_DM.threadId!,
                 authorKind: "human" as const,

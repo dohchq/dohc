@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { assertClientLogProvenance, assertServiceReplicaLogProvenance, namedShareOrigin, SHARE_MEMBER_ORIGIN_PREFIX, COLLECTION_CREATE_ORIGIN_PREFIX, COLLECTION_FILE_ORIGIN_PREFIX } from "./relayLogInputs";
+import { assertClientLogProvenance, namedShareOrigin, SHARE_MEMBER_ORIGIN_PREFIX, COLLECTION_CREATE_ORIGIN_PREFIX, COLLECTION_FILE_ORIGIN_PREFIX, SERVICE_HOST_ORIGIN_PREFIX } from "./relayLogInputs";
 import { claimWorkspace, closeTestStorages, createShare, jsonBody, request, testHandler, testStorage } from "./testing";
 
 afterEach(closeTestStorages);
 
 const RELAY_ORIGIN_PREFIXES = [SHARE_MEMBER_ORIGIN_PREFIX, COLLECTION_CREATE_ORIGIN_PREFIX, COLLECTION_FILE_ORIGIN_PREFIX];
 const RELAY_AUTHORS = [
+  // A live author snapshot's account or link holder is the relay's to admit.
   {kind: "human", humanId: "recipient", humanName: "Recipient"},
   {kind: "link", publicPrincipalId: "public-link", label: "Link editor"},
   {kind: "human", humanId: "forged", onBehalfOf: "owner"},
@@ -28,48 +29,6 @@ const publicLiveAuthors = [
   {kind: "unattributed"},
   {kind: "agent", agentId: "agent", agentName: "Agent", onBehalfOf: "owner", depth: 1},
 ];
-
-describe("native service settlement provenance", () => {
-  const moment = (authors: unknown, momentId: unknown = nativeMomentId) => [{opKind: "moment.append", payload: {momentId, authors}}];
-  it("preserves aggregate public live authors beyond one update snapshot", () => {
-    expect(() => assertServiceReplicaLogProvenance("native", moment(publicLiveAuthors))).not.toThrow();
-    expect(() => assertServiceReplicaLogProvenance("native", moment(null))).not.toThrow();
-  });
-  it("requires native settlement identities for human and public link authors", () => {
-    expect(() => assertServiceReplicaLogProvenance("native", [{opKind: "moment.append", payload: {authors: publicLiveAuthors}}])).toThrow();
-    for (const id of [null, "moment-local-write", `moment-ydoc-${"a".repeat(63)}`, `${nativeMomentId}x`, `moment-ydoc-${"A".repeat(64)}`]) {
-      expect(() => assertServiceReplicaLogProvenance("native", moment(publicLiveAuthors, id))).toThrow();
-    }
-  });
-  it("refuses private direct-write authors and malformed public entries in settlements", () => {
-    for (const author of [
-      ...RELAY_AUTHORS.slice(2),
-      {kind: "human", humanId: "recipient"},
-      {kind: "human", humanId: "recipient", humanName: "Recipient", grantId: "private"},
-      {kind: "link", publicPrincipalId: "public-link", label: "Link editor", principalId: "private"},
-      {kind: "link", publicPrincipalId: "", label: "Link editor"},
-      {kind: "agent", agentId: ""},
-      {kind: "unattributed", humanId: "forged"},
-      {kind: "agent", agentId: "agent", depth: 65},
-      {kind: "agent", agentId: "agent", grantId: "private"},
-      {kind: "automation", automationId: "collection:Tasks#stamp"},
-    ]) {
-      expect(() => assertServiceReplicaLogProvenance("native", moment([author]))).toThrow();
-      expect(() => assertServiceReplicaLogProvenance("native", moment([publicLiveAuthors[0], author]))).toThrow();
-    }
-    for (const authors of [[], {}, "human", Array(1025).fill(publicLiveAuthors[0]),
-      Array.from({length: 1024}, (_, i) => ({kind: "human", humanId: `human-${i}`, humanName: "n".repeat(200)}))]) {
-      expect(() => assertServiceReplicaLogProvenance("native", moment(authors))).toThrow();
-    }
-  });
-  it("retains origin reservations and ordinary agent and automation writes", () => {
-    for (const prefix of RELAY_ORIGIN_PREFIXES) {
-      expect(() => assertServiceReplicaLogProvenance(`${prefix}grant`, [])).toThrow();
-      expect(() => assertServiceReplicaLogProvenance(`${prefix}grant`, moment(publicLiveAuthors))).toThrow();
-    }
-    expect(() => assertServiceReplicaLogProvenance("native", moment([{kind: "automation", automationId: "stamp"}], "ordinary"))).not.toThrow();
-  });
-});
 
 describe("client log provenance", () => {
   it("does not acknowledge an altered retry as a refusal of an accepted moment", async () => {
@@ -96,8 +55,14 @@ describe("client log provenance", () => {
     expect(origins.every(origin => /^relay:share-member:[a-f0-9]{64}$/.test(origin))).toBe(true);
   });
   it("reserves the relay origins even for an empty batch", () => {
-    for (const prefix of RELAY_ORIGIN_PREFIXES) {
+    for (const prefix of [...RELAY_ORIGIN_PREFIXES, SERVICE_HOST_ORIGIN_PREFIX]) {
       expect(() => assertClientLogProvenance(`${prefix}grant`, [])).toThrow();
+    }
+  });
+  it("lets only the service host's feed write from its reserved origins", () => {
+    expect(() => assertClientLogProvenance(`${SERVICE_HOST_ORIGIN_PREFIX}host`, [], {serviceHost: true})).not.toThrow();
+    for (const origin of ["device", `${SHARE_MEMBER_ORIGIN_PREFIX}grant`]) {
+      expect(() => assertClientLogProvenance(origin, [], {serviceHost: true})).toThrow();
     }
   });
   it("refuses client-stamped relay moments", () => {
@@ -151,6 +116,19 @@ describe("client log provenance", () => {
     })));
     expect(retry.status).toBe(200);
     expect(await retry.json()).toMatchObject({inserted:0, skipped:1, currentMaxOriginSeq:0});
+  });
+  it("stores an owner's hosted agent settlement once its people are left out", async () => {
+    const storage = await testStorage();
+    const handler = testHandler(storage);
+    await claimWorkspace(handler, "owner", "workspace");
+    // What the engine publishes for a settled [account holder, declared agent] snapshot.
+    const authors = [{kind: "agent", agentId: "writer", agentName: "Writer", onBehalfOf: "owner", depth: 0}];
+    const response = await handler(request("owner", "/sync/workspace/log", jsonBody({originId: "device", ops: [{originSeq: 0, opKind: "moment.append", recordedAtMs: 1, payload: {authors}}]})));
+    expect(response.status).toBe(200);
+    const [row, ...rest] = storage.fetchLogPage({workspaceId: "workspace", sinceRelaySeq: 0, limit: 100}).rows;
+    expect(rest).toEqual([]);
+    expect(row?.opKind).toBe("moment.append");
+    expect(JSON.parse(row!.payloadJson)).toEqual({authors});
   });
   it("accepts owner device settlement coverage without granting recipients moment writes", async () => {
     const storage = await testStorage();

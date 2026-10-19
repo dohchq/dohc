@@ -278,6 +278,7 @@ impl RelayTransport for FakeRelay {
         let current_max_origin_seq = req.ops.last().map_or(req.after_seq, |op| op.origin_seq);
         Ok(PushResponse {
             settlement_refusals,
+            hosted_refusals: Vec::new(),
             accepted,
             inserted: accepted,
             skipped: 0,
@@ -471,11 +472,16 @@ impl RelayTransport for KeyConflictRelay {
 }
 
 struct PagedRelay {
+    relay_seq_offset: i64,
+    origin_max_probe_elapsed: Mutex<Vec<std::time::Duration>>,
     pages: BTreeMap<i64, PullResponse>,
     blobs: BTreeMap<String, Vec<u8>>,
     coordinates: Mutex<BTreeMap<(String, i64), LogCoordinateResponse>>,
     pulls: Mutex<Vec<(i64, usize)>>,
+    coordinate_lookups: Mutex<Vec<(String, i64)>>,
+    pushes: Mutex<Vec<PushRequest>>,
     download_batches: Mutex<Vec<BlobDownloadBatchRequest>>,
+    push_conflicts: Mutex<usize>,
 }
 
 impl PagedRelay {
@@ -489,10 +495,15 @@ impl PagedRelay {
             .collect();
         Self {
             pages,
+            relay_seq_offset: 100,
+            origin_max_probe_elapsed: Mutex::new(Vec::new()),
             blobs: BTreeMap::new(),
             coordinates: Mutex::new(BTreeMap::new()),
             pulls: Mutex::new(Vec::new()),
+            coordinate_lookups: Mutex::new(Vec::new()),
+            pushes: Mutex::new(Vec::new()),
             download_batches: Mutex::new(Vec::new()),
+            push_conflicts: Mutex::new(0),
         }
     }
 
@@ -524,22 +535,66 @@ fn assign_fixture_relay_sequences(page: &mut PullResponse) {
 
 impl RelayTransport for PagedRelay {
     fn push(&self, req: PushRequest) -> Result<PushResponse, RelayError> {
+        let started = std::time::Instant::now();
         let accepted = req.ops.len();
-        let current_max_origin_seq = req.ops.last().map_or(req.after_seq, |op| op.origin_seq);
+        self.pushes.lock().unwrap().push(req.clone());
         let mut coordinates = self.coordinates.lock().expect("coordinate responses");
+        // Check the whole batch before inserting, as the relay does for a cloned origin.
+        for op in &req.ops {
+            if let Some(
+                LogCoordinateResponse::Present(existing)
+                | LogCoordinateResponse::PresentBelowEpochFloor(existing),
+            ) = coordinates.get(&(op.origin_id.clone(), op.origin_seq))
+                && (existing.workspace_id != op.workspace_id
+                    || existing.op_kind != op.op_kind
+                    || existing.payload != op.payload
+                    || existing.recorded_at_ms != op.recorded_at_ms)
+            {
+                *self.push_conflicts.lock().unwrap() += 1;
+                return Err(RelayError::Conflict);
+            }
+        }
+        let mut inserted = 0;
         for op in req.ops {
             let mut pulled = op;
-            pulled.relay_seq = Some(100 + pulled.origin_seq);
-            coordinates.insert(
-                (pulled.origin_id.clone(), pulled.origin_seq),
-                LogCoordinateResponse::Present(pulled),
-            );
+            pulled.relay_seq = Some(self.relay_seq_offset + pulled.origin_seq);
+            let coordinate = (pulled.origin_id.clone(), pulled.origin_seq);
+            if !matches!(
+                coordinates.get(&coordinate),
+                Some(
+                    LogCoordinateResponse::Present(_)
+                        | LogCoordinateResponse::PresentBelowEpochFloor(_)
+                )
+            ) {
+                coordinates.insert(coordinate, LogCoordinateResponse::Present(pulled));
+                inserted += 1;
+            }
+        }
+        let current_max_origin_seq = coordinates
+            .iter()
+            .filter_map(|((origin, seq), response)| {
+                (origin == &req.origin_id
+                    && matches!(
+                        response,
+                        LogCoordinateResponse::Present(_)
+                            | LogCoordinateResponse::PresentBelowEpochFloor(_)
+                    ))
+                .then_some(*seq)
+            })
+            .max()
+            .unwrap_or(-1);
+        if accepted == 0 {
+            self.origin_max_probe_elapsed
+                .lock()
+                .unwrap()
+                .push(started.elapsed());
         }
         Ok(PushResponse {
             settlement_refusals: Vec::new(),
+            hosted_refusals: Vec::new(),
             accepted,
-            inserted: accepted,
-            skipped: 0,
+            inserted,
+            skipped: accepted - inserted,
             current_max_origin_seq,
         })
     }
@@ -559,6 +614,10 @@ impl RelayTransport for PagedRelay {
         &self,
         req: LogCoordinateRequest,
     ) -> Result<LogCoordinateResponse, RelayError> {
+        self.coordinate_lookups
+            .lock()
+            .expect("coordinate lookups")
+            .push((req.origin_id.clone(), req.origin_seq));
         self.coordinates
             .lock()
             .expect("coordinate responses")
@@ -810,6 +869,7 @@ impl RelayTransport for PagedShareRelay {
             .push(req);
         Ok(PushResponse {
             settlement_refusals: Vec::new(),
+            hosted_refusals: Vec::new(),
             accepted,
             inserted: accepted,
             skipped: 0,
@@ -990,8 +1050,10 @@ fn version_create_with_shipped_snapshots(
 
 // Keep child modules after assert_invalid_refusal so they inherit its macro scope.
 mod chat;
+mod file_export_lane;
+mod hosted_replica;
 mod outbound_authors;
-mod owner_publication;
+pub(crate) mod owner_publication;
 mod recover;
 mod relay_pull;
 mod relay_pull_bench;
@@ -1005,6 +1067,8 @@ mod version;
 mod ydoc_base;
 mod ydoc_cache;
 mod ydoc_drain;
+mod ydoc_live_echo;
+mod ydoc_projection_authors;
 mod ydoc_restore;
 
 #[test]
@@ -1118,3 +1182,96 @@ fn refused_malformed_proof_with_phantom_blobs_does_not_block_the_next_pull_opera
         );
     }
 }
+
+#[cfg(test)]
+mod nested_contract_production_folds {
+    use super::*;
+    #[test]
+    fn refuses_outside_edits_before_journaling() {
+        let corpus: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tools/rust-engine-program/nested-markdown-contract.json"
+        ))
+        .unwrap();
+        let sources = corpus["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|case| case["productionFoldRefuse"] == true)
+            .map(|case| case["source"].as_str().unwrap());
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.rewrite_content_to_markdown(
+            dohc_engine_collab::ContentKind::Richdoc,
+            "Other settled body",
+        )
+        .unwrap();
+        let seed = doc.encode_full_state();
+        for source in sources {
+            let (_scratch, _path, mut store) = open_store();
+            seed_replication_version(&mut store, "main", "main");
+            store.write_with(&NoFaults, |tx| { tx.execute_batch("INSERT INTO sync_identity(workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) VALUES('ws','probe-origin','epoch','stream',1); INSERT INTO sync_relay_cursors(workspace_id,cursor,replication_epoch,stream_identity) VALUES('ws','0','epoch','stream');").map_err(SyncError::persist) }).unwrap();
+            let key = dohc_engine_collab::DocKey::new("ws", "main", "probe").unwrap();
+            VersionedTextStore::new(&mut store)
+                .write_text(
+                    &dohc_engine_domain::WriteText {
+                        workspace_id: "ws".into(),
+                        version_id: "main".into(),
+                        object_id: "probe".into(),
+                        path: "notes/probe.md".into(),
+                        text: "Other settled body".into(),
+                        moment_id: "seed-settled".into(),
+                        metadata_origin: "ydoc".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 1501,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+            dohc_engine_collab::claim_base(
+                &mut store,
+                &key,
+                dohc_engine_collab::ContentKind::Richdoc,
+                &seed,
+                &NoFaults,
+                1500,
+            )
+            .unwrap();
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(
+                        "UPDATE ydoc_docs SET last_settled_sha=?1 WHERE object_id='probe'",
+                        [dohc_engine_storage::hex_sha256(b"Other settled body")],
+                    )
+                    .map_err(SyncError::persist)
+                })
+                .unwrap();
+            let result = store.write_with(&NoFaults, |tx| {
+                crate::ydoc_apply::fold_resolution_into_ydoc_in_tx(
+                    tx,
+                    "ws",
+                    "main",
+                    "probe",
+                    "notes/probe.md",
+                    source,
+                    1600,
+                )
+            });
+            let loaded = dohc_engine_collab::load_persisted(&store, &key)
+                .unwrap()
+                .unwrap();
+            let canonical = loaded
+                .doc
+                .project(dohc_engine_collab::ContentKind::Richdoc)
+                .unwrap()
+                .content;
+            let journaled:i64=store.read_with(|conn|conn.query_row("SELECT COUNT(*) FROM replication_log WHERE op_kind='ydoc.update' AND imported=0",[],|row|row.get(0))).unwrap();
+            assert!(result.is_err(), "{source}");
+            assert_eq!(canonical, "Other settled body", "{source}");
+            assert_eq!(journaled, 0, "{source}");
+        }
+    }
+}
+
+mod passive_store;

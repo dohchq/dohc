@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { MAX_FILE_WRITE_BYTES, MAX_FILE_WRITE_FILES } from "@dohc/cli/protocol";
 import { createTestScratch } from "./testTemp";
 import { AuthoredTextChangedError, type WorkspaceEngineCapture } from "./workspaceEngineCapture";
+import * as assets from "./workspaceAssets";
 import { withOrderedWorkspaceTargetPath, writeWorkspaceText } from "./workspaceAssets";
 import { decodeFileWriteContent, writeWorkspaceFilesAs } from "./workspaceFileWrites";
 import * as policyFile from "./workspaceEnginePolicyFile";
@@ -25,7 +26,7 @@ async function fixture() {
     await options?.beforeWrite?.(absolute);
     await mkdir(dirname(absolute), { recursive: true });
     await writeFile(absolute, content);
-    return { resolvedAbsolutePath: absolute, materializeOutcome: "applied" };
+    return { resolvedAbsolutePath: absolute, materializeOutcome: "applied", objectId: "object", momentId: "moment", deduped: false };
   }) };
   return { rootPath, operation, capture, run: (files: Parameters<typeof writeWorkspaceFilesAs>[1]) =>
     writeWorkspaceFilesAs(operation, files, author, { capture, requestId: "batch" }) };
@@ -119,15 +120,23 @@ describe("workspace file write admission", () => {
   it("reads files.toml after the editor ordering queue opens", async () => {
     const f = await fixture();
     await writeFile(join(f.rootPath, "queued.txt"), "original");
-    const entered = barrier(), release = barrier();
+    const entered = barrier(), release = barrier(), queued = barrier();
     const held = withOrderedWorkspaceTargetPath(f.rootPath, await realpath(join(f.rootPath, "queued.txt")), async () => { entered.release(); await release.promise; });
     await entered.promise;
-    const pending = f.run([file("queued.txt")]);
-    await writeFile(join(f.rootPath, ".dohc/files.toml"), '[[rule]]\npath = "queued.txt"\ntracked = false\n');
-    release.release();
-    await held;
-    expect(await pending).toMatchObject({ ok: false, written: [] });
-    expect(f.capture.writeAuthoredFile).not.toHaveBeenCalled();
+    const ordered = vi.spyOn(assets, "withOrderedWorkspaceTargetPath").mockImplementationOnce((...args) => {
+      queued.release();
+      return withOrderedWorkspaceTargetPath(...args);
+    });
+    try {
+      const pending = f.run([file("queued.txt")]);
+      // Admission already passed under the old policy, so only the queued recheck can refuse.
+      await queued.promise;
+      await writeFile(join(f.rootPath, ".dohc/files.toml"), '[[rule]]\npath = "queued.txt"\ntracked = false\n');
+      release.release();
+      await held;
+      expect(await pending).toMatchObject({ ok: false, written: [], reason: expect.stringContaining("History cannot record") });
+      expect(await readFile(join(f.rootPath, "queued.txt"), "utf8")).toBe("original");
+    } finally { ordered.mockRestore(); }
   });
 
   it("rechecks policy when the capture queue opens", async () => {
@@ -183,7 +192,7 @@ describe("workspace file write admission", () => {
 
   it.each(["error", "skipped", undefined])("refuses unpublished outcome %s", async materializeOutcome => {
     const f = await fixture();
-    f.capture.writeAuthoredFile.mockResolvedValueOnce({ resolvedAbsolutePath: join(f.rootPath, "plain.txt"), materializeOutcome });
+    f.capture.writeAuthoredFile.mockResolvedValueOnce({ resolvedAbsolutePath: join(f.rootPath, "plain.txt"), materializeOutcome, objectId: "object", momentId: "moment", deduped: false });
     expect(await f.run([file("plain.txt")])).toMatchObject({ ok: false, written: [], reason: expect.stringContaining("could not publish") });
   });
 
@@ -196,7 +205,7 @@ describe("workspace file write admission", () => {
 
   it("reports publication conflicts as failures", async () => {
     const f = await fixture();
-    f.capture.writeAuthoredFile.mockResolvedValueOnce({ resolvedAbsolutePath: join(f.rootPath, "plain.txt"), materializeOutcome: "conflict" });
+    f.capture.writeAuthoredFile.mockResolvedValueOnce({ resolvedAbsolutePath: join(f.rootPath, "plain.txt"), materializeOutcome: "conflict", objectId: "object", momentId: "moment", deduped: false });
     expect(await f.run([file("plain.txt")])).toMatchObject({ ok: false, written: [], currentSha256: null });
   });
 

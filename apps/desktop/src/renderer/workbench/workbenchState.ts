@@ -1,15 +1,18 @@
-import { parseDatasetPath } from "@dohc/security-contract/dataset";
 // Pure workbench model: activity-bar view, side-panel visibility
-// and width, open editor tabs, and the right-hand Chats panel. Pure like
+// and width, open editor tabs, and the right-hand About rail. Pure like
 // window/windowState.ts so every transition and the persistence round-trip
 // are unit-tested without Electron. `dirty` is runtime-only (derived from the
 // editor's save state) and never lives here or on disk.
 
+import { basenameOf } from "../path";
+import { parseDatasetPath } from "@dohc/security-contract/dataset";
 import type { WorkspaceUiState } from "../../ipc/bridgeContract";
 import type { SidebarSettings } from "../../settings/userSettings";
+import type { ObjectKind } from "../ui/KindGlyph";
 
 export const VIEW_IDS = [
   "explorer",
+  "chats",
   "search",
   "graph",
   "sites",
@@ -21,7 +24,9 @@ export type ViewId = (typeof VIEW_IDS)[number];
 // every path in a view or tab id.
 export const APP_VIEW_ID_PREFIX = "app-view:";
 export type AppViewId = `${typeof APP_VIEW_ID_PREFIX}${string}`;
-export type ActivityViewId = ViewId | AppViewId;
+// Sharing sits at the foot of the rail, so the person cannot hide or reorder it.
+export const SHARING_VIEW_ID = "sharing";
+export type ActivityViewId = ViewId | AppViewId | typeof SHARING_VIEW_ID;
 
 export function appViewId(appRoot: string): AppViewId {
   return `${APP_VIEW_ID_PREFIX}${encodeURIComponent(appRoot)}`;
@@ -54,6 +59,7 @@ function isActivityViewId(value: unknown): value is ActivityViewId {
   if (typeof value !== "string") return false;
   return (
     isViewId(value) ||
+    value === SHARING_VIEW_ID ||
     parseAppViewId(value) !== null
   );
 }
@@ -138,63 +144,17 @@ const DATA_COLLECTION_TAB_PREFIX = "tab://data-collection/";
 export function transactionalCollectionTabPath(datasetPath: string, tableId: string): string {
   return `${DATA_COLLECTION_TAB_PREFIX}${encodeURIComponent(datasetPath)}/${encodeURIComponent(tableId)}`;
 }
-export function parseTransactionalCollectionTabPath(path: string | null): { datasetPath: string; tableId: string } | null {
-  if (!path?.startsWith(DATA_COLLECTION_TAB_PREFIX)) return null;
-  const parts = path.slice(DATA_COLLECTION_TAB_PREFIX.length).split("/");
-  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-  if (parts.length !== 2 || !uuid.test(parts[1]!)) return null;
-  try { return { datasetPath: parseDatasetPath(decodeURIComponent(parts[0]!)), tableId: parts[1]! }; }
-  catch { return null; }
-}
 
 export function collectionTabPath(collectionPath: string): string {
   return `${COLLECTION_TAB_PREFIX}${encodeURIComponent(collectionPath)}`;
-}
-
-export function isCollectionTabPath(path: string | null): boolean {
-  return typeof path === "string" && path.startsWith(COLLECTION_TAB_PREFIX);
-}
-
-export function parseCollectionTabPath(path: string | null): string | null {
-  if (typeof path !== "string" || !isCollectionTabPath(path)) return null;
-  try {
-    const collectionPath = decodeURIComponent(
-      path.slice(COLLECTION_TAB_PREFIX.length),
-    );
-    return collectionPath.length > 0 ? collectionPath : null;
-  } catch {
-    return null;
-  }
 }
 
 export function momentDiffTabPath(momentId: string): string {
   return `${MOMENT_DIFF_TAB_PREFIX}${encodeURIComponent(momentId)}`;
 }
 
-export function isMomentDiffTabPath(path: string | null): boolean {
-  return typeof path === "string" && path.startsWith(MOMENT_DIFF_TAB_PREFIX);
-}
-
-export function parseMomentDiffTabPath(path: string | null): string | null {
-  if (typeof path !== "string" || !isMomentDiffTabPath(path)) return null;
-  try {
-    const momentId = decodeURIComponent(path.slice(MOMENT_DIFF_TAB_PREFIX.length));
-    return momentId.length > 0 ? momentId : null;
-  } catch {
-    return null;
-  }
-}
-
 export function siteTabPath(siteRoot: string): string {
   return `${APP_TAB_PREFIX}${encodeURIComponent(siteRoot)}`;
-}
-
-export function isGraphTabPath(path: string | null): boolean {
-  return path === GRAPH_TAB_PATH;
-}
-
-export function isHistoryTabPath(path: string | null): boolean {
-  return path === HISTORY_TAB_PATH;
 }
 
 export type ChatTabTarget =
@@ -208,104 +168,178 @@ export function chatTabPath(target: ChatTabTarget): string {
   return `${CHATS_TAB_PATH}/${target.kind}/${encodeURIComponent(target.id)}`;
 }
 
-export function parseChatTabPath(path: string | null): ChatTabTarget | null {
-  if (path === CHATS_TAB_PATH) return { kind: "home" };
-  if (path === `${CHATS_TAB_PATH}/new`) return { kind: "new" };
-  if (!path?.startsWith(`${CHATS_TAB_PATH}/`)) return null;
-  const parts = path.slice(CHATS_TAB_PATH.length + 1).split("/");
-  if (parts.length !== 2 || (parts[0] !== "channel" && parts[0] !== "dm")) return null;
-  try {
-    const id = decodeURIComponent(parts[1]!);
-    return id ? { kind: parts[0], id } : null;
-  } catch {
-    return null;
-  }
-}
-
-export function chatTabDefaultTitle(path: string): string {
-  const target = parseChatTabPath(path);
-  return target?.kind === "home" ? "Home" : target?.kind === "new" ? "New message" : "Chat";
-}
-
-export function isChatsTabPath(path: string | null): path is string {
-  return parseChatTabPath(path) !== null;
-}
-
-export function isSiteTabPath(path: string | null): boolean {
-  return typeof path === "string" && path.startsWith(APP_TAB_PREFIX);
-}
-
-export function isSingletonEditorTabPath(path: string | null): boolean {
-  return (
-    isChatsTabPath(path) ||
-    isSiteTabPath(path)
-  );
-}
-
-export function canonicalSingletonEditorTabPath(path: string | null): string | null {
-  const chat = parseChatTabPath(path);
-  if (chat) return chatTabPath(chat);
-  const siteRoot = parseSiteTabPath(path);
-  return siteRoot === null ? null : siteTabPath(siteRoot);
-}
-
-export function parseSiteTabPath(path: string | null): string | null {
-  if (typeof path !== "string" || !isSiteTabPath(path)) return null;
-  try {
-    const siteRoot = decodeURIComponent(path.slice(APP_TAB_PREFIX.length));
-    return siteRoot.length > 0 ? siteRoot : null;
-  } catch {
-    return null;
-  }
-}
-
 // Versions compare page (PR 0M-4): one tab per compared version, keyed by
 // the version id so re-comparing re-activates instead of duplicating.
 export function versionCompareTabPath(versionId: string): string {
   return `${VERSION_COMPARE_TAB_PREFIX}${encodeURIComponent(versionId)}`;
 }
 
-export function isVersionCompareTabPath(path: string | null): boolean {
-  return typeof path === "string" && path.startsWith(VERSION_COMPARE_TAB_PREFIX);
-}
-
-export function parseVersionCompareTabPath(path: string | null): string | null {
-  if (typeof path !== "string" || !isVersionCompareTabPath(path)) return null;
+// A navigation address carries no authority. Malformed recognized ids retain
+// their kind so the existing closeable fallback can render; unknown schemes drop.
+export type ParsedTab = { path: string } & (
+  | { kind: "file" }
+  | { kind: "removed" }
+  | { kind: "graph" }
+  | { kind: "history" }
+  | { kind: "chat"; target: ChatTabTarget }
+  | { kind: "site"; siteRoot: string | null }
+  | { kind: "momentDiff"; momentId: string | null }
+  | { kind: "versionCompare"; versionId: string | null }
+  | { kind: "collection"; collectionPath: string | null }
+  | { kind: "transactionalCollection"; datasetPath: string; tableId: string }
+);
+const TABLE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+function decodedTabField(value: string): string | null {
   try {
-    const versionId = decodeURIComponent(path.slice(VERSION_COMPARE_TAB_PREFIX.length));
-    return versionId.length > 0 ? versionId : null;
+    return decodeURIComponent(value) || null;
   } catch {
     return null;
   }
 }
-
-/**
- * `tab://` is reserved for tabs dohc renders itself. A persisted tab on that
- * scheme that no kind above recognizes is a tab from a removed surface.
- * It is not a workspace file and must never be restored as one. For example,
- * `tab://retired-dashboard/report` would otherwise open as a plain path and
- * show an editor for a file that does not exist. Restore drops it instead.
- * Unmigrated v2 IDs are also dropped; only the v2 reader converts them.
- */
-export function isRemovedVirtualTabPath(path: string | null): boolean {
-  return (
-    typeof path === "string" &&
-    (path.startsWith(V2_TAB_SCHEME) ||
-      (path.startsWith(INTERNAL_TAB_SCHEME) && !isVirtualTabPath(path)))
-  );
+export function parseTab(path: string): ParsedTab;
+export function parseTab(path: string | null): ParsedTab | null;
+export function parseTab(path: string | null): ParsedTab | null {
+  if (path === null) return null;
+  if (!path.startsWith(INTERNAL_TAB_SCHEME)) {
+    return { kind: path.startsWith(V2_TAB_SCHEME) ? "removed" : "file", path };
+  }
+  if (path === GRAPH_TAB_PATH) return { kind: "graph", path };
+  if (path === HISTORY_TAB_PATH) return { kind: "history", path };
+  if (path === CHATS_TAB_PATH) return { kind: "chat", path, target: { kind: "home" } };
+  if (path === CHATS_TAB_PATH + "/new") return { kind: "chat", path, target: { kind: "new" } };
+  if (path.startsWith(CHATS_TAB_PATH + "/")) {
+    const parts = path.slice(CHATS_TAB_PATH.length + 1).split("/");
+    const id = parts.length === 2 ? decodedTabField(parts[1]!) : null;
+    if (id && (parts[0] === "channel" || parts[0] === "dm")) {
+      return { kind: "chat", path, target: { kind: parts[0], id } };
+    }
+  }
+  if (path.startsWith(APP_TAB_PREFIX)) return { kind: "site", path, siteRoot: decodedTabField(path.slice(APP_TAB_PREFIX.length)) };
+  if (path.startsWith(MOMENT_DIFF_TAB_PREFIX)) return { kind: "momentDiff", path, momentId: decodedTabField(path.slice(MOMENT_DIFF_TAB_PREFIX.length)) };
+  if (path.startsWith(VERSION_COMPARE_TAB_PREFIX)) return { kind: "versionCompare", path, versionId: decodedTabField(path.slice(VERSION_COMPARE_TAB_PREFIX.length)) };
+  if (path.startsWith(COLLECTION_TAB_PREFIX)) return { kind: "collection", path, collectionPath: decodedTabField(path.slice(COLLECTION_TAB_PREFIX.length)) };
+  if (path.startsWith(DATA_COLLECTION_TAB_PREFIX)) {
+    const parts = path.slice(DATA_COLLECTION_TAB_PREFIX.length).split("/");
+    if (parts.length === 2 && TABLE_ID.test(parts[1]!)) {
+      try { return { kind: "transactionalCollection", path, datasetPath: parseDatasetPath(decodeURIComponent(parts[0]!)), tableId: parts[1]! }; } catch { /* Removed below. */ }
+    }
+  }
+  return { kind: "removed", path };
 }
-
-export function isVirtualTabPath(path: string | null): boolean {
-  return (
-    parseTransactionalCollectionTabPath(path) !== null ||
-    isGraphTabPath(path) ||
-    isHistoryTabPath(path) ||
-    isChatsTabPath(path) ||
-    isMomentDiffTabPath(path) ||
-    isCollectionTabPath(path) ||
-    isVersionCompareTabPath(path) ||
-    isSiteTabPath(path)
-  );
+export function tabPath(tab: ParsedTab): string {
+  switch (tab.kind) {
+    case "chat": return chatTabPath(tab.target);
+    case "site": return tab.siteRoot === null ? tab.path : siteTabPath(tab.siteRoot);
+    case "momentDiff": return tab.momentId === null ? tab.path : momentDiffTabPath(tab.momentId);
+    case "versionCompare": return tab.versionId === null ? tab.path : versionCompareTabPath(tab.versionId);
+    case "collection": return tab.collectionPath === null ? tab.path : collectionTabPath(tab.collectionPath);
+    case "transactionalCollection": return transactionalCollectionTabPath(tab.datasetPath, tab.tableId);
+    case "graph": return GRAPH_TAB_PATH;
+    case "history": return HISTORY_TAB_PATH;
+    case "file": case "removed": return tab.path;
+  }
+}
+type TabTitle = (tab: ParsedTab, label?: string) => string;
+// The object a tab shows, for its glyph. Null for a file, whose glyph comes
+// from the listing: its kind and page icon.
+type TabObjectRule = (tab: ParsedTab) => ObjectKind | null;
+type TabRules = { virtual: boolean; singleton: boolean; title: TabTitle; tooltip: TabTitle; explorerTitle: TabTitle; glyph: TabObjectRule };
+const fileTitles = {
+  title: (tab: ParsedTab) => basenameOf(tab.path),
+  tooltip: (tab: ParsedTab) => tab.path,
+  explorerTitle: (tab: ParsedTab) => basenameOf(tab.path),
+};
+const chatGlyph: TabObjectRule =(tab) => tab.kind === "chat" && tab.target.kind === "channel" ? "group" : "chat";
+const chatTitle: TabTitle = (tab, label) => {
+  if (label !== undefined) return label;
+  if (tab.kind !== "chat") return "Chat";
+  return tab.target.kind === "home" ? "Home" : tab.target.kind === "new" ? "New message" : "Chat";
+};
+const diffTitle: TabTitle = (_tab, label) => {
+  const name = label === undefined ? undefined : basenameOf(label);
+  return name ? `Diff: ${name}` : "History change";
+};
+const collectionTitle: TabTitle = (_tab, label) => label ?? "Collection";
+export const TAB_KINDS: Record<ParsedTab["kind"], TabRules> = {
+  file: {
+    virtual: false,
+    singleton: false,
+    ...fileTitles,
+    glyph: () => null,
+  },
+  removed: {
+    virtual: false,
+    singleton: false,
+    ...fileTitles,
+    glyph: () => null,
+  },
+  graph: {
+    virtual: true,
+    singleton: false,
+    title: () => "Graph",
+    tooltip: () => "Workspace graph",
+    explorerTitle: () => "Graph",
+    glyph: () => "graph",
+  },
+  history: {
+    virtual: true,
+    singleton: false,
+    title: () => "History",
+    tooltip: () => "Workspace history",
+    explorerTitle: () => "History",
+    glyph: () => "history",
+  },
+  chat: {
+    virtual: true,
+    singleton: true,
+    title: chatTitle,
+    tooltip: chatTitle,
+    explorerTitle: chatTitle,
+    glyph: chatGlyph,
+  },
+  site: {
+    virtual: true,
+    singleton: true,
+    ...fileTitles,
+    explorerTitle: tab => `App: ${tab.kind === "site" ? tab.siteRoot ?? "preview" : "preview"}`,
+    glyph: () => "app",
+  },
+  momentDiff: {
+    virtual: true,
+    singleton: false,
+    title: diffTitle,
+    tooltip: (_tab, label) => label ? `History diff: ${label}` : "History change",
+    explorerTitle: diffTitle,
+    glyph: () => "change",
+  },
+  versionCompare: {
+    virtual: true,
+    singleton: false,
+    title: () => "Compare with Main",
+    tooltip: () => "Compare this Version with Main",
+    explorerTitle: () => "Compare with Main",
+    glyph: () => "compare",
+  },
+  collection: {
+    virtual: true,
+    singleton: false,
+    ...fileTitles,
+    explorerTitle: tab => basenameOf(tab.kind === "collection" ? tab.collectionPath ?? "Collection" : "Collection"),
+    glyph: () => "collection",
+  },
+  transactionalCollection: {
+    virtual: true,
+    singleton: false,
+    title: collectionTitle,
+    tooltip: (_tab, label) => label ? `Collection: ${label}` : "Collection",
+    explorerTitle: collectionTitle,
+    glyph: () => "collection",
+  },
+};
+export function singletonTabIdentity(tab: ParsedTab | null): string | null {
+  if (tab === null || !TAB_KINDS[tab.kind].singleton) return null;
+  if (tab.kind === "site" && tab.siteRoot === null) return null;
+  return tabPath(tab);
 }
 
 export interface WorkbenchTab {
@@ -328,10 +362,10 @@ export interface WorkbenchState {
   // in each group, while each group owns its own active tab.
   editorGroups: EditorGroup[];
   activeEditorGroup: string;
-  // The right-hand Chats panel (VS Code's secondary sidebar: toggleable,
+  // The right-hand About rail (VS Code's secondary sidebar: toggleable,
   // resizable, hidden by default). Independent of the left panel entirely.
-  chatsVisible: boolean;
-  chatsWidth: number;
+  aboutVisible: boolean;
+  aboutWidth: number;
   // Max height of the explorer's Open Editors list (VS Code-style resizable
   // section): the list caps here and scrolls internally; shorter lists shrink
   // to fit.
@@ -354,9 +388,9 @@ type EditorTransitionActivation = "target" | "preserve";
 export const SIDEBAR_MIN_WIDTH = 160;
 export const SIDEBAR_MAX_WIDTH = 2400;
 export const SIDEBAR_DEFAULT_WIDTH = 240;
-export const CHATS_MIN_WIDTH = 240;
-export const CHATS_MAX_WIDTH = 2400;
-export const CHATS_DEFAULT_WIDTH = 320;
+export const ABOUT_MIN_WIDTH = 240;
+export const ABOUT_MAX_WIDTH = 2400;
+export const ABOUT_DEFAULT_WIDTH = 320;
 // Open-editors rows are 28px (h-7). The default shows 4.5 rows — the half row
 // at the cutoff signals there is more to scroll; the min keeps two rows
 // grabbable and the max is generous (tall portrait monitors) like the rails.
@@ -388,8 +422,8 @@ export function defaultWorkbenchState(): WorkbenchState {
       { id: DEFAULT_EDITOR_GROUP_ID, tabs: [], activeTab: null, size: 1 },
     ],
     activeEditorGroup: DEFAULT_EDITOR_GROUP_ID,
-    chatsVisible: false,
-    chatsWidth: CHATS_DEFAULT_WIDTH,
+    aboutVisible: false,
+    aboutWidth: ABOUT_DEFAULT_WIDTH,
     openEditorsHeight: OPEN_EDITORS_DEFAULT_HEIGHT,
     expandedFolders: [],
     pinned: [],
@@ -403,9 +437,9 @@ export function clampSidebarWidth(width: number): number {
   return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.round(width)));
 }
 
-export function clampChatsWidth(width: number): number {
-  if (!Number.isFinite(width)) return CHATS_DEFAULT_WIDTH;
-  return Math.min(CHATS_MAX_WIDTH, Math.max(CHATS_MIN_WIDTH, Math.round(width)));
+export function clampAboutWidth(width: number): number {
+  if (!Number.isFinite(width)) return ABOUT_DEFAULT_WIDTH;
+  return Math.min(ABOUT_MAX_WIDTH, Math.max(ABOUT_MIN_WIDTH, Math.round(width)));
 }
 
 export function clampOpenEditorsHeight(height: number): number {
@@ -518,17 +552,18 @@ export function openTab(
   path: string,
   targetGroupId: string = state.activeEditorGroup,
 ): WorkbenchState {
-  const singletonPath = canonicalSingletonEditorTabPath(path);
-  if (isSingletonEditorTabPath(path) && singletonPath === null) return state;
+  const parsed = parseTab(path);
+  const singletonPath = singletonTabIdentity(parsed);
+  if (TAB_KINDS[parsed.kind].singleton && singletonPath === null) return state;
   const openedPath = singletonPath ?? path;
   if (singletonPath !== null) {
     const existingGroup = state.editorGroups.find((group) =>
       group.tabs.some(
-        (tab) => canonicalSingletonEditorTabPath(tab.path) === singletonPath,
+        (tab) => singletonTabIdentity(parseTab(tab.path)) === singletonPath,
       ),
     );
     const existingTab = existingGroup?.tabs.find(
-      (tab) => canonicalSingletonEditorTabPath(tab.path) === singletonPath,
+      (tab) => singletonTabIdentity(parseTab(tab.path)) === singletonPath,
     );
     if (existingGroup && existingTab) {
       return activateTab(state, existingGroup.id, existingTab.path);
@@ -574,6 +609,15 @@ export function activateTab(
   return next.activeEditorGroup === groupId
     ? next
     : { ...next, activeEditorGroup: groupId };
+}
+
+// The tab after or before the group's active tab, wrapping at the ends.
+export function adjacentTabPath(group: EditorGroup, step: 1 | -1): string | null {
+  const { tabs } = group;
+  const index = tabs.findIndex((tab) => tab.path === group.activeTab);
+  // With no active tab, next is the first tab and previous the last.
+  const from = index === -1 && step === -1 ? 0 : index;
+  return tabs[(from + step + tabs.length) % tabs.length]?.path ?? null;
 }
 
 // Close a tab. When the group's active tab closes, the tab that enters its
@@ -749,7 +793,7 @@ export function createEditorGroupRight(
   const requestedSource = state.editorGroups.find(
     (group) => group.id === sourceGroupId,
   );
-  if (isSingletonEditorTabPath(requestedSource?.activeTab ?? null)) return state;
+  if (TAB_KINDS[parseTab(requestedSource?.activeTab ?? null)?.kind ?? "removed"].singleton) return state;
   let base: WorkbenchState = {
     ...state,
     editorGroups: normalizeEditorGroupSizes(
@@ -855,12 +899,23 @@ export function setView(
   return { ...state, activeView: view, sidebarVisible: true };
 }
 
+// A command that names a view shows it and never hides it; only the rail's
+// own button toggles.
+export function showView(
+  state: WorkbenchState,
+  view: ActivityViewId,
+): WorkbenchState {
+  return state.activeView === view && state.sidebarVisible
+    ? state
+    : { ...state, activeView: view, sidebarVisible: true };
+}
+
 export function toggleSidebar(state: WorkbenchState): WorkbenchState {
   return { ...state, sidebarVisible: !state.sidebarVisible };
 }
 
-export function toggleChats(state: WorkbenchState): WorkbenchState {
-  return { ...state, chatsVisible: !state.chatsVisible };
+export function toggleAbout(state: WorkbenchState): WorkbenchState {
+  return { ...state, aboutVisible: !state.aboutVisible };
 }
 
 export function setSidebarWidth(state: WorkbenchState, width: number): WorkbenchState {
@@ -868,9 +923,9 @@ export function setSidebarWidth(state: WorkbenchState, width: number): Workbench
   return clamped === state.sidebarWidth ? state : { ...state, sidebarWidth: clamped };
 }
 
-export function setChatsWidth(state: WorkbenchState, width: number): WorkbenchState {
-  const clamped = clampChatsWidth(width);
-  return clamped === state.chatsWidth ? state : { ...state, chatsWidth: clamped };
+export function setAboutWidth(state: WorkbenchState, width: number): WorkbenchState {
+  const clamped = clampAboutWidth(width);
+  return clamped === state.aboutWidth ? state : { ...state, aboutWidth: clamped };
 }
 
 export function setOpenEditorsHeight(
@@ -971,7 +1026,8 @@ export function remapWorkbenchPaths(
   project: (path: string) => string | null,
 ): WorkbenchState {
   const projectTab = (path: string): string | null => {
-    const collectionPath = parseCollectionTabPath(path);
+    const tab = parseTab(path);
+    const collectionPath = tab.kind === "collection" ? tab.collectionPath : null;
     if (collectionPath === null) return project(path);
     const next = project(collectionPath);
     if (next === null) return null;
@@ -1046,7 +1102,7 @@ export function pruneMissingRestoredTabs(
     const tabs = group.tabs.filter(
       (tab) =>
         !restoredPaths.has(tab.path) ||
-        isVirtualTabPath(tab.path) ||
+        TAB_KINDS[parseTab(tab.path).kind].virtual ||
         fileExists(tab.path),
     );
     if (tabs.length === group.tabs.length) return group;
@@ -1078,8 +1134,8 @@ export function serializeUiState(state: WorkbenchState): WorkspaceUiState {
       size: group.size,
     })),
     activeEditorGroup: state.activeEditorGroup,
-    chatsVisible: state.chatsVisible,
-    chatsWidth: clampChatsWidth(state.chatsWidth),
+    aboutVisible: state.aboutVisible,
+    aboutWidth: clampAboutWidth(state.aboutWidth),
     openEditorsHeight: clampOpenEditorsHeight(state.openEditorsHeight),
     expandedFolders: state.expandedFolders,
     pinned: state.pinned,
@@ -1153,11 +1209,11 @@ export function parseUiState(raw: unknown): WorkbenchState {
       const tabPaths = new Set<string>();
       const rawTabs = groupOwn("tabs");
       const rawActiveTab = migrateTabPath(groupOwn("activeTab"));
-      const normalizedActiveTab =
-        typeof rawActiveTab === "string"
-          ? (canonicalSingletonEditorTabPath(rawActiveTab) ??
-            (isSingletonEditorTabPath(rawActiveTab) ? null : rawActiveTab))
-          : null;
+      const parsedActiveTab = typeof rawActiveTab === "string" ? parseTab(rawActiveTab) : null;
+      const normalizedActiveTab = parsedActiveTab
+        ? (singletonTabIdentity(parsedActiveTab) ??
+          (TAB_KINDS[parsedActiveTab.kind].singleton ? null : parsedActiveTab.path))
+        : null;
       if (Array.isArray(rawTabs)) {
         for (const rawTab of rawTabs) {
           if (tabCount >= MAX_OPEN_TABS) break;
@@ -1165,15 +1221,15 @@ export function parseUiState(raw: unknown): WorkbenchState {
           if (
             typeof tab !== "string" ||
             tab.length === 0 ||
-            tab.length > 4096 ||
-            // A tab from a surface dohc no longer has. Dropped here, so it
-            // cannot survive as a workspace file path that does not exist.
-            isRemovedVirtualTabPath(tab)
+            tab.length > 4096
           ) {
             continue;
           }
-          const canonicalSingleton = canonicalSingletonEditorTabPath(tab);
-          if (isSingletonEditorTabPath(tab) && canonicalSingleton === null) {
+          const parsedTab = parseTab(tab);
+          // Removed surfaces never restore as workspace file paths.
+          if (parsedTab.kind === "removed") continue;
+          const canonicalSingleton = singletonTabIdentity(parsedTab);
+          if (TAB_KINDS[parsedTab.kind].singleton && canonicalSingleton === null) {
             continue;
           }
           const tabPath = canonicalSingleton ?? tab;
@@ -1232,8 +1288,11 @@ export function parseUiState(raw: unknown): WorkbenchState {
   const rawView = own("activeView");
   const rawSidebarVisible = own("sidebarVisible");
   const rawSidebarWidth = own("sidebarWidth");
-  const rawChatsVisible = own("chatsVisible");
-  const rawChatsWidth = own("chatsWidth");
+  // A file saved before the About rail names its fields chatsVisible and
+  // chatsWidth. Nothing reads them, so the rail opens closed at its default
+  // width and the rest of the file restores as saved.
+  const rawAboutVisible = own("aboutVisible");
+  const rawAboutWidth = own("aboutWidth");
   const rawOpenEditorsHeight = own("openEditorsHeight");
   return {
     activeView: isActivityViewId(rawView) ? rawView : defaults.activeView,
@@ -1247,14 +1306,14 @@ export function parseUiState(raw: unknown): WorkbenchState {
         : defaults.sidebarWidth,
     editorGroups: normalizedGroups,
     activeEditorGroup,
-    chatsVisible:
-      typeof rawChatsVisible === "boolean"
-        ? rawChatsVisible
-        : defaults.chatsVisible,
-    chatsWidth:
-      typeof rawChatsWidth === "number"
-        ? clampChatsWidth(rawChatsWidth)
-        : defaults.chatsWidth,
+    aboutVisible:
+      typeof rawAboutVisible === "boolean"
+        ? rawAboutVisible
+        : defaults.aboutVisible,
+    aboutWidth:
+      typeof rawAboutWidth === "number"
+        ? clampAboutWidth(rawAboutWidth)
+        : defaults.aboutWidth,
     openEditorsHeight:
       typeof rawOpenEditorsHeight === "number"
         ? clampOpenEditorsHeight(rawOpenEditorsHeight)

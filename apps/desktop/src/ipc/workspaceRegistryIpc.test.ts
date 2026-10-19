@@ -23,8 +23,9 @@ async function registryHarness() {
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
   const summaries: WorkspaceSummary[] = [];
   const steps: string[] = [];
-  const createFolder = vi.fn(async (input: { rootPath: string; kind: "personal" | "shared" }) => {
+  const createFolder = vi.fn(async ({ homeDir, ...input }: { rootPath: string; homeDir: string; kind: "personal" | "shared" }) => {
     steps.push("create");
+    expect(homeDir).toBe(home);
     return { workspaceId: "workspace", ...input, mode: defaultWorkspaceMode(input.kind) };
   });
   const register = vi.fn((summary: WorkspaceSummary) => { steps.push("register"); summaries.push(summary); });
@@ -88,6 +89,18 @@ describe("registered workspace registry handlers", () => {
     await expect(h.invoke(CHANNELS.attachWorkspaceFolder, { rootPath: join(h.home, "unapproved") }))
       .rejects.toThrow("chosen through dohc");
     expect(h.createFolder).toHaveBeenCalledOnce();
+  });
+
+  it.skipIf(process.platform === "win32")("keeps a backslash in a picked folder's name through create and attach", async () => {
+    const h = await registryHarness();
+    const picked = join(h.home, "trip\\2026");
+    h.pick.mockResolvedValue({ canceled: false, filePaths: [picked] });
+    expect(await h.invoke(CHANNELS.pickWorkspaceRoot)).toBe(picked);
+    await h.invoke(CHANNELS.attachWorkspaceFolder, { rootPath: picked });
+    await h.invoke(CHANNELS.createLocalWorkspace, { rootPath: `${picked}/Notes`, kind: "personal" });
+    expect(h.createFolder.mock.calls.map(([input]) => input.rootPath)).toEqual([picked, `${picked}/Notes`]);
+    // The same name with a separator is another folder, which was never picked.
+    expect(() => h.roots.usableRoot(join(h.home, "trip", "2026"))).toThrow("chosen through dohc");
   });
 
   it("uses each dialog pick and preserves attach identity and registry ordering", async () => {
@@ -157,19 +170,20 @@ function openHarness() {
   const projection = vi.fn(async (_workspace: typeof workspace, value: SyncStatusResult) => value);
   const preferred = vi.fn();
   const opened = vi.fn();
+  const shown = vi.fn();
   const handlers = new Map<string, (event: OpenEvent, payload: unknown) => unknown>();
   registerOpenWorkspaceIpcHandler<typeof sender, OpenEvent, typeof workspace, typeof operation>({
     registerHandler: (channel, handler) => handlers.set(channel, handler),
     assertTrustedSender: (event) => { if (!event.trusted) throw new Error("untrusted"); },
     withPhysicalWorkspaceOperation, rendererWorkspaceSessions: sessions,
-    setPreferredWorkspaceId: preferred, markWorkspaceOpened: opened, openWorkspaceActivity: activity,
+    setPreferredWorkspaceId: preferred, markWorkspaceOpened: opened, workspaceShown: shown, openWorkspaceActivity: activity,
     syncStatusWithOwnedProjection: projection,
   });
   const invoke = async (trusted = true) => handlers.get(CHANNELS.openWorkspace)!({ sender, trusted }, {
     workspaceId: workspace.workspaceId, rendererDocumentId: documentId,
   });
   return {
-    sender, workspace, sessions, activity, projection, preferred, opened, handlers, invoke,
+    sender, workspace, sessions, activity, projection, preferred, opened, shown, handlers, invoke,
     retirePhysical: () => { physicalCurrent = false; },
   };
 }
@@ -183,6 +197,7 @@ describe("registered workspace open", () => {
     await expect(h.invoke()).resolves.toEqual(status);
     expect(h.preferred).toHaveBeenCalledWith("workspace", h.sender);
     expect(h.opened).toHaveBeenCalledWith("workspace");
+    expect(h.shown).toHaveBeenCalledWith("workspace", h.sender);
     expect(h.projection).toHaveBeenCalledWith(h.workspace, status);
   });
 
@@ -199,6 +214,7 @@ describe("registered workspace open", () => {
     held.resolve(status);
     await expect(result).rejects.toThrow();
     expect(h.opened).not.toHaveBeenCalled();
+    expect(h.shown).not.toHaveBeenCalled();
   });
 
   it("stamps the last open only after the open succeeds, and a stamp failure does not fail it", async () => {

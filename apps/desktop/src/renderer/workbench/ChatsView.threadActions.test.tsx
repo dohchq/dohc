@@ -79,7 +79,7 @@ describe("ChatsView decisions", () => {
 
   it("answers a poll by picking a choice, and the choice travels with the answer", async () => {
     const user = userEvent.setup();
-    const opening = message({ authorKind: "agent", authorDisplayName: "You", body: "Ship on which day?" });
+    const opening = message({ presentation: { group: "fixture", hue: null, self: false }, authorKind: "agent", authorDisplayName: "You", body: "Ship on which day?" });
     const poll = {
       threadId: "thread-1",
       messageId: opening.id,
@@ -295,11 +295,41 @@ describe("ChatsView work and run links", () => {
     expect(onOpenPath).not.toHaveBeenCalled();
   });
 
+  it("names a heading attachment by its file and heading, as before the chip", async () => {
+    const user = userEvent.setup();
+    const onOpenPath = vi.fn();
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    bridgeMock.listChatThreadAttachments.mockResolvedValue({
+      attachments: [
+        {
+          attachmentId: "attachment-heading",
+          threadId: "thread-1",
+          messageId: "message-1",
+          targetKind: "file",
+          objectId: "object-1",
+          pathHint: "projects/launch/brief.md",
+          headingText: "Scope",
+          headingAnchor: "scope",
+          createdAtMs: NOW,
+        },
+      ],
+    });
+    renderView(vi.fn(), vi.fn(), { onOpenPath });
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    const chip = await screen.findByTestId("chats-attachment-chip");
+    expect(screen.getByRole("button", { name: "brief.md#Scope" })).toBe(chip);
+    await user.click(chip);
+    expect(onOpenPath).toHaveBeenCalledWith("projects/launch/brief.md", "scope");
+  });
+
   it("opens attachment paths and shows linked agent-run details", async () => {
     const user = userEvent.setup();
     const onOpenPath = vi.fn();
     const opening = message();
-    const agentComment = message({
+    const agentComment = message({ presentation: { group: "fixture", hue: null, self: false },
       id: "agent-report",
       parentMessageId: opening.id,
       authorKind: "agent",
@@ -349,6 +379,7 @@ describe("ChatsView work and run links", () => {
     });
     expect(attachment.textContent).toContain("brief.md");
     expect(attachment.getAttribute("title")).toBe("projects/launch/brief.md");
+    expect(screen.getByRole("button", { name: "brief.md" })).toBe(attachment);
     await user.click(attachment);
     expect(onOpenPath).toHaveBeenCalledWith("projects/launch/brief.md");
 

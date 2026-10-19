@@ -1,10 +1,12 @@
 import {
-  APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, CLI_CAPABILITIES, DATASET_CAPABILITIES,
+  APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, CLI_CAPABILITIES,
   type CliRequest, type CliResultByVerb,
 } from "@dohc/cli/protocol";
+import { DATASET_CAPABILITIES } from "@dohc/cli/dataset";
 import { CAPABILITIES, type CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import { USAGE_ACTION_IDS } from "@dohc/workspace-contracts/usage";
 import { RENDERER_USAGE_COVERAGE } from "./rendererUsage";
+import { AUTOMATION_USAGE_ACTION_IDS } from "@dohc/automation-executor/automation-usage";
 
 type ActionId = (typeof USAGE_ACTION_IDS)[number];
 export type CliUsageInvocation = { capabilityId: ActionId; door: "cli" | "mcp" };
@@ -17,8 +19,13 @@ const covered = new Set<CapabilityId>(CLI_USAGE_ACTION_IDS);
 // MCP also uses fileWrite for app.create and data.import, so its file.write
 // count cannot distinguish those capabilities.
 const mcpCovered = new Set<CapabilityId>(CLI_USAGE_ACTION_IDS.filter(id => id !== "file.write"));
+// Automation coverage for dataset.operation.invoke counts successful invocations
+// of write-capable actions, including no-ops. The change signal is not kept
+// through receipt replay or the saved run.
+const automationCovered = new Set<CapabilityId>(AUTOMATION_USAGE_ACTION_IDS);
 export const DESKTOP_USAGE_COVERAGE = RENDERER_USAGE_COVERAGE.map(pair => ({ ...pair,
   status: (pair.door === "cli" && covered.has(pair.capabilityId)
+    || pair.door === "automation" && automationCovered.has(pair.capabilityId)
     || pair.door === "mcp" && mcpCovered.has(pair.capabilityId)
       && Object.values(CAPABILITIES[pair.capabilityId].mcp).some(tools => Array.isArray(tools) && tools.length > 0))
     ? "covered" as const : pair.status,
@@ -27,6 +34,7 @@ export const DESKTOP_USAGE_COVERAGE = RENDERER_USAGE_COVERAGE.map(pair => ({ ...
 // Called only with the dispatcher's validated result. The collector receives
 // the aggregate pair, never arguments, content, paths or result objects.
 export function cliUsageInvocation(request: CliRequest, result: CliResultByVerb[CliRequest["verb"]]): CliUsageInvocation | null {
+  if (result === null) return null;
   const id = request.verb === "dataset" ? DATASET_CAPABILITIES[request.args.request.action]
     : request.verb === "appPublication" ? APP_PUBLICATION_CAPABILITIES[request.args.request.action]
     : request.verb === "ownerAppResponses" ? APP_RESPONSE_CAPABILITIES[request.args.request.action]

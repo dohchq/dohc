@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// "Export as PDF" (ViewHeader document menu): the renderer already built a
+// "Export as PDF" (the document menu): the renderer already built a
 // SELF-CONTAINED HTML document (documentExport.ts — inline styles, no
 // external assets); this module's only job is turning that string into PDF
 // bytes. It never touches workspace files or IPC identity — the caller

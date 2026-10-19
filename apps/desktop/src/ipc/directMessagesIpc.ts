@@ -1,3 +1,5 @@
+import { agentColorsForPresentation } from "../settings/userSettingsStore";
+import { createActorPresentationRequest } from "../workspaces/actorPresentation";
 import { join } from "node:path";
 import { normalizeChatMessageBody } from "@dohc/workspace-contracts/chat-message-body";
 import {
@@ -20,6 +22,7 @@ import {
 } from "../workspaces/dmRequests";
 import { credentialScopedOperation, requireCredentials } from "../workspaces/credentialScopedOperation";
 import { resolveWorkspaceRelayAuthorId, type ChatRelayIdentityTarget } from "../workspaces/chatRelayIdentity";
+import { deriveChatActorKey } from "../workspaces/chatWrites";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { relayApiFetch, relayFetchWithTimeout, RELAY_FETCH_TIMEOUT_MS } from "../workspaces/sharedChannels";
 import { ShareUnavailableError, type SyncRelayConnection } from "@dohc/workspace-contracts/relay";
@@ -92,12 +95,13 @@ export function registerDirectMessagesIpcHandlers<
   assertShareNotHeldElsewhere(shareId: string, workspaceId: string, channelWireId?: string): void;
   reserveAndPullSharedChannelForWorkspace(input: {
     operation: Operation; assertCurrent?: () => void; relay: SyncRelayConnection;
-    shareId: string; recipientUserId: string; relayUrl: string;
+    shareId: string; recipientUserId: string; relayUrl: string; serverUrl: string;
     preWrite?: (info: { channelWireId: string }) => void;
   }): Promise<JoinedSharedChannel>;
-  endWorkspaceJoinedChannel(operation: Operation, shareId: string): void;
+  endWorkspaceJoinedChannel(operation: Operation, shareId: string): Promise<void>;
   chatScope: Pick<ReturnType<typeof createChatScopeCapability>, "resolveChatFileReferences">;
   localUserDisplayName(): string;
+  localInstallationId(): string;
   activity: {
     queueCloudSync(workspaceId: string): void;
     queueCloudPull(workspaceId: string): void;
@@ -111,7 +115,7 @@ export function registerDirectMessagesIpcHandlers<
     normalizeServerUrl, listWorkspaces, stateDir, peekedReceivedGrantKinds,
     syncRendererSharedChannelsForChatTarget, assertShareNotHeldElsewhere,
     reserveAndPullSharedChannelForWorkspace, endWorkspaceJoinedChannel,
-    localUserDisplayName, activity, chatDispatchService,
+    localUserDisplayName, localInstallationId, activity, chatDispatchService,
   } = dependencies;
   const { resolveChatFileReferences } = dependencies.chatScope;
 
@@ -368,6 +372,7 @@ export function registerDirectMessagesIpcHandlers<
               shareId: input.shareId,
               recipientUserId: acceptCredentials.userId,
               relayUrl: acceptedRelayUrl,
+              serverUrl: acceptCredentials.serverUrl,
               preWrite: (info) => {
                 assertCurrentAcceptSession();
                 assertShareNotHeldElsewhere(
@@ -450,12 +455,12 @@ export function registerDirectMessagesIpcHandlers<
       event.sender,
       input.workspaceId,
       "Leaving stopped because this window changed workspaces.",
-      (operation) => {
+      async (operation) => {
         const workspace = operation.workspace;
         const leftRow = (workspace.sharedChannels ?? []).find(
           (channel) => channel.shareId === input.shareId,
         );
-        endWorkspaceJoinedChannel(operation, input.shareId);
+        await endWorkspaceJoinedChannel(operation, input.shareId);
         operation.assertCurrent();
         // The leave is locally knowable without the relay. Keep this physical
         // attachment's fallback lanes consistent with the registry write.
@@ -648,12 +653,17 @@ export function registerDirectMessagesIpcHandlers<
               kind: "human" as const,
               displayName: localUserDisplayName(),
             };
+            const authorActorKey = deriveChatActorKey({
+              credentials, installationId: localInstallationId(), workspaceId: workspace.workspaceId,
+              writer: { via: "renderer" }, displayName: author.displayName,
+            });
             return running
               ? store.sendMessage({
                   workspaceId: workspace.workspaceId,
                   threadId: running.thread.id,
                   author,
                   authorUserId,
+                  authorActorKey,
                   body,
                   ...(attachments.length > 0 ? { attachments } : {}),
                 })
@@ -663,6 +673,7 @@ export function registerDirectMessagesIpcHandlers<
                     channelId,
                     author,
                     authorUserId,
+                    authorActorKey,
                     body,
                     ...(attachments.length > 0 ? { attachments } : {}),
                   })
@@ -694,7 +705,11 @@ export function registerDirectMessagesIpcHandlers<
         return StartDmResult.parse({
           dm: dmRecordForIpc(dm),
           // A person's own message names no automation.
-          message: chatMessageForIpc(message, () => null),
+          message: chatMessageForIpc(message, () => null, await createActorPresentationRequest({
+            agentColors: await agentColorsForPresentation(stateDir()),
+            readWorkspace: () => listWorkspaces().find(entry => entry.workspaceId === workspace.workspaceId) ?? null,
+            store, assertCurrent: assertCurrentDmSession, installationId: localInstallationId(), credentials: currentCredentials(),
+          })(message, message.threadId)),
         });
       },
     );

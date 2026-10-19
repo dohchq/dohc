@@ -28,14 +28,14 @@ pub enum ErrorCode {
     MethodNotFound,
     /// The request params failed method-level validation.
     InvalidParams,
-    /// The request deadline elapsed before the engine finished.
+    /// The request deadline elapsed and the work did not happen. A request
+    /// whose work landed before its deadline answers with that work's result.
     DeadlineExceeded,
-    /// The request was cancelled by the client or by session teardown.
+    /// The client or session teardown cancelled the request and the work did
+    /// not happen. A request whose work landed first answers with its result.
     Cancelled,
     /// Bounded queues are full; explicit backpressure.
     Overloaded,
-    /// Collection reconciliation waits for an open document's session lease.
-    CollectionReconciliationLeaseHeld,
     /// The session generation is no longer valid (engine restarted).
     SessionExpired,
     /// The workspace handle does not refer to an open workspace.
@@ -90,6 +90,9 @@ pub enum ErrorCode {
     RelayMethodNotAllowed,
     /// The relay returned a response that violated its wire contract.
     RelayInvalidResponse,
+    /// The relay address is not an https origin, so the engine refused it
+    /// before sending anything.
+    RelayHttpsRequired,
     /// Internal engine failure; details in redacted diagnostics only.
     Internal,
 }
@@ -108,7 +111,6 @@ impl ErrorCode {
             ErrorCode::DeadlineExceeded => "DEADLINE_EXCEEDED",
             ErrorCode::Cancelled => "CANCELLED",
             ErrorCode::Overloaded => "OVERLOADED",
-            ErrorCode::CollectionReconciliationLeaseHeld => "COLLECTION_RECONCILIATION_LEASE_HELD",
             ErrorCode::SessionExpired => "SESSION_EXPIRED",
             ErrorCode::WorkspaceUnavailable => "WORKSPACE_UNAVAILABLE",
             ErrorCode::Conflict => "CONFLICT",
@@ -136,13 +138,14 @@ impl ErrorCode {
             ErrorCode::InvalidChannel => "INVALID_CHANNEL",
             ErrorCode::RelayMethodNotAllowed => "RELAY_METHOD_NOT_ALLOWED",
             ErrorCode::RelayInvalidResponse => "RELAY_INVALID_RESPONSE",
+            ErrorCode::RelayHttpsRequired => "RELAY_HTTPS_REQUIRED",
             ErrorCode::Internal => "INTERNAL",
         }
     }
 
     /// Default retryability classification for this code. A response may
-    /// override it (e.g. `INTERNAL` after a definitely-not-committed write
-    /// can be `afterBackoff`), but the default is what generated clients use.
+    /// override it. An `INTERNAL` response with `afterBackoff` may follow a
+    /// committed write, so mutation retries must keep the original idempotency key.
     pub const fn default_retryability(self) -> Retryability {
         match self {
             ErrorCode::AuthFailed
@@ -177,12 +180,12 @@ impl ErrorCode {
             | ErrorCode::InvalidChannel
             | ErrorCode::RelayMethodNotAllowed
             | ErrorCode::RelayInvalidResponse
+            | ErrorCode::RelayHttpsRequired
             | ErrorCode::Cancelled => Retryability::No,
             // Safe to retry only because retryable mutations carry
             // idempotency keys; the engine deduplicates on replay.
             ErrorCode::DeadlineExceeded => Retryability::AfterBackoff,
             ErrorCode::Overloaded => Retryability::AfterBackoff,
-            ErrorCode::CollectionReconciliationLeaseHeld => Retryability::AfterBackoff,
             ErrorCode::SessionExpired | ErrorCode::WorkspaceUnavailable => {
                 Retryability::AfterReconnect
             }

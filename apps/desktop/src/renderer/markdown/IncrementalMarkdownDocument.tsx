@@ -73,7 +73,6 @@ export function IncrementalMarkdownDocument(props: {
         return (
           <a
             href={href}
-            className="text-accent underline"
             onClick={activate}
             onAuxClick={(event) => {
               if (event.button === 1) activate(event);

@@ -58,7 +58,7 @@ function fixture() {
   const commit = vi.spyOn(relay.storage, "commitLiveUpdateJournal");
   let requestId = 0;
   const run = () => drainOwnerOutbox({storage: relay.storage,client: client as unknown as EngineClient,
-    admission: {shares: new Map([[document.workspaceId,"share"]]),maxEntriesPerDrain: 1,maxBytesPerDrain: 10_000,validate},
+    admission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([[document.workspaceId,"share"]]),maxEntriesPerDrain: 1,maxBytesPerDrain: 10_000,validate},
     workspace: "handle",host,registrationId: 1,binding,adoption: {adoptionId: "adoption",sequence: 1,applied() {}},nextRequestId: () => ++requestId,deadlineMs: 1_000,
     assertCurrent() {},applyThrough});
   return {relay,document,host,binding,entry,pending,receipts,applyThrough,validate,commit,run};
@@ -125,6 +125,26 @@ it("retries without acknowledging when SQLite is busy before the first journal w
   expect(outcome!).toEqual({status: "fulfilled",value: {admittedEntries: 0,hasMore: true,retryReady: true}});
   expect(await f.run()).toEqual({admittedEntries: 1,hasMore: false});
   expect(f.relay.journalRows().journal).toHaveLength(1); expect(f.receipts).toHaveLength(1);
+});
+
+// Proves: deleting an enrolled document's last Edit share refuses the owner
+// outbox entry an in-flight drain validated before it. The journal admits
+// nothing and the owner head stays.
+it("refuses an owner outbox entry validated before the document's last Edit share was deleted", async () => {
+  const f = fixture(), entered = deferred(), release = deferred();
+  f.relay.storage.claimWorkspaceIdentity({workspaceId: f.document.workspaceId, replicationEpoch: "epoch", streamIdentity: "stream"});
+  f.relay.storage.enrollServiceHostDocument({workspaceId: f.document.workspaceId, ownerUserId: "owner", shareId: "share",
+    path: f.binding.currentPath, nowMs: 10, guard() {}});
+  f.validate.mockImplementationOnce(async input => {entered.resolve(); await release.promise; return validateJournal(input);});
+  const first = f.run(), firstOutcome = Promise.allSettled([first]);
+  await Promise.race([entered.promise, first.then(() => {throw new Error("Owner drain ended before validation.");})]);
+  expect(f.relay.storage.revokeShare("share", 30)).toBe(true);
+  release.resolve();
+  const [outcome] = await firstOutcome;
+  expect(outcome).toMatchObject({status: "rejected", reason: new Error("Owner update admission refused.")});
+  expect(f.commit.mock.results[0]!.value).toMatchObject({result: {kind: "refused",reason: "authority-refused"},admitted: null});
+  expect(f.relay.journalRows().journal).toEqual([]); expect(f.receipts).toEqual([]);
+  expect(f.pending).toEqual([f.entry]); expect(f.applyThrough).not.toHaveBeenCalled();
 });
 
 it("still throws on a genuine journal admission refusal and retains the owner head", async () => {

@@ -1,3 +1,4 @@
+import {createLiveBufferBudget} from "@dohc/live-session-contract/live-connection";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -39,11 +40,13 @@ try {
 }
 
 const application = createShareWebApplication({
+  deleteAccountGateways(userId, workspaceIds) {namedGateway?.deleteAccount(userId,workspaceIds); linkGateway?.deleteAccount(userId,workspaceIds);},
   appLaunch: config.appLaunch,
   relayUrl: config.relayUrl,
   publicRelayUrl: config.publicRelayUrl,
   relayExchangeKey: config.relayExchangeKey,
   publicHosts: config.publicHosts,
+  internalHosts: config.internalHosts,
   viewerAssetsDir,
   accountAuth: config.accountAuth,
   namedBrowserSessionLimits: config.namedBrowserSessionLimits,
@@ -55,12 +58,13 @@ const application = createShareWebApplication({
 
 const server = serveFetchHandler({
   handler: application.handle,
-  maxBodyBytes: url => url.pathname === "/api/mcp/exchange" ? 8 * 1024 : ["/api/live/link-document", "/api/live/link-ticket"].includes(url.pathname) && config.linkLive ? config.linkLive.requests.maxRequestBytes : ["/api/live/named-session", "/api/live/named-ticket", "/api/live/named-documents"].includes(url.pathname) && config.namedBrowserSessionLimits
+  maxBodyBytes: url => url.pathname === "/api/mcp/exchange" ? 8 * 1024 : ["/api/live/link-document", "/api/live/link-ticket"].includes(url.pathname) && config.linkLive ? config.linkLive.requests.maxRequestBytes : ["/api/live/named-session", "/api/live/named-ticket", "/api/live/named-documents", "/api/named-chat/messages"].includes(url.pathname) && config.namedBrowserSessionLimits
     ? config.namedBrowserSessionLimits.maxRequestBytes : MAX_REQUEST_BODY_BYTES,
   // These authenticate before they read, then bound the body and its deadline:
   // an agent request and a Collection write can carry megabytes.
   streamBody: url => url.pathname === "/mcp" || url.pathname === COLLECTION_WRITES_PATH,
-  oversized: refusal,
+  oversized: url => url.pathname === "/api/named-chat/messages"
+    ? Response.json({ok: false, error: "Post is too large.", code: "payload_too_large"}, {status: 413, headers: {"cache-control": "private, no-store"}}) : refusal(),
   failure: refusal,
   prepareHeaders: (headers, incoming) => {
     headers.set(
@@ -86,9 +90,11 @@ if (process.env.DOHC_DEVICE_CONTROL_LIMITS !== undefined) {
     fatal("FATAL: Invalid device control configuration. Check DOHC_DEVICE_CONTROL_LIMITS, DOHC_SHARE_WEB_DEVICE_CONTROL_ADMISSION, and relay settings.");
   }
 }
+const gatewayBufferMaximum = config.namedLiveGatewayLimits?.maxBufferedBytes ?? config.linkLive?.gateway.maxBufferedBytes;
+const gatewayBuffers = gatewayBufferMaximum === undefined ? undefined : createLiveBufferBudget(gatewayBufferMaximum);
 let namedGateway: ReturnType<typeof createLiveGateway> | undefined;
 if (config.namedLiveGatewayLimits) {
-  namedGateway = createLiveGateway({publicHosts: config.publicHosts, publicOrigin: config.accountAuth!.publicOrigin,
+  namedGateway = createLiveGateway({bufferBudget: gatewayBuffers, publicHosts: config.publicHosts, publicOrigin: config.accountAuth!.publicOrigin,
     limits: config.namedLiveGatewayLimits,
     resolveSession(request, discriminator, signal) {
       const authenticated = namedLiveGatewayRequest(request, config.accountAuth!.publicOrigin, signal);
@@ -101,7 +107,7 @@ if (config.namedLiveGatewayLimits) {
   process.once("SIGTERM", namedGateway.close);
   server.once("close", namedGateway.close);
 }
-const linkGateway = config.linkLive && application.linkLive ? createLiveGateway({publicHosts: config.publicHosts, publicOrigin: config.linkLive.publicOrigin,
+const linkGateway = config.linkLive && application.linkLive ? createLiveGateway({bufferBudget: gatewayBuffers, publicHosts: config.publicHosts, publicOrigin: config.linkLive.publicOrigin,
   path: "/api/live/link", limits: config.linkLive.gateway, resolveSession: application.linkLive.resolveSession, openHostRoute: application.linkLive.openHostRoute}) : undefined;
 if (linkGateway) {
   process.once("SIGINT", linkGateway.close); process.once("SIGTERM", linkGateway.close); server.once("close", linkGateway.close);

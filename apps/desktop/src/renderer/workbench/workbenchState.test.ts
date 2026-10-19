@@ -1,61 +1,49 @@
 import { describe, expect, it } from "vitest";
 import { SetWorkspaceUiStatePayload } from "../../ipc/bridgeContract";
 import {
+  parseTab,
+  TAB_KINDS,
   activateTab,
   activeGroup,
   activeTabPath,
+  adjacentTabPath,
   allTabs,
-  clampChatsWidth,
+  clampAboutWidth,
   clampOpenEditorsHeight,
   clampSidebarWidth,
   closeTab,
   closeEditorGroup,
   collectionTabPath,
   transactionalCollectionTabPath,
-  parseTransactionalCollectionTabPath,
-  isCollectionTabPath,
-  parseCollectionTabPath,
   createEditorGroupRight,
   defaultWorkbenchState,
   DEFAULT_EDITOR_GROUP_ID,
-  CHATS_DEFAULT_WIDTH,
-  CHATS_MAX_WIDTH,
-  CHATS_MIN_WIDTH,
+  ABOUT_DEFAULT_WIDTH,
+  ABOUT_MAX_WIDTH,
+  ABOUT_MIN_WIDTH,
   HISTORY_TAB_PATH,
   CHATS_TAB_PATH,
   chatTabPath,
-  parseChatTabPath,
-  isChatsTabPath,
-  isHistoryTabPath,
-  isMomentDiffTabPath,
   momentDiffTabPath,
-  parseMomentDiffTabPath,
-  isVersionCompareTabPath,
-  parseVersionCompareTabPath,
   versionCompareTabPath,
-  isSiteTabPath,
-  isSingletonEditorTabPath,
-  canonicalSingletonEditorTabPath,
   GRAPH_TAB_PATH,
-  isRemovedVirtualTabPath,
-  isVirtualTabPath,
   moveTab,
   openTab,
-  parseSiteTabPath,
   parseUiState,
   pruneMissingRestoredTabs,
   serializeUiState,
   setSidebarWidth,
-  setChatsWidth,
+  setAboutWidth,
   setOpenEditorsHeight,
   setView,
+  showView,
   OPEN_EDITORS_DEFAULT_HEIGHT,
   OPEN_EDITORS_MAX_HEIGHT,
   OPEN_EDITORS_MIN_HEIGHT,
   SIDEBAR_DEFAULT_WIDTH,
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
-  toggleChats,
+  toggleAbout,
   toggleSidebar,
   MAX_EDITOR_GROUPS,
   MAX_OPEN_TABS,
@@ -82,6 +70,16 @@ function withTabs(...paths: string[]): WorkbenchState {
 }
 
 describe("tabs", () => {
+  it("finds the next and previous tab in a group, wrapping at the ends", () => {
+    const group = activeGroup(activateTab(withTabs("a.md", "b.md", "c.md"), DEFAULT_EDITOR_GROUP_ID, "a.md"));
+    expect(adjacentTabPath(group, 1)).toBe("b.md");
+    expect(adjacentTabPath(group, -1)).toBe("c.md");
+    expect(adjacentTabPath({ ...group, activeTab: "c.md" }, 1)).toBe("a.md");
+    expect(adjacentTabPath({ ...group, activeTab: null }, 1)).toBe("a.md");
+    expect(adjacentTabPath({ ...group, activeTab: null }, -1)).toBe("c.md");
+    expect(adjacentTabPath({ ...group, tabs: [], activeTab: null }, 1)).toBeNull();
+  });
+
   it("starts with one focused empty editor group", () => {
     const state = defaultWorkbenchState();
     expect(state.editorGroups).toEqual([
@@ -314,9 +312,9 @@ describe("tabs", () => {
     state = moveTabToNewGroup(state, DEFAULT_EDITOR_GROUP_ID, "a.md", "right");
     state = openTab(state, dm, "right");
     state = openTab(state, channel, "right");
-    expect(allTabs(state).filter((tab) => isChatsTabPath(tab.path)).map((tab) => tab.path)).toEqual([CHATS_TAB_PATH, channel, dm]);
+    expect(allTabs(state).filter((tab) => (parseTab(tab.path)?.kind === "chat")).map((tab) => tab.path)).toEqual([CHATS_TAB_PATH, channel, dm]);
     expect(state.activeEditorGroup).toBe(DEFAULT_EDITOR_GROUP_ID);
-    expect(parseChatTabPath(channel)).toEqual({ kind: "channel", id: "channel/with spaces" });
+    expect(parseTab(channel)).toMatchObject({ kind: "chat", target: { kind: "channel", id: "channel/with spaces" } });
     const restored = parseUiState(serializeUiState(state));
     expect(allTabs(restored).map((tab) => tab.path)).toEqual(allTabs(state).map((tab) => tab.path));
     expect(SetWorkspaceUiStatePayload.safeParse({ workspaceId: "workspace", state: serializeUiState(state) }).success).toBe(true);
@@ -554,38 +552,38 @@ describe("tabs", () => {
   });
 
   it("recognizes history as a virtual workbench tab", () => {
-    expect(isHistoryTabPath(HISTORY_TAB_PATH)).toBe(true);
-    expect(isVirtualTabPath(HISTORY_TAB_PATH)).toBe(true);
-    expect(isVirtualTabPath("notes/today.md")).toBe(false);
+    expect(parseTab(HISTORY_TAB_PATH).kind).toBe("history");
+    expect(TAB_KINDS[parseTab(HISTORY_TAB_PATH).kind].virtual).toBe(true);
+    expect(TAB_KINDS[parseTab("notes/today.md").kind].virtual).toBe(false);
   });
 
   it("recognizes chats as a virtual workbench tab", () => {
-    expect(isChatsTabPath(CHATS_TAB_PATH)).toBe(true);
-    expect(isChatsTabPath("tab://chats/extra")).toBe(false);
-    expect(isChatsTabPath(null)).toBe(false);
-    expect(isVirtualTabPath(CHATS_TAB_PATH)).toBe(true);
+    expect(parseTab(CHATS_TAB_PATH).kind).toBe("chat");
+    expect(parseTab("tab://chats/extra").kind).toBe("removed");
+    expect(parseTab(null)).toBeNull();
+    expect(TAB_KINDS[parseTab(CHATS_TAB_PATH).kind].virtual).toBe(true);
   });
 
   it("recognizes engine moment diffs by their encoded moment id", () => {
     const path = momentDiffTabPath("moment id/with strange chars");
-    expect(isMomentDiffTabPath(path)).toBe(true);
-    expect(isVirtualTabPath(path)).toBe(true);
-    expect(parseMomentDiffTabPath(path)).toBe("moment id/with strange chars");
-    expect(parseMomentDiffTabPath("tab://moment-diff/")).toBeNull();
-    expect(parseMomentDiffTabPath("tab://moment-diff/%ZZ")).toBeNull();
-    expect(parseMomentDiffTabPath("notes/today.md")).toBeNull();
-    expect(parseMomentDiffTabPath(null)).toBeNull();
+    expect(parseTab(path).kind).toBe("momentDiff");
+    expect(TAB_KINDS[parseTab(path).kind].virtual).toBe(true);
+    expect(parseTab(path)).toEqual({ kind: "momentDiff", path, momentId: "moment id/with strange chars" });
+    expect(parseTab("tab://moment-diff/")).toEqual({ kind: "momentDiff", path: "tab://moment-diff/", momentId: null });
+    expect(parseTab("tab://moment-diff/%ZZ")).toEqual({ kind: "momentDiff", path: "tab://moment-diff/%ZZ", momentId: null });
+    expect(parseTab("notes/today.md")).toEqual({ kind: "file", path: "notes/today.md" });
+    expect(parseTab(null)).toBeNull();
   });
 
   it("recognizes collections as virtual tabs with encoded folder paths", () => {
     const path = collectionTabPath("projects/road trips");
-    expect(isCollectionTabPath(path)).toBe(true);
-    expect(isVirtualTabPath(path)).toBe(true);
-    expect(parseCollectionTabPath(path)).toBe("projects/road trips");
-    expect(parseCollectionTabPath("tab://collection/")).toBeNull();
-    expect(parseCollectionTabPath("tab://collection/%ZZ")).toBeNull();
-    expect(parseCollectionTabPath("notes/today.md")).toBeNull();
-    expect(parseCollectionTabPath(null)).toBeNull();
+    expect(parseTab(path).kind).toBe("collection");
+    expect(TAB_KINDS[parseTab(path).kind].virtual).toBe(true);
+    expect(parseTab(path)).toEqual({ kind: "collection", path, collectionPath: "projects/road trips" });
+    expect(parseTab("tab://collection/")).toEqual({ kind: "collection", path: "tab://collection/", collectionPath: null });
+    expect(parseTab("tab://collection/%ZZ")).toEqual({ kind: "collection", path: "tab://collection/%ZZ", collectionPath: null });
+    expect(parseTab("notes/today.md")).toEqual({ kind: "file", path: "notes/today.md" });
+    expect(parseTab(null)).toBeNull();
   });
 
   it("persists and restores the largest multibyte moment identity", () => {
@@ -608,26 +606,26 @@ describe("tabs", () => {
 
   it("recognizes version compare pages as virtual tabs with encoded version ids", () => {
     const path = versionCompareTabPath("version id/with strange chars");
-    expect(isVersionCompareTabPath(path)).toBe(true);
-    expect(isVirtualTabPath(path)).toBe(true);
-    expect(parseVersionCompareTabPath(path)).toBe("version id/with strange chars");
-    expect(parseVersionCompareTabPath("tab://versions/compare/")).toBeNull();
-    expect(parseVersionCompareTabPath("tab://versions/compare/%ZZ")).toBeNull();
-    expect(parseVersionCompareTabPath("notes/today.md")).toBeNull();
-    expect(parseVersionCompareTabPath(null)).toBeNull();
+    expect(parseTab(path).kind).toBe("versionCompare");
+    expect(TAB_KINDS[parseTab(path).kind].virtual).toBe(true);
+    expect(parseTab(path)).toEqual({ kind: "versionCompare", path, versionId: "version id/with strange chars" });
+    expect(parseTab("tab://versions/compare/")).toEqual({ kind: "versionCompare", path: "tab://versions/compare/", versionId: null });
+    expect(parseTab("tab://versions/compare/%ZZ")).toEqual({ kind: "versionCompare", path: "tab://versions/compare/%ZZ", versionId: null });
+    expect(parseTab("notes/today.md")).toEqual({ kind: "file", path: "notes/today.md" });
+    expect(parseTab(null)).toBeNull();
   });
 
   it("recognizes site previews as virtual tabs with encoded site roots", () => {
     const path = siteTabPath("clients/acme website");
-    expect(isSiteTabPath(path)).toBe(true);
-    expect(isVirtualTabPath(path)).toBe(true);
-    expect(parseSiteTabPath(path)).toBe("clients/acme website");
-    expect(parseSiteTabPath("tab://app/")).toBeNull();
-    expect(parseSiteTabPath(null)).toBeNull();
-    expect(parseSiteTabPath("not-a-site-path")).toBeNull();
+    expect(parseTab(path).kind).toBe("site");
+    expect(TAB_KINDS[parseTab(path).kind].virtual).toBe(true);
+    expect(parseTab(path)).toEqual({ kind: "site", path, siteRoot: "clients/acme website" });
+    expect(parseTab("tab://app/")).toEqual({ kind: "site", path: "tab://app/", siteRoot: null });
+    expect(parseTab(null)).toBeNull();
+    expect(parseTab("not-a-site-path")).toEqual({ kind: "file", path: "not-a-site-path" });
 
     const reservedRoot = "clients/site/nested?view=main#summary";
-    expect(parseSiteTabPath(siteTabPath(reservedRoot))).toBe(reservedRoot);
+    expect(parseTab(siteTabPath(reservedRoot))).toEqual({ kind: "site", path: siteTabPath(reservedRoot), siteRoot: reservedRoot });
   });
 
   it("refuses a virtual tab at the open-tab cap, which is what the shell reports", () => {
@@ -716,14 +714,34 @@ describe("views and panels", () => {
     expect(setView(collapsed, "explorer").sidebarVisible).toBe(true);
   });
 
-  it("toggleSidebar and toggleChats flip independently", () => {
+  it("toggleSidebar and toggleAbout flip independently", () => {
     const state = toggleSidebar(defaultWorkbenchState());
     expect(state.sidebarVisible).toBe(false);
-    // The Chats panel is hidden by default (VS Code secondary-sidebar
+    // The About rail is hidden by default (VS Code secondary-sidebar
     // grammar) — unlike the old always-on history rail.
-    expect(state.chatsVisible).toBe(false);
-    expect(toggleChats(state).chatsVisible).toBe(true);
-    expect(toggleChats(state).sidebarVisible).toBe(false);
+    expect(state.aboutVisible).toBe(false);
+    expect(toggleAbout(state).aboutVisible).toBe(true);
+    expect(toggleAbout(state).sidebarVisible).toBe(false);
+  });
+
+  it("selects Chats like any other left view and leaves the About rail alone", () => {
+    const state = toggleAbout(defaultWorkbenchState());
+    const chats = setView(state, "chats");
+    expect(chats.activeView).toBe("chats");
+    expect(chats.sidebarVisible).toBe(true);
+    expect(chats.aboutVisible).toBe(true);
+    // Choosing Chats again hides the left panel, as every rail view does.
+    expect(setView(chats, "chats").sidebarVisible).toBe(false);
+    expect(setView(setView(chats, "chats"), "chats")).toEqual(chats);
+  });
+
+  it("showView shows a view and never hides it", () => {
+    const chats = showView(defaultWorkbenchState(), "chats");
+    expect(chats.activeView).toBe("chats");
+    expect(chats.sidebarVisible).toBe(true);
+    expect(showView(chats, "chats")).toBe(chats);
+    const hidden = toggleSidebar(chats);
+    expect(showView(hidden, "chats")).toEqual(chats);
   });
 });
 
@@ -737,13 +755,13 @@ describe("rail widths", () => {
     expect(clampSidebarWidth(Number.POSITIVE_INFINITY)).toBe(SIDEBAR_DEFAULT_WIDTH);
   });
 
-  it("clamps the chats panel into the same generous resize range", () => {
-    expect(clampChatsWidth(10)).toBe(CHATS_MIN_WIDTH);
-    expect(clampChatsWidth(9999)).toBe(CHATS_MAX_WIDTH);
-    expect(clampChatsWidth(1200)).toBe(1200);
-    expect(clampChatsWidth(300.6)).toBe(301);
-    expect(clampChatsWidth(Number.NaN)).toBe(CHATS_DEFAULT_WIDTH);
-    expect(clampChatsWidth(Number.POSITIVE_INFINITY)).toBe(CHATS_DEFAULT_WIDTH);
+  it("clamps the About rail into the same generous resize range", () => {
+    expect(clampAboutWidth(10)).toBe(ABOUT_MIN_WIDTH);
+    expect(clampAboutWidth(9999)).toBe(ABOUT_MAX_WIDTH);
+    expect(clampAboutWidth(1200)).toBe(1200);
+    expect(clampAboutWidth(300.6)).toBe(301);
+    expect(clampAboutWidth(Number.NaN)).toBe(ABOUT_DEFAULT_WIDTH);
+    expect(clampAboutWidth(Number.POSITIVE_INFINITY)).toBe(ABOUT_DEFAULT_WIDTH);
   });
 
   it("setSidebarWidth stores the clamped width and no-ops on no change", () => {
@@ -752,10 +770,10 @@ describe("rail widths", () => {
     expect(setSidebarWidth(state, SIDEBAR_DEFAULT_WIDTH)).toBe(state);
   });
 
-  it("setChatsWidth stores the clamped width and no-ops on no change", () => {
+  it("setAboutWidth stores the clamped width and no-ops on no change", () => {
     const state = defaultWorkbenchState();
-    expect(setChatsWidth(state, 360).chatsWidth).toBe(360);
-    expect(setChatsWidth(state, CHATS_DEFAULT_WIDTH)).toBe(state);
+    expect(setAboutWidth(state, 360).aboutWidth).toBe(360);
+    expect(setAboutWidth(state, ABOUT_DEFAULT_WIDTH)).toBe(state);
   });
 
   it("clamps the open-editors height into bounds and rounds; non-finite resets to the default", () => {
@@ -797,11 +815,11 @@ describe("ui-state persistence round-trip", () => {
       sitePath,
     ]);
     expect(restored.editorGroups[0]!.activeTab).toBe(sitePath);
-    expect(isRemovedVirtualTabPath(sitePath)).toBe(false);
-    expect(isRemovedVirtualTabPath(removedPath)).toBe(true);
-    expect(isRemovedVirtualTabPath(GRAPH_TAB_PATH)).toBe(false);
-    expect(isRemovedVirtualTabPath("notes/tab://app/a.md")).toBe(false);
-    expect(isRemovedVirtualTabPath("notes/a.md")).toBe(false);
+    expect(parseTab(sitePath).kind).toBe("site");
+    expect(parseTab(removedPath).kind).toBe("removed");
+    expect(parseTab(GRAPH_TAB_PATH).kind).toBe("graph");
+    expect(parseTab("notes/tab://app/a.md").kind).toBe("file");
+    expect(parseTab("notes/a.md").kind).toBe("file");
   });
 
   it("restores the built-in Apps view", () => {
@@ -820,16 +838,28 @@ describe("ui-state persistence round-trip", () => {
     state = resizeEditorGroups(state, DEFAULT_EDITOR_GROUP_ID, "right", 0.35);
     state = setView(state, "history");
     state = setSidebarWidth(state, 333);
-    state = setChatsWidth(state, 444);
+    state = setAboutWidth(state, 444);
     state = setOpenEditorsHeight(state, 210);
-    state = toggleChats(state);
+    state = toggleAbout(state);
     expect(parseUiState(serializeUiState(state))).toEqual(state);
+  });
+
+  it("keeps Chats open across a restart, through the stored file's schema", () => {
+    const stored = serializeUiState(setView(defaultWorkbenchState(), "chats"));
+    expect(SetWorkspaceUiStatePayload.parse({ workspaceId: "workspace", state: stored }).state.activeView).toBe("chats");
+    expect(parseUiState(stored).activeView).toBe("chats");
   });
 
   it("falls back to the explorer for a stored view this build does not know", () => {
     expect(
       parseUiState({ ...serializeUiState(defaultWorkbenchState()), activeView: "plugins" }).activeView,
     ).toBe("explorer");
+  });
+
+  it("keeps Sharing open across a restart, through the stored file's schema", () => {
+    const stored = serializeUiState(setView(defaultWorkbenchState(), "sharing"));
+    expect(SetWorkspaceUiStatePayload.parse({ workspaceId: "workspace", state: stored }).state.activeView).toBe("sharing");
+    expect(parseUiState(stored).activeView).toBe("sharing");
   });
 
   it("does not migrate or alias the version-1 flat-tab contract", () => {
@@ -867,7 +897,7 @@ describe("ui-state persistence round-trip", () => {
     const state = parseUiState({
       version: 3,
       sidebarWidth: 5,
-      chatsWidth: 9999,
+      aboutWidth: 9999,
       editorGroups: [
         {
           id: "left",
@@ -886,7 +916,7 @@ describe("ui-state persistence round-trip", () => {
       activeEditorGroup: "missing",
     });
     expect(state.sidebarWidth).toBe(SIDEBAR_MIN_WIDTH);
-    expect(state.chatsWidth).toBe(CHATS_MAX_WIDTH);
+    expect(state.aboutWidth).toBe(ABOUT_MAX_WIDTH);
     expect(state.editorGroups.map((group) => group.id)).toEqual(["left", "right"]);
     expect(state.editorGroups[0].tabs.map((tab) => tab.path)).toEqual(["a.md", "b.md"]);
     expect(state.editorGroups[0].activeTab).toBe("a.md");
@@ -1004,7 +1034,7 @@ describe("ui-state persistence round-trip", () => {
           { id: "evil", tabs: ["evil.md"], activeTab: "evil.md", size: 1 },
         ],
         activeEditorGroup: "evil",
-        chatsVisible: true,
+        aboutVisible: true,
       }),
     );
     expect(inherited).toEqual(defaultWorkbenchState());
@@ -1482,7 +1512,7 @@ describe("pruneMissingRestoredTabs (restored tabs whose file is gone)", () => {
 it("uses the dataset.json address for Collection tabs and rejects old ID-only addresses", () => {
   const tableId = "00000000-0000-4000-8000-000000000002";
   const datasetPath = "旅行/Equipment list/dataset.json";
-  expect(parseTransactionalCollectionTabPath(transactionalCollectionTabPath(datasetPath, tableId))).toEqual({ datasetPath, tableId });
-  expect(parseTransactionalCollectionTabPath(transactionalCollectionTabPath("00000000-0000-4000-8000-000000000001", tableId))).toBeNull();
-  expect(parseTransactionalCollectionTabPath(transactionalCollectionTabPath("../dataset.json", tableId))).toBeNull();
+  expect(parseTab(transactionalCollectionTabPath(datasetPath, tableId))).toMatchObject({ kind: "transactionalCollection", datasetPath, tableId });
+  expect(parseTab(transactionalCollectionTabPath("00000000-0000-4000-8000-000000000001", tableId)).kind).toBe("removed");
+  expect(parseTab(transactionalCollectionTabPath("../dataset.json", tableId)).kind).toBe("removed");
 });

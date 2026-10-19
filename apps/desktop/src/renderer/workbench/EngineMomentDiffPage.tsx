@@ -1,5 +1,6 @@
 import { ExternalLink, FileArchive, FileText, Lock, Undo2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { isCaptureRecoveryOrigin } from "@dohc/workspace-contracts/engine";
 import type { EngineMomentDetailRecord, HistoryPolicyUnreadableResult } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { HistoryHiddenState, HistoryUntrackedState } from "./HistoryPolicyStates";
@@ -7,16 +8,16 @@ import { momentDiffSides } from "./momentDiffSides";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import {OwnerRestoreDialog} from "../OwnerRestoreDialog";
 import type { StopTarget } from "../StopAndRestoreDialog";
-import { SectionLabel } from "../ui/controls";
+import { CopyButton } from "../ui/CopyButton";
 import {
+  DiffCounts,
   UnifiedDiffLines,
   buildUnifiedDiffLines,
   computeTextDiff,
   type UnifiedDiffLine,
 } from "./unifiedDiff";
 import { EngineMomentSource, engineMomentSummary } from "./EngineHistory";
-import { parseMomentDiffTabPath } from "./workbenchState";
-import { hasBlockingModal } from "../modalFocus";
+import { parseTab } from "./workbenchState";
 import { SkeletonRows } from "../ui/SkeletonRows";
 
 function isEditableShortcutTarget(target: EventTarget | null) {
@@ -36,9 +37,27 @@ function isEditableShortcutTarget(target: EventTarget | null) {
   );
 }
 
+// The change's file, its folder quieter than its name.
+function MomentPath({ path }: { path: string }) {
+  const slash = path.lastIndexOf("/");
+  return (
+    <>
+      {slash >= 0 ? <span className="text-muted">{path.slice(0, slash + 1)}</span> : null}
+      <span className="font-semibold">{path.slice(slash + 1)}</span>
+    </>
+  );
+}
+
 export type ActiveUndoHandler = {
   run: () => Promise<void>;
   acceptsEvent: (event: KeyboardEvent) => boolean;
+};
+
+// Who a change credits. Account names can arrive after the change is read,
+// so the page refreshes these without building the change's diff again.
+type MomentCredit = {
+  namedAuthor: EngineMomentDetailRecord["namedAuthor"];
+  authorLabels: EngineMomentDetailRecord["authorLabels"];
 };
 
 // Engine history diff page: one MOMENT's
@@ -76,13 +95,13 @@ export function EngineMomentDiffPage({
   // hide the change.
   onPathResolved: (momentId: string, path: string | null) => void;
   registerActiveUndo: (handler: ActiveUndoHandler | null) => void;
-  onRestored: () => void;
+  onRestored: (momentId?: string) => void;
   // Opens the shell's Stop and restore for a person the owner shared with,
   // or for the Edit share link that wrote this change.
   onStopAndRestore: (target: StopTarget) => void;
   // A failed restore or undo goes to the shell's toast and Notices row. A
   // later success clears that row.
-  onError: (fallback: string, error: unknown, retry: () => void, identity: string) => void;
+  onError: (fallback: string, error: unknown, retry: () => void, identity: string, path: string) => void;
   onSettled: (identity: string) => void;
   // The shell's latest History answer. Each new one reads this change again,
   // because the rules that decide whether History shows it may have changed.
@@ -93,16 +112,22 @@ export function EngineMomentDiffPage({
   restoreRequested: boolean;
   onRestoreRequestTaken: () => void;
 }) {
-  const momentId = useMemo(() => parseMomentDiffTabPath(tabPath), [tabPath]);
+  const momentId = useMemo(() => {
+    const tab = parseTab(tabPath);
+    return tab.kind === "momentDiff" ? tab.momentId : null;
+  }, [tabPath]);
   const [state, setState] = useState<
     | { status: "loading" }
-    | { status: "ready"; moment: EngineMomentDetailRecord | null }
+    | { status: "ready"; moment: EngineMomentDetailRecord | null; credit: MomentCredit }
     | { status: "hidden"; result: HistoryPolicyUnreadableResult }
     | { status: "untracked" }
     | { status: "error" }
   >({ status: "loading" });
   // Bumped by Try again on a hidden or untracked page, to read the change again.
   const [readAttempt, setReadAttempt] = useState(0);
+  useEffect(() => bridge().onHistoryNamesChanged?.(event => {
+    if (event.workspaceId === workspaceId) setReadAttempt(attempt => attempt + 1);
+  }), [workspaceId]);
   const [restoreState, setRestoreState] = useState<
     | { status: "idle" }
     | { status: "restoring" }
@@ -159,11 +184,15 @@ export function EngineMomentDiffPage({
         if (result.moment) onPathResolved(momentId, result.moment.path);
         const next = result.moment;
         // A change never changes, so reading the same one again keeps the
-        // diff already built for it.
-        setState((current) =>
-          current.status === "ready" && next !== null && current.moment?.id === next.id
-            ? current
-            : { status: "ready", moment: next });
+        // diff already built for it. Only its authors' names can change.
+        const credit: MomentCredit = { namedAuthor: next?.namedAuthor, authorLabels: next?.authorLabels };
+        setState((current) => {
+          if (current.status === "ready" && next !== null && current.moment?.id === next.id) {
+            if (JSON.stringify(current.credit) === JSON.stringify(credit)) return current;
+            return { ...current, credit };
+          }
+          return { status: "ready", moment: next, credit };
+        });
       })
       .catch(() => {
         if (read !== readToken.current) return;
@@ -188,17 +217,20 @@ export function EngineMomentDiffPage({
     setUndoMomentId(null);
   }, [tabPath]);
 
-  const moment = state.status === "ready" ? state.moment : null;
+  const diffMoment = state.status === "ready" ? state.moment : null;
+  const moment = useMemo(() => state.status === "ready" && state.moment
+    ? { ...state.moment, ...state.credit }
+    : null, [state]);
   // The diff is the expensive part of this page, and a moment's bodies never
   // change while its tab is open. Build it once per moment: it used to run
   // twice per render — once for the counts, once for the lines — and a
   // hydrated 10 MiB body cost seconds each time.
   const prepared = useMemo(() => {
-    if (!moment) return null;
-    const sides = momentDiffSides(moment);
+    if (!diffMoment) return null;
+    const sides = momentDiffSides(diffMoment);
     const diff = computeTextDiff(sides.before, sides.after, 800);
     return { sides, diff, lines: buildUnifiedDiffLines(diff) };
-  }, [moment]);
+  }, [diffMoment]);
   const restoreBusy =
     restoreState.status === "restoring" || restoreState.status === "undoing";
   const canRestore = moment !== null && moment.operation !== "rename" && !undoMomentId;
@@ -226,7 +258,7 @@ export function EngineMomentDiffPage({
     try {
       releaseOperation = await onBeforeRestore();
       const result = await bridge().restoreEngineMomentFile({ workspaceId, momentId: target });
-      onRestored();
+      onRestored(target);
       onSettled(identity);
       if (!live()) return;
       setRestoreState({
@@ -250,6 +282,7 @@ export function EngineMomentDiffPage({
         // before the restore, so it runs again as it is.
         kind === "undo" ? () => void runRestore(kind, target, path, token) : () => onReopenRestore(target, path),
         identity,
+        path,
       );
       if (live()) setRestoreState({ status: "idle" });
     } finally {
@@ -308,7 +341,7 @@ export function EngineMomentDiffPage({
         ) {
           return false;
         }
-        return !hasBlockingModal();
+        return true;
       },
     });
     return () => registerActiveUndo(null);
@@ -360,10 +393,14 @@ export function EngineMomentDiffPage({
   // rides the encrypted path end to end).
   const isProtected = moment.protected === true;
   // Who wrote this change directly, when the owner can stop them and restore
-  // what they wrote: a person they shared with, or an Edit share link.
-  const stopTarget: StopTarget | null = moment.namedAuthor
+  // what they wrote: a person they shared with, or an Edit share link. Only
+  // the relay's direct-write lane carries such a change in, as "sync"; that
+  // lane's ledger is what Stop and restore reverts. A live document's change
+  // names its collaborator too, and restores through Restore shared file.
+  const directWrite = moment.origin === "sync";
+  const stopTarget: StopTarget | null = directWrite && moment.namedAuthor
     ? { target: { kind: "person", userId: moment.namedAuthor.userId }, label: moment.namedAuthor.label }
-    : moment.linkAuthor
+    : directWrite && moment.linkAuthor
       ? { target: { kind: "link", grantId: moment.linkAuthor.grantId }, label: "Edit link" }
       : null;
   // Each side presents by its own kind (see momentDiffSides).
@@ -392,6 +429,8 @@ export function EngineMomentDiffPage({
       : moment.operation !== "delete" ||
         (restoreState.status === "restored" && restoreState.restored === "text");
   const diffLines: UnifiedDiffLine[] = prepared.lines;
+  // A recovery change's before side is the typing capture kept.
+  const keptTyping = isCaptureRecoveryOrigin(moment.origin) ? prepared.sides.before : undefined;
 
   const restoreFile = async () => {
     if (!canRestore || restoreBusy) return;
@@ -402,12 +441,19 @@ export function EngineMomentDiffPage({
     <section
       ref={pageRef}
       data-testid="engine-moment-diff-page"
+      data-moment-id={moment.id}
       className="flex min-h-0 flex-1 flex-col overflow-hidden bg-bg"
     >
-      <header className="flex shrink-0 items-start gap-3 border-b border-line bg-panel px-4 py-3">
-        <div className="min-w-0 flex-1">
-          <SectionLabel>History diff</SectionLabel>
-          <h2 className="mb-0 mt-0.5 truncate text-[15px] font-semibold text-ink">
+      <header className="flex shrink-0 items-start gap-3 border-b border-line px-4 py-3">
+        {isProtected ? (
+          <Lock size={14} aria-hidden className="mt-[3px] shrink-0 text-subtle" />
+        ) : afterIsBinary ? (
+          <FileArchive size={14} aria-hidden className="mt-[3px] shrink-0 text-subtle" />
+        ) : (
+          <FileText size={14} aria-hidden className="mt-[3px] shrink-0 text-subtle" />
+        )}
+        <div className="-ml-1 min-w-0 flex-1">
+          <h2 className="m-0 truncate text-[14px] font-normal text-ink">
             {canOpenFile ? (
               <button
                 type="button"
@@ -416,10 +462,10 @@ export function EngineMomentDiffPage({
                 className="max-w-full cursor-pointer truncate rounded text-left hover:text-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
                 title={`Open ${moment.path}`}
               >
-                {moment.path}
+                <MomentPath path={moment.path} />
               </button>
             ) : (
-              moment.path
+              <MomentPath path={moment.path} />
             )}
           </h2>
           <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-muted">
@@ -431,11 +477,7 @@ export function EngineMomentDiffPage({
                   : "Changed"}
             </span>
             <EngineMomentSource moment={moment} testId="engine-diff-source" />
-            {counts ? (
-              <span className="font-mono" data-testid="engine-diff-counts">
-                +{counts.added} -{counts.removed}
-              </span>
-            ) : null}
+            {counts ? <DiffCounts counts={counts} testId="engine-diff-counts" /> : null}
           </div>
           <p
             data-testid="engine-diff-summary"
@@ -454,6 +496,12 @@ export function EngineMomentDiffPage({
             ) : null}
           </div>
         </div>
+        {/* Kept typing's way back into a file History Restore refuses:
+            the whole file as it was with the typing, to replace the
+            file's text with. */}
+        {keptTyping !== undefined ? (
+          <CopyButton size="header" label="Copy your version" testId="engine-diff-copy-typing" getText={() => keptTyping} />
+        ) : null}
         {readOnly ? null : <>
         <button
           type="button"
@@ -507,65 +555,46 @@ export function EngineMomentDiffPage({
           </button>
         ) : null}
       </header>
-      <div className="min-h-0 overflow-auto overflow-x-hidden p-4">
-        <section className="overflow-hidden rounded border border-line bg-bg shadow-sm">
-          <div className="flex min-h-9 items-center gap-2 border-b border-line bg-panel-2 px-3 py-2">
-            {isProtected ? (
-              <Lock size={13} aria-hidden className="shrink-0 text-subtle" />
-            ) : afterIsBinary ? (
-              <FileArchive size={13} aria-hidden className="shrink-0 text-subtle" />
-            ) : (
-              <FileText size={13} aria-hidden className="shrink-0 text-subtle" />
-            )}
-            <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-ink">
-              {moment.path}
+      <div className="min-h-0 overflow-auto overflow-x-hidden">
+        {isProtected ? (
+          <div
+            data-testid="engine-diff-protected"
+            className="flex flex-col items-center gap-1 px-4 py-10 text-center"
+          >
+            <Lock size={16} aria-hidden className="text-subtle" />
+            <span className="text-sm text-muted">Contents are protected</span>
+            <span className="text-xs text-subtle">
+              dohc versions this file encrypted and never shows its contents
+              in history, search, or comparisons.
             </span>
-            {counts ? (
-              <span className="shrink-0 font-mono text-[11px] text-subtle">
-                +{counts.added} -{counts.removed}
-              </span>
-            ) : null}
           </div>
-          {isProtected ? (
-            <div
-              data-testid="engine-diff-protected"
-              className="flex flex-col items-center gap-1 px-4 py-10 text-center"
-            >
-              <Lock size={16} aria-hidden className="text-subtle" />
-              <span className="text-sm text-muted">Contents are protected</span>
-              <span className="text-xs text-subtle">
-                dohc versions this file encrypted and never shows its contents
-                in history, search, or comparisons.
-              </span>
-            </div>
-          ) : bytesOnly ? (
-            <div
-              data-testid="engine-diff-binary"
-              className="flex flex-col items-center gap-1 px-4 py-10 text-center"
-            >
-              <FileArchive size={16} aria-hidden className="text-subtle" />
-              <span className="text-sm text-muted">Binary contents</span>
-              <span className="text-xs text-subtle">
-                {binaryByteLength} bytes are versioned byte-for-byte and are
-                not shown in text diffs.
-              </span>
-            </div>
-          ) : (
-            <>
-              {beforeIsBinary || afterIsBinary ? (
-                <p
-                  data-testid="engine-diff-binary-side"
-                  className="m-0 border-b border-line bg-panel-2 px-3 py-2 text-[11px] leading-4 text-subtle"
-                >
-                  {afterIsBinary
-                    ? `This file became a binary file. Its ${moment.afterBinary?.byteLength ?? 0} bytes are not shown in text diffs.`
-                    : `This file was a binary file before this change. Its ${moment.beforeBinary?.byteLength ?? 0} bytes are not shown in text diffs.`}
-                </p>
-              ) : null}
-              <UnifiedDiffLines lines={diffLines} testId="engine-diff-lines" />
-            </>
-          )}
-        </section>
+        ) : bytesOnly ? (
+          <div
+            data-testid="engine-diff-binary"
+            className="flex flex-col items-center gap-1 px-4 py-10 text-center"
+          >
+            <FileArchive size={16} aria-hidden className="text-subtle" />
+            <span className="text-sm text-muted">Binary contents</span>
+            <span className="text-xs text-subtle">
+              {binaryByteLength} bytes are versioned byte-for-byte and are
+              not shown in text diffs.
+            </span>
+          </div>
+        ) : (
+          <>
+            {beforeIsBinary || afterIsBinary ? (
+              <p
+                data-testid="engine-diff-binary-side"
+                className="m-0 border-b border-line bg-panel-2 px-4 py-2 text-[11px] leading-4 text-subtle"
+              >
+                {afterIsBinary
+                  ? `This file became a binary file. Its ${moment.afterBinary?.byteLength ?? 0} bytes are not shown in text diffs.`
+                  : `This file was a binary file before this change. Its ${moment.beforeBinary?.byteLength ?? 0} bytes are not shown in text diffs.`}
+              </p>
+            ) : null}
+            <UnifiedDiffLines lines={diffLines} testId="engine-diff-lines" />
+          </>
+        )}
       </div>
       {sharedRestoreOpen && <OwnerRestoreDialog key={`${workspaceId}:${moment.path}`} workspaceId={workspaceId} path={moment.path}
         onClose={() => setSharedRestoreOpen(false)} onBeforeRestore={onBeforeRestore} onRestored={onRestored} />}

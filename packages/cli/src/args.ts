@@ -1,10 +1,13 @@
+import { LinksInInput, LinksResolveInput, type LinksInInput as InInput, type LinksResolveInput as ResolveInput } from "@dohc/workspace-contracts/links";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import type { z } from "zod";
-import { DATASET_CAPABILITIES, APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, type CliActor } from "./protocol";
+import { APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, type CliActor } from "./protocol";
 import { DohcCliError } from "./errors";
 import { OwnerAppPublicationRequest } from "./appPublication";
 import { OwnerAppResponsesRequest } from "./appResponses";
-import { DatasetRequest, DatasetSchemaChange } from "./dataset";
+import { DATASET_CAPABILITIES, DatasetRequest, DatasetSchemaChange } from "./dataset";
+import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
+import { AccessObjectRef } from "@dohc/workspace-contracts/access";
 
 interface ParsedCliBase {
   actor: CliActor;
@@ -17,7 +20,15 @@ type ExportScope =
   | { kind: "thread"; thread: string };
 
 type CliCommandBody =
-  | { verb: "documentRead"; path: string }
+  | ({ verb: "linksIn" } & InInput)
+  | ({ verb: "linksResolve" } & ResolveInput)
+  | { verb: "stopSync"; agent?: string }
+  | { verb: "shareCopy"; shareId: string; grantId: string }
+  | { verb: "accountDeletePreview" }
+  | { verb: "accountDelete"; server: string; previewToken: string }
+  | { verb: "accessObject"; ref: AccessObjectRef; cursor?: string }
+  | { verb: "accessSharing"; lane: "granted" | "received"; cursor?: string }
+  | { verb: "documentRead" | "fileChats"; path: string }
   | { verb: "fileChatStart"; path: string; title: string; body: string; stdin: boolean; agent?: string; requestId?: string; runId?: string }
   | { verb: "documentEdit" | "documentCreate"; path: string; text: string; stdin: boolean; find?: string; agent?: string; requestId?: string }
   | { verb: "dataset"; request: DatasetRequest }
@@ -63,6 +74,8 @@ type CliCommandBody =
     }
   | { verb: "export"; scope: ExportScope; outDir: string }
   | { verb: "moments"; path?: string; limit: number }
+  | { verb: "historyOperation"; operationId: string; cursor?: string }
+  | { verb: "historyUndo"; operationId: string }
   | { verb: "moment"; id: string; side: "before" | "after" }
   | { verb: "automationRuns"; collectionPath: string; automation: string; page?: string }
   | { verb: "automationList"; collectionPath: string }
@@ -113,6 +126,8 @@ export interface CliVerbSpec {
   freeText?: boolean;
   /** Request fields copied from an earlier verb's result. */
   take?: readonly CliFieldSource[];
+  /** A stray argument can be a secret, so refusing one never repeats it. */
+  strayRefusal?: string;
   parse(input: VerbInput): CliCommandBody;
 }
 
@@ -180,7 +195,7 @@ function readVerbInput(name: string, verb: CliVerbSpec, tokens: readonly string[
     } else if (!optionsEnded && token === "--") {
       optionsEnded = true;
     } else if (!optionsEnded && token.startsWith("--")) {
-      fail(`unknown ${name} option '${token}'${verb.freeText ? `; put ${DASH_RULE}` : ""}`);
+      fail(verb.strayRefusal ?? `unknown ${name} option '${token}'${verb.freeText ? `; put ${DASH_RULE}` : ""}`);
     } else {
       operands.push(token);
     }
@@ -209,6 +224,13 @@ const documentTextFlags: readonly CliFlag[] = [
   { name: "--agent", value: "name", text: "Record this agent name with the change." },
 ];
 
+function parsePath({ operands }: VerbInput, name: string): string {
+  const [path, ...extra] = operands;
+  if (!path) fail(`${name} requires a path`);
+  noExtraArgs(extra, name);
+  return path;
+}
+
 function documentWrite(input: VerbInput, verb: "documentEdit" | "documentCreate"): CliCommandBody {
   const [path, body, ...extra] = input.operands;
   if (!path) fail("document requires a path");
@@ -233,12 +255,7 @@ const DOCUMENT_VERBS = {
     summary: "Read the current Markdown, including edits in an open editor.",
     operands: "<path>",
     notes: ["Read before editing. Without --json, prints the Markdown byte for byte."],
-    parse: ({ operands }) => {
-      const [path, ...extra] = operands;
-      if (!path) fail("document read requires a path");
-      noExtraArgs(extra, "document read");
-      return { verb: "documentRead", path };
-    },
+    parse: input => ({ verb: "documentRead", path: parsePath(input, "document read") }),
   },
   edit: {
     capabilityId: "document.edit",
@@ -261,6 +278,13 @@ const DOCUMENT_VERBS = {
     notes: [stdinNote, "Use --text instead to supply Markdown. With neither, create an empty document.",
       "The path must end in .md or .markdown. Frontmatter is refused."],
     parse: (input) => documentWrite(input, "documentCreate"),
+  },
+  chats: {
+    capabilityId: "file.chats.list",
+    summary: "List chats linked to a workspace file.",
+    operands: "<path>",
+    notes: ["Chats follow the file across renames.", "Use chat show --peek with a thread ID to read it without marking it read."],
+    parse: input => ({ verb: "fileChats", path: parsePath(input, "document chats") }),
   },
   comment: {
     capabilityId: "file.chat.start",
@@ -484,7 +508,26 @@ const CHAT_VERBS = {
   },
 } satisfies Record<string, CliVerbSpec>;
 
+const operationId = (value: string | undefined) => {
+  if (!HistoryOperationId.safeParse(value).success) fail("Use an operation id from history list: dohc-operation: followed by a UUID.");
+  return value!;
+};
 const HISTORY_VERBS = {
+  operation: {
+    capabilityId: "history.operation.read", summary: "List the paths changed by one operation.", operands: "<operation>",
+    flags: [{ name: "--cursor", value: "cursor", text: "Continue from the cursor on the previous operation page." }],
+    parse: input => {
+      const [id, ...extra] = input.operands; noExtraArgs(extra, "history operation");
+      return { verb: "historyOperation", operationId: operationId(id), cursor: lastValue(input, "--cursor") };
+    },
+  },
+  undo: {
+    capabilityId: "history.operation.undo", summary: "Undo a delete, move, or rename recorded in History.", operands: "<operation>",
+    parse: input => {
+      const [id, ...extra] = input.operands; noExtraArgs(extra, "history undo");
+      return { verb: "historyUndo", operationId: operationId(id) };
+    },
+  },
   list: {
     capabilityId: "history.list",
     summary: "List changes to files, newest first.",
@@ -645,6 +688,47 @@ const AUTOMATION_VERBS = {
         confirm: allValues(input, "--confirm"),
         ...(requestId ? { requestId } : {}),
       };
+    },
+  },
+} satisfies Record<string, CliVerbSpec>;
+
+const ACCOUNT_DELETE_STRAY =
+  "account delete takes only --server and --preview-token; dohc reads the password from stdin or asks for it";
+
+const ACCOUNT_VERBS = {
+  deletePreview: {
+    capabilityId: "account.delete.preview",
+    summary: "List what deleting the connected server account removes.",
+    operands: "",
+    notes: ["The result holds the server and previewToken that delete needs. The token expires after five minutes."],
+    parse: ({ operands }) => {
+      noExtraArgs(operands, "account deletePreview");
+      return { verb: "accountDeletePreview" };
+    },
+  },
+  delete: {
+    capabilityId: "account.delete",
+    summary: "Delete the connected server account and the workspaces it owns on the server.",
+    operands: "",
+    flags: [
+      { name: "--server", value: "address", text: "Use server from deletePreview. Required." },
+      { name: "--preview-token", value: "token", text: "Use previewToken from deletePreview. Required." },
+    ],
+    notes: [
+      "dohc reads the account password from stdin, or asks for it when stdin is a terminal. Never pass it as an argument.",
+      "This cannot be undone. Copies on this computer stay. People you shared with lose access and keep their copies.",
+      "If you create an account again later, the server will not accept your old copies of the deleted workspaces. Its backups keep the data until they expire.",
+      "When the server cannot finish at once, the account stays blocked and the server finishes later. Either way, the dohc app disconnects from the server. If it cannot, delete exits 1 and says how to finish.",
+      "If the preview expired or changed, run deletePreview again.",
+    ],
+    strayRefusal: ACCOUNT_DELETE_STRAY,
+    parse: (input) => {
+      if (input.operands.length > 0) fail(ACCOUNT_DELETE_STRAY);
+      const server = lastValue(input, "--server");
+      const previewToken = lastValue(input, "--preview-token");
+      if (!server) fail("account delete requires --server <address> from deletePreview");
+      if (!previewToken) fail("account delete requires --preview-token <token> from deletePreview");
+      return { verb: "accountDelete", server, previewToken };
     },
   },
 } satisfies Record<string, CliVerbSpec>;
@@ -845,7 +929,7 @@ const APP_HELP: Record<OwnerAppPublicationRequest["action"], JsonVerbHelp> = {
   listLocal: { summary: "List an app's publications on this computer." },
   prepareLocal: {
     summary: "Prepare an app to open on this computer.",
-    notes: ["Review the source and the dataset operations it asks for, then approve."],
+    notes: ["Review the source and the Collection access it asks for, then approve."],
   },
   launchLocal: {
     summary: "Get a local URL for an approved app.",
@@ -880,10 +964,15 @@ const APP_HELP: Record<OwnerAppPublicationRequest["action"], JsonVerbHelp> = {
   withdraw: {
     summary: "Stop a shared publication.",
     take: publicationFromList,
+    notes: [
+      "For an app approved on this computer, take publicationId and authorityRevision from listLocal.",
+      "withdrawalUnconfirmed means access ended, but responses the app sent earlier are not yet confirmed saved or refused. Withdraw again with the returned authorityRevision to confirm.",
+    ],
   },
   revokeCollection: {
     summary: "Remove a shared publication's Collection access.",
     take: publicationFromList,
+    notes: ["For an app approved on this computer, this ends its approval, as withdraw does."],
   },
   reviewReactivation: {
     summary: "Prepare a stopped publication to publish again.",
@@ -942,8 +1031,78 @@ const APP_VERBS: Record<string, CliVerbSpec> = Object.fromEntries([
 
 /** Every command and verb the CLI dispatches. Help reads this table too. */
 export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
+  links: { summary: "Read and resolve document links.", notes: [], verbs: {
+    in: { capabilityId: "links.in", summary: "Read documents that link to a file.", operands: "<subject-json>", flags: [{ name: "--cursor", value: "cursor", text: "Continue the previous page." }], parse: input => {
+      const [subject, ...extra] = input.operands; noExtraArgs(extra, "links in");
+      try { return { verb: "linksIn", ...LinksInInput.parse({ subject: JSON.parse(subject ?? "null"), cursor: lastValue(input, "--cursor") }) }; } catch { return fail('Use a subject JSON object with path or objectId.'); }
+    } },
+    resolve: { capabilityId: "links.resolve", summary: "Resolve links from one document.", operands: "<source> <literals-json>", parse: input => {
+      const [source, literals, ...extra] = input.operands; noExtraArgs(extra, "links resolve");
+      try { return { verb: "linksResolve", ...LinksResolveInput.parse({ source, literals: JSON.parse(literals ?? "null") }) }; } catch { return fail('Use a source path and a JSON array of kind and literal objects.'); }
+    } },
+  } },
+  sync: {
+    summary: "Stop syncing this workspace on this computer.",
+    notes: ["Local files, documents, records, and history stay here. Shares and protected-file keys are retained.",
+      "Groups you joined and received-share mounts keep syncing.",
+      "Turn sync on in Settings to resume the same workspace."],
+    verbs: {
+      stop: {
+        capabilityId: "workspace.sync.stop", summary: "Stop this computer's sync after saving live document edits.", operands: "",
+        flags: [{ name: "--agent", value: "name", text: "Record this agent name when --as-agent is set." }],
+        parse: (input) => {
+          noExtraArgs(input.operands, "sync stop");
+          const agent = lastValue(input, "--agent");
+          if (agent !== undefined && !documentAgentNameSchema.safeParse(agent).success) fail("invalid --agent name");
+          return { verb: "stopSync", ...(agent === undefined ? {} : { agent }) };
+        },
+      },
+    },
+  },
+  access: {
+    summary: "Read observed object grants and Sharing inventories.",
+    notes: ["Answers describe observed grants, not authorization. An empty page means no matching grants within its coverage.",
+      "Paths resolve from your current folder. Received selectors use their source workspace's coordinates."],
+    verbs: {
+      object: {
+        capabilityId: "access.object.read", summary: "Read the grants covering an object.", operands: "<reference-json>",
+        flags: [{ name: "--cursor", value: "cursor", text: "Continue the previous answer." }],
+        parse: input => {
+          const [value, ...extra] = input.operands; noExtraArgs(extra, "access object");
+          let ref: AccessObjectRef;
+          try { ref = AccessObjectRef.parse(JSON.parse(value ?? "")); } catch { return fail("Use a path, file, chat, or Collection reference as JSON."); }
+          const cursor = lastValue(input, "--cursor");
+          return { verb: "accessObject", ref, ...(cursor ? { cursor } : {}) };
+        },
+      },
+      sharing: {
+        capabilityId: "access.sharing.read", summary: "Page this workspace's granted shares or this account's received shares.", operands: "<granted|received>",
+        flags: [{ name: "--cursor", value: "cursor", text: "Continue the previous answer." }],
+        parse: input => {
+          const [lane, ...extra] = input.operands; noExtraArgs(extra, "access sharing");
+          if (lane !== "granted" && lane !== "received") return fail("Choose granted or received.");
+          const cursor = lastValue(input, "--cursor");
+          return { verb: "accessSharing", lane, ...(cursor ? { cursor } : {}) };
+        },
+      },
+    },
+  },
+  share: {
+    summary: "Read copy details for an owned share grant.",
+    notes: ["Requires the original workspace and its signed-in owner account."],
+    verbs: {
+      copy: {
+        capabilityId: "share.copy.read", summary: "Read a grant's share code and named-account invite link.", operands: "<shareId> <grantId>",
+        parse: input => {
+          const [shareId, grantId, ...extra] = input.operands; noExtraArgs(extra, "share copy");
+          if (!shareId || !grantId) return fail("Provide a share id and grant id.");
+          return { verb: "shareCopy", shareId, grantId };
+        },
+      },
+    },
+  },
   document: {
-    summary: "Read, edit, and create live Markdown documents, and comment on tracked text files.",
+    summary: "Read, edit, and create live Markdown documents. List and start chats on tracked files.",
     notes: ["Paths resolve from your current folder. Changes are recorded as an agent's, as with MCP.",
       "A refusal exits with status 1 and prints its reason to stderr, including with --json."],
     verbs: DOCUMENT_VERBS,
@@ -967,7 +1126,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
     verbs: APP_VERBS,
   },
   history: {
-    summary: "Read the changes History records for files.",
+    summary: "Read History changes and undo deletes, moves, and renames.",
     notes: ["Changes come from the active version of the workspace."],
     verbs: HISTORY_VERBS,
   },
@@ -978,6 +1137,11 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
       "Each computer keeps the runs of the automations it ran. Try again follows the same rules as in dohc.",
     ],
     verbs: AUTOMATION_VERBS,
+  },
+  account: {
+    summary: "Review and delete the server account the dohc app is connected to.",
+    notes: ["Unlike other commands, account verbs also work outside a workspace folder."],
+    verbs: ACCOUNT_VERBS,
   },
 };
 
@@ -1046,7 +1210,7 @@ export function parseCliArguments(
   const verb = lookup(command.verbs, verbName);
   if (!verb) fail(`unknown ${commandName} verb '${verbName}'; run dohc ${commandName} --help`);
   if (help) return { help: [commandName, verbName] };
-  const agent = commandName === "document" || global.actorFlag || (commandName === "chat" && env.DOHC_CHAT_ACTOR === "agent");
+  const agent = (commandName === "history" && verbName === "undo") || commandName === "document" || global.actorFlag || (commandName === "chat" && env.DOHC_CHAT_ACTOR === "agent");
   const body = verb.parse(readVerbInput(`${commandName} ${verbName}`, verb, tokens));
   return { actor: agent ? "agent" : "human", json: global.json, ...body };
 }

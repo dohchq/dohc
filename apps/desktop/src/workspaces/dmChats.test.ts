@@ -92,6 +92,22 @@ function joined(overrides: Partial<JoinedSharedChannel> & { channelWireId: strin
   };
 }
 
+type ChannelsUpdate = (channels: readonly JoinedSharedChannel[]) => readonly JoinedSharedChannel[];
+
+// Applies each reservation to the channels as they stand, as the registry does.
+function registryUpdater(registry: Map<string, JoinedSharedChannel[]>) {
+  return vi.fn(async (workspaceId: string, update: ChannelsUpdate) => {
+    registry.set(workspaceId, [...update(registry.get(workspaceId) ?? [])]);
+  });
+}
+
+function workspacesUpdater(workspaces: Array<{ workspaceId: string; sharedChannels: JoinedSharedChannel[] }>) {
+  return vi.fn(async (workspaceId: string, update: ChannelsUpdate) => {
+    const workspace = workspaces.find((candidate) => candidate.workspaceId === workspaceId);
+    if (workspace) workspace.sharedChannels = [...update(workspace.sharedChannels)];
+  });
+}
+
 describe("parseDmRecipients / dmChannelNameFor", () => {
   it("normalizes, dedupes, sorts, and validates recipient emails", () => {
     expect(parseDmRecipients(" Bob@X.com, alice@y.com  bob@x.com ")).toEqual([
@@ -659,22 +675,18 @@ describe("DM request decisions", () => {
       ["workspace-b", []],
       ["workspace-c", []],
     ]);
-    const writeSharedChannels = vi.fn(
-      (workspaceId: string, channels: JoinedSharedChannel[]) => {
-        registry.set(workspaceId, channels);
-      },
-    );
+    const updateSharedChannels = registryUpdater(registry);
     const pull = vi.fn(async () => ({ applied: 1 }));
 
     await reserveAndPullSharedChannel({
+      serverUrl: "HTTPS://ACCOUNTS.TEST:443/",
       relay: { baseUrl: "http://relay.test", token: "token" },
       shareId: "share-c",
       workspaceId: "workspace-c",
       rootPath: "/workspaces/c",
       recipientUserId: "user-c",
       relayUrl: "http://relay.test",
-      readSharedChannels: (workspaceId) => registry.get(workspaceId) ?? [],
-      writeSharedChannels,
+      updateSharedChannels,
       fetchInfo: async () => ({
         shareId: "share-c",
         granterUserId: "granter",
@@ -688,11 +700,12 @@ describe("DM request decisions", () => {
       serialize: async (_workspaceId, run) => await run(),
     });
 
-    expect(writeSharedChannels).toHaveBeenCalledTimes(1);
-    expect(writeSharedChannels.mock.calls[0]?.[0]).toBe("workspace-c");
+    expect(updateSharedChannels).toHaveBeenCalledTimes(1);
+    expect(updateSharedChannels.mock.calls[0]?.[0]).toBe("workspace-c");
     expect(registry.get("workspace-a")).toEqual([]);
     expect(registry.get("workspace-b")).toEqual([]);
     expect(registry.get("workspace-c")?.[0]?.shareId).toBe("share-c");
+    expect(registry.get("workspace-c")?.[0]?.serverUrl).toBe("https://accounts.test");
   });
 
   it("lets only one concurrent workspace reserve the same DM share", async () => {
@@ -716,22 +729,17 @@ describe("DM request decisions", () => {
           fetchResolvers.push(resolve);
         }),
     );
-    const writeSharedChannels = (
-      workspaceId: string,
-      channels: JoinedSharedChannel[],
-    ) => {
-      registry.set(workspaceId, channels);
-    };
+    const updateSharedChannels = registryUpdater(registry);
     const reserve = (workspaceId: string) =>
       reserveAndPullSharedChannel({
+        serverUrl: "HTTPS://ACCOUNTS.TEST:443/",
         relay: { baseUrl: "http://relay.test", token: "token" },
         shareId: info.shareId,
         workspaceId,
         rootPath: `/workspaces/${workspaceId}`,
         recipientUserId: "user-1",
         relayUrl: "http://relay.test",
-        readSharedChannels: (candidateId) => registry.get(candidateId) ?? [],
-        writeSharedChannels,
+        updateSharedChannels,
         fetchInfo,
         pull: async () => ({ applied: 0 }),
         serialize: async (_candidateId, run) => await run(),
@@ -764,6 +772,74 @@ describe("DM request decisions", () => {
     expect(holders).toHaveLength(1);
   });
 
+  it("checks other workspaces where a delayed reservation lands, so one wire id gets one live holder", async () => {
+    const registry = new Map<string, JoinedSharedChannel[]>([
+      ["workspace-a", []],
+      ["workspace-b", []],
+    ]);
+    // Like the registry: the update runs once before the folder's history
+    // wait and again, on the channels as they stand, when the row lands.
+    const landings: Array<() => void> = [];
+    const bothWaiting = Promise.withResolvers<void>();
+    const updateSharedChannels = async (workspaceId: string, update: ChannelsUpdate) => {
+      update(registry.get(workspaceId) ?? []);
+      await new Promise<void>((resolve) => {
+        landings.push(resolve);
+        if (landings.length === 2) bothWaiting.resolve();
+      });
+      registry.set(workspaceId, [...update(registry.get(workspaceId) ?? [])]);
+    };
+    const pulled: string[] = [];
+    const reserve = (workspaceId: string, shareId: string) =>
+      reserveAndPullSharedChannel({
+        serverUrl: "https://accounts.test",
+        relay: { baseUrl: "http://relay.test", token: "token" },
+        shareId,
+        workspaceId,
+        rootPath: `/workspaces/${workspaceId}`,
+        recipientUserId: "user-1",
+        relayUrl: "http://relay.test",
+        updateSharedChannels,
+        fetchInfo: async () => ({
+          shareId,
+          granterUserId: "granter",
+          granterEmail: "granter@example.com",
+          channelWireId: "wire-race",
+          access: "read-write",
+          kind: "chat" as const,
+          createdAtMs: 1,
+        }),
+        pull: async () => {
+          pulled.push(workspaceId);
+          return { applied: 0 };
+        },
+        serialize: async (_workspaceId, run) => await run(),
+        preWrite: (info) => {
+          const holder = otherLiveSharedChannelHolderByWireId({
+            workspaces: [...registry].map(([candidateId, sharedChannels]) => ({
+              workspaceId: candidateId,
+              rootPath: `/workspaces/${candidateId}`,
+              sharedChannels,
+            })),
+            workspaceId,
+            channelWireId: info.channelWireId,
+          });
+          if (holder) throw new Error("wire held elsewhere");
+        },
+      });
+
+    const first = reserve("workspace-a", "share-old");
+    const second = reserve("workspace-b", "share-new");
+    await bothWaiting.promise;
+    landings[0]!();
+    await expect(first).resolves.toMatchObject({ shareId: "share-old" });
+    landings[1]!();
+    await expect(second).rejects.toThrow("wire held elsewhere");
+
+    expect(registry.get("workspace-b")).toEqual([]);
+    expect(pulled).toEqual(["workspace-a"]);
+  });
+
   it("refuses a direct re-grant reservation when its resolved wire id is held elsewhere", async () => {
     const registry = new Map<string, JoinedSharedChannel[]>([
       [
@@ -772,12 +848,8 @@ describe("DM request decisions", () => {
       ],
       ["workspace-b", []],
     ]);
-    const writeSharedChannels = vi.fn(
-      (workspaceId: string, channels: JoinedSharedChannel[]) => {
-        registry.set(workspaceId, channels);
-      },
-    );
-    const preWrite = (info: { channelWireId: string }) => {
+    const updateSharedChannels = registryUpdater(registry);
+    const preWrite =(info: { channelWireId: string }) => {
       const holder = otherLiveSharedChannelHolderByWireId({
         workspaces: [...registry].map(([workspaceId, sharedChannels]) => ({
           workspaceId,
@@ -797,14 +869,14 @@ describe("DM request decisions", () => {
 
     await expect(
       reserveAndPullSharedChannel({
+        serverUrl: "HTTPS://ACCOUNTS.TEST:443/",
         relay: { baseUrl: "http://relay.test", token: "token" },
         shareId: "share-new",
         workspaceId: "workspace-b",
         rootPath: "/workspaces/workspace-b",
         recipientUserId: "user-b",
         relayUrl: "http://relay.test",
-        readSharedChannels: (workspaceId) => registry.get(workspaceId) ?? [],
-        writeSharedChannels,
+        updateSharedChannels,
         fetchInfo: async () => ({
           shareId: "share-new",
           granterUserId: "granter",
@@ -821,7 +893,7 @@ describe("DM request decisions", () => {
     ).rejects.toThrow(
       "This conversation already lives in workspace-a. Open that workspace to continue.",
     );
-    expect(writeSharedChannels).not.toHaveBeenCalled();
+    expect(registry.get("workspace-b")).toEqual([]);
   });
 
   it("releases a wire id after its old workspace row ends", async () => {
@@ -860,26 +932,17 @@ describe("DM request decisions", () => {
       { shareId: "share-new", granterEmail: "owner@example.com" },
     ]);
 
-    const writeSharedChannels = vi.fn(
-      (workspaceId: string, channels: JoinedSharedChannel[]) => {
-        const workspace = workspaces.find(
-          (candidate) => candidate.workspaceId === workspaceId,
-        );
-        if (workspace) workspace.sharedChannels = channels;
-      },
-    );
+    const updateSharedChannels = workspacesUpdater(workspaces);
     await expect(
       reserveAndPullSharedChannel({
+        serverUrl: "HTTPS://ACCOUNTS.TEST:443/",
         relay: { baseUrl: "http://relay.test", token: "token" },
         shareId: "share-new",
         workspaceId: "workspace-b",
         rootPath: "/workspaces/workspace-b",
         recipientUserId: "user-b",
         relayUrl: "http://relay.test",
-        readSharedChannels: (workspaceId) =>
-          workspaces.find((workspace) => workspace.workspaceId === workspaceId)
-            ?.sharedChannels ?? [],
-        writeSharedChannels,
+        updateSharedChannels,
         fetchInfo: async () => ({
           shareId: "share-new",
           granterUserId: "granter",
@@ -904,7 +967,7 @@ describe("DM request decisions", () => {
       shareId: "share-new",
       channelWireId: "wire-x",
     });
-    expect(writeSharedChannels).toHaveBeenCalledOnce();
+    expect(updateSharedChannels).toHaveBeenCalledOnce();
   });
 
   it("treats an ended row as re-requestable and re-accepts it", async () => {
@@ -931,16 +994,16 @@ describe("DM request decisions", () => {
     expect(isShareAcceptedInWorkspace([ended], "share-x")).toBe(false);
 
     const pull = vi.fn(async () => ({ applied: 0 }));
-    const writeSharedChannels = vi.fn();
+    const registry = new Map([["workspace-a", [ended]]]);
     await reserveAndPullSharedChannel({
+      serverUrl: "HTTPS://ACCOUNTS.TEST:443/",
       relay: { baseUrl: "http://relay.test", token: "token" },
       shareId: "share-x",
       workspaceId: "workspace-a",
       rootPath: "/a",
       recipientUserId: "user-a",
       relayUrl: "http://relay.test",
-      readSharedChannels: () => [ended],
-      writeSharedChannels,
+      updateSharedChannels: registryUpdater(registry),
       fetchInfo: async () => ({
         shareId: "share-x",
         granterUserId: "granter",
@@ -953,7 +1016,7 @@ describe("DM request decisions", () => {
       pull,
       serialize: async (_workspaceId, run) => await run(),
     });
-    expect(writeSharedChannels.mock.calls[0]?.[1]?.[0]?.ended).toBeUndefined();
+    expect(registry.get("workspace-a")?.[0]?.ended).toBeUndefined();
     expect(pull).toHaveBeenCalledOnce();
   });
 
@@ -1006,25 +1069,15 @@ describe("DM request decisions", () => {
     expect(afterLeave.pending.map((row) => row.shareId)).toEqual(["share-live"]);
 
     // Accepting elsewhere (workspace-b) succeeds.
-    const writeSharedChannels = vi.fn(
-      (workspaceId: string, channels: JoinedSharedChannel[]) => {
-        const workspace = workspaces.find(
-          (candidate) => candidate.workspaceId === workspaceId,
-        );
-        if (workspace) workspace.sharedChannels = channels;
-      },
-    );
     const revived = await reserveAndPullSharedChannel({
+      serverUrl: "HTTPS://ACCOUNTS.TEST:443/",
       relay: { baseUrl: "http://relay.test", token: "token" },
       shareId: "share-live",
       workspaceId: "workspace-b",
       rootPath: "/b",
       recipientUserId: "user-b",
       relayUrl: "http://relay.test",
-      readSharedChannels: (workspaceId) =>
-        workspaces.find((workspace) => workspace.workspaceId === workspaceId)
-          ?.sharedChannels ?? [],
-      writeSharedChannels,
+      updateSharedChannels: workspacesUpdater(workspaces),
       fetchInfo: async () => ({
         shareId: "share-live",
         granterUserId: "granter",

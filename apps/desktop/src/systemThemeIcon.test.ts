@@ -31,37 +31,31 @@ describe("system theme app icon", () => {
   });
 
   it.each(["win32", "linux"] as const)(
-    "updates every %s window icon without touching the macOS Dock",
+    "updates every %s window icon",
     (platform) => {
       const firstWindow = { setIcon: vi.fn() };
       const secondWindow = { setIcon: vi.fn() };
-      const setDockIcon = vi.fn();
 
       applyDesktopIconToPlatform({
         platform,
         iconPath: "icon-dark.png",
         windows: [firstWindow, secondWindow],
-        setDockIcon,
       });
 
       expect(firstWindow.setIcon).toHaveBeenCalledWith("icon-dark.png");
       expect(secondWindow.setIcon).toHaveBeenCalledWith("icon-dark.png");
-      expect(setDockIcon).not.toHaveBeenCalled();
     },
   );
 
-  it("updates the macOS Dock without calling the unsupported window API", () => {
+  it("leaves macOS to the package icon and never calls the unsupported window API", () => {
     const window = { setIcon: vi.fn() };
-    const setDockIcon = vi.fn();
 
     applyDesktopIconToPlatform({
       platform: "darwin",
       iconPath: "icon-dark.png",
       windows: [window],
-      setDockIcon,
     });
 
-    expect(setDockIcon).toHaveBeenCalledWith("icon-dark.png");
     expect(window.setIcon).not.toHaveBeenCalled();
   });
 

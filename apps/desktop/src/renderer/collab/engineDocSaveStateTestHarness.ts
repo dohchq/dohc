@@ -267,10 +267,24 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
     }
   }
 
+  // Main refused an edit and is about to restore the admitted document.
+  function emitEditRefusal(message: string, seq: number): void {
+    if (openedSessionId === null) throw new Error("session not open yet");
+    const editRefusal = { workspaceId: "ws-1", path: "notes/a.md", requestId: "refused", message };
+    const event = {
+      sessionId: openedSessionId, workspaceId: "ws-1", path: "notes/a.md",
+      ...engineSaveState("error", editRefusal), editRefusal, seq,
+    };
+    act(() => {
+      for (const listener of [...saveStateListeners]) listener(event);
+    });
+  }
+
   return {
     api,
     emit,
     emitNow,
+    emitEditRefusal,
     emitRemoteEdit,
     emitLineageReplacement,
     applied,

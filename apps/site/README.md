@@ -22,6 +22,7 @@ Build with `pnpm --filter @dohc/site build`, then point any static host
 ## Design
 
 Brand tokens mirror `packages/brand/src/tokens.css` (warm paper +
-graphite, almost monochrome). Fonts: brand serif/sans stacks are system
-fonts; `IBM Plex Mono` and the handwriting face `Homemade Apple` load
-from Google Fonts.
+graphite, almost monochrome). Fonts are bundled from Fontsource packages,
+with no external font requests. `styles.css` embeds `Inter`,
+`Source Serif 4`, and the handwriting face `Homemade Apple`. The demo
+loads `Inter` and `IBM Plex Mono` in `src/main.tsx` when it mounts.

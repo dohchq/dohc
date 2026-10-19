@@ -1,18 +1,25 @@
+import { LinksInInput, LinksResolveInput, LinksInResult, LinksResolveResult } from "@dohc/workspace-contracts/links";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import {
   COLLECTION_SCHEMA_REASON_CODES,
   FIELD_VALUE_REASON_CODES,
 } from "@dohc/workspace-contracts/collection";
 import { z } from "zod";
+import { ShareCopyInput, ShareCopyResult } from "@dohc/workspace-contracts/share-copy";
+import { AccessAnswer, ObjectAccessInput, SharingAccessInput } from "@dohc/workspace-contracts/access";
 import { WORKSPACE_POLICY_PATHS } from "@dohc/security-contract/effective-policy";
 import type { AutomationDefinitionList, AutomationSwitchResult } from "@dohc/workspace-contracts/automation-controls";
 import { CreationPartial } from "./creation";
-import { DatasetRequest, DatasetResult } from "./dataset";
+import { DATASET_CAPABILITIES, DatasetRequest, DatasetResult } from "./dataset";
 import { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "./appPublication";
 import {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "./appResponses";
+import { ServerAccountDeletionPreview, ServerAccountDeleteRequest, ServerAccountDeleteResult } from "./account";
 
-export const CLI_PROTOCOL_VERSION = 4;
-export const CLI_JSON_SCHEMA_VERSION = 2;
+import { OperationRecovery, HistoryOperationId, HistoryOperationReadResult, HistoryOperationUndoResult } from "@dohc/workspace-contracts/history-operation";
+import { WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
+
+export const CLI_PROTOCOL_VERSION = 5;
+export const CLI_JSON_SCHEMA_VERSION = 3;
 
 // Who runs a CLI command. The CLI never writes as an automation.
 const cliActorSchema = z.enum(["human", "agent"]);
@@ -31,6 +38,9 @@ const argsBase = {
   cwd: z.string().min(1),
   actor: cliActorSchema,
 };
+
+const historyOperationArgsSchema = z.object({ ...argsBase, operationId: HistoryOperationId, cursor: z.string().optional() }).strict();
+const historyUndoArgsSchema = z.object({ ...argsBase, operationId: HistoryOperationId, agent: z.string().min(1).max(200).optional() }).strict();
 
 const groupsArgsSchema = z.object(argsBase).strict();
 const threadsArgsSchema = z
@@ -379,7 +389,20 @@ const automationPressArgsSchema = z
   })
   .strict();
 
+// The account verbs act on the server account the app is connected to, from
+// any folder. The password travels only in this request, never in argv.
+const accountDeletePreviewArgsSchema = z.object(argsBase).strict();
+const accountDeleteArgsSchema = ServerAccountDeleteRequest.extend(argsBase).strict();
+
 export const cliRequestSchema = z.discriminatedUnion("verb", [
+  z.object({ ...requestBase, verb: z.literal("linksIn"), args: LinksInInput.extend(argsBase).strict() }).strict(),
+  z.object({ ...requestBase, verb: z.literal("linksResolve"), args: LinksResolveInput.extend(argsBase).strict() }).strict(),
+  z.object({ ...requestBase, verb: z.literal("stopSync"), args: z.object({ ...argsBase, agent: documentAgentNameSchema.optional() }).strict() }).strict(),
+  z.object({ ...requestBase, verb: z.literal("shareCopy"), args: ShareCopyInput.extend(argsBase).strict() }).strict(),
+  z.object({ ...requestBase, verb: z.literal("accountDeletePreview"), args: accountDeletePreviewArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("accountDelete"), args: accountDeleteArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("accessObject"), args: ObjectAccessInput.extend(argsBase).strict() }).strict(),
+  z.object({ ...requestBase, verb: z.literal("accessSharing"), args: SharingAccessInput.extend(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("automationButtons"), args: z.object({ ...argsBase, collectionPath: collectionPathArg, table: z.string().min(1).max(256).optional() }).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("dataset"), args: z.object({ ...argsBase, request: DatasetRequest }).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("appPublication"), args: z.object({ ...argsBase, request: OwnerAppPublicationRequest }).strict() }).strict(),
@@ -423,6 +446,8 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
     args: collectionCreateRecordArgsSchema,
   }).strict(),
   z.object({ ...requestBase, verb: z.literal("fileWrite"), args: fileWriteArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("historyOperation"), args: historyOperationArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("historyUndo"), args: historyUndoArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("fileMove"), args: fileMoveArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("fileDelete"), args: fileDeleteArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentRead"), args: documentReadArgsSchema }).strict(),
@@ -441,44 +466,6 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
 
 export type CliRequest = z.infer<typeof cliRequestSchema>;
 export type CliVerb = CliRequest["verb"];
-
-// Local metadata only. These ids never enter a request or its authorship.
-export const DATASET_CAPABILITIES = {
-  list: "dataset.list",
-  describe: "dataset.describe",
-  history: "dataset.history.list",
-  historyRevision: "dataset.history.revision",
-  prepareHistoryRestore: "dataset.history.restore.prepare",
-  lifecycle: "dataset.lifecycle.read",
-  deletePreview: "dataset.delete.preview",
-  delete: "dataset.delete",
-  archive: "dataset.archive",
-  restore: "dataset.restore",
-  pendingAttempts: "dataset.attempts.list",
-  reconcileAttempt: "dataset.attempt.reconcile",
-  cancelAttempt: "dataset.attempt.cancel",
-  permissions: "dataset.permissions.read",
-  setGrant: "dataset.grant.set",
-  removeGrant: "dataset.grant.remove",
-  export: "dataset.export",
-  prepareRecovery: "dataset.recovery.prepare",
-  claimRecovery: "dataset.recovery.claim",
-  discardRecovery: "dataset.recovery.discard",
-  upload: "dataset.file.upload",
-  file: "dataset.file.read",
-  createForm: "dataset.form.create",
-  prepareRelationChoices: "dataset.relation.choices.prepare",
-  create: "dataset.create",
-  prepare: "dataset.prepare",
-  approve: "dataset.approve",
-  discard: "dataset.discard",
-  prepareMigration: "dataset.migration.prepare",
-  migrationPreviewPage: "dataset.migration.preview",
-  prepareSchemaChange: "dataset.schema.change.prepare",
-  approveMigration: "dataset.migration.approve",
-  discardMigration: "dataset.migration.discard",
-  invoke: "dataset.operation.invoke",
-} as const satisfies Record<DatasetRequest["action"], CapabilityId>;
 
 export const APP_PUBLICATION_CAPABILITIES = {
   createLink: "app.link.create",
@@ -500,6 +487,14 @@ export const APP_RESPONSE_CAPABILITIES = {
 } as const satisfies Record<OwnerAppResponsesRequest["action"], CapabilityId>;
 
 export const CLI_CAPABILITIES = {
+  stopSync: ["workspace.sync.stop"],
+  linksIn: ["links.in"],
+  linksResolve: ["links.resolve"],
+  shareCopy: ["share.copy.read"],
+  accountDeletePreview: ["account.delete.preview"],
+  accountDelete: ["account.delete"],
+  accessObject: ["access.object.read"],
+  accessSharing: ["access.sharing.read"],
   groups: ["group.list"],
   threads: ["chat.threads.list"],
   inbox: ["chat.inbox.read"],
@@ -510,6 +505,8 @@ export const CLI_CAPABILITIES = {
   grep: ["chat.search"],
   export: ["chat.export"],
   moments: ["history.list"],
+  historyOperation: ["history.operation.read"],
+  historyUndo: ["history.operation.undo"],
   moment: ["history.read"],
   fileChats: ["file.chats.list"],
   chat: ["chat.read"],
@@ -722,11 +719,12 @@ const exportResultSchema = z
   })
   .strict();
 
-const rawMomentAuthorSchema = z.discriminatedUnion("kind", [
+const rawMomentAuthorSchema = z.union([
   z.object({ kind: z.literal("unattributed") }).strict(),
   z.object({
     kind: z.literal("agent"),
     agentId: z.string().min(1),
+    agentName: z.string().min(1).optional(),
     onBehalfOf: z.string().min(1).optional(),
     agentRunId: z.string().min(1).optional(),
     // Named only past 0, by a run an automation started.
@@ -735,7 +733,20 @@ const rawMomentAuthorSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("human"),
     humanId: z.string().min(1),
+    humanName: z.string().min(1).max(500).optional(),
+    relayConfirmed: z.literal(true).optional(),
     onBehalfOf: z.string().min(1).optional(),
+  }).strict(),
+  // A live author snapshot's account holder or link holder, as the relay admitted them.
+  z.object({
+    kind: z.literal("human"),
+    humanId: z.string().min(1),
+    humanName: z.string().min(1),
+  }).strict(),
+  z.object({
+    kind: z.literal("link"),
+    publicPrincipalId: z.string().min(1),
+    label: z.string().min(1),
   }).strict(),
   z.object({
     kind: z.literal("public"),
@@ -770,6 +781,7 @@ const rawMomentFileSchema = z
   .strict();
 const rawMomentSummarySchema = z
   .object({
+    operationId: HistoryOperationId.optional(),
     id: z.string().min(1),
     recordedAtMs: z.number(),
     source: z.literal("workspace-engine"),
@@ -1011,6 +1023,12 @@ const collectionRecordResultSchema = z.discriminatedUnion("ok", [
             onBehalfOf: z.string().min(1).nullable(),
             depth: z.number().int().nonnegative().nullable(),
             recordedAtMs: z.number().int().nonnegative(),
+            linkAuthor: z.object({
+              kind: z.literal("link"),
+              grantId: z.string().min(1),
+              grantGeneration: z.number().int().positive(),
+              publicPrincipalId: z.string().min(1),
+            }).strict().nullable(),
             // The automation run that made the change: its claim, and the automation's name when it ran.
             automationRun: z
               .object({ claimId: z.string().min(1), automationName: z.string().min(1) })
@@ -1270,7 +1288,7 @@ const replacedPathSchema = z.object({
 
 const fileMoveResultSchema = z.discriminatedUnion("ok", [
   z.object({
-    ok: z.literal(true), fromPath: z.string(), toPath: z.string(), withoutHistory: z.array(z.string()).optional(),
+    ok: z.literal(true), ...OperationRecovery.shape, fromPath: z.string(), toPath: z.string(), withoutHistory: z.array(z.string()).optional(),
     replaced: replacedPathSchema.optional(),
   }).strict(),
   z.object({
@@ -1286,7 +1304,7 @@ const fileMoveResultSchema = z.discriminatedUnion("ok", [
 // deleted.
 const fileDeleteResultSchema = z.discriminatedUnion("ok", [
   z.object({
-    ok: z.literal(true), path: z.string(), trashed: z.boolean(), trashPath: z.string().optional(),
+    ok: z.literal(true), ...OperationRecovery.shape, path: z.string(), trashed: z.boolean(), trashPath: z.string().optional(),
     withoutHistory: z.array(z.string()).optional(),
   }).strict(),
   z.object({
@@ -1322,6 +1340,18 @@ const automationPressResultSchema = z.union([
 ]);
 
 export const cliResultSchemas = {
+  stopSync: z.union([
+    z.object({ ok: z.literal(true), workspaceId: z.string().min(1), workspaceSynced: z.literal(false),
+      syncPause: WorkspaceSyncPauseStatus.optional() }).strict(),
+    rawFailureSchema,
+  ]),
+  linksIn: LinksInResult,
+  linksResolve: LinksResolveResult,
+  shareCopy: ShareCopyResult,
+  accountDeletePreview: ServerAccountDeletionPreview,
+  accountDelete: ServerAccountDeleteResult,
+  accessObject: AccessAnswer,
+  accessSharing: AccessAnswer,
   automationList: z.discriminatedUnion("ok", [
     z.object({ ok: z.literal(true), definitions: z.custom<AutomationDefinitionList>(value => value !== null && typeof value === "object" && "file" in value && "canSwitch" in value && "contentHash" in value) }).strict(),
     z.object({ ok: z.literal(false), reason: z.string() }).strict(),
@@ -1331,6 +1361,8 @@ export const cliResultSchemas = {
     z.object({ ok: z.literal(false), reason: z.string() }).strict(),
   ]),
   fileWrite: fileWriteResultSchema,
+  historyOperation: HistoryOperationReadResult,
+  historyUndo: HistoryOperationUndoResult,
   fileMove: fileMoveResultSchema,
   fileDelete: fileDeleteResultSchema,
   dataset: DatasetResult,

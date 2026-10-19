@@ -1,5 +1,8 @@
+import { createReceivedIdentity, tokenizeReceivedPayload, type ReceivedRecipient } from "./receivedIdentity";
+import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import { createAccountlessPathProjection } from "./accountlessPathProjection";
-import {parseLiveAuthorSnapshot} from "@dohc/live-session-contract";
+import { createHmac } from "node:crypto";
+import { COLLECTION_CREATE_ORIGIN_PREFIX, COLLECTION_FILE_ORIGIN_PREFIX } from "./relayLogInputs";
 import {
   filterOpForShare,
   groupChannelIsOrdinary,
@@ -10,7 +13,6 @@ import {
   parseShareOpPayloadWithReferencedPaths,
   pathVisibleThroughShare,
   targetVersionId,
-  visibleSharePath,
   type AnyShareSelector,
   type ChatShareChannelKind,
   type ChatShareThreadResolver,
@@ -24,6 +26,7 @@ import {
 } from "./storage";
 import { LINK_REVISION_SCAN_LIMIT } from "./storage/limits";
 import { MAX_LOG_PAGE_SIZE } from "./wireLimits";
+import {sharedMomentAuthors} from "./sharedMomentAuthors";
 
 // One accountless response may scan this many raw log rows for admitted ops.
 export const MAX_RAW_ROWS_PER_LINK_PAGE = 10_000;
@@ -55,7 +58,9 @@ export function createShareReadQueries(
     | "listLinkRevisionLogRows"
   >,
   linkFreshnessPageSize: number,
+  linkKey?: string | Uint8Array,
 ) {
+  const identity = createReceivedIdentity(linkKey);
   // MU-C4: the thread→channel resolver the chat share filter scopes by. Backed
   // by the shared workspace's own log (earliest chat.thread.create wins), so a
   // member-pushed forgery can never re-bind an existing thread. Memoized per
@@ -180,11 +185,13 @@ export function createShareReadQueries(
 
   const filteredLogPage = (
     workspaceId: string,
+    shareId: string,
     selector: AnyShareSelector,
     since: number,
     limit: number,
     audience: "authenticated" | "accountless",
     half?: "chat" | "files",
+    recipient?: ReceivedRecipient,
   ): {
     ops: Array<Record<string, unknown>>;
     nextCursor: number;
@@ -196,33 +203,22 @@ export function createShareReadQueries(
       audience === "accountless" && fileSelector
         ? createAccountlessPathProjection(fileSelector)
         : null;
-    const ops: Array<Record<string, unknown>> = [];
-    let nextCursor = since;
-    let rawRowsConsumed = 0;
-
-    for (;;) {
-      const rawLimit =
-        audience === "accountless"
-          ? Math.min(
-              MAX_LOG_PAGE_SIZE,
-              MAX_RAW_ROWS_PER_LINK_PAGE - rawRowsConsumed,
-            )
-          : limit;
-      const page = storage.fetchLogPage({
+    const page = scanFilteredLog(
+      storage,
+      {
         workspaceId,
-        sinceRelaySeq: nextCursor,
-        limit: rawLimit,
-      });
-
-      for (const [index, row] of page.rows.entries()) {
-        rawRowsConsumed += 1;
-        nextCursor = row.relaySeq;
-        if (row.settlementAdmission?.status === "refused") continue;
+        since,
+        limit,
+        maxRawRows: audience === "accountless" ? MAX_RAW_ROWS_PER_LINK_PAGE : limit,
+      },
+      (row) => {
+        // A departed publication names a path its document no longer holds.
+        if (row.settlementAdmission?.status === "refused" || row.relayAdmission !== undefined) return null;
         if (
           audience === "accountless" &&
           !ACCOUNTLESS_FILE_REPLAY_OP_KINDS.has(row.opKind)
         ) {
-          continue;
+          return null;
         }
         const decision = filterOpForShare(
           selector,
@@ -243,16 +239,16 @@ export function createShareReadQueries(
                 chatResolver,
               )
             : null;
-        if (payload === null) continue;
-        if (audience === "authenticated" && row.opKind === "moment.append") {
-          const authors = row.settlementAdmission?.status === "accepted"
-            ? row.admittedAuthorSnapshot?.map(author => author.kind === "automation" ? {
-              kind: "automation", automationId: author.automationId, depth: author.attribution.depth,
-              ...(author.attribution.onBehalfOf === undefined ? {} : {onBehalfOf: author.attribution.onBehalfOf}),
-            } : author)
-            : admittedMomentAuthors(row.payloadJson);
-          if (authors) (payload as Record<string, unknown>).authors = authors;
-          const original = JSON.parse(row.payloadJson) as Record<string, unknown>;
+        if (payload === null) return null;
+        const authenticatedMoment = audience === "authenticated" && row.opKind === "moment.append";
+        const original = recipient || authenticatedMoment
+          ? JSON.parse(row.payloadJson) as Record<string, unknown>
+          : undefined;
+        if (recipient && original) tokenizeReceivedPayload({ identity, recipient, workspaceId, selector, chat: chatResolver,
+          opKind: row.opKind, original, served: payload as Record<string, unknown>,
+          ...(accountlessProjection ? { projectPath: accountlessProjection.projectPath } : {}) });
+        if (authenticatedMoment && original) {
+          (payload as Record<string, unknown>).authors = sharedMomentAuthors(row.admittedAuthorSnapshot);
           const mark = original.attributionUnavailable;
           if (mark && typeof mark === "object" && !Array.isArray(mark)) {
             const unavailable = mark as Record<string, unknown>;
@@ -264,35 +260,21 @@ export function createShareReadQueries(
             }
           }
         }
-        ops.push({
+        const collectionOriginPrefix = row.originId.startsWith(COLLECTION_FILE_ORIGIN_PREFIX) ? COLLECTION_FILE_ORIGIN_PREFIX
+          : row.originId.startsWith(COLLECTION_CREATE_ORIGIN_PREFIX) ? COLLECTION_CREATE_ORIGIN_PREFIX : undefined;
+        return {
           relaySeq: row.relaySeq,
-          ...(audience === "authenticated" ? { originId: row.originId } : {}),
+          ...(audience === "authenticated" ? { originId: collectionOriginPrefix !== undefined
+            ? `${collectionOriginPrefix}${createHmac("sha256", shareId).update(row.originId).digest("hex")}`
+            : row.originId } : {}),
           originSeq: row.originSeq,
           opKind: row.opKind,
           payload,
           recordedAtMs: row.recordedAtMs,
-          ...(row.admittedAuthorSnapshot === undefined || row.opKind === "moment.append" ? {} : {admittedAuthorSnapshot: row.admittedAuthorSnapshot}),
-        });
-        if (ops.length === limit) {
-          return {
-            ops,
-            nextCursor,
-            hasMore:
-              (audience === "accountless" &&
-                rawRowsConsumed === MAX_RAW_ROWS_PER_LINK_PAGE) ||
-              index < page.rows.length - 1 ||
-              page.hasMore,
-          };
-        }
-      }
-
-      if (audience === "authenticated" || !page.hasMore) {
-        return { ops, nextCursor, hasMore: page.hasMore };
-      }
-      if (rawRowsConsumed === MAX_RAW_ROWS_PER_LINK_PAGE) {
-        return { ops, nextCursor, hasMore: true };
-      }
-    }
+        };
+      },
+    );
+    return { ops: page.items, nextCursor: page.nextCursor, hasMore: page.hasMore };
   };
 
   const newestFilteredOpFreshness = (
@@ -320,7 +302,7 @@ export function createShareReadQueries(
         limit: linkFreshnessPageSize,
       });
       for (const row of rows) {
-        if (row.settlementAdmission?.status === "refused") continue;
+        if (row.settlementAdmission?.status === "refused" || row.relayAdmission !== undefined) continue;
         if (row.relaySeq <= epochLogFloor) {
           return { lastSettledAtMs: null, lastSettledKnown: true };
         }
@@ -463,36 +445,39 @@ export function createShareReadQueries(
   };
 }
 
-// The native moment-author budgets in dohc-engine-domain/src/store.rs.
-const MAX_SHARED_MOMENT_AUTHORS = 1_024;
-const MAX_SHARED_AUTHOR_JSON_BYTES = 128 * 1024;
-
-/** Author summaries from the selected durable moment, projected through the same shared shape. */
-function admittedMomentAuthors(payloadJson: string): Array<Record<string, unknown>> | null {
-  const raw = (JSON.parse(payloadJson) as Record<string, unknown>).authors;
-  if (!Array.isArray(raw) || raw.length > MAX_SHARED_MOMENT_AUTHORS) return null;
-  const authors: Array<Record<string, unknown>> = [];
-  for (const value of raw) {
-    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
-    const author = value as Record<string, unknown>;
-    if (author.kind === "unattributed" && Object.keys(author).length === 1) {
-      authors.push({kind: "unattributed"});
-      continue;
+/**
+ * Serves the rows `admit` maps, reading at most `maxRawRows` raw log rows.
+ * The cursor passes every row read, served or not, so a run of rows the
+ * reader may not see never stalls it.
+ */
+export function scanFilteredLog<T>(
+  storage: Pick<SyncRelayStorage, "fetchLogPage">,
+  input: { workspaceId: string; since: number; limit: number; maxRawRows: number },
+  admit: (row: SyncRelayLogRow) => T | null,
+): { items: T[]; nextCursor: number; hasMore: boolean } {
+  const items: T[] = [];
+  let nextCursor = input.since;
+  let consumed = 0;
+  for (;;) {
+    const page = storage.fetchLogPage({
+      workspaceId: input.workspaceId,
+      sinceRelaySeq: nextCursor,
+      limit: Math.min(MAX_LOG_PAGE_SIZE, input.maxRawRows - consumed),
+    });
+    for (const [index, row] of page.rows.entries()) {
+      consumed += 1;
+      nextCursor = row.relaySeq;
+      const item = admit(row);
+      if (item === null) continue;
+      items.push(item);
+      if (items.length === input.limit) {
+        return { items, nextCursor, hasMore: index < page.rows.length - 1 || page.hasMore };
+      }
     }
-    if (author.kind !== "human" && author.kind !== "link" && author.kind !== "agent") continue;
-    if (author.kind === "human" && (typeof author.humanName !== "string" || String(author.humanId).startsWith("local:"))) continue;
-    const publicAuthor = author.kind === "agent" ? {kind: "agent", agentId: author.agentId,
-      ...(author.agentName === undefined ? {} : {agentName: author.agentName}),
-      ...(author.onBehalfOf === undefined || String(author.onBehalfOf).startsWith("local:") ? {} : {onBehalfOf: author.onBehalfOf}),
-      ...(author.depth === undefined || author.depth === 0 ? {} : {depth: author.depth})} : author;
-    try {
-      if (Object.values(publicAuthor).some(field => typeof field === "string" && /\p{Cc}/u.test(field))) continue;
-      authors.push({...parseLiveAuthorSnapshot([publicAuthor])[0]!});
+    if (!page.hasMore || consumed >= input.maxRawRows) {
+      return { items, nextCursor, hasMore: page.hasMore };
     }
-    catch { /* Optional malformed provenance does not discard an authorized file change. */ }
   }
-  return authors.length > 0 && Buffer.byteLength(JSON.stringify(authors), "utf8") <= MAX_SHARED_AUTHOR_JSON_BYTES
-    ? authors : null;
 }
 
 // The objects whose after-content in an admitted row is `sha256`: the moment's

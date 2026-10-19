@@ -1,3 +1,4 @@
+import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import { ensureLiveLinkPublicPrincipal } from "./liveAuthorSnapshot";
 import type { StoredLiveDocumentAuthority } from "./types";
 import {serviceHostDocumentEnabled} from "./serviceHostEnrollment";
@@ -50,7 +51,6 @@ import {
   parseStoredAnyShareSelectorJson,
   effectiveShareSelector,
   isLiveEditShareSelector,
-  visibleSharePath,
 } from "../shareFilter";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import type { StorageContext } from "./context";

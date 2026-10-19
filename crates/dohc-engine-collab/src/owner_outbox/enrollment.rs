@@ -43,14 +43,17 @@ fn native_state(
         .validate_canonical()
         .map_err(OwnerOutboxError::InvalidInput)?;
     let key = key(binding)?;
-    let configured: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM live_device_application_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)",
-        params![key.workspace_id,key.version_id,key.object_id], |r| r.get(0),
+    let (configured,stopped):(bool,bool) = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM live_device_application_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3) OR EXISTS(SELECT 1 FROM live_owner_adoptions WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3), CASE WHEN ?4 THEN 0 ELSE EXISTS(SELECT 1 FROM owner_live_stops WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3) END",
+        params![key.workspace_id,key.version_id,key.object_id,successor], |r| Ok((r.get(0)?,r.get(1)?)),
     ).map_err(read_sql)?;
-    if configured || super::has_adopted_owner_in(conn, &key).map_err(collab)? {
+    if configured {
         return Err(OwnerOutboxError::ParentMismatch);
     }
     if !successor {
+        if stopped {
+            return Err(OwnerOutboxError::Frozen);
+        }
         super::draft::require_ordinary_write(conn, &key).map_err(collab)?;
     }
     crate::live_update_application::require_restore_open(conn, &key).map_err(collab)?;
@@ -284,12 +287,7 @@ pub fn enroll_in_tx(
                 &checkpoint,
                 now_ms,
             )?;
-            index_checkpoint_frontmatter_in_tx(
-                tx,
-                &input.binding,
-                &host.frontmatter_json(),
-                now_ms,
-            )?;
+            index_frontmatter_in_tx(tx, &input.binding, &host, None, None, now_ms)?;
             return Ok(draft);
         }
         let draft = advance_generation_in_tx(
@@ -302,10 +300,9 @@ pub fn enroll_in_tx(
             checkpoint,
             now_ms,
         )?;
-        index_checkpoint_frontmatter_in_tx(tx, &input.binding, &host.frontmatter_json(), now_ms)?;
+        index_frontmatter_in_tx(tx, &input.binding, &host, None, None, now_ms)?;
         return Ok(draft);
     }
-    let checkpoint_frontmatter = host.frontmatter_json();
     host.apply(&local_bytes).map_err(collab)?;
     let merged = bounded(&host)?;
     if host.has_pending_dependencies() || host.lineage_epoch_tag() != original.lineage_epoch_tag() {
@@ -336,7 +333,7 @@ pub fn enroll_in_tx(
         &input.host_vector,
         now_ms,
     )?;
-    index_checkpoint_frontmatter_in_tx(tx, &input.binding, &checkpoint_frontmatter, now_ms)?;
+    index_frontmatter_in_tx(tx, &input.binding, &host, None, None, now_ms)?;
     let observed = ObservedOwnerBinding {
         binding: input.binding.clone(),
         relay_database_namespace: input.relay_database_namespace.clone(),
@@ -419,47 +416,6 @@ fn recover_in_tx(
     super::draft::descriptor_for_key_in(tx, &key(&input.binding)?)?.ok_or(OwnerOutboxError::Corrupt)
 }
 
-fn index_checkpoint_frontmatter_in_tx(
-    tx: &rusqlite::Transaction<'_>,
-    binding: &LiveObjectBinding,
-    after: &serde_json::Value,
-    now_ms: i64,
-) -> Result<(), OwnerOutboxError> {
-    let before = dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(
-        tx,
-        &binding.workspace_id,
-        &binding.main_version_id,
-        &binding.object_id,
-    )
-    .map_err(checkpoint_index_error)?;
-    if let Some(before) = before {
-        dohc_engine_domain::index_collection_frontmatter_apply_in_tx(
-            tx,
-            &binding.workspace_id,
-            &binding.main_version_id,
-            &binding.object_id,
-            &before,
-            after,
-            &before,
-            after,
-            None,
-            None,
-            None,
-            None,
-            now_ms,
-        )
-        .map_err(checkpoint_index_error)?;
-    }
-    Ok(())
-}
-
-fn checkpoint_index_error(error: dohc_engine_domain::DomainError) -> OwnerOutboxError {
-    match error {
-        dohc_engine_domain::DomainError::Storage(error) => OwnerOutboxError::Storage(error),
-        _ => OwnerOutboxError::Corrupt,
-    }
-}
-
 /// A later restore generation of an observed owner. The authenticated host cut
 /// becomes canonical as it is; old-generation work stays quarantined for
 /// recovery, and none of it is merged into or queued for the new generation.
@@ -491,10 +447,36 @@ fn advance_generation_in_tx(
             now_ms,
         )?;
     }
-    tx.execute(
-        "UPDATE owner_ydoc_outboxes SET state='quarantined',quarantine_reason='restore-fenced',observed_binding_json=?6 WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5 AND state!='quarantined'",
-        params![old.workspace_id,old.main_version_id,old.object_id,old.lineage_claim_id,old.restore_fence_generation,binding_json(&input.binding)?],
-    ).map_err(write_sql)?;
+    let outboxes = {
+        let mut stmt = tx.prepare(
+            "SELECT outbox_id FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5 AND state!='quarantined'",
+        ).map_err(read_sql)?;
+        let rows = stmt
+            .query_map(
+                params![
+                    old.workspace_id,
+                    old.main_version_id,
+                    old.object_id,
+                    old.lineage_claim_id,
+                    old.restore_fence_generation
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(read_sql)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(read_sql)?
+    };
+    for outbox_id in outboxes {
+        quarantine_in_tx(
+            tx,
+            workspace,
+            &OwnerOutboxQuarantineInput {
+                outbox_id,
+                reason: "restore-fenced".into(),
+                observed_binding: Some(input.binding.clone()),
+            },
+            now_ms,
+        )?;
+    }
     let key = key(&input.binding)?;
     let checkpoint_digest = hex_sha256(&checkpoint);
     put_binary_blob_with_sha(tx, &checkpoint, &checkpoint_digest)?;

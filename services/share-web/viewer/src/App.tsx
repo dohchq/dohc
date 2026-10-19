@@ -1,3 +1,4 @@
+import {fetchShareWeb} from "./apiVersion";
 import {normalizeShareLabel} from "@dohc/security-contract/share-labels";
 import { buildShareHandoffUrl } from "@dohc/workspace-contracts/deep-links";
 import { OpenSharedApp } from "./OpenSharedApp";
@@ -99,14 +100,13 @@ class ViewResponseError extends Error {
   }
 }
 
-// The server's share page and sync service run versions that disagree. The
-// server names which one needs the update.
+// A share-web ingress refusal describes the viewer/server wire mismatch.
 class VersionMismatchError extends Error {}
 
 async function versionMismatch(response: Response): Promise<VersionMismatchError | null> {
   if (response.status !== 409) return null;
-  const body = await response.clone().json().catch(() => null) as { code?: unknown; error?: unknown } | null;
-  return (body?.code === "api_version_too_old" || body?.code === "api_version_too_new") && typeof body.error === "string"
+  const body = await response.clone().json().catch(() => null) as { api?: unknown; code?: unknown; error?: unknown } | null;
+  return body?.api === "share-web" && (body.code === "api_version_too_old" || body?.code === "api_version_too_new") && typeof body.error === "string"
     ? new VersionMismatchError(body.error)
     : null;
 }
@@ -169,7 +169,7 @@ async function api(
   path: string,
   signal?: AbortSignal,
 ): Promise<Response> {
-  return fetch(path, {
+  return fetchShareWeb(path, {
     credentials: "same-origin",
     headers: { [SESSION_HEADER]: session },
     ...(signal ? { signal } : {}),
@@ -505,7 +505,7 @@ async function establishSession(signal?: AbortSignal): Promise<string> {
   const secret = location.hash.slice(1);
   if (/^[A-Za-z0-9_-]{43}$/u.test(secret)) {
     const exchange = withBoundedRetry(
-      () => fetch("/api/exchange", {
+      () => fetchShareWeb("/api/exchange", {
         method: "POST",
         credentials: "same-origin",
         headers: { "content-type": "application/json" },
@@ -906,7 +906,7 @@ function OpenInDohc(props: { session: string }) {
 
     let response: Response;
     try {
-      response = await fetch("/api/handoff", {
+      response = await fetchShareWeb("/api/handoff", {
         method: "POST",
         credentials: "same-origin",
         headers: { [SESSION_HEADER]: props.session },

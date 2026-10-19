@@ -1,7 +1,7 @@
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ListWorkspaceFilesResult } from "../ipc/bridgeContract";
+import type { WorkspacePathListing } from "../ipc/bridgeContract";
 import { overlayCanonicalShareMountFiles } from "./shareMounts";
 import type { ShareViewFilesTarget } from "./shareViewFiles";
 import { createOwnedWorkspaceReadPort } from "./ownedWorkspaceReadPort";
@@ -37,6 +37,7 @@ describe("createOwnedWorkspaceReadPort", () => {
   it("skips a full owner listing for an unrestricted local search", async () => {
     const listOwnedFiles = vi.fn(async () => ({ files: [] }));
     const port = createOwnedWorkspaceReadPort({
+      lookupFiles: async () => { throw Error("Unexpected exact lookup"); },
       listFiles: listOwnedFiles,
       hasShareState: false,
       searchSources: [],
@@ -57,6 +58,7 @@ describe("createOwnedWorkspaceReadPort", () => {
       folders: ["notes"],
     }));
     const port = createOwnedWorkspaceReadPort({
+      lookupFiles: async () => { throw Error("Unexpected exact lookup"); },
       listFiles: listOwnedFiles,
       hasShareState: true,
       searchSources: [],
@@ -87,7 +89,7 @@ describe("createOwnedWorkspaceReadPort", () => {
       "damaged needle\n",
     );
 
-    const healthyCanonical: ListWorkspaceFilesResult = {
+    const healthyCanonical: WorkspacePathListing = {
       files: [{ path: "missing.md", kind: "file" as const }],
       folders: [] as string[],
     };
@@ -98,6 +100,7 @@ describe("createOwnedWorkspaceReadPort", () => {
     const repaired: string[] = [];
     const failures: string[] = [];
     const port = createOwnedWorkspaceReadPort({
+      lookupFiles: async () => { throw Error("Unexpected exact lookup"); },
       listFiles: async () =>
         overlayCanonicalShareMountFiles({
           disk: await listFiles(root),
@@ -146,11 +149,12 @@ describe("createOwnedWorkspaceReadPort", () => {
     const mountRoot = join(root, "shared-with-me", "healthy");
     await mkdir(mountRoot, { recursive: true });
     const mount = mounts[0]!;
-    const canonical: ListWorkspaceFilesResult = {
+    const canonical: WorkspacePathListing = {
       files: [{ path: "restored.md", kind: "file" as const }],
       folders: [] as string[],
     };
     const port = createOwnedWorkspaceReadPort({
+      lookupFiles: async () => { throw Error("Unexpected exact lookup"); },
       listFiles: async () =>
         overlayCanonicalShareMountFiles({
           disk: await listFiles(root),

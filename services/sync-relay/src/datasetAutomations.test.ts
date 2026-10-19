@@ -168,6 +168,7 @@ async function executorFor(f: Awaited<ReturnType<typeof fixture>>, button = fals
       }
       return { busy: false, claim };
     },
+    makeAutomationWritesDurable: async () => {},
     claimNextAutomation: async () => { const claim = claims.find(value => value.state === "pending"); if (!claim) return null; claim.state = "running"; claim.attempts++; return structuredClone(claim); },
     settleAutomationClaim: async ({ claimId, state, error }: { claimId: string; state: "done" | "failed"; error?: string }) => { Object.assign(claims.find(value => value.claimId === claimId)!, { state, error }); },
     releaseAutomationClaim: async ({ claimId }: { claimId: string }) => { claims.find(value => value.claimId === claimId)!.state = "pending"; },
@@ -258,7 +259,7 @@ async function executorFor(f: Awaited<ReturnType<typeof fixture>>, button = fals
     holdUnprovenWithoutHistory: async () => serverCopy !== undefined && f.storage.automationWorkspaceInfo("w")!.everShared,
     groupRelayRecord: async () => ({ generation: 0, handover: null }), reachRelayRecord: async () => ({ generation: 0, reach: null, everShared: false }),
     groupMessagesSkipped: async () => undefined, requestHost: async () => undefined, readMessageBody: async () => "",
-    chat: { directory: async () => null, write: async () => { throw Error("Unexpected chat"); } }, postNotice: async () => undefined,
+    chat: { hasMessage: async () => false, directory: async () => null, write: async () => { throw Error("Unexpected chat"); } }, postNotice: async () => undefined,
     mayRetryPress: async () => false, onPressSettled: () => undefined, onPressWaiting: event => { waiting.push(event.reason); },
     onRunsChanged: () => undefined, reportFailure: async () => undefined, withdrawFailure: async () => undefined, onSwitchedOff: () => undefined, onHoldsChanged: () => undefined, onAutomationsChanged: () => undefined,
     onError: (context, error) => {errorContexts.push(context); errors.push(error);},

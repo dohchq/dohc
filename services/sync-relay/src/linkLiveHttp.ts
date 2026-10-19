@@ -10,7 +10,9 @@ import {linkRefusal, opaqueLinkRefusal} from "./linkRefusal";
 
 /** Private relay metadata. The viewer receives only the selected object ID. */
 export function createLinkLiveHttp(options: {storage: SyncRelayStorage; linkKey: BinaryLike;
-  hosts: ReadonlySet<string>; publicOrigin: string; exchangeKey: string; limits: NamedLiveRouteLimits}) {
+  hosts: ReadonlySet<string>; publicOrigin: string; exchangeKey: string; limits: NamedLiveRouteLimits;
+  /** Whether the session host cannot continue the document until its owner or operator acts. */
+  sessionHostBlocked?: (document: {workspaceId: string; objectId: string}) => boolean}) {
   const limits = parseNamedLiveRouteLimits(options.limits), hosts = new Set(options.hosts);
   const origin = new URL(options.publicOrigin);
   if (origin.protocol !== "https:" || origin.origin !== options.publicOrigin || options.exchangeKey.length < 32 || !hosts.size) throw new TypeError("Invalid link live metadata configuration.");
@@ -48,7 +50,8 @@ export function createLinkLiveHttp(options: {storage: SyncRelayStorage; linkKey:
           if (!authorizeLinkShareAction({storage: options.storage, grantId: context.grantId, action: "live-edit"}).ok) return null;
           const current = options.storage.resolveLiveObjectHostBinding(context, objectId);
           if (current.kind === "refused" && (current.reason === "host-unavailable" || current.reason === "stale-document")) return linkRefusal("link_live_unavailable");
-          return current.kind === "current" && current.binding.currentPath === path ? {objectId} : null;
+          if (current.kind !== "current" || current.binding.currentPath !== path) return null;
+          return options.sessionHostBlocked?.({workspaceId: context.workspaceId, objectId}) ? linkRefusal("link_live_unavailable") : {objectId};
         }
         // Ticket minting has already enrolled this profile before a gateway can open.
         const principal = options.storage.getLinkPrincipalForGrantProfile(context.grantId, context.profileTokenHash);

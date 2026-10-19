@@ -6,6 +6,7 @@ import type {
 import { renderAuthorDisplayName } from "./chatIdentity";
 import { renderThreadMarkdown } from "./threadMarkdown";
 import { DohcCliError } from "./errors";
+import { formatStoredBytes } from "./account";
 
 type GroupsResult = CliResultByVerb["groups"];
 type ThreadsResult = CliResultByVerb["threads"];
@@ -18,6 +19,28 @@ type ExportResult = CliResultByVerb["export"];
 
 function lineSafe(value: string): string {
   return value.replace(/\s+/g, " ").trim();
+}
+
+function counted(count: number, one: string, many: string): string {
+  return `${count} ${count === 1 ? one : many}`;
+}
+
+function renderAccountDeletionPreview(preview: CliResultByVerb["accountDeletePreview"]): string {
+  const local = preview.workspaces.map((workspace) => lineSafe(workspace.name));
+  return [
+    `Deleting ${preview.email} on ${preview.server} removes it from the server, with:`,
+    `  ${counted(local.length, "workspace", "workspaces")} on this computer${local.length ? `: ${local.join(", ")}` : ""}`,
+    `  ${counted(preview.workspacesElsewhere, "workspace", "workspaces")} not on this computer`,
+    `  ${formatStoredBytes(preview.storedBytes)} of stored files, data, apps, chats, and history`,
+    `  ${counted(preview.ownedShareCount, "share", "shares")} you own. People you shared with lose access and keep their copies.`,
+    "  your access to shares others gave you",
+    "Copies on this computer stay. This cannot be undone.",
+    "If you create an account again later, this server will not accept your old copies of these workspaces.",
+    "The server's backups keep the data until they expire.",
+    "",
+    "To delete, run this within five minutes. dohc asks for the account password:",
+    `  dohc account delete --server ${preview.server} --preview-token ${preview.previewToken}`,
+  ].join("\n");
 }
 
 function dateTime(atMs: number): string {
@@ -130,7 +153,7 @@ function renderMoments(result: CliResultByVerb["moments"]): string {
     const agents = (change.authors ?? [])
       .map((author) => (author.kind === "agent" ? ` · agent ${author.agentId}` : ""))
       .join("");
-    return `${change.id} · ${dateTime(change.recordedAtMs)} · ${change.operation} · ${change.path}${agents}`;
+    return `${change.id} · ${dateTime(change.recordedAtMs)} · ${change.operation} · ${change.path}${agents}${change.operationId ? ` · operation ${change.operationId}` : ""}`;
   });
   if (result.hasMore) lines.push(`${result.totalAvailable - result.count} more; raise --limit to list them`);
   return lines.join("\n");
@@ -258,6 +281,29 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
   options: { grepFilesWithMatches?: boolean; grepContext?: number; momentSide?: "before" | "after" } = {},
 ): string {
   switch (verb) {
+    case "accountDeletePreview":
+      return renderAccountDeletionPreview(result as CliResultByVerb["accountDeletePreview"]);
+    case "accountDelete": {
+      const deleted = result as CliResultByVerb["accountDelete"];
+      if (!deleted.ok) throw new DohcCliError(deleted.reason);
+      const outcome = deleted.finished
+        ? `Deleted ${deleted.email} on ${deleted.server}.`
+        : `${deleted.email} on ${deleted.server} is blocked. The server will finish removing its data.`;
+      if (deleted.disconnectError === null) {
+        return `${outcome} The dohc app disconnected from this server. Workspaces on this computer stay.`;
+      }
+      return [
+        `${outcome} Workspaces on this computer stay.`,
+        `The dohc app could not disconnect from this server: ${lineSafe(deleted.disconnectError)}`,
+        `Quit and reopen the dohc app. If Settings > Sync and sharing still shows ${deleted.email}, choose Disconnect.`,
+      ].join("\n");
+    }
+    case "linksIn":
+    case "linksResolve":
+    case "shareCopy":
+    case "accessObject":
+    case "accessSharing":
+      return JSON.stringify(result, null, 2);
     case "automationList":
     case "automationSwitch":
       return JSON.stringify(result, null, 2);
@@ -300,6 +346,19 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       });
     case "export":
       return renderExport(result as CliResultByVerb["export"]);
+    case "historyOperation": {
+      const operation = result as CliResultByVerb["historyOperation"];
+      if (!operation.ok) return operation.reason;
+      return [...operation.members.map(member => `${member.momentId} · ${member.operation} · ${member.beforePath ? `${member.beforePath} → ` : ""}${member.path}`),
+        ...(operation.withoutHistory ?? []).map(path => `${path} · without History`),
+        ...(operation.nextCursor ? [`More paths; use --cursor ${operation.nextCursor}`] : [])].join("\n");
+    }
+    case "historyUndo": {
+      const undo = result as CliResultByVerb["historyUndo"];
+      if (!undo.ok) return undo.reason;
+      return [`History: ${undo.tracked.state}`, ...undo.restored.map(path => `Restored ${path}`),
+        ...undo.remaining.map(item => `${item.reason}${item.retry && !item.reason.includes("Undo again to retry") ? " Undo again to retry." : ""}`)].join("\n");
+    }
     case "moments":
       return renderMoments(result as CliResultByVerb["moments"]);
     case "moment":

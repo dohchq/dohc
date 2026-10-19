@@ -1,7 +1,4 @@
-import type {
-  CreatedWorkspace,
-  createWorkspaceFolder,
-} from "./createWorkspaceFolder";
+import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import type { RegistryEntry } from "./registryStore";
 import type {
   WorkspaceAuthorityBinding,
@@ -11,11 +8,18 @@ import type {
 type Binding = WorkspaceAuthorityBinding<RegistryEntry>;
 
 export function createJoinedWorkspaceRunner(dependencies: {
+  // The folder's canonicalWorkspaceRoot. The reservation, the folder, and the
+  // registry row must name the same root.
+  canonicalizeRoot(rootPath: string): string;
   reserve(input: {
     workspaceId: string;
     rootPath: string;
   }): WorkspaceAuthorityReservation;
-  createFolder: typeof createWorkspaceFolder;
+  createFolder(input: {
+    rootPath: string;
+    workspaceId: string;
+    kind: "personal";
+  }): Promise<CreatedWorkspace>;
   register(
     reservation: WorkspaceAuthorityReservation,
     workspace: RegistryEntry,
@@ -38,11 +42,12 @@ export function createJoinedWorkspaceRunner(dependencies: {
     cleanupFailureMessage: string;
     failure(error: unknown): Error;
   }): Promise<CreatedWorkspace> {
-    const reservation = dependencies.reserve(input);
+    const rootPath = dependencies.canonicalizeRoot(input.rootPath);
+    const reservation = dependencies.reserve({ workspaceId: input.workspaceId, rootPath });
     let binding: Binding | null = null;
     try {
       const workspace = await dependencies.createFolder({
-        rootPath: input.rootPath,
+        rootPath,
         workspaceId: input.workspaceId,
         kind: "personal",
       });

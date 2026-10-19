@@ -1,5 +1,30 @@
 use super::*;
 
+#[test]
+fn ordinary_recording_claim_does_not_shorten_recovered_prefix() {
+    for kind in ["moment.append", "ydoc.update"] {
+        let (_scratch, _path, mut engine) = open_store();
+        let payload = json!({"isBaseState":false, "actorOriginId":"owner",
+            "attribution":{"actorKind":"human", "depth":0},
+            "authorContext":{"kind":"account", "accountId":"owner"}});
+        journal_test_op(&mut engine, kind, &payload);
+        let mut stored = payload;
+        stored.as_object_mut().unwrap().remove("authorContext");
+        let client = RelaySyncClient::new(PagedRelay::new([(
+            0,
+            PullResponse {
+                ops: vec![envelope("local", 0, kind, stored)],
+                next_cursor: 1,
+                has_more: false,
+            },
+        )]));
+        let recovered = client
+            .recover_origin(&mut engine, "ws", "recovered", &NoFaults)
+            .expect("recover sanitized recording");
+        assert_eq!(recovered.shared_prefix_length, 1);
+    }
+}
+
 fn journal_test_op(engine: &mut EngineStore, op_kind: &str, payload: &serde_json::Value) -> i64 {
     match journal_local_replication_op(
         engine, "ws", "local", "epoch-1", "stream-1", op_kind, payload, 2_000, &NoFaults,

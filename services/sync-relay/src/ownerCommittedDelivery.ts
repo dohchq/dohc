@@ -32,7 +32,7 @@ export class OwnerCommittedDelivery {
     bounds: { maxBytes: number; maxEvents: number };
     ownerAdmission: OwnerOutboxAdmission;
     restore?: LiveRestorePreparation;
-    publishOrdinary?(signal?: AbortSignal): Promise<unknown>;
+    publish?(signal?: AbortSignal): Promise<unknown>;
   }) {
     authorityInteger(connection.bounds.maxBytes,1); authorityInteger(connection.bounds.maxEvents,1); authorityInteger(connection.deadlineMs,1);
     this.#store = storage.createLiveCommittedDeliveryStore(history, connection.ownerAdmission.activation);
@@ -50,6 +50,11 @@ export class OwnerCommittedDelivery {
     return saved !== undefined && this.#seedApplied.get(key) === saved.adoptionId;
   }
   #forget(key: string) { this.#adopted.delete(key); this.#seedApplied.delete(key); }
+  /** Ends the document's registration after the host unloaded it. */
+  release(document: LiveDocumentKey) {
+    const parsed = parseLiveDocumentKey(document);
+    this.#registrations.invalidate(parsed.objectId); this.#forget(JSON.stringify(parsed));
+  }
   get workspace() { return this.connection.workspace; }
   async #run(value: LiveDocumentKey,settle: false,signal?: AbortSignal): Promise<OwnerDeliveryOutcome>;
   async #run(value: LiveDocumentKey,settle: true,signal?: AbortSignal): Promise<CommittedSettlement>;

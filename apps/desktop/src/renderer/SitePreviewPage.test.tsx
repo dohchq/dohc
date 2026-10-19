@@ -486,7 +486,7 @@ describe("SitePreviewPage", () => {
   });
 
   it("opens a generated form approved on this device from the app page", async () => {
-    const localRow = { publicationId: "d".repeat(64), authorityRevision: 1, appRoot: "report", sourceRevision: "b".repeat(64), active: true,
+    const localRow = { publicationId: "d".repeat(64), authorityRevision: 1, appRoot: "report", sourceRevision: "b".repeat(64), approved: true, active: true,
       datasetCapability: { kind: "dataset" as const, name: "Orders", datasetId: "00000000-0000-4000-8000-000000000001", revision: 1, revisionSha256: "a".repeat(64), operationIds: [], operations: [] } };
     const publishOwnerApp = vi.fn(async (request: { action: string }) => request.action === "listLocal"
       ? { kind: "localListed", publications: [localRow] }

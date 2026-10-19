@@ -6,6 +6,11 @@
 use dohc_engine_crypto::CryptoError;
 use dohc_engine_storage::StorageError;
 
+/// The [`DomainError::InvalidInput`] reason a hosted replica refuses a write
+/// with: the relay takes only its hosted documents' writes from a session
+/// host. The one input refusal whose reason the RPC surface shows.
+pub const HOSTED_REPLICA_WRITE_REFUSED: &str = "a hosted replica writes only its hosted documents";
+
 /// A typed versioning-domain failure. `#[non_exhaustive]`: later shards add
 /// variants (merge/conflict/secret) without a breaking change.
 #[derive(Debug, thiserror::Error)]
@@ -77,12 +82,18 @@ pub enum DomainError {
     #[error("capture does not own this path current head")]
     CaptureNotOwned,
 
+    #[error("Undo refused: {reason}: {path}")]
+    UndoRefused { path: String, reason: &'static str },
+
     /// A rename/rollback restore path is already occupied by another object.
     #[error("target path already exists")]
     TargetPathExists,
 
     #[error("file changed since it was read")]
     WritePreconditionFailed { current_sha256: Option<String> },
+
+    #[error("checked delete moment has replication dependents")]
+    CheckedDeleteReplicationDependents,
 
     #[error("live document binding is still active")]
     LiveDocumentBindingActive,
@@ -231,6 +242,10 @@ impl DomainError {
             DomainError::TextHeadNotBinary => "text-head-not-binary",
             DomainError::CaptureNotOwned => "capture-not-owned",
             DomainError::WritePreconditionFailed { .. } => "write-precondition-failed",
+            DomainError::CheckedDeleteReplicationDependents => {
+                "checked-delete-replication-dependents"
+            }
+            DomainError::UndoRefused { .. } => "undo-refused",
             DomainError::TargetPathExists => "target-path-exists",
             DomainError::LiveDocumentBindingActive => "live-document-binding-active",
             DomainError::ForkBaseNotFound => "fork-base-not-found",

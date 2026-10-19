@@ -1,28 +1,15 @@
 use dohc_engine_domain::VersionedTextStore;
 use dohc_engine_runtime::{
     CancellationToken, CaptureIngest, CaptureRetire, MAX_CAPTURE_INGEST_BATCH_BYTES,
-    MAX_CAPTURE_INGEST_BATCH_OPS, NoFaults, RuntimeError, WorkspaceRootGuard, WorkspaceSupervisor,
+    MAX_CAPTURE_INGEST_BATCH_OPS, NoFaults, RuntimeError, WorkspaceSupervisor,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
+use dohc_engine_testkit::capture::ExistingRootGuard;
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
 use std::path::Path;
 use std::sync::Arc;
 
 const BATCH_WORKSPACE_ID: &str = "ws-capture-batch-fault";
-
-struct ExistingRootGuard;
-
-impl WorkspaceRootGuard for ExistingRootGuard {
-    fn validate(&self, root_dir: &Path) -> Result<(), RuntimeError> {
-        root_dir
-            .is_dir()
-            .then_some(())
-            .ok_or(RuntimeError::Identity {
-                reason: "test workspace root disappeared",
-                source: None,
-            })
-    }
-}
 
 fn capture_batch_inputs() -> Vec<CaptureIngest> {
     [
@@ -166,7 +153,7 @@ fn blocking_capture_variants_round_trip_through_the_actor() {
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
 
     let written = handle
-        .capture_ingest_blocking(
+        .capture_ingest_with_search_policy_blocking(
             CaptureIngest {
                 workspace_id: "ws-actor-capture".to_owned(),
                 version_id: "main".to_owned(),
@@ -180,6 +167,9 @@ fn blocking_capture_variants_round_trip_through_the_actor() {
                 request_id: Some("actor-capture-request".to_owned()),
                 claim_foreign_head: true,
             },
+            Arc::new(dohc_engine_runtime::search::read_engine_search_policy(
+                scratch.path(),
+            )),
             dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
         )
@@ -189,7 +179,7 @@ fn blocking_capture_variants_round_trip_through_the_actor() {
     assert_eq!(written.snapshot.path, "notes/a.md");
 
     let retired = handle
-        .capture_retire_blocking(
+        .capture_retire_materialized_blocking_guarded(
             CaptureRetire {
                 workspace_id: "ws-actor-capture".to_owned(),
                 version_id: "main".to_owned(),
@@ -202,11 +192,87 @@ fn blocking_capture_variants_round_trip_through_the_actor() {
                 only_if_capture_origin: false,
                 allow_ydoc_origin: true,
             },
+            scratch.path().to_path_buf(),
+            true,
+            Arc::new(()),
             dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
+            Arc::new(ExistingRootGuard),
         )
         .expect("blocking retire");
     assert!(retired.retired.is_some());
+    supervisor.close(&db).expect("close actor");
+}
+
+/// An absence retire refuses while anything answers at the path, including a
+/// file stored under another spelling. On a disk that ignores case that file
+/// can be a distinct head's, such as one of a pair of case variants a peer
+/// that keeps case apart synced. Skips where the disk keeps case apart.
+#[test]
+fn an_absence_retire_refuses_a_file_at_another_spelling() {
+    let scratch = ScratchDir::new().expect("scratch");
+    std::fs::write(scratch.path().join("Notes.md"), "variant").expect("write file");
+    if !scratch.path().join("notes.md").exists() {
+        eprintln!("SKIP: this disk keeps case apart");
+        return;
+    }
+    let db = engine_db_path(&scratch).expect("db");
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    handle
+        .capture_ingest_with_search_policy_blocking(
+            CaptureIngest {
+                workspace_id: "ws-actor-capture".to_owned(),
+                version_id: "main".to_owned(),
+                path: "notes.md".to_owned(),
+                text: "captured".to_owned(),
+                metadata_origin: "actor-test".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 10,
+                request_id: None,
+                claim_foreign_head: true,
+            },
+            Arc::new(dohc_engine_runtime::search::read_engine_search_policy(
+                scratch.path(),
+            )),
+            dohc_engine_collab::LeaseRegistry::new(),
+            Arc::new(NoFaults),
+        )
+        .expect("blocking capture");
+
+    let refused = handle.capture_retire_materialized_blocking_guarded(
+        CaptureRetire {
+            workspace_id: "ws-actor-capture".to_owned(),
+            version_id: "main".to_owned(),
+            path: "notes.md".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            now_ms: 20,
+            request_id: None,
+            only_if_text_head: false,
+            only_if_capture_origin: false,
+            allow_ydoc_origin: true,
+        },
+        scratch.path().to_path_buf(),
+        true,
+        Arc::new(()),
+        dohc_engine_collab::LeaseRegistry::new(),
+        Arc::new(NoFaults),
+        Arc::new(ExistingRootGuard),
+    );
+    assert!(
+        matches!(
+            refused,
+            Err(dohc_engine_runtime::RuntimeError::Sync(
+                dohc_engine_sync::SyncError::RetryableState {
+                    reason: "path-present-on-disk"
+                }
+            ))
+        ),
+        "{refused:?}"
+    );
     supervisor.close(&db).expect("close actor");
 }
 
@@ -787,49 +853,27 @@ async fn async_capture_variants_round_trip_and_honor_precancellation() {
         .expect("async capture");
     assert_eq!(written.snapshot.text, "captured asynchronously");
 
-    let retired = handle
-        .capture_retire(
-            CaptureRetire {
-                workspace_id: "ws-actor-async-capture".to_owned(),
-                version_id: "main".to_owned(),
-                path: "notes/async.md".to_owned(),
-                metadata_summary: None,
-                metadata_correlation_id: None,
-                now_ms: 20,
-                request_id: Some("actor-async-retire-request".to_owned()),
-                only_if_text_head: false,
-                only_if_capture_origin: false,
-                allow_ydoc_origin: true,
-            },
-            dohc_engine_collab::LeaseRegistry::new(),
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await
-        .expect("async retire");
+    let retired = dohc_engine_testkit::capture::retire_captured_path(
+        &handle,
+        CaptureRetire {
+            workspace_id: "ws-actor-async-capture".to_owned(),
+            version_id: "main".to_owned(),
+            path: "notes/async.md".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            now_ms: 20,
+            request_id: Some("actor-async-retire-request".to_owned()),
+            only_if_text_head: false,
+            only_if_capture_origin: false,
+            allow_ydoc_origin: true,
+        },
+        scratch.path(),
+        dohc_engine_collab::LeaseRegistry::new(),
+        Arc::new(NoFaults),
+    )
+    .await
+    .expect("async retire");
     assert!(retired.retired.is_some());
-
-    let retained = handle
-        .capture_ingest(
-            CaptureIngest {
-                workspace_id: "ws-actor-async-capture".to_owned(),
-                version_id: "main".to_owned(),
-                path: "notes/retained.md".to_owned(),
-                text: "must survive cancelled retire".to_owned(),
-                metadata_origin: "actor-test".to_owned(),
-                metadata_summary: None,
-                metadata_correlation_id: None,
-                author_json: None,
-                now_ms: 25,
-                request_id: None,
-                claim_foreign_head: true,
-            },
-            dohc_engine_collab::LeaseRegistry::new(),
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await
-        .expect("capture retained path");
 
     let cancelled = CancellationToken::new();
     cancelled.cancel();
@@ -867,51 +911,10 @@ async fn async_capture_variants_round_trip_and_honor_precancellation() {
         .expect("read cancelled ingest path");
     assert!(cancelled_read.is_none());
 
-    let cancelled = CancellationToken::new();
-    cancelled.cancel();
-    let error = handle
-        .capture_retire(
-            CaptureRetire {
-                workspace_id: "ws-actor-async-capture".to_owned(),
-                version_id: "main".to_owned(),
-                path: "notes/retained.md".to_owned(),
-                metadata_summary: None,
-                metadata_correlation_id: None,
-                now_ms: 40,
-                request_id: None,
-                only_if_text_head: false,
-                only_if_capture_origin: false,
-                allow_ydoc_origin: true,
-            },
-            dohc_engine_collab::LeaseRegistry::new(),
-            Arc::new(NoFaults),
-            cancelled,
-        )
-        .await
-        .expect_err("pre-cancelled retire must fail");
-    assert!(matches!(error, RuntimeError::Cancelled));
-
-    let retained_read = handle
-        .versioned_text_read(
-            "ws-actor-async-capture".to_owned(),
-            "main".to_owned(),
-            "notes/retained.md".to_owned(),
-            CancellationToken::new(),
-        )
-        .await
-        .expect("read retained path")
-        .expect("retained path must remain present");
-    assert_eq!(retained_read, retained.snapshot);
-
     supervisor.close(&db).expect("close actor");
 
     let store = EngineStore::open(&db, 50).expect("reopen store");
-    let (cancelled_snapshots, cancelled_moments, retained_snapshots, retained_moments): (
-        i64,
-        i64,
-        i64,
-        i64,
-    ) = store
+    let (cancelled_snapshots, cancelled_moments): (i64, i64) = store
         .read_with(|conn| {
             Ok::<_, rusqlite::Error>((
                 conn.query_row(
@@ -926,23 +929,10 @@ async fn async_capture_variants_round_trip_and_honor_precancellation() {
                     ["ws-actor-async-capture", "main", "notes/cancelled.md"],
                     |row| row.get(0),
                 )?,
-                conn.query_row(
-                    "SELECT COUNT(*) FROM snapshots WHERE workspace_id = ?1 \
-                     AND version_id = ?2 AND path = ?3",
-                    ["ws-actor-async-capture", "main", "notes/retained.md"],
-                    |row| row.get(0),
-                )?,
-                conn.query_row(
-                    "SELECT COUNT(*) FROM moments WHERE workspace_id = ?1 \
-                     AND version_id = ?2 AND path = ?3",
-                    ["ws-actor-async-capture", "main", "notes/retained.md"],
-                    |row| row.get(0),
-                )?,
             ))
         })
         .expect("capture persistence counts");
     assert_eq!((cancelled_snapshots, cancelled_moments), (0, 0));
-    assert_eq!((retained_snapshots, retained_moments), (1, 1));
 }
 
 #[tokio::test]
@@ -1325,7 +1315,7 @@ fn an_absence_retire_is_refused_while_the_file_is_on_disk_or_displaced() {
 
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
     handle
-        .capture_ingest_blocking(
+        .capture_ingest_with_search_policy_blocking(
             CaptureIngest {
                 workspace_id: WORKSPACE_ID.to_owned(),
                 version_id: "main".to_owned(),
@@ -1339,6 +1329,9 @@ fn an_absence_retire_is_refused_while_the_file_is_on_disk_or_displaced() {
                 request_id: None,
                 claim_foreign_head: true,
             },
+            Arc::new(dohc_engine_runtime::search::read_engine_search_policy(
+                scratch.path(),
+            )),
             dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
         )

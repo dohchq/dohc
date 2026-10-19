@@ -1,6 +1,6 @@
-import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { atomicReplaceFile } from "../atomicReplaceFile";
 import { join } from "node:path";
-import { isServerDisplayName } from "./cloudConfiguration";
 
 // server session credentials for this desktop install. The token is
 // sealed with Electron safeStorage when the OS keychain is available, but
@@ -10,13 +10,17 @@ import { isServerDisplayName } from "./cloudConfiguration";
 export interface CloudCredentials {
   serverUrl: string;
   relayUrl?: string;
-  serverName?: string;
   networkAccess?: "private" | "public";
   email: string;
   // The Better Auth user id (an opaque uuid). This is the stable author key,
   // so a signed-in session cannot exist without it.
   userId: string;
   token: string;
+}
+
+export interface DeletedAccount {
+  serverUrl: string;
+  userId: string;
 }
 
 export interface TokenCipher {
@@ -28,6 +32,7 @@ export interface TokenCipher {
 
 const FILE_NAME = "dohc-cloud.json";
 const INVALID_FILE_NAME = "dohc-cloud-invalid.json";
+const DELETED_FILE_NAME = "dohc-cloud-deleted.json";
 const MAX_CLOUD_CREDENTIAL_EMAIL_LENGTH = 320;
 
 function nonEmptyString(value: unknown): value is string {
@@ -49,6 +54,7 @@ export function createCloudCredentialStore(options: {
   const { dir, cipher } = options;
   const file = join(dir, FILE_NAME);
   const invalidFile = join(dir, INVALID_FILE_NAME);
+  const deletedFile = join(dir, DELETED_FILE_NAME);
 
   return {
     async load(): Promise<CloudCredentials | null> {
@@ -96,7 +102,6 @@ export function createCloudCredentialStore(options: {
       return {
         serverUrl: obj.serverUrl,
         ...(nonEmptyString(obj.relayUrl) ? { relayUrl: obj.relayUrl } : {}),
-        ...(isServerDisplayName(obj.serverName) ? { serverName: obj.serverName } : {}),
         ...(obj.networkAccess === "private" || obj.networkAccess === "public" ? { networkAccess: obj.networkAccess } : {}),
         email: obj.email,
         userId: obj.userId,
@@ -113,7 +118,6 @@ export function createCloudCredentialStore(options: {
         !nonEmptyString(credentials.token) ||
         (credentials.relayUrl !== undefined &&
           !nonEmptyString(credentials.relayUrl)) ||
-        (credentials.serverName !== undefined && !isServerDisplayName(credentials.serverName)) ||
         (credentials.networkAccess !== undefined && !["private", "public"].includes(credentials.networkAccess))
       ) {
         throw new Error(
@@ -130,7 +134,6 @@ export function createCloudCredentialStore(options: {
         version: 1,
         serverUrl: credentials.serverUrl,
         ...(credentials.relayUrl ? { relayUrl: credentials.relayUrl } : {}),
-        ...(credentials.serverName ? { serverName: credentials.serverName } : {}),
         ...(credentials.networkAccess ? { networkAccess: credentials.networkAccess } : {}),
         email: credentials.email,
         userId: credentials.userId,
@@ -144,9 +147,7 @@ export function createCloudCredentialStore(options: {
       // Atomic: write a temp file then rename over the target so a crash or
       // concurrent reader never sees a half-written credential file. The 0600
       // mode is set on the temp file so the rename preserves it.
-      const tmp = `${file}.tmp-${process.pid}`;
-      await writeFile(tmp, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
-      await rename(tmp, file);
+      await atomicReplaceFile(file, (tmp) => writeFile(tmp, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 }));
     },
 
     async clear(): Promise<void> {
@@ -195,9 +196,7 @@ export function createCloudCredentialStore(options: {
     }) {
       await mkdir(dir, { recursive: true, mode: 0o700 });
       const payload = { version: 1, ...marker };
-      const tmp = `${invalidFile}.tmp-${process.pid}`;
-      await writeFile(tmp, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
-      await rename(tmp, invalidFile);
+      await atomicReplaceFile(invalidFile, (tmp) => writeFile(tmp, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 }));
     },
 
     async clearInvalidMarker() {
@@ -206,6 +205,40 @@ export function createCloudCredentialStore(options: {
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
+    },
+
+    // Accounts deleted from this computer. A server never reuses a user ID,
+    // so the list only grows, and a sign-in to any of them is refused. A
+    // missing or unreadable file reads as empty: the server still refuses a
+    // deleted account.
+    async loadDeletedAccounts(): Promise<DeletedAccount[]> {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(await readFile(deletedFile, "utf8"));
+      } catch {
+        return [];
+      }
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return [];
+      }
+      const obj = parsed as Record<string, unknown>;
+      if (obj.version !== 1 || !Array.isArray(obj.accounts)) return [];
+      return obj.accounts.flatMap((entry: unknown) => {
+        if (entry === null || typeof entry !== "object") return [];
+        const account = entry as Record<string, unknown>;
+        return nonEmptyString(account.serverUrl) && nonEmptyString(account.userId)
+          ? [{ serverUrl: account.serverUrl, userId: account.userId }]
+          : [];
+      });
+    },
+
+    async saveDeletedAccounts(accounts: DeletedAccount[]) {
+      await mkdir(dir, { recursive: true, mode: 0o700 });
+      const payload = {
+        version: 1,
+        accounts: accounts.map(({ serverUrl, userId }) => ({ serverUrl, userId })),
+      };
+      await atomicReplaceFile(deletedFile, (tmp) => writeFile(tmp, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 }));
     },
   };
 }

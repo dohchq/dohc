@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { expect, it } from "vitest";
 import * as Y from "yjs";
-import { yDocToMarkdown } from "@dohc/ydoc-projection";
+import { yDocToArtifactMarkdown, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { YdocLoopbackEngine } from "../testing/ydocLoopbackEngine";
 import { YdocLiveAdapter } from "./ydocLiveAdapter";
 import { YDOC_METHOD } from "./ydocWireContract";
@@ -22,8 +22,9 @@ it("the daemon source fixture comes from the real captured Markdown seeder", asy
   try {
     const records = engine.requests.filter((request) => request.method === YDOC_METHOD.recordUpdate);
     expect(records).toHaveLength(1);
-    const seed = records[0]!.params as { seed: boolean; updateBase64: string };
+    const seed = records[0]!.params as { seed: boolean; updateBase64: string; expectedLineageClaimId: string | null };
     expect(seed.seed).toBe(true);
+    expect(seed.expectedLineageClaimId).toBeNull();
     const bytes = Array.from(Buffer.from(seed.updateBase64, "base64"));
     if (process.env.UPDATE_OWNER_SOURCE_FIXTURE === "1") {
       writeFileSync(fixture, `${JSON.stringify({ markdown, canonical, bytes })}\n`);
@@ -36,6 +37,7 @@ it("the daemon source fixture comes from the real captured Markdown seeder", asy
       try {
         Y.applyUpdate(doc, Uint8Array.from(update));
         expect(yDocToMarkdown(doc)).toBe(canonical);
+        expect(yDocToArtifactMarkdown(doc)).toBe(markdown);
         expect(doc.getMap("meta").get("dohcMarkdownSource")).toBe(markdown);
         expect(doc.getMap("meta").get("dohcMarkdownSourceSha256")).toBe(createHash("sha256").update(markdown).digest("hex"));
         expect(doc.getMap("meta").get("dohcMarkdownSourceProjectionSha256")).toBe(createHash("sha256").update(canonical).digest("hex"));
@@ -57,6 +59,7 @@ const lexicalFixture = new URL(
 // Ordinary files that differ from their projection only in spelling. The seed
 // keeps each file's bytes, and the engine must start a live session from that
 // seed without rewriting the file.
+const canonicalArtifactFixtures = new Set(['plain-ampersands', 'angle-words', 'cell-break']);
 const LEXICAL: Record<string, string> = {
   "star-bullets": "* one\n* two\n",
   "plus-bullets": "+ one\n+ two\n",
@@ -119,6 +122,7 @@ it("the lexical source fixtures come from the real captured Markdown seeder", as
       try {
         Y.applyUpdate(doc, Uint8Array.from(seed.bytes));
         expect(yDocToMarkdown(doc)).toBe(seed.canonical);
+        expect(yDocToArtifactMarkdown(doc)).toBe(canonicalArtifactFixtures.has(name) ? seed.canonical : markdown);
         const meta = doc.getMap("meta");
         expect(meta.get("dohcMarkdownSource")).toBe(markdown);
         expect(meta.get("dohcMarkdownSourceSha256")).toBe(createHash("sha256").update(markdown).digest("hex"));

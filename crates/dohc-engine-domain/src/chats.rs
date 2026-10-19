@@ -135,10 +135,8 @@ const FEED_LIMIT_DEFAULT: i64 = 20;
 /// asking for more is clamped to this; the returned `next_after_message_order`
 /// cursor pages the rest. Keeps every read bounded (plan §Rust policy).
 pub const MAX_MESSAGE_PAGE: i64 = 500;
-/// Hard cap on the low-cardinality workspace lists (channels/threads/follows/
-/// bookmarks). These are per-workspace enumerations with no natural paging in the
-/// TS oracle; the cap bounds the returned `Vec` so a corrupt/huge store cannot
-/// materialize an unbounded allocation. Chosen well above realistic cardinality.
+/// Maximum rows in one convenience list read. Channel and follow RPC lists
+/// use bounded keyset pages to continue beyond it.
 const MAX_LIST_ROWS: i64 = 10_000;
 /// base32 lowercase (RFC 4648, no padding) alphabet (`linkedChatStore.ts:557`).
 const BASE32_LOWERCASE_ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
@@ -154,7 +152,7 @@ pub enum ChatChannelKind {
 }
 
 impl ChatChannelKind {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             ChatChannelKind::Channel => "channel",
             ChatChannelKind::Dm => "dm",
@@ -228,7 +226,7 @@ pub enum ChatActorKind {
 }
 
 impl ChatActorKind {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             ChatActorKind::Human => "human",
             ChatActorKind::Agent => "agent",
@@ -328,6 +326,8 @@ pub struct ChatMessageAutomation {
 /// A durable chat message row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatMessage {
+    /// This device's serialized local admission key. Never journaled.
+    pub author_actor_key: Option<String>,
     pub workspace_id: String,
     pub thread_id: String,
     pub message_id: String,
@@ -373,7 +373,7 @@ pub enum ChatReactionState {
 }
 
 impl ChatReactionState {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Added => "added",
             Self::Removed => "removed",
@@ -413,7 +413,7 @@ pub enum ChatDecisionState {
 }
 
 impl ChatDecisionState {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Open => "open",
             Self::Resolved => "resolved",
@@ -529,7 +529,7 @@ pub enum FollowTargetKind {
 }
 
 impl FollowTargetKind {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             FollowTargetKind::Person => "person",
             FollowTargetKind::Agent => "agent",
@@ -609,6 +609,8 @@ pub struct ChatFeedItem {
 /// Opening-message projection used by a channel thread summary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelOpeningMessage {
+    pub author_actor_key: Option<String>,
+    pub origin: Option<String>,
     pub message_id: String,
     pub author_kind: ChatActorKind,
     pub author_display_name: String,
@@ -767,7 +769,7 @@ pub struct AgentRunRecord {
     pub exit_code: Option<i64>,
     pub failure_reason: Option<String>,
     pub log_path: Option<String>,
-    pub failure_note_posted: bool,
+    pub failure_handled: bool,
 }
 
 /// A message-to-run link in the oracle's run-first ordering.
@@ -2223,6 +2225,22 @@ impl<'a> LinkedChatStore<'a> {
         &self,
         workspace_id: &str,
     ) -> Result<Vec<ChatChannelSummary>, DomainError> {
+        self.list_channels_page(workspace_id, None, MAX_LIST_ROWS)
+    }
+
+    /// Read one bounded channel page after an exclusive creation coordinate.
+    pub fn list_channels_page(
+        &self,
+        workspace_id: &str,
+        after: Option<(i64, &str)>,
+        limit: i64,
+    ) -> Result<Vec<ChatChannelSummary>, DomainError> {
+        if !(1..=MAX_LIST_ROWS).contains(&limit) {
+            return Err(DomainError::chat(
+                "invalid-parameters",
+                "Page limit is invalid.",
+            ));
+        }
         self.store.read_with(|conn| {
             let corrupt_read_state = conn
                 .query_row(
@@ -2244,13 +2262,22 @@ impl<'a> LinkedChatStore<'a> {
                     "Linked chat store is corrupt.",
                 ));
             }
+            // CROSS JOIN keeps the bounded page before the thread lookups.
             let mut stmt = conn
                 .prepare_cached(
-                    "SELECT ch.workspace_id, ch.channel_id, ch.name, ch.slug, ch.kind, \
+                    "WITH page AS ( \
+                       SELECT ch.* FROM chat_channels ch \
+                       WHERE ch.workspace_id = ?1 \
+                         AND (ch.created_at_ms, ch.channel_id) > (?2, ?3) \
+                         AND NOT EXISTS (SELECT 1 FROM chat_channel_placeholders p \
+                           WHERE p.workspace_id = ch.workspace_id AND p.channel_id = ch.channel_id) \
+                       ORDER BY ch.created_at_ms, ch.channel_id LIMIT ?4 \
+                     ) \
+                     SELECT ch.workspace_id, ch.channel_id, ch.name, ch.slug, ch.kind, \
                             ch.created_at_ms, ch.updated_at_ms, \
                             ch.type, ch.purpose, ch.folder_path, \
                             COALESCE(agg.thread_count, 0), COALESCE(agg.unread_count, 0) \
-                     FROM chat_channels ch \
+                     FROM page ch \
                      LEFT JOIN ( \
                        SELECT t.workspace_id, t.channel_id, COUNT(*) AS thread_count, \
                               SUM(MAX( \
@@ -2261,18 +2288,16 @@ impl<'a> LinkedChatStore<'a> {
                                             WHERE rs.workspace_id = t.workspace_id \
                                               AND rs.thread_id = t.thread_id), 0), \
                                 0)) AS unread_count \
-                       FROM chat_threads t \
-                       WHERE t.channel_id IS NOT NULL \
+                       FROM page selected CROSS JOIN chat_threads t \
+                       WHERE t.workspace_id = selected.workspace_id \
+                         AND t.channel_id = selected.channel_id \
                        GROUP BY t.workspace_id, t.channel_id \
                      ) agg ON agg.workspace_id = ch.workspace_id AND agg.channel_id = ch.channel_id \
-                     WHERE ch.workspace_id = ?1 \
-                       AND NOT EXISTS (SELECT 1 FROM chat_channel_placeholders p \
-                         WHERE p.workspace_id = ch.workspace_id AND p.channel_id = ch.channel_id) \
-                     ORDER BY ch.created_at_ms, ch.channel_id LIMIT ?2",
+                     ORDER BY ch.created_at_ms, ch.channel_id",
                 )
                 .map_err(DomainError::sql_corrupt)?;
             let rows = stmt
-                .query_map(params![workspace_id, MAX_LIST_ROWS], |row| {
+                .query_map(params![workspace_id, after.map_or(i64::MIN, |value| value.0), after.map_or("", |value| value.1), limit], |row| {
                     let channel = map_channel_row(row)?;
                     let thread_count = row.get(10)?;
                     let unread_count = row.get(11)?;
@@ -2466,6 +2491,20 @@ impl<'a> LinkedChatStore<'a> {
         input: &StartChannelThread,
         faults: &dyn FaultInjector,
     ) -> Result<(ChatThread, ChatMessage), DomainError> {
+        self.start_admitted_channel_thread(input, None, faults)
+    }
+
+    pub fn start_admitted_channel_thread(
+        &mut self,
+        input: &StartChannelThread,
+        author_actor_key: Option<&str>,
+        faults: &dyn FaultInjector,
+    ) -> Result<(ChatThread, ChatMessage), DomainError> {
+        if self.store.is_passive() {
+            return Err(DomainError::InvalidInput {
+                reason: "passive store cannot originate",
+            });
+        }
         non_empty(
             &input.workspace_id,
             "invalid-channel-name",
@@ -2595,8 +2634,8 @@ impl<'a> LinkedChatStore<'a> {
                 "INSERT INTO chat_messages \
                  (workspace_id, thread_id, message_order, message_id, author_kind, \
                   author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
-                  automation_id, chain_depth) \
-                 VALUES (?1, ?2, ?10, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?11, ?12, ?13)",
+                  automation_id, chain_depth, author_actor_key) \
+                 VALUES (?1, ?2, ?10, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?11, ?12, ?13, ?14)",
                 params![
                     input.workspace_id,
                     thread_id,
@@ -2611,9 +2650,11 @@ impl<'a> LinkedChatStore<'a> {
                     owner_name,
                     automation.as_ref().map(|automation| &automation.automation_id),
                     automation.as_ref().map(|automation| automation.chain_depth),
+                    author_actor_key,
                 ],
             )
             .map_err(DomainError::sql_persist)?;
+            dispatch::queue_local_dispatch_discovery(tx, &input.workspace_id, &input.message_id, now)?;
             index_message_mentions_in_tx(
                 tx,
                 &input.workspace_id,
@@ -2739,6 +2780,7 @@ impl<'a> LinkedChatStore<'a> {
             record_request(tx, input.request_id.as_deref(), &payload_hash, now)?;
             bump_chat_conversation_revision(tx, &input.workspace_id, thread_id)?;
             let message = ChatMessage {
+                author_actor_key: author_actor_key.map(str::to_owned),
                 workspace_id: input.workspace_id.clone(),
                 thread_id: thread_id.to_owned(),
                 message_id: input.message_id.clone(),
@@ -2769,6 +2811,20 @@ impl<'a> LinkedChatStore<'a> {
         input: &SendMessage,
         faults: &dyn FaultInjector,
     ) -> Result<ChatMessage, DomainError> {
+        self.send_admitted_message(input, None, faults)
+    }
+
+    pub fn send_admitted_message(
+        &mut self,
+        input: &SendMessage,
+        author_actor_key: Option<&str>,
+        faults: &dyn FaultInjector,
+    ) -> Result<ChatMessage, DomainError> {
+        if self.store.is_passive() {
+            return Err(DomainError::InvalidInput {
+                reason: "passive store cannot originate",
+            });
+        }
         non_empty(
             &input.workspace_id,
             "invalid-channel-name",
@@ -2867,8 +2923,8 @@ impl<'a> LinkedChatStore<'a> {
                 "INSERT INTO chat_messages \
                  (workspace_id, thread_id, message_order, message_id, author_kind, \
                   author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
-                  automation_id, chain_depth) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                  automation_id, chain_depth, author_actor_key) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     input.workspace_id,
                     input.thread_id,
@@ -2884,9 +2940,11 @@ impl<'a> LinkedChatStore<'a> {
                     owner_name,
                     automation.as_ref().map(|automation| &automation.automation_id),
                     automation.as_ref().map(|automation| automation.chain_depth),
+                    author_actor_key,
                 ],
             )
             .map_err(DomainError::sql_persist)?;
+            dispatch::queue_local_dispatch_discovery(tx, &input.workspace_id, &input.message_id, now)?;
             index_message_mentions_in_tx(
                 tx,
                 &input.workspace_id,
@@ -3030,6 +3088,7 @@ impl<'a> LinkedChatStore<'a> {
             record_request(tx, input.request_id.as_deref(), &payload_hash, now)?;
             bump_chat_conversation_revision(tx, &input.workspace_id, &input.thread_id)?;
             let message = ChatMessage {
+                author_actor_key: author_actor_key.map(str::to_owned),
                 workspace_id: input.workspace_id.clone(),
                 thread_id: input.thread_id.clone(),
                 message_id: input.message_id.clone(),
@@ -3387,7 +3446,7 @@ impl<'a> LinkedChatStore<'a> {
                     .prepare_cached(
                         "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
                          author_display_name, author_user_id, parent_message_id, origin, body, \
-                         created_at_ms, author_owner_display_name, automation_id, chain_depth \
+                         created_at_ms, author_owner_display_name, automation_id, chain_depth, author_actor_key \
                          FROM chat_messages WHERE workspace_id = ?1 \
                            AND message_id IN (SELECT value FROM json_each(?2))",
                     )
@@ -3410,6 +3469,8 @@ impl<'a> LinkedChatStore<'a> {
                 let opening_message = opening_id
                     .and_then(|opening_id| opening_messages.remove(&opening_id))
                     .map(|message| ChannelOpeningMessage {
+                        author_actor_key: message.author_actor_key,
+                        origin: message.origin,
                         reactions: reactions.remove(&message.message_id).unwrap_or_default(),
                         body_snippet: opening_message_body_snippet(&message.body),
                         message_id: message.message_id,
@@ -3888,7 +3949,7 @@ impl<'a> LinkedChatStore<'a> {
                 .prepare_cached(
                     "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
                      author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
-                     automation_id, chain_depth \
+                     automation_id, chain_depth, author_actor_key \
                      FROM chat_messages WHERE workspace_id = ?1 AND thread_id = ?2 \
                        AND message_order > ?3 ORDER BY message_order ASC LIMIT ?4",
                 )
@@ -4145,6 +4206,24 @@ impl<'a> LinkedChatStore<'a> {
         owner_user_id: &str,
         state: Option<&str>,
     ) -> Result<Vec<ChatFollow>, DomainError> {
+        self.list_follows_page(workspace_id, owner_user_id, state, None, MAX_LIST_ROWS)
+    }
+
+    /// Read one bounded follow page after an exclusive target coordinate.
+    pub fn list_follows_page(
+        &self,
+        workspace_id: &str,
+        owner_user_id: &str,
+        state: Option<&str>,
+        after: Option<(FollowTargetKind, &str)>,
+        limit: i64,
+    ) -> Result<Vec<ChatFollow>, DomainError> {
+        if !(1..=MAX_LIST_ROWS).contains(&limit) {
+            return Err(DomainError::chat(
+                "invalid-parameters",
+                "Page limit is invalid.",
+            ));
+        }
         // The write path stores trimmed owners: a padded lookup must resolve
         // the same identity or the caller sees a silently empty list.
         let owner_user_id = normalize_feed_identity(owner_user_id, "follow owner")?;
@@ -4167,12 +4246,20 @@ impl<'a> LinkedChatStore<'a> {
                      origin_id, origin_seq FROM chat_follows \
                      WHERE workspace_id = ?1 AND owner_user_id = ?2 \
                        AND (?3 IS NULL OR state = ?3) \
-                     ORDER BY target_kind, target_id LIMIT ?4",
+                       AND (target_kind, target_id) > (?4, ?5) \
+                     ORDER BY target_kind, target_id LIMIT ?6",
                 )
                 .map_err(DomainError::sql_corrupt)?;
             let rows = stmt
                 .query_map(
-                    params![workspace_id, owner_user_id, state, MAX_LIST_ROWS],
+                    params![
+                        workspace_id,
+                        owner_user_id,
+                        state,
+                        after.map_or("", |value| value.0.as_str()),
+                        after.map_or("", |value| value.1),
+                        limit
+                    ],
                     map_follow_row,
                 )
                 .map_err(DomainError::sql_corrupt)?;
@@ -6633,11 +6720,26 @@ fn ensure_thread_structure_exported(
 /// must never be able to forge either half of it (`ensureOriginId` /
 /// `nextOriginSeq`). SQLite supplies the random bytes so the domain needs no
 /// caller-controlled or process-global identity seam.
+///
+/// A session host's hosted replica holds no chat: the relay accepts only its
+/// hosted documents' writes, and its sequences come from `hosted_replicas`.
 fn local_replication_coordinate(
     tx: &Transaction<'_>,
     workspace_id: &str,
     now_ms: i64,
 ) -> Result<(String, i64), DomainError> {
+    let hosted: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM hosted_replicas WHERE workspace_id = ?1)",
+            [workspace_id],
+            |row| row.get(0),
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    if hosted {
+        return Err(DomainError::InvalidInput {
+            reason: crate::HOSTED_REPLICA_WRITE_REFUSED,
+        });
+    }
     tx.execute(
         "INSERT OR IGNORE INTO sync_identity \
          (workspace_id, origin_id, replication_epoch, stream_identity, created_at_ms, claim_state) \
@@ -6918,7 +7020,7 @@ fn message_by_id(
     conn.query_row(
         "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
          author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
-         automation_id, chain_depth \
+         automation_id, chain_depth, author_actor_key \
          FROM chat_messages WHERE workspace_id = ?1 AND message_id = ?2",
         params![workspace_id, message_id],
         map_message_row,
@@ -6938,7 +7040,7 @@ fn first_message_for_thread(
     conn.query_row(
         "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
          author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
-         automation_id, chain_depth \
+         automation_id, chain_depth, author_actor_key \
          FROM chat_messages WHERE workspace_id = ?1 AND thread_id = ?2 \
          ORDER BY created_at_ms, message_id LIMIT 1",
         params![workspace_id, thread_id],
@@ -7146,6 +7248,7 @@ fn map_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatMessa
     let author_owner_display_name: Option<String> = row.get(11)?;
     let automation_id: Option<String> = row.get(12)?;
     let chain_depth: Option<u32> = row.get(13)?;
+    let author_actor_key: Option<String> = row.get(14)?;
     let automation = match (automation_id, chain_depth) {
         (Some(automation_id), Some(chain_depth)) => Some(ChatMessageAutomation {
             automation_id,
@@ -7155,6 +7258,7 @@ fn map_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatMessa
     };
     Ok(
         ChatActorKind::from_db(&author_kind_str).map(|author_kind| ChatMessage {
+            author_actor_key,
             workspace_id,
             thread_id,
             message_id,

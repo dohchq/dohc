@@ -1,39 +1,62 @@
+import { DatasetHostError } from "@dohc/app-backend-runtime/dataset-error";
 import { parseApprovalAgent } from "@dohc/security-contract/approval-provenance";
 import { parseDatasetRevision, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { verifyDatasetArtifacts } from "@dohc/security-contract/dataset-artifacts";
 import type { DatasetScope, JournalDb } from "./journal.js";
 import { datasetHistoryUndo } from "./dataset-history-undo.js";
 
+const statements = new WeakMap<JournalDb, Map<string, ReturnType<JournalDb["prepare"]>>>();
+export function historyStatement(db: JournalDb, sql: string) {
+  let cache = statements.get(db);
+  if (!cache) { cache = new Map(); statements.set(db, cache); }
+  let statement = cache.get(sql);
+  if (!statement) { statement = db.prepare(sql); cache.set(sql, statement); }
+  return statement;
+}
+
+/** Latest dated journal revision, using each table's workspace/dataset/revision index. */
+export const historyActivitySql = `(SELECT recorded_at_ms FROM (
+  SELECT * FROM (SELECT revision,recorded_at_ms FROM dohc_dataset_events WHERE workspace_id=j.workspace_id AND dataset_id=j.dataset_id ORDER BY revision DESC LIMIT 1)
+  UNION ALL SELECT * FROM (SELECT revision,recorded_at_ms FROM dohc_dataset_checkpoint_times WHERE workspace_id=j.workspace_id AND dataset_id=j.dataset_id ORDER BY revision DESC LIMIT 1)
+) ORDER BY revision DESC LIMIT 1)`;
+
 /** Called inside an owner-authorized transaction. No input payloads or grants leave this boundary. */
-export function readDatasetHistory(db: JournalDb, scope: DatasetScope, approved: DatasetRevision, before: number, limit: number) {
-  const rows = db.prepare(`WITH changes AS (
+export function readDatasetHistory(db: JournalDb, scope: DatasetScope, approved: DatasetRevision | undefined, before: number, limit: number, metadataOnly = false) {
+  const receipt = metadataOnly ? "NULL" : "CASE WHEN length(CAST(e.result_json AS BLOB)) <= 16384 THEN e.result_json END";
+  const changes = `WITH changes AS (
     SELECT e.revision,e.operation,e.caller_key,e.recorded_at_ms,e.approved_revision_hash,
       length(e.changeset) AS changeset_bytes,json_array_length(e.attached_file_ids) AS attachment_count,
-      CASE WHEN length(CAST(e.result_json AS BLOB)) <= 16384 THEN e.result_json END AS undo_receipt,
+      ${receipt} AS undo_receipt,
       NULL AS previous_hash,a.automation_id,a.depth AS automation_depth FROM dohc_dataset_events e
       LEFT JOIN dohc_dataset_automation_revisions a ON a.workspace_id=e.workspace_id AND a.dataset_id=e.dataset_id AND a.revision=e.revision
       WHERE e.workspace_id=? AND e.dataset_id=? AND e.revision<?
     UNION ALL
-    SELECT revision,'Fields and rules',NULL,NULL,json_extract(cursor_json,'$.approvedRevisionHash'),0,0,NULL,
-      json_extract(previous_json,'$.approvedRevisionHash'),NULL,NULL FROM dohc_dataset_checkpoint_history
-      WHERE workspace_id=? AND dataset_id=? AND revision<? AND previous_json IS NOT NULL
-        AND json_extract(previous_json,'$.approvedRevisionHash') != json_extract(cursor_json,'$.approvedRevisionHash')
+    SELECT h.revision,'Fields and rules',NULL,t.recorded_at_ms,json_extract(h.cursor_json,'$.approvedRevisionHash'),0,0,NULL,
+      json_extract(h.previous_json,'$.approvedRevisionHash'),NULL,NULL FROM dohc_dataset_checkpoint_history h
+      LEFT JOIN dohc_dataset_checkpoint_times t ON t.workspace_id=h.workspace_id AND t.dataset_id=h.dataset_id AND t.revision=h.revision
+      WHERE h.workspace_id=? AND h.dataset_id=? AND h.revision<? AND h.previous_json IS NOT NULL
+        AND json_extract(h.previous_json,'$.approvedRevisionHash') != json_extract(h.cursor_json,'$.approvedRevisionHash')
     UNION ALL
-    SELECT checkpoint_revision,'Fields and rules',NULL,NULL,approved_revision_hash,0,0,NULL,
-      json_extract(checkpoint_previous_json,'$.approvedRevisionHash'),NULL,NULL FROM dohc_dataset_journals
-      WHERE workspace_id=? AND dataset_id=? AND checkpoint_revision<? AND checkpoint_previous_json IS NOT NULL
-        AND json_extract(checkpoint_previous_json,'$.approvedRevisionHash') != approved_revision_hash
-  ) SELECT * FROM changes ORDER BY revision DESC LIMIT ?`).all(
-    scope.workspaceId, scope.datasetId, before, scope.workspaceId, scope.datasetId, before,
-    scope.workspaceId, scope.datasetId, before, limit + 1);
+    SELECT j.checkpoint_revision,'Fields and rules',NULL,t.recorded_at_ms,j.approved_revision_hash,0,0,NULL,
+      json_extract(j.checkpoint_previous_json,'$.approvedRevisionHash'),NULL,NULL FROM dohc_dataset_journals j
+      LEFT JOIN dohc_dataset_checkpoint_times t ON t.workspace_id=j.workspace_id AND t.dataset_id=j.dataset_id AND t.revision=j.checkpoint_revision
+      WHERE j.workspace_id=? AND j.dataset_id=? AND j.checkpoint_revision<? AND j.checkpoint_previous_json IS NOT NULL
+        AND json_extract(j.checkpoint_previous_json,'$.approvedRevisionHash') != j.approved_revision_hash
+   )`;
+  const bindings = [scope.workspaceId, scope.datasetId, before, scope.workspaceId, scope.datasetId, before, scope.workspaceId, scope.datasetId, before];
+  const rows = historyStatement(db, `${changes} SELECT * FROM changes ORDER BY revision DESC LIMIT ?`).all(...bindings, limit + 1);
+  let olderRecordedAtMs = rows.find(row => row.recorded_at_ms !== null)?.recorded_at_ms ?? null;
+  if (metadataOnly && rows[0]?.recorded_at_ms === null && olderRecordedAtMs === null) {
+    olderRecordedAtMs = historyStatement(db, `${changes} SELECT recorded_at_ms FROM changes WHERE recorded_at_ms IS NOT NULL ORDER BY revision DESC LIMIT 1`).get(...bindings)?.recorded_at_ms ?? null;
+  }
   const entries = [];
   let undoBytes = 0;
   for (const row of rows.slice(0, limit)) {
-    const undo = datasetHistoryUndo(approved, String(row.operation), String(row.approved_revision_hash), row.undo_receipt);
+    const undo = !metadataOnly && approved ? datasetHistoryUndo(approved, String(row.operation), String(row.approved_revision_hash), row.undo_receipt) : undefined;
     const bytes = undo ? Buffer.byteLength(JSON.stringify(undo)) : 0;
     if (entries.length && undoBytes + bytes > 64 * 1024) break;
     undoBytes += bytes;
-    const approval = row.previous_hash === null ? undefined : db.prepare("SELECT agent_json FROM dohc_dataset_approval_provenance WHERE workspace_id=? AND dataset_id=? AND revision=? AND approved_revision_hash=?").get(scope.workspaceId,scope.datasetId,Number(row.revision),String(row.approved_revision_hash));
+    const approval = row.previous_hash === null ? undefined : historyStatement(db, "SELECT agent_json FROM dohc_dataset_approval_provenance WHERE workspace_id=? AND dataset_id=? AND revision=? AND approved_revision_hash=?").get(scope.workspaceId,scope.datasetId,Number(row.revision),String(row.approved_revision_hash));
     entries.push({ ...(approval ? {approvalAgent:parseApprovalAgent(JSON.parse(String(approval.agent_json)))} : {}), revision: Number(row.revision), operation: String(row.operation),
       callerReference: row.caller_key === null ? null : String(row.caller_key),
       recordedAtMs: row.recorded_at_ms === null ? null : Number(row.recorded_at_ms),
@@ -43,7 +66,7 @@ export function readDatasetHistory(db: JournalDb, scope: DatasetScope, approved:
       ...(row.automation_id === null ? {} : { automation: { automationId: String(row.automation_id), depth: Number(row.automation_depth) } }),
       ...(row.previous_hash === null ? {} : { schema: { previousRevisionHash: String(row.previous_hash), revisionHash: String(row.approved_revision_hash) } }) });
   }
-  return { entries, nextBeforeRevision: rows.length > entries.length ? entries.at(-1)!.revision : null };
+  return { ...(metadataOnly ? { olderRecordedAtMs: olderRecordedAtMs === null ? null : Number(olderRecordedAtMs) } : {}), entries, nextBeforeRevision: rows.length > entries.length ? entries.at(-1)!.revision : null };
 }
 
 /** Returns the immutable approved source, never the mutable workspace file at the same path. */
@@ -61,4 +84,31 @@ export function readDatasetHistoryRevision(db: JournalDb, scope: DatasetScope, r
   if (revision.datasetId !== scope.datasetId || revision.revisionSha256 !== revisionSha256) throw new Error("The saved Collection revision does not match this change.");
   const approval = db.prepare("SELECT agent_json FROM dohc_dataset_approval_provenance WHERE workspace_id=? AND dataset_id=? AND approved_revision_hash=? ORDER BY revision LIMIT 1").get(scope.workspaceId,scope.datasetId,revisionSha256);
   return { revision, schemaSql: String(schemaSql), operationSource: String(operationSource), ...(approval ? {approvalAgent:parseApprovalAgent(JSON.parse(String(approval.agent_json)))} : {}) };
+}
+
+export function datasetHistoryLineage(db: JournalDb, key: DatasetScope): string {
+  const row = historyStatement(db, "SELECT checkpoint_digest AS digest FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=? AND checkpoint_revision=0 UNION ALL SELECT json_extract(cursor_json,'$.digest') AS digest FROM dohc_dataset_checkpoint_history WHERE workspace_id=? AND dataset_id=? AND revision=0 LIMIT 1")
+    .get(key.workspaceId, key.datasetId, key.workspaceId, key.datasetId);
+  if (!row) throw new DatasetHostError("conflict", "Collection history lineage is unavailable.");
+  return String(row.digest);
+}
+
+/** Read-only metadata. The caller owns workspace authorization and the read snapshot. */
+export function readDatasetHistoryHeads(db: JournalDb, raw: { workspaceId: string; positions?: Array<{ datasetId: string; beforeRevision: number }>; skip?: string[]; limit?: number; maxSources?: number }) {
+  const workspaceId = raw.workspaceId, limit = raw.limit ?? 51;
+  if (typeof workspaceId !== "string" || !workspaceId.length || workspaceId.includes("\0") || Buffer.byteLength(workspaceId) > 256) throw new DatasetHostError("invalid", "Invalid Collection id.");
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new DatasetHostError("invalid", "Invalid Collection history page.");
+  const positions = raw.positions && new Map(raw.positions.map(p => [p.datasetId, p.beforeRevision]));
+  const skip = new Set(raw.skip);
+  const select = "SELECT c.dataset_id,json_extract(c.revision_json,'$.definition.name') AS name,j.revision FROM dohc_dataset_catalog c JOIN dohc_dataset_journals j ON j.workspace_id=c.workspace_id AND j.dataset_id=c.dataset_id LEFT JOIN dohc_dataset_lifecycle l ON l.workspace_id=c.workspace_id AND l.dataset_id=c.dataset_id WHERE c.workspace_id=? AND COALESCE(l.archived,0)=0";
+  const rows = positions
+    ? [...positions.keys()].flatMap(datasetId => { const row = historyStatement(db, select + " AND c.dataset_id=?").get(workspaceId, datasetId); return row ? [row] : []; })
+    : historyStatement(db, select + ` ORDER BY ${historyActivitySql} DESC,c.dataset_id LIMIT ?`).all(workspaceId, raw.maxSources ?? 129);
+  const pages = rows.filter(row => !skip.has(String(row.dataset_id)) && (!positions || positions.has(String(row.dataset_id)))).map(row => {
+    const datasetId = String(row.dataset_id), key = { workspaceId, datasetId }, before = positions?.get(datasetId) ?? Number.MAX_SAFE_INTEGER;
+    if (!Number.isSafeInteger(before) || before < 1) throw new DatasetHostError("invalid", "Invalid Collection history position.");
+    return { datasetId, name: String(row.name), headRevision: Number(row.revision), lineage: datasetHistoryLineage(db, key),
+      ...readDatasetHistory(db, key, undefined, before, limit, true) };
+  });
+  return pages;
 }

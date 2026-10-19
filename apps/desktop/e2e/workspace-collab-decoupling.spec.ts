@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { DOCUMENT_END } from "./helpers/keys";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -65,7 +66,7 @@ test("a local workspace edits a rich doc through the engine provider without a c
 
     // Type into the live rich editor and let the debounced settle land.
     await editor.click();
-    await page.keyboard.press("ControlOrMeta+End");
+    await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.type(sentinel);
     await expect(page.getByTestId("markdown-save-state")).toHaveAttribute(
       "data-state",

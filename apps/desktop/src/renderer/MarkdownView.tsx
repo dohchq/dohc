@@ -1,3 +1,4 @@
+import { hasPrimaryModifier, shortcutTitle } from "../shortcuts/shortcutRegistry";
 import { SAVED_HERE, SAVING, saveProblem, saveStateEqual, type SaveState } from "@dohc/workspace-contracts/save-state";
 import { registerPendingEditorDraft } from "./pendingEditorDrafts";
 import { RecordButtonsRow } from "./collections/RecordButtonsRow";
@@ -7,7 +8,8 @@ import {
   DocumentControls,
   EngineMayHoldDocumentNotice,
   OPENING_TITLE,
-  ViewHeader,
+  OpeningState,
+  ViewActions,
   OrphanedDraftNotices,
   EngineRemovalInProgressNotice,
 } from "./fileInspectorUi";
@@ -17,13 +19,15 @@ import {
   StateMark,
 } from "./ui/StateMark";
 import { LazySourceCodeEditor } from "./LazySourceCodeEditor";
+import { prepareArtifactSource, projectArtifactSource } from "./editor/artifactSource";
+import { canPreserveMarkdownSource } from "@dohc/ydoc-projection/artifact-markdown-guard";
 import type { PendingTextUndo } from "./fileEditorUndo";
 import {
   AUTOSAVE_DEBOUNCE_MS,
   publishOwnedUnmountDraft,
   type DraftFlush,
 } from "./useAutosavedTextDraft";
-import { resolveWikilinkNavigation, resolveWorkspaceLinkNavigation } from "./wikilinkNavigation";
+import { resolveLinkNavigation } from "./wikilinkNavigation";
 import { reportTextSave } from "./shell/useDocumentSaveNotices";
 import { CopyButton } from "./ui/CopyButton";
 import { SkeletonRows } from "./ui/SkeletonRows";
@@ -46,13 +50,8 @@ import { bridge } from "./bridge";
 import type { DocumentGoneCause } from "./collab/engineDocLease";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 import {
-  frontmatterBlockFor,
-  writtenFrontmatterKeys,
-} from "@dohc/ydoc-projection/frontmatter";
-import {
   markdownEditorBody,
   mergeMarkdownEditorBody,
-  orderFrontmatter,
 } from "./markdown/frontmatter";
 import type {
   BlockNavigationTarget,
@@ -64,6 +63,7 @@ import { blockTargetForLine } from "./editor/intraBlock";
 import type { HeadingNavigationTarget } from "./editor/OutlinePanel";
 import type { PropertiesPanelProps } from "./PropertiesPanel";
 import { PageIdentity } from "./PageIdentity";
+import { PROPERTIES_LINE, PROPERTIES_PANEL } from "./pageTopmatter";
 import { FrontmatterAsWritten, LiveFrontmatterAsWritten } from "./FrontmatterAsWritten";
 import { captureOrphanedDraft, useOrphanedDrafts } from "./orphanedDrafts";
 import { BacklinksPanel } from "./BacklinksPanel";
@@ -78,11 +78,6 @@ import { dirnameOf } from "./path";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
 
 const EMPTY_WIKILINK_FILES: ReadonlyArray<WikilinkFile> = [];
-
-// The engine Y.Doc frontmatter map field name — the same key PageIdentity and
-// PropertiesPanel use for title, icon, and properties. Read it directly so
-// engine-mode export/copy reflects live frontmatter edits.
-const ENGINE_FRONTMATTER_FIELD = "frontmatter";
 
 // The filename without its directory or extension — the Notion-style empty
 // title placeholder ("2026-plan.md" -> "2026-plan").
@@ -172,13 +167,13 @@ function DeletedWhileEditingNotice(props: {
   );
 }
 
-// One line in the 28px the empty properties row takes, so the body below
-// does not move when the panel arrives.
+// One line in the 24px a line of pills takes, so the body below does not
+// move when the panel arrives.
 function PropertiesFallback() {
   return (
-    <div className="dohc-page-properties">
-      <div className="dohc-page-properties__inner">
-        <SkeletonRows rows={1} label="Loading properties..." className="h-7 justify-center" />
+    <div className={PROPERTIES_PANEL}>
+      <div className={PROPERTIES_LINE}>
+        <SkeletonRows rows={1} label="Loading properties..." className="h-6 w-full justify-center" />
       </div>
     </div>
   );
@@ -210,6 +205,8 @@ export function MarkdownView(props: {
   chatMentionsAvailable?: boolean;
   onSharePath?: (path: string) => void;
   onSaveStateChange?: (state: SaveState) => void;
+  // A live document became read-only while it was open.
+  onLiveReadOnly?: () => void;
   registerDraftFlush?: (flush: DraftFlush | null) => void;
   knownFiles?: ReadonlyArray<WikilinkFile>;
   pendingUndo?: PendingTextUndo;
@@ -727,46 +724,18 @@ export function MarkdownView(props: {
     return latestDraft.current;
   };
 
-  // Engine-mode export/serialize: in the engine branch the WYSIWYG editor is
-  // always mounted and collab-bound to the engine Y.Doc, so its live body is
-  // the canonical current markdown. serializeDraftRef can't be reused here
-  // because it falls back to the stale (possibly truncated) props.body whenever
-  // the properties panel is open or the doc opened in read mode, neither of
-  // which reflects the live edit. This reads the editor on demand at click time
-  // so the exported source is fresh.
-  //
-  // Frontmatter (title / icon / properties) is edited through PageIdentity and
-  // PropertiesPanel, which write straight into the engine Y.Doc's frontmatter
-  // MAP — not into latestDraft.current, which stays at this mount's initial
-  // markdown. Reading latestDraft.current for the frontmatter therefore exports
-  // a stale title. Serialize the live map instead and combine it with the body
-  // the mounted WYSIWYG editor already owns.
-  const serializeEngineDraft = (): string | null => {
-    // This export path needs the mounted editor's live body. `props.body` is
-    // the markdown cache beside the canonical Y.Doc, so it lags every edit the
-    // document has taken since the read. On the recovery path (a failed read
-    // whose retry bound the document), it is empty. Refuse instead of
-    // exporting stale text; the menu says the document is not ready.
-    const editorBody = wysiwygRef.current?.getMarkdown();
-    if (editorBody === undefined && displayDoc !== null) return null;
-    const body = editorBody ?? markdownEditorBody(props.body);
-    if (!displayDoc) {
-      return mergeMarkdownEditorBody(latestDraft.current, body);
+  // Read the live Y.Doc at the action, while retaining the mounted-editor guard.
+  const serializeEngineDraft = async (): Promise<string | null> => {
+    if (displayDoc) {
+      if (wysiwygRef.current === null || displayDoc.isDestroyed) return null;
+      if (canPreserveMarkdownSource(displayDoc.getMap('meta').get('dohcMarkdownSource'))) {
+        try {return await projectArtifactSource(displayDoc);} catch { /* Canonical output needs no witness proof. */ }
+      }
+      const {yDocToMarkdown} = await loadImportExport();
+      return displayDoc.isDestroyed ? null : yDocToMarkdown(displayDoc);
     }
-    const liveMeta = Object.fromEntries(
-      displayDoc.getMap(ENGINE_FRONTMATTER_FIELD).entries(),
-    ) as Record<string, unknown>;
-    // The frontmatter text the settle keeps, so a copy matches the file.
-    const meta = displayDoc.getMap("meta");
-    const written = writtenFrontmatterKeys(displayDoc.getMap(ENGINE_FRONTMATTER_FIELD), meta);
-    const block = frontmatterBlockFor(
-      orderFrontmatter(liveMeta),
-      meta.get("dohcFrontmatterSource"),
-      body,
-      "\n",
-      written,
-    );
-    return `${block}${body}`;
+    const editorBody = wysiwygRef.current?.getMarkdown();
+    return mergeMarkdownEditorBody(latestDraft.current, editorBody ?? markdownEditorBody(props.body));
   };
 
   const hasSetAsideEdit =
@@ -778,6 +747,13 @@ export function MarkdownView(props: {
   }, [surfaceMode, props.path]);
 
   const { onSaveStateChange } = props;
+  const onLiveReadOnly = useRef(props.onLiveReadOnly);
+  onLiveReadOnly.current = props.onLiveReadOnly;
+  // Once each time the live document turns read-only, with or without an
+  // edit waiting: the shell asks whether the share behind it ended.
+  useEffect(() => {
+    if (engine.readOnlyWhileEditing) onLiveReadOnly.current?.();
+  }, [engine.readOnlyWhileEditing]);
 
   // Parse-once + visible-first: the memo stops re-parses on
   // unrelated re-renders (collab status flips, save-state ticks), and the
@@ -793,23 +769,29 @@ export function MarkdownView(props: {
   const openWorkspaceLinkRef = useRef<(target: WorkspaceLinkTarget) => void>(
     () => undefined,
   );
-  openWikilinkRef.current = (target) => {
-    const navigation = resolveWikilinkNavigation(
-      target,
-      props.path,
-      knownFiles,
-      ++linkNavigationNonce.current,
-    );
-    props.onOpenPath?.(navigation.path, navigation.headingTarget);
+  const navigationIdentity = useRef({ workspaceId: props.workspaceId, path: props.path });
+  if (navigationIdentity.current.workspaceId !== props.workspaceId || navigationIdentity.current.path !== props.path) {
+    navigationIdentity.current = { workspaceId: props.workspaceId, path: props.path };
+  }
+  useEffect(() => () => { navigationIdentity.current = { workspaceId: "", path: "" }; }, []);
+  const navigate = (literal: string, kind: "wikilink" | "markdown") => {
+    const identity = navigationIdentity.current;
+    const nonce = ++linkNavigationNonce.current;
+    const current = () => navigationIdentity.current === identity && linkNavigationNonce.current === nonce;
+    void resolveLinkNavigation(props.workspaceId, props.path, literal, kind, nonce)
+      .then(navigation => {
+        if (current() && navigation) props.onOpenPath?.(navigation.path, navigation.headingTarget);
+      })
+      .catch(error => {
+        if (current()) props.onButtonError?.("This link could not be opened.", error, () => navigate(literal, kind));
+      });
   };
-  openWorkspaceLinkRef.current = (target) => {
-    const navigation = resolveWorkspaceLinkNavigation(
-      target,
-      props.path,
-      knownFiles,
-      ++linkNavigationNonce.current,
-    );
-    props.onOpenPath?.(navigation.path, navigation.headingTarget);
+  openWikilinkRef.current = target => navigate(target, "wikilink");
+  openWorkspaceLinkRef.current = target => {
+    // The activation parser has decoded the path. Encode delimiters before the
+    // engine splits the literal's query and fragment, then decodes its path.
+    const path = target.path.split("/").map(encodeURIComponent).join("/");
+    navigate(path + (target.rawFragment !== undefined ? "#" + target.rawFragment : ""), "markdown");
   };
   const markdownOpenMarkedRef = useRef(false);
   // Complete the open from the first real Markdown surface that commits. The
@@ -930,11 +912,14 @@ export function MarkdownView(props: {
   flushEngineUpdatesRef.current = engine.flushPendingLocalUpdates;
 
   // "View markdown as source" (engine mode): a READ-ONLY projection of the
-  // canonical Y.Doc through the same yDocToMarkdown the settle uses to write
-  // the .md — the source view shows exactly what lands on disk. Deliberately
+  // canonical Y.Doc with its verified source, as settlement writes the .md.
+  // The source view shows exactly what lands on disk. Deliberately
   // not editable: `atoms.body` markdown is a derived cache of the Y.Doc, and
   // an editable raw surface would have to round-trip through full-body
   // markdown patching (the invariant this must never become).
+  useEffect(() => {
+    if (displayDoc) return prepareArtifactSource(displayDoc);
+  }, [displayDoc]);
   const [showSource, setShowSource] = useState(false);
   const [sourceProjection, setSourceProjection] = useState<{
     documentKey: string;
@@ -1253,28 +1238,44 @@ export function MarkdownView(props: {
     const doc = displayDoc;
     const documentKey = props.documentKey;
     let cancelled = false;
-    let serialize: ((doc: Y.Doc) => string) | null = null;
+    let serialize: ((doc: Y.Doc) => string | Promise<string>) | null = null;
+    let inFlight = false;
+    let trailing = false;
     let updateTimer: ReturnType<typeof setTimeout> | null = null;
     let updateDeadline: number | null = null;
-    const recompute = () => {
+    const recompute = async () => {
       if (cancelled || !serialize) return;
-      const markdown = serialize(doc);
-      if (cancelled) return;
-      setSourceProjection({ documentKey, doc, markdown });
+      if (inFlight) {trailing = true; return;}
+      inFlight = true;
+      try {
+        const markdown = await serialize(doc);
+        if (cancelled) return;
+        setSourceProjection({ documentKey, doc, markdown });
+      } catch (error) {
+        if (!cancelled) props.onButtonError?.(
+          'dohc could not open the Markdown source.', error, () => {void recompute();},
+        );
+      } finally {
+        inFlight = false;
+        if (trailing && !cancelled) {trailing = false; void recompute();}
+      }
     };
     const runScheduledRecompute = () => {
       updateTimer = null;
       updateDeadline = null;
-      recompute();
+      void recompute();
     };
     void loadImportExport().then((mod) => {
-      serialize = mod.yDocToMarkdown;
+      // A failed witness proof shows canonical Markdown, as Copy does.
+      serialize = (current) => canPreserveMarkdownSource(current.getMap('meta').get('dohcMarkdownSource'))
+        ? projectArtifactSource(current).catch(() => mod.yDocToMarkdown(current))
+        : mod.yDocToMarkdown(current);
       if (updateTimer !== null) {
         clearTimeout(updateTimer);
         updateTimer = null;
         updateDeadline = null;
       }
-      recompute();
+      void recompute();
     });
     // Live: agent edits / co-editors keep flowing into the mirror doc while
     // the source view is up. A co-editor's keystroke burst forwards one delta
@@ -1298,7 +1299,7 @@ export function MarkdownView(props: {
       if (updateTimer !== null) clearTimeout(updateTimer);
       doc.off("update", scheduleRecompute);
     };
-  }, [showSource, displayDoc, props.documentKey]);
+  }, [showSource, displayDoc, props.documentKey, props.onButtonError]);
 
   // One toggle for both branches (the shell's palette command and Ctrl/Cmd+/
   // route through it): engine mode flips the read-only source projection; the
@@ -1687,7 +1688,7 @@ export function MarkdownView(props: {
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
-      if (!(event.metaKey || event.ctrlKey) || event.key !== "/") return;
+      if (!hasPrimaryModifier(event, window.dohcDesktop?.platform) || event.key !== "/") return;
       if (props.autoFocus === false) return;
       event.preventDefault();
       // Engine mode: the same keystroke drives the source-view toggle (the
@@ -1917,6 +1918,10 @@ export function MarkdownView(props: {
   // The restore half of #567: each set-aside draft stays copyable until the
   // user takes it or dismisses it. Rendered in both branches below — the
   // reopen can resolve into either editor.
+  // The read-only view that follows an ended share closes the live session,
+  // so the draft that turn set aside is remembered here to keep its words.
+  const readOnlyDraftId = useRef<number | null>(null);
+  if (engine.readOnlyDraftId !== null) readOnlyDraftId.current = engine.readOnlyDraftId;
   const documentNotices = (
     <>
       {engine.deletedWhileEditing ? (
@@ -1925,7 +1930,13 @@ export function MarkdownView(props: {
           hasSetAsideEdit={hasSetAsideEdit}
         />
       ) : null}
-      <OrphanedDraftNotices workspaceId={props.workspaceId} path={props.path} />
+      <OrphanedDraftNotices
+        workspaceId={props.workspaceId}
+        path={props.path}
+        message="This document became read-only. Copy your text to keep it."
+        messageDraftId={readOnlyDraftId.current}
+        replacedDraftIds={engine.replacedDraftIds}
+      />
     </>
   );
 
@@ -1939,6 +1950,7 @@ export function MarkdownView(props: {
       refreshKey={props.refreshKey}
       onOpenPath={props.onOpenPath}
       onOpenChatMention={props.onOpenChatMention}
+      onError={props.onButtonError}
       chatMentionsAvailable={props.chatMentionsAvailable}
     />
   );
@@ -1954,13 +1966,13 @@ export function MarkdownView(props: {
   if (displayDoc) {
     return (
       <div className="flex min-h-0 flex-1 flex-col">
-        <ViewHeader
-          path={props.path}
+        <ViewActions
           onShare={onShareCurrentPath}
           status={
             <StateMark
               testId="markdown-save-state"
               truncate
+              quietWhenCalm
               state={engine.readOnlyWhileEditing || readOnlyCopy ? "read-only" : engineChipState}
               shown={engine.readOnlyWhileEditing || readOnlyCopy
                 ? orphanedDrafts.length > 0 ? "read-only-transition" : engine.readOnlyCause === "access-ended" ? "read-only" : "read-only-unavailable"
@@ -1976,6 +1988,7 @@ export function MarkdownView(props: {
                     ? engine.saveError
                     : undefined
               }
+              onRetry={engine.retryReplacement ?? undefined}
             />
           }
           actions={
@@ -1984,17 +1997,17 @@ export function MarkdownView(props: {
                 label: showSource ? "Editor" : "Source",
                 testId: "markdown-source-toggle",
                 pressed: showSource,
-                title: "Toggle markdown source (Ctrl+/)",
+                title: `Toggle markdown source (${shortcutTitle("toggle-markdown-source", window.dohcDesktop?.platform)})`,
                 onClick: toggleSourceView,
               }}
               menu={{
                 workspaceId: props.workspaceId,
                 reportError: props.onButtonError,
                 suggestedName: filenameStem(props.path),
-                // Always live, even in source view: the WYSIWYG editor stays
-                // MOUNTED (hidden) while source is shown, so its ref keeps
-                // serializing the current Y.Doc state at click time.
+                // Read the live Y.Doc at the action. The hidden mounted editor
+                // supplies the readiness guard while source view is shown.
                 getMarkdown: () => serializeEngineDraft(),
+                documentKey: props.documentKey,
               }}
             />
           }
@@ -2049,8 +2062,8 @@ export function MarkdownView(props: {
           className="min-h-0 flex-1 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable]"
         >
           {/* Title + inline properties are one top-matter zone (hovering it
-              reveals the quiet "Add a property" affordance on empty docs). */}
-          <div className="dohc-page-topmatter">
+              reveals the quiet "Add a property" + on empty docs). */}
+          <div className="group/topmatter">
             <PageIdentity
               ydoc={displayDoc}
               filenameStem={filenameStem(props.path)}
@@ -2112,39 +2125,25 @@ export function MarkdownView(props: {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <ViewHeader
-        path={props.path}
+      <ViewActions
         onShare={onShareCurrentPath}
         status={
           <>
-            {/* The wait has its own word: an opening document is not a
-                saved one, and dohc has not decided about it yet. Read mode
-                hides the "Saved" idle chip, but PageIdentity stays editable
-                there and autosaves title/icon edits — so a pending or failed
-                save (saveState.kind !== "saved-here") must surface even when not
+            {/* The wait has its own word, shown once the open is slow
+                (OpeningState): an opening document is not a saved one, and
+                dohc has not decided about it yet. Read mode hides the
+                "Saved" chip, but PageIdentity stays editable there and
+                autosaves title/icon edits — so a pending or failed save
+                (saveState.kind !== "saved-here") must surface even when not
                 `editing`, or a failed title/icon save is invisible while the
                 optimistic value keeps showing. */}
-            {opening ? (
-              <span
-                data-testid="markdown-open-state"
-                data-state="opening"
-                // The same sentence as the disabled button's, because a
-                // browser does not reliably draw a tooltip over a disabled
-                // control. This span is not disabled, so hovering the state
-                // always explains it.
-                title={OPENING_TITLE}
-                // Shown only if opening is slow, like the loading lines.
-                className="dohc-reveal-if-slow min-w-0 truncate font-mono text-[11px] text-subtle"
-              >
-                Opening…
-              </span>
-            ) : null}
+            {opening ? <OpeningState /> : null}
             {/* Independent of "Opening…", not its else-branch: a save
                 that fails inside the opening window must still surface. While
                 opening, `editing` is always false, so the chip appears there
                 only when the state is not "saved". */}
             {editing || chipState !== "saved" ? (
-              <StateMark testId="markdown-save-state" truncate state={chipState} shown={chipState} title={chipState === "read-only" ? "Your access to this document ended." : undefined} />
+              <StateMark testId="markdown-save-state" truncate quietWhenCalm state={chipState} shown={chipState} title={chipState === "read-only" ? "Your access to this document ended." : undefined} />
             ) : null}
           </>
         }
@@ -2205,7 +2204,7 @@ export function MarkdownView(props: {
           timeout aside — where the user can copy it — instead of letting it
           reach disk over the artifact the engine is binding. */}
       {engine.engineMayHoldDocument || engine.liveHostUnavailable ? (
-        <EngineMayHoldDocumentNotice onRetry={props.onRetryEngineOpen} contentShown message={engine.sharedWaiting?.message} />
+        <EngineMayHoldDocumentNotice onRetry={props.onRetryEngineOpen} contentShown message={engine.openRefusal ?? engine.sharedWaiting?.message} />
       ) : null}
       {engine.removalInProgress ? (
         <EngineRemovalInProgressNotice
@@ -2245,7 +2244,7 @@ export function MarkdownView(props: {
           data-dohc-doc-pane=""
           className="min-h-0 flex-1 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable]"
         >
-          <div className="dohc-page-topmatter">
+          <div className="group/topmatter">
             <PageIdentity
               body={draft}
               onChange={onPropertiesDraft}
@@ -2317,29 +2316,31 @@ export function MarkdownView(props: {
         <div
           ref={localDocPaneRef}
           data-testid="view-markdown"
-          className="min-h-0 flex-1 overflow-auto [scrollbar-gutter:stable]"
+          className="min-h-0 flex-1 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable]"
         >
-          <div className="dohc-page-topmatter">
+          <div className="group/topmatter">
             {/* Title, icon and properties autosave through the same disk write
                 as the body, so the opening refusal covers them too. */}
             <PageIdentity
               body={draft}
               onChange={onPropertiesDraft}
               filenameStem={filenameStem(props.path)}
-              readOnly={readOnly || opening}
+              readOnly={readOnly}
+              opening={opening}
             />
             {recordButtons}
-            {!readOnly && !opening ? (
+            {/* Opening, the panel draws its pills where they will be and the
+                block as written starts as it will once the open answers, so
+                the ready document draws in the same place. */}
+            {readOnly ? null : (
               <Suspense fallback={<PropertiesFallback />}>
-                <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} fieldMarks={fieldMarks} />
+                <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} fieldMarks={fieldMarks} opening={opening} />
               </Suspense>
-            ) : null}
-            <FrontmatterAsWritten markdown={draft} propertiesShown={!readOnly && !opening} />
+            )}
+            <FrontmatterAsWritten markdown={draft} propertiesShown={!readOnly} />
           </div>
-          <div
-            ref={readDocumentRef}
-            className="dohc-readable-text p-6 text-[length:var(--dohc-editor-font-size)] [font-family:var(--dohc-editor-font)]"
-          >
+          {/* The editor's own rules draw the body, so it replaces it in place. */}
+          <div ref={readDocumentRef} className="dohc-readable-text dohc-notion-editor">
             {renderedDocument}
           </div>
           {backlinks}

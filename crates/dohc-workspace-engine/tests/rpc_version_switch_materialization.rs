@@ -21,21 +21,21 @@ async fn fixture(
     let scratch = ScratchDir::new().expect("scratch");
     let workspace_id = format!("ws-switch-{name}");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace_id,
-                }),
-            ),
-        )
-        .await
-        .expect("open");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace_id,
+            }),
+        ),
+    )
+    .await
+    .expect("open");
     let handle = serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
     (scratch, transport, handle, workspace_id)
 }
@@ -48,17 +48,17 @@ async fn write_text(
     path: &str,
     text: &str,
 ) {
-    call(
+    call_keyed(
         transport,
         handle,
         id,
         "versionedText.write",
+        &format!("{id}-{version_id}-{path}"),
         json!({
             "versionId": version_id,
             "path": path,
             "text": text,
             "origin": "api",
-            "requestId": format!("{id}-{version_id}-{path}"),
         }),
     )
     .await;
@@ -194,17 +194,17 @@ async fn ordinary_binary_write_after_switch_is_not_superseded_by_switch_timestam
     write_text(&transport, &handle, 4, &feature, "notes.md", "feature").await;
     switch_to(&transport, &handle, 5, &workspace_id, &feature).await;
 
-    call(
+    call_keyed(
         &transport,
         &handle,
         6,
         "versionedBinary.write",
+        "ordinary-binary-after-switch",
         json!({
             "versionId": feature,
             "path": "notes.md",
             "bytes": [0, 1, 2, 3, 255],
             "origin": "api",
-            "requestId": "ordinary-binary-after-switch",
         }),
     )
     .await;
@@ -414,17 +414,17 @@ async fn switching_deletes_path_missing_from_target() {
     write_text(&transport, &handle, 2, "main", "retired.md", "main").await;
     std::fs::write(scratch.path().join("retired.md"), "main").expect("seed disk");
     let feature = create_feature(&transport, &handle, 3, &workspace_id).await;
-    call(
+    call_keyed(
         &transport,
         &handle,
         4,
         "versionedText.delete",
+        "switch-delete-feature",
         json!({
             "workspaceId": workspace_id,
             "versionId": feature,
             "path": "retired.md",
             "origin": "api",
-            "requestId": "switch-delete-feature",
         }),
     )
     .await;

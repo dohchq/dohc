@@ -1,3 +1,4 @@
+import {ServiceHostRetirementConflict} from "./storage/serviceHostEnrollment";
 import {readBoundedJson} from "@dohc/service-http";
 import type {ResolveActor} from "@dohc/workspace-auth/session";
 import {liveDocumentKindForPath} from "@dohc/workspace-contracts/live-documents";
@@ -18,7 +19,7 @@ export function serviceHostSharePaths(storage: SyncRelayStorage, input: {workspa
   const files = storage.readCurrentFileState({workspaceId: input.workspaceId, versionId: "main", selectorPaths: selector.paths, limit: 5_000});
   if (files.tooMany) throw badRequest("This share has too many files for live editing.");
   const paths = files.files.filter(file => file.contentKind === "text" && liveDocumentKindForPath(file.path) === "richdoc" &&
-    (!input.missingOnly || !storage.hasServiceHostEnrollment(input.workspaceId, file.path))).map(file => file.path);
+    (!input.missingOnly || !storage.hasKeptServiceHostEnrollment(input.workspaceId, file.path))).map(file => file.path);
   if (paths.length > 64) throw badRequest("This server supports up to 64 live documents.");
   return paths;
 }
@@ -34,7 +35,7 @@ export function discoverServiceHostDocuments(storage: SyncRelayStorage, onRefuse
     catch (error) {if (error instanceof RelayError) {onRefused?.(error); continue;} throw error;}
     for (const path of paths) {
       const key = JSON.stringify([share.workspaceId, path]);
-      if (existing.has(key) || storage.hasServiceHostEnrollment(share.workspaceId, path)) continue;
+      if (existing.has(key) || storage.hasKeptServiceHostEnrollment(share.workspaceId, path)) continue;
       try {storage.enrollServiceHostDocument({workspaceId: share.workspaceId, ownerUserId, shareId: share.shareId, path, nowMs: Date.now(), guard: storage.captureStanding()});}
       catch (error) {if (error instanceof RelayError) {onRefused?.(error); continue;} throw error;}
       existing.add(key);
@@ -75,15 +76,27 @@ export function serviceHostEnrollmentRefusals(storage: SyncRelayStorage, workspa
 
 export function createServiceHostEnrollmentRoutes(options: {
   storage: SyncRelayStorage; history: LiveJournalHistoryAuthority; resolveActor: ResolveActor;
-  host: Pick<Awaited<ReturnType<typeof startSelfHostedLiveHost>>, "ready" | "reconcile" | "unavailable">;
+  host: Pick<Awaited<ReturnType<typeof startSelfHostedLiveHost>>, "ready" | "reconcile" | "unavailable" | "blocked" | "unblock" | "diverged">;
 }) {
   const {storage, history, host} = options;
   const activation = storage.createServiceActivationStore(history);
+  const changed = (row: ServiceHostEnrollment) => !storage.workspaceIsOwnedBy(row.workspaceId, row.ownerUserId) || storage.verifyWorkspaceIdentity(row) !== "matched";
+  // Nothing its owner does, not even a Pause or Stop, continues a document
+  // whose hosted replica diverged. Its store stays for the operator.
+  const diverged = (row: ServiceHostEnrollment) => !changed(row) && host.diverged(row);
   function state(row: ServiceHostEnrollment) {
     const base = {path: row.path};
-    if (!row.enabled) return {...base, status: "paused"};
-    if (!storage.workspaceIsOwnedBy(row.workspaceId, row.ownerUserId) || storage.verifyWorkspaceIdentity(row) !== "matched") return {...base, status: "unavailable", reason: "workspace-changed"};
+    if (diverged(row)) return {...base, status: "unavailable", reason: "session-host-diverged"};
+    // A Pause still waiting for its document to unload reads as paused.
+    if (!row.enabled || row.ownerStop) return {...base, status: "paused"};
+    if (changed(row)) return {...base, status: "unavailable", reason: "workspace-changed"};
     if (storage.objectIdAtPathInVersion({workspaceId: row.workspaceId, versionId: "main", path: row.path}) !== row.objectId) return {...base, status: "unavailable", reason: "document-unavailable"};
+    // Only the owner's Resume lets the host try a document it could not continue.
+    // One with no live-editing history needs its owner to open it first, and a Resume
+    // cannot continue one whose host copy misses an edit made while live editing was off.
+    const block = host.blocked(row);
+    if (block) return {...base, status: "unavailable", reason: block === "without-lineage" ? "live-document-without-lineage" :
+      block === "live-edit-unadmitted" ? "live-edit-unadmitted" : "session-host-refused"};
     const saved = activation.read(row.workspaceId, row.path, 4 * 1024 * 1024);
     if (!saved?.completed) return {...base, status: host.unavailable ? "unavailable" : "preparing"};
     const document = {workspaceId: row.workspaceId, mainVersionId: "main", objectId: saved.source.objectId, lineageClaimId: saved.source.lineageClaimId};
@@ -112,20 +125,28 @@ export function createServiceHostEnrollmentRoutes(options: {
         url.searchParams.has("after") ? parseShareId(url.searchParams.get("after") ?? undefined) : undefined)});
       if (retiredPage) {
         const page = storage.listRetiredServiceHostEnrollments(workspaceId, url.searchParams.get("after") ?? undefined);
-        return response({ok: true, documents: page.documents.map(row => ({path: row.path, status: "retired"})), nextCursor: page.nextCursor});
+        return response({ok: true, documents: page.documents.map(row => ({path: row.path, status: "retired",
+          ...(diverged(row) ? {reason: "session-host-diverged"} : {})})), nextCursor: page.nextCursor});
       }
-      if (request.method === "GET") return response({ok: true, documents: storage.listServiceHostEnrollments(workspaceId).map(state)});
+      // Whether the workspace's hosted replica diverged, even once its owner stopped every document.
+      if (request.method === "GET") {
+        const identity = storage.getWorkspaceIdentity(workspaceId);
+        return response({ok: true, diverged: !!identity && host.diverged({workspaceId, ...identity}),
+          documents: storage.listServiceHostEnrollments(workspaceId).map(state)});
+      }
       if (request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") throw badRequest("Expected a JSON request.");
       const raw = await readBoundedJson(request, 16 * 1024, request.signal); guard();
       if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw badRequest("Invalid live host request.");
       const input = raw as Record<string, unknown>;
       if (request.method === "DELETE") {
-        if (Object.keys(input).some(key => key !== "path" && key !== "retire") || typeof input.path !== "string" ||
-          (input.retire !== undefined && input.retire !== true)) throw badRequest("A document path and optional retirement are required.");
+        if (Object.keys(input).some(key => !["path","objectId","retire","restoreFenceGeneration"].includes(key)) || typeof input.path !== "string" ||
+          (input.objectId !== undefined && (typeof input.objectId !== "string" || input.retire !== true)) ||
+          (input.retire !== undefined && input.retire !== true) || (input.restoreFenceGeneration !== undefined && (!Number.isSafeInteger(input.restoreFenceGeneration) || Number(input.restoreFenceGeneration) < 0 || input.retire !== true))) throw badRequest("A document path and optional retirement are required.");
         const row = storage.setServiceHostEnrollmentEnabled({workspaceId, path: input.path, ownerUserId: actor.userId, enabled: false,
-          ...(input.retire === true ? {retire: true} : {}), nowMs: Date.now(), guard});
+          ...(input.retire === true ? {retire: true, ...(input.objectId === undefined ? {} : {objectId: input.objectId as string}),
+            ...(input.restoreFenceGeneration === undefined ? {} : {restoreFenceGeneration: Number(input.restoreFenceGeneration)})} : {}), nowMs: Date.now(), guard});
         if (!row) throw notFound();
-        host.reconcile(); return response({ok: true, ...(input.retire === true ? {path: row.path, status: "retired"} : state(row))});
+        host.reconcile(); return response({ok: true, ...(input.retire === true ? {path: row.path, objectId: row.objectId, status: "retired", acceptedCursor: row.acceptedCursor} : state(row))});
       }
       if (Object.keys(input).some(key => !["path", "shareId", "retry"].includes(key)) || (input.shareId !== undefined && typeof input.shareId !== "string") ||
         (input.path !== undefined && typeof input.path !== "string") || (input.retry !== undefined && typeof input.retry !== "boolean") ||
@@ -135,9 +156,11 @@ export function createServiceHostEnrollmentRoutes(options: {
       const shareId = parseShareId(input.shareId ?? retained!.shareId);
       const paths = input.path === undefined ? serviceHostSharePaths(storage, {workspaceId, shareId, ownerUserId: actor.userId, missingOnly: input.retry === true}) : [input.path as string];
       const rows = storage.enrollServiceHostDocuments(paths.map(path => ({workspaceId, path, shareId, ownerUserId: actor.userId, nowMs: Date.now(), guard})));
+      // A Resume gives a blocked document one more attempt in the store it has.
+      if (input.path !== undefined) host.unblock(rows[0]!);
       host.reconcile();
       const documents = rows.map(state);
       return response({ok: true, ...(input.path === undefined ? {documents} : documents[0])}, documents.every(row => row.status === "ready") ? 200 : 202);
-    } catch (error) {return errorResponse(error);}
+    } catch (error) {if (error instanceof ServiceHostRetirementConflict) return response({ok:false,code:"restore-fenced",restoreFenceGeneration:error.restoreFenceGeneration},409); return errorResponse(error);}
   };
 }

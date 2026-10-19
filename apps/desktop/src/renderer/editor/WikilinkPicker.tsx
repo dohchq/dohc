@@ -1,4 +1,3 @@
-import { FileText } from "lucide-react";
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { TextSelection } from "@tiptap/pm/state";
@@ -10,16 +9,14 @@ import {
   MENU_EMPTY,
   MENU_ENTER,
   MENU_FRAME,
-  MENU_ICON,
-  MENU_PATH,
   MENU_ROW,
   MENU_ROW_TONE,
-  MENU_TITLE,
   menuEnterFrom,
   movedPointer,
   moveInMenu,
   revealMenuRow,
 } from "../ui/Menu";
+import { Ref } from "../ui/Ref";
 
 export type WikilinkPickerState =
   | { open: false }
@@ -54,8 +51,16 @@ type Props = {
 function defaultDisplayName(file: WikilinkFile): string {
   return (
     (file.title ?? "").trim() ||
-    (file.path.replace(/\.md$/i, "").split("/").pop() ?? file.path)
+    (file.path.replace(/\.(md|markdown)$/i, "").split("/").pop() ?? file.path)
   );
+}
+
+/** An option's accessible name: its display name, then its path without
+ *  `.md` unless that is the same words. */
+function optionName(file: WikilinkFile): string {
+  const display = defaultDisplayName(file);
+  const subpath = file.path.replace(/\.md$/i, "");
+  return subpath === display ? display : `${display} ${subpath}`;
 }
 
 /** Replace the `from..cursor` range with the picked file, either as
@@ -220,39 +225,31 @@ export function WikilinkPicker({
         <div className={MENU_EMPTY}>No files match "{state.query}"</div>
       ) : (
         <div>
-          {matches.map((f, i) => {
-            const display = defaultDisplayName(f);
-            const subpath = f.path.replace(/\.md$/i, "");
-            return (
-              <button
-                key={f.path}
-                id={optionId(i)}
-                ref={(el) => {
-                  itemRefs.current[i] = el;
-                }}
-                type="button"
-                role="option"
-                tabIndex={-1}
-                aria-selected={i === activeIdx}
-                data-active={i === activeIdx || undefined}
-                className={`${MENU_ROW} ${MENU_ACTIVE_OPTION} ${MENU_ROW_TONE.rest} data-active:text-ink`}
-                // Only a pointer that moves picks the active option, so a
-                // list that opens or scrolls under a still pointer keeps the
-                // keys' choice.
-                onMouseMove={(event) => {
-                  if (movedPointer(event) && i !== activeIdx) setActiveIdx(i);
-                }}
-                onClick={() => commit(f)}
-              >
-                <span className={`${MENU_ICON} text-subtle`}>
-                  <FileText size={14} aria-hidden />
-                </span>
-                <span className={MENU_TITLE}>{display}</span>
-                {/* A page at the workspace root without a title: its path is its name. */}
-                {subpath === display ? null : <span className={MENU_PATH}>{subpath}</span>}
-              </button>
-            );
-          })}
+          {matches.map((f, i) => (
+            <button
+              key={f.path}
+              id={optionId(i)}
+              ref={(el) => {
+                itemRefs.current[i] = el;
+              }}
+              type="button"
+              role="option"
+              tabIndex={-1}
+              aria-selected={i === activeIdx}
+              data-active={i === activeIdx || undefined}
+              aria-label={optionName(f)}
+              className={`${MENU_ROW} ${MENU_ACTIVE_OPTION} ${MENU_ROW_TONE.rest}`}
+              // Only a pointer that moves picks the active option, so a
+              // list that opens or scrolls under a still pointer keeps the
+              // keys' choice.
+              onMouseMove={(event) => {
+                if (movedPointer(event) && i !== activeIdx) setActiveIdx(i);
+              }}
+              onClick={() => commit(f)}
+            >
+              <Ref path={f.path} title={f.title?.trim() || undefined} folder />
+            </button>
+          ))}
         </div>
       )}
     </div>

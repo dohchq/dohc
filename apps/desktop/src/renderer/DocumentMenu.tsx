@@ -5,7 +5,7 @@ import { bridge } from "./bridge";
 import { CustomizeContext } from "./settings/customize";
 import type { ReportButtonError } from "./collections/useAutomationButtons";
 
-// The document header's "…" menu (ViewHeader): copy the raw markdown, export
+// The document's "…" menu in its tab row (ViewActions): copy the raw markdown, export
 // it as a .md file, or export a self-contained HTML/PDF render. The Menu part
 // owns the trigger, the list, and dismissal; this file owns what each row
 // does and what the menu says about it afterwards.
@@ -41,6 +41,7 @@ const REFUSAL_LABEL = "Document not open";
 
 export function DocumentMenu(props: {
   workspaceId: string;
+  documentKey?: string;
   // Filename stem (no extension) — becomes the export dialog's suggested
   // name and, absent a `title` frontmatter key, the document's title.
   suggestedName: string;
@@ -52,7 +53,7 @@ export function DocumentMenu(props: {
   // refuses on null rather than falling back to a stale or empty body: a
   // copy or an export that silently produces nothing is a file the user
   // believes is their document.
-  getMarkdown: () => string | null;
+  getMarkdown: () => string | null | Promise<string | null>;
   // The shell's error hook. A copy that fails after the menu has closed has
   // no row left to say so, and reaches the person through this instead.
   reportError?: ReportButtonError;
@@ -85,7 +86,7 @@ export function DocumentMenu(props: {
   // close can then tell the two apart. The person closed the menu, so a
   // success needs no message, but a failure still owes them one, unless a
   // later action took over or the document went away.
-  const actions = useRequestSequence();
+  const actions = useRequestSequence([props.workspaceId, props.suggestedName, props.documentKey]);
 
   useEffect(() => {
     if (!open) return;
@@ -134,29 +135,34 @@ export function DocumentMenu(props: {
   // log, and the menu still open as though the click had missed (#564,
   // codex r23). Both actions serialize through here, so both answer a throw
   // the way they answer any other failure.
-  function serializeOrFail(
+  async function serializeOrFail(
     id: DocumentMenuItemId,
     failureLabel: string,
     what: string,
-  ): { markdown: string | null } | null {
+    action: number,
+    attempt: number,
+  ): Promise<{ markdown: string | null } | null> {
     try {
-      return { markdown: props.getMarkdown() };
+      return { markdown: await props.getMarkdown() };
     } catch (error) {
       console.error(`${what} failed`, error);
-      showFeedback(id, failureLabel);
+      if (actions.isCurrent(action) && attempts.isCurrent(attempt)) showFeedback(id, failureLabel);
       return null;
     }
   }
 
   async function copyAsMarkdown(attempt: number, action: number) {
-    const serialized = serializeOrFail(
+    const serialized = await serializeOrFail(
       "copy-markdown",
       "Couldn't copy",
       "Copy as Markdown",
+      action,
+      attempt,
     );
-    if (!serialized) return;
+    if (!serialized || !actions.isCurrent(action)) return;
     const markdown = serialized.markdown;
     if (markdown === null) {
+      if (!attempts.isCurrent(attempt)) return;
       showFeedback(
         "copy-markdown",
         REFUSAL_LABEL,
@@ -194,7 +200,8 @@ export function DocumentMenu(props: {
     void (async () => {
       let failure: unknown;
       try {
-        const markdown = props.getMarkdown();
+        const markdown = await props.getMarkdown();
+        if (!actions.isCurrent(action)) return;
         if (markdown === null) throw new Error(REFUSAL_LABEL);
         await navigator.clipboard?.writeText(markdown);
         return;
@@ -205,15 +212,18 @@ export function DocumentMenu(props: {
     })();
   }
 
-  async function exportDocument(kind: "markdown" | "html" | "pdf") {
-    const serialized = serializeOrFail(
+  async function exportDocument(kind: "markdown" | "html" | "pdf", action: number, attempt: number) {
+    const serialized = await serializeOrFail(
       `export-${kind}`,
       "Couldn't export",
       `Export as ${kind.toUpperCase()}`,
+      action,
+      attempt,
     );
-    if (!serialized) return;
+    if (!serialized || !actions.isCurrent(action)) return;
     const documentMarkdown = serialized.markdown;
     if (documentMarkdown === null) {
+      if (!attempts.isCurrent(attempt)) return;
       // Before closing: the feedback replaces the item's label, so a refusal
       // shown into a closed menu is a refusal the user never sees — the
       // export would just appear to do nothing.
@@ -280,10 +290,8 @@ export function DocumentMenu(props: {
       customize?.("editor");
       return;
     }
-    // The export path needs no token: it decides everything it says before
-    // its first await, and closes the menu before the bridge call.
     void exportDocument(
-      id === "export-pdf" ? "pdf" : id === "export-html" ? "html" : "markdown",
+      id === "export-pdf" ? "pdf" : id === "export-html" ? "html" : "markdown", action, attempt,
     );
   }
 

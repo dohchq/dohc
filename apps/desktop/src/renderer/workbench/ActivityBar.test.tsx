@@ -26,8 +26,8 @@ describe("ActivityBar views", () => {
   });
 });
 
-describe("ActivityBar optional utility actions", () => {
-  it("renders Cloud and Settings as inert icons when the host omits actions", () => {
+describe("ActivityBar Sharing and Settings", () => {
+  it("renders Settings as an inert icon when the host omits its action", () => {
     render(
       <ActivityBar
         views={VIEW_IDS}
@@ -38,31 +38,44 @@ describe("ActivityBar optional utility actions", () => {
       />,
     );
 
-    expect(screen.getByTestId("activity-cloud").tagName).toBe("SPAN");
     expect(screen.getByTestId("activity-settings").tagName).toBe("SPAN");
-    expect(screen.queryByRole("button", { name: "Sync and sharing" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Open settings" })).toBeNull();
   });
 
-  it("keeps the desktop Cloud and Settings actions clickable when supplied", () => {
-    const onOpenCloud = vi.fn();
+  it("opens Sharing as a view, marks it current, and carries the conflict badge", () => {
+    const onSelectView = vi.fn();
     const onOpenSettings = vi.fn();
-    render(
+    const { rerender } = render(
       <ActivityBar
         views={VIEW_IDS}
         activeView="explorer"
         sidebarVisible
-        hasConflict={false}
-        onSelectView={() => undefined}
-        onOpenCloud={onOpenCloud}
+        hasConflict
+        onSelectView={onSelectView}
         onOpenSettings={onOpenSettings}
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Sync and sharing" }));
+    const sharing = screen.getByRole("button", { name: "Sharing" });
+    expect(sharing.getAttribute("data-testid")).toBe("activity-sharing");
+    expect(screen.queryByRole("button", { name: "Sync and sharing" })).toBeNull();
+    expect(sharing.querySelector(".bg-danger")).not.toBeNull();
+    fireEvent.click(sharing);
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
-    expect(onOpenCloud).toHaveBeenCalledOnce();
+    expect(onSelectView).toHaveBeenCalledWith("sharing");
     expect(onOpenSettings).toHaveBeenCalledOnce();
+
+    rerender(
+      <ActivityBar
+        views={VIEW_IDS}
+        activeView="sharing"
+        sidebarVisible
+        hasConflict={false}
+        onSelectView={onSelectView}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Sharing" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("button", { name: "Sharing" }).querySelector(".bg-danger")).toBeNull();
   });
 });
 
@@ -81,7 +94,7 @@ describe("ActivityBar order and pinned apps", () => {
     expect(
       [...rail.querySelectorAll("[data-testid^='activity-']")]
         .map((button) => button.getAttribute("data-testid"))
-        .filter((id) => id !== "activity-bar" && id !== "activity-cloud" && id !== "activity-settings"),
+        .filter((id) => id !== "activity-bar" && id !== "activity-sharing" && id !== "activity-settings"),
     ).toEqual(["activity-sites", "activity-explorer"]);
     expect(screen.queryByTestId("activity-search")).toBeNull();
   });

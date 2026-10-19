@@ -67,7 +67,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 24.14.0
+          node-version-file: .node-version
 
       - name: Setup pnpm
         run: |
@@ -151,7 +151,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 24.14.0
+          node-version-file: .node-version
 
       - name: Keep published update platforms
         if: needs.preflight.outputs.dry_run != 'true'
@@ -220,7 +220,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 24.14.0
+          node-version-file: .node-version
 
       - name: Setup pnpm
         shell: bash
@@ -236,29 +236,29 @@ jobs:
           DESKTOP_VERSION: ${{ needs.preflight.outputs.version }}
         run: node scripts/update-desktop-package-version.mjs
 
-      # Report services are repository variables, not secrets: the key and
-      # DSN ship inside the app. A dry run builds an app that sends nothing.
+      # The PostHog project is a repository variable, not a secret: the key
+      # ships inside the app. A dry run builds an app that sends nothing.
       - name: Build desktop
         env:
           DOHC_POSTHOG_KEY: ${{ needs.preflight.outputs.dry_run != 'true' && vars.DOHC_POSTHOG_KEY || '' }}
           DOHC_POSTHOG_HOST: ${{ needs.preflight.outputs.dry_run != 'true' && vars.DOHC_POSTHOG_HOST || '' }}
-          DOHC_SENTRY_DSN: ${{ needs.preflight.outputs.dry_run != 'true' && vars.DOHC_SENTRY_DSN || '' }}
-          DOHC_SENTRY_DIST: ${{ matrix.artifact_platform }}-${{ matrix.arch }}
+          DOHC_DESKTOP_DIST: ${{ matrix.artifact_platform }}-${{ matrix.arch }}
         run: pnpm build:desktop
 
-      # Error reports name frames in the minified files. These source maps,
-      # which the installer leaves out, let Sentry show the original lines.
-      # A build with a DSN fails here if the upload cannot run.
+      # Error reports name frames in the minified files. This step writes a
+      # chunk ID into each file and uploads its source map, which the
+      # installer leaves out, so PostHog can show the original lines. The
+      # package ships the files with those IDs. A build with a PostHog key
+      # fails here if the upload cannot run.
       - name: Upload source maps
         if: needs.preflight.outputs.dry_run != 'true'
         env:
-          DOHC_SENTRY_DSN: ${{ needs.preflight.outputs.dry_run != 'true' && vars.DOHC_SENTRY_DSN || '' }}
-          DOHC_SENTRY_DIST: ${{ matrix.artifact_platform }}-${{ matrix.arch }}
+          DOHC_POSTHOG_KEY: ${{ needs.preflight.outputs.dry_run != 'true' && vars.DOHC_POSTHOG_KEY || '' }}
+          DOHC_DESKTOP_DIST: ${{ matrix.artifact_platform }}-${{ matrix.arch }}
           DESKTOP_VERSION: ${{ needs.preflight.outputs.version }}
-          SENTRY_AUTH_TOKEN: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.SENTRY_AUTH_TOKEN || '' }}
-          SENTRY_URL: ${{ vars.SENTRY_URL }}
-          SENTRY_ORG: ${{ vars.SENTRY_ORG }}
-          SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT }}
+          POSTHOG_CLI_API_KEY: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.POSTHOG_CLI_API_KEY || '' }}
+          POSTHOG_CLI_PROJECT_ID: ${{ vars.POSTHOG_CLI_PROJECT_ID }}
+          POSTHOG_CLI_HOST: ${{ vars.POSTHOG_CLI_HOST }}
         run: node scripts/upload-desktop-source-maps.mjs
 
       - name: Build workspace engine
@@ -306,6 +306,9 @@ jobs:
           DOHC_REQUIRE_SIGNING: ${{ steps.signing.outputs.require }}
           CSC_LINK: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.MACOS_CSC_LINK || '' }}
           WIN_CSC_LINK: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.WIN_CSC_LINK || '' }}
+          APPLE_ID: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.APPLE_TEAM_ID || '' }}
         run: pnpm smoke:package:desktop
 
       - name: Package desktop
@@ -347,6 +350,14 @@ jobs:
         env:
           DOHC_E2E_NO_CHROMIUM_SANDBOX: "1"
         run: xvfb-run -a pnpm smoke:fuses:desktop
+
+      # Checks the bundle's signature and fuses, builds one app through the
+      # package's signed compiler, then boots it.
+      - name: macOS packaged smoke
+        if: runner.os == 'macOS'
+        env:
+          DOHC_SMOKE_PACKAGE_DIRECTORY: ${{ github.workspace }}/apps/desktop/release/mac-arm64/dohc.app
+        run: pnpm smoke:fuses:desktop
 
       - name: Windows packaged smoke
         if: runner.os == 'Windows'
@@ -393,7 +404,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          shopt -s globstar nullglob
+          shopt -s nullglob
           channel="${{ needs.preflight.outputs.release_channel }}"
           unexpected_channel="nightly"
           if [[ "$channel" == "nightly" ]]; then
@@ -431,23 +442,7 @@ jobs:
             esac
           }
 
-          mac_manifest_name="${channel}-mac.yml"
-          mac_manifests=(release-artifacts/**/"$mac_manifest_name")
-          if (( ${#mac_manifests[@]} > 0 )); then
-            cp "${mac_manifests[0]}" "release-upload/$mac_manifest_name"
-            for manifest in "${mac_manifests[@]:1}"; do
-              node scripts/merge-update-manifests.mjs \
-                --platform mac \
-                "release-upload/$mac_manifest_name" \
-                "$manifest" \
-                "release-upload/$mac_manifest_name"
-            done
-          fi
-
           while IFS= read -r -d '' file; do
-            if [[ "$(basename "$file")" == "$mac_manifest_name" ]]; then
-              continue
-            fi
             if ! is_release_upload_file "$file"; then
               continue
             fi

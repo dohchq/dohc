@@ -1,7 +1,8 @@
 // Pure engine-history -> IPC record mappers, extracted from main.ts so the
 // per-side content-kind rules are unit-testable (WS-G1 review fix). main
-// injects how agent, named, and automation authors read; nothing here touches
-// Electron or process state.
+// injects how agent, named, and automation authors read, and the Collection
+// automations it names them from; nothing here touches Electron or process
+// state.
 import type { VersionedTextMomentSummary } from "@dohc/workspace-contracts/engine";
 import type {
   WorkspaceEngineCapture,
@@ -9,27 +10,77 @@ import type {
   WorkspaceEngineMomentSummary,
 } from "../workspaces/workspaceEngineCapture";
 import type {
+  ActorPresentation,
   EngineMomentDetailRecord,
   EngineMomentRecord,
   ListEngineMomentsResponse,
   WorkspaceVersionConflict,
 } from "./bridgeContract";
-import { ListEngineMomentsResponse as ListEngineMomentsResponseSchema } from "./bridgeContract";
+import { posix } from "node:path";
+import { AUTOMATION_AUTHOR_TEXT_MAX, ListEngineMomentsResponse as ListEngineMomentsResponseSchema } from "./bridgeContract";
 import { isWorkspaceUpdatingRefusal } from "@dohc/workspace-engine-client";
+import { parseCollectionAutomationId } from "@dohc/automation-executor/automation-plan";
+import type { CollectionAutomations } from "@dohc/automation-executor/collection-automations";
 
 type MomentAuthor = NonNullable<VersionedTextMomentSummary["authors"]>[number];
 
-// Main supplies how an author reads. An agent working for this computer's
+// Main supplies how an author reads and looks. An agent working for this computer's
 // person reads as the configured agent name, and any other agent as
 // "Agent". This computer's person reads as their name; any other person is
 // left unnamed. A Collection automation
 // reads as its name and the Collection it belongs to; null leaves any other
-// automation on the moment's origin label.
+// automation on the moment's origin label. Each author looks as chats draw them.
 export interface EngineMomentAuthorNames {
+  prepare?(authors: readonly MomentAuthor[]): void;
   agent(author: Extract<MomentAuthor, {kind: "agent"}>): string | undefined;
   person(author: Extract<MomentAuthor, {kind: "human"}>): string | undefined;
   automation(automationId: string): { name: string; collection?: string } | null;
   named(author: Extract<MomentAuthor, {kind: "named"}>): string;
+  presentations(authors: readonly MomentAuthor[]): ActorPresentation[];
+}
+
+// A Collection automation that wrote a moment, as History shows it: its
+// name from the workspace's automations.yaml as this computer read it, or
+// its id when the file no longer has it or the name is longer than History
+// shows, and the Collection it belongs to now. Any other automation keeps
+// the moment's origin label.
+export function collectionAutomationAuthor(
+  automations: Pick<CollectionAutomations, "locate" | "automationName"> | undefined,
+  automationId: string,
+): { name: string; collection?: string } | null {
+  const parsed = parseCollectionAutomationId(automationId);
+  if (parsed === null) return null;
+  const located = automations?.locate(automationId) ?? null;
+  const name = automations?.automationName(automationId) ?? null;
+  return {
+    name: name !== null && name.length <= AUTOMATION_AUTHOR_TEXT_MAX ? name : parsed.id,
+    ...(located === null ? {} : { collection: posix.basename(located.collectionPath) }),
+  };
+}
+
+// A live author snapshot's account holder or link holder, as the relay
+// admitted them.
+function isSnapshotPerson(author: MomentAuthor): boolean {
+  return (author.kind === "human" && "humanName" in author) || (author.kind === "link" && "publicPrincipalId" in author);
+}
+
+// How one of several authors reads. A moment one author wrote keeps the
+// singleton fields below instead. A snapshot reads as the name its agent
+// declared and the relay stored for its account or link holder.
+function authorLabel(author: MomentAuthor, names: EngineMomentAuthorNames): string {
+  switch (author.kind) {
+    case "unattributed": return "An unrecorded author";
+    case "agent": return author.agentName ?? names.agent(author) ?? "Agent";
+    case "human": return author.humanName ?? names.person(author) ?? "Another person";
+    case "named": return names.named(author);
+    case "link": return "publicPrincipalId" in author ? `Link holder ${author.label}` : `Edit link · holder ${author.principalId.slice(0, 8)}`;
+    case "public": return `Link holder ${author.principalId.replace(/^public_/, "").slice(0, 8)}`;
+    case "automation": {
+      const automation = names.automation(author.automationId);
+      if (!automation) return "Automation";
+      return automation.collection === undefined ? automation.name : `${automation.name} in ${automation.collection}`;
+    }
+  }
 }
 
 export async function listEngineMomentsForIpc(
@@ -38,14 +89,16 @@ export async function listEngineMomentsForIpc(
 ): Promise<ListEngineMomentsResponse> {
   try {
     const page = await read();
+    names.prepare?.(page.moments.flatMap(moment => moment.authors ?? []));
     return ListEngineMomentsResponseSchema.parse({
       moments: page.moments.map((moment) =>
         engineMomentForIpc(moment, names),
       ),
-      nextBeforeMomentOrder: page.nextBeforeMomentOrder,
+      startCursor: page.startCursor,
+      nextCursor: page.nextCursor,
+      versionMarkers: page.versionMarkers,
       latestMomentOrder: page.latestMomentOrder,
       activeVersionId: page.activeVersionId,
-      protectedTruncated: page.protectedTruncated,
     });
   } catch (error) {
     if (isWorkspaceUpdatingRefusal(error)) {
@@ -66,8 +119,9 @@ function engineMomentBaseForIpc(
 ) {
   // Keep every author in IPC. Existing display fields name singleton authors.
   const author = moment.authors?.length === 1 ? moment.authors[0] : undefined;
-  const agentAuthorName = author?.kind === "agent" ? names.agent(author) : undefined;
-  const personAuthorName = author?.kind === "human" ? names.person(author) : undefined;
+  const agentAuthorName = author?.kind === "agent" ? author.agentName ?? names.agent(author) : undefined;
+  const personAuthorName = author?.kind === "human" && !("humanName" in author) ? names.person(author) : undefined;
+  const liveAuthorName = author !== undefined && isSnapshotPerson(author) ? authorLabel(author, names) : undefined;
   return {
     id: moment.id,
     versionId: moment.versionId,
@@ -75,16 +129,26 @@ function engineMomentBaseForIpc(
     recordedAtMs: moment.recordedAtMs,
     operation: moment.operation,
     origin: moment.metadata.origin,
-    ...(moment.authors !== undefined ? { authors: moment.authors } : {}),
+    ...(moment.authors !== undefined
+      ? { authors: moment.authors, authorPresentations: names.presentations(moment.authors) }
+      : {}),
     ...(agentAuthorName !== undefined
       ? { agentAuthorName }
       : {}),
     ...(personAuthorName !== undefined ? { personAuthorName } : {}),
+    ...(liveAuthorName !== undefined ? { liveAuthorName } : {}),
     ...(author?.kind === "public" ? { publicAuthor: author } : {}),
+    // Only a grant's Edit link wrote directly; a snapshot's link holder never
+    // offers Stop and restore.
     ...(author?.kind === "link" && "grantId" in author ? { linkAuthor: author } : {}),
     ...automationAuthorOf(author, names),
     ...(author?.kind === "named"
       ? { namedAuthor: { userId: author.userId, label: names.named(author) } }
+      : {}),
+    // Several authors: each of them, in the order the moment recorded them.
+    // None stands in for the rest.
+    ...(moment.authors !== undefined && moment.authors.length > 1
+      ? { authorLabels: moment.authors.map((each) => authorLabel(each, names)) }
       : {}),
     ...(moment.operation !== "rename" && moment.metadata.summary !== undefined
       ? { summary: moment.metadata.summary }
@@ -100,7 +164,7 @@ function automationAuthorOf(author: MomentAuthor | undefined, names: EngineMomen
   return automationAuthor === null ? {} : { automationAuthor };
 }
 
-function engineMomentForIpc(
+export function engineMomentForIpc(
   moment: WorkspaceEngineMomentSummary,
   names: EngineMomentAuthorNames,
 ): EngineMomentRecord {

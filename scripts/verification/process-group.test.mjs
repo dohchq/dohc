@@ -47,6 +47,16 @@ test("abort during onSpawn is observed after registering the listener", { timeou
   assert.deepEqual([process.listenerCount("SIGINT"), process.listenerCount("SIGTERM")], listeners);
 });
 
+test("a command that exited before its abort reached it keeps its own failure", { timeout: 20_000 }, async () => {
+  const controller = new AbortController();
+  // The abort arrives after the command has exited but before its output closes, as when another step's failure stops the run.
+  const error = await run(process.execPath, ["-e", "process.exit(3)"], { signal: controller.signal, timeoutMs: 15_000,
+    onSpawn: child => child.once("exit", () => controller.abort()) }).catch(failure => failure);
+  assert.equal(error.interrupted, false);
+  assert.equal(error.exitCode, 3);
+  assert.equal(error.commandExitFailure, true);
+});
+
 test("POSIX abort waits for an ignored-stdio descendant after its leader closes", {
   skip: process.platform === "win32" ? "POSIX process-group lifecycle" : false, timeout: 30_000,
 }, async context => {
@@ -604,6 +614,92 @@ for (const flag of ["--require", "--import"]) {
   });
 }
 
+test("a command started through the Windows job relay stops when its caller exits", {
+  skip: process.platform !== "win32", timeout: 60_000,
+}, async () => {
+  // Microsoft Store PowerShell starts outside its caller's job, so only the relay can tie the command to its caller.
+  const root = mkdtempSync(join(tmpdir(), "dohc-job-caller-"));
+  const commandPid = join(root, "command.pid");
+  const callerScript = join(root, "caller.mjs");
+  const command = `require("node:fs").writeFileSync(${JSON.stringify(commandPid)}, String(process.pid)); setInterval(() => {}, 1000);`;
+  writeFileSync(callerScript, `
+    const { run } = await import(${JSON.stringify(new URL("./process.mjs", import.meta.url).href)});
+    run(process.execPath, ["-e", ${JSON.stringify(command)}], { quietStdout: true }).catch(() => {});
+    setInterval(() => {}, 1000);
+  `);
+  const alive = pid => { try { process.kill(pid, 0); return true; } catch (error) { return error.code === "EPERM"; } };
+  const until = async (read, message) => {
+    const deadline = Date.now() + 20_000;
+    for (;;) {
+      const value = read();
+      if (value) return value;
+      assert.ok(Date.now() < deadline, message);
+      await new Promise(done => setTimeout(done, 50));
+    }
+  };
+  const caller = spawn(process.execPath, [callerScript], { stdio: "ignore", windowsHide: true });
+  let pid;
+  try {
+    pid = await until(() => existsSync(commandPid) && Number(readFileSync(commandPid, "utf8")), "the command must start");
+    assert.ok(alive(pid));
+    // Terminating the caller runs none of its cleanup, as when an agent or the queue service is killed.
+    caller.kill("SIGKILL");
+    await until(() => !alive(pid), "the command must stop once its caller has exited");
+  } finally {
+    caller.kill("SIGKILL");
+    if (pid && alive(pid)) process.kill(pid);
+    rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("a descendant holding the relay's output stops when the caller exits", {
+  skip: process.platform !== "win32", timeout: 60_000,
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-job-drain-"));
+  const descendantPid = join(root, "descendant.pid");
+  // A relay that leaves a descendant holding its output, then exits: the job owner is left draining output.
+  const relay = join(root, "relay.mjs");
+  writeFileSync(relay, `
+    import { spawn } from "node:child_process";
+    import { writeFileSync } from "node:fs";
+    for await (const chunk of process.stdin) void chunk;
+    const descendant = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: ["ignore", "inherit", "inherit"], detached: true });
+    writeFileSync(${JSON.stringify(descendantPid)}, String(descendant.pid));
+    descendant.unref();
+  `);
+  const quote = (value) => `'${value.replaceAll("'", "''")}'`;
+  const job = fileURLToPath(new URL("./windows-job.ps1", import.meta.url));
+  const callerScript = join(root, "caller.mjs");
+  writeFileSync(callerScript, `
+    import { spawn } from "node:child_process";
+    const command = ${JSON.stringify(`& ([scriptblock]::Create([IO.File]::ReadAllText(${quote(job)}))) `)} +
+      [process.execPath, ${JSON.stringify(relay)}, "payload", String(process.pid)].map(value => "'" + value.replaceAll("'", "''") + "'").join(" ");
+    spawn("pwsh.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    setInterval(() => {}, 1000);
+  `);
+  const alive = pid => { try { process.kill(pid, 0); return true; } catch (error) { return error.code === "EPERM"; } };
+  const until = async (read, message) => {
+    const deadline = Date.now() + 20_000;
+    for (;;) {
+      const value = read();
+      if (value) return value;
+      assert.ok(Date.now() < deadline, message);
+      await new Promise(done => setTimeout(done, 50));
+    }
+  };
+  const caller = spawn(process.execPath, [callerScript], { stdio: "ignore", windowsHide: true });
+  let pid;
+  try {
+    pid = await until(() => existsSync(descendantPid) && Number(readFileSync(descendantPid, "utf8")), "the relay must start its descendant");
+    caller.kill("SIGKILL");
+    await until(() => !alive(pid), "the descendant must stop once the caller has exited");
+  } finally {
+    caller.kill("SIGKILL");
+    if (pid && alive(pid)) process.kill(pid);
+    rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
 for (const waitForRelay of [false, true]) {
   test(`Windows job closes the relay without launching commands or preloads when assignment fails${waitForRelay ? " after relay startup" : ""}`, {
     skip: process.platform !== "win32", timeout: 30_000,
@@ -626,13 +722,13 @@ for (const waitForRelay of [false, true]) {
       const quote = (value) => `'${value.replaceAll("'", "''")}'`;
       const result = spawnSync("pwsh.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
         `& ([scriptblock]::Create([IO.File]::ReadAllText(${quote(script)}))) ${[
-          process.execPath, fileURLToPath(new URL("./windows-command.mjs", import.meta.url)), payload,
+          process.execPath, fileURLToPath(new URL("./windows-command.mjs", import.meta.url)), payload, String(process.pid),
         ].map(quote).join(" ")}`], {
         env: { ...process.env, NODE_OPTIONS: `--require ${JSON.stringify(preload)}` },
         encoding: "utf8", windowsHide: true, timeout: 20_000,
       });
       assert.equal(result.error, undefined, result.stderr);
-      assert.equal(result.status, 1, result.stderr);
+      assert.equal(result.status, 0xD0C5, "the relay's exit code for a command that never started");
       assert.match(result.stderr, /Win32Exception/);
       assert.equal(existsSync(marker), false);
       assert.equal(existsSync(join(root, "preloads.jsonl")), false, "preloads must not run even if the relay starts before assignment fails");

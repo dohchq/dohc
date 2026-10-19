@@ -1,3 +1,4 @@
+import { chatOperations } from "./ipc/chatOperations";
 import {
   type Request,
   type Response,
@@ -7,16 +8,22 @@ import {
   type LinkedChatStore,
 } from "@dohc/workspace-contracts/engine";
 import { describe, expect, it, vi } from "vitest";
-import { CHANNELS } from "./ipc/channels";
-import {
-  createChatChannelIpcHandler,
-  createWritableChatIpcHandler,
-  type MainChatIpcHandler,
-} from "./mainChatIpcHandlers";
-import type { AwaitableLinkedChatStore } from "./workspaces/awaitableLinkedChatStore";
+import type { MainChatIpcHandler } from "./mainChatIpcHandlers";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createDesktopLinkedChatStore } from "./workspaces/liveLinkedChatStore";
 import { createTestScratch } from "./workspaces/testTemp";
+
+function createChatFlowHandler<Event, Payload extends { workspaceId: string }, Context, Result>(input: {
+  parsePayload: (payload: unknown) => Payload;
+  requireContext: (workspaceId: string) => Promise<Context>;
+  run: (context: Context, payload: Payload) => Promise<Result>;
+}): MainChatIpcHandler<Event, Result> {
+  return async (_event, rawPayload) => {
+    const payload = input.parsePayload(rawPayload);
+    const context = await input.requireContext(payload.workspaceId);
+    return input.run(context, payload);
+  };
+}
 
 interface TestEvent {
   trusted: boolean;
@@ -24,7 +31,7 @@ interface TestEvent {
 
 interface TestContext {
   workspace: { workspaceId: string };
-  store: AwaitableLinkedChatStore;
+  store: LinkedChatStore;
 }
 
 type RegisteredHandler = MainChatIpcHandler<TestEvent, unknown>;
@@ -69,11 +76,10 @@ function registerChatFlowHandlers(
       }
       return context;
     },
-    assertWritable: null,
   };
 
   ipc.handle(
-    CHANNELS.listChatChannels,
+    chatOperations.listChatChannels.channel,
     async (event, payload) => {
       deps.assertTrustedSender(event);
       const input = parseWorkspacePayload<{ workspaceId: string }>(payload);
@@ -81,19 +87,18 @@ function registerChatFlowHandlers(
     },
   );
   ipc.handle(
-    CHANNELS.createChatChannel,
-    createChatChannelIpcHandler({
+    chatOperations.createChatChannel.channel,
+    createChatFlowHandler({
       ...deps,
       parsePayload: (payload) =>
         parseWorkspacePayload<{ workspaceId: string; name: string }>(payload),
       run: async ({ store }, input) =>
         await store.createChannel({ ...input, kind: "channel" }),
-      queueCloudSync: () => undefined,
     }),
   );
   ipc.handle(
-    CHANNELS.startChannelThread,
-    createWritableChatIpcHandler({
+    chatOperations.startChannelThread.channel,
+    createChatFlowHandler({
       ...deps,
       parsePayload: (payload) =>
         parseWorkspacePayload<{
@@ -104,13 +109,14 @@ function registerChatFlowHandlers(
         }>(payload),
       run: async ({ store }, input) =>
         await store.startChannelThread({
+          authorActorKey: null,
           ...input,
           author: { kind: "human", displayName: "Sam" },
         }),
     }),
   );
   ipc.handle(
-    CHANNELS.listChannelThreads,
+    chatOperations.listChannelThreads.channel,
     async (event, payload) => {
       deps.assertTrustedSender(event);
       return await context.store.listChannelThreads(
@@ -119,8 +125,8 @@ function registerChatFlowHandlers(
     },
   );
   ipc.handle(
-    CHANNELS.sendChatMessage,
-    createWritableChatIpcHandler({
+    chatOperations.sendChatMessage.channel,
+    createChatFlowHandler({
       ...deps,
       parsePayload: (payload) =>
         parseWorkspacePayload<{
@@ -130,13 +136,14 @@ function registerChatFlowHandlers(
         }>(payload),
       run: async ({ store }, input) =>
         await store.sendMessage({
+          authorActorKey: null,
           ...input,
           author: { kind: "human", displayName: "Sam" },
         }),
     }),
   );
   ipc.handle(
-    CHANNELS.listChatMessages,
+    chatOperations.listChatMessages.channel,
     async (event, payload) => {
       deps.assertTrustedSender(event);
       return await context.store.listMessages(
@@ -145,7 +152,7 @@ function registerChatFlowHandlers(
     },
   );
   ipc.handle(
-    CHANNELS.getChatThreadRevision,
+    chatOperations.getChatThreadRevision.channel,
     async (event, payload) => {
       deps.assertTrustedSender(event);
       const revision = await context.store.getThreadRevision(
@@ -155,8 +162,8 @@ function registerChatFlowHandlers(
     },
   );
   ipc.handle(
-    CHANNELS.markChatThreadRead,
-    createWritableChatIpcHandler({
+    chatOperations.markChatThreadRead.channel,
+    createChatFlowHandler({
       ...deps,
       parsePayload: (payload) =>
         parseWorkspacePayload<{
@@ -168,8 +175,8 @@ function registerChatFlowHandlers(
     }),
   );
   ipc.handle(
-    CHANNELS.resolveChatDecision,
-    createWritableChatIpcHandler({
+    chatOperations.resolveChatDecision.channel,
+    createChatFlowHandler({
       ...deps,
       parsePayload: (payload) =>
         parseWorkspacePayload<{
@@ -183,7 +190,7 @@ function registerChatFlowHandlers(
     }),
   );
   ipc.handle(
-    CHANNELS.listChatReactions,
+    chatOperations.listChatReactions.channel,
     async (event, payload) => {
       deps.assertTrustedSender(event);
       return await context.store.listReactions(
@@ -192,8 +199,8 @@ function registerChatFlowHandlers(
     },
   );
   ipc.handle(
-    CHANNELS.setChatReaction,
-    createWritableChatIpcHandler({
+    chatOperations.setChatReaction.channel,
+    createChatFlowHandler({
       ...deps,
       parsePayload: (payload) =>
         parseWorkspacePayload<{
@@ -215,8 +222,8 @@ function registerChatFlowHandlers(
     }),
   );
   ipc.handle(
-    CHANNELS.saveChatBookmark,
-    createWritableChatIpcHandler({
+    chatOperations.saveChatBookmark.channel,
+    createChatFlowHandler({
       ...deps,
       parsePayload: (payload) =>
         parseWorkspacePayload<{
@@ -244,8 +251,8 @@ function registerChatFlowHandlers(
     }),
   );
   ipc.handle(
-    CHANNELS.setChatFollow,
-    createWritableChatIpcHandler({
+    chatOperations.setChatFollow.channel,
+    createChatFlowHandler({
       ...deps,
       parsePayload: (payload) =>
         parseWorkspacePayload<{
@@ -303,27 +310,27 @@ describe("main chat IPC live backend", () => {
       registerChatFlowHandlers({ workspace, store }, ipc);
 
       try {
-        const channel = (await ipc.invoke(CHANNELS.createChatChannel, {
+        const channel = (await ipc.invoke(chatOperations.createChatChannel.channel, {
           workspaceId: workspace.workspaceId,
           name: "Planning",
         })) as Awaited<ReturnType<LinkedChatStore["createChannel"]>>;
         expect(channel.name).toBe("Planning");
         await expect(
-          ipc.invoke(CHANNELS.listChatChannels, {
+          ipc.invoke(chatOperations.listChatChannels.channel, {
             workspaceId: workspace.workspaceId,
           }),
         ).resolves.toEqual([
           expect.objectContaining({ id: channel.id, name: "Planning" }),
         ]);
 
-        const started = (await ipc.invoke(CHANNELS.startChannelThread, {
+        const started = (await ipc.invoke(chatOperations.startChannelThread.channel, {
           workspaceId: workspace.workspaceId,
           channelId: channel.id,
           body: "Choose a direction",
           needsDecision: true,
         })) as Awaited<ReturnType<LinkedChatStore["startChannelThread"]>>;
         await expect(
-          ipc.invoke(CHANNELS.listChannelThreads, {
+          ipc.invoke(chatOperations.listChannelThreads.channel, {
             workspaceId: workspace.workspaceId,
             channelId: channel.id,
           }),
@@ -333,32 +340,32 @@ describe("main chat IPC live backend", () => {
           }),
         ]);
 
-        const resolution = (await ipc.invoke(CHANNELS.sendChatMessage, {
+        const resolution = (await ipc.invoke(chatOperations.sendChatMessage.channel, {
           workspaceId: workspace.workspaceId,
           threadId: started.thread.id,
           body: "Use the Rust path",
         })) as Awaited<ReturnType<LinkedChatStore["sendMessage"]>>;
         await expect(
-          ipc.invoke(CHANNELS.getChatThreadRevision, {
+          ipc.invoke(chatOperations.getChatThreadRevision.channel, {
             workspaceId: workspace.workspaceId,
             threadId: started.thread.id,
           }),
         ).resolves.toEqual({ revision: 3 });
         await expect(
-          ipc.invoke(CHANNELS.listChatMessages, {
+          ipc.invoke(chatOperations.listChatMessages.channel, {
             workspaceId: workspace.workspaceId,
             threadId: started.thread.id,
           }),
         ).resolves.toHaveLength(2);
         await expect(
-          ipc.invoke(CHANNELS.markChatThreadRead, {
+          ipc.invoke(chatOperations.markChatThreadRead.channel, {
             workspaceId: workspace.workspaceId,
             threadId: started.thread.id,
             upToSequence: 2,
           }),
         ).resolves.toMatchObject({ lastReadSequence: 2 });
         await expect(
-          ipc.invoke(CHANNELS.resolveChatDecision, {
+          ipc.invoke(chatOperations.resolveChatDecision.channel, {
             workspaceId: workspace.workspaceId,
             threadId: started.thread.id,
             messageId: started.message.id,
@@ -366,7 +373,7 @@ describe("main chat IPC live backend", () => {
           }),
         ).resolves.toMatchObject({ state: "resolved" });
         await expect(
-          ipc.invoke(CHANNELS.setChatReaction, {
+          ipc.invoke(chatOperations.setChatReaction.channel, {
             workspaceId: workspace.workspaceId,
             threadId: started.thread.id,
             messageId: resolution.id,
@@ -375,7 +382,7 @@ describe("main chat IPC live backend", () => {
           }),
         ).resolves.toMatchObject({ state: "added" });
         await expect(
-          ipc.invoke(CHANNELS.listChatReactions, {
+          ipc.invoke(chatOperations.listChatReactions.channel, {
             workspaceId: workspace.workspaceId,
             threadId: started.thread.id,
           }),
@@ -387,7 +394,7 @@ describe("main chat IPC live backend", () => {
           }),
         ]);
         await expect(
-          ipc.invoke(CHANNELS.setChatReaction, {
+          ipc.invoke(chatOperations.setChatReaction.channel, {
             workspaceId: workspace.workspaceId,
             threadId: started.thread.id,
             messageId: resolution.id,
@@ -396,7 +403,7 @@ describe("main chat IPC live backend", () => {
           }),
         ).resolves.toMatchObject({ state: "removed" });
         await expect(
-          ipc.invoke(CHANNELS.saveChatBookmark, {
+          ipc.invoke(chatOperations.saveChatBookmark.channel, {
             workspaceId: workspace.workspaceId,
             targetId: resolution.id,
             destinationPath: "bookmarks/rust.md",
@@ -406,7 +413,7 @@ describe("main chat IPC live backend", () => {
           bookmark: { projectionState: "ready" },
         });
         await expect(
-          ipc.invoke(CHANNELS.setChatFollow, {
+          ipc.invoke(chatOperations.setChatFollow.channel, {
             workspaceId: workspace.workspaceId,
             targetId: started.thread.id,
           }),

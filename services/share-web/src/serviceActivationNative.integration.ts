@@ -22,6 +22,8 @@ import { createNamedLiveRoutes } from "../../sync-relay/src/namedLiveRoutes.js";
 import { createLiveTickets } from "../../sync-relay/src/liveTickets.js";
 import { createLiveHostReports } from "../../sync-relay/src/namedLiveHostReports.js";
 import { createNamedFrameChanges } from "../../sync-relay/src/liveHostChanges.js";
+import { createServiceHostReplication } from "../../sync-relay/src/serviceHostReplication.js";
+import { authorizeServiceHostReplication, deriveServiceHostBearer } from "../../sync-relay/src/serviceHostCredential.js";
 import { createShareWebApplication } from "./server.js";
 import { createLiveGateway } from "./liveGateway.js";
 import { createNamedLiveRelayRoute, namedLiveGatewayRequest } from "./namedLiveRelayRoute.js";
@@ -34,7 +36,7 @@ const validationPolicy = { maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000
 const frames = { receive: { maxFrameBytes: 65536, maxStateVectorBytes: 100000, maxUpdateBytes: 1000000, maxSyncBytes: 2000000 },
   maxQueuedBytes: 2000000, maxQueuedFrames: 64, maxControlBytes: 131072, maxControlFrames: 8, maxAssemblyBytes: 2000000 };
 const browserLimits = { maxPendingRequests: 4, maxRequestBytes: 4096, maxResponseBytes: 8192, timeoutMs: 30000 };
-const routeLimits = { maxConnections: 4, maxConnectionsPerSession: 3, maxConnectionsPerPrincipal: 3, maxConnectionsPerGrant: 4,
+const routeLimits = { maxConnections: 4, maxConnectionsPerWorkspace: 96, reservedOwnerConnections: 0, maxConnectionsPerSession: 3, maxConnectionsPerPrincipal: 3, maxConnectionsPerGrant: 4, maxBufferedBytes: 134217728,
   maxPendingRequests: 4, maxRequestBytes: 4096, maxResponseBytes: 8192, maxPendingBytes: 2000000, maxFragments: 8, maxBufferedChunks: 64,
   upgradeTimeoutMs: 30000, idleTimeoutMs: 60000, drainTimeoutMs: 1000 };
 const audience = "https://share.example.test", exchangeKey = "native-network-exchange-".repeat(2), ticketKey = "native-network-tickets-".repeat(2);
@@ -186,7 +188,12 @@ it("resumes a real configured service activation after a lost native adoption re
     let routes: ReturnType<typeof createNamedLiveRoutes> | undefined;
     const relayApp = createSyncRelayHandler({storage, shareWebOrigin: audience, relayExchangeKey: exchangeKey, resolveActor: createSessionActorResolver(relayAuth),
       namedBrowserSessionLimits: {...browserLimits, maxSessions: 4, retentionMs: 120000}, ownerRestoreHost: () => active});
-    const relayHttp = serveFetchHandler({handler: request => new URL(request.url).pathname === "/sync/live/named-tickets" ? routes!.handle(request) : relayApp(request),
+    // The service host replicates through its scoped feed, with the credential this relay derives for it.
+    const serviceKey = {key: Buffer.from(ticketKey), namespace: history.namespace};
+    const serviceReplication = createServiceHostReplication({storage, prefix: "dohc-service-v1.", hostedFeed: true,
+      authorize: input => authorizeServiceHostReplication(storage, {...serviceKey, ...input})});
+    const relayHttp = serveFetchHandler({handler: request => request.headers.get("authorization")?.startsWith("Bearer dohc-service-v1.") ? serviceReplication(request)
+      : new URL(request.url).pathname === "/sync/live/named-tickets" ? routes!.handle(request) : relayApp(request),
       maxBodyBytes: () => 8_000_000, oversized: () => new Response(null, {status: 404}), failure: () => new Response(null, {status: 500})});
     relayHttp.listen(0, "127.0.0.1"); await once(relayHttp, "listening");
     closes.push(() => new Promise<void>(done => relayHttp.close(() => done())));
@@ -198,8 +205,9 @@ it("resumes a real configured service activation after a lost native adoption re
     const opened = await owner.sendRequest({id: requestId++, method: "workspace.open", params: {rootDir: ownerRoot, workspaceId: "workspace", captureMode: "none",
       relay: {baseUrl: relayUrl, bearerToken: bearer, allowInsecureLoopbackForTests: true}}, deadlineMs: 30000});
     const handle = (opened.result as {workspace: string}).workspace;
-    async function rpc(method: string, params: Record<string, any>) {
-      try {return (await owner!.sendRequest({id: requestId++, workspace: handle, method, params, deadlineMs: 30000})).result as Record<string, any>;}
+    async function rpc(method: string, params: Record<string, any>, idempotencyKey?: string) {
+      try {return (await owner!.sendRequest({id: requestId++, workspace: handle, method, params, deadlineMs: 30000,
+        ...(idempotencyKey === undefined ? {} : {idempotencyKey})})).result as Record<string, any>;}
       catch (cause) {throw new Error(`Service proof source RPC failed: ${method}`, {cause});}
     }
     results.claim = await rpc("sync.claim", {workspaceId: "workspace"});
@@ -218,15 +226,15 @@ it("resumes a real configured service activation after a lost native adoption re
       throw new Error("Owner push exceeded its eight-page bound.");
     }
     results.ownerEnrollmentPush = await push();
-    const written = await rpc("versionedText.write", {workspaceId: "workspace", versionId: mainVersionId, path: "docs/a.md", text: "Hello", origin: "api", requestId: randomUUID()});
+    const written = await rpc("versionedText.write", {workspaceId: "workspace", versionId: mainVersionId, path: "docs/a.md", text: "Hello", origin: "api"}, randomUUID());
     const objectId = written.object.id as string;
     expect(typeof objectId).toBe("string");
     const editor = await rpc("ydoc.open", {versionId: mainVersionId, path: "docs/a.md", expectedObjectId: objectId, contentKind: "richdoc"});
     expect(editor.seedContent).toBe("Hello");
     const baseline = Y.encodeStateAsUpdate(ownerDoc), lineageClaimId = hash(baseline), document = {workspaceId: "workspace", mainVersionId, objectId, lineageClaimId};
-    await rpc("ydoc.recordUpdate", {sessionId: editor.sessionId, updateBase64: Buffer.from(baseline).toString("base64"), seed: true});
+    const seeded = await rpc("ydoc.recordUpdate", {sessionId: editor.sessionId, updateBase64: Buffer.from(baseline).toString("base64"), seed: true, expectedLineageClaimId: editor.lineageClaimId});
     const vector = Y.encodeStateVector(ownerDoc); ownerDoc.getMap("frontmatter").set("beforeActivation", "ordinary-owner");
-    await rpc("ydoc.recordUpdate", {sessionId: editor.sessionId, updateBase64: Buffer.from(Y.encodeStateAsUpdate(ownerDoc, vector)).toString("base64")});
+    await rpc("ydoc.recordUpdate", {sessionId: editor.sessionId, updateBase64: Buffer.from(Y.encodeStateAsUpdate(ownerDoc, vector)).toString("base64"), expectedLineageClaimId: seeded.lineageClaimId});
     await rpc("ydoc.settle", {sessionId: editor.sessionId}); await rpc("ydoc.close", {sessionId: editor.sessionId});
     results.initialPush = await push();
     expect(storage.workspaceIsOwnedBy("workspace", ownerUser.id)).toBe(true);
@@ -236,18 +244,22 @@ it("resumes a real configured service activation after a lost native adoption re
     expect(storage.provisionLiveHostControl({mode: "service", hostId: "service", updatedAtMs: Date.now(), guard: storage.captureStanding()}).ok).toBe(true);
     const identity = storage.getWorkspaceBootstrap("workspace").identity, serviceConfig = join(root, "service.json");
     if (!identity) throw new Error("Ordinary source owner did not establish a relay identity.");
+    // Enrollment puts the document in the service host's scope and gives the host its credential.
+    const enrolled = storage.enrollServiceHostDocument({workspaceId: "workspace", path: "docs/a.md", shareId: "share", ownerUserId: ownerUser.id,
+      nowMs: Date.now(), guard: storage.captureStanding()});
     writeFileSync(serviceConfig, JSON.stringify({version: 1, engineExecutable: executable, hostId: "service", instanceId: "instance",
-      workspaces: [{root: workspace, workspaceId: "workspace", maxRegistrations: 2, ordinaryReplication: {relay: {baseUrl: "https://service-activation-relay.example.test", bearerToken: bearer},
-        identity: {kind: "join", replicationEpoch: identity.replicationEpoch, streamIdentity: identity.streamIdentity}, maxPagesPerPull: 8}}],
+      workspaces: [{root: workspace, workspaceId: "workspace", maxRegistrations: 2, hostedReplication: {relay: {baseUrl: "https://service-activation-relay.example.test",
+        bearerToken: deriveServiceHostBearer(enrolled, serviceKey)},
+        identity: {replicationEpoch: identity.replicationEpoch, streamIdentity: identity.streamIdentity}, maxPagesPerPull: 8}}],
       settlement: {maxApplicationsPerSettlement: 8}, adoption: {maxBytes: 1_000_000, maxEvents: 100, ownerOutbox: {maxPendingBytes: 1_000_000, maxPendingAgeMs: 600000}},
       sync: {policy: {maxClientVectorBytes: 100000, maxHostVectorBytes: 100000, maxOutputBytes: 1_000_000, maxReadBytes: 4_000_000}, workingReserveBytes: 4_000_000},
       activation: {targets: [{workspaceId: "workspace", path: "docs/a.md", shareId: "share"}], validation: validationPolicy, maxCaptureBytes: 1_000_000, maxEntriesPerDrain: 8,
-        maxBytesPerDrain: 1_000_000, maxDocumentsPerPass: 1, pollIntervalMs: 100, passDeadlineMs: 30000},
+        maxBytesPerDrain: 1_000_000, maxDocumentsPerPass: 1, pollIntervalMs: 100, passDeadlineMs: 30000, idleUnloadMs: 600000, idleRetryMs: 30000},
       ingress: {aggregateBytes: 512 * 1024 * 1024, applicationWorkingReserveBytes: 8 * 1024 * 1024, maxUploads: 4, uploadDeadlineMs: 30000},
       client: {aggregateBytes: 200_000_000, maxUploads: 4, connectTimeoutMs: 30000, requestDeadlineMs: 30000}}));
     let committed!: () => void; const adoptionCommitted = new Promise<void>(resolve => {committed = resolve;}); harness.committed = committed;
     const activationFailed = new Promise<Error>(resolve => {harness.failed = resolve;});
-    active = await startServiceLiveHost({configPath: serviceConfig, storage, history, frameChanges});
+    active = await startServiceLiveHost({trustedAccount: (accountId: string) => ({accountId, name: accountId}), configPath: serviceConfig, storage, history, frameChanges});
     const activationOutcome = await Promise.race([adoptionCommitted, activationFailed]);
     if (activationOutcome instanceof Error) throw activationOutcome;
     const pending = storage.createServiceActivationStore(history).read("workspace", "docs/a.md", 1_000_000)!;
@@ -256,7 +268,7 @@ it("resumes a real configured service activation after a lost native adoption re
     const firstConnectionId = active.coordinate.connectionId;
     await active.close(); active = undefined;
     expect(storage.createServiceActivationStore(history).read("workspace", "docs/a.md", 1_000_000)!.activationId).toBe(pending.activationId);
-    active = await startServiceLiveHost({configPath: serviceConfig, storage, history, frameChanges});
+    active = await startServiceLiveHost({trustedAccount: (accountId: string) => ({accountId, name: accountId}), configPath: serviceConfig, storage, history, frameChanges});
     expect(active.coordinate.connectionId).not.toBe(firstConnectionId);
     await vi.waitFor(() => expect(storage.createServiceActivationStore(history).read("workspace", "docs/a.md", 1_000_000)?.completed).toBe(true), {timeout: 30000});
     const completed = storage.createServiceActivationStore(history).read("workspace", "docs/a.md", 1_000_000)!;
@@ -274,7 +286,7 @@ it("resumes a real configured service activation after a lost native adoption re
     const application = createShareWebApplication({relayUrl, publicRelayUrl: audience, relayExchangeKey: exchangeKey, publicHosts: new Set([new URL(audience).host]),
       accountAuth: {publicOrigin: audience, upstreamUrl: authUrl}, namedBrowserSessionLimits: browserLimits, namedLiveTickets: true});
     const gateway = createLiveGateway({publicOrigin: audience, publicHosts: new Set([new URL(audience).host]),
-      limits: {maxConnections: 4, maxConnectionsPerSession: 3, maxConnectionsPerPrincipal: 3, maxConnectionsPerGrant: 4, maxFrameBytes: 65536, maxPendingBytes: 2_000_000,
+      limits: {maxConnections: 4, maxConnectionsPerWorkspace: 96, reservedOwnerConnections: 0, maxConnectionsPerSession: 3, maxConnectionsPerPrincipal: 3, maxConnectionsPerGrant: 4, maxBufferedBytes: 134217728, maxFrameBytes: 65536, maxPendingBytes: 4 * 1024 * 1024,
         maxPendingFrames: 64, maxFragments: 8, maxBufferedChunks: 64, upgradeTimeoutMs: 30000, idleTimeoutMs: 60000, drainTimeoutMs: 1000},
       resolveSession: async (request, discriminator, signal) => {const authenticated = namedLiveGatewayRequest(request, audience, signal); return authenticated ? application.resolveNamedBrowserSession(authenticated, discriminator) : null;},
       openHostRoute: createNamedLiveRelayRoute({relayUrl, publicOrigin: audience, exchangeKey, handshakeTimeoutMs: 30000})});
@@ -294,7 +306,7 @@ it("resumes a real configured service activation after a lost native adoption re
       openSocket: (input, protocols) => {const url = new URL(input); expect(url.origin).toBe(audience.replace("https:", "wss:"));
         const socket = new WebSocket(`ws://127.0.0.1:${port}${url.pathname}${url.search}`, protocols, {headers: {host: new URL(audience).host, origin: audience, cookie}, perMessageDeflate: false});
         sockets.push(socket); socket.on("error", () => undefined); socket.once("unexpected-response", (_request, response) => {response.resume(); socket.terminate();}); return socket as unknown as BrowserSocket;}});
-    const provider = manager.select({accountId: namedUser.id, workspaceId: "workspace", grantId: "grant", objectId}); providers.push(provider);
+    const provider = manager.select({accountId: namedUser.id, workspaceId: "named:grant", grantId: "grant", objectId}); providers.push(provider);
     await provider.reconnect(); await stateWhen(provider, state => state.status === "live");
     expect(yDocToMarkdown(provider.doc)).toBe(yDocToMarkdown(ownerDoc));
     const beforeNamedCursor = provider.state().lastApplied?.journalCursor ?? 0;

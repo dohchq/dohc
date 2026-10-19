@@ -1,5 +1,6 @@
 use super::*;
 use crate::{ContentKind, Ydoc};
+use dohc_engine_storage::text;
 
 /// A source read and retained by the native actor after ordinary cursor commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,6 +34,44 @@ pub struct ImportedOwnerActivation {
     pub baseline_bytes: Vec<u8>,
     pub full_state: Vec<u8>,
     pub restore_generation: Option<i64>,
+}
+
+/// The committed fetch position the document's imported content stands at,
+/// with the identity it was fetched under. A hosted replica answers only for
+/// a document whose backfill committed, at the further of its main and
+/// backfill cursors; any other replica reads its ordinary cursor.
+fn committed_position(
+    conn: &rusqlite::Connection,
+    key: &DocKey,
+) -> Result<(i64, String, String), ApplicationError> {
+    let hosted: Option<(Option<String>, i64, String, String)> = conn
+        .query_row(
+            "SELECT d.state,MAX(h.main_cursor,COALESCE(d.backfill_cursor,0)),
+                    i.replication_epoch,i.stream_identity
+             FROM hosted_replicas h JOIN sync_identity i ON i.workspace_id=h.workspace_id
+             LEFT JOIN hosted_documents d ON d.workspace_id=h.workspace_id AND d.object_id=?2
+                AND d.scope_generation=h.scope_generation
+             WHERE h.workspace_id=?1",
+            params![key.workspace_id, key.object_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(read_sql)?;
+    if let Some((state, cursor, epoch, stream)) = hosted {
+        if state.as_deref() != Some("ready") {
+            return Err(ApplicationError::HostedDocumentUnready);
+        }
+        return Ok((cursor, epoch, stream));
+    }
+    let (cursor, epoch, stream): (String, String, String) = conn
+        .query_row(
+            "SELECT cursor,replication_epoch,stream_identity FROM sync_relay_cursors WHERE workspace_id=?1",
+            [&key.workspace_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(read_sql)?;
+    let cursor: i64 = cursor.parse().map_err(|_| ApplicationError::Corrupt)?;
+    Ok((cursor, epoch, stream))
 }
 
 pub fn release_imported_owner_activation(
@@ -105,7 +144,14 @@ pub fn capture_imported_owner_activation(
         return Err(invalid("invalid ordinary activation capture"));
     }
     let result = store.write_with(faults, |tx| {
-        let marker = durable::read_marker_in(tx, key)?.ok_or(ApplicationError::Conflict)?;
+        let Some(marker) = durable::read_marker_in(tx, key)? else {
+            // A hosted document that is not ready, or Y.Doc input waiting for
+            // its base, may still bring a lineage.
+            committed_position(tx, key)?;
+            let deferred: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
+                params![key.workspace_id,key.version_id,key.object_id], |row| row.get(0)).map_err(read_sql)?;
+            return Err(if deferred { ApplicationError::Conflict } else { ApplicationError::LiveDocumentWithoutLineage });
+        };
         if marker.content_kind != ContentKind::Richdoc || marker.regime != Regime::Replicated
             || marker.lineage_claim_status != durable::LineageClaimStatus::Exact
             || marker.path.as_deref() != Some(path)
@@ -114,10 +160,7 @@ pub fn capture_imported_owner_activation(
         let base_origin_id = marker.base_origin_id.clone().ok_or(ApplicationError::Conflict)?;
         let base_origin_seq = marker.base_origin_seq.ok_or(ApplicationError::Conflict)?;
         let base_relay_seq = marker.base_relay_seq.ok_or(ApplicationError::Conflict)?;
-        let (cursor, epoch, stream): (String, String, String) = tx.query_row(
-            "SELECT cursor,replication_epoch,stream_identity FROM sync_relay_cursors WHERE workspace_id=?1",
-            [&key.workspace_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).map_err(read_sql)?;
-        let cursor: i64 = cursor.parse().map_err(|_| ApplicationError::Corrupt)?;
+        let (cursor, epoch, stream) = committed_position(tx, key)?;
         integer(cursor, 0, SAFE)?;
         if base_relay_seq > cursor { return Err(ApplicationError::Conflict); }
         let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
@@ -154,9 +197,8 @@ pub fn capture_imported_owner_activation(
         // file keeps a body the engine reads differently still activates.
         let text = local
             .settled_markdown_source(&projection, || {
-                tx.query_row("SELECT text FROM blobs WHERE sha256=?1", [&source_digest], |row| row.get(0))
+                text::read(tx, &source_digest)
                     .optional()
-                    .map(Option::flatten)
                     .map_err(read_sql)
             })?
             .unwrap_or(projection);
@@ -208,13 +250,15 @@ pub fn resume_imported_owner_activation(
         return Err(invalid("invalid ordinary activation resume"));
     }
     store.read_with(|conn| {
+        // A store that does not hold the activation, as one an identity change
+        // selected, can never resume it.
         let sizes: (i64,i64,i64) = conn.query_row(
             "SELECT length(CAST(a.descriptor_json AS BLOB)),length(b.bytes),length(f.bytes)
              FROM ydoc_owner_activation_sources a JOIN binary_blobs b ON b.sha256=a.lineage_claim_id
              JOIN binary_blobs f ON f.sha256=a.full_state_digest WHERE a.activation_id=?1
              AND a.relay_database_namespace=?2 AND a.workspace_id=?3 AND a.version_id=?4 AND a.object_id=?5",
             params![activation_id,namespace,key.workspace_id,key.version_id,key.object_id],
-            |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(read_sql)?;
+            |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(read_sql)?.ok_or(ApplicationError::Conflict)?;
         let mut total=0usize;
         for length in [sizes.0,sizes.1,sizes.2] {
             let length=usize::try_from(length).map_err(|_|ApplicationError::Corrupt)?;
@@ -226,6 +270,9 @@ pub fn resume_imported_owner_activation(
         let json:String=conn.query_row("SELECT descriptor_json FROM ydoc_owner_activation_sources WHERE activation_id=?1",[activation_id],|r|r.get(0)).map_err(read_sql)?;
         if format!("ordinary-activation-{}",hex_sha256(json.as_bytes()))!=activation_id { return Err(ApplicationError::Corrupt); }
         let source:ImportedOwnerSource=serde_json::from_str(&json).map_err(|_|ApplicationError::Corrupt)?;
+        // A document that is not ready may still be changing, so readiness is
+        // decided before its state is compared with the retained activation.
+        let (cursor,epoch,stream)=committed_position(conn,key)?;
         let marker=durable::read_marker_in(conn,key)?.ok_or(ApplicationError::Conflict)?;
         if marker.content_kind!=ContentKind::Richdoc || marker.regime!=Regime::Replicated
             || marker.lineage_claim_status!=durable::LineageClaimStatus::Exact
@@ -240,10 +287,6 @@ pub fn resume_imported_owner_activation(
         let verified=adoption::read_adoption_source(conn,namespace,activation_id,&binding)?
             .and_then(|(_,_,_,_,source)|source).ok_or(ApplicationError::Corrupt)?;
         if verified!=source { return Err(ApplicationError::Corrupt); }
-        let (cursor,epoch,stream):(String,String,String)=conn.query_row(
-            "SELECT cursor,replication_epoch,stream_identity FROM sync_relay_cursors WHERE workspace_id=?1",
-            [&key.workspace_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(read_sql)?;
-        let cursor:i64=cursor.parse().map_err(|_|ApplicationError::Corrupt)?;
         if cursor<source.committed_cursor || epoch!=source.replication_epoch || stream!=source.stream_identity {
             return Err(ApplicationError::Conflict);
         }

@@ -76,7 +76,7 @@ function fixture({prefix = 0, owners = 1, maxEvents = 10, suffix = 0} = {}) {
     client: client as unknown as EngineClient,workspace: "handle",deadlineMs: 1_000,nextRequestId: () => ++requestId,
     host: {mode: "device",hostId: "host",hostEpoch: 1,instanceId: "instance",connectionId: "connection"} as never,
     bounds: {maxBytes: 10_000,maxEvents},
-    ownerAdmission: {shares: new Map([[document.workspaceId,"share"]]),maxEntriesPerDrain: 10,maxBytesPerDrain: 10_000,validate: () => ({} as never)},
+    ownerAdmission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([[document.workspaceId,"share"]]),maxEntriesPerDrain: 10,maxBytesPerDrain: 10_000,validate: () => ({} as never)},
   });
   return {consumer,client,store,retained,outboxAcks,ownerEntries,persist,invalidate: () => {current = false;}};
 }
@@ -314,4 +314,20 @@ it("schedules another owner pass after worker capacity returns even without prio
   vi.mocked(drainOwnerOutbox).mockResolvedValueOnce({admittedEntries: 0, hasMore: true, retryReady: true});
   expect(await f.consumer.drain(document)).toMatchObject({kind: "pending", continueDrain: true});
   expect(await f.consumer.drain(document)).toMatchObject({kind: "done", continueDrain: false});
+});
+
+it("continues applying incoming accepted edits while the retained owner outbox is quarantined", async () => {
+  const f = fixture({prefix: 1, owners: 1});
+  const actual = await vi.importActual<typeof import("./ownerOutboxDelivery")>("./ownerOutboxDelivery");
+  vi.mocked(drainOwnerOutbox).mockImplementation(actual.drainOwnerOutbox);
+  const original = f.client.sendRequest.getMockImplementation()!;
+  f.client.sendRequest.mockImplementation(async input => input.method === "liveApplication.ownerOutbox"
+    ? {id: input.id, result: {outboxId: "outbox", pendingBytes: 1, state: "quarantined"}}
+    : original(input));
+  expect(await f.consumer.drain(document)).toMatchObject({kind: "done"});
+  expect(f.client.sendLiveApplication).toHaveBeenCalledTimes(1);
+  expect(f.client.sendLiveApplication.mock.calls[0]![1].metadata.accepted.receipt).toEqual(receipt(1));
+  expect(f.outboxAcks).toEqual([]);
+  expect(f.retained).toEqual(f.ownerEntries);
+  expect(f.consumer.adoptionSeedApplied(document)).toBe(true);
 });

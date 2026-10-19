@@ -1,5 +1,7 @@
 mod common;
 
+#[cfg(target_vendor = "apple")]
+use common::FatVolume;
 use common::Scratch;
 use dohc_engine_files::{
     CancellationToken, CaptureError, CaptureOp, CaptureSink, FilesHandle, IngestOutcome,
@@ -322,4 +324,56 @@ async fn probe_root_delete_recreate_race_is_not_silently_missed() {
     );
 
     watcher.stop().expect("stop");
+}
+
+/// A FAT32 volume stores a name that is not UTF-8 percent-encoded but
+/// reports its raw bytes to FSEvents. The watcher must keep reporting
+/// changes: the FSEvents callback of an unpatched notify 8.2.0 panicked on
+/// that path, and a panic there aborts the process.
+#[cfg(target_vendor = "apple")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_watcher_survives_a_name_that_is_not_utf8() {
+    use std::os::unix::ffi::OsStrExt;
+    let scratch = Scratch::new();
+    let Some(volume) = FatVolume::attach(scratch.path()) else {
+        eprintln!("SKIP: hdiutil could not attach a FAT32 image here");
+        return;
+    };
+    let root = volume.mount.join("ws");
+    std::fs::create_dir(&root).expect("workspace on the FAT32 volume");
+    let actor = dohc_engine_files::FilesActor::spawn_async(root.clone(), ScanBounds::default())
+        .await
+        .expect("actor");
+    let handle = actor.handle();
+    let ready = NativeWatcher::start(root.clone(), handle.clone(), CancellationToken::new())
+        .await
+        .expect("watch start");
+    let mut watcher = ready.watcher;
+    apply_and_ack(&handle, ready.initial_reconcile).await;
+
+    std::fs::write(root.join(std::ffi::OsStr::from_bytes(b"\xff.md")), b"raw")
+        .expect("FAT32 takes a name that is not UTF-8");
+    wait_dirty(&handle).await;
+    let run = handle
+        .reconcile_if_dirty(CancellationToken::new())
+        .await
+        .expect("reconcile the raw-byte name");
+    apply_and_ack(&handle, run).await;
+
+    std::fs::write(root.join("after.md"), b"after").expect("ordinary file");
+    wait_dirty(&handle).await;
+    let run = handle
+        .reconcile_if_dirty(CancellationToken::new())
+        .await
+        .expect("reconcile the ordinary file");
+    let plan = apply_and_ack(&handle, run).await;
+    assert!(
+        plan.ops
+            .iter()
+            .any(|op| matches!(op, CaptureOp::Ingest { path, .. } if path == "after.md")),
+        "{:?}",
+        plan.ops
+    );
+    watcher.stop().expect("stop");
+    drop(actor);
 }

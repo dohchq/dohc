@@ -9,6 +9,7 @@ import { backup, DatabaseSync } from "node:sqlite";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildRelayFixture } from "../../scripts/build.mjs";
 import { parseAppPublicationCandidate, APP_COLLECTION_RESPONSE_BYTES, type AppPublicationCandidate, type AppCollectionCapability } from "@dohc/security-contract/app-publication";
+import { compareAppCollectionPaths, isAppCollectionRecordPath } from "@dohc/security-contract/app-collection-checks";
 import { parseCollectionRecordFields } from "@dohc/workspace-contracts/collection-values";
 import { openSyncRelayStorage } from "../storage";
 import { createSyncRelayHandler,type CreateSyncRelayHandlerOptions } from "../server";
@@ -17,6 +18,9 @@ import {TokenBucketLimiter} from "@dohc/service-http";
 import type { StorageContext } from "./context";
 import type { AcceptAppCollectionInput } from "./appCollections";
 import { DiscussionActivityHub } from "../discussionActivity";
+import { createShareReadQueries } from "../shareReadQueries";
+import { ensureLiveLinkPublicPrincipal } from "./liveAuthorSnapshot";
+import { workspaceUsageBytes } from "./workspaces";
 
 const hash = (value:string|Uint8Array) => createHash("sha256").update(value).digest("hex");
 const limits = {maxFiles:10,maxMetadataBytes:16_384,maxBundleBytes:4096};
@@ -72,6 +76,75 @@ function fixture() {
   return {directory,path,owner,input,write,get storage(){return storage;},get raw(){return (storage as StorageContext).db;},restart(){storage.close();storage=openSyncRelayStorage(path);},accept(patch:Partial<AcceptAppCollectionInput>={},maxCreatesPerGrant=100){return storage.acceptAppCollection({...input,...patch},{maxCreatesPerGrant});}};
 }
 
+it.each([null, "Sam"])("snapshots the app link holder's name %j for authenticated readers only", displayName => {
+  const f = fixture();
+  if (displayName !== null) {
+    f.accept({idempotencyKey: "enroll"});
+    f.raw.prepare("UPDATE sync_relay_link_principals SET display_name=?").run(displayName);
+  }
+  const since = f.storage.fetchLogPage({workspaceId: "w", sinceRelaySeq: 0, limit: 10}).nextCursor;
+  const before = workspaceUsageBytes(f.storage as StorageContext, "w");
+  const receipt = f.accept();
+  const row = f.storage.fetchLogPage({workspaceId: "w", sinceRelaySeq: since, limit: 10}).rows[0]!;
+  const payload = JSON.parse(row.payloadJson);
+  const principalId = String(f.raw.prepare("SELECT principal_id FROM sync_relay_link_principals").get()!.principal_id);
+  const publicPrincipalId = (f.storage as StorageContext).tx(() => ensureLiveLinkPublicPrincipal(f.storage as StorageContext,
+    {principalKind: "link", principalId, grantId: "g", grantGeneration: 1}));
+  const authors = [{kind: "link", publicPrincipalId, label: displayName ?? "Anonymous"}];
+  expect(row.admittedAuthorSnapshot).toEqual(authors);
+  expect(payload.authors).toEqual([{kind: "public", principalId: publicPrincipalId, grantId: "g"}]);
+  const blob = f.storage.getBlob("w", payload.payloadAfterBlobSha256)!;
+  expect(parseCollectionRecordFields(Buffer.from(blob).toString())?.created_by).toBe(publicPrincipalId);
+  const durableCharges = Number(f.raw.prepare("SELECT storage_bytes FROM sync_relay_app_collection_receipts WHERE acceptance_id=?").get(receipt.acceptanceId)!.storage_bytes)
+    + (displayName === null ? Number(f.raw.prepare("SELECT storage_bytes FROM sync_relay_app_public_principals").get()!.storage_bytes)
+      + Number(f.raw.prepare("SELECT storage_bytes FROM sync_relay_link_principals").get()!.storage_bytes) : 0);
+  expect(workspaceUsageBytes(f.storage as StorageContext, "w") - before)
+    .toBe(durableCharges + blob.byteLength + Buffer.byteLength(row.payloadJson) + Buffer.byteLength(JSON.stringify(authors)));
+  const queries = createShareReadQueries(f.storage, 500);
+  const selector = {paths: ["responses"], versionId: null, access: "view" as const};
+  const authenticated = queries.filteredLogPage("w", "s", selector, since, 10, "authenticated");
+  expect(authenticated.ops).toHaveLength(1);
+  expect(authenticated.ops[0]!.payload).toMatchObject({authors});
+  const accountless = queries.filteredLogPage("w", "s", selector, since, 10, "accountless");
+  expect(accountless.ops).toHaveLength(1);
+  expect(accountless.ops[0]!.payload).not.toHaveProperty("authors");
+  expect(accountless.ops[0]).not.toHaveProperty("originId");
+  for (const page of [authenticated, accountless]) {
+    const serialized = JSON.stringify(page);
+    for (const secret of [principalId, f.input.capabilityHash, f.input.profileTokenHash, '"grantId"', '"grantGeneration"', '"principalId"']) {
+      expect(serialized).not.toContain(secret);
+    }
+  }
+  f.raw.prepare("UPDATE sync_relay_link_principals SET display_name='Changed'").run();
+  expect(f.accept()).toEqual(receipt);
+  expect(f.storage.fetchLogPage({workspaceId: "w", sinceRelaySeq: since, limit: 10}).rows[0]!.admittedAuthorSnapshot).toEqual(authors);
+});
+
+it("hides the app-create grant in authenticated share log origins", () => {
+  const f = fixture();
+  f.accept();
+  const queries = createShareReadQueries(f.storage, 500);
+  const selector = {paths: ["responses"], versionId: null, access: "view" as const};
+  const read = (shareId: string) => queries.filteredLogPage("w", shareId, selector, 1, 10, "authenticated").ops[0]!.originId;
+  expect(read("s")).not.toBe("relay:collection-create:g");
+  expect(read("s")).toBe(read("s"));
+  expect(read("s")).not.toBe(read("another-share"));
+});
+
+it("keeps private grant metadata out of app-created share blobs", () => {
+  const f = fixture();
+  f.accept();
+  const queries = createShareReadQueries(f.storage, 500);
+  const selector = {paths: ["responses"], versionId: null, access: "view" as const};
+  for (const audience of ["authenticated", "accountless"] as const) {
+    const page = queries.filteredLogPage("w", "s", selector, 1, 10, audience);
+    const payload = page.ops[0]!.payload as Record<string, unknown>;
+    const blob = queries.historicalSharedBlob("w", selector, String(payload.payloadAfterBlobSha256));
+    expect(blob).not.toBeNull();
+    expect(parseCollectionRecordFields(Buffer.from(blob!).toString())).not.toHaveProperty("grant_id");
+  }
+});
+
 it("names the sync service when collection approval needs a newer reader",()=>{
   const f=fixture();
   const newer="version: 2\n"+schemaText;
@@ -89,7 +162,8 @@ it("accepts one durable workspace moment and payload-bound receipt across retrie
   expect(row.originId).toBe("relay:collection-create:g");
   const payload=JSON.parse(row.payloadJson),blob=f.storage.getBlob("w",payload.payloadAfterBlobSha256)!;
   const record=parseCollectionRecordFields(Buffer.from(blob).toString("utf8"))!;
-  expect(record).toMatchObject({destination:"Tokyo",name:"Sam",created_at:20,grant_id:"g",acceptance_id:receipt.acceptanceId});
+  expect(record).toMatchObject({destination:"Tokyo",name:"Sam",created_at:20,acceptance_id:receipt.acceptanceId});
+  expect(record).not.toHaveProperty("grant_id");
   expect(record).not.toHaveProperty("idempotency_key");
   expect(record).not.toHaveProperty("id");expect(record.created_by).toMatch(/^public_/);
   expect(payload).toMatchObject({metadata:{origin:"sync"},authors:[{kind:"public",principalId:record.created_by,grantId:"g"}]});
@@ -571,4 +645,61 @@ it("rechecks owner authority after an approval upload yields",async()=>{
   await body.ready;f.raw.prepare("UPDATE sync_relay_workspaces SET owner_user_id='other' WHERE workspace_id='w'").run();
   body.send({expectedAuthorityRevision:2,capability:null});expect((await pending).status).toBe(404);
   expect(f.raw.prepare("SELECT authority_revision FROM sync_relay_app_publications").get()!.authority_revision).toBe(2);
+});
+
+it("operator takedown refuses Collection writes and receipt retries from an existing launch", () => {
+  const f = fixture();
+  f.accept();
+  const before = f.storage.maxOriginSeq("w", "relay:collection-create:g");
+  const disabled = f.storage.disableAppPublication({publicationId: f.owner.publicationId, reason: "Confirmed phishing", nowMs: 30});
+  expect(disabled.authorityRevision).toBe(3);
+  expect(() => f.accept()).toThrow(/not found/i);
+  expect(() => f.accept({idempotencyKey: "after-takedown"})).toThrow(/not found/i);
+  expect(() => f.accept({idempotencyKey: "guessed-revision", expectedAuthorityRevision: 3})).toThrow(/not found/i);
+  expect(() => f.storage.reactivateAppPublication({...f.owner, expectedAuthorityRevision: 3})).toThrow(/operator disabled/);
+  f.restart();
+  expect(() => f.accept({idempotencyKey: "after-restart"})).toThrow(/not found/i);
+  expect(f.storage.maxOriginSeq("w", "relay:collection-create:g")).toBe(before);
+  expect(f.raw.prepare("SELECT COUNT(*) n FROM sync_relay_app_collection_receipts").get()!.n).toBe(1);
+});
+
+
+it("keeps SQL path filtering and UTF-8 ordering before the scan limit", () => {
+  const f = fixture();
+  const text = '---\n{"destination":"Tokyo","name":"Sam"}\n---\n';
+  const paths = ["responses/000-nested/a.md","responses/001.txt","responses/002.MD","responses/\ue000.md","responses/😀.md"];
+  for (const path of paths) f.write(path,text);
+  const scannedPaths: string[] = [];
+  const prepare = f.raw.prepare.bind(f.raw);
+  vi.spyOn(f.raw,"prepare").mockImplementation(query => {
+    const statement = prepare(query);
+    if (query.includes("FROM sync_relay_current_files file LEFT JOIN sync_relay_blobs")) {
+      const all = statement.all.bind(statement);
+      vi.spyOn(statement,"all").mockImplementation((...args) => {
+        const rows = all(...args);
+        scannedPaths.push(...rows.map(row => String(row.path)));
+        return rows;
+      });
+    }
+    return statement;
+  });
+  const first = f.storage.readAppCollection({...f.input,limit:1});
+  expect(JSON.stringify(first)).toBe(JSON.stringify({records:[{path:"responses/002.MD",recordId:null,fields:{destination:"Tokyo",name:"Sam"}}],nextPath:"responses/002.MD"}));
+  const rest = f.storage.readAppCollection({...f.input,limit:10,afterPath:first.nextPath!});
+  expect(rest.records.map(record=>record.path)).toEqual(["responses/\ue000.md","responses/😀.md"]);
+  for (const path of scannedPaths) expect(isAppCollectionRecordPath("responses",path),path).toBe(true);
+  expect([...new Set(scannedPaths)]).toEqual(paths.filter(path => isAppCollectionRecordPath("responses",path)).sort(compareAppCollectionPaths));
+});
+
+it("does not inspect corrupt rows after the page byte budget fills", () => {
+  const f = fixture();
+  for (let index=0;index<6;index++) {
+    f.write(`responses/00${index}.md`,`---\n${JSON.stringify({destination:"Tokyo",name:String(index)+"x".repeat(15_000)})}\n---\n`);
+  }
+  const corrupt = f.raw.prepare("SELECT blob_sha256 FROM sync_relay_current_files WHERE path='responses/005.md'").get()!;
+  f.raw.prepare("UPDATE sync_relay_blobs SET byte_length=byte_length+1 WHERE sha256=?").run(corrupt.blob_sha256);
+  const page = f.storage.readAppCollection({...f.input,limit:10});
+  expect(page.records.map(record=>record.path)).toEqual(["responses/000.md","responses/001.md","responses/002.md","responses/003.md"]);
+  expect(page.nextPath).toBe("responses/003.md");
+  expect(()=>f.storage.readAppCollection({...f.input,limit:10,afterPath:page.nextPath!})).toThrow(/not found/i);
 });

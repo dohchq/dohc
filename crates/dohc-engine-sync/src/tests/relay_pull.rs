@@ -1,5 +1,148 @@
 use super::*;
 
+fn open_document_pull_fixture(later: i64, live: bool) -> (i64, i64, u128) {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1000, &NoFaults)
+        .unwrap();
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "shared").unwrap();
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.plaintext_insert(0, "before");
+    let sha = engine.put_binary_blob(&doc.encode_full_state()).unwrap();
+    let base = envelope(
+        "peer",
+        0,
+        "ydoc.update",
+        json!({"versionId":"main", "objectId":"shared", "path":"shared.md", "contentKind":"plaintext", "updateBlobSha256":sha, "lineageClaimId":sha, "isBaseState":true}),
+    );
+    apply_ydoc_envelope(
+        &mut engine,
+        &mut Default::default(),
+        &base,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap();
+    let leases = dohc_engine_collab::LeaseRegistry::new();
+    let _held = live.then(|| leases.acquire(&key).unwrap());
+    if let Some(held) = &_held {
+        held.bind_claim(base.payload["lineageClaimId"].as_str())
+            .unwrap();
+    }
+    let bytes = doc.plaintext_insert(6, " settled");
+    let delta_sha = engine.put_binary_blob(&bytes).unwrap();
+    let mut delta = base.clone();
+    delta.origin_seq = 1;
+    delta.payload["updateBlobSha256"] = json!(delta_sha);
+    delta.payload["isBaseState"] = json!(false);
+    let text = "before settled";
+    let text_sha = dohc_engine_storage::hex_sha256(text.as_bytes());
+    let moment = |seq, object: String, path: String| {
+        envelope(
+            "peer",
+            seq,
+            "moment.append",
+            json!({
+                "momentId":if seq == 2 { format!("moment-ydoc-{}", "c".repeat(64)) } else { format!("settled-{seq}") }, "versionId":"main", "objectId":object, "objectCreatedAtMs":1,
+                "path":path, "recordedAtMs":2000, "operation":"write", "payloadBeforeBlobSha256":null, "payloadBeforePath":null,
+                "payloadAfterBlobSha256":text_sha, "payloadAfterPath":path, "payloadAfterContentKind":"text",
+                "metadata":{"origin":"sync"}, "beforePresent":"absent"
+            }),
+        )
+    };
+    let mut ops = vec![delta, moment(2, "shared".into(), "shared.md".into())];
+    ops.extend((0..later).map(|i| moment(i + 3, format!("other-{i}"), format!("other-{i}.md"))));
+    let mut cursor = 0;
+    let total = ops.len();
+    let pages = ops
+        .chunks(500)
+        .map(|chunk| {
+            let start = cursor;
+            cursor += chunk.len() as i64;
+            (
+                start,
+                PullResponse {
+                    ops: chunk.to_vec(),
+                    next_cursor: cursor,
+                    has_more: cursor < total as i64,
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut relay = PagedRelay::new(pages);
+    relay.blobs.insert(text_sha, text.as_bytes().to_vec());
+    let client = RelaySyncClient::new(relay);
+    let start = std::time::Instant::now();
+    let mut cache = Default::default();
+    loop {
+        let result = client
+            .pull_chat_workspace(&mut engine, &mut cache, "ws", &NoFaults, &leases, 2100)
+            .unwrap();
+        let SyncPassOutcome::Complete {
+            has_more,
+            pending_cursor: Some(cursor),
+            ..
+        } = result
+        else {
+            panic!("{result:?}");
+        };
+        client
+            .commit_pull_cursor(&mut engine, "ws", &cursor, &NoFaults, &leases, 2100)
+            .unwrap();
+        if !has_more {
+            break;
+        }
+    }
+    let micros = start.elapsed().as_micros();
+    let deferred = engine
+        .read_with(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM relay_deferred_ops", [], |r| {
+                r.get::<_, i64>(0)
+            })
+        })
+        .unwrap();
+    let others = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM snapshots WHERE object_id LIKE 'other-%'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+        })
+        .unwrap();
+    if deferred == 0 {
+        assert_eq!(
+            read_replication_acked_seq(&engine, "ws", "peer").unwrap(),
+            later + 2
+        );
+    }
+    (others, deferred, micros)
+}
+
+#[test]
+fn open_document_pull_admits_settlement_and_same_origin_later_files() {
+    let (others, deferred, _) = open_document_pull_fixture(2, true);
+    assert_eq!((others, deferred), (2, 0));
+}
+
+#[test]
+#[ignore = "manual before/after pull measurement"]
+fn open_document_pull_measurement() {
+    for live in [true, false] {
+        for sample in 0..std::env::var("OPENHOLD_SAMPLES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5)
+        {
+            let (others, deferred, micros) = open_document_pull_fixture(1000, live);
+            println!(
+                "OPENHOLD pull live={live} sample={sample} applied_later={others} deferred={deferred} micros={micros}"
+            );
+        }
+    }
+}
+
 #[derive(Default)]
 struct ClaimRelay {
     relay: FakeRelay,
@@ -883,6 +1026,149 @@ fn fresh_coordinate_does_not_canonicalize_payload_for_a_comparison_that_cannot_e
 }
 
 #[test]
+fn ordinary_recording_claim_is_consumed_on_owner_echo_and_redelivery() {
+    for (kind, authors) in [
+        ("moment.append", None),
+        (
+            "moment.append",
+            Some(json!([{"kind":"agent", "agentId":"writer"}])),
+        ),
+        ("ydoc.update", None),
+    ] {
+        let (_scratch, _path, mut engine) = open_store();
+        let mut payload = json!({"content": "original", "isBaseState": false,
+            "actorOriginId": "owner", "attribution": {"actorKind": "human", "depth": 0},
+            "authorContext": {"kind": "account", "accountId": "owner"}});
+        if let Some(authors) = authors {
+            payload["authors"] = authors;
+        }
+        journal_local_replication_op(
+            &mut engine,
+            "ws",
+            "local",
+            "epoch-1",
+            "stream-1",
+            kind,
+            &payload,
+            2_000,
+            &NoFaults,
+        )
+        .expect("journal recording claim");
+        let mut stored = payload.clone();
+        stored.as_object_mut().unwrap().remove("authorContext");
+        let mut echo = envelope("local", 0, kind, stored);
+        for _ in 0..2 {
+            assert!(matches!(
+                apply_envelope_with(
+                    &mut engine,
+                    &echo,
+                    &NoFaults,
+                    |_, _| -> Result<(), SyncError> { panic!("owner echo must not apply twice") }
+                ),
+                Ok(ApplyOutcome {
+                    primary: ApplyDisposition::Skipped,
+                    ..
+                })
+            ));
+            assert!(
+                crate::apply::is_acknowledged_envelope(&engine, &echo).expect("acknowledged echo")
+            );
+        }
+        echo.payload["content"] = json!("changed");
+        assert!(matches!(
+            apply_envelope_with(&mut engine, &echo, &NoFaults, |_, _| Ok(())),
+            Err(SyncError::CoordinateDiverged)
+        ));
+        let journal = list_replication_ops(&engine, "ws", "local", -1, 10).unwrap();
+        assert_eq!(
+            journal[0].payload, payload,
+            "comparison does not rewrite the journal"
+        );
+        let mut changed_claim = envelope("local", 0, kind, payload.clone());
+        changed_claim.payload["authorContext"]["accountId"] = json!("someone-else");
+        assert!(matches!(
+            apply_envelope_with(&mut engine, &changed_claim, &NoFaults, |_, _| Ok(())),
+            Err(SyncError::CoordinateDiverged)
+        ));
+        crate::cursor::write_pushed_seq_with_refusals(
+            &mut engine,
+            "ws",
+            "local",
+            0,
+            &[],
+            &[],
+            &[envelope("local", 0, kind, payload)],
+            &NoFaults,
+            &NoLiveLeases,
+            2_001,
+        )
+        .expect("commit successful push");
+        let stored = list_replication_ops(&engine, "ws", "local", -1, 10).unwrap();
+        assert!(stored[0].payload.get("authorContext").is_none());
+    }
+}
+
+#[test]
+fn ordinary_recording_claim_preserves_live_agent_settlement_and_base_contexts() {
+    for (kind, fields, context) in [
+        (
+            "ydoc.update",
+            json!({}),
+            json!({"kind":"account", "accountId":"owner"}),
+        ),
+        (
+            "ydoc.update",
+            json!({"isBaseState":true}),
+            json!({"kind":"account", "accountId":"owner"}),
+        ),
+        (
+            "ydoc.update",
+            json!({"isBaseState":false, "actorOriginId":"owner", "attribution":{"actorKind":"human"}}),
+            json!({"kind":"account", "accountId":"owner", "agent":{"agentId":"writer"}}),
+        ),
+        (
+            "moment.append",
+            json!({"settlementReference":{}}),
+            json!({"kind":"account", "accountId":"owner"}),
+        ),
+        (
+            "moment.append",
+            json!({"authors":[{"kind":"agent", "agentId":"writer"}]}),
+            json!({"kind":"account", "accountId":"owner", "agent":{"agentId":"writer"}}),
+        ),
+        (
+            "moment.append",
+            json!({"momentId":"unavailable-moment", "attributionUnavailable":{"settlementId":"unavailable", "reason":"unproven-hosted-authors"}}),
+            json!({"kind":"account", "accountId":"owner"}),
+        ),
+        (
+            "other",
+            json!({}),
+            json!({"kind":"account", "accountId":"owner"}),
+        ),
+    ] {
+        let (_scratch, _path, mut engine) = open_store();
+        let mut original = envelope("peer", 0, kind, fields);
+        original.payload["authorContext"] = context;
+        apply_envelope_with(&mut engine, &original, &NoFaults, |_, _| Ok(())).unwrap();
+        let mut changed = original.clone();
+        changed
+            .payload
+            .as_object_mut()
+            .unwrap()
+            .remove("authorContext");
+        assert!(
+            matches!(
+                apply_envelope_with(&mut engine, &changed, &NoFaults, |_, _| Ok(())),
+                Err(SyncError::CoordinateDiverged)
+            ),
+            "{kind}: {}",
+            original.payload
+        );
+    }
+}
+
+#[test]
 fn pull_repairs_legacy_null_base_coordinates_only_from_exact_relay_answers() {
     for (label, content_kind, below_floor, mismatch, expected) in [
         (
@@ -1215,26 +1501,20 @@ fn invalid_pull_page_leaves_legacy_base_repair_and_pull_state_unchanged() {
     );
 }
 
-#[test]
-fn local_unpushed_absence_stays_pending_until_push_makes_the_coordinate_present() {
-    let (_scratch, _path, mut engine) = open_store();
-    seed_identity(&mut engine);
-    VersionedTextStore::new(&mut engine)
-        .ensure_main_version("ws", "main", 1_000, &NoFaults)
-        .expect("main version");
-    seed_text_head(
-        &mut engine,
-        "object-local-pending",
-        "notes/local-pending.md",
-        "local base",
-    );
-    let key =
-        dohc_engine_collab::DocKey::new("ws", "main", "object-local-pending").expect("doc key");
+pub(super) fn seed_base_repair_candidate(
+    engine: &mut EngineStore,
+    object_id: &str,
+    origin_id: &str,
+    origin_seq: i64,
+) -> ReplicationEnvelope {
+    let path = format!("notes/{object_id}.md");
+    seed_text_head(engine, object_id, &path, "local base");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", object_id).expect("doc key");
     let doc = dohc_engine_collab::Ydoc::wire();
     doc.plaintext_insert(0, "local base");
     let base = doc.encode_full_state();
     let claim_id = match dohc_engine_collab::claim_base(
-        &mut engine,
+        engine,
         &key,
         dohc_engine_collab::ContentKind::Plaintext,
         &base,
@@ -1251,7 +1531,7 @@ fn local_unpushed_absence_stays_pending_until_push_makes_the_coordinate_present(
     let payload = json!({
         "versionId": "main",
         "objectId": key.object_id,
-        "path": "notes/local-pending.md",
+        "path": &path,
         "contentKind": "plaintext",
         "updateBlobSha256": &claim_id,
         "lineageClaimId": &claim_id,
@@ -1263,21 +1543,60 @@ fn local_unpushed_absence_stays_pending_until_push_makes_the_coordinate_present(
                 "INSERT INTO replication_log (
                      workspace_id,origin_id,origin_seq,op_kind,payload_json,
                      recorded_at_ms,imported,apply_disposition
-                 ) VALUES ('ws','local',1,'ydoc.update',?1,1100,0,'applied')",
-                [payload.to_string()],
+                 ) VALUES ('ws',?1,?2,'ydoc.update',?3,1100,?4,'applied')",
+                params![
+                    origin_id,
+                    origin_seq,
+                    payload.to_string(),
+                    i64::from(origin_id != "local")
+                ],
             )
             .map_err(SyncError::persist)?;
             tx.execute(
                 "INSERT INTO ydoc_base_relay_candidates (
                      workspace_id,version_id,object_id,lineage_claim_id,origin_id,origin_seq
-                 ) VALUES ('ws','main',?1,?2,'local',1)",
-                params![key.object_id, claim_id],
+                 ) VALUES ('ws','main',?1,?2,?3,?4)",
+                params![key.object_id, claim_id, origin_id, origin_seq],
             )
             .map_err(SyncError::persist)?;
             Ok::<_, SyncError>(())
         })
         .expect("seed local pending coordinate");
-    let relay = PagedRelay::new([(
+    ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
+        workspace_id: "ws".to_owned(),
+        origin_id: origin_id.to_owned(),
+        origin_seq,
+        op_kind: "ydoc.update".to_owned(),
+        payload,
+        recorded_at_ms: 1_100,
+        relay_seq: Some(7),
+    }
+}
+
+fn base_repair_state(engine: &EngineStore, object_id: &str) -> (Option<i64>, i64, i64) {
+    engine
+        .read_with(|conn| {
+            let marker = conn.query_row(
+                "SELECT base_relay_seq,base_relay_confirmed_absent FROM ydoc_docs
+             WHERE workspace_id='ws' AND version_id='main' AND object_id=?1",
+                [object_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let count = conn.query_row(
+                "SELECT COUNT(*) FROM ydoc_base_relay_candidates
+             WHERE workspace_id='ws' AND version_id='main' AND object_id=?1",
+                [object_id],
+                |row| row.get(0),
+            )?;
+            Ok::<_, rusqlite::Error>((marker.0, marker.1, count))
+        })
+        .expect("base repair state")
+}
+
+pub(super) fn empty_base_repair_relay() -> PagedRelay {
+    PagedRelay::new([(
         0,
         PullResponse {
             ops: Vec::new(),
@@ -1285,71 +1604,771 @@ fn local_unpushed_absence_stays_pending_until_push_makes_the_coordinate_present(
             has_more: false,
         },
     )])
-    .with_coordinate("local", 1, LogCoordinateResponse::Absent);
-    let client = RelaySyncClient::new(relay);
+}
 
+fn pull_base_repair(client: &RelaySyncClient<PagedRelay>, engine: &mut EngineStore) {
     client
         .pull_chat_workspace(
-            &mut engine,
+            engine,
             &mut dohc_engine_collab::WriterDocCache::new(),
             "ws",
             &NoFaults,
             &NoLiveLeases,
             1_200,
         )
-        .expect("pull before push");
-    let pending = engine
-        .read_with(|conn| {
-            let marker = conn.query_row(
-                "SELECT base_relay_seq,base_relay_confirmed_absent
-                   FROM ydoc_docs
-                  WHERE workspace_id='ws' AND version_id='main' AND object_id=?1",
-                [&key.object_id],
-                |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, i64>(1)?)),
-            )?;
-            let candidates = conn.query_row(
-                "SELECT COUNT(*) FROM ydoc_base_relay_candidates
-                  WHERE workspace_id='ws' AND version_id='main' AND object_id=?1",
-                [&key.object_id],
-                |row| row.get::<_, i64>(0),
-            )?;
-            Ok::<_, rusqlite::Error>((marker.0, marker.1, candidates))
-        })
-        .expect("pending marker");
-    assert_eq!(pending, (None, 0, 1));
+        .expect("pull base repair");
+}
 
-    client
-        .push_workspace(&mut engine, "ws", &NoFaults, &crate::NoLiveLeases, 1_300, 0)
-        .expect("push local coordinate");
-    client
-        .pull_chat_workspace(
+#[test]
+fn base_repair_uses_pulled_coordinate_without_lookup() {
+    page_base_repair(false);
+}
+
+#[test]
+fn base_repair_repeated_page_coordinate_keeps_lowest_sequence() {
+    page_base_repair(true);
+}
+
+fn page_base_repair(repeat_coordinate: bool) {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let mut base = seed_base_repair_candidate(&mut engine, "page-base", "peer", 0);
+    base.relay_seq = Some(10);
+    let mut ops = vec![base.clone()];
+    if repeat_coordinate {
+        base.relay_seq = Some(20);
+        ops.push(base);
+    }
+    let mut relay = PagedRelay::new([(
+        0,
+        PullResponse {
+            ops,
+            next_cursor: if repeat_coordinate { 20 } else { 10 },
+            has_more: false,
+        },
+    )]);
+    // The fixture assigns contiguous positions; this page has sparse positions.
+    relay.pages.get_mut(&0).unwrap().ops[0].relay_seq = Some(10);
+    let client = RelaySyncClient::new(relay);
+    pull_base_repair(&client, &mut engine);
+    assert_eq!(base_repair_state(&engine, "page-base"), (Some(10), 0, 0));
+    assert!(
+        client
+            .transport()
+            .coordinate_lookups
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+fn add_base_candidate(engine: &mut EngineStore, op: &ReplicationEnvelope) {
+    engine.write_with(&NoFaults, |tx| {
+        tx.execute("INSERT INTO replication_log (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported,apply_disposition) VALUES ('ws',?1,?2,'ydoc.update',?3,?4,?5,'applied')", params![op.origin_id,op.origin_seq,op.payload.to_string(),op.recorded_at_ms,i64::from(op.origin_id != "local")]).map_err(SyncError::persist)?;
+        tx.execute("INSERT INTO ydoc_base_relay_candidates (workspace_id,version_id,object_id,lineage_claim_id,origin_id,origin_seq) VALUES ('ws','main',?1,?2,?3,?4)", params![op.payload["objectId"].as_str().unwrap(),op.payload["lineageClaimId"].as_str().unwrap(),op.origin_id,op.origin_seq]).map_err(SyncError::persist)?;
+        Ok::<_,SyncError>(())
+    }).unwrap();
+}
+
+fn divergent_repair_base(base: &ReplicationEnvelope) -> (ReplicationEnvelope, Vec<u8>) {
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.plaintext_insert(0, "divergent base");
+    let bytes = doc.encode_full_state();
+    let sha = dohc_engine_storage::hex_sha256(&bytes);
+    let mut op = base.clone();
+    op.origin_id = "divergent".into();
+    op.origin_seq = 0;
+    op.payload["lineageClaimId"] = json!(sha);
+    op.payload["updateBlobSha256"] = json!(sha);
+    (op, bytes)
+}
+
+#[test]
+fn base_repair_publication_blocked_pull_matches_main() {
+    for mixed_absent in [false, true] {
+        let (_scratch, mut engine, observed, _checkpoint) = super::owner_publication::fixture();
+        let local = seed_base_repair_candidate(&mut engine, "blocked", "local", 1);
+        let owner = envelope(
+            "local",
+            0,
+            "ydoc.update",
+            json!({"versionId":"main","objectId":"owner","path":"owner.md","contentKind":"richdoc","lineageClaimId":observed.binding.lineage_claim_id,"updateBlobSha256":observed.binding.lineage_claim_id,"isBaseState":true}),
+        );
+        engine.write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE replication_log SET op_kind='ydoc.update',payload_json=?1,recorded_at_ms=?2,apply_disposition='applied' WHERE workspace_id='ws' AND origin_id='local' AND origin_seq=0", params![owner.payload.to_string(),owner.recorded_at_ms]).map_err(SyncError::persist)?;
+            tx.execute("UPDATE ydoc_owner_bindings SET binding_json=json_set(binding_json,'$.currentPath','private/owner.md','$.selectorPaths',json('[\"private/owner.md\"]'))",[]).map_err(SyncError::persist)?;
+            Ok::<_,SyncError>(())
+        }).unwrap();
+        let (divergent, bytes) = divergent_repair_base(&local);
+        let mut relay = PagedRelay::new([(
+            0,
+            PullResponse {
+                ops: vec![divergent.clone()],
+                next_cursor: 120,
+                has_more: false,
+            },
+        )]);
+        relay
+            .blobs
+            .insert(dohc_engine_storage::hex_sha256(&bytes), bytes);
+        if mixed_absent {
+            let mut peer = local.clone();
+            peer.origin_id = "absent-peer".into();
+            peer.origin_seq = 0;
+            add_base_candidate(&mut engine, &peer);
+            relay = relay.with_coordinate("absent-peer", 0, LogCoordinateResponse::Absent);
+        }
+        let client =
+            RelaySyncClient::new(relay.with_coordinate("local", 1, LogCoordinateResponse::Absent));
+        let pushed = client
+            .push_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1500, 1_000_000)
+            .unwrap();
+        assert!(matches!(
+            pushed,
+            SyncPassOutcome::Complete { pushed: 0, .. }
+        ));
+        assert!(client.transport().pushes.lock().unwrap().is_empty());
+        assert_eq!(
+            client
+                .pull_chat_workspace(
+                    &mut engine,
+                    &mut dohc_engine_collab::WriterDocCache::new(),
+                    "ws",
+                    &NoFaults,
+                    &NoLiveLeases,
+                    1200,
+                )
+                .unwrap_err(),
+            RelayError::Local("retryable-state".into())
+        );
+        let lineage: String = engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT lineage_claim_id FROM ydoc_docs WHERE object_id='blocked'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(lineage, local.payload["lineageClaimId"].as_str().unwrap());
+        assert_eq!(
+            base_repair_state(&engine, "blocked"),
+            (None, 0, if mixed_absent { 2 } else { 1 })
+        );
+        assert_eq!(read_pushed_seq(&engine, "ws", "local").unwrap(), -1);
+    }
+}
+
+#[test]
+fn base_repair_cloned_store_pull_keeps_cursor_and_next_push_conflicts() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let base = seed_base_repair_candidate(&mut engine, "clone", "local", 1);
+    engine.write_with(&NoFaults, |tx| {
+        for seq in [2, 3] {
+            tx.execute("INSERT INTO replication_log (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported,apply_disposition) VALUES ('ws','local',?1,'probe.suffix','{\"device\":\"B\"}',1000,0,'applied')", [seq]).map_err(SyncError::persist)?;
+        }
+        Ok::<_,SyncError>(())
+    }).unwrap();
+    let mut committed = base;
+    committed.relay_seq = Some(100);
+    let mut other_device = envelope("local", 2, "probe.suffix", json!({"device":"A"}));
+    other_device.relay_seq = Some(101);
+    let client = RelaySyncClient::new(
+        empty_base_repair_relay()
+            .with_coordinate("local", 1, LogCoordinateResponse::Present(committed))
+            .with_coordinate("local", 2, LogCoordinateResponse::Present(other_device)),
+    );
+    pull_base_repair(&client, &mut engine);
+    assert_eq!(read_pushed_seq(&engine, "ws", "local").unwrap(), -1);
+    assert_eq!(base_repair_state(&engine, "clone"), (Some(100), 0, 0));
+    assert_eq!(
+        client
+            .push_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1300, 0)
+            .unwrap_err(),
+        RelayError::OriginDiverged
+    );
+    let pushes = client.transport().pushes.lock().unwrap();
+    let batch = pushes
+        .iter()
+        .find(|request| !request.ops.is_empty())
+        .unwrap();
+    assert_eq!(*client.transport().push_conflicts.lock().unwrap(), 1);
+    assert_eq!(batch.after_seq, -1);
+    assert!(
+        batch
+            .ops
+            .iter()
+            .any(|op| op.origin_seq == 2 && op.payload["device"] == "B")
+    );
+    assert!(
+        !client
+            .transport()
+            .coordinates
+            .lock()
+            .unwrap()
+            .contains_key(&("local".into(), 3)),
+        "conflicting batch must not append B's suffix"
+    );
+    assert_eq!(read_pushed_seq(&engine, "ws", "local").unwrap(), -1);
+}
+
+#[test]
+fn base_repair_crash_commit_survives_empty_publication_push_and_later_lower_base() {
+    let (scratch, mut engine, observed, _checkpoint) = super::owner_publication::fixture();
+    let local = seed_base_repair_candidate(&mut engine, "crash-scope", "local", 1);
+    let owner = envelope(
+        "local",
+        0,
+        "ydoc.update",
+        json!({"versionId":"main","objectId":"owner","path":"owner.md","contentKind":"richdoc","lineageClaimId":observed.binding.lineage_claim_id,"updateBlobSha256":observed.binding.lineage_claim_id,"isBaseState":true}),
+    );
+    engine.write_with(&NoFaults, |tx| {
+        tx.execute("UPDATE replication_log SET op_kind='ydoc.update',payload_json=?1,recorded_at_ms=?2,apply_disposition='applied' WHERE workspace_id='ws' AND origin_id='local' AND origin_seq=0", params![owner.payload.to_string(),owner.recorded_at_ms]).map_err(SyncError::persist)?;
+        Ok::<_,SyncError>(())
+    }).unwrap();
+    let mut relay = empty_base_repair_relay();
+    relay.relay_seq_offset = 99;
+    let client = RelaySyncClient::new(relay);
+    assert_eq!(
+        client
+            .push_workspace(
+                &mut engine,
+                "ws",
+                ScriptedFaults::crash_at(FaultPoint::SyncAfterPushBeforeCursorPersist).as_ref(),
+                &NoLiveLeases,
+                1300,
+                1_000_000
+            )
+            .unwrap(),
+        SyncPassOutcome::CrashedAfterRemoteCommit
+    );
+    let path = engine_db_path(scratch.path()).unwrap();
+    drop(engine);
+    let mut engine = EngineStore::open(&path, 1400).unwrap();
+    assert_eq!(read_pushed_seq(&engine, "ws", "local").unwrap(), -1);
+    // The owner's new publication scope blocks the first queued operation.
+    engine.write_with(&NoFaults, |tx| {
+        tx.execute("UPDATE ydoc_owner_bindings SET binding_json=json_set(binding_json,'$.currentPath','private/owner.md','$.selectorPaths',json('[\"private/owner.md\"]'))",[]).map_err(SyncError::persist)?;
+        Ok::<_,SyncError>(())
+    }).unwrap();
+    let prefix =
+        crate::owner_publication_prefix(&engine, "ws", &[owner.clone(), local.clone()], 1_000_000)
+            .unwrap();
+    assert_eq!(prefix.allowed_ops, 0);
+    assert!(prefix.pending.is_some());
+    // Use sparse relay sequences to expose the minimum-ordering failure.
+    let own_echo = match client
+        .transport()
+        .coordinates
+        .lock()
+        .unwrap()
+        .get(&("local".into(), 1))
+        .unwrap()
+    {
+        LogCoordinateResponse::Present(op) => op.clone(),
+        other => panic!("missing crash commit: {other:?}"),
+    };
+    assert_eq!(own_echo.relay_seq, Some(100));
+    let mut peer = local.clone();
+    peer.origin_id = "identical-peer".into();
+    peer.origin_seq = 0;
+    let (divergent, bytes) = divergent_repair_base(&local);
+    let relay = PagedRelay::new([
+        (
+            0,
+            PullResponse {
+                ops: vec![owner, own_echo.clone()],
+                next_cursor: 100,
+                has_more: true,
+            },
+        ),
+        (
+            100,
+            PullResponse {
+                ops: vec![peer],
+                next_cursor: 140,
+                has_more: false,
+            },
+        ),
+    ])
+    .with_coordinate("local", 1, LogCoordinateResponse::Present(own_echo));
+    let client = RelaySyncClient::new(relay);
+    let pushed = client
+        .push_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1500, 1_000_000)
+        .unwrap();
+    assert!(matches!(
+        pushed,
+        SyncPassOutcome::Complete { pushed: 0, .. }
+    ));
+    assert!(
+        client.transport().pushes.lock().unwrap().is_empty(),
+        "blocked push must send nothing"
+    );
+    pull_base_repair(&client, &mut engine);
+    assert_eq!(base_repair_state(&engine, "crash-scope"), (Some(100), 0, 0));
+    assert_eq!(read_pushed_seq(&engine, "ws", "local").unwrap(), -1);
+    assert!(
+        client
+            .transport()
+            .coordinate_lookups
+            .lock()
+            .unwrap()
+            .is_empty(),
+        "the fetched own echo resolves the crash coordinate"
+    );
+    assert_eq!(
+        client.transport().pushes.lock().unwrap().len(),
+        1,
+        "one recovery probe"
+    );
+    // No cursor acknowledgement yet: the next fetch reveals the older append at 120.
+    let mut relay = PagedRelay::new([(
+        0,
+        PullResponse {
+            ops: vec![divergent],
+            next_cursor: 120,
+            has_more: false,
+        },
+    )]);
+    relay
+        .blobs
+        .insert(dohc_engine_storage::hex_sha256(&bytes), bytes);
+    let client = RelaySyncClient::new(relay);
+    pull_base_repair(&client, &mut engine);
+    assert_eq!(base_repair_state(&engine, "crash-scope").0, Some(100));
+    let lineage: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT lineage_claim_id FROM ydoc_docs WHERE object_id='crash-scope'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(lineage, local.payload["lineageClaimId"].as_str().unwrap());
+    assert!(
+        client.transport().pushes.lock().unwrap().is_empty(),
+        "no own pending coordinate above the cursor, no probe"
+    );
+}
+
+fn proven_minimum_allows_divergent_pull(origin: &str) {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let mut earliest = seed_base_repair_candidate(&mut engine, "proven-min", origin, 1);
+    earliest.relay_seq = Some(100);
+    let mut unsent = earliest.clone();
+    unsent.origin_id = "local".into();
+    unsent.origin_seq = 2;
+    add_base_candidate(&mut engine, &unsent);
+    if origin == "local" {
+        crate::cursor::write_pushed_seq(
             &mut engine,
-            &mut dohc_engine_collab::WriterDocCache::new(),
             "ws",
+            "local",
+            1,
             &NoFaults,
             &NoLiveLeases,
-            1_400,
+            1200,
         )
-        .expect("repair after push");
-    let repaired = engine
-        .read_with(|conn| {
-            let marker = conn.query_row(
-                "SELECT base_relay_seq,base_relay_confirmed_absent
-                   FROM ydoc_docs
-                  WHERE workspace_id='ws' AND version_id='main' AND object_id=?1",
-                [&key.object_id],
-                |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, i64>(1)?)),
-            )?;
-            let candidates = conn.query_row(
-                "SELECT COUNT(*) FROM ydoc_base_relay_candidates
-                  WHERE workspace_id='ws' AND version_id='main' AND object_id=?1",
-                [&key.object_id],
-                |row| row.get::<_, i64>(0),
-            )?;
-            Ok::<_, rusqlite::Error>((marker.0, marker.1, candidates))
+        .unwrap();
+    }
+    let (divergent, bytes) = divergent_repair_base(&earliest);
+    let mut relay = PagedRelay::new([(
+        0,
+        PullResponse {
+            ops: vec![divergent],
+            next_cursor: 120,
+            has_more: false,
+        },
+    )])
+    .with_coordinate(origin, 1, LogCoordinateResponse::Present(earliest));
+    relay
+        .blobs
+        .insert(dohc_engine_storage::hex_sha256(&bytes), bytes);
+    let client = RelaySyncClient::new(relay);
+    pull_base_repair(&client, &mut engine);
+    assert_eq!(base_repair_state(&engine, "proven-min"), (Some(100), 0, 0));
+    assert_eq!(
+        *client.transport().coordinate_lookups.lock().unwrap(),
+        [(origin.to_owned(), 1)]
+    );
+    assert_eq!(client.transport().pushes.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn base_repair_own_pushed_minimum_allows_divergent_pull() {
+    proven_minimum_allows_divergent_pull("local");
+}
+
+#[test]
+fn base_repair_foreign_minimum_allows_divergent_pull() {
+    proven_minimum_allows_divergent_pull("peer");
+}
+
+#[test]
+fn base_repair_own_unpushed_absence_stays_pending_without_lookup_or_cursor_write() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    seed_base_repair_candidate(&mut engine, "local-pending", "local", 1);
+    let client = RelaySyncClient::new(empty_base_repair_relay());
+    pull_base_repair(&client, &mut engine);
+    assert_eq!(base_repair_state(&engine, "local-pending"), (None, 0, 1));
+    assert!(
+        client
+            .transport()
+            .coordinate_lookups
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(client.transport().pushes.lock().unwrap().len(), 1);
+    assert_eq!(read_pushed_seq(&engine, "ws", "local").unwrap(), -1);
+    client
+        .push_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1300, 0)
+        .unwrap();
+    pull_base_repair(&client, &mut engine);
+    assert_eq!(
+        base_repair_state(&engine, "local-pending"),
+        (Some(101), 0, 0)
+    );
+    assert_eq!(
+        *client.transport().coordinate_lookups.lock().unwrap(),
+        [("local".to_owned(), 1)]
+    );
+}
+
+#[test]
+fn base_repair_recovers_remote_commit_before_idempotent_repush() {
+    let (_scratch, path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    seed_base_repair_candidate(&mut engine, "crash-pending", "local", 1);
+    let client = RelaySyncClient::new(empty_base_repair_relay());
+    let faults = ScriptedFaults::crash_at(FaultPoint::SyncAfterPushBeforeCursorPersist);
+    assert_eq!(
+        client
+            .push_workspace(&mut engine, "ws", faults.as_ref(), &NoLiveLeases, 1_300, 0)
+            .expect("push crash"),
+        SyncPassOutcome::CrashedAfterRemoteCommit
+    );
+    drop(engine);
+    let mut engine = EngineStore::open(&path, 1_400).expect("reopen");
+    assert_eq!(read_pushed_seq(&engine, "ws", "local").unwrap(), -1);
+    // A retry must retain the relay sequence assigned by the committed push.
+    let original = {
+        let coordinates = client.transport().coordinates.lock().unwrap();
+        let LogCoordinateResponse::Present(op) = coordinates.get(&("local".to_owned(), 1)).unwrap()
+        else {
+            panic!("remote commit must exist")
+        };
+        assert_eq!(op.relay_seq, Some(101));
+        op.clone()
+    };
+    pull_base_repair(&client, &mut engine);
+    assert_eq!(
+        base_repair_state(&engine, "crash-pending"),
+        (Some(101), 0, 0)
+    );
+    assert_eq!(read_pushed_seq(&engine, "ws", "local").unwrap(), -1);
+    assert_eq!(
+        *client.transport().coordinate_lookups.lock().unwrap(),
+        [("local".to_owned(), 1)]
+    );
+    assert_eq!(
+        client
+            .transport()
+            .pushes
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|req| req.ops.is_empty())
+            .count(),
+        1
+    );
+    assert!(matches!(
+        client
+            .push_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_500, 0)
+            .expect("idempotent repush"),
+        SyncPassOutcome::Complete {
+            pushed: 0,
+            applied: 0,
+            ..
+        }
+    ));
+    assert_eq!(read_pushed_seq(&engine, "ws", "local").unwrap(), 1);
+    assert_eq!(
+        client
+            .transport()
+            .coordinates
+            .lock()
+            .unwrap()
+            .get(&("local".to_owned(), 1)),
+        Some(&LogCoordinateResponse::Present(original))
+    );
+    pull_base_repair(&client, &mut engine);
+    assert_eq!(
+        base_repair_state(&engine, "crash-pending"),
+        (Some(101), 0, 0)
+    );
+    assert_eq!(
+        client.transport().coordinate_lookups.lock().unwrap().len(),
+        1
+    );
+}
+
+#[test]
+fn base_repair_origin_max_bound_does_not_recover_or_write_cursor() {
+    for remote_max in [-1, 3] {
+        let (_scratch, _path, mut engine) = open_store();
+        seed_identity(&mut engine);
+        seed_replication_version(&mut engine, "main", "main");
+        let mut op = seed_base_repair_candidate(&mut engine, "probe-range", "local", 2);
+        crate::cursor::write_pushed_seq(
+            &mut engine,
+            "ws",
+            "local",
+            1,
+            &NoFaults,
+            &NoLiveLeases,
+            1200,
+        )
+        .unwrap();
+        let mut relay = empty_base_repair_relay();
+        if remote_max >= 0 {
+            op.origin_seq = remote_max;
+            relay = relay
+                .with_coordinate("local", remote_max, LogCoordinateResponse::Present(op))
+                .with_coordinate("local", 2, LogCoordinateResponse::Absent);
+        }
+        let client = RelaySyncClient::new(relay);
+        pull_base_repair(&client, &mut engine);
+        assert_eq!(read_pushed_seq(&engine, "ws", "local").unwrap(), 1);
+        assert_eq!(base_repair_state(&engine, "probe-range"), (None, 0, 1));
+        assert_eq!(
+            client.transport().coordinate_lookups.lock().unwrap().len(),
+            usize::from(remote_max >= 2)
+        );
+        assert_eq!(client.transport().pushes.lock().unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn base_repair_still_confirms_absent_for_own_pushed_and_foreign_coordinates() {
+    for origin in ["local", "peer"] {
+        let (_scratch, _path, mut engine) = open_store();
+        seed_identity(&mut engine);
+        seed_replication_version(&mut engine, "main", "main");
+        seed_base_repair_candidate(&mut engine, "absent", origin, 1);
+        if origin == "local" {
+            crate::cursor::write_pushed_seq(
+                &mut engine,
+                "ws",
+                "local",
+                1,
+                &NoFaults,
+                &NoLiveLeases,
+                1_200,
+            )
+            .expect("acknowledged cursor");
+        }
+        let client = RelaySyncClient::new(empty_base_repair_relay().with_coordinate(
+            origin,
+            1,
+            LogCoordinateResponse::Absent,
+        ));
+        pull_base_repair(&client, &mut engine);
+        assert_eq!(base_repair_state(&engine, "absent"), (None, 1, 0));
+        assert!(client.transport().pushes.lock().unwrap().is_empty());
+        assert_eq!(
+            *client.transport().coordinate_lookups.lock().unwrap(),
+            [(origin.to_owned(), 1)]
+        );
+    }
+}
+
+fn mixed_base_group_repairs_present_or_absent(present: bool) {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let mut peer = seed_base_repair_candidate(&mut engine, "mixed", "local", 1);
+    peer.origin_id = "a-peer".to_owned();
+    peer.origin_seq = 0;
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO replication_log (workspace_id,origin_id,origin_seq,
+            op_kind,payload_json,recorded_at_ms,imported,apply_disposition)
+            VALUES ('ws','a-peer',0,'ydoc.update',?1,1100,1,'applied')",
+                [peer.payload.to_string()],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO ydoc_base_relay_candidates
+            (workspace_id,version_id,object_id,lineage_claim_id,origin_id,origin_seq)
+            VALUES ('ws','main','mixed',?1,'a-peer',0)",
+                [peer.payload["lineageClaimId"].as_str().unwrap()],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
         })
-        .expect("repaired marker");
-    assert_eq!(repaired, (Some(101), 0, 0));
+        .unwrap();
+    let client = RelaySyncClient::new(
+        empty_base_repair_relay()
+            .with_coordinate(
+                "a-peer",
+                0,
+                if present {
+                    LogCoordinateResponse::Present(peer)
+                } else {
+                    LogCoordinateResponse::Absent
+                },
+            )
+            .with_coordinate("local", 1, LogCoordinateResponse::Absent),
+    );
+    let revision = engine
+        .read_with(|conn| Ok::<_, rusqlite::Error>(conn.total_changes()))
+        .unwrap();
+    pull_base_repair(&client, &mut engine);
+    assert_eq!(
+        base_repair_state(&engine, "mixed"),
+        if present {
+            (Some(7), 0, 0)
+        } else {
+            (None, 0, 2)
+        }
+    );
+    assert_eq!(
+        *client.transport().coordinate_lookups.lock().unwrap(),
+        [("a-peer".to_owned(), 0)]
+    );
+    assert_eq!(client.transport().pushes.lock().unwrap().len(), 1);
+    let changes = engine
+        .read_with(|conn| Ok::<_, rusqlite::Error>(conn.total_changes()))
+        .unwrap();
+    assert_eq!(changes > revision, present);
+}
+
+#[test]
+fn base_repair_resolves_mixed_group_after_confirming_own_coordinate_is_unsent() {
+    mixed_base_group_repairs_present_or_absent(true);
+}
+
+#[test]
+fn base_repair_keeps_mixed_absent_group_pending() {
+    mixed_base_group_repairs_present_or_absent(false);
+}
+
+#[test]
+fn base_repair_own_unpushed_deferred_update_is_absent_without_lookup() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let op = seed_base_repair_candidate(&mut engine, "deferred", "local", 1);
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute("DELETE FROM ydoc_base_relay_candidates", [])
+                .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO ydoc_deferred_updates
+            (workspace_id,version_id,object_id,lineage_claim_id,origin_id,origin_seq,recorded_at_ms)
+            VALUES ('ws','main','deferred',?1,'local',1,1100)",
+                [op.payload["lineageClaimId"].as_str().unwrap()],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let client = RelaySyncClient::new(empty_base_repair_relay());
+    pull_base_repair(&client, &mut engine);
+    assert!(
+        client
+            .transport()
+            .coordinate_lookups
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
+    let relay_seq: Option<i64> = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT relay_seq FROM ydoc_deferred_updates WHERE origin_id='local'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(relay_seq, None);
+    assert_eq!(client.transport().pushes.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn base_repair_updates_foreign_deferred_coordinate_after_confirming_own_is_unsent() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let mut peer = seed_base_repair_candidate(&mut engine, "mixed-deferred", "local", 1);
+    peer.origin_id = "a-peer".to_owned();
+    peer.origin_seq = 0;
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute("DELETE FROM ydoc_base_relay_candidates", [])
+                .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO replication_log (workspace_id,origin_id,origin_seq,
+            op_kind,payload_json,recorded_at_ms,imported,apply_disposition)
+            VALUES ('ws','a-peer',0,'ydoc.update',?1,1100,1,'applied')",
+                [peer.payload.to_string()],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO ydoc_deferred_updates
+            (workspace_id,version_id,object_id,lineage_claim_id,origin_id,origin_seq,recorded_at_ms)
+            VALUES ('ws','main','mixed-deferred',?1,'local',1,1100),
+                   ('ws','main','mixed-deferred',?1,'a-peer',0,1100)",
+                [peer.payload["lineageClaimId"].as_str().unwrap()],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let client = RelaySyncClient::new(empty_base_repair_relay().with_coordinate(
+        "a-peer",
+        0,
+        LogCoordinateResponse::Present(peer),
+    ));
+    let changes = engine
+        .read_with(|conn| Ok::<_, SyncError>(conn.total_changes()))
+        .unwrap();
+    pull_base_repair(&client, &mut engine);
+    assert_eq!(
+        *client.transport().coordinate_lookups.lock().unwrap(),
+        [("a-peer".to_owned(), 0)]
+    );
+    assert_eq!(client.transport().pushes.lock().unwrap().len(), 1);
+    engine
+        .read_with(|conn| {
+            assert_eq!(conn.total_changes(), changes + 1);
+            let pending: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM ydoc_deferred_updates WHERE relay_seq IS NULL",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(pending, 1);
+            let local: Option<i64> = conn.query_row(
+                "SELECT relay_seq FROM ydoc_deferred_updates WHERE origin_id='local'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(local, None);
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
 }
 
 #[test]
@@ -1579,7 +2598,7 @@ fn fault_sync_between_apply_and_cursor_commit_refetches_and_dedups() {
         } => cursor,
         other => panic!("unexpected retry outcome: {other:?}"),
     };
-    assert_eq!(
+    assert!(matches!(
         client
             .commit_pull_cursor(
                 &mut reopened,
@@ -1590,8 +2609,8 @@ fn fault_sync_between_apply_and_cursor_commit_refetches_and_dedups() {
                 1_000
             )
             .expect("commit"),
-        TxnOutcome::Committed(Vec::new())
-    );
+        TxnOutcome::Committed(ref commit) if commit.sharing_declined.is_empty()
+    ));
 }
 
 #[test]
@@ -2167,6 +3186,182 @@ fn relay_pull_reports_applied_and_redelivered_ydoc_materialization_paths() {
             "dropping non-moment durable-intent reconstruction loses the owed path"
         );
     }
+}
+
+#[test]
+fn an_owner_records_a_relay_refusal_as_a_silent_no_op_that_takes_its_coordinate() {
+    let (_scratch, _path, mut engine) = open_store();
+    let origin = "service-host:host";
+    let refused = envelope(
+        origin,
+        0,
+        "relay.refused",
+        json!({"opKind": "moment.append", "payloadSha256": "a".repeat(64), "reason": "outside-hosted-documents"}),
+    );
+    let later = envelope(origin, 1, "workspace.init", json!({}));
+    for op in [&refused, &later] {
+        let outcome = apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            op,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+        assert!(
+            matches!(outcome.primary, ApplyDisposition::Applied(_)) && outcome.refusals.is_empty(),
+            "{} applies: {outcome:?}",
+            op.op_kind
+        );
+    }
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", origin).unwrap(),
+        1
+    );
+    assert!(list_refusal_notices(&engine, "ws").unwrap().is_empty());
+    assert_eq!(engine.table_row_count("moments").unwrap(), 0);
+}
+
+#[test]
+fn relay_pull_rejects_a_tampered_own_ydoc_echo() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO replication_peers (workspace_id, origin_id, acked_seq) \
+                 VALUES ('ws','local',0) \
+                 ON CONFLICT(workspace_id,origin_id) DO UPDATE SET acked_seq=0",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed local frontier");
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ws','own-echo-tamper',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("scaffolding");
+
+    let local_doc = dohc_engine_collab::Ydoc::wire();
+    local_doc.plaintext_insert(0, "local");
+    let local_bytes = local_doc.encode_full_state();
+    let local_sha = engine.put_binary_blob(&local_bytes).expect("local blob");
+    let local = envelope(
+        "local",
+        1,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "own-echo-tamper",
+            "path": "notes/own-echo-tamper.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": local_sha,
+            "lineageClaimId": local_sha,
+            "isBaseState": true
+        }),
+    );
+    apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &local,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("seed durable local coordinate");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE replication_peers SET acked_seq=0 WHERE workspace_id='ws' AND origin_id='local'",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("rewind acknowledgement for first-delivery proof");
+    assert!(
+        crate::apply::is_acknowledged_envelope(&engine, &local)
+            .expect("first delivery exact durable row"),
+        "the durable row matches at acked_seq + 1"
+    );
+    assert!(matches!(
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &local,
+            &NoFaults,
+            &NoLiveLeases,
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Skipped,
+            ..
+        })
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "local").unwrap(),
+        1
+    );
+
+    let tampered_doc = dohc_engine_collab::Ydoc::wire();
+    tampered_doc.plaintext_insert(0, "tampered");
+    let tampered_bytes = tampered_doc.encode_full_state();
+    let tampered_sha = engine
+        .put_binary_blob(&tampered_bytes)
+        .expect("tampered blob");
+    let mut tampered = local.clone();
+    tampered.payload["updateBlobSha256"] = json!(tampered_sha.clone());
+    tampered.payload["lineageClaimId"] = json!(tampered_sha.clone());
+    tampered.relay_seq = Some(2);
+
+    assert!(matches!(
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &tampered,
+            &NoFaults,
+            &NoLiveLeases,
+        ),
+        Err(SyncError::CoordinateDiverged)
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "local").expect("local ack after direct tamper"),
+        1,
+        "direct tampering must leave the acknowledgement unchanged"
+    );
+
+    let mut relay = PagedRelay::new([(
+        0,
+        PullResponse {
+            ops: vec![tampered],
+            next_cursor: 2,
+            has_more: false,
+        },
+    )]);
+    relay.blobs.insert(tampered_sha, tampered_bytes);
+    let result = RelaySyncClient::new(relay).pull_chat_workspace(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        "ws",
+        &NoFaults,
+        &NoLiveLeases,
+        2_000,
+    );
+    assert!(matches!(result, Err(RelayError::OriginDiverged)));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "local").expect("local ack"),
+        1,
+        "a changed payload at the acknowledged coordinate must not advance it"
+    );
 }
 
 #[test]
@@ -2967,7 +4162,7 @@ fn a_second_relay_position_does_not_repeat_enrollment_backfill() {
 
     assert!(matches!(
         crate::cursor::write_pushed_seq(&mut engine, "ws", "local", -1, &NoFaults, &crate::NoLiveLeases, 7_001),
-        Ok(TxnOutcome::Committed(ref declines)) if declines.is_empty()
+        Ok(TxnOutcome::Committed(ref commit)) if commit.is_empty()
     ));
     let after_first: i64 = engine
         .read_with(|conn| {
@@ -2985,7 +4180,7 @@ fn a_second_relay_position_does_not_repeat_enrollment_backfill() {
 
     assert!(matches!(
         crate::cursor::write_pushed_seq(&mut engine, "ws", "local", 0, &NoFaults, &crate::NoLiveLeases, 7_002),
-        Ok(TxnOutcome::Committed(ref declines)) if declines.is_empty()
+        Ok(TxnOutcome::Committed(ref commit)) if commit.is_empty()
     ));
     let after_second: i64 = engine
         .read_with(|conn| {
@@ -3603,11 +4798,11 @@ fn persisted_relay_and_share_cursors_never_regress_within_the_same_stream() {
     };
     assert!(matches!(
         commit_relay_cursor(&mut engine, "ws", &relay(10), &NoFaults, &crate::NoLiveLeases, 1_000),
-        Ok(TxnOutcome::Committed(ref declines)) if declines.is_empty()
+        Ok(TxnOutcome::Committed(ref commit)) if commit.sharing_declined.is_empty()
     ));
     assert!(matches!(
         commit_relay_cursor(&mut engine, "ws", &relay(4), &NoFaults, &crate::NoLiveLeases, 1_000),
-        Ok(TxnOutcome::Committed(ref declines)) if declines.is_empty()
+        Ok(TxnOutcome::Committed(ref commit)) if commit.sharing_declined.is_empty()
     ));
     assert_eq!(
         read_relay_cursor(&engine, "ws")
@@ -3857,6 +5052,7 @@ fn pull_reaches_later_cross_origin_work_before_retrying_a_deferred_origin() {
             payload_sha256: String::new(),
         }],
         lineage_transition: None,
+        exported_before: None,
     })
     .expect("retryable parent carrier");
     let mut parent = envelope("bundle-peer", 0, "conflict.resolve", built.value);
@@ -4429,7 +5625,7 @@ fn relay_cursor_serializes_numeric_position_into_the_shipped_text_column() {
     };
     assert!(matches!(
         commit_relay_cursor(&mut engine, "ws", &cursor, &NoFaults, &crate::NoLiveLeases, 1_000),
-        Ok(TxnOutcome::Committed(ref declines)) if declines.is_empty()
+        Ok(TxnOutcome::Committed(ref commit)) if commit.sharing_declined.is_empty()
     ));
     let stored = engine
         .read_with(|conn| {
@@ -5349,6 +6545,7 @@ fn assert_held_conflict_replays_after_restart(joining: bool) {
             payload_sha256: String::new(),
         }],
         lineage_transition: None,
+        exported_before: None,
     })
     .expect("retryable parent carrier");
     let mut parent = envelope("bundle-peer", 0, "conflict.resolve", built.value);
@@ -5646,6 +6843,55 @@ fn deferred_relay_work_rejects_divergence_gaps_identity_changes_and_limit_overfl
 }
 
 #[test]
+fn deferred_relay_work_charges_a_blob_it_names_twice_once() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    let identity = read_sync_identity(&engine, "ws").unwrap().unwrap();
+    let blob = vec![7; 1_000];
+    let sha = engine.put_binary_blob(&blob).unwrap();
+    // One digest as both a Y.Doc update and a binary chunk.
+    let twice = |origin: &str| {
+        envelope(
+            origin,
+            0,
+            "live.audit.application",
+            json!({"updateBlobSha256": sha, "manifest": {"chunks": [{"sha256": sha}]}}),
+        )
+    };
+    let charged = |op: &ReplicationEnvelope| {
+        serde_json::to_string(op).unwrap().len() as i64 + blob.len() as i64
+    };
+    let retained = |engine: &EngineStore, origin: &str| -> i64 {
+        engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT retained_bytes FROM relay_deferred_ops WHERE workspace_id='ws' AND origin_id=?1",
+                    [origin],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap()
+    };
+    let first = twice("a-held");
+    crate::deferred::retain(&mut engine, &identity, &[&first], &NoFaults).unwrap();
+    assert_eq!(retained(&engine, "a-held"), charged(&first));
+    let next = twice("b-held");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE relay_deferred_ops SET retained_bytes=?1",
+                [536_870_912 - charged(&next)],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    crate::deferred::retain(&mut engine, &identity, &[&next], &NoFaults)
+        .expect("work that exactly fills the limit is retained");
+    assert_eq!(retained(&engine, "b-held"), charged(&next));
+}
+
+#[test]
 fn deferred_relay_replay_rotates_between_held_origins() {
     let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
@@ -5748,6 +6994,7 @@ fn fetched_suffix_does_not_starve_a_released_deferred_origin() {
                 payload_sha256: String::new(),
             }],
             lineage_transition: None,
+            exported_before: None,
         })
         .expect("retryable parent carrier");
         let mut parent = envelope(origin, 0, "conflict.resolve", built.value);
@@ -5890,4 +7137,270 @@ fn deferred_relay_suffixes_and_new_origins_keep_their_place_in_the_cycle() {
         )
         .unwrap();
     }
+}
+
+#[test]
+fn refused_live_audit_below_ack_does_not_stall_an_uncommitted_pull_replay() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    let mut audit = envelope(
+        "audit-peer",
+        0,
+        "live.audit.application",
+        json!({"extra":"refused"}),
+    );
+    audit.relay_seq = Some(1);
+    audit.admitted_author_snapshot =
+        Some(json!([{"kind":"human","humanId":"recipient","humanName":"Recipient"}]));
+    let client = RelaySyncClient::new(FakeRelay {
+        pull: Mutex::new(Some(PullResponse {
+            ops: vec![audit.clone()],
+            next_cursor: 1,
+            has_more: false,
+        })),
+        ..Default::default()
+    });
+    let first = client
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1000,
+        )
+        .unwrap();
+    assert!(matches!(
+        first,
+        SyncPassOutcome::Complete {
+            refused: 1,
+            pending_cursor: Some(_),
+            ..
+        }
+    ));
+    // The pass's row/ack committed, but its workspace pull cursor did not.
+    let mut later = envelope("audit-peer", 1, "workspace.init", json!({}));
+    later.relay_seq = Some(2);
+    let replay = RelaySyncClient::new(FakeRelay {
+        pull: Mutex::new(Some(PullResponse {
+            ops: vec![audit, later],
+            next_cursor: 2,
+            has_more: false,
+        })),
+        ..Default::default()
+    });
+    let result = replay
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1001,
+        )
+        .unwrap();
+    assert!(matches!(
+        result,
+        SyncPassOutcome::Complete {
+            applied: 1,
+            skipped: 1,
+            pending_cursor: Some(_),
+            ..
+        }
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "audit-peer").unwrap(),
+        1
+    );
+}
+
+#[test]
+#[ignore = "manual partial-index insert measurement"]
+fn ydoc_update_index_insert_measurement() {
+    for local in [true, false] {
+        for live in [true, false] {
+            for indexed in [true, false, false, true] {
+                let (_scratch, _path, mut store) = open_store();
+                seed_identity(&mut store);
+                VersionedTextStore::new(&mut store)
+                    .ensure_main_version("ws", "main", 1, &NoFaults)
+                    .unwrap();
+                let key = dohc_engine_collab::DocKey::new("ws", "main", "measured").unwrap();
+                let doc = dohc_engine_collab::Ydoc::wire();
+                doc.plaintext_insert(0, "base");
+                let sha = store.put_binary_blob(&doc.encode_full_state()).unwrap();
+                let base = envelope(
+                    "peer",
+                    0,
+                    "ydoc.update",
+                    json!({"versionId":"main","objectId":"measured","path":"measured.md","contentKind":"plaintext","updateBlobSha256":sha,"lineageClaimId":sha,"isBaseState":true}),
+                );
+                let mut cache = Default::default();
+                apply_ydoc_envelope(&mut store, &mut cache, &base, &NoFaults, &NoLiveLeases)
+                    .unwrap();
+                store.write_with(&NoFaults,|tx| {
+                    for origin in ["history-a","history-b","history-c"] {
+                        for seq in 0..3334 {
+                            tx.execute("INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) VALUES ('ws',?1,?2,'ydoc.update',?3,1,1)",params![origin,seq,base.payload.to_string()]).unwrap();
+                        }
+                    }
+                    if !indexed { tx.execute_batch("DROP INDEX replication_ydoc_origin_document").unwrap(); }
+                    Ok::<_,SyncError>(())
+                }).unwrap();
+                let leases = dohc_engine_collab::LeaseRegistry::new();
+                let held = live.then(|| leases.acquire(&key).unwrap());
+                if let Some(held) = &held {
+                    held.bind_claim(Some(&sha)).unwrap();
+                }
+                let mut samples = Vec::new();
+                let mut inserts = Vec::new();
+                for seq in 1..=110 {
+                    let update = doc.plaintext_insert((seq + 3) as u32, "x");
+                    let mut op = base.clone();
+                    op.origin_seq = seq;
+                    op.payload["isBaseState"] = json!(false);
+                    // Hydration is outside the timed remote apply, as in a pull.
+                    if !local {
+                        op.payload["updateBlobSha256"] =
+                            json!(store.put_binary_blob(&update).unwrap());
+                    }
+                    let started = std::time::Instant::now();
+                    if local {
+                        dohc_engine_collab::record_local_update(
+                            &mut store,
+                            &mut cache,
+                            &key,
+                            &update,
+                            Default::default(),
+                            &NoFaults,
+                            seq + 2,
+                            |tx, _, update_sha| {
+                                op.payload["updateBlobSha256"] = json!(update_sha);
+                                let journal = std::time::Instant::now();
+                                crate::journal_local_op_in_tx(
+                                    tx,
+                                    "ws",
+                                    "ydoc.update",
+                                    &op.payload,
+                                    seq + 2,
+                                )
+                                .unwrap();
+                                inserts.push(journal.elapsed().as_nanos());
+                                Ok(())
+                            },
+                        )
+                        .unwrap();
+                    } else {
+                        apply_ydoc_envelope(&mut store, &mut cache, &op, &NoFaults, &leases)
+                            .unwrap();
+                    }
+                    if seq > 10 {
+                        samples.push(started.elapsed().as_nanos());
+                    }
+                }
+                samples.sort_unstable();
+                inserts = inserts.into_iter().skip(10).collect();
+                inserts.sort_unstable();
+                println!(
+                    "OPENHOLD index local={local} live={live} indexed={indexed} n=100 p50_ns={} p95_ns={} journal_p50_ns={} journal_p95_ns={}",
+                    samples[49],
+                    samples[94],
+                    inserts.get(49).copied().unwrap_or(0),
+                    inserts.get(94).copied().unwrap_or(0)
+                );
+                // Isolate the journal insert from remote projection and local replay costs.
+                let payload = base.payload.to_string();
+                store.write_with(&NoFaults,|tx| {
+                    let mut timings=Vec::new();
+                    let mut statement=tx.prepare_cached("INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported,apply_disposition) VALUES ('ws','insert-only',?1,'ydoc.update',?2,1,?3,'applied')").unwrap();
+                    for seq in 0..1010 {
+                        let start=std::time::Instant::now();
+                        statement.execute(params![seq,payload,i64::from(!local)]).unwrap();
+                        if seq>=10 { timings.push(start.elapsed().as_nanos()); }
+                    }
+                    timings.sort_unstable();
+                    println!("OPENHOLD insert local={local} live={live} indexed={indexed} n=1000 p50_ns={} p95_ns={}",timings[499],timings[949]);
+                    Ok::<_,SyncError>(())
+                }).unwrap();
+            }
+        }
+    }
+}
+
+/// A rename that changes only case reaches a pull as a delete of the old
+/// spelling and a write of the new one. On a disk that ignores case the write
+/// opens the old file, so the page must delete first: `Notes.md` sorts before
+/// `notes.md`, and in path order the delete would remove the renamed file.
+#[test]
+fn relay_pull_puts_a_renames_delete_before_its_write() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_000, &NoFaults)
+        .expect("main");
+    let text = "body\n";
+    let sha = dohc_engine_storage::hex_sha256(text.as_bytes());
+    let write = envelope(
+        "peer",
+        0,
+        "moment.append",
+        json!({
+            "momentId": "write-notes", "versionId": "main", "objectId": "notes",
+            "objectCreatedAtMs": 1, "path": "notes.md", "recordedAtMs": 2_000,
+            "operation": "write", "payloadBeforeBlobSha256": null, "payloadBeforePath": null,
+            "payloadAfterBlobSha256": sha, "payloadAfterPath": "notes.md",
+            "payloadAfterContentKind": "text", "metadata": {"origin": "sync"},
+            "beforePresent": "absent"
+        }),
+    );
+    let rename = envelope(
+        "peer",
+        1,
+        "moment.append",
+        json!({
+            "momentId": "rename-notes", "versionId": "main", "objectId": "notes",
+            "objectCreatedAtMs": 1, "path": "notes.md", "recordedAtMs": 2_001,
+            "operation": "rename", "payloadBeforeBlobSha256": sha,
+            "payloadBeforePath": "notes.md", "payloadBeforeContentKind": "text",
+            "payloadAfterBlobSha256": sha, "payloadAfterPath": "Notes.md",
+            "payloadAfterContentKind": "text", "metadata": {"origin": "sync"},
+            "beforePresent": "present", "beforeObjectId": "notes", "beforeVersionId": "main",
+            "beforePath": "notes.md", "beforeBlobSha256": sha, "beforeContentKind": "text",
+            "beforeUpdatedAtMs": 2_000, "beforeLatestMomentId": "write-notes",
+            "beforeMetadata": {"origin": "sync"}
+        }),
+    );
+    let mut relay = PagedRelay::new([(
+        0,
+        PullResponse {
+            ops: vec![write, rename],
+            next_cursor: 2,
+            has_more: false,
+        },
+    )]);
+    relay.blobs.insert(sha, text.as_bytes().to_vec());
+    let outcome = RelaySyncClient::new(relay)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            3_000,
+        )
+        .expect("pull");
+    let SyncPassOutcome::Complete {
+        applied,
+        changed_paths,
+        ..
+    } = outcome
+    else {
+        panic!("incomplete pull: {outcome:?}");
+    };
+    assert_eq!(applied, 2);
+    let page: Vec<_> = changed_paths
+        .iter()
+        .map(|change| (change.operation, change.path.as_str()))
+        .collect();
+    assert_eq!(page, [("delete", "notes.md"), ("write", "Notes.md")]);
 }

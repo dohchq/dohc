@@ -1,4 +1,5 @@
 import { activityPin } from "../src/testPins";
+import { DOCUMENT_END } from "./helpers/keys";
 import { expect, test, type Page } from "@playwright/test";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -15,6 +16,7 @@ import {
 import { enrollWorkspaceKeyEnvelope } from "../src/workspaces/workspaceKeyEnvelopeEnrollment";
 import { waitForPathMoments } from "../src/workspaces/waitForPathMoments";
 import { openLiveDaemonWorkspace } from "./helpers/daemonSeed";
+import { readHistoryMoments } from "./helpers/history";
 import { withEngineDb } from "./helpers/engineDb";
 import { claimRelayWorkspace, relayServesWorkspace } from "./helpers/relayPeer";
 import { launchDesktopApp } from "./helpers/desktopApp";
@@ -55,8 +57,6 @@ import {
 const TOKEN = "test:e2e-user";
 type SyncStatusBridge = Pick<DohcDesktopBridge, "getSyncStatus">;
 type WorkspaceRegistryBridge = Pick<DohcDesktopBridge, "getWorkspaceRegistry">;
-type EngineMomentsBridge = Pick<DohcDesktopBridge, "listEngineMoments">;
-
 async function readSyncStatus(
   page: Page,
   workspaceId: string,
@@ -108,16 +108,9 @@ async function pathMomentCount(
   workspaceId: string,
   path: string,
 ): Promise<number> {
-  return await page.evaluate(async ({ workspaceId, path }) => {
-    const api = (window as unknown as { dohcDesktop?: EngineMomentsBridge })
-      .dohcDesktop;
-    if (!api) throw new Error("desktop bridge is unavailable");
-    const result = await api.listEngineMoments({ workspaceId, limit: 500 });
-    if ("status" in result) {
-      throw new Error("History was still updating after the sync wait.");
-    }
-    return result.moments.filter((moment) => moment.path === path).length;
-  }, { workspaceId, path });
+  const moments = await readHistoryMoments(page, workspaceId, path);
+  if (moments === null) throw new Error("History is unavailable after the sync wait.");
+  return moments.length;
 }
 
 async function fileMatches(path: string, expected: Buffer): Promise<boolean> {
@@ -198,17 +191,18 @@ test("offline edits reach the Electron conflict review and its resolution surviv
     await waitForWorkspaceFile(page, workspaceId, path);
     expect(await readFile(join(temp.rootPath, path), "utf8")).toBe(base);
 
-    const appMomentsBeforeEdit = await pathMomentCount(page, workspaceId, path);
+    let appMomentsBeforeEdit = 0;
+    await expect(async () => {
+      appMomentsBeforeEdit = await pathMomentCount(page, workspaceId, path);
+    }).toPass({ timeout: 30_000 });
 
     // Both machines edit from the same base while the relay is unavailable.
     await relay.stop();
     relay = null;
     await writeWorkspaceFiles(temp, [{ path, contents: appEdit }]);
-    await expect
-      .poll(() => pathMomentCount(page, workspaceId, path), {
-        timeout: 30_000,
-      })
-      .toBeGreaterThan(appMomentsBeforeEdit);
+    await expect(async () => {
+      expect(await pathMomentCount(page, workspaceId, path)).toBeGreaterThan(appMomentsBeforeEdit);
+    }).toPass({ timeout: 30_000 });
     await writeFile(join(sourceRoot, path), peerEdit);
     await waitForPathMoments(capture, path, 2);
 
@@ -925,7 +919,7 @@ async function typeWhileEnablingSync(pattern: TypingPattern): Promise<void> {
     });
     await expect(editor).toHaveAttribute("contenteditable", "true");
     await editor.click();
-    await page.keyboard.press("ControlOrMeta+End");
+    await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.press("Enter");
     await page.keyboard.type("Before sync.");
     await expect.poll(readPlan, { timeout: 20_000 }).toContain("Before sync.");
@@ -1138,7 +1132,7 @@ test("typing continues after enabling sync claims the open document", async () =
     });
     await expect(editor).toHaveAttribute("contenteditable", "true");
     await editor.click();
-    await page.keyboard.press("ControlOrMeta+End");
+    await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.press("Enter");
     await page.keyboard.type("Before sync.");
     await expect.poll(readPlan, { timeout: 20_000 }).toContain("Before sync.");
@@ -1188,7 +1182,7 @@ test("typing continues after enabling sync claims the open document", async () =
       timeout: 30_000,
     });
     await editor.click();
-    await page.keyboard.press("ControlOrMeta+End");
+    await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.type(" After the handoff.");
     await expect.poll(readPlan, { timeout: 30_000 }).toContain("After the handoff.");
     await expect(page.getByTestId("markdown-save-state")).not.toHaveAttribute(

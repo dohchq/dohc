@@ -162,8 +162,10 @@ fn apply_version_create(tx: &Transaction<'_>, op: &ReplicationEnvelope) -> Resul
         )
         .map_err(SyncError::persist)?;
     }
-    validate_shipped_snapshots(&payload.fork_snapshots)?;
-    for snapshot in payload.fork_snapshots {
+    let mut fork_snapshots = payload.fork_snapshots;
+    fork_snapshots.retain(|snapshot| !crate::path_policy::floor_ignores(&snapshot.path));
+    validate_shipped_snapshots(&fork_snapshots)?;
+    for snapshot in fork_snapshots {
         insert_shipped_snapshot(tx, op, &payload.version_id, payload.created_at_ms, snapshot)?;
     }
     Ok(())

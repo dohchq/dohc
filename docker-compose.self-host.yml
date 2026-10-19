@@ -67,6 +67,8 @@ services:
       DOHC_SMTP_USER: ${DOHC_SMTP_USER:-}
       DOHC_SMTP_PASSWORD: ${DOHC_SMTP_PASSWORD:-}
       DOHC_SMTP_FROM: ${DOHC_SMTP_FROM:?Set DOHC_SMTP_FROM}
+      DOHC_SIGN_UP_EMAILS: ${DOHC_SIGN_UP_EMAILS:-}
+      WORKSPACE_API_RELAY_URL: http://sync-relay:1788
     depends_on:
       postgres-migrate: {condition: service_completed_successfully}
     healthcheck:
@@ -81,6 +83,7 @@ services:
     environment:
       <<: *auth
       DOHC_RELAY_LINK_KEY: ${DOHC_RELAY_LINK_KEY:?Run the self-host bootstrap to generate secrets}
+      DOHC_RELAY_SHARE_WEB_URL: http://share-web:1790
       DOHC_RELAY_EXCHANGE_KEY: ${DOHC_RELAY_EXCHANGE_KEY:?Run the self-host bootstrap to generate secrets}
       DOHC_RELAY_SHARE_WEB_ORIGIN: ${DOHC_PUBLIC_ORIGIN:?Set DOHC_PUBLIC_ORIGIN}
       SYNC_RELAY_AUTH_BASE_URL: ${DOHC_PUBLIC_ORIGIN:?Set DOHC_PUBLIC_ORIGIN}
@@ -103,11 +106,43 @@ services:
       - dohc_self_host_sync_relay:/data
       - dohc_self_host_relay_continuity:/continuity
       - dohc_self_host_host_data:/host-data
+      - dohc_self_host_replicas:/replicas
     healthcheck:
       test: [CMD, node, /app/tools/self-host/health.mjs, sync-relay]
       interval: 5s
       timeout: 5s
       retries: 20
+
+  relay-snapshot:
+    <<: *service
+    profiles: [snapshots]
+    entrypoint: [node, /app/services/sync-relay/dist/relay-snapshot.js]
+    command: [run, --database, /data/sync-relay.sqlite, --state-directory, /snapshots]
+    environment:
+      DOHC_SERVER_NAME: ${DOHC_SERVER_NAME:-dohc}
+      # Optional here: Compose interpolates this service even when its profile is off. The job refuses to run without a key.
+      DOHC_SNAPSHOT_KEY: ${DOHC_SNAPSHOT_KEY:-}
+      DOHC_SNAPSHOT_S3_ENDPOINT: ${DOHC_SNAPSHOT_S3_ENDPOINT:-}
+      DOHC_SNAPSHOT_S3_REGION: ${DOHC_SNAPSHOT_S3_REGION:-auto}
+      DOHC_SNAPSHOT_S3_BUCKET: ${DOHC_SNAPSHOT_S3_BUCKET:-}
+      DOHC_SNAPSHOT_S3_ACCESS_KEY_ID: ${DOHC_SNAPSHOT_S3_ACCESS_KEY_ID:-}
+      DOHC_SNAPSHOT_S3_SECRET_ACCESS_KEY: ${DOHC_SNAPSHOT_S3_SECRET_ACCESS_KEY:-}
+      DOHC_SNAPSHOT_ALERT_EMAIL: ${DOHC_SNAPSHOT_ALERT_EMAIL:-}
+      DOHC_SNAPSHOT_HEARTBEAT_URL: ${DOHC_SNAPSHOT_HEARTBEAT_URL:-}
+      DOHC_SMTP_HOST: ${DOHC_SMTP_HOST:?Set DOHC_SMTP_HOST}
+      DOHC_SMTP_PORT: ${DOHC_SMTP_PORT:-587}
+      DOHC_SMTP_SECURE: ${DOHC_SMTP_SECURE:-false}
+      DOHC_SMTP_USER: ${DOHC_SMTP_USER:-}
+      DOHC_SMTP_PASSWORD: ${DOHC_SMTP_PASSWORD:-}
+      DOHC_SMTP_FROM: ${DOHC_SMTP_FROM:?Set DOHC_SMTP_FROM}
+    depends_on:
+      sync-relay: {condition: service_healthy}
+    # Storage, SMTP and the heartbeat are outside; nothing on the internal network is reachable from here.
+    networks: [snapshots]
+    # The relay database is read-only here; continuity is never mounted.
+    volumes:
+      - dohc_self_host_sync_relay:/data:ro
+      - dohc_self_host_snapshots:/snapshots
 
   share-web:
     <<: *service
@@ -122,6 +157,7 @@ services:
       DOHC_SHARE_WEB_AUTH_URL: http://workspace-api:1786
       DOHC_SHARE_WEB_PUBLIC_ORIGIN: ${DOHC_PUBLIC_ORIGIN:?Set DOHC_PUBLIC_ORIGIN}
       DOHC_SHARE_WEB_PUBLIC_RELAY_URL: ${DOHC_PUBLIC_ORIGIN:?Set DOHC_PUBLIC_ORIGIN}
+      DOHC_SHARE_WEB_INTERNAL_HOSTS: share-web:1790
       DOHC_SHARE_WEB_PUBLIC_HOSTS: ${DOHC_PUBLIC_HOST:?Set DOHC_PUBLIC_HOST}
       DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY: ${DOHC_RELAY_EXCHANGE_KEY:?Run the self-host bootstrap to generate secrets}
       DOHC_SHARE_WEB_TRUSTED_PROXIES: ${DOHC_GATEWAY_ADDRESS:-10.233.42.2}
@@ -161,11 +197,16 @@ networks:
       config:
         - subnet: ${DOHC_NETWORK_SUBNET:-10.233.42.0/24}
           ip_range: ${DOHC_NETWORK_IP_RANGE:-10.233.42.128/25}
+  snapshots: {}
 
 volumes:
   dohc_self_host_postgres:
   dohc_self_host_sync_relay:
   dohc_self_host_relay_continuity:
   dohc_self_host_host_data:
+  dohc_self_host_replicas:
+    labels:
+      dohc.backup: skip
+  dohc_self_host_snapshots:
   dohc_self_host_tls:
   dohc_self_host_gateway_config:

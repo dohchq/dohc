@@ -4,6 +4,7 @@ use crate::rpc::history::MOMENTS_PAGE_BYTE_BUDGET;
 use crate::rpc::reads::VersionPathParams;
 use crate::rpc::reads::byte_budget_cut_serialized;
 use crate::rpc::request::OperationCancellation;
+use crate::rpc::request::after_landing;
 use crate::rpc::request::now_ms;
 use crate::rpc::request::parse;
 use crate::rpc::request::validate_metadata_fields;
@@ -232,12 +233,13 @@ impl EngineService {
         Ok(json!(exists))
     }
 
+    /// The workspace's secret key, and whether this call minted it.
     async fn load_or_create_secret_key(
         &self,
         cancellation: &OperationCancellation,
         open: &OpenWorkspace,
         operation: &'static str,
-    ) -> Result<dohc_engine_crypto::SecretDataKey, WireError> {
+    ) -> Result<(dohc_engine_crypto::SecretDataKey, bool), WireError> {
         let key_root = open.root.clone();
         let key_task =
             tokio::task::spawn_blocking(move || dohc_engine_crypto::load_key_file(&key_root));
@@ -251,7 +253,7 @@ impl EngineService {
                 .map_err(|error| map_runtime(RuntimeError::Domain(DomainError::Crypto(error))))?,
         };
         if let Some(key) = loaded {
-            return Ok(key);
+            return Ok((key, false));
         }
 
         let has_state = Self::read_under_ctx(
@@ -264,16 +266,17 @@ impl EngineService {
             return Err(WireError::new(ErrorCode::Internal, "key-corrupt"));
         }
 
-        let key_root = open.root.clone();
-        let key_task =
-            tokio::task::spawn_blocking(move || dohc_engine_crypto::create_key_file(&key_root));
-        tokio::select! {
-            biased;
-            () = cancellation.token.cancelled() => Err(cancellation.interruption(operation)),
-            created = key_task => created
-                .map_err(|_| WireError::new(ErrorCode::Internal, "key-corrupt"))?
-                .map_err(|error| map_runtime(RuntimeError::Domain(DomainError::Crypto(error)))),
+        if cancellation.token.is_cancelled() {
+            return Err(cancellation.interruption(operation));
         }
+        // A started mint finishes even if its caller leaves, so wait for it.
+        let key_root = open.root.clone();
+        let created =
+            tokio::task::spawn_blocking(move || dohc_engine_crypto::create_key_file(&key_root))
+                .await
+                .map_err(|_| WireError::new(ErrorCode::Internal, "key-corrupt"))?
+                .map_err(|error| map_runtime(RuntimeError::Domain(DomainError::Crypto(error))))?;
+        Ok((created, true))
     }
 
     pub(super) async fn secrets_write(
@@ -308,9 +311,15 @@ impl EngineService {
             ),
         )
         .await?;
-        let key = self
+        let (key, minted) = self
             .load_or_create_secret_key(&cancellation, &open, "secrets.write (key load)")
             .await?;
+        // The minted key landed, so the write runs to its answer.
+        let cancellation = if minted {
+            OperationCancellation::new(&after_landing(ctx))
+        } else {
+            cancellation
+        };
         let result = open
             .actor
             .write_secret_file(

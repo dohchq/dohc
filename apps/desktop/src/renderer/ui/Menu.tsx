@@ -9,6 +9,7 @@ import {
   type RefObject,
 } from "react";
 import { IconButton } from "./controls";
+import { isComposingKey } from "./keys";
 import { useDismiss } from "./useDismiss";
 
 export type MenuItem = {
@@ -64,8 +65,10 @@ export type MenuTriggerProps = {
 };
 
 const MENU_WIDTH_PX = 144;
-// Between the trigger and the list, and between the list and the window's edge.
+// Between the trigger and the list.
 const GAP_PX = 4;
+// Between the list and the window's edge, as toasts and the editor's menus keep.
+const EDGE_PX = 12;
 
 type Place = { left: number; maxHeight: number; top?: number; bottom?: number; above: boolean };
 
@@ -179,11 +182,12 @@ export function moveInMenu(
   return null;
 }
 
-// The Menu part's own rows take DOM focus, so focus carries the fill, and
-// the accent :focus-visible outline marks the row for the keyboard. The list
-// scrolls, so the outline sits inside the row, where the scroller cannot clip
-// it on a row scrolled to an edge.
-const ROW = `${MENU_ROW} focus:bg-selected focus-visible:-outline-offset-2`;
+// The Menu part's own rows take DOM focus, so focus is the active row: the
+// fill and the accent outline, whether the keyboard or the pointer moved it,
+// as MENU_ACTIVE_OPTION draws it. The fill alone would match the current
+// row's. The list scrolls, so the outline sits inside the row, where the
+// scroller cannot clip it on a row scrolled to an edge.
+const ROW = `${MENU_ROW} focus:bg-selected focus:outline-2 focus:outline-accent focus:-outline-offset-2`;
 // Hover paints only after the pointer moves, so a menu opened from the
 // keyboard under a still pointer shows one active row.
 const ROW_TONE = {
@@ -191,12 +195,6 @@ const ROW_TONE = {
   current: { base: MENU_ROW_TONE.current, hover: "" },
   danger: { base: MENU_ROW_TONE.danger, hover: "hover:bg-hover" },
 };
-
-// During IME composition, Enter, Escape and the arrows work the candidate
-// list. Some browsers mark those keys only with keyCode 229.
-function composing(event: KeyboardEvent): boolean {
-  return event.nativeEvent.isComposing || event.keyCode === 229;
-}
 
 function isField(row: MenuRow): row is MenuField {
   return "field" in row;
@@ -263,9 +261,9 @@ export function Menu(props: {
     const box = trigger.current?.getBoundingClientRect();
     const height = list.current?.offsetHeight ?? 0;
     if (box) {
-      const left = Math.max(GAP_PX, box.right - width);
-      const below = window.innerHeight - box.bottom - 2 * GAP_PX;
-      const above = box.top - 2 * GAP_PX;
+      const left = Math.max(EDGE_PX, Math.min(box.right, window.innerWidth - EDGE_PX) - width);
+      const below = window.innerHeight - box.bottom - GAP_PX - EDGE_PX;
+      const above = box.top - GAP_PX - EDGE_PX;
       setPlace(
         height > below && above > below
           ? { left, bottom: window.innerHeight - box.top + GAP_PX, maxHeight: above, above: true }
@@ -300,12 +298,13 @@ export function Menu(props: {
   const current = () => rowElements.current.findIndex((row) => row === document.activeElement);
   const onKeyDown = (event: KeyboardEvent) => {
     const inField = typing();
-    if (inField && composing(event)) return;
+    if (inField && isComposingKey(event)) return;
     const arrow = event.key === "ArrowDown" || event.key === "ArrowUp";
     const letter = event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey;
     // A field keeps Home, End and the typed letters; the arrows leave it.
     const next = arrow || (!inField && (letter || event.key === "Home" || event.key === "End"))
-      ? moveInMenu(event, current(), rowElements.current.slice(0, count).map((row) => row?.textContent ?? ""))
+      ? moveInMenu(event, current(), rows.map((row, index) =>
+        "label" in row && typeof row.label === "string" ? row.label : rowElements.current[index]?.textContent ?? ""))
       : null;
     if (next !== null) {
       if (!letter) event.preventDefault();
@@ -405,12 +404,12 @@ export function Menu(props: {
                     onKeyDownCapture={(event) => {
                       if (event.key !== "Escape") return;
                       event.stopPropagation();
-                      if (composing(event) || field.busy) return;
+                      if (isComposingKey(event) || field.busy) return;
                       refocus.current = entry.id;
                       field.onCancel();
                     }}
                     onKeyDown={(event) => {
-                      if (event.key !== "Enter" || composing(event)) return;
+                      if (event.key !== "Enter" || isComposingKey(event)) return;
                       event.preventDefault();
                       if (!field.busy) field.onSubmit();
                     }}

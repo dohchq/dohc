@@ -5,16 +5,31 @@ import {
   type DiscussionActivityHub,
 } from "./discussionActivity";
 import { badRequest, notFound, relayError } from "./errors";
-import { assertChatAuthorship, assertClientLogProvenance, assertServiceReplicaLogProvenance, parseAuthenticatedLogOps, type LogAuthorNameLookup } from "./relayLogInputs";
+import { cacheLogAuthorNames } from "./logAuthorNameCache";
+import type { ReplicaWatches } from "./replicaWatches";
+import { assertChatAuthorship, assertClientLogProvenance, parseAuthenticatedLogOps, type LogAuthorNameLookup } from "./relayLogInputs";
 import { parseCursor, parseLimit, parseString, parseWorkspaceId, readJsonObject } from "./requestInputs";
-import type { EnforceWorkspaceIdentityResult, SyncRelayStorage } from "./storage";
+import type { EnforceWorkspaceIdentityResult, SyncRelayLogInput, SyncRelayLogRow, SyncRelayStorage } from "./storage";
+import { readRefusal } from "./storage/relayAdmission";
 import { MAX_DISCUSSION_ACTIVITY_HOLD_MS, MAX_OPS_PER_REQUEST, MAX_ORIGIN_ID_CHARS } from "./wireLimits";
 
 export type WorkspaceReplicationRoute =
   | { route: "bootstrap"; workspaceId: string }
   | { route: "epoch"; workspaceId: string }
-  | { route: "log"; workspaceId: string }
+  // `serviceHost` marks the service host's own feed, the only writer of its reserved origins.
+  | { route: "log"; workspaceId: string; serviceHost?: HostedAdmission }
   | { route: "log-coordinate"; workspaceId: string; originId: string; originSeq: number };
+
+/**
+ * The service host's per-row decisions. A refused op becomes a relay-written
+ * refusal at its coordinate, and the batch continues.
+ */
+export interface HostedAdmission {
+  /** Before preparation: answers retried refusals, and refuses what the current scope already rules out. */
+  screen(originId: string, ops: SyncRelayLogInput[]): Promise<void>;
+  /** Under the append's writer, for the ops at coordinates the log does not hold yet. */
+  admit(ops: SyncRelayLogInput[]): void;
+}
 
 const MAX_IDENTITY_BYTES = 512;
 
@@ -25,7 +40,7 @@ export function createWorkspaceReplicationRoutes(
     | "getWorkspaceBootstrap"
     | "rotateWorkspaceIdentity"
     | "appendLogBatch"
-    | "prepareHostedSettlements"
+    | "prepareLogAppend"
     | "fetchLogPage"
     | "fetchLogCoordinate"
     | "getWorkspaceIdentity"
@@ -35,9 +50,11 @@ export function createWorkspaceReplicationRoutes(
   >,
   nowMs: () => number,
   discussionActivity: Pick<DiscussionActivityHub, "wakeLog" | "wait">,
+  replicaWatches: Pick<ReplicaWatches, "watched">,
   lookupUserDisplayName?: LogAuthorNameLookup,
-  logProvenance: "client" | "native-settlements" = "client",
+  onLogRead?: (request: Request, workspaceId: string, rows: readonly SyncRelayLogRow[]) => void,
 ) {
+  const accountNames = lookupUserDisplayName && cacheLogAuthorNames(lookupUserDisplayName, nowMs);
   async function respondToWorkspaceRegistration(
     request: Request,
     actor: { userId: string },
@@ -127,14 +144,15 @@ export function createWorkspaceReplicationRoutes(
       // parseLogOp and appendLogBatch, so the relay rejects the full batch
       // before it writes any operation.
       assertChatAuthorship(input.ops, actor.userId);
-      if (logProvenance === "native-settlements") assertServiceReplicaLogProvenance(originId, input.ops, true);
-      else assertClientLogProvenance(originId, input.ops, true);
-      const ops = await parseAuthenticatedLogOps(input.ops, actor.userId, lookupUserDisplayName);
-      await storage.prepareHostedSettlements({workspaceId:route.workspaceId,originId,ops},request.signal);
+      assertClientLogProvenance(originId, input.ops, {deferMomentRefusal: true, serviceHost: route.serviceHost !== undefined});
+      const ops = await parseAuthenticatedLogOps(input.ops, actor.userId, accountNames);
+      await route.serviceHost?.screen(originId, ops);
+      await storage.prepareLogAppend({workspaceId:route.workspaceId,originId,ops},request.signal);
       const result = storage.appendLogBatch({
         workspaceId: route.workspaceId,
         originId,
         ops,
+        ...(route.serviceHost ? {admit: route.serviceHost.admit} : {}),
         // Identity claim/verification rides the append's BEGIN IMMEDIATE
         // transaction. A gap/conflict/quota/blob failure later in append
         // rolls back a first-adopt claim together with the batch.
@@ -151,6 +169,10 @@ export function createWorkspaceReplicationRoutes(
       if (result.inserted > 0) {
         discussionActivity.wakeLog(route.workspaceId);
       }
+      const refusals = ops.flatMap(op => {
+        const refusal = readRefusal(op);
+        return refusal ? [{originId, originSeq: op.originSeq, opKind: refusal.opKind, reason: refusal.reason}] : [];
+      });
       return jsonResponse({
         ok: true,
         accepted: ops.length,
@@ -158,6 +180,7 @@ export function createWorkspaceReplicationRoutes(
         skipped: result.skipped,
         currentMaxOriginSeq: result.currentMaxOriginSeq,
         ...(result.settlementRefusals ? {settlementRefusals:result.settlementRefusals} : {}),
+        ...(refusals.length ? {refusals} : {}),
       });
     }
 
@@ -178,6 +201,7 @@ export function createWorkspaceReplicationRoutes(
           identity,
           requestedSince,
           since,
+          reportedWatched: url.searchParams.get("watched") === "1",
           ...(reauthenticate === undefined
             ? { holdMs: 0, reauthenticate: async () => {} }
             : { holdMs, reauthenticate }),
@@ -190,19 +214,9 @@ export function createWorkspaceReplicationRoutes(
         sinceRelaySeq: since,
         limit,
       });
-      return jsonResponse({
+      const response = jsonResponse({
         ok: true,
-        ops: page.rows.map((row) => ({
-          relaySeq: row.relaySeq,
-          workspaceId: row.workspaceId,
-          originId: row.originId,
-          originSeq: row.originSeq,
-          opKind: row.opKind,
-          payload: JSON.parse(row.payloadJson) as unknown,
-          recordedAtMs: row.recordedAtMs,
-          ...(row.admittedAuthorSnapshot === undefined ? {} : {admittedAuthorSnapshot: row.admittedAuthorSnapshot}),
-          ...(row.settlementAdmission === undefined ? {} : {settlementAdmission:row.settlementAdmission}),
-        })),
+        ops: page.rows.map(servedLogOp),
         // A hidden epoch floor is a read filter, not a served log row. An
         // empty response therefore cannot advance the caller's cursor: the
         // strict page contract requires nextCursor to equal the final
@@ -210,6 +224,8 @@ export function createWorkspaceReplicationRoutes(
         nextCursor: page.rows.length === 0 ? requestedSince : page.nextCursor,
         hasMore: page.hasMore,
       });
+      onLogRead?.(request, route.workspaceId, page.rows);
+      return response;
     }
 
     if (route.route === "log-coordinate" && request.method === "GET") {
@@ -225,30 +241,9 @@ export function createWorkspaceReplicationRoutes(
         originId: route.originId,
         originSeq: route.originSeq,
       });
-      if (!row) return jsonResponse({ ok: true, status: "absent" });
-      const op = {
-        relaySeq: row.relaySeq,
-        workspaceId: row.workspaceId,
-        originId: row.originId,
-        originSeq: row.originSeq,
-        opKind: row.opKind,
-        payload: JSON.parse(row.payloadJson) as unknown,
-        recordedAtMs: row.recordedAtMs,
-        ...(row.admittedAuthorSnapshot === undefined ? {} : {admittedAuthorSnapshot: row.admittedAuthorSnapshot}),
-          ...(row.settlementAdmission === undefined ? {} : {settlementAdmission:row.settlementAdmission}),
-      };
-      if (row.relaySeq <= epochLogFloor) {
-        return jsonResponse({
-          ok: true,
-          status: "presentBelowEpochFloor",
-          op,
-        });
-      }
-      return jsonResponse({
-        ok: true,
-        status: "present",
-        op,
-      });
+      const response = jsonResponse(logCoordinateAnswer(row, epochLogFloor));
+      if (row) onLogRead?.(request, route.workspaceId, [row]);
+      return response;
     }
 
     throw relayError("method_not_allowed");
@@ -256,7 +251,7 @@ export function createWorkspaceReplicationRoutes(
 
   // A held read tells a device when its log has an op past `since`, so an
   // idle device can pull only when there is something to pull. It answers
-  // only `hasMore` and never serves an op. `hold` is an
+  // `hasMore` and the current watch boolean, and never serves an op. `hold` is an
   // upper bound. The relay answers at once when the log already has an op,
   // and also when its parked reads are at capacity, so a device must not
   // read an early empty answer as a promise to hold the next one.
@@ -269,6 +264,7 @@ export function createWorkspaceReplicationRoutes(
       requestedSince: number;
       since: number;
       holdMs: number;
+      reportedWatched: boolean;
       guard: () => void;
       reauthenticate: () => Promise<void>;
     },
@@ -276,18 +272,19 @@ export function createWorkspaceReplicationRoutes(
     let since = input.since;
     const hasMore = () =>
       storage.fetchLogPage({ workspaceId, sinceRelaySeq: since, limit: 0 }).hasMore;
+    const changed = () => hasMore() || replicaWatches.watched(workspaceId) !== input.reportedWatched;
     const deadlineAtMs = Date.now() + input.holdMs;
     // A wake can leave nothing past `since`, for example a retried link
     // submission that appended nothing. The read then parks again until its
     // deadline, so it answers early only with a change.
-    while (!hasMore() && !request.signal.aborted) {
+    while (!changed() && !request.signal.aborted) {
       const holdMs = deadlineAtMs - Date.now();
       if (holdMs <= 0) break;
       try {
         await discussionActivity.wait(ownerLogWaitGroup(workspaceId), `owner:${userId}`, {
           holdMs,
           signal: request.signal,
-          shouldPark: () => !hasMore(),
+          shouldPark: () => !changed(),
         });
       } catch (error) {
         if (!(error instanceof DiscussionActivityCapacityError)) throw error;
@@ -309,10 +306,35 @@ export function createWorkspaceReplicationRoutes(
       ops: [],
       nextCursor: input.requestedSince,
       hasMore: hasMore(),
+      ...(replicaWatches.watched(workspaceId) ? { watched: true } : {}),
     });
   }
 
   return { respondToWorkspaceRegistration, respondToWorkspaceReplication };
+}
+
+/** A log row as replication serves it: the stored payload, unchanged. */
+export function servedLogOp(row: SyncRelayLogRow) {
+  return {
+    relaySeq: row.relaySeq,
+    workspaceId: row.workspaceId,
+    originId: row.originId,
+    originSeq: row.originSeq,
+    opKind: row.opKind,
+    payload: JSON.parse(row.payloadJson) as unknown,
+    recordedAtMs: row.recordedAtMs,
+    ...(row.admittedAuthorSnapshot === undefined ? {} : {admittedAuthorSnapshot: row.admittedAuthorSnapshot}),
+    ...(row.settlementAdmission === undefined ? {} : {settlementAdmission: row.settlementAdmission}),
+  };
+}
+
+export function logCoordinateAnswer(row: SyncRelayLogRow | null, epochLogFloor: number) {
+  if (!row) return { ok: true, status: "absent" };
+  return {
+    ok: true,
+    status: row.relaySeq <= epochLogFloor ? "presentBelowEpochFloor" : "present",
+    op: servedLogOp(row),
+  };
 }
 
 function parseLogHold(value: string): number {
@@ -350,7 +372,7 @@ function parseOptionalWorkspaceIdentity(
   );
 }
 
-function parseOptionalWorkspaceIdentityQuery(
+export function parseOptionalWorkspaceIdentityQuery(
   searchParams: URLSearchParams,
 ): OptionalWorkspaceIdentity | null {
   return parseOptionalWorkspaceIdentityValues(
@@ -383,7 +405,7 @@ function parseOptionalWorkspaceIdentityValues(
   };
 }
 
-function enforceWorkspaceIdentity(
+export function enforceWorkspaceIdentity(
   storage: Pick<SyncRelayStorage, "getWorkspaceIdentity" | "verifyWorkspaceIdentity" | "getEpochLogFloor">,
   workspaceId: string,
   identity: OptionalWorkspaceIdentity | null,

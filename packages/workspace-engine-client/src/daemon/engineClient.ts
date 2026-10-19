@@ -9,6 +9,8 @@ import type { BlobStart, Envelope, Event, Request, Response, WireError } from ".
 import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
 import type { OwnerYDocOutboxAppendResult } from "../ydoc/ownerYDocOutbox";
 import { decodeOwnerYDocOutboxAppendResult, decodeOwnerYDocDraftDescriptor, type YdocOwnerDraft } from "../ydoc/ydocWireContract";
+import {validateUserWritePath} from "@dohc/workspace-core";
+import { encodeReplicaJournalPage, replicaPageResult, type ReplicaJournalRow, type ReplicaPageResult } from "./replicaJournal";
 import { parseNativeOwnerActivation, type NativeOwnerActivation } from "./nativeOwnerActivation";
 
 const FRAME_MAGIC = Buffer.from("DOP1", "ascii");
@@ -600,11 +602,34 @@ export class EngineRequestError extends EngineClientError {
 }
 
 /**
+ * The engine refused a hosted document that is not ready: its hosted replica
+ * holds, backfills or parked it, or it left the scope. A later pull may make
+ * it ready. Any other CONFLICT on the same request is a divergence.
+ */
+export function isHostedDocumentUnready(error: unknown): boolean {
+  return error instanceof EngineRequestError && error.wireError?.code === "CONFLICT" &&
+    error.wireError.message === "hosted-document-unready";
+}
+
+/**
+ * The engine refused a first capture because the document has no Y.Doc
+ * lineage, as a file only ever written as text: nothing can activate until a
+ * device opens it.
+ */
+export function isLiveDocumentWithoutLineage(error: unknown): boolean {
+  return error instanceof EngineRequestError && error.wireError?.code === "CONFLICT" &&
+    error.wireError.message === "live-document-without-lineage";
+}
+
+/**
  * A request the caller deadlined ran out of time before the daemon answered.
  *
  * Expiry can precede transmission. The code remains `transport-error` for
  * callers that recover by rebinding; this class lets them distinguish their
  * own deadline from a socket failure without matching message text.
+ *
+ * The outcome is unknown: the daemon may still finish the work. Only the
+ * daemon's own `DEADLINE_EXCEEDED` or `CANCELLED` means the work did not happen.
  */
 export class EngineRequestDeadlineError extends EngineClientError {
   readonly requestId: number;
@@ -779,6 +804,51 @@ export class EngineClient implements EngineTransport {
     const captured=row.captured as {nativeHeadSequence:number;localStateDigest:string};
     if (!captured || Object.keys(captured).sort().join()!=="localStateDigest,nativeHeadSequence" || !Number.isSafeInteger(captured.nativeHeadSequence) || captured.nativeHeadSequence<0) throw new TypeError("Invalid owner capture.");
     return {status:"capture",captured:{nativeHeadSequence:captured.nativeHeadSequence,localStateDigest:parseLiveUpdateDigest(captured.localStateDigest)}};
+  }
+
+  async ownerYDocStopRequest(request: OwnerYDocDeliveryRequest, target: string | {mainVersionId: string; objectId: string; currentPath: string}, signal?: AbortSignal) {
+    const rows = await this.ownerLiveStop(request, "request", typeof target === "string" ? {path: target} : {document: target}, signal);
+    if (rows.length !== 1 || (typeof target !== "string" && (rows[0]!.document.objectId !== target.objectId || rows[0]!.document.mainVersionId !== target.mainVersionId))) throw new TypeError("Invalid Stop response.");
+    return rows[0]!;
+  }
+  async ownerYDocRelease(request: OwnerYDocDeliveryRequest, binding: OwnerYDocDeliveryTarget["binding"], acceptedCursor: number, signal?: AbortSignal) {
+    if (!Number.isSafeInteger(acceptedCursor) || acceptedCursor < 0) throw new TypeError("Invalid retirement cursor.");
+    const rows = await this.ownerLiveStop(request, "release", {binding,acceptedCursor}, signal);
+    if (rows.length !== 1 || rows[0]!.state !== "released" || JSON.stringify(rows[0]!.binding) !== JSON.stringify(parseLiveObjectBinding(binding))) throw new TypeError("Invalid release response.");
+    return rows[0]!;
+  }
+  async ownerYDocStopRetired(request: OwnerYDocDeliveryRequest, document: {mainVersionId: string; objectId: string; currentPath: string}, signal?: AbortSignal): Promise<void> {
+    const rows=await this.ownerLiveStop(request,"retired",{document},signal);
+    if (rows.length) throw new TypeError("Invalid retirement response.");
+  }
+  async ownerYDocStopClear(request: OwnerYDocDeliveryRequest, path: string, signal?: AbortSignal): Promise<void> {
+    const rows = await this.ownerLiveStop(request, "clear", {path}, signal);
+    if (rows.length) throw new TypeError("Invalid Stop cancellation response.");
+  }
+  async ownerYDocStopList(request: OwnerYDocDeliveryRequest, signal?: AbortSignal) {
+    return this.ownerLiveStop(request, "list", {}, signal);
+  }
+  private async ownerLiveStop(request: OwnerYDocDeliveryRequest, action: string, params: object, signal?: AbortSignal) {
+    const response = await this.sendRequest({...request, method: `ydoc.ownerStop.${action}`, params}, signal);
+    const value = response.result as {stops?: unknown};
+    if (!value || Object.keys(value).join() !== "stops" || !Array.isArray(value.stops) || value.stops.length > 64) throw new TypeError("Invalid Stop response.");
+    return value.stops.map((row: unknown) => {
+      if (!row || typeof row !== "object" || Object.keys(row).filter(key => key !== "deferred").sort().join() !== "binding,document,relayDatabaseNamespace,retirementOwed,state") throw new TypeError("Invalid Stop row.");
+      const r=row as {binding: unknown;document: unknown;relayDatabaseNamespace: unknown;retirementOwed: unknown;state: unknown;deferred?: unknown};
+      if (r.state !== "requested" && r.state !== "released" || typeof r.retirementOwed !== "boolean") throw new TypeError("Invalid Stop state.");
+      const d=r.document as {mainVersionId?: unknown;objectId?: unknown;currentPath?: unknown};
+      if (!d || Object.keys(d).sort().join()!=="currentPath,mainVersionId,objectId" || typeof d.currentPath!=="string" || !validateUserWritePath(d.currentPath).ok) throw new TypeError("Invalid Stop document.");
+      const document={mainVersionId:parseLiveUpdateIdentifier(d.mainVersionId,"main version"),objectId:parseLiveUpdateIdentifier(d.objectId,"object ID"),currentPath:d.currentPath};
+      const binding=r.binding===null ? null : parseLiveObjectBinding(r.binding);
+      if (binding && (binding.objectId!==document.objectId || binding.mainVersionId!==document.mainVersionId) || !binding && r.state!=="released") throw new TypeError("Invalid Stop binding.");
+      let deferred: {unsentEdits: number; editable: boolean} | undefined;
+      if (r.deferred !== undefined) {
+        const d=r.deferred as {unsentEdits: number; editable: boolean};
+        if (!d || Object.keys(d).sort().join()!=="editable,unsentEdits" || !Number.isSafeInteger(d.unsentEdits) || d.unsentEdits<0 || typeof d.editable!=="boolean" || !binding || r.state!=="released" || r.retirementOwed) throw new TypeError("Invalid deferred Stop.");
+        deferred={unsentEdits:d.unsentEdits,editable:d.editable};
+      }
+      return {binding,document,retirementOwed:r.retirementOwed,relayDatabaseNamespace:binding ? parseLiveUpdateIdentifier(r.relayDatabaseNamespace,"relay namespace") : r.relayDatabaseNamespace==="" ? "" : (()=>{throw new TypeError("Invalid Stop namespace.");})(),state:r.state,...(deferred ? {deferred} : {})};
+    });
   }
 
   async ownerYDocEnroll(request:OwnerYDocDeliveryRequest, input:OwnerYDocDeliveryTarget & {
@@ -1076,6 +1146,9 @@ export class EngineClient implements EngineTransport {
    * `onProgress` runs each time the engine reports that this request's work
    * moved. It can run only when `reportsProgress()` is true, and only for a
    * method whose work reports (today `workspace.open`).
+   *
+   * Aborting `signal` rejects at once and drops the daemon's later answer, so
+   * the outcome is unknown. Use `cancelRequest` to learn what happened.
    */
   async sendRequest(
     request: Request,
@@ -1487,6 +1560,17 @@ export class EngineClient implements EngineTransport {
     return { response, bytes: output.blob!.bytes };
   }
 
+  async applyReplicaJournalPage(request: Omit<LiveApplicationRequest, "registrationId">, after: number, epochLogFloor: number, rows: readonly ReplicaJournalRow[], signal?: AbortSignal): Promise<ReplicaPageResult> {
+    if (!Number.isSafeInteger(after) || after < 0) throw new TypeError("Invalid replica cursor.");
+    if (!Number.isSafeInteger(epochLogFloor) || epochLogFloor < 0) throw new TypeError("Invalid replica epoch floor.");
+    const bytes = encodeReplicaJournalPage(rows);
+    const response = await this.sendLiveUpload(request, "replica.applyJournalPage", bytes.length * 3 + 3 * 1024 * 1024, () => {
+      const streamId = this.nextLiveStreamId++, digest = createHash("sha256").update(bytes).digest("hex");
+      return {params: {after, epochLogFloor, streamId, byteLength: bytes.length, digest}, streams: [{streamId, bytes, digest}]};
+    }, signal);
+    return replicaPageResult(response.result);
+  }
+
   private async sendLiveUpload(
     request: Omit<LiveApplicationRequest, "registrationId"> & { registrationId?: number },
     method: string,
@@ -1508,7 +1592,7 @@ export class EngineClient implements EngineTransport {
       throw new TypeError("Private live application uploads require a positive blob chunk limit.");
     }
     if (
-      (!restoreOutput && !["ydoc.ownerDelivery.applyAcceptedFrame","ydoc.ownerDelivery.applyInitialSync","ydoc.ownerDelivery.isReceiptApplied","ydoc.ownerDelivery.listDrafts","ydoc.ownerDelivery.appendDraft","ydoc.ownerDelivery.prepareEnrollment","ydoc.ownerDelivery.enroll","ydoc.ownerDelivery.refuseEntry"].includes(method) && (!Number.isSafeInteger(request.registrationId) ||
+      (!restoreOutput && !["replica.applyJournalPage","ydoc.ownerDelivery.applyAcceptedFrame","ydoc.ownerDelivery.applyInitialSync","ydoc.ownerDelivery.isReceiptApplied","ydoc.ownerDelivery.listDrafts","ydoc.ownerDelivery.appendDraft","ydoc.ownerDelivery.prepareEnrollment","ydoc.ownerDelivery.enroll","ydoc.ownerDelivery.refuseEntry"].includes(method) && (!Number.isSafeInteger(request.registrationId) ||
       request.registrationId! < 1)) ||
       !Number.isSafeInteger(request.deadlineMs) ||
       request.deadlineMs < 1 ||
@@ -1612,6 +1696,15 @@ export class EngineClient implements EngineTransport {
     }
   }
 
+  /**
+   * Ask the daemon to stop a request. The request still settles with the
+   * daemon's answer: `CANCELLED` or `DEADLINE_EXCEEDED` means the work did not
+   * happen, and a result means the work landed before the daemon could stop it.
+   * A live application acknowledgement (apply, settle, restore fence, native
+   * restore, owner activation capture) stopped after its work landed gets no
+   * answer. It ends at its own deadline with `EngineRequestDeadlineError`, and
+   * the outcome is unknown.
+   */
   async cancelRequest(callerId: number): Promise<void> {
     const pending = [...this.pending.entries()].find(
       ([, request]) => request.callerId === callerId,

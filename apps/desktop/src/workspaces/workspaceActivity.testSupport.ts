@@ -11,7 +11,7 @@ import {
 
 type TestActivityWorkspace = CreatedWorkspace & { attachmentId?: symbol };
 export const idleObservation: WorkspaceActivityOptions["observationFor"] = () => ({
-  ready: Promise.resolve(), stop: async () => {}, pulledPaths: async () => {}, pullStarting: () => {}, pullFinished: () => {},
+  ready: Promise.resolve(), stop: async () => {}, pulledPaths: async () => {}, pullStarting: () => {}, pullFinished: () => {}, retry: async () => {},
 });
 
 /** Test-only registry adapter for the single-attachment activity service. */
@@ -180,11 +180,19 @@ export function createInMemoryWorkspaceActivity(
         expectedRootPath,
       );
     },
+    agentRunState: (workspaceId: string) => {
+      const authority = requireAuthority(workspaceId);
+      return service.agentRunState(authority.workspace, authority.state);
+    },
     hasAgentRun: (workspaceId: string, expectedRootPath?: string): boolean => {
       const authority = authorities.get(workspaceId);
       return authority
         ? service.hasAgentRun(authority.state, expectedRootPath)
         : false;
+    },
+    dispatchedAgentRun: (workspaceId: string): boolean => {
+      const authority = authorities.get(workspaceId);
+      return authority ? service.dispatchedAgentRun(authority.state) : false;
     },
     engineCaptureFor: (
       workspaceId: string,

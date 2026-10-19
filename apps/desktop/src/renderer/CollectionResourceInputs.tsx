@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { isComposingKey } from "./ui/keys";
 import { APP_BACKEND_UPLOAD_BYTES, parseAppBackendFile, type AppBackendFile, type AppBackendJson } from "@dohc/security-contract/app-backend";
 import type { TransactionalField } from "./transactionalCollectionModel";
 import { inputClass } from "./collections/FieldForm";
@@ -74,7 +75,7 @@ export function CollectionRelationInput(props: InputProps & { resolve: NonNullab
   }
   useEffect(() => { void load(""); }, []);
   return <fieldset aria-label={props.field.name} disabled={props.disabled} className="m-0 flex flex-col gap-2 border-0 p-0">
-    <div className="flex gap-2"><input aria-label={`Search ${props.field.name}`} type="search" maxLength={200} value={search} className={inputClass} onChange={event => setSearch(event.target.value)} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); void load(search); } }} /><SecondaryButton onClick={() => void load(search)}>Find records</SecondaryButton></div>
+    <div className="flex gap-2"><input aria-label={`Search ${props.field.name}`} type="search" maxLength={200} value={search} className={inputClass} onChange={event => setSearch(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && !isComposingKey(event)) { event.preventDefault(); void load(search); } }} /><SecondaryButton onClick={() => void load(search)}>Find records</SecondaryButton></div>
     {values.map(value => <div key={JSON.stringify(value)} className="flex items-center gap-2 text-[12px] text-ink"><span>{options.find(option => option.value === value)?.label ?? String(value)}</span><SecondaryButton aria-label={`Remove ${String(value)} from ${props.field.name}`} onClick={() => { setInvalid(null); props.onChange(props.field.relation?.many ? values.filter(entry => entry !== value) : null); }}>Remove</SecondaryButton></div>)}
     {pending ? <span role="status" className="text-[12px] text-muted">Finding records…</span> : <div className="flex max-h-40 flex-col gap-1 overflow-auto">{options.filter(option => !values.includes(option.value)).map(option => <SecondaryButton key={JSON.stringify(option.value)} onClick={() => {
       if (props.field.relation?.many && values.length >= 100) { setInvalid("Choose up to 100 related records."); return; }

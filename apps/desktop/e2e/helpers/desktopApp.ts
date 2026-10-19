@@ -1,3 +1,4 @@
+import { mainProcessLogLines } from "./mainProcessCrashText";
 import { test, type Page } from "@playwright/test";
 import {
   _electron as electron,
@@ -80,6 +81,7 @@ function launchEnv(input: {
     ...process.env,
     CI: process.env.CI ?? "0",
     DOHC_DESKTOP_TEST: "1",
+    DOHC_TEST_IGNORE_MOUSE: "1",
     // The e2e relay is a local plain-http server; the daemon transport only
     // accepts it when this explicit flag is set (and the URL is loopback).
     DOHC_E2E_ALLOW_INSECURE_LOOPBACK_RELAY: "1",
@@ -100,6 +102,8 @@ export async function launchDesktopApp(input: {
   env?: NodeJS.ProcessEnv;
   /** Extra Chromium switches for this launch. */
   switches?: string[];
+  /** A program that runs Electron with the arguments it receives. */
+  executablePath?: string;
 }): Promise<LaunchedDesktopApp> {
   const build = requireBuiltDesktopApp();
   const userDataDir = await createUserDataDir(input.workspace);
@@ -117,18 +121,16 @@ export async function launchDesktopApp(input: {
     try { appendFileSync(logPath, JSON.stringify(timed) + "\n"); }
     catch (error) { logFailure ??= error; }
   };
-  const onStdoutData = (chunk: string) => {
-    record({ source: "main", level: "stdout", text: chunk });
-  };
-  const onStderrData = (chunk: string) => {
-    record({ source: "main", level: "stderr", text: chunk });
-  };
+  const stdoutLines = mainProcessLogLines(text => record({source: "main", level: "stdout", text}));
+  const stderrLines = mainProcessLogLines(text => record({source: "main", level: "stderr", text}));
+  const onStdoutData = (chunk: string) => stdoutLines.chunk(chunk);
+  const onStderrData = (chunk: string) => stderrLines.chunk(chunk);
 
   let app: ElectronApplication | null = null;
   let processHandle: ElectronProcess | null = null;
   try {
     app = await electron.launch({
-      executablePath: electronExecutable,
+      executablePath: input.executablePath ?? electronExecutable,
       args: electronLaunchArgs({ mainEntry, userDataDir, switches: input.switches }),
       cwd: desktopRoot,
       env: launchEnv(input),
@@ -177,6 +179,7 @@ export async function launchDesktopApp(input: {
           try {
             await closeElectronApplication(launchedApp, launchedProcess, DESKTOP_CLOSE_GRACE_MS);
           } finally {
+            stdoutLines.end(); stderrLines.end();
             launchedProcess.stdout?.off("data", onStdoutData);
             launchedProcess.stderr?.off("data", onStderrData);
             await test.info().attach("desktop logs", { path: logPath, contentType: "application/x-ndjson" });
@@ -194,6 +197,7 @@ export async function launchDesktopApp(input: {
       } catch (cleanupError) {
         console.error("Failed-launch cleanup:", cleanupError);
       } finally {
+        stdoutLines.end(); stderrLines.end();
         processHandle?.stdout?.off("data", onStdoutData);
         processHandle?.stderr?.off("data", onStderrData);
       }

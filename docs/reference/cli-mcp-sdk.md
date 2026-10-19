@@ -7,7 +7,7 @@ Agents and developers use this page to work with dohc from outside the app. It l
 
 ## Connect
 
-- **MCP.** In dohc, open **Settings**, then **Agents & MCP**. Choose **Enable MCP**, then copy the **MCP config** into your agent's MCP settings. The server works on one workspace.
+- **MCP.** In dohc, open **Settings**, then **Agents**. Copy the **MCP config** into your agent's MCP settings. The server works on one workspace.
 - **CLI.** The `dohc` command talks to the running dohc app, so keep dohc open. Run it inside the workspace folder. Agents that dohc starts have it on their `PATH`.
 - **Share links.** A share link has its own MCP server, `dohc-share`, with other tools. This page does not list them. The [share-web README](../../services/share-web/README.md) says how an agent connects to it.
 
@@ -16,7 +16,7 @@ Agents and developers use this page to work with dohc from outside the app. It l
 Agent prompts and scripts depend on these names. Before launch, a rename replaces the old name outright, with no alias.
 
 - The desktop MCP server reports its version as `0.3.0`. A rename or removal of a tool, argument, or result field raises it.
-- `--json` output carries `schemaVersion: 2`. A change to the shape of that output raises it.
+- `--json` output carries `schemaVersion: 3`. A change to the shape of that output raises it.
 - The CLI and the app must be the same build. Otherwise the CLI stops with `CLI/app version mismatch — restart the app`.
 
 A tool or command that cannot do what was asked returns `{ ok: false, reason }`, or exits with status 1 and prints the reason. MCP marks such a result as an error.
@@ -24,6 +24,17 @@ A tool or command that cannot do what was asked returns `{ ok: false, reason }`,
 Partial form creation returns `{ kind: "partial", created, failedStage, reason, retry }`. The CLI exits with status 1 and keeps the structured output. MCP marks the result as an error and keeps its structured content.
 
 ## Desktop MCP tools
+
+### `dohc_read_share_copy`
+
+Read one owned grant's share code and named-account invite link. Requires the original workspace and its signed-in owner account. Ended grants return only status; unknown and link grants are refused.
+
+The code and invite link belong to the owner's sharing. Shared profiles do not offer this read.
+
+- `shareId`: `string`. Required.
+- `grantId`: `string`. Required.
+
+Returns `{ status: "active", shareCode, browserInvitationUrl? } | { status: "ended" }`.
 
 ### `dohc_list_automations`
 
@@ -35,7 +46,7 @@ Returns `{ ok: true, definitions } | { ok: false, reason }`.
 
 ### `dohc_publish_app`
 
-Create a share link, prepare an immutable app revision, and approve publication with local owner authority. createLink requires a stable operationId; retries return the existing grant, never another link. Paths default to the app root at View access. A URL is a bearer credential at its stated access level, usable by anyone holding it. Keep its secret yourself. Append the returned appQuery before the fragment of any link URL, including one returned by createLink. Never send its secret to dohc. Rotation remains in the desktop. Agent labels are agent-declared provenance.
+Create a share link, prepare an immutable app revision, and approve publication as its owner on this computer. createLink requires a stable operationId; retries return the existing grant, never another link. Paths default to the app root at View access. A URL is a bearer credential at its stated access level, usable by anyone holding it. Keep its secret yourself. Append the returned appQuery before the fragment of any link URL, including one returned by createLink. Never send its secret to dohc. Rotation remains in the desktop. Agent labels are agent-declared provenance.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -67,7 +78,56 @@ Report whether this workspace is local-only or cloud-synced.
 
 No arguments.
 
-Returns `{ synced, scope, cloudConnected, credentialStatus, workspaceId?, serverUrl? }`. `scope` is `"local"` or `"cloud"`.
+Returns `{ synced, scope, cloudConnected, credentialStatus, workspaceId?, serverUrl?, syncPause? }`. `scope` is `"local"` or `"cloud"`.
+
+### `dohc_stop_workspace_sync`
+
+Stop this computer's sync for the owning workspace after saving live document edits. Keep local work, shares, history, and protected-file keys. Groups you joined and received-share mounts keep syncing. Record who paused and when. Resume in Settings.
+
+Changes the workspace, so a shared view does not offer it.
+
+No arguments.
+
+Returns `{ ok: true, workspaceId, workspaceSynced: false, syncPause?: { atMs, author } } | { ok: false, reason }`.
+
+### `dohc_links_in`
+
+Read a bounded page of documents linking to a file. indexBuilding reports active indexing; unchecked names omitted sources. complete excludes mount coverage, reported by mountsCovered. Cursors carry index state across pages.
+
+- `subject`: `{ path: string } | { objectId: string }`. Required.
+- `cursor`: `string`
+
+Returns `{ versionId, subject: { path, objectId }, entries: { source, title, ordinal, span, line, highlightStart, highlightEnd, snippet }[], unchecked, complete, indexBuilding, mountsCovered, nextCursor } | null`.
+
+### `dohc_links_resolve`
+
+Resolve wikilink or Markdown literals from one source document using the engine's link rules.
+
+- `source`: `string`. Required.
+- `literals`: `({ kind: "wikilink" | "markdown", literal: string })[]`. Required.
+
+Returns `{ versionId, results: ({ path, fragment } | { path, create, fragment } | null)[], mountsCovered }`.
+
+### `dohc_read_operation`
+
+List the paths changed by one operation, up to 50 per page. Returns change references and paths without retained contents. Owner workspace only.
+
+Operation reads require the owning workspace. Shared profiles do not offer this read.
+
+- `operationId`: `string`. Required.
+- `cursor`: `string`
+
+Returns `{ ok: false, reason } | { ok: true, operationId, members: { momentId, operation, path, beforePath? }[], withoutHistory?, nextCursor }`.
+
+### `dohc_undo_operation`
+
+Undo a delete, move, or rename by its operation id. Requires dohc open and the owning workspace. Returns History restoration state, restored paths, and remaining paths with reasons and retry flags. Undo again to retry each remaining path marked retry.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `operationId`: `string`. Required.
+
+Returns `{ ok: false, reason } | { ok: true, tracked: { state, momentCount }, restored, remaining: { path, reason, retry }[] }`.
 
 ### `dohc_list_changes`
 
@@ -78,7 +138,7 @@ List workspace history, newest first: workspace-engine moments (the recorder for
 - `includeFiles`: `boolean`
 - `path`: `string`
 
-Returns `{ changes: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files? }[], count, totalAvailable, hasMore, cursorMs } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
+Returns `{ changes: { operationId?, id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files? }[], count, totalAvailable, hasMore, cursorMs } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
 
 ### `dohc_list_kept_copies`
 
@@ -106,7 +166,7 @@ Read one history entry by id: a workspace-engine moment with its full before/aft
 
 - `id`: `string`. Required.
 
-Returns `{ ok: true, change: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files, before, after } } | { ok: false, reason } | { ok: false, status: "untracked", reason } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
+Returns `{ ok: true, change: { operationId?, id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files, before, after } } | { ok: false, reason } | { ok: false, status: "untracked", reason } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
 
 ### `dohc_list_files`
 
@@ -201,7 +261,7 @@ Returns `{ ok: true, path }`, or `{ ok: true, path, unchanged: true }` when the 
 
 ### `dohc_move_path`
 
-Move or rename a visible workspace file or folder. Requires dohc open. History records the move under your agent name. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. Files over 5 MiB binary or 10 MiB text move without a History row. Text with invalid UTF-8 also moves without a row when History cannot keep it as binary. `withoutHistory` lists their destination paths. With overwrite, `replaced` separately reports the old destination's trash location and files without History copies. A failed move puts everything back it can. `deleted` lists files History records as deleted after rollback. They stay in the workspace's .dohc/trash, and Restore in History brings them back.
+Move or rename a visible workspace file or folder. Returns operationId and undo availability. Use dohc_undo_operation when available. Requires dohc open. History records the move under your agent name. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. Files over 5 MiB binary or 10 MiB text move without a History row. Text with invalid UTF-8 also moves without a row when History cannot keep it as binary. `withoutHistory` lists their destination paths. With overwrite, `replaced` separately reports the old destination's trash location and files without History copies. A failed move puts everything back it can. `deleted` lists files History records as deleted after rollback. They stay in the workspace's .dohc/trash, and Restore in History brings them back.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -210,18 +270,18 @@ Changes the workspace, so a shared view does not offer it.
 - `overwrite`: `boolean`
 - `summary`: `string`
 
-Returns `{ ok: true, fromPath, toPath, withoutHistory?, replaced? }`. Uses the desktop `fileMove` verb. `withoutHistory` lists moved files with no History row: oversized files or non-UTF-8 text that History cannot keep as binary. `replaced` describes the old destination separately: `{ path, trashed, trashPath?, withoutHistory }`. `trashed` is true when the system trash took it; otherwise `trashPath` names its workspace trash entry. `replaced.withoutHistory` lists replaced files without History copies; other replaced files can be restored in History. On failure: `{ ok: false, reason, path?, deleted?, withoutHistory?, replaced? }`. The reason reports rollback's outcome. `withoutHistory` names moved files without History rows after rollback. `replaced` reports any old destination files retained in the workspace trash. `deleted` lists files History records as deleted after the failed move. They stay in the workspace's .dohc/trash.
+Returns `{ ok: true, operationId, fromPath, toPath, withoutHistory?, replaced? }`. Uses the desktop `fileMove` verb. `withoutHistory` lists moved files with no History row: oversized files or non-UTF-8 text that History cannot keep as binary. `replaced` describes the old destination separately: `{ path, trashed, trashPath?, withoutHistory }`. `trashed` is true when the system trash took it; otherwise `trashPath` names its workspace trash entry. `replaced.withoutHistory` lists replaced files without History copies; other replaced files can be restored in History. On failure: `{ ok: false, reason, path?, deleted?, withoutHistory?, replaced? }`. The reason reports rollback's outcome. `withoutHistory` names moved files without History rows after rollback. `replaced` reports any old destination files retained in the workspace trash. `deleted` lists files History records as deleted after the failed move. They stay in the workspace's .dohc/trash.
 
 ### `dohc_delete_path`
 
-Delete a visible workspace file or folder. Requires dohc open. History records the delete under your agent name, and Restore there brings the file back. Files over 5 MiB binary or 10 MiB text delete without a History row. Text with invalid UTF-8 also deletes without a row when History cannot keep it as binary. `withoutHistory` lists their paths. Restore these files from the trash. The file or folder goes through the workspace's .dohc/trash to the system trash, or stays in .dohc/trash when the system refuses; `trashed` says which. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. If History refuses a file in a folder, `deleted` lists the files already deleted, and the rest go back to their place.
+Delete a visible workspace file or folder. Returns operationId and undo availability. Use dohc_undo_operation when available. Requires dohc open. History records the delete under your agent name, and Restore there brings the file back. Files over 5 MiB binary or 10 MiB text delete without a History row. Text with invalid UTF-8 also deletes without a row when History cannot keep it as binary. `withoutHistory` lists their paths. Restore these files from the trash. The file or folder goes through the workspace's .dohc/trash to the system trash, or stays in .dohc/trash when the system refuses; `trashed` says which. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. If History refuses a file in a folder, `deleted` lists the files already deleted, and the rest go back to their place.
 
 Changes the workspace, so a shared view does not offer it.
 
 - `path`: `string`. Required.
 - `summary`: `string`
 
-Returns `{ ok: true, path, trashed, trashPath?, withoutHistory? }`. Uses the desktop `fileDelete` verb. `trashed` is true when the system trash took the entry; otherwise `trashPath` names its workspace trash entry. `withoutHistory` lists files deleted without History rows: oversized files or non-UTF-8 text that History cannot keep as binary. On failure: `{ ok: false, reason, deleted?, path?, withoutHistory? }`. `deleted` lists files History recorded as deleted before it refused `path`. `withoutHistory` names files already removed without History rows. The reason names their workspace trash location.
+Returns `{ ok: true, operationId, undo, path, trashed, trashPath?, withoutHistory? }`. Uses the desktop `fileDelete` verb. `trashed` is true when the system trash took the entry; otherwise `trashPath` names its workspace trash entry. `withoutHistory` lists files deleted without History rows: oversized files or non-UTF-8 text that History cannot keep as binary. On failure: `{ ok: false, reason, deleted?, path?, withoutHistory? }`. `deleted` lists files History recorded as deleted before it refused `path`. `withoutHistory` names files already removed without History rows. The reason names their workspace trash location.
 
 ### `dohc_detect_apps`
 
@@ -368,7 +428,7 @@ Read one collection record by id: current field values plus per-field history wi
 - `historyLimit`: `integer`
 - `beforeHistoryId`: `integer`
 
-Returns `{ ok: true, collection: { path, status, reasons }, record: { id, path, conflicted, values }, history: { historyId, field, previous, next, authorOriginId, actorKind, onBehalfOf, depth, recordedAtMs, automationRun }[] } | { ok: false, reason }`.
+Returns `{ ok: true, collection: { path, status, reasons }, record: { id, path, conflicted, values }, history: { historyId, field, previous, next, authorOriginId, actorKind, onBehalfOf, depth, recordedAtMs, linkAuthor, automationRun }[] } | { ok: false, reason }`.
 
 ### `dohc_set_record_fields`
 
@@ -485,9 +545,113 @@ Two environment variables also change what the CLI does:
 - `DOHC_RUN_ID` links the messages that `post` and `reply` write to a local agent run.
 - `DOHC_STATE_DIR` names the app's state folder when the CLI cannot find the running app in its default place.
 
+### `dohc links`
+
+Read and resolve document links.
+
+`indexBuilding` is true while the link index is being built: seed work, pending updates, or eligible files without an index row. It carries across cursor pages; start a fresh walk to observe completion. `unchecked` names sources that could not be checked, including oversized files. These can keep `complete` false after building stops. `complete` describes the local index; `mountsCovered` separately reports mounted-share coverage. IPC, CLI, and MCP return these same fields.
+
+#### `dohc links in`
+
+```sh
+dohc links in <subject-json> [options]
+```
+
+Read documents that link to a file.
+
+- `--cursor <cursor>`: Continue the previous page.
+
+With `--json`, prints `{ schemaVersion, versionId, subject: { path, objectId }, entries: { source, title, ordinal, span, line, highlightStart, highlightEnd, snippet }[], unchecked, complete, indexBuilding, mountsCovered, nextCursor }` or `null`.
+
+#### `dohc links resolve`
+
+```sh
+dohc links resolve <source> <literals-json> [options]
+```
+
+Resolve links from one document.
+
+With `--json`, prints `{ schemaVersion, versionId, results: ({ path, fragment } | { path, create, fragment } | null)[], mountsCovered }`.
+
+### `dohc sync`
+
+Stop syncing this workspace on this computer.
+
+Local files, documents, records, and history stay here. Shares and protected-file keys are retained. Groups you joined and received-share mounts keep syncing. Turn sync on in Settings to resume the same workspace.
+
+The pause result records who paused and when. A person author has kind person, personId, and self. Show you when self is true. Person pause labels do not use profile names. An agent author has kind agent, agentId, onBehalfOf, and depth. Agent names are provenance and grant no authority.
+
+#### `dohc sync stop`
+
+```sh
+dohc sync stop [options]
+```
+
+Stop this computer's sync after saving live document edits.
+
+- `--agent <name>`: Record this agent name when --as-agent is set.
+
+With `--json`, prints `{ schemaVersion, ok: true, workspaceId, workspaceSynced: false, syncPause?: { atMs, author } }`.
+
+### `dohc access`
+
+Read observed object grants and Sharing inventories.
+
+Answers describe observed grants, not authorization. An empty page means no matching grants within its coverage. Paths resolve from your current folder. Received selectors use their source workspace's coordinates.
+
+Both verbs return only the allowlisted AccessAnswer fields shown below, with at most 100 rows per page. They never return credentials, bearer URLs, invitation URLs, share codes, or link URLs.
+
+Share answers use the current observation; the CLI never refreshes share inventories. `freshness` is `fresh`, `stale`, or `unknown`; `checkedAtMs` is the observation timestamp in milliseconds, or null when unknown. `coverage` names the observed scope and whether it is complete. Its `observation` is `interval`: pages do not form an atomic snapshot. `nextCursor` continues the answer, or is null at the end.
+
+`unknownReason` is null when coverage is known. When visibility is `hidden` or `missing`, it is null because visibility states why the answer is unavailable. Every other answer with `coverage.kind` set to `unavailable` requires one reason. Its closed values are `signed-out`, `not-synced`, `other-account`, `other-server`, `not-listed-yet`, `changed`, and `unreadable`. Reasons describe only this device's records and account. They contain no account identity, email, server URL, share id, or path.
+
+Queries use only the CLI's registered workspace, with no workspace enumeration. The granted lane contains that workspace owner's grants; the received lane contains the signed-in account's received shares. A received object's answer shows only the recipient's own grant.
+
+Collection answers report current access and capabilities, not share grants.
+
+#### `dohc access object`
+
+```sh
+dohc access object <reference-json> [options]
+```
+
+Read the grants covering an object.
+
+- `--cursor <cursor>`: Continue the previous answer.
+
+With `--json`, prints `{ schemaVersion, ref: { kind: "path", path, versionId } | { kind: "file", objectId } | { kind: "chat", channelWireId } | { kind: "collection", datasetId } | null, rows: ({ kind: "share", shareId, grantId, via, granterUserId, granterEmail, recipientUserId, recipientEmail, subjectName, sharerName, selector, access, status, generation, fileScope?, removalMessage? } | { kind: "collection", datasetId, principal, appId, operationIds, revision, revisionSha256, compatible })[], visibility, coverage: { kind, complete, observation: "interval" }, unknownReason, checkedAtMs, freshness, nextCursor }`. Uses socket verb `accessObject`.
+
+#### `dohc access sharing`
+
+```sh
+dohc access sharing <granted|received> [options]
+```
+
+Page this workspace's granted shares or this account's received shares.
+
+- `--cursor <cursor>`: Continue the previous answer.
+
+With `--json`, prints `{ schemaVersion, ref: { kind: "path", path, versionId } | { kind: "file", objectId } | { kind: "chat", channelWireId } | { kind: "collection", datasetId } | null, rows: ({ kind: "share", shareId, grantId, via, granterUserId, granterEmail, recipientUserId, recipientEmail, subjectName, sharerName, selector, access, status, generation, fileScope?, removalMessage? } | { kind: "collection", datasetId, principal, appId, operationIds, revision, revisionSha256, compatible })[], visibility, coverage: { kind, complete, observation: "interval" }, unknownReason, checkedAtMs, freshness, nextCursor }`. Uses socket verb `accessSharing`.
+
+### `dohc share`
+
+Read copy details for an owned share grant.
+
+Requires the original workspace and its signed-in owner account.
+
+#### `dohc share copy`
+
+```sh
+dohc share copy <shareId> <grantId> [options]
+```
+
+Read a grant's share code and named-account invite link.
+
+With `--json`, prints `{ schemaVersion, status: "active", shareCode, browserInvitationUrl? }` or `{ schemaVersion, status: "ended" }`.
+
 ### `dohc document`
 
-Read, edit, and create live Markdown documents, and comment on tracked text files.
+Read, edit, and create live Markdown documents. List and start chats on tracked files.
 
 Paths resolve from your current folder. Changes are recorded as an agent's, as with MCP. A refusal exits with status 1 and prints its reason to stderr, including with --json.
 
@@ -534,6 +698,18 @@ Use - as the body to read it from stdin. Use --text instead to supply Markdown. 
 - `--agent <name>`: Record this agent name with the change.
 
 With `--json`, prints `{ schemaVersion, ok: true, path }`.
+
+#### `dohc document chats`
+
+```sh
+dohc document chats <path> [options]
+```
+
+List chats linked to a workspace file.
+
+Chats follow the file across renames. Use chat show --peek with a thread ID to read it without marking it read.
+
+With `--json`, prints `{ schemaVersion, ok: true, path, fileObjectId, threads: { id, title, createdAtMs, updatedAtMs, linkedPathHint? }[] }`.
 
 #### `dohc document comment`
 
@@ -730,7 +906,7 @@ List saved operations, with values to undo edits.
 - `beforeRevision`: `integer`
 - `limit`: `integer`
 
-Returns `{ kind: "history", datasetId, headRevision, entries: { revision, operation, callerReference, recordedAtMs, approvedRevisionHash, changesetBytes, attachmentCount, undo?, automation?, approvalAgent?, schema? }[], nextBeforeRevision }`.
+Returns `{ kind: "history", datasetId, name?, lineage?, olderRecordedAtMs?, archived?, headRevision, entries: { revision, operation, callerReference, recordedAtMs, approvedRevisionHash, changesetBytes, attachmentCount, undo?, automation?, approvalAgent?, schema? }[], nextBeforeRevision }`.
 
 #### `dohc dataset historyRevision`
 
@@ -1168,13 +1344,13 @@ List an app's publications on this computer.
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`. Required.
 
-Returns `{ kind: "localListed", publications: { publicationId, authorityRevision, appRoot, sourceRevision, active, datasetCapability }[] }`.
+Returns `{ kind: "localListed", publications: ({ publicationId, authorityRevision, appRoot, sourceRevision, approved, active, datasetCapability } | { publicationId, authorityRevision, appRoot, sourceRevision, approved, active, collectionCapability, pendingCreates })[] }`.
 
 #### `dohc app prepareLocal`
 
 Prepare an app to open on this computer.
 
-Review the source and the dataset operations it asks for, then approve.
+Review the source and the Collection access it asks for, then approve.
 
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`. Required.
@@ -1200,7 +1376,7 @@ List an app's shared publications.
 - `appRoot`: `string`. Required.
 - `cursor`: `SHA-256 hex`
 
-Returns `{ kind: "listed", publications: ({ approvalProvenance?, publicationId, authorityRevision, shareId, grantId, active, linkCurrent, collectionCapability, datasetCapability, manifestUnavailable: false, appRoot, sourceRevision } | { approvalProvenance?, publicationId, authorityRevision, shareId, grantId, active, linkCurrent, collectionCapability, datasetCapability, manifestUnavailable: true })[], nextCursor }`.
+Returns `{ kind: "listed", publications: ({ operatorTakedown?, approvalProvenance?, publicationId, authorityRevision, shareId, grantId, active, linkCurrent, collectionCapability, datasetCapability, manifestUnavailable: false, appRoot, sourceRevision } | { operatorTakedown?, approvalProvenance?, publicationId, authorityRevision, shareId, grantId, active, linkCurrent, collectionCapability, datasetCapability, manifestUnavailable: true })[], nextCursor }`.
 
 #### `dohc app prepare`
 
@@ -1244,25 +1420,25 @@ Returns `{ kind: "cancelled" }`.
 
 Stop a shared publication.
 
-Set `publicationId` to `publications[].publicationId` from `list`. Set `expectedAuthorityRevision` to `publications[].authorityRevision` from `list`.
+Set `publicationId` to `publications[].publicationId` from `list`. Set `expectedAuthorityRevision` to `publications[].authorityRevision` from `list`. For an app approved on this computer, take publicationId and authorityRevision from listLocal. withdrawalUnconfirmed means access ended, but responses the app sent earlier are not yet confirmed saved or refused. Withdraw again with the returned authorityRevision to confirm.
 
 - `workspaceId`: `string`. Required.
 - `publicationId`: `SHA-256 hex`. Required.
 - `expectedAuthorityRevision`: `integer`. Required.
 
-Returns `{ kind: "withdrawn", publicationId, authorityRevision }`.
+Returns `{ kind: "withdrawn", publicationId, authorityRevision }` or `{ kind: "withdrawalUnconfirmed", publicationId, authorityRevision, unresolvedCreates }`.
 
 #### `dohc app revokeCollection`
 
 Remove a shared publication's Collection access.
 
-Set `publicationId` to `publications[].publicationId` from `list`. Set `expectedAuthorityRevision` to `publications[].authorityRevision` from `list`.
+Set `publicationId` to `publications[].publicationId` from `list`. Set `expectedAuthorityRevision` to `publications[].authorityRevision` from `list`. For an app approved on this computer, this ends its approval, as withdraw does.
 
 - `workspaceId`: `string`. Required.
 - `publicationId`: `SHA-256 hex`. Required.
 - `expectedAuthorityRevision`: `integer`. Required.
 
-Returns `{ kind: "collectionRevoked", publicationId, authorityRevision }`.
+Returns `{ kind: "collectionRevoked", publicationId, authorityRevision }` or `{ kind: "withdrawalUnconfirmed", publicationId, authorityRevision, unresolvedCreates }`.
 
 #### `dohc app reviewReactivation`
 
@@ -1304,9 +1480,31 @@ Returns `{ action: "undo", items: { acceptanceId, status, momentId? }[], nextCur
 
 ### `dohc history`
 
-Read the changes History records for files.
+Read History changes and undo deletes, moves, and renames.
 
 Changes come from the active version of the workspace.
+
+#### `dohc history operation`
+
+```sh
+dohc history operation <operation> [options]
+```
+
+List the paths changed by one operation.
+
+- `--cursor <cursor>`: Continue from the cursor on the previous operation page.
+
+With `--json`, prints `{ schemaVersion, ok: true, operationId, members: { momentId, operation, path, beforePath? }[], withoutHistory?, nextCursor }`.
+
+#### `dohc history undo`
+
+```sh
+dohc history undo <operation> [options]
+```
+
+Undo a delete, move, or rename recorded in History.
+
+With `--json`, prints `{ schemaVersion, ok: true, tracked: { state, momentCount }, restored, remaining: { path, reason, retry }[] }`.
 
 #### `dohc history list`
 
@@ -1320,7 +1518,7 @@ With a path, list that file's own changes, across its renames. Each line starts 
 
 - `--limit <count>`: List at most this many changes. The default is 50, the most 500.
 
-With `--json`, prints `{ schemaVersion, changes: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files? }[], count, totalAvailable, hasMore, cursorMs }`.
+With `--json`, prints `{ schemaVersion, changes: { operationId?, id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files? }[], count, totalAvailable, hasMore, cursorMs }`.
 
 #### `dohc history show`
 
@@ -1334,7 +1532,7 @@ Find the change's ID with history list. With --json, print both sides and the ch
 
 - `--before`: Print the text from before the change instead.
 
-With `--json`, prints `{ schemaVersion, ok: true, change: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files, before, after } }`.
+With `--json`, prints `{ schemaVersion, ok: true, change: { operationId?, id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files, before, after } }`.
 
 ### `dohc automation`
 
@@ -1433,6 +1631,39 @@ Name the record by its id, or a dataset record by its primary key as JSON. The p
 - `--request-id <id>`: Send the same id again, after a timeout for example, to get the same press instead of a second one.
 
 With `--json`, prints `{ schemaVersion, ok: true, run, outcome, error, waiting }` or `{ schemaVersion, ok: true, relayed: true }`.
+
+### `dohc account`
+
+Review and delete the server account the dohc app is connected to.
+
+Unlike other commands, account verbs also work outside a workspace folder.
+
+#### `dohc account deletePreview`
+
+```sh
+dohc account deletePreview [options]
+```
+
+List what deleting the connected server account removes.
+
+The result holds the server and previewToken that delete needs. The token expires after five minutes.
+
+With `--json`, prints `{ schemaVersion, email, server, workspaces: { workspaceId, name }[], workspacesElsewhere, storedBytes, ownedShareCount, heldGrantCount, previewToken }`.
+
+#### `dohc account delete`
+
+```sh
+dohc account delete [options]
+```
+
+Delete the connected server account and the workspaces it owns on the server.
+
+dohc reads the account password from stdin, or asks for it when stdin is a terminal. Never pass it as an argument. This cannot be undone. Copies on this computer stay. People you shared with lose access and keep their copies. If you create an account again later, the server will not accept your old copies of the deleted workspaces. Its backups keep the data until they expire. When the server cannot finish at once, the account stays blocked and the server finishes later. Either way, the dohc app disconnects from the server. If it cannot, delete exits 1 and says how to finish. If the preview expired or changed, run deletePreview again.
+
+- `--server <address>`: Use server from deletePreview. Required.
+- `--preview-token <token>`: Use previewToken from deletePreview. Required.
+
+With `--json`, prints `{ schemaVersion, ok: true, finished, email, server, disconnectError }`.
 
 ## App channel
 

@@ -1,3 +1,4 @@
+import { createReceivedIdentity } from "./receivedIdentity";
 import type { TokenBucketLimiter } from "@dohc/service-http";
 import { createAccountlessPathProjection } from "./accountlessPathProjection";
 import {
@@ -5,14 +6,14 @@ import {
   linkLogWaitGroup,
   type DiscussionActivityHub,
 } from "./discussionActivity";
-import { badRequest, notFound, relayError } from "./errors";
+import { notFound, relayError } from "./errors";
 import type { createLinkResponseStreams } from "./linkResponseStreams";
 import type { LinkEgressRateLimiter, ValidatedLinkCapability } from "./linkSecurity";
-import { assertSha256, parseCursor, parseLimit } from "./requestInputs";
+import { assertSha256, parseCursor, parseLimit, parseLinkLogHold } from "./requestInputs";
 import { targetVersionId } from "./shareFilter";
 import type { createShareReadQueries } from "./shareReadQueries";
 import type { SyncRelayStorage } from "./storage";
-import { MAX_BLOB_BYTES, MAX_DISCUSSION_ACTIVITY_HOLD_MS } from "./wireLimits";
+import { MAX_BLOB_BYTES } from "./wireLimits";
 
 export type LinkReadRoute =
   | { route: "link-share" }
@@ -30,6 +31,7 @@ export function createLinkReadRoutes(
     | "currentFileBlobByteLength"
     | "getBlob"
     | "automationSwitchableFolder"
+    | "objectIdAtPathInVersion"
   >,
   nowMs: () => number,
   linkCurrentFileLimit: number,
@@ -54,7 +56,9 @@ export function createLinkReadRoutes(
   discussionActivity: Pick<DiscussionActivityHub, "wait">,
   admitLinkBlobBytes: (grantId: string, byteLength: number) => (() => void) | null,
   respondWithLinkBytes: ReturnType<typeof createLinkResponseStreams>["respondWithLinkBytes"],
+  linkKey?: string | Uint8Array,
 ) {
+  const identity = createReceivedIdentity(linkKey);
   return async function respondToLinkRead(
     request: Request,
     route: LinkReadRoute,
@@ -87,6 +91,7 @@ export function createLinkReadRoutes(
       );
       return linkJsonResponse(fresh.shareId, fresh.grantId, {
         ok: true,
+        receivedSource: identity.source(["link", fresh.grantId], share.workspaceId),
         effectiveSelector: presentation.selector,
         access: fresh.access,
         subjectName: storage.getShareLabels(fresh.shareId).subjectName,
@@ -117,6 +122,7 @@ export function createLinkReadRoutes(
         if (path === null) throw notFound();
         return {
           path,
+          objectId: identity.object(["link", fresh.grantId], share.workspaceId, storage.objectIdAtPathInVersion({ workspaceId: share.workspaceId, versionId: targetVersionId(fresh.effectiveSelector), path: file.path })),
           blobSha256: file.blobSha256,
           contentKind: file.contentKind,
           ...(requestedFolder !== null && path === `${requestedFolder}/automations.yaml` ? { automationSwitchable: fresh.access === "edit"
@@ -147,10 +153,15 @@ export function createLinkReadRoutes(
       const hold = parseLinkLogHold(url.searchParams.get("hold"));
       let page = filteredLogPage(
         share.workspaceId,
+        share.shareId,
         capability.effectiveSelector,
         since,
         limit,
         "accountless",
+
+        undefined,
+
+        ["link", capability.grantId],
       );
       if (
         hold > 0 &&
@@ -183,10 +194,15 @@ export function createLinkReadRoutes(
                     if (currentEpochLogFloor !== epochLogFloor) return false;
                     const checked = filteredLogPage(
                       share.workspaceId,
+                      share.shareId,
                       fresh.effectiveSelector,
                       scanSince,
                       limit,
                       "accountless",
+
+                      undefined,
+
+                      ["link", capability.grantId],
                     );
                     if (checked.ops.length > 0 || checked.hasMore) return false;
                     scanSince = checked.nextCursor;
@@ -210,10 +226,15 @@ export function createLinkReadRoutes(
           );
           page = filteredLogPage(
             share.workspaceId,
+            share.shareId,
             fresh.effectiveSelector,
             Math.max(scanSince, currentEpochLogFloor),
             limit,
             "accountless",
+
+            undefined,
+
+            ["link", capability.grantId],
           );
           scanSince = page.nextCursor;
           if (
@@ -237,10 +258,15 @@ export function createLinkReadRoutes(
         );
         page = filteredLogPage(
           share.workspaceId,
+          share.shareId,
           fresh.effectiveSelector,
           Math.max(scanSince, currentEpochLogFloor),
           limit,
           "accountless",
+
+          undefined,
+
+          ["link", capability.grantId],
         );
         requireFreshLinkRead(capabilityToken, capability);
         return linkJsonResponse(capability.shareId, capability.grantId, {
@@ -319,22 +345,4 @@ export function createLinkReadRoutes(
       }
     }
   };
-}
-
-function parseLinkLogHold(value: string | null): number {
-  if (value === null) return 0;
-  if (!/^(?:0|[1-9]\d*)$/u.test(value)) {
-    throw badRequest("hold must be a non-negative integer");
-  }
-  const hold = Number(value);
-  if (
-    !Number.isSafeInteger(hold) ||
-    hold < 0 ||
-    hold > MAX_DISCUSSION_ACTIVITY_HOLD_MS
-  ) {
-    throw badRequest(
-      `hold must be a non-negative integer no greater than ${String(MAX_DISCUSSION_ACTIVITY_HOLD_MS)}`,
-    );
-  }
-  return hold;
 }

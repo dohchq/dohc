@@ -3,6 +3,8 @@
 #![forbid(unsafe_code)]
 
 pub mod projection_stdio;
+mod replica_mode;
+pub mod replica_sandbox;
 
 mod automation_recovery;
 pub(crate) mod capture_driver;
@@ -62,9 +64,10 @@ use std::sync::MutexGuard;
 /// Read-intent opens get non-owning handles over that service's binding;
 /// cross-service or aliased attachments remain rejected so barriers cannot split.
 pub struct EngineService {
+    replica_mode: Option<replica_mode::ReplicaMode>,
     supervisor: &'static WorkspaceSupervisor,
     handles: Mutex<HashMap<WorkspaceHandle, Arc<OpenWorkspace>>>,
-    live_applications: Mutex<rpc::live_application::Registry>,
+    live_applications: Arc<Mutex<rpc::live_application::Registry>>,
     configured_live_host: std::sync::OnceLock<rpc::configured_live_host::Discovery>,
     ordinary_live_host: std::sync::OnceLock<rpc::ordinary_live_host::OrdinaryHost>,
     pending_cursors: Mutex<HashMap<String, PendingCursor>>,
@@ -107,6 +110,7 @@ impl Default for EngineService {
     }
 }
 
+// Keep dispatcher state out of callers' inline RPC futures.
 impl ProtocolEngineService for EngineService {
     type Input = LiveApplicationInput;
 
@@ -118,7 +122,7 @@ impl ProtocolEngineService for EngineService {
     ) -> Result<ServiceResponse, WireError> {
         match input {
             Some(input) => self.dispatch_input(ctx, request, input).await,
-            None => self.dispatch(ctx, request).await,
+            None => Box::pin(self.dispatch(ctx, request)).await,
         }
     }
     async fn call(
@@ -126,7 +130,7 @@ impl ProtocolEngineService for EngineService {
         ctx: RequestContext,
         request: Request,
     ) -> Result<ServiceResponse, WireError> {
-        self.dispatch(ctx, request).await
+        Box::pin(self.dispatch(ctx, request)).await
     }
 }
 
@@ -137,6 +141,20 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl EngineService {
+    /// Confine the relay child to passive RPCs and its startup store directory.
+    pub fn replica(store_dir: &std::path::Path) -> std::io::Result<Self> {
+        let mut service = Self::new();
+        service.replica_mode = Some(replica_mode::ReplicaMode::new(store_dir)?);
+        Ok(service)
+    }
+
+    pub(crate) fn guard_replica_request(&self, request: &mut Request) -> Result<(), WireError> {
+        if let Some(mode) = &self.replica_mode {
+            mode.guard(request)?;
+        }
+        Ok(())
+    }
+
     pub fn new() -> Self {
         Self::with_supervisor(WorkspaceSupervisor::global())
     }
@@ -152,9 +170,10 @@ impl EngineService {
 
     fn with_supervisor(supervisor: &'static WorkspaceSupervisor) -> Self {
         EngineService {
+            replica_mode: None,
             supervisor,
             handles: Mutex::new(HashMap::new()),
-            live_applications: Mutex::new(rpc::live_application::Registry::default()),
+            live_applications: Arc::new(Mutex::new(rpc::live_application::Registry::default())),
             configured_live_host: std::sync::OnceLock::new(),
             ordinary_live_host: std::sync::OnceLock::new(),
             pending_cursors: Mutex::new(HashMap::new()),

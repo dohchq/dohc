@@ -15,6 +15,7 @@ use dohc_engine_protocol::transport::RequestContext;
 use dohc_engine_protocol::wire::WorkspaceHandle;
 use dohc_engine_runtime::RuntimeError;
 use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Value;
 use serde_json::json;
 use std::sync::Arc;
@@ -119,11 +120,7 @@ impl BlobEgressBudget {
         cancellation: &OperationCancellation,
         operation: &str,
     ) -> Result<tokio::sync::OwnedSemaphorePermit, WireError> {
-        let bytes = usize::try_from(byte_length)
-            .ok()
-            .filter(|bytes| *bytes <= BLOB_EGRESS_BYTE_BUDGET)
-            .and_then(|bytes| u32::try_from(bytes).ok())
-            .ok_or_else(|| WireError::new(ErrorCode::Internal, "state-corrupt"))?;
+        let bytes = Self::permits_for(byte_length)?;
         tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
@@ -133,6 +130,29 @@ impl BlobEgressBudget {
                 permit.map_err(|_| WireError::new(ErrorCode::Internal, "blob egress budget unavailable"))
             }
         }
+    }
+
+    /// Reserve for the blob of a request whose work landed. The wait ignores
+    /// the request's cancellation and ends at `until`, when it answers
+    /// OVERLOADED `blob-egress-capacity`, which clients retry after backoff.
+    pub(super) async fn reserve_landed(
+        &self,
+        byte_length: i64,
+        until: tokio::time::Instant,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, WireError> {
+        let bytes = Self::permits_for(byte_length)?;
+        tokio::time::timeout_at(until, Arc::clone(&self.permits).acquire_many_owned(bytes))
+            .await
+            .map_err(|_| WireError::new(ErrorCode::Overloaded, "blob-egress-capacity"))?
+            .map_err(|_| WireError::new(ErrorCode::Internal, "blob egress budget unavailable"))
+    }
+
+    fn permits_for(byte_length: i64) -> Result<u32, WireError> {
+        usize::try_from(byte_length)
+            .ok()
+            .filter(|bytes| *bytes <= BLOB_EGRESS_BYTE_BUDGET)
+            .and_then(|bytes| u32::try_from(bytes).ok())
+            .ok_or_else(|| WireError::new(ErrorCode::Internal, "state-corrupt"))
     }
 }
 
@@ -196,62 +216,64 @@ struct VersionedTextReadBlobParams {
     sha256: String,
 }
 
-/// A text body under the in-band cap, or null (the byte length beside it
-/// tells the caller what was withheld).
-pub(super) fn inband_text(text: Option<&str>) -> Value {
-    match text {
-        Some(text) if text.len() <= MAX_DESKTOP_CAPTURE_TEXT_BYTES => json!(text),
-        _ => Value::Null,
-    }
+/// How a snapshot projection carries its text body.
+#[derive(Clone, Copy)]
+pub(super) enum TextBody {
+    /// The whole body, whatever its size.
+    Full,
+    /// The body up to the in-band cap, withheld past it.
+    Capped,
+    /// Withheld, whatever its size.
+    Withheld,
 }
 
-pub(super) fn snapshot_json(snapshot: &TextSnapshot) -> Value {
-    json!({
-        "workspaceId": snapshot.workspace_id,
-        "versionId": snapshot.version_id,
-        "objectId": snapshot.object_id,
-        "path": snapshot.path,
-        "text": snapshot.text,
-        "contentKind": "text",
-        "sha256": snapshot.blob_sha256,
-        "byteLength": snapshot.text.len(),
-        "blobSha256": snapshot.blob_sha256,
-        "updatedAtMs": snapshot.updated_at_ms,
-        "latestMomentId": snapshot.latest_moment_id,
-        "metadataOrigin": snapshot.metadata_origin,
-        "metadataSummary": snapshot.metadata_summary,
-        "metadataCorrelationId": snapshot.metadata_correlation_id
+/// One head as a versioned read value. A withheld text body goes out as a null
+/// `text` beside `inbandLimitBytes`; `byteLength` and the digests stay, so the
+/// caller can size the hydration and ask `versionedText.readBlob` for it.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SnapshotWire<'a> {
+    workspace_id: &'a str,
+    version_id: &'a str,
+    object_id: &'a str,
+    path: &'a str,
+    content_kind: &'a str,
+    text: Option<&'a str>,
+    byte_length: i64,
+    blob_sha256: &'a str,
+    sha256: &'a str,
+    updated_at_ms: i64,
+    latest_moment_id: &'a str,
+    metadata_origin: &'a str,
+    metadata_summary: Option<&'a str>,
+    metadata_correlation_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inband_limit_bytes: Option<usize>,
+}
+
+pub(super) fn snapshot_json(snapshot: &TextSnapshot, body: TextBody) -> Value {
+    let withheld = match body {
+        TextBody::Full => false,
+        TextBody::Capped => snapshot.text.len() > MAX_DESKTOP_CAPTURE_TEXT_BYTES,
+        TextBody::Withheld => true,
+    };
+    json!(SnapshotWire {
+        workspace_id: &snapshot.workspace_id,
+        version_id: &snapshot.version_id,
+        object_id: &snapshot.object_id,
+        path: &snapshot.path,
+        content_kind: "text",
+        text: (!withheld).then_some(snapshot.text.as_str()),
+        byte_length: snapshot.text.len() as i64,
+        blob_sha256: &snapshot.blob_sha256,
+        sha256: &snapshot.blob_sha256,
+        updated_at_ms: snapshot.updated_at_ms,
+        latest_moment_id: &snapshot.latest_moment_id,
+        metadata_origin: &snapshot.metadata_origin,
+        metadata_summary: snapshot.metadata_summary.as_deref(),
+        metadata_correlation_id: snapshot.metadata_correlation_id.as_deref(),
+        inband_limit_bytes: withheld.then_some(MAX_DESKTOP_CAPTURE_TEXT_BYTES),
     })
-}
-
-/// Withhold one text body, in place: the digest and the limit go out, the body
-/// does not. `byteLength` is left as serialized, so a caller can size the
-/// hydration before it asks for it.
-pub(super) fn withhold_text(body: &mut Value) {
-    if body.get("text").is_some_and(|text| !text.is_null()) {
-        body["text"] = Value::Null;
-        body["inbandLimitBytes"] = json!(MAX_DESKTOP_CAPTURE_TEXT_BYTES);
-    }
-}
-
-/// Withhold one text body past the in-band cap, in place. This is the shape
-/// `versionedText.read` already uses, so the caller hydrates with
-/// `versionedText.readBlob`.
-pub(super) fn withhold_over_cap_text(body: &mut Value) {
-    let over_cap = body
-        .get("text")
-        .and_then(Value::as_str)
-        .is_some_and(|text| text.len() > MAX_DESKTOP_CAPTURE_TEXT_BYTES);
-    if over_cap {
-        withhold_text(body);
-    }
-}
-
-/// The body a resolution settled, withheld past the in-band cap.
-pub(super) fn settled_snapshot_json(snapshot: &TextSnapshot) -> Value {
-    let mut body = snapshot_json(snapshot);
-    withhold_over_cap_text(&mut body);
-    body
 }
 
 pub(super) fn file_object_json(object: &dohc_engine_domain::FileObjectRecord) -> Value {
@@ -361,26 +383,23 @@ impl EngineService {
             None => Value::Null,
             Some(snapshot) => {
                 let over_cap = snapshot.content_kind == "text" && snapshot.text.is_none();
-                let mut body = json!({
-                    "workspaceId": snapshot.workspace_id,
-                    "versionId": snapshot.version_id,
-                    "objectId": snapshot.object_id,
-                    "path": snapshot.path,
-                    "contentKind": snapshot.content_kind,
-                    "text": snapshot.text,
-                    "byteLength": snapshot.byte_length,
-                    "blobSha256": snapshot.blob_sha256,
-                    "sha256": snapshot.blob_sha256,
-                    "updatedAtMs": snapshot.updated_at_ms,
-                    "latestMomentId": snapshot.latest_moment_id,
-                    "metadataOrigin": snapshot.metadata_origin,
-                    "metadataSummary": snapshot.metadata_summary,
-                    "metadataCorrelationId": snapshot.metadata_correlation_id
-                });
-                if over_cap {
-                    body["inbandLimitBytes"] = json!(MAX_DESKTOP_CAPTURE_TEXT_BYTES);
-                }
-                body
+                json!(SnapshotWire {
+                    workspace_id: &snapshot.workspace_id,
+                    version_id: &snapshot.version_id,
+                    object_id: &snapshot.object_id,
+                    path: &snapshot.path,
+                    content_kind: &snapshot.content_kind,
+                    text: snapshot.text.as_deref(),
+                    byte_length: snapshot.byte_length,
+                    blob_sha256: &snapshot.blob_sha256,
+                    sha256: &snapshot.blob_sha256,
+                    updated_at_ms: snapshot.updated_at_ms,
+                    latest_moment_id: &snapshot.latest_moment_id,
+                    metadata_origin: &snapshot.metadata_origin,
+                    metadata_summary: snapshot.metadata_summary.as_deref(),
+                    metadata_correlation_id: snapshot.metadata_correlation_id.as_deref(),
+                    inband_limit_bytes: over_cap.then_some(MAX_DESKTOP_CAPTURE_TEXT_BYTES),
+                })
             }
         })
     }
@@ -699,6 +718,113 @@ mod tests {
     use crate::rpc::request::OperationCancellation;
     use dohc_engine_protocol::transport::RequestContext;
     use std::time::Duration;
+
+    fn snapshot(text: &str) -> TextSnapshot {
+        TextSnapshot {
+            workspace_id: "ws".to_owned(),
+            version_id: "main".to_owned(),
+            object_id: "object".to_owned(),
+            path: "notes/a.md".to_owned(),
+            text: text.to_owned(),
+            blob_sha256: "digest".to_owned(),
+            updated_at_ms: 7,
+            latest_moment_id: "moment".to_owned(),
+            metadata_origin: "api".to_owned(),
+            metadata_summary: Some("summary".to_owned()),
+            metadata_correlation_id: None,
+        }
+    }
+
+    #[test]
+    fn a_snapshot_names_the_in_band_limit_only_beside_a_withheld_body() {
+        let carried = json!({
+            "workspaceId": "ws",
+            "versionId": "main",
+            "objectId": "object",
+            "path": "notes/a.md",
+            "contentKind": "text",
+            "text": "body",
+            "byteLength": 4,
+            "blobSha256": "digest",
+            "sha256": "digest",
+            "updatedAtMs": 7,
+            "latestMomentId": "moment",
+            "metadataOrigin": "api",
+            "metadataSummary": "summary",
+            "metadataCorrelationId": null,
+        });
+        let mut withheld = carried.clone();
+        withheld["text"] = Value::Null;
+        withheld["inbandLimitBytes"] = json!(128 * 1024);
+        for (body, expected) in [
+            (TextBody::Full, &carried),
+            (TextBody::Capped, &carried),
+            (TextBody::Withheld, &withheld),
+        ] {
+            assert_eq!(&snapshot_json(&snapshot("body"), body), expected);
+        }
+        // An empty body is still a body: forced withholding names the limit.
+        let empty = snapshot_json(&snapshot(""), TextBody::Withheld);
+        assert_eq!(
+            (
+                &empty["text"],
+                &empty["inbandLimitBytes"],
+                &empty["byteLength"]
+            ),
+            (&Value::Null, &json!(128 * 1024), &json!(0))
+        );
+    }
+
+    #[test]
+    fn a_capped_snapshot_withholds_only_past_the_in_band_cap() {
+        let at_cap = "a".repeat(MAX_DESKTOP_CAPTURE_TEXT_BYTES);
+        let past_cap = "a".repeat(MAX_DESKTOP_CAPTURE_TEXT_BYTES + 1);
+        let carried = snapshot_json(&snapshot(&at_cap), TextBody::Capped);
+        assert_eq!(carried["text"], json!(at_cap));
+        assert_eq!(carried.get("inbandLimitBytes"), None);
+        let withheld = snapshot_json(&snapshot(&past_cap), TextBody::Capped);
+        assert_eq!(withheld["text"], Value::Null);
+        assert_eq!(withheld["inbandLimitBytes"], json!(128 * 1024));
+        assert_eq!(withheld["byteLength"], json!(past_cap.len()));
+        let full = snapshot_json(&snapshot(&past_cap), TextBody::Full);
+        assert_eq!(full["text"], json!(past_cap));
+        assert_eq!(full.get("inbandLimitBytes"), None);
+    }
+
+    #[test]
+    fn snapshot_metadata_carries_no_body_and_falls_back_for_a_binary_head() {
+        let head = snapshot("body");
+        let expected = |content_kind: &str, sha256: &str, byte_length: i64| {
+            json!({
+                "workspaceId": "ws",
+                "versionId": "main",
+                "objectId": "object",
+                "path": "notes/a.md",
+                "contentKind": content_kind,
+                "sha256": sha256,
+                "byteLength": byte_length,
+                "updatedAtMs": 7,
+                "latestMomentId": "moment",
+                "metadataOrigin": "api",
+                "metadataSummary": "summary",
+                "metadataCorrelationId": null,
+            })
+        };
+        assert_eq!(
+            snapshot_metadata_json(&head, "text", Some("ignored"), Some(99)),
+            expected("text", "digest", 4)
+        );
+        assert_eq!(
+            snapshot_metadata_json(&head, "binary", Some("binary-digest"), Some(99)),
+            expected("binary", "binary-digest", 99)
+        );
+        for missing_or_negative in [None, Some(-1)] {
+            assert_eq!(
+                snapshot_metadata_json(&head, "binary", None, missing_or_negative),
+                expected("binary", "digest", 0)
+            );
+        }
+    }
 
     #[tokio::test]
     async fn blob_egress_budget_blocks_when_aggregate_bytes_are_exhausted() {

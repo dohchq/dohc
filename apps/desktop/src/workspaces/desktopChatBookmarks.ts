@@ -83,7 +83,7 @@ export function createDesktopChatBookmarks<
     const lease = requireWorkspaceAuthority(workspace.workspaceId);
     if (workspace.attachmentId !== undefined && workspace.attachmentId !== lease.binding.attachmentId) {
       lease.release();
-      throw new Error("This chat store request belongs to a retired workspace.");
+      throw new Error("This workspace was closed. Open it again.");
     }
     return lease;
   }

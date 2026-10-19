@@ -1,3 +1,4 @@
+import { receivedReferencePin, type ReceivedReferencePin } from "./workspaceFileReferenceScopes";
 import {normalizeShareLabel} from "@dohc/security-contract/share-labels";
 import {
   type ShareAccess,
@@ -30,6 +31,7 @@ export interface ShareUnconfirmedChanges {
 }
 
 export interface ShareViewInfo {
+  receivedIdentity?: ReceivedReferencePin;
   subjectName?: string | null;
   sharerName?: string | null;
   shareId: string;
@@ -173,6 +175,7 @@ export async function fetchShareViewInfo(input: {
     throw new ShareSelectorInvalidError(input.shareId);
   }
   return {
+    receivedIdentity: receivedReferencePin(body),
     shareId: String(body.shareId ?? input.shareId),
     granterUserId: String(body.granterUserId ?? ""),
     subjectName: normalizeShareLabel(body.subjectName),
@@ -207,6 +210,29 @@ export async function fetchShareViewAccess(input: {
     throw new ShareSelectorInvalidError(input.shareId);
   }
   return body.access;
+}
+
+export async function probeShareViewLog(input: {
+  relay: SyncRelayConnection;
+  shareId: string;
+  since: number;
+  signal?: AbortSignal;
+}): Promise<{ unchanged: boolean }> {
+  // Standalone share.view.pull reads the whole share log without channelWireId,
+  // including group shares. Only shared-channel pulls pass a channel filter.
+  const response = await shareFetch(input.relay,
+    `/sync/shares/${encodeURIComponent(input.shareId)}/log?since=${input.since}`,
+    { signal: input.signal });
+  const body: unknown = await response.json();
+  if (!body || typeof body !== "object" || !("ops" in body) || !Array.isArray(body.ops) ||
+    !("hasMore" in body) || typeof body.hasMore !== "boolean" ||
+    !("nextCursor" in body) || typeof body.nextCursor !== "number" ||
+    !Number.isSafeInteger(body.nextCursor) || body.nextCursor < input.since) {
+    throw new Error("The server did not return a readable share log.");
+  }
+  // This cursor is only a probe. The engine commits the next cursor after
+  // applying changes and recording refusals through the full refresh path.
+  return { unchanged: body.ops.length === 0 && !body.hasMore };
 }
 
 export async function fetchShareAutomationSwitchable(input: {

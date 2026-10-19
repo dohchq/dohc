@@ -17,32 +17,82 @@ pub struct ObservedEntry {
     pub modified: Option<std::time::SystemTime>,
     #[cfg(unix)]
     pub changed: (i64, i64),
-    #[cfg(windows)]
+    /// The path as NTFS and APFS compare names by default, so a rename that
+    /// changes only case or Unicode normalization never reads as a deletion.
+    #[cfg(any(windows, target_vendor = "apple"))]
     pub key: String,
 }
 
 impl ObservedEntry {
-    fn key(&self) -> &str {
+    /// Folded keys group spellings of one name. A macOS volume can hold
+    /// several, such as names that differ only in a zero-width character, and
+    /// each keeps its own entry. Windows keeps one per key.
+    fn order(&self, other: &Self) -> std::cmp::Ordering {
         #[cfg(windows)]
+        {
+            self.key().cmp(other.key())
+        }
+        #[cfg(not(windows))]
+        {
+            (self.key(), &self.path).cmp(&(other.key(), &other.path))
+        }
+    }
+
+    fn key(&self) -> &str {
+        #[cfg(any(windows, target_vendor = "apple"))]
         {
             &self.key
         }
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_vendor = "apple")))]
         {
             &self.path
         }
     }
 }
 
-/// Metadata-only listing, with no hash workers or capture queue.
+/// Metadata-only listing, with no hash workers or capture queue. A walker
+/// observes one root.
 pub struct ObservationWalker {
     bounds: crate::ScanBounds,
     feed: ObservationFeed,
+    #[cfg(target_vendor = "apple")]
+    ignores_case: std::sync::OnceLock<bool>,
 }
 
 impl ObservationWalker {
     pub fn new(bounds: crate::ScanBounds, feed: ObservationFeed) -> Self {
-        Self { bounds, feed }
+        Self {
+            bounds,
+            feed,
+            #[cfg(target_vendor = "apple")]
+            ignores_case: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Whether names compare as the volume at `root` compares them: always on
+    /// Windows, on macOS where the volume ignores case, never elsewhere.
+    fn folds_names(&self, root: &std::path::Path) -> bool {
+        #[cfg(windows)]
+        {
+            let _ = root;
+            true
+        }
+        #[cfg(target_vendor = "apple")]
+        {
+            if let Some(&folds) = self.ignores_case.get() {
+                return folds;
+            }
+            match volume_ignores_case(root) {
+                Some(folds) => *self.ignores_case.get_or_init(|| folds),
+                // A macOS volume ignores case unless it was formatted otherwise.
+                None => true,
+            }
+        }
+        #[cfg(not(any(windows, target_vendor = "apple")))]
+        {
+            let _ = root;
+            false
+        }
     }
 
     pub fn observe(
@@ -60,6 +110,7 @@ impl ObservationWalker {
         let mut listing = Vec::with_capacity(previous_len);
         let mut failed = Vec::new();
         let mut stack = vec![(root.to_path_buf(), String::new())];
+        let folds = self.folds_names(root);
         let mut entries = 0;
         while let Some((dir, relative)) = stack.pop() {
             if listing.len() + failed.len() > self.bounds.max_files {
@@ -76,6 +127,7 @@ impl ObservationWalker {
                 }
                 Err(error) if dir == root => {
                     return Err(crate::FilesError::scan_io(
+                        &dir,
                         dir.to_string_lossy().into_owned(),
                         &error,
                     ));
@@ -88,8 +140,12 @@ impl ObservationWalker {
                     continue;
                 }
             };
-            #[cfg(windows)]
-            let relative_key = floor::fold_segment(&relative);
+            #[cfg(any(windows, target_vendor = "apple"))]
+            let relative_key = if folds {
+                floor::fold_segment(&relative)
+            } else {
+                String::new()
+            };
             for child in children {
                 if token.is_cancelled() {
                     return Ok(false);
@@ -157,8 +213,10 @@ impl ObservationWalker {
                     (metadata.ctime(), metadata.ctime_nsec())
                 };
                 listing.push(ObservedEntry {
-                    #[cfg(windows)]
-                    key: if relative_key.is_empty() {
+                    #[cfg(any(windows, target_vendor = "apple"))]
+                    key: if !folds {
+                        path.clone()
+                    } else if relative_key.is_empty() {
                         normalized
                     } else {
                         format!("{relative_key}/{normalized}")
@@ -172,9 +230,56 @@ impl ObservationWalker {
                 });
             }
         }
-        self.feed.publish(listing, &failed, self.bounds.max_files)?;
+        observe_visibility_policy(root, &mut listing, &mut failed);
+        self.feed
+            .publish(listing, &failed, self.bounds.max_files, folds)?;
         Ok(true)
     }
+}
+
+// The listing needs policy edits even though ordinary observation excludes .dohc.
+// Read metadata for this one path without entering or following the metadata directory.
+fn observe_visibility_policy(
+    root: &std::path::Path,
+    listing: &mut Vec<ObservedEntry>,
+    failed: &mut Vec<FailedPath>,
+) {
+    let path = ".dohc/visibility.toml";
+    let metadata = (|| {
+        let parent = std::fs::symlink_metadata(root.join(".dohc"))?;
+        if parent.is_dir() && !parent.file_type().is_symlink() {
+            std::fs::symlink_metadata(root.join(path))
+        } else {
+            // A refused parent still changes the policy verdict. Never follow it.
+            Ok(parent)
+        }
+    })();
+    let metadata = match metadata {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            failed.push(FailedPath {
+                path: path.to_owned(),
+                kind: error.kind(),
+            });
+            return;
+        }
+    };
+    #[cfg(unix)]
+    let changed = {
+        use std::os::unix::fs::MetadataExt;
+        (metadata.ctime(), metadata.ctime_nsec())
+    };
+    listing.push(ObservedEntry {
+        path: path.to_owned(),
+        symlink: metadata.file_type().is_symlink(),
+        size: metadata.len(),
+        modified: metadata.modified().ok(),
+        #[cfg(unix)]
+        changed,
+        #[cfg(any(windows, target_vendor = "apple"))]
+        key: path.to_owned(),
+    });
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -324,11 +429,14 @@ impl ObservationFeed {
         });
     }
 
+    /// `folds` says whether `listing`'s keys fold names, so a failed path
+    /// reads the same way.
     pub(crate) fn publish(
         &self,
         mut listing: Vec<ObservedEntry>,
         failed: &[FailedPath],
         cap: usize,
+        folds: bool,
     ) -> Result<(), crate::FilesError> {
         let mut state = self
             .state
@@ -340,13 +448,15 @@ impl ObservationFeed {
             self.resync();
             return Ok(());
         }
-        listing.sort_unstable_by(|a, b| a.key().cmp(b.key()));
+        listing.sort_unstable_by(ObservedEntry::order);
         if !failed.is_empty() {
             let observed_len = listing.len();
-            #[cfg(windows)]
-            let failures: BTreeSet<_> = failed
+            let failures: BTreeSet<String> = failed
                 .iter()
                 .map(|f| {
+                    if !folds {
+                        return f.path.clone();
+                    }
                     f.path
                         .split('/')
                         .map(floor::normalize_segment)
@@ -354,8 +464,6 @@ impl ObservationFeed {
                         .join("/")
                 })
                 .collect();
-            #[cfg(not(windows))]
-            let failures: BTreeSet<_> = failed.iter().map(|f| f.path.as_str()).collect();
             for entry in &state.listing {
                 if (failures.contains("")
                     || failures.contains(entry.key())
@@ -364,7 +472,7 @@ impl ObservationFeed {
                         .match_indices('/')
                         .any(|(index, _)| failures.contains(&entry.key()[..index])))
                     && listing[..observed_len]
-                        .binary_search_by(|e| e.key().cmp(entry.key()))
+                        .binary_search_by(|e| e.order(entry))
                         .is_err()
                 {
                     if listing.len() == cap {
@@ -377,40 +485,27 @@ impl ObservationFeed {
             }
         }
         if !failed.is_empty() {
-            listing.sort_unstable_by(|a, b| a.key().cmp(b.key()));
+            listing.sort_unstable_by(ObservedEntry::order);
         }
-        listing.dedup_by(|a, b| a.key() == b.key());
+        listing.dedup_by(|a, b| a.order(b).is_eq());
         let mut changes = BTreeMap::new();
         let mut bytes = 0;
         let mut overflow = false;
         let (mut old, mut new) = (0, 0);
         'diff: while state.listing_valid && (old < state.listing.len() || new < listing.len()) {
-            let before = state.listing.get(old);
-            let after = listing.get(new);
-            let (old_spelling, entry, kind) = match (before, after) {
-                (Some(a), Some(b)) if a.key() == b.key() => {
-                    old += 1;
-                    new += 1;
-                    if a == b {
-                        continue;
-                    }
-                    ((a.path != b.path).then_some(a), b, FileChangeKind::Changed)
-                }
-                (Some(a), Some(b)) if a.key() < b.key() => {
-                    old += 1;
-                    (None, a, FileChangeKind::Disappeared)
-                }
-                (Some(_), Some(b)) | (None, Some(b)) => {
-                    new += 1;
-                    (None, b, FileChangeKind::Appeared)
-                }
-                (Some(a), None) => {
-                    old += 1;
-                    (None, a, FileChangeKind::Disappeared)
-                }
+            let key = match (state.listing.get(old), listing.get(new)) {
+                (Some(a), Some(b)) => a.key().min(b.key()),
+                (Some(entry), None) | (None, Some(entry)) => entry.key(),
                 (None, None) => break,
             };
-            for entry in old_spelling.into_iter().chain(std::iter::once(entry)) {
+            let before = key_group(&state.listing, &mut old, key);
+            let after = key_group(&listing, &mut new, key);
+            // A group a listing cannot read makes every reader list again.
+            let Some(group) = key_group_changes(before, after) else {
+                overflow = true;
+                break 'diff;
+            };
+            for (entry, kind) in group {
                 let path = sidecar_base(&entry.path).unwrap_or(&entry.path);
                 if !changes.contains_key(path) {
                     bytes += fact_bytes(path);
@@ -469,6 +564,85 @@ impl ObservationFeed {
     }
 }
 
+/// Whether the volume holding `root` ignores case. The volume answers lookups
+/// in its own folders, so the workspace's `.dohc` is looked up as `.DOHC`.
+/// `None` while the root has no `.dohc`.
+#[cfg(target_vendor = "apple")]
+fn volume_ignores_case(root: &std::path::Path) -> Option<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let identity = |name: &str| {
+        std::fs::symlink_metadata(root.join(name)).map(|metadata| (metadata.dev(), metadata.ino()))
+    };
+    let own = identity(".dohc").ok()?;
+    match identity(".DOHC") {
+        Ok(found) => Some(found == own),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(false),
+        Err(_) => None,
+    }
+}
+
+/// The entries from `listing[*index..]` with `key`, advancing `index` past them.
+fn key_group<'a>(
+    listing: &'a [ObservedEntry],
+    index: &mut usize,
+    key: &str,
+) -> &'a [ObservedEntry] {
+    let start = *index;
+    while listing.get(*index).is_some_and(|entry| entry.key() == key) {
+        *index += 1;
+    }
+    &listing[start..*index]
+}
+
+/// The facts between two listings' entries for one folded key, or `None`
+/// when a listing cannot tell them. While the group keeps its paths, each
+/// path is compared with itself, and when one side is empty its paths
+/// appeared or disappeared. When the paths change on both sides, a respell,
+/// which keeps the file, reads the same as a replacement by a name the volume
+/// keeps apart. Windows reports a respell's two spellings as changed.
+fn key_group_changes<'a>(
+    before: &'a [ObservedEntry],
+    after: &'a [ObservedEntry],
+) -> Option<Vec<(&'a ObservedEntry, FileChangeKind)>> {
+    let same_paths = before.len() == after.len()
+        && before
+            .iter()
+            .zip(after)
+            .all(|(old, new)| old.path == new.path);
+    if !same_paths && !before.is_empty() && !after.is_empty() {
+        #[cfg(windows)]
+        if let ([old], [new]) = (before, after) {
+            return Some(vec![
+                (old, FileChangeKind::Changed),
+                (new, FileChangeKind::Changed),
+            ]);
+        }
+        return None;
+    }
+    let mut changes = Vec::new();
+    let (mut old, mut new) = (0, 0);
+    loop {
+        match (before.get(old), after.get(new)) {
+            (Some(a), Some(b)) => {
+                old += 1;
+                new += 1;
+                if a != b {
+                    changes.push((b, FileChangeKind::Changed));
+                }
+            }
+            (Some(a), None) => {
+                old += 1;
+                changes.push((a, FileChangeKind::Disappeared));
+            }
+            (None, Some(b)) => {
+                new += 1;
+                changes.push((b, FileChangeKind::Appeared));
+            }
+            (None, None) => return Some(changes),
+        }
+    }
+}
+
 // Include JSON escaping and fixed object overhead, so a read fits the smallest
 // negotiated frame even for filenames containing quotes or control characters.
 fn fact_bytes(path: &str) -> usize {
@@ -499,7 +673,6 @@ fn editor_noise(name: &str) -> bool {
         || name.ends_with(".swo")
         || name.ends_with('~')
         || name.len() >= 2 && name.starts_with('#') && name.ends_with('#')
-        || name == ".ds_store"
 }
 
 #[cfg(test)]
@@ -507,6 +680,24 @@ mod tests {
     use super::*;
     use crate::{CancellationToken, ScanBounds, Scanner};
     use dohc_test_scratch::ScratchDir;
+
+    /// Whether test listings fold names, as the default volume does.
+    const FOLDS: bool = cfg!(any(windows, target_vendor = "apple"));
+
+    /// What a respell since `cursor` reports. Windows reports both
+    /// spellings changed, as `on_windows` lists. macOS asks readers to list
+    /// again: a listing cannot tell a respell from a replacement by a name
+    /// the volume keeps apart.
+    #[cfg(any(windows, target_vendor = "apple"))]
+    fn assert_respelled(f: &Fixture, cursor: &ObservationCursor, on_windows: Vec<FileChange>) {
+        let changes = f.observe(cursor);
+        if cfg!(windows) {
+            assert_eq!(changes.facts, on_windows);
+        } else {
+            let _ = on_windows;
+            assert!(changes.resync, "{:?}", changes.facts);
+        }
+    }
 
     struct Fixture {
         root: ScratchDir,
@@ -516,6 +707,9 @@ mod tests {
     impl Fixture {
         fn new() -> Self {
             let root = ScratchDir::new_named("file-observation").unwrap();
+            // A workspace root holds `.dohc`, which tells the walker how the
+            // volume compares names.
+            std::fs::create_dir(root.path().join(".dohc")).unwrap();
             let feed = ObservationFeed::new();
             let scanner = ObservationWalker::new(
                 ScanBounds::builder().max_file_bytes(4).build(),
@@ -536,10 +730,13 @@ mod tests {
             std::fs::write(path, text).unwrap();
         }
         fn scan(&self, cursor: &ObservationCursor) -> Vec<FileChange> {
+            self.observe(cursor).facts
+        }
+        fn observe(&self, cursor: &ObservationCursor) -> ObservationChanges {
             self.scanner
                 .observe(self.root.path(), &CancellationToken::new())
                 .unwrap();
-            self.feed.changes_since(Some(cursor)).facts
+            self.feed.changes_since(Some(cursor))
         }
         fn cursor(&self) -> ObservationCursor {
             self.feed.changes_since(None).cursor
@@ -556,7 +753,7 @@ mod tests {
     fn cursor_before_first_listing_requires_resync() {
         let feed = ObservationFeed::new();
         let cursor = feed.changes_since(None).cursor;
-        feed.publish(Vec::new(), &[], 10).unwrap();
+        feed.publish(Vec::new(), &[], 10, FOLDS).unwrap();
         let changes = feed.changes_since(Some(&cursor));
         assert!(changes.ready && changes.resync);
     }
@@ -656,41 +853,175 @@ mod tests {
         assert!(recovered.facts.is_empty());
     }
 
-    #[cfg(windows)]
+    /// The old spelling never reads as gone: the file is still there.
+    #[cfg(any(windows, target_vendor = "apple"))]
     #[test]
-    fn case_only_rename_reports_changed_never_disappeared() {
+    fn case_only_rename_never_reads_as_a_deletion() {
         let f = Fixture::new();
         f.write("note.md", "a");
+        if !f.root.path().join("NOTE.md").exists() {
+            eprintln!("SKIP: this volume keeps case apart");
+            return;
+        }
         f.scan(&f.cursor());
         let cursor = f.cursor();
         std::fs::rename(f.root.path().join("note.md"), f.root.path().join("NOTE.md")).unwrap();
-        assert_eq!(
-            f.scan(&cursor),
+        assert_respelled(
+            &f,
+            &cursor,
             vec![
                 fact("NOTE.md", FileChangeKind::Changed),
                 fact("note.md", FileChangeKind::Changed),
-            ]
+            ],
         );
         assert!(f.root.path().join("note.md").exists());
     }
 
-    #[cfg(windows)]
+    /// APFS can be formatted case-sensitive. There `note.md` and `Note.md`
+    /// are two files, and each reports its own edits, removal and return. A
+    /// file deleted while another spelling is created reads as just that.
+    /// Skips where the volume ignores case.
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn case_variants_on_a_case_sensitive_volume_report_their_own_facts() {
+        let f = Fixture::new();
+        f.write("note.md", "a");
+        f.write("Note.md", "b");
+        if std::fs::read_to_string(f.root.path().join("note.md")).unwrap() != "a" {
+            eprintln!("SKIP: this volume ignores case");
+            return;
+        }
+        f.scan(&f.cursor());
+        let after = |change: &dyn Fn()| {
+            let cursor = f.cursor();
+            change();
+            f.scan(&cursor)
+        };
+        let remove = |path: &str| std::fs::remove_file(f.root.path().join(path)).unwrap();
+        for path in ["note.md", "Note.md"] {
+            let changed = after(&|| f.write(path, "longer"));
+            assert_eq!(changed, vec![fact(path, FileChangeKind::Changed)]);
+        }
+        assert_eq!(
+            after(&|| remove("Note.md")),
+            vec![fact("Note.md", FileChangeKind::Disappeared)]
+        );
+        assert_eq!(
+            after(&|| f.write("Note.md", "back")),
+            vec![fact("Note.md", FileChangeKind::Appeared)]
+        );
+        assert_eq!(
+            after(&|| remove("note.md")),
+            vec![fact("note.md", FileChangeKind::Disappeared)]
+        );
+        // With one spelling left, a replacement must not read as a rename.
+        let replaced = after(&|| {
+            remove("Note.md");
+            f.write("NOTE.md", "other");
+        });
+        assert_eq!(
+            replaced,
+            vec![
+                fact("NOTE.md", FileChangeKind::Appeared),
+                fact("Note.md", FileChangeKind::Disappeared),
+            ]
+        );
+    }
+
+    /// APFS keeps `a\u{200b}b.md` and `ab.md` apart, but folding drops the
+    /// zero-width space, so both share a key. Each still reports its own
+    /// edits.
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn names_that_fold_together_keep_their_own_facts() {
+        let f = Fixture::new();
+        f.write("a\u{200b}b.md", "a");
+        f.write("ab.md", "b");
+        f.scan(&f.cursor());
+        for path in ["a\u{200b}b.md", "ab.md"] {
+            let cursor = f.cursor();
+            f.write(path, "longer");
+            assert_eq!(f.scan(&cursor), vec![fact(path, FileChangeKind::Changed)]);
+        }
+    }
+
+    /// `ab.md` and `a\u{200b}b.md` share a folded key but are two files on
+    /// APFS. When one is renamed by case, or a file is replaced by a distinct
+    /// name with the same key, a listing cannot tell which file went where.
+    /// The feed asks readers to list again rather than report a deletion or a
+    /// change that did not happen. Skips where the volume keeps case apart.
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn a_changed_group_of_names_that_fold_together_rescans() {
+        let f = Fixture::new();
+        f.write("a\u{200b}b.md", "a");
+        f.write("ab.md", "b");
+        if !f.root.path().join("AB.md").exists() {
+            eprintln!("SKIP: this volume keeps case apart");
+            return;
+        }
+        f.scan(&f.cursor());
+        let cursor = f.cursor();
+        std::fs::rename(f.root.path().join("ab.md"), f.root.path().join("AB.md")).unwrap();
+        let renamed = f.observe(&cursor);
+        assert!(renamed.resync, "{:?}", renamed.facts);
+
+        let f = Fixture::new();
+        f.write("ab.md", "b");
+        f.scan(&f.cursor());
+        let cursor = f.cursor();
+        std::fs::remove_file(f.root.path().join("ab.md")).unwrap();
+        f.write("a\u{200b}b.md", "a");
+        let replaced = f.observe(&cursor);
+        assert!(replaced.resync, "{:?}", replaced.facts);
+    }
+
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn normalization_only_rename_never_reads_as_a_deletion() {
+        let f = Fixture::new();
+        f.write("caf\u{e9}.md", "a");
+        f.scan(&f.cursor());
+        let cursor = f.cursor();
+        std::fs::rename(
+            f.root.path().join("caf\u{e9}.md"),
+            f.root.path().join("cafe\u{301}.md"),
+        )
+        .unwrap();
+        let stored: Vec<_> = std::fs::read_dir(f.root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name != ".dohc")
+            .collect();
+        if stored != ["cafe\u{301}.md"] {
+            eprintln!("SKIP: this volume kept the old spelling: {stored:?}");
+            return;
+        }
+        assert_respelled(&f, &cursor, Vec::new());
+    }
+
+    #[cfg(any(windows, target_vendor = "apple"))]
     #[test]
     fn case_only_directory_rename_changes_both_spellings_and_sidecar_bases() {
         let f = Fixture::new();
         f.write("notes/a.md", "a");
+        if !f.root.path().join("NOTES/a.md").exists() {
+            eprintln!("SKIP: this volume keeps case apart");
+            return;
+        }
         f.write("notes/data.sqlite-wal", "wal");
         f.scan(&f.cursor());
         let cursor = f.cursor();
         std::fs::rename(f.root.path().join("notes"), f.root.path().join("NOTES")).unwrap();
-        assert_eq!(
-            f.scan(&cursor),
+        assert_respelled(
+            &f,
+            &cursor,
             vec![
                 fact("NOTES/a.md", FileChangeKind::Changed),
                 fact("NOTES/data.sqlite", FileChangeKind::Changed),
                 fact("notes/a.md", FileChangeKind::Changed),
                 fact("notes/data.sqlite", FileChangeKind::Changed),
-            ]
+            ],
         );
     }
 
@@ -817,6 +1148,9 @@ mod tests {
             "a~",
             "#a#",
             ".DS_Store",
+            "._a.md",
+            "Thumbs.db",
+            ".fseventsd/a",
             ".dohc/a",
             ".git/a",
             "node_modules/a",
@@ -847,6 +1181,52 @@ mod tests {
     }
 
     #[test]
+    fn observation_tracks_only_visibility_policy_inside_metadata() {
+        let f = Fixture::new();
+        let cursor = f.cursor();
+        f.write(".dohc/visibility.toml", "visible");
+        f.write(".dohc/files.toml", "noise");
+        f.write(".dohc/engine/engine.db-wal", "noise");
+        assert_eq!(
+            f.scan(&cursor),
+            vec![fact(".dohc/visibility.toml", FileChangeKind::Appeared)]
+        );
+        let cursor = f.cursor();
+        f.write(".dohc/visibility.toml", "hidden and longer");
+        f.write(".dohc/engine/engine.db-wal", "more noise");
+        assert_eq!(
+            f.scan(&cursor),
+            vec![fact(".dohc/visibility.toml", FileChangeKind::Changed)]
+        );
+        let cursor = f.cursor();
+        std::fs::remove_file(f.root.path().join(".dohc/visibility.toml")).unwrap();
+        assert_eq!(
+            f.scan(&cursor),
+            vec![fact(".dohc/visibility.toml", FileChangeKind::Disappeared)]
+        );
+    }
+
+    #[test]
+    fn observation_policy_does_not_follow_metadata_symlinks() {
+        let f = Fixture::new();
+        let outside = ScratchDir::new_named("observation-policy-outside").unwrap();
+        std::fs::write(outside.path().join("visibility.toml"), "outside").unwrap();
+        let cursor = f.cursor();
+        std::fs::remove_dir(f.root.path().join(".dohc")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path(), f.root.path().join(".dohc")).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(outside.path(), f.root.path().join(".dohc")).unwrap();
+        assert_eq!(
+            f.scan(&cursor),
+            vec![fact(".dohc/visibility.toml", FileChangeKind::Appeared)]
+        );
+        let cursor = f.cursor();
+        std::fs::write(outside.path().join("visibility.toml"), "outside changed").unwrap();
+        assert!(f.scan(&cursor).is_empty());
+    }
+
+    #[test]
     fn observation_symlink_leaf_does_not_follow_target() {
         let f = Fixture::new();
         let outside = ScratchDir::new_named("observation-link-target").unwrap();
@@ -872,10 +1252,10 @@ mod tests {
             modified: None,
             #[cfg(unix)]
             changed: (0, 0),
-            #[cfg(windows)]
+            #[cfg(any(windows, target_vendor = "apple"))]
             key: "dir/a".to_owned(),
         };
-        feed.publish(vec![entry], &[], 200_000).unwrap();
+        feed.publish(vec![entry], &[], 200_000, FOLDS).unwrap();
         let cursor = feed.changes_since(None).cursor;
         feed.publish(
             vec![],
@@ -884,17 +1264,18 @@ mod tests {
                 kind: std::io::ErrorKind::PermissionDenied,
             }],
             200_000,
+            FOLDS,
         )
         .unwrap();
         assert!(feed.changes_since(Some(&cursor)).facts.is_empty());
-        feed.publish(vec![], &[], 200_000).unwrap();
+        feed.publish(vec![], &[], 200_000, FOLDS).unwrap();
         assert_eq!(
             feed.changes_since(Some(&cursor)).facts,
             vec![fact("dir/a", FileChangeKind::Disappeared)]
         );
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_vendor = "apple"))]
     #[test]
     fn failed_case_renamed_directory_preserves_presence() {
         let f = Fixture::new();
@@ -909,6 +1290,7 @@ mod tests {
                     kind: std::io::ErrorKind::PermissionDenied,
                 }],
                 10,
+                true,
             )
             .unwrap();
         assert!(f.feed.changes_since(Some(&cursor)).facts.is_empty());
@@ -932,7 +1314,7 @@ mod tests {
     #[test]
     fn observation_escaped_facts_fit_the_response_budget() {
         let feed = ObservationFeed::new();
-        feed.publish(vec![], &[], 200_000).unwrap();
+        feed.publish(vec![], &[], 200_000, FOLDS).unwrap();
         let cursor = feed.changes_since(None).cursor;
         let listing: Vec<_> = (0..400)
             .map(|i| ObservedEntry {
@@ -942,11 +1324,11 @@ mod tests {
                 modified: None,
                 #[cfg(unix)]
                 changed: (0, 0),
-                #[cfg(windows)]
+                #[cfg(any(windows, target_vendor = "apple"))]
                 key: format!("{i}-{}", "\u{0001}\"\\".repeat(100)),
             })
             .collect();
-        feed.publish(listing.clone(), &[], 200_000).unwrap();
+        feed.publish(listing.clone(), &[], 200_000, FOLDS).unwrap();
         let response = feed.changes_since(Some(&cursor));
         assert!(!response.resync);
         assert_eq!(response.facts.len(), 400);
@@ -956,14 +1338,14 @@ mod tests {
             .into_iter()
             .map(|mut e| {
                 e.path.push_str(&"\u{0001}".repeat(200));
-                #[cfg(windows)]
+                #[cfg(any(windows, target_vendor = "apple"))]
                 {
                     e.key = floor::fold_segment(&e.path);
                 }
                 e
             })
             .collect();
-        feed.publish(larger, &[], 200_000).unwrap();
+        feed.publish(larger, &[], 200_000, FOLDS).unwrap();
         let response = feed.changes_since(Some(&cursor));
         assert!(response.resync);
         assert!(response.facts.is_empty());
@@ -1018,7 +1400,7 @@ mod tests {
                 .iter()
                 .map(|e| {
                     let bytes = e.path.capacity();
-                    #[cfg(windows)]
+                    #[cfg(any(windows, target_vendor = "apple"))]
                     let bytes = bytes + e.key.capacity();
                     bytes
                 })
@@ -1027,7 +1409,9 @@ mod tests {
         drop(state);
         let start = std::time::Instant::now();
         for _ in 0..100 {
-            f.feed.publish(listing.clone(), &[], 200_000).unwrap();
+            f.feed
+                .publish(listing.clone(), &[], 200_000, FOLDS)
+                .unwrap();
         }
         eprintln!(
             "OBSERVATION_COST files=10000 baseline_scan_median_ms={:.3} observed_scan_median_ms={:.3} listing_clone_sort_diff_ms={:.3} listing_bytes={} bytes_per_path={:.1}",

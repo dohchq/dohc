@@ -7,15 +7,17 @@ use dohc_engine_files::media::is_text_media_type;
 use dohc_engine_files::policy::{PathClassification, classify_engine_file_path_normalized};
 use dohc_engine_files::{
     BatchIngestResult, CaptureError, CaptureOp, CaptureSink, IngestOutcome, IngestReason,
-    MAX_CAPTURE_BINARY_BYTES, MAX_CAPTURE_TEXT_BYTES,
+    MAX_CAPTURE_BINARY_BYTES, MAX_CAPTURE_TEXT_BYTES, RespelledRetire, Respelling,
+    stored_under_other_spelling,
 };
+use dohc_engine_runtime::actor::CapturePlacementPath;
 use dohc_engine_runtime::search::{
     FilesPolicyRule, SearchPolicySnapshot, read_engine_search_policy, resolve_effective_policy,
 };
 use dohc_engine_runtime::{
     ActorHandle, CaptureIngest, CaptureIngestBinary, CaptureRetire, CaptureSecret,
-    CaptureSecretRetire, MAX_CAPTURE_INGEST_BATCH_BYTES, MAX_CAPTURE_INGEST_BATCH_OPS, NoFaults,
-    RuntimeError, WorkspaceRootGuard,
+    CaptureSecretRetire, CollectionReconciliation, MAX_CAPTURE_INGEST_BATCH_BYTES,
+    MAX_CAPTURE_INGEST_BATCH_OPS, NoFaults, RuntimeError, WorkspaceRootGuard,
 };
 use dohc_engine_storage::hex_sha256;
 use std::collections::HashMap;
@@ -37,6 +39,10 @@ const INGEST_FAILED: CaptureError = CaptureError {
 };
 const BINARY_INGEST_FAILED: CaptureError = CaptureError {
     reason: "capture binary ingest failed",
+};
+/// A respelled path's retire that must wait, as while an editor holds it.
+const RESPELLED_RETIRE_WAITS: CaptureError = CaptureError {
+    reason: "respelled-retire-waits",
 };
 const RETIRE_FAILED: CaptureError = CaptureError {
     reason: "capture retire failed",
@@ -65,6 +71,9 @@ const SECRET_KEY_UNAVAILABLE: CaptureError = CaptureError {
 /// that syscall path on the launch profile without competing with the actor's
 /// serialized database writer.
 const MAX_ADDED_TEXT_PREPARE_WORKERS: usize = 8;
+
+mod busy_retry;
+use busy_retry::CaptureBatchRetry;
 
 /// Per-run moment provenance, mirroring the TS capture metadata: a reconcile
 /// pass stamps one summary + correlation id across every moment it records
@@ -279,6 +288,7 @@ impl CapturedRoot {
 /// active version and capture-time provenance; `.dohc/files.toml` is read once at construction, matching
 /// the one-policy-snapshot-per-task rule in the TS capture path.
 pub struct StoreCaptureSink {
+    batch_retry: CaptureBatchRetry,
     actor: ActorHandle,
     leases: LeaseRegistry,
     workspace_id: String,
@@ -300,6 +310,7 @@ pub struct StoreCaptureSink {
     /// Automation claims this run's captures and reconciliations inserted.
     /// The driver announces them after the run.
     automation_claims: std::cell::RefCell<Vec<AutomationClaim>>,
+    pending_placement_paths: std::cell::RefCell<Vec<CapturePlacementPath>>,
     /// Lazily loaded-or-created on the first secret capture (TS parity:
     /// `loadSecretDataKey` create branch) so workspaces without secrets never
     /// mint a key file.
@@ -310,6 +321,7 @@ pub struct StoreCaptureSink {
 
 pub(crate) struct StoreCaptureSinkParams {
     pub(crate) actor: ActorHandle,
+    pub(crate) cancel: dohc_engine_files::CancellationToken,
     pub(crate) workspace_id: String,
     pub(crate) version_id: String,
     pub(crate) shadow_root: PathBuf,
@@ -333,6 +345,7 @@ pub(crate) fn bound_sink_params(
     let shadow_root = shadow_root.into();
     let captured_root = CapturedRoot::bind(&shadow_root).map(Arc::new);
     StoreCaptureSinkParams {
+        cancel: dohc_engine_files::CancellationToken::new(),
         actor,
         workspace_id: workspace_id.to_owned(),
         version_id: version_id.to_owned(),
@@ -366,6 +379,7 @@ pub(crate) enum PolicyState {
 impl StoreCaptureSink {
     pub(crate) fn new(params: StoreCaptureSinkParams) -> Self {
         let StoreCaptureSinkParams {
+            cancel,
             actor,
             workspace_id,
             version_id,
@@ -387,6 +401,7 @@ impl StoreCaptureSink {
             PolicyState::Known(snapshot.files_policy.clone())
         };
         StoreCaptureSink {
+            batch_retry: CaptureBatchRetry::new(cancel),
             actor,
             leases,
             workspace_id,
@@ -399,10 +414,19 @@ impl StoreCaptureSink {
             files_policy,
             policy_held: std::cell::Cell::new(false),
             automation_claims: std::cell::RefCell::new(Vec::new()),
+            pending_placement_paths: std::cell::RefCell::new(Vec::new()),
             secret_key: None,
             self_writes,
             provenance,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_batch_wait_for_test(
+        &mut self,
+        wait: impl Fn(std::time::Duration) + Send + 'static,
+    ) {
+        self.batch_retry.wait = Some(Box::new(wait));
     }
 
     fn captured_root(&self) -> Result<&CapturedRoot, CaptureError> {
@@ -485,6 +509,11 @@ impl StoreCaptureSink {
         self.policy_held.get()
     }
 
+    /// Take paths whose committed observations need a placement drain.
+    pub(crate) fn take_pending_placement_paths(&self) -> Vec<CapturePlacementPath> {
+        self.pending_placement_paths.take()
+    }
+
     /// Take the automation claims this run inserted so far.
     pub(crate) fn take_automation_claims(&self) -> Vec<AutomationClaim> {
         self.automation_claims.take()
@@ -493,12 +522,15 @@ impl StoreCaptureSink {
     /// Refresh collection detection and record bindings after a clean capture
     /// pass. Adoption uses the runtime's ordinary Y.Doc update + settle path,
     /// including durable replication journaling and self-write suppression.
-    pub(crate) fn reconcile_collections(&self) -> Result<Vec<String>, RuntimeError> {
+    pub(crate) fn reconcile_collections_observed(
+        &self,
+        committed: Option<dohc_engine_runtime::actor::CollectionCommitListener>,
+    ) -> Result<CollectionReconciliation, RuntimeError> {
         let root_guard = self.root_guard().map_err(|_| RuntimeError::Identity {
             reason: "workspace root changed during capture",
             source: None,
         })?;
-        let reconciliation = self.actor.reconcile_collections_blocking_guarded(
+        self.actor.reconcile_collections_blocking_guarded(
             self.workspace_id.clone(),
             self.version_id.clone(),
             self.shadow_root.clone(),
@@ -507,11 +539,8 @@ impl StoreCaptureSink {
             self.now_ms,
             Arc::new(NoFaults),
             root_guard,
-        )?;
-        self.automation_claims
-            .borrow_mut()
-            .extend(reconciliation.automation_claims);
-        Ok(reconciliation.changed_paths)
+            committed,
+        )
     }
 
     /// Check only the changed collection records offered by this capture
@@ -588,7 +617,7 @@ impl StoreCaptureSink {
         text: String,
         claim_foreign_head: bool,
     ) -> Result<DomainIngest, CaptureError> {
-        match self.actor.capture_ingest_with_search_policy_blocking(
+        let result = self.actor.capture_ingest_with_search_policy_blocking(
             CaptureIngest {
                 workspace_id: self.workspace_id.clone(),
                 version_id: self.version_id.clone(),
@@ -605,8 +634,17 @@ impl StoreCaptureSink {
             Arc::clone(&self.search_policy),
             self.leases.clone(),
             Arc::new(NoFaults),
-        ) {
+        );
+        match self.batch_retry.observe(result) {
             Ok(result) => {
+                if result.pending_placement {
+                    self.pending_placement_paths
+                        .borrow_mut()
+                        .push(CapturePlacementPath {
+                            path: path.to_owned(),
+                            released_hold: result.released_capture_hold,
+                        });
+                }
                 self.automation_claims
                     .borrow_mut()
                     .extend(result.automation_claims);
@@ -622,10 +660,20 @@ impl StoreCaptureSink {
             // The head belongs to another writer (RPC/replication): capture
             // does not own it, so it stops tracking the path rather than
             // overwriting content that may have no disk counterpart.
+            Err(RuntimeError::CaptureNotOwnedAfterHold { path }) => {
+                self.pending_placement_paths
+                    .borrow_mut()
+                    .push(CapturePlacementPath {
+                        path,
+                        released_hold: true,
+                    });
+                Ok(DomainIngest::ForeignHead)
+            }
             Err(RuntimeError::Domain(DomainError::CaptureNotOwned)) => {
                 Ok(DomainIngest::ForeignHead)
             }
             Err(error) if held_as_new_file(&error) => Ok(DomainIngest::HeldAsNewFile),
+            Err(RuntimeError::CaptureFileHeld { .. }) => Ok(DomainIngest::Held),
             Err(_) => Err(INGEST_FAILED),
         }
     }
@@ -636,7 +684,7 @@ impl StoreCaptureSink {
         bytes: Vec<u8>,
         claim_foreign_head: bool,
     ) -> Result<DomainIngest, CaptureError> {
-        match self.actor.capture_ingest_binary_blocking(
+        let result = self.actor.capture_ingest_binary_blocking(
             CaptureIngestBinary {
                 workspace_id: self.workspace_id.clone(),
                 version_id: self.version_id.clone(),
@@ -652,18 +700,39 @@ impl StoreCaptureSink {
             },
             self.leases.clone(),
             Arc::new(NoFaults),
-        ) {
-            Ok(_) => Ok(DomainIngest::Persisted),
+        );
+        match self.batch_retry.observe(result) {
+            Ok(result) => {
+                if result.pending_placement {
+                    self.pending_placement_paths
+                        .borrow_mut()
+                        .push(CapturePlacementPath {
+                            path: path.to_owned(),
+                            released_hold: result.released_capture_hold,
+                        });
+                }
+                Ok(DomainIngest::Persisted)
+            }
             // Same settled-refusal rule as text: the store's admission gate is
             // stricter than the scan floor, and a refused name can never
             // succeed on retry.
             Err(RuntimeError::Domain(DomainError::InvalidPath { .. })) => {
                 Ok(DomainIngest::NameRefused)
             }
+            Err(RuntimeError::CaptureNotOwnedAfterHold { path }) => {
+                self.pending_placement_paths
+                    .borrow_mut()
+                    .push(CapturePlacementPath {
+                        path,
+                        released_hold: true,
+                    });
+                Ok(DomainIngest::ForeignHead)
+            }
             Err(RuntimeError::Domain(DomainError::CaptureNotOwned)) => {
                 Ok(DomainIngest::ForeignHead)
             }
             Err(error) if held_as_new_file(&error) => Ok(DomainIngest::HeldAsNewFile),
+            Err(RuntimeError::CaptureFileHeld { .. }) => Ok(DomainIngest::Held),
             Err(_) => Err(BINARY_INGEST_FAILED),
         }
     }
@@ -703,7 +772,7 @@ impl StoreCaptureSink {
                 self.ensure_secret_key()?;
                 let key = self.secret_key.clone().expect("key ensured just above");
                 self.require_captured_root()?;
-                match self.actor.capture_secret_blocking(
+                let result = self.actor.capture_secret_blocking(
                     CaptureSecret {
                         workspace_id: self.workspace_id.clone(),
                         version_id: self.version_id.clone(),
@@ -716,7 +785,8 @@ impl StoreCaptureSink {
                     },
                     key,
                     Arc::new(NoFaults),
-                ) {
+                );
+                match self.batch_retry.observe(result) {
                     Ok(_) => Ok(IngestOutcome::Captured { size, sha256 }),
                     Err(RuntimeError::Domain(DomainError::InvalidPath { .. })) => {
                         Ok(IngestOutcome::NotOwned)
@@ -799,7 +869,7 @@ impl StoreCaptureSink {
 
     fn retire_secret(&self, path: &str) -> Result<(), CaptureError> {
         let root_guard = self.root_guard()?;
-        match self.actor.capture_secret_retire_blocking_guarded(
+        let result = self.actor.capture_secret_retire_blocking_guarded(
             CaptureSecretRetire {
                 workspace_id: self.workspace_id.clone(),
                 version_id: self.version_id.clone(),
@@ -812,7 +882,8 @@ impl StoreCaptureSink {
             self.shadow_root.clone(),
             Arc::new(NoFaults),
             root_guard,
-        ) {
+        );
+        match self.batch_retry.observe(result) {
             Ok(_) => Ok(()),
             Err(RuntimeError::Domain(DomainError::InvalidPath { .. })) => Ok(()),
             Err(_) => Err(SECRET_RETIRE_FAILED),
@@ -832,14 +903,37 @@ impl StoreCaptureSink {
         only_if_text_head: bool,
         summary: Option<String>,
     ) -> Result<(), CaptureError> {
-        self.retire_head_with(path, only_if_text_head, summary, true, false)
+        self.retire_head_with(path, only_if_text_head, summary, true, false, None)
     }
 
     /// Retire a head because its file is gone. The actor confirms the absence
     /// on its own thread and refuses while the file is back, so a replace
     /// caught between its two renames is never recorded as a delete.
     fn retire_absent_head(&self, path: &str, summary: Option<String>) -> Result<(), CaptureError> {
-        self.retire_head_with(path, false, summary, true, true)
+        self.retire_head_with(path, false, summary, true, true, None)
+    }
+
+    /// Retire the head at a spelling the disk proves respelled to `to`. The
+    /// file is still there under the new spelling, so this is not a deletion;
+    /// the actor lets it retire a head capture does not own, such as one a
+    /// peer synced, while that head still holds the bytes found at `to`.
+    fn retire_respelled_head(
+        &self,
+        path: &str,
+        to: &Respelling,
+    ) -> Result<RespelledRetire, CaptureError> {
+        match self.retire_head_with(
+            path,
+            false,
+            self.provenance.summary.clone(),
+            true,
+            false,
+            Some(to),
+        ) {
+            Ok(()) => Ok(RespelledRetire::Retired),
+            Err(RESPELLED_RETIRE_WAITS) => Ok(RespelledRetire::Waits),
+            Err(error) => Err(error),
+        }
     }
 
     fn retire_head_with(
@@ -849,32 +943,62 @@ impl StoreCaptureSink {
         summary: Option<String>,
         allow_ydoc_origin: bool,
         confirm_absent: bool,
+        respelled_to: Option<&Respelling>,
     ) -> Result<(), CaptureError> {
         let root_guard = self.root_guard()?;
-        match self.actor.capture_retire_materialized_blocking_guarded(
-            CaptureRetire {
-                workspace_id: self.workspace_id.clone(),
-                version_id: self.version_id.clone(),
-                path: path.to_owned(),
-                metadata_summary: summary,
-                metadata_correlation_id: self.provenance.correlation_id.clone(),
-                now_ms: self.now_ms,
-                request_id: None,
-                only_if_text_head,
-                only_if_capture_origin: true,
-                allow_ydoc_origin,
-            },
-            self.shadow_root.clone(),
-            confirm_absent,
-            Arc::new(self.self_writes.clone()),
-            self.leases.clone(),
-            Arc::new(NoFaults),
-            root_guard,
-        ) {
-            Ok(_) => Ok(()),
+        let input = CaptureRetire {
+            workspace_id: self.workspace_id.clone(),
+            version_id: self.version_id.clone(),
+            path: path.to_owned(),
+            metadata_summary: summary,
+            metadata_correlation_id: self.provenance.correlation_id.clone(),
+            now_ms: self.now_ms,
+            request_id: None,
+            only_if_text_head,
+            only_if_capture_origin: true,
+            allow_ydoc_origin,
+        };
+        let result = match respelled_to {
+            Some(to) => self.actor.capture_retire_respelled_blocking_guarded(
+                input,
+                to.path.clone(),
+                to.sha256.clone(),
+                self.shadow_root.clone(),
+                Arc::new(self.self_writes.clone()),
+                self.leases.clone(),
+                Arc::new(NoFaults),
+                root_guard,
+            ),
+            None => self.actor.capture_retire_materialized_blocking_guarded(
+                input,
+                self.shadow_root.clone(),
+                confirm_absent,
+                Arc::new(self.self_writes.clone()),
+                self.leases.clone(),
+                Arc::new(NoFaults),
+                root_guard,
+            ),
+        };
+        match self.batch_retry.observe(result) {
+            Ok(result) => {
+                if result.pending_placement {
+                    self.pending_placement_paths
+                        .borrow_mut()
+                        .push(CapturePlacementPath {
+                            path: path.to_owned(),
+                            released_hold: result.released_capture_hold,
+                        });
+                }
+                Ok(())
+            }
             // A name the store refuses to address can never hold a head;
             // there is nothing to retire.
             Err(RuntimeError::Domain(DomainError::InvalidPath { .. })) => Ok(()),
+            Err(RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState { .. }))
+                if respelled_to.is_some() =>
+            {
+                Err(RESPELLED_RETIRE_WAITS)
+            }
             Err(_) => Err(RETIRE_FAILED),
         }
     }
@@ -891,6 +1015,7 @@ enum DomainIngest {
     /// A live session holds a file the store has no head for. See
     /// [`held_new_file_outcome`] for when that defers.
     HeldAsNewFile,
+    Held,
 }
 
 /// A live session holds a file the store has no head for yet. Capture defers
@@ -1135,6 +1260,13 @@ impl StoreCaptureSink {
     }
 
     fn commit_added_text_batch(&self, batch: Vec<PreparedTextCapture>) -> BatchIngestResult {
+        #[cfg(feature = "harness")]
+        let mut phase = dohc_engine_storage::capture_phase::Phase::new(
+            "sink_capture_batch",
+            self.provenance.correlation_id.as_deref(),
+            batch.len(),
+            true,
+        );
         let root_guard = match self.root_guard() {
             Ok(root_guard) => root_guard,
             Err(_) => {
@@ -1149,23 +1281,51 @@ impl StoreCaptureSink {
             inputs.push(prepared.input);
             identities.push((prepared.size, prepared.sha256));
         }
-        let results = self.actor.capture_ingest_batch_blocking(
-            inputs,
-            Arc::clone(&self.search_policy),
-            self.leases.clone(),
-            Arc::new(NoFaults),
-            self.shadow_root.clone(),
-            root_guard,
-        );
+        // Each attempt rechecks live leases and preserves uncovered Y.Doc recovery.
+        // The receipt records these bytes' hash, so the watcher or next scan
+        // captures a newer disk edit even when it arrives during the wait.
+        let inputs: Arc<[CaptureIngest]> = inputs.into();
+        #[cfg(feature = "harness")]
+        let roundtrip_phase =
+            dohc_engine_storage::capture_phase::Measure::new("actor_roundtrip_including_retry");
+        let results = self.batch_retry.run(|| {
+            self.actor.capture_ingest_batch_blocking(
+                Arc::clone(&inputs),
+                Arc::clone(&self.search_policy),
+                self.leases.clone(),
+                Arc::new(NoFaults),
+                self.shadow_root.clone(),
+                Arc::clone(&root_guard),
+            )
+        });
+        #[cfg(feature = "harness")]
+        drop(roundtrip_phase);
         match results {
             Ok(results) if results.len() == identities.len() => {
                 let mut outcomes = Vec::with_capacity(results.len());
                 for (result, (size, sha256)) in results.into_iter().zip(identities) {
                     outcomes.push(match result {
                         Ok(result) => {
+                            if result.pending_placement {
+                                self.pending_placement_paths.borrow_mut().push(
+                                    CapturePlacementPath {
+                                        path: result.snapshot.path.clone(),
+                                        released_hold: result.released_capture_hold,
+                                    },
+                                );
+                            }
                             self.automation_claims
                                 .borrow_mut()
                                 .extend(result.automation_claims);
+                            Ok(IngestOutcome::Captured { size, sha256 })
+                        }
+                        Err(RuntimeError::CaptureNotOwnedAfterHold { path }) => {
+                            self.pending_placement_paths
+                                .borrow_mut()
+                                .push(CapturePlacementPath {
+                                    path,
+                                    released_hold: true,
+                                });
                             Ok(IngestOutcome::Captured { size, sha256 })
                         }
                         Err(RuntimeError::Domain(DomainError::CaptureNotOwned)) => {
@@ -1175,20 +1335,38 @@ impl StoreCaptureSink {
                             Ok(IngestOutcome::NotOwned)
                         }
                         Err(error) if held_as_new_file(&error) => held_new_file_outcome(size),
+                        Err(RuntimeError::CaptureFileHeld { .. }) => {
+                            Ok(IngestOutcome::Held { size, sha256 })
+                        }
                         Err(_) => Err(INGEST_FAILED),
                     });
                 }
+                #[cfg(feature = "harness")]
+                {
+                    phase.field(
+                        "failed_receipts",
+                        outcomes.iter().filter(|r| r.is_err()).count() as u64,
+                    );
+                    phase.finish("receipts");
+                }
                 BatchIngestResult::Committed(outcomes)
             }
-            Ok(_) | Err(_) => BatchIngestResult::Uncertain {
-                attempted: identities.len(),
-            },
+            Ok(_) | Err(_) => {
+                #[cfg(feature = "harness")]
+                {
+                    phase.field("failed_receipts", identities.len() as u64);
+                    phase.finish("uncertain");
+                }
+                BatchIngestResult::Uncertain {
+                    attempted: identities.len(),
+                }
+            }
         }
     }
 
     /// Retire a path the current policy excludes, without the absence check.
     ///
-    /// The driver calls this for `retained_over_cap` paths: they are still on
+    /// The driver calls this for `retained_unread` paths: they are still on
     /// disk by definition (that is why the scanner retained them), so the
     /// public [`CaptureSink::retire`] would refuse with a reappearance
     /// guard and the narrowed head would survive forever. Policy exclusion is
@@ -1247,8 +1425,20 @@ impl CaptureSink for StoreCaptureSink {
             Ok(root) => root,
             Err(_) => return Some(self.ingest_single_added_op(&ops[0])),
         };
+        #[cfg(feature = "harness")]
+        let mut prepare_phase = dohc_engine_storage::capture_phase::Phase::new(
+            "parallel_prepare",
+            self.provenance.correlation_id.as_deref(),
+            candidates.len(),
+            false,
+        );
         let prepared =
             prepare_added_text_prefix_parallel(&self.shadow_root, captured_root, &candidates);
+        #[cfg(feature = "harness")]
+        {
+            prepare_phase.finish("completed");
+            drop(prepare_phase);
+        }
         let prepared = match prepared {
             PreparedTextPrefix::Ready(prepared) => prepared,
             PreparedTextPrefix::FallbackFirst => {
@@ -1355,6 +1545,10 @@ impl CaptureSink for StoreCaptureSink {
                     // next genuine edit arrives as `Changed` and is captured.
                     DomainIngest::ForeignHead => Ok(IngestOutcome::Captured { size, sha256 }),
                     DomainIngest::HeldAsNewFile => held_new_file_outcome(size),
+                    DomainIngest::Held => {
+                        self.self_writes.clear_path(&self.workspace_id, path);
+                        Ok(IngestOutcome::Held { size, sha256 })
+                    }
                 }
             }
             CurrentContent::Absent => {
@@ -1401,6 +1595,7 @@ impl CaptureSink for StoreCaptureSink {
                     Some("Stopped tracking non-text content".to_owned()),
                     false,
                     false,
+                    None,
                 )?;
                 Ok(IngestOutcome::NotOwned)
             }
@@ -1420,6 +1615,7 @@ impl CaptureSink for StoreCaptureSink {
                     DomainIngest::NameRefused => Ok(IngestOutcome::NotOwned),
                     DomainIngest::ForeignHead => Ok(IngestOutcome::Captured { size, sha256 }),
                     DomainIngest::HeldAsNewFile => held_new_file_outcome(size),
+                    DomainIngest::Held => Ok(IngestOutcome::Held { size, sha256 }),
                 }
             }
         }
@@ -1483,6 +1679,25 @@ impl CaptureSink for StoreCaptureSink {
             }
             // Nothing was ever stored under a non-canonical literal name.
             (PathClassification::Tracked, _) => Ok(()),
+        }
+    }
+
+    fn retire_respelled(
+        &mut self,
+        path: &str,
+        to: &Respelling,
+    ) -> Result<RespelledRetire, CaptureError> {
+        let respelled = matches!(
+            classify_engine_file_path_normalized(path),
+            (PathClassification::Tracked, Some(normalized)) if normalized == path
+        ) && matches!(self.path_containment(path), Containment::Contained)
+            && std::fs::symlink_metadata(self.shadow_root.join(path))
+                .is_ok_and(|metadata| metadata.file_type().is_file())
+            && stored_under_other_spelling(&self.shadow_root, path);
+        if respelled {
+            self.retire_respelled_head(path, to)
+        } else {
+            self.retire(path).map(|()| RespelledRetire::Retired)
         }
     }
 }
@@ -1566,7 +1781,7 @@ fn read_contained_current(
     }
     // Between the capture cap and the SCAN cap (64 MiB) the scanner still
     // lists the file, so a grow-past-capture-cap lands here and retires.
-    // Past the scan cap the plan classifies it `retained_over_cap` and the
+    // Past the scan cap the plan classifies it `retained_unread` and the
     // sink is never called — deliberately not a retire: the ratified CAL-3
     // delta keeps last-known-good rather than
     // false-deleting live user data behind an operational scan bound.

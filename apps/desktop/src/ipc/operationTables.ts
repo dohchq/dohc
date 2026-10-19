@@ -1,31 +1,73 @@
+import { linksOperations } from "./linksOperations";
+import { shareHandoffOperations, shareMountOperations, shareProposalOperations, sharedChannelOperations, relayShareOperations } from "./shareOperations";
+import { datasetOperations } from "./datasetOperations";
+import { chatOperations } from "./chatOperations";
 import {
+  workspaceSyncOperations,
+  systemMotionOperations,
+  systemPrivacySettingsOperations,
+  serverAccountOperations,
   chatDispatchNoticeOperations,
+  agentRunStateOperations,
   crashReportOperations,
   engineYDocAdmissionOperations,
   liveDraftRecoveryOperations,
+  stopAndRestoreRecoveryOperations,
   engineYDocSaveOperations,
   captureRecoveryOperations,
+  fileObservationOperations,
   noticeOperations,
   reportingOperations,
   scheduleHostOperations,
   sharedViewAccessOperations,
+  shareDirectWriteDeliveryOperations,
+  usageRecordOperations,
   workspaceSearchOperations,
+  folderAppOfferOperations,
   workspaceVersionOperations,
+  historyOperations,
 } from "./bridgeContract";
+import { settingsOperations } from "./settingsOperations";
 import type { OperationTable } from "./operationTable";
+import { shareCopyOperations } from "./shareCopyOperations";
+import { accessOperations } from "./accessOperations";
+import { workspaceFileOperations } from "./workspaceFileOperations";
 
 // Add each migrated table here when B5 replaces its manual registrations.
 export const OPERATION_TABLES = [
+  workspaceFileOperations,
+  settingsOperations,
+  chatOperations,
+  datasetOperations,
+  shareHandoffOperations,
+  shareMountOperations,
+  shareProposalOperations,
+  sharedChannelOperations,
+  relayShareOperations,
+  shareCopyOperations,
+  linksOperations,
+  workspaceSyncOperations,
+  systemMotionOperations,
+  systemPrivacySettingsOperations,
+  serverAccountOperations,
+  accessOperations,
   workspaceVersionOperations,
+  historyOperations,
   workspaceSearchOperations,
+  folderAppOfferOperations,
   crashReportOperations,
   reportingOperations,
+  usageRecordOperations,
   engineYDocAdmissionOperations,
   liveDraftRecoveryOperations,
+  stopAndRestoreRecoveryOperations,
   engineYDocSaveOperations,
   captureRecoveryOperations,
+  fileObservationOperations,
   chatDispatchNoticeOperations,
+  agentRunStateOperations,
   scheduleHostOperations,
   noticeOperations,
   sharedViewAccessOperations,
+  shareDirectWriteDeliveryOperations,
 ] as const satisfies readonly OperationTable[];

@@ -31,7 +31,7 @@ themeToggle?.addEventListener('click', () => {
 
 syncThemeToggle();
 
-const RELEASES_URL = 'https://github.com/dohc-ai/dohc/releases';
+const RELEASES_URL = 'https://github.com/dohchq/dohc/releases';
 
 function matchesBuild(extension, architecture) {
   const architecturePattern = new RegExp(`(?:^|[-_])${architecture}(?:[-_.]|$)`, 'i');
@@ -46,10 +46,6 @@ const downloadBuilds = {
   'mac-arm64': {
     platform: 'mac', label: 'macOS', detail: 'Apple silicon, .dmg', icon: 'apple',
     matches: matchesBuild('.dmg', 'arm64'),
-  },
-  'mac-x64': {
-    platform: 'mac', label: 'macOS', detail: 'Intel, .dmg', icon: 'apple',
-    matches: matchesBuild('.dmg', 'x64'),
   },
   'linux-x64': {
     platform: 'linux', label: 'Linux', detail: 'x64, AppImage', icon: 'linux',
@@ -80,7 +76,6 @@ async function preferredDownloadKey() {
   try {
     const values = await navigator.userAgentData?.getHighEntropyValues?.(['architecture']);
     if (/arm/i.test(values?.architecture ?? '')) return 'mac-arm64';
-    if (/x86/i.test(values?.architecture ?? '')) return 'mac-x64';
   } catch {
     // Safari and privacy-hardened browsers do not expose architecture.
   }

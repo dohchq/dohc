@@ -15,7 +15,7 @@ export function createPrepareFixture(root, buildSource, { commit = true } = {}) 
   put("scripts/verification/build.mjs", readFileSync(buildSource));
   put("scripts/verification/cancellation.mjs", readFileSync(new URL("./cancellation.mjs", import.meta.url)));
   put("tools/rust-engine-program/build-slot.mjs", "export const acquireExclusiveSlot=()=>null; export const capBuildParallelism=source=>({...source}); export const resolveBuildBudget=()=>null; export const freeDiskGb=()=>100; export const acquireBuildSlot=()=>{throw Error('not expected')};  export const acquireVerificationSlot=()=>null;");
-  put("scripts/verification/admission.mjs", "export const admissionPreflight=()=>{};export const installedDependenciesMatch=()=>false;export const verificationAdmission=()=>({lightweight:false,reason:'fixture full lane'});");
+  put("scripts/verification/admission.mjs", "export const admissionPreflight=()=>{};export const installedDependenciesMatch=()=>false;");
   put("apps/desktop/scripts/require-e2e-engine.mjs", "export const requireE2eEngine=()=>{};");
   put("scripts/verification/process.mjs", `
     import assert from 'node:assert/strict';
@@ -31,7 +31,7 @@ export function createPrepareFixture(root, buildSource, { commit = true } = {}) 
       appendFileSync(join(repoRoot,'.dohc-dev/calls.jsonl'),JSON.stringify({command,args})+'\\n');
       if(command==='pnpm' && args[0]==='install') {
         put(log,'preparation install output');
-        assert.deepEqual(args,['install','--frozen-lockfile']);
+        assert.deepEqual(args,['install','--frozen-lockfile','--config.confirm-modules-purge=false']);
         assert.ok(existsSync(join(repoRoot,'.dohc-dev/verification/build.json.lock')));
         if(process.env.FIXTURE_INSTALL_FAIL==='1') throw new Error('frozen install rejected');
         put(join(repoRoot,'node_modules/installed.txt'),readFileSync(join(repoRoot,'pnpm-lock.yaml')));
@@ -50,7 +50,8 @@ export function createPrepareFixture(root, buildSource, { commit = true } = {}) 
       }
       assert.deepEqual([command,...args],['pnpm','--filter','@dohc/desktop','build']);
       for(const path of ['apps/desktop/dist','apps/desktop/resources/cli-bin','apps/desktop/resources/app-backend-runtime',
-        ...(process.platform==='win32' && process.arch==='x64'?['apps/desktop/resources/app-compiler']:[])])
+        ...(['win32-x64','darwin-arm64','linux-arm64','linux-x64'].includes(process.platform+'-'+process.arch)?['apps/desktop/resources/app-compiler']:[]),
+        ...(process.platform==='win32' && process.arch==='x64'?['apps/desktop/resources/agent-probe']:[])])
         put(join(repoRoot,path,'built.txt'),readFileSync(join(repoRoot,'node_modules/installed.txt')));
       for(const name of ['dohc','dohc-mcp']) {
         const launcher=join(repoRoot,'apps/desktop/resources/cli-bin',name);

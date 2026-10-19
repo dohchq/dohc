@@ -317,22 +317,31 @@ fn enqueue_operation(
 fn row_to_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<MaterializationJob> {
     let present: i64 = row.get(4)?;
     let preimage_sha: Option<String> = row.get(5)?;
-    let preimage = if present != 0 {
-        Preimage::Present(preimage_sha.unwrap_or_default())
-    } else {
-        Preimage::Absent
+    let preimage = match (present, preimage_sha) {
+        (0, None) => Preimage::Absent,
+        (1, Some(sha)) if !sha.is_empty() => Preimage::Present(sha),
+        _ => {
+            return Err(invalid_job_field(
+                4,
+                rusqlite::types::Type::Integer,
+                "invalid materialization preimage",
+            ));
+        }
     };
     let status_raw: String = row.get(7)?;
-    let status = JobStatus::parse(&status_raw).unwrap_or(JobStatus::Conflict);
+    let status = JobStatus::parse(&status_raw).ok_or_else(|| {
+        invalid_job_field(
+            7,
+            rusqlite::types::Type::Text,
+            "unknown materialization status",
+        )
+    })?;
     let operation_raw: String = row.get(9)?;
     let operation = MaterializationOperation::parse(&operation_raw).ok_or_else(|| {
-        rusqlite::Error::FromSqlConversionFailure(
+        invalid_job_field(
             9,
             rusqlite::types::Type::Text,
-            Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "unknown materialization operation",
-            )),
+            "unknown materialization operation",
         )
     })?;
     Ok(MaterializationJob {
@@ -348,14 +357,57 @@ fn row_to_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<MaterializationJob> {
     })
 }
 
+fn invalid_job_field(
+    index: usize,
+    kind: rusqlite::types::Type,
+    message: &'static str,
+) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        index,
+        kind,
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            message,
+        )),
+    )
+}
+
 const JOB_COLUMNS: &str = "job_id, workspace_id, target_path, content_sha256, preimage_present, \
      preimage_sha256, target_generation, status, created_at_ms, operation";
 
-/// Every pending job, oldest first (then by id for determinism). The set the
-/// filesystem pipeline replays at startup and executes on enqueue.
+/// Every pending job, oldest first, then by id for determinism. The set the
+/// filesystem pipeline replays at startup and executes on enqueue. Checked
+/// deletes are left to their own recovery.
 pub(crate) fn list_pending_jobs(
     conn: &Connection,
 ) -> Result<Vec<MaterializationJob>, StorageError> {
+    let invalid_status: bool = conn
+        .prepare_cached(
+            "SELECT EXISTS (SELECT 1 FROM materialization_jobs \
+             WHERE status < ?1 \
+                OR (status > ?1 AND status < ?2) \
+                OR (status > ?2 AND status < ?3) \
+                OR (status > ?3 AND status < ?4) \
+                OR status > ?4)",
+        )
+        .map_err(StorageError::corrupt)?
+        .query_row(
+            [
+                JobStatus::Cancelled.as_str(),
+                JobStatus::Complete.as_str(),
+                JobStatus::Conflict.as_str(),
+                JobStatus::Pending.as_str(),
+            ],
+            |row| row.get(0),
+        )
+        .map_err(StorageError::corrupt)?;
+    if invalid_status {
+        return Err(StorageError::corrupt(invalid_job_field(
+            7,
+            rusqlite::types::Type::Text,
+            "unknown materialization status",
+        )));
+    }
     list_jobs(conn, true)
 }
 
@@ -369,7 +421,7 @@ pub(crate) fn list_jobs(
         ""
     };
     let sql = format!(
-        "SELECT {JOB_COLUMNS} FROM materialization_jobs \
+        "SELECT {JOB_COLUMNS} FROM materialization_jobs j \
          {filter} ORDER BY created_at_ms ASC, job_id ASC"
     );
     let mut stmt = conn.prepare_cached(&sql).map_err(StorageError::corrupt)?;
@@ -381,6 +433,21 @@ pub(crate) fn list_jobs(
         jobs.push(job.map_err(StorageError::corrupt)?);
     }
     Ok(jobs)
+}
+
+/// Pending switch intents in the replay workspace, including legacy unscoped rows.
+pub fn pending_switch_jobs_in(
+    conn: &Connection,
+    workspace_id: &str,
+) -> Result<Vec<(String, String)>, StorageError> {
+    let mut statement = conn.prepare_cached(
+        "SELECT job_id,target_path FROM materialization_jobs WHERE workspace_id IN (?1,'') AND status='pending' AND job_id GLOB 'version-switch-*'"
+    ).map_err(StorageError::corrupt_public)?;
+    statement
+        .query_map([workspace_id], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(StorageError::corrupt_public)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StorageError::corrupt_public)
 }
 
 pub(crate) fn has_pending_job_for_path(
@@ -441,6 +508,31 @@ pub(crate) fn mark_cancelled(
     now_ms: i64,
 ) -> Result<(), StorageError> {
     set_status(conn, job_id, JobStatus::Cancelled, now_ms)
+}
+
+/// The publication job id of moment `m`, from its recorded kind: binary
+/// writes prefix the moment id with `binary-mat_` (the domain's
+/// `binary_write_job_id`), text writes with `authored-mat_`. A job is that
+/// moment's only when its workspace and generation also match the moment.
+pub const MOMENT_PUBLICATION_JOB_SQL: &str = "CASE m.after_content_kind WHEN 'binary' \
+     THEN 'binary-mat_' || m.moment_id ELSE 'authored-mat_' || m.moment_id END";
+
+/// Record that the keyed write this job publishes never reached disk.
+pub(crate) fn record_superseded_publication(
+    conn: &Connection,
+    job: &MaterializationJob,
+) -> Result<(), StorageError> {
+    conn.execute(
+        &format!(
+            "UPDATE engine_requests SET publication_outcome = 'superseded' \
+             WHERE kind = 'versioned' AND publication_outcome IS NULL AND result_seq = \
+             (SELECT m.moment_order FROM moments m WHERE m.workspace_id = ?1 \
+              AND m.moment_order = ?2 AND {MOMENT_PUBLICATION_JOB_SQL} = ?3)"
+        ),
+        rusqlite::params![job.workspace_id, job.target_generation, job.job_id],
+    )
+    .map_err(StorageError::persist)?;
+    Ok(())
 }
 
 /// Mark a job in conflict (newer external content was preserved; not clobbered).
@@ -627,16 +719,7 @@ pub(crate) fn open_displacements(
     if specs.is_empty() {
         return Ok(Vec::new());
     }
-    const SYNCHRONOUS_FULL: i64 = 2;
-    let session: i64 = conn
-        .pragma_query_value(None, "synchronous", |row| row.get(0))
-        .map_err(StorageError::corrupt)?;
-    conn.pragma_update(None, "synchronous", SYNCHRONOUS_FULL)
-        .map_err(StorageError::persist)?;
-    let inserted = (|| {
-        let tx = conn
-            .unchecked_transaction()
-            .map_err(StorageError::persist)?;
+    with_full_commit(conn, |tx| {
         let mut ids = Vec::with_capacity(specs.len());
         for spec in specs {
             tx.execute(
@@ -657,15 +740,8 @@ pub(crate) fn open_displacements(
             .map_err(StorageError::persist)?;
             ids.push(tx.last_insert_rowid());
         }
-        tx.commit().map_err(StorageError::persist)?;
-        Ok::<_, StorageError>(ids)
-    })();
-    let restored = conn
-        .pragma_update(None, "synchronous", session)
-        .map_err(StorageError::persist);
-    let displacement_id = inserted?;
-    restored?;
-    Ok(displacement_id)
+        Ok(ids)
+    })
 }
 
 /// Record a staged file that stays where it is as a `kept` row, in an
@@ -824,9 +900,9 @@ pub(crate) fn pending_job_count(conn: &Connection) -> Result<i64, StorageError> 
 /// for `path` in `workspace_id`, including legacy rows whose workspace
 /// coordinate predates the column, or `None` if nothing has been materialized
 /// there yet. An empty caller coordinate is itself a legacy global job, so its
-/// fence spans every workspace. Active
-/// version projections use snapshot timestamps, which are a different
-/// namespace and therefore cannot participate in this ordering fence. The
+/// fence spans every workspace. Active version projections (`version-switch-`
+/// jobs) use snapshot timestamps, which are a different namespace and
+/// therefore cannot participate in this ordering fence. The
 /// materialization pipeline uses this to skip a pending ordinary job whose
 /// generation is superseded by an already-materialized newer generation for
 /// the same path (concurrent/out-of-order jobs must never regress a path).
@@ -845,4 +921,95 @@ pub(crate) fn max_completed_generation_for_path(
     .map_err(StorageError::corrupt)?
     .query_row([workspace_id, path], |r| r.get::<_, Option<i64>>(0))
     .map_err(StorageError::corrupt)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetainedDisplacement {
+    pub displacement_id: i64,
+    pub job_id: String,
+    pub workspace_id: String,
+    pub target_path: String,
+    pub source_path: String,
+    pub device: String,
+    pub inode: String,
+    pub digest: String,
+    pub size: i64,
+    pub mtime: String,
+    pub ctime: String,
+    pub changed_at_ms: i64,
+}
+
+pub(crate) fn retained_rows(
+    conn: &Connection,
+    after: i64,
+) -> Result<Vec<RetainedDisplacement>, StorageError> {
+    let mut q = conn.prepare_cached("SELECT displacement_id,job_id,workspace_id,target_path,source_path,device,inode,digest,size,mtime,ctime,changed_at_ms FROM materialization_retained WHERE displacement_id>?1 ORDER BY displacement_id LIMIT 128").map_err(StorageError::corrupt)?;
+    q.query_map([after], |r| {
+        Ok(RetainedDisplacement {
+            displacement_id: r.get(0)?,
+            job_id: r.get(1)?,
+            workspace_id: r.get(2)?,
+            target_path: r.get(3)?,
+            source_path: r.get(4)?,
+            device: r.get(5)?,
+            inode: r.get(6)?,
+            digest: r.get(7)?,
+            size: r.get(8)?,
+            mtime: r.get(9)?,
+            ctime: r.get(10)?,
+            changed_at_ms: r.get(11)?,
+        })
+    })
+    .map_err(StorageError::corrupt)?
+    .collect::<Result<_, _>>()
+    .map_err(StorageError::corrupt)
+}
+
+pub(crate) fn with_full_commit<T>(
+    conn: &Connection,
+    f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T, StorageError>,
+) -> Result<T, StorageError> {
+    crate::durability::with_full_synchronous(conn, |conn| {
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(StorageError::persist)?;
+        let value = f(&tx)?;
+        tx.commit().map_err(StorageError::persist)?;
+        Ok(value)
+    })
+}
+
+pub(crate) fn retain(conn: &Connection, row: &RetainedDisplacement) -> Result<i64, StorageError> {
+    // A lost row is reconstructed from the staged name during recovery.
+    // Keep the ordinary NORMAL commit off the per-save fsync path.
+    conn.execute("INSERT INTO materialization_retained(job_id,workspace_id,target_path,source_path,device,inode,digest,size,mtime,ctime,changed_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) ON CONFLICT(source_path) DO NOTHING",rusqlite::params![row.job_id,row.workspace_id,row.target_path,row.source_path,row.device,row.inode,row.digest,row.size,row.mtime,row.ctime,row.changed_at_ms]).map_err(StorageError::persist)?;
+    conn.query_row(
+        "SELECT displacement_id FROM materialization_retained WHERE source_path=?1",
+        [&row.source_path],
+        |r| r.get(0),
+    )
+    .map_err(StorageError::corrupt)
+}
+
+pub(crate) fn record_retained_read(
+    conn: &Connection,
+    old: &RetainedDisplacement,
+    new: &RetainedDisplacement,
+    bytes: &[u8],
+    now_ms: i64,
+) -> Result<(), StorageError> {
+    if crate::hex_sha256(bytes) != new.digest || bytes.len() > crate::MAX_MATERIALIZE_BYTES {
+        return Err(StorageError::InvalidInput {
+            reason: "retained read bytes do not match the bounded digest",
+        });
+    }
+    // A read version can be overwritten before recovery or source release.
+    // FULL keeps those exact bytes even when the staged inode later changes.
+    with_full_commit(conn, |tx| {
+        let updated=tx.execute("UPDATE materialization_retained SET digest=?2,size=?3,mtime=?4,ctime=?5,changed_at_ms=?6,device=?9,inode=?10 WHERE displacement_id=?1 AND digest=?7 AND changed_at_ms=?8",rusqlite::params![old.displacement_id,new.digest,new.size,new.mtime,new.ctime,now_ms,old.digest,old.changed_at_ms,new.device,new.inode]).map_err(StorageError::persist)?;
+        if updated == 1 && new.digest != old.digest {
+            tx.execute("INSERT OR IGNORE INTO materialization_displacement_reads(workspace_id,displacement_id,job_id,target_path,sha256,bytes,observed_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7)",rusqlite::params![old.workspace_id,format!("retained:{}",old.displacement_id),old.job_id,old.target_path,new.digest,bytes,now_ms]).map_err(StorageError::persist)?;
+        }
+        Ok(())
+    })
 }

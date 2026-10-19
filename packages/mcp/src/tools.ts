@@ -1,3 +1,7 @@
+import { LinksInInput, LinksResolveInput } from "@dohc/workspace-contracts/links";
+import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
+import { WorkspaceSyncPause, workspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
+import { ShareCopyInput } from "@dohc/workspace-contracts/share-copy";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import {normalizeShareLabel, shareSubjectFallback, shareSenderLabel} from "@dohc/security-contract/share-labels";
 import { sha256Hex } from "@dohc/workspace-core/hash";
@@ -17,10 +21,9 @@ import { databaseSyncStrategy, DOHC_METADATA_GUARD, frameworkConfigName, hasIgno
 import { sendCliRequest } from "@dohc/cli/client";
 import { DohcCliError } from "@dohc/cli/errors";
 import { OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
-import { DatasetRequest } from "@dohc/cli/dataset";
+import { DATASET_CAPABILITIES, DatasetRequest } from "@dohc/cli/dataset";
 import {
   CLI_PROTOCOL_VERSION,
-  DATASET_CAPABILITIES,
   APP_PUBLICATION_CAPABILITIES,
   collectionCreateFieldsSchema,
   collectionQueryCursorSchema,
@@ -56,15 +59,19 @@ import {
 import { basename, join } from "node:path";
 
 export const MCP_TOOL_CAPABILITIES = {
+  dohc_read_share_copy: ["share.copy.read"],
   dohc_list_automations: ["automation.list"],
   dohc_switch_automation: ["automation.switch"],
   dohc_dataset: Object.values(DATASET_CAPABILITIES),
   dohc_publish_app: Object.values(APP_PUBLICATION_CAPABILITIES),
   dohc_list_workspaces: ["workspace.list"],
   dohc_workspace_status: ["workspace.status"],
+  dohc_stop_workspace_sync: ["workspace.sync.stop"],
   dohc_list_changes: ["history.list"],
   dohc_list_kept_copies: ["file.kept.list"],
   dohc_save_kept_copy: ["file.kept.save"],
+  dohc_links_in: ["links.in"],
+  dohc_links_resolve: ["links.resolve"],
   dohc_read_change: ["history.read"],
   dohc_list_files: ["file.list"],
   dohc_read_file: ["file.read"],
@@ -74,6 +81,8 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_create_document: ["document.create"],
   dohc_write_file: ["file.write"],
   dohc_create_directory: ["folder.create"],
+  dohc_read_operation: ["history.operation.read"],
+  dohc_undo_operation: ["history.operation.undo"],
   dohc_move_path: ["file.move"],
   dohc_delete_path: ["file.delete"],
   dohc_detect_apps: ["app.detect"],
@@ -105,9 +114,8 @@ export interface ToolContext {
   // Desktop state/home dir (the --home arg): holds dohc-workspaces.json.
   home: string;
   // The share level this server was launched for, from the
-  // --share-access flag. Absent means a local workspace: every tool registers.
-  // A level narrows the write surface — see createDohcMcpServer, which decides
-  // which write tools exist for it.
+  // --share-access flag. Absent means a local workspace at the Owner level.
+  // The capability table decides the levels at which each tool registers.
   shareAccess?: ShareAccess;
   // Injectable CLI transport for tests. Production uses sendCliRequest with
   // the explicit desktop state dir supplied by --home.
@@ -866,6 +874,8 @@ interface RegistryWorkspace {
   kind: string;
   mode?: string;
   remote?: RemoteIdentity;
+  pausedRemote?: RemoteIdentity;
+  syncPause?: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPause;
   confirmedRemovedShares?: Array<{ shareId: string; removedAtMs: number }>;
 }
 
@@ -1029,6 +1039,11 @@ function removedShareStatus(workspace: RegistryWorkspace | null) {
   return removedShares.length ? {removedShares} : {};
 }
 
+export async function stopWorkspaceSync(ctx: ToolContext, agent?: string) {
+  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "Open the owning workspace to stop its sync." };
+  return requestCli(ctx, "stopSync", { ...(agent ? { agent } : {}) });
+}
+
 export async function workspaceStatus(ctx: ToolContext) {
   const [manifest, remote, credentials, entry] = await Promise.all([
     readSyncManifest(ctx),
@@ -1037,8 +1052,16 @@ export async function workspaceStatus(ctx: ToolContext) {
     findWorkspaceEntry(ctx),
   ]);
   const serverUrl = remote?.serverUrl ?? manifest?.serverUrl;
-  const synced = remote !== null || nonEmptyString(manifest?.serverUrl);
+  const synced = !entry?.pausedRemote && (remote !== null || nonEmptyString(manifest?.serverUrl));
   const credential = credentialStatusFor(remote, credentials);
+  const pause = !entry?.shareView ? WorkspaceSyncPause.safeParse(entry?.syncPause) : null;
+  let syncPause: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseStatus | undefined;
+  if (pause?.success) {
+    const identity = pause.data.author.kind === "person"
+      ? await readJson<unknown>(join(ctx.home, "dohc-local-id.json")) : null;
+    const personId = isRecord(identity) && typeof identity.id === "string" ? identity.id : null;
+    syncPause = workspaceSyncPauseStatus(pause.data, personId);
+  }
   return {
     ...(entry?.shareView ? {receivedShare: {
       subjectName: normalizeShareLabel(entry.shareView.subjectName) ?? shareSubjectFallback(entry.shareView.grantedSelector),
@@ -1046,6 +1069,7 @@ export async function workspaceStatus(ctx: ToolContext) {
       access: ctx.shareAccess ?? null,
     }} : {}),
     synced,
+    ...(syncPause ? { syncPause } : {}),
     ...removedShareStatus(entry),
     scope: synced ? ("cloud" as const) : ("local" as const),
     ...credential,
@@ -1748,7 +1772,7 @@ export async function importData(
   const body = await readFile(sourceRel.absolute, "utf8");
   const { createSqliteEngine } = await import("@dohc/sqlite-worker");
   const engine = await createSqliteEngine();
-  const result = await engine.importData({
+  const result = await engine.materializeImport({
     name: args.sourcePath,
     mediaType: mediaTypeForPath(args.sourcePath) ?? "text/plain",
     body,
@@ -1757,7 +1781,7 @@ export async function importData(
   if (!result.ok) return { ok: false as const, reason: `${result.code}: ${result.message}` };
 
   const written = await requestCli(ctx, "fileWrite", {
-    files: [{ path: dbRel.normalized, contentBase64: result.bytesBase64, createOnly: true }],
+    files: [{ path: dbRel.normalized, contentBase64: result.bytes.toString('base64'), createOnly: true }],
     agent, requestId: randomUUID(),
   });
   if (!written.ok) return written;
@@ -1865,13 +1889,32 @@ async function requestCli<Verb extends CliVerb>(
     },
   } as unknown as Extract<CliRequestWithoutToken, { verb: Verb }>;
   try {
-    const rawResult = ctx.request
-      ? await ctx.request(request)
-      : await sendCliRequest(request, { stateDir: ctx.home, ...(verb === "dataset" || verb === "appPublication" ? {timeoutMs:90_000} : {}) });
-    return parseCliResult(verb, rawResult);
+    if (ctx.request) return parseCliResult(verb, await ctx.request(request));
+    return await sendCliRequest(request, { stateDir: ctx.home, ...(verb === "dataset" || verb === "appPublication" ? {timeoutMs:90_000} : {}) });
   } catch (error) {
     return { ok: false as const, reason: cliFailureReason(error, verb) };
   }
+}
+
+export async function linksIn(ctx: ToolContext, input: LinksInInput) { return requestCli(ctx, "linksIn", LinksInInput.parse(input)); }
+export async function linksResolve(ctx: ToolContext, input: LinksResolveInput) { return requestCli(ctx, "linksResolve", LinksResolveInput.parse(input)); }
+
+export async function readOperation(ctx: ToolContext, args: { operationId: string; cursor?: string }) {
+  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "History operations require the owning workspace. Open it to continue." };
+  if (!HistoryOperationId.safeParse(args.operationId).success) return { ok: false as const, reason: "Use an operation id from history list: dohc-operation: followed by a UUID." };
+  return requestCli(ctx, "historyOperation", args);
+}
+export async function undoOperation(ctx: ToolContext, args: { operationId: string }, agent?: string) {
+  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "History operations require the owning workspace. Open it to continue." };
+  if (!HistoryOperationId.safeParse(args.operationId).success) return { ok: false as const, reason: "Use an operation id from history list: dohc-operation: followed by a UUID." };
+  return requestCli(ctx, "historyUndo", { operationId: args.operationId, ...(agent ? { agent } : {}) });
+}
+
+export async function getShareCopyDetails(ctx: ToolContext, input: unknown) {
+  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "Share copy details require the owning workspace." };
+  const parsed = ShareCopyInput.safeParse(input);
+  if (!parsed.success) return { ok: false as const, reason: "Invalid share copy request." };
+  return requestCli(ctx, "shareCopy", parsed.data);
 }
 
 /** Publication uses the same owner-local attachment as the CLI. */

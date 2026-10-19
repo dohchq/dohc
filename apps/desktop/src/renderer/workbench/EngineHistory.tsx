@@ -1,17 +1,19 @@
 import { formatChatTime } from "../time";
 import { basenameOf } from "../path";
-import { ChevronDown, ChevronRight, FileArchive, FileText, History, Lock, RotateCcw, Search, X, Zap } from "lucide-react";
+import { ChevronDown, ChevronRight, Database, FileArchive, FileText, History, Info, Layers, Lock, RotateCcw, Search, TriangleAlert, X, Zap } from "lucide-react";
 import { EmptyState } from "../ui/controls";
-import { useId, useMemo, useState } from "react";
+import { Ref } from "../ui/Ref";
+import { useCallback, useId, useMemo, useState } from "react";
 import { LegendList } from "@legendapp/list/react";
-import type { EngineMomentRecord } from "../../ipc/bridgeContract";
-import { chatAuthorLabel } from "./LinkedChats";
+import { HISTORY_MAX_SOURCES, type EngineMomentRecord, type TimelineEntry } from "../../ipc/bridgeContract";
+import { chatAuthorLabel } from "./chatMessages";
 
-// Engine history timeline. Renders engine moments with their summaries
-// ("Saved latest edits", "Merged version X into Main", "Reconciled offline
-// edits", ...) and groups a multi-file pass (reconcile, switch, merge,
-// restore) into one expandable item via its correlationId. Product
-// vocabulary only, no git terms.
+// The History timeline: file moments, version markers and Collection
+// changes, newest first, in the order main merged them. File moments keep
+// their summaries ("Saved latest edits", "Merged version X into Main",
+// "Reconciled offline edits", ...) and a multi-file pass (reconcile, switch,
+// merge, restore) groups into one expandable item via its correlationId.
+// Product vocabulary only, no git terms.
 
 interface EngineHistoryGroup {
   key: string;
@@ -20,6 +22,23 @@ interface EngineHistoryGroup {
   correlationId?: string;
   moments: EngineMomentRecord[];
 }
+
+type VersionEntry = Extract<TimelineEntry, { kind: "version" }>;
+type CollectionEntry = Extract<TimelineEntry, { kind: "collection" }>;
+
+export type TimelineItem =
+  | { kind: "files"; key: string; group: EngineHistoryGroup }
+  | { kind: "version"; key: string; version: VersionEntry["version"] }
+  | { kind: "collection"; key: string; entry: CollectionEntry };
+
+// The Collections a timeline can name and open on their History, with each
+// operation's label by its name. A Collection this computer cannot open has
+// no `openHistory`.
+export type HistoryCollections = ReadonlyMap<string, {
+  name: string;
+  operationLabels?: ReadonlyMap<string, string>;
+  openHistory?: () => void;
+}>;
 
 // The list label for one moment: its real engine summary when it has one,
 // else calm product copy derived from the operation.
@@ -55,6 +74,11 @@ export function engineOriginLabel(origin: EngineMomentRecord["origin"]): string 
       return "dohc";
     case "ydoc":
       return "Live edit";
+    // Typing capture kept when its file changed outside dohc, in the words
+    // of its notice. Dismissing or restoring it leaves the same change.
+    case "capture-recovery":
+    case "capture-recovery-cleared":
+      return "Typing kept";
     default:
       return "Unknown source";
   }
@@ -64,15 +88,22 @@ export function engineOriginLabel(origin: EngineMomentRecord["origin"]): string 
 // "the agent name" (the same formatting rule the chat rail uses via
 // chatAuthorLabel), and one a Collection automation authored as the
 // automation's name and its Collection. An Edit link's direct file write
-// names the link and a short form of the browser session that used it, so
-// it never reads like an app submission from a link holder. A restore names
-// this computer's person who made it; their other edits read as a local file
-// edit or a live edit. Everything else keeps its actor-neutral origin label.
+// names the link and a short id for its holder; an app submission names the
+// holder with the same short id, so it never reads like an Edit link's write. A
+// restore names this computer's person who made it; their other edits read as a local file
+// edit or a live edit. A live edit the relay admitted from an account or link
+// holder names them. Everything else keeps its actor-neutral origin label.
 export function engineMomentSourceLabel(
-  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "personAuthorName" | "publicAuthor" | "linkAuthor" | "automationAuthor" | "namedAuthor">,
+  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "personAuthorName" | "liveAuthorName" | "publicAuthor" | "linkAuthor" | "automationAuthor" | "namedAuthor" | "authorLabels">,
 ): string {
   if (moment.origin === "restore" && moment.personAuthorName !== undefined) return moment.personAuthorName;
-  if (moment.publicAuthor) return `Link holder ${moment.publicAuthor.principalId}`;
+  if (moment.authorLabels) {
+    const [first, second, third, ...rest] = moment.authorLabels;
+    const shown = [first, second, third].filter((label): label is string => label !== undefined).join(", ");
+    return rest.length ? `${shown} and ${rest.length} more` : shown;
+  }
+  if (moment.liveAuthorName) return moment.liveAuthorName;
+  if (moment.publicAuthor) return `Link holder ${moment.publicAuthor.principalId.replace(/^public_/, "").slice(0, 8)}`;
   if (moment.linkAuthor) return `Edit link · holder ${moment.linkAuthor.principalId.slice(0, 8)}`;
   if (moment.automationAuthor) {
     const { name, collection } = moment.automationAuthor;
@@ -87,7 +118,7 @@ export function engineMomentSourceLabel(
 // Where a moment came from, as one line of History. An automation's name
 // and Collection follow the ⚡ mark, in words, so nothing waits behind hover.
 export function EngineMomentSource(props: {
-  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "personAuthorName" | "publicAuthor" | "linkAuthor" | "automationAuthor" | "namedAuthor">;
+  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "personAuthorName" | "liveAuthorName" | "publicAuthor" | "linkAuthor" | "automationAuthor" | "namedAuthor" | "authorLabels">;
   testId: string;
   id?: string;
 }) {
@@ -126,47 +157,99 @@ export function groupAgentAuthorName(
     : undefined;
 }
 
-// Groups consecutive moments that share a correlationId (the list is newest
-// first, and one pass records its per-file moments contiguously on the
-// capture chain). Moments without a correlationId stay singletons.
-export function groupEngineMoments(
-  moments: readonly EngineMomentRecord[],
-): EngineHistoryGroup[] {
-  const groups: EngineHistoryGroup[] = [];
-  for (const moment of moments) {
-    const previous = groups[groups.length - 1];
-    if (
-      previous &&
-      moment.correlationId !== undefined &&
-      previous.correlationId === moment.correlationId
-    ) {
-      previous.moments.push(moment);
+// Keeps the order main merged and groups consecutive file moments that share
+// a correlationId (one pass records its per-file moments contiguously on the
+// capture chain). A version or Collection row between them ends the group.
+// Moments without a correlationId stay singletons.
+export function groupTimeline(entries: readonly TimelineEntry[]): TimelineItem[] {
+  const items: TimelineItem[] = [];
+  for (const entry of entries) {
+    if (entry.kind === "version") {
+      items.push({ kind: "version", key: `version:${entry.version.id}`, version: entry.version });
       continue;
     }
-    groups.push({
+    if (entry.kind === "collection") {
+      items.push({ kind: "collection", key: `collection:${entry.datasetId}:${entry.change.revision}`, entry });
+      continue;
+    }
+    const { moment } = entry;
+    const previous = items[items.length - 1];
+    if (
+      previous?.kind === "files" &&
+      moment.correlationId !== undefined &&
+      previous.group.correlationId === moment.correlationId
+    ) {
+      previous.group.moments.push(moment);
+      continue;
+    }
+    items.push({
+      kind: "files",
       key: moment.id,
-      summary: engineMomentSummary(moment),
-      recordedAtMs: moment.recordedAtMs,
-      ...(moment.correlationId !== undefined
-        ? { correlationId: moment.correlationId }
-        : {}),
-      moments: [moment],
+      group: {
+        key: moment.id,
+        summary: engineMomentSummary(moment),
+        recordedAtMs: moment.recordedAtMs,
+        ...(moment.correlationId !== undefined
+          ? { correlationId: moment.correlationId }
+          : {}),
+        moments: [moment],
+      },
     });
   }
-  return groups;
+  return items;
 }
 
-function engineHistorySearchText(group: EngineHistoryGroup): string {
+function automationName(automation: NonNullable<CollectionEntry["change"]["automation"]>): string {
+  return automation.name ?? automation.automationId.slice(automation.automationId.lastIndexOf("#") + 1);
+}
+
+// Main is where the workspace starts, not a version someone created.
+export function versionMarkerTitle(version: VersionEntry["version"]): string {
+  return version.kind === "main" ? "Workspace created" : `Created version ${version.name}`;
+}
+
+// A Collection change in the person's words. A rules change says so; a
+// record change takes its operation's label when the Collection's
+// definition names it, else the Collection it changed.
+export function collectionChangeTitle(entry: CollectionEntry, label: string | undefined): string {
+  if (entry.change.schema) return "Changed fields and rules";
+  return label ?? `Changed ${entry.name}`;
+}
+
+// The agent that approved a Collection's rules, if one did.
+function approvalAgentName(change: CollectionEntry["change"]): string | undefined {
+  const agent = change.approvalAgent;
+  return agent ? chatAuthorLabel({ authorKind: "agent", authorDisplayName: agent.label ?? "Agent" }) : undefined;
+}
+
+function timelineSearchText(item: TimelineItem, labelOf: (entry: CollectionEntry) => string | undefined): string {
+  if (item.kind === "version") return versionMarkerTitle(item.version).toLowerCase();
+  if (item.kind === "collection") {
+    const { name, change } = item.entry;
+    return [collectionChangeTitle(item.entry, labelOf(item.entry)), name, change.operation,
+      approvalAgentName(change) ?? "", change.automation ? automationName(change.automation) : ""].join("\n").toLowerCase();
+  }
   return [
-    group.summary,
-    ...group.moments.flatMap((moment) => [
+    item.group.summary,
+    ...item.group.moments.flatMap((moment) => [
       moment.path,
       engineMomentSummary(moment),
       engineMomentSourceLabel(moment),
+      ...(moment.authorLabels ?? []),
     ]),
   ]
     .join("\n")
     .toLowerCase();
+}
+
+// Which day heading an item sits under. A Collection change main could not
+// date sits where main placed it, under its neighbours' day; its row says
+// the date is unknown. Only an item with no placement time either gets the
+// "Date unknown" heading.
+function itemPlacement(item: TimelineItem): number | null {
+  if (item.kind === "files") return item.group.recordedAtMs;
+  if (item.kind === "version") return item.version.createdAtMs;
+  return item.entry.sortAtMs;
 }
 
 function dayKey(recordedAtMs: number): string {
@@ -183,7 +266,8 @@ const dayFormat = new Intl.DateTimeFormat(undefined, {
   year: "numeric",
 });
 
-function formatDay(recordedAtMs: number): { label: string; dateTime: string } {
+function formatDay(recordedAtMs: number | null): { label: string; dateTime: string | null } {
+  if (recordedAtMs === null) return { label: "Date unknown", dateTime: null };
   const recordedAt = new Date(recordedAtMs);
   return {
     label: dayFormat.format(recordedAt),
@@ -191,7 +275,35 @@ function formatDay(recordedAtMs: number): { label: string; dateTime: string } {
   };
 }
 
-function MomentRow(props: {
+// "Budget", "Budget and Guests", "Budget, Guests, Tasks and 2 more", or
+// "2 Collections" when this computer knows none of their names.
+export function collectionListPhrase(names: readonly string[], total: number): string {
+  const shown = names.slice(0, 3);
+  const rest = total - shown.length;
+  if (shown.length === 0) return `${total} Collection${total === 1 ? "" : "s"}`;
+  if (rest > 0) return `${shown.join(", ")} and ${rest} more`;
+  return shown.length === 1 ? shown[0]! : `${shown.slice(0, -1).join(", ")} and ${shown.at(-1)}`;
+}
+
+// The sentences that say what a partial timeline is missing.
+export function missingSourcesWords(
+  unavailable: readonly { datasetId: string }[],
+  omitted: number,
+  nameOf: (datasetId: string) => string | undefined,
+): { unavailable: string | null; omitted: string | null } {
+  const names = unavailable.flatMap((source) => nameOf(source.datasetId) ?? []);
+  return {
+    unavailable: unavailable.length
+      ? `dohc could not load changes from ${collectionListPhrase(names, unavailable.length)}.`
+      : null,
+    omitted: omitted > 0
+      ? `History includes up to ${HISTORY_MAX_SOURCES} Collections. ${omitted} more ${omitted === 1 ? "is" : "are"} left out. To see a Collection's changes, open it and choose History.`
+      : null,
+  };
+}
+
+// One change in the timeline. The states page renders it too.
+export function MomentRow(props: {
   moment: EngineMomentRecord;
   nested?: boolean;
   onOpenMoment: (momentId: string, filePath: string) => void;
@@ -202,6 +314,9 @@ function MomentRow(props: {
   // change is its description.
   const sourceId = useId();
   const describedBySource = moment.automationAuthor !== undefined && !props.nested;
+  // A state mark sits on the first line's center: the 22px chip in a nested
+  // row, the 13px summary otherwise.
+  const mark = props.nested ? "mt-[5px]" : "mt-0.5";
   return (
     <button
       type="button"
@@ -224,28 +339,33 @@ function MomentRow(props: {
             size={12}
             aria-hidden
             data-testid="engine-moment-lock"
-            className="mt-0.5 shrink-0 text-subtle"
+            className={`${mark} shrink-0 text-subtle`}
           />
         ) : moment.contentKind === "binary" ? (
           <FileArchive
             size={12}
             aria-hidden
             data-testid="engine-moment-binary"
-            className="mt-0.5 shrink-0 text-subtle"
+            className={`${mark} shrink-0 text-subtle`}
           />
         ) : moment.origin === "restore" ? (
-          <RotateCcw size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
+          <RotateCcw size={12} aria-hidden className={`${mark} shrink-0 text-subtle`} />
+        ) : props.nested ? (
+          // The file's own chip carries its kind.
+          <span aria-hidden className="size-3 shrink-0" />
         ) : (
           <FileText size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
         )}
         <span className="min-w-0 flex-1">
-          <span
-            className={`block truncate text-[13px] text-ink ${
-              props.nested ? "font-mono" : "font-medium"
-            }`}
-          >
-            {props.nested ? moment.path : engineMomentSummary(moment)}
-          </span>
+          {props.nested ? (
+            <span className="flex min-w-0">
+              <Ref path={moment.path} folder />
+            </span>
+          ) : (
+            <span className="block truncate text-[13px] font-medium text-ink">
+              {engineMomentSummary(moment)}
+            </span>
+          )}
           <span className="mt-0.5 block truncate text-[11px] text-subtle">
             {props.nested ? (
               engineOperationLabel(moment)
@@ -349,44 +469,181 @@ function GroupRow(props: {
   );
 }
 
+// A version starting, as a marker between changes. It opens nothing, so it
+// reads lighter than the changes around it.
+function VersionMarkerRow(props: { version: VersionEntry["version"] }) {
+  const createdAt = formatChatTime(props.version.createdAtMs);
+  return (
+    <div className="flex min-w-0 items-start gap-2 px-3 py-2">
+      <Layers size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-[13px] text-muted">
+          {versionMarkerTitle(props.version)}
+        </span>
+        <span className="mt-0.5 block truncate text-[11px] text-subtle">
+          <time dateTime={createdAt.iso} title={createdAt.iso} className="font-mono">
+            {createdAt.label}
+          </time>
+        </span>
+      </span>
+    </div>
+  );
+}
+
+// One saved Collection change. Like a file's row opens its diff, it opens its
+// Collection's History, where the change and its Undo are, when this
+// computer can open that Collection.
+function CollectionChangeRow(props: { entry: CollectionEntry; label?: string; openHistory?: () => void }) {
+  const { name, change } = props.entry;
+  const recordedAt = change.recordedAtMs === null ? null : formatChatTime(change.recordedAtMs);
+  const agent = approvalAgentName(change);
+  // Only a record change with no label names its Collection in its title,
+  // and only it needs its operation's own name to say which change it was.
+  const unlabelled = !change.schema && props.label === undefined;
+  // The row's name says what it opens, so the change is its description.
+  const metaId = useId();
+  const body = (
+    <span className="flex min-w-0 items-start gap-2">
+      <Database size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-[13px] font-medium text-ink">
+          {collectionChangeTitle(props.entry, props.label)}
+        </span>
+        <span id={metaId} className="mt-0.5 block truncate text-[11px] text-subtle">
+          {agent !== undefined ? (
+            <>
+              <span data-testid="history-collection-agent" className="text-agent">{agent}</span>
+              {" · "}
+            </>
+          ) : null}
+          {change.automation ? (
+            <>
+              <span className="inline-flex items-center gap-1 text-muted">
+                <Zap size={12} strokeWidth={1.9} aria-hidden className="shrink-0" />
+                <span className="sr-only">Automation </span>
+                {automationName(change.automation)}
+              </span>
+              {" · "}
+            </>
+          ) : null}
+          {recordedAt ? (
+            <time dateTime={recordedAt.iso} title={recordedAt.iso} className="font-mono">
+              {recordedAt.label}
+            </time>
+          ) : (
+            <span data-testid="history-collection-date-unknown">Date unknown</span>
+          )}
+          {" · "}
+          {unlabelled ? <span className="font-mono">{change.operation}</span> : <span>{name}</span>}
+        </span>
+      </span>
+    </span>
+  );
+  return props.openHistory ? (
+    <button
+      type="button"
+      data-testid="history-collection-open"
+      aria-describedby={metaId}
+      aria-label={`Open Collection history for ${name}`}
+      title={`Open Collection history for ${name}`}
+      onClick={props.openHistory}
+      className="block w-full px-3 py-2 text-left transition-colors hover:bg-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
+    >
+      {body}
+    </button>
+  ) : (
+    <div className="px-3 py-2">{body}</div>
+  );
+}
+
+// What a partial timeline is missing, above its rows. Try again starts a new
+// source chain; a source left out by the limit stays out, so only the
+// Collections that did not load offer it.
+function HistorySourcesNotice(props: {
+  words: { unavailable: string | null; omitted: string | null };
+  onRetry: () => void;
+}) {
+  const { words } = props;
+  return (
+    <div
+      data-testid="history-sources-notice"
+      className="flex shrink-0 items-start gap-2 border-b border-line bg-panel px-3 py-2 text-[12px] text-muted"
+    >
+      {words.unavailable ? (
+        <TriangleAlert size={12} aria-hidden className="mt-0.5 shrink-0 text-warning" />
+      ) : (
+        <Info size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
+      )}
+      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+        {words.unavailable ? <span data-testid="history-sources-unavailable">{words.unavailable}</span> : null}
+        {words.omitted ? <span data-testid="history-sources-omitted">{words.omitted}</span> : null}
+      </span>
+      {words.unavailable ? (
+        <button
+          type="button"
+          data-testid="history-sources-retry"
+          onClick={props.onRetry}
+          className="h-6 shrink-0 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink"
+        >
+          Try again
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 // The timeline body (side panel History view and the history tab render
 // this over the same root-owned page state).
 export function EngineHistoryView(props: {
-  moments: EngineMomentRecord[];
+  entries: TimelineEntry[];
   hasMore: boolean;
   loadingMore: boolean;
-  protectedTruncated: boolean;
   onLoadMore: () => void;
   onOpenMoment: (momentId: string, filePath: string) => void;
+  unavailableSources?: readonly { datasetId: string }[];
+  omittedSources?: number;
+  collections?: HistoryCollections;
+  // Reads the newest page again, which starts a new source chain.
+  onRetry?: () => void;
 }) {
   const [query, setQuery] = useState("");
   const [expandedGroups, setExpandedGroups] = useState<ReadonlySet<string>>(new Set());
   const [focusedKey, setFocusedKey] = useState<string | null>(null);
   const normalizedQuery = query.trim().toLowerCase();
-  const groups = useMemo(() => groupEngineMoments(props.moments), [props.moments]);
-  const filteredGroups = useMemo(
+  const { collections, entries } = props;
+  const items = useMemo(() => groupTimeline(props.entries), [props.entries]);
+  const labelOf = useCallback(
+    (entry: CollectionEntry) => collections?.get(entry.datasetId)?.operationLabels?.get(entry.change.operation),
+    [collections],
+  );
+  const filteredItems = useMemo(
     () =>
       normalizedQuery
-        ? groups.filter((group) =>
-            engineHistorySearchText(group).includes(normalizedQuery),
-          )
-        : groups,
-    [groups, normalizedQuery],
+        ? items.filter((item) => timelineSearchText(item, labelOf).includes(normalizedQuery))
+        : items,
+    [items, normalizedQuery, labelOf],
   );
   const rows = useMemo(() => {
     const result: Array<
-      | { key: string; day: ReturnType<typeof formatDay>; group?: never }
-      | { key: string; group: EngineHistoryGroup; day?: never }
+      | { key: string; day: ReturnType<typeof formatDay>; item?: never }
+      | { key: string; item: TimelineItem; day?: never }
     > = [];
-    let previousDay: string | null = null;
-    for (const group of filteredGroups) {
-      const day = formatDay(group.recordedAtMs);
-      if (previousDay !== day.dateTime) result.push({ key: `day:${group.key}`, day });
-      result.push({ key: group.key, group });
+    let previousDay: string | null | undefined;
+    for (const item of filteredItems) {
+      const day = formatDay(itemPlacement(item));
+      if (previousDay !== day.dateTime) result.push({ key: `day:${item.key}`, day });
+      result.push({ key: item.key, item });
       previousDay = day.dateTime;
     }
     return result;
-  }, [filteredGroups]);
+  }, [filteredItems]);
+  const words = useMemo(
+    () => missingSourcesWords(props.unavailableSources ?? [], props.omittedSources ?? 0, (datasetId) =>
+      collections?.get(datasetId)?.name ??
+        entries.find((entry): entry is CollectionEntry => entry.kind === "collection" && entry.datasetId === datasetId)?.name),
+    [props.unavailableSources, props.omittedSources, collections, entries],
+  );
+  const retry = props.onRetry ?? (() => undefined);
   const stickyHeaderIndices = useMemo(
     () => rows.flatMap((row, index) => (row.day ? [index] : [])),
     [rows],
@@ -396,17 +653,41 @@ export function EngineHistoryView(props: {
   const retainedKeys = focusedIndex < 0
     ? []
     : rows.slice(Math.max(0, focusedIndex - 2), focusedIndex + 3).map((row) => row.key);
-  const headerItemCount = props.protectedTruncated ? 1 : 0;
+  const headerItemCount = 0;
   const listItemCount = headerItemCount + rows.length + (props.hasMore ? 1 : 0);
   const rowPresentation = useMemo(
-    () => ({ expandedGroups, headerItemCount, listItemCount, onOpenMoment: props.onOpenMoment }),
-    [expandedGroups, headerItemCount, listItemCount, props.onOpenMoment],
+    () => ({ expandedGroups, headerItemCount, listItemCount, onOpenMoment: props.onOpenMoment, collections }),
+    [expandedGroups, headerItemCount, listItemCount, props.onOpenMoment, collections],
   );
+  const partial = words.unavailable !== null || words.omitted !== null;
 
-  // A known page with no moments. The caller renders this view only when it
+  // A known page with no rows. The caller renders this view only when it
   // has a page: "No changes yet" states something about the workspace,
   // and a read still in flight or a read that failed may not state it.
-  if (props.moments.length === 0 && !props.hasMore) {
+  // Neither may a page that is missing Collections: their changes are
+  // unknown, not absent.
+  if (props.entries.length === 0 && !props.hasMore) {
+    if (partial) {
+      return (
+        <div
+          data-testid="history-collections-unavailable"
+          className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center text-xs text-muted"
+        >
+          {words.unavailable ? <span>{words.unavailable}</span> : null}
+          {words.omitted ? <span>{words.omitted}</span> : null}
+          {words.unavailable ? (
+            <button
+              type="button"
+              data-testid="history-sources-retry"
+              onClick={retry}
+              className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink"
+            >
+              Try again
+            </button>
+          ) : null}
+        </div>
+      );
+    }
     return (
       <EmptyState
         icon={History}
@@ -443,14 +724,17 @@ export function EngineHistoryView(props: {
           ) : null}
         </label>
       </div>
+      {partial ? <HistorySourcesNotice words={words} onRetry={retry} /> : null}
       <LegendList
         role="list"
         data-testid="engine-history-list"
-        className="m-0 min-h-0 flex-1 list-none p-0"
+        // `isolate` keeps the sticky day headings' z-index inside History,
+        // under any overlay.
+        className="isolate m-0 min-h-0 flex-1 list-none p-0"
         data={rows}
         keyExtractor={(row) => row.key}
         estimatedItemSize={56}
-        getItemType={(row) => (row.day ? "day" : "moment")}
+        getItemType={(row) => (row.day ? "day" : row.item.kind)}
         stickyHeaderIndices={stickyHeaderIndices}
         recycleItems={false}
         alwaysRender={{ keys: retainedKeys }}
@@ -464,16 +748,6 @@ export function EngineHistoryView(props: {
           if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocusedKey(null);
         }}
         extraData={rowPresentation}
-        ListHeaderComponent={props.protectedTruncated ? (
-          <li
-            role="listitem"
-            aria-posinset={1}
-            aria-setsize={listItemCount}
-            className="border-b border-line px-3 py-2 text-[11px] text-muted"
-          >
-            Some protected activity in this range is not shown.
-          </li>
-        ) : null}
         renderItem={({ item, index }) => item.day ? (
           <li
             role="listitem"
@@ -481,26 +755,41 @@ export function EngineHistoryView(props: {
             aria-setsize={listItemCount}
             className="border-b border-line bg-panel-2 px-3 py-1"
           >
-            <time
-              data-testid="engine-history-day-heading"
-              dateTime={item.day.dateTime}
-              className="dohc-section-label"
-            >
-              {item.day.label}
-            </time>
+            {item.day.dateTime === null ? (
+              <span data-testid="engine-history-day-heading" className="dohc-section-label">
+                {item.day.label}
+              </span>
+            ) : (
+              <time
+                data-testid="engine-history-day-heading"
+                dateTime={item.day.dateTime}
+                className="dohc-section-label"
+              >
+                {item.day.label}
+              </time>
+            )}
           </li>
         ) : (
           <li
             role="listitem"
             aria-posinset={headerItemCount + index + 1}
             aria-setsize={listItemCount}
-            data-testid="engine-moment"
+            data-testid={item.item.kind === "files" ? "engine-moment"
+              : item.item.kind === "version" ? "history-version" : "history-collection-change"}
             data-history-key={item.key}
             className="border-b border-line"
           >
-            {item.group.moments.length > 1 ? (
+            {item.item.kind === "version" ? (
+              <VersionMarkerRow version={item.item.version} />
+            ) : item.item.kind === "collection" ? (
+              <CollectionChangeRow
+                entry={item.item.entry}
+                label={labelOf(item.item.entry)}
+                openHistory={collections?.get(item.item.entry.datasetId)?.openHistory}
+              />
+            ) : item.item.group.moments.length > 1 ? (
               <GroupRow
-                group={item.group}
+                group={item.item.group}
                 expanded={expandedGroups.has(item.key)}
                 onToggle={() => setExpandedGroups((current) => {
                   const next = new Set(current);
@@ -511,7 +800,7 @@ export function EngineHistoryView(props: {
                 onOpenMoment={props.onOpenMoment}
               />
             ) : (
-              <MomentRow moment={item.group.moments[0]} onOpenMoment={props.onOpenMoment} />
+              <MomentRow moment={item.item.group.moments[0]} onOpenMoment={props.onOpenMoment} />
             )}
           </li>
         )}

@@ -1,4 +1,4 @@
-import { basenameOf, dirnameOf } from "../path";
+import { basenameOf } from "../path";
 import {
   CaseSensitive,
   ChevronDown,
@@ -14,6 +14,8 @@ import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { SearchResultsEventEntry } from "../../ipc/bridgeContract";
 import { rendererMarks } from "../../performance/rendererMarks";
 import { EmptyState, SecondaryButton, SectionLabel } from "../ui/controls";
+import { isComposingKey } from "../ui/keys";
+import { Ref } from "../ui/Ref";
 import {
   GROUP_WINDOW_STEP,
   groupVisibleEntries,
@@ -81,7 +83,6 @@ const FileGroup = memo(function FileGroup(props: {
   const visible = groupVisibleEntries(group, props.showAll);
   const hidden = group.entries.length - visible.length;
   const chatEntry = group.entries.find((entry) => entry.surface === "chat");
-  const groupTitle = chatEntry?.title ?? basenameOf(group.path);
   return (
     <li
       data-testid="search-result-group"
@@ -106,18 +107,16 @@ const FileGroup = memo(function FileGroup(props: {
           <ChevronDown size={12} aria-hidden className="shrink-0 text-subtle" />
         )}
         {chatEntry ? (
-          <span className="inline-flex shrink-0 items-center gap-1 rounded bg-line px-1.5 text-[10px] font-semibold uppercase leading-4 text-muted">
-            <MessageSquare size={10} aria-hidden />
-            Chat
-          </span>
-        ) : null}
-        {/* File paths speak in the mono metadata voice; chat titles are prose. */}
-        <span className={`truncate ${chatEntry ? "font-medium" : "font-mono"}`}>
-          {groupTitle}
-        </span>
-        {!chatEntry && dirnameOf(group.path) ? (
-          <span className="truncate font-mono text-[11px] text-subtle">{dirnameOf(group.path)}</span>
-        ) : null}
+          <>
+            <span className="inline-flex shrink-0 items-center gap-1 rounded bg-line px-1.5 text-[10px] font-semibold uppercase leading-4 text-muted">
+              <MessageSquare size={10} aria-hidden />
+              Chat
+            </span>
+            <span className="truncate font-medium">{chatEntry.title ?? basenameOf(group.path)}</span>
+          </>
+        ) : (
+          <Ref path={group.path} folder />
+        )}
         <span
           data-testid="search-group-count"
           className="ml-auto rounded-full border border-line bg-panel-2 px-1.5 text-[10px] font-medium leading-4 text-muted"
@@ -336,6 +335,7 @@ export function SearchView(props: {
   }, [selectedIndex]);
 
   function onInputKeyDown(event: React.KeyboardEvent): void {
+    if (isComposingKey(event)) return;
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       setSelected(

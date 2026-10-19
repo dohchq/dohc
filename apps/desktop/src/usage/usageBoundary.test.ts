@@ -88,10 +88,11 @@ describe("usage import boundary", () => {
 
   it("wires one deferred startup load with stateDir and orderly shutdown in main", () => {
     const main = readFileSync(join(root, "apps/desktop/src/main.ts"), "utf8");
-    expect(main).toContain("createUsageStore({ stateDir, appVersion: app.getVersion(), coverage: DESKTOP_USAGE_COVERAGE })");
+    const created = "usageStore = createUsageStore({ stateDir, appVersion: app.getVersion(), coverage: DESKTOP_USAGE_COVERAGE,\n"
+      + "            onStop: usageRecordStopped });";
     const markReady = main.slice(main.indexOf("markReady: () =>"), main.indexOf("startEngine: () =>"));
     expect(markReady).toContain("usageLoad = setImmediate(() => {");
-    expect(markReady).toContain("usageStore = createUsageStore({ stateDir, appVersion: app.getVersion(), coverage: DESKTOP_USAGE_COVERAGE });");
+    expect(markReady.replaceAll("\r\n", "\n")).toContain(created);
     expect(main.slice(0, main.indexOf("markReady: () =>"))).not.toMatch(/createUsageStore\(\{/);
     expect(main.match(/usageStore\.load\(/g)).toHaveLength(1);
     expect(markReady).not.toMatch(/if\s*\(/);
@@ -103,6 +104,7 @@ describe("usage import boundary", () => {
     expect(main).not.toContain("rendererUsage.dispatch");
     expect(main).toContain("if (usageLoad) clearImmediate(usageLoad);");
     expect(main).toContain("recordSuccess: invocation => usageStore?.recordSuccess(invocation),");
+    expect(main.match(/onUsageSuccess:.*$/gm)).toEqual(["onUsageSuccess: invocation => { usageStore?.recordSuccess(invocation); },"]);
     // Privacy has no counting observer or agent transport registration.
     const usage = readFileSync(join(root, "apps/desktop/src/usage/rendererUsage.ts"), "utf8");
     expect(usage).not.toMatch(/usage\.(read|query|copy)/);

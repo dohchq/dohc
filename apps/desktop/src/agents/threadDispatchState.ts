@@ -11,7 +11,7 @@ export async function readThreadDispatchState(
     store.latestRunForThread(workspaceId, threadId),
   ]);
   const failureReason = run?.failureReason ?? (
-    run?.endedAtMs !== undefined && run.exitCode === 0 && run.failureNotePosted
+    run?.endedAtMs !== undefined && run.exitCode === 0 && run.failureHandled
       ? "no-reply"
       : null
   );

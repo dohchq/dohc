@@ -24,7 +24,8 @@ describe("socket usage coverage", () => {
         CLI_USAGE_ACTION_IDS.includes(pair.capabilityId as (typeof CLI_USAGE_ACTION_IDS)[number])
         && pair.capabilityId !== "file.write"
         && Object.values(CAPABILITIES[pair.capabilityId].mcp).some(value => Array.isArray(value) && value.length > 0));
-      if (pair.door === "automation") expect(pair.status).toBe("uncovered");
+      if (pair.door === "automation") expect(pair.status === "covered").toBe(
+        ["collection.record.edit", "collection.record.create", "chat.post", "chat.reply", "dataset.operation.invoke"].includes(pair.capabilityId));
     }
   });
 

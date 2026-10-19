@@ -61,16 +61,20 @@ describe("local usage contracts", () => {
     upgraded.coverage = [...snapshot.coverage, { appVersion: "0.2.0", pairs: [{ ...pair, status: "covered" }] }];
     expect(queryUsage(upgraded, { from: day, through: day, pairs: [pair] })[0]!.total).toBe(0);
   });
-  it("drops retired ids while preserving strict validation and known counts", () => {
+  it("separates retired ids while preserving strict validation and known counts", () => {
     const retired = { capabilityId: "retired.action", door: "renderer" as const };
     const input = { ...snapshot, counts: [{ ...pair, day, count: 3 }, { ...retired, day, count: 5 }],
       coverage: [{ appVersion: "0.1.0", pairs: [{ ...pair, status: "covered" }, { ...retired, status: "covered" }] }] };
     const decoded = decodeUsageSnapshot(input);
-    expect(decoded.counts).toEqual([{ ...pair, day, count: 3 }]);
-    expect(decoded.coverage[0]!.pairs).toEqual([{ ...pair, status: "covered" }]);
+    expect(decoded.snapshot.counts).toEqual([{ ...pair, day, count: 3 }]);
+    expect(decoded.snapshot.coverage[0]!.pairs).toEqual([{ ...pair, status: "covered" }]);
+    expect(decoded.dropped).toEqual({ counts: [{ ...retired, day, count: 5 }],
+      coverage: [{ appVersion: "0.1.0", pairs: [{ ...retired, status: "covered" }] }] });
     expect(() => decodeUsageSnapshot({ ...input, counts: [{ ...retired, day, count: 1, content: "private" }] })).toThrow();
     const { cleanExit: _marker, ...missingMarker } = snapshot;
-    expect(decodeUsageSnapshot(missingMarker).cleanExit).toBe(false);
+    const withoutUnknown = decodeUsageSnapshot(missingMarker);
+    expect(withoutUnknown.snapshot.cleanExit).toBe(false);
+    expect(withoutUnknown.dropped).toEqual({ counts: [], coverage: [] });
   });
   it("uses local calendar dates and bounds query ranges", () => {
     expect(localUsageDay(new Date(2026, 0, 1, 0, 5))).toBe("2026-01-01");

@@ -1,10 +1,11 @@
+import { registerTypingCheckpoint } from "./workspaces/outageTypingRecovery";
 import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
 import { resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAppLifecycle, LAUNCH_SETTLED_MS } from "./appLifecycle";
 import { createExitRounds, createQuitGuard } from "./quitGuard";
-import { QUIT_ASK_TIMEOUT_MS, resolveShutdownDeadlineExitCode, WILL_QUIT_BUDGET_MS } from "./shutdownBudgets";
+import { DISPATCH_STOP_LIMIT_MS, QUIT_ASK_TIMEOUT_MS, resolveShutdownDeadlineExitCode, WILL_QUIT_BUDGET_MS } from "./shutdownBudgets";
 import { closeElectronApplication } from "../../../scripts/verification/close-electron.mjs";
 import { DESKTOP_CLOSE_GRACE_MS } from "../../../scripts/verification/desktop-close-policy.mjs";
 import { beginLaunch, finishLaunch, type MarkerFileSystem } from "./launch/launchMarker";
@@ -106,6 +107,7 @@ function fixture(configure?: (dependencies: Dependencies) => void) {
     },
     launch: {
       finished: vi.fn(() => { log.push("launch-finished"); }),
+      settled: vi.fn(() => { log.push("launch-settled"); }),
     },
     beforeQuit: vi.fn(),
     shutdown: {
@@ -142,7 +144,7 @@ afterEach(() => {
 });
 
 describe("desktop bootstrap", () => {
-  it("registers IPC before the window, applies stored zoom, and overlaps the daemon handshake", async () => {
+  it("registers IPC and installs the menu before the window, applies stored zoom, and overlaps the daemon handshake", async () => {
     const f = fixture();
     const ready = f.lifecycle.start();
     expect(f.log).toEqual([]);
@@ -151,7 +153,7 @@ describe("desktop bootstrap", () => {
     expect(f.log).toEqual(["app-ready", "engine-start", "settings-read", "handlers"]);
     f.settings.resolve({ zoom: 1.75 });
     expect(await f.created.promise).toEqual({ id: 1, zoom: 1.75 });
-    expect(f.log.slice(-4)).toEqual(["settings-apply", "window", "load-listener", "first-window"]);
+    expect(f.log.slice(-5)).toEqual(["settings-apply", "native", "window", "load-listener", "first-window"]);
     expect(f.dependencies.services.startCli).not.toHaveBeenCalled();
     expect(f.dependencies.workspaces.openPath).not.toHaveBeenCalled();
     expect(f.dependencies.services.warmCredentials).not.toHaveBeenCalled();
@@ -365,6 +367,28 @@ describe("desktop bootstrap", () => {
     expect(f.dependencies.launch.finished).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
     expect(f.dependencies.launch.finished).toHaveBeenCalledOnce();
+    expect(f.dependencies.launch.settled).toHaveBeenCalledOnce();
+  });
+
+  // Settling starts the engine's startup check, which must not run on the
+  // way out: the timer can still fire during quit or after Windows ends the
+  // session, neither of which stops the process at once.
+  it.each(["quit", "session end"] as const)("does not settle the launch after a %s", async (ending) => {
+    vi.useFakeTimers();
+    const f = fixture();
+    await boot(f);
+    f.loaded.resolve(true);
+    await vi.advanceTimersByTimeAsync(5_000);
+    if (ending === "quit") {
+      f.app.emit("will-quit", event());
+    } else {
+      const window = new EventEmitter();
+      f.app.emit("browser-window-created", {}, window);
+      window.emit("session-end", {});
+    }
+    await vi.advanceTimersByTimeAsync(LAUNCH_SETTLED_MS);
+    expect(f.dependencies.launch.finished).toHaveBeenCalled();
+    expect(f.dependencies.launch.settled).not.toHaveBeenCalled();
   });
 
   it("finishes the launch at a clean quit before 30 s have passed", async () => {
@@ -377,6 +401,16 @@ describe("desktop bootstrap", () => {
     f.app.emit("will-quit", event());
     expect(f.dependencies.launch.finished).toHaveBeenCalledOnce();
     // A quit vetoed at before-quit never reaches will-quit, so it counts nothing.
+  });
+
+  it("flushes outage typing at OS session end without cancelling the end", async () => {
+    const f = fixture(); await boot(f); const window = new EventEmitter();
+    const flush = vi.fn(() => undefined); const unregister = registerTypingCheckpoint("workspace", async()=>{},()=>true,undefined,flush);
+    try {
+      f.app.emit("browser-window-created", {}, window); const preventDefault = vi.fn();
+      window.emit("session-end", {preventDefault});
+      expect(flush).toHaveBeenCalledOnce(); expect(preventDefault).not.toHaveBeenCalled();
+    } finally {unregister();}
   });
 
   it("finishes the launch when Windows ends the session, which emits no quit event", async () => {
@@ -876,6 +910,23 @@ describe("desktop shutdown", () => {
     expect(f.app.exit).toHaveBeenCalledOnce();
   });
 
+  it("stops waiting on a dispatch stop at its limit and still closes within the budget", async () => {
+    vi.useFakeTimers();
+    const f = fixture((d) => {
+      d.shutdown.budgetMs = WILL_QUIT_BUDGET_MS;
+      d.shutdown.deadlineExitCode = 1;
+      d.services.dispatch.stop = () => new Promise<void>(() => undefined);
+    });
+    await boot(f);
+    f.app.emit("will-quit", event());
+    await vi.advanceTimersByTimeAsync(DISPATCH_STOP_LIMIT_MS - 1);
+    expect(f.dependencies.shutdown.closeWorkspaces).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.log.slice(-4)).toEqual(["workspaces-close", "database-stop", "relay-close", "engine-stop"]);
+    expect(f.app.exit).toHaveBeenCalledExactlyOnceWith(0);
+    expect(DISPATCH_STOP_LIMIT_MS).toBeLessThan(WILL_QUIT_BUDGET_MS);
+  });
+
   it("sends reports alongside teardown and exits only once both finish", async () => {
     vi.useFakeTimers();
     const ydoc = deferred();
@@ -946,6 +997,13 @@ describe("desktop shutdown", () => {
     f.app.emit("before-quit", quit);
     expect(f.dependencies.beforeQuit).toHaveBeenCalledWith(quit);
     expect(f.dependencies.shutdown.beginEngineShutdown).not.toHaveBeenCalled();
+  });
+
+  it("runs the checkpoint boundary when ordinary quit has no workspace window", async () => {
+    const checkpoint = vi.fn((quit: {preventDefault(): void}) => quit.preventDefault());
+    const f = fixture(d => {d.windows.hasWorkspace = () => false; d.beforeQuitWithoutWindows = checkpoint;});
+    await boot(f); const quit = event(); f.app.emit("before-quit", quit);
+    expect(checkpoint).toHaveBeenCalledWith(quit); expect(f.dependencies.beforeQuit).not.toHaveBeenCalled();
   });
 
   it.each([false, true])("keeps the process after the last window only when dispatch is enabled: %s", async (enabled) => {

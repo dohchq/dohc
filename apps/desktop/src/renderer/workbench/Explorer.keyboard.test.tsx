@@ -193,7 +193,7 @@ describe("the active row inside a multi-selection", () => {
     );
 
     await user.click(row("notes.md"));
-    fireEvent.click(row("apps/reading-list/index.html"), { ctrlKey: true, metaKey: true });
+    fireEvent.click(row("apps/reading-list/index.html"), { ctrlKey: true });
     expect(row("notes.md").getAttribute("aria-selected")).toBe("true");
     expect(row("apps/reading-list/index.html").getAttribute("aria-selected")).toBe("true");
 
@@ -203,5 +203,32 @@ describe("the active row inside a multi-selection", () => {
     expect(row("apps/reading-list/index.html").className).not.toContain("font-medium");
     expect(row("apps/reading-list/index.html").className).toContain("bg-selected");
     expect(row("notes.md").className).toContain("bg-selected");
+  });
+});
+
+describe("macOS file tree keys", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it.each([
+    ["darwin", "⌘⌫ asks", { key: "Backspace", metaKey: true }, true],
+    ["darwin", "⌫ alone does not ask", { key: "Backspace" }, false],
+    ["darwin", "Delete asks", { key: "Delete" }, true],
+    ["win32", "Meta+Backspace does not ask", { key: "Backspace", metaKey: true }, false],
+    ["win32", "Delete asks", { key: "Delete" }, true],
+  ] as const)("on %s, %s to delete the selection", (platform, _name, init, asks) => {
+    vi.stubGlobal("dohcDesktop", { platform });
+    render(<Fixture {...explorerProps()} />);
+    fireEvent.click(row("notes.md"));
+    fireEvent.keyDown(row("notes.md"), init);
+    expect(screen.queryByTestId("delete-confirm") !== null).toBe(asks);
+  });
+
+  it("adds a row to the selection with ⌘-click on macOS", () => {
+    vi.stubGlobal("dohcDesktop", { platform: "darwin" });
+    render(<Fixture {...explorerProps({ expandedFolders: ["apps", "apps/reading-list"] })} />);
+    fireEvent.click(row("notes.md"));
+    fireEvent.click(row("apps/reading-list/index.html"), { metaKey: true });
+    expect(row("notes.md").getAttribute("aria-selected")).toBe("true");
+    expect(row("apps/reading-list/index.html").getAttribute("aria-selected")).toBe("true");
   });
 });

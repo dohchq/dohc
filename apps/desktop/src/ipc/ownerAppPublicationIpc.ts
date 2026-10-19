@@ -22,14 +22,14 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
 }>(dependencies: {
   callerKey(caller: Caller): string;
   withWorkspaceOperation<Result>(caller: Caller, workspaceId: string, work: (operation: Operation) => Promise<Result>): Promise<Result>;
-  remoteForWorkspace(workspace: Workspace): Promise<{ credentials: CloudCredentials; credentialGeneration: number }>;
+  remoteForWorkspace(workspace: Workspace, options?: { allowPaused: boolean }): Promise<{ credentials: CloudCredentials; credentialGeneration: number }>;
   currentCredentialGeneration(): number;
   flushCapture(workspace: Workspace): Promise<void>;
   withAdapter<Result>(workspace: Workspace, work: (adapter: VersionedLiveAdapter) => Promise<Result>): Promise<Result | null>;
   compile(request: ClosedAppBuildRequest, signal: AbortSignal): Promise<ClosedAppBuild>;
   relayJson(credentials: CloudCredentials, path: string, init?: RequestInit): Promise<unknown>;
   upload(credentials: CloudCredentials, workspaceId: string, sha256: string, bytes: Uint8Array, signal: AbortSignal): Promise<void>;
-  localPublication?(input: OwnerAppPublicationRequest, callerKey: string, operation: Operation): Promise<OwnerAppPublicationResult | null>;
+  localPublication?(input: OwnerAppPublicationRequest, callerKey: string, operation: Operation, attribution: ApprovalAgent | null): Promise<OwnerAppPublicationResult | null>;
   beforeSharedPublish?(workspace: Workspace, candidate: AppPublicationCandidate, signal: AbortSignal): Promise<void>;
   /** May resolve local approved rules before an explicit authority transfer at publication. */
   resolveDatasetRevision?(workspace: Workspace, binding: AppDatasetBinding, signal: AbortSignal): Promise<DatasetRevision>;
@@ -52,11 +52,12 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
     return dependencies.withWorkspaceOperation(caller, input.workspaceId, async operation => {
       operation.assertCurrent();
       if (shareViewIsPresent(operation.workspace.shareView)) throw new Error("Only the original workspace can publish this app.");
-      const local = await dependencies.localPublication?.(input, callerKey, operation);
+      const local = await dependencies.localPublication?.(input, callerKey, operation, agent);
       operation.assertCurrent(); operation.signal.throwIfAborted();
       if (local) return local;
       if (input.action === "prepareLocal" || input.action === "listLocal" || input.action === "launchLocal") throw new Error("Local apps are unavailable. Restart dohc and try again.");
-      const remote = await dependencies.remoteForWorkspace(operation.workspace);
+      const remote = await dependencies.remoteForWorkspace(operation.workspace,
+        input.action === "withdraw" || input.action === "revokeCollection" ? { allowPaused: true } : undefined);
       const session = credentialScopedOperation({ assertCurrent: () => operation.assertCurrent(), capturedGeneration: remote.credentialGeneration, currentGeneration: dependencies.currentCredentialGeneration });
       session.assertCurrent();
       const remoteData = createRemoteDatasetData({ workspaceId: input.workspaceId, ...remote, signal: operation.signal,
@@ -131,10 +132,11 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
         if (preparing.has(callerKey)) throw new Error("This caller is already preparing an app. Wait for it to finish.");
         const raw = await session.run(() => dependencies.relayJson(remote.credentials,
           `/sync/${encodeURIComponent(input.workspaceId)}/app-publications/${input.publicationId}`, { signal: operation.signal }));
-        const row = raw as { publicationId?: string; candidate?: unknown; active?: boolean; authorityRevision?: number;
+        const row = raw as { operatorTakedown?: unknown; publicationId?: string; candidate?: unknown; active?: boolean; authorityRevision?: number;
           owner?: { workspaceId?: string; ownerUserId?: string; shareId?: string; grantId?: string; generation?: number } } | null;
         if (!row || row.publicationId !== input.publicationId || row.active !== false || row.owner?.workspaceId !== input.workspaceId || row.owner.ownerUserId !== remote.credentials.userId ||
             !Number.isSafeInteger(row.authorityRevision) || row.authorityRevision! < 1 || !Number.isSafeInteger(row.owner.generation) || row.owner.generation! < 1) throw new Error("This app publication cannot be republished. Refresh the publication list.");
+        if (row.operatorTakedown) throw new Error("The server operator disabled this publication. Contact the server operator.");
         const candidate = parseAppPublicationCandidate(row.candidate, APP_PUBLICATION_LIMITS);
         const dataset = candidate.capabilities.find(capability => capability.kind === "dataset");
         if (dataset) verifyAppDatasetCapability(dataset, await resolveDatasetRevision(dataset));
@@ -258,6 +260,7 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
         const owner = row.owner as Record<string, unknown> | undefined;
         if (!owner || owner.workspaceId !== input.workspaceId || owner.shareId !== entry.input.shareId || owner.grantId !== entry.input.grantId || owner.generation !== prepared.generation ||
             JSON.stringify(row.candidate) !== JSON.stringify(candidate)) throw new Error("The app publication changed. Review it again.");
+        if (row.operatorTakedown) throw new Error("The server operator disabled this publication. Contact the server operator.");
         if (row.active !== true) throw new Error("This app is already unpublished. Review it from the publication list to republish it.");
         return finishPublication(row.publicationId, row.authorityRevision);
       }

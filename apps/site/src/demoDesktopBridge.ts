@@ -240,6 +240,7 @@ export function resolveDemoWorkspaceAssetUrl(workspacePath: string): string | nu
 
 type DemoDesktopBridge = Pick<
   DohcDesktopBridge,
+  | "platform"
   | "onSearchResults"
   | "onUpdateState"
   | "getUpdateState"
@@ -385,7 +386,7 @@ function thread(channelId = "channel-general", body = "What needs attention next
     lastReadSequence: 1,
     unreadCount: channelId === "channel-agent" ? 1 : 0,
     openDecisionCount: 0,
-    openingMessage: {
+    openingMessage: { presentation: { group: "demo-you", hue: null, self: true },
       id: `message-${channelId}-1`,
       authorKind: "human" as const,
       authorDisplayName: "You",
@@ -405,7 +406,7 @@ function demoThreadBody(channelId: string): string {
 }
 
 function message(threadId: string, id: string, body: string, agent = false) {
-  return {
+  return { presentation: { group: agent ? "demo-agent" : "demo-you", hue: null, self: true },
     id,
     threadId,
     authorKind: agent ? ("agent" as const) : ("human" as const),
@@ -428,6 +429,8 @@ export function answerDemoJoinedLane(
 }
 
 const demoBridge = {
+  // The desktop renderer chooses each shortcut's modifier from the platform.
+  platform: /Mac|iP(hone|[oa]d)/.test(navigator.platform) ? "darwin" : /Win/.test(navigator.platform) ? "win32" : "linux",
   onUpdateState() { return () => undefined; },
   async getUpdateState() {
     return { status: "idle" as const, message: "Updates are unavailable in the demo." };
@@ -587,7 +590,6 @@ const demoBridge = {
     return {
       settings: {
         version: 1 as const,
-        agents: { mcpAutoStart: false },
         sites: { defaultPreviewMode: "auto" as const },
         privacy: { confirmExternalLinks: true },
         files: { attachmentLocation: "per-document" as const, attachmentFolderName: "assets" },

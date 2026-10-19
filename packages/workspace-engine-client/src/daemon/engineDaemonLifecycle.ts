@@ -173,7 +173,7 @@ export interface EngineDaemonLifecycleOptions {
   onFailure?: (error: Error, terminal: boolean) => void;
   // Retire work owned by the previous daemon before callers can open workspaces
   // on its replacement. This barrier must not request the unpublished client.
-  beforePublish?: () => void | Promise<void>;
+  beforePublish?: (signal: AbortSignal) => void | Promise<void>;
   // Fires once per launched daemon generation (the first launch and every
   // restart). The first generation is only handshaked when this fires — its
   // startup smoke still runs behind it; restart generations have passed the
@@ -183,6 +183,11 @@ export interface EngineDaemonLifecycleOptions {
   // ever generated. Consumers use this to invalidate state that daemon
   // events would otherwise keep fresh (e.g. the history timeline).
   onLaunch?: () => void;
+  // Holds the first launch's background smoke until it settles: "skip" when
+  // a real workspace open already proved workspace work, "run" otherwise.
+  // The smoke takes the engine's one open lock, so starting it at the
+  // handshake slowed the first workspace open. Without this, it starts there.
+  startupSmoke?: Promise<"run" | "skip">;
 }
 
 export interface EngineBinaryPathOptions {
@@ -932,7 +937,7 @@ export class EngineDaemonLifecycle {
         if (signal.aborted) onAbort();
         // Shutdown stops waiting; the race still observes a later retirement
         // rejection, and the publication check below rejects a cancelled launch.
-        await Promise.race([this.options.beforePublish?.(), cancelled]);
+        await Promise.race([this.options.beforePublish?.(signal), cancelled]);
       } finally {
         signal.removeEventListener("abort", onAbort);
       }
@@ -981,13 +986,28 @@ export class EngineDaemonLifecycle {
     );
   }
 
-  // The first launch's smoke checks workspace work after the handshake.
+  // The first launch's smoke checks workspace work after the handshake, or
+  // once `startupSmoke` asks for it.
   // Failures kill for replacement through the normal restart path.
   private async runDeferredSmoke(
     generation: number,
     client: EngineDaemonClient,
   ): Promise<void> {
     try {
+      if (this.options.startupSmoke) {
+        const stop = this.stopController.signal;
+        let onStop!: () => void;
+        const stopped = new Promise<"skip">((resolve) => { onStop = () => resolve("skip"); });
+        stop.addEventListener("abort", onStop, { once: true });
+        if (stop.aborted) onStop();
+        let decision: "run" | "skip";
+        try {
+          decision = await Promise.race([this.options.startupSmoke.catch((): "run" => "run"), stopped]);
+        } finally {
+          stop.removeEventListener("abort", onStop);
+        }
+        if (decision === "skip" || !this.probedGenerationIsLive(generation, client)) return;
+      }
       await this.runSmoke(client);
     } catch (error) {
       // A generation that already exited, was replaced, or is stopping has

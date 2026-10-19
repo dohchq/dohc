@@ -179,6 +179,58 @@ struct YdocCloseMaterialization {
 }
 
 impl ActorHandle {
+    #[allow(clippy::too_many_arguments)]
+    pub async fn owner_ydoc_stop(
+        &self,
+        workspace: String,
+        path: Option<String>,
+        binding: Option<dohc_engine_collab::LiveObjectBinding>,
+        document: Option<dohc_engine_collab::owner_outbox::release::OwnerStopDocument>,
+        accepted_cursor: Option<i64>,
+        action: String,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<
+        Result<Vec<dohc_engine_collab::owner_outbox::release::OwnerLiveStop>, OwnerOutboxError>,
+        RuntimeError,
+    > {
+        self.run(move |store, cache| {
+            use dohc_engine_collab::owner_outbox::release;
+            if token.is_cancelled() {return Err(RuntimeError::Cancelled);}
+            if action=="list" {return Ok(store.read_with(|conn|release::list_requested_in(conn,&workspace)));}
+            let key=if let Some(b)=&binding {DocKey::new(&workspace,&b.main_version_id,&b.object_id)?}
+            else if let Some(d)=&document {DocKey::new(&workspace,&d.main_version_id,&d.object_id)?}
+            else {
+                let path=path.as_ref().ok_or(RuntimeError::Cancelled)?;
+                let found=store.read_with(|conn| {
+                    let mut stmt=conn.prepare("SELECT main_version_id,object_id FROM ydoc_owner_bindings WHERE workspace_id=?1 AND json_extract(binding_json,'$.currentPath')=?2 AND main_version_id=(SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=?1) UNION SELECT version_id,object_id FROM path_aliases WHERE workspace_id=?1 AND path=?2 AND version_id=(SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=?1) UNION SELECT main_version_id,object_id FROM owner_live_stops WHERE workspace_id=?1 AND (json_extract(binding_json,'$.document.currentPath')=?2 OR json_extract(binding_json,'$.binding.currentPath')=?2) AND main_version_id=(SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=?1) LIMIT 2").map_err(StorageError::corrupt_public)?;
+                    let rows=stmt.query_map(params![workspace,path],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).map_err(StorageError::corrupt_public)?;
+                    rows.collect::<Result<Vec<_>,_>>().map_err(StorageError::corrupt_public)
+                })?;
+                if found.len()>1 {return Ok(Err(OwnerOutboxError::StopConflict));}
+                let Some((version,object))=found.into_iter().next() else {return Ok(Err(OwnerOutboxError::NotFound));};
+                DocKey::new(&workspace,&version,&object)?
+            };
+            let outcome=store.write_with(faults.as_ref(),|tx|match action.as_str() {
+                "request"=>release::request_in_tx(tx,&key,now_ms).map(|row|vec![row]),
+                "clear"=>release::clear_in_tx(tx,&key).map(|()|vec![]),
+                "retired"=>release::retired_in_tx(tx,&key,now_ms).map(|()|vec![]),
+                "release"=>{
+                    let b=binding.as_ref().ok_or(OwnerOutboxError::StopConflict)?;
+                    let path:Option<String>=tx.query_row("SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![workspace,key.version_id,key.object_id],|r|r.get(0)).optional().map_err(|_|OwnerOutboxError::Corrupt)?;
+                    let path=path.as_deref().unwrap_or(&b.current_path);
+                    release::release_in_tx(tx,b,accepted_cursor.ok_or(OwnerOutboxError::StopConflict)?,now_ms,|tx,update,actor,attribution,outcome| {
+                        journal_recovery_append_in_tx(tx,&key,path,ContentKind::Richdoc,update,actor,attribution,outcome,now_ms).map(|_|())
+                    }).map(|row|vec![row])
+                },
+                _=>Err(OwnerOutboxError::InvalidInput("invalid Stop action")),
+            });
+            if action=="release" && !matches!(&outcome,Ok(TxnOutcome::Committed(rows)) if rows.iter().all(|row|row.deferred.is_some())) {cache.remove(&key);}
+            Ok(match outcome {Ok(TxnOutcome::Committed(rows))=>Ok(rows),Ok(TxnOutcome::Crashed{..})=>Err(OwnerOutboxError::Corrupt),Err(error)=>Err(error)})
+        }).await
+    }
+
     pub async fn owner_ydoc_prepare_enrollment(
         &self,
         binding: dohc_engine_collab::LiveObjectBinding,
@@ -332,6 +384,7 @@ impl ActorHandle {
         &self,
         workspace_id: String,
         input: dohc_engine_collab::owner_outbox::OwnerOutboxRefuseInput,
+        now_ms: i64,
         token: CancellationToken,
         reservation: Arc<dyn Send + Sync>,
     ) -> Result<Result<dohc_engine_collab::LiveObjectBinding, OwnerOutboxError>, RuntimeError> {
@@ -342,7 +395,12 @@ impl ActorHandle {
             }
             Ok(
                 match store.write_with(&NoFaults, |tx| {
-                    dohc_engine_collab::owner_outbox::refuse_entry_in_tx(tx, &workspace_id, &input)
+                    dohc_engine_collab::owner_outbox::refuse_entry_in_tx(
+                        tx,
+                        &workspace_id,
+                        &input,
+                        now_ms,
+                    )
                 }) {
                     Ok(TxnOutcome::Committed(binding)) => Ok(binding),
                     Ok(TxnOutcome::Crashed { .. }) => Err(OwnerOutboxError::Corrupt),
@@ -605,13 +663,14 @@ impl ActorHandle {
         &self,
         workspace_id: String,
         input: OwnerOutboxQuarantineInput,
+        now_ms: i64,
         token: CancellationToken,
     ) -> Result<Result<(), OwnerOutboxError>, RuntimeError> {
         self.run(move |store, _cache| {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                Ok(quarantine_owner_outbox(store, &workspace_id, input))
+                Ok(quarantine_owner_outbox(store, &workspace_id, input, now_ms))
             }
         })
         .await
@@ -711,9 +770,12 @@ impl ActorHandle {
                         store,
                         &root_dir,
                         MaterializationReplayScope {
+                            holds: None,
                             workspace_id: &workspace_id,
                             self_writes: Some(self_writes.as_ref()),
                             progress: None,
+                            file_outcomes_settled: false,
+                            released_hold_paths: None,
                         },
                         now_ms,
                         &NoFaults,
@@ -946,6 +1008,7 @@ impl ActorHandle {
                 return Ok((None, None));
             };
             if marker.lineage_claim_status.has_claimed_base()
+                || marker.file_export_lane.is_enabled()
                 || (marker.head_update_seq == 0 && marker.head_snapshot_seq == 0)
                 || !store.read_with(|conn| {
                     dohc_engine_sync::workspace_replicates_with_relay(conn, &key.workspace_id)
@@ -1433,13 +1496,13 @@ fn seed_scene_from_artifact_on_store(
             .as_bytes()
         )
     );
-    // Only the moment ids whose head writes were actually enqueued: a planned
+    // Only the jobs of head writes that were actually enqueued: a planned
     // asset whose content-addressed path already holds matching content takes
     // the `continue` below and creates no moment, and counting it as a
     // materialization job would reject the open as pending forever. The
     // guarded closure can run again after a crash retry, so it rebuilds the
     // list from scratch each attempt.
-    let mut created_moment_ids: Vec<String> = Vec::new();
+    let mut created_job_ids: Vec<String> = Vec::new();
     let outcome = dohc_engine_collab::record_local_update(
         store,
         doc_cache,
@@ -1459,7 +1522,7 @@ fn seed_scene_from_artifact_on_store(
         faults,
         now_ms,
         |tx, _, _update_sha| {
-            created_moment_ids.clear();
+            created_job_ids.clear();
             // The drawing's file is the artifact this seed imported, so the
             // lineage is not ahead of it until another update lands.
             dohc_engine_collab::author_coverage::advance_in(tx, key, false)?;
@@ -1528,7 +1591,7 @@ fn seed_scene_from_artifact_on_store(
                     .map_err(|error| CollabError::Corrupt {
                         reason: format!("scene asset outbound journal failed: {error}"),
                     })?;
-                created_moment_ids.push(asset.moment_id.clone());
+                created_job_ids.push(dohc_engine_domain::binary_write_job_id(&asset.moment_id));
             }
             Ok(())
         },
@@ -1536,7 +1599,7 @@ fn seed_scene_from_artifact_on_store(
     if matches!(outcome, TxnOutcome::Crashed { .. }) {
         return Err(RuntimeError::OperationCrashed);
     }
-    Ok(created_moment_ids)
+    Ok(created_job_ids)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1557,6 +1620,11 @@ pub(super) fn ydoc_open_state_on_store(
         return Err(RuntimeError::Cancelled);
     }
     let canonical_path = validate_addressable_plaintext_path(path)?;
+    if dohc_engine_files::placement_is_held_in(store, workspace_id, &canonical_path)? {
+        return Err(RuntimeError::CaptureFileHeld {
+            path: canonical_path,
+        });
+    }
     // Bootstrap: the first live doc in an empty workspace must be creatable —
     // without this, read_text errors VersionNotFound before the absent-path
     // flow can run (capture normally creates main, but nothing has captured).
@@ -1979,104 +2047,21 @@ pub(super) fn ydoc_record_update_on_store(
         },
         faults,
         now_ms,
-        |tx, outcome, update_sha| {
-            dohc_engine_collab::owner_outbox::append_adopted_local_update_in_tx(
+        |tx, outcome, _update_sha| {
+            if !journal_local_append_in_tx(
                 tx,
                 &journal_key,
                 &journal_path,
-                outcome.seq,
+                journal_kind,
                 update,
-                now_ms,
-            )?;
-            if dohc_engine_collab::owner_outbox::has_adopted_owner_in(tx, &journal_key)? {
-                outcome.emit_outbound = false;
-                return Ok(());
-            }
-            // Origination is asked first and owns the base-once decision: it
-            // originates only a lineage that has no base yet. The base is a
-            // full state, so it already carries this append and every row the
-            // lineage held before it — a delta beside it would be redundant.
-            // Everything else journals its delta.
-            let base_originated = match dohc_engine_sync::originate_ydoc_base_in_tx(
-                tx,
-                &journal_key,
-                &journal_path,
                 actor_origin_id.as_deref(),
                 attribution.as_ref(),
+                seed_source.as_ref(),
+                &mut sharing_declined,
+                outcome,
                 now_ms,
-            )
-            .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
-                reason: format!("outbound ydoc.update base origination failed: {error}"),
-            })? {
-                dohc_engine_sync::BaseOrigination::Originated { base_snapshot_sha } => {
-                    if let Some(source) = &seed_source {
-                        dohc_engine_collab::owner_base_source::retain_owner_base_source_in_tx(
-                            tx,
-                            &journal_key,
-                            &journal_path,
-                            &base_snapshot_sha,
-                            source,
-                        )?;
-                    }
-                    true
-                }
-                dohc_engine_sync::BaseOrigination::Declined(reason) => {
-                    sharing_declined = Some(reason);
-                    false
-                }
-                dohc_engine_sync::BaseOrigination::NothingToDo => false,
-            };
-            if !base_originated && outcome.emit_outbound {
-                let lineage_claim_id = dohc_engine_collab::read_marker_in(tx, &journal_key)?
-                    .and_then(|marker| marker.lineage_claim_id)
-                    .ok_or_else(|| dohc_engine_collab::CollabError::Corrupt {
-                        reason: "exact Y.Doc lineage has no claim id".to_owned(),
-                    })?;
-                let origin_seq = dohc_engine_sync::journal_local_op_in_tx(
-                    tx,
-                    &journal_key.workspace_id,
-                    "ydoc.update",
-                    &ydoc_update_payload(
-                        &journal_key,
-                        &journal_path,
-                        journal_kind,
-                        update_sha,
-                        &lineage_claim_id,
-                        actor_origin_id.as_deref(),
-                        attribution.as_ref(),
-                        false,
-                    ),
-                    now_ms,
-                )
-                .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
-                    // Named explicitly: an exact replicated lineage
-                    // with NO sync identity is a half-initialized state
-                    // (every real replicated flow runs sync init first —
-                    // pulls require the identity and the TS driver creates
-                    // it when journaling the base). Fail closed with a
-                    // diagnosable reason rather than a generic failure; an
-                    // identity cannot be seeded down here (origin identity
-                    // is minted by sync init, not the collab layer).
-                    reason: format!("outbound ydoc.update journal append failed: {error}"),
-                })?;
-                // The op's replication coordinate exists only now, after the
-                // journal assigned it. Thread it into the facts so record
-                // events and the automation trigger key see the same
-                // coordinate every peer derives from the envelope. A
-                // base-originated or never-synced apply keeps `None`; its
-                // per-change key is the history row id.
-                if let Some(facts) = outcome.record_facts.as_mut() {
-                    let origin_id: String = tx
-                        .query_row(
-                            "SELECT origin_id FROM sync_identity WHERE workspace_id=?1",
-                            [&journal_key.workspace_id],
-                            |row| row.get(0),
-                        )
-                        .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
-                            reason: format!("journaled ydoc.update has no sync identity: {error}"),
-                        })?;
-                    facts.source = Some((origin_id, origin_seq));
-                }
+            )? {
+                return Ok(());
             }
             // The origin-device automation trigger (ADR 0008). This hook runs
             // only for ops this device journals — the sync apply path never
@@ -2102,13 +2087,19 @@ pub(super) fn ydoc_record_update_on_store(
         },
     )? {
         TxnOutcome::Committed(outcome) => {
-            let lineage_claim_id = dohc_engine_collab::read_marker(store, key)?
-                .and_then(|marker| marker.lineage_claim_id);
+            let marker = dohc_engine_collab::read_marker(store, key)?;
+            let lineage_originated_here = match &marker {
+                Some(marker) => store.read_with(|conn| {
+                    dohc_engine_sync::lineage_originated_here(conn, key, marker)
+                })?,
+                None => false,
+            };
             Ok(YdocAppend {
                 settlement_requested: outcome.settlement_requested,
                 outcome,
                 sharing_declined,
-                lineage_claim_id,
+                lineage_claim_id: marker.and_then(|marker| marker.lineage_claim_id),
+                lineage_originated_here,
                 automation_claims,
             })
         }
@@ -2129,6 +2120,8 @@ pub struct YdocAppend {
     pub outcome: AppendOutcome,
     pub sharing_declined: Option<dohc_engine_sync::SharingDeclined>,
     pub lineage_claim_id: Option<String>,
+    /// See [`dohc_engine_sync::lineage_originated_here`].
+    pub lineage_originated_here: bool,
     /// Pending automation claims this append inserted (ADR 0008): one per
     /// subscribed automation, committed in the append's own transaction. The
     /// service emits `automation.claimed` for each, post-commit.
@@ -2715,6 +2708,7 @@ pub(super) fn ydoc_settle_on_store(
                 root_dir,
                 &job,
                 &MaterializeOptions {
+                    holds: None,
                     policy: DurabilityPolicy::per_os(),
                     replacer: &StdReplacer,
                     backoff: &StdBackoff,
@@ -2735,6 +2729,12 @@ pub(super) fn ydoc_settle_on_store(
                 }
             };
             match replay_outcome {
+                JobOutcome::Parked => {
+                    self_writes.retract(&key.workspace_id, &current.path, &current.blob_sha256);
+                    return Err(RuntimeError::CaptureFileHeld {
+                        path: current.path.clone(),
+                    });
+                }
                 JobOutcome::Completed | JobOutcome::AlreadyMaterialized => {
                     reconcile_author_coverage(store, key, now_ms, faults)?;
                 }
@@ -3092,6 +3092,7 @@ pub(super) fn ydoc_settle_on_store(
         root_dir,
         &job,
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::per_os(),
             replacer: &StdReplacer,
             backoff: &StdBackoff,
@@ -3123,6 +3124,16 @@ pub(super) fn ydoc_settle_on_store(
     };
     let mut materialized = true;
     match job_outcome {
+        JobOutcome::Parked => {
+            self_writes.retract(
+                &key.workspace_id,
+                &write.snapshot.path,
+                &write.snapshot.blob_sha256,
+            );
+            return Err(RuntimeError::CaptureFileHeld {
+                path: write.snapshot.path.clone(),
+            });
+        }
         JobOutcome::Completed | JobOutcome::AlreadyMaterialized => {
             reconcile_author_coverage(store, key, now_ms, faults)?;
         }
@@ -3269,6 +3280,79 @@ fn ydoc_resync_on_store(
     })
 }
 
+/// The head's projection digest that a close compares with the artifact, or
+/// none for a lineage without edits.
+fn close_projection(
+    store: &EngineStore,
+    key: &DocKey,
+    marker: &dohc_engine_collab::Marker,
+    root_dir: Option<&std::path::Path>,
+) -> Result<Option<dohc_engine_collab::CloseProjection>, RuntimeError> {
+    if marker.head_update_seq == 0 {
+        return Ok(None);
+    }
+    let persisted = dohc_engine_collab::load_persisted(store, key)?
+        .ok_or(dohc_engine_collab::CollabError::NoMarker)?;
+    let projection = project_ydoc_on_store(store, key, &persisted.doc, marker.content_kind)?;
+    // A reopened seed can import an engine-written head whose earlier
+    // close cleared last_settled_sha. Prove these source bytes still
+    // belong to this object and are on disk before allowing its prune.
+    let materialized_seed_source_sha256 = if let Some(root_dir) = root_dir
+        && let Some(path) = marker.path.as_deref()
+        && let Some(seed_source) = dohc_engine_collab::read_seed_only_lineage_source(store, key)?
+        && store.read_with(|conn| -> Result<bool, StorageError> {
+            conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM snapshots \
+                     WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
+                       AND path = ?4 AND blob_sha256 = ?5 AND binary_sha256 IS NULL \
+                       AND metadata_origin <> ?6)",
+                params![
+                    key.workspace_id,
+                    key.version_id,
+                    key.object_id,
+                    path,
+                    seed_source,
+                    dohc_engine_domain::store::CAPTURE_ORIGIN
+                ],
+                |row| row.get(0),
+            )
+            .map_err(StorageError::persist_public)
+        })?
+        && matches!(
+            probe_projection_target(root_dir, path, ProjectionTargetKind::Plaintext),
+            ProjectionTargetState::Text { sha256 } if sha256 == seed_source
+        ) {
+        Some(seed_source)
+    } else {
+        None
+    };
+    Ok(Some(dohc_engine_collab::CloseProjection {
+        sha256: hex_sha256(projection.content.as_bytes()),
+        materialized_seed_source_sha256,
+    }))
+}
+
+/// Name the settlement work an unload must wait for: the condition a
+/// local-only close enforces before it prunes, applied in every regime.
+pub(super) fn ydoc_unload_pending(
+    store: &mut EngineStore,
+    key: &DocKey,
+    root_dir: &std::path::Path,
+    now_ms: i64,
+) -> Result<Option<dohc_engine_collab::live_update_application::UnloadPending>, RuntimeError> {
+    use dohc_engine_collab::live_update_application::UnloadPending;
+    if !reconcile_author_coverage(store, key, now_ms, &NoFaults)? {
+        return Ok(Some(UnloadPending::Materialization));
+    }
+    let Some(marker) = dohc_engine_collab::read_marker(store, key)? else {
+        return Ok(None);
+    };
+    let projection = close_projection(store, key, &marker, Some(root_dir))?;
+    let covered =
+        dohc_engine_collab::local_close_is_covered(store, key, &marker, projection.as_ref())?;
+    Ok((!covered).then_some(UnloadPending::Settlement))
+}
+
 fn ydoc_close_session_on_store(
     store: &mut EngineStore,
     doc_cache: &mut WriterDocCache,
@@ -3312,49 +3396,13 @@ fn ydoc_close_session_on_store(
     // Keeping the closed CRDT authoritative here would shadow external file
     // edits on reopen: existing lineage, no seedContent, stale document.
     let persist_closed_state = false;
-    let authoritative_projection = if marker.regime == Regime::LocalOnly
-        && marker.head_update_seq > 0
-    {
-        let persisted = dohc_engine_collab::load_persisted(store, key)?
-            .ok_or(dohc_engine_collab::CollabError::NoMarker)?;
-        let projection = project_ydoc_on_store(store, key, &persisted.doc, marker.content_kind)?;
-        // A reopened seed can import an engine-written head whose earlier
-        // close cleared last_settled_sha. Prove these source bytes still
-        // belong to this object and are on disk before allowing its prune.
-        let materialized_seed_source_sha256 = if let Some(materialization) = materialization
-            && let Some(path) = marker.path.as_deref()
-            && let Some(seed_source) =
-                dohc_engine_collab::read_seed_only_lineage_source(store, key)?
-            && store.read_with(|conn| -> Result<bool, StorageError> {
-                conn.query_row(
-                    "SELECT EXISTS (SELECT 1 FROM snapshots \
-                         WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
-                           AND path = ?4 AND blob_sha256 = ?5 AND binary_sha256 IS NULL \
-                           AND metadata_origin <> ?6)",
-                    params![
-                        key.workspace_id,
-                        key.version_id,
-                        key.object_id,
-                        path,
-                        seed_source,
-                        dohc_engine_domain::store::CAPTURE_ORIGIN
-                    ],
-                    |row| row.get(0),
-                )
-                .map_err(StorageError::persist_public)
-            })?
-            && matches!(
-                probe_projection_target(&materialization.root_dir, path, ProjectionTargetKind::Plaintext),
-                ProjectionTargetState::Text { sha256 } if sha256 == seed_source
-            ) {
-            Some(seed_source)
-        } else {
-            None
-        };
-        Some(dohc_engine_collab::CloseProjection {
-            sha256: hex_sha256(projection.content.as_bytes()),
-            materialized_seed_source_sha256,
-        })
+    let authoritative_projection = if marker.regime == Regime::LocalOnly {
+        close_projection(
+            store,
+            key,
+            &marker,
+            materialization.map(|materialization| materialization.root_dir.as_path()),
+        )?
     } else {
         None
     };
@@ -3485,9 +3533,12 @@ fn materialize_ydoc_drain(
         store,
         &materialization.root_dir,
         MaterializationReplayScope {
+            holds: None,
             workspace_id: &key.workspace_id,
             self_writes: Some(materialization.self_writes.as_ref()),
             progress: None,
+            file_outcomes_settled: false,
+            released_hold_paths: None,
         },
         now_ms,
         faults,
@@ -3996,14 +4047,14 @@ mod scene_seed_transaction_tests {
             &NoFaults,
         )
         .expect("seed scene");
-        // Every returned moment id must name a job that actually exists.
+        // Every returned job id must name a job that actually exists.
         for job_id in &jobs {
             assert!(
                 store
                     .load_materialization_job(job_id)
                     .expect("load job")
                     .is_some(),
-                "returned moment id {job_id} has no materialization job",
+                "returned job id {job_id} has no materialization job",
             );
         }
     }
@@ -4059,9 +4110,12 @@ mod scene_seed_transaction_tests {
             &mut store,
             scratch.path(),
             MaterializationReplayScope {
+                holds: None,
                 workspace_id: "workspace",
                 self_writes: None,
                 progress: None,
+                file_outcomes_settled: false,
+                released_hold_paths: None,
             },
             3,
             &NoFaults,
@@ -4101,9 +4155,12 @@ mod scene_seed_transaction_tests {
             &mut store,
             scratch.path(),
             MaterializationReplayScope {
+                holds: None,
                 workspace_id: "workspace",
                 self_writes: None,
                 progress: Some(&jobs_taken),
+                file_outcomes_settled: false,
+                released_hold_paths: None,
             },
             7,
             &NoFaults,
@@ -4260,4 +4317,152 @@ mod collection_adoption_settlement_tests {
             .expect("other binding");
         assert_eq!(other, "pending");
     }
+}
+
+/// Returns false for an adopted owner, whose appends must not claim local automations.
+#[allow(clippy::too_many_arguments)]
+fn journal_local_append_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    path: &str,
+    content_kind: ContentKind,
+    update: &[u8],
+    actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
+    seed_source: Option<&dohc_engine_collab::owner_base_source::OwnerSeedSource>,
+    sharing_declined: &mut Option<SharingDeclined>,
+    outcome: &mut AppendOutcome,
+    now_ms: i64,
+) -> Result<bool, CollabError> {
+    let update_sha = &hex_sha256(update);
+    dohc_engine_collab::owner_outbox::append_adopted_local_update_in_tx(
+        tx,
+        key,
+        path,
+        outcome.seq,
+        update,
+        now_ms,
+    )?;
+    if dohc_engine_collab::owner_outbox::has_adopted_owner_in(tx, key)? {
+        outcome.emit_outbound = false;
+        return Ok(false);
+    }
+    // Origination is asked first and owns the base-once decision: it
+    // originates only a lineage that has no base yet. The base is a
+    // full state, so it already carries this append and every row the
+    // lineage held before it — a delta beside it would be redundant.
+    // Everything else journals its delta.
+    let base_originated = match dohc_engine_sync::originate_appended_ydoc_base_in_tx(
+        tx,
+        key,
+        path,
+        actor_origin_id,
+        attribution,
+        seed_source.is_some(),
+        now_ms,
+    )
+    .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
+        reason: format!("outbound ydoc.update base origination failed: {error}"),
+    })? {
+        dohc_engine_sync::BaseOrigination::Originated { base_snapshot_sha } => {
+            if let Some(source) = seed_source {
+                dohc_engine_collab::owner_base_source::retain_owner_base_source_in_tx(
+                    tx,
+                    key,
+                    path,
+                    &base_snapshot_sha,
+                    source,
+                )?;
+            }
+            true
+        }
+        dohc_engine_sync::BaseOrigination::Declined(reason) => {
+            *sharing_declined = Some(reason);
+            false
+        }
+        dohc_engine_sync::BaseOrigination::NothingToDo => false,
+    };
+    if !base_originated && outcome.emit_outbound {
+        let lineage_claim_id = dohc_engine_collab::read_marker_in(tx, key)?
+            .and_then(|marker| marker.lineage_claim_id)
+            .ok_or_else(|| dohc_engine_collab::CollabError::Corrupt {
+                reason: "exact Y.Doc lineage has no claim id".to_owned(),
+            })?;
+        let origin_seq = dohc_engine_sync::journal_local_op_in_tx(
+            tx,
+            &key.workspace_id,
+            "ydoc.update",
+            &ydoc_update_payload(
+                key,
+                path,
+                content_kind,
+                update_sha,
+                &lineage_claim_id,
+                actor_origin_id,
+                attribution,
+                false,
+            ),
+            now_ms,
+        )
+        .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
+            // Named explicitly: an exact replicated lineage
+            // with NO sync identity is a half-initialized state
+            // (every real replicated flow runs sync init first —
+            // pulls require the identity and the TS driver creates
+            // it when journaling the base). Fail closed with a
+            // diagnosable reason rather than a generic failure; an
+            // identity cannot be seeded down here (origin identity
+            // is minted by sync init, not the collab layer).
+            reason: format!("outbound ydoc.update journal append failed: {error}"),
+        })?;
+        // The op's replication coordinate exists only now, after the
+        // journal assigned it. Thread it into the facts so record
+        // events and the automation trigger key see the same
+        // coordinate every peer derives from the envelope. A
+        // base-originated or never-synced apply keeps `None`; its
+        // per-change key is the history row id.
+        if let Some(facts) = outcome.record_facts.as_mut() {
+            let origin_id: String = tx
+                .query_row(
+                    "SELECT origin_id FROM sync_identity WHERE workspace_id=?1",
+                    [&key.workspace_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
+                    reason: format!("journaled ydoc.update has no sync identity: {error}"),
+                })?;
+            facts.source = Some((origin_id, origin_seq));
+        }
+    }
+    Ok(true)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn journal_recovery_append_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    path: &str,
+    content_kind: ContentKind,
+    update: &[u8],
+    actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
+    outcome: &mut AppendOutcome,
+    now_ms: i64,
+) -> Result<bool, CollabError> {
+    if outcome.deduped {
+        return Ok(false);
+    }
+    journal_local_append_in_tx(
+        tx,
+        key,
+        path,
+        content_kind,
+        update,
+        actor_origin_id,
+        attribution,
+        None,
+        &mut None,
+        outcome,
+        now_ms,
+    )
 }

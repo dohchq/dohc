@@ -39,7 +39,7 @@ const validationPolicy = { maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000
 const frames = { receive: { maxFrameBytes: 65536, maxStateVectorBytes: 100000, maxUpdateBytes: 1000000, maxSyncBytes: 2000000 },
   maxQueuedBytes: 2000000, maxQueuedFrames: 64, maxControlBytes: 131072, maxControlFrames: 8, maxAssemblyBytes: 2000000 };
 const browserLimits = { maxPendingRequests: 4, maxRequestBytes: 4096, maxResponseBytes: 8192, timeoutMs: 30000 };
-const routeLimits = { maxConnections: 4, maxConnectionsPerSession: 3, maxConnectionsPerPrincipal: 3, maxConnectionsPerGrant: 4,
+const routeLimits = { maxConnections: 4, maxConnectionsPerWorkspace: 96, reservedOwnerConnections: 0, maxConnectionsPerSession: 3, maxConnectionsPerPrincipal: 3, maxConnectionsPerGrant: 4, maxBufferedBytes: 134217728,
   maxPendingRequests: 4, maxRequestBytes: 4096, maxResponseBytes: 8192, maxPendingBytes: 2000000, maxFragments: 8, maxBufferedChunks: 64,
   upgradeTimeoutMs: 30000, idleTimeoutMs: 60000, drainTimeoutMs: 1000 };
 const exchangeKey = "native-network-exchange-".repeat(2);
@@ -106,7 +106,7 @@ it("edits and pauses through the desktop capture, IPC, renderer mirror and a rea
     const { storage } = deployment;
     expect(storage.claimWorkspace({ workspaceId: "workspace", ownerUserId: ownerUser.id, createdAtMs: 1 })).toBe("created");
     expect(storage.provisionLiveHostControl({ mode: "service", hostId: "service", updatedAtMs: 1, guard: storage.captureStanding() }).ok).toBe(true);
-    active = await startServiceLiveHost({ configPath: serviceConfig, ...deployment, frameChanges });
+    active = await startServiceLiveHost({trustedAccount: (accountId: string) => ({accountId, name: accountId}), configPath: serviceConfig, ...deployment, frameChanges });
     const baseline = Y.encodeStateAsUpdate(ownerDoc), document = { workspaceId: "workspace", mainVersionId: mainVersionId!, objectId: "object", lineageClaimId: hash(baseline) };
     const registration = createLiveMarkdownRegistrationValidator(validationPolicy)({ document, currentPath: "docs/a.md", checkpoint: baseline });
     if (registration.kind !== "accepted") throw new Error(JSON.stringify(registration));
@@ -246,20 +246,19 @@ it("edits and pauses through the desktop capture, IPC, renderer mirror and a rea
     expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe(yDocToMarkdown(first.mirror.doc));
     results.edit = {saveEvent, peerMarkdown: yDocToMarkdown(peer.mirror.doc), ordinaryCaptureCalls, localMarkdown: "Hello", settlement};
     const wrong = await desktop(0, "wrong-bearer", {token: tokens[1]});
-    expect(wrong.mirror.available).toBe(false); expect(wrong.mirror.liveHostUnavailable).toBe(false);
-    expect(wrong.mirror.doc).toBeNull();
-    expect(wrong.mirror.sharedWaiting).toEqual({state: "failed", message: "dohc could not open this file for editing."});
+    const failedOpen = {state: "failed", message: "dohc could not open this file for editing."};
+    expect(wrong.mirror.available).toBe(false); expect(wrong.mirror.doc).toBeNull();
+    expect(wrong.mirror.liveHostUnavailable).toBe(false); expect(wrong.mirror.sharedWaiting).toEqual(failedOpen);
     const stale = await desktop(0, "stale", {current: false}); expect(stale.mirror.available).toBe(false);
     const paused = [saveWhen(first, "read-only"), saveWhen(peer, "read-only")];
     await active.close(); active = undefined;
     const pausedEvents = await Promise.all(paused);
     expect(pausedEvents.map(event => event.readOnlyCause)).toEqual(["reconnecting", "reconnecting"]);
     const unavailable = await desktop(0, "offline");
-    expect(unavailable.mirror.available).toBe(false); expect(unavailable.mirror.liveHostUnavailable).toBe(false);
-    expect(unavailable.mirror.doc).toBeNull();
-    expect(unavailable.mirror.sharedWaiting).toEqual({state: "failed", message: "dohc could not open this file for editing."});
+    expect(unavailable.mirror.available).toBe(false); expect(unavailable.mirror.doc).toBeNull();
+    expect(unavailable.mirror.liveHostUnavailable).toBe(false); expect(unavailable.mirror.sharedWaiting).toEqual(failedOpen);
     expect(readFileSync(join(unavailable.localRoot, "docs/a.md"), "utf8")).toBe("Hello");
-    active = await startServiceLiveHost({configPath: serviceConfig, ...deployment, frameChanges});
+    active = await startServiceLiveHost({trustedAccount: (accountId: string) => ({accountId, name: accountId}), configPath: serviceConfig, ...deployment, frameChanges});
     const reopened = await desktop(0, "reopened"); expect(reopened.mirror.available).toBe(true);
     if (!reopened.mirror.doc) throw new Error("Missing reopened live renderer mirror.");
     expect(yDocToMarkdown(reopened.mirror.doc)).toBe(yDocToMarkdown(first.mirror.doc));

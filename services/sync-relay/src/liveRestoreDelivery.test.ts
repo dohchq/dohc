@@ -9,7 +9,7 @@ const receipt={operation,localHeadSequence:2,recordedAtMs:3};
 const refused={status:"pending",reason:"publication-pending"};
 
 // The old cut already reached native; only the fence remains.
-function restore(answers:unknown[],publishOrdinary?:(signal?:AbortSignal)=>Promise<unknown>,signal?:AbortSignal){
+function restore(answers:unknown[],publishReplica?:(signal?:AbortSignal)=>Promise<unknown>,signal?:AbortSignal){
   const calls:string[]=[];
   const sendRequest=vi.fn(async(request:{method:string})=>{
     calls.push(request.method);
@@ -17,11 +17,11 @@ function restore(answers:unknown[],publishOrdinary?:(signal?:AbortSignal)=>Promi
   });
   const store={openStopRestoreCut:()=>({kind:"applied",receipt:{kind:"owner"}}),closeStopRestoreCut:vi.fn(),
     pendingStopRestoreFence:vi.fn(()=>({operation})),acknowledgeStopRestoreFence:vi.fn((_input:unknown,value:unknown)=>value)};
-  const publish=publishOrdinary && vi.fn(async(signal?:AbortSignal)=>{calls.push("publish");return publishOrdinary(signal);});
+  const publish=publishReplica && vi.fn(async(signal?:AbortSignal)=>{calls.push("publish");return publishReplica(signal);});
   const stopped=deliverStopRestore({store:store as never,lookup:{workspaceId:"workspace",ownerUserId:"owner",operationId:"operation"},
     deliveryKind:"owner",signal,connection:{client:{sendRequest} as never,workspace:"native-workspace",
       host:{mode:"service",hostId:"service",hostEpoch:1,instanceId:"instance",connectionId:"connection"} as never,deadlineMs:1000,
-      nextRequestId:()=>1,...(publish?{publishOrdinary:publish}:{})}});
+      nextRequestId:()=>1,...(publish?{publish}:{})}});
   return {stopped,store,calls};
 }
 

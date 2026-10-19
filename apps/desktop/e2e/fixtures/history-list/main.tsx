@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { EngineMomentRecord } from "../../../src/ipc/bridgeContract";
 import { EngineHistoryView } from "../../../src/renderer/workbench/EngineHistory";
@@ -20,6 +20,7 @@ const initialMoments: EngineMomentRecord[] = Array.from({ length: 5000 }, (_, in
 
 function HistoryFixture() {
   const [moments, setMoments] = useState(initialMoments);
+  const entries = useMemo(() => moments.map((moment) => ({ kind: "file" as const, moment })), [moments]);
   const [hasMore, setHasMore] = useState(true);
   const [opened, setOpened] = useState("");
   const [callbackGeneration, setCallbackGeneration] = useState(0);
@@ -33,10 +34,9 @@ function HistoryFixture() {
         Replace open callback
       </button>
       <EngineHistoryView
-        moments={moments}
+        entries={entries}
         hasMore={hasMore}
         loadingMore={false}
-        protectedTruncated
         onOpenMoment={onOpenMoment}
         onLoadMore={() => {
           setMoments((current) => [...current, {

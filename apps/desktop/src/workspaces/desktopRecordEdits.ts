@@ -1,11 +1,14 @@
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import {
+  AutomationCreationCommitted,
   runCollectionRecordCreation,
   type CollectionRecordEditAdapter,
   type CollectionRecordEditContext,
   type CreateCollectionRecordInput,
   type RecordEditSession,
 } from "@dohc/automation-executor/collection-record-edits";
+import { isIdempotencyKeyReuseRefusal } from "@dohc/workspace-engine-client";
 import { readWorkspaceText } from "./workspaceAssets";
 import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import { requirePublishedWrite, type WorkspaceEngineCapture } from "./workspaceEngineCapture";
@@ -58,10 +61,18 @@ export function desktopRecordEditContext(host: DesktopRecordEditHost): Collectio
     openRecord: async (path) => byPerson(await capture.openRecordSession(path), person.humanId),
     async createFile(path, text, author) {
       const named = author.kind === "automation" || author.kind === "agent" ? author : person;
-      requirePublishedWrite(path, await capture.writeAuthoredFile(join(workspaceRoot, path), text, named, {
+      let result;
+      try { result = await capture.writeAuthoredFile(join(workspaceRoot, path), text, named, {
         createOnly: true,
+        ...(named.kind === "automation" ? { requestId: `automation-create:${createHash("sha256").update(text).digest("hex")}` } : {}),
         signal,
-      }));
+      }); }
+      catch (error) {
+        if (named.kind === "automation" && isIdempotencyKeyReuseRefusal(error)) throw new AutomationCreationCommitted();
+        throw error;
+      }
+      if (named.kind === "automation" && result.deduped) throw new AutomationCreationCommitted();
+      requirePublishedWrite(path, result);
       return path;
     },
     readText: (path) => readWorkspaceText(workspaceRoot, path),

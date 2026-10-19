@@ -29,15 +29,15 @@ async fn open(
         .as_object_mut()
         .expect("open params")
         .extend(params.as_object().expect("extra open params").clone());
-    transport
-        .call(
-            RequestContext::unbounded(),
-            request(id, "workspace.open", None, open_params),
-        )
-        .await
-        .map(|response| {
-            serde_json::from_value(response.result["workspace"].clone()).expect("workspace handle")
-        })
+    call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(id, "workspace.open", None, open_params),
+    )
+    .await
+    .map(|response| {
+        serde_json::from_value(response.result["workspace"].clone()).expect("workspace handle")
+    })
 }
 
 async fn call(
@@ -46,14 +46,14 @@ async fn call(
     id: u64,
     method: &str,
 ) -> Value {
-    transport
-        .call(
-            RequestContext::unbounded(),
-            request(id, method, Some(handle.clone()), json!({})),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{method} failed: {error:?}"))
-        .result
+    call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(id, method, Some(handle.clone()), json!({})),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{method} failed: {error:?}"))
+    .result
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -160,16 +160,16 @@ async fn read_attachment_over_a_full_owner_cannot_reach_mutating_methods() {
     let error = transport
         .call(
             RequestContext::unbounded(),
-            request(
+            keyed_request(
                 3,
                 "versionedText.write",
                 Some(cli.clone()),
+                "attach-write-1",
                 json!({
                     "versionId": "main",
                     "path": "notes/isolated.md",
                     "text": "a read handle must not write",
                     "origin": "api",
-                    "requestId": "attach-write-1",
                 }),
             ),
         )
@@ -185,16 +185,16 @@ async fn read_attachment_over_a_full_owner_cannot_reach_mutating_methods() {
     let written = transport
         .call(
             RequestContext::unbounded(),
-            request(
+            keyed_request(
                 4,
                 "versionedText.write",
                 Some(desktop.clone()),
+                "attach-write-2",
                 json!({
                     "versionId": "main",
                     "path": "notes/isolated.md",
                     "text": "the owner still writes",
                     "origin": "api",
-                    "requestId": "attach-write-2",
                 }),
             ),
         )
@@ -213,7 +213,7 @@ async fn read_attachment_over_a_full_owner_cannot_reach_mutating_methods() {
     .await;
     assert_eq!(history["activeVersion"]["id"], "main");
     assert_eq!(
-        history["textMomentPage"]["moments"][0]["momentId"],
+        history["moments"][0]["momentId"],
         written["moment"]["momentId"]
     );
     let detail = common::call(
@@ -260,29 +260,38 @@ async fn read_only_history_hydrates_large_moment_text_within_its_workspace() {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let workspace_id = "ws-read-only-history-blob";
     let other_workspace = "ws-read-only-history-blob-other";
+    let other_scratch = ScratchDir::new().expect("other workspace scratch");
     let db_path = scratch.path().join(".dohc/engine/engine.db");
-    std::fs::create_dir_all(db_path.parent().expect("engine dir")).expect("engine dir");
+    let other_db_path = other_scratch.path().join(".dohc/engine/engine.db");
+    for path in [&db_path, &other_db_path] {
+        std::fs::create_dir_all(path.parent().expect("engine dir")).expect("engine dir");
+    }
     let text = "x".repeat(128 * 1024 + 1);
     let sha256 = dohc_engine_storage::hex_sha256(text.as_bytes());
     let other_text = "referenced only by another workspace";
     let other_sha256 = dohc_engine_storage::hex_sha256(other_text.as_bytes());
-    {
-        let mut store = EngineStore::open(&db_path, 1).expect("store");
+    for (path, workspace, moments) in [
+        (
+            &db_path,
+            workspace_id,
+            vec![
+                ("large-text-moment", text.as_str()),
+                ("current-text-moment", "small now"),
+            ],
+        ),
+        (
+            &other_db_path,
+            other_workspace,
+            vec![("other-text-moment", other_text)],
+        ),
+    ] {
+        let mut store = EngineStore::open(path, 1).expect("store");
         store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
         let mut versioned = VersionedTextStore::new(&mut store);
-        for workspace in [workspace_id, other_workspace] {
-            versioned
-                .ensure_main_version(workspace, "main", 1, &NoFaults)
-                .expect("main");
-        }
-        for (index, (workspace, moment_id, body)) in [
-            (workspace_id, "large-text-moment", text.as_str()),
-            (workspace_id, "current-text-moment", "small now"),
-            (other_workspace, "other-text-moment", other_text),
-        ]
-        .into_iter()
-        .enumerate()
-        {
+        versioned
+            .ensure_main_version(workspace, "main", 1, &NoFaults)
+            .expect("main");
+        for (index, (moment_id, body)) in moments.into_iter().enumerate() {
             versioned
                 .write_text(
                     &WriteText {
@@ -304,6 +313,24 @@ async fn read_only_history_hydrates_large_moment_text_within_its_workspace() {
                 .expect("seed text moment");
         }
     }
+    // The other workspace's text reaches this root only as a raw payload:
+    // nothing versioned here references it.
+    {
+        let connection = rusqlite::Connection::open(&db_path).expect("sqlite");
+        connection
+            .execute(
+                "ATTACH DATABASE ?1 AS other_root",
+                [other_db_path.to_string_lossy().into_owned()],
+            )
+            .expect("attach other root");
+        let copied = connection
+            .execute(
+                "INSERT INTO blobs SELECT * FROM other_root.blobs WHERE sha256 = ?1",
+                [&other_sha256],
+            )
+            .expect("copy unreferenced text payload");
+        assert_eq!(copied, 1);
+    }
 
     let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(Arc::clone(&service));
@@ -324,14 +351,14 @@ async fn read_only_history_hydrates_large_moment_text_within_its_workspace() {
         json!({ "workspaceId": workspace_id }),
     )
     .await;
-    let moment = history["textMomentPage"]["moments"]
+    let moment = history["moments"]
         .as_array()
         .expect("history moments")
         .iter()
         .find(|moment| moment["momentId"] == "large-text-moment")
         .expect("historical large text moment");
-    assert_eq!(moment["afterText"], Value::Null);
-    assert_eq!(moment["afterBlobSha256"], sha256);
+    assert!(moment.get("afterText").is_none());
+    assert!(moment.get("afterBlobSha256").is_none());
     let detail = common::call(
         &transport,
         &read_only,
@@ -393,6 +420,26 @@ async fn read_only_history_hydrates_large_moment_text_within_its_workspace() {
         "method is unavailable on a read-only workspace handle"
     );
     call(&transport, &read_only, 8, "workspace.close").await;
+    let connection = rusqlite::Connection::open(&db_path).expect("sqlite");
+    let (payloads, references): (i64, i64) = connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM blobs WHERE sha256 = ?1), \
+                    (SELECT COUNT(*) FROM snapshots WHERE blob_sha256 = ?1) + \
+                    (SELECT COUNT(*) FROM fork_base_snapshots WHERE blob_sha256 = ?1) + \
+                    (SELECT COUNT(*) FROM moments \
+                     WHERE after_blob_sha256 = ?1 OR before_blob_sha256 = ?1) + \
+                    (SELECT COUNT(*) FROM conflicts \
+                     WHERE base_blob_sha256 = ?1 OR current_blob_sha256 = ?1 \
+                        OR incoming_blob_sha256 = ?1)",
+            [&other_sha256],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("count the refused payload and its references");
+    assert_eq!(
+        (payloads, references),
+        (1, 0),
+        "the refused text payload exists in this root without a reference"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

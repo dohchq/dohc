@@ -1,5 +1,4 @@
 import { app } from "electron";
-import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { RelayAutomationHost } from "@dohc/workspace-contracts/relay";
@@ -12,6 +11,8 @@ import {
   type ShareMountRecord,
   type ShareViewIdentity,
 } from "./registryStore";
+import { canonicalWorkspaceRoot, FOLDER_CHANGED } from "./createWorkspaceFolder";
+import { storedShareMounts } from "./shareViewFilesTarget";
 import { recordReceivedShare, recordSynced } from "./syncHistory";
 
 // Electron wiring over the pure registry store. The registry lives in
@@ -48,16 +49,21 @@ export function listWorkspaces(): RegistryEntry[] {
   return store().list();
 }
 
+// Saves only a root that is its folder's real path, the one every workspace
+// operation receives. A root that no longer resolves to itself changed after
+// createWorkspaceFolder checked it, so nothing is saved.
 export function registerWorkspace(workspace: RegistryEntry): void {
-  const canonicalRoot = realpathSync.native(workspace.rootPath);
+  if (canonicalWorkspaceRoot(workspace.rootPath) !== workspace.rootPath) {
+    throw new Error(FOLDER_CHANGED);
+  }
   for (const existing of store().list()) {
-    let existingCanonicalRoot: string;
+    let existingRoot: string;
     try {
-      existingCanonicalRoot = realpathSync.native(existing.rootPath);
+      existingRoot = canonicalWorkspaceRoot(existing.rootPath);
     } catch {
       continue;
     }
-    if (existingCanonicalRoot === canonicalRoot) {
+    if (existingRoot === workspace.rootPath) {
       throw new Error(`Folder is already attached: ${existing.rootPath}`);
     }
   }
@@ -74,15 +80,19 @@ export function removeWorkspace(workspaceId: string): void {
   store().remove(workspaceId);
 }
 
-export function setWorkspaceRemote(
+export async function setWorkspaceRemote(
   workspaceId: string,
   remote: RemoteIdentity,
-): void {
+): Promise<void> {
   // The folder keeps the fact too, so a forgotten and reattached copy still
   // knows it synced. See syncHistory.ts.
   const workspace = findWorkspace(workspaceId);
-  if (workspace && !workspace.remote) recordSynced(workspace.rootPath);
+  if (workspace && !workspace.remote) await recordSynced(workspace.rootPath);
   store().setRemote(workspaceId, remote);
+}
+
+export function pauseWorkspaceRemote(workspaceId: string, syncPause?: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPause): void {
+  store().pauseRemote(workspaceId, syncPause);
 }
 
 export function markWorkspaceOpened(workspaceId: string, atMs = Date.now()): void {
@@ -125,12 +135,12 @@ export function markWorkspaceShareRosterPulled(workspaceId: string): void {
   store().markShareRosterPulled(workspaceId);
 }
 
-export function setWorkspaceShareView(
+export async function setWorkspaceShareView(
   workspaceId: string,
   shareView: ShareViewIdentity,
-): void {
+): Promise<void> {
   const workspace = findWorkspace(workspaceId);
-  if (workspace && !workspace.shareView) recordSynced(workspace.rootPath);
+  if (workspace && !workspace.shareView) await recordSynced(workspace.rootPath);
   store().setShareView(workspaceId, shareView);
 }
 
@@ -148,27 +158,42 @@ export function reconcileWorkspaceRecipientShares(
   return store().reconcileRecipientShares(workspaceId, reconcile);
 }
 
-// MU-C4: the workspace's joined shared channels (replace-the-set write).
-export function setWorkspaceSharedChannels(
+// MU-C4: change the workspace's joined shared channels. See updateReceived.
+export function updateWorkspaceSharedChannels(
   workspaceId: string,
-  sharedChannels: JoinedSharedChannel[],
-): void {
-  recordReceivedShareIn(workspaceId, sharedChannels);
-  store().setSharedChannels(workspaceId, sharedChannels);
+  update: (current: readonly JoinedSharedChannel[]) => readonly JoinedSharedChannel[],
+): Promise<void> {
+  return updateReceived(workspaceId, entry => entry.sharedChannels ?? [], update,
+    next => store().setSharedChannels(workspaceId, next));
 }
 
-// Share mounts: the workspace's mounted shares (replace-the-set write).
-export function setWorkspaceShareMounts(
+// Share mounts: change the workspace's mounted shares. See updateReceived.
+export function updateWorkspaceShareMounts(
   workspaceId: string,
-  shareMounts: ShareMountRecord[],
-): void {
-  recordReceivedShareIn(workspaceId, shareMounts);
-  store().setShareMounts(workspaceId, shareMounts);
+  update: (current: readonly ShareMountRecord[]) => readonly ShareMountRecord[],
+): Promise<void> {
+  return updateReceived(workspaceId, storedShareMounts, update,
+    next => store().setShareMounts(workspaceId, next));
 }
 
-// The folder keeps that a share came in, so leaving or removing it later
-// cannot make the workspace look never shared. See syncHistory.ts.
-function recordReceivedShareIn(workspaceId: string, received: readonly unknown[]): void {
-  const workspace = findWorkspace(workspaceId);
-  if (workspace && received.length > 0) recordReceivedShare(workspace.rootPath);
+// The folder keeps that a share came in before the registry does, so leaving
+// or removing it later cannot make the workspace look never shared. See
+// syncHistory.ts. `update` runs on the set as it stands after that wait and
+// is stored in the same step, so a change made meanwhile is kept; it may run
+// twice and throws to change nothing. Returning `current` stores nothing.
+async function updateReceived<Row>(
+  workspaceId: string,
+  stored: (entry: RegistryEntry) => readonly Row[],
+  update: (current: readonly Row[]) => readonly Row[],
+  commit: (next: Row[]) => void,
+): Promise<void> {
+  for (let recorded = false; ; recorded = true) {
+    const workspace = findWorkspace(workspaceId);
+    if (!workspace) throw new Error("This workspace is not open. Open it again.");
+    const current = stored(workspace);
+    const next = update(current);
+    if (next === current) return;
+    if (recorded || next.length === 0) return commit([...next]);
+    await recordReceivedShare(workspace.rootPath);
+  }
 }

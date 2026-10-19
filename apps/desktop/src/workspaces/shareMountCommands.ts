@@ -17,7 +17,9 @@ import {
   shareMountRecordsForId,
   shareMountResultRow,
   usableShareMountRecord,
+  withoutShareMountRecords,
 } from "./shareMounts";
+import { receivedReferencePin, refreshReceivedReferencePin } from "./workspaceFileReferenceScopes";
 import type { ShareViewInfo } from "./shareViewInfo";
 import {
   ShareViewMountRollbackError,
@@ -37,6 +39,7 @@ export interface ShareMountCommandWorkspace {
 export interface ShareMountCommandCredentials {
   relayUrl?: string | null;
   token: string;
+  userId?: string;
   email?: string | null;
 }
 
@@ -47,12 +50,17 @@ type ShareMountFilesLifecycle = Pick<
 
 export interface ShareMountCommandDependencies<WorkspaceSummary> {
   readMounts(workspaceId: string): readonly ShareMountRecord[];
-  writeMounts(workspaceId: string, mounts: ShareMountRecord[]): void;
+  // Stores `update` applied to the mounts as they stand when written.
+  updateMounts(
+    workspaceId: string,
+    update: (mounts: readonly ShareMountRecord[]) => readonly ShareMountRecord[],
+  ): Promise<void>;
   loadCredentials(): Promise<ShareMountCommandCredentials | null>;
+  currentCredentialGeneration(): number;
   fetchInfo(
     relay: SyncRelayConnection,
     shareId: string,
-  ): Promise<Pick<ShareViewInfo, "granterEmail" | "selector">>;
+  ): Promise<Pick<ShareViewInfo, "granterEmail" | "selector" | "receivedIdentity">>;
   listDirectory(absolutePath: string): Promise<string[]>;
   withWorkspaceOperation<T>(
     workspaceRoot: string,
@@ -133,7 +141,7 @@ function assertShareMountLifecycleOwner(
 export function createShareMountCommands<WorkspaceSummary>(
   dependencies: ShareMountCommandDependencies<WorkspaceSummary>,
 ): ShareMountCommands<WorkspaceSummary> {
-  // Mount, refresh, and unmount replace the whole registry mount set. Keep
+  // Mount, refresh, and unmount decide from the registry mount set. Keep
   // relay preflight in the same admission so no command can act on a stale
   // snapshot or recreate a projection after unmount removes it.
   const locks = new Map<string, Promise<void>>();
@@ -171,16 +179,17 @@ export function createShareMountCommands<WorkspaceSummary>(
       const projection = dependencies.projectionFor(owner);
       await projection.create();
       try {
-        dependencies.writeMounts(target.workspaceId, [
-          ...dependencies.readMounts(target.workspaceId),
-          {
-            shareId: target.shareId,
-            label: target.mountLabel,
-            granterEmail: target.granterEmail,
-            relayUrl: target.relayUrl,
-            recipientEmail: target.recipientEmail ?? null,
-            grantedSelector: target.grantedSelector,
-          },
+        const mount: ShareMountRecord = {
+          shareId: target.shareId,
+          label: target.mountLabel,
+          granterEmail: target.granterEmail,
+          relayUrl: target.relayUrl,
+          recipientEmail: target.recipientEmail ?? null,
+          grantedSelector: target.grantedSelector,
+        };
+        await dependencies.updateMounts(target.workspaceId, (mounts) => [
+          ...mounts,
+          mount,
         ]);
       } catch (error) {
         let rollback: Awaited<ReturnType<typeof projection.remove>>;
@@ -217,13 +226,8 @@ export function createShareMountCommands<WorkspaceSummary>(
           removed.error,
         );
       }
-      const mounts = dependencies.readMounts(target.workspaceId);
-      const matches = new Set(
-        shareMountRecordsForId(mounts, target.shareId),
-      );
-      dependencies.writeMounts(
-        target.workspaceId,
-        mounts.filter((mount) => !matches.has(mount)),
+      await dependencies.updateMounts(target.workspaceId, (mounts) =>
+        withoutShareMountRecords(mounts, target.shareId),
       );
       return {
         folderLeft: removed.folderLeft,
@@ -279,6 +283,11 @@ export function createShareMountCommands<WorkspaceSummary>(
         }
         const credentials = await dependencies.loadCredentials();
         assertCurrent();
+        const generation = dependencies.currentCredentialGeneration();
+        const assertIdentityCurrent = () => {
+          assertCurrent();
+          if (generation !== dependencies.currentCredentialGeneration()) throw new Error("The server session changed.");
+        };
         if (!credentials) throw new Error("Sign in to your server first.");
         const relayUrl = credentials.relayUrl;
         if (!relayUrl || !relayUrlsMatch(relayUrl, parsed.relayUrl)) {
@@ -293,11 +302,11 @@ export function createShareMountCommands<WorkspaceSummary>(
           throw new Error("This share is already added to this workspace.");
         }
         const relay = { baseUrl: relayUrl, token: credentials.token };
-        let info: Pick<ShareViewInfo, "granterEmail" | "selector">;
+        let info: Pick<ShareViewInfo, "granterEmail" | "selector" | "receivedIdentity">;
         try {
           assertCurrent();
           info = await dependencies.fetchInfo(relay, parsed.shareId);
-          assertCurrent();
+          assertIdentityCurrent();
         } catch (error) {
           if (error instanceof ShareUnavailableError) {
             throw new Error(
@@ -323,6 +332,7 @@ export function createShareMountCommands<WorkspaceSummary>(
               join(workspace.rootPath, SHARED_WITH_ME_FOLDER),
             );
             assertCurrent();
+            assertIdentityCurrent();
             const mount = {
               shareId: parsed.shareId,
               label: allocateShareMountLabel({
@@ -335,6 +345,8 @@ export function createShareMountCommands<WorkspaceSummary>(
               relayUrl,
               recipientEmail: credentials.email ?? null,
               grantedSelector,
+              recipientUserId: credentials.userId,
+              receivedIdentity: info.receivedIdentity,
             };
             const prepared: PreparedShareViewFilesMount = {
               kind: "mount",
@@ -439,6 +451,13 @@ export function createShareMountCommands<WorkspaceSummary>(
           assertCurrent();
           mounts = dependencies.readMounts(workspace.workspaceId);
         }
+        const credentials = mounts.some(mount => record(mount) && !mount.ended && mount.recipientUserId && !receivedReferencePin(mount.receivedIdentity)) ? await dependencies.loadCredentials() : null;
+        assertCurrent();
+        const generation = dependencies.currentCredentialGeneration();
+        const assertIdentityCurrent = () => {
+          assertCurrent();
+          if (generation !== dependencies.currentCredentialGeneration()) throw new Error("The server session changed.");
+        };
         const results: ShareMountStatusRow[] = [];
         const pushResult = (
           mount: unknown,
@@ -462,6 +481,20 @@ export function createShareMountCommands<WorkspaceSummary>(
             }
             assertCurrent();
             try {
+              if (!mount.ended && !receivedReferencePin(mount.receivedIdentity) && mount.recipientUserId && credentials?.userId === mount.recipientUserId && credentials.relayUrl && relayUrlsMatch(credentials.relayUrl, mount.relayUrl)) {
+                // Recover a missing pin once; ordinary refresh uses the pinned projection.
+                let info: Awaited<ReturnType<typeof dependencies.fetchInfo>> | undefined;
+                try {
+                  info = await dependencies.fetchInfo({ baseUrl: credentials.relayUrl, token: credentials.token }, mount.shareId);
+                } catch (error) {
+                  reportFailure(`share metadata refresh for ${mount.label}:`, error);
+                }
+                assertIdentityCurrent();
+                if (info) {
+                  await dependencies.updateMounts(workspace.workspaceId, rows => rows.map(row => row.shareId === mount.shareId ? { ...row, receivedIdentity: refreshReceivedReferencePin(row.receivedIdentity, info) } : row));
+                  assertIdentityCurrent();
+                }
+              }
               // A slow relay holds only this mount's workspace transaction,
               // never one lease across the complete refresh pass.
               const reconciled = await dependencies.withWorkspaceOperation(
@@ -542,9 +575,8 @@ export function createShareMountCommands<WorkspaceSummary>(
                 });
               // The empty array is a durable ownership tombstone. Removing
               // the registry field could promote leftover projection bytes.
-              dependencies.writeMounts(
-                workspace.workspaceId,
-                removal.remaining,
+              await dependencies.updateMounts(workspace.workspaceId, (mounts) =>
+                withoutShareMountRecords(mounts, shareId),
               );
               presentWorkspace(
                 workspace.workspaceId,

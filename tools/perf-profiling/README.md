@@ -8,7 +8,7 @@ It does not rebuild the package, change Electron fuses, or enable a product test
 
 1. Install the checkout's pinned dependencies before the measurement slot.
 2. Prepare baseline and candidate packages with their build receipts.
-3. Reserve an idle Windows host and exclusive access to its desktop. Use Node 24.14 or newer and PowerShell 7.
+3. Reserve an idle Windows host and exclusive access to its desktop. Use Node 24.16 or newer and PowerShell 7.
 4. Run `node tools/perf-profiling/packaged-benchmark.mjs --help` for the options.
 5. Run each package with a new output directory and its full build commit:
 
@@ -18,6 +18,16 @@ node tools/perf-profiling/summarize-packaged-benchmark.mjs C:/perf/baseline-1
 ```
 
 Use `--label candidate` for the candidate. Keep the workload settings identical. Alternate baseline and candidate runs.
+
+Each receipt records `settings.metricVersion`. Version 2 times a document open from the Explorer click; the harness first scrolls a virtualized row into view outside the timing. Version 1 receipts, which have no setting, included that scroll. The comparison refuses receipts of different versions.
+
+On an Apple silicon Mac, pass the unpacked app bundle, such as `--package-dir apps/desktop/release/mac-arm64/dohc.app`.
+Build it unsigned with `CSC_IDENTITY_AUTO_DISCOVERY=false` and `electron-builder --dir --mac --arm64`.
+Use an output path without symbolic links, such as `/private/tmp/...` instead of `/tmp/...`. The app records workspace roots by their real path.
+The macOS sampler reports CPU time from `ps` and private bytes as the physical footprint from `footprint`. It has no IO counters.
+macOS cannot minimize another app's window without Accessibility permission, so the background idle phase hides the app instead.
+The startup, full, switch, Go to, command palette, search and soak scenarios run on macOS. The scenarios that seed through the Windows job object do not.
+Add `--typing-trace true` to the full scenario to time each key from its EventLatency trace slice, as the presence scenario does, instead of the censored Event Timing value.
 
 To fail on a regression, run `node tools/perf-profiling/compare-packaged-benchmark.mjs <baseline-directory> <candidate-directory>`.
 It writes `comparison.json` in the candidate directory and exits 1 when the candidate fails.
@@ -43,7 +53,7 @@ Output directories cannot be reused. Failure logs and fixtures remain available 
 Cleanup closes the recorded app and helper; failed startup and shutdown also terminate their owned process trees.
 Ctrl-C and SIGTERM cancel pending launch or idle work, stop owned processes, and preserve the failed-run receipt.
 
-The Collection scenario defaults to five runs; other scenarios default to three. Set `--runs` to override the default.
+The Collection and presence scenarios default to five runs; other scenarios default to three. Set `--runs` to override the default.
 The default workload uses three fresh/restart cycles, 100-paragraph rich editing, 5,000-paragraph source editing,
 30 trusted keystrokes per document, ten switches, and 60 seconds each of visible and minimized idle.
 `--files 5000 --scenario switches` adds deterministic flat files; the two editor documents count toward each workspace's total.
@@ -63,8 +73,10 @@ wall time sits beside each timing in the receipt.
 - `--files 5000 --scenario go-to`: Ctrl+P to a focused Go to input, then `fixture-004242` one keystroke at a time, then a warm reopen. Each keystroke ends when the input echoes the prefix and the first ranked row contains its characters in order. The summary calls this `keystrokeToFirstMatchPaintedMs`; it does not check the other rows, so it is not a full re-ranking time. After the last keystroke the first ranked row must be `fixture-004242.txt`.
 - `--scenario command-palette`: Ctrl+Shift+P to the first command row, then a warm reopen. Every palette close first waits until no animation runs on the palette or its ancestors. Go to's typing already outlasts the entrance animation; the wait gives the command palette's warm reopen the same settled start.
 - `--files 5000 --scenario search`: the Search rail button to a focused input, then `fixture` and `fixture 4242.` submitted with Enter, each to its first result row and to the complete state.
+- `--files 5000 --scenario go-to-mixed`: runs the same Go to samples after provisioning the admitted mixed-kind workload through a dedicated test relay. This arm signs in and relaunches. Use the signed-out `go-to` arm for Pass A comparisons.
 - `--scenario chat-history [--chat-messages 200]`: seeds one #general post and its replies through `packages/cli/bin/dohc.js` against the running package, restarts, then opens the channel to its post card and the thread to its first and to all comment rows. One observer carries both comment milestones from the same click.
 - `--scenario collection [--records 500] [--find-cap 50] [--write-cap 200]`: seeds `records/collection.yaml` and Markdown records with pre-minted ids, waits for the Explorer to mark the folder as a Collection, then opens it to the first table rows. It then runs the typing workload in `small.md`, then the automation phase described below.
+- `--scenario presence [--presence-peers 2]`: owner typing at the end of rich documents with 100 and 5,000 paragraphs, first solo and then with admitted remote editors. See [Presence typing](#presence-typing).
 - `--scenario soak [--soak-minutes 10]`: repeats a mixed cycle (open both documents, Go to typing `small`, command palette, search for `Performance`, two switches) until the time is up and records working set and private bytes per process kind after each cycle. Each cycle records its search query. The document-open and switch timings are the existing harness wall-clock observations.
 - `--scenario soak --soak-minutes 60 --heap-snapshot-minutes 10,60`: also captures renderer heaps at the first completed cycle boundary at or after each requested minute. Minutes must be distinct positive integers within the soak duration. Capture is off by default.
 
@@ -76,6 +88,7 @@ Each capture receipt records its boundary `cycle`, requested and actual elapsed 
 The soak receipt and summary also report total `heapSnapshotPauseMs`. Capture pauses are outside measured cycle durations.
 
 `go-to` and `search` reject `--files` below 4243, because their queries name `fixture-004242`.
+`go-to-mixed` requires at least 5,000 files to include generated sources and that target.
 Search waits for the Explorer to list every fixture file before it submits. A sample whose search id changed before Enter is flagged `debounceFiredBeforeSubmit`.
 With an engine capture, search queries the engine index and returns at most 50 results in one batch, so `limitHit` false does not mean the results are complete. `sawUpdating` records whether the view passed through updating, whose retry backoff lands in the settled time.
 Chat seeding runs `seed-chat-cli.mjs` through `scripts/verification/process.mjs`. The packaged benchmark throws unless it runs on Windows, so seeding always runs in that runner's job object. The job kills every descendant when the harness-owned job owner exits, including a CLI worker whose launcher exited abnormally. Each CLI call times out after 60 seconds. Each message still runs two Node processes, the launcher and the CLI. Output returns only after both pipes close. The receipt hashes `packages/cli` bin, src, and package.json, the seed script, and the runner. The thread comment list is not virtualized, so every reply renders.
@@ -139,6 +152,91 @@ Main profiling must produce a log matching the recorded main PID.
 CPU-profiled runs and `--heap-snapshot-minutes` runs are marked diagnostic in summaries.
 The comparison command refuses diagnostic runs. Use separate uninstrumented soaks for the memory budgets.
 
+### Presence typing
+
+Run each package in the reserved measurement slot. Use the same command settings on both sides:
+
+```powershell
+node tools/perf-profiling/packaged-benchmark.mjs --binary <exe> --package-commit <full-build-SHA> --output <new-directory> --label baseline --scenario presence --runs 5 --keystrokes 60 --presence-peers 2
+node tools/perf-profiling/summarize-packaged-benchmark.mjs <baseline-directory>
+node tools/perf-profiling/compare-packaged-benchmark.mjs <baseline-directory> <candidate-directory>
+```
+
+Use `--label candidate` for the second package. Presence refuses fewer than five runs and accepts two to eight peers.
+It uses the existing profiling admission to refuse overlap with registered builds and verification jobs.
+
+Each run first opens both documents in the package, then closes it before reading their canonical engine snapshots.
+The desktop E2E helper `presenceBenchmark.ts` creates an isolated local relay deployment and a TLS endpoint using the checkout's test CA.
+It provisions a device-host credential and writes the native ingress and desktop owner-host configuration from `selfHostLiveProfile`.
+The harness restarts the same profile with fixture-only `DOHC_DESKTOP_OWNER_HOST_CONFIG` and `NODE_EXTRA_CA_CERTS`.
+The packaged desktop's own daemon and open editor serve as the live host through `desktopOwnerHost` and the authenticated device-control bridge.
+There is no service-host substitute. The fixture registers the package's CRDT baseline with the relay and waits for owner adoption before measuring.
+
+For each document, the owner types `--keystrokes` trusted keys at its end, with no peers, using the existing typing collector.
+The fixture then admits N named Edit recipients through `/sync/live/desktop-open` and the production named-live transport.
+Each peer edits its first body block at 5 characters per second and publishes relative selections through the existing presence channel at 20 Hz.
+The driver keeps one tick in flight and schedules each deadline from the current time, without catch-up bursts.
+Only publications and edits between the first and last trusted key count toward the achieved rates.
+Rates below 18 selections or 4 edits per second fail the workload. Any gap above 100 ms also fails, including either window edge.
+The output records each peer's largest gap and counters.
+Before closing, peers stop generating edits and wait for every pending update acknowledgement, bounded by the fixture signal and 120-second deadline.
+A peer that leaves the live state fails the drain immediately; cleanup preserves that failure.
+The harness then waits up to 120 seconds for the owner's editor to contain exactly the total inserted marker count.
+A delivery timeout reports the observed count. Peers leave before the next document.
+Just after the last key's end mark, the owner must already show at least `sum(windowEdits) - peers` insertions, allowing one in-flight edit per peer.
+Later catch-up cannot turn a stalled typing window into a pass.
+
+Before and after each typing arm, the harness takes ten renderer clock samples between Node monotonic timestamps.
+The shortest round trip supplies the midpoint offset. If it exceeds 5 ms, the harness retries once after a paint, then refuses the run.
+The two selected offsets must agree within 3 ms. Peer ticks and the rebased first-to-last-key window use the Node clock.
+The output retains both batches, selected offsets, round-trip intervals, and drift; owner awareness uses its original renderer window.
+The owner observer counts remote awareness updates during the typing window through the Tiptap caret provider's awareness.
+It reports `presenceUpdatesReceived` and the binding explicitly. An unbound baseline reports zero.
+A caret extension without observable awareness or received updates refuses the run.
+
+No product Markdown object-topic builder exists on this base.
+PR 5 must move and import `makePresenceObjectTopic` from `apps/desktop/e2e/helpers/presenceBenchmark.ts` as its shared topic definition.
+It must expose the bound awareness through the caret extension's standard `options.provider.awareness` for this observer.
+Both sizes use the rich editor. The retained baseline package may have no Markdown caret binding; record that limitation with the package receipt.
+
+The result stores raw keystrokes and long tasks for each arm and document in every run.
+The summary pools keystrokes within each run to obtain p50 and p95, then preserves those per-run rows.
+For each percentile, the comparison takes the median of the baseline runs and the median of the candidate runs.
+The candidate may exceed baseline by `min(8 ms, max(baseline maximum minus minimum, 2 ms))`.
+Solo and peer typing must both pass, for both document sizes. Neither side may contain a long task.
+Missing trace timing, a source editor, an incomplete peer workload, or fewer than five runs refuses a passing verdict.
+The presence rule is fixed; the comparison's automation and percentage margin options do not change it.
+
+Both arms use the same CDP trace categories, `input,blink.user_timing`, during the typing window.
+The input category enables Chromium's `EventLatency` slices. User Timing marks bound each trusted key in the trace clock.
+Each key must match one `KEY_PRESSED` slice in the owner's renderer and reach a compositor presentation.
+The slice's presentation timestamp minus its generated timestamp supplies the uncensored input-to-next-paint value in milliseconds.
+After the last key's paint wait, both rich arms wait for three more owner animation frames before stopping the trace.
+This frame wait has a one-second deadline. The completed trace must still contain the final key's presentation stage.
+The harness retains each raw trace, its categories, browser revision, per-key matches, and validation result.
+Missing, ambiguous, untrusted, or unpresented keys fail the run.
+
+Event Timing remains supplemental. For each reported keydown, its duration must agree with the trace within 5 ms: 4 ms for its 8 ms rounding interval plus 1 ms.
+A mismatch fails the run. Omitted Event Timing entries do not remove fast trace samples or affect the verdict.
+The output records the checked count, individual differences, maximum difference, and agreement result.
+The two-frame diagnostic remains separate. Required tracing runs in both arms and both packages; optional CPU profiling still prevents performance comparison.
+
+The trace contract was checked against [Chromium 150's recorder](https://github.com/chromium/chromium/blob/69bf1c67cb894365d151bd020bb0171fd583633a/cc/metrics/event_latency_tracing_recorder.cc).
+Run this dry hook smoke against the checkout's Electron before packaged measurements:
+
+```powershell
+node tools/perf-profiling/presence-typing-trace-smoke.mjs --output <new-directory>
+```
+
+The smoke opens an isolated, temporary contenteditable window. It launches no dohc workspace or packaged benchmark.
+Eight keys alternate short and 25 ms fixture handlers to exercise uncensored timing and the Event Timing cross-check.
+The smoke waits for the final slow key's Event Timing report before stopping the trace.
+It retains the trace and validation receipt, closes its own process, and removes the temporary profile.
+
+Run `node --test tools/perf-profiling/packaged-presence.test.mjs tools/perf-profiling/presence-owner.test.mjs tools/perf-profiling/presence-typing-trace.test.mjs tools/perf-profiling/presence-packaged-fixture.test.mjs` for the rule tests and a dry TLS/relay setup smoke.
+The dry smoke uses a small canonical snapshot specimen and launches no desktop or live typing workload.
+The full packaged-harness suite includes these tests. The orchestrator owns packaged measurements and the final performance verdict.
+
 Run `node --test tools/perf-profiling/packaged-benchmark.test.mjs` for CLI, lifecycle, fixture, and summary checks. The fixture contract check imports the automation executor, so build `@dohc/app-backend-runtime` first, as the JS gate does.
 These tests also run through the canonical root test command. They do not launch the GUI workload.
 
@@ -156,9 +254,147 @@ scenarios measure:
 
 The reader is the next agent preparing a scheduled profiling run.
 
+## Measure document-size limits
+
+This is PR 1 of 5. It measures the decision without changing a product limit.
+Prepare the release package and its matching relay checkout before the booking.
+Run pnpm --filter @dohc/app-backend-runtime build in that checkout.
+Keep any diagnostic content/SQL/state raise in a disposable checkout; preserve its patch and build receipt.
+Native ingress, worker and process memory budgets stay unchanged.
+
+Calibrate the estimate with a packaged pilot first. It runs one size, four pairs per shape, the relay and a one-minute soak:
+
+~~~powershell
+node tools/perf-profiling/packaged-benchmark.mjs --binary <release.exe> --package-commit <SHA> --output <pilot-directory> --label candidate --scenario document-size --document-mode pilot --document-mib 2 --runs 4 --keystrokes 60 --soak-minutes 1
+node tools/perf-profiling/summarize-packaged-benchmark.mjs <pilot-directory>
+~~~
+
+Read `documentSize.timing` in the summary. `pairMs` covers pairs 1 to 3 with peer and churn arms and lean pair 4.
+`relayCaseMs` is the relay work per case, and `seedMsPerValidation` is the seeding wall time per validation across both workers.
+Treat `seedMsPerValidation` as a lower bound. Each validation replays the whole suffix, and cut reads and commits run serially on the relay's main thread.
+The pilot seeds to 452 entries; the full run seeds to 3,855, about 1,930 on average.
+Scale the pilot's cost by suffix length with each relay case's `seed.windows`, which record suffix, CPU median and wall time per 128 seeds.
+Relay and seed costs also grow with document size, so 2 MiB values understate larger sizes.
+Also read each phase's `rate` and the soak's `compactionTimings` against its `compactions`.
+The pilot reaches no checkpoint and never stops seeding. Pilots cannot choose a limit.
+
+Run the full benchmark from the harness checkout on an admitted idle Windows host.
+Run the baseline first. The candidate's `--baseline` names the baseline's output directory:
+
+~~~powershell
+node tools/perf-profiling/packaged-benchmark.mjs --binary <baseline.exe> --package-commit <SHA> --output <baseline-directory> --label baseline --scenario document-size --document-mib 2,5,8,10 --runs 20 --keystrokes 60 --relay-sessions 1,2,4 --updates-per-second 8 --churn-edits 100000 --soak-minutes 60
+node tools/perf-profiling/packaged-benchmark.mjs --binary <release.exe> --package-commit <SHA> --output <candidate-directory> --label candidate --baseline <baseline-directory> --scenario document-size --document-mib 2,5,8,10 --runs 20 --keystrokes 60 --relay-sessions 1,2,4 --updates-per-second 8 --churn-edits 100000 --soak-minutes 60
+~~~
+
+Use --relay-checkout <path> or --engine-commit <SHA> when those inputs differ.
+The candidate decides its 2 MiB extensions and early stops against the baseline receipt, and records that receipt's hash.
+Summarize each result.json, then run compare-packaged-benchmark.mjs <baseline-directory> <candidate-directory>.
+The comparison is inconclusive when the candidate recorded another baseline receipt.
+The receipt hashes sources, packages, engine, schema, fixtures and harness, and saves the relay patch.
+Full and soak remain separate release requirements; other scenarios keep their settings comparison rules.
+
+Book **six hours per package**. The uncalibrated normal estimate is **5.1 hours**:
+115 minutes for 106 lean GUI pairs at 65 seconds, 5 for controls, 26 for seeding,
+90 for the other relay and fixture work, 60 for one soak and 10 for setup.
+Seeding is 61,680 validations, 30,840 per worker, at the 50 ms CPU budget.
+A size whose fresh separate arms exceed that budget stops before it seeds.
+Seeding itself stops once a 128-seed window after the first has a CPU median over that budget.
+These stops bound worker CPU, not main-thread wall time.
+An extension adds 18 to 33 minutes, at most one per size.
+A fallback soak adds 60 minutes. It fits only when the calibrated normal run is under five hours.
+The six-hour deadline aborts owned work and marks unfinished evidence inconclusive. It never grants a size.
+Baseline runs only the 2 MiB relay/churn/soak arms, plus three GUI refusal pairs per larger shape,
+about three hours. This saves baseline work without treating a refusal as performance evidence.
+
+| Work | Gate configuration | Confidence cost |
+| --- | --- | --- |
+| Sizes | All 2, 5, 8 and 10 MiB, exact UTF-8 including frontmatter. | No size interpolation. |
+| Shapes/pairs | Formatted-retained: ten 2 MiB control pairs, twenty at each larger size. Other shapes: three pairs each. | Twenty-pair p95 is second-slowest; ten-pair p95 is slowest. Shape proofs have weak tail power. |
+| Extension | An arm whose planned-pair open, first-key or typing p95 is within 10% of its limit gets more pairs right away: shapes to twenty, the worst shape to forty. At most one arm per size, the first in run order. The comparator repeats the decision with the same control. | 17 to 30 more pairs. Twenty-pair p95 is second-slowest and forty-pair third-slowest, not distribution-free bounds. |
+| Stops | After each case, a candidate checks it as the comparator does. A failed or missing check ends the run, because no larger size can be chosen. A stopped run first finishes its forty control opens in fresh launches, so a smaller passing size stays choosable. In the relay, a failed separate arm or separate CPU over budget skips the case's later arms and churn. Seeding stops once its CPU median exceeds the budget. | Larger sizes stay unmeasured once a smaller size fails. |
+| Correctness | Export/history in the first three fresh/restart pairs; full durable hash every pair. Three peer/churn renderer arms per shape. | Rare correctness failures have less repetition. |
+| Controls | Forty 5,000-paragraph opens and forty with 500 distinct local links, pooled once across fresh launches. Startup pools all launches. | One pooled control across forty fresh launches; no per-size control gate or variance estimate. |
+| Relay | Independent of GUI pairs: 240 updates/session for separate 1/2/4 and shared 4, on the worst shape at every size. Other shapes get separate/4 and native separate/1 proofs. | One independent worker/storage launch per arm; update percentiles do not estimate run-to-run GC/JIT variance. |
+| Long suffix | Worst-shape separate/4 seeds 3,855 production-validated commits into each document, across both workers. Its timed updates see suffixes of 3,855 to 4,094 entries, the longest the journal allows. Separate 1/2 and shared 4 start fresh; separate/4 bounds their CPU, wait and slot at that suffix. | Seeding is unpaced and excluded from latency statistics. CPU p50 is a long-suffix median, an upper bound on the steady state; mid-suffix updates are not sampled. Shared latency remains diagnostic. |
+| Checkpoints | Each separate/4 document's last timed update commits the real 4,095th entry and its checkpoint. Unit-test both count and 20 MiB suffix-byte triggers. | Byte-trigger timing is not measured: a large artificial update would change the workload. |
+| Churn | Exactly 100,000 edits, eight client IDs; exact state-ceiling crossing search capped at one million, then censored. Replay churned separate 1/4 and shared 4; other shapes separate 1/4. | No decision loss from censoring beyond required headroom. Churned relay samples have short suffixes; the seeded separate/4 arm covers long-suffix replay cost. |
+| Joins | Separate/1: worst shape has twenty native and twenty named/link socket joins across fresh/restart; other shapes have six native and twelve socket proofs. Real restore once per shape. | Join tail has twenty samples. Restore/ACK/native-drain latency is diagnostic, not an unapproved gate. |
+| Soak | One sixty-minute formatted-retained soak starting at 100,000 edits at the largest otherwise-passing size; next size down if it fails. At most two hours. | Smaller sizes and other shapes rely on rising memory cost; there is no independent sixty-minute sample for them. Two failures leave no qualified raise. |
+
+Long paragraphs exceed 700 bytes so normal fixtures retain node headroom at 10 MiB.
+Separate 120-byte paragraph/list/table probes enter the real relay validator and report their admission/refusal and node/depth counts.
+Native admission is exercised when the relay accepts. Rust exposes no node-count metric; the harness does not invent one.
+
+A second production IPC session stays connected to the GUI's canonical engine Y.Doc for the peer control.
+Another arm applies 100,000 CRDT replacements through that session before GUI open/typing.
+This measures renderer fan-out and churn; named/Edit-link network peers are covered separately by real socket/provider probes.
+Trusted selections alternate beginning/middle/end. Preparation waits two frames after scrolling.
+Key timing starts at event.timeStamp and ends in a MessageChannel task posted from rAF, including queue and layout/paint opportunity.
+Edit activation is separate; edit-ready is first content plus activation, excluding Playwright's scheduling gap.
+Total click-to-editable remains diagnostic. History/export use the ordinary bridge and Copy as Markdown.
+
+The relay uses production SQLite, authority, journal/checkpoint code and two real workers with a **512 MiB hard old-generation limit**.
+Each relay arm runs in a fresh owned process, excluding earlier proof/churn allocations. Fixture Y.Docs live in a separate owned process with independent client IDs, including shared-document peers.
+Proof clients allocate only after timed samples finish. Private bytes gate on the relay PID only. The process inventory separately reports native and generator memory.
+Native draining happens after the measured admission loop; it cannot throttle offered validation load.
+The scheduler offers eight updates/s/session and records achieved rate, queue lag, worker CPU, wait, slot and occupancy.
+Boundary/25 ms worker heap samples can miss brief peaks. Exclude final heap sampling from occupied time.
+A five-second asynchronous process sampler replaces one-second pwsh launches; its cost is recorded.
+GUI memory and history probes run independently of typing.
+The engine compacts a document once 64 updates are pending past its snapshot.
+Only the soak times compaction. The soak gates its edit rate, not typing latency, and arms that gate typing latency never wait on the engine.
+Before each soak key, the harness reads the edited document's head.
+In the last four keys before the threshold, each key waits for an append, so the harness finds the key that crossed it.
+Compaction timing starts at that key's dispatch and ends when the new snapshot is visible.
+If the editor's saves trail by four keys or more, a key can cross the threshold without waiting, and that compaction has no timing; the half-coverage rule then fails the soak. If they trail by fewer, the append a key waits for can be an earlier key's, so timing starts a key late and leaves out part of the save delay. Compare `compactionTimings` with `compactions` after the first soak at 10 MiB.
+A detached 5 ms poll times it while typing continues, so compaction neither stalls the soak's rate nor goes untyped.
+The soak's compaction check needs a timing for at least half of the observed compactions.
+A 60-key arm spends most of each 125 ms key on CDP round trips and frame waits, so its rate measures the harness.
+A longer arm keeps the same per-key cost, so 60-key arms report their rate and the soak gates it. Latency samples do not depend on the rate.
+
+| Gate | Budget |
+| --- | --- |
+| Relative comparisons | Each records baseline, spread and margin. Allow max(10% of control, 17 ms, control p95 minus p50). Candidate variability never enlarges its own allowance. |
+| Startup; 500-link open | Matching package baseline with that margin. Startup p50; links p50/p95. |
+| First key/typing | 2 MiB versus matching baseline; larger sizes versus this package's matching 2 MiB solo/peer/churn control. Same margin at p50/p95 for solo and p95 for peer/churn. |
+| 5,000-paragraph control | Open p50/p95 <=487/532 ms, measured once. |
+| 2 MiB first content; edit-ready | p50/p95 <=487/532 ms; 750/1000 ms. |
+| 5 MiB first content; edit-ready | 750/1000 ms; 1250/1500 ms. |
+| 8 MiB first content; edit-ready | 1000/1250 ms; 1750/2000 ms. |
+| 10 MiB first content; edit-ready | 1250/1500 ms; 2250/2500 ms. |
+| Achieved edit rate | >=456 edits/min over the soak and >=7.6 updates/s per separate relay session. 60-key arms report their rate. CPU and recorded writes normalize to 480 edits/min. |
+| Renderer private bytes | <=435 MB at ten minutes; <=477 MB at sixty minutes and sampled peak. |
+| Relay update | CPU p50/p95 <=50/100 ms; wait/slot/backlog <=100 ms; two-worker occupancy <=80%. Shared latency is reported. |
+| Relay memory | Worker sampled heap <=384 MiB; 512 MiB hard limit. Relay PID private plus restore reservation <=1 GiB. |
+| Restore reservation | Actual framed R; native reservation <=512 MiB. Read event count/reserves from the profile and header bytes from Rust. Memory takes precedence over the 20 MiB state ceiling. |
+| Join; settle/compaction | Join p95 <=2 s; settle/observed compaction <=1 s. |
+| State/transfer | State <=20 MiB; initial framed transfer <=3S+64 KiB; steady framed socket bytes <=2 KiB/edit. Payload bytes reported separately. |
+| Retained history | Post-compaction referenced bytes excluding the current snapshot/vector; net growth <=2 MiB over the first compaction. Trend is diagnostic. |
+| Write volume | Record OS byte counters normalized per 480 edits, separately from retained overhead. No write-volume gate. fsWrite is operations, never bytes. |
+| Engine CPU | At most one normalized core during editing. |
+
+Open allowances increase with bytes to pay for full parse/admission; they do not weaken typing or the original control.
+Report logical retained overhead, current state, physical SQLite/WAL, sampled peaks, update/snapshot/transfer sizes and native drain/restore/ACK costs separately.
+For each shape require 100,000 edits to fit and at least 5 MiB initial headroom below 20 MiB.
+State-reader and admission bounds follow that state derivation; only the projector's 16 MiB output ceiling stays fixed.
+Choose the largest contiguous otherwise-passing size, then require its full soak. Missing metrics/refusals/crashes/lost edits fail closed.
+No passing 2 MiB means no raise. Always measure 8 MiB before choosing between 5 and 10.
+
+For a launch-free plan, add --document-mib 2 --document-mode dry-run; the binary may be absent.
+No pilot or full packaged run is part of harness verification.
+For the bounded relay smoke, write settings.json with absolute checkout/directory paths and updatesPerSecond: 8, then run:
+
+~~~powershell
+node --import ./services/sync-relay/node_modules/tsx/dist/loader.mjs tools/perf-profiling/document-size-runner.mjs smoke <settings.json>
+~~~
+
+Smoke uses separate/shared two-session 2 MiB documents and three updates/session.
+Without engineBinary it proves storage/worker/client plumbing, not native or GUI paths.
+Run the harness suite with node --test tools/perf-profiling/packaged-benchmark.test.mjs.
+
 ## Run the full profiles
 
-Use Node 24.14 or newer and pnpm 11.20.0.
+Use Node 24.16 or newer and pnpm 11.20.0.
 
 1. Schedule an otherwise idle machine and exclusive access to the desktop display.
 2. Run `node tools/perf-profiling/run-profiles.mjs --output test-results/perf-profiling`.
@@ -238,3 +474,51 @@ A missing scenario is `null`, never a pass. `complete` is true only when every
 scenario produced an artifact.
 
 React commit counts are currently `null`. The app has no production React Profiler or commit mark.
+
+
+## Measure engine History queries
+
+The ignored Rust test `history_page_benchmark` measures first pages, later pages, and a three-edit object in a 100,000-moment version.
+The fixture also contains 1,000 protected rows and 100 version markers.
+The candidate drains those streams before timing a later text cursor, so the benchmark exercises a text position as well as marker positions.
+It reports capture-inclusive reads and the first reopen after removing the candidate's History index migration.
+The reopen builds both History indexes.
+After the reads, it times 100 saves through `versionedText.write`, following ten warmup saves.
+It then imports ten batches of 100 moments through `apply_moment_envelope`, following one warmup batch.
+Each imported moment uses its own production sync transaction. Envelope preparation stays outside timing.
+`save` reports milliseconds per save. `importPerMoment` reports milliseconds per moment, averaged within each batch.
+Both paths append to the same 100,000-moment fixture. Compare their baseline and candidate values to measure the indexes' write cost.
+
+Prepare separate base and candidate checkouts before the admitted measurement window.
+Copy `crates/dohc-workspace-engine/tests/history_page_benchmark.rs` from the candidate into the base checkout.
+The harness chooses the old page cursor when `HISTORY_BENCH_MODE=baseline`.
+Keep both checkouts and build outputs within their registered task worktrees.
+
+Read the repository's `rust-gate` skill and build each executable through its build budget with these arguments:
+
+```text
+cargo test --locked --release -p dohc-workspace-engine --test history_page_benchmark --no-run -j 8
+```
+
+Use the test executable path printed by Cargo. It is platform-specific and includes a content hash.
+Record its SHA256, checkout commit, profile, fixture size, and concurrent host context.
+Both arms must use the release profile and the same fixture.
+
+Run both arms from the candidate checkout with the repository runner:
+
+```text
+node tools/perf-profiling/history-query-benchmark.mjs --exe <base-release-test-executable> --mode baseline
+node tools/perf-profiling/history-query-benchmark.mjs --exe <candidate-release-test-executable> --mode candidate
+```
+
+Use absolute executable paths for the base and candidate builds. The runner fixes the fixture size at 100,000 moments.
+The runner acquires profiling admission, monitors the owned child, and releases admission after the child exits.
+Admission refusal ends the command without launching the executable. Rerun during the scheduled window.
+Do not run the test through Cargo while holding profiling admission: its build slot conflicts with profiling admission.
+Do not bypass an admission refusal.
+
+The runner prints `HISTORY_BENCH` numbers after successful completion and a final admission check.
+After the run, it rejects results from a debug-profile build.
+It records the executable SHA256, process ownership, raw log, numbers, and admission observations under `.agent-artifacts/history-page/measurement-*`.
+TEMP, TMP, and DOHC_TEST_SCRATCH_ROOT stay inside that run's checkout.
+Preserve the printed evidence path with the comparison.

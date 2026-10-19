@@ -30,6 +30,17 @@ const validMoment = {
 };
 
 describe("versioned result decoder rejection", () => {
+  it("preserves parked rollback placement as a distinct outcome", () => {
+    const result = {
+      rolledBack: true,
+      deduped: false,
+      materializeEnqueued: true,
+      materialized: false,
+      materializeOutcome: "parked",
+    };
+    expect(decodeVersionedResult(VERSIONED_METHOD.textRollback, result)).toEqual(result);
+  });
+
   it.each([
     { kind: "agent", agentId: "agent" },
     { kind: "automation", automationId: "collection:tasks#stamp", depth: 4 },
@@ -53,6 +64,27 @@ describe("versioned result decoder rejection", () => {
     expect(() => decodeVersionedResult(VERSIONED_METHOD.momentsGet, {
       ...validMoment, authors: { kind: "agent", agentId: "agent" },
     })).toThrow(ProtocolShapeError);
+  });
+
+  it("keeps a live author snapshot's account holder, declared agent, and link holder", () => {
+    const authors = [
+      { kind: "human", humanId: "owner", humanName: "Owner" },
+      { kind: "agent", agentId: "writer", agentName: "Writer", onBehalfOf: "owner", depth: 1 },
+      { kind: "link", publicPrincipalId: "public_1", label: "Anonymous" },
+      { kind: "link", grantId: "grant", grantGeneration: 2, principalId: "holder" },
+    ];
+    expect(decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, authors })?.authors).toEqual(authors);
+    for (const author of [
+      { kind: "human", humanId: "owner", humanName: "Owner", onBehalfOf: "owner" },
+      { kind: "human", humanId: "owner", humanName: 1 },
+      { kind: "link", publicPrincipalId: "public_1" },
+      { kind: "link", publicPrincipalId: "public_1", label: "Anonymous", grantId: "grant" },
+      { kind: "link", grantId: "grant", grantGeneration: 2, principalId: "holder", label: "Ana" },
+      { kind: "agent", agentId: "writer", agentName: null },
+    ]) {
+      expect(() => decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, authors: [author] }), JSON.stringify(author))
+        .toThrow(ProtocolShapeError);
+    }
   });
 
   it("reports the wrong-typed nested write field path", () => {
@@ -236,4 +268,27 @@ describe("versionedText.list hasYdocMarker", () => {
       }),
     ).toThrow(ProtocolShapeError);
   });
+});
+
+
+describe("metadata-only History pages", () => {
+  const cursor = { format: 1, engineUuid: "store", workspaceId: "ws", versionId: "main", objectId: null, operationId: null,
+    textFence: 1, protectedFence: -1, markerFence: 1, text: null, protected: null, marker: null };
+  const metadata = { momentOrder: 1, momentId: "m", versionId: "main", objectId: "o", path: "a.md", beforePath: null, recordedAtMs: 10,
+    operation: "write", afterContentKind: "text", afterByteLength: 1, metadataOrigin: "api", authors: null, syncRecordOnly: false };
+  const page = { activeVersion: { id: "main", workspaceId: "ws", kind: "main", name: "Main", createdAtMs: 1 },
+    moments: [metadata], protectedMoments: [], versionMarkers: [], startCursor: cursor, nextCursor: null, latestMomentOrder: 1 };
+  it("decodes literal positions and metadata without payload fields", () => {
+    expect(decodeVersionedResult(VERSIONED_METHOD.historyPage, page)).toEqual(page);
+  });
+  it.each(["afterText", "beforeText", "payload", "bytesBase64"])("rejects a page moment carrying %s", key => {
+    expect(() => decodeVersionedResult(VERSIONED_METHOD.historyPage, { ...page, moments: [{ ...metadata, [key]: "body" }] })).toThrow(ProtocolShapeError);
+  });
+});
+
+const operationResult = {operationId:"dohc-operation:minted", versionId:"main", momentCount:15000};
+it.each([VERSIONED_METHOD.historyOperations, VERSIONED_METHOD.historyUndo])("decodes %s as a bounded summary", method => {
+  const result = method===VERSIONED_METHOD.historyUndo ? {...operationResult,compensationOperationId:"dohc-operation:undo:committed",deduped:true,materialized:false} : operationResult;
+  expect(decodeVersionedResult(method,result)).toEqual(result);
+  expect(()=>decodeVersionedResult(method,{...result,moments:[]})).toThrow(ProtocolShapeError);
 });

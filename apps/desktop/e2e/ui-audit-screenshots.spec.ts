@@ -1,4 +1,5 @@
 import { desktopPins, activityPin } from "../src/testPins";
+import { DOCUMENT_END } from "./helpers/keys";
 import { expect, test } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -263,7 +264,7 @@ test("@ui-audit capture baseline screenshots", async () => {
 
     // 06 — slash menu (new line + "/")
     await editor.click();
-    await page.keyboard.press("Control+End");
+    await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.press("Enter");
     await page.keyboard.type("/", { delay: 50 });
     await page.waitForTimeout(400);
@@ -281,15 +282,15 @@ test("@ui-audit capture baseline screenshots", async () => {
     await page.waitForTimeout(1_200);
     await shot(page, "07-search-light");
 
-    // 08 — chats panel (right-hand secondary sidebar)
-    await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
+    // 08 — Chats view (left side panel)
+    await page.getByTestId(activityPin("chats")).click();
     await page.waitForTimeout(800);
     await shot(page, "08-chats-light");
     await setTheme(page, "dark");
     await shot(page, "08-chats-dark");
     await setTheme(page, "light");
-    // Close the panel so later shots keep their pre-panel composition.
-    await page.getByTestId(desktopPins.chatsPanelCollapse).click();
+    // Back to Search so later shots keep their earlier composition.
+    await page.getByTestId(activityPin("search")).click();
 
     // 09 — graph view
     await page.getByTestId(activityPin("graph")).click();
@@ -305,13 +306,13 @@ test("@ui-audit capture baseline screenshots", async () => {
     // slots stay vacant so later shot names keep matching earlier audit runs.)
 
     // 13 — command palette
-    await page.keyboard.press("Control+k");
+    await page.keyboard.press("ControlOrMeta+k");
     await page.waitForTimeout(400);
     await shot(page, "13-command-palette-light");
     await page.keyboard.press("Escape");
 
     // 14 — quick open
-    await page.keyboard.press("Control+p");
+    await page.keyboard.press("ControlOrMeta+p");
     await page.waitForTimeout(400);
     await shot(page, "14-quick-open-light");
     await page.keyboard.press("Escape");
@@ -343,7 +344,7 @@ test("@ui-audit capture baseline screenshots", async () => {
     await setTheme(page, "light");
 
     // 18 — new file dialog
-    await page.keyboard.press("Control+n");
+    await page.keyboard.press("ControlOrMeta+n");
     await page.waitForTimeout(400);
     await shot(page, "18-new-file-dialog-light");
     await page.keyboard.press("Escape");

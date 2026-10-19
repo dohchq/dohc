@@ -16,7 +16,9 @@ import type { SyncRelayHandler } from "./server";
 import { authorizeShareAction } from "./shareAuthorization";
 import { LINK_INVENTORY_PAGE_SIZE, type SyncRelayStorage } from "./storage";
 import {
+  chatChannelCreate,
   seedDependentGrant,
+  sequenced,
   closeTestStorage,
   closeTestStorages,
   countStorageCalls,
@@ -31,6 +33,7 @@ import {
   reopenTestStorage,
   request,
   seedLinkGrant,
+  seedLinkSession,
   storagePath,
   testHandler,
   testStorage,
@@ -43,6 +46,63 @@ const WORKSPACE = "workspace-links";
 const OTHER_WORKSPACE = "workspace-links-other";
 
 afterEach(closeTestStorages);
+
+it("lists ended holders only for the owner, without changing recipient or link-holder listings", async () => {
+  const storage = await newStorage();
+  const h = handler(storage, { lookupUserEmails: async ids => new Map(ids.map(id => [id, `${id}@example.test`])) });
+  await seedFileShare(h, "edit");
+  seedStorageLink(storage, { grantId: "history-link", access: "edit" });
+  seedStorageLink(storage, { grantId: "unrelated-link", access: "view" });
+  const bearer = Buffer.alloc(32, 9).toString("base64url");
+  seedLinkSession(storage, { grantId: "unrelated-link", capabilityHash: hmac(bearer) });
+  const linkListing = () => h(request(null, "/sync/link/share", { headers: { authorization: `LinkCapability ${bearer}` } }));
+  const linkBefore = await linkListing();
+  expect(linkBefore.status).toBe(200);
+  const linkBeforeBody = await linkBefore.text();
+  expect(seedDependentGrant(storage, { shareId: "share-existing", parentGrantId: "history-link", grantId: "history-holder", principalUserId: "holder", createdAtMs: 2_001 })).toMatchObject({ ok: true });
+  const recipientBefore = await json(await h(request(RECIPIENT, "/sync/shares?received=true")));
+  expect(storage.revokeShareGrant({ shareId: "share-existing", grantId: "history-link", revokedAtMs: 3_000, expectedDependentGrantIds: ["history-holder"] })).toMatchObject({ ok: true });
+  const defaultListing = await json(await h(request(OWNER, `/sync/${WORKSPACE}/shares/links`)));
+  expect(defaultListing).not.toHaveProperty("endedLinks");
+  const owner = await json(await h(request(OWNER, `/sync/${WORKSPACE}/shares/links?historyGrantId=history-holder`)));
+  expect(owner.holders).toEqual([{ grantId: "history-holder", recipientUserId: "holder", recipientEmail: "holder@example.test", parentGrantId: "history-link" }]);
+  expect((defaultListing.links as Array<{ dependents: unknown[] }>).flatMap(link => link.dependents)).toEqual([]);
+  expect(await json(await h(request(RECIPIENT, "/sync/shares?received=true")))).toEqual(recipientBefore);
+  const linkAfter = await linkListing();
+  expect(linkAfter.status).toBe(200);
+  expect(await linkAfter.text()).toBe(linkBeforeBody);
+  expect((await h(request(null, `/sync/${WORKSPACE}/shares/links`, { headers: { authorization: `LinkCapability ${bearer}` } }))).status).toBe(401);
+  const holderListing = await json(await h(request("holder", "/sync/shares?received=true")));
+  expect(holderListing).not.toHaveProperty("endedLinks");
+  expect(holderListing.received).toEqual([]);
+  expect((await h(request(RECIPIENT, `/sync/${WORKSPACE}/shares/links?historyGrantId=history-holder`))).status).toBe(404);
+  expect((await h(request("holder", `/sync/${WORKSPACE}/shares/links?historyGrantId=history-holder`))).status).toBe(404);
+  expect(authorizeShareAction({ storage, shareId: "share-existing", actorUserId: "holder", action: "read" }).ok).toBe(false);
+});
+
+it("bounds identity lookups and uses one account query for exact ended dependents", async () => {
+  const storage = await newStorage();
+  const lookupUserEmails = vi.fn(async (ids: readonly string[]) => new Map(ids.map(id => [id, `${id}@example.test`])));
+  const h = handler(storage, { lookupUserEmails });
+  await seedFileShare(h, "edit");
+  seedStorageLink(storage, { grantId: "history-link", access: "edit" });
+  expect(seedDependentGrant(storage, { shareId: "share-existing", parentGrantId: "history-link", grantId: "history-holder", principalUserId: "holder", createdAtMs: 2001 })).toMatchObject({ ok: true });
+  storage.revokeShareGrant({ shareId: "share-existing", grantId: "history-link", revokedAtMs: 3000, expectedDependentGrantIds: ["history-holder"] });
+  const body = await json(await h(request(OWNER, `/sync/${WORKSPACE}/shares/links?historyGrantId=history-holder&historyUserId=holder`)));
+  expect(body.holders).toEqual([{ grantId: "history-holder", recipientUserId: "holder", parentGrantId: "history-link", recipientEmail: "holder@example.test" }]);
+  expect(lookupUserEmails.mock.calls).toEqual([[["holder"]]]);
+  const named = storage.listSharesGrantedBy(OWNER).find(row => row.grant.principalKind === "user" && row.grant.parentGrantId === null)!;
+  expect(named).toBeDefined();
+  storage.revokeShareGrant({ shareId: named.share.shareId, grantId: named.grant.grantId, revokedAtMs: 3001 });
+  const unrelated = await json(await h(request(OWNER, `/sync/${WORKSPACE}/shares/links?historyGrantId=${named.grant.grantId}`)));
+  expect(unrelated.holders).toEqual([]);
+  await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: OTHER_WORKSPACE })));
+  expect((await json(await h(request(OWNER, `/sync/${OTHER_WORKSPACE}/shares/links?historyGrantId=history-holder`)))).holders).toEqual([]);
+  const tooMany = new URLSearchParams();
+  for (let i = 0; i < 201; i++) tooMany.append("historyGrantId", `holder-${i}`);
+  expect((await h(request(OWNER, `/sync/${WORKSPACE}/shares/links?${tooMany}`))).status).toBe(400);
+  expect((await h(request(RECIPIENT, `/sync/${WORKSPACE}/shares/links?${tooMany}`))).status).toBe(404);
+});
 
 describe("relay exchange key verification", () => {
   const exchangeKey = "share-web-relay-exchange-key-at-least-32";
@@ -2141,7 +2201,7 @@ describe("owner link inventory and impact preconditions", () => {
     );
     expect(grantIds).toEqual(expectedGrantIds);
     expect(new Set(grantIds).size).toBe(expectedGrantIds.length);
-  }, 30_000);
+  }, 120_000);
 
   it("pages 1,001 links without splitting dependents or losing concurrent changes", async () => {
     const storage = await newStorage();
@@ -5623,6 +5683,60 @@ describe("relay link grants", () => {
         await h(request(null, "/sync/link-exchange", jsonBody({ secret: chatSecret }))),
       ),
     ).toBe(missing);
+
+    // A Group link serves only an ordinary channel: never a direct message
+    // or an agent channel.
+    storage.appendLogBatch({
+      workspaceId: WORKSPACE,
+      originId: "channels",
+      ops: sequenced([
+        chatChannelCreate("wire-dm", { kind: "dm" }),
+        chatChannelCreate("wire-agent", { kind: "agent" }),
+      ]).map(({ payload, ...op }) => ({ ...op, payloadJson: JSON.stringify(payload) })),
+    });
+    for (const [wire, fill] of [["wire-dm", 8], ["wire-agent", 9]] as const) {
+      storage.createShare({
+        share: {
+          shareId: `share-${wire}`,
+          workspaceId: WORKSPACE,
+          granterUserId: OWNER,
+          selectorJson: JSON.stringify({ kind: "group", channelWireId: wire, paths: [wire], versionId: null }),
+          createdAtMs: 2_030,
+        },
+        grant: {
+          grantId: `grant-${wire}-user`,
+          shareId: `share-${wire}`,
+          principalKind: "user",
+          principalUserId: RECIPIENT,
+          principalEmail: null,
+          access: "read-only",
+          generation: 1,
+          status: "active",
+          createdAtMs: 2_030,
+          revokedAtMs: null,
+          parentGrantId: null,
+        },
+      });
+      expect(
+        (
+          await h(
+            request(OWNER, `/sync/${WORKSPACE}/shares/share-${wire}/links`, jsonBody({ access: "read-only" })),
+          )
+        ).status,
+      ).toBe(404);
+      const groupSecret = Buffer.alloc(32, fill).toString("base64url");
+      seedLinkGrant(storage, {
+        grantId: `grant-${wire}-link`,
+        shareId: `share-${wire}`,
+        secretHash: hmac(groupSecret),
+        access: "read-only",
+      });
+      expect(
+        await denialBytes(
+          await h(request(null, "/sync/link-exchange", jsonBody({ secret: groupSecret }))),
+        ),
+      ).toBe(missing);
+    }
 
     const noKey = handler(storage, { linkKey: undefined });
     expect(

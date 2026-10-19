@@ -5,24 +5,32 @@ use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
 use dohc_engine_sync::{
     BlobDownloadBatchRequest, BlobDownloadBatchResponse, BlobDownloadResponse, BlobHaveRequest,
     BlobHaveResponse, BlobUploadRequest, ClaimRequest, ClaimResponse, DirectWritePushOutcome,
-    EpochRequest, EpochResponse, KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse,
+    EpochRequest, EpochResponse, HostedCursor, HostedPassOutcome, HostedPullRequest,
+    HostedPullResponse, KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse,
     KeyEnvelopeRequest, KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse,
-    MAX_BLOB_DOWNLOAD_BATCH, ProbeRequest, ProbeResponse, PullRequest, PullResponse, PushRequest,
-    PushResponse, PushWorkspaceProgress, RecoverResponse, RelayCursor, RelayError, RelaySyncClient,
-    RelayTransport, ShareBlobRequest, ShareBlobUploadRequest, ShareCollectionWriteRequest,
-    ShareCollectionWriteResponse, ShareCursor, ShareLogPushRequest, ShareProposalSubmitOutcome,
-    ShareProposalSubmitRequest, ShareProposalSubmitResponse, ShareViewPullOutcome,
-    ShareViewRequest, ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome,
-    SharedChannelRequest, SharedChannelResponse, SyncPassOutcome, adopt_join_identity,
-    create_claim_identity, read_sync_identity,
+    MAX_BASE_REPAIR_LOOKUPS, MAX_BLOB_DOWNLOAD_BATCH, ProbeRequest, ProbeResponse, PullRequest,
+    PullResponse, PushRequest, PushResponse, PushWorkspaceProgress, RecoverResponse, RelayCursor,
+    RelayError, RelaySyncClient, RelayTransport, ShareBlobRequest, ShareBlobUploadRequest,
+    ShareCollectionWriteRequest, ShareCollectionWriteResponse, ShareCursor, ShareLogPushRequest,
+    ShareProposalSubmitOutcome, ShareProposalSubmitRequest, ShareProposalSubmitResponse,
+    ShareViewPullOutcome, ShareViewRequest, ShareViewResponse, SharedChannelPullOutcome,
+    SharedChannelPushOutcome, SharedChannelRequest, SharedChannelResponse, SyncError,
+    SyncPassOutcome, adopt_join_identity, create_claim_identity, create_hosted_replica,
+    is_hosted_replica, read_sync_identity,
 };
 use dohc_engine_sync_http::HttpRelayTransport;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(not(test))]
+use dohc_engine_storage::NoFaults as CursorFaults;
+#[cfg(test)]
+use relay_push_tests::cache_tests::CursorFaults;
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct RelayConfiguration {
     pub base_url: String,
+    pub socket_path: Option<std::path::PathBuf>,
     pub bearer_token: String,
     #[cfg(debug_assertions)]
     pub allow_insecure_loopback_for_tests: bool,
@@ -142,6 +150,92 @@ pub enum RelayOperation {
         workspace_id: String,
         cursor: ShareCursor,
     },
+    /// Make a pristine workspace the session host's hosted replica under the
+    /// relay's coordinate, before any other write gives it an ordinary one.
+    /// Then confirm the relay holds nothing of its origin past what it
+    /// numbered. Every attach runs this before its first other hosted call,
+    /// so a store that lost pushed commits stops before anyone edits it.
+    CreateHostedReplica {
+        workspace_id: String,
+        new_origin_id: String,
+        replication_epoch: String,
+        stream_identity: String,
+        created_at_ms: i64,
+    },
+    /// One pass of the hosted feed. Its cursor commits with
+    /// `CommitHostedCursor` once its changed paths are materialized. A pass
+    /// that adopts a new scope, and every commit, then park the documents
+    /// that left the scope, as `root` holds them.
+    PullHosted {
+        workspace_id: String,
+        root: std::path::PathBuf,
+        now_ms: i64,
+    },
+    CommitHostedCursor {
+        workspace_id: String,
+        cursor: HostedCursor,
+        root: std::path::PathBuf,
+        now_ms: i64,
+    },
+}
+
+impl RelayOperation {
+    fn workspace_id(&self) -> &str {
+        match self {
+            Self::Push { workspace_id, .. }
+            | Self::Pull { workspace_id, .. }
+            | Self::CommitCursor { workspace_id, .. }
+            | Self::Probe { workspace_id }
+            | Self::Claim { workspace_id, .. }
+            | Self::AdoptJoinIdentity { workspace_id, .. }
+            | Self::RecoverOrigin { workspace_id, .. }
+            | Self::UploadKeyEnvelope { workspace_id, .. }
+            | Self::DownloadKeyEnvelope { workspace_id }
+            | Self::PullSharedChannel { workspace_id, .. }
+            | Self::PushSharedChannel { workspace_id, .. }
+            | Self::PullShareView { workspace_id, .. }
+            | Self::RecordShareViewIdentity { workspace_id, .. }
+            | Self::SubmitShareProposal { workspace_id, .. }
+            | Self::PushDirectWrites { workspace_id, .. }
+            | Self::CommitShareViewCursor { workspace_id, .. }
+            | Self::CreateHostedReplica { workspace_id, .. }
+            | Self::PullHosted { workspace_id, .. }
+            | Self::CommitHostedCursor { workspace_id, .. } => workspace_id,
+        }
+    }
+
+    /// The replicas this operation runs on. A push goes to whichever log
+    /// its replica writes.
+    fn replicas(&self) -> Replicas {
+        match self {
+            Self::Push { .. } => Replicas::Both,
+            Self::CreateHostedReplica { .. }
+            | Self::PullHosted { .. }
+            | Self::CommitHostedCursor { .. } => Replicas::Hosted,
+            Self::Pull { .. }
+            | Self::CommitCursor { .. }
+            | Self::Probe { .. }
+            | Self::Claim { .. }
+            | Self::AdoptJoinIdentity { .. }
+            | Self::RecoverOrigin { .. }
+            | Self::UploadKeyEnvelope { .. }
+            | Self::DownloadKeyEnvelope { .. }
+            | Self::PullSharedChannel { .. }
+            | Self::PushSharedChannel { .. }
+            | Self::PullShareView { .. }
+            | Self::RecordShareViewIdentity { .. }
+            | Self::SubmitShareProposal { .. }
+            | Self::PushDirectWrites { .. }
+            | Self::CommitShareViewCursor { .. } => Replicas::Ordinary,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Replicas {
+    Ordinary,
+    Hosted,
+    Both,
 }
 
 const RELAY_IO_PENDING: &str = "relay-io-pending";
@@ -154,12 +248,15 @@ const RELAY_IO_ABORTED: &str = "relay-io-aborted";
 enum RelayIoRequest {
     Push(PushRequest),
     Pull(PullRequest),
-    LookupCoordinate(LogCoordinateRequest),
+    PushHosted(PushRequest),
+    PullHosted(HostedPullRequest),
+    LookupCoordinates(Vec<LogCoordinateRequest>),
     Probe(ProbeRequest),
     Claim(ClaimRequest),
     RotateEpoch(EpochRequest),
     BlobsHave(BlobHaveRequest),
     UploadBlob(BlobUploadRequest),
+    UploadBlobs(Vec<BlobUploadRequest>),
     DownloadBlobs(BlobDownloadBatchRequest),
     UploadKeyEnvelope(KeyEnvelopeRequest),
     DownloadKeyEnvelope(KeyEnvelopeDownloadRequest),
@@ -172,11 +269,32 @@ enum RelayIoRequest {
     ShareCollectionWrite(ShareCollectionWriteRequest),
 }
 
+impl RelayIoRequest {
+    /// Whether the relay may store something once this request is issued.
+    fn changes_relay(&self) -> bool {
+        !matches!(
+            self,
+            RelayIoRequest::Pull(_)
+                | RelayIoRequest::PullHosted(_)
+                | RelayIoRequest::LookupCoordinates(_)
+                | RelayIoRequest::Probe(_)
+                | RelayIoRequest::BlobsHave(_)
+                | RelayIoRequest::DownloadBlobs(_)
+                | RelayIoRequest::DownloadKeyEnvelope(_)
+                | RelayIoRequest::SharedChannelPull(_)
+                | RelayIoRequest::ShareViewPull(_)
+                | RelayIoRequest::ShareBlob(_)
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 enum RelayIoResponse {
+    /// Answers both log pushes.
     Push(PushResponse),
     Pull(PullResponse),
-    LookupCoordinate(LogCoordinateResponse),
+    PullHosted(HostedPullResponse),
+    LookupCoordinates(Vec<LogCoordinateResponse>),
     Probe(ProbeResponse),
     Claim(ClaimResponse),
     RotateEpoch(EpochResponse),
@@ -224,44 +342,25 @@ impl DeferredRelayTransport {
             .iter()
             .position(|(completed, _)| same_io_request(completed, &request))
         {
-            let release = matches!(
-                state.completed[index].0,
-                RelayIoRequest::Push(_)
-                    | RelayIoRequest::ShareLogPush(_)
-                    | RelayIoRequest::UploadBlob(_)
-                    | RelayIoRequest::DownloadBlobs(_)
-                    | RelayIoRequest::UploadKeyEnvelope(_)
-                    | RelayIoRequest::DownloadKeyEnvelope(_)
-                    | RelayIoRequest::ShareBlob(_)
-                    | RelayIoRequest::ShareProposalSubmit(_)
-            );
-            let uploaded = match &state.completed[index].0 {
-                RelayIoRequest::UploadBlob(upload) => Some((
-                    upload.workspace_id.clone(),
-                    upload.replication_epoch.clone(),
-                    upload.stream_identity.clone(),
-                    upload.sha256.clone(),
-                )),
-                _ => None,
-            };
+            // Only the stable repair probe must survive operation replay.
+            let release = !matches!(&state.completed[index].0, RelayIoRequest::Push(push) if push.ops.is_empty() && push.after_seq == -1)
+                && matches!(
+                    state.completed[index].0,
+                    RelayIoRequest::Push(_)
+                        | RelayIoRequest::PushHosted(_)
+                        | RelayIoRequest::ShareLogPush(_)
+                        | RelayIoRequest::DownloadBlobs(_)
+                        | RelayIoRequest::UploadKeyEnvelope(_)
+                        | RelayIoRequest::DownloadKeyEnvelope(_)
+                        | RelayIoRequest::ShareBlob(_)
+                        | RelayIoRequest::ShareProposalSubmit(_)
+                );
             let projected = match &mut state.completed[index].1 {
                 Ok(response) => project(response).ok_or(RelayError::InvalidResponse),
                 Err(error) => Err(error.clone()),
             };
             if release && projected.is_ok() {
                 let _ = state.completed.swap_remove(index);
-                if let Some((workspace, epoch, stream, sha)) = uploaded {
-                    for (request, result) in &mut state.completed {
-                        if let RelayIoRequest::BlobsHave(have) = request
-                            && have.workspace_id == workspace
-                            && have.replication_epoch == epoch
-                            && have.stream_identity == stream
-                            && let Ok(RelayIoResponse::BlobsHave(response)) = result
-                        {
-                            response.missing.retain(|missing| missing != &sha);
-                        }
-                    }
-                }
             }
             return projected;
         }
@@ -285,12 +384,59 @@ impl DeferredRelayTransport {
     }
 
     fn complete(&self, request: RelayIoRequest, result: Result<RelayIoResponse, RelayError>) {
+        if let (RelayIoRequest::BlobsHave(have), Ok(RelayIoResponse::BlobsHave(response))) =
+            (&request, &result)
+        {
+            if let Ok(missing) = response.validated_missing(&have.sha256s) {
+                self.push_progress
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .confirm_blob_presence(
+                        &have.workspace_id,
+                        &have.replication_epoch,
+                        &have.stream_identity,
+                        have.sha256s
+                            .iter()
+                            .filter(|sha| !missing.contains(sha))
+                            .cloned(),
+                    );
+            }
+        }
+        let uploads = match (&request, &result) {
+            (RelayIoRequest::UploadBlob(upload), Ok(RelayIoResponse::UploadBlob)) => {
+                std::slice::from_ref(upload)
+            }
+            (RelayIoRequest::UploadBlobs(uploads), Ok(RelayIoResponse::UploadBlob)) => {
+                uploads.as_slice()
+            }
+            _ => &[],
+        };
+        if !uploads.is_empty() {
+            let mut progress = self
+                .push_progress
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let confirmed = uploads.iter().all(|upload| {
+                progress.confirm_blob_presence(
+                    &upload.workspace_id,
+                    &upload.replication_epoch,
+                    &upload.stream_identity,
+                    [upload.sha256.clone()],
+                )
+            });
+            debug_assert!(
+                confirmed,
+                "a successful upload belongs to the active push identity"
+            );
+            // The native continuation consumes presence, without retaining blob bytes.
+            return;
+        }
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Ok(RelayIoResponse::Push(response)) = &result
-            && let RelayIoRequest::Push(request) = &request
+            && let RelayIoRequest::Push(request) | RelayIoRequest::PushHosted(request) = &request
             && !request.ops.is_empty()
         {
             state.workspace_pushed = state.workspace_pushed.saturating_add(response.inserted);
@@ -329,6 +475,16 @@ impl DeferredRelayTransport {
     }
 }
 
+fn coordinate_cache_key(request: &LogCoordinateRequest) -> (&str, &str, &str, &str, i64) {
+    (
+        &request.workspace_id,
+        &request.replication_epoch,
+        &request.stream_identity,
+        &request.origin_id,
+        request.origin_seq,
+    )
+}
+
 /// Whether a completed request answers `request`. A share upload is named by
 /// its share and content hash, because its completed copy no longer holds the
 /// content.
@@ -362,13 +518,96 @@ impl RelayTransport for DeferredRelayTransport {
 
     relay_transport_method!(push, PushRequest, Push, PushResponse, Push);
     relay_transport_method!(pull, PullRequest, Pull, PullResponse, Pull);
+    relay_transport_method!(push_hosted, PushRequest, PushHosted, PushResponse, Push);
     relay_transport_method!(
-        lookup_log_coordinate,
-        LogCoordinateRequest,
-        LookupCoordinate,
-        LogCoordinateResponse,
-        LookupCoordinate
+        pull_hosted,
+        HostedPullRequest,
+        PullHosted,
+        HostedPullResponse,
+        PullHosted
     );
+    fn lookup_log_coordinate(
+        &self,
+        request: LogCoordinateRequest,
+    ) -> Result<LogCoordinateResponse, RelayError> {
+        self.lookup_log_coordinates(vec![request])?
+            .pop()
+            .ok_or(RelayError::InvalidResponse)
+    }
+    fn lookup_log_coordinates(
+        &self,
+        requests: Vec<LogCoordinateRequest>,
+    ) -> Result<Vec<LogCoordinateResponse>, RelayError> {
+        if requests.is_empty() || requests.len() > MAX_BASE_REPAIR_LOOKUPS {
+            return Err(RelayError::InvalidResponse);
+        }
+        // Completed groups leave the next replay's repair query. Match answers by
+        // coordinate so pending groups cannot shift and repeat a completed batch.
+        let mut answers = {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut known = std::collections::BTreeMap::new();
+            for (request, result) in &state.completed {
+                match (request, result) {
+                    (
+                        RelayIoRequest::LookupCoordinates(batch),
+                        Ok(RelayIoResponse::LookupCoordinates(responses)),
+                    ) => {
+                        if batch.len() != responses.len() {
+                            return Err(RelayError::InvalidResponse);
+                        }
+                        for (coordinate, response) in batch.iter().zip(responses) {
+                            known.insert(coordinate_cache_key(coordinate), response);
+                        }
+                    }
+                    (RelayIoRequest::LookupCoordinates(batch), Err(error))
+                        if requests.iter().any(|request| batch.contains(request)) =>
+                    {
+                        return Err(error.clone());
+                    }
+                    _ => {}
+                }
+            }
+            requests
+                .iter()
+                .map(|request| {
+                    known
+                        .get(&coordinate_cache_key(request))
+                        .map(|answer| (*answer).clone())
+                })
+                .collect::<Vec<_>>()
+        };
+        let missing = requests
+            .iter()
+            .zip(&answers)
+            .filter(|(_, answer)| answer.is_none())
+            .map(|(request, _)| request.clone())
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            let resolved = self.resolve(
+                RelayIoRequest::LookupCoordinates(missing),
+                |response| match response {
+                    RelayIoResponse::LookupCoordinates(values) => Some(values.clone()),
+                    _ => None,
+                },
+            )?;
+            let mut resolved = resolved.into_iter();
+            for answer in &mut answers {
+                if answer.is_none() {
+                    *answer = Some(resolved.next().ok_or(RelayError::InvalidResponse)?);
+                }
+            }
+            if resolved.next().is_some() {
+                return Err(RelayError::InvalidResponse);
+            }
+        }
+        answers
+            .into_iter()
+            .map(|answer| answer.ok_or(RelayError::InvalidResponse))
+            .collect()
+    }
     relay_transport_method!(probe, ProbeRequest, Probe, ProbeResponse, Probe);
     relay_transport_method!(claim_workspace, ClaimRequest, Claim, ClaimResponse, Claim);
     relay_transport_method!(
@@ -385,6 +624,15 @@ impl RelayTransport for DeferredRelayTransport {
         BlobHaveResponse,
         BlobsHave
     );
+
+    fn upload_blobs(&self, mut requests: Vec<BlobUploadRequest>) -> Result<(), RelayError> {
+        if requests.len() == 1 {
+            return self.upload_blob(requests.remove(0));
+        }
+        self.resolve(RelayIoRequest::UploadBlobs(requests), |response| {
+            matches!(response, RelayIoResponse::UploadBlob).then_some(())
+        })
+    }
 
     fn upload_blob(&self, request: BlobUploadRequest) -> Result<(), RelayError> {
         self.resolve(RelayIoRequest::UploadBlob(request), |response| {
@@ -480,8 +728,395 @@ mod relay_bench;
 mod relay_push_tests;
 
 #[cfg(test)]
+#[path = "relay_base_repair_tests.rs"]
+mod relay_base_repair_tests;
+
+#[cfg(test)]
+#[path = "relay_hosted_origin_tests.rs"]
+mod relay_hosted_origin_tests;
+
+#[cfg(test)]
 mod deferred_relay_tests {
     use super::*;
+
+    #[test]
+    fn a_lane_drain_is_not_repeated_when_a_push_resumes_after_blob_io() {
+        use dohc_engine_domain::{VersionedTextStore, WriteText};
+        use dohc_engine_testkit::{ScratchDir, engine_db_path};
+        let scratch = ScratchDir::new().unwrap();
+        let path = engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&path, 1).unwrap();
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1, &NoFaults)
+            .unwrap();
+        dohc_engine_sync::adopt_join_identity(
+            &mut store, "ws", "local", "epoch", "stream", 1, &NoFaults,
+        )
+        .unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO sync_relay_push_state VALUES ('ws','local',-1)",
+                    [],
+                )
+                .unwrap();
+                Ok::<_, dohc_engine_storage::StorageError>(())
+            })
+            .unwrap();
+        let write = |store: &mut EngineStore, id: &str, text: &str, now| {
+            VersionedTextStore::new(store)
+                .write_text(
+                    &WriteText {
+                        workspace_id: "ws".into(),
+                        version_id: "main".into(),
+                        object_id: "doc".into(),
+                        moment_id: id.into(),
+                        path: "doc.md".into(),
+                        text: text.into(),
+                        metadata_origin: "ydoc".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: now,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+        };
+        write(&mut store, "a", "A", 10);
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("INSERT INTO ydoc_docs(workspace_id,version_id,object_id,content_kind,regime,lineage_claim_status,updated_at_ms,file_export_lane,path) VALUES ('ws','main','doc','plaintext','local-only','unclaimed',1,1,'doc.md')", []).unwrap();
+            Ok::<_, dohc_engine_storage::StorageError>(())
+        }).unwrap();
+        let transport = DeferredRelayTransport::default();
+        let operation = RelayOperation::Push {
+            workspace_id: "ws".into(),
+            now_ms: 20,
+            max_read_bytes: 0,
+        };
+        let mut cache = WriterDocCache::new();
+        let run = |store: &mut EngineStore, cache: &mut WriterDocCache| {
+            execute_relay_operation(
+                store,
+                cache,
+                transport.clone(),
+                operation.clone(),
+                &LeaseRegistry::default(),
+                &ClaimAnnouncer::default(),
+                &mut crate::actor::live_application::Registry::default(),
+            )
+        };
+        assert!(matches!(run(&mut store, &mut cache),
+            Err(RuntimeError::Relay(RelayError::Local(reason))) if reason == RELAY_IO_PENDING));
+        let pending = transport.take_pending().unwrap();
+        assert!(matches!(pending, RelayIoRequest::BlobsHave(_)));
+        write(&mut store, "b", "B", 30);
+        transport.complete(
+            pending,
+            Ok(RelayIoResponse::BlobsHave(BlobHaveResponse {
+                missing: Vec::new(),
+            })),
+        );
+        assert!(matches!(run(&mut store, &mut cache),
+            Err(RuntimeError::Relay(RelayError::Local(reason))) if reason == RELAY_IO_PENDING));
+        let exported: Vec<String> = store.read_with(|conn| {
+            conn.prepare("SELECT json_extract(payload_json,'$.momentId') FROM replication_log WHERE imported=0 AND op_kind='moment.append' ORDER BY rowid")?
+                .query_map([], |row| row.get(0))?.collect::<Result<_, rusqlite::Error>>()
+        }).unwrap();
+        assert_eq!(
+            exported,
+            ["a"],
+            "a sync continuation must not select a newer settle"
+        );
+        for continuation in 0..8 {
+            let pending = transport.take_pending().unwrap();
+            let response = match &pending {
+                RelayIoRequest::BlobsHave(_) => RelayIoResponse::BlobsHave(BlobHaveResponse {
+                    missing: Vec::new(),
+                }),
+                RelayIoRequest::Push(request) => RelayIoResponse::Push(PushResponse {
+                    settlement_refusals: Vec::new(),
+                    hosted_refusals: Vec::new(),
+                    accepted: request.ops.len(),
+                    inserted: request.ops.len(),
+                    skipped: 0,
+                    current_max_origin_seq: request.ops.last().unwrap().origin_seq,
+                }),
+                other => panic!("unexpected I/O: {other:?}"),
+            };
+            transport.complete(pending, Ok(response));
+            match run(&mut store, &mut cache) {
+                Ok(_) => break,
+                Err(RuntimeError::Relay(RelayError::Local(reason)))
+                    if reason == RELAY_IO_PENDING =>
+                {
+                    assert!(continuation < 7, "the push did not finish");
+                }
+                other => panic!("unexpected outcome: {other:?}"),
+            }
+        }
+        let count = || {
+            store.read_with(|conn| conn.query_row(
+            "SELECT count(*) FROM replication_log WHERE imported=0 AND op_kind='moment.append'", [], |row| row.get::<_, i64>(0))).unwrap()
+        };
+        assert_eq!(count(), 1);
+        let second_phase = execute_relay_operation(
+            &mut store,
+            &mut cache,
+            transport.clone(),
+            operation.clone(),
+            &LeaseRegistry::default(),
+            &ClaimAnnouncer::default(),
+            &mut crate::actor::live_application::Registry::default(),
+        );
+        assert!(
+            second_phase.is_ok(),
+            "a second phase must keep the same selection"
+        );
+        let next_operation = RelayOperation::Push {
+            workspace_id: "ws".into(),
+            now_ms: 40,
+            max_read_bytes: 0,
+        };
+        let next = execute_relay_operation(
+            &mut store,
+            &mut cache,
+            DeferredRelayTransport::default(),
+            next_operation,
+            &LeaseRegistry::default(),
+            &ClaimAnnouncer::default(),
+            &mut crate::actor::live_application::Registry::default(),
+        );
+        assert!(matches!(next,
+            Err(RuntimeError::Relay(RelayError::Local(reason))) if reason == RELAY_IO_PENDING));
+        let exported: Vec<String> = store.read_with(|conn| {
+            conn.prepare("SELECT json_extract(payload_json,'$.momentId') FROM replication_log WHERE imported=0 AND op_kind='moment.append' ORDER BY rowid")?
+                .query_map([], |row| row.get(0))?.collect::<Result<_, rusqlite::Error>>()
+        }).unwrap();
+        assert_eq!(
+            exported,
+            ["a", "b"],
+            "the next pass selects the later settle"
+        );
+    }
+
+    #[test]
+    fn base_repair_probe_is_sent_once_across_pull_replays_without_cursor_advance() {
+        base_repair_probe_across_replays(false);
+    }
+
+    #[test]
+    fn base_repair_push_between_pull_replays_keeps_stale_probe_safe() {
+        base_repair_probe_across_replays(true);
+    }
+
+    fn base_repair_probe_across_replays(push_between_replays: bool) {
+        use dohc_engine_sync::{ReplicationEnvelope, SyncError};
+        use rusqlite::params;
+        let (_scratch, _path, mut store) = dohc_engine_testkit::open_store();
+        dohc_engine_domain::VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1000, &NoFaults)
+            .unwrap();
+        dohc_engine_sync::adopt_join_identity(
+            &mut store, "ws", "local", "epoch", "stream", 1000, &NoFaults,
+        )
+        .unwrap();
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("INSERT INTO file_objects (workspace_id,object_id,created_at_ms) VALUES ('ws','doc',1000)", []).map_err(|error| SyncError::Storage(dohc_engine_storage::StorageError::persist_public(error)))?;
+            tx.execute("INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) VALUES ('ws','local',-1)", []).map_err(|error| SyncError::Storage(dohc_engine_storage::StorageError::persist_public(error)))?;
+            Ok::<_,SyncError>(())
+        }).unwrap();
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.plaintext_insert(0, "base");
+        let bytes = doc.encode_full_state();
+        let claim = dohc_engine_storage::hex_sha256(&bytes);
+        let key = dohc_engine_collab::DocKey::new("ws", "main", "doc").unwrap();
+        dohc_engine_collab::claim_base(
+            &mut store,
+            &key,
+            dohc_engine_collab::ContentKind::Plaintext,
+            &bytes,
+            &NoFaults,
+            1000,
+        )
+        .unwrap();
+        let payload = serde_json::json!({"versionId":"main","objectId":"doc","path":"doc.md","contentKind":"plaintext","lineageClaimId":claim,"updateBlobSha256":claim,"isBaseState":true});
+        store.write_with(&NoFaults, |tx| {
+            for (origin,seq) in [("local",0),("local",1),("peer",0)] {
+                tx.execute("INSERT INTO replication_log (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported,apply_disposition) VALUES ('ws',?1,?2,'ydoc.update',?3,1000,?4,'applied')",params![origin,seq,payload.to_string(),i64::from(origin!="local")]).map_err(|error| SyncError::Storage(dohc_engine_storage::StorageError::persist_public(error)))?;
+                tx.execute("INSERT INTO ydoc_base_relay_candidates (workspace_id,version_id,object_id,lineage_claim_id,origin_id,origin_seq) VALUES ('ws','main','doc',?1,?2,?3)",params![claim,origin,seq]).map_err(|error| SyncError::Storage(dohc_engine_storage::StorageError::persist_public(error)))?;
+            }
+            Ok::<_,SyncError>(())
+        }).unwrap();
+        let committed = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
+            workspace_id: "ws".into(),
+            origin_id: "local".into(),
+            origin_seq: 0,
+            op_kind: "ydoc.update".into(),
+            payload: payload.clone(),
+            recorded_at_ms: 1000,
+            relay_seq: Some(100),
+        };
+        let transport = DeferredRelayTransport::default();
+        let mut cache = WriterDocCache::new();
+        let operation = RelayOperation::Pull {
+            workspace_id: "ws".into(),
+            now_ms: 1200,
+        };
+        let mut probes = 0;
+        let mut lookups = 0;
+        let mut runs = 0;
+        loop {
+            runs += 1;
+            assert!(
+                runs <= 6,
+                "repair repeated a relay request: probes={probes}, lookups={lookups}"
+            );
+            match execute_relay_operation(
+                &mut store,
+                &mut cache,
+                transport.clone(),
+                operation.clone(),
+                &LeaseRegistry::default(),
+                &ClaimAnnouncer::default(),
+                &mut crate::actor::live_application::Registry::default(),
+            ) {
+                Ok(RelayOperationOutcome::Sync(SyncPassOutcome::Complete { .. })) => break,
+                Err(RuntimeError::Relay(RelayError::Local(reason)))
+                    if reason == RELAY_IO_PENDING =>
+                {
+                    let request = transport.take_pending().unwrap();
+                    let response = match &request {
+                        RelayIoRequest::Pull(_) => RelayIoResponse::Pull(PullResponse {
+                            ops: Vec::new(),
+                            next_cursor: 0,
+                            has_more: false,
+                        }),
+                        RelayIoRequest::Push(push) => {
+                            assert!(push.ops.is_empty());
+                            probes += 1;
+                            RelayIoResponse::Push(PushResponse {
+                                settlement_refusals: Vec::new(),
+                                hosted_refusals: Vec::new(),
+                                accepted: 0,
+                                inserted: 0,
+                                skipped: 0,
+                                current_max_origin_seq: 0,
+                            })
+                        }
+                        RelayIoRequest::LookupCoordinates(coordinates) => {
+                            lookups += coordinates.len();
+                            RelayIoResponse::LookupCoordinates(
+                                coordinates
+                                    .iter()
+                                    .map(|coordinate| {
+                                        if coordinate.origin_id == "local" {
+                                            let mut op = committed.clone();
+                                            op.origin_seq = coordinate.origin_seq;
+                                            op.relay_seq = Some(100 + coordinate.origin_seq);
+                                            LogCoordinateResponse::Present(op)
+                                        } else {
+                                            LogCoordinateResponse::Absent
+                                        }
+                                    })
+                                    .collect(),
+                            )
+                        }
+                        other => panic!("unexpected repair request: {other:?}"),
+                    };
+                    transport.complete(request, Ok(response));
+                    if push_between_replays && runs == 2 {
+                        // Complete a separate push while this pull retains the earlier maximum of zero.
+                        let push_transport = DeferredRelayTransport::default();
+                        for push_run in 0..4 {
+                            match execute_relay_operation(
+                                &mut store,
+                                &mut WriterDocCache::new(),
+                                push_transport.clone(),
+                                RelayOperation::Push {
+                                    workspace_id: "ws".into(),
+                                    now_ms: 1201,
+                                    max_read_bytes: 0,
+                                },
+                                &LeaseRegistry::default(),
+                                &ClaimAnnouncer::default(),
+                                &mut crate::actor::live_application::Registry::default(),
+                            ) {
+                                Ok(RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
+                                    ..
+                                })) => break,
+                                Err(RuntimeError::Relay(RelayError::Local(reason)))
+                                    if reason == RELAY_IO_PENDING =>
+                                {
+                                    assert!(push_run < 3, "push failed to finish");
+                                    let request = push_transport.take_pending().unwrap();
+                                    let response = match &request {
+                                        RelayIoRequest::BlobsHave(_) => {
+                                            RelayIoResponse::BlobsHave(BlobHaveResponse {
+                                                missing: Vec::new(),
+                                            })
+                                        }
+                                        RelayIoRequest::Push(push) => {
+                                            assert_eq!(push.ops.len(), 2);
+                                            RelayIoResponse::Push(PushResponse {
+                                                settlement_refusals: Vec::new(),
+                                                hosted_refusals: Vec::new(),
+                                                accepted: 2,
+                                                inserted: 1,
+                                                skipped: 1,
+                                                current_max_origin_seq: 1,
+                                            })
+                                        }
+                                        other => {
+                                            panic!("unexpected concurrent push request: {other:?}")
+                                        }
+                                    };
+                                    push_transport.complete(request, Ok(response));
+                                }
+                                other => panic!("unexpected concurrent push result: {other:?}"),
+                            }
+                        }
+                        assert_eq!(
+                            dohc_engine_sync::read_pushed_seq(&store, "ws", "local").unwrap(),
+                            1
+                        );
+                        // A newly captured base still needs the cached bound when the pull resumes.
+                        store.write_with(&NoFaults, |tx| {
+                            tx.execute("INSERT INTO replication_log (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported,apply_disposition) VALUES ('ws','local',2,'ydoc.update',?1,1000,0,'applied')", [payload.to_string()]).unwrap();
+                            tx.execute("INSERT INTO ydoc_base_relay_candidates (workspace_id,version_id,object_id,lineage_claim_id,origin_id,origin_seq) VALUES ('ws','main','doc',?1,'local',2)", [&claim]).unwrap();
+                            Ok::<_,SyncError>(())
+                        }).unwrap();
+                    }
+                }
+                other => panic!("unexpected pull result: {other:?}"),
+            }
+        }
+        assert_eq!(
+            (probes, lookups, runs),
+            if push_between_replays {
+                (1, 3, 4)
+            } else {
+                (1, 2, 4)
+            }
+        );
+        assert_eq!(
+            dohc_engine_sync::read_pushed_seq(&store, "ws", "local").unwrap(),
+            if push_between_replays { 1 } else { -1 }
+        );
+        let relay_seq: Option<i64> = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT base_relay_seq FROM ydoc_docs WHERE object_id='doc'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(relay_seq, Some(100));
+    }
 
     /// An operation reruns from its start after each relay call. Send changes
     /// uploads each changed file's content before it submits, so a completed
@@ -669,6 +1304,7 @@ mod deferred_relay_tests {
             RelayIoRequest::Push(request.clone()),
             Ok(RelayIoResponse::Push(PushResponse {
                 settlement_refusals: Vec::new(),
+                hosted_refusals: Vec::new(),
                 accepted: request.ops.len(),
                 inserted: request.ops.len(),
                 skipped: 0,
@@ -680,6 +1316,7 @@ mod deferred_relay_tests {
             transport.push(request).expect("consume completed push"),
             PushResponse {
                 settlement_refusals: Vec::new(),
+                hosted_refusals: Vec::new(),
                 accepted: dohc_engine_sync::MAX_PUSH_OPS_PER_BATCH,
                 inserted: dohc_engine_sync::MAX_PUSH_OPS_PER_BATCH,
                 skipped: 0,
@@ -1118,6 +1755,7 @@ pub enum RelayOperationOutcome {
     Sync(SyncPassOutcome),
     CursorCommitted {
         sharing_declined: Vec<dohc_engine_sync::SharingDeclined>,
+        writer_cache_changed: bool,
     },
     Probe(bool),
     Claimed,
@@ -1136,6 +1774,33 @@ pub enum RelayOperationOutcome {
     ShareViewIdentity(ShareViewIdentityRecord),
     ShareProposalSubmitted(ShareProposalSubmitOutcome),
     DirectWritesPushed(DirectWritePushOutcome),
+    HostedReplicaCreated,
+    HostedPass {
+        pass: HostedPassOutcome,
+        /// Each document of the scope that is not ready after the pass. Its
+        /// live registrations were released before the pass replied.
+        unready: Vec<String>,
+        /// Each document that left the scope and is not gone from the
+        /// replica yet: its rows or its file remain.
+        departed: Vec<String>,
+    },
+    HostedCursorCommitted {
+        /// Not committed when the scope moved since the pass fetched; and
+        /// whether a document it kept held waits for the next pass.
+        commit: dohc_engine_sync::HostedCommit,
+        /// Parking after the commit: `Ok(true)` when a document that left the
+        /// scope parked or its file's path came free, so work that waited for
+        /// its path can apply and the caller pulls again. Its failure leaves
+        /// the commit standing.
+        retirement: Result<bool, RuntimeError>,
+        /// As for [`Self::HostedPass`], after the commit. A failure to read
+        /// them released nothing and leaves the commit standing; the next
+        /// pass releases them.
+        unready: Result<Vec<String>, RuntimeError>,
+        /// As for [`Self::HostedPass`], after the parking. A failure to
+        /// read them leaves the commit standing; the next pass reports them.
+        departed: Result<Vec<String>, RuntimeError>,
+    },
 }
 
 /// What a share view's identity call settled on, including the answer the
@@ -1270,7 +1935,19 @@ impl ActorHandle {
         if token.is_cancelled() {
             return Err(RuntimeError::Cancelled);
         }
-        let http_transport = Arc::new(build_http_transport(configuration)?);
+        let http_transport = build_http_transport(configuration)?;
+        // A hosted replica reads and writes only the session host's scoped
+        // feed, and so does the operation that creates one.
+        let workspace_id = operation.workspace_id().to_owned();
+        let hosted = operation.replicas() == Replicas::Hosted
+            || self
+                .run(move |store, _cache| Ok(is_hosted_replica(store, &workspace_id)?))
+                .await?;
+        let http_transport = Arc::new(if hosted {
+            http_transport.hosted()
+        } else {
+            http_transport
+        });
         // Keep the deferred I/O state out of callers' inline RPC futures.
         Box::pin(self.relay_with_io(
             http_transport.publishes_native_settlements(),
@@ -1288,7 +1965,7 @@ impl ActorHandle {
         native_settlements: bool,
         operation: RelayOperation,
         leases: LeaseRegistry,
-        token: CancellationToken,
+        mut token: CancellationToken,
         reservation: Option<Arc<dyn Send + Sync>>,
         execute_io: F,
     ) -> Result<RelayOperationOutcome, RuntimeError>
@@ -1300,6 +1977,9 @@ impl ActorHandle {
             native_settlements,
             ..DeferredRelayTransport::default()
         };
+        // Once the relay may have stored something, the operation runs to its
+        // end so the request answers with what landed. Until then each step
+        // and each effect-free read stops on cancellation.
         loop {
             if token.is_cancelled() {
                 return Err(RuntimeError::Cancelled);
@@ -1311,8 +1991,10 @@ impl ActorHandle {
             let queued_reservation = reservation.clone();
             let queued_claims = self.claims.clone();
             let outcome = self
-                .run(move |store, cache| {
+                .run_with_registrations(move |store, cache, registrations| {
                     let _reservation = queued_reservation;
+                    let is_push = matches!(&queued_operation, RelayOperation::Push { .. });
+                    let is_pull = matches!(&queued_operation, RelayOperation::Pull { .. });
                     let outcome = if queued_token.is_cancelled() {
                         Err(RuntimeError::Cancelled)
                     } else {
@@ -1323,11 +2005,42 @@ impl ActorHandle {
                             queued_operation,
                             &queued_leases,
                             &queued_claims,
+                            registrations,
                         )
                     };
-                    // A pull can claim, replace, or advance lineages behind the
-                    // local path (probe-covered; reset hooks stay unconditional).
-                    cache.clear();
+                    // Push handles enrollment resets below. A pull that only
+                    // redelivers durable echoes leaves the writer cache valid;
+                    // applied or materialized work still invalidates it.
+                    let pull_changed = match &outcome {
+                        Ok(RelayOperationOutcome::Sync(
+                            SyncPassOutcome::Complete {
+                                applied,
+                                changed_paths,
+                                ..
+                            }
+                            | SyncPassOutcome::CrashedAfterApply {
+                                applied,
+                                changed_paths,
+                                ..
+                            },
+                        )) => *applied > 0 || !changed_paths.is_empty(),
+                        Err(RuntimeError::Relay(RelayError::Local(reason)))
+                            if reason == RELAY_IO_PENDING =>
+                        {
+                            false
+                        }
+                        _ => true,
+                    };
+                    let unchanged_commit = matches!(
+                        &outcome,
+                        Ok(RelayOperationOutcome::CursorCommitted {
+                            writer_cache_changed: false,
+                            ..
+                        })
+                    );
+                    if !is_push && !unchanged_commit && (!is_pull || pull_changed) {
+                        cache.clear();
+                    }
                     outcome
                 })
                 .await;
@@ -1338,6 +2051,9 @@ impl ActorHandle {
                     let request = transport
                         .take_pending()
                         .ok_or(RuntimeError::Relay(RelayError::InvalidResponse))?;
+                    if request.changes_relay() {
+                        token = CancellationToken::new();
+                    }
                     let io_request = request.clone();
                     let result = tokio::select! {
                         biased;
@@ -1359,6 +2075,12 @@ impl ActorHandle {
 fn build_http_transport(
     configuration: RelayConfiguration,
 ) -> Result<HttpRelayTransport, RelayError> {
+    if let Some(path) = &configuration.socket_path {
+        if !configuration.base_url.is_empty() {
+            return Err(RelayError::InvalidResponse);
+        }
+        return HttpRelayTransport::new_unix_socket(path, configuration.bearer_token);
+    }
     #[cfg(debug_assertions)]
     {
         let test_ca = test_relay_ca(
@@ -1409,6 +2131,7 @@ fn build_debug_http_transport(
 ) -> Result<HttpRelayTransport, RelayError> {
     let RelayConfiguration {
         base_url,
+        socket_path: _,
         bearer_token: token,
         allow_insecure_loopback_for_tests: insecure,
     } = configuration;
@@ -1421,6 +2144,7 @@ fn build_debug_http_transport(
 }
 
 const MAX_CONCURRENT_BLOB_DOWNLOADS: usize = 4;
+const MAX_CONCURRENT_COORDINATE_LOOKUPS: usize = 8;
 const RELAY_IO_CANCELLED: &str = "relay-io-cancelled";
 
 fn relay_io_aborted() -> RelayError {
@@ -1436,6 +2160,13 @@ async fn execute_http_request(
     request: RelayIoRequest,
     token: CancellationToken,
 ) -> Result<RelayIoResponse, RelayError> {
+    if let RelayIoRequest::LookupCoordinates(requests) = request {
+        return execute_coordinate_lookup_batch(requests, token, move |request, worker_token| {
+            transport.lookup_log_coordinate_cancellable(request, || worker_token.is_cancelled())
+        })
+        .await
+        .map(RelayIoResponse::LookupCoordinates);
+    }
     if let RelayIoRequest::DownloadBlobs(request) = request {
         let download_transport = Arc::clone(&transport);
         return execute_blob_download_batch(request, token, move |request, worker_token| {
@@ -1448,6 +2179,63 @@ async fn execute_http_request(
     tokio::task::spawn_blocking(move || execute_blocking_http_request(&transport, request))
         .await
         .map_err(|_| relay_io_aborted())?
+}
+
+async fn execute_coordinate_lookup_batch<F>(
+    requests: Vec<LogCoordinateRequest>,
+    token: CancellationToken,
+    lookup: F,
+) -> Result<Vec<LogCoordinateResponse>, RelayError>
+where
+    F: Fn(LogCoordinateRequest, CancellationToken) -> Result<LogCoordinateResponse, RelayError>
+        + Clone
+        + Send
+        + 'static,
+{
+    if requests.is_empty() || requests.len() > MAX_BASE_REPAIR_LOOKUPS {
+        return Err(RelayError::InvalidResponse);
+    }
+    let workers = token.child_token();
+    let _cancel_workers = workers.clone().drop_guard();
+    let mut results = vec![None; requests.len()];
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut requests = requests.into_iter().enumerate();
+    loop {
+        if token.is_cancelled() {
+            return Err(relay_io_cancelled());
+        }
+        while tasks.len() < MAX_CONCURRENT_COORDINATE_LOOKUPS {
+            let Some((index, request)) = requests.next() else {
+                break;
+            };
+            let lookup = lookup.clone();
+            let worker_token = workers.clone();
+            tasks.spawn_blocking(move || {
+                let result = if worker_token.is_cancelled() {
+                    Err(relay_io_cancelled())
+                } else {
+                    lookup(request, worker_token)
+                };
+                (index, result)
+            });
+        }
+        if tasks.is_empty() {
+            break;
+        }
+        let joined = tokio::select! {
+            biased;
+            () = token.cancelled() => return Err(relay_io_cancelled()),
+            joined = tasks.join_next() => joined,
+        };
+        let (index, result) = joined
+            .ok_or(RelayError::InvalidResponse)?
+            .map_err(|_| relay_io_aborted())?;
+        results[index] = Some(result?);
+    }
+    results
+        .into_iter()
+        .map(|result| result.ok_or(RelayError::InvalidResponse))
+        .collect()
 }
 
 /// Fan one deterministic bridge request into bounded blocking GETs. At the
@@ -1541,9 +2329,13 @@ fn execute_blocking_http_request(
     match request {
         RelayIoRequest::Push(request) => transport.push(request).map(RelayIoResponse::Push),
         RelayIoRequest::Pull(request) => transport.pull(request).map(RelayIoResponse::Pull),
-        RelayIoRequest::LookupCoordinate(request) => transport
-            .lookup_log_coordinate(request)
-            .map(RelayIoResponse::LookupCoordinate),
+        RelayIoRequest::PushHosted(request) => {
+            transport.push_hosted(request).map(RelayIoResponse::Push)
+        }
+        RelayIoRequest::PullHosted(request) => transport
+            .pull_hosted(request)
+            .map(RelayIoResponse::PullHosted),
+        RelayIoRequest::LookupCoordinates(_) => Err(RelayError::InvalidResponse),
         RelayIoRequest::Probe(request) => transport.probe(request).map(RelayIoResponse::Probe),
         RelayIoRequest::Claim(request) => transport
             .claim_workspace(request)
@@ -1554,6 +2346,9 @@ fn execute_blocking_http_request(
         RelayIoRequest::BlobsHave(request) => transport
             .blobs_have(request)
             .map(RelayIoResponse::BlobsHave),
+        RelayIoRequest::UploadBlobs(requests) => transport
+            .upload_blobs(requests)
+            .map(|()| RelayIoResponse::UploadBlob),
         RelayIoRequest::UploadBlob(request) => transport
             .upload_blob(request)
             .map(|()| RelayIoResponse::UploadBlob),
@@ -1598,9 +2393,10 @@ fn execute_relay_operation(
     operation: RelayOperation,
     leases: &LeaseRegistry,
     claims: &ClaimAnnouncer,
+    registrations: &mut super::live_application::Registry,
 ) -> Result<RelayOperationOutcome, RuntimeError> {
     let client = RelaySyncClient::new(transport);
-    let outcome = run_relay_operation(store, doc_cache, &client, operation, leases);
+    let outcome = run_relay_operation(store, doc_cache, &client, operation, leases, registrations);
     claims.announce(&client.take_automation_claims());
     outcome
 }
@@ -1611,28 +2407,59 @@ fn run_relay_operation(
     client: &RelaySyncClient<DeferredRelayTransport>,
     operation: RelayOperation,
     leases: &LeaseRegistry,
+    registrations: &mut super::live_application::Registry,
 ) -> Result<RelayOperationOutcome, RuntimeError> {
+    let replicas = operation.replicas();
+    if store.is_passive()
+        && !matches!(
+            &operation,
+            RelayOperation::Pull { .. }
+                | RelayOperation::CommitCursor { .. }
+                | RelayOperation::AdoptJoinIdentity { .. }
+        )
+    {
+        if replicas == Replicas::Hosted {
+            return Err(RuntimeError::Relay(RelayError::HostedRefusal(
+                dohc_engine_sync::PASSIVE_STORE_CANNOT_HOST,
+            )));
+        }
+        return Err(RuntimeError::Sync(SyncError::InvalidInput {
+            reason: "passive store cannot execute this relay operation",
+        }));
+    }
+    // Before any state change or relay request: a hosted replica reaches only
+    // its hosted feed.
+    if replicas == Replicas::Ordinary && is_hosted_replica(store, operation.workspace_id())? {
+        return Err(RuntimeError::Relay(dohc_engine_sync::hosted_feed_only()));
+    }
     match operation {
         RelayOperation::Push {
             workspace_id,
             now_ms,
             max_read_bytes,
-        } => client
-            .resume_push_workspace(
+        } => {
+            let mut progress = client
+                .transport()
+                .push_progress
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let outcome = client.resume_push_workspace(
                 store,
                 &workspace_id,
                 &NoFaults,
                 leases,
                 now_ms,
                 max_read_bytes,
-                &mut client
-                    .transport()
-                    .push_progress
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner),
-            )
-            .map(RelayOperationOutcome::Sync)
-            .map_err(RuntimeError::from),
+                &mut progress,
+            );
+            // Enrollment can claim bases before I/O yields or an error.
+            if progress.writer_cache_reset_required() {
+                doc_cache.clear();
+            }
+            outcome
+                .map(RelayOperationOutcome::Sync)
+                .map_err(RuntimeError::from)
+        }
         RelayOperation::Pull {
             workspace_id,
             now_ms,
@@ -1648,13 +2475,14 @@ fn run_relay_operation(
             store,
             &workspace_id,
             &cursor,
-            &NoFaults,
+            &CursorFaults,
             leases,
             now_ms,
         )? {
-            TxnOutcome::Committed(sharing_declined) => {
-                Ok(RelayOperationOutcome::CursorCommitted { sharing_declined })
-            }
+            TxnOutcome::Committed(commit) => Ok(RelayOperationOutcome::CursorCommitted {
+                sharing_declined: commit.sharing_declined,
+                writer_cache_changed: commit.writer_cache_changed,
+            }),
             TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
         },
         RelayOperation::Probe { workspace_id } => {
@@ -1874,9 +2702,375 @@ fn run_relay_operation(
         } => match client.commit_share_view_cursor(store, &workspace_id, &cursor, &NoFaults)? {
             TxnOutcome::Committed(()) => Ok(RelayOperationOutcome::CursorCommitted {
                 sharing_declined: Vec::new(),
+                writer_cache_changed: true,
             }),
             TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
         },
+        RelayOperation::CreateHostedReplica {
+            workspace_id,
+            new_origin_id,
+            replication_epoch,
+            stream_identity,
+            created_at_ms,
+        } => {
+            match create_hosted_replica(
+                store,
+                &workspace_id,
+                &new_origin_id,
+                &replication_epoch,
+                &stream_identity,
+                created_at_ms,
+                &NoFaults,
+            )
+            .map_err(|error| match error {
+                SyncError::InvalidInput { reason } => {
+                    RuntimeError::Relay(RelayError::HostedRefusal(reason))
+                }
+                error => RuntimeError::Sync(error),
+            })? {
+                TxnOutcome::Committed(_) => {}
+                TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+            }
+            // After the commit, so a lost answer leaves the replica created
+            // and the retry asks again.
+            client.confirm_hosted_origin(store, &workspace_id)?;
+            Ok(RelayOperationOutcome::HostedReplicaCreated)
+        }
+        RelayOperation::PullHosted {
+            workspace_id,
+            root,
+            now_ms,
+        } => {
+            let pass =
+                client.pull_hosted_workspace(store, doc_cache, &workspace_id, &NoFaults, leases)?;
+            // A pass without a cursor adopted a new scope.
+            if pass.pending_cursor.is_none() {
+                park_departed_hosted(store, doc_cache, leases, &workspace_id, &root, now_ms)?;
+            }
+            Ok(RelayOperationOutcome::HostedPass {
+                pass,
+                unready: release_unready_hosted(store, registrations, &workspace_id)?,
+                departed: dohc_engine_sync::departed_hosted_object_ids(store, &workspace_id)?,
+            })
+        }
+        RelayOperation::CommitHostedCursor {
+            workspace_id,
+            cursor,
+            root,
+            now_ms,
+        } => match client.commit_hosted_cursor(store, &workspace_id, &cursor, &NoFaults)? {
+            TxnOutcome::Committed(commit) => {
+                let retirement =
+                    park_departed_hosted(store, doc_cache, leases, &workspace_id, &root, now_ms);
+                Ok(RelayOperationOutcome::HostedCursorCommitted {
+                    commit,
+                    retirement,
+                    unready: release_unready_hosted(store, registrations, &workspace_id),
+                    departed: dohc_engine_sync::departed_hosted_object_ids(store, &workspace_id)
+                        .map_err(RuntimeError::from),
+                })
+            }
+            TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+        },
+    }
+}
+
+/// Release the live registrations of each document of the hosted scope that
+/// is not ready, held or backfilling again: none can be edited live until a
+/// later commit settles it ready. The release is in memory only, so its
+/// accepted work still pushes. A document that left the scope keeps its
+/// registrations until it drains.
+fn release_unready_hosted(
+    store: &EngineStore,
+    registrations: &mut super::live_application::Registry,
+    workspace_id: &str,
+) -> Result<Vec<String>, RuntimeError> {
+    let unready = dohc_engine_sync::read_hosted_replica(store, workspace_id)?
+        .map(|replica| {
+            replica
+                .documents
+                .into_iter()
+                .filter(|(_, document)| {
+                    document.status != dohc_engine_sync::HostedDocumentStatus::Ready
+                })
+                .map(|(object_id, _)| object_id)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    registrations.release(workspace_id, &unready);
+    Ok(unready)
+}
+
+/// Park each hosted document that left the scope once nothing of it is left
+/// to settle, deliver or push: no live session holds it, the unload checks
+/// pass, and its file holds its head or nothing. Each parks in its own
+/// transaction, which records its file as retired; the file goes after, and
+/// a file an earlier pass could not remove goes first. A pass can stop after
+/// it applied a document's rows and before it wrote their files, and once it
+/// leaves the scope no pass serves those rows again, so such a document's
+/// files are first written as the pass that makes it ready writes them. A
+/// file holding anything else after that is a bug in a service root nothing
+/// else writes to, so its document stays departed, the others still park,
+/// and the pass names the first such file, or else the first such write that
+/// failed. Answers whether any document parked or any path came free.
+fn park_departed_hosted(
+    store: &mut EngineStore,
+    doc_cache: &mut WriterDocCache,
+    leases: &LeaseRegistry,
+    workspace_id: &str,
+    root: &std::path::Path,
+    now_ms: i64,
+) -> Result<bool, RuntimeError> {
+    let active = dohc_engine_domain::VersionedTextStore::new(store)
+        .get_active_version(workspace_id)?
+        .version_id;
+    let mut unexpected = None;
+    let mut unwritten = None;
+    let mut parked = remove_retired_files(store, workspace_id, root, &mut unexpected)?;
+    'departed: for document in dohc_engine_sync::departed_hosted_documents(store, workspace_id)? {
+        let versions = document
+            .heads
+            .iter()
+            .map(|head| &head.version_id)
+            .chain(&document.ydoc_versions)
+            .collect::<std::collections::BTreeSet<_>>();
+        let keys = versions
+            .into_iter()
+            .map(|version_id| {
+                dohc_engine_collab::DocKey::new(workspace_id, version_id, &document.object_id)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if keys.iter().any(|key| leases.is_held(key))
+            || !dohc_engine_sync::hosted_document_parkable(
+                store,
+                workspace_id,
+                &document.object_id,
+            )?
+        {
+            continue;
+        }
+        for key in &keys {
+            if super::ydoc::ydoc_unload_pending(store, key, root, now_ms)?.is_some() {
+                continue 'departed;
+            }
+        }
+        let finished = dohc_engine_sync::departed_hosted_materialization(
+            store,
+            workspace_id,
+            &document.object_id,
+            &active,
+        )
+        .map_err(RuntimeError::from)
+        .and_then(|page| match page {
+            Some(page) => super::versions::materialize_relay_page_on_store(
+                store,
+                workspace_id,
+                root,
+                page,
+                &(),
+                now_ms,
+                &CancellationToken::new(),
+            ),
+            None => Ok(()),
+        });
+        if let Err(error) = finished {
+            unwritten.get_or_insert(error);
+            continue;
+        }
+        let files = document
+            .heads
+            .iter()
+            .filter(|head| head.version_id == active)
+            .collect::<Vec<_>>();
+        for head in &files {
+            use dohc_engine_files::ProjectionTargetState as File;
+            match dohc_engine_files::probe_projection_target(
+                root,
+                &head.path,
+                dohc_engine_files::ProjectionTargetKind::Plaintext,
+            ) {
+                File::Absent => {}
+                File::Text { sha256 } | File::Binary { sha256 } if sha256 == head.sha256 => {}
+                _ => {
+                    unexpected.get_or_insert_with(|| head.path.clone());
+                    continue 'departed;
+                }
+            }
+        }
+        match dohc_engine_sync::park_hosted_document(
+            store,
+            workspace_id,
+            &document.object_id,
+            &active,
+            &NoFaults,
+        )? {
+            TxnOutcome::Committed(true) => {}
+            TxnOutcome::Committed(false) => continue,
+            TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+        }
+        parked = true;
+        for key in &keys {
+            doc_cache.remove(key);
+            doc_cache.unpin(key);
+        }
+        remove_retired_files(store, workspace_id, root, &mut unexpected)?;
+    }
+    match (unexpected, unwritten) {
+        (Some(path), _) => Err(RuntimeError::HostedFileUnexpected { path }),
+        (None, Some(error)) => Err(error),
+        (None, None) => Ok(parked),
+    }
+}
+
+/// Remove each retired file that still holds its document's head, and free
+/// its path. One that holds anything else stays on disk with its path held,
+/// so its document stays departed; the first such path goes in `unexpected`
+/// for the pass to name. A removal that fails also keeps the path held for
+/// the next pass. The folders a removed file leaves empty go too, so a file
+/// can take their name; an empty one that cannot go keeps the path held, and
+/// with it each folder above, until a later pass removes it; that pass walks
+/// past the folders already gone. A folder that cannot be inspected also
+/// keeps the path held. Answers whether any path came free.
+fn remove_retired_files(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    root: &std::path::Path,
+    unexpected: &mut Option<String>,
+) -> Result<bool, RuntimeError> {
+    let mut freed = false;
+    for file in dohc_engine_sync::retired_hosted_files(store, workspace_id)? {
+        if !dohc_engine_files::remove_file_holding(store, root, &file.path, &file.sha256)? {
+            unexpected.get_or_insert(file.path);
+            continue;
+        }
+        let mut stuck = false;
+        let mut parent = file.path.as_str();
+        while let Some((folder, _)) = parent.rsplit_once('/') {
+            let path = root.join(folder);
+            match left_folder(
+                dohc_engine_files::remove_empty_directory_target(store, root, folder),
+                || std::fs::symlink_metadata(&path).map(|m| m.is_dir()),
+                || Ok(std::fs::read_dir(&path)?.next().transpose()?.is_none()),
+            ) {
+                // An earlier pass removed it; an empty folder above may remain.
+                LeftFolder::Removed | LeftFolder::Gone => {}
+                LeftFolder::HasContent => break,
+                LeftFolder::Stuck => {
+                    stuck = true;
+                    break;
+                }
+            }
+            parent = folder;
+        }
+        if stuck {
+            continue;
+        }
+        freed = true;
+        match dohc_engine_sync::forget_retired_hosted_file(
+            store,
+            workspace_id,
+            &file.path,
+            &NoFaults,
+        )? {
+            TxnOutcome::Committed(()) => {}
+            TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+        }
+    }
+    Ok(freed)
+}
+
+/// What became of a folder a removed retired file left.
+#[derive(Debug, PartialEq, Eq)]
+enum LeftFolder {
+    Removed,
+    Gone,
+    HasContent,
+    Stuck,
+}
+
+/// Fail closed: the path goes free only past a folder that is surely gone
+/// or surely holds something; any other answer keeps it held.
+fn left_folder<E>(
+    removed: Result<bool, E>,
+    is_dir: impl FnOnce() -> std::io::Result<bool>,
+    is_empty: impl FnOnce() -> std::io::Result<bool>,
+) -> LeftFolder {
+    match removed {
+        Ok(true) => return LeftFolder::Removed,
+        Ok(false) => {}
+        Err(_) => return LeftFolder::Stuck,
+    }
+    match is_dir() {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => LeftFolder::Gone,
+        Err(_) => LeftFolder::Stuck,
+        Ok(false) => LeftFolder::HasContent,
+        Ok(true) => match is_empty() {
+            Ok(false) => LeftFolder::HasContent,
+            Ok(true) | Err(_) => LeftFolder::Stuck,
+        },
+    }
+}
+
+#[cfg(test)]
+mod left_folder_tests {
+    use super::{LeftFolder, left_folder};
+    use std::io::{Error, ErrorKind, Result};
+
+    fn unreachable() -> Result<bool> {
+        panic!("inspected a folder whose answer was already known")
+    }
+
+    fn denied() -> Result<bool> {
+        Err(Error::from(ErrorKind::PermissionDenied))
+    }
+
+    #[test]
+    fn a_removed_folder_is_not_inspected() {
+        let removed = left_folder(Ok::<_, ()>(true), unreachable, unreachable);
+        assert_eq!(removed, LeftFolder::Removed);
+    }
+
+    #[test]
+    fn a_failed_removal_keeps_the_path_held() {
+        let stuck = left_folder(Err(()), unreachable, unreachable);
+        assert_eq!(stuck, LeftFolder::Stuck);
+    }
+
+    #[test]
+    fn only_a_missing_folder_counts_as_gone() {
+        let missing = || Err(Error::from(ErrorKind::NotFound));
+        assert_eq!(
+            left_folder(Ok::<_, ()>(false), missing, unreachable),
+            LeftFolder::Gone
+        );
+        assert_eq!(
+            left_folder(Ok::<_, ()>(false), denied, unreachable),
+            LeftFolder::Stuck
+        );
+    }
+
+    #[test]
+    fn a_folder_that_holds_something_lets_the_path_go() {
+        assert_eq!(
+            left_folder(Ok::<_, ()>(false), || Ok(true), || Ok(false)),
+            LeftFolder::HasContent
+        );
+        assert_eq!(
+            left_folder(Ok::<_, ()>(false), || Ok(false), unreachable),
+            LeftFolder::HasContent
+        );
+    }
+
+    #[test]
+    fn an_empty_or_unlisted_folder_keeps_the_path_held() {
+        assert_eq!(
+            left_folder(Ok::<_, ()>(false), || Ok(true), || Ok(true)),
+            LeftFolder::Stuck
+        );
+        assert_eq!(
+            left_folder(Ok::<_, ()>(false), || Ok(true), denied),
+            LeftFolder::Stuck
+        );
     }
 }
 
@@ -1919,6 +3113,7 @@ mod share_view_identity_tests {
                     operation.clone(),
                     &LeaseRegistry::default(),
                     &ClaimAnnouncer::default(),
+                    &mut crate::actor::live_application::Registry::default(),
                 );
                 assert!(
                     matches!(result, Err(RuntimeError::Relay(RelayError::Local(reason))) if reason == RELAY_IO_PENDING)
@@ -1938,7 +3133,8 @@ mod share_view_identity_tests {
                     transport.clone(),
                     push.clone(),
                     &LeaseRegistry::default(),
-                    &ClaimAnnouncer::default()
+                    &ClaimAnnouncer::default(),
+                    &mut crate::actor::live_application::Registry::default()
                 ),
                 Err(RuntimeError::Relay(RelayError::IdentityRequired))
             ));
@@ -1949,6 +3145,7 @@ mod share_view_identity_tests {
                 operation.clone(),
                 &LeaseRegistry::default(),
                 &ClaimAnnouncer::default(),
+                &mut crate::actor::live_application::Registry::default(),
             );
             assert!(result.is_err());
             let request = transport.take_pending().unwrap();
@@ -1961,7 +3158,8 @@ mod share_view_identity_tests {
                     transport,
                     operation,
                     &LeaseRegistry::default(),
-                    &ClaimAnnouncer::default()
+                    &ClaimAnnouncer::default(),
+                    &mut crate::actor::live_application::Registry::default()
                 ),
                 Ok(RelayOperationOutcome::Claimed)
             ));
@@ -1994,6 +3192,7 @@ mod share_view_identity_tests {
             },
             &LeaseRegistry::default(),
             &ClaimAnnouncer::default(),
+            &mut crate::actor::live_application::Registry::default(),
         )
         .expect("recording runs");
         match outcome {
@@ -2112,6 +3311,493 @@ mod share_view_identity_tests {
     }
 }
 
+#[cfg(test)]
+mod hosted_refusal_tests {
+    use super::*;
+    use dohc_engine_sync::{CursorKind, ShareAccess, ShareGrant};
+    use dohc_engine_testkit::ScratchDir;
+
+    /// Every row of every table, to show a refusal changed nothing.
+    fn everything(store: &EngineStore) -> Vec<String> {
+        store
+            .read_with(|conn| {
+                let tables = conn
+                    .prepare("SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name")?
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                let mut rows = Vec::new();
+                for table in tables {
+                    let mut statement = conn.prepare(&format!("SELECT * FROM \"{table}\""))?;
+                    let columns = statement.column_count();
+                    let mut query = statement.query([])?;
+                    while let Some(row) = query.next()? {
+                        let values = (0..columns)
+                            .map(|column| row.get::<_, rusqlite::types::Value>(column))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        rows.push(format!("{table}: {values:?}"));
+                    }
+                }
+                Ok::<_, rusqlite::Error>(rows)
+            })
+            .unwrap()
+    }
+
+    /// Sol's slice-4 review: ordinary operations reached ordinary relay
+    /// routes from a hosted replica, and a claim left `pending` behind.
+    /// Each is refused with its reason before it writes or sends anything.
+    #[test]
+    fn a_hosted_replica_refuses_every_ordinary_operation_untouched() {
+        let scratch = ScratchDir::new().unwrap();
+        let path = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&path, 1_000).unwrap();
+        create_hosted_replica(
+            &mut store,
+            "ws",
+            "service-host:host",
+            "epoch",
+            "stream",
+            1_000,
+            &NoFaults,
+        )
+        .unwrap();
+        let ws = || "ws".to_owned();
+        let granted = || ShareGrant {
+            paths: Vec::new(),
+            version_id: None,
+            access: ShareAccess::Edit,
+        };
+        let operations = [
+            RelayOperation::Pull {
+                workspace_id: ws(),
+                now_ms: 2_000,
+            },
+            RelayOperation::CommitCursor {
+                workspace_id: ws(),
+                cursor: RelayCursor {
+                    cursor: 1,
+                    replication_epoch: "epoch".into(),
+                    stream_identity: "stream".into(),
+                    bootstrap_complete: true,
+                    settlement_report_id: None,
+                },
+                now_ms: 2_000,
+            },
+            RelayOperation::Probe { workspace_id: ws() },
+            RelayOperation::Claim {
+                workspace_id: ws(),
+                account_id: Some("account".into()),
+                new_origin_id: "origin".into(),
+                new_replication_epoch: "epoch-2".into(),
+                new_stream_identity: "stream-2".into(),
+                created_at_ms: 2_000,
+            },
+            RelayOperation::AdoptJoinIdentity {
+                workspace_id: ws(),
+                new_origin_id: "origin".into(),
+                replication_epoch: "epoch".into(),
+                stream_identity: "stream".into(),
+                created_at_ms: 2_000,
+            },
+            RelayOperation::RecoverOrigin {
+                workspace_id: ws(),
+                new_origin_id: "service-host:rebased".into(),
+            },
+            RelayOperation::UploadKeyEnvelope {
+                workspace_id: ws(),
+                envelope_json: "{}".into(),
+                if_match: None,
+            },
+            RelayOperation::DownloadKeyEnvelope { workspace_id: ws() },
+            RelayOperation::PullSharedChannel {
+                workspace_id: ws(),
+                share_id: "share".into(),
+                channel_wire_id: "wire".into(),
+            },
+            RelayOperation::PushSharedChannel {
+                workspace_id: ws(),
+                share_id: "share".into(),
+                channel_wire_id: "wire".into(),
+            },
+            RelayOperation::PullShareView {
+                workspace_id: ws(),
+                share_id: "share".into(),
+                granted: granted(),
+            },
+            RelayOperation::RecordShareViewIdentity {
+                workspace_id: ws(),
+                access: ShareAccess::Edit,
+                origin_id: "origin".into(),
+                replication_epoch: "epoch".into(),
+                stream_identity: "stream".into(),
+                created_at_ms: 2_000,
+            },
+            RelayOperation::SubmitShareProposal {
+                workspace_id: ws(),
+                share_id: "share".into(),
+                granted: granted(),
+                submit_id: "submit".into(),
+                max_read_bytes: 0,
+            },
+            RelayOperation::PushDirectWrites {
+                workspace_id: ws(),
+                share_id: "share".into(),
+                granted: granted(),
+                max_read_bytes: 0,
+            },
+            RelayOperation::CommitShareViewCursor {
+                workspace_id: ws(),
+                cursor: ShareCursor {
+                    kind: CursorKind::ShareView,
+                    share_id: "share".into(),
+                    cursor: 1,
+                },
+            },
+        ];
+        let before = everything(&store);
+        let mut cache = WriterDocCache::new();
+        for operation in operations {
+            assert_eq!(operation.replicas(), Replicas::Ordinary, "{operation:?}");
+            let transport = DeferredRelayTransport::default();
+            let refused = execute_relay_operation(
+                &mut store,
+                &mut cache,
+                transport.clone(),
+                operation.clone(),
+                &LeaseRegistry::default(),
+                &ClaimAnnouncer::default(),
+                &mut crate::actor::live_application::Registry::default(),
+            );
+            assert!(
+                matches!(&refused, Err(RuntimeError::Relay(refusal))
+                    if *refusal == dohc_engine_sync::hosted_feed_only()),
+                "{operation:?}: {refused:?}"
+            );
+            assert_eq!(transport.take_pending(), None, "{operation:?} sent nothing");
+            assert_eq!(everything(&store), before, "{operation:?} wrote nothing");
+        }
+    }
+
+    /// The switch-over plan: a retired file holding anything but its head was
+    /// forgotten before it was named, so its document left `departed` while
+    /// the file stayed. Its path stays held now: every pass names the file,
+    /// across a restart, until it holds its head again and goes.
+    #[test]
+    fn a_retired_file_holding_anything_else_keeps_its_document_departed() {
+        let scratch = ScratchDir::new().unwrap();
+        let root = ScratchDir::new().unwrap();
+        let path = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&path, 1_000).unwrap();
+        create_hosted_replica(
+            &mut store,
+            "ws",
+            "service-host:host",
+            "epoch",
+            "stream",
+            1_000,
+            &NoFaults,
+        )
+        .unwrap();
+        dohc_engine_domain::VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 0, &NoFaults)
+            .unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO hosted_retired_files (workspace_id,path,object_id,sha256) \
+                     VALUES ('ws','a.md','doc-b',?1)",
+                    [dohc_engine_storage::hex_sha256(b"hosted b")],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)
+            })
+            .unwrap();
+        let file = root.path().join("a.md");
+        std::fs::write(&file, "not the head").unwrap();
+        let pass = |store: &mut EngineStore| {
+            park_departed_hosted(
+                store,
+                &mut WriterDocCache::new(),
+                &LeaseRegistry::default(),
+                "ws",
+                root.path(),
+                2_000,
+            )
+        };
+        let departed = |store: &EngineStore| {
+            dohc_engine_sync::departed_hosted_object_ids(store, "ws").unwrap()
+        };
+
+        for _ in 0..2 {
+            let refused = pass(&mut store);
+            assert!(
+                matches!(&refused, Err(RuntimeError::HostedFileUnexpected { path }) if path == "a.md"),
+                "{refused:?}"
+            );
+            assert_eq!(departed(&store), ["doc-b"]);
+        }
+        drop(store);
+        let mut store = EngineStore::open(&path, 3_000).unwrap();
+        let refused = pass(&mut store);
+        assert!(
+            matches!(&refused, Err(RuntimeError::HostedFileUnexpected { path }) if path == "a.md"),
+            "{refused:?}"
+        );
+        assert_eq!(departed(&store), ["doc-b"]);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "not the head");
+
+        std::fs::write(&file, "hosted b").unwrap();
+        assert!(pass(&mut store).unwrap(), "its path came free");
+        assert!(departed(&store).is_empty());
+        assert!(!file.exists());
+    }
+
+    /// The durability review: a stuck retired file returned before the
+    /// retired files after it and every departed document, so nothing else
+    /// in the workspace ever retired. The others still go or park; the stuck
+    /// one stays departed, and the pass still names it.
+    #[test]
+    fn a_stuck_retired_file_does_not_hold_back_other_departed_documents() {
+        let scratch = ScratchDir::new().unwrap();
+        let root = ScratchDir::new().unwrap();
+        let path = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&path, 1_000).unwrap();
+        create_hosted_replica(
+            &mut store,
+            "ws",
+            "service-host:host",
+            "epoch",
+            "stream",
+            1_000,
+            &NoFaults,
+        )
+        .unwrap();
+        dohc_engine_domain::VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 0, &NoFaults)
+            .unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO hosted_retired_files (workspace_id,path,object_id,sha256) \
+                     VALUES ('ws','a.md','doc-b',?1),('ws','z.md','doc-z',?2)",
+                    [
+                        dohc_engine_storage::hex_sha256(b"hosted b"),
+                        dohc_engine_storage::hex_sha256(b"hosted z"),
+                    ],
+                )
+                .and_then(|_| {
+                    tx.execute(
+                        "INSERT INTO hosted_documents \
+                         (workspace_id,object_id,path,state,scope_generation) \
+                         VALUES ('ws','doc-c','c.md','ready',1)",
+                        [],
+                    )
+                })
+                .map_err(dohc_engine_storage::StorageError::persist_public)
+            })
+            .unwrap();
+        std::fs::write(root.path().join("a.md"), "not the head").unwrap();
+        std::fs::write(root.path().join("z.md"), "hosted z").unwrap();
+        assert_eq!(
+            dohc_engine_sync::departed_hosted_object_ids(&store, "ws").unwrap(),
+            ["doc-b", "doc-c", "doc-z"]
+        );
+
+        let refused = park_departed_hosted(
+            &mut store,
+            &mut WriterDocCache::new(),
+            &LeaseRegistry::default(),
+            "ws",
+            root.path(),
+            2_000,
+        );
+        assert!(
+            matches!(&refused, Err(RuntimeError::HostedFileUnexpected { path }) if path == "a.md"),
+            "{refused:?}"
+        );
+        assert_eq!(
+            dohc_engine_sync::departed_hosted_object_ids(&store, "ws").unwrap(),
+            ["doc-b"]
+        );
+        assert!(root.path().join("a.md").exists());
+        assert!(!root.path().join("z.md").exists());
+    }
+
+    /// The durability review: a retired `a.md/x/c.md` left the folder
+    /// `a.md`, which a file at `a.md` could never replace. The folders its
+    /// file leaves empty go with it, up to one that still holds something.
+    #[test]
+    fn a_retired_file_takes_the_folders_it_leaves_empty() {
+        let scratch = ScratchDir::new().unwrap();
+        let root = ScratchDir::new().unwrap();
+        let path = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&path, 1_000).unwrap();
+        create_hosted_replica(
+            &mut store,
+            "ws",
+            "service-host:host",
+            "epoch",
+            "stream",
+            1_000,
+            &NoFaults,
+        )
+        .unwrap();
+        dohc_engine_domain::VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 0, &NoFaults)
+            .unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO hosted_retired_files (workspace_id,path,object_id,sha256) \
+                     VALUES ('ws','a.md/x/c.md','doc-c',?1),('ws','d/e/f.md','doc-f',?1)",
+                    [dohc_engine_storage::hex_sha256(b"hosted")],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)
+            })
+            .unwrap();
+        std::fs::create_dir_all(root.path().join("a.md/x")).unwrap();
+        std::fs::create_dir_all(root.path().join("d/e")).unwrap();
+        std::fs::write(root.path().join("a.md/x/c.md"), "hosted").unwrap();
+        std::fs::write(root.path().join("d/e/f.md"), "hosted").unwrap();
+        std::fs::write(root.path().join("d/keep.md"), "keep").unwrap();
+
+        assert!(
+            park_departed_hosted(
+                &mut store,
+                &mut WriterDocCache::new(),
+                &LeaseRegistry::default(),
+                "ws",
+                root.path(),
+                2_000,
+            )
+            .unwrap()
+        );
+        assert!(!root.path().join("a.md").exists());
+        assert!(!root.path().join("d/e").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("d/keep.md")).unwrap(),
+            "keep"
+        );
+        assert!(
+            dohc_engine_sync::retired_hosted_files(&store, "ws")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// Sol's sixth park review: a finish that stops after writing a
+    /// document's file keeps only that document departed while the others
+    /// park, and after a restart the next pass parks it too.
+    #[test]
+    fn an_interrupted_finish_holds_back_only_its_document_until_a_restart() {
+        let scratch = ScratchDir::new().unwrap();
+        let root = ScratchDir::new().unwrap();
+        let path = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&path, 1_000).unwrap();
+        create_hosted_replica(
+            &mut store,
+            "ws",
+            "service-host:host",
+            "epoch",
+            "stream",
+            1_000,
+            &NoFaults,
+        )
+        .unwrap();
+        dohc_engine_domain::VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 0, &NoFaults)
+            .unwrap();
+        for (seq, object_id) in [(1, "doc-a"), (2, "doc-b")] {
+            dohc_engine_domain::VersionedTextStore::new(&mut store)
+                .write_text(
+                    &dohc_engine_domain::WriteText {
+                        workspace_id: "ws".to_owned(),
+                        version_id: "main".to_owned(),
+                        object_id: object_id.to_owned(),
+                        path: format!("{object_id}.md"),
+                        text: format!("hosted {object_id}"),
+                        moment_id: format!("moment-{seq}"),
+                        metadata_origin: "sync".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 1_000 + seq,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+        }
+        // Both applied rows no committed pass wrote, then left the scope.
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO hosted_documents \
+                     (workspace_id,object_id,path,state,scope_generation,unmaterialized_seq) \
+                     VALUES ('ws','doc-a','doc-a.md','ready',1,1),\
+                     ('ws','doc-b','doc-b.md','ready',1,2)",
+                    [],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)
+            })
+            .unwrap();
+        let pass = |store: &mut EngineStore| {
+            park_departed_hosted(
+                store,
+                &mut WriterDocCache::new(),
+                &LeaseRegistry::default(),
+                "ws",
+                root.path(),
+                2_000,
+            )
+        };
+        let departed = |store: &EngineStore| {
+            dohc_engine_sync::departed_hosted_object_ids(store, "ws").unwrap()
+        };
+        let a = root.path().join("doc-a.md");
+
+        let faults = dohc_engine_testkit::ScriptedFaults::crash_at(
+            dohc_engine_storage::FaultPoint::MaterializeAfterRenameBeforeComplete,
+        );
+        let armed: Arc<dyn dohc_engine_storage::FaultInjector> = faults.clone();
+        super::super::versions::tests::RELAY_FAULTS.with(|relay| relay.replace(Some(armed)));
+        let interrupted = pass(&mut store);
+        super::super::versions::tests::RELAY_FAULTS.with(|relay| relay.take());
+        assert!(faults.fired());
+        assert!(
+            matches!(
+                interrupted,
+                Err(RuntimeError::ActiveVersionMaterializationIncomplete { failed_jobs: 1 })
+            ),
+            "{interrupted:?}"
+        );
+        assert_eq!(departed(&store), ["doc-a"]);
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "hosted doc-a");
+        assert!(!root.path().join("doc-b.md").exists());
+
+        drop(store);
+        let mut store = EngineStore::open(&path, 3_000).unwrap();
+        super::super::materialization::replay_pending_materializations(
+            &mut store,
+            root.path(),
+            super::super::materialization::MaterializationReplayScope {
+                holds: None,
+                workspace_id: "ws",
+                self_writes: None,
+                progress: None,
+                file_outcomes_settled: false,
+                released_hold_paths: None,
+            },
+            3_000,
+            &NoFaults,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(pass(&mut store).unwrap());
+        assert!(departed(&store).is_empty());
+        assert!(!a.exists());
+    }
+}
+
 #[cfg(all(test, debug_assertions))]
 mod test_relay_ca_tests {
     use super::*;
@@ -2123,6 +3809,7 @@ mod test_relay_ca_tests {
     fn configuration(base_url: &str, insecure: bool) -> RelayConfiguration {
         RelayConfiguration {
             base_url: base_url.to_owned(),
+            socket_path: None,
             bearer_token: "token".to_owned(),
             allow_insecure_loopback_for_tests: insecure,
         }

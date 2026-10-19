@@ -1,5 +1,5 @@
 import "../../testing/legendListMock";
-import { formatChatDay, formatChatTime } from "../time";
+import { formatChatDay, formatChatTime, formatClock, formatClockDigits } from "../time";
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -16,7 +16,7 @@ import {
 import { extractChatFileReferenceTokens } from "./chatFileMentions";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
 import { AgentSettingsProvider } from "./AgentBadge";
-import { identityHue } from "./ChatAvatar";
+
 import { setChosenColors } from "./chosenColors";
 
 // Real implementations, spied: every message-body render runs the file-token
@@ -70,6 +70,37 @@ describe("ChatComposer Enter-to-send", () => {
     expect(onSend).toHaveBeenCalledTimes(1);
   });
 
+  it("leaves an Escape that cancels an IME composition to the input method", () => {
+    const onEscape = vi.fn();
+    renderComposer({ onEscape });
+    const composer = screen.getByTestId("test-chat-composer");
+    fireEvent.keyDown(composer, { key: "Escape", isComposing: true });
+    fireEvent.keyDown(composer, { key: "Escape", keyCode: 229 });
+    expect(onEscape).not.toHaveBeenCalled();
+    fireEvent.keyDown(composer, { key: "Escape" });
+    expect(onEscape).toHaveBeenCalledOnce();
+  });
+
+  it("does not send on an Enter that IME marks only with keyCode 229", () => {
+    const { onSend } = renderComposer();
+    fireEvent.keyDown(screen.getByTestId("test-chat-composer"), { key: "Enter", keyCode: 229 });
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["darwin", "starts a new line", false],
+    ["win32", "still sends", true],
+  ] as const)("Option+Return on %s %s", (platform, _result, sends) => {
+    vi.stubGlobal("dohcDesktop", { platform });
+    try {
+      const { onSend } = renderComposer();
+      fireEvent.keyDown(screen.getByTestId("test-chat-composer"), { key: "Enter", altKey: true });
+      expect(onSend).toHaveBeenCalledTimes(sends ? 1 : 0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("does not send on Shift+Enter (newline stays a newline)", () => {
     const { onSend } = renderComposer();
     fireEvent.keyDown(screen.getByTestId("test-chat-composer"), {
@@ -81,9 +112,9 @@ describe("ChatComposer Enter-to-send", () => {
 });
 
 describe("chat authorship display", () => {
-  it("renders its rows again for a new name, and not for any other settings save", () => {
+  it("does not infer self or colours from a settings display name", () => {
     setChosenColors({ ...DEFAULT_USER_SETTINGS.appearance, yourColor: "plum" });
-    const messages: ChatMessageRecord[] = [{
+    const messages: ChatMessageRecord[] = [{ presentation: { group: "fixture", hue: null, self: false },
       id: "m1", threadId: "thread", authorKind: "human", authorDisplayName: "Ada",
       body: "Hello", createdAtMs: new Date(2026, 8, 17, 12).getTime(),
     }];
@@ -95,7 +126,7 @@ describe("chat authorship display", () => {
     const save = (settings: typeof DEFAULT_USER_SETTINGS) =>
       <AgentSettingsProvider settings={settings}>{list}</AgentSettingsProvider>;
     const { rerender } = render(save(DEFAULT_USER_SETTINGS));
-    expect(screen.getByTitle("Ada").className).toContain(`text-hue-${identityHue("Ada")}`);
+    expect(screen.getByTitle("Ada").className).toContain("text-muted");
     const scans = vi.mocked(extractChatFileReferenceTokens).mock.calls.length;
 
     // A save that hides a sidebar view is a new settings object.
@@ -103,7 +134,7 @@ describe("chat authorship display", () => {
     expect(vi.mocked(extractChatFileReferenceTokens).mock.calls.length).toBe(scans);
 
     rerender(save({ ...DEFAULT_USER_SETTINGS, profile: { preferredName: "Ada" } }));
-    expect(screen.getByTitle("Ada").className).toContain("text-hue-plum");
+    expect(screen.getByTitle("Ada").className).toContain("text-muted");
     setChosenColors(DEFAULT_USER_SETTINGS.appearance);
   });
 
@@ -113,12 +144,12 @@ describe("chat authorship display", () => {
     { name: "only the earlier identity known", firstId: "a", continues: false },
     { name: "only the later identity known", secondId: "a", continues: false },
     { name: "neither identity known", continues: true },
-    { name: "different names without identities", secondName: "Other", continues: false },
+    { name: "different unknown authors", secondName: "Other", continues: false },
     { name: "different author kinds", firstId: "a", secondId: "a", secondKind: "agent" as const, continues: false },
     { name: "five minutes apart", firstId: "a", secondId: "a", gap: 300_000, continues: false },
     { name: "different days", gap: 120_000, start: new Date(2026, 8, 17, 23, 59).getTime(), continues: false },
   ])("groups messages by identity: $name", (test) => {
-    const first: ChatMessageRecord = {
+    const first: ChatMessageRecord = { presentation: { group: test.firstId ?? "unknown-Sam", hue: null, self: false },
       id: "first", threadId: "thread", authorKind: "human", authorDisplayName: "Sam",
       authorUserId: test.firstId, body: "First", createdAtMs: test.start ?? new Date(2026, 8, 17, 12).getTime(),
     };
@@ -127,6 +158,7 @@ describe("chat authorship display", () => {
         testIdPrefix="test-chat"
         messages={[first, {
           ...first, id: "second", authorUserId: test.secondId,
+          presentation: { ...first.presentation, group: test.secondId ?? "unknown-" + (test.secondName ?? "Sam") },
           authorDisplayName: test.secondName ?? first.authorDisplayName,
           authorKind: test.secondKind ?? first.authorKind,
           createdAtMs: first.createdAtMs + (test.gap ?? 60_000),
@@ -137,6 +169,41 @@ describe("chat authorship display", () => {
       />,
     );
     expect(screen.getAllByTestId("test-chat-message")[1]?.dataset.continues).toBe(String(test.continues));
+  });
+
+  it("fits a continued message's time in the avatar's column, without AM or PM", () => {
+    // Two runs: "11:05 AM" and "12:45 PM", a two-digit hour in each.
+    const runs = [["Ana", 11, 3], ["Ana", 11, 5], ["Sam", 12, 43], ["Sam", 12, 45]] as const;
+    const messages = runs.map(([name, hour, minute], index): ChatMessageRecord => ({
+      id: `m${index}`, threadId: "thread", presentation: { group: name, hue: null, self: false },
+      authorKind: "human", authorDisplayName: name,
+      body: "Hello", createdAtMs: new Date(2026, 8, 17, hour, minute).getTime(),
+    }));
+    render(
+      <ChatMessageList
+        testIdPrefix="test-chat"
+        messages={messages}
+        loading={false}
+        emptyLabel="No messages"
+        listRef={createRef<ChatMessageListHandle>()}
+      />,
+    );
+    const items = screen.getAllByTestId("test-chat-message");
+    expect(items.map((item) => item.dataset.continues)).toEqual(["false", "true", "false", "true"]);
+    // The avatar and the time share one fixed slot, so the text starts at
+    // the same place whatever the time's length.
+    const slot = (item: HTMLElement) => item.querySelector(".group")!.firstElementChild!;
+    for (const at of [1, 3]) {
+      const { createdAtMs } = messages[at]!;
+      expect(slot(items[at]!).className).toBe(slot(items[at - 1]!).className);
+      expect(slot(items[at]!).className.split(/\s+/)).toEqual(expect.arrayContaining(["w-9", "shrink-0", "justify-end"]));
+      const time = slot(items[at]!).querySelector("time")!;
+      expect(time.textContent).toBe(formatClockDigits(createdAtMs));
+      expect(time.textContent).not.toMatch(/AM|PM/i);
+      expect(time.getAttribute("title")).toBe(formatChatTime(createdAtMs).label);
+      expect(time.getAttribute("aria-hidden")).toBe("true");
+      expect(slot(items[at]!).querySelector(".sr-only")?.textContent).toBe(formatClock(createdAtMs));
+    }
   });
 
   it("renders agent messages as \"their stored name\" and humans by name", () => {
@@ -150,7 +217,7 @@ describe("chat authorship display", () => {
       <ChatMessageList
         testIdPrefix="test-chat"
         messages={[
-          {
+          { presentation: { group: "fixture", hue: null, self: false },
             id: "message-1",
             threadId: "thread-1",
             authorKind: "agent",
@@ -175,7 +242,7 @@ describe("chat authorship display", () => {
       <ChatMessageList
         testIdPrefix="test-chat"
         messages={[
-          {
+          { presentation: { group: "fixture", hue: null, self: false },
             id: "message-auto",
             threadId: "thread-1",
             authorKind: "automation",
@@ -206,7 +273,7 @@ describe("chat authorship display", () => {
       <ChatMessageList
         testIdPrefix="test-chat"
         messages={[
-          {
+          { presentation: { group: "fixture", hue: null, self: false },
             id: "message-file",
             threadId: "thread-1",
             authorKind: "human",
@@ -237,7 +304,7 @@ describe("chat authorship display", () => {
       <ChatMessageList
         testIdPrefix="test-chat"
         messages={[
-          {
+          { presentation: { group: "fixture", hue: null, self: false },
             id: "message-file",
             threadId: "thread-1",
             authorKind: "human",
@@ -268,7 +335,7 @@ describe("chat authorship display", () => {
       <ChatMessageList
         testIdPrefix="test-chat"
         messages={[
-          {
+          { presentation: { group: "fixture", hue: null, self: false },
             id: "message-file",
             threadId: "thread-1",
             authorKind: "human",
@@ -306,7 +373,7 @@ describe("chat authorship display", () => {
       <ChatMessageList
         testIdPrefix="test-chat"
         messages={[
-          {
+          { presentation: { group: "fixture", hue: null, self: false },
             id: "message-file",
             threadId: "thread-1",
             authorKind: "human",
@@ -355,7 +422,7 @@ describe("chat authorship display", () => {
       <ChatMessageList
         testIdPrefix="test-chat"
         messages={[
-          {
+          { presentation: { group: "fixture", hue: null, self: false },
             id: "message-file",
             threadId: "thread-1",
             authorKind: "agent",
@@ -462,7 +529,7 @@ describe("ChatMessageList memo boundary", () => {
   // every message body) when its own props are unchanged.
   it("skips re-rendering when the host re-renders with unchanged props", () => {
     const messages: ChatMessageRecord[] = [
-      {
+      { presentation: { group: "fixture", hue: null, self: false },
         id: "message-1",
         threadId: "thread-1",
         authorKind: "human",
@@ -496,7 +563,7 @@ describe("ChatMessageList memo boundary", () => {
 });
 
 describe("message reactions (WS-MU-C2)", () => {
-  const message: ChatMessageRecord = {
+  const message: ChatMessageRecord = { presentation: { group: "fixture", hue: null, self: false },
     id: "message-1",
     threadId: "thread-1",
     authorKind: "agent",

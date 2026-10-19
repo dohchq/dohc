@@ -33,7 +33,7 @@ tokio-util = "0.7"
 # Native workspace notifications. The watcher owns `RecommendedWatcher` on a
 # dedicated thread and reduces every settled burst to the actor's sticky dirty
 # signal; no notify callback ever runs the scan or actor command loop.
-notify = "8"
+notify = "=8.2.0"
 # OS file identity ((st_dev, st_ino) / (volume serial, file index)) for the
 # watcher root-liveness check: existence alone can't distinguish the ORIGINAL
 # watched directory object from a delete-then-recreate that leaves the OS watch
@@ -75,6 +75,14 @@ rustix = { version = "1.1", features = ["fs"] }
 winapi-util = "0.1"
 # Safe exclusive Windows rename wrapper.
 dohc-windows-files = { path = "../dohc-windows-files" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+dohc-linux-files = { path = "../dohc-linux-files" }
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+# Keeps Finder tags, other extended attributes and the ACL when a write
+# replaces a file.
+dohc-macos-files = { path = "../dohc-macos-files" }
 
 [dev-dependencies]
 # The differential harness parses the workspace-kernel golden fixtures under tests/fixtures

@@ -1,14 +1,10 @@
 // @vitest-environment jsdom
+import {SHARE_WEB_API_VERSION, SHARE_WEB_API_VERSION_HEADER} from "@dohc/workspace-contracts/relay-values";
 // App discovery has its own request, cancellation, and rendering tests.
 vi.mock("./PublishedApps", () => ({PublishedApps: () => null}));
 import { jsonResponse, requestPath as fullRequestPath, settle, setControlValue } from "./testing";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import {
-  SETTLEMENT_END_TO_END_MAX_MS,
-  createSettlementScheduler,
-  type SettlementReason,
-} from "@dohc/live-session-contract";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   App,
@@ -411,8 +407,8 @@ describe("App", () => {
     expect(init?.method).toBe("POST");
     expect(init?.credentials).toBe("same-origin");
     expect(init).not.toHaveProperty("body");
-    expect(init?.headers).toEqual({ "x-dohc-link-session": SESSION });
-    expect(Object.keys(init?.headers ?? {})).toEqual(["x-dohc-link-session"]);
+    expect(init?.headers).toEqual({ "x-dohc-link-session": SESSION, [SHARE_WEB_API_VERSION_HEADER]: String(SHARE_WEB_API_VERSION) });
+    expect(Object.keys(init?.headers ?? {}).sort()).toEqual(["x-dohc-link-session", SHARE_WEB_API_VERSION_HEADER].sort());
 
     expect(navigate).toHaveBeenCalledWith(FIRST_HANDOFF_CODE, PUBLIC_RELAY_URL);
     const launchedCode = String(navigate.mock.calls[0]?.[0]);
@@ -1591,9 +1587,9 @@ describe("App", () => {
     expect(container.textContent).not.toContain("This link isn't available.");
   });
 
-  it.each(["exchange", "current"] as const)("says which server part needs an update when its versions disagree at %s", async (step) => {
-    const message = "This server's sync service needs an update to match its share page. Ask the person who runs the server to update it.";
-    const mismatch = () => jsonResponse({ ok: false, code: "api_version_too_new", error: message }, 409);
+  it.each(["exchange", "current"] as const)("renders server-supplied reload recovery for a share-web mismatch at %s", async (step) => {
+    const message = "Reload this share page to use the supported API version.";
+    const mismatch = () => jsonResponse({ ok: false, api: "share-web", code: "api_version_too_new", error: message }, 409);
     history.replaceState(null, "", `/s/#${"v".repeat(43)}`);
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
@@ -1607,9 +1603,9 @@ describe("App", () => {
     expect(container.textContent).not.toContain("This link isn't available.");
   });
 
-  it.each(["log", "meta"] as const)("stops following an open page when the server's versions start to disagree at %s", async (step) => {
-    const message = "This server's share page needs an update to match its sync service. Ask the person who runs the server to update it.";
-    const mismatch = () => jsonResponse({ ok: false, code: "api_version_too_old", error: message }, 409);
+  it.each(["log", "meta"] as const)("shows server-supplied recovery and stops following after a share-web mismatch at %s", async (step) => {
+    const message = "Reload this share page to use the supported API version.";
+    const mismatch = () => jsonResponse({ ok: false, api: "share-web", code: "api_version_too_old", error: message }, 409);
     vi.useFakeTimers();
     history.replaceState(null, "", `/s/${SESSION}`);
     let logRequests = 0;
@@ -3078,7 +3074,7 @@ describe("App", () => {
     });
   });
 
-  it("renders quiet and hard-triggered settlements through the ordinary View follower", async () => {
+  it("renders published settlements through the ordinary View follower", async () => {
     vi.useFakeTimers();
     exposeHeldLogQuery = true;
     const startedAt = new Date("2026-08-27T00:00:00.000Z").getTime();
@@ -3088,11 +3084,11 @@ describe("App", () => {
       blobSha256: "1".repeat(64),
       contentKind: "text",
     };
-    const quietFile: SharedFile = {
+    const firstFile: SharedFile = {
       ...initialFile,
       blobSha256: "2".repeat(64),
     };
-    const hardFile: SharedFile = {
+    const secondFile: SharedFile = {
       ...initialFile,
       blobSha256: "3".repeat(64),
     };
@@ -3131,7 +3127,6 @@ describe("App", () => {
     };
     const trace: string[] = [];
     const heldLogs: HeldLog[] = [];
-    const reasons: SettlementReason[] = [];
     let currentRequests = 0;
     let metadataRequests = 0;
     let initialCatchupRequests = 0;
@@ -3194,11 +3189,11 @@ describe("App", () => {
       if (path === `/api/view/blob/${initialFile.blobSha256}`) {
         return new Response("# Initial settlement");
       }
-      if (path === `/api/view/blob/${quietFile.blobSha256}`) {
-        return new Response("# Quiet settlement");
+      if (path === `/api/view/blob/${firstFile.blobSha256}`) {
+        return new Response("# First published settlement");
       }
-      if (path === `/api/view/blob/${hardFile.blobSha256}`) {
-        return new Response("# Hard-limit settlement");
+      if (path === `/api/view/blob/${secondFile.blobSha256}`) {
+        return new Response("# Second published settlement");
       }
       if (path === `/api/view/blob/${staleFile.blobSha256}`) {
         return await new Promise<Response>((resolve) => {
@@ -3230,109 +3225,48 @@ describe("App", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const scheduler = createSettlementScheduler({
-      hardTriggerMs: SETTLEMENT_END_TO_END_MAX_MS - 1,
-      now: () => Date.now(),
-      onEvent: () => undefined,
-      settle: (reason) => {
-        reasons.push(reason);
-        trace.push(`publish:${reason}`);
-        const parked = [...heldLogs].reverse().find((held) => !held.settled);
-        if (!parked) throw new Error(`no parked View follower for ${reason}`);
-        if (reason === "quiet") {
-          parked.resolve(logOpsPage([write(2, initialFile, quietFile)], 2));
-        } else if (reason === "hard-limit") {
-          parked.resolve(logOpsPage([write(3, quietFile, hardFile)], 3));
-        } else {
-          throw new Error(`unexpected settlement reason: ${reason}`);
-        }
-      },
-    });
+    const parkedAt = (since: number): HeldLog | undefined =>
+      heldLogs.find((held) =>
+        held.path === `/api/view/log?since=${String(since)}&limit=500&hold=30000` &&
+        !held.settled
+      );
+    const publish = (since: number, op: RelayOp): void => {
+      const parked = parkedAt(since);
+      if (!parked) throw new Error(`no parked View follower since ${String(since)}`);
+      trace.push(`publish:${String(op.relaySeq)}`);
+      parked.resolve(logOpsPage([op], op.relaySeq));
+    };
 
     await renderApp();
     const mountedViewer = container.querySelector(".viewer");
-    await settle(() =>
-      heldLogs.some((held) =>
-        held.path === "/api/view/log?since=1&limit=500&hold=30000" &&
-        !held.settled
-      )
-    );
+    await settle(() => parkedAt(1) !== undefined);
     expect(initialCatchupRequests).toBe(1);
     expect(container.querySelector("article.markdown")?.textContent).toContain(
       "Initial settlement",
     );
     expect(metadataRequests).toBe(0);
 
-    scheduler.markDirty(Date.now());
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(799);
-    });
-    expect(reasons).toEqual([]);
-    expect(container.querySelector("article.markdown")?.textContent).toContain(
-      "Initial settlement",
-    );
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(1);
-    });
+    publish(1, write(2, initialFile, firstFile));
     await settle(() =>
       container.querySelector("article.markdown")?.textContent
-        ?.includes("Quiet settlement") === true
+        ?.includes("First published settlement") === true
     );
-    expect(reasons).toEqual(["quiet"]);
-    expect(heldLogs.some((held) =>
-      held.path === "/api/view/log?since=2&limit=500&hold=30000" &&
-      !held.settled
-    )).toBe(true);
+    await settle(() => parkedAt(2) !== undefined);
     expect(container.querySelector(".viewer")).toBe(mountedViewer);
-    const quietPublish = trace.indexOf("publish:quiet");
-    const quietMeta = trace.indexOf("meta:1");
-    expect(quietMeta).toBeGreaterThan(quietPublish);
+    expect(trace.indexOf("meta:1")).toBeGreaterThan(trace.indexOf("publish:2"));
 
-    const hardWindowStartedAt = Date.now();
-    scheduler.markDirty(hardWindowStartedAt);
-    for (let index = 0; index < 6; index += 1) {
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(799);
-      });
-      scheduler.markDirty(Date.now());
-      expect(reasons).toEqual(["quiet"]);
-    }
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(205);
-    });
-    expect(Date.now() - hardWindowStartedAt).toBe(
-      SETTLEMENT_END_TO_END_MAX_MS - 1,
-    );
-    expect(Date.now() - hardWindowStartedAt).toBeLessThan(5_000);
+    publish(2, write(3, firstFile, secondFile));
     await settle(() =>
       container.querySelector("article.markdown")?.textContent
-        ?.includes("Hard-limit settlement") === true
+        ?.includes("Second published settlement") === true
     );
-    expect(Date.now() - hardWindowStartedAt).toBeLessThan(5_000);
-    await settle(() =>
-      heldLogs.some((held) =>
-        held.path === "/api/view/log?since=3&limit=500&hold=30000" &&
-        !held.settled
-      )
-    );
-    expect(reasons).toEqual(["quiet", "hard-limit"]);
-    const hardPublish = trace.indexOf("publish:hard-limit");
-    const hardMeta = trace.indexOf("meta:2");
-    expect(hardMeta).toBeGreaterThan(hardPublish);
+    await settle(() => parkedAt(3) !== undefined);
+    expect(container.querySelector(".viewer")).toBe(mountedViewer);
+    expect(trace.indexOf("meta:2")).toBeGreaterThan(trace.indexOf("publish:3"));
 
-    const staleFollower = [...heldLogs].reverse().find((held) =>
-      held.path === "/api/view/log?since=3&limit=500&hold=30000" &&
-      !held.settled
-    );
-    staleFollower?.resolve(logOpsPage([write(4, hardFile, staleFile)], 4));
+    publish(3, write(4, secondFile, staleFile));
     await settle(() => staleBlobResolve !== undefined);
-    await settle(() =>
-      heldLogs.some((held) =>
-        held.path === "/api/view/log?since=4&limit=500&hold=30000" &&
-        !held.settled
-      )
-    );
+    await settle(() => parkedAt(4) !== undefined);
     staleBlobResolve?.(new Response(null, { status: 404 }));
     await settle(() =>
       container.querySelector("article.markdown")?.textContent
@@ -3342,10 +3276,7 @@ describe("App", () => {
     expect(trace).toContain(
       "abort:/api/view/log?since=4&limit=500&hold=30000",
     );
-    expect(heldLogs.some((held) =>
-      held.path === "/api/view/log?since=4&limit=500&hold=30000" &&
-      !held.settled
-    )).toBe(true);
+    expect(parkedAt(4)).toBeDefined();
     expect(container.querySelector(".viewer")).toBe(mountedViewer);
 
     const personVisibleNetworkTrace = trace
@@ -3364,7 +3295,7 @@ describe("App", () => {
     root = null;
     expect(abandoned?.signal.aborted).toBe(true);
     const traceLengthAtUnmount = trace.length;
-    abandoned?.resolve(logOpsPage([write(5, recoveredFile, hardFile)], 5));
+    abandoned?.resolve(logOpsPage([write(5, recoveredFile, secondFile)], 5));
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();

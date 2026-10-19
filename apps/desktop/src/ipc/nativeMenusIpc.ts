@@ -17,7 +17,6 @@ import { resolveWorkspaceFile } from "../workspaces/workspaceAssets";
 import type { RegistryEntry } from "../workspaces/registryStore";
 
 type NativeMenuOptions = Parameters<typeof popupNativeMenu>[0];
-type NativeMenuTemplate = Parameters<NativeMenuOptions["buildFromTemplate"]>[0];
 
 export function registerNativeMenusIpcHandlers<
   Sender,
@@ -60,8 +59,8 @@ export function registerNativeMenusIpcHandlers<
   // Native explorer context menu over the closed EXPLORER_MENU_COMMANDS set:
   // main owns every label and the item structure (the renderer only names
   // what was right-clicked), and the chosen id resolves the same invoke —
-  // null on dismiss. "Reveal in file manager" is performed here (containment
-  // first) so no broader open-path IPC needs to exist for it.
+  // null on dismiss. Show in Finder, or its Windows and Linux twin, runs here
+  // (containment first) so no broader open-path IPC needs to exist for it.
   registerHandler(CHANNELS.showExplorerMenu, async (event, payload) => {
     assertTrustedSender(event);
     const input = ShowExplorerMenuPayload.parse(payload);
@@ -135,7 +134,7 @@ export function registerNativeMenusIpcHandlers<
             // needs a relay-side workspace to grant from.
             canShare: menuContext.canShare,
             shareView: menuContext.shareView,
-          }).map((entry) =>
+          }, process.platform).map((entry) =>
             entry.kind === "separator"
               ? { type: "separator" as const }
               : item(entry.label, entry.id),
@@ -190,15 +189,6 @@ export function registerNativeMenusIpcHandlers<
         buildFromTemplate,
         template: (item) => {
           const separator = { type: "separator" as const };
-          const editRoles: NativeMenuTemplate = [
-            { role: "undo" },
-            { role: "redo" },
-            separator,
-            { role: "cut" },
-            { role: "copy" },
-            { role: "paste" },
-            { role: "selectAll" },
-          ];
           return input.context === "tab"
             ? [
                 item("Move into New Group", "move-tab-to-new-group"),
@@ -226,9 +216,7 @@ export function registerNativeMenusIpcHandlers<
                   separator,
                   item("Toggle Theme", "toggle-theme"),
                 ]
-              : input.context === "pinned-app"
-                ? [item("Unpin", "unpin-app")]
-                : [...editRoles];
+              : [item("Unpin", "unpin-app")];
         },
       });
     })();

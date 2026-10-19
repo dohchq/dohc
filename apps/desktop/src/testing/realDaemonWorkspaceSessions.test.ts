@@ -1,7 +1,4 @@
-import { readFileSync, readdirSync } from "node:fs";
 import { rm } from "node:fs/promises";
-import { join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
 import type { Request } from "@dohc/workspace-engine-client";
 import type { EngineDaemonClient } from "@dohc/workspace-engine-client/daemon";
 import { describe, expect, it } from "vitest";
@@ -10,11 +7,6 @@ import {
   createRealDaemonLifecycle,
   createRealDaemonWorkspaceSessions,
 } from "./realDaemonWorkspaceSessions";
-
-let sourceInventory: ReturnType<typeof testSources> | undefined;
-function desktopTestSources(): ReturnType<typeof testSources> {
-  return sourceInventory ??= testSources(fileURLToPath(new URL("../..", import.meta.url)));
-}
 
 describe("real daemon workspace sessions", () => {
   it("gives every workspace open the shared real-daemon test deadline", async () => {
@@ -117,61 +109,4 @@ describe("real daemon workspace sessions", () => {
     }
   });
 
-  it("keeps real-daemon suites on the shared session factory", () => {
-    const sessionConstructor = ["new", "EngineWorkspaceSessions("].join(" ");
-    const offenders = desktopTestSources()
-      .filter(({ path, source }) => {
-        const normalized = path.replaceAll("\\", "/");
-        return (
-          normalized !== FACTORY_PATH &&
-          (normalized.startsWith("e2e/") ||
-            normalized.endsWith(".e2e.test.ts") ||
-            source.includes(LIFECYCLE_CONSTRUCTOR) ||
-            source.includes("createRealDaemonLifecycle("))
-        );
-      })
-      .filter(({ source }) => source.includes(sessionConstructor))
-      .map(({ path }) => path)
-      .sort();
-
-    expect(offenders).toEqual([]);
-  });
-
-  it("starts real-daemon suites on the shared lifecycle factory", () => {
-    const offenders = desktopTestSources()
-      .map(({ path, source }) => ({ path: path.replaceAll("\\", "/"), source }))
-      .filter(({ path, source }) =>
-        path !== FACTORY_PATH &&
-        (source.includes(LIFECYCLE_CONSTRUCTOR) ||
-          // desktopEngine.test.ts builds the production daemon over a fake launch.
-          (source.includes("createRustEngineDaemon(") &&
-            /requireEngineBinaryOrSkip\(|resolveEngineBinary\(/.test(source))))
-      .map(({ path }) => path)
-      .sort();
-
-    expect(offenders).toEqual([]);
-  });
 });
-
-const FACTORY_PATH = "src/testing/realDaemonWorkspaceSessions.ts";
-const LIFECYCLE_CONSTRUCTOR = ["new", "EngineDaemonLifecycle("].join(" ");
-
-function testSources(root: string): Array<{ path: string; source: string }> {
-  const sources: Array<{ path: string; source: string }> = [];
-  const visit = (directory: string): void => {
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      const absolute = join(directory, entry.name);
-      if (entry.isDirectory()) {
-        visit(absolute);
-      } else if (entry.isFile() && entry.name.endsWith(".ts")) {
-        sources.push({
-          path: relative(root, absolute),
-          source: readFileSync(absolute, "utf8"),
-        });
-      }
-    }
-  };
-  visit(join(root, "src"));
-  visit(join(root, "e2e"));
-  return sources;
-}

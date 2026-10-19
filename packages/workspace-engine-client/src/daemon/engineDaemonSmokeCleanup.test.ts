@@ -1,17 +1,18 @@
-import { rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { afterEach, expect, it, vi } from "vitest";
 import type { Request } from "../protocol";
 import { EngineDaemonLifecycle } from "./engineDaemonLifecycle";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
-  return { ...actual, rm: vi.fn(actual.rm) };
+  return { ...actual, mkdtemp: vi.fn(actual.mkdtemp), rm: vi.fn(actual.rm) };
 });
 
 const roots: string[] = [];
 afterEach(async () => {
   const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
   vi.mocked(rm).mockReset().mockImplementation(actual.rm);
+  vi.mocked(mkdtemp).mockReset().mockImplementation(actual.mkdtemp);
   await Promise.all(roots.splice(0).map((root) => actual.rm(root, { recursive: true, force: true })));
 });
 
@@ -55,4 +56,57 @@ it.each([false, true])("reports temporary cleanup failure without replacing the 
   } finally {
     await lifecycle.stop();
   }
+});
+
+// The smoke's first step is making its directory, so the mkdtemp spy shows
+// whether it started. It takes the engine's one open lock, and sent at the
+// handshake it made the first workspace open wait behind it (#2187).
+function smokeClient() {
+  const requests: string[] = [];
+  return {
+    requests,
+    close: vi.fn(),
+    async sendRequest(request: Request) {
+      requests.push(request.method);
+      return { id: request.id, result: request.method === "workspace.open" ? { workspace: "smoke" } : null };
+    },
+  };
+}
+const smokeStarted = () => vi.mocked(mkdtemp).mock.calls.some(([prefix]) => String(prefix).includes("dohc-rust-engine-smoke-"));
+
+it.each(["run", "skip"] as const)("holds the first launch's smoke until it is told to %s", async (decision) => {
+  const client = smokeClient();
+  const startupSmoke = Promise.withResolvers<"run" | "skip">();
+  const lifecycle = new EngineDaemonLifecycle({
+    command: "unused-test-engine", fileExists: () => true,
+    launch: async () => client,
+    startupSmoke: startupSmoke.promise,
+  });
+  try {
+    // An ungated smoke calls mkdtemp before start() resolves.
+    await lifecycle.start();
+    expect(smokeStarted()).toBe(false);
+    startupSmoke.resolve(decision);
+    if (decision === "run") {
+      await vi.waitFor(() => expect(client.requests).toEqual(["workspace.open", "versions.active", "workspace.close"]), { timeout: 10_000 });
+    }
+  } finally {
+    // stop() joins the smoke, so a skipped one has finished deciding by now.
+    await lifecycle.stop();
+  }
+  expect(smokeStarted()).toBe(decision === "run");
+});
+
+it("stops without waiting for a held smoke", async () => {
+  const client = smokeClient();
+  const lifecycle = new EngineDaemonLifecycle({
+    command: "unused-test-engine", fileExists: () => true,
+    launch: async () => client,
+    startupSmoke: new Promise<"run" | "skip">(() => undefined),
+  });
+  await lifecycle.start();
+  await lifecycle.stop();
+  expect(client.close).toHaveBeenCalled();
+  expect(smokeStarted()).toBe(false);
+  expect(client.requests).toEqual([]);
 });

@@ -1,6 +1,6 @@
 import {
   defaultWorkspaceRoot,
-  normalizeAbsolutePath,
+  normalizeRootPath,
   validateWorkspaceRootChoice,
 } from "@dohc/workspace-core";
 import type {
@@ -33,7 +33,7 @@ export function createWorkspaceRootApproval(effectiveHome: () => string) {
   const approvedRoots = new Set<string>();
 
   function approveRoot(rootPath: string): void {
-    approvedRoots.add(normalizeAbsolutePath(rootPath));
+    approvedRoots.add(normalizeRootPath(rootPath, process.platform));
   }
 
   function isApprovedRoot(normalized: string): boolean {
@@ -53,7 +53,7 @@ export function createWorkspaceRootApproval(effectiveHome: () => string) {
   // suggestion or dialog pick — a renderer cannot scope fs ops to a path it
   // invented. All downstream ops use the normalized root.
   function usableRoot(rootPath: string): string {
-    const check = validateWorkspaceRootChoice(rootPath, effectiveHome());
+    const check = validateWorkspaceRootChoice(rootPath, effectiveHome(), process.platform);
     if (!check.ok) throw new Error(check.reason);
     if (!isApprovedRoot(check.normalized)) {
       throw new Error(
@@ -167,6 +167,7 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     desktopMarks.mark("workspace-create-start");
     const created = await createWorkspaceFolder({
       rootPath: usableRoot(input.rootPath),
+      homeDir: effectiveHome(),
       kind: input.kind,
     });
     desktopMarks.measureSince("workspace-create", "workspace-create-start");
@@ -186,6 +187,7 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     // turns the folder into a fresh personal workspace in place.
     const attached = await createWorkspaceFolder({
       rootPath: usableRoot(input.rootPath),
+      homeDir: effectiveHome(),
       kind: "personal",
     });
     // Parse-then-register (see createLocalWorkspace): a foreign manifest's
@@ -264,6 +266,8 @@ export function registerOpenWorkspaceIpcHandler<
   };
   setPreferredWorkspaceId(workspaceId: string, sender: Sender): void;
   markWorkspaceOpened(workspaceId: string): void;
+  // The renderer finished opening this workspace, so it hears what main sends it.
+  workspaceShown(workspaceId: string, sender: Sender): void;
   syncStatusWithOwnedProjection(
     workspace: Workspace,
     status: SyncStatusResult,
@@ -277,6 +281,7 @@ export function registerOpenWorkspaceIpcHandler<
     rendererWorkspaceSessions,
     setPreferredWorkspaceId,
     markWorkspaceOpened,
+    workspaceShown,
     syncStatusWithOwnedProjection,
     openWorkspaceActivity,
   } = dependencies;
@@ -313,6 +318,7 @@ export function registerOpenWorkspaceIpcHandler<
           error,
         );
       }
+      workspaceShown(workspace.workspaceId, event.sender);
       return status;
     });
   });

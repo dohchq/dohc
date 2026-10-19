@@ -16,6 +16,22 @@ export function foldPathSegment(segment: string): string {
 
 const reservedSegments = [".dohc", ".git", "node_modules"];
 
+// Names the OS writes beside user files, with AppleDouble `._*` files checked
+// below. The shared fold fixtures hold this equal to the engine floor's
+// macOS and Windows metadata lists in crates/dohc-engine-files/src/floor.rs.
+const osMetadataSegments = [
+  ".ds_store",
+  ".localized",
+  "icon\r",
+  ".spotlight-v100",
+  ".fseventsd",
+  ".trashes",
+  ".temporaryitems",
+  ".documentrevisions-v100",
+  "thumbs.db",
+  "desktop.ini",
+];
+
 /** Inputs have already been folded by the caller. */
 export function isReserved83Alias(segment: string, reserved: string): boolean {
   const match = /^([a-z0-9_-]+)~([0-9]+)$/.exec(segment);
@@ -31,5 +47,7 @@ export function isIgnoredPathSegment(segment: string, stripAliases = true): bool
   return reservedSegments.includes(name)
     || reservedSegments.some((reserved) => isReserved83Alias(name, reserved))
     || name.startsWith(".dohc-write-")
-    || isReserved83Alias(name, ".dohc-write-");
+    || isReserved83Alias(name, ".dohc-write-")
+    || osMetadataSegments.includes(name)
+    || name.startsWith("._");
 }

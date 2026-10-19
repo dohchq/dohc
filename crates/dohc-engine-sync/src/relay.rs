@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use dohc_engine_domain::{DeleteTextFile, DomainError, VersionedTextStore, WriteBinary, WriteText};
+use dohc_engine_storage::text;
 use dohc_engine_storage::{
     EngineStore, FaultInjector, FaultPoint, StorageError, TxnOutcome, hex_sha256,
 };
@@ -16,6 +17,7 @@ use crate::cursor::{
 use crate::error::GENERIC_REPLAY_REFUSAL_CODE;
 use crate::hydration::VerifiedBlob;
 use crate::journal::{crashes, list_replication_ops, read_sync_identity};
+use crate::references::{MomentRefs, VersionCreateRefs, YdocRefs, conflict_open_sides};
 
 mod direct_write;
 mod share_authors;
@@ -54,6 +56,8 @@ pub struct PushRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushResponse {
     pub settlement_refusals: Vec<SettlementPublicationRefusal>,
+    /// Ops the scoped feed refused one at a time. Only a hosted push has any.
+    pub hosted_refusals: Vec<HostedPushRefusal>,
     pub accepted: usize,
     pub inserted: usize,
     pub skipped: usize,
@@ -69,6 +73,18 @@ pub struct SettlementPublicationRefusal {
     pub settlement_id: String,
     pub reason: String,
 }
+
+/// A hosted op the relay refused. It keeps the coordinate as a refusal, so
+/// the origin's later ops still land; the op itself never reaches the log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HostedPushRefusal {
+    pub origin_id: String,
+    pub origin_seq: i64,
+    pub op_kind: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullRequest {
     pub workspace_id: String,
@@ -83,6 +99,66 @@ pub struct PullResponse {
     pub ops: Vec<ReplicationEnvelope>,
     pub next_cursor: i64,
     pub has_more: bool,
+}
+
+/// A read of the session host's scoped feed, `GET /sync/:workspace/hosted/log`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostedPullRequest {
+    pub workspace_id: String,
+    pub replication_epoch: String,
+    pub stream_identity: String,
+    /// The scope the host last adopted, sent as `scope`. `None` before the first.
+    pub scope_token: Option<String>,
+    /// One document's backfill, sent as `object`. `None` reads the main feed.
+    pub object_id: Option<String>,
+    pub cursor: i64,
+    pub limit: usize,
+}
+
+/// One scoped feed page. Its cursor may pass rows the feed withholds. When the
+/// request's scope token is stale, it carries no ops and the request's cursor,
+/// and its scope is the one the host must adopt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostedPullResponse {
+    pub scope: HostedScope,
+    pub ops: Vec<ReplicationEnvelope>,
+    pub next_cursor: i64,
+    pub has_more: bool,
+}
+
+/// The documents the host may read, under the token that names them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostedScope {
+    pub token: String,
+    pub documents: Vec<HostedScopeDocument>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostedScopeDocument {
+    pub object_id: String,
+    pub path: String,
+}
+
+/// One hosted pull pass. Its cursor stays pending until the caller
+/// materializes the pass and commits it with [`RelaySyncClient::commit_hosted_cursor`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HostedPassOutcome {
+    pub fetched: usize,
+    pub has_more: bool,
+    pub applied: usize,
+    pub refused: usize,
+    pub skipped: usize,
+    pub conflicts_opened: i64,
+    /// `None` when the pass adopted a new scope and applied nothing.
+    pub pending_cursor: Option<crate::HostedCursor>,
+    pub changed_paths: Vec<crate::MomentMaterializationChange>,
+    pub refusals: Vec<crate::ReplicationRefusal>,
+    pub sharing_declined: Vec<crate::SharingDeclined>,
+    pub record_facts: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
+    /// The fetched documents this pass leaves held, by object id, with what
+    /// holds each. None of them can be edited live until a later pass
+    /// settles it ready.
+    pub held: BTreeMap<String, crate::HostedHold>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,6 +224,18 @@ pub struct BlobHaveRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlobHaveResponse {
     pub missing: Vec<String>,
+}
+
+impl BlobHaveResponse {
+    /// Reject duplicate or unrequested digests before using a presence answer.
+    pub fn validated_missing(&self, requested: &[String]) -> Result<BTreeSet<&String>, RelayError> {
+        let missing = self.missing.iter().collect::<BTreeSet<_>>();
+        if missing.len() != self.missing.len() || missing.iter().any(|sha| !requested.contains(sha))
+        {
+            return Err(RelayError::InvalidResponse);
+        }
+        Ok(missing)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -560,21 +648,51 @@ pub struct ShareViewPullOutcome {
 /// Runtime-owned relay seam. The core crate contains no HTTP or async runtime
 /// dependency; production adapters live in separate crates.
 pub trait RelayTransport {
-    /// The credential selects the relay's native settlement route, which attests authors.
+    /// The native replica publishes settlement proofs; the relay derives their authors.
     fn publishes_native_settlements(&self) -> bool {
         false
     }
     fn push(&self, req: PushRequest) -> Result<PushResponse, RelayError>;
     fn pull(&self, req: PullRequest) -> Result<PullResponse, RelayError>;
+    /// GET the session host's scoped feed. Only a hosted replica's transport serves it.
+    fn pull_hosted(&self, _req: HostedPullRequest) -> Result<HostedPullResponse, RelayError> {
+        Err(no_hosted_feed())
+    }
+    /// POST to the scoped feed's log under the host's `service-host:` origin.
+    /// It answers as [`RelayTransport::push`] does.
+    fn push_hosted(&self, _req: PushRequest) -> Result<PushResponse, RelayError> {
+        Err(no_hosted_feed())
+    }
     fn lookup_log_coordinate(
         &self,
         req: LogCoordinateRequest,
     ) -> Result<LogCoordinateResponse, RelayError>;
+    /// A local bridge batch. Adapters still use the existing coordinate endpoint.
+    fn lookup_log_coordinates(
+        &self,
+        requests: Vec<LogCoordinateRequest>,
+    ) -> Result<Vec<LogCoordinateResponse>, RelayError> {
+        if requests.is_empty() || requests.len() > MAX_BASE_REPAIR_LOOKUPS {
+            return Err(RelayError::InvalidResponse);
+        }
+        requests
+            .into_iter()
+            .map(|request| self.lookup_log_coordinate(request))
+            .collect()
+    }
     fn probe(&self, req: ProbeRequest) -> Result<ProbeResponse, RelayError>;
     fn claim_workspace(&self, req: ClaimRequest) -> Result<ClaimResponse, RelayError>;
     fn rotate_epoch(&self, req: EpochRequest) -> Result<EpochResponse, RelayError>;
     fn blobs_have(&self, req: BlobHaveRequest) -> Result<BlobHaveResponse, RelayError>;
     fn upload_blob(&self, req: BlobUploadRequest) -> Result<(), RelayError>;
+    fn upload_blobs(&self, requests: Vec<BlobUploadRequest>) -> Result<(), RelayError> {
+        if requests.is_empty() || requests.len() > MAX_BLOB_UPLOAD_BATCH {
+            return Err(RelayError::InvalidResponse);
+        }
+        requests
+            .into_iter()
+            .try_for_each(|request| self.upload_blob(request))
+    }
     fn download_blobs(
         &self,
         req: BlobDownloadBatchRequest,
@@ -656,6 +774,13 @@ pub struct RelaySyncClient<T> {
     automation_claims: std::sync::Mutex<Vec<dohc_engine_domain::AutomationClaim>>,
 }
 
+#[cfg(test)]
+#[path = "relay_prepared_tests.rs"]
+mod prepared_tests;
+
+pub const MAX_BLOB_UPLOAD_BATCH: usize = 4;
+const MAX_BLOB_UPLOAD_BATCH_BYTES: usize = 1024 * 1024;
+
 const MAX_PUSH_OPS_PER_PASS: usize = crate::MAX_PUSH_OPS_PER_BATCH;
 // Soft limit on preparation and blob uploads, reserving 10 seconds of the
 // desktop's 30-second RPC deadline for append and durable acknowledgement.
@@ -667,8 +792,38 @@ const PUSH_PRE_APPEND_BUDGET: std::time::Duration = std::time::Duration::from_se
 pub struct PushWorkspaceProgress {
     started: std::time::Instant,
     acknowledged: usize,
+    confirmed_identity: Option<crate::SyncIdentity>,
+    confirmed_blobs: BTreeSet<String>,
     page: Option<PreparedPushPage>,
     batch_size: usize,
+    file_versions_selected: bool,
+    writer_cache_reset_required: bool,
+}
+
+impl PushWorkspaceProgress {
+    /// Record validated successful responses from this push's transport only.
+    pub fn confirm_blob_presence(
+        &mut self,
+        workspace: &str,
+        epoch: &str,
+        stream: &str,
+        sha256s: impl IntoIterator<Item = String>,
+    ) -> bool {
+        if !self.confirmed_identity.as_ref().is_some_and(|identity| {
+            identity.workspace_id == workspace
+                && identity.replication_epoch == epoch
+                && identity.stream_identity == stream
+        }) {
+            return false;
+        }
+        self.confirmed_blobs.extend(sha256s);
+        true
+    }
+
+    /// Sticky across I/O continuations, including failed enrollment work.
+    pub fn writer_cache_reset_required(&self) -> bool {
+        self.writer_cache_reset_required
+    }
 }
 
 impl Default for PushWorkspaceProgress {
@@ -676,9 +831,40 @@ impl Default for PushWorkspaceProgress {
         Self {
             started: std::time::Instant::now(),
             acknowledged: 0,
+            confirmed_identity: None,
+            confirmed_blobs: BTreeSet::new(),
             page: None,
             batch_size: crate::MAX_PUSH_OPS_PER_BATCH,
+            file_versions_selected: false,
+            writer_cache_reset_required: false,
         }
+    }
+}
+
+fn select_file_versions(
+    selection: &mut bool,
+    store: &mut EngineStore,
+    workspace_id: &str,
+    faults: &dyn FaultInjector,
+) -> Result<(), RelayError> {
+    if *selection {
+        return Ok(());
+    }
+    match store
+        .write_with(faults, |tx| {
+            if !crate::ydoc_origination::can_originate_local_bases_in_tx(tx, workspace_id)? {
+                return Ok::<_, SyncError>(false);
+            }
+            crate::enrolment::backfill_file_versions_in_tx(tx, workspace_id)?;
+            Ok(true)
+        })
+        .map_err(local)?
+    {
+        TxnOutcome::Committed(selected) => {
+            *selection = selected;
+            Ok(())
+        }
+        TxnOutcome::Crashed { .. } => Err(local(SyncError::FaultCrash)),
     }
 }
 
@@ -690,9 +876,17 @@ struct PreparedPushPage {
     ops: Vec<ReplicationEnvelope>,
     prefix: crate::OwnerPublicationPrefix,
     blob_refs: BTreeMap<String, BTreeSet<BlobKind>>,
-    missing: Option<BTreeSet<String>>,
+    missing: BTreeSet<String>,
+    inventory: VecDeque<Vec<String>>,
     uploaded_ops: usize,
     sending: Option<usize>,
+}
+
+fn base_repair_collab_error(error: dohc_engine_collab::CollabError) -> SyncError {
+    match error {
+        dohc_engine_collab::CollabError::Storage(storage) => SyncError::Storage(storage),
+        hard => SyncError::Storage(StorageError::corrupt_public(hard)),
+    }
 }
 
 struct PendingBaseRelayRepair {
@@ -707,6 +901,20 @@ struct PendingBaseRelayRepair {
 
 type BaseRelayRepairKey = (String, String, String);
 type BaseRelayRepairCandidate = (PendingBaseRelayRepair, Option<i64>, bool);
+
+pub const MAX_BASE_REPAIR_LOOKUPS: usize = 256;
+
+#[derive(Default)]
+struct BaseRelayRepairChunk {
+    repairs: Vec<PendingBaseRelayRepair>,
+    deferred: Vec<PendingDeferredRelayRepair>,
+}
+
+impl BaseRelayRepairChunk {
+    fn len(&self) -> usize {
+        self.repairs.len() + self.deferred.len()
+    }
+}
 
 struct PendingDeferredRelayRepair {
     origin_id: String,
@@ -746,13 +954,26 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         &self.transport
     }
 
-    fn repair_pending_ydoc_base_orders(
+    /// A hosted replica writes to the scoped feed's log; any other to the workspace log.
+    fn push_log(&self, hosted: bool, req: PushRequest) -> Result<PushResponse, RelayError> {
+        if hosted {
+            self.transport.push_hosted(req)
+        } else {
+            self.transport.push(req)
+        }
+    }
+
+    pub(crate) fn repair_pending_ydoc_base_orders(
         &self,
         store: &mut EngineStore,
         workspace_id: &str,
         identity: &crate::journal::SyncIdentity,
         faults: &dyn FaultInjector,
+        page: &[ReplicationEnvelope],
     ) -> Result<(), RelayError> {
+        let passive = store.is_passive();
+        let local_pushed_seq =
+            read_pushed_seq(store, workspace_id, &identity.origin_id).map_err(local)?;
         let rows = store
             .read_with(|conn| {
                 let mut statement = conn
@@ -859,8 +1080,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             });
         }
 
-        let local_pushed_seq =
-            read_pushed_seq(store, workspace_id, &identity.origin_id).map_err(local)?;
         let deferred = store
             .read_with(|conn| {
                 let mut statement = conn
@@ -893,173 +1112,281 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     .map_err(SyncError::corrupt)
             })
             .map_err(local)?;
-        let mut deferred_repairs = Vec::new();
-        for (origin_id, origin_seq, op_kind, payload_json, recorded_at_ms) in deferred {
-            let repair = PendingDeferredRelayRepair {
-                origin_id,
-                origin_seq,
-                op_kind,
-                payload: serde_json::from_str(&payload_json)
-                    .map_err(|error| local(SyncError::corrupt(error)))?,
-                recorded_at_ms,
-            };
-            let response = self.transport.lookup_log_coordinate(LogCoordinateRequest {
-                workspace_id: workspace_id.to_owned(),
-                replication_epoch: identity.replication_epoch.clone(),
-                stream_identity: identity.stream_identity.clone(),
-                origin_id: repair.origin_id.clone(),
-                origin_seq: repair.origin_seq,
-            })?;
-            let relay_seq = match response {
-                LogCoordinateResponse::Present(op)
-                | LogCoordinateResponse::PresentBelowEpochFloor(op) => {
-                    if op.validate().is_err()
-                        || op.workspace_id != workspace_id
-                        || op.origin_id != repair.origin_id
-                        || op.origin_seq != repair.origin_seq
-                        || op.op_kind != repair.op_kind
-                        || op.payload != repair.payload
-                        || op.recorded_at_ms != repair.recorded_at_ms
-                    {
-                        return Err(RelayError::InvalidResponse);
-                    }
-                    Some(op.relay_seq.ok_or(RelayError::InvalidResponse)?)
-                }
-                LogCoordinateResponse::Absent
-                    if repair.origin_id == identity.origin_id
-                        && local_pushed_seq < repair.origin_seq =>
-                {
-                    None
-                }
-                LogCoordinateResponse::Absent => None,
-            };
-            if let Some(relay_seq) = relay_seq {
-                deferred_repairs.push((repair.origin_id, repair.origin_seq, relay_seq));
-            }
+        if repairs.is_empty() && deferred.is_empty() {
+            return Ok(());
         }
-        let mut grouped: BTreeMap<BaseRelayRepairKey, Vec<BaseRelayRepairCandidate>> =
-            BTreeMap::new();
+        let needs_confirmation = repairs.iter().any(|repair| {
+            repair.origin_id == identity.origin_id && repair.origin_seq > local_pushed_seq
+        }) || deferred.iter().any(|(origin_id, origin_seq, ..)| {
+            origin_id == &identity.origin_id && *origin_seq > local_pushed_seq
+        });
+        let relay_origin_max = if needs_confirmation && !passive {
+            let hosted = store
+                .read_with(|conn| crate::hosted::is_hosted(conn, workspace_id))
+                .map_err(local)?;
+            // Empty pushes ignore the cursor; keep the request stable across deferred-I/O replay.
+            let probe = self.push_log(
+                hosted,
+                push_probe_request(workspace_id, identity, &identity.origin_id, -1),
+            )?;
+            validate_probe_response(&probe)?;
+            probe.current_max_origin_seq
+        } else {
+            local_pushed_seq
+        };
+        // A same-device push during reruns can make this maximum stale, as between main's lookup and push.
+        // Today's callers push before pulling.
+        let own_relay_bound = local_pushed_seq.max(relay_origin_max);
+        let mut page_coordinates = BTreeMap::new();
+        for op in page {
+            // Validated pages are in relay order; repeated coordinates keep their minimum.
+            page_coordinates
+                .entry((op.origin_id.as_str(), op.origin_seq))
+                .or_insert(op);
+        }
+        let deferred = deferred
+            .into_iter()
+            .map(
+                |(origin_id, origin_seq, op_kind, payload_json, recorded_at_ms)| {
+                    Ok(PendingDeferredRelayRepair {
+                        origin_id,
+                        origin_seq,
+                        op_kind,
+                        payload: serde_json::from_str(&payload_json)
+                            .map_err(|error| local(SyncError::corrupt(error)))?,
+                        recorded_at_ms,
+                    })
+                },
+            )
+            .collect::<Result<Vec<_>, RelayError>>()?;
+        let mut groups: BTreeMap<BaseRelayRepairKey, Vec<PendingBaseRelayRepair>> = BTreeMap::new();
         for repair in repairs {
-            let response = self.transport.lookup_log_coordinate(LogCoordinateRequest {
-                workspace_id: workspace_id.to_owned(),
-                replication_epoch: identity.replication_epoch.clone(),
-                stream_identity: identity.stream_identity.clone(),
-                origin_id: repair.origin_id.clone(),
-                origin_seq: repair.origin_seq,
-            })?;
-            let (relay_seq, unresolved_local_coordinate) = match response {
-                LogCoordinateResponse::Present(op)
-                | LogCoordinateResponse::PresentBelowEpochFloor(op) => {
-                    if op.validate().is_err()
-                        || op.workspace_id != workspace_id
-                        || op.origin_id != repair.origin_id
-                        || op.origin_seq != repair.origin_seq
-                        || op.op_kind != repair.op_kind
-                        || op.payload != repair.payload
-                        || op.recorded_at_ms != repair.recorded_at_ms
-                        || !crate::ydoc_apply::is_exact_repairable_ydoc_base_claim(
-                            &op.payload,
-                            &repair.key,
-                            &repair.lineage_claim_id,
-                        )
-                    {
-                        return Err(RelayError::InvalidResponse);
-                    }
-                    (
-                        Some(op.relay_seq.ok_or(RelayError::InvalidResponse)?),
-                        false,
-                    )
-                }
-                LogCoordinateResponse::Absent
-                    if repair.origin_id == identity.origin_id
-                        && local_pushed_seq < repair.origin_seq =>
-                {
-                    (None, true)
-                }
-                LogCoordinateResponse::Absent => (None, false),
-            };
-            grouped
+            groups
                 .entry((
                     repair.key.version_id.clone(),
                     repair.key.object_id.clone(),
                     repair.lineage_claim_id.clone(),
                 ))
                 .or_default()
-                .push((repair, relay_seq, unresolved_local_coordinate));
+                .push(repair);
         }
-
-        for candidates in grouped.into_values() {
-            let resolved = candidates
-                .iter()
-                .filter_map(|(repair, relay_seq, _)| relay_seq.map(|relay_seq| (repair, relay_seq)))
-                .min_by_key(|(_, relay_seq)| *relay_seq);
-            let (chosen, relay_seq) = match resolved {
-                Some((repair, relay_seq)) => (repair, Some(relay_seq)),
-                None if candidates.iter().any(|(_, _, unresolved)| *unresolved) => continue,
-                None => (&candidates[0].0, None),
-            };
-            match store
-                .write_with(faults, |tx| {
-                    dohc_engine_collab::record_base_coordinate_in_tx(
-                        tx,
-                        dohc_engine_collab::BaseCoordinateRecord {
-                            key: &chosen.key,
-                            lineage_claim_id: &chosen.lineage_claim_id,
-                            origin_id: &chosen.origin_id,
-                            origin_seq: chosen.origin_seq,
-                            relay_seq,
-                            now_ms: chosen.recorded_at_ms,
-                        },
-                    )?;
-                    if relay_seq.is_none() {
-                        dohc_engine_collab::mark_base_coordinate_absent_in_tx(
-                            tx,
-                            &chosen.key,
-                            &chosen.lineage_claim_id,
-                            &chosen.origin_id,
-                            chosen.origin_seq,
-                            chosen.recorded_at_ms,
-                        )?;
-                    }
-                    tx.execute(
-                        "DELETE FROM ydoc_base_relay_candidates
-                          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-                        params![
-                            chosen.key.workspace_id,
-                            chosen.key.version_id,
-                            chosen.key.object_id
-                        ],
-                    )
-                    .map_err(|error| {
-                        dohc_engine_collab::CollabError::Storage(StorageError::persist_public(
-                            error,
-                        ))
-                    })?;
-                    Ok(())
-                })
-                .map_err(|error| match error {
-                    dohc_engine_collab::CollabError::Storage(storage) => {
-                        local(SyncError::Storage(storage))
-                    }
-                    hard => local(SyncError::Storage(StorageError::corrupt_public(hard))),
-                })? {
-                TxnOutcome::Committed(()) => {}
-                TxnOutcome::Crashed { .. } => return Err(local(SyncError::FaultCrash)),
+        let mut chunks = Vec::new();
+        let mut chunk = BaseRelayRepairChunk::default();
+        for group in groups.into_values() {
+            if chunk.len() > 0 && chunk.len() + group.len() > MAX_BASE_REPAIR_LOOKUPS {
+                chunks.push(std::mem::take(&mut chunk));
+            }
+            chunk.repairs.extend(group);
+            if chunk.len() >= MAX_BASE_REPAIR_LOOKUPS {
+                chunks.push(std::mem::take(&mut chunk));
             }
         }
-        for (origin_id, origin_seq, relay_seq) in deferred_repairs {
+        for repair in deferred {
+            if chunk.len() >= MAX_BASE_REPAIR_LOOKUPS {
+                chunks.push(std::mem::take(&mut chunk));
+            }
+            chunk.deferred.push(repair);
+        }
+        if chunk.len() > 0 {
+            chunks.push(chunk);
+        }
+
+        for BaseRelayRepairChunk { repairs, deferred } in chunks {
+            let mut coordinates = BTreeSet::new();
+            coordinates.extend(
+                repairs
+                    .iter()
+                    .map(|repair| (repair.origin_id.clone(), repair.origin_seq)),
+            );
+            coordinates.extend(
+                deferred
+                    .iter()
+                    .map(|repair| (repair.origin_id.clone(), repair.origin_seq)),
+            );
+            let requests = coordinates
+                .into_iter()
+                .filter(|(origin, seq)| {
+                    !(page_coordinates.contains_key(&(origin.as_str(), *seq))
+                        || !passive && origin == &identity.origin_id && *seq > own_relay_bound)
+                })
+                .map(|(origin_id, origin_seq)| LogCoordinateRequest {
+                    workspace_id: workspace_id.to_owned(),
+                    replication_epoch: identity.replication_epoch.clone(),
+                    stream_identity: identity.stream_identity.clone(),
+                    origin_id,
+                    origin_seq,
+                })
+                .collect::<Vec<_>>();
+            let mut responses = BTreeMap::new();
+            // A group wider than one batch retains its answers across replay and commits whole.
+            for requests in requests.chunks(MAX_BASE_REPAIR_LOOKUPS) {
+                let answers = self.transport.lookup_log_coordinates(requests.to_vec())?;
+                if answers.len() != requests.len() {
+                    return Err(RelayError::InvalidResponse);
+                }
+                for (request, answer) in requests.iter().zip(answers) {
+                    responses.insert((request.origin_id.clone(), request.origin_seq), answer);
+                }
+            }
+            let lookup = |origin_id: &str, origin_seq: i64| {
+                if let Some(op) = page_coordinates.get(&(origin_id, origin_seq)) {
+                    Ok(LogCoordinateResponse::Present((*op).clone()))
+                } else if !passive
+                    && origin_id == identity.origin_id
+                    && origin_seq > own_relay_bound
+                {
+                    Ok(LogCoordinateResponse::Absent)
+                } else {
+                    responses
+                        .get(&(origin_id.to_owned(), origin_seq))
+                        .cloned()
+                        .ok_or(RelayError::InvalidResponse)
+                }
+            };
+            let mut deferred_repairs = Vec::new();
+            for repair in deferred {
+                let response = lookup(&repair.origin_id, repair.origin_seq)?;
+                let relay_seq = match response {
+                    LogCoordinateResponse::Present(op)
+                    | LogCoordinateResponse::PresentBelowEpochFloor(op) => {
+                        if op.validate().is_err()
+                            || op.workspace_id != workspace_id
+                            || op.origin_id != repair.origin_id
+                            || op.origin_seq != repair.origin_seq
+                            || op.op_kind != repair.op_kind
+                            || op.payload != repair.payload
+                            || op.recorded_at_ms != repair.recorded_at_ms
+                        {
+                            return Err(RelayError::InvalidResponse);
+                        }
+                        Some(op.relay_seq.ok_or(RelayError::InvalidResponse)?)
+                    }
+                    LogCoordinateResponse::Absent
+                        if repair.origin_id == identity.origin_id
+                            && local_pushed_seq < repair.origin_seq
+                            && !passive =>
+                    {
+                        None
+                    }
+                    LogCoordinateResponse::Absent => None,
+                };
+                if let Some(relay_seq) = relay_seq {
+                    deferred_repairs.push((repair.origin_id, repair.origin_seq, relay_seq));
+                }
+            }
+            let mut grouped: BTreeMap<BaseRelayRepairKey, Vec<BaseRelayRepairCandidate>> =
+                BTreeMap::new();
+            for repair in repairs {
+                let response = lookup(&repair.origin_id, repair.origin_seq)?;
+                let (relay_seq, unresolved_local_coordinate) = match response {
+                    LogCoordinateResponse::Present(op)
+                    | LogCoordinateResponse::PresentBelowEpochFloor(op) => {
+                        if op.validate().is_err()
+                            || op.workspace_id != workspace_id
+                            || op.origin_id != repair.origin_id
+                            || op.origin_seq != repair.origin_seq
+                            || op.op_kind != repair.op_kind
+                            || op.payload != repair.payload
+                            || op.recorded_at_ms != repair.recorded_at_ms
+                            || !crate::ydoc_apply::is_exact_repairable_ydoc_base_claim(
+                                &op.payload,
+                                &repair.key,
+                                &repair.lineage_claim_id,
+                            )
+                        {
+                            return Err(RelayError::InvalidResponse);
+                        }
+                        (
+                            Some(op.relay_seq.ok_or(RelayError::InvalidResponse)?),
+                            false,
+                        )
+                    }
+                    LogCoordinateResponse::Absent
+                        if repair.origin_id == identity.origin_id
+                            && local_pushed_seq < repair.origin_seq
+                            && !passive =>
+                    {
+                        (None, true)
+                    }
+                    LogCoordinateResponse::Absent => (None, false),
+                };
+                grouped
+                    .entry((
+                        repair.key.version_id.clone(),
+                        repair.key.object_id.clone(),
+                        repair.lineage_claim_id.clone(),
+                    ))
+                    .or_default()
+                    .push((repair, relay_seq, unresolved_local_coordinate));
+            }
+
+            grouped.retain(|_, candidates| {
+                candidates
+                    .iter()
+                    .any(|(_, relay_seq, _)| relay_seq.is_some())
+                    || !candidates.iter().any(|(_, _, unresolved)| *unresolved)
+            });
+            if grouped.is_empty() && deferred_repairs.is_empty() {
+                continue;
+            }
             match store
                 .write_with(faults, |tx| {
-                    let changed = tx
-                        .execute(
-                            "UPDATE ydoc_deferred_updates SET relay_seq=?4
-                              WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3
-                                AND relay_seq IS NULL",
-                            params![workspace_id, origin_id, origin_seq, relay_seq],
+                    for candidates in grouped.into_values() {
+                        let resolved = candidates
+                            .iter()
+                            .filter_map(|(repair, relay_seq, _)| {
+                                relay_seq.map(|relay_seq| (repair, relay_seq))
+                            })
+                            .min_by_key(|(_, relay_seq)| *relay_seq);
+                        let (chosen, relay_seq) = match resolved {
+                            Some((repair, relay_seq)) => (repair, Some(relay_seq)),
+                            None => (&candidates[0].0, None),
+                        };
+                        dohc_engine_collab::record_base_coordinate_in_tx(
+                            tx,
+                            dohc_engine_collab::BaseCoordinateRecord {
+                                key: &chosen.key,
+                                lineage_claim_id: &chosen.lineage_claim_id,
+                                origin_id: &chosen.origin_id,
+                                origin_seq: chosen.origin_seq,
+                                relay_seq,
+                                now_ms: chosen.recorded_at_ms,
+                            },
+                        )
+                        .map_err(base_repair_collab_error)?;
+                        if relay_seq.is_none() {
+                            dohc_engine_collab::mark_base_coordinate_absent_in_tx(
+                                tx,
+                                &chosen.key,
+                                &chosen.lineage_claim_id,
+                                &chosen.origin_id,
+                                chosen.origin_seq,
+                                chosen.recorded_at_ms,
+                            )
+                            .map_err(base_repair_collab_error)?;
+                        }
+                        tx.execute(
+                            "DELETE FROM ydoc_base_relay_candidates
+                    WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                            params![
+                                chosen.key.workspace_id,
+                                chosen.key.version_id,
+                                chosen.key.object_id
+                            ],
                         )
                         .map_err(SyncError::persist)?;
-                    if changed != 1 {
-                        return Err(SyncError::CoordinateDiverged);
+                    }
+                    for (origin_id, origin_seq, relay_seq) in deferred_repairs {
+                        let changed = tx
+                            .execute(
+                                "UPDATE ydoc_deferred_updates SET relay_seq=?4
+                    WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3 AND relay_seq IS NULL",
+                                params![workspace_id, origin_id, origin_seq, relay_seq],
+                            )
+                            .map_err(SyncError::persist)?;
+                        if changed != 1 {
+                            return Err(SyncError::CoordinateDiverged);
+                        }
                     }
                     Ok(())
                 })
@@ -1104,6 +1431,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         max_read_bytes: usize,
         progress: &mut PushWorkspaceProgress,
     ) -> Result<SyncPassOutcome, RelayError> {
+        if store.is_passive() {
+            return Err(local(SyncError::InvalidInput {
+                reason: "passive store cannot write to the relay",
+            }));
+        }
         let identity = read_sync_identity(store, workspace_id)
             .map_err(local)?
             .ok_or(RelayError::IdentityRequired)?;
@@ -1127,14 +1459,41 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 .ok_or(RelayError::InvalidResponse)?;
             return Err(RelayError::ClaimRefused(Box::new(refusal.clone())));
         }
-        let mut sharing_declined = crate::live_audit::enrollment::prepare_exports(
-            store,
-            workspace_id,
-            faults,
-            leases,
-            now_ms,
-        )
-        .map_err(local)?;
+        if !progress
+            .confirmed_identity
+            .as_ref()
+            .is_some_and(|confirmed| {
+                confirmed.workspace_id == identity.workspace_id
+                    && confirmed.replication_epoch == identity.replication_epoch
+                    && confirmed.stream_identity == identity.stream_identity
+            })
+        {
+            progress.confirmed_blobs.clear();
+            progress.confirmed_identity = Some(identity.clone());
+        }
+        // A hosted replica holds the owner's documents, not its own: it
+        // enrolls nothing and only sends what its live sessions journal.
+        let hosted = store
+            .read_with(|conn| crate::hosted::is_hosted(conn, workspace_id))
+            .map_err(local)?;
+        let mut sharing_declined = Vec::new();
+        if !hosted {
+            sharing_declined = crate::live_audit::enrollment::prepare_exports(
+                store,
+                workspace_id,
+                faults,
+                leases,
+                now_ms,
+                &mut progress.writer_cache_reset_required,
+            )
+            .map_err(local)?;
+            select_file_versions(
+                &mut progress.file_versions_selected,
+                store,
+                workspace_id,
+                faults,
+            )?;
+        }
         let mut origins = list_workspace_origins(store, workspace_id).map_err(local)?;
         let mut pushed = 0_usize;
         let mut owner_admission_pending = Vec::new();
@@ -1144,8 +1503,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let has_position = store
             .read_with(|conn| has_relay_position(conn, workspace_id))
             .map_err(local)?;
-        let mut enrollment_prepared = has_position;
-        if origins.is_empty() && !has_position {
+        // The first pushed cursor can backfill and claim local bases. A hosted
+        // replica already replicates, so its pushes never backfill.
+        progress.writer_cache_reset_required |= !has_position && !hosted;
+        let mut enrollment_prepared = has_position || hosted;
+        if origins.is_empty() && !enrollment_prepared {
             let response = self.transport.push(push_probe_request(
                 workspace_id,
                 &identity,
@@ -1179,10 +1541,17 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     faults,
                     leases,
                     now_ms,
+                    &mut progress.writer_cache_reset_required,
                 )
                 .map_err(local)?,
             );
             enrollment_prepared = true;
+            select_file_versions(
+                &mut progress.file_versions_selected,
+                store,
+                workspace_id,
+                faults,
+            )?;
             // Re-read so the probe's backfill enters the push loop.
             origins = list_workspace_origins(store, workspace_id).map_err(local)?;
         }
@@ -1214,21 +1583,23 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     .map_err(local)?;
                 // An in-flight append can consume its original response after
                 // local edits, but never under a different workspace identity.
-                let cached = progress.page.as_ref().is_some_and(|page| {
+                let previous = progress.page.as_ref().filter(|page| {
                     page.identity == identity
                         && page.origin_id == origin_id
                         && page.cursor == cursor
-                        && (page.sending.is_some() || page.revision == revision)
                 });
+                let cached = previous
+                    .is_some_and(|page| page.sending.is_some() || page.revision == revision);
                 if !cached {
-                    let mut ops = list_replication_ops(
-                        store,
-                        workspace_id,
-                        &origin_id,
-                        cursor,
-                        MAX_PUSH_OPS_PER_PASS - progress.acknowledged,
-                    )
-                    .map_err(local)?;
+                    // Reprove the original bounded page after every write. New
+                    // appends enter the next page, after this one is acknowledged.
+                    let limit = previous
+                        .map_or(MAX_PUSH_OPS_PER_PASS - progress.acknowledged, |page| {
+                            page.ops.len()
+                        });
+                    let mut ops =
+                        list_replication_ops(store, workspace_id, &origin_id, cursor, limit)
+                            .map_err(local)?;
                     if ops.is_empty() {
                         break;
                     }
@@ -1249,18 +1620,38 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     let revision = store
                         .read_with(|conn| Ok::<_, SyncError>(conn.total_changes()))
                         .map_err(local)?;
-                    progress.page = Some(PreparedPushPage {
+                    let blob_refs = collect_blob_refs(&ops[..prefix.allowed_ops])?;
+                    let retained =
+                        previous.is_some_and(|page| page.ops == ops && page.prefix == prefix);
+                    let mut page = PreparedPushPage {
                         identity: identity.clone(),
                         origin_id: origin_id.clone(),
                         cursor,
                         revision,
-                        blob_refs: collect_blob_refs(&ops[..prefix.allowed_ops])?,
+                        blob_refs,
+                        inventory: VecDeque::new(),
                         ops,
                         prefix,
-                        missing: None,
+                        missing: BTreeSet::new(),
                         uploaded_ops: 0,
                         sending: None,
-                    });
+                    };
+                    if retained && let Some(previous) = progress.page.take() {
+                        page.missing = previous.missing;
+                        page.inventory = previous.inventory;
+                        page.uploaded_ops = previous.uploaded_ops;
+                    } else {
+                        page.inventory = page
+                            .blob_refs
+                            .keys()
+                            .filter(|sha| !progress.confirmed_blobs.contains(*sha))
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .chunks(crate::MAX_BLOB_HAVE_BATCH)
+                            .map(<[String]>::to_vec)
+                            .collect();
+                    }
+                    progress.page = Some(page);
                 }
                 let page = progress.page.as_mut().ok_or(RelayError::InvalidResponse)?;
                 let count = match page.sending {
@@ -1271,6 +1662,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         &identity,
                         page,
                         progress.started,
+                        &mut progress.confirmed_blobs,
                     )?,
                 };
                 page.sending = Some(count);
@@ -1288,14 +1680,17 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 while batch_start < ops.len() {
                     let batch =
                         &ops[batch_start..(batch_start + progress.batch_size).min(ops.len())];
-                    let response = match self.transport.push(PushRequest {
-                        workspace_id: workspace_id.to_owned(),
-                        replication_epoch: identity.replication_epoch.clone(),
-                        stream_identity: identity.stream_identity.clone(),
-                        origin_id: origin_id.clone(),
-                        after_seq: cursor,
-                        ops: batch.to_vec(),
-                    }) {
+                    let response = match self.push_log(
+                        hosted,
+                        PushRequest {
+                            workspace_id: workspace_id.to_owned(),
+                            replication_epoch: identity.replication_epoch.clone(),
+                            stream_identity: identity.stream_identity.clone(),
+                            origin_id: origin_id.clone(),
+                            after_seq: cursor,
+                            ops: batch.to_vec(),
+                        },
+                    ) {
                         Ok(response) => response,
                         Err(RelayError::SettlementProofBudget) if batch.len() > 1 => {
                             progress.batch_size = (batch.len() / 2).max(1);
@@ -1307,7 +1702,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         }
                         Err(error) => return Err(error),
                     };
-                    validate_push_response(&response, batch, local_max)?;
+                    validate_push_response(&response, batch, local_max, hosted)?;
                     if response.current_max_origin_seq > local_max {
                         return Err(RelayError::OriginDiverged);
                     }
@@ -1320,6 +1715,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         &origin_id,
                         response.current_max_origin_seq,
                         &response.settlement_refusals,
+                        &response.hosted_refusals,
+                        batch,
                         faults,
                         leases,
                         now_ms,
@@ -1342,6 +1739,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             },
                         },
                     ));
+                    publication_refusals.extend(
+                        response
+                            .hosted_refusals
+                            .iter()
+                            .map(|refusal| crate::hosted::push_refusal(workspace_id, refusal)),
+                    );
                     if !enrollment_prepared {
                         sharing_declined.extend(
                             crate::live_audit::enrollment::prepare_exports(
@@ -1350,10 +1753,17 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                                 faults,
                                 leases,
                                 now_ms,
+                                &mut progress.writer_cache_reset_required,
                             )
                             .map_err(local)?,
                         );
                         enrollment_prepared = true;
+                        select_file_versions(
+                            &mut progress.file_versions_selected,
+                            store,
+                            workspace_id,
+                            faults,
+                        )?;
                         for added in list_workspace_origins(store, workspace_id).map_err(local)? {
                             if seen_origins.insert(added.clone()) {
                                 origins.push_back(added);
@@ -1378,12 +1788,10 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     continue;
                 }
 
-                let probe = self.transport.push(push_probe_request(
-                    workspace_id,
-                    &identity,
-                    &origin_id,
-                    cursor,
-                ))?;
+                let probe = self.push_log(
+                    hosted,
+                    push_probe_request(workspace_id, &identity, &origin_id, cursor),
+                )?;
                 validate_probe_response(&probe)?;
                 if probe.current_max_origin_seq > local_max
                     || probe.current_max_origin_seq >= cursor
@@ -1446,7 +1854,15 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let identity = read_sync_identity(store, workspace_id)
             .map_err(local)?
             .ok_or(RelayError::InvalidResponse)?;
-        let (queued, mut durable_origins) = crate::deferred::read(store, workspace_id, &identity)?;
+        if store
+            .read_with(|conn| crate::hosted::is_hosted(conn, workspace_id))
+            .map_err(local)?
+        {
+            return Err(RelayError::HostedRefusal(
+                "a hosted replica pulls with pull_hosted_workspace",
+            ));
+        }
+        let (queued, durable_origins) = crate::deferred::read(store, workspace_id, &identity)?;
         let current = crate::read_relay_cursor(store, workspace_id).map_err(local)?;
         if let Some(cursor) = &current {
             if cursor.replication_epoch != identity.replication_epoch
@@ -1502,173 +1918,50 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             .iter()
             .map(|op| (op.origin_id.clone(), op.origin_seq))
             .collect();
+        let fetched_op_count = ops.len();
         ops.extend(
             queued
                 .iter()
                 .filter(|op| !fetched_coordinates.contains(&(op.origin_id.clone(), op.origin_seq)))
                 .cloned(),
         );
-        self.repair_pending_ydoc_base_orders(store, workspace_id, &identity, faults)?;
         preflight_collisions(store, workspace_id, &identity.origin_id, &ops)?;
+        self.repair_pending_ydoc_base_orders(
+            store,
+            workspace_id,
+            &identity,
+            faults,
+            &ops[..fetched_op_count],
+        )?;
         self.hydrate_missing_blobs(store, workspace_id, &identity, &ops, faults)?;
         let ordered = merge_by_origin(ops);
-        let mut applied = 0_usize;
-        let mut refused = 0_usize;
-        let mut skipped = 0_usize;
-        let mut conflicts_opened = 0_i64;
-        let mut refusals = Vec::new();
-        let mut sharing_declined = Vec::new();
-        let mut changed_paths = BTreeMap::new();
-        let mut record_facts = Vec::new();
-        let mut retryable = Vec::new();
-        let mut completed = Vec::new();
-        let mut deferred_origins = durable_origins.clone();
-        for op in &ordered {
-            if op.op_kind != "ydoc.update" || op.payload["isBaseState"] == true {
-                crate::ydoc_apply::drain_inactive_ydoc_updates(store, workspace_id, faults)
-                    .map_err(local)?;
-            }
-            let routed = crate::router::apply_replication_envelope_in_batch(
-                store, cache, op, faults, leases, true,
-            );
-            match routed {
-                Err(SyncError::RetryableState { reason }) => {
-                    if matches!(op.op_kind.as_str(), "conflict.resolve" | "moment.append")
-                        && reason == "ydoc-session-live"
-                    {
-                        durable_origins.insert(op.origin_id.clone());
-                    }
-                    deferred_origins.insert(op.origin_id.clone());
-                    retryable.push(op);
-                }
-                Err(SyncError::SequenceGap) if deferred_origins.contains(&op.origin_id) => {
-                    retryable.push(op);
-                }
-                Err(error) => return Err(local(error)),
-                Ok(outcome) => {
-                    completed.push(op);
-                    accumulate_pull_outcome(
-                        store,
-                        op,
-                        outcome,
-                        &mut applied,
-                        &mut refused,
-                        &mut skipped,
-                        &mut conflicts_opened,
-                        &mut changed_paths,
-                        &mut refusals,
-                        &mut sharing_declined,
-                        &mut record_facts,
-                        |claims| self.keep_automation_claims(claims),
-                    )?;
-                }
-            }
-        }
-        while !retryable.is_empty() {
-            let mut still_retryable = Vec::new();
-            let mut still_deferred_origins = durable_origins.clone();
-            let mut made_progress = false;
-            for op in retryable {
-                if op.op_kind != "ydoc.update" || op.payload["isBaseState"] == true {
-                    crate::ydoc_apply::drain_inactive_ydoc_updates(store, workspace_id, faults)
-                        .map_err(local)?;
-                }
-                let routed = crate::router::apply_replication_envelope_in_batch(
-                    store, cache, op, faults, leases, true,
-                );
-                match routed {
-                    Err(SyncError::RetryableState { reason }) => {
-                        if matches!(op.op_kind.as_str(), "conflict.resolve" | "moment.append")
-                            && reason == "ydoc-session-live"
-                        {
-                            durable_origins.insert(op.origin_id.clone());
-                        }
-                        still_deferred_origins.insert(op.origin_id.clone());
-                        still_retryable.push(op);
-                    }
-                    Err(SyncError::SequenceGap)
-                        if still_deferred_origins.contains(&op.origin_id) =>
-                    {
-                        still_retryable.push(op);
-                    }
-                    Err(error) => return Err(local(error)),
-                    Ok(outcome) => {
-                        made_progress = true;
-                        completed.push(op);
-                        accumulate_pull_outcome(
-                            store,
-                            op,
-                            outcome,
-                            &mut applied,
-                            &mut refused,
-                            &mut skipped,
-                            &mut conflicts_opened,
-                            &mut changed_paths,
-                            &mut refusals,
-                            &mut sharing_declined,
-                            &mut record_facts,
-                            |claims| self.keep_automation_claims(claims),
-                        )?;
-                    }
-                }
-            }
-            if still_retryable.is_empty() {
-                break;
-            }
-            if !made_progress {
-                if still_retryable
-                    .iter()
-                    .any(|op| !durable_origins.contains(&op.origin_id))
-                {
-                    return Err(RelayError::Local("retryable-state".to_owned()));
-                }
-                crate::deferred::retain(store, &identity, &still_retryable, faults)?;
-                break;
-            }
-            retryable = still_retryable;
-        }
-        crate::ydoc_apply::drain_inactive_ydoc_updates(store, workspace_id, faults)
-            .map_err(local)?;
-        let mut settlements = match crate::moment_apply::pending::drain_and_claim(
+        let AppliedPass {
+            applied,
+            refused,
+            skipped,
+            conflicts_opened,
+            changed_paths,
+            refusals,
+            mut sharing_declined,
+            record_facts,
+            settlement_report_id,
+            has_more: settled_more,
+            stopped: _,
+            // Only a hosted pass has documents that are not ready.
+            redelivered: _,
+        } = self.apply_pulled(
             store,
+            cache,
             workspace_id,
+            &identity,
+            &queued,
+            &ordered,
+            durable_origins,
+            Holding::ByOrigin,
             faults,
             leases,
-        ) {
-            Ok(settlements) => settlements,
-            Err(error) => {
-                // A fault can report failure after the transaction commits.
-                cache.clear();
-                return Err(local(error));
-            }
-        };
-        if settlements.report_id.is_some() {
-            cache.clear();
-        }
-        let replay_more = crate::deferred::claim_report(
-            store,
-            workspace_id,
-            &queued,
-            &completed,
-            &mut settlements.report_id,
-            faults,
         )?;
-        let has_more = has_more || settlements.has_more || replay_more;
-        for change in settlements.changes {
-            insert_changed_path(&mut changed_paths, change);
-        }
-        record_facts.extend(settlements.record_facts);
-        // A drain refusal can commit before a later envelope fails hard, or
-        // outside a pull during open/resync/close. Claim every relay-owned
-        // pending sidecar under a unique local report token and return it here.
-        // Direct-RPC retry rows retain their sentinel. Cursor commit clears only
-        // the claimed token; a later drain remains unowned, while a newer pull
-        // retags relay rows so a stale cursor cannot destroy an unread refusal.
-        let pending_refusals =
-            crate::apply::read_pending_refusals(store, workspace_id).map_err(local)?;
-        for refusal in pending_refusals {
-            push_refusal_once(&mut refusals, refusal);
-        }
+        let has_more = has_more || settled_more;
 
         let mut pulled_foreign_max = BTreeMap::<String, i64>::new();
         for op in &ordered {
@@ -1706,7 +1999,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 || (!has_more && !crate::deferred::has_unapplied(store, workspace_id)?),
             replication_epoch: identity.replication_epoch,
             stream_identity: identity.stream_identity,
-            settlement_report_id: settlements.report_id,
+            settlement_report_id,
         };
         if crashes(faults, FaultPoint::SyncBetweenApplyAndCursorCommit) {
             return Ok(SyncPassOutcome::CrashedAfterApply {
@@ -1715,7 +2008,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 skipped,
                 conflicts_opened,
                 pending_cursor,
-                changed_paths: changed_paths.into_values().collect(),
+                changed_paths: page_order(changed_paths.into_values(), |change| change.operation),
                 refusals,
                 sharing_declined,
                 record_facts,
@@ -1731,11 +2024,624 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             skipped,
             conflicts_opened,
             pending_cursor: Some(pending_cursor),
-            changed_paths: changed_paths.into_values().collect(),
+            changed_paths: page_order(changed_paths.into_values(), |change| change.operation),
             refusals,
             sharing_declined,
             record_facts,
         })
+    }
+
+    /// Confirm the relay holds nothing of this hosted replica's own origin
+    /// past what the replica numbered. A store restored from an older copy
+    /// lost commits it already pushed. The counter is the only local record of
+    /// them: a pull imports the host's own rows back into the journal, so the
+    /// journal's maximum rises to the relay's. Sends one empty push to the
+    /// hosted log and writes nothing.
+    pub fn confirm_hosted_origin(
+        &self,
+        store: &EngineStore,
+        workspace_id: &str,
+    ) -> Result<(), RelayError> {
+        let numbered = store
+            .read_with(|conn| crate::hosted::last_outbound_seq(conn, workspace_id))
+            .map_err(local)?
+            .ok_or(RelayError::HostedRefusal(
+                crate::hosted::NOT_A_HOSTED_REPLICA,
+            ))?;
+        let identity = read_sync_identity(store, workspace_id)
+            .map_err(local)?
+            .ok_or(RelayError::InvalidResponse)?;
+        let probe = self.transport.push_hosted(push_probe_request(
+            workspace_id,
+            &identity,
+            &identity.origin_id,
+            -1,
+        ))?;
+        validate_probe_response(&probe)?;
+        if probe.current_max_origin_seq > numbered {
+            return Err(RelayError::OriginDiverged);
+        }
+        Ok(())
+    }
+
+    /// Pull one hosted pass: the first document still backfilling reads its
+    /// own rows from its backfill cursor, and only when none is left does the
+    /// main feed move, skipping the rows of every document that is not ready.
+    /// Each held document then reads one page of its own rows from its
+    /// cursor, so a row that could not apply before is tried again. A
+    /// response under a new scope applies nothing; the pass adopts the scope
+    /// and returns no cursor. The returned cursor stays pending until the
+    /// caller materializes the pass and commits it.
+    pub fn pull_hosted_workspace(
+        &self,
+        store: &mut EngineStore,
+        cache: &mut dohc_engine_collab::WriterDocCache,
+        workspace_id: &str,
+        faults: &dyn FaultInjector,
+        leases: &dyn crate::LeaseProbe,
+    ) -> Result<HostedPassOutcome, RelayError> {
+        let replica = crate::read_hosted_replica(store, workspace_id)
+            .map_err(local)?
+            .ok_or(RelayError::HostedRefusal(
+                crate::hosted::NOT_A_HOSTED_REPLICA,
+            ))?;
+        let identity = read_sync_identity(store, workspace_id)
+            .map_err(local)?
+            .ok_or(RelayError::InvalidResponse)?;
+        let backfill = replica
+            .documents
+            .iter()
+            .find(|(_, document)| document.status == crate::HostedDocumentStatus::Backfilling)
+            .map(|(object_id, document)| (object_id.clone(), document.backfill_cursor));
+        let held = replica
+            .documents
+            .iter()
+            .filter(|(_, document)| matches!(document.status, crate::HostedDocumentStatus::Held(_)))
+            .map(|(object_id, document)| (object_id.clone(), document.backfill_cursor))
+            .collect::<Vec<_>>();
+        let unready: BTreeSet<String> = replica
+            .documents
+            .iter()
+            .filter(|(_, document)| document.status != crate::HostedDocumentStatus::Ready)
+            .map(|(object_id, _)| object_id.clone())
+            .collect();
+        let backfilled = backfill.as_ref().map(|(object_id, _)| object_id.as_str());
+        let adopted = || HostedPassOutcome {
+            has_more: true,
+            ..HostedPassOutcome::default()
+        };
+        let mut ops = Vec::new();
+        let mut cursor = backfill
+            .as_ref()
+            .map_or(replica.main_cursor, |(_, cursor)| *cursor);
+        let mut fetched = 0_usize;
+        let mut pages = 0_usize;
+        let has_more = loop {
+            let remaining = crate::model::MAX_PULL_OPS_PER_PASS
+                .checked_sub(fetched)
+                .ok_or(RelayError::InvalidResponse)?;
+            let limit = remaining.min(crate::MAX_PULL_OPS);
+            let Some(response) = self.hosted_page(
+                store,
+                workspace_id,
+                &identity,
+                &replica,
+                backfilled,
+                cursor,
+                limit,
+                faults,
+            )?
+            else {
+                // What earlier pages fetched under the old scope is dropped
+                // too: it cannot commit.
+                return Ok(adopted());
+            };
+            fetched = fetched
+                .checked_add(response.ops.len())
+                .ok_or(RelayError::InvalidResponse)?;
+            ops.extend(response.ops);
+            cursor = response.next_cursor;
+            let has_more = response.has_more;
+            pages = pages.checked_add(1).ok_or(RelayError::InvalidResponse)?;
+            if !has_more
+                || fetched >= crate::model::MAX_PULL_OPS_PER_PASS
+                || pages >= crate::model::MAX_PULL_PAGES_PER_PASS
+            {
+                break has_more;
+            }
+        };
+        let mut reads = BTreeMap::new();
+        match &backfill {
+            Some((object_id, _)) => {
+                reads.insert(object_id.clone(), (cursor, has_more));
+            }
+            // A held document's own read covers these rows. It reads after
+            // the main feed, and its document is not ready until that read
+            // reaches the end of its rows.
+            None => ops.retain(|op| {
+                crate::hosted::hosted_document(op).is_none_or(|id| !unready.contains(id))
+            }),
+        }
+        // Held reads share what the pass has left. A stopped document needs
+        // only the row it stopped at, and a read cut short goes on next pass.
+        let per_held = (crate::model::MAX_PULL_OPS_PER_PASS.saturating_sub(fetched)
+            / held.len().max(1))
+        .clamp(1, crate::MAX_PULL_OPS);
+        for (object_id, from) in &held {
+            let Some(response) = self.hosted_page(
+                store,
+                workspace_id,
+                &identity,
+                &replica,
+                Some(object_id),
+                *from,
+                per_held,
+                faults,
+            )?
+            else {
+                return Ok(adopted());
+            };
+            fetched = fetched
+                .checked_add(response.ops.len())
+                .ok_or(RelayError::InvalidResponse)?;
+            ops.extend(response.ops);
+            reads.insert(object_id.clone(), (response.next_cursor, response.has_more));
+        }
+        // A returning document's heads come back before its rows route, so
+        // the rows it applied skip as redelivered against them.
+        crate::hosted::unpark_returned(store, workspace_id, faults).map_err(local)?;
+
+        // Every document with retained work may retain more behind it; one
+        // whose retained work runs past this replay holds from where it stops.
+        let replay = crate::deferred::read_hosted(store, workspace_id, &identity)?;
+        let queued = replay.ops;
+        let durable = replay.documents.keys().cloned().collect();
+        let behind = replay
+            .documents
+            .into_iter()
+            .filter_map(|(object_id, from)| Some((object_id, from?)))
+            .collect();
+        if !queued.is_empty() {
+            crate::deferred::check_redelivery(store, &ops)?;
+        }
+        let fetched_coordinates: BTreeSet<_> = ops
+            .iter()
+            .map(|op| (op.origin_id.clone(), op.origin_seq))
+            .collect();
+        let fetched_op_count = ops.len();
+        ops.extend(
+            queued
+                .iter()
+                .filter(|op| !fetched_coordinates.contains(&(op.origin_id.clone(), op.origin_seq)))
+                .cloned(),
+        );
+        preflight_collisions(store, workspace_id, &identity.origin_id, &ops)?;
+        self.repair_pending_ydoc_base_orders(
+            store,
+            workspace_id,
+            &identity,
+            faults,
+            &ops[..fetched_op_count],
+        )?;
+        self.hydrate_missing_blobs(store, workspace_id, &identity, &ops, faults)?;
+        // Relay order is each document's order, across origins.
+        ops.sort_by_key(|op| op.relay_seq);
+        let mut pass = self.apply_pulled(
+            store,
+            cache,
+            workspace_id,
+            &identity,
+            &queued,
+            &ops,
+            durable,
+            Holding::ByDocument { behind, unready },
+            faults,
+            leases,
+        )?;
+        // A ready document that stopped at a conflict child whose parent the
+        // feed withholds, or at work past the retention limit, is held from
+        // there and reads its own rows.
+        for (object_id, op) in &pass.stopped {
+            if replica
+                .documents
+                .get(object_id)
+                .is_some_and(|document| document.status == crate::HostedDocumentStatus::Ready)
+            {
+                let at = op.relay_seq.map_or(0, |seq| seq.saturating_sub(1));
+                reads.insert(object_id.clone(), (at, true));
+            }
+        }
+        // A read stops before its document's first row that did not apply;
+        // nothing of it was retained, so its next read fetches it again.
+        let redelivered = std::mem::take(&mut pass.redelivered);
+        let (reads, held, unparks, standing, heads) = store
+            .read_with(|conn| {
+                // What holds each path, read once for every document.
+                let mut occupancy = crate::hosted::Occupancy::new(conn, workspace_id);
+                let mut held = BTreeMap::new();
+                let mut settled = BTreeMap::new();
+                // A document whose parked heads this pass freed the paths of
+                // comes back on the next pass.
+                let mut unparks = false;
+                // What its history stored that still stands, checked once
+                // per document against what the pass left holding its paths.
+                let mut standing = Vec::new();
+                for (object_id, stored) in redelivered {
+                    standing.extend(crate::hosted::redelivered_unready(
+                        &mut occupancy,
+                        &object_id,
+                        stored.into_values(),
+                    )?);
+                }
+                // Readiness never precedes its files, so a pass whose commit
+                // can make a document ready writes each of its heads.
+                let mut heads = Vec::new();
+                for (object_id, (cursor, more)) in reads {
+                    unparks |= crate::hosted::unparks_next(&mut occupancy, &object_id)?;
+                    let mut read = match pass.stopped.get(&object_id) {
+                        Some(op) => crate::HostedRead {
+                            // Commit refuses one below its document's read
+                            // that is not explained by work it releases.
+                            cursor: op
+                                .relay_seq
+                                .map_or(0, |seq| cursor.min(seq.saturating_sub(1))),
+                            stopped: Some(crate::hosted::stopped_hold(
+                                &mut occupancy,
+                                &object_id,
+                                op,
+                            )?),
+                            complete: false,
+                            heads_written: false,
+                        },
+                        None => crate::HostedRead {
+                            cursor,
+                            stopped: None,
+                            complete: !more,
+                            heads_written: false,
+                        },
+                    };
+                    match read.hold(&mut occupancy, &object_id)? {
+                        Some(hold) => {
+                            held.insert(object_id.clone(), hold);
+                        }
+                        None if read.complete => {
+                            heads.extend(crate::hosted::head_writes(
+                                conn,
+                                workspace_id,
+                                &object_id,
+                            )?);
+                            read.heads_written = true;
+                        }
+                        None => {}
+                    }
+                    settled.insert(object_id, read);
+                }
+                // A ready document that a refusal of this pass held is held
+                // too. It reads its own rows from the next pass.
+                for (object_id, document) in &replica.documents {
+                    if document.status == crate::HostedDocumentStatus::Ready
+                        && !settled.contains_key(object_id)
+                        && let Some(hold) =
+                            crate::hosted::recorded_hold(conn, workspace_id, object_id)?
+                    {
+                        held.insert(object_id.clone(), hold);
+                    }
+                }
+                Ok::<_, SyncError>((settled, held, unparks, standing, heads))
+            })
+            .map_err(local)?;
+        for change in standing {
+            pass.changed_paths
+                .entry((change.version_id.clone(), change.path.clone()))
+                .or_insert(change);
+        }
+        for change in heads {
+            insert_changed_path(&mut pass.changed_paths, change);
+        }
+        // A finished backfill still leaves the main feed or another document,
+        // and a held document whose read went on backfills again.
+        let more = has_more
+            || pass.has_more
+            || unparks
+            || backfill.is_some()
+            || reads
+                .values()
+                .any(|read| read.stopped.is_none() && !read.complete);
+        Ok(HostedPassOutcome {
+            fetched,
+            has_more: more,
+            applied: pass.applied,
+            refused: pass.refused,
+            skipped: pass.skipped,
+            conflicts_opened: pass.conflicts_opened,
+            pending_cursor: Some(crate::HostedCursor {
+                scope_generation: replica.scope_generation,
+                cursor_commits: replica.cursor_commits,
+                main_cursor: backfill.is_none().then_some(cursor),
+                reads,
+                settlement_report_id: pass.settlement_report_id,
+            }),
+            changed_paths: page_order(pass.changed_paths.into_values(), |change| change.operation),
+            refusals: pass.refusals,
+            sharing_declined: pass.sharing_declined,
+            record_facts: pass.record_facts,
+            held,
+        })
+    }
+
+    /// Commit a hosted pass's cursor after its work materialized. Commits
+    /// nothing when the scope moved or another pass committed since its
+    /// fetch.
+    pub fn commit_hosted_cursor(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        cursor: &crate::HostedCursor,
+        faults: &dyn FaultInjector,
+    ) -> Result<TxnOutcome<crate::HostedCommit>, RelayError> {
+        crate::commit_hosted_cursor(store, workspace_id, cursor, faults).map_err(
+            |error| match error {
+                SyncError::InvalidInput {
+                    reason: reason @ crate::hosted::NOT_A_HOSTED_REPLICA,
+                } => RelayError::HostedRefusal(reason),
+                error => local(error),
+            },
+        )
+    }
+
+    /// One page of the hosted feed under the stored scope: `workspace.init`
+    /// and scoped documents' rows on the main feed, and only `backfilled`'s
+    /// rows in its backfill. `None` when the response announced another
+    /// scope, which is adopted instead: the feed serves nothing under a stale
+    /// one.
+    #[allow(clippy::too_many_arguments)]
+    fn hosted_page(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        identity: &crate::SyncIdentity,
+        replica: &crate::HostedReplicaState,
+        backfilled: Option<&str>,
+        cursor: i64,
+        limit: usize,
+        faults: &dyn FaultInjector,
+    ) -> Result<Option<HostedPullResponse>, RelayError> {
+        let response = self.transport.pull_hosted(HostedPullRequest {
+            workspace_id: workspace_id.to_owned(),
+            replication_epoch: identity.replication_epoch.clone(),
+            stream_identity: identity.stream_identity.clone(),
+            scope_token: replica.scope_token.clone(),
+            object_id: backfilled.map(str::to_owned),
+            cursor,
+            limit,
+        })?;
+        validate_hosted_page(&response, workspace_id, cursor)?;
+        if response.ops.len() > limit {
+            return Err(RelayError::InvalidResponse);
+        }
+        let documents = hosted_scope_documents(&response.scope)?;
+        if replica.scope_token.as_deref() != Some(response.scope.token.as_str()) {
+            if !response.ops.is_empty() || response.next_cursor != cursor {
+                return Err(RelayError::InvalidResponse);
+            }
+            match crate::hosted::adopt_scope(
+                store,
+                workspace_id,
+                &response.scope.token,
+                &documents,
+                faults,
+            )
+            .map_err(local)?
+            {
+                TxnOutcome::Committed(()) => return Ok(None),
+                TxnOutcome::Crashed { .. } => return Err(local(SyncError::FaultCrash)),
+            }
+        }
+        // One token names one set of documents at their paths.
+        if !documents.iter().eq(replica
+            .documents
+            .iter()
+            .map(|(object_id, document)| (object_id, &document.path)))
+        {
+            return Err(RelayError::InvalidResponse);
+        }
+        for op in &response.ops {
+            let admitted = match (crate::hosted::hosted_document(op), backfilled) {
+                (Some(object_id), Some(backfilled)) => object_id == backfilled,
+                (Some(object_id), None) => replica.documents.contains_key(object_id),
+                (None, None) => op.op_kind == "workspace.init",
+                (None, Some(_)) => false,
+            };
+            if !admitted {
+                return Err(RelayError::InvalidResponse);
+            }
+        }
+        Ok(Some(response))
+    }
+
+    /// Apply a pass's ops in order and settle what they left pending. An op
+    /// that cannot apply yet holds the ops behind it; when a round makes no
+    /// progress, work held for a durable reason is retained so the cursor can
+    /// move past it, and any other hold fails the pass.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_pulled(
+        &self,
+        store: &mut EngineStore,
+        cache: &mut dohc_engine_collab::WriterDocCache,
+        workspace_id: &str,
+        identity: &crate::SyncIdentity,
+        queued: &[ReplicationEnvelope],
+        ordered: &[ReplicationEnvelope],
+        mut durable: BTreeSet<String>,
+        mut holding: Holding,
+        faults: &dyn FaultInjector,
+        leases: &dyn crate::LeaseProbe,
+    ) -> Result<AppliedPass, RelayError> {
+        let mut pass = AppliedPass::default();
+        let mut completed = Vec::new();
+        let recovered =
+            crate::drain_open_document_artifacts(store, cache, workspace_id, leases, faults)
+                .map_err(local)?;
+        for change in recovered.changes {
+            insert_changed_path(&mut pass.changed_paths, change);
+        }
+        pass.record_facts.extend(recovered.record_facts);
+        pass.refusals.extend(recovered.refusals);
+        pass.sharing_declined.extend(recovered.sharing_declined);
+        pass.conflicts_opened += recovered.conflicts_opened;
+        let mut round = ordered.iter().collect::<Vec<_>>();
+        let mut first = true;
+        loop {
+            let mut held = match &holding {
+                Holding::ByOrigin => durable.clone(),
+                Holding::ByDocument { .. } => BTreeSet::new(),
+            };
+            let mut still_retryable = Vec::new();
+            let mut made_progress = false;
+            for op in round {
+                let key = holding.key(op);
+                if let (Holding::ByDocument { behind, .. }, Some(key)) = (&holding, &key) {
+                    let omitted = behind
+                        .get(key)
+                        .is_some_and(|from| op.relay_seq.is_some_and(|seq| seq >= *from));
+                    if omitted || held.contains(key) {
+                        still_retryable.push(op);
+                        continue;
+                    }
+                }
+                if op.op_kind != "ydoc.update" || op.payload["isBaseState"] == true {
+                    crate::ydoc_apply::drain_inactive_ydoc_updates(store, workspace_id, faults)
+                        .map_err(local)?;
+                }
+                let routed = match holding.held_before_routing(store, op)? {
+                    Some(reason) => Err(SyncError::RetryableState { reason }),
+                    None => crate::router::apply_replication_envelope_in_batch(
+                        store, cache, op, faults, leases, true,
+                    ),
+                };
+                match routed {
+                    Err(SyncError::RetryableState { reason }) => {
+                        holding.stop_at_withheld_parent(op, reason);
+                        if let Some(key) = key {
+                            if retained_while_held(op, reason) {
+                                durable.insert(key.clone());
+                            }
+                            held.insert(key);
+                        }
+                        still_retryable.push(op);
+                    }
+                    Err(SyncError::SequenceGap)
+                        if matches!(holding, Holding::ByOrigin) && held.contains(&op.origin_id) =>
+                    {
+                        still_retryable.push(op);
+                    }
+                    Err(error) => return Err(local(error)),
+                    Ok(outcome) => {
+                        made_progress = true;
+                        completed.push(op);
+                        accumulate_pull_outcome(
+                            store,
+                            op,
+                            holding.unready(op),
+                            outcome,
+                            &mut pass.applied,
+                            &mut pass.refused,
+                            &mut pass.skipped,
+                            &mut pass.conflicts_opened,
+                            &mut pass.changed_paths,
+                            &mut pass.redelivered,
+                            &mut pass.refusals,
+                            &mut pass.sharing_declined,
+                            &mut pass.record_facts,
+                            |claims| self.keep_automation_claims(claims),
+                        )?;
+                    }
+                }
+            }
+            if still_retryable.is_empty() {
+                break;
+            }
+            if !first && !made_progress {
+                // A document that is not ready retains nothing: its read
+                // stops at its first op still to apply, in relay order.
+                let (stopped, retained): (Vec<_>, Vec<_>) = still_retryable
+                    .into_iter()
+                    .partition(|op| holding.unready(op).is_some());
+                for op in stopped {
+                    if let Some(object_id) = holding.unready(op) {
+                        pass.stopped
+                            .entry(object_id.to_owned())
+                            .or_insert_with(|| op.clone());
+                    }
+                }
+                if retained
+                    .iter()
+                    .any(|op| !holding.key(op).is_some_and(|key| durable.contains(&key)))
+                {
+                    return Err(RelayError::Local("retryable-state".to_owned()));
+                }
+                // A hosted document that would pass the retention limit is
+                // held at its first op still to apply, as one that is not
+                // ready, so the pass still commits and releases other work.
+                let unretained = crate::deferred::retain(store, identity, &retained, faults)?;
+                for op in retained {
+                    if let Some(object_id) = crate::hosted::hosted_document(op)
+                        .filter(|object_id| unretained.contains(*object_id))
+                    {
+                        pass.stopped
+                            .entry(object_id.to_owned())
+                            .or_insert_with(|| op.clone());
+                    }
+                }
+                break;
+            }
+            first = false;
+            round = still_retryable;
+        }
+        crate::ydoc_apply::drain_inactive_ydoc_updates(store, workspace_id, faults)
+            .map_err(local)?;
+        let mut settlements = match crate::moment_apply::pending::drain_and_claim(
+            store,
+            workspace_id,
+            faults,
+            leases,
+        ) {
+            Ok(settlements) => settlements,
+            Err(error) => {
+                // A fault can report failure after the transaction commits.
+                cache.clear();
+                return Err(local(error));
+            }
+        };
+        if settlements.report_id.is_some() {
+            cache.clear();
+        }
+        let replay_more = crate::deferred::claim_report(
+            store,
+            workspace_id,
+            queued,
+            &completed,
+            &mut settlements.report_id,
+            faults,
+        )?;
+        pass.has_more = settlements.has_more || replay_more;
+        for change in settlements.changes {
+            insert_changed_path(&mut pass.changed_paths, change);
+        }
+        pass.record_facts.extend(settlements.record_facts);
+        // A drain refusal can commit before a later envelope fails hard, or
+        // outside a pull during open/resync/close. Claim every relay-owned
+        // pending sidecar under a unique local report token and return it here.
+        // Direct-RPC retry rows retain their sentinel. Cursor commit clears only
+        // the claimed token; a later drain remains unowned, while a newer pull
+        // retags relay rows so a stale cursor cannot destroy an unread refusal.
+        let pending_refusals =
+            crate::apply::read_pending_refusals(store, workspace_id).map_err(local)?;
+        for refusal in pending_refusals {
+            push_refusal_once(&mut pass.refusals, refusal);
+        }
+        pass.settlement_report_id = settlements.report_id;
+        Ok(pass)
     }
 
     pub fn commit_pull_cursor(
@@ -1746,7 +2652,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         faults: &dyn FaultInjector,
         leases: &dyn crate::LeaseProbe,
         now_ms: i64,
-    ) -> Result<TxnOutcome<Vec<crate::SharingDeclined>>, RelayError> {
+    ) -> Result<TxnOutcome<crate::CursorCommit>, RelayError> {
         commit_relay_cursor(store, workspace_id, cursor, faults, leases, now_ms).map_err(local)
     }
 
@@ -1766,11 +2672,23 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         account_id: Option<&str>,
         faults: &dyn FaultInjector,
     ) -> Result<ClaimResponse, RelayError> {
+        if store.is_passive() {
+            return Err(local(SyncError::InvalidInput {
+                reason: "passive store cannot write to the relay",
+            }));
+        }
         validate_identity_request(
             &req.workspace_id,
             &req.replication_epoch,
             &req.stream_identity,
         )?;
+        // Before the pending state below, which would hold back hosted pushes.
+        if store
+            .read_with(|conn| crate::hosted::is_hosted(conn, &req.workspace_id))
+            .map_err(local)?
+        {
+            return Err(hosted_feed_only());
+        }
         let save = |store: &mut EngineStore, state: Option<&str>, keep_refusal: bool| match store
             .write_with(faults, |tx| {
                 let changed = tx
@@ -1863,6 +2781,16 @@ impl<T: RelayTransport> RelaySyncClient<T> {
     ) -> Result<RecoverResponse, RelayError> {
         crate::model::bounded(new_origin_id, "origin_id must be non-empty and bounded")
             .map_err(local)?;
+        // The rebase rewrites this origin's coordinates and resets acks the
+        // hosted journal does not keep. A hosted origin is the relay's to name.
+        if store
+            .read_with(|conn| crate::hosted::is_hosted(conn, workspace_id))
+            .map_err(local)?
+        {
+            return Err(RelayError::HostedRefusal(
+                "a hosted replica never rebases its origin",
+            ));
+        }
         let identity = read_sync_identity(store, workspace_id)
             .map_err(local)?
             .ok_or(RelayError::InvalidResponse)?;
@@ -1900,8 +2828,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 if local_op.origin_seq != shared_prefix_length
                     || local_op.op_kind != op.op_kind
                     || local_op.recorded_at_ms != op.recorded_at_ms
-                    || canonical_json_bytes(&local_op.payload).map_err(local)?
-                        != canonical_json_bytes(&op.payload).map_err(local)?
+                    || !replication_payloads_match(&op.op_kind, &local_op.payload, &op.payload)
+                        .map_err(local)?
                 {
                     break 'pages;
                 }
@@ -2225,6 +3153,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         channel_wire_id: &str,
         faults: &dyn FaultInjector,
     ) -> Result<SharedChannelPushOutcome, RelayError> {
+        if store.is_passive() {
+            return Err(local(SyncError::InvalidInput {
+                reason: "passive store cannot write to the relay",
+            }));
+        }
         let identity = read_sync_identity(store, workspace_id)
             .map_err(local)?
             .ok_or(RelayError::InvalidResponse)?;
@@ -2253,11 +3186,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 origin_id: identity.origin_id.clone(),
                 ops: batch.iter().map(|(_, op)| op.clone()).collect(),
             })?;
-            if push.accepted != batch.len()
-                || push.inserted.checked_add(push.skipped) != Some(push.accepted)
-            {
-                return Err(RelayError::InvalidResponse);
-            }
+            validate_share_push_response(&push, batch.len())?;
             Ok(push.inserted)
         };
         let mut after = scanned;
@@ -2364,6 +3293,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         faults: &dyn FaultInjector,
         max_read_bytes: usize,
     ) -> Result<ShareProposalSubmitOutcome, RelayError> {
+        if store.is_passive() {
+            return Err(local(SyncError::InvalidInput {
+                reason: "passive store cannot write to the relay",
+            }));
+        }
         // The PINNED level is read here rather than trusted from the relay's
         // own refusal. A recipient offers nothing it was not granted, so a
         // View or Comment share never contacts the relay at all.
@@ -2665,7 +3599,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             applied,
             skipped,
             refusals,
-            changed_paths: changed.into_values().collect(),
+            changed_paths: page_order(changed.into_values(), |change| change.operation),
             pending_cursor: crate::ShareCursor {
                 kind: crate::CursorKind::ShareView,
                 share_id: share_id.to_owned(),
@@ -2694,35 +3628,36 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         identity: &crate::SyncIdentity,
         page: &mut PreparedPushPage,
         started: std::time::Instant,
+        confirmed: &mut BTreeSet<String>,
     ) -> Result<usize, RelayError> {
         let ops = &page.ops[..page.prefix.allowed_ops];
-        if page.missing.is_none() {
-            let all = page.blob_refs.keys().cloned().collect::<Vec<_>>();
-            let mut missing = BTreeSet::new();
-            for chunk in all.chunks(crate::MAX_BLOB_HAVE_BATCH) {
-                let response = self.transport.blobs_have(BlobHaveRequest {
-                    workspace_id: workspace_id.to_owned(),
-                    replication_epoch: identity.replication_epoch.clone(),
-                    stream_identity: identity.stream_identity.clone(),
-                    sha256s: chunk.to_vec(),
-                })?;
-                let requested = chunk.iter().collect::<BTreeSet<_>>();
-                for sha in response.missing {
-                    if !requested.contains(&sha) || !missing.insert(sha) {
-                        return Err(RelayError::InvalidResponse);
-                    }
-                }
-            }
-            page.missing = Some(missing);
+        let missing = &mut page.missing;
+        while let Some(chunk) = page.inventory.front() {
+            let response = self.transport.blobs_have(BlobHaveRequest {
+                workspace_id: workspace_id.to_owned(),
+                replication_epoch: identity.replication_epoch.clone(),
+                stream_identity: identity.stream_identity.clone(),
+                sha256s: chunk.clone(),
+            })?;
+            let returned = response.validated_missing(chunk)?;
+            confirmed.extend(chunk.iter().filter(|sha| !returned.contains(sha)).cloned());
+            missing.extend(response.missing);
+            page.inventory.pop_front();
         }
-        let missing = page.missing.as_mut().ok_or(RelayError::InvalidResponse)?;
+        missing.retain(|sha| !confirmed.contains(sha));
         while page.uploaded_ops < ops.len() {
-            // Finish at least one operation, then reserve time for append and
-            // durable acknowledgement before the caller's 30-second deadline.
             if page.uploaded_ops > 0 && started.elapsed() >= PUSH_PRE_APPEND_BUDGET {
                 break;
             }
-            for sha256 in collect_blob_refs(&ops[page.uploaded_ops..=page.uploaded_ops])?.keys() {
+            let width = if started.elapsed() >= PUSH_PRE_APPEND_BUDGET {
+                1
+            } else {
+                MAX_BLOB_UPLOAD_BATCH
+            };
+            let end = (page.uploaded_ops + width).min(ops.len());
+            let mut uploads = Vec::new();
+            let mut upload_bytes = 0;
+            'blobs: for sha256 in collect_blob_refs(&ops[page.uploaded_ops..end])?.keys() {
                 if !missing.contains(sha256) {
                     continue;
                 }
@@ -2732,21 +3667,46 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     .get(sha256)
                     .ok_or(RelayError::InvalidResponse)?;
                 for kind in kinds {
+                    if !uploads.is_empty()
+                        && local_blob_length(store, sha256, *kind, false)?.is_some_and(|length| {
+                            length > MAX_BLOB_UPLOAD_BATCH_BYTES - upload_bytes
+                        })
+                    {
+                        break 'blobs;
+                    }
                     if let Some(local) = local_blob_bytes(store, sha256, *kind)? {
                         bytes = Some(local);
                         break;
                     }
                 }
-                self.transport.upload_blob(BlobUploadRequest {
+                let bytes = bytes.ok_or(RelayError::BlobInvalid)?;
+                upload_bytes += bytes.len();
+                uploads.push(BlobUploadRequest {
                     workspace_id: workspace_id.to_owned(),
                     replication_epoch: identity.replication_epoch.clone(),
                     stream_identity: identity.stream_identity.clone(),
                     sha256: sha256.clone(),
-                    bytes: bytes.ok_or(RelayError::BlobInvalid)?,
-                })?;
-                missing.remove(sha256);
+                    bytes,
+                });
+                if uploads.len() == MAX_BLOB_UPLOAD_BATCH
+                    || upload_bytes >= MAX_BLOB_UPLOAD_BATCH_BYTES
+                {
+                    break;
+                }
             }
-            page.uploaded_ops += 1;
+            if !uploads.is_empty() {
+                let uploaded = uploads
+                    .iter()
+                    .map(|upload| upload.sha256.clone())
+                    .collect::<Vec<_>>();
+                self.transport.upload_blobs(uploads)?;
+                for sha in uploaded {
+                    missing.remove(&sha);
+                    confirmed.insert(sha);
+                }
+                continue;
+            }
+            page.uploaded_ops = end;
         }
         Ok(page.uploaded_ops)
     }
@@ -2767,10 +3727,10 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }
 
         let mut pending = Vec::new();
-        for (sha256, kinds) in collect_blob_refs(ops)? {
+        for (sha256, kinds) in blob_refs_to_apply(store, ops)? {
             let mut missing = Vec::new();
             for kind in kinds {
-                if !local_blob_present(store, &sha256, kind)? {
+                if local_blob_length(store, &sha256, kind, true)?.is_none() {
                     missing.push(kind);
                 }
             }
@@ -2870,17 +3830,44 @@ fn relabel_ceiling(error: RelayError, constraint: &'static str, limit_bytes: usi
     }
 }
 
+/// The blobs this replica needs to apply `ops`. A hosted replica never needs,
+/// and so never requests, a before side the feed withholds.
+pub(crate) fn blob_refs_to_apply(
+    store: &EngineStore,
+    ops: &[ReplicationEnvelope],
+) -> Result<BTreeMap<String, BTreeSet<BlobKind>>, RelayError> {
+    let mut forgotten: Option<Vec<ReplicationEnvelope>> = None;
+    for (index, op) in ops.iter().enumerate() {
+        if op.op_kind == "moment.append"
+            && !settlement_refused(op)
+            && store
+                .read_with(|conn| crate::hosted::withheld_before(conn, op))
+                .map_err(local)?
+                .is_some()
+        {
+            let forgotten = forgotten.get_or_insert_with(|| ops.to_vec());
+            crate::hosted::forget_before(&mut forgotten[index].payload);
+        }
+    }
+    collect_blob_refs(forgotten.as_deref().unwrap_or(ops))
+}
+
+/// Deterministic refusal acknowledges only the immutable coordinate, and the
+/// relay serves a refused row without validating it: unavailable hostile
+/// content must not hold up subsequent operations.
+fn settlement_refused(op: &ReplicationEnvelope) -> bool {
+    matches!(
+        op.settlement_admission,
+        Some(crate::SettlementAdmission::Refused { .. })
+    )
+}
+
 pub(crate) fn collect_blob_refs(
     ops: &[ReplicationEnvelope],
 ) -> Result<BTreeMap<String, BTreeSet<BlobKind>>, RelayError> {
     let mut refs = BTreeMap::new();
     for op in ops {
-        // Deterministic refusal acknowledges only the immutable coordinate;
-        // unavailable hostile content must not hold up subsequent operations.
-        if matches!(
-            op.settlement_admission,
-            Some(crate::SettlementAdmission::Refused { .. })
-        ) {
+        if settlement_refused(op) {
             continue;
         }
         match op.op_kind.as_str() {
@@ -2889,35 +3876,23 @@ pub(crate) fn collect_blob_refs(
                     &mut refs,
                     op.payload
                         .get("settlementReference")
-                        .and_then(|v| v.get("record"))
-                        .and_then(|v| v.get("acceptedStateBlobSha256")),
+                        .and_then(|reference| reference.get("record"))
+                        .and_then(|record| string_field(record, "acceptedStateBlobSha256")),
                     BlobKind::Ydoc,
                 )?;
-                insert_optional_ref(
-                    &mut refs,
-                    op.payload.get("payloadBeforeBlobSha256"),
-                    content_kind(op.payload.get("payloadBeforeContentKind")),
-                )?;
-                insert_optional_ref(
-                    &mut refs,
-                    op.payload.get("payloadAfterBlobSha256"),
-                    content_kind(op.payload.get("payloadAfterContentKind")),
-                )?;
-                insert_optional_ref(
-                    &mut refs,
-                    op.payload.get("beforeBlobSha256"),
-                    content_kind(op.payload.get("beforeContentKind")),
-                )?;
+                for side in MomentRefs::read(&op.payload).sides() {
+                    insert_optional_ref(
+                        &mut refs,
+                        side.blob_sha256,
+                        side.content_kind.blob_kind(),
+                    )?;
+                }
             }
             "conflict.open" => {
-                for name in ["base", "current", "incoming"] {
-                    let Some(state) = op.payload.get(name) else {
-                        continue;
-                    };
-                    if state.get("exists").and_then(serde_json::Value::as_bool) == Some(true)
-                        && content_kind(state.get("contentKind")) == BlobKind::Binary
-                    {
-                        insert_optional_ref(&mut refs, state.get("sha256"), BlobKind::Binary)?;
+                // A text side carries its content inline.
+                for side in conflict_open_sides(&op.payload) {
+                    if side.content_kind.blob_kind() == BlobKind::Binary {
+                        insert_optional_ref(&mut refs, side.sha256, BlobKind::Binary)?;
                     }
                 }
             }
@@ -2941,17 +3916,11 @@ pub(crate) fn collect_blob_refs(
                 }
             }
             "version.create" => {
-                for snapshot in op
-                    .payload
-                    .get("forkSnapshots")
-                    .and_then(serde_json::Value::as_array)
-                    .into_iter()
-                    .flatten()
-                {
+                for snapshot in VersionCreateRefs::read(&op.payload).snapshots() {
                     insert_optional_ref(
                         &mut refs,
-                        snapshot.get("blobSha256"),
-                        content_kind(snapshot.get("contentKind")),
+                        snapshot.content.blob_sha256,
+                        snapshot.content.content_kind.blob_kind(),
                     )?;
                 }
             }
@@ -2961,14 +3930,14 @@ pub(crate) fn collect_blob_refs(
                 // captured-file cap.
                 insert_optional_ref(
                     &mut refs,
-                    op.payload.get("updateBlobSha256"),
+                    YdocRefs::read(&op.payload).update_blob_sha256,
                     BlobKind::Ydoc,
                 )?;
             }
             "live.audit.application" => {
                 insert_optional_ref(
                     &mut refs,
-                    op.payload.get("updateBlobSha256"),
+                    string_field(&op.payload, "updateBlobSha256"),
                     BlobKind::Ydoc,
                 )?;
                 for chunk in op
@@ -2979,7 +3948,11 @@ pub(crate) fn collect_blob_refs(
                     .into_iter()
                     .flatten()
                 {
-                    insert_optional_ref(&mut refs, chunk.get("sha256"), BlobKind::Binary)?;
+                    insert_optional_ref(
+                        &mut refs,
+                        string_field(chunk, "sha256"),
+                        BlobKind::Binary,
+                    )?;
                 }
             }
             "live.audit.settlement" => {
@@ -2987,14 +3960,14 @@ pub(crate) fn collect_blob_refs(
                     &mut refs,
                     op.payload
                         .get("record")
-                        .and_then(|v| v.get("acceptedStateBlobSha256")),
+                        .and_then(|record| string_field(record, "acceptedStateBlobSha256")),
                     BlobKind::Ydoc,
                 )?;
                 insert_optional_ref(
                     &mut refs,
                     op.payload
                         .get("record")
-                        .and_then(|record| record.get("markdownDigest")),
+                        .and_then(|record| string_field(record, "markdownDigest")),
                     BlobKind::Text,
                 )?;
             }
@@ -3004,14 +3977,14 @@ pub(crate) fn collect_blob_refs(
                     op.payload
                         .get("record")
                         .and_then(|record| record.get("checkpoint"))
-                        .and_then(|checkpoint| checkpoint.get("stateDigest")),
+                        .and_then(|checkpoint| string_field(checkpoint, "stateDigest")),
                     BlobKind::Ydoc,
                 )?;
             }
             "secret.file.put" => {
                 insert_optional_ref(
                     &mut refs,
-                    op.payload.get("ciphertextSha256"),
+                    string_field(&op.payload, "ciphertextSha256"),
                     BlobKind::Binary,
                 )?;
             }
@@ -3023,7 +3996,11 @@ pub(crate) fn collect_blob_refs(
                     .into_iter()
                     .flatten()
                 {
-                    insert_optional_ref(&mut refs, row.get("ciphertextSha256"), BlobKind::Binary)?;
+                    insert_optional_ref(
+                        &mut refs,
+                        string_field(row, "ciphertextSha256"),
+                        BlobKind::Binary,
+                    )?;
                 }
             }
             _ => {}
@@ -3032,25 +4009,14 @@ pub(crate) fn collect_blob_refs(
     Ok(refs)
 }
 
-fn content_kind(value: Option<&serde_json::Value>) -> BlobKind {
-    if value.and_then(serde_json::Value::as_str) == Some("binary") {
-        BlobKind::Binary
-    } else {
-        BlobKind::Text
-    }
-}
-
 fn insert_optional_ref(
     refs: &mut BTreeMap<String, BTreeSet<BlobKind>>,
-    value: Option<&serde_json::Value>,
+    sha256: Option<&str>,
     kind: BlobKind,
 ) -> Result<(), RelayError> {
-    let Some(sha256) = value.and_then(serde_json::Value::as_str) else {
+    let Some(sha256) = sha256.filter(|sha256| !sha256.is_empty()) else {
         return Ok(());
     };
-    if sha256.is_empty() {
-        return Ok(());
-    }
     if !valid_sha256(sha256) {
         return Err(RelayError::BlobInvalid);
     }
@@ -3075,12 +4041,7 @@ pub(crate) fn local_blob_bytes(
     store
         .read_with(|conn| match kind {
             BlobKind::Text => {
-                let row = conn
-                    .query_row(
-                        "SELECT byte_length,text FROM blobs WHERE sha256=?1",
-                        [sha256],
-                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-                    )
+                let row = text::with_length(conn, sha256)
                     .optional()
                     .map_err(SyncError::corrupt)?;
                 let Some((byte_length, text)) = row else {
@@ -3142,7 +4103,9 @@ pub(crate) fn take_local_blob_bytes_call_count() -> usize {
     })
 }
 
-/// Is this digest already hydrated and valid for the kind being asked for?
+/// Read the stored length; with `validate_ceiling`, refuse one over the kind's
+/// ceiling. Upload passes `false` and only needs the length;
+/// `local_blob_bytes` refuses its bytes.
 ///
 /// Both questions, because they stopped being the same one. `Binary` and
 /// `Ydoc` share `binary_blobs` and no longer share a ceiling, so bare table
@@ -3153,15 +4116,16 @@ pub(crate) fn take_local_blob_bytes_call_count() -> usize {
 /// `hydrate_blob_content`, the only place `MAX_CAPTURE_BINARY_FILE_BYTES` is
 /// enforced — and materialize as an oversized captured file.
 ///
-/// So stored bytes over the requested kind's ceiling are refused here, by
+/// So pull's stored bytes over the requested kind's ceiling are refused here, by
 /// name, rather than reported present. Refused rather than re-fetched: the
 /// length is already known, and downloading identical bytes to reject them
 /// would only make the observed size less exact.
-fn local_blob_present(
+fn local_blob_length(
     store: &EngineStore,
     sha256: &str,
     kind: BlobKind,
-) -> Result<bool, RelayError> {
+    validate_ceiling: bool,
+) -> Result<Option<usize>, RelayError> {
     let (constraint, limit_bytes) = blob_ceiling(kind);
     let stored: Option<i64> = store
         .read_with(|conn| {
@@ -3179,17 +4143,17 @@ fn local_blob_present(
         })
         .map_err(local)?;
     let Some(byte_length) = stored else {
-        return Ok(false);
+        return Ok(None);
     };
     let observed = usize::try_from(byte_length).map_err(|_| RelayError::BlobInvalid)?;
-    if observed > limit_bytes {
+    if validate_ceiling && observed > limit_bytes {
         return Err(RelayError::BlobTooLarge {
             constraint,
             limit_bytes,
             observed: ObservedBytes::Exact(observed),
         });
     }
-    Ok(true)
+    Ok(Some(observed))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -3479,7 +4443,7 @@ fn preflight_collisions(
                 };
                 if op_kind != op.op_kind
                     || recorded_at_ms != op.recorded_at_ms
-                    || canonical_json_bytes(&local_payload)? != canonical_json_bytes(&op.payload)?
+                    || !replication_payloads_match(&op.op_kind, &local_payload, &op.payload)?
                 {
                     return Ok(Some(op.origin_id == local_origin_id));
                 }
@@ -3494,6 +4458,58 @@ fn preflight_collisions(
         Some(false) => Err(RelayError::InvalidResponse),
         None => Ok(()),
     }
+}
+
+/// The relay consumes ordinary recording claims, while main's live, agent,
+/// settlement and full-state payloads retain their exact context.
+pub(crate) fn without_recording_claim(
+    kind: &str,
+    payload: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let context = payload.get("authorContext")?;
+    let account = context.get("accountId")?.as_str()?;
+    if crate::outbound::ordinary_account_context(account).as_ref() != Some(context) {
+        return None;
+    }
+    match kind {
+        "moment.append"
+            if payload.get("settlementReference").is_none()
+                && payload.get("attributionUnavailable").is_none() => {}
+        "ydoc.update"
+            if payload.get("isBaseState") == Some(&serde_json::Value::Bool(false))
+                && payload
+                    .get("actorOriginId")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(account)
+                && payload["attribution"]["actorKind"] == "human" => {}
+        _ => return None,
+    }
+    let mut stored = payload.clone();
+    stored.as_object_mut()?.remove("authorContext");
+    Some(stored)
+}
+
+pub(crate) fn replication_payloads_match(
+    kind: &str,
+    left: &serde_json::Value,
+    right: &serde_json::Value,
+) -> Result<bool, SyncError> {
+    // A lost push acknowledgement can leave the claim only in the local journal.
+    // Two claims, or any other content difference, still compare exactly.
+    let stripped_left = right
+        .get("authorContext")
+        .is_none()
+        .then(|| without_recording_claim(kind, left))
+        .flatten();
+    let stripped_right = left
+        .get("authorContext")
+        .is_none()
+        .then(|| without_recording_claim(kind, right))
+        .flatten();
+    Ok(
+        canonical_json_bytes(stripped_left.as_ref().unwrap_or(left))?
+            == canonical_json_bytes(stripped_right.as_ref().unwrap_or(right))?,
+    )
 }
 
 pub(crate) fn canonical_json_bytes(value: &serde_json::Value) -> Result<Vec<u8>, SyncError> {
@@ -3516,6 +4532,125 @@ pub(crate) fn take_canonical_json_call_count() -> usize {
         calls.set(0);
         count
     })
+}
+
+/// Whether a held op is retained across passes, so the cursor can move past
+/// it: work behind a live session, and a hosted moment or Y.Doc row whose
+/// path waits for a departed document to park. A hosted document that is
+/// not ready retains nothing.
+fn retained_while_held(op: &ReplicationEnvelope, reason: &str) -> bool {
+    match reason {
+        crate::hosted::PATH_HELD_BY_DEPARTED => true,
+        "ydoc-session-live" => {
+            matches!(op.op_kind.as_str(), "conflict.resolve" | "moment.append")
+        }
+        _ => false,
+    }
+}
+
+/// How a pass holds later work behind an op that cannot apply yet.
+enum Holding {
+    /// Admission takes each origin in sequence, so it refuses later ops of a
+    /// held origin with a gap.
+    ByOrigin,
+    /// A hosted replica admits sparsely, so the pass itself holds later ops of
+    /// a held document. `behind` gives, for each document whose retained work
+    /// runs past this pass's replay, the relay position of the first op the
+    /// replay left out: that op and every later one of the document hold.
+    /// `unready` names the documents in the scope that are not ready.
+    ByDocument {
+        behind: BTreeMap<String, i64>,
+        unready: BTreeSet<String>,
+    },
+}
+
+impl Holding {
+    fn key(&self, op: &ReplicationEnvelope) -> Option<String> {
+        match self {
+            Self::ByOrigin => Some(op.origin_id.clone()),
+            Self::ByDocument { .. } => crate::hosted::hosted_document(op).map(str::to_owned),
+        }
+    }
+
+    /// Why a hosted replica holds `op` back before routing it
+    /// ([`crate::hosted::held_before_routing`]).
+    fn held_before_routing(
+        &self,
+        store: &EngineStore,
+        op: &ReplicationEnvelope,
+    ) -> Result<Option<&'static str>, RelayError> {
+        let Self::ByDocument { unready, .. } = self else {
+            return Ok(None);
+        };
+        store
+            .read_with(|conn| crate::hosted::held_before_routing(conn, unready, op))
+            .map_err(local)
+    }
+
+    /// The document of `op`, when it is a hosted document that is not ready.
+    fn unready<'a>(&self, op: &'a ReplicationEnvelope) -> Option<&'a str> {
+        let Self::ByDocument { unready, .. } = self else {
+            return None;
+        };
+        crate::hosted::hosted_document(op).filter(|object_id| unready.contains(*object_id))
+    }
+
+    /// Stop a ready hosted document at `op`, whose conflict parent the feed
+    /// withholds: it can wait indefinitely, so the document is held there
+    /// and retains nothing, as one that is not ready.
+    fn stop_at_withheld_parent(&mut self, op: &ReplicationEnvelope, reason: &str) {
+        if let Self::ByDocument { unready, .. } = self
+            && reason == crate::hosted::CONFLICT_PARENT_WITHHELD
+            && let Some(object_id) = crate::hosted::hosted_document(op)
+        {
+            unready.insert(object_id.to_owned());
+        }
+    }
+}
+
+#[derive(Default)]
+struct AppliedPass {
+    applied: usize,
+    refused: usize,
+    skipped: usize,
+    conflicts_opened: i64,
+    changed_paths: ChangedPaths,
+    /// The decisions journaled rows of each hosted document that is not
+    /// ready stored, which the pass has yet to check against what holds
+    /// their paths.
+    redelivered: BTreeMap<String, ChangedPaths>,
+    refusals: Vec<crate::ReplicationRefusal>,
+    sharing_declined: Vec<crate::SharingDeclined>,
+    record_facts: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
+    settlement_report_id: Option<String>,
+    /// Settlement or deferred replay left work for another pass.
+    has_more: bool,
+    /// Each hosted document that is not ready, that stopped at a withheld
+    /// conflict parent, or whose work would pass the retention limit, whose
+    /// ops did not all apply, with the first that did not.
+    stopped: BTreeMap<String, ReplicationEnvelope>,
+}
+
+/// The documents a scope names, each once, with its path.
+fn hosted_scope_documents(scope: &HostedScope) -> Result<BTreeMap<String, String>, RelayError> {
+    let bounded = |value: &str| {
+        crate::model::bounded(value, "hosted scope fields must be non-empty and bounded").is_ok()
+    };
+    let mut documents = BTreeMap::new();
+    if !bounded(&scope.token) {
+        return Err(RelayError::InvalidResponse);
+    }
+    for document in &scope.documents {
+        if !bounded(&document.object_id)
+            || !bounded(&document.path)
+            || documents
+                .insert(document.object_id.clone(), document.path.clone())
+                .is_some()
+        {
+            return Err(RelayError::InvalidResponse);
+        }
+    }
+    Ok(documents)
 }
 
 fn merge_by_origin(ops: Vec<ReplicationEnvelope>) -> Vec<ReplicationEnvelope> {
@@ -3569,15 +4704,20 @@ fn list_workspace_origins(
     })
 }
 
-fn local_max_origin_seq(
+/// The highest sequence `origin_id` wrote here. A hosted replica's own origin
+/// reads its counter too, which outlives the journal rows it numbered.
+pub(crate) fn local_max_origin_seq(
     store: &EngineStore,
     workspace_id: &str,
     origin_id: &str,
 ) -> Result<i64, SyncError> {
     store.read_with(|conn| {
         conn.query_row(
-            "SELECT COALESCE(MAX(origin_seq),-1) FROM replication_log \
-             WHERE workspace_id=?1 AND origin_id=?2",
+            "SELECT MAX(COALESCE((SELECT MAX(origin_seq) FROM replication_log \
+               WHERE workspace_id=?1 AND origin_id=?2),-1), \
+             COALESCE((SELECT h.last_outbound_seq FROM hosted_replicas h \
+               JOIN sync_identity i ON i.workspace_id=h.workspace_id \
+               WHERE h.workspace_id=?1 AND i.origin_id=?2),-1))",
             params![workspace_id, origin_id],
             |row| row.get(0),
         )
@@ -3589,8 +4729,10 @@ fn validate_push_response(
     response: &PushResponse,
     batch: &[ReplicationEnvelope],
     local_max: i64,
+    hosted: bool,
 ) -> Result<(), RelayError> {
     crate::settlement_publication::validate_push_refusals(&response.settlement_refusals, batch)?;
+    crate::hosted::validate_push_refusals(response, batch, hosted)?;
     let last = batch
         .last()
         .map(|op| op.origin_seq)
@@ -3611,8 +4753,23 @@ fn validate_push_response(
     Ok(())
 }
 
-fn validate_probe_response(response: &PushResponse) -> Result<(), RelayError> {
+/// A share log answers for its whole batch: only the hosted log refuses ops one at a time.
+pub(crate) fn validate_share_push_response(
+    push: &PushResponse,
+    batch_len: usize,
+) -> Result<(), RelayError> {
+    if push.accepted != batch_len
+        || push.inserted.checked_add(push.skipped) != Some(push.accepted)
+        || !push.hosted_refusals.is_empty()
+    {
+        return Err(RelayError::InvalidResponse);
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_probe_response(response: &PushResponse) -> Result<(), RelayError> {
     if !response.settlement_refusals.is_empty()
+        || !response.hosted_refusals.is_empty()
         || response.accepted != 0
         || response.inserted != 0
         || response.skipped != 0
@@ -3644,27 +4801,62 @@ fn validate_pull_page(
     workspace_id: &str,
     cursor: i64,
 ) -> Result<(), RelayError> {
-    if response.ops.len() > crate::MAX_PULL_OPS
-        || !(0..=crate::MAX_WIRE_INTEGER).contains(&response.next_cursor)
-        || (!response.has_more && response.next_cursor < cursor)
+    validate_log_page(
+        &response.ops,
+        response.next_cursor,
+        response.has_more,
+        workspace_id,
+        cursor,
+        false,
+    )
+}
+
+/// A hosted page may end past its last op: the scoped feed's cursor passes
+/// the rows it withholds.
+fn validate_hosted_page(
+    response: &HostedPullResponse,
+    workspace_id: &str,
+    cursor: i64,
+) -> Result<(), RelayError> {
+    validate_log_page(
+        &response.ops,
+        response.next_cursor,
+        response.has_more,
+        workspace_id,
+        cursor,
+        true,
+    )
+}
+
+fn validate_log_page(
+    ops: &[ReplicationEnvelope],
+    next_cursor: i64,
+    has_more: bool,
+    workspace_id: &str,
+    cursor: i64,
+    passes_withheld_rows: bool,
+) -> Result<(), RelayError> {
+    if ops.len() > crate::MAX_PULL_OPS
+        || !(0..=crate::MAX_WIRE_INTEGER).contains(&next_cursor)
+        || (!has_more && next_cursor < cursor)
     {
         return Err(RelayError::InvalidResponse);
     }
-    if response.has_more && response.next_cursor <= cursor {
+    if has_more && next_cursor <= cursor {
         return Err(RelayError::NoProgress);
     }
     let mut previous = cursor;
-    for op in &response.ops {
+    for op in ops {
         if op.workspace_id != workspace_id || op.validate().is_err() {
             return Err(RelayError::InvalidResponse);
         }
         let relay_seq = op.relay_seq.ok_or(RelayError::InvalidResponse)?;
-        if relay_seq <= previous || relay_seq > response.next_cursor {
+        if relay_seq <= previous || relay_seq > next_cursor {
             return Err(RelayError::InvalidResponse);
         }
         previous = relay_seq;
     }
-    if previous != response.next_cursor {
+    if !passes_withheld_rows && previous != next_cursor {
         return Err(RelayError::InvalidResponse);
     }
     Ok(())
@@ -3965,16 +5157,13 @@ fn write_share_proposal_scan_position(
 /// Whether every path this moment names sits inside the pinned grant.
 ///
 /// The outbound twin of `enforce_share_view_boundary`'s containment loop,
-/// reading the same four fields through the same rule. A moment naming one
-/// path outside the grant is not this share's to offer, in either direction —
-/// and a moment naming no path at all describes no file, so there is nothing
-/// to propose.
-fn proposal_paths_within_grant(payload: &serde_json::Value, granted: &crate::ShareGrant) -> bool {
+/// reading the same paths through the same rule. A moment naming one path
+/// outside the grant is not this share's to offer, in either direction — and
+/// a moment naming no path at all describes no file, so there is nothing to
+/// propose.
+fn proposal_paths_within_grant(moment: MomentRefs<'_>, granted: &crate::ShareGrant) -> bool {
     let mut named = false;
-    for field in crate::share::MOMENT_PATH_FIELDS {
-        let Some(path) = string_field(payload, field) else {
-            continue;
-        };
+    for path in moment.paths() {
         named = true;
         if !crate::share::selected_path_within_grant(path, granted) {
             return false;
@@ -4021,30 +5210,28 @@ struct ShareProposalScan {
 /// granter must end up with, and the relay derives the moment's own label from
 /// the two paths at accept.
 fn proposed_change(op: &ReplicationEnvelope) -> ShareProposalChange {
+    let moment = MomentRefs::read(&op.payload);
     ShareProposalChange {
-        based_on_path: string_field(&op.payload, "payloadBeforePath").map(str::to_owned),
-        based_on_blob_sha256: string_field(&op.payload, "payloadBeforeBlobSha256")
+        based_on_path: moment.payload_before.path.map(str::to_owned),
+        based_on_blob_sha256: moment
+            .payload_before
+            .blob_sha256
             .filter(|sha256| valid_sha256(sha256))
             .map(str::to_owned),
-        operation: if string_field(&op.payload, "operation") == Some("delete") {
+        operation: if moment.operation == Some("delete") {
             "delete".to_owned()
         } else {
             "write".to_owned()
         },
-        after_path: string_field(&op.payload, "payloadAfterPath").map(str::to_owned),
-        after_blob_sha256: string_field(&op.payload, "payloadAfterBlobSha256")
+        after_path: moment.payload_after.path.map(str::to_owned),
+        after_blob_sha256: moment
+            .payload_after
+            .blob_sha256
             .filter(|sha256| valid_sha256(sha256))
             .map(str::to_owned),
         // The relay accepts exactly two content kinds, so state one of them. A
-        // moment carrying neither is text, the same reading
-        // `ContentKind::from_wire` applies on apply.
-        after_content_kind: Some(
-            if string_field(&op.payload, "payloadAfterContentKind") == Some("binary") {
-                "binary".to_owned()
-            } else {
-                "text".to_owned()
-            },
-        ),
+        // moment carrying neither is text, as on apply.
+        after_content_kind: Some(moment.payload_after.content_kind.as_str().to_owned()),
         after_byte_length: op
             .payload
             .get("payloadAfterByteLength")
@@ -4101,10 +5288,13 @@ fn collect_share_proposal_changes(
             if op.origin_seq > submit_through {
                 break 'pages;
             }
+            let moment = match op.op_kind.as_str() {
+                "moment.append" => Some(MomentRefs::read(&op.payload)),
+                _ => None,
+            };
             // An open write stops the scan at its file's first op past what
             // is already settled; a settled op is read past as usual.
-            if op.op_kind == "moment.append"
-                && let Some(object_id) = string_field(&op.payload, "objectId")
+            if let Some(object_id) = moment.and_then(|moment| moment.object_id)
                 && skips.stop_at.contains(object_id)
                 && skips
                     .settled
@@ -4114,15 +5304,15 @@ fn collect_share_proposal_changes(
                 more_pending = true;
                 break 'pages;
             }
-            if op.op_kind == "moment.append"
-                && let Some(object_id) = string_field(&op.payload, "objectId").map(str::to_owned)
+            if let Some(moment) = moment
+                && let Some(object_id) = moment.object_id.map(str::to_owned)
                 && !outside_share.contains(&object_id)
                 && skips
                     .settled
                     .get(&object_id)
                     .is_none_or(|through| op.origin_seq > *through)
             {
-                if !proposal_paths_within_grant(&op.payload, granted) {
+                if !proposal_paths_within_grant(moment, granted) {
                     // One op outside the grant takes the whole file out of
                     // this share's reach. A rename out of the grant must not
                     // leave the file's pre-rename state proposed, so what the
@@ -4522,11 +5712,11 @@ fn replay_share_view_op<T: RelayTransport>(
             .version_id
     };
     if envelope.op_kind == "moment.append" {
-        let operation = string_field(&envelope.payload, "operation");
-        let path = string_field(&envelope.payload, "path");
-        match operation {
+        let moment = MomentRefs::read(&envelope.payload);
+        let after_kind = moment.payload_after.content_kind.as_str();
+        match moment.operation {
             Some("delete") => {
-                if let Some(path) = path {
+                if let Some(path) = moment.path {
                     replay_share_delete(
                         &mut *context.store,
                         context.workspace_id,
@@ -4541,10 +5731,11 @@ fn replay_share_view_op<T: RelayTransport>(
                 }
             }
             Some("rename") => {
-                let before = string_field(&envelope.payload, "payloadBeforePath");
-                let after = string_field(&envelope.payload, "payloadAfterPath").or(path);
-                let sha = string_field(&envelope.payload, "payloadAfterBlobSha256");
-                if let (Some(before), Some(after), Some(sha)) = (before, after, sha) {
+                if let (Some(before), Some(after), Some(sha)) = (
+                    moment.payload_before.path,
+                    moment.after_path(),
+                    moment.payload_after.blob_sha256,
+                ) {
                     if let Err(error) = replay_share_write(
                         context.transport,
                         &mut *context.store,
@@ -4554,39 +5745,22 @@ fn replay_share_view_op<T: RelayTransport>(
                         envelope,
                         after,
                         sha,
-                        content_kind_name(envelope.payload.get("payloadAfterContentKind")),
+                        after_kind,
+                        moment.object_id,
+                        Some(before),
                         context.faults,
                         &mut *context.applied,
                         &mut *context.changed,
                         &mut *context.blob_refusals,
                     ) {
                         refuse_replay_unit(context, &mut refused, after, error)?;
-                        // The rename's delete does not run. Removing the old
-                        // path when its replacement was refused would lose the
-                        // file outright — the one outcome worse than not
-                        // renaming it.
-                        record_refused_blobs(context, envelope, &refused);
-                        return Ok(());
-                    }
-                    if before != after {
-                        replay_share_delete(
-                            &mut *context.store,
-                            context.workspace_id,
-                            &main_version_id,
-                            context.share_id,
-                            envelope,
-                            before,
-                            context.faults,
-                            &mut *context.applied,
-                            &mut *context.changed,
-                        )?;
                     }
                 }
             }
             Some("write") => {
-                let after = string_field(&envelope.payload, "payloadAfterPath").or(path);
-                let sha = string_field(&envelope.payload, "payloadAfterBlobSha256");
-                if let (Some(after), Some(sha)) = (after, sha) {
+                if let (Some(after), Some(sha)) =
+                    (moment.after_path(), moment.payload_after.blob_sha256)
+                {
                     if let Err(error) = replay_share_write(
                         context.transport,
                         &mut *context.store,
@@ -4596,7 +5770,9 @@ fn replay_share_view_op<T: RelayTransport>(
                         envelope,
                         after,
                         sha,
-                        content_kind_name(envelope.payload.get("payloadAfterContentKind")),
+                        after_kind,
+                        moment.object_id,
+                        None,
                         context.faults,
                         &mut *context.applied,
                         &mut *context.changed,
@@ -4609,16 +5785,9 @@ fn replay_share_view_op<T: RelayTransport>(
             _ => {}
         }
     } else if envelope.op_kind == "version.create" {
-        for snapshot in envelope
-            .payload
-            .get("forkSnapshots")
-            .and_then(serde_json::Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            let path = string_field(snapshot, "path");
-            let sha = string_field(snapshot, "blobSha256");
-            if let (Some(path), Some(sha)) = (path, sha) {
+        for snapshot in VersionCreateRefs::read(&envelope.payload).snapshots() {
+            let content = snapshot.content;
+            if let (Some(path), Some(sha)) = (content.path, content.blob_sha256) {
                 // Per SNAPSHOT, so one refused file in a shared version does
                 // not take its siblings with it. The loop continues.
                 if let Err(error) = replay_share_write(
@@ -4630,7 +5799,9 @@ fn replay_share_view_op<T: RelayTransport>(
                     envelope,
                     path,
                     sha,
-                    content_kind_name(snapshot.get("contentKind")),
+                    content.content_kind.as_str(),
+                    snapshot.object_id,
+                    None,
                     context.faults,
                     &mut *context.applied,
                     &mut *context.changed,
@@ -4656,6 +5827,8 @@ fn replay_share_write<T: RelayTransport>(
     path: &str,
     sha256: &str,
     content_kind: &'static str,
+    object_id: Option<&str>,
+    rename_from: Option<&str>,
     faults: &dyn FaultInjector,
     applied: &mut usize,
     changed: &mut BTreeMap<String, ShareViewChangedPath>,
@@ -4684,7 +5857,16 @@ fn replay_share_write<T: RelayTransport>(
     // find anything this call did not. The writes below therefore keep the
     // plain `domain` mapping.
     dohc_engine_domain::validate_plaintext_storable_path(path).map_err(replayed_domain)?;
-    let key = replay_id(share_id, envelope, "write", path);
+    let key = replay_id(
+        share_id,
+        envelope,
+        if rename_from.is_some() {
+            "rename"
+        } else {
+            "write"
+        },
+        path,
+    );
     let request_id = format!("share-view:{key}");
     let already_applied = store
         .read_with(|conn| {
@@ -4697,6 +5879,16 @@ fn replay_share_write<T: RelayTransport>(
         })
         .map_err(local)?;
     if already_applied {
+        if let Some(before) = rename_from {
+            changed.insert(
+                before.to_owned(),
+                ShareViewChangedPath {
+                    path: before.to_owned(),
+                    operation: "delete",
+                    content_kind,
+                },
+            );
+        }
         changed.insert(
             path.to_owned(),
             ShareViewChangedPath {
@@ -4765,12 +5957,96 @@ fn replay_share_write<T: RelayTransport>(
             },
         ));
     }
+    if content_kind != "binary" && std::str::from_utf8(&bytes).is_err() {
+        return Err(RelayError::ShareOpInvalid {
+            reason: "share write claims text content the shared bytes cannot be",
+        });
+    }
+    if let Some(before) = rename_from {
+        let input = dohc_engine_domain::RenameTextFile {
+            workspace_id: workspace_id.to_owned(),
+            version_id: version_id.to_owned(),
+            from_path: before.to_owned(),
+            to_path: path.to_owned(),
+            moment_id: format!("moment-share-{key}"),
+            request_id: Some(request_id.clone()),
+            metadata_origin: "sync".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            author_json: share_authors::received_authors(envelope),
+            now_ms: envelope.recorded_at_ms,
+        };
+        let result =
+            VersionedTextStore::new(store).rename_text_file_with(&input, faults, |tx, result| {
+                if result.before.blob_sha256 != sha256
+                    || object_id
+                        .filter(|id| received_object_token(id))
+                        .is_some_and(|id| {
+                            result.object.object_id != id
+                                && !result.object.object_id.starts_with("object-share-")
+                        })
+                {
+                    return Err(DomainError::InvalidInput {
+                        reason: "received rename does not match its object and content",
+                    });
+                }
+                dohc_engine_storage::count_remote_change_in_tx(tx, workspace_id)?;
+                Ok(())
+            });
+        match result {
+            Ok(result) => {
+                if !result.deduped {
+                    *applied = applied.checked_add(1).ok_or(RelayError::InvalidResponse)?;
+                }
+                changed.insert(
+                    before.to_owned(),
+                    ShareViewChangedPath {
+                        path: before.to_owned(),
+                        operation: "delete",
+                        content_kind,
+                    },
+                );
+                changed.insert(
+                    path.to_owned(),
+                    ShareViewChangedPath {
+                        path: path.to_owned(),
+                        operation: "write",
+                        content_kind,
+                    },
+                );
+                return Ok(());
+            }
+            Err(DomainError::FileNotFound | DomainError::TargetPathExists) => {}
+            Err(DomainError::InvalidInput {
+                reason: "received rename does not match its object and content",
+            }) => {}
+            Err(error) => return Err(replayed_domain(error)),
+        }
+    }
+    // The rename receipt covers the fallback write and source delete together.
+    let rename_delete = rename_from.map(|before| {
+        let key = replay_id(share_id, envelope, "delete", before);
+        DeleteTextFile {
+            workspace_id: workspace_id.to_owned(),
+            version_id: version_id.to_owned(),
+            path: before.to_owned(),
+            moment_id: format!("moment-share-{key}"),
+            request_id: Some(format!("share-view:{key}")),
+            metadata_origin: "sync".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            author_json: share_authors::received_authors(envelope),
+            now_ms: envelope.recorded_at_ms,
+        }
+    });
     let deduped = {
         if content_kind == "binary" {
             let input = WriteBinary {
                 workspace_id: workspace_id.to_owned(),
                 version_id: version_id.to_owned(),
-                object_id: format!("object-share-{key}"),
+                object_id: object_id
+                    .filter(|id| received_object_token(id))
+                    .map_or_else(|| format!("object-share-{key}"), str::to_owned),
                 path: path.to_owned(),
                 bytes,
                 moment_id: format!("moment-share-{key}"),
@@ -4785,7 +6061,30 @@ fn replay_share_write<T: RelayTransport>(
                 store,
                 workspace_id,
                 faults,
-                |tx| dohc_engine_domain::write_binary_in_tx(tx, &input),
+                |tx| {
+                    prepare_received_identity(
+                        tx,
+                        workspace_id,
+                        version_id,
+                        path,
+                        &input.object_id,
+                    )?;
+                    if let Some(before) = rename_from {
+                        rebind_received_rename(
+                            tx,
+                            workspace_id,
+                            version_id,
+                            before,
+                            path,
+                            &input.object_id,
+                        )?;
+                    }
+                    let result = dohc_engine_domain::write_binary_in_tx(tx, &input)?;
+                    if let Some(delete) = &rename_delete {
+                        delete_received_rename_source_in_tx(tx, delete)?;
+                    }
+                    Ok(result)
+                },
                 |result| result.deduped,
             )
             .map_err(domain)?
@@ -4805,7 +6104,9 @@ fn replay_share_write<T: RelayTransport>(
             let input = WriteText {
                 workspace_id: workspace_id.to_owned(),
                 version_id: version_id.to_owned(),
-                object_id: format!("object-share-{key}"),
+                object_id: object_id
+                    .filter(|id| received_object_token(id))
+                    .map_or_else(|| format!("object-share-{key}"), str::to_owned),
                 path: path.to_owned(),
                 text,
                 moment_id: format!("moment-share-{key}"),
@@ -4820,7 +6121,30 @@ fn replay_share_write<T: RelayTransport>(
                 store,
                 workspace_id,
                 faults,
-                |tx| dohc_engine_domain::write_text_in_tx(tx, &input),
+                |tx| {
+                    prepare_received_identity(
+                        tx,
+                        workspace_id,
+                        version_id,
+                        path,
+                        &input.object_id,
+                    )?;
+                    if let Some(before) = rename_from {
+                        rebind_received_rename(
+                            tx,
+                            workspace_id,
+                            version_id,
+                            before,
+                            path,
+                            &input.object_id,
+                        )?;
+                    }
+                    let result = dohc_engine_domain::write_text_in_tx(tx, &input)?;
+                    if let Some(delete) = &rename_delete {
+                        delete_received_rename_source_in_tx(tx, delete)?;
+                    }
+                    Ok(result)
+                },
                 |result| result.deduped,
             )
             .map_err(domain)?
@@ -4838,6 +6162,87 @@ fn replay_share_write<T: RelayTransport>(
             content_kind,
         },
     );
+    if let Some(before) = rename_from {
+        changed.insert(
+            before.to_owned(),
+            ShareViewChangedPath {
+                path: before.to_owned(),
+                operation: "delete",
+                content_kind,
+            },
+        );
+    }
+    Ok(())
+}
+
+// Rebinding can vacate the source before deletion; the rename receipt still covers it.
+fn delete_received_rename_source_in_tx(
+    tx: &Transaction<'_>,
+    input: &DeleteTextFile,
+) -> Result<(), DomainError> {
+    match dohc_engine_domain::delete_text_in_tx(tx, input) {
+        Ok(_) | Err(DomainError::FileNotFound) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) fn received_object_token(id: &str) -> bool {
+    id.strip_prefix("share-object:v1:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
+}
+
+// The received head owns this path, including when it displaces an unsubmitted draft.
+// Retire its alias and current snapshot so reads cannot expose two heads at one path.
+// Draft moments and blobs remain in history; pre-token received stores keep their identity.
+fn prepare_received_identity(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+    path: &str,
+    token: &str,
+) -> Result<(), DomainError> {
+    if !received_object_token(token) {
+        return Ok(());
+    }
+    let previous: Option<String> = tx.query_row("SELECT object_id FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND path=?3",
+        params![workspace_id, version_id, path], |row| row.get(0)).optional().map_err(|err| DomainError::Storage(StorageError::corrupt_public(err)))?;
+    if let Some(previous) = previous.filter(|id| id != token && !id.starts_with("object-share-")) {
+        tx.execute(
+            "DELETE FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            params![workspace_id, version_id, previous],
+        )
+        .map_err(|err| DomainError::Storage(StorageError::persist_public(err)))?;
+        tx.execute(
+            "DELETE FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            params![workspace_id, version_id, previous],
+        )
+        .map_err(|err| DomainError::Storage(StorageError::persist_public(err)))?;
+    }
+    Ok(())
+}
+
+// A fallback write keeps the token and its preimage while releasing the old path.
+fn rebind_received_rename(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+    before: &str,
+    after: &str,
+    token: &str,
+) -> Result<(), DomainError> {
+    if !received_object_token(token) {
+        return Ok(());
+    }
+    tx.execute("UPDATE path_aliases SET path=?4 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND path=?5",
+        params![workspace_id,version_id,token,after,before])
+        .map_err(|err| DomainError::Storage(StorageError::persist_public(err)))?;
+    tx.execute("UPDATE snapshots SET path=?4 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND path=?5",
+        params![workspace_id,version_id,token,after,before])
+        .map_err(|err| DomainError::Storage(StorageError::persist_public(err)))?;
     Ok(())
 }
 
@@ -4952,14 +6357,6 @@ fn string_field<'a>(value: &'a serde_json::Value, name: &str) -> Option<&'a str>
     value.get(name).and_then(serde_json::Value::as_str)
 }
 
-fn content_kind_name(value: Option<&serde_json::Value>) -> &'static str {
-    if value.and_then(serde_json::Value::as_str) == Some("binary") {
-        "binary"
-    } else {
-        "text"
-    }
-}
-
 fn domain(error: DomainError) -> RelayError {
     if matches!(error, DomainError::Storage(StorageError::FileLocked)) {
         return RelayError::StoreBusy;
@@ -4996,16 +6393,22 @@ pub(crate) fn replayed_domain(error: DomainError) -> RelayError {
     }
 }
 
+/// Fold one routed op into its pass. `unready` names its hosted document when
+/// that is not ready; the decisions a row of it the journal already held
+/// stored go to `redelivered`, by document, for its pass to keep what still
+/// stands of them once it has applied ([`crate::hosted::redelivered_unready`]).
 #[allow(clippy::too_many_arguments)]
 fn accumulate_pull_outcome(
     store: &EngineStore,
     op: &ReplicationEnvelope,
+    unready: Option<&str>,
     outcome: ApplyOutcome<crate::RoutedApply>,
     applied: &mut usize,
     refused: &mut usize,
     skipped: &mut usize,
     conflicts_opened: &mut i64,
-    changed_paths: &mut BTreeMap<(String, String), crate::MomentMaterializationChange>,
+    changed_paths: &mut ChangedPaths,
+    redelivered: &mut BTreeMap<String, ChangedPaths>,
     refusals: &mut Vec<crate::ReplicationRefusal>,
     sharing_declined: &mut Vec<crate::SharingDeclined>,
     record_facts: &mut Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
@@ -5050,10 +6453,14 @@ fn accumulate_pull_outcome(
             if let Some(refusal) = crate::apply::read_replayed_refusal(store, op).map_err(local)? {
                 push_refusal_once(refusals, refusal);
             }
+            let stored = match unready {
+                Some(object_id) => redelivered.entry(object_id.to_owned()).or_default(),
+                None => &mut *changed_paths,
+            };
             for change in
                 crate::router::redelivered_materialization_changes(store, op).map_err(local)?
             {
-                insert_changed_path(changed_paths, change);
+                insert_changed_path(stored, change);
             }
             *skipped = skipped.checked_add(1).ok_or(RelayError::InvalidResponse)?;
         }
@@ -5064,8 +6471,26 @@ fn accumulate_pull_outcome(
     Ok(())
 }
 
-fn insert_changed_path(
-    changed_paths: &mut BTreeMap<(String, String), crate::MomentMaterializationChange>,
+/// A pass's materialization decisions, by version and path.
+pub(crate) type ChangedPaths = BTreeMap<(String, String), crate::MomentMaterializationChange>;
+
+/// A page's changes in the order they apply: every delete, then every write,
+/// each in path order. A disk that ignores case or Unicode normalization
+/// opens `Notes.md` as the `notes.md` that a rename deletes, so a write that
+/// ran first would go with that delete.
+pub(crate) fn page_order<T>(
+    changes: impl IntoIterator<Item = T>,
+    operation: impl Fn(&T) -> &str,
+) -> Vec<T> {
+    let (mut page, writes): (Vec<T>, Vec<T>) = changes
+        .into_iter()
+        .partition(|change| operation(change) == "delete");
+    page.extend(writes);
+    page
+}
+
+pub(crate) fn insert_changed_path(
+    changed_paths: &mut ChangedPaths,
     change: crate::MomentMaterializationChange,
 ) {
     changed_paths.insert((change.version_id.clone(), change.path.clone()), change);
@@ -5129,6 +6554,17 @@ fn local(error: SyncError) -> RelayError {
         return RelayError::StoreBusy;
     }
     RelayError::Local(error.code().to_owned())
+}
+
+/// A hosted feed request on a transport built for an ordinary replica.
+pub fn no_hosted_feed() -> RelayError {
+    RelayError::HostedRefusal("relay transport serves no hosted feed")
+}
+
+/// An ordinary relay operation or route on a hosted replica, which reaches
+/// only the session host's scoped feed.
+pub fn hosted_feed_only() -> RelayError {
+    RelayError::HostedRefusal("a hosted replica uses only its hosted feed")
 }
 
 #[cfg(test)]
@@ -5198,7 +6634,8 @@ mod push_budget_tests {
                     pending: None,
                     budget_exhausted: false,
                 },
-                missing: Some(BTreeSet::from([sha])),
+                missing: BTreeSet::from([sha]),
+                inventory: VecDeque::new(),
                 uploaded_ops: 0,
                 sending: None,
             };
@@ -5210,12 +6647,13 @@ mod push_budget_tests {
                         "ws",
                         &identity,
                         &mut page,
-                        std::time::Instant::now()
+                        std::time::Instant::now(),
+                        &mut BTreeSet::new(),
                     )
                     .unwrap(),
                 2
             );
-            assert!(page.missing.unwrap().is_empty());
+            assert!(page.missing.is_empty());
         }
     }
 
@@ -5252,7 +6690,8 @@ mod push_budget_tests {
                 budget_exhausted: false,
             },
             blob_refs: BTreeMap::new(),
-            missing: None,
+            inventory: VecDeque::new(),
+            missing: BTreeSet::new(),
             uploaded_ops: 0,
             sending: None,
         };
@@ -5260,7 +6699,14 @@ mod push_budget_tests {
         let started = std::time::Instant::now() - PUSH_PRE_APPEND_BUDGET;
         assert_eq!(
             client
-                .upload_push_prefix(&store, "ws", &identity, &mut page, started)
+                .upload_push_prefix(
+                    &store,
+                    "ws",
+                    &identity,
+                    &mut page,
+                    started,
+                    &mut BTreeSet::new()
+                )
                 .unwrap(),
             1
         );
@@ -5330,6 +6776,58 @@ mod pull_page_validation_tests {
         ] {
             assert_eq!(
                 validate_pull_page(&invalid, "ws", 10),
+                Err(RelayError::InvalidResponse)
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_hosted_page_may_end_past_its_last_op() {
+        let scope = super::HostedScope {
+            token: "scope".to_owned(),
+            documents: Vec::new(),
+        };
+        for (ops, next_cursor) in [(vec![op(Some(12))], 15), (Vec::new(), 15)] {
+            let hosted = super::HostedPullResponse {
+                scope: scope.clone(),
+                ops: ops.clone(),
+                next_cursor,
+                has_more: false,
+            };
+            super::validate_hosted_page(&hosted, "ws", 10)
+                .expect("the scoped feed's cursor passes rows it withholds");
+            let ordinary = PullResponse {
+                ops,
+                next_cursor,
+                has_more: false,
+            };
+            assert_eq!(
+                validate_pull_page(&ordinary, "ws", 10),
+                Err(RelayError::InvalidResponse)
+            );
+        }
+        for invalid in [
+            super::HostedPullResponse {
+                scope: scope.clone(),
+                ops: vec![op(Some(16))],
+                next_cursor: 15,
+                has_more: false,
+            },
+            super::HostedPullResponse {
+                scope: scope.clone(),
+                ops: vec![op(Some(10))],
+                next_cursor: 15,
+                has_more: false,
+            },
+            super::HostedPullResponse {
+                scope,
+                ops: Vec::new(),
+                next_cursor: 9,
+                has_more: false,
+            },
+        ] {
+            assert_eq!(
+                super::validate_hosted_page(&invalid, "ws", 10),
                 Err(RelayError::InvalidResponse)
             );
         }
@@ -5554,6 +7052,7 @@ mod conflict_resolve_blob_ref_tests {
                 result_object_created_at_ms: Some(1),
             },
             effects: Vec::new(),
+            exported_before: None,
             lineage_transition: Some(LineageTransitionV1 {
                 predecessor_claim_id: dohc_engine_storage::hex_sha256(b"predecessor"),
                 predecessor_state_vector_sha256: dohc_engine_storage::hex_sha256(

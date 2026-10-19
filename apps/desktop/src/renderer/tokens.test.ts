@@ -14,6 +14,8 @@ import {
 import { contrastRatio as contrast, luminance, mixHex as mix } from "./accentColor";
 import { MENU_FRAME } from "./ui/Menu";
 
+import { agentTextClass, presentationColor, presentationClasses } from "./workbench/actorPresentation";
+
 const SURFACES = ["bg", "panel", "panel2"] as const;
 
 // The ink alpha of a state fill, so the test can composite it on a surface.
@@ -212,6 +214,14 @@ describe("styles.css mirrors tokens.ts", () => {
       expect(blocks.light, name).toContain(`${name}: ${value};`);
     }
   });
+
+  // index.html's `light dark` follows the OS, so a dark app on a light OS
+  // drew white native checkboxes.
+  it("native controls follow the app theme and check in the accent", () => {
+    expect(blocks.light).toContain("color-scheme: light;");
+    expect(blocks.dark).toContain("color-scheme: dark;");
+    expect(css).toMatch(/\binput \{\s*accent-color: var\(--dohc-accent\);/);
+  });
 });
 
 // An attenuated state fill (a bg-selected/ or bg-hover/ opacity modifier)
@@ -284,5 +294,34 @@ describe("the type stacks name the bundled families", () => {
     it(`${token} is the family ${specifier} declares`, () => {
       expect(declaredFamilies(specifier)).toEqual(new Set([firstFamily(fonts[token])]));
     });
+  }
+});
+
+it("keeps document caret labels at AA for every hue and neutral in both themes", () => {
+  const css = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
+  const label = css.match(/\.dohc-notion-editor \.collaboration-carets__label\s*\{([^}]+)\}/)![1]!;
+  expect(label.match(/\bcolor:\s*([^;]+);/)![1]!.trim()).toBe("var(--dohc-bg)");
+  for (const hue of [null, ...IDENTITY_HUES]) {
+    for (const mode of ["light", "dark"] as const) {
+      expect(contrast(palette[mode].bg, presentationColor({ group: "label", hue, self: false }, "human", mode).stroke), `${hue ?? "neutral"} label (${mode})`).toBeGreaterThanOrEqual(4.5);
+    }
+  }
+});
+
+
+it("keeps agent name, glyph and opaque border contrast on every surface in both themes", () => {
+  for (const mode of ["light", "dark"] as const) {
+    for (const hue of [null, ...IDENTITY_HUES]) {
+      const token = { group: "contrast", hue, self: false };
+      const color = presentationColor(token, "agent", mode).stroke;
+      for (const surface of SURFACES) {
+        expect(contrast(color, palette[mode][surface]), String(hue) + "/" + surface).toBeGreaterThanOrEqual(4.5);
+      }
+      // The name and sparkle beside the avatar take the hue measured above.
+      expect(agentTextClass(token)).toBe(hue ? "text-hue-" + hue : "text-agent");
+      const classes = presentationClasses(token, "agent");
+      expect(classes).toContain(hue ? "border-hue-" + hue : "border-agent");
+      expect(classes).not.toContain("/50");
+    }
   }
 });

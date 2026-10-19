@@ -1,3 +1,4 @@
+import { workspaceIsDeleted, accountIsFenced } from "./storage/accountDeletion";
 import {isDeepStrictEqual} from "node:util";
 import { createHash } from "node:crypto";
 import { posix } from "node:path";
@@ -116,7 +117,7 @@ export type ServerExecutor = Pick<
   | "open" | "dispose" | "notifyClaimed" | "handlePulledPaths" | "relayAnswered" | "groupMessagesArrived" | "hostChanged"
   | "releaseGroupSubscriptions" | "reachHandover" | "relayedClaim" | "pressRelayed" | "automationName"
   | "schedules" | "scheduleMarks" | "claimSchedule" | "failuresChanged" | "datasetsChanged" | "pressDataset" | "holds"
-  | "runs" | "listedRun" | "retry" | "undo" | "undoRunsOf" | "confirmReach"
+  | "runs" | "listedRun" | "retry" | "undo" | "undoRunsOf" | "removePendingRestore" | "confirmReach"
   | "inspectRelayedBatch"
 >;
 
@@ -418,10 +419,11 @@ export async function startAutomationServer(options: AutomationServerOptions) {
   }
 
   async function nameOf(ws: WorkspaceState, userId: string): Promise<string | null> {
+    if (accountIsFenced(storage, userId)) return null;
     const known = ws.names.get(userId);
     if (known !== undefined) return known;
     const name = (await options.lookupUserDisplayName(userId))?.trim() || null;
-    if (name !== null) ws.names.set(userId, cutText(name, 40));
+    if (name !== null && !accountIsFenced(storage, userId) && !ws.closed) ws.names.set(userId, cutText(name, 40));
     return ws.names.get(userId) ?? null;
   }
 
@@ -656,6 +658,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       evaluator: evaluator.forWorkspace(workspaceId),
       store: runStore,
       chat: {
+        hasMessage: chat.hasMessage,
         directory: chat.directory,
         write: async (signal, message, run) => {
           try {
@@ -749,8 +752,8 @@ export async function startAutomationServer(options: AutomationServerOptions) {
         return version === null ? null : (await adapter.readTextFile({ workspaceId, versionId: version.id, path }))?.objectId ?? null;
       },
       listMoments: async (input) => {
-        const page = await adapter.listMoments({ workspaceId, ...input });
-        return { moments: page.moments.map(({ momentId }) => ({ id: momentId, protected: false })), nextBeforeMomentOrder: page.nextBeforeMomentOrder };
+        const page = await adapter.readHistoryPage({ workspaceId, ...input });
+        return { moments: page.moments.map(({ momentId }) => ({ id: momentId, protected: false })), nextCursor: page.nextCursor };
       },
       readMoment: async (momentId) => {
         const moment = await adapter.getMoment({ workspaceId, momentId });
@@ -926,7 +929,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     if (current && current.replica === replica) return;
     const opening = current ? close(current) : Promise.resolve();
     void opening.then(() => {
-      if (!closed && replica && replicas.replica(workspaceId) === replica && !hosted.has(workspaceId)) open(replica);
+      if (!closed && !workspaceIsDeleted(storage, workspaceId) && replica && replicas.replica(workspaceId) === replica && !hosted.has(workspaceId)) open(replica);
     }).catch((error: unknown) => options.onError(`close the automations of workspace "${workspaceId}"`, error));
   }
 
@@ -944,7 +947,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
 
   let capacityReporting = Promise.resolve();
   const excluded = new Map<string, { ownerUserId: string; noticeId: string }>();
-  const allWantedWorkspaces = () => [...new Set([...storage.serverHostedWorkspaces(), ...(options.live?.workspaces() ?? []), ...(options.datasetHost?.automations.wantedWorkspaces() ?? [])])];
+  const allWantedWorkspaces = () => [...new Set([...storage.serverHostedWorkspaces(), ...(options.live?.workspaces() ?? []), ...(options.datasetHost?.automations.wantedWorkspaces() ?? [])])].filter(id => !workspaceIsDeleted(storage, id));
   function wantedWorkspaces(): string[] {
     const running = runningWorkspaces();
     // A copy an owner's action reopened stays open while the action runs,
@@ -1077,7 +1080,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
         : { incarnation: kept.incarnation, unwantedSinceMs: kept.unwantedSinceMs, leftAtMs: kept.leftAtMs },
     });
     try {
-      replicas.reconcile();
+      replicas.reconcile(workspaceId);
       await copyOpened(workspaceId);
       return await work(ownedCopy(scope));
     } finally {
@@ -1147,9 +1150,14 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       await ws.replica.sync();
       return result;
     }),
-    restore: (scope, definitions, again) => withCopy(scope, async (copy) => {
+    restore: (scope, definitions, again, retentionId) => withCopy(scope, async (copy) => {
       const ws = await currentCopy(scope, copy);
-      const result = await ws.executor.undoRunsOf(definitions, trashIn(ws), again);
+      const id = `desktop:${retentionId}`;
+      if (definitions.length === 0) {
+        await ws.executor.removePendingRestore(id);
+        return {undone: 0, left: 0, reverted: 0, missing: 0, keptFields: [], otherKept: 0, errorMessage: null};
+      }
+      const result = await ws.executor.undoRunsOf(definitions, trashIn(ws), again, id);
       // What it put back reaches the relay before the owner's computer takes its turn.
       await ws.replica.sync();
       return result;
@@ -1165,6 +1173,13 @@ export async function startAutomationServer(options: AutomationServerOptions) {
   });
 
   return {
+    deleteAccount(userId: string) {
+      for (const ws of hosted.values()) ws.names.delete(userId);
+    },
+    async deleteWorkspaces(workspaceIds: readonly string[]) {
+      for (const id of workspaceIds) {const ws = hosted.get(id); if (ws) await close(ws); visits.delete(id); excluded.delete(id); toldOverBudget.delete(id); gate.forgetWorkspace(id);}
+      await replicas.deleteWorkspaces(workspaceIds);
+    },
     async pressDataset(auth: Extract<AppBackendAuth, { kind: "named" }>, input: DatasetServerPress, signal: AbortSignal) {
       if (!options.datasetHost) throw notFound();
       return options.datasetHost.automations.press(auth, input.datasetId, signal, async describe => {
@@ -1276,6 +1291,7 @@ export function createRunGate(input: {
   });
 
   return {
+    forgetWorkspace(workspaceId: string) {buckets.delete(workspaceId);},
     async admit(workspaceId: string, signal: AbortSignal): Promise<RunAdmission | null> {
       for (;;) {
         if (signal.aborted) return null;

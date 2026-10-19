@@ -116,12 +116,10 @@ export const CSS_TOKEN_NAMES: Record<keyof ThemeTokens, string> = {
   selection: "--dohc-selection",
 };
 
-// Identity hues for human avatars. ChatAvatar hashes a stable key into this
-// list, so one person keeps one hue across every surface.
+// Display hue choices. Olive belongs to the agent default.
 export const IDENTITY_HUES = [
   "rust",
   "amber",
-  "olive",
   "teal",
   "blue",
   "indigo",
@@ -134,7 +132,6 @@ export const identityHues: Record<"light" | "dark", Record<IdentityHue, string>>
   light: {
     rust: "#88412c",
     amber: "#705012",
-    olive: "#50602a",
     teal: "#22645a",
     blue: "#285884",
     indigo: "#4c528f",
@@ -144,7 +141,6 @@ export const identityHues: Record<"light" | "dark", Record<IdentityHue, string>>
   dark: {
     rust: "#dc9378",
     amber: "#d9b05a",
-    olive: "#b9c47a",
     teal: "#82c9bb",
     blue: "#8fb8e2",
     indigo: "#a7abee",

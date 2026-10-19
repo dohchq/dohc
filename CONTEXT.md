@@ -18,6 +18,40 @@ _Avoid_: self-hosted Drive
 A device's authenticated connection to a dohc server. Workspace permissions determine which work the connection can access.
 _Avoid_: Drive connection (for a self-hosted server)
 
+**Server account**:
+A person's identity on one dohc server. A dohc Drive account is a server account on Drive and carries no authority on any other server.
+_Avoid_: dohc account, global account
+
+**Cell**:
+One deployment of the dohc release behind dohc Drive, holding a set of workspaces. Each workspace lives on exactly one cell. People never see cells; to them Drive is one server.
+_Avoid_: shard, node, tenant
+
+### Privacy
+
+**Usage record**:
+Counts of finished actions per capability, way in, and day, kept on one computer. dohc never sends it. A person can see, copy, clear, or turn it off in Privacy.
+_Avoid_: usage report, telemetry, analytics
+
+**Usage report**:
+A small count of events that a packaged build sends to its report service while the person's switch in Privacy allows it.
+_Avoid_: usage record (that stays on the computer)
+
+**Privacy denial**:
+macOS refusing dohc a folder the person has not allowed in System Settings › Privacy & Security, such as Documents or a removable volume. It has the code `privacy-denied`. It is not about dohc's own Privacy settings.
+_Avoid_: permission error (a file's own permissions)
+
+### Offers
+
+**Offer**:
+A suggestion for a person at a relevant point in their work. Detection changes nothing; the person chooses whether to act.
+_Avoid_: Offering (what dohc sells), Moment (see History)
+
+### History
+
+**Moment**:
+A recorded file change within a workspace version. Writes, renames, and deletions create moments, including saved live edits and restores. History shows each moment as a row. Moments from one multi-file pass, such as a merge or restore, fold into one expandable row.
+_Avoid_: version (the line of history that holds moments), snapshot (a file's current state within a version, which names its latest moment), checkpoint
+
 ### Collections
 
 **Collection**:
@@ -51,6 +85,17 @@ _Avoid_: workflow, zap
 **Personal step**:
 A step in an automation that uses one person's own reach, such as waking that person's agent. Only that person can change it.
 _Avoid_: private step, owner step
+
+### References
+
+**WorkspaceRef**:
+An exclusive source identity, either a workspace id or a recipient source handle, and native object identity with display labels. Labels do not affect equality. A reference grants no authority.
+
+**Received source handle**:
+A relay-derived identity for one source workspace within a recipient namespace. Named recipients share it across grants; link holders share it only within one link grant.
+
+**Received object token**:
+A relay-derived file identity within the same recipient namespace. It survives source renames and never exposes the source object id.
 
 ### Chat
 
@@ -91,7 +136,7 @@ A URL carrying the credential that authenticates a link grant: anyone holding it
 _Avoid_: public link, web share, share URL
 
 **Link holder**:
-A person using a share link without a dohc identity. Known by a link principal and an optional self-claimed, unverified name.
+A person using a share link without a server account. Known by a link principal and an optional self-claimed, unverified name.
 _Avoid_: guest (means sandboxed code in the app runtime), anonymous user, visitor
 
 **Link principal**:
@@ -99,11 +144,11 @@ The server-minted identity for one browser holding one share link. It carries pr
 _Avoid_: anonymous id, device id
 
 **Received share**:
-The recipient-side materialization of a share: either its own workspace or a mount inside a host workspace under `shared-with-me/`, constrained by the grant's access.
+The recipient-side materialization of a share: either its own workspace or a mount inside a host workspace under `shared-with-me/`, constrained by the grant's access. A mount syncs only with the share's server.
 _Avoid_: shared folder, remote workspace
 
 **Pending invite**:
-A share grant addressed to an email with no dohc account yet, claimed on the recipient's first relay contact.
+A share grant addressed to an email with no server account on the share's server yet, claimed on the recipient's first relay contact.
 _Avoid_: unclaimed share
 
 **Session host**:
@@ -118,6 +163,10 @@ _Avoid_: site, dashboard, artifact
 An immutable, owner-approved bundle of one app revision. Authority comes from the publication, never from the app's source or manifest alone.
 _Avoid_: deploy, build (for the approved object)
 
+**App domain**:
+The domain that serves app launches, on a different registrable domain from the server's share pages. Each launch gets a random subdomain. With the domain on the Public Suffix List, browsers treat every subdomain as its own site and refuse cookies set for the shared parent, so one app cannot set cookies another app reads.
+_Avoid_: publish domain, user content domain
+
 **Dataset**:
 A workspace-owned transactional data domain with its schema, operations, records, and file associations. Apps receive permission to use approved operations; they do not own a separate backend.
 _Avoid_: app backend, private app database
@@ -125,3 +174,21 @@ _Avoid_: app backend, private app database
 **Dataset operation**:
 A named action in an approved dataset revision with declared caller access and read or write authority. Forms, apps, owner views, and agents use the same operation to enforce its rules.
 _Avoid_: raw database edit (for a governed data change)
+
+## Replica current view
+
+A replica current view is the relay-owned view of a shared workspace after the passive engine drains both replication lanes.
+It contains a complete file manifest, current text, and the applied ordinary and journal cursors.
+The union of current share selectors limits collection. It grants no recipient access.
+The relay replaces the stored view atomically and removes text with no remaining references.
+Settlement cuts remain a separate concept.
+
+## History pin
+
+An immutable recipient History version of one shared object, sampled from a stored replica current view.
+The current grant, selector, and object visibility control access. A grant cannot read a pin superseded at or before that grant began.
+Pins do not enter the owner's replication log or count against the owner's quota.
+
+## History operation
+
+A History operation groups the file changes made by one admitted action under a main-minted `dohc-operation:` id. Reading it returns paths and change references. Delete and move Undo also use the operation's recovery record.

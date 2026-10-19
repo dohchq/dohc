@@ -8,13 +8,13 @@ export type ServerDescriptor = {
   authUrl: string;
   relayUrl: string;
   shareUrl: string;
-  name?: string;
   networkAccess?: "private" | "public";
 };
 
-export async function discoverServer(serverUrl: string, fetchImpl: typeof fetch = fetch): Promise<ServerDescriptor> {
-  const origin = canonicalCloudOrigin(serverUrl);
-  if (!origin) throw new Error("Enter an HTTPS server address. HTTP is only available on this machine.");
+export async function discoverServer(serverUrl: string, fetchImpl: typeof fetch = fetch, allowInsecureLoopbackForTests = false): Promise<ServerDescriptor> {
+  const canonical = (value: string) => canonicalCloudOrigin(value, allowInsecureLoopbackForTests);
+  const origin = canonical(serverUrl);
+  if (!origin) throw new Error("Enter the server's https address, like https://dohc.example.com.");
   let response: Response;
   try {
     response = await fetchImpl(`${origin}/.well-known/dohc-server`, {
@@ -60,9 +60,9 @@ export async function discoverServer(serverUrl: string, fetchImpl: typeof fetch 
     throw new Error("This server returned an invalid connection description. Check the server setup.");
   }
   const descriptor = value as Record<string, unknown>;
-  const authUrl = typeof descriptor.authUrl === "string" ? canonicalCloudOrigin(descriptor.authUrl) : null;
-  const relayUrl = typeof descriptor.relayUrl === "string" ? canonicalCloudOrigin(descriptor.relayUrl) : null;
-  const shareUrl = typeof descriptor.shareUrl === "string" ? canonicalCloudOrigin(descriptor.shareUrl) : null;
+  const authUrl = typeof descriptor.authUrl === "string" ? canonical(descriptor.authUrl) : null;
+  const relayUrl = typeof descriptor.relayUrl === "string" ? canonical(descriptor.relayUrl) : null;
+  const shareUrl = typeof descriptor.shareUrl === "string" ? canonical(descriptor.shareUrl) : null;
   if (descriptor.version !== 1 || !authUrl || !relayUrl || !shareUrl ||
       authUrl !== origin || relayUrl !== origin || shareUrl !== origin ||
       (descriptor.name !== undefined && !isServerDisplayName(descriptor.name)) ||
@@ -72,7 +72,6 @@ export async function discoverServer(serverUrl: string, fetchImpl: typeof fetch 
   }
   return {
     version: 1, authUrl, relayUrl, shareUrl,
-    ...(isServerDisplayName(descriptor.name) ? { name: descriptor.name } : {}),
     ...(descriptor.networkAccess === "private" || descriptor.networkAccess === "public" ? { networkAccess: descriptor.networkAccess } : {}),
   };
 }

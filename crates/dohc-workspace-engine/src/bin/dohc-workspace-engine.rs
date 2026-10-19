@@ -4,7 +4,7 @@
 
 use dohc_engine_protocol::{
     cancel::CancelSignal,
-    error::{ErrorCode, WireError},
+    error::{EnvelopeDecodeError, ErrorCode, Retryability, WireError},
     frame::{Frame, FrameDecoder, blob_chunks, encode_blob_chunk_frame},
     limits::WireLimits,
     supervisor::{Supervisor, SupervisorConfig},
@@ -20,7 +20,9 @@ use dohc_engine_protocol::{
 use dohc_engine_runtime::{RuntimeError, WorkspaceSupervisor};
 #[cfg(test)]
 use dohc_workspace_engine::EngineEventNotice;
-use dohc_workspace_engine::live_application_ingress::{LiveApplicationIngress, UploadCompletion};
+use dohc_workspace_engine::live_application_ingress::{
+    LiveApplicationIngress, LiveApplicationIngressConfig, UploadCompletion,
+};
 use dohc_workspace_engine::{ConfiguredLiveHostConfig, EngineService, LiveApplicationInput};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
@@ -73,6 +75,31 @@ impl From<Envelope> for OutputItem {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args == ["--replica-sandbox-check"] {
+        let mut random = [0u8; 16];
+        getrandom::fill(&mut random)?;
+        let store = std::env::temp_dir().join(format!(
+            "dohc-sandbox-check-{:032x}",
+            u128::from_le_bytes(random)
+        ));
+        std::fs::create_dir(&store)?;
+        let result = std::process::Command::new(std::env::current_exe()?)
+            .arg("--replica-sandbox-check-store")
+            .arg(&store)
+            .status();
+        std::fs::remove_dir(&store)?;
+        if !result?.success() {
+            return Err(io::Error::other("replica sandbox check failed").into());
+        }
+        return Ok(());
+    }
+    if args.len() == 2 && args[0] == "--replica-sandbox-check-store" {
+        println!(
+            "Landlock policy ABI {}",
+            dohc_workspace_engine::replica_sandbox::apply(std::path::Path::new(&args[1]))?
+        );
+        return Ok(());
+    }
     if args == ["--projection-only"] {
         if std::env::var_os("DOHC_ENGINE_LIVE_HOST_CONFIG").is_some()
             || std::env::var_os("DOHC_ENGINE_OWNER_HOST_CONFIG").is_some()
@@ -85,7 +112,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         )?;
         return Ok(());
     }
-    if !args.is_empty() {
+    let replica = args == ["--replica"];
+    if replica {
+        dohc_workspace_engine::replica_sandbox::apply(&std::env::current_dir()?)?;
+    }
+    let passive = replica || args == ["--store-role", "passive"];
+    if !args.is_empty() && !passive {
         return Err(io::Error::other("unknown engine arguments").into());
     }
     let auth_token = std::env::var(AUTH_TOKEN_ENV)
@@ -94,10 +126,44 @@ fn main() -> Result<(), Box<dyn Error>> {
         .ok_or_else(|| {
             io::Error::new(io::ErrorKind::PermissionDenied, "engine auth token missing")
         })?;
-    tokio::runtime::Runtime::new()?.block_on(run_stdio(auth_token))
+    let runtime = if replica {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(4)
+            .enable_all()
+            .build()?
+    } else {
+        tokio::runtime::Runtime::new()?
+    };
+    runtime.block_on(run_stdio(auth_token, passive, replica))
 }
 
-async fn run_stdio(auth_token: String) -> Result<(), Box<dyn Error>> {
+fn passive_ingress(
+    service: Arc<EngineService>,
+    passive: bool,
+) -> Result<Option<(ConnectionOwner, LiveApplicationIngress)>, Box<dyn Error>> {
+    if !passive {
+        return Ok(None);
+    }
+    let ingress = LiveApplicationIngress::new(
+        service,
+        LiveApplicationIngressConfig {
+            aggregate_bytes: 2 * 1024 * 1024 * 1024,
+            application_working_reserve_bytes: 32 * 1024 * 1024,
+            max_uploads: 1,
+            upload_deadline: std::time::Duration::from_secs(120),
+        },
+    )?;
+    Ok(Some((ConnectionOwner::authenticated(), ingress)))
+}
+
+async fn run_stdio(auth_token: String, passive: bool, replica: bool) -> Result<(), Box<dyn Error>> {
+    if passive
+        && (std::env::var_os("DOHC_ENGINE_LIVE_HOST_CONFIG").is_some()
+            || std::env::var_os("DOHC_ENGINE_OWNER_HOST_CONFIG").is_some())
+    {
+        return Err(io::Error::other("passive daemon takes no live host configuration").into());
+    }
     if std::env::var_os("DOHC_ENGINE_LIVE_HOST_CONFIG").is_some()
         && std::env::var_os("DOHC_ENGINE_OWNER_HOST_CONFIG").is_some()
     {
@@ -121,7 +187,15 @@ async fn run_stdio(auth_token: String) -> Result<(), Box<dyn Error>> {
                 let (service, owner, ingress) = EngineService::ordinary_live_host(config)?;
                 (service, Some((owner, ingress)))
             }
-            None => (Arc::new(EngineService::new()), None),
+            None => {
+                let service = Arc::new(if replica {
+                    EngineService::replica(&std::env::current_dir()?)?
+                } else {
+                    EngineService::new()
+                });
+                let live = passive_ingress(service.clone(), passive)?;
+                (service, live)
+            }
         },
     };
     let supervisor = Arc::new(Supervisor::new(
@@ -133,7 +207,7 @@ async fn run_stdio(auth_token: String) -> Result<(), Box<dyn Error>> {
         tokio::io::stdin(),
         tokio::io::stdout(),
         supervisor,
-        service.events().subscribe_with_files(),
+        service.events().subscribe_with_wakes(),
         || WorkspaceSupervisor::global().close_all(),
         live,
     )
@@ -196,7 +270,7 @@ where
     let limits = WireLimits::default();
     let (output_tx, mut output_rx) =
         tokio::sync::mpsc::channel::<OutputItem>(OUTPUT_QUEUE_CAPACITY);
-    let active_egress = Arc::new(Mutex::new(HashMap::<u64, CancelSignal>::new()));
+    let active_egress: ActiveEgress = Arc::default();
     let (writer_gone_tx, mut writer_gone_rx) = tokio::sync::watch::channel(false);
     let writer_limits = limits.clone();
     let writer_signal = writer_gone_tx.clone();
@@ -463,7 +537,8 @@ where
                         Envelope::Request(request)
                             if matches!(
                                 request.method.as_str(),
-                                "liveApplication.apply"
+                                "replica.applyJournalPage"
+                                    | "liveApplication.apply"
                                     | "ydoc.ownerDelivery.applyAcceptedFrame"
                                     | "ydoc.ownerDelivery.applyInitialSync"
                                     | "ydoc.ownerDelivery.enroll"
@@ -590,17 +665,28 @@ fn reap_completed(tasks: &mut JoinSet<()>) {
     while tasks.try_join_next().is_some() {}
 }
 
+/// The output still owed to each answered request, by request id, which keeps
+/// the id in use until its output is written. A live acknowledgement's guard
+/// signal is what a `Cancel` stops. A blob has none: its request answered, so
+/// a later `Cancel` must not turn that answer into CANCELLED.
+type ActiveEgress = Arc<Mutex<HashMap<u64, Option<CancelSignal>>>>;
+
 async fn write_output<W: AsyncWrite + Unpin>(
     mut output: W,
     output_rx: &mut tokio::sync::mpsc::Receiver<OutputItem>,
     limits: &WireLimits,
-    active_egress: Arc<Mutex<HashMap<u64, CancelSignal>>>,
+    active_egress: ActiveEgress,
 ) -> Result<(), io::Error> {
+    let mut negotiated_limits = limits.clone();
     'items: while let Some(item) = output_rx.recv().await {
+        if let OutputItem::Envelope(Envelope::HelloAck(ack)) = &item {
+            negotiated_limits = ack.limits.clone();
+        }
+        let limits = &negotiated_limits;
         match item {
             OutputItem::Guarded { response, guard } => {
                 let request_id = response.id;
-                let frame = encode_control(&Envelope::Response(response), limits)
+                let frame = encode_reply_or_limit_error(&Envelope::Response(response), limits)
                     .map_err(|error| io::Error::other(format!("response encode: {error:?}")))?;
                 let cancel = guard.cancel_signal();
                 let retired = guard.retirement_signal();
@@ -701,9 +787,9 @@ async fn write_output<W: AsyncWrite + Unpin>(
                 // A service-initiated event the wire cannot carry is dropped
                 // here, with its name on stderr, instead of ending the
                 // transport: delivery is at most once and the subscriber
-                // reconciles from history. A response is different: its
-                // caller is waiting, so an unencodable one still fails loud.
-                let bytes = match (encode_control(&envelope, limits), &envelope) {
+                // reconciles from history. An oversized reply gets a bounded
+                // error so its caller can continue using the connection.
+                let bytes = match (encode_reply_or_limit_error(&envelope, limits), &envelope) {
                     (Ok(bytes), _) => bytes,
                     (Err(error), Envelope::Event(event)) => {
                         eprintln!(
@@ -791,12 +877,42 @@ async fn write_output<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
+fn response_limit_error(id: Option<u64>) -> Envelope {
+    Envelope::Error(ErrorEnvelope {
+        id,
+        // Execution may have committed before encoding failed. Retrying a
+        // mutation must retain its idempotency key; this is not input refusal.
+        error: WireError {
+            code: ErrorCode::Internal,
+            message: "response-wire-limit-exceeded".to_owned(),
+            retry: Retryability::AfterBackoff,
+        },
+    })
+}
+
+fn encode_reply_or_limit_error(
+    envelope: &Envelope,
+    limits: &WireLimits,
+) -> Result<Vec<u8>, EnvelopeDecodeError> {
+    match encode_control(envelope, limits) {
+        Ok(bytes) => Ok(bytes),
+        Err(error) => {
+            let id = match envelope {
+                Envelope::Response(response) => Some(response.id),
+                Envelope::Error(error) => error.id,
+                _ => return Err(error),
+            };
+            encode_control(&response_limit_error(id), limits)
+        }
+    }
+}
+
 async fn write_envelope<W: AsyncWrite + Unpin>(
     output: &mut W,
     envelope: &Envelope,
     limits: &WireLimits,
 ) -> Result<(), io::Error> {
-    let bytes = encode_control(envelope, limits)
+    let bytes = encode_reply_or_limit_error(envelope, limits)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "response too large"))?;
     output.write_all(&bytes).await?;
     output.flush().await
@@ -864,6 +980,7 @@ async fn write_blob_egress<W: AsyncWrite + Unpin>(
     egress: BlobEgress,
     limits: &WireLimits,
 ) -> Result<(), io::Error> {
+    let request_id = response.id;
     let interruption = |deadline: Option<std::time::Instant>| {
         if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
             WireError::new(
@@ -892,10 +1009,16 @@ async fn write_blob_egress<W: AsyncWrite + Unpin>(
         )
         .await;
     }
+    let response_frame = match encode_control(&Envelope::Response(response), limits) {
+        Ok(frame) => frame,
+        Err(_) => {
+            return write_envelope(output, &response_limit_error(Some(request_id)), limits).await;
+        }
+    };
     write_envelope(
         output,
         &Envelope::BlobStart(BlobStart {
-            request_id: response.id,
+            request_id,
             stream_id: egress.stream_id,
             total_bytes: Some(egress.bytes.len() as u64),
             sha256: Some(egress.sha256),
@@ -914,7 +1037,7 @@ async fn write_blob_egress<W: AsyncWrite + Unpin>(
             return write_envelope(
                 output,
                 &Envelope::Error(ErrorEnvelope {
-                    id: Some(response.id),
+                    id: Some(request_id),
                     error: interruption(egress.deadline),
                 }),
                 limits,
@@ -926,7 +1049,8 @@ async fn write_blob_egress<W: AsyncWrite + Unpin>(
         output.write_all(&frame).await?;
         output.flush().await?;
     }
-    write_envelope(output, &Envelope::Response(response), limits).await
+    output.write_all(&response_frame).await?;
+    output.flush().await
 }
 
 fn authenticate(envelope: Envelope, auth_token: &str) -> Result<HelloAck, WireError> {
@@ -990,7 +1114,7 @@ async fn dispatch_authenticated<
     output: &tokio::sync::mpsc::Sender<OutputItem>,
     writer_gone: &tokio::sync::watch::Sender<bool>,
     active_requests: &Arc<Mutex<HashSet<u64>>>,
-    active_egress: &Arc<Mutex<HashMap<u64, CancelSignal>>>,
+    active_egress: &ActiveEgress,
     request_tasks: &mut JoinSet<()>,
     blobs_negotiated: bool,
     progress_negotiated: bool,
@@ -1046,19 +1170,15 @@ async fn dispatch_authenticated<
                     // Before the terminal response is queued, so no progress
                     // message can follow it.
                     finish_progress.finish();
-                    if let Ok(service_response) = outcome
-                        && let Some(guard) = &service_response.output_guard
-                    {
-                        lock(&completion_egress).insert(id, guard.cancel_signal());
-                    }
                     // The handoff runs before the supervisor drops its cancel
                     // registration. Cancel therefore always reaches either the
-                    // request signal, this egress signal, or both.
-                    if blobs_negotiated
-                        && let Ok(service_response) = outcome
-                        && let Some(egress) = &service_response.blob_egress
-                    {
-                        lock(&completion_egress).insert(id, egress.cancel.clone());
+                    // request signal, this guard signal, or both.
+                    if let Ok(service_response) = outcome {
+                        if let Some(guard) = &service_response.output_guard {
+                            lock(&completion_egress).insert(id, Some(guard.cancel_signal()));
+                        } else if blobs_negotiated && service_response.blob_egress.is_some() {
+                            lock(&completion_egress).insert(id, None);
+                        }
                     }
                 },
             ) {
@@ -1166,7 +1286,7 @@ async fn dispatch_authenticated<
         }
         Envelope::Cancel(cancel) => {
             let _ = supervisor.cancel(cancel.id);
-            if let Some(signal) = lock(active_egress).get(&cancel.id) {
+            if let Some(Some(signal)) = lock(active_egress).get(&cancel.id) {
                 signal.cancel();
             }
             true
@@ -1306,6 +1426,20 @@ mod tests {
     use tokio::sync::Notify;
 
     const TEST_AUTH_TOKEN: &str = "r14-test-token";
+
+    #[test]
+    fn desktop_daemon_keeps_live_upload_methods_on_dispatch() {
+        assert!(
+            passive_ingress(Arc::new(EngineService::new()), false)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            passive_ingress(Arc::new(EngineService::new()), true)
+                .unwrap()
+                .is_some()
+        );
+    }
 
     #[tokio::test]
     #[ignore = "requires an owned external consumer fixture"]
@@ -1657,7 +1791,7 @@ mod tests {
                 .await
                 .unwrap();
                 drop(tx);
-                let active = Arc::new(Mutex::new(HashMap::from([(9, cancel.clone())])));
+                let active = Arc::new(Mutex::new(HashMap::from([(9, Some(cancel.clone()))])));
                 let (writer, mut reader) = tokio::io::duplex(4096);
                 let output = InterruptAfterFrame {
                     output: writer,
@@ -1753,7 +1887,7 @@ mod tests {
             .await
             .unwrap();
             drop(tx);
-            let active = Arc::new(Mutex::new(HashMap::from([(9, cancel.clone())])));
+            let active = Arc::new(Mutex::new(HashMap::from([(9, Some(cancel.clone()))])));
             let limits = WireLimits {
                 max_blob_chunk_bytes: 512 * 1024,
                 ..WireLimits::default()
@@ -2049,7 +2183,7 @@ mod tests {
             .await
             .unwrap();
             drop(tx);
-            let active = Arc::new(Mutex::new(HashMap::from([(9, CancelSignal::new())])));
+            let active = Arc::new(Mutex::new(HashMap::from([(9, Some(CancelSignal::new()))])));
             let mut output = Vec::new();
             let limits = WireLimits::default();
             write_output(&mut output, &mut rx, &limits, active.clone())
@@ -2232,6 +2366,315 @@ mod tests {
             last_session_generation: None,
             max_frame_bytes: None,
         }))
+    }
+
+    async fn next_envelope(
+        decoder: &mut FrameDecoder,
+        input: &mut (impl AsyncRead + Unpin),
+        limits: &WireLimits,
+    ) -> Envelope {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(frame) = decoder.next_frame().expect("frame") {
+                    let Frame::Control(payload) = frame else {
+                        panic!("expected a control frame");
+                    };
+                    return decode_control(&payload, limits).expect("decode envelope");
+                }
+                let mut buf = [0_u8; 4096];
+                let read = input.read(&mut buf).await.expect("read");
+                assert!(read > 0, "transport closed before the expected frame");
+                decoder.push(&buf[..read]);
+            }
+        })
+        .await
+        .expect("control envelope arrives")
+    }
+
+    #[tokio::test]
+    async fn lowered_frame_limit_refuses_escape_heavy_secret_then_accepts_ping() {
+        use dohc_engine_protocol::transport::{EngineTransport, InProcessTransport};
+        use dohc_engine_testkit::ScratchDir;
+        use serde_json::json;
+
+        let scratch = ScratchDir::new().expect("scratch");
+        let service = Arc::new(EngineService::new());
+        let direct = InProcessTransport::new(Arc::clone(&service));
+        let request = |id, method: &str, workspace, params| WireRequest {
+            id,
+            method: method.to_owned(),
+            workspace,
+            deadline_ms: None,
+            idempotency_key: None,
+            progress: false,
+            params,
+        };
+        let opened = direct
+            .call(
+                RequestContext::unbounded(),
+                request(
+                    1,
+                    "workspace.open",
+                    None,
+                    json!({
+                        "workspaceId": "frame-limit-secret",
+                        "rootDir": scratch.path().to_string_lossy(),
+                        "captureMode": "none",
+                    }),
+                ),
+            )
+            .await
+            .expect("open local workspace");
+        let handle: dohc_engine_protocol::wire::WorkspaceHandle =
+            serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+        direct
+            .call(
+                RequestContext::unbounded(),
+                request(
+                    2,
+                    "versions.ensureMain",
+                    Some(handle.clone()),
+                    json!({
+                        "workspaceId": "frame-limit-secret",
+                    }),
+                ),
+            )
+            .await
+            .expect("main version");
+        let text = "\u{0001}".repeat(200_000);
+        assert!(text.len() <= dohc_engine_domain::MAX_SECRET_FILE_BYTES);
+        direct
+            .call(
+                RequestContext::unbounded(),
+                request(
+                    3,
+                    "secrets.write",
+                    Some(handle.clone()),
+                    json!({
+                        "workspaceId": "frame-limit-secret", "versionId": "main",
+                        "path": ".env", "text": text, "origin": "api",
+                        "momentId": "escape-heavy-secret",
+                    }),
+                ),
+            )
+            .await
+            .expect("permitted secret write");
+        let read = request(
+            4,
+            "secrets.materialize",
+            Some(handle.clone()),
+            json!({
+                "versionId": "main", "path": ".env",
+            }),
+        );
+        let materialized = direct
+            .call(RequestContext::unbounded(), read.clone())
+            .await
+            .expect("secret read is permitted locally");
+        assert_eq!(materialized.result["text"], text);
+        let limits = WireLimits {
+            max_frame_bytes: dohc_engine_protocol::limits::MIN_NEGOTIABLE_FRAME_BYTES,
+            ..WireLimits::default()
+        };
+        let reply = Envelope::Response(materialized);
+        assert!(encode_control(&reply, &WireLimits::default()).is_ok());
+        assert!(encode_control(&reply, &limits).is_err());
+
+        let supervisor = Arc::new(Supervisor::new(
+            SupervisorConfig::default(),
+            Arc::clone(&service),
+        ));
+        let (mut client_output, daemon_input) = tokio::io::duplex(4096);
+        let (daemon_output, mut client_input) = tokio::io::duplex(4096);
+        let run = tokio::spawn(run_transport(
+            TEST_AUTH_TOKEN.to_owned(),
+            daemon_input,
+            daemon_output,
+            supervisor,
+            no_events(),
+            || Ok(()),
+        ));
+        client_output
+            .write_all(&encode_envelope(&Envelope::Hello(Hello {
+                protocol_version: PROTOCOL_VERSION,
+                auth_token: TEST_AUTH_TOKEN.to_owned(),
+                capabilities: Vec::new(),
+                last_session_generation: None,
+                max_frame_bytes: Some(limits.max_frame_bytes),
+            })))
+            .await
+            .expect("hello");
+        let mut decoder = FrameDecoder::new(limits.clone());
+        let Envelope::HelloAck(ack) = next_envelope(&mut decoder, &mut client_input, &limits).await
+        else {
+            panic!("hello acknowledgement");
+        };
+        assert_eq!(ack.limits.max_frame_bytes, limits.max_frame_bytes);
+        client_output
+            .write_all(&encode_envelope(&Envelope::Request(read)))
+            .await
+            .expect("secret request");
+        let Envelope::Error(error) = next_envelope(&mut decoder, &mut client_input, &limits).await
+        else {
+            panic!("bounded secret error");
+        };
+        assert_eq!(error.id, Some(4));
+        assert_eq!(error.error.code, ErrorCode::Internal);
+        assert_eq!(error.error.message, "response-wire-limit-exceeded");
+        assert_eq!(error.error.retry, Retryability::AfterBackoff);
+        assert!(!error.error.message.contains('\u{0001}'));
+        client_output
+            .write_all(&encode_envelope(&Envelope::Request(request(
+                5,
+                "engine.ping",
+                None,
+                json!({}),
+            ))))
+            .await
+            .expect("ping");
+        assert!(
+            matches!(next_envelope(&mut decoder, &mut client_input, &limits).await,
+            Envelope::Response(response) if response.id == 5)
+        );
+        client_output
+            .shutdown()
+            .await
+            .expect("close transport input");
+        run.await
+            .expect("transport task")
+            .expect("transport stays usable");
+        direct
+            .call(
+                RequestContext::unbounded(),
+                request(6, "workspace.close", Some(handle), json!({})),
+            )
+            .await
+            .expect("close local workspace");
+        service.shutdown_all_capture().await;
+    }
+
+    #[tokio::test]
+    async fn negotiated_writer_bounds_all_reply_forms_before_blob_egress() {
+        let ack = authenticate(
+            Envelope::Hello(Hello {
+                protocol_version: PROTOCOL_VERSION,
+                auth_token: TEST_AUTH_TOKEN.to_owned(),
+                capabilities: vec!["blobs".to_owned()],
+                last_session_generation: None,
+                max_frame_bytes: Some(dohc_engine_protocol::limits::MIN_NEGOTIABLE_FRAME_BYTES),
+            }),
+            TEST_AUTH_TOKEN,
+        )
+        .expect("authenticate");
+        let limits = ack.limits.clone();
+        let oversized = serde_json::json!({"text": "\u{0001}".repeat(200_000)});
+        let response = |id| WireResponse {
+            id,
+            result: oversized.clone(),
+        };
+        let guard = || {
+            Arc::new(TestOutputGuard {
+                cancel: CancelSignal::new(),
+                retired: CancelSignal::new(),
+                deadline: None,
+                dropped: Arc::new(AtomicBool::new(false)),
+            }) as Arc<dyn OutputGuard>
+        };
+        let blob = |id| BlobEgress {
+            stream_id: id,
+            sha256: dohc_engine_storage::hex_sha256(b"must-not-send"),
+            bytes: b"must-not-send".to_vec(),
+            cancel: CancelSignal::new(),
+            deadline: None,
+            byte_permit: None,
+        };
+        let (output_tx, mut output_rx) = tokio::sync::mpsc::channel(16);
+        let items = [
+            OutputItem::Envelope(Envelope::HelloAck(ack)),
+            OutputItem::Envelope(Envelope::Response(response(1))),
+            OutputItem::Envelope(Envelope::Error(ErrorEnvelope {
+                id: Some(2),
+                error: WireError::new(ErrorCode::Internal, "\u{0001}".repeat(200_000)),
+            })),
+            OutputItem::Guarded {
+                response: response(3),
+                guard: guard(),
+            },
+            OutputItem::Blob {
+                response: response(4),
+                egress: blob(4),
+            },
+            OutputItem::GuardedBlob {
+                response: response(5),
+                egress: blob(5),
+                guard: guard(),
+            },
+            OutputItem::Envelope(Envelope::Event(Event {
+                seq: 1,
+                session_generation: 1,
+                name: "oversized".to_owned(),
+                payload: oversized,
+            })),
+            OutputItem::Envelope(Envelope::Response(WireResponse {
+                id: 6,
+                result: serde_json::json!({"ok": true}),
+            })),
+        ];
+        for item in items {
+            output_tx.send(item).await.expect("queue output");
+        }
+        drop(output_tx);
+        let active = Arc::new(Mutex::new(HashMap::from([
+            (3, Some(CancelSignal::new())),
+            (4, None),
+            (5, Some(CancelSignal::new())),
+        ])));
+        let (output, mut input) = tokio::io::duplex(4096);
+        let mut transcript = Vec::new();
+        let default_limits = WireLimits::default();
+        let (written, read) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(
+                write_output(output, &mut output_rx, &default_limits, Arc::clone(&active)),
+                input.read_to_end(&mut transcript),
+            )
+        })
+        .await
+        .expect("writer and transcript settle");
+        written.expect("bounded writer");
+        read.expect("transcript");
+        let mut decoder = FrameDecoder::new(limits.clone());
+        decoder.push(&transcript);
+        let Frame::Control(payload) = decoder.next_frame().unwrap().unwrap() else {
+            panic!("hello ack");
+        };
+        assert!(matches!(
+            decode_control(&payload, &limits).unwrap(),
+            Envelope::HelloAck(_)
+        ));
+        for id in 1..=5 {
+            let Frame::Control(payload) = decoder.next_frame().unwrap().unwrap() else {
+                panic!("oversized blob metadata must not emit raw blob frames");
+            };
+            assert!(
+                matches!(decode_control(&payload, &limits).unwrap(), Envelope::Error(error)
+                if error.id == Some(id)
+                    && error.error.code == ErrorCode::Internal
+                    && error.error.message == "response-wire-limit-exceeded"
+                    && error.error.retry == Retryability::AfterBackoff)
+            );
+        }
+        let Frame::Control(payload) = decoder.next_frame().unwrap().unwrap() else {
+            panic!("ping reply");
+        };
+        assert!(
+            matches!(decode_control(&payload, &limits).unwrap(), Envelope::Response(response)
+            if response.id == 6 && response.result["ok"] == true)
+        );
+        assert!(
+            decoder.next_frame().unwrap().is_none(),
+            "oversized event is dropped"
+        );
+        assert!(lock(&active).is_empty());
     }
 
     fn request_bytes(id: u64) -> Vec<u8> {
@@ -2502,6 +2945,89 @@ mod tests {
                 }),
             })
         }
+    }
+
+    /// A `Cancel` that arrives after a request answered with a blob, as a
+    /// scene open whose assets landed does, is too late: the blob and the
+    /// answer are still sent.
+    #[tokio::test]
+    async fn a_cancel_after_the_answer_still_delivers_its_blob() {
+        let supervisor = Arc::new(Supervisor::new(
+            SupervisorConfig::default(),
+            Arc::new(BlobService),
+        ));
+        let (queued, mut answers) = tokio::sync::mpsc::channel(1);
+        let (gone, _) = tokio::sync::watch::channel(false);
+        let active = Arc::new(Mutex::new(HashSet::new()));
+        let egress: ActiveEgress = Arc::default();
+        let mut tasks = JoinSet::new();
+        for envelope in [
+            Envelope::Request(WireRequest {
+                id: 31,
+                method: "test.blob".into(),
+                workspace: None,
+                deadline_ms: None,
+                idempotency_key: None,
+                progress: false,
+                params: serde_json::Value::Null,
+            }),
+            Envelope::Cancel(dohc_engine_protocol::wire::Cancel { id: 31 }),
+        ] {
+            let request = matches!(envelope, Envelope::Request(_));
+            assert!(
+                dispatch_authenticated(
+                    envelope,
+                    &supervisor,
+                    &queued,
+                    &gone,
+                    &active,
+                    &egress,
+                    &mut tasks,
+                    true,
+                    false,
+                    WireLimits::default().max_frame_bytes,
+                    None,
+                    None,
+                )
+                .await
+            );
+            if request {
+                // The answer is queued for the writer before the cancel arrives.
+                while answers.is_empty() {
+                    tokio::task::yield_now().await;
+                }
+            }
+        }
+        drop(queued);
+        let mut output = Vec::new();
+        let limits = WireLimits::default();
+        write_output(&mut output, &mut answers, &limits, Arc::clone(&egress))
+            .await
+            .expect("written");
+        assert!(lock(&egress).is_empty());
+        let mut decoder = FrameDecoder::new(limits.clone());
+        decoder.push(&output);
+        let Some(Frame::Control(start)) = decoder.next_frame().expect("frame") else {
+            panic!("blob start");
+        };
+        assert!(matches!(
+            decode_control(&start, &limits).expect("decode start"),
+            Envelope::BlobStart(BlobStart { request_id: 31, .. })
+        ));
+        let Some(Frame::BlobChunk {
+            fin: true, bytes, ..
+        }) = decoder.next_frame().expect("frame")
+        else {
+            panic!("the blob is sent");
+        };
+        assert_eq!(bytes, vec![0x7a; 64 * 1024]);
+        let Some(Frame::Control(response)) = decoder.next_frame().expect("frame") else {
+            panic!("response");
+        };
+        assert!(matches!(
+            decode_control(&response, &limits).expect("decode response"),
+            Envelope::Response(response) if response.id == 31
+        ));
     }
 
     /// Reports when its call starts, then blocks until released — lets a
@@ -3053,24 +3579,6 @@ mod tests {
 
         let limits = WireLimits::default();
         let mut decoder = FrameDecoder::new(limits.clone());
-        async fn next_envelope(
-            decoder: &mut FrameDecoder,
-            input: &mut (impl AsyncRead + Unpin),
-            limits: &WireLimits,
-        ) -> Envelope {
-            loop {
-                if let Some(frame) = decoder.next_frame().expect("frame") {
-                    let Frame::Control(payload) = frame else {
-                        panic!("expected a control frame");
-                    };
-                    return decode_control(&payload, limits).expect("decode envelope");
-                }
-                let mut buf = [0_u8; 4096];
-                let read = input.read(&mut buf).await.expect("read");
-                assert!(read > 0, "transport closed before the expected frame");
-                decoder.push(&buf[..read]);
-            }
-        }
         let Envelope::HelloAck(ack) = next_envelope(&mut decoder, &mut client_input, &limits).await
         else {
             panic!("first envelope must be HelloAck");

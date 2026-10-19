@@ -13,7 +13,7 @@ import {
   type CliResultByVerb,
 } from "./protocol";
 import { renderCliResult } from "./render";
-import { readStdinText } from "./stdin";
+import { readPassword, readStdinText } from "./stdin";
 import {
   CHAT_MESSAGE_TOO_LONG,
   MAX_CHAT_MESSAGE_BODY_BYTES,
@@ -33,6 +33,7 @@ interface CliExecutionOptions {
   cwd?: string;
   env?: Readonly<Record<string, string | undefined>>;
   readStdin?: () => Promise<string>;
+  readPassword?: () => Promise<string>;
   request?: (request: CliRequestWithoutToken) => Promise<unknown>;
   client?: CliClientOptions;
 }
@@ -68,6 +69,7 @@ function buildCliRequest(
   cwdInput: string,
   stdinBody?: string,
   runId?: string,
+  password?: string,
 ): CliRequestWithoutToken {
   const common = {
     protocolVersion: CLI_PROTOCOL_VERSION,
@@ -75,6 +77,29 @@ function buildCliRequest(
     actor: command.actor,
   } as const;
   switch (command.verb) {
+    case "linksIn":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, subject: command.subject, cursor: command.cursor } };
+    case "linksResolve":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, source: command.source, literals: command.literals } };
+    case "historyOperation":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, operationId: command.operationId, ...(command.cursor ? { cursor: command.cursor } : {}) } };
+    case "historyUndo":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, operationId: command.operationId } };
+    case "stopSync":
+      return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, ...(command.agent ? { agent: command.agent } : {}) } };
+    case "shareCopy":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, shareId: command.shareId, grantId: command.grantId } };
+    case "accountDeletePreview":
+      return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor } };
+    case "accountDelete":
+      return { verb: command.verb, protocolVersion: common.protocolVersion, args: {
+        cwd: common.cwd, actor: common.actor, server: command.server, previewToken: command.previewToken, password: password ?? "",
+      } };
+    case "accessObject":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, ref: command.ref, cursor: command.cursor } };
+    case "accessSharing":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, lane: command.lane, cursor: command.cursor } };
+    case "fileChats":
     case "documentRead":
       return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, path: command.path } };
     case "documentEdit":
@@ -287,13 +312,13 @@ function buildCliRequest(
 // A verb that could not do what was asked exits with its reason. A refused
 // Try again for another computer's run adds the notice that names it.
 function refusal(result: CliResultByVerb[keyof CliResultByVerb]): string | null {
-  if (!("ok" in result) || result.ok !== false) return null;
+  if (result === null || !("ok" in result) || result.ok !== false) return null;
   return "notice" in result && result.notice
     ? `${result.reason} ${result.notice.title}: ${result.notice.body}`
     : result.reason;
 }
 
-const REFUSING_VERBS = new Set(["moments", "moment", "documentRead", "documentEdit", "documentCreate", "fileChatStart", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress"]);
+const REFUSING_VERBS = new Set(["historyOperation", "historyUndo", "accountDelete", "moments", "moment", "documentRead", "documentEdit", "documentCreate", "fileChats", "fileChatStart", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress"]);
 
 function jsonOutput(result: CliResultByVerb[keyof CliResultByVerb]): string {
   return JSON.stringify({ schemaVersion: CLI_JSON_SCHEMA_VERSION, ...result }, null, 2);
@@ -305,38 +330,44 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
     const command = parseCliArguments(options.argv, env);
     if ("help" in command) return { exitCode: 0, stdout: renderCliHelp(command), stderr: "" };
     const stdinBody = await bodyForCommand(command, options.readStdin ?? (() => readStdinText(process.stdin, command.verb === "fileChatStart" ? { bytes: MAX_CHAT_MESSAGE_BODY_BYTES, message: CHAT_MESSAGE_TOO_LONG } : undefined)));
+    const password = command.verb === "accountDelete"
+      ? await (options.readPassword ?? (() => readPassword(process.stdin, process.stderr)))()
+      : undefined;
+    if (password === "") throw new DohcCliError("account delete requires the server account password");
     const request = buildCliRequest(
       command,
       options.cwd ?? process.cwd(),
       stdinBody,
       env.DOHC_RUN_ID,
+      password,
     );
-    const send =
-      options.request ??
-      ((value: CliRequestWithoutToken) =>
-        sendCliRequest(value, {
-          ...options.client,
-          timeoutMs: options.client?.timeoutMs ?? (command.verb === "dataset" || command.verb === "appPublication" || command.verb === "ownerAppResponses" ? 90_000 : DEFAULT_RESPONSE_TIMEOUT_MS),
-          env,
-        }));
-    const rawResult = await send(request);
     let result: CliResultByVerb[keyof CliResultByVerb];
-    try {
-      result = parseCliResult(command.verb, rawResult);
-    } catch {
-      throw new DohcCliError("desktop app returned an invalid response");
+    if (options.request) {
+      const rawResult = await options.request(request);
+      try {
+        result = parseCliResult(command.verb, rawResult);
+      } catch {
+        throw new DohcCliError("desktop app returned an invalid response");
+      }
+    } else {
+      result = await sendCliRequest<typeof command.verb>(request, {
+        ...options.client,
+        timeoutMs: options.client?.timeoutMs ?? (command.verb === "accountDelete" ? 120_000
+          : command.verb === "historyUndo" || command.verb === "dataset" || command.verb === "appPublication" || command.verb === "ownerAppResponses" ? 90_000 : DEFAULT_RESPONSE_TIMEOUT_MS),
+        env,
+      });
     }
     const refused = REFUSING_VERBS.has(command.verb) ? refusal(result) : null;
     if (refused !== null) throw new DohcCliError(refused);
     const output = command.json
-      ? jsonOutput(result)
+      ? result === null ? "null" : jsonOutput(result)
       : renderCliResult(command.verb, result, {
           grepFilesWithMatches: command.verb === "grep" ? command.filesWithMatches : false,
           grepContext: command.verb === "grep" ? command.context : 0,
           momentSide: command.verb === "moment" ? command.side : "after",
         });
     return {
-      exitCode: "kind" in result && result.kind === "partial" ? 1 : 0,
+      exitCode: result !== null && (("remaining" in result && result.remaining.length > 0) || ("kind" in result && result.kind === "partial") || ("disconnectError" in result && result.disconnectError !== null)) ? 1 : 0,
       // Markdown prints byte for byte so redirection preserves it.
       stdout: (command.verb === "moment" || command.verb === "documentRead") && !command.json
         ? output

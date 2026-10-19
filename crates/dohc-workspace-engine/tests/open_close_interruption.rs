@@ -2,9 +2,9 @@
 //! engine.db so that the same caller's retry refuses with "workspace database
 //! is already attached".
 //!
-//! The daemon dispatcher drops a handler future on deadline expiry or cancel,
-//! so every await in the open and close paths is a point where the request
-//! can vanish mid-flight. `tokio::spawn` plus `abort()` reproduces that drop
+//! An in-process caller can drop a handler future at any await, so every
+//! await in the open and close paths is a point where the request can vanish
+//! mid-flight. `tokio::spawn` plus `abort()` reproduces that drop
 //! at pseudo-random points across both paths while a second workspace opens
 //! and closes on the same service, the way the desktop's startup smoke open
 //! races the first real open. The OpenGuard and the Closing marker are what
@@ -36,21 +36,20 @@ impl Harness {
     }
 
     async fn open(&self, root: &str, workspace_id: &str) -> Result<WorkspaceHandle, WireError> {
-        self.transport
-            .call(
-                RequestContext::unbounded(),
-                request(
-                    self.next_id(),
-                    "workspace.open",
-                    None,
-                    json!({ "rootDir": root, "workspaceId": workspace_id }),
-                ),
-            )
-            .await
-            .map(|response| {
-                serde_json::from_value(response.result["workspace"].clone())
-                    .expect("workspace handle")
-            })
+        call_with_busy_retry(
+            &self.transport,
+            RequestContext::unbounded(),
+            request(
+                self.next_id(),
+                "workspace.open",
+                None,
+                json!({ "rootDir": root, "workspaceId": workspace_id }),
+            ),
+        )
+        .await
+        .map(|response| {
+            serde_json::from_value(response.result["workspace"].clone()).expect("workspace handle")
+        })
     }
 
     async fn close(&self, handle: WorkspaceHandle) -> Result<Value, WireError> {

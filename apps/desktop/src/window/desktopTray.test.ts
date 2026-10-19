@@ -55,7 +55,7 @@ async function harness(platform: NodeJS.Platform = "win32", packaged = false) {
     constructor(readonly image: Image) { created.push(this); }
     on(event: "double-click", listener: () => void) { this.listeners.set(event, listener); return this; }
   }
-  const app = { isPackaged: packaged, getAppPath: () => root, quit: vi.fn(), dock: { setIcon: vi.fn((_path: string) => undefined) } };
+  const app = { isPackaged: packaged, getAppPath: () => root, quit: vi.fn() };
   const runtime = { platform, resourcesPath: resourcesPath as string | undefined };
   const theme = { shouldUseDarkColors: false };
   const windows = [{ setIcon: vi.fn((_path: string) => undefined) }];
@@ -170,23 +170,24 @@ describe("desktop tray owner", () => {
     h.theme.shouldUseDarkColors = true;
     h.owner.refreshSystemThemeDesktopIcons();
     for (const window of h.windows) expect(window.setIcon).toHaveBeenCalledWith(dark);
-    expect(h.app.dock.setIcon).not.toHaveBeenCalled();
     expect(h.created[0]!.setImage.mock.calls[0]?.[0].path).toBe(dark);
     expect(h.created).toHaveLength(1);
   });
 
-  it("uses the macOS Dock and marks both initial and refreshed tray images as templates", async () => {
-    const h = await harness("darwin", true);
-    const light = await h.asset("icon-light.png");
-    const dark = await h.asset("icon-dark.png");
+  it.each([false, true])("gives the macOS menu bar the template image whatever the theme (packaged: %s)", async (packaged) => {
+    const h = await harness("darwin", packaged);
+    await h.asset("icon-light.png");
+    await h.asset("icon-dark.png");
+    const template = await h.asset("trayTemplate.png");
     await h.owner.refreshDispatchTray();
-    expect(h.created[0]!.image.path).toBe(light);
+    expect(h.created[0]!.image.path).toBe(template);
     expect(h.created[0]!.image.setTemplateImage).toHaveBeenCalledWith(true);
     h.theme.shouldUseDarkColors = true;
     h.owner.refreshSystemThemeDesktopIcons();
-    expect(h.app.dock.setIcon).toHaveBeenCalledWith(dark);
     expect(h.windows[0]!.setIcon).not.toHaveBeenCalled();
-    expect(h.created[0]!.setImage.mock.calls[0]?.[0].setTemplateImage).toHaveBeenCalledWith(true);
+    const refreshed = h.created[0]!.setImage.mock.calls[0]?.[0];
+    expect(refreshed?.path).toBe(template);
+    expect(refreshed?.setTemplateImage).toHaveBeenCalledWith(true);
   });
 
   it("refreshes system icons before a tray exists without creating one", async () => {

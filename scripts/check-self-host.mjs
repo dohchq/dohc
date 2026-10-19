@@ -1,11 +1,13 @@
 import { existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
-import { composeArgs, readSettings, supportedComposeVersion, validateSettings } from '../tools/self-host/config.mjs';
+import { composeArgs, deploymentChecks, readSettings, supportedComposeVersion, validateSettings } from '../tools/self-host/config.mjs';
 
-const { values } = parseArgs({ options: { start: { type: 'boolean' }, running: { type: 'boolean' }, 'env-file': { type: 'string', default: '.env.self-host' } } });
+const { values } = parseArgs({ options: { start: { type: 'boolean' }, 'first-start': { type: 'boolean' }, running: { type: 'boolean' }, 'env-file': { type: 'string', default: '.env.self-host' } } });
 const envFile = values['env-file'];
+const docker = args => spawnSync('docker', args, { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
 const checks = [];
+console.log('Development read replicas require Linux 5.19 or later with Landlock ABI 2 or later enabled. Replicas are disabled by default.');
 const record = (name, ok, detail = '') => { checks.push(ok); console.log(`[${ok ? 'ok' : 'missing'}] ${name}${detail ? ` - ${detail}` : ''}`); };
 const version = spawnSync('docker', ['compose', 'version', '--short'], { encoding: 'utf8' });
 const supportedCompose = version.status === 0 && supportedComposeVersion(version.stdout ?? '');
@@ -14,13 +16,23 @@ if (!existsSync(envFile)) record('self-host env file', false, `${envFile} is mis
 else {
   let settings;
   try { settings = readSettings(envFile); } catch (error) { record('self-host env file', false, error.message); settings = null; }
-  if (settings && supportedCompose) {
-    const errors = validateSettings(settings);
-    record('self-host env values', errors.length === 0, errors.join(' '));
+  const errors = settings ? validateSettings(settings) : [];
+  if (settings) record('self-host env values', errors.length === 0, errors.join(' '));
+  // Invalid settings never reach Docker or the database.
+  if (settings && supportedCompose && errors.length === 0) {
     const compose = spawnSync('docker', composeArgs(envFile, settings, 'config', '--services'), { encoding: 'utf8' });
     const services = new Set((compose.stdout ?? '').trim().split(/\r?\n/).filter(Boolean));
-    for (const service of ['postgres', 'postgres-migrate', 'relay-initialize', 'workspace-api', 'sync-relay', 'share-web', 'gateway']) record(`compose service:${service}`, compose.status === 0 && services.has(service));
-    if ((values.start || values.running) && compose.status === 0 && errors.length === 0) {
+    for (const service of [...(settings.DOHC_POSTGRES_HOST ? [] : ['postgres']), 'postgres-migrate', 'relay-initialize', 'workspace-api', 'sync-relay', 'share-web', 'gateway']) {
+      record(`compose service:${service}`, compose.status === 0 && services.has(service));
+    }
+    let deploymentOk = true;
+    if (compose.status === 0) {
+      for (const [name, problem] of deploymentChecks(envFile, settings, docker, { start: Boolean(values.start), firstStart: Boolean(values['first-start']) })) {
+        record(name, !problem, problem);
+        deploymentOk &&= !problem;
+      }
+    }
+    if ((values.start || values.running) && compose.status === 0 && deploymentOk) {
       let upOk = true;
       if (values.start) {
         const up = spawnSync('docker', composeArgs(envFile, settings, 'up', '-d', '--wait', '--wait-timeout', '180'), { stdio: 'inherit' });
@@ -63,6 +75,9 @@ else {
         if(value.version!==1||value.relayUrl!==process.env.DOHC_RELAY_PUBLIC_ORIGIN)throw Error('Unexpected descriptor');})().catch(()=>{console.error('Relay cannot verify its public HTTPS origin. Check DNS, TLS, and host routing.');process.exitCode=1;});`;
       const hairpin = spawnSync('docker', composeArgs(envFile, settings, 'exec', '-T', 'sync-relay', 'node', '-e', hairpinScript), {stdio: 'inherit'});
       record('native executable and relay HTTPS reachability', hairpin.status === 0);
+      const sandbox = spawnSync('docker', composeArgs(envFile, settings, 'exec', '-T', 'sync-relay',
+        '/app/bin/dohc-workspace-engine', '--replica-sandbox-check'), {encoding: 'utf8'});
+      console.log(`[${sandbox.status === 0 ? 'available' : 'unavailable'}] development read replicas - ${sandbox.status === 0 ? sandbox.stdout.trim() : 'Use Linux 5.19 or later with Landlock ABI 2 or later enabled; permit landlock_* in the container seccomp profile.'}`);
       // Replica sync uses the gateway, so check it after Compose has started every service.
       const automations = spawnSync('docker', composeArgs(envFile, settings, 'exec', '-T', 'sync-relay',
         'node', '/app/tools/self-host/health.mjs', 'sync-relay', '--automations'), {stdio: 'inherit'});

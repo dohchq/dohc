@@ -1,7 +1,7 @@
 //! Author coverage belongs to the admitted interval, independently of CRDT compaction.
 
 use crate::{CollabError, DocKey};
-use dohc_engine_domain::{ChangeActorKind, ChangeAttribution};
+use dohc_engine_domain::{ChangeActorKind, ChangeAttribution, SharedChangeAuthor};
 use dohc_engine_storage::StorageError;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
@@ -14,6 +14,8 @@ pub const MAX_INTERVAL_AUTHORS: usize = dohc_engine_domain::MAX_MOMENT_AUTHORS;
 pub const MAX_INTERVAL_AUTHOR_BYTES: usize = dohc_engine_domain::MAX_AUTHOR_JSON_BYTES;
 pub const SETTLE_AUTHOR_BYTE_THRESHOLD: usize = 96 * 1024;
 pub const SETTLE_AUTHOR_COUNT_THRESHOLD: usize = 960;
+/// Digits of the largest grant generation a shared author names (2^53 - 1).
+const MAX_GRANT_GENERATION_DIGITS: usize = 16;
 
 fn sql(error: rusqlite::Error) -> CollabError {
     StorageError::persist_public(error).into()
@@ -25,7 +27,7 @@ fn corrupt(reason: impl Into<String>) -> CollabError {
     }
 }
 
-/// One snapshot per scoped identity. Later admissions replace the summary snapshot.
+/// One snapshot per scoped identity. Confirmation requires every merged entry.
 #[derive(Default)]
 pub struct Authors(BTreeMap<String, Value>);
 
@@ -49,22 +51,36 @@ impl Authors {
             self.0.insert("unattributed".into(), author);
             return Ok(());
         }
-        let field = match kind {
-            "agent" => "agentId",
-            "automation" => "automationId",
-            "human" => "humanId",
-            "link" => "publicPrincipalId",
+        // A shared author is one identity per grant: its person or link
+        // principal. A link an admitted snapshot names is its public principal.
+        let (field, scope_field) = match kind {
+            "agent" => ("agentId", "onBehalfOf"),
+            "automation" => ("automationId", "onBehalfOf"),
+            "human" => ("humanId", "onBehalfOf"),
+            "named" => ("userId", "grantId"),
+            "link" if author.get("publicPrincipalId").is_some() => {
+                ("publicPrincipalId", "onBehalfOf")
+            }
+            "link" => ("principalId", "grantId"),
             _ => return Err(corrupt("unsupported live author kind")),
         };
         let id = author
             .get(field)
             .and_then(Value::as_str)
             .ok_or_else(|| corrupt("author has no identity"))?;
-        let scope = author.get("onBehalfOf").and_then(Value::as_str);
+        let scope = author.get(scope_field).and_then(Value::as_str);
         let identity = serde_json::json!([kind, scope, id]).to_string();
-        let prior_depth = self
-            .0
-            .get(&identity)
+        let previous = self.0.get(&identity);
+        if previous.is_some_and(|previous| {
+            previous.get("relayConfirmed") != Some(&Value::Bool(true))
+                || author.get("relayConfirmed") != Some(&Value::Bool(true))
+        }) {
+            author
+                .as_object_mut()
+                .expect("author object")
+                .remove("relayConfirmed");
+        }
+        let prior_depth = previous
             .and_then(|previous| previous.get("depth"))
             .and_then(Value::as_u64)
             .unwrap_or(0);
@@ -93,28 +109,44 @@ impl Authors {
         self.json().len()
     }
 
-    // Known ids and scopes cannot grow. Reserve their depth's largest encoding
-    // so a known author remains admissible even at capacity, without truncation.
+    // Known ids and scopes cannot grow. Reserve their depth's, or their grant
+    // generation's, largest encoding so a known author remains admissible even
+    // at capacity, without truncation.
     fn admission_bytes(&self) -> usize {
-        self.journal_bytes()
-            + self
-                .0
-                .values()
-                .map(|author| {
-                    let kind = author.get("kind").and_then(Value::as_str);
-                    let depth = author.get("depth").map(Value::to_string);
-                    match (kind, depth) {
-                        (Some("agent"), None) => r#","depth":64"#.len(),
-                        (Some("agent" | "automation"), Some(depth)) => 2 - depth.len().min(2),
-                        _ => 0,
-                    }
-                })
-                .sum::<usize>()
+        self.journal_bytes() + self.0.values().map(reserved_bytes).sum::<usize>()
     }
 
     pub fn moment_json(&self) -> Option<String> {
         (!self.is_empty()).then(|| self.json())
     }
+
+    pub fn has_unattributed(&self) -> bool {
+        self.0.contains_key("unattributed")
+    }
+
+    pub fn remove_unattributed(&mut self) {
+        self.0.remove("unattributed");
+    }
+}
+
+fn reserved_bytes(author: &Value) -> usize {
+    let kind = author.get("kind").and_then(Value::as_str);
+    let depth = author.get("depth").map(Value::to_string);
+    let generation = author.get("grantGeneration").map(Value::to_string);
+    match (kind, depth, generation) {
+        (Some("agent"), None, _) => r#","depth":64"#.len(),
+        (Some("agent" | "automation"), Some(depth), _) => 2 - depth.len().min(2),
+        (Some("named" | "link"), _, Some(generation)) => {
+            MAX_GRANT_GENERATION_DIGITS - generation.len().min(MAX_GRANT_GENERATION_DIGITS)
+        }
+        _ => 0,
+    }
+}
+
+/// One author's share of the admission bytes. Depth and generation growth
+/// leave it unchanged.
+fn entry_admission_bytes(author: &Value) -> usize {
+    author.to_string().len() + reserved_bytes(author)
 }
 
 /// Whether this lineage belongs to an adopted owner. Its native log also holds
@@ -135,6 +167,7 @@ pub fn accepted_only_in(conn: &Connection, key: &DocKey) -> Result<bool, CollabE
 
 /// Read only authors above the settled boundary, including rows a fold already
 /// consumed and authors that accepted deliveries admitted.
+/// `through` bounds native rows; pending coverage, including the marker, is interval-wide.
 pub fn interval_in(conn: &Connection, key: &DocKey, through: i64) -> Result<Authors, CollabError> {
     let (boundary, pending): (Option<i64>, String) = conn
         .query_row(
@@ -149,8 +182,8 @@ pub fn interval_in(conn: &Connection, key: &DocKey, through: i64) -> Result<Auth
     if accepted_only_in(conn, key)? {
         return Ok(authors);
     }
-    // Admission caps distinct identities, so this returns at most
-    // MAX_INTERVAL_AUTHORS rows from the retained rows above the boundary.
+    // Actorless edits and accepted snapshots retain coverage at admission.
+    // Admission caps the named identities retained above the boundary.
     let mut stmt = conn
         .prepare_cached(
             "SELECT actor_origin_id, actor_kind, on_behalf_of, MAX(chain_depth) FROM ydoc_updates \
@@ -233,11 +266,27 @@ pub fn reserved_in(conn: &Connection, key: &DocKey) -> Result<Authors, CollabErr
         .flatten();
     if let Some(json) = reserved {
         authors.union_json(&json)?;
+        // Confirmation belongs to that settlement, not the next local interval.
+        for author in authors.0.values_mut() {
+            if let Some(fields) = author.as_object_mut() {
+                fields.remove("relayConfirmed");
+            }
+        }
     }
     for author in interval_in(conn, key, i64::MAX)?.0.into_values() {
         authors.insert(author)?;
     }
     Ok(authors)
+}
+
+/// The author a collaborator's or an Edit share link's accepted delivery names.
+pub fn shared_json(author: &SharedChangeAuthor) -> Result<String, CollabError> {
+    if !author.is_valid() {
+        return Err(corrupt("shared author is incomplete"));
+    }
+    Ok(dohc_engine_domain::moment_author_list_json(
+        &serde_json::to_value(author).map_err(|_| corrupt("shared author is not JSON"))?,
+    ))
 }
 
 /// History recovery keeps native authors too. Accepted settlement deliberately
@@ -303,10 +352,15 @@ fn admit(covered: &mut Authors, json: &str) -> Result<usize, CollabError> {
         .keys()
         .next()
         .ok_or_else(|| corrupt("attribution has no identity"))?;
-    let known = covered.0.contains_key(identity);
+    let prior = covered.0.get(identity).map(entry_admission_bytes);
     covered.union_json(json)?;
     let bytes = covered.admission_bytes();
-    if !known && (covered.len() > MAX_INTERVAL_AUTHORS || bytes > MAX_INTERVAL_AUTHOR_BYTES) {
+    // A later snapshot can still lengthen a known author's name or label.
+    let grown =
+        prior.is_none_or(|prior| covered.0.get(identity).map(entry_admission_bytes) > Some(prior));
+    if (prior.is_none() && covered.len() > MAX_INTERVAL_AUTHORS)
+        || (grown && bytes > MAX_INTERVAL_AUTHOR_BYTES)
+    {
         return Err(CollabError::AuthorCapacity);
     }
     Ok(bytes)
@@ -318,27 +372,144 @@ pub fn check_admission_in(
     actor: Option<&str>,
     attribution: Option<&ChangeAttribution>,
 ) -> Result<bool, CollabError> {
-    let Some(json) = dohc_engine_domain::moment_author_json(actor, attribution) else {
-        return Ok(false);
-    };
+    check_admission_with_coverage_in(conn, key, actor, attribution)
+        .map(|admission| admission.request_settlement)
+}
+
+/// Reserve a burst's credits against one interval snapshot, before appending.
+pub(crate) fn check_batch_admission_in<'a>(
+    conn: &Connection,
+    key: &DocKey,
+    credits: impl Iterator<Item = (Option<&'a str>, Option<&'a ChangeAttribution>)>,
+) -> Result<bool, CollabError> {
+    let mut covered = reserved_in(conn, key)?;
+    let mut seen = std::collections::BTreeSet::new();
+    let mut settle = false;
+    for (actor, attribution) in credits {
+        let json = dohc_engine_domain::moment_author_json(actor, attribution);
+        let actorless = json.is_none();
+        let json = json.unwrap_or_else(|| r#"[{"kind":"unattributed"}]"#.to_owned());
+        if !seen.insert(json.clone()) {
+            continue;
+        }
+        let bytes = admit(&mut covered, &json)?;
+        if actorless {
+            retain_pending_in(conn, key, &[json])?;
+        }
+        settle |=
+            bytes >= SETTLE_AUTHOR_BYTE_THRESHOLD || covered.len() >= SETTLE_AUTHOR_COUNT_THRESHOLD;
+    }
+    Ok(settle && !unresolved_in(conn, key)?)
+}
+
+struct Admission {
+    request_settlement: bool,
+    introduced_unattributed: bool,
+}
+
+fn check_admission_with_coverage_in(
+    conn: &Connection,
+    key: &DocKey,
+    actor: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
+) -> Result<Admission, CollabError> {
+    let json = dohc_engine_domain::moment_author_json(actor, attribution);
+    let actorless = json.is_none();
+    let json = json.unwrap_or_else(|| r#"[{"kind":"unattributed"}]"#.to_owned());
     // An adopted owner's edit is private until the relay accepts it. Its
     // author joins the interval with that acceptance, where a settlement can
     // always make room, so only the entry itself is bounded here.
     if accepted_only_in(conn, key)? {
         entry(&json)?;
-        return Ok(false);
+        return Ok(Admission {
+            request_settlement: false,
+            introduced_unattributed: false,
+        });
+    }
+    if actorless {
+        let pending: String = conn
+            .query_row(
+                "SELECT pending_authors_json FROM ydoc_docs \
+             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                params![key.workspace_id, key.version_id, key.object_id],
+                |row| row.get(0),
+            )
+            .map_err(sql)?;
+        let mut admitted = Authors::default();
+        admitted.union_json(&pending)?;
+        // Repeated actorless edits add no identity or bytes. Only a new named
+        // identity needs room; its admission checks capacity again, and
+        // AuthorCapacity queues a settlement.
+        if admitted.has_unattributed() {
+            return Ok(Admission {
+                request_settlement: false,
+                introduced_unattributed: false,
+            });
+        }
     }
     let mut covered = reserved_in(conn, key)?;
+    let introduced_unattributed = actorless && !covered.has_unattributed();
     let bytes = admit(&mut covered, &json)?;
-    Ok(
-        (bytes >= SETTLE_AUTHOR_BYTE_THRESHOLD || covered.len() >= SETTLE_AUTHOR_COUNT_THRESHOLD)
+    if actorless {
+        retain_pending_in(conn, key, &[json])?;
+    }
+    Ok(Admission {
+        request_settlement: (bytes >= SETTLE_AUTHOR_BYTE_THRESHOLD
+            || covered.len() >= SETTLE_AUTHOR_COUNT_THRESHOLD)
             && !unresolved_in(conn, key)?,
-    )
+        introduced_unattributed,
+    })
+}
+
+/// A historical coordinate's verified snapshot owns its coverage, just as an
+/// accepted delivery's snapshot does. Raw replication rows cannot mint it.
+/// Returns whether admission introduced the unknown-author marker.
+pub(crate) fn check_remote_admission_in(
+    conn: &Connection,
+    key: &DocKey,
+    origin_id: &str,
+    origin_seq: i64,
+    actor: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
+) -> Result<bool, CollabError> {
+    let verified: Option<(String, String)> = conn
+        .query_row(
+            "SELECT a.author_json,d.pending_authors_json FROM live_audit_projection_authors a JOIN ydoc_docs d \
+             ON d.workspace_id=a.workspace_id AND d.version_id=a.version_id AND d.object_id=a.object_id \
+             AND d.path=a.path AND d.lineage_claim_id=a.lineage_claim_id \
+             WHERE a.workspace_id=?1 AND a.origin_id=?2 AND a.origin_seq=?3 \
+             AND a.version_id=?4 AND a.object_id=?5",
+            params![key.workspace_id, origin_id, origin_seq, key.version_id, key.object_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(sql)?;
+    if let Some((verified, pending)) = verified {
+        let mut covered = Authors::default();
+        covered.union_json(&pending)?;
+        covered.union_json(&verified)?;
+        // Identical admitted snapshots add no identity or bytes. Catch-up must
+        // not scan the native interval again for every known coordinate.
+        if covered.json() == pending {
+            return Ok(false);
+        }
+        let authors: Vec<Value> = serde_json::from_str(&verified)
+            .map_err(|_| corrupt("verified remote coverage is not an author list"))?;
+        let entries = authors
+            .into_iter()
+            .map(|author| Value::Array(vec![author]).to_string())
+            .collect::<Vec<_>>();
+        admit_accepted_in(conn, key, &entries).map(|_| false)
+    } else {
+        check_admission_with_coverage_in(conn, key, actor, attribution)
+            .map(|admission| admission.introduced_unattributed)
+    }
 }
 
 /// Admits the authors of one accepted delivery to the current interval, under
-/// the bounds a local author meets. Only the admitted snapshot credits a
-/// live delivery. The delivery retains no
+/// the bounds a local author meets: the authors its admitted snapshot names,
+/// and the collaborator or Edit share link the relay accepted it from. The
+/// delivery retains no
 /// attributed update row, so the interval keeps them with the authors
 /// compaction folded until a settlement names them. Refuses before writing
 /// when a new author would not fit.
@@ -358,6 +529,14 @@ pub fn admit_accepted_in(
     for json in authors {
         admit(&mut covered, json)?;
     }
+    retain_pending_in(conn, key, authors)
+}
+
+fn retain_pending_in(
+    conn: &Connection,
+    key: &DocKey,
+    authors: &[String],
+) -> Result<(), CollabError> {
     let pending: String = conn
         .query_row(
             "SELECT pending_authors_json FROM ydoc_docs \
@@ -371,15 +550,14 @@ pub fn admit_accepted_in(
     for json in authors {
         admitted.union_json(json)?;
     }
+    let json = admitted.json();
+    if json == pending {
+        return Ok(());
+    }
     conn.execute(
         "UPDATE ydoc_docs SET pending_authors_json=?4 \
          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-        params![
-            key.workspace_id,
-            key.version_id,
-            key.object_id,
-            admitted.json()
-        ],
+        params![key.workspace_id, key.version_id, key.object_id, json],
     )
     .map_err(sql)?;
     Ok(())
@@ -439,6 +617,18 @@ fn advance(
             reserve_attempt,
             keep_boundary
         ],
+    )
+    .map_err(sql)?;
+    clear_provisional_author_in(conn, key)?;
+    Ok(())
+}
+
+/// Only the latest covered interval can still replace its provisional marker.
+fn clear_provisional_author_in(conn: &Connection, key: &DocKey) -> Result<(), CollabError> {
+    conn.execute(
+        "DELETE FROM engine_requests WHERE request_id='sync-ydoc-provisional-author:'||json_array(?1,?2,?3) \
+         AND kind='sync-ydoc-provisional-author'",
+        params![key.workspace_id, key.version_id, key.object_id],
     )
     .map_err(sql)?;
     Ok(())
@@ -530,6 +720,7 @@ pub fn reset_in(conn: &Connection, key: &DocKey, retain_content: bool) -> Result
     if retain_content {
         fold_in(conn, key, i64::MAX)?;
     }
+    clear_provisional_author_in(conn, key)?;
     conn.execute(
         "UPDATE ydoc_docs SET settled_update_seq=NULL,settle_prior_update_seq=NULL, \
          last_settled_sha=CASE WHEN ?4 THEN last_settled_sha ELSE NULL END, \
@@ -634,4 +825,191 @@ pub fn reconcile_workspace_in(
         reconcile_in(conn, &key, now_ms)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ContentKind, LocalAppend, MarkerCreation, Regime, WriterDocCache, Ydoc};
+    use dohc_engine_domain::{VersionedTextStore, WriteText};
+    use dohc_engine_storage::{EngineStore, NoFaults};
+
+    /// A collaborator the interval already names can return at a later grant
+    /// generation. Admission held room for that, so every known author still
+    /// applies at the byte bound and the interval still fits one moment.
+    #[test]
+    fn a_known_shared_author_at_a_later_generation_fits_the_bound() {
+        let named = |index: usize, grant_generation: i64| {
+            shared_json(&SharedChangeAuthor::Named {
+                user_id: format!("{index:04}{}", "u".repeat(508)),
+                grant_id: format!("{index:04}{}", "g".repeat(508)),
+                grant_generation,
+            })
+            .unwrap()
+        };
+        let covering = |admitted: &[String]| {
+            let mut covered = Authors::default();
+            for json in admitted {
+                covered.union_json(json).unwrap();
+            }
+            covered
+        };
+        let mut admitted = Vec::new();
+        loop {
+            let json = named(admitted.len(), 1);
+            match admit(&mut covering(&admitted), &json) {
+                Ok(_) => admitted.push(json),
+                Err(CollabError::AuthorCapacity) => break,
+                Err(other) => panic!("unexpected {other:?}"),
+            }
+        }
+        assert!(admitted.len() > 1, "the byte bound refuses a new identity");
+        let mut covered = covering(&admitted);
+        for index in 0..admitted.len() {
+            admit(&mut covered, &named(index, 9_007_199_254_740_991))
+                .expect("a known author applies at a later generation");
+        }
+        assert_eq!(covered.len(), admitted.len());
+        assert!(covered.journal_bytes() <= MAX_INTERVAL_AUTHOR_BYTES);
+        assert!(covered.json().len() <= dohc_engine_domain::MAX_AUTHOR_JSON_BYTES);
+    }
+
+    /// Identifiers made only of quotes escape to twice their size. An Edit
+    /// link named that way still fits one entry at every valid generation.
+    #[test]
+    fn an_escaped_link_author_fits_one_entry_at_every_generation() {
+        let quotes = "\"".repeat(512);
+        let link = |grant_generation: i64| {
+            shared_json(&SharedChangeAuthor::Link {
+                grant_id: quotes.clone(),
+                grant_generation,
+                principal_id: quotes.clone(),
+            })
+            .unwrap()
+        };
+        let mut covered = Authors::default();
+        for generation in [1, 100, 9_007_199_254_740_991] {
+            admit(&mut covered, &link(generation)).expect("a known link applies");
+        }
+        assert_eq!(covered.len(), 1);
+        // An 80-byte skeleton and two escaped 512-byte identifiers.
+        assert_eq!(covered.json().len() - "[]".len(), 2_128);
+    }
+
+    /// An admitted snapshot names a link by its public principal, the relay's
+    /// authority by its grant. Each stays its own author, and returns as known.
+    #[test]
+    fn a_snapshot_link_and_an_authority_link_are_separate_authors() {
+        let snapshot = r#"[{"kind":"link","publicPrincipalId":"public_1","label":"Anonymous"}]"#;
+        let authority = shared_json(&SharedChangeAuthor::Link {
+            grant_id: "grant".into(),
+            grant_generation: 1,
+            principal_id: "holder".into(),
+        })
+        .unwrap();
+        let mut covered = Authors::default();
+        for json in [snapshot, authority.as_str(), snapshot, authority.as_str()] {
+            admit(&mut covered, json).expect("a link applies");
+        }
+        assert_eq!(covered.len(), 2);
+    }
+
+    #[test]
+    fn remote_admission_does_not_introduce_a_reserved_unattributed_marker() {
+        let scratch = dohc_test_scratch::ScratchDir::new().unwrap();
+        let mut store = EngineStore::open(&scratch.join("engine.db"), 1).unwrap();
+        let key = DocKey::new("ws", "main", "object").unwrap();
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1, &NoFaults)
+            .unwrap();
+        let moment = VersionedTextStore::new(&mut store)
+            .write_text(
+                &WriteText {
+                    workspace_id: key.workspace_id.clone(),
+                    version_id: key.version_id.clone(),
+                    object_id: key.object_id.clone(),
+                    path: "note.txt".into(),
+                    text: "unproven local edit".into(),
+                    moment_id: "local-settlement".into(),
+                    metadata_origin: "ydoc".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: Some(r#"[{"kind":"human","humanId":"recipient","relayConfirmed":true},{"kind":"unattributed"}]"#.into()),
+                    now_ms: 3,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap()
+            .moment;
+        crate::record_local_update(
+            &mut store,
+            &mut WriterDocCache::new(),
+            &key,
+            &Ydoc::wire().plaintext_insert(0, "unproven local edit"),
+            LocalAppend {
+                marker: Some(MarkerCreation {
+                    path: Some("note.txt"),
+                    content_kind: ContentKind::Plaintext,
+                    regime: Regime::LocalOnly,
+                }),
+                ..LocalAppend::default()
+            },
+            &NoFaults,
+            2,
+            |_, _, _| Ok(()),
+        )
+        .unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                // Model the reservation before materialization compensation.
+                advance_in(tx, &key, true)?;
+                tx.execute("UPDATE ydoc_docs SET settle_seq=?1", [moment.moment_order])
+                    .map_err(sql)?;
+                assert!(unresolved_in(tx, &key)?);
+                assert!(interval_in(tx, &key, i64::MAX)?.is_empty());
+                let reserved = reserved_in(tx, &key)?;
+                assert!(reserved.has_unattributed());
+                let reserved_json: Value = serde_json::from_str(&reserved.json()).unwrap();
+                assert_eq!(reserved_json, serde_json::json!([{ "kind": "human", "humanId": "recipient" }, { "kind": "unattributed" }]));
+                assert!(
+                    !check_remote_admission_in(tx, &key, "remote", 1, None, None)?,
+                    "the unresolved local settlement already reserves the marker"
+                );
+                assert!(interval_in(tx, &key, i64::MAX)?.has_unattributed());
+                assert!(!check_remote_admission_in(
+                    tx, &key, "remote", 2, None, None
+                )?);
+                compensate_in(tx, &key, None, 4)?;
+                assert!(interval_in(tx, &key, i64::MAX)?.has_unattributed());
+                Ok::<_, CollabError>(())
+            })
+            .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod confirmation_tests {
+    use super::Authors;
+    use serde_json::json;
+
+    #[test]
+    fn confirmation_requires_every_entry_for_an_identity_in_either_order() {
+        let plain = json!([{"kind":"human","humanId":"recipient","humanName":"Recipient"}]);
+        let confirmed = json!([{"kind":"human","humanId":"recipient","humanName":"Recipient","relayConfirmed":true}]);
+        for (first, second) in [(&plain, &confirmed), (&confirmed, &plain)] {
+            let mut authors = Authors::default();
+            authors.union_json(&first.to_string()).unwrap();
+            authors.union_json(&second.to_string()).unwrap();
+            assert_eq!(authors.json(), plain.to_string());
+        }
+        let mut authors = Authors::default();
+        authors.union_json(r#"[{"kind":"unattributed"}]"#).unwrap();
+        authors.union_json(&confirmed.to_string()).unwrap();
+        authors.union_json(&confirmed.to_string()).unwrap();
+        assert_eq!(
+            authors.json(),
+            json!([confirmed[0].clone(), {"kind":"unattributed"}]).to_string()
+        );
+    }
 }

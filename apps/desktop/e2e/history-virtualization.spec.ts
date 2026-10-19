@@ -75,13 +75,11 @@ test.describe("history virtualization", () => {
       const list = page.getByTestId("engine-history-list");
       const firstGroup = page.locator('[data-history-key="moment-0"]');
       const toggle = firstGroup.getByTestId("engine-moment-group-toggle");
-      // 4,000 correlated groups, 36 day headings, notice, and load-more row.
-      await expect(firstGroup).toHaveAttribute("aria-posinset", "3");
-      await expect(firstGroup).toHaveAttribute("aria-setsize", "4038");
-      await expect(list.getByRole("listitem").filter({ hasText: "Some protected activity" }))
-        .toHaveAttribute("aria-posinset", "1");
+      // 4,000 correlated groups, 36 day headings and a load-more row.
+      await expect(firstGroup).toHaveAttribute("aria-posinset", "2");
+      await expect(firstGroup).toHaveAttribute("aria-setsize", "4037");
       await expect(page.getByTestId("engine-history-day-heading").first().locator(".."))
-        .toHaveAttribute("aria-posinset", "2");
+        .toHaveAttribute("aria-posinset", "1");
       await toggle.click();
       await expect(toggle).toHaveAttribute("aria-expanded", "true");
       await page.getByTestId("engine-history-search").focus();
@@ -89,7 +87,7 @@ test.describe("history virtualization", () => {
       await expect(firstGroup).toHaveCount(0);
       await page.getByTestId("engine-history-load-more").focus();
       await expect(page.getByTestId("engine-history-load-more").locator(".."))
-        .toHaveAttribute("aria-posinset", "4038");
+        .toHaveAttribute("aria-posinset", "4037");
       await page.keyboard.press("Shift+Tab");
       await expect(page.locator('[data-moment-id="moment-4999"]')).toBeFocused();
       await page.getByTestId("engine-history-load-more").click();
@@ -102,8 +100,8 @@ test.describe("history virtualization", () => {
       await list.evaluate((element) => { element.scrollTop = 20_000; });
       await expect(page.locator('[data-moment-id="moment-399"]')).toBeVisible();
       await expect(firstGroup.locator('[data-moment-id="moment-1"]')).toBeFocused();
-      await expect(firstGroup).toHaveAttribute("aria-posinset", "3");
-      await expect(firstGroup).toHaveAttribute("aria-setsize", "4038");
+      await expect(firstGroup).toHaveAttribute("aria-posinset", "2");
+      await expect(firstGroup).toHaveAttribute("aria-setsize", "4037");
       await expect.poll(() => list.evaluate((element) => {
         const top = element.getBoundingClientRect().top;
         return [...element.querySelectorAll('[data-testid="engine-history-day-heading"]')]
@@ -116,7 +114,7 @@ test.describe("history virtualization", () => {
         items.map((item) => Number(item.getAttribute("aria-posinset"))),
       );
       expect(new Set(mountedPositions).size).toBe(mountedPositions.length);
-      expect(mountedPositions.every((position) => position >= 1 && position <= 4038)).toBe(true);
+      expect(mountedPositions.every((position) => position >= 1 && position <= 4037)).toBe(true);
       const dayHeadings = await list.getByTestId("engine-history-day-heading").evaluateAll((headings) =>
         headings.filter((heading) => !heading.closest('[aria-hidden="true"]'))
           .map((heading) => heading.getAttribute("datetime")),

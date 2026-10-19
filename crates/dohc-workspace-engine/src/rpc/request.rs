@@ -35,10 +35,9 @@ impl OperationCancellation {
         let hit = Arc::clone(&deadline_hit);
         let child = token.clone();
         let bridge = tokio::spawn(async move {
-            // The supervisor enforces deadlines non-cooperatively for wire
-            // requests; embedded callers (InProcessTransport, future
-            // mobile/WASM hosts) have no supervisor, so the deadline arms
-            // the same token here.
+            // Embedded callers (InProcessTransport, future mobile/WASM
+            // hosts) have no supervisor to signal expiry, so the deadline
+            // arms the same token here.
             match deadline {
                 Some(deadline) => {
                     tokio::select! {
@@ -84,10 +83,48 @@ impl Drop for OperationCancellation {
     }
 }
 
+/// The context for work that follows a landed step. It ignores the request's
+/// cancellation and deadline, so the request answers with what landed.
+pub(super) fn after_landing(ctx: &RequestContext) -> RequestContext {
+    RequestContext {
+        cancel: dohc_engine_protocol::cancel::CancelSignal::new(),
+        deadline: None,
+        ..ctx.clone()
+    }
+}
+
+/// When a wait that follows a landed step gives up: the request's deadline,
+/// or two seconds from now for a request without one. The request then
+/// answers with what landed and leaves the rest to a later step.
+pub(super) fn landed_wait_until(ctx: &RequestContext) -> tokio::time::Instant {
+    ctx.deadline.map_or_else(
+        || tokio::time::Instant::now() + std::time::Duration::from_secs(2),
+        tokio::time::Instant::from_std,
+    )
+}
+
 pub(super) fn required_idempotency_key(request_id: Option<String>) -> Result<String, WireError> {
     request_id
-        .filter(|request_id| !request_id.is_empty())
+        .filter(|request_id| !request_id.is_empty() && !request_id.chars().any(char::is_control))
         .ok_or_else(|| WireError::new(ErrorCode::InvalidParams, "idempotency-key-required"))
+}
+
+pub(super) fn validate_request_ids(
+    request: &dohc_engine_protocol::wire::Request,
+) -> Result<(), WireError> {
+    if request
+        .idempotency_key
+        .as_deref()
+        .into_iter()
+        .chain(request.params.get("requestId").and_then(Value::as_str))
+        .any(|key| key.chars().any(char::is_control))
+    {
+        return Err(WireError::new(
+            ErrorCode::InvalidParams,
+            "invalid-request-id",
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn deserialize_optional_non_null<'de, D, T>(
@@ -104,6 +141,12 @@ pub(super) fn validate_metadata_fields(
     summary: Option<&str>,
     correlation_id: Option<&str>,
 ) -> Result<(), WireError> {
+    if correlation_id.is_some_and(|id| id.starts_with(dohc_engine_domain::OPERATION_ID_PREFIX)) {
+        return Err(WireError::new(
+            ErrorCode::InvalidParams,
+            "reserved-operation-id",
+        ));
+    }
     if [summary, correlation_id]
         .into_iter()
         .flatten()
@@ -155,6 +198,13 @@ pub(super) fn validated_author(author: Option<&Value>) -> Result<Option<String>,
                 && object
                     .get("depth")
                     .is_none_or(|value| depth_within(value, 1))
+                // Only the relay attests an author; a local caller names no more.
+                && object.keys().all(|key| {
+                    matches!(
+                        key.as_str(),
+                        "kind" | "agentId" | "onBehalfOf" | "agentRunId" | "depth"
+                    )
+                })
         }
         // An automation writing a file, so the moment carries its identity
         // and chain depth into the claims the write causes. It names the
@@ -187,8 +237,6 @@ pub(super) fn validated_author(author: Option<&Value>) -> Result<Option<String>,
         "humanId",
         "onBehalfOf",
         "agentRunId",
-        "principalId",
-        "grantId",
     ] {
         if object
             .get(field)
@@ -199,9 +247,6 @@ pub(super) fn validated_author(author: Option<&Value>) -> Result<Option<String>,
         }
     }
     let authors = dohc_engine_domain::moment_author_list_json(value);
-    if authors.len() > dohc_engine_domain::MAX_AUTHOR_JSON_BYTES {
-        return Err(WireError::new(ErrorCode::InvalidParams, "invalid-metadata"));
-    }
     Ok(Some(authors))
 }
 
@@ -243,33 +288,83 @@ impl EngineService {
         format!("{prefix}-{}", dohc_engine_storage::hex(&digest.finalize()))
     }
 
-    /// Await an actor read under the request's cancellation/deadline — the
-    /// wait is abandoned (the actor's work completes and is discarded),
-    /// the same shape capture.flush uses. Read commands carry no token, so
-    /// abandoning the wait IS the cancellation semantics.
+    /// Await an actor command to its answer. A queued command still runs
+    /// after its caller leaves, so the caller never stops waiting: the
+    /// request answers with what the command did. A command that observes
+    /// the token and stops before any effect answers as interrupted.
     pub(super) async fn read_under_ctx<T>(
         cancellation: &OperationCancellation,
         what: &str,
         read: impl std::future::Future<Output = Result<T, RuntimeError>>,
     ) -> Result<T, WireError> {
-        tokio::select! {
-            biased;
-            () = cancellation.token.cancelled() => Err(cancellation.interruption(what)),
-            result = read => result.map_err(map_runtime),
-        }
+        read.await.map_err(|error| match error {
+            RuntimeError::Cancelled => cancellation.interruption(what),
+            error => map_runtime(error),
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::validated_author;
+    use super::{required_idempotency_key, validated_author};
+
+    #[tokio::test]
+    async fn a_read_that_answered_is_not_reported_as_cancelled() {
+        let ctx = super::RequestContext::unbounded();
+        ctx.cancel.cancel();
+        let cancellation = super::OperationCancellation::new(&ctx);
+        let read = crate::EngineService::read_under_ctx(&cancellation, "read", async {
+            Ok::<_, super::RuntimeError>(7)
+        })
+        .await;
+        assert_eq!(read.ok(), Some(7));
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_request_still_answers_with_its_command() {
+        let ctx = super::RequestContext::unbounded();
+        let cancellation = super::OperationCancellation::new(&ctx);
+        let (answer, answered) = tokio::sync::oneshot::channel();
+        let command = crate::EngineService::read_under_ctx(&cancellation, "write", async {
+            answered
+                .await
+                .map_err(|_| super::RuntimeError::ActorUnavailable)
+        });
+        tokio::pin!(command);
+        ctx.cancel.cancel();
+        cancellation.token.cancelled().await;
+        std::future::poll_fn(|cx| {
+            assert!(
+                std::future::Future::poll(command.as_mut(), cx).is_pending(),
+                "the command has not answered yet"
+            );
+            std::task::Poll::Ready(())
+        })
+        .await;
+        answer.send(7).expect("command waits");
+        assert_eq!(command.await.ok(), Some(7));
+    }
+
+    #[test]
+    fn request_ids_cannot_claim_internal_durability_markers() {
+        assert!(required_idempotency_key(Some("ordinary-id".into())).is_ok());
+        for key in [
+            None,
+            Some(String::new()),
+            Some("\0automation-durability:ws".into()),
+            Some("id\n".into()),
+            Some("id\u{0085}".into()),
+        ] {
+            assert!(required_idempotency_key(key).is_err());
+        }
+    }
     use serde_json::json;
 
     #[test]
     fn locally_supplied_author_fields_refuse_control_characters() {
         let agent = json!({"kind":"agent", "agentId":"runner", "onBehalfOf":"person"});
         assert!(validated_author(Some(&agent)).is_ok());
-        for field in ["agentId", "onBehalfOf", "agentRunId", "name"] {
+        for field in ["agentId", "onBehalfOf", "agentRunId"] {
             for control in ['\0', '\n'].into_iter().chain('\u{0080}'..='\u{009f}') {
                 let mut invalid = agent.clone();
                 invalid[field] = json!(format!("local{control}author"));
@@ -284,13 +379,7 @@ mod tests {
     #[test]
     fn locally_supplied_authors_fit_the_moment_identity_and_json_budgets() {
         let agent = json!({"kind":"agent", "agentId":"runner", "onBehalfOf":"person"});
-        for field in [
-            "agentId",
-            "onBehalfOf",
-            "agentRunId",
-            "principalId",
-            "grantId",
-        ] {
+        for field in ["agentId", "onBehalfOf", "agentRunId"] {
             let mut bounded = agent.clone();
             bounded[field] = json!("é".repeat(dohc_engine_domain::MAX_AUTHOR_FIELD_BYTES / 2));
             assert!(validated_author(Some(&bounded)).is_ok());
@@ -299,9 +388,6 @@ mod tests {
         }
         let automation = json!({"kind":"automation", "automationId":"x".repeat(dohc_engine_domain::MAX_AUTHOR_FIELD_BYTES + 1), "depth":1});
         assert!(validated_author(Some(&automation)).is_err());
-        let mut oversized = agent;
-        oversized["name"] = json!("x".repeat(dohc_engine_domain::MAX_AUTHOR_JSON_BYTES));
-        assert!(validated_author(Some(&oversized)).is_err());
     }
 
     #[test]
@@ -344,5 +430,32 @@ mod tests {
         ] {
             assert!(validated_author(Some(&invalid)).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn an_agent_author_names_only_its_contract_fields() {
+        let agent = json!({"kind": "agent", "agentId": "agent", "onBehalfOf": "person"});
+        let mut run = agent.clone();
+        run["agentRunId"] = json!("run");
+        run["depth"] = json!(2);
+        assert_eq!(
+            validated_author(Some(&run)).expect("a valid agent run"),
+            Some(json!([run]).to_string())
+        );
+        for (field, value) in [
+            ("relayConfirmed", json!(true)),
+            ("relayConfirmed", json!(false)),
+            ("principalId", json!("principal")),
+            ("grantId", json!("grant")),
+            ("humanId", json!("person")),
+            ("name", json!("Agent")),
+        ] {
+            let mut invalid = agent.clone();
+            invalid[field] = value;
+            let error = validated_author(Some(&invalid)).expect_err("extra agent field refused");
+            assert_eq!(error.message, "invalid-metadata", "{invalid}");
+        }
+        let human = json!({"kind": "human", "humanId": "person", "relayConfirmed": true});
+        assert!(validated_author(Some(&human)).is_err());
     }
 }

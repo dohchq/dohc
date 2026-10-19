@@ -1,7 +1,7 @@
 import { type StorageContext } from "./context";
 import { assertWorkspaceQuota } from "./workspaces";
 import { type PutBlobResult, type CollectUnreferencedBlobsResult } from "./types";
-import { BLOB_LOG_TEXT_CHUNK, blobLogPayloadChunks, currentBlobLogSequence, isCanonicalBlobSha, removeBlobLogReferences } from "./blobLogRoots";
+import { BLOB_LOG_TEXT_CHUNK, REFERENCES_BLOBS, blobLogPayloadChunks, currentBlobLogSequence, isCanonicalBlobSha, removeBlobLogReferences } from "./blobLogRoots";
 
 const DIRECT_SQL_INVENTORY_LIMIT = 16;
 
@@ -14,7 +14,7 @@ async function excludeLogReferencedBlobs(
   if (remaining.size <= DIRECT_SQL_INVENTORY_LIMIT) {
     // A few LIKE probes avoid copying a large raw payload into JavaScript.
     const reference = storage.db.prepare(`SELECT 1 FROM sync_relay_log
-      WHERE workspace_id = ? AND payload_json LIKE '%' || ? || '%' LIMIT 1`);
+      WHERE workspace_id = ? AND ${REFERENCES_BLOBS} AND payload_json LIKE '%' || ? || '%' LIMIT 1`);
     for (const sha of remaining) {
       if (reference.get(workspaceId, sha) !== undefined) remaining.delete(sha);
     }
@@ -44,37 +44,40 @@ async function excludeLogReferencedBlobs(
   return Array.from(remaining);
 }
 
-export function putBlob(storage: StorageContext, input: {
-    workspaceId: string;
-    sha256: string;
-    content: Uint8Array;
-    createdAtMs: number;
-  }): PutBlobResult {
+export type PutBlobInput = { workspaceId: string; sha256: string; content: Uint8Array; createdAtMs: number };
+
+export function putBlob(storage: StorageContext, input: PutBlobInput): PutBlobResult {
+    return storage.tx(() => putBlobInTransaction(storage, input));
+  }
+
+export function putBlobInTransaction(storage: StorageContext, input: PutBlobInput): PutBlobResult {
     const byteLength = input.content.byteLength;
-    return storage.tx(() => {
-      const existing = storage.db
-        .prepare(
-          "SELECT 1 AS ok FROM sync_relay_blobs WHERE workspace_id = ? AND sha256 = ?",
-        )
-        .get(input.workspaceId, input.sha256);
-      if (existing !== undefined) {
-        return { byteLength, alreadyHad: true };
-      }
-      assertWorkspaceQuota(storage, input.workspaceId, byteLength);
-      storage.db
-        .prepare(
-          `INSERT INTO sync_relay_blobs (workspace_id, sha256, byte_length, content, created_at_ms)
-           VALUES (?, ?, ?, ?, ?)`,
-        )
-        .run(
-          input.workspaceId,
-          input.sha256,
-          byteLength,
-          Buffer.from(input.content),
-          Math.trunc(input.createdAtMs),
-        );
-      return { byteLength, alreadyHad: false };
-    });
+    const createdAtMs = Math.trunc(input.createdAtMs);
+    // A repeated upload restarts the grace window, so collection cannot take
+    // bytes the uploader was just told are stored before its reference lands.
+    const refreshed = storage.db
+      .prepare(
+        `UPDATE sync_relay_blobs SET created_at_ms = max(created_at_ms, ?)
+         WHERE workspace_id = ? AND sha256 = ?`,
+      )
+      .run(createdAtMs, input.workspaceId, input.sha256);
+    if (refreshed.changes > 0) {
+      return { byteLength, alreadyHad: true };
+    }
+    assertWorkspaceQuota(storage, input.workspaceId, byteLength);
+    storage.db
+      .prepare(
+        `INSERT INTO sync_relay_blobs (workspace_id, sha256, byte_length, content, created_at_ms)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(
+        input.workspaceId,
+        input.sha256,
+        byteLength,
+        Buffer.from(input.content),
+        createdAtMs,
+      );
+    return { byteLength, alreadyHad: false };
   }
 
 export async function collectUnreferencedBlobs(
@@ -136,7 +139,7 @@ export async function collectUnreferencedBlobs(
          AND NOT EXISTS (
            SELECT 1
            FROM sync_relay_log l
-           WHERE l.workspace_id = ?
+           WHERE l.workspace_id = ? AND l.${REFERENCES_BLOBS}
              AND l.payload_json LIKE '%' || ? || '%'
          )
          AND NOT EXISTS (

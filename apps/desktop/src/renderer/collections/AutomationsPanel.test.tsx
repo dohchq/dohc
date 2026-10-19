@@ -79,7 +79,7 @@ function read(automations: ValidAutomationSummary[]): ListCollectionAutomationsR
 type Run = Extract<ListCollectionAutomationRunsResult, { status: "listed" }>["runs"][number];
 const run = (overrides: Partial<Run>): Run => ({
   claimId: "atc_1", state: "done", error: null, createdAtMs: Date.now(), updatedAtMs: Date.now(),
-  trigger: { kind: "changed", recordId: "rec_1", by: "human", sharedAuthor: null, depth: 0 }, writes: [], definitionChanged: false, neverStarted: false, chainStopped: false, undone: false, ...overrides,
+  trigger: { kind: "changed", recordId: "rec_1", by: "human", sharedAuthor: null, depth: 0 }, writes: [], definitionChanged: false, neverStarted: false, chainStopped: false, undone: false, undoUnfinished: false, ...overrides,
 });
 
 function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], options: {
@@ -2786,6 +2786,44 @@ describe("an automation's runs", () => {
     expect(within(row).queryByRole("button", { name: "Undo" })).toBeNull();
     await userEvent.click(within(row).getByRole("button", { name: "Show 1 change" }));
     expect(row.textContent).toContain("Sent a message to Trip");
+  });
+
+  it.each(["running", "pending"] as const)("hides the durability warning while a run is %s", async state => {
+    makeBridge(read([summary(stamp)]), [run({ state, writes: [{ kind: "field", recordId: "rec_1",
+      path: "Tasks/Plan.md", field: "Status", before: "Doing", after: "Done", unconfirmed: true }] })]);
+    render(<AutomationRuns workspaceId="ws-1" automationId="collection:Tasks#stamp" refreshKey={0}
+      onRetry={vi.fn()} onError={vi.fn()} onNotice={vi.fn()} />);
+    const row = await screen.findByTestId("automation-run-atc_1");
+    await userEvent.click(within(row).getByRole("button", { name: "Show 1 change" }));
+    expect(row.textContent).not.toContain("May not be saved");
+  });
+
+  it("shows unconfirmed changes and keeps Undo available", async () => {
+    makeBridge(read([summary(stamp)]), [run({ state: "failed", writes: [{ kind: "field", recordId: "rec_1",
+      path: "Tasks/Plan.md", field: "Status", before: "Doing", after: "Done", unconfirmed: true }] })]);
+    render(<AutomationRuns workspaceId="ws-1" automationId="collection:Tasks#stamp" refreshKey={0}
+      onRetry={vi.fn()} onError={vi.fn()} onNotice={vi.fn()} />);
+    const row = await screen.findByTestId("automation-run-atc_1");
+    expect(within(row).getByRole("button", { name: "Undo" })).toBeDefined();
+    await userEvent.click(within(row).getByRole("button", { name: "Show 1 change" }));
+    expect(row.textContent).toContain("May not be saved");
+  });
+
+  it("marks unfinished Undo and routes Try again to finish the reversal", async () => {
+    const saved = run({undoUnfinished: true, state: "failed", writes: [
+      {kind: "field", recordId: "rec_1", path: "Tasks/Plan.md", field: "Note", before: "a", after: "b"},
+    ]});
+    const {bridge} = makeBridge(read([summary(stamp)]), [saved]);
+    bridge.undoCollectionAutomationRun.mockResolvedValue({...NOTHING_UNDONE, reverted: 1});
+    const onRetry = vi.fn();
+    render(<AutomationRuns workspaceId="ws-1" automationId="collection:Tasks#stamp" refreshKey={0}
+      onRetry={onRetry} onError={vi.fn()} onNotice={vi.fn()} />);
+    const row = await screen.findByTestId("automation-run-atc_1");
+    expect(row.textContent).toContain("Undo unfinished");
+    expect(within(row).queryByLabelText("Done")).toBeNull();
+    await userEvent.click(within(row).getByRole("button", {name: "Try again"}));
+    await waitFor(() => expect(bridge.undoCollectionAutomationRun).toHaveBeenCalled());
+    expect(onRetry).not.toHaveBeenCalled();
   });
 
   it("keeps Undo available for a locally saved run and clears its pending note after settlement", async () => {

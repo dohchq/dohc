@@ -1,11 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { yXmlFragmentToProseMirrorRootNode } from "y-prosemirror";
 import { blockForLine } from "./lineBlocks";
 import {
   getDohcProseMirrorSchema,
   getDohcYDocBodyFragment,
   markdownToYDoc,
-} from "./import-export";
+} from "@dohc/ydoc-projection";
 
 // The span is what lets a caller slice the block's own source and refine a
 // landing inside it. Same walk as the index, so the rules above hold
@@ -181,9 +181,9 @@ describe("blockForLine — the index", () => {
     expect(blockForLine("- one\n1) matched\n\nAfter", 2).index).toBe(1);
     expect(blockForLine("1) one\n- matched\n\nAfter", 2).index).toBe(1);
     expect(blockForLine("1. one\n- matched\n\nAfter", 2).index).toBe(1);
-    // Ordered delimiters are not part of the list's identity.
-    expect(blockForLine("1) a\n1. b", 2).index).toBe(0);
-    expect(blockForLine("1. a\n1) b", 2).index).toBe(0);
+    // A changed delimiter starts a separate ordered list.
+    expect(blockForLine("1) a\n1. b", 2).index).toBe(1);
+    expect(blockForLine("1. a\n1) b", 2).index).toBe(1);
     // Indented, it is a nested list and stays in the item.
     expect(blockForLine("- one\n  1. matched\n\nAfter", 2).index).toBe(0);
   });
@@ -375,9 +375,55 @@ describe("blockForLine — the index", () => {
     expect(blockForLine("A \\| B \\| C | D\n--- | ---\n1 | 2\n\nAfter", 3).index).toBe(0);
     // An escaped backslash does not escape the pipe after it.
     expect(blockForLine("A \\\\ B | C\n--- | ---\n1 | 2\n\nAfter", 3).index).toBe(0);
-    // A pipe in a code span is not protected — the tokenizer divides on it,
-    // so this header is three cells over two and forms no table.
-    expect(blockForLine("A `x | y` B | C\n--- | ---\n    matched\n\nAfter", 3).index).toBe(0);
+    // The parser escapes a pipe in a code span before it splits the header,
+    // so this is two cells over two: a table, then indented code, then After.
+    const spans = "A `x | y` B | C\n--- | ---\n    matched\n\nAfter";
+    expect(blockForLine(spans, 1)).toEqual({ index: 0, startLine: 1, endLine: 2 });
+    expect(blockForLine(spans, 3)).toEqual({ index: 1, startLine: 3, endLine: 4 });
+    expect(blockForLine(spans, 5)).toEqual({ index: 2, startLine: 5, endLine: 5 });
+    expect(blockForLine("A ``x | ` | y`` B | C\n--- | ---\n    matched\n\nAfter", 3).index).toBe(1);
+    // When that reading is no table it reads the header as written, where
+    // the code span's pipe divides: two cells over two again.
+    expect(blockForLine("A `x | y` B\n--- | ---\n    matched\n\nAfter", 3).index).toBe(1);
+  });
+
+  // Count the helper's character reads and backtick-search extents through
+  // blockForLine. Distinct unmatched run lengths must not restart suffix scans.
+  it("reads a header of unclosed backtick runs in a linear amount of work", () => {
+    const { charCodeAt, indexOf } = String.prototype;
+    const work = (runs: number) => {
+      const header = `A ${Array.from({ length: runs }, (_, i) => `${"`".repeat(i + 1)}x`).join(" ")} | B | C`;
+      const body = `${header}\n--- | ---\n    matched\n\nAfter`;
+      let read = 0;
+      const charCodeAtSpy = vi.spyOn(String.prototype, "charCodeAt").mockImplementation(function (
+        this: string,
+        at: number,
+      ) {
+        read += 1;
+        return Reflect.apply(charCodeAt, this, [at]) as number;
+      });
+      const indexOfSpy = vi.spyOn(String.prototype, "indexOf").mockImplementation(function (
+        this: string,
+        search: string,
+        from?: number,
+      ) {
+        const found = Reflect.apply(indexOf, this, [search, from]) as number;
+        if (search === "`") read += (found < 0 ? this.length : found + 1) - (from ?? 0);
+        return found;
+      });
+      try {
+        blockForLine(body, 5);
+      } finally {
+        charCodeAtSpy.mockRestore();
+        indexOfSpy.mockRestore();
+      }
+      return { length: body.length, read };
+    };
+    const small = work(130);
+    const large = work(184);
+    expect(large.length).toBeGreaterThan(small.length * 1.9);
+    expect(small.read).toBeGreaterThan(0);
+    expect(large.read, `${small.read} -> ${large.read}`).toBeLessThan(small.read * 2.2);
   });
 
   it("rejects a fence opener that is already four columns in", () => {
@@ -443,9 +489,9 @@ describe("blockForLine — the index", () => {
 
   it("ends an open list at a quote, but not at a table or display math", () => {
     expect(blockForLine("- item\n> matched\n\nAfter", 2).index).toBe(1);
-    // An ordered-list item keeps the quote as nested content.
-    expect(blockForLine("1. item\n> matched\n\nAfter", 2).index).toBe(0);
-    expect(blockForLine("1) item\n> matched\n\nAfter", 2).index).toBe(0);
+    // A quote must be indented into either kind of list item.
+    expect(blockForLine("1. item\n> matched\n\nAfter", 2).index).toBe(1);
+    expect(blockForLine("1) item\n> matched\n\nAfter", 2).index).toBe(1);
     // A table and display math interrupt a paragraph only.
     expect(blockForLine("- item\n$$x$$\n\nAfter", 2).index).toBe(0);
     expect(blockForLine("- item\n| A |\n| --- |\n| r |\n\nAfter", 2).index).toBe(0);
@@ -454,19 +500,17 @@ describe("blockForLine — the index", () => {
     expect(blockForLine("- item\n  > matched\n\nAfter", 2).index).toBe(0);
   });
 
-  it("takes any indent for an ordered item", () => {
-    // Measured, not derived: either delimiter keeps a one-column continuation.
-    expect(blockForLine("1. item\n\n para\n\nAfter", 3).index).toBe(0);
+  it("requires the ordered item's content column after a blank", () => {
+    expect(blockForLine("1. item\n\n para\n\nAfter", 3).index).toBe(1);
     expect(blockForLine("1. item\n\npara\n\nAfter", 3).index).toBe(1);
-    expect(blockForLine("10. item\n\n   para\n\nAfter", 3).index).toBe(0);
-    expect(blockForLine("1) item\n\n  para\n\nAfter", 3).index).toBe(0);
+    expect(blockForLine("10. item\n\n   para\n\nAfter", 3).index).toBe(1);
+    expect(blockForLine("1) item\n\n  para\n\nAfter", 3).index).toBe(1);
     expect(blockForLine("1) item\n\n   para\n\nAfter", 3).index).toBe(0);
   });
 
-  it("splits a CHECKLIST at a blank line, where a bullet list joins", () => {
-    // A checklist is a taskList, a different node with the opposite rule.
-    expect(blockForLine("- [ ] a\n\n- [ ] b\n\nAfter", 3).index).toBe(1);
-    expect(blockForLine("- [ ] a\n\n- [ ] b\n\n- [ ] c\n\nAfter", 5).index).toBe(2);
+  it("keeps a loose checklist together across blank lines", () => {
+    expect(blockForLine("- [ ] a\n\n- [ ] b\n\nAfter", 3).index).toBe(0);
+    expect(blockForLine("- [ ] a\n\n- [ ] b\n\n- [ ] c\n\nAfter", 5).index).toBe(0);
     // A bullet list still joins across one.
     expect(blockForLine("- a\n\n- b\n\nAfter", 3).index).toBe(0);
     // With no blank line the checklist is one node, mixed states and all.
@@ -487,7 +531,7 @@ describe("blockForLine — the index", () => {
   it("reads a checkbox only where the tokenizer does", () => {
     // Both cases, and the bullet markers. An ordered item is never a task.
     for (const item of ["- [x]", "- [X]", "* [ ]", "+ [ ]"]) {
-      expect(blockForLine(`${item} a\n\n${item} b\n\nAfter`, 3).index).toBe(1);
+      expect(blockForLine(`${item} a\n\n${item} b\n\nAfter`, 3).index).toBe(0);
     }
     expect(blockForLine("1. [ ] a\n\n2. [ ] b\n\nAfter", 3).index).toBe(0);
     // The box needs a space or the line end after it, and only `x`/`X` in it.
@@ -507,36 +551,53 @@ describe("blockForLine — the index", () => {
     expect(blockForLine("- one\n* two", 2).index).toBe(1);
     expect(blockForLine("- one\n+ two", 2).index).toBe(1);
     expect(blockForLine("- a\n\n* b\n\n- c\n\nAfter", 5).index).toBe(2);
-    // An ordered list's delimiter does not change its identity.
-    expect(blockForLine("1. a\n\n2) b\n\nAfter", 3).index).toBe(0);
+    expect(blockForLine("1. a\n\n2) b\n\nAfter", 3).index).toBe(1);
     // The same marker still resumes, and an indented one is a nested list.
     expect(blockForLine("- one\n\n- two\n\nAfter", 3).index).toBe(0);
     expect(blockForLine("1. a\n\n2. b\n\nAfter", 3).index).toBe(0);
     expect(blockForLine("- a\n\n  * b\n\nAfter", 3).index).toBe(0);
   });
 
-  it("counts no block for a link reference definition", () => {
-    // The definition renders nothing, so it must not shift what follows.
+  it("counts a link reference definition as a block of its own", () => {
+    // The canonical writer keeps the definition as paragraph text.
     const body = "Intro\n\n[docs]: https://e.com\n\nAfter";
-    expect(blockForLine(body, 5).index).toBe(1);
-    // A hit ON the definition lands on the block above it, as any gap does.
-    expect(blockForLine(body, 3).index).toBe(0);
-    // Titles, on the line or under it, are part of the same invisible block.
-    expect(blockForLine('Intro\n\n[a]: https://a.com "T"\n\nAfter', 5).index).toBe(1);
-    expect(blockForLine('Intro\n\n[a]: https://a.com\n  "T"\n\nAfter', 6).index).toBe(1);
+    expect(blockForLine(body, 3).index).toBe(1);
+    expect(blockForLine(body, 5).index).toBe(2);
+    // It ends at its own line, so what follows opens a block with no blank
+    // line between, where a paragraph would run on.
+    expect(blockForLine("Intro\n\n[docs]: https://e.com\nAfter", 4).index).toBe(2);
+    // Adjacent definitions are one block each.
+    expect(blockForLine("Intro\n\n[a]: https://a.com\n[b]: https://b.com\nAfter", 4).index).toBe(2);
+    expect(blockForLine("Intro\n\n[a]: https://a.com\n[b]: https://b.com\nAfter", 5).index).toBe(3);
+    // Titles, on the line or under it, indented or not, belong to it.
+    expect(blockForLine('Intro\n\n[a]: https://a.com "T"\nAfter', 4).index).toBe(2);
+    expect(blockForLine('Intro\n\n[a]: https://a.com\n  "T"\nAfter', 4).index).toBe(1);
+    expect(blockForLine('Intro\n\n[a]: https://a.com\n  "T"\nAfter', 5).index).toBe(2);
+    expect(blockForLine('Intro\n\n[a]: https://a.com\n"T"\nAfter', 4).index).toBe(1);
+    expect(blockForLine('Intro\n\n[a]: https://a.com\n"T"\nAfter', 5).index).toBe(2);
+    // A definition holds one title, so a quoted line under a definition that
+    // already has one is a paragraph of its own.
+    const twoTitles = 'Intro\n\n[a]: https://a.test "one"\n"two"\n\n# After';
+    expect(blockForLine(twoTitles, 4).index).toBe(2);
+    expect(blockForLine(twoTitles, 6).index).toBe(3);
+    expect(blockForLine('Intro\n\n[a]:\n  https://a.test "one"\n"two"', 5).index).toBe(2);
   });
 
   it("takes a definition whose destination sits on the next line", () => {
-    // `[docs]:` then the destination under it renders no node either, so the
-    // pair must not shift what follows.
-    expect(blockForLine("Intro\n\n[docs]:\n  https://e.com\n\nAfter", 6).index).toBe(1);
-    expect(blockForLine("Intro\n\n[docs]:\nhttps://e.com\n\nAfter", 6).index).toBe(1);
-    // And a title under that is still the same invisible run.
-    expect(
-      blockForLine('Intro\n\n[docs]:\n  https://e.com\n  "T"\n\nAfter', 7).index,
-    ).toBe(1);
+    // `[docs]:` then the destination under it is one definition, one block.
+    expect(blockForLine("Intro\n\n[docs]:\n  https://e.com\nAfter", 4).index).toBe(1);
+    expect(blockForLine("Intro\n\n[docs]:\n  https://e.com\nAfter", 5).index).toBe(2);
+    expect(blockForLine("Intro\n\n[docs]:\nhttps://e.com\nAfter", 5).index).toBe(2);
+    // And a title under that is still the same block.
+    expect(blockForLine('Intro\n\n[docs]:\n  https://e.com\n  "T"\nAfter', 5).index).toBe(1);
+    expect(blockForLine('Intro\n\n[docs]:\n  https://e.com\n  "T"\nAfter', 6).index).toBe(2);
     // A bare label with nothing under it is ordinary text.
     expect(blockForLine("Intro\n\n[docs]:\n\nAfter", 5).index).toBe(2);
+  });
+
+  it("keeps a definition indented into a list item inside that item", () => {
+    expect(blockForLine("- item\n\n  [a]: https://a.com\n\nAfter", 3).index).toBe(0);
+    expect(blockForLine("- item\n\n  [a]: https://a.com\n\nAfter", 5).index).toBe(1);
   });
 
   it("ends a quote's lazy continuation at an unquoted block marker", () => {
@@ -614,38 +675,41 @@ describe("blockForLine — the index", () => {
     expect(blockForLine("Intro\n\n| A |\n\t| --- |\n| r |\n\nAfter", 7).index).toBe(2);
     expect(blockForLine("Intro\n\n\t[a]: https://e.com\n\nAfter", 3).index).toBe(1);
     expect(blockForLine("Intro\n\n\t[a]:\n\thttps://e.com\n\nAfter", 3).index).toBe(1);
-    // Three columns is still a table and still a definition.
+    // Three columns is still a table and still a definition, which ends at its
+    // own line where indented code runs on.
     expect(blockForLine("Intro\n\n   | A |\n   | --- |\n   | r |\n\nAfter", 7).index).toBe(2);
-    expect(blockForLine("Intro\n\n   [a]: https://e.com\n\nAfter", 5).index).toBe(1);
+    expect(blockForLine("Intro\n\n   [a]: https://e.com\n    code\n\nAfter", 4).index).toBe(2);
+    expect(blockForLine("Intro\n\n\t[a]: https://e.com\n    code\n\nAfter", 4).index).toBe(1);
     // The kinds guarded earlier stay guarded: a tab makes each of these code.
     for (const marker of ["# H", "- item", "1. item", "> q", "---"]) {
       expect(blockForLine(`Intro\n\n\t${marker}\n\nAfter`, 5).index).toBe(2);
     }
   });
 
-  it("hides a definition only when its destination parses", () => {
-    // An unparseable destination is a paragraph, and hiding it would shift
-    // every block after it.
-    expect(blockForLine("Intro\n\n[docs]: <broken\n\nAfter", 5).index).toBe(2);
-    expect(blockForLine("Intro\n\n[docs]: foo bar\n\nAfter", 5).index).toBe(2);
-    expect(blockForLine("Intro\n\n[docs]: https://e.com 'unclosed\n\nAfter", 5).index).toBe(2);
-    expect(blockForLine("Intro\n\n[docs]: https://e.com junk\n\nAfter", 5).index).toBe(2);
-    expect(blockForLine("Intro\n\n[docs]:\n  <broken\n\nAfter", 6).index).toBe(2);
-    // The forms that DO parse still render nothing.
-    expect(blockForLine("Intro\n\n[docs]: https://e.com\n\nAfter", 5).index).toBe(1);
-    expect(blockForLine("Intro\n\n[docs]: <https://e.com>\n\nAfter", 5).index).toBe(1);
+  it("takes a definition only when its destination parses", () => {
+    // An unparseable destination is a paragraph, which runs on into the line
+    // below it.
+    expect(blockForLine("Intro\n\n[docs]: <broken\nAfter", 4).index).toBe(1);
+    expect(blockForLine("Intro\n\n[docs]: foo bar\nAfter", 4).index).toBe(1);
+    expect(blockForLine("Intro\n\n[docs]: https://e.com 'unclosed\nAfter", 4).index).toBe(1);
+    expect(blockForLine("Intro\n\n[docs]: https://e.com junk\nAfter", 4).index).toBe(1);
+    expect(blockForLine("Intro\n\n[docs]:\n  <broken\nAfter", 5).index).toBe(1);
+    // The forms that DO parse end at their own line.
+    expect(blockForLine("Intro\n\n[docs]: https://e.com\nAfter", 4).index).toBe(2);
+    expect(blockForLine("Intro\n\n[docs]: <https://e.com>\nAfter", 4).index).toBe(2);
     // Angle brackets may hold spaces where a bare destination may not.
-    expect(blockForLine("Intro\n\n[docs]: <foo bar>\n\nAfter", 5).index).toBe(1);
-    expect(blockForLine('Intro\n\n[docs]: https://e.com "T"\n\nAfter', 5).index).toBe(1);
-    expect(blockForLine("Intro\n\n[docs]: https://e.com (T)\n\nAfter", 5).index).toBe(1);
+    expect(blockForLine("Intro\n\n[docs]: <foo bar>\nAfter", 4).index).toBe(2);
+    expect(blockForLine('Intro\n\n[docs]: https://e.com "T"\nAfter', 4).index).toBe(2);
+    expect(blockForLine("Intro\n\n[docs]: https://e.com (T)\nAfter", 4).index).toBe(2);
   });
 
-  it("only drops a definition where the tokenizer resolves one", () => {
+  it("takes a definition only where the tokenizer resolves one", () => {
     // No label, no destination, and four columns of indent are all content.
-    expect(blockForLine("Intro\n\n[]: https://a.com\n\nAfter", 5).index).toBe(2);
+    expect(blockForLine("Intro\n\n[]: https://a.com\nAfter", 4).index).toBe(1);
     expect(blockForLine("Intro\n\n[a]:\n\nAfter", 5).index).toBe(2);
     expect(blockForLine("Intro\n\n    [a]: https://a.com\n\nAfter", 5).index).toBe(2);
-    // Inside an open paragraph it is that paragraph's own text, not metadata.
+    // Inside an open paragraph it is that paragraph's own text.
+    expect(blockForLine("Intro\n[a]: https://a.com\n\nAfter", 2).index).toBe(0);
     expect(blockForLine("Intro\n[a]: https://a.com\n\nAfter", 4).index).toBe(1);
   });
 
@@ -1096,7 +1160,7 @@ describe("blockForLine — the index agrees with the editor's own parse", () => 
       ],
     },
     {
-      name: "ordered delimiters share one list",
+      name: "ordered delimiters start separate lists",
       body: "1. a\n\n2) b\n\nAfter",
       lands: [
         [1, "a"],
@@ -1104,6 +1168,39 @@ describe("blockForLine — the index agrees with the editor's own parse", () => 
         [5, "After"],
       ],
     },
+    ...[
+      ["1. item\n  lazy\n\nAfter", 2, 4],
+      ["10. item\n   lazy\n\nAfter", 2, 4],
+      ["- item\n lazy\n\nAfter", 2, 4],
+    ].map(([body, lazy, after]) => ({
+      name: `an underindented lazy line stays in its item: ${body}`,
+      body: body as string,
+      lands: [[lazy as number, "lazy"], [after as number, "After"]] as [number, string][],
+    })),
+    { name: "a lazy line leaves a deep or empty item: - a\n      b\n lazy\n\nAfter", body: "- a\n      b\n lazy\n\nAfter", lands: [[3, "lazy"], [5, "After"]] as [number, string][] },
+    { name: "a lazy line leaves a deep or empty item: - a\n  - b\n      c\n lazy\n\nAfter", body: "- a\n  - b\n      c\n lazy\n\nAfter", lands: [[4, "lazy"], [6, "After"]] as [number, string][] },
+    { name: "a lazy line leaves a deep or empty item: - a\n      b\nlazy\n\nAfter", body: "- a\n      b\nlazy\n\nAfter", lands: [[3, "lazy"], [5, "After"]] as [number, string][] },
+    { name: "a lazy line leaves a deep or empty item: -\nlazy\n\nAfter", body: "-\nlazy\n\nAfter", lands: [[2, "lazy"], [4, "After"]] as [number, string][] },
+    { name: "a lazy line leaves a deep or empty item: -     a\nlazy\n\nAfter", body: "-     a\nlazy\n\nAfter", lands: [[2, "lazy"], [4, "After"]] as [number, string][] },
+    { name: "a lazy line leaves a deep or empty item: - a\n  \tb\n lazy\n\nAfter", body: "- a\n  \tb\n lazy\n\nAfter", lands: [[3, "lazy"], [5, "After"]] as [number, string][] },
+    { name: "r25-deep-marker-bullet", body: "-    a\nlazy\n\nAfter", lands: [[2,"lazy"],[4,"After"]] as [number, string][] },
+    { name: "r25-deep-marker-ordered", body: "1.    a\nlazy\n\nAfter", lands: [[2,"lazy"],[4,"After"]] as [number, string][] },
+    { name: "r25-heading-marker", body: "- # h\nlazy\n\nAfter", lands: [[2,"lazy"],[4,"After"]] as [number, string][] },
+    { name: "r25-heading-continuation", body: "- a\n  # h\nlazy\n\nAfter", lands: [[3,"lazy"],[5,"After"]] as [number, string][] },
+    { name: "r25-fence-marker", body: "- ```\n  x\n  ```\nlazy\n\nAfter", lands: [[4,"lazy"],[6,"After"]] as [number, string][] },
+    { name: "r25-fence-continuation", body: "- a\n  ```\n  x\n  ```\nlazy\n\nAfter", lands: [[5,"lazy"],[7,"After"]] as [number, string][] },
+    { name: "r25-rule-marker", body: "- ---\nlazy\n\nAfter", lands: [[2,"lazy"],[4,"After"]] as [number, string][] },
+    { name: "r25-rule-continuation", body: "- a\n  - - -\nlazy\n\nAfter", lands: [[3,"lazy"],[5,"After"]] as [number, string][] },
+    { name: "r26-hashtag-prose-resumes", body: "- #tag\n  plain\nlazy\n\nAfter", lands: [[3, "lazy"], [5, "After"]] as [number, string][] },
+    { name: "r26-hashtag-next", body: "- a\n#tag\n\nAfter", lands: [] as [number,string][] },
+    { name: "r26-hashtag-marker", body: "- #tag\nlazy\n\nAfter", lands: [] as [number,string][] },
+    { name: "r26-hashtag-continuation", body: "- a\n  #tag\nlazy\n\nAfter", lands: [] as [number,string][] },
+    { name: "r26-hashtag-number", body: "- #1 priority\nnext\n\nAfter", lands: [] as [number,string][] },
+    { name: "r26-html-next", body: "- a\n<!-- note -->\n\nAfter", lands: [] as [number,string][] },
+    { name: "r26-deep-heading", body: "- a\n    # h\nlazy\n\nAfter", lands: [] as [number,string][] },
+    { name: "r26-deep-fence", body: "- a\n    ```\n    x\n    ```\nlazy\n\nAfter", lands: [] as [number,string][] },
+    { name: "r26-deep-ordered-heading", body: "1. a\n      # h\nlazy\n\nAfter", lands: [] as [number,string][] },
+    { name: "r26-five-space-marker-fence", body: "-     ```\nnext\n\n# H", lands: [] as [number,string][] },
     {
       name: "three lists, two marker changes",
       body: "- a\n\n* b\n\n- c\n\nAfter",
@@ -1114,11 +1211,20 @@ describe("blockForLine — the index agrees with the editor's own parse", () => 
       ],
     },
     {
-      name: "a link reference definition renders no node",
+      name: "a link reference definition is a paragraph of its own text",
       body: "Intro\n\n[docs]: https://e.com\n\nAfter",
       lands: [
         [1, "Intro"],
+        [3, "[docs]: https://e.com"],
         [5, "After"],
+      ],
+    },
+    {
+      name: "a definition ends at its own line",
+      body: "Intro\n\n[docs]: https://e.com\nAfter",
+      lands: [
+        [3, "[docs]: https://e.com"],
+        [4, "After"],
       ],
     },
     {
@@ -1126,13 +1232,43 @@ describe("blockForLine — the index agrees with the editor's own parse", () => 
       body: 'Intro\n\n[a]: https://a.com\n  "T"\n\nAfter',
       lands: [
         [1, "Intro"],
+        [4, '"T"'],
         [6, "After"],
       ],
     },
     {
-      name: "a trailing cluster of definitions renders nothing",
+      name: "an unindented title line goes with it too",
+      body: 'Intro\n\n[a]: https://a.com\n"T"\nAfter',
+      lands: [
+        [4, '"T"'],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "a second title line is a paragraph of its own",
+      body: 'Intro\n\n[a]: https://a.test "one"\n"two"\n\n# After',
+      lands: [
+        [3, '[a]: https://a.test "one"'],
+        [4, '"two"'],
+        [6, "After"],
+      ],
+    },
+    {
+      name: "a trailing cluster of definitions is one block each",
       body: "Text\n\n[a]: https://a.com\n[b]: https://b.com",
-      lands: [[1, "Text"]],
+      lands: [
+        [1, "Text"],
+        [3, "[a]: https://a.com"],
+        [4, "[b]: https://b.com"],
+      ],
+    },
+    {
+      name: "a definition indented into a list item stays in that item",
+      body: "- item\n\n  [a]: https://a.com\n\nAfter",
+      lands: [
+        [3, "[a]: https://a.com"],
+        [5, "After"],
+      ],
     },
     {
       name: "a definition inside a paragraph is that paragraph's text",
@@ -1252,10 +1388,18 @@ describe("blockForLine — the index agrees with the editor's own parse", () => 
       ],
     },
     {
-      name: "a `)`-ordered item accepts any indented continuation",
+      name: "an underindented continuation leaves a `)`-ordered item",
       body: "1) item\n\n  para\n\nAfter",
       lands: [
         [1, "item"],
+        [3, "para"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "five padding columns leave one marker space in an ordered item",
+      body: "1.     item\n\n   para\n\nAfter",
+      lands: [
         [3, "para"],
         [5, "After"],
       ],
@@ -1287,7 +1431,7 @@ describe("blockForLine — the index agrees with the editor's own parse", () => 
       ],
     },
     {
-      name: "an ordered delimiter change stays in one list",
+      name: "an ordered delimiter change starts a new list",
       body: "1) a\n1. b",
       lands: [
         [1, "a"],
@@ -1377,9 +1521,61 @@ describe("blockForLine — the index agrees with the editor's own parse", () => 
       ],
     },
     {
-      name: "a pipe in a code span still divides, so this forms no table",
+      name: "a pipe in a code span is escaped first, so the columns agree",
       body: "A `x | y` B | C\n--- | ---\n    matched\n\nAfter",
-      lands: [[5, "After"]],
+      lands: [
+        [1, "x | y"],
+        [3, "matched"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "a pipe in a double-backtick code span is escaped too",
+      body: "A ``x | ` | y`` B | C\n--- | ---\n    matched\n\nAfter",
+      lands: [
+        [3, "matched"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "a header that is no table escaped is read as written",
+      body: "A `x | y` B\n--- | ---\n    matched\n\nAfter",
+      lands: [
+        [3, "matched"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "a run with no closer is text, and a later span still closes",
+      body: "A ``x | y` | z` B | C\n--- | --- | ---\n    matched\n\nAfter",
+      lands: [
+        [3, "matched"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "a backslash does not stop a backtick from closing a span",
+      body: "A `x | \\` B | C\n--- | ---\n    matched\n\nAfter",
+      lands: [
+        [3, "matched"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "an escaped backtick leaves the rest of its run to open a span",
+      body: "A \\``x | y` B | C\n--- | ---\n    matched\n\nAfter",
+      lands: [
+        [3, "matched"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "a span keeps a pipe already escaped and escapes the rest",
+      body: "A `x \\| y | z` B | C\n--- | ---\n    matched\n\nAfter",
+      lands: [
+        [3, "matched"],
+        [5, "After"],
+      ],
     },
     {
       name: "a tab-indented fence is code, and the next fence is the real one",
@@ -1445,7 +1641,7 @@ describe("blockForLine — the index agrees with the editor's own parse", () => 
       ],
     },
     {
-      name: "an ordered list absorbs the quote under it",
+      name: "an unindented quote ends an ordered list",
       body: "1. item\n> matched\n\nAfter",
       lands: [
         [2, "matched"],
@@ -1464,10 +1660,11 @@ describe("blockForLine — the index agrees with the editor's own parse", () => 
     },
     {
       name: "a definition's destination may sit on the next line",
-      body: "Intro\n\n[docs]:\n  https://e.com\n\nAfter",
+      body: "Intro\n\n[docs]:\n  https://e.com\nAfter",
       lands: [
         [1, "Intro"],
-        [6, "After"],
+        [4, "https://e.com"],
+        [5, "After"],
       ],
     },
     {
@@ -1536,30 +1733,30 @@ describe("blockForLine — the index agrees with the editor's own parse", () => 
     },
     {
       name: "an unparseable destination leaves an ordinary paragraph",
-      body: "Intro\n\n[docs]: <broken\n\nAfter",
+      body: "Intro\n\n[docs]: <broken\nAfter",
       lands: [
         [3, "[docs]: <broken"],
-        [5, "After"],
+        [4, "After"],
       ],
     },
     {
       name: "a bare destination may not carry spaces",
-      body: "Intro\n\n[docs]: foo bar\n\nAfter",
+      body: "Intro\n\n[docs]: foo bar\nAfter",
       lands: [
         [3, "[docs]: foo bar"],
-        [5, "After"],
+        [4, "After"],
       ],
     },
     {
       name: "an angle-bracketed destination may",
-      body: "Intro\n\n[docs]: <foo bar>\n\nAfter",
+      body: "Intro\n\n[docs]: <foo bar>\nAfter",
       lands: [
-        [1, "Intro"],
-        [5, "After"],
+        [3, "[docs]: <foo bar>"],
+        [4, "After"],
       ],
     },
     {
-      name: "a blank line splits a checklist",
+      name: "a blank line keeps a loose checklist together",
       body: "- [ ] a\n\n- [ ] b\n\nAfter",
       lands: [
         [1, "a"],

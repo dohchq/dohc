@@ -6,6 +6,7 @@ import { parseNamedLiveBrowserClientLimits, type NamedLiveBrowserClientLimits } 
 import {parseLiveGatewayLimits, type LiveGatewayLimits} from "./liveGateway";
 import {parseNamedLiveBrowserLimits, type NamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
 import {selfHostLiveProfile} from "../../sync-relay/src/selfHostLiveProfile";
+import {canonicalIpAddress} from "@dohc/service-http";
 
 export interface ShareWebConfig {
   appLaunch?: AppLaunchConfig;
@@ -14,6 +15,7 @@ export interface ShareWebConfig {
   publicRelayUrl: string;
   relayExchangeKey?: string;
   publicHosts: Set<string>;
+  internalHosts: Set<string>;
   trustedProxies: Set<string>;
   port: number;
   bind: string;
@@ -88,7 +90,11 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
       : exactList(
           trustedProxyValue,
           "DOHC_SHARE_WEB_TRUSTED_PROXIES must contain exact comma-separated peer addresses.",
-        ),
+        ).map(entry => {
+          const address = canonicalIpAddress(entry);
+          if (!address) throw new Error("DOHC_SHARE_WEB_TRUSTED_PROXIES must contain exact comma-separated peer addresses.");
+          return address;
+        }),
   );
 
   const portValue = env.DOHC_SHARE_WEB_PORT ?? "1790";
@@ -114,6 +120,9 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
   if (devMode && nodeEnv !== "development" && nodeEnv !== "test") {
     throw new Error("DOHC_SHARE_WEB_DEV=1 requires NODE_ENV=development or test.");
   }
+  const internalHosts = new Set(env.DOHC_SHARE_WEB_INTERNAL_HOSTS ? exactList(env.DOHC_SHARE_WEB_INTERNAL_HOSTS,
+    "DOHC_SHARE_WEB_INTERNAL_HOSTS must contain exact comma-separated Host values.").map(host => host.toLowerCase()) : []);
+  if (relayExchangeKey && internalHosts.size === 0) throw new Error("DOHC_SHARE_WEB_INTERNAL_HOSTS must be set when DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY is configured.");
 
   let accountAuth: AccountAuthConfig | undefined;
   const authUpstream = env.DOHC_SHARE_WEB_AUTH_URL;
@@ -154,7 +163,8 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
   if (env.DOHC_SHARE_WEB_NAMED_EDITOR_LIMITS !== undefined) {
     if (!namedLiveGatewayLimits) throw new Error("Named browser editing requires the named live gateway.");
     namedRecipientBrowserLimits = parseNamedLiveBrowserLimits(JSON.parse(env.DOHC_SHARE_WEB_NAMED_EDITOR_LIMITS));
-    if (namedRecipientBrowserLimits.provider.frames.receive.maxFrameBytes > namedLiveGatewayLimits.maxFrameBytes) {
+    if (namedRecipientBrowserLimits.provider.frames.receive.maxFrameBytes > namedLiveGatewayLimits.maxFrameBytes ||
+      namedRecipientBrowserLimits.provider.frames.maxQueuedBytes > namedLiveGatewayLimits.maxPendingBytes) {
       throw new Error("Named browser frames exceed gateway capacity.");
     }
   }
@@ -167,8 +177,11 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
     if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).sort().join() !== "editor,gateway,requests") throw new Error("Invalid link live limits.");
     const fields = value as Record<string, unknown>;
     linkLive = {publicOrigin, gateway: parseLiveGatewayLimits(fields.gateway), requests: parseNamedLiveBrowserClientLimits(fields.requests), editor: parseNamedLiveBrowserLimits(fields.editor)};
-    if (linkLive.editor.provider.frames.receive.maxFrameBytes > linkLive.gateway.maxFrameBytes) throw new Error("Link browser frames exceed gateway capacity.");
+    if (linkLive.editor.provider.frames.receive.maxFrameBytes > linkLive.gateway.maxFrameBytes ||
+      linkLive.editor.provider.frames.maxQueuedBytes > linkLive.gateway.maxPendingBytes) throw new Error("Link browser frames exceed gateway capacity.");
   }
+
+  if (namedLiveGatewayLimits && linkLive && namedLiveGatewayLimits.maxBufferedBytes !== linkLive.gateway.maxBufferedBytes) throw new TypeError("Live gateways must share one buffer budget.");
 
   const publicEditRelease = parsePublicEditRelease(env.DOHC_PUBLIC_EDIT_RELEASE === undefined ? undefined : JSON.parse(env.DOHC_PUBLIC_EDIT_RELEASE));
   if (publicEditRelease && !linkLive) throw new Error("Public Edit release requires configured link live limits and relay exchange.");
@@ -180,6 +193,7 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
     publicRelayUrl,
     relayExchangeKey,
     publicHosts: new Set(hosts),
+    internalHosts,
     trustedProxies,
     port,
     bind: env.DOHC_SHARE_WEB_BIND ?? (devMode ? "127.0.0.1" : "0.0.0.0"),

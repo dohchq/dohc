@@ -14,16 +14,17 @@ import * as Y from "yjs";
 // hold the window open deterministically.
 vi.mock("./editor/MarkdownEditor", () => new Promise(() => {}));
 
-import { markdownToYDoc } from "./editor/import-export";
+import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { FileInspector } from "./FileInspector";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { disposeEngineDocLeasesForTests } from "./collab/engineDocLease";
+import { EDGE_MARKDOWN } from "./markdown/frontmatter.edge-fixture";
 
 const DOC_MARKDOWN = "# Plan\n\nBody from the last read.\n";
 
 function engineBridge(
   markdown: string,
-  options?: { available?: boolean; engineMayHoldDocument?: boolean },
+  options?: { available?: boolean; engineMayHoldDocument?: boolean; captureHeld?: boolean },
 ) {
   const serverDoc = markdownToYDoc(markdown);
   return {
@@ -40,6 +41,7 @@ function engineBridge(
       source: "default" as const,
     })),
     openEngineYDocSession: vi.fn(async () => {
+      if (options?.captureHeld) return { available: false, captureHeld: true };
       if (options?.engineMayHoldDocument === true) {
         return { available: false, engineMayHoldDocument: true };
       }
@@ -96,9 +98,21 @@ afterEach(async () => {
 // Exporting it while the only serializer of the canonical doc is
 // unmounted writes a file that is not the user's document, and says it saved.
 describe("engine-mode export with no mounted serializer", () => {
-  it("refuses the export while the engine document has no serializer", async () => {
+  it("keeps a held file read-only and explains why live editing is unavailable", async () => {
+    const bridge = engineBridge(DOC_MARKDOWN, { captureHeld: true });
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    expect(await screen.findByText('dohc cannot open "a.md" for live editing. dohc cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.')).toBeTruthy();
+    expect(screen.queryByTestId("markdown-source-toggle")).toBeNull();
+    expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
+    expect(bridge.applyEngineYDocUpdate).not.toHaveBeenCalled();
+  });
+  it.each([
+    ["plain", DOC_MARKDOWN],
+    ["shared-type frontmatter", EDGE_MARKDOWN],
+  ])("refuses the export while the engine document has no serializer (%s)", async (_name, markdown) => {
     const user = userEvent.setup();
-    const bridge = engineBridge(DOC_MARKDOWN);
+    const bridge = engineBridge(markdown);
     vi.stubGlobal("dohcDesktop", bridge);
 
     render(<FileInspector workspaceId="ws-1" path="a.md" />);

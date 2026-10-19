@@ -12,16 +12,27 @@ import {
   type SetStateAction,
 } from "react";
 import { ShellErrorReporter } from "../shell/useShellError";
-import { Extension, resolveFocusPosition, type Editor } from "@tiptap/core";
-import { DohcMarkdownTable, serializeRichdocBody } from "@dohc/ydoc-projection";
+import {
+  Extension,
+  resolveFocusPosition,
+  type Editor,
+  type JSONContent,
+} from "@tiptap/core";
+import { parseRichdocMarkdown, serializeRichdocBody } from "@dohc/ydoc-projection";
+import {
+  DohcMarkdownTable,
+  DohcTaskItem,
+  escapeHighlightMarkdown,
+  MarkdownListItem,
+  MarkdownOrderedList,
+  MarkdownTaskList,
+} from "@dohc/ydoc-projection/markdown-extensions";
 import { EditorContent, useEditor, useEditorState } from "@tiptap/react";
 import { BubbleMenu } from "@tiptap/react/menus";
 import { StarterKit } from "@tiptap/starter-kit";
-import { Markdown } from "@tiptap/markdown";
-import { Marked, type marked } from "marked";
-import { TaskList } from "@tiptap/extension-list";
 import { TableKit } from "@tiptap/extension-table";
 import { Placeholder } from "@tiptap/extensions/placeholder";
+import { closeHistory } from "@tiptap/pm/history";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { Plugin, PluginKey } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
@@ -36,13 +47,8 @@ import {
 import type * as Y from "yjs";
 import type { Awareness } from "y-protocols/awareness";
 import { caretSelectionRender, resolveCaretUser } from "../collab/caretPresence";
-import {
-  DohcTaskItem,
-  dohcMarkdownExtensions,
-  escapeHighlightMarkdown,
-  type DohcImageStorage,
-} from "./extensions";
-import { FenceWideningCodeBlock, getDohcYDocSelectionSeed } from "./import-export";
+import { desktopMarkdownExtensions, type DohcImageStorage } from "./extensions";
+import { getDohcYDocSelectionSeed } from "./import-export";
 import type { ImageSrcContext } from "./imageSrc";
 import {
   documentReplacementMap,
@@ -53,9 +59,19 @@ import {
   pickAndInsertImages,
   type ImagePasteContext,
 } from "./imagePaste";
+import {
+  chooseUrlForm,
+  dismissUrlPasteOffer,
+  makeUrlPasteOfferPlugin,
+  urlPasteOfferKeyDown,
+  type UrlForm,
+  type UrlPasteOfferState,
+} from "./urlPaste";
+import { UrlPasteOffer } from "./UrlPasteOffer";
 import { bridge } from "../bridge";
 import { FindReplaceBar } from "./FindReplaceBar";
-import { findReplaceExtension } from "./findReplace";
+import { findReplaceExtension, runFindCommand } from "./findReplace";
+import { onEditorMenuCommand } from "./editorMenuCommands";
 import { makeInlineAtomPlugin } from "./inlineAtomPlugin";
 import { makeTableControlsPlugin } from "./tableControls";
 import {
@@ -104,6 +120,7 @@ import {
   type BlockMenuEntry,
   type BlockMenuState,
 } from "./blockControls";
+import { TABLE_CELL_MIN_WIDTH } from "./tableSizing";
 import {
   makeCodeBlockChromePlugin,
   makeCodeBlockContinuationPlugin,
@@ -123,7 +140,8 @@ import {
 import { intraBlockRange, type IntraBlockMatch } from "./intraBlock";
 import { SafeTrailingNode } from "./safeTrailingNode";
 import { hasFormattableSelection, selectionFormat } from "./selectionFormat";
-import { createCollaborationHistoryHandle } from "./sharedCollaborationHistory";
+import { CollaborationHistoryInput, createCollaborationHistoryHandle } from "./sharedCollaborationHistory";
+import { ListConversions, parseMarkdownListClipboard } from "./listEditing";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
 
@@ -246,22 +264,23 @@ const LINK_MARK_OPTIONS = { openOnClick: false, linkOnPaste: false };
 // clearly against warm paper and charcoal alike — the inline style resolves the
 // CSS variable against the editor's cascade.
 const DROP_CURSOR_OPTIONS = { color: "var(--dohc-accent)", width: 2 };
-// codeBlock: false on both starter kits hands the node to
-// FenceWideningCodeBlock below (in STATIC_EDITOR_EXTENSIONS, so it applies
-// regardless of which starter kit is active) instead of StarterKit's default,
-// which hardcodes a three-backtick fence and truncates a code block whose own
-// content contains a ``` line on export — the same rule import-export.ts
-// registers for engine-driven saves.
+// orderedList: false on both starter kits hands the node to the projection's
+// MarkdownOrderedList in STATIC_EDITOR_EXTENSIONS, as the projection's own
+// schema does. The editor lists the projection's Markdown extensions before
+// the starter kit, as the projection does, so the two schemas rank marks the
+// same: highlight above bold, italic, strike, underline, and code.
 const LOCAL_STARTER_KIT = StarterKit.configure({
   trailingNode: false,
-  codeBlock: false,
+  orderedList: false,
+  listItem: false,
   dropcursor: DROP_CURSOR_OPTIONS,
   link: LINK_MARK_OPTIONS,
 });
 const COLLAB_STARTER_KIT = StarterKit.configure({
   trailingNode: false,
   undoRedo: false,
-  codeBlock: false,
+  orderedList: false,
+  listItem: false,
   dropcursor: DROP_CURSOR_OPTIONS,
   link: LINK_MARK_OPTIONS,
 });
@@ -289,23 +308,35 @@ const PLACEHOLDER_EXTENSION = Placeholder.configure({
 // source-view edit keeps resized rows. Column resizing is off by default in
 // Tiptap; it is turned on here so the grip/menu UI (tableControls.tsx) has
 // resizing to coexist with. These are runtime options: they do not change
-// the schema, so import-export.ts's unconfigured table (parsing only, never
-// rendered) stays in parity. See schema-parity.test.ts.
+// the schema, so the projection's unconfigured table stays in parity. See
+// schema-parity.test.ts.
 const TABLE_EXTENSION = DohcMarkdownTable.configure({
   resizable: true,
   // A useful default column measure makes appended columns grow the table
   // past the reading column instead of compressing every cell indefinitely.
   // The tableWrapper owns horizontal scrolling in styles.css.
-  cellMinWidth: 120,
+  cellMinWidth: TABLE_CELL_MIN_WIDTH,
+  // The block gutter selects a whole table as a node, so Backspace and Delete
+  // remove it. Tiptap otherwise turns that selection into a cell selection.
+  allowTableNodeSelection: true,
 });
 const STATIC_EDITOR_EXTENSIONS = [
-  ...dohcMarkdownExtensions,
-  TaskList,
+  ListConversions,
+  MarkdownListItem,
+  MarkdownOrderedList,
+  MarkdownTaskList,
   DohcTaskItem,
-  FenceWideningCodeBlock,
   TableKit.configure({ table: false }),
   TABLE_EXTENSION,
 ];
+
+// The editor reads Markdown through the projection's parser, so it keeps
+// exactly what every other surface keeps. An empty body is left to the
+// editor's own empty document, which fills in a paragraph.
+function markdownContent(markdown: string): JSONContent | string {
+  const json = parseRichdocMarkdown(markdown);
+  return json.content?.length ? json : "";
+}
 
 function BubbleButton(props: {
   label: string;
@@ -330,7 +361,7 @@ function BubbleButton(props: {
 // transaction, so the toolbar reads the block and marks under the selection
 // from the editor's state; a render-time read showed the previous
 // selection's. selectionFormat keeps that read cheap on every keystroke.
-export function SelectionToolbar(props: {
+function SelectionToolbar(props: {
   editor: Editor;
   onOpenLink: (state: LinkMenuState) => void;
 }) {
@@ -430,9 +461,8 @@ function scrollToBlock(
 }
 
 function renderInlineText(editor: Editor, source: string): string {
-  if (!editor.markdown) return source;
   try {
-    return editor.schema.nodeFromJSON(editor.markdown.parse(source)).textContent;
+    return editor.schema.nodeFromJSON(parseRichdocMarkdown(source)).textContent;
   } catch {
     return source;
   }
@@ -520,6 +550,10 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     const onOpenWorkspaceLinkRef = useRef<
       ((target: WorkspaceLinkTarget) => void) | null
     >(onOpenWorkspaceLink ?? null);
+    // The offer a URL pasted on its own line raises, and its row. Mod+K in
+    // the editor moves focus to the row.
+    const [urlOffer, setUrlOffer] = useState<UrlPasteOfferState | null>(null);
+    const urlOfferRowRef = useRef<HTMLDivElement>(null);
     const onFocusRef = useRef(onFocus);
     onFocusRef.current = onFocus;
     // The shell's error hook, for a code block's copy the clipboard refused.
@@ -690,6 +724,10 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               makeTableControlsPlugin({
                 rowResizeEnabled: Boolean(collab?.ydoc),
               }),
+              makeUrlPasteOfferPlugin(
+                setUrlOffer,
+                collaborationExtensions?.yTiptap ?? null,
+              ),
             ];
           },
         }),
@@ -722,15 +760,9 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
         const awareness = collab?.awareness ?? null;
         const isCollab = Boolean(collabYDoc && collaborationExtensions);
         return [
+          ...desktopMarkdownExtensions,
           isCollab ? COLLAB_STARTER_KIT : LOCAL_STARTER_KIT,
           ...STATIC_EDITOR_EXTENSIONS,
-          // MarkdownManager registers custom tokenizers on its marked
-          // instance. Give each editor a private instance so opening and
-          // closing documents cannot grow the process-wide marked registry.
-          Markdown.configure({
-            indentation: { style: "space", size: 2 },
-            marked: new Marked() as unknown as typeof marked,
-          }),
           findReplaceExtension,
           ...(includePlaceholdersRef.current ? [PLACEHOLDER_EXTENSION] : []),
           ...(isCollab
@@ -740,6 +772,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
                   field: "body",
                   yUndoOptions: { undoManager: collaborationHistory! },
                 }),
+                CollaborationHistoryInput,
                 // Only wired when the caller hands us an Awareness
                 // bound to this same ydoc (docPresence.ts's bindDocPresence).
                 // No awareness (today's only caller, or a peer that dropped
@@ -797,7 +830,6 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
         // undefined (empty/frontmatter-only body) falls back to the normal
         // empty-doc path below, same as non-collab mounts.
         content: collabActive ? collabInitialContent : value,
-        contentType: collabActive ? undefined : "markdown",
         editable: !readOnly,
         // Register the image node view's per-editor context before the
         // ProseMirror view is built (createView reads the extension's storage),
@@ -809,8 +841,14 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           if (imageStorage) {
             imageStorage.resolveContext = () => imageContextRef.current;
           }
+          // Markdown is parsed once, as the editor is built, not on every
+          // render that passes the current value.
+          if (!collabActive && typeof editor.options.content === "string") {
+            editor.options.content = markdownContent(editor.options.content);
+          }
         },
         editorProps: {
+          clipboardTextParser: parseMarkdownListClipboard,
           attributes: {
             class: "dohc-notion-editor",
             "data-testid": "markdown-editor",
@@ -819,7 +857,12 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
             handleImagePaste(view, event, pasteContextRef.current),
           handleDrop: (view, event) =>
             handleImageDrop(view, event as DragEvent, pasteContextRef.current),
-          handleKeyDown: readCaretBeforeKey,
+          handleKeyDown: (view, event) => {
+            readCaretBeforeKey(view, event);
+            return urlPasteOfferKeyDown(view, event, () =>
+              urlOfferRowRef.current?.querySelector("button")?.focus(),
+            );
+          },
           handleDOMEvents: {
             focus: (view) => {
               collaborationHistory?.stopCapturing();
@@ -891,6 +934,33 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
         pane.removeEventListener("dragover", onDragOver);
         pane.removeEventListener("drop", onDrop);
       };
+    }, [editor]);
+
+    // Edit > Find on macOS, while focus is in this editor or its find bar.
+    useEffect(() => {
+      const container = containerRef.current;
+      if (!container || !editor) return;
+      return onEditorMenuCommand(container, (command) => runFindCommand(editor, command));
+    }, [editor]);
+
+    // A choice is its own undo step in either history, so Undo, like Ctrl+Z,
+    // takes back the choice and keeps the paste.
+    const chooseUrlOffer = useCallback(
+      (form: UrlForm) => {
+        if (!editor || editor.isDestroyed) return;
+        collaborationHistory?.stopCapturing();
+        chooseUrlForm(editor.view, form);
+        collaborationHistory?.stopCapturing();
+      },
+      [editor, collaborationHistory],
+    );
+    const undoUrlOffer = useCallback(() => {
+      if (!editor || editor.isDestroyed) return;
+      editor.chain().focus().undo().run();
+      dismissUrlPasteOffer(editor.view);
+    }, [editor]);
+    const dismissUrlOffer = useCallback(() => {
+      if (editor && !editor.isDestroyed) dismissUrlPasteOffer(editor.view);
     }, [editor]);
 
     const openSlashMenuAtPosition = useCallback(
@@ -1013,21 +1083,33 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       if (!editor || collabActive || !pendingUndo) return;
       if (appliedPendingUndoToken.current === pendingUndo.token) return;
       const current = serializeRichdocBody(escapeHighlightMarkdown(editor.getJSON()));
-      if (current !== pendingUndo.restoredText) {
+      // The restore arrives as the file's source, which can spell raw HTML and
+      // escapes differently from a save, so compare the document it reads as.
+      const restored = editor.schema.nodeFromJSON(
+        parseRichdocMarkdown(pendingUndo.restoredText),
+      );
+      if (current !== serializeRichdocBody(escapeHighlightMarkdown(restored.toJSON()))) {
         onPendingUndoConsumed?.(pendingUndo.token);
         return;
       }
       appliedPendingUndoToken.current = pendingUndo.token;
       applyingPendingUndoRef.current = true;
       try {
-        editor.commands.setContent(pendingUndo.undoText, {
-          contentType: "markdown",
-          emitUpdate: false,
-        });
-        editor.commands.setContent(pendingUndo.restoredText, {
-          contentType: "markdown",
-          emitUpdate: false,
-        });
+        editor
+          .chain()
+          .setContent(markdownContent(pendingUndo.undoText), { emitUpdate: false })
+          .setMeta("addToHistory", false)
+          .run();
+        // Closing the history group keeps the restore from joining the event
+        // before it, so one undo lands on undoText.
+        editor
+          .chain()
+          .setContent(markdownContent(pendingUndo.restoredText), { emitUpdate: false })
+          .command(({ tr }) => {
+            closeHistory(tr);
+            return true;
+          })
+          .run();
         editor.commands.focus("end");
       } finally {
         applyingPendingUndoRef.current = false;
@@ -1104,8 +1186,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           const selection = editor.state.selection.getBookmark();
           editor
             .chain()
-            .setContent(markdown, {
-              contentType: "markdown",
+            .setContent(markdownContent(markdown), {
               emitUpdate: false,
             })
             .command(({ tr }) => {
@@ -1219,6 +1300,14 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               editor={editor}
               state={linkMenuState}
               onDismiss={() => setLinkMenuState(CLOSED_LINK_MENU_STATE)}
+            />
+            <UrlPasteOffer
+              offer={urlOffer}
+              view={pickerView}
+              rowRef={urlOfferRowRef}
+              onChoose={chooseUrlOffer}
+              onUndo={undoUrlOffer}
+              onDismiss={dismissUrlOffer}
             />
           </>
         ) : null}

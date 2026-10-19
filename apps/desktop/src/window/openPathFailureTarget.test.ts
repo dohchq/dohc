@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
-import { captureOpenPathFailureTarget, whenOpenPathFailureTargetReady } from "./openPathFailureTarget";
+import { captureOpenPathFailureTarget, whenRendererReady } from "./openPathFailureTarget";
 
 function fixture() {
   const window = Object.assign(new EventEmitter(), { isDestroyed: vi.fn(() => false) });
@@ -16,6 +16,7 @@ function fixture() {
 function expectNoListeners(window: ReturnType<typeof fixture>) {
   expect(window.listenerCount("closed")).toBe(0);
   expect(window.webContents.listenerCount("did-finish-load")).toBe(0);
+  expect(window.webContents.listenerCount("did-stop-loading")).toBe(0);
   expect(window.webContents.listenerCount("did-fail-load")).toBe(0);
   expect(window.webContents.listenerCount("destroyed")).toBe(0);
   expect(window.webContents.listenerCount("render-process-gone")).toBe(0);
@@ -26,7 +27,7 @@ describe("launch path failure renderer readiness", () => {
     const window = fixture();
     window.webContents.getURL.mockReturnValue("file:///dohc/index.html");
     window.webContents.isLoadingMainFrame.mockReturnValue(false);
-    expect(await whenOpenPathFailureTargetReady(window)).toBe(true);
+    expect(await whenRendererReady(window)).toBe(true);
     expectNoListeners(window);
   });
 
@@ -35,24 +36,26 @@ describe("launch path failure renderer readiness", () => {
     if (reason === "window") window.isDestroyed.mockReturnValue(true);
     if (reason === "contents") window.webContents.isDestroyed.mockReturnValue(true);
     if (reason === "crashed") window.webContents.isCrashed.mockReturnValue(true);
-    expect(await whenOpenPathFailureTargetReady(window)).toBe(false);
+    expect(await whenRendererReady(window)).toBe(false);
     expectNoListeners(window);
   });
 
-  it.each(["loaded", "closed", "failed", "destroyed", "render-process-gone"])("settles and removes listeners when %s", async (outcome) => {
+  it.each(["loaded", "stopped", "closed", "failed", "destroyed", "render-process-gone"])("settles and removes listeners when %s", async (outcome) => {
     const window = fixture();
-    const ready = whenOpenPathFailureTargetReady(window);
+    const ready = whenRendererReady(window);
     if (outcome === "loaded") window.webContents.emit("did-finish-load");
+    // Asked after did-finish-load, while the main frame still counts as loading.
+    if (outcome === "stopped") window.webContents.emit("did-stop-loading");
     if (outcome === "closed") window.emit("closed");
     if (outcome === "destroyed" || outcome === "render-process-gone") window.webContents.emit(outcome);
     if (outcome === "failed") window.webContents.emit("did-fail-load", {}, -2, "failed", "", true);
-    expect(await ready).toBe(outcome === "loaded");
+    expect(await ready).toBe(outcome === "loaded" || outcome === "stopped");
     expectNoListeners(window);
   });
 
   it("waits for the replacement navigation after an aborted load and ignores subframes", async () => {
     const window = fixture();
-    const ready = whenOpenPathFailureTargetReady(window);
+    const ready = whenRendererReady(window);
     window.webContents.emit("did-fail-load", {}, -3, "aborted", "", true);
     window.webContents.emit("did-fail-load", {}, -2, "failed", "", false);
     expect(window.webContents.listenerCount("did-finish-load")).toBe(1);

@@ -5,7 +5,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import { markdownToYDoc } from "./editor/import-export";
+import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { FileInspector } from "./FileInspector";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { captureOrphanedDraft, resetOrphanedDrafts } from "./orphanedDrafts";
@@ -181,11 +181,13 @@ describe("markdown document opening state", () => {
     await advanceAutosaveDebounce();
   }
 
-  // The header after its icon and path, read left to right: the status
-  // slot (a save state, "Opening…"), then Share and the document's controls.
+  // The document's actions, read left to right: the status slot (a save
+  // state, "Opening…"), then Share and the document's controls. Outside an
+  // editor group they draw in a row of their own.
   function headerGroup() {
-    const header = screen.getByTestId("file-inspector").querySelector("header");
-    const [, , status, ...controls] = [...(header?.children ?? [])];
+    const children = [...screen.getByTestId("view-actions").children];
+    const status = children.find((el) => el.hasAttribute("data-view-status"));
+    const controls = children.filter((el) => el !== status);
     const control = (el: Element) => el.querySelector("button") ?? el;
     return {
       // A truncating save state sits in a wrapper beside its tooltip.
@@ -214,8 +216,10 @@ describe("markdown document opening state", () => {
     expect(headerGroup(), "a loading header without the toggle and the menu puts the menu where Share was once the text arrives").toEqual({
       status: [], controls: CONTROLS, disabled: [false, true, false],
     });
-    // The header names the file, never its kind in words: the icon says it.
-    expect(screen.getByTestId("file-inspector").querySelector("header")?.textContent).toBe("a.mdEdit");
+    // No header repeats the file above the page: its tab names it, and the
+    // actions say no kind in words.
+    expect(screen.getByTestId("file-inspector").querySelector("header")).toBeNull();
+    expect(screen.getByTestId("view-actions").textContent).toBe("Edit");
 
     // The text arrived and the engine open is held: the opening view.
     await act(async () => read.resolve({ text: DOC_MARKDOWN, truncated: false, contentHash: TEST_CONTENT_HASH }));
@@ -241,7 +245,7 @@ describe("markdown document opening state", () => {
       status: [], controls: CONTROLS, disabled: [false, true, true],
     });
     // A failed read never opens, so the toggle does not promise that it will.
-    expect(screen.getByTestId("file-inspector").querySelector("header button:not([aria-label])")?.getAttribute("title")).toBeNull();
+    expect(screen.getByTestId("view-actions").querySelector("button:not([aria-label])")?.getAttribute("title")).toBeNull();
   });
 
   it("keeps the document's header controls in their places, disabled, when the file is gone from its path", async () => {
@@ -304,31 +308,74 @@ describe("markdown document opening state", () => {
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
   });
 
-  it("keeps the properties panel out of an opening document", async () => {
+  it("shows an opening document's properties and refuses their edits", async () => {
     useAutoAdvancingFakeTimers();
     // The panel writes frontmatter through the same disk save as the body, so
-    // it is part of the refusal. It is also lazy — a bare queryByTestId would
-    // pass while the chunk was merely still loading, proving nothing. Load the
-    // module first, then absence means refusal.
-    await import("./PropertiesPanel");
+    // it is part of the refusal. Opening, it draws the pills where they will
+    // be, with no field that takes typing, no × and no +.
     const { bridgeMock, answerNotEngineBacked } = makeHeldOpenBridge();
+    bridgeMock.readWorkspaceText.mockResolvedValue({
+      text: `---\nstatus: draft\n---\n\n${DOC_MARKDOWN}`,
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
     vi.stubGlobal("dohcDesktop", bridgeMock);
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
     await screen.findByTestId("markdown-open-state");
 
+    const value = (await screen.findByTestId("property-value")) as HTMLInputElement;
+    expect(value.value).toBe("draft");
+    expect(value.readOnly, "`readOnly={refused}` → `readOnly={locked}`. An opening document's property takes typing, and the edit autosaves to disk under the artifact the engine is binding.").toBe(true);
+    expect(screen.queryByTestId("property-remove")).toBeNull();
+    expect(screen.queryByTestId("property-add")).toBeNull();
+    fireEvent.change(value, { target: { value: "done" } });
     await advanceAutosaveDebounce();
-    expect(screen.queryByTestId("properties-panel"), "`{!readOnly && !opening ?` → `{!readOnly ?`. The panel mounts during the held open and its property edits autosave to disk. It would still be mounted at the end of this window — `opening` does not flicker.").toBeNull();
     expect(bridgeMock.writeWorkspaceText.mock.calls).toEqual([]);
 
-    // The same surface, one state later, does show it — so the absence above
-    // was this branch refusing, not a chunk that never arrived.
+    // One state later the same panel takes edits.
     // Wait for the call that creates `settle` (see the note above): the open
     // state renders one commit before the bridge is asked.
     await waitFor(() =>
       expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
     );
     answerNotEngineBacked();
+    await screen.findByTestId("property-add");
+    expect((screen.getByTestId("property-value") as HTMLInputElement).readOnly).toBe(false);
+  });
+
+  it("draws an opening document where the ready one draws it", async () => {
+    const { bridgeMock, bind } = makeHeldOpenBridge();
+    bridgeMock.readWorkspaceText.mockResolvedValue({
+      text: `---\nicon: 🎒\n---\n\n${DOC_MARKDOWN}`,
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("markdown-open-state");
+    await waitFor(() =>
+      expect(screen.getByTestId("view-markdown").textContent).toContain("Base paragraph."),
+    );
+
+    // The properties draw where they will be, and the block as written starts
+    // closed, as it does once the properties take edits.
     await screen.findByTestId("properties-panel");
+    const asWritten = () => screen.getByTestId("frontmatter-as-written").querySelector("details");
+    expect(asWritten()?.open, "`propertiesShown={!readOnly}` → `propertiesShown={!readOnly && !opening}`. The block opens while the document opens, then closes when it is ready and moves the body.").toBe(false);
+    // The body draws with the editor's own rules (styles.css
+    // .dohc-notion-editor): its column, type and block spacing. No block
+    // carries a look of its own that would beat them.
+    const body = screen.getByText("Base paragraph.").parentElement;
+    expect(body?.classList.contains("dohc-notion-editor"), "The read body keeps its own type and spacing, so each block moves when the editor replaces it.").toBe(true);
+    expect(body?.querySelector("h1")?.className).toBe("");
+    expect(body?.querySelector("p")?.className).toBe("");
+
+    await waitFor(() =>
+      expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
+    );
+    bind();
+    await screen.findByTestId("markdown-source-toggle");
+    expect(asWritten()?.open).toBe(false);
   });
 
   it("gives up the bound editor the moment a version switch reopens the session", async () => {
@@ -1583,7 +1630,7 @@ describe("markdown document opening state", () => {
     );
   });
 
-  it("settles a held raw-source save after switching to lossy WYSIWYG without repainting or retrying", async () => {
+  it("settles a held raw-source save after switching to WYSIWYG without repainting or retrying", async () => {
     const bridge = makeHeldOpenBridge();
     let releaseWrite!: () => void;
     const heldWrite = new Promise<{ status: "written"; contentHash: string }>(
@@ -1609,7 +1656,8 @@ describe("markdown document opening state", () => {
       return editor;
     });
     const renderedBeforeWriteLands = wysiwyg.innerHTML;
-    expect(wysiwyg.textContent).not.toContain("keep raw");
+    // The editor shows the comment as the text the file holds.
+    expect(wysiwyg.textContent).toContain("<!-- keep raw -->");
     expect(bridge.bridgeMock.writeWorkspaceText.mock.calls[0]?.[0].text).toBe(
       rawSource,
     );

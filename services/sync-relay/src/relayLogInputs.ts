@@ -1,9 +1,10 @@
 import { sha256Hex } from "@dohc/workspace-core/hash";
-import { MAX_LIVE_AUTHOR_BYTES, MAX_LIVE_AUTHOR_IDENTITIES, parseLiveAuthorContext, parseLiveAuthorSnapshot, type LiveAuthorContext } from "@dohc/live-session-contract/live-authorship";
+import { parseLiveAuthorContext, parseLiveAuthorSnapshot, type LiveAuthorContext } from "@dohc/live-session-contract/live-authorship";
 import { stableJsonStringify } from "./canonicalJson";
 import { badRequest, relayError } from "./errors";
 import { parseString } from "./requestInputs";
 import type { SyncRelayLogInput } from "./storage";
+import { REFUSED_OP_KIND } from "./storage/relayAdmission";
 import { MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
 
 const MAX_OP_KIND_CHARS = 128;
@@ -12,6 +13,10 @@ export const COLLECTION_CREATE_ORIGIN_PREFIX = "relay:collection-create:";
 export const COLLECTION_FILE_ORIGIN_PREFIX = "relay:collection-file:";
 
 export const SHARE_MEMBER_ORIGIN_PREFIX = "relay:share-member:";
+
+// Only the service host's own feed accepts writes from these origins, so they
+// never collide with an owner device's coordinates.
+export const SERVICE_HOST_ORIGIN_PREFIX = "service-host:";
 
 export function namedShareOrigin(shareId: string, userId: string, originId: string): string {
   return `${SHARE_MEMBER_ORIGIN_PREFIX}${sha256Hex(JSON.stringify([shareId, userId, originId]))}`;
@@ -22,8 +27,9 @@ export function namedShareOrigin(shareId: string, userId: string, originId: stri
 // alone mints human, public, named, and link attribution.
 const CLIENT_MOMENT_AUTHOR_KINDS: ReadonlySet<unknown> = new Set(["agent", "automation"]);
 
-export function assertClientLogProvenance(originId: string, rawOps: unknown[], deferMomentRefusal = false): void {
-  assertUnreservedLogOrigin(originId);
+export function assertClientLogProvenance(originId: string, rawOps: unknown[],
+  {deferMomentRefusal = false, serviceHost = false}: {deferMomentRefusal?: boolean; serviceHost?: boolean} = {}): void {
+  assertUnreservedLogOrigin(originId, serviceHost);
   for (const raw of rawOps) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
     const op = raw as Record<string, unknown>;
@@ -34,7 +40,10 @@ export function assertClientLogProvenance(originId: string, rawOps: unknown[], d
   }
 }
 
-function assertUnreservedLogOrigin(originId: string): void {
+function assertUnreservedLogOrigin(originId: string, serviceHost: boolean): void {
+  if (originId.startsWith(SERVICE_HOST_ORIGIN_PREFIX) !== serviceHost) {
+    throw badRequest(serviceHost ? "originId must use the service host prefix" : "originId is reserved for service host writes");
+  }
   if (originId.startsWith(SHARE_MEMBER_ORIGIN_PREFIX)) {
     throw badRequest("originId is reserved for named share writes");
   }
@@ -43,38 +52,6 @@ function assertUnreservedLogOrigin(originId: string): void {
   }
   if (originId.startsWith(COLLECTION_FILE_ORIGIN_PREFIX)) {
     throw badRequest("originId is reserved for relay collection file writes");
-  }
-}
-
-// A credential derived for the native service can publish the public authors
-// already recorded in its live settlements. Other moments keep client rules.
-export function assertServiceReplicaLogProvenance(originId: string, rawOps: unknown[], deferMomentRefusal = false): void {
-  assertUnreservedLogOrigin(originId);
-  for (const raw of rawOps) {
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
-    const op = raw as Record<string, unknown>;
-    if (op.opKind !== "moment.append") continue;
-    const payload = op.payload as Record<string, unknown> | null;
-    if (deferMomentRefusal && payload && Object.hasOwn(payload, "settlementReference")) continue;
-    if (typeof payload?.momentId !== "string" || !/^moment-ydoc-[0-9a-f]{64}$/.test(payload.momentId)) {
-      assertClientLogProvenance(originId, [raw], deferMomentRefusal);
-      continue;
-    }
-    const authors = payload.authors;
-    if (authors == null) continue;
-    try {
-      if (!Array.isArray(authors) || authors.length === 0 || authors.length > MAX_LIVE_AUTHOR_IDENTITIES ||
-        Buffer.byteLength(JSON.stringify(authors), "utf8") > MAX_LIVE_AUTHOR_BYTES) throw new TypeError("Invalid settlement authors.");
-      // Settlement coverage combines many update snapshots, so it can exceed
-      // a single snapshot's two entries. Validate each public entry strictly.
-      for (const author of authors) {
-        if (author && typeof author === "object" && !Array.isArray(author)
-          && author.kind === "unattributed" && Object.keys(author).length === 1) continue;
-        parseLiveAuthorSnapshot([author]);
-      }
-    } catch {
-      throw relayError("authorship_mismatch");
-    }
   }
 }
 
@@ -95,6 +72,7 @@ export function parseLogOp(value: unknown): SyncRelayLogInput {
     throw badRequest("originSeq must be a non-negative integer");
   }
   const opKind = parseString(op.opKind, "opKind", MAX_OP_KIND_CHARS);
+  if (opKind === REFUSED_OP_KIND) throw badRequest("opKind is reserved for the relay");
   if (!op.payload || typeof op.payload !== "object" || Array.isArray(op.payload)) {
     throw badRequest("payload must be a JSON object");
   }
@@ -111,15 +89,61 @@ export function parseLogOp(value: unknown): SyncRelayLogInput {
 
 export type LogAuthorNameLookup = (userId: string) => Promise<string | null> | string | null;
 
-function ordinaryAuthorContext(payload: unknown): LiveAuthorContext | undefined {
+async function authenticatedDisplayName(actorUserId: string, lookupUserDisplayName?: LogAuthorNameLookup, fallback = "Unnamed"): Promise<string> {
+  const name = (await lookupUserDisplayName?.(actorUserId))?.trim() || fallback;
+  try {
+    parseLiveAuthorSnapshot([{kind: "human", humanId: actorUserId, humanName: name}]);
+    return name;
+  } catch {
+    return fallback;
+  }
+}
+
+export async function parseNamedShareLogOps(
+  values: unknown[],
+  actorUserId: string,
+  lookupUserDisplayName?: LogAuthorNameLookup,
+): Promise<SyncRelayLogInput[]> {
+  let lookup: Promise<string | null> | undefined;
+  // A failed lookup leaves the post unnamed rather than refusing it.
+  const accountName = () => lookup ??= Promise.resolve().then(() => lookupUserDisplayName?.(actorUserId) ?? null).catch(() => null);
+  const ops = await parseAuthenticatedLogOps(values, actorUserId, accountName);
+  const chatOps = ops.filter(op => op.opKind === "chat.message.append" || op.opKind === "chat.reaction.set");
+  if (chatOps.length === 0) return ops;
+  // Chat names a person without an account name "Unnamed", as the relay's other chat and discussion routes do.
+  const name = await authenticatedDisplayName(actorUserId, accountName, "Unnamed");
+  const humanName = name.length <= 200 && name.isWellFormed() ? name : "Unnamed";
+  const snapshot = parseLiveAuthorSnapshot([{kind: "human", humanId: actorUserId, humanName}]);
+  for (const op of chatOps) {
+    op.admittedAuthorSnapshot = snapshot;
+    if (op.opKind === "chat.reaction.set") continue;
+    const payload = JSON.parse(op.payloadJson) as Record<string, unknown>;
+    if (payload.authorKind !== "human" && payload.authorKind !== "agent" && payload.authorKind !== "automation") {
+      throw badRequest("invalid author kind");
+    }
+    if (payload.authorKind !== "human") {
+      const name = payload.authorDisplayName;
+      if (typeof name !== "string" || !name.isWellFormed() || !name.trim() || name.trim().length > 200) {
+        throw badRequest("invalid display name");
+      }
+      payload.authorDisplayName = name.trim();
+      op.payloadJson = stableJsonStringify(payload);
+    }
+  }
+  return ops;
+}
+
+function ordinaryAuthorContext(payload: unknown, opKind: string): LiveAuthorContext | undefined {
   const fields = payload as Record<string, unknown>;
+  if (opKind === "moment.append" && (Object.hasOwn(fields, "settlementReference") ||
+    Object.hasOwn(fields, "attributionUnavailable") || fields.authors != null)) return undefined;
   if (!Object.hasOwn(fields, "authorContext")) return undefined;
   try {
     const context = parseLiveAuthorContext(fields.authorContext);
     if (context.agent) parseLiveAuthorSnapshot([{kind: "agent", ...context.agent}]);
     return context;
   } catch {
-    throw badRequest("invalid ydoc.update authorContext");
+    throw badRequest(`invalid ${opKind} authorContext`);
   }
 }
 
@@ -129,19 +153,35 @@ export async function parseAuthenticatedLogOps(
   lookupUserDisplayName?: LogAuthorNameLookup,
 ): Promise<SyncRelayLogInput[]> {
   const ops = values.map(value => parseLogOp(value));
-  const contexts = ops.map((op, index) => op.opKind === "ydoc.update"
-    ? ordinaryAuthorContext((values[index] as Record<string, unknown>).payload)
+  const contexts = ops.map((op, index) => op.opKind === "ydoc.update" || op.opKind === "moment.append"
+    ? ordinaryAuthorContext((values[index] as Record<string, unknown>).payload, op.opKind)
     : undefined);
+  // Consume ordinary recording claims even if queued moment authors were
+  // repaired. Main's live, declared-agent and settlement contexts stay intact.
+  for (const [index, op] of ops.entries()) {
+    const payload = (values[index] as {payload: Record<string, unknown>}).payload;
+    const context = payload.authorContext as {kind?: unknown; accountId?: unknown; agent?: unknown} | null | undefined;
+    if (context?.kind !== "account" || context.agent != null) continue;
+    if (op.opKind === "moment.append" && (Object.hasOwn(payload, "settlementReference") ||
+      Object.hasOwn(payload, "attributionUnavailable"))) continue;
+    const attribution = payload.attribution as {actorKind?: unknown} | null | undefined;
+    if (op.opKind !== "moment.append" && !(op.opKind === "ydoc.update" && payload.isBaseState === false &&
+      payload.actorOriginId === context.accountId && attribution?.actorKind === "human")) continue;
+    const {authorContext: _claim, ...stored} = payload;
+    op.payloadJson = stableJsonStringify(stored);
+  }
   if (!contexts.some(context => context?.kind === "account" && context.accountId === actorUserId)) return ops;
-  const name = (await lookupUserDisplayName?.(actorUserId))?.trim() || actorUserId;
-  let humanName = name;
-  try { parseLiveAuthorSnapshot([{kind: "human", humanId: actorUserId, humanName}]); }
-  catch { humanName = actorUserId; }
+  let humanName: string;
+  try {
+    humanName = await authenticatedDisplayName(actorUserId, lookupUserDisplayName);
+  } catch {
+    return ops;
+  }
   for (const [index, context] of contexts.entries()) {
     if (context?.kind !== "account" || context.accountId !== actorUserId) continue;
     ops[index]!.admittedAuthorSnapshot = parseLiveAuthorSnapshot([
       {kind: "human", humanId: actorUserId, humanName},
-      ...(context.agent ? [{kind: "agent", ...context.agent}] : []),
+      ...(context.agent ? [{kind: "agent", ...context.agent, onBehalfOf: actorUserId}] : []),
     ]);
   }
   return ops;
@@ -201,8 +241,8 @@ const CHAT_OP_POLICY: Record<string, ChatOpPolicy> = {
 };
 
 // Verifies chat authorship before parseLogOp freezes the exact payload bytes.
-// The relay never mutates replicated payloads because the author reads its own
-// operations back and compares those bytes with its local replication log.
+// The ordinary workspace route preserves payload bytes for replica comparison.
+// Named share writes separately admit the account's chat display name.
 export function assertChatAuthorship(
   rawOps: unknown[],
   actorUserId: string,

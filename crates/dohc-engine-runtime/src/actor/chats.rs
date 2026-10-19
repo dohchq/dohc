@@ -6,9 +6,9 @@ use dohc_engine_domain::{
     ChatChannelSummary, ChatDecision, ChatFeedPage, ChatFeedReadState, ChatFileMention, ChatFollow,
     ChatMention, ChatMessage, ChatMessagePage, ChatProjectionFileAccess, ChatReaction, ChatThread,
     ChatThreadLane, ChatThreadProjection, ChatThreadReadState, CreateFileThread, DispatchClaim,
-    DispatchRecovery, LinkedChatStore, MentionCursor, PendingBookmarkRow, ResolveDecision,
-    RunRecordLink, SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread,
-    ThreadDispatchPause, UnreadFileThread,
+    DispatchRecovery, FollowTargetKind, LinkedChatStore, MentionCursor, PendingBookmarkRow,
+    ResolveDecision, RunRecordLink, SaveBookmark, SendMessage, SetFollow, SetReaction,
+    StartChannelThread, ThreadDispatchPause, UnreadFileThread,
 };
 use dohc_engine_storage::NoFaults;
 use tokio_util::sync::CancellationToken;
@@ -103,10 +103,16 @@ impl ActorHandle {
     pub async fn chat_channels_list(
         &self,
         workspace_id: String,
+        after: Option<(i64, String)>,
+        limit: i64,
     ) -> Result<Vec<ChatChannelSummary>, RuntimeError> {
         self.run_chats(move |chats| {
             chats
-                .list_channels(&workspace_id)
+                .list_channels_page(
+                    &workspace_id,
+                    after.as_ref().map(|(at, id)| (*at, id.as_str())),
+                    limit,
+                )
                 .map_err(RuntimeError::from)
         })
         .await
@@ -143,6 +149,7 @@ impl ActorHandle {
     pub async fn chat_thread_start(
         &self,
         input: StartChannelThread,
+        author_actor_key: Option<String>,
         token: CancellationToken,
     ) -> Result<(ChatThread, ChatMessage), RuntimeError> {
         self.run_chats(move |chats| {
@@ -150,7 +157,7 @@ impl ActorHandle {
                 Err(RuntimeError::Cancelled)
             } else {
                 chats
-                    .start_channel_thread(&input, &NoFaults)
+                    .start_admitted_channel_thread(&input, author_actor_key.as_deref(), &NoFaults)
                     .map_err(RuntimeError::from)
             }
         })
@@ -343,6 +350,7 @@ impl ActorHandle {
     pub async fn chat_message_send(
         &self,
         input: SendMessage,
+        author_actor_key: Option<String>,
         token: CancellationToken,
     ) -> Result<ChatMessage, RuntimeError> {
         self.run_chats(move |chats| {
@@ -350,7 +358,7 @@ impl ActorHandle {
                 Err(RuntimeError::Cancelled)
             } else {
                 chats
-                    .send_message(&input, &NoFaults)
+                    .send_admitted_message(&input, author_actor_key.as_deref(), &NoFaults)
                     .map_err(RuntimeError::from)
             }
         })
@@ -585,10 +593,18 @@ impl ActorHandle {
         workspace_id: String,
         owner_user_id: String,
         state: Option<String>,
+        after: Option<(FollowTargetKind, String)>,
+        limit: i64,
     ) -> Result<Vec<ChatFollow>, RuntimeError> {
         self.run_chats(move |chats| {
             chats
-                .list_follows(&workspace_id, &owner_user_id, state.as_deref())
+                .list_follows_page(
+                    &workspace_id,
+                    &owner_user_id,
+                    state.as_deref(),
+                    after.as_ref().map(|(kind, id)| (*kind, id.as_str())),
+                    limit,
+                )
                 .map_err(RuntimeError::from)
         })
         .await
@@ -1128,7 +1144,7 @@ impl ActorHandle {
         .await
     }
 
-    pub async fn chat_dispatch_mark_failure_note_posted(
+    pub async fn chat_dispatch_mark_failure_handled(
         &self,
         workspace_id: String,
         run_id: String,
@@ -1139,7 +1155,7 @@ impl ActorHandle {
                 Err(RuntimeError::Cancelled)
             } else {
                 chats
-                    .mark_failure_note_posted(&workspace_id, &run_id, &NoFaults)
+                    .mark_failure_handled(&workspace_id, &run_id, &NoFaults)
                     .map_err(RuntimeError::from)
             }
         })

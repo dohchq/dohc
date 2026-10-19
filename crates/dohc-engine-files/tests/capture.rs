@@ -3,8 +3,8 @@ mod common;
 use common::Scratch;
 use dohc_engine_files::{
     BatchIngestResult, CancellationToken, CaptureError, CaptureOp, CaptureSink, FilesError,
-    IngestOutcome, IngestReason, ReconcileController, ReconcileRun, ScanBounds, Scanner,
-    apply_reconcile_plan_cancellable, apply_then_ack,
+    IngestOutcome, IngestReason, ReconcileController, ReconcileRun, RespelledRetire, Respelling,
+    ScanBounds, Scanner, apply_reconcile_plan_cancellable, apply_then_ack,
 };
 use dohc_engine_storage::NoFaults;
 use std::collections::{BTreeMap, BTreeSet};
@@ -704,4 +704,161 @@ fn uncertain_batch_prefix_does_not_poll_the_post_commit_crash_seam() {
     assert!(result.crashed_after_durable_boundary.is_none());
     assert!(!faults.fired());
     assert!(sink.ordinary_calls.is_empty());
+}
+
+fn ingest(path: &str) -> CaptureOp {
+    CaptureOp::Ingest {
+        path: path.to_owned(),
+        size: 1,
+        sha256: "a".repeat(64),
+        mtime_ms: 0,
+        media_type: "text/markdown",
+        reason: IngestReason::Added,
+    }
+}
+
+fn plan_of(
+    ops: Vec<CaptureOp>,
+    unconfirmed_removed: &[&str],
+    respelled_retires: &[(&str, &str)],
+) -> dohc_engine_files::ReconcilePlan {
+    dohc_engine_files::ReconcilePlan {
+        from_generation: dohc_engine_files::ScanGeneration(0),
+        to_generation: dohc_engine_files::ScanGeneration(1),
+        ops,
+        retained_unread: Vec::new(),
+        unconfirmed_removed: unconfirmed_removed
+            .iter()
+            .map(|path| (*path).to_owned())
+            .collect(),
+        respelled_retires: respelled_retires
+            .iter()
+            .map(|(path, to)| {
+                (
+                    (*path).to_owned(),
+                    Respelling {
+                        path: (*to).to_owned(),
+                        sha256: "a".repeat(64),
+                    },
+                )
+            })
+            .collect(),
+        degraded: !unconfirmed_removed.is_empty(),
+        degraded_paths: Vec::new(),
+        prepared_from_dirty: false,
+        dirty_epoch: 0,
+    }
+}
+
+fn retire(path: &str) -> CaptureOp {
+    CaptureOp::Retire {
+        path: path.to_owned(),
+    }
+}
+
+/// A sink whose respelled retires wait for the paths in `waits`, as one does
+/// while an editor has the file open.
+#[derive(Default)]
+struct WaitingSink {
+    inner: TwoAtATimeSink,
+    waits: BTreeSet<String>,
+}
+
+impl CaptureSink for WaitingSink {
+    fn ingest(
+        &mut self,
+        path: &str,
+        size: u64,
+        sha256: &str,
+        media_type: &str,
+        reason: IngestReason,
+    ) -> Result<IngestOutcome, CaptureError> {
+        self.inner.ingest(path, size, sha256, media_type, reason)
+    }
+
+    fn retire(&mut self, path: &str) -> Result<(), CaptureError> {
+        self.inner.retire(path)
+    }
+
+    fn retire_respelled(
+        &mut self,
+        path: &str,
+        _to: &Respelling,
+    ) -> Result<RespelledRetire, CaptureError> {
+        if self.waits.contains(path) {
+            self.inner.0.calls.push(path.to_owned());
+            return Ok(RespelledRetire::Waits);
+        }
+        self.retire(path).map(|()| RespelledRetire::Retired)
+    }
+
+    fn ingest_batch(&mut self, ops: &[CaptureOp]) -> Option<BatchIngestResult> {
+        self.inner.ingest_batch(ops)
+    }
+}
+
+fn apply(
+    plan: &dohc_engine_files::ReconcilePlan,
+    sink: &mut dyn CaptureSink,
+) -> dohc_engine_files::CaptureApplyResult {
+    apply_reconcile_plan_cancellable(plan, sink, &NoFaults, &CancellationToken::new())
+}
+
+/// A peer must receive a respelled path's retire before its ingest, or a
+/// disk that ignores case deletes the new file. When the retire of
+/// `notes.md` must wait, here because an editor has it open, the ingest of
+/// `Notes.md` waits for a later pass; other paths go on.
+#[test]
+fn an_ingest_waits_for_the_waiting_retire_of_its_old_spelling() {
+    let plan = plan_of(
+        vec![
+            retire("notes.md"),
+            ingest("a.md"),
+            ingest("b.md"),
+            ingest("Notes.md"),
+            ingest("other.md"),
+            ingest("z.md"),
+        ],
+        &[],
+        &[("notes.md", "Notes.md")],
+    );
+    let mut sink = WaitingSink {
+        waits: ["notes.md".to_owned()].into(),
+        ..WaitingSink::default()
+    };
+    let result = apply(&plan, &mut sink);
+    assert_eq!(
+        sink.inner.0.calls,
+        ["notes.md", "a.md", "b.md", "other.md", "z.md"]
+    );
+    assert_eq!(result.failed_applies, ["notes.md", "Notes.md"]);
+}
+
+/// Where the disk cannot show the stored spelling, as on Windows, the old
+/// spelling's removal stays unconfirmed every pass. The new spelling is
+/// captured as it is without the respell fix, never held back for good.
+#[test]
+fn an_unproven_respell_never_holds_back_an_ingest() {
+    let plan = plan_of(vec![ingest("Notes.md")], &["notes.md"], &[]);
+    let mut sink = WaitingSink::default();
+    let result = apply(&plan, &mut sink);
+    assert_eq!(sink.inner.0.calls, ["Notes.md"]);
+    assert_eq!(result.applied_paths, ["Notes.md"]);
+}
+
+/// A retire that fails for good does not starve the new spelling either:
+/// only a retire that waits holds it back.
+#[test]
+fn a_failed_respelled_retire_never_holds_back_an_ingest() {
+    let plan = plan_of(
+        vec![retire("notes.md"), ingest("Notes.md")],
+        &[],
+        &[("notes.md", "Notes.md")],
+    );
+    let mut sink = WaitingSink::default();
+    sink.inner.0.fail.insert("notes.md".to_owned());
+    let result = apply(&plan, &mut sink);
+    assert_eq!(sink.inner.0.calls, ["notes.md", "Notes.md"]);
+    assert_eq!(result.failed_applies, ["notes.md"]);
+    assert_eq!(result.applied_paths, ["Notes.md"]);
 }

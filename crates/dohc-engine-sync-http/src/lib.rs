@@ -2,12 +2,16 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(unix)]
+mod unix_socket;
+
 use std::net::IpAddr;
 use std::time::Duration;
 
 use dohc_engine_sync::{
     BlobDownloadBatchRequest, BlobDownloadBatchResponse, BlobDownloadResponse, BlobHaveRequest,
     BlobHaveResponse, BlobUploadRequest, ClaimRequest, ClaimResponse, EpochRequest, EpochResponse,
+    HostedPullRequest, HostedPullResponse, HostedScope, HostedScopeDocument,
     KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse, KeyEnvelopeRequest,
     KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse, MAX_BLOB_DOWNLOAD_BATCH,
     MAX_INGEST_BLOB_BYTES, MAX_PAYLOAD_JSON_BYTES, MAX_PULL_OPS, ObservedBytes, ProbeRequest,
@@ -34,9 +38,11 @@ const MAX_KEY_ENVELOPE_ACK_BYTES: u64 = 64 * 1024;
 const RELAY_API_VERSION_HEADER: &str = "x-dohc-api-version";
 const RELAY_API_VERSION: &str = "1";
 const CANCELLABLE_BODY_READ_POLL_INTERVAL: Duration = Duration::from_millis(25);
-/// A canceled synchronous ureq read may live until its transport timeout;
-/// match the runtime's download concurrency so those readers stay bounded.
+/// A canceled synchronous read may live until its transport timeout. Each
+/// limit matches the runtime's concurrency for that kind of read and is
+/// shared by every workspace in the process, so those readers stay bounded.
 const MAX_CANCELLABLE_BODY_READ_WORKERS: usize = 4;
+const MAX_CANCELLABLE_COORDINATE_READ_WORKERS: usize = 8;
 /// The largest blob body a response may carry: the loosest ingest ceiling plus
 /// the one byte that lets ingest observe an overage and refuse it by name.
 const MAX_BLOB_BODY_BYTES: usize = MAX_INGEST_BLOB_BYTES + 1;
@@ -68,16 +74,20 @@ fn map_body_read_error(error: std::io::Error, overflow: &RelayError) -> RelayErr
     }
 }
 
-static CANCELLABLE_BODY_READ_WORKERS: std::sync::LazyLock<(
-    std::sync::Mutex<usize>,
-    std::sync::Condvar,
-)> = std::sync::LazyLock::new(|| (std::sync::Mutex::new(0), std::sync::Condvar::new()));
+type ReadWorkerBudget = (std::sync::Mutex<usize>, std::sync::Condvar);
 
-struct BodyReadWorkerPermit;
+static CANCELLABLE_BODY_READ_WORKERS: std::sync::LazyLock<ReadWorkerBudget> =
+    std::sync::LazyLock::new(|| (std::sync::Mutex::new(0), std::sync::Condvar::new()));
+static CANCELLABLE_COORDINATE_READ_WORKERS: std::sync::LazyLock<ReadWorkerBudget> =
+    std::sync::LazyLock::new(|| (std::sync::Mutex::new(0), std::sync::Condvar::new()));
 
-impl Drop for BodyReadWorkerPermit {
+struct ReadWorkerPermit {
+    workers: &'static ReadWorkerBudget,
+}
+
+impl Drop for ReadWorkerPermit {
     fn drop(&mut self) {
-        let (active, available) = &*CANCELLABLE_BODY_READ_WORKERS;
+        let (active, available) = self.workers;
         let mut active = active
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -86,19 +96,34 @@ impl Drop for BodyReadWorkerPermit {
     }
 }
 
-fn acquire_body_read_worker<C>(cancelled: &C) -> Result<BodyReadWorkerPermit, RelayError>
+fn acquire_body_read_worker<C>(cancelled: &C) -> Result<ReadWorkerPermit, RelayError>
 where
     C: Fn() -> bool + ?Sized,
 {
-    let (active, available) = &*CANCELLABLE_BODY_READ_WORKERS;
+    acquire_read_worker(
+        &CANCELLABLE_BODY_READ_WORKERS,
+        MAX_CANCELLABLE_BODY_READ_WORKERS,
+        cancelled,
+    )
+}
+
+fn acquire_read_worker<C>(
+    workers: &'static ReadWorkerBudget,
+    limit: usize,
+    cancelled: &C,
+) -> Result<ReadWorkerPermit, RelayError>
+where
+    C: Fn() -> bool + ?Sized,
+{
+    let (active, available) = workers;
     let mut active = active.lock().map_err(|_| RelayError::InvalidResponse)?;
     loop {
         if cancelled() {
             return Err(cancelled_relay_request());
         }
-        if *active < MAX_CANCELLABLE_BODY_READ_WORKERS {
+        if *active < limit {
             *active += 1;
-            return Ok(BodyReadWorkerPermit);
+            return Ok(ReadWorkerPermit { workers });
         }
         (active, _) = available
             .wait_timeout(active, CANCELLABLE_BODY_READ_POLL_INTERVAL)
@@ -115,6 +140,8 @@ pub struct HttpRelayTransport {
     base_url: String,
     token: String,
     agent: Agent,
+    /// Serves a hosted replica through the session host's scoped feed.
+    hosted: bool,
 }
 
 impl std::fmt::Debug for HttpRelayTransport {
@@ -123,11 +150,48 @@ impl std::fmt::Debug for HttpRelayTransport {
             .debug_struct("HttpRelayTransport")
             .field("base_url", &self.base_url)
             .field("token", &"[redacted]")
+            .field("hosted", &self.hosted)
             .finish_non_exhaustive()
     }
 }
 
 impl HttpRelayTransport {
+    /// Local replica feed, with no TCP connector, proxy, TLS, or redirects.
+    pub fn new_unix_socket(
+        socket_path: &std::path::Path,
+        token: impl Into<String>,
+    ) -> Result<Self, RelayError> {
+        let token = token.into();
+        if !socket_path.is_absolute() || token.is_empty() {
+            return Err(RelayError::InvalidResponse);
+        }
+        #[cfg(unix)]
+        {
+            let config = Agent::config_builder()
+                .timeout_global(Some(Duration::from_secs(30)))
+                .http_status_as_error(false)
+                .https_only(false)
+                .max_redirects(0)
+                .proxy(None)
+                .middleware(name_relay_api_version)
+                .build();
+            Ok(Self {
+                base_url: "http://127.0.0.1".into(),
+                token,
+                hosted: false,
+                agent: Agent::with_parts(
+                    config,
+                    unix_socket::UnixConnector(socket_path.into()),
+                    unix_socket::UnixResolver,
+                ),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Err(RelayError::Local("relay-unix-socket-unavailable".into()))
+        }
+    }
+
     pub fn new(base_url: impl Into<String>, token: impl Into<String>) -> Result<Self, RelayError> {
         Self::build(base_url, token, false)
     }
@@ -182,13 +246,108 @@ impl HttpRelayTransport {
     ) -> Result<Self, RelayError> {
         let base_url = base_url.into().trim_end_matches('/').to_owned();
         let token = token.into();
-        if token.is_empty() || !base_url_is_allowed(&base_url, allow_insecure_loopback) {
+        if token.is_empty() {
             return Err(RelayError::InvalidResponse);
+        }
+        if !base_url_is_allowed(&base_url, allow_insecure_loopback) {
+            // An https address refused for its query or fragment is malformed,
+            // not a scheme the engine refuses.
+            let https = base_url
+                .get(..8)
+                .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"));
+            return Err(if https {
+                RelayError::InvalidResponse
+            } else {
+                RelayError::HttpsRequired
+            });
         }
         Ok(Self {
             base_url,
             token,
             agent: configured_agent(Duration::from_secs(30), allow_insecure_loopback, None),
+            hosted: false,
+        })
+    }
+
+    /// This transport for a hosted replica. Its log, blob and coordinate
+    /// requests go to the session host's scoped feed, under `/hosted/`.
+    #[must_use]
+    pub fn hosted(mut self) -> Self {
+        self.hosted = true;
+        self
+    }
+
+    /// The route prefix of the feed this transport's replica reads and writes.
+    fn feed(&self) -> &'static str {
+        if self.hosted { "/hosted" } else { "" }
+    }
+
+    /// Look up a coordinate while cooperatively observing request cancellation.
+    pub fn lookup_log_coordinate_cancellable<C>(
+        &self,
+        req: LogCoordinateRequest,
+        cancelled: C,
+    ) -> Result<LogCoordinateResponse, RelayError>
+    where
+        C: Fn() -> bool,
+    {
+        self.lookup_log_coordinate_with_cancellation(req, Some(&cancelled))
+    }
+
+    fn lookup_log_coordinate_with_cancellation(
+        &self,
+        req: LogCoordinateRequest,
+        cancelled: Option<&dyn Fn() -> bool>,
+    ) -> Result<LogCoordinateResponse, RelayError> {
+        if req.origin_seq < 0 || req.origin_seq > dohc_engine_sync::MAX_WIRE_INTEGER {
+            return Err(RelayError::InvalidResponse);
+        }
+        let suffix = format!(
+            "{}/log/{}/{}",
+            self.feed(),
+            encode_segment(&req.origin_id),
+            req.origin_seq
+        );
+        let url = self.workspace_url(
+            &req.workspace_id,
+            &suffix,
+            &req.replication_epoch,
+            &req.stream_identity,
+            &[],
+        )?;
+        let request = self
+            .agent
+            .get(&url)
+            .header("authorization", &self.authorization());
+        let wire: WireLogCoordinateResponse = match cancelled {
+            Some(cancelled) => {
+                self.json_cancellable(move || request.call(), RequestContext::Workspace, cancelled)?
+            }
+            None => self.json(request.call(), RequestContext::Workspace)?,
+        };
+        let (mut op, below_epoch_floor) = match wire {
+            WireLogCoordinateResponse::Absent => return Ok(LogCoordinateResponse::Absent),
+            WireLogCoordinateResponse::Present { op } => (op, false),
+            WireLogCoordinateResponse::PresentBelowEpochFloor { op } => (op, true),
+        };
+        let workspace_id = op.workspace_id.take().ok_or(RelayError::InvalidResponse)?;
+        if workspace_id != req.workspace_id
+            || op.origin_id != req.origin_id
+            || op.origin_seq != req.origin_seq
+        {
+            return Err(RelayError::InvalidResponse);
+        }
+        let envelope = op.into_workspace_envelope(workspace_id);
+        if envelope
+            .relay_seq
+            .is_none_or(|relay_seq| !(0..=dohc_engine_sync::MAX_WIRE_INTEGER).contains(&relay_seq))
+        {
+            return Err(RelayError::InvalidResponse);
+        }
+        Ok(if below_epoch_floor {
+            LogCoordinateResponse::PresentBelowEpochFloor(envelope)
+        } else {
+            LogCoordinateResponse::Present(envelope)
         })
     }
 
@@ -223,11 +382,11 @@ impl HttpRelayTransport {
                     .ok_or(RelayError::InvalidResponse)?;
                 let url = self.workspace_url(
                     &req.workspace_id,
-                    &format!("/blobs/{}", encode_segment(&blob.sha256)),
+                    &format!("{}/blobs/{}", self.feed(), encode_segment(&blob.sha256)),
                     &req.replication_epoch,
                     &req.stream_identity,
                     &[],
-                );
+                )?;
                 if cancelled() {
                     return Err(cancelled_relay_request());
                 }
@@ -291,8 +450,23 @@ impl HttpRelayTransport {
         format!("Bearer {}", self.token)
     }
 
-    fn url(&self, path: &str) -> String {
-        format!("{}{}", self.base_url, path)
+    /// The URL of a relay route. A hosted transport reaches only the session
+    /// host's scoped feed, `/sync/:ws/hosted/`, and no other transport does.
+    fn url(&self, path: &str) -> Result<String, RelayError> {
+        let hosted_route = path
+            .strip_prefix("/sync/")
+            .and_then(|route| route.split_once('/'))
+            .is_some_and(|(workspace, route)| {
+                workspace != "shares" && route.starts_with("hosted/")
+            });
+        if hosted_route != self.hosted {
+            return Err(if self.hosted {
+                dohc_engine_sync::hosted_feed_only()
+            } else {
+                dohc_engine_sync::no_hosted_feed()
+            });
+        }
+        Ok(format!("{}{}", self.base_url, path))
     }
 
     fn workspace_path(&self, workspace_id: &str, suffix: &str) -> String {
@@ -306,7 +480,7 @@ impl HttpRelayTransport {
         replication_epoch: &str,
         stream_identity: &str,
         extra_query: &[(&str, String)],
-    ) -> String {
+    ) -> Result<String, RelayError> {
         let mut query = vec![
             (
                 "replicationEpoch",
@@ -331,7 +505,12 @@ impl HttpRelayTransport {
         ))
     }
 
-    fn share_url(&self, share_id: &str, suffix: &str, query: &[(&str, String)]) -> String {
+    fn share_url(
+        &self,
+        share_id: &str,
+        suffix: &str,
+        query: &[(&str, String)],
+    ) -> Result<String, RelayError> {
         let mut path = format!("/sync/shares/{}{}", encode_segment(share_id), suffix);
         if !query.is_empty() {
             path.push('?');
@@ -351,16 +530,53 @@ impl HttpRelayTransport {
         response: Result<Response<Body>, ureq::Error>,
         context: RequestContext,
     ) -> Result<T, RelayError> {
-        let mut response = response.map_err(map_transport_error)?;
-        if !response.status().is_success() {
-            return Err(map_http_error(&mut response, context));
+        decode_json_response(response, context)
+    }
+
+    fn json_cancellable<T, C, F>(
+        &self,
+        request: F,
+        context: RequestContext,
+        cancelled: &C,
+    ) -> Result<T, RelayError>
+    where
+        T: DeserializeOwned + Send + 'static,
+        C: Fn() -> bool + ?Sized,
+        F: FnOnce() -> Result<Response<Body>, ureq::Error> + Send + 'static,
+    {
+        let permit = acquire_read_worker(
+            &CANCELLABLE_COORDINATE_READ_WORKERS,
+            MAX_CANCELLABLE_COORDINATE_READ_WORKERS,
+            cancelled,
+        )?;
+        let (response_tx, response_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::Builder::new()
+            .name("dohc-relay-json-read".to_owned())
+            .spawn(move || {
+                let _permit = permit;
+                let _ = response_tx.send(decode_json_response(request(), context));
+            })
+            .map_err(|_| RelayError::InvalidResponse)?;
+        loop {
+            if cancelled() {
+                return Err(cancelled_relay_request());
+            }
+            match response_rx.recv_timeout(CANCELLABLE_BODY_READ_POLL_INTERVAL) {
+                Ok(result) => {
+                    worker.join().map_err(|_| RelayError::InvalidResponse)?;
+                    return if cancelled() {
+                        Err(cancelled_relay_request())
+                    } else {
+                        result
+                    };
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    worker.join().map_err(|_| RelayError::InvalidResponse)?;
+                    return Err(RelayError::InvalidResponse);
+                }
+            }
         }
-        response
-            .body_mut()
-            .with_config()
-            .limit(MAX_JSON_RESPONSE_BYTES)
-            .read_json()
-            .map_err(|_| RelayError::InvalidResponse)
     }
 
     fn bytes(
@@ -401,94 +617,138 @@ impl HttpRelayTransport {
         overflow: RelayError,
         cancelled: Option<&dyn Fn() -> bool>,
     ) -> Result<(Vec<u8>, Option<String>), RelayError> {
-        let mut response = response.map_err(map_transport_error)?;
+        let response = response.map_err(map_transport_error)?;
         if cancelled.is_some_and(|cancelled| cancelled()) {
             return Err(cancelled_relay_request());
         }
         if !response.status().is_success() {
-            let error = map_http_error(&mut response, context);
-            return if cancelled.is_some_and(|cancelled| cancelled()) {
-                Err(cancelled_relay_request())
-            } else {
-                Err(error)
+            let status = response.status().as_u16();
+            if status == 401 {
+                return Err(RelayError::Unauthorized);
+            }
+            let body = read_response_body(
+                response,
+                MAX_ERROR_RESPONSE_BYTES,
+                RelayError::InvalidResponse,
+                cancelled,
+            );
+            if cancelled.is_some_and(|cancelled| cancelled()) {
+                return Err(cancelled_relay_request());
+            }
+            let code = match body {
+                Ok(bytes) => serde_json::from_slice::<ErrorBody>(&bytes)
+                    .ok()
+                    .and_then(|body| body.code),
+                Err(error) if error == cancelled_relay_request() => return Err(error),
+                Err(_) => None,
             };
+            return Err(classify_http_error(status, code.as_deref(), context));
         }
         let etag = response
             .headers()
             .get("etag")
             .and_then(|value| value.to_str().ok())
             .and_then(parse_etag);
-        let mut reader = response
-            .into_body()
-            .into_with_config()
-            .limit(read_limit_bytes as u64)
-            .reader();
-        let Some(cancelled) = cancelled else {
+        read_response_body(response, read_limit_bytes as u64, overflow, cancelled)
+            .map(|bytes| (bytes, etag))
+    }
+}
+
+fn read_response_body(
+    response: Response<Body>,
+    read_limit_bytes: u64,
+    overflow: RelayError,
+    cancelled: Option<&dyn Fn() -> bool>,
+) -> Result<Vec<u8>, RelayError> {
+    let mut reader = response
+        .into_body()
+        .into_with_config()
+        .limit(read_limit_bytes)
+        .reader();
+    let Some(cancelled) = cancelled else {
+        let mut bytes = Vec::new();
+        let mut chunk = [0_u8; 64 * 1024];
+        loop {
+            let read = std::io::Read::read(&mut reader, &mut chunk)
+                .map_err(|error| map_body_read_error(error, &overflow))?;
+            if read == 0 {
+                return Ok(bytes);
+            }
+            bytes.extend_from_slice(&chunk[..read]);
+        }
+    };
+
+    let permit = acquire_body_read_worker(cancelled)?;
+    let (message_tx, message_rx) = std::sync::mpsc::channel();
+    let worker = std::thread::Builder::new()
+        .name("dohc-relay-body-read".to_owned())
+        .spawn(move || {
+            let _permit = permit;
             let mut bytes = Vec::new();
             let mut chunk = [0_u8; 64 * 1024];
             loop {
                 let read = std::io::Read::read(&mut reader, &mut chunk)
-                    .map_err(|error| map_body_read_error(error, &overflow))?;
-                if read == 0 {
-                    return Ok((bytes, etag));
-                }
-                bytes.extend_from_slice(&chunk[..read]);
-            }
-        };
-
-        let permit = acquire_body_read_worker(cancelled)?;
-        let (message_tx, message_rx) = std::sync::mpsc::channel();
-        let worker = std::thread::Builder::new()
-            .name("dohc-relay-body-read".to_owned())
-            .spawn(move || {
-                let _permit = permit;
-                let mut bytes = Vec::new();
-                let mut chunk = [0_u8; 64 * 1024];
-                loop {
-                    let read = std::io::Read::read(&mut reader, &mut chunk)
-                        .map_err(|error| map_body_read_error(error, &overflow));
-                    match read {
-                        Ok(0) => {
-                            let _ = message_tx.send(BodyReadWorkerMessage::Finished(Ok(bytes)));
-                            return;
-                        }
-                        Ok(read) => {
-                            bytes.extend_from_slice(&chunk[..read]);
-                            if message_tx.send(BodyReadWorkerMessage::Progress).is_err() {
-                                return;
-                            }
-                        }
-                        Err(error) => {
-                            let _ = message_tx.send(BodyReadWorkerMessage::Finished(Err(error)));
+                    .map_err(|error| map_body_read_error(error, &overflow));
+                match read {
+                    Ok(0) => {
+                        let _ = message_tx.send(BodyReadWorkerMessage::Finished(Ok(bytes)));
+                        return;
+                    }
+                    Ok(read) => {
+                        bytes.extend_from_slice(&chunk[..read]);
+                        if message_tx.send(BodyReadWorkerMessage::Progress).is_err() {
                             return;
                         }
                     }
-                }
-            })
-            .map_err(|_| RelayError::InvalidResponse)?;
-
-        loop {
-            match message_rx.recv_timeout(CANCELLABLE_BODY_READ_POLL_INTERVAL) {
-                Ok(BodyReadWorkerMessage::Progress) => {}
-                Ok(BodyReadWorkerMessage::Finished(result)) => {
-                    worker.join().map_err(|_| RelayError::InvalidResponse)?;
-                    return if cancelled() {
-                        Err(cancelled_relay_request())
-                    } else {
-                        result.map(|bytes| (bytes, etag))
-                    };
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    worker.join().map_err(|_| RelayError::InvalidResponse)?;
-                    return Err(RelayError::InvalidResponse);
+                    Err(error) => {
+                        let _ = message_tx.send(BodyReadWorkerMessage::Finished(Err(error)));
+                        return;
+                    }
                 }
             }
-            if cancelled() {
-                return Err(cancelled_relay_request());
+        })
+        .map_err(|_| RelayError::InvalidResponse)?;
+
+    loop {
+        match message_rx.recv_timeout(CANCELLABLE_BODY_READ_POLL_INTERVAL) {
+            Ok(BodyReadWorkerMessage::Progress) => {
+                #[cfg(test)]
+                tests::signal_body_read_progress();
+            }
+            Ok(BodyReadWorkerMessage::Finished(result)) => {
+                worker.join().map_err(|_| RelayError::InvalidResponse)?;
+                return if cancelled() {
+                    Err(cancelled_relay_request())
+                } else {
+                    result
+                };
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                worker.join().map_err(|_| RelayError::InvalidResponse)?;
+                return Err(RelayError::InvalidResponse);
             }
         }
+        if cancelled() {
+            return Err(cancelled_relay_request());
+        }
     }
+}
+
+fn decode_json_response<T: DeserializeOwned>(
+    response: Result<Response<Body>, ureq::Error>,
+    context: RequestContext,
+) -> Result<T, RelayError> {
+    let mut response = response.map_err(map_transport_error)?;
+    if !response.status().is_success() {
+        return Err(map_http_error(&mut response, context));
+    }
+    response
+        .body_mut()
+        .with_config()
+        .limit(MAX_JSON_RESPONSE_BYTES)
+        .read_json()
+        .map_err(|_| RelayError::InvalidResponse)
 }
 
 fn configured_agent(
@@ -523,40 +783,13 @@ fn name_relay_api_version(
 
 impl RelayTransport for HttpRelayTransport {
     fn publishes_native_settlements(&self) -> bool {
-        // main.ts mounts this credential prefix with provenance: native-settlements.
-        // The relay still authenticates the credential before accepting authors.
+        // main.ts mounts this credential prefix for the native service replica.
+        // The relay derives settlement authors from admitted live updates.
         self.token.starts_with("dohc-service-v1.")
     }
 
     fn push(&self, req: PushRequest) -> Result<PushResponse, RelayError> {
-        validate_outbound_payloads(req.ops.iter().map(|op| &op.payload))?;
-        let body = WirePushRequest {
-            replication_epoch: &req.replication_epoch,
-            stream_identity: &req.stream_identity,
-            origin_id: &req.origin_id,
-            ops: req.ops.iter().map(WireLogInput::from).collect(),
-        };
-        let url = self.workspace_url(
-            &req.workspace_id,
-            "/log",
-            &req.replication_epoch,
-            &req.stream_identity,
-            &[],
-        );
-        let wire: WirePushResponse = self.json(
-            self.agent
-                .post(&url)
-                .header("authorization", &self.authorization())
-                .send_json(body),
-            RequestContext::Workspace,
-        )?;
-        Ok(PushResponse {
-            settlement_refusals: wire.settlement_refusals,
-            accepted: wire.accepted,
-            inserted: wire.inserted,
-            skipped: wire.skipped,
-            current_max_origin_seq: wire.current_max_origin_seq,
-        })
+        self.push_log("/log", req)
     }
 
     fn pull(&self, req: PullRequest) -> Result<PullResponse, RelayError> {
@@ -569,7 +802,7 @@ impl RelayTransport for HttpRelayTransport {
                 ("since", req.cursor.to_string()),
                 ("limit", req.limit.to_string()),
             ],
-        );
+        )?;
         let wire: WireLogPage = self.json(
             self.agent
                 .get(&url)
@@ -577,73 +810,67 @@ impl RelayTransport for HttpRelayTransport {
                 .call(),
             RequestContext::Workspace,
         )?;
-        let mut ops = Vec::with_capacity(wire.ops.len());
-        for mut row in wire.ops {
-            let workspace_id = row.workspace_id.take().ok_or(RelayError::InvalidResponse)?;
-            if workspace_id != req.workspace_id {
-                return Err(RelayError::InvalidResponse);
-            }
-            let envelope = row.into_workspace_envelope(workspace_id);
-            if envelope.relay_seq.is_none_or(|relay_seq| {
-                !(0..=dohc_engine_sync::MAX_WIRE_INTEGER).contains(&relay_seq)
-            }) {
-                return Err(RelayError::InvalidResponse);
-            }
-            ops.push(envelope);
-        }
         Ok(PullResponse {
-            ops,
+            ops: workspace_envelopes(wire.ops, &req.workspace_id)?,
             next_cursor: wire.next_cursor,
             has_more: wire.has_more,
         })
     }
 
-    fn lookup_log_coordinate(
-        &self,
-        req: LogCoordinateRequest,
-    ) -> Result<LogCoordinateResponse, RelayError> {
-        if req.origin_seq < 0 || req.origin_seq > dohc_engine_sync::MAX_WIRE_INTEGER {
-            return Err(RelayError::InvalidResponse);
-        }
-        let suffix = format!("/log/{}/{}", encode_segment(&req.origin_id), req.origin_seq);
+    fn pull_hosted(&self, req: HostedPullRequest) -> Result<HostedPullResponse, RelayError> {
+        // The feed serves the scope it holds to a request without `scope`.
+        let mut query = vec![
+            ("since", req.cursor.to_string()),
+            ("limit", req.limit.to_string()),
+        ];
+        query.extend(req.scope_token.iter().map(|token| ("scope", token.clone())));
+        query.extend(
+            req.object_id
+                .iter()
+                .map(|object_id| ("object", object_id.clone())),
+        );
         let url = self.workspace_url(
             &req.workspace_id,
-            &suffix,
+            "/hosted/log",
             &req.replication_epoch,
             &req.stream_identity,
-            &[],
-        );
-        let wire: WireLogCoordinateResponse = self.json(
+            &query,
+        )?;
+        let wire: WireHostedLogPage = self.json(
             self.agent
                 .get(&url)
                 .header("authorization", &self.authorization())
                 .call(),
             RequestContext::Workspace,
         )?;
-        let (mut op, below_epoch_floor) = match wire {
-            WireLogCoordinateResponse::Absent => return Ok(LogCoordinateResponse::Absent),
-            WireLogCoordinateResponse::Present { op } => (op, false),
-            WireLogCoordinateResponse::PresentBelowEpochFloor { op } => (op, true),
-        };
-        let workspace_id = op.workspace_id.take().ok_or(RelayError::InvalidResponse)?;
-        if workspace_id != req.workspace_id
-            || op.origin_id != req.origin_id
-            || op.origin_seq != req.origin_seq
-        {
-            return Err(RelayError::InvalidResponse);
-        }
-        let envelope = op.into_workspace_envelope(workspace_id);
-        if envelope
-            .relay_seq
-            .is_none_or(|relay_seq| !(0..=dohc_engine_sync::MAX_WIRE_INTEGER).contains(&relay_seq))
-        {
-            return Err(RelayError::InvalidResponse);
-        }
-        Ok(if below_epoch_floor {
-            LogCoordinateResponse::PresentBelowEpochFloor(envelope)
-        } else {
-            LogCoordinateResponse::Present(envelope)
+        Ok(HostedPullResponse {
+            scope: HostedScope {
+                token: wire.scope.token,
+                documents: wire
+                    .scope
+                    .documents
+                    .into_iter()
+                    .map(|document| HostedScopeDocument {
+                        object_id: document.object_id,
+                        path: document.path,
+                    })
+                    .collect(),
+            },
+            ops: workspace_envelopes(wire.ops, &req.workspace_id)?,
+            next_cursor: wire.next_cursor,
+            has_more: wire.has_more,
         })
+    }
+
+    fn push_hosted(&self, req: PushRequest) -> Result<PushResponse, RelayError> {
+        self.push_log("/hosted/log", req)
+    }
+
+    fn lookup_log_coordinate(
+        &self,
+        req: LogCoordinateRequest,
+    ) -> Result<LogCoordinateResponse, RelayError> {
+        self.lookup_log_coordinate_with_cancellation(req, None)
     }
 
     fn probe(&self, req: ProbeRequest) -> Result<ProbeResponse, RelayError> {
@@ -667,7 +894,7 @@ impl RelayTransport for HttpRelayTransport {
         };
         let _: WireOk = self.json(
             self.agent
-                .post(&self.url("/sync/workspaces"))
+                .post(&self.url("/sync/workspaces")?)
                 .header("authorization", &self.authorization())
                 .send_json(body),
             RequestContext::Claim,
@@ -686,7 +913,7 @@ impl RelayTransport for HttpRelayTransport {
             &req.replication_epoch,
             &req.stream_identity,
             &[],
-        );
+        )?;
         let wire: WireEpochResponse = self.json(
             self.agent
                 .post(&url)
@@ -709,11 +936,11 @@ impl RelayTransport for HttpRelayTransport {
         };
         let url = self.workspace_url(
             &req.workspace_id,
-            "/blobs/have",
+            &format!("{}/blobs/have", self.feed()),
             &req.replication_epoch,
             &req.stream_identity,
             &[],
-        );
+        )?;
         let wire: WireBlobHaveResponse = self.json(
             self.agent
                 .post(&url)
@@ -729,11 +956,11 @@ impl RelayTransport for HttpRelayTransport {
     fn upload_blob(&self, req: BlobUploadRequest) -> Result<(), RelayError> {
         let url = self.workspace_url(
             &req.workspace_id,
-            &format!("/blobs/{}", encode_segment(&req.sha256)),
+            &format!("{}/blobs/{}", self.feed(), encode_segment(&req.sha256)),
             &req.replication_epoch,
             &req.stream_identity,
             &[],
-        );
+        )?;
         let _: WireOk = self.json(
             self.agent
                 .put(&url)
@@ -742,6 +969,27 @@ impl RelayTransport for HttpRelayTransport {
             RequestContext::Blob,
         )?;
         Ok(())
+    }
+
+    fn upload_blobs(&self, mut requests: Vec<BlobUploadRequest>) -> Result<(), RelayError> {
+        if requests.is_empty() || requests.len() > dohc_engine_sync::MAX_BLOB_UPLOAD_BATCH {
+            return Err(RelayError::InvalidResponse);
+        }
+        if requests.len() == 1 {
+            return self.upload_blob(requests.remove(0));
+        }
+        std::thread::scope(|scope| {
+            let jobs = requests
+                .into_iter()
+                .map(|request| scope.spawn(move || self.upload_blob(request)))
+                .collect::<Vec<_>>();
+            // Join every owned PUT before returning an error or allowing append.
+            let results = jobs
+                .into_iter()
+                .map(|job| job.join().unwrap_or(Err(RelayError::InvalidResponse)))
+                .collect::<Vec<_>>();
+            results.into_iter().collect()
+        })
     }
 
     fn download_blobs(
@@ -761,7 +1009,7 @@ impl RelayTransport for HttpRelayTransport {
             &req.replication_epoch,
             &req.stream_identity,
             &[],
-        );
+        )?;
         let mut request = self
             .agent
             .put(&url)
@@ -800,7 +1048,7 @@ impl RelayTransport for HttpRelayTransport {
             &req.replication_epoch,
             &req.stream_identity,
             &[],
-        );
+        )?;
         let (bytes, etag) = self.bytes(
             self.agent
                 .get(&url)
@@ -847,12 +1095,12 @@ impl RelayTransport for HttpRelayTransport {
     }
 
     fn share_log_push(&self, req: ShareLogPushRequest) -> Result<PushResponse, RelayError> {
+        let url = self.share_url(&req.share_id, "/log", &[])?;
         validate_outbound_payloads(req.ops.iter().map(|op| &op.payload))?;
         let body = WireSharePushRequest {
             origin_id: &req.origin_id,
             ops: req.ops.iter().map(WireShareLogInput::from).collect(),
         };
-        let url = self.share_url(&req.share_id, "/log", &[]);
         let wire: WirePushResponse = self.json(
             self.agent
                 .post(&url)
@@ -862,6 +1110,7 @@ impl RelayTransport for HttpRelayTransport {
         )?;
         Ok(PushResponse {
             settlement_refusals: wire.settlement_refusals,
+            hosted_refusals: wire.hosted_refusals,
             accepted: wire.accepted,
             inserted: wire.inserted,
             skipped: wire.skipped,
@@ -888,7 +1137,7 @@ impl RelayTransport for HttpRelayTransport {
             &req.share_id,
             &format!("/blobs/{}", encode_segment(&req.sha256)),
             &[],
-        );
+        )?;
         let (bytes, _) = self.bytes(
             self.agent
                 .get(&url)
@@ -906,7 +1155,7 @@ impl RelayTransport for HttpRelayTransport {
             &req.share_id,
             &format!("/blobs/{}", encode_segment(&req.sha256)),
             &[],
-        );
+        )?;
         let _: WireOk = self.json(
             self.agent
                 .put(&url)
@@ -925,7 +1174,7 @@ impl RelayTransport for HttpRelayTransport {
             submit_id: &req.submit_id,
             ops: &req.ops,
         };
-        let url = self.share_url(&req.share_id, "/proposals", &[]);
+        let url = self.share_url(&req.share_id, "/proposals", &[])?;
         let wire: WireShareProposalSubmitResponse = self.json(
             self.agent
                 .post(&url)
@@ -947,7 +1196,7 @@ impl RelayTransport for HttpRelayTransport {
             submit_id: &req.submit_id,
             changes: &req.changes,
         };
-        let url = self.share_url(&req.share_id, "/collection-writes", &[]);
+        let url = self.share_url(&req.share_id, "/collection-writes", &[])?;
         let mut response = self
             .agent
             .post(&url)
@@ -1011,6 +1260,38 @@ fn collection_write_answer(
 }
 
 impl HttpRelayTransport {
+    fn push_log(&self, suffix: &str, req: PushRequest) -> Result<PushResponse, RelayError> {
+        let url = self.workspace_url(
+            &req.workspace_id,
+            suffix,
+            &req.replication_epoch,
+            &req.stream_identity,
+            &[],
+        )?;
+        validate_outbound_payloads(req.ops.iter().map(|op| &op.payload))?;
+        let body = WirePushRequest {
+            replication_epoch: &req.replication_epoch,
+            stream_identity: &req.stream_identity,
+            origin_id: &req.origin_id,
+            ops: req.ops.iter().map(WireLogInput::from).collect(),
+        };
+        let wire: WirePushResponse = self.json(
+            self.agent
+                .post(&url)
+                .header("authorization", &self.authorization())
+                .send_json(body),
+            RequestContext::Workspace,
+        )?;
+        Ok(PushResponse {
+            settlement_refusals: wire.settlement_refusals,
+            hosted_refusals: wire.hosted_refusals,
+            accepted: wire.accepted,
+            inserted: wire.inserted,
+            skipped: wire.skipped,
+            current_max_origin_seq: wire.current_max_origin_seq,
+        })
+    }
+
     fn read_share_log(
         &self,
         share_id: &str,
@@ -1020,7 +1301,7 @@ impl HttpRelayTransport {
     ) -> Result<WireLogPage, RelayError> {
         let mut query = vec![("since", cursor.to_string()), ("limit", limit.to_string())];
         query.extend_from_slice(extra_query);
-        let url = self.share_url(share_id, "/log", &query);
+        let url = self.share_url(share_id, "/log", &query)?;
         let wire: WireLogPage = self.json(
             self.agent
                 .get(&url)
@@ -1081,6 +1362,28 @@ fn names_ip_loopback(base_url: &str) -> bool {
     host.parse().is_ok_and(|ip: IpAddr| ip.is_loopback())
 }
 
+/// A workspace log page's rows, each of `workspace_id` and at a relay position.
+fn workspace_envelopes(
+    rows: Vec<WireLogRow>,
+    workspace_id: &str,
+) -> Result<Vec<ReplicationEnvelope>, RelayError> {
+    rows.into_iter()
+        .map(|mut row| {
+            let row_workspace_id = row.workspace_id.take().ok_or(RelayError::InvalidResponse)?;
+            if row_workspace_id != workspace_id {
+                return Err(RelayError::InvalidResponse);
+            }
+            let envelope = row.into_workspace_envelope(row_workspace_id);
+            if envelope.relay_seq.is_none_or(|relay_seq| {
+                !(0..=dohc_engine_sync::MAX_WIRE_INTEGER).contains(&relay_seq)
+            }) {
+                return Err(RelayError::InvalidResponse);
+            }
+            Ok(envelope)
+        })
+        .collect()
+}
+
 fn validate_outbound_payloads<'a>(
     payloads: impl IntoIterator<Item = &'a serde_json::Value>,
 ) -> Result<(), RelayError> {
@@ -1135,8 +1438,12 @@ fn map_http_error(response: &mut Response<Body>, context: RequestContext) -> Rel
         .read_json::<ErrorBody>()
         .ok()
         .and_then(|body| body.code);
+    classify_http_error(status, code.as_deref(), context)
+}
+
+fn classify_http_error(status: u16, code: Option<&str>, context: RequestContext) -> RelayError {
     if let Some(code) = code {
-        return map_server_code(&code, context);
+        return map_server_code(code, context);
     }
     match status {
         300..=399 => RelayError::BadRequest,
@@ -1176,6 +1483,7 @@ define_server_error_codes! {
     "blob_not_found" => |_| RelayError::BlobMissing,
     "collection_write_rate_limited" => |_| RelayError::HttpStatus(429),
     "conflict" => |_| RelayError::Conflict,
+    "restore-in-progress" => |_| RelayError::Conflict,
     "dependents_changed" => |_| RelayError::Conflict,
     "discussion_limit_reached" => |_| RelayError::QuotaExceeded,
     "discussion_rate_limited" => |_| RelayError::DiscussionRateLimited,
@@ -1387,6 +1695,9 @@ struct WireCollectionWriteError {
 struct WirePushResponse {
     #[serde(default)]
     settlement_refusals: Vec<dohc_engine_sync::SettlementPublicationRefusal>,
+    /// Only the hosted log refuses ops one at a time. Sync validates which push may carry them.
+    #[serde(default, rename = "refusals")]
+    hosted_refusals: Vec<dohc_engine_sync::HostedPushRefusal>,
     accepted: usize,
     inserted: usize,
     skipped: usize,
@@ -1400,6 +1711,28 @@ struct WireLogPage {
     ops: Vec<WireLogRow>,
     next_cursor: i64,
     has_more: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireHostedLogPage {
+    scope: WireHostedScope,
+    ops: Vec<WireLogRow>,
+    next_cursor: i64,
+    has_more: bool,
+}
+
+#[derive(Deserialize)]
+struct WireHostedScope {
+    token: String,
+    documents: Vec<WireHostedScopeDocument>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireHostedScopeDocument {
+    object_id: String,
+    path: String,
 }
 
 #[derive(Deserialize)]
@@ -1485,6 +1818,19 @@ mod tests {
     use rustls::{ServerConfig, ServerConnection, StreamOwned};
 
     use super::*;
+
+    thread_local! {
+        static BODY_READ_PROGRESS: std::cell::RefCell<Option<std::sync::mpsc::Sender<()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn signal_body_read_progress() {
+        BODY_READ_PROGRESS.with_borrow_mut(|signal| {
+            if let Some(signal) = signal.take() {
+                let _ = signal.send(());
+            }
+        });
+    }
 
     #[derive(Deserialize)]
     struct RelayErrorFixture {
@@ -1654,6 +2000,59 @@ mod tests {
     }
 
     #[test]
+    fn cancellable_error_reads_preserve_codes_statuses_and_the_error_body_bound() {
+        let cases = [
+            (
+                401,
+                r#"{"code":"blob_not_found"}"#.to_owned(),
+                RelayError::Unauthorized,
+            ),
+            (403, "not JSON".to_owned(), RelayError::Forbidden),
+            (404, "{}".to_owned(), RelayError::WorkspaceUnavailable),
+            (500, "{}".to_owned(), RelayError::ServerInternal),
+            (
+                500,
+                r#"{"code":"blob_not_found"}"#.to_owned(),
+                RelayError::BlobMissing,
+            ),
+            (
+                500,
+                r#"{"code":"future_code"}"#.to_owned(),
+                RelayError::UnknownServerCode("future_code".to_owned()),
+            ),
+            (
+                500,
+                format!(
+                    r#"{{"code":"blob_not_found","padding":"{}"}}"#,
+                    "x".repeat(MAX_ERROR_RESPONSE_BYTES as usize)
+                ),
+                RelayError::ServerInternal,
+            ),
+        ];
+        for (status, body, expected) in cases {
+            let (base, server) = answer_once(status, body);
+            let transport = HttpRelayTransport::new_insecure_loopback_for_tests(base, "token")
+                .expect("loopback transport");
+            let outcome = transport
+                .download_blobs_cancellable(
+                    BlobDownloadBatchRequest {
+                        workspace_id: "workspace".to_owned(),
+                        replication_epoch: "epoch".to_owned(),
+                        stream_identity: "stream".to_owned(),
+                        blobs: vec![dohc_engine_sync::BlobDownloadSpec {
+                            sha256: "blob".to_owned(),
+                            limit_bytes: 8,
+                        }],
+                    },
+                    || false,
+                )
+                .expect("download batch");
+            server.join().expect("server");
+            assert_eq!(outcome.results, vec![Err(expected)], "status {status}");
+        }
+    }
+
+    #[test]
     fn settlement_carriers_survive_pull_and_coordinate_lookup_without_changing_payloads() {
         for (admission, authors, payload) in [
             (
@@ -1766,6 +2165,48 @@ mod tests {
                 .collect::<BTreeSet<_>>(),
             BTreeSet::from(["originSeq", "opKind", "payload", "recordedAtMs"])
         );
+    }
+
+    #[test]
+    fn hosted_push_reads_the_relays_refusal_of_each_op() {
+        let op = ReplicationEnvelope {
+            workspace_id: "ws".into(),
+            origin_id: "service-host:host".into(),
+            origin_seq: 3,
+            relay_seq: None,
+            op_kind: "ydoc.update".into(),
+            payload: serde_json::json!({"objectId":"object"}),
+            recorded_at_ms: 7,
+            settlement_admission: None,
+            admitted_author_snapshot: None,
+        };
+        let (base, server) = answer_once(
+            200,
+            r#"{"ok":true,"accepted":1,"inserted":1,"skipped":0,"currentMaxOriginSeq":3,"refusals":[{"originId":"service-host:host","originSeq":3,"opKind":"ydoc.update","reason":"outside-hosted-documents"}]}"#,
+        );
+        let transport = HttpRelayTransport::new_insecure_loopback_for_tests(base, "token")
+            .unwrap()
+            .hosted();
+        let response = transport
+            .push_hosted(PushRequest {
+                workspace_id: "ws".into(),
+                replication_epoch: "epoch".into(),
+                stream_identity: "stream".into(),
+                origin_id: "service-host:host".into(),
+                after_seq: 2,
+                ops: vec![op],
+            })
+            .unwrap();
+        assert_eq!(
+            response.hosted_refusals,
+            [dohc_engine_sync::HostedPushRefusal {
+                origin_id: "service-host:host".into(),
+                origin_seq: 3,
+                op_kind: "ydoc.update".into(),
+                reason: "outside-hosted-documents".into(),
+            }]
+        );
+        assert!(server.join().unwrap().contains("/sync/ws/hosted/log"));
     }
 
     #[test]
@@ -1893,12 +2334,19 @@ mod tests {
 
     #[test]
     fn plaintext_bearer_transport_requires_the_debug_loopback_opt_in() {
-        assert!(
-            HttpRelayTransport::new("http://127.0.0.1:1", "token").is_err(),
+        assert_eq!(
+            HttpRelayTransport::new("http://127.0.0.1:1", "token").err(),
+            Some(RelayError::HttpsRequired),
             "accepting `http://` in the normal constructor makes the first two assertions expose a bearer token over plaintext."
         );
-        assert!(HttpRelayTransport::new("http://localhost:1", "token").is_err());
-        assert!(HttpRelayTransport::new("http://example.com", "token").is_err());
+        assert_eq!(
+            HttpRelayTransport::new("http://localhost:1", "token").err(),
+            Some(RelayError::HttpsRequired)
+        );
+        assert_eq!(
+            HttpRelayTransport::new("http://example.com", "token").err(),
+            Some(RelayError::HttpsRequired)
+        );
         assert!(HttpRelayTransport::new("https://example.com", "token").is_ok());
 
         #[cfg(debug_assertions)]
@@ -1926,8 +2374,15 @@ mod tests {
 
     #[test]
     fn relay_base_url_rejects_query_and_fragment_components() {
-        assert!(HttpRelayTransport::new("https://relay.example?tenant=a", "token").is_err());
-        assert!(HttpRelayTransport::new("https://relay.example/#fragment", "token").is_err());
+        assert_eq!(
+            HttpRelayTransport::new("https://relay.example?tenant=a", "token").err(),
+            Some(RelayError::InvalidResponse),
+            "a malformed https address must not tell the person to use https"
+        );
+        assert_eq!(
+            HttpRelayTransport::new("HTTPS://relay.example/#fragment", "token").err(),
+            Some(RelayError::InvalidResponse)
+        );
         assert!(
             HttpRelayTransport::new("https://relay.example/base", "token").is_ok(),
             "ordinary path prefixes remain supported"
@@ -1989,6 +2444,7 @@ mod tests {
             base_url: format!("https://localhost:{port}"),
             token: "token".to_owned(),
             agent: configured_agent(Duration::from_secs(5), false, Some(tls_config)),
+            hosted: false,
         };
 
         let error = transport
@@ -2053,6 +2509,7 @@ mod tests {
             base_url: format!("https://localhost:{port}"),
             token: "token".to_owned(),
             agent: configured_agent(Duration::from_secs(5), false, Some(tls_config)),
+            hosted: false,
         };
         let (outcome_tx, outcome_rx) = mpsc::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -2093,7 +2550,18 @@ mod tests {
 
     #[test]
     fn cancelling_a_stalled_tls_blob_body_settles_before_body_release() {
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        assert_stalled_blob_body_cancels(200, "partdone");
+    }
+
+    #[test]
+    fn cancelling_stalled_tls_blob_error_bodies_settles_before_body_release() {
+        for status in [404, 500] {
+            assert_stalled_blob_body_cancels(status, r#"{"code":"blob_not_found"}"#);
+        }
+    }
+
+    fn assert_stalled_blob_body_cancels(status: u16, body: &'static str) {
+        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::mpsc;
         use std::time::Duration;
 
@@ -2120,12 +2588,17 @@ mod tests {
             let mut stream = StreamOwned::new(connection, stream);
             let mut request = [0_u8; 4096];
             let _ = stream.read(&mut request).expect("TLS request");
+            let partial_response = format!(
+                "HTTP/1.1 {status} Answer\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                &body[..4],
+            );
             stream
-                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 8\r\nconnection: close\r\n\r\npart")
+                .write_all(partial_response.as_bytes())
                 .expect("partial TLS blob response");
             stream.flush().expect("partial TLS blob flush");
             release_body_rx.recv().expect("release stalled body");
-            let _ = stream.write_all(b"done");
+            let _ = stream.write_all(&body.as_bytes()[4..]);
             let _ = stream.flush();
         });
         let tls_config = ureq::tls::TlsConfig::builder()
@@ -2136,15 +2609,14 @@ mod tests {
             base_url: format!("https://localhost:{port}"),
             token: "token".to_owned(),
             agent: configured_agent(Duration::from_secs(5), false, Some(tls_config)),
+            hosted: false,
         };
         let (mid_body_tx, mid_body_rx) = mpsc::channel();
         let (outcome_tx, outcome_rx) = mpsc::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
         let request_cancelled = Arc::clone(&cancelled);
-        let checks = Arc::new(AtomicUsize::new(0));
-        let request_checks = Arc::clone(&checks);
-        const MID_BODY_CHECK_THRESHOLD: usize = 7;
         let request_thread = thread::spawn(move || {
+            BODY_READ_PROGRESS.with_borrow_mut(|signal| *signal = Some(mid_body_tx));
             let outcome = transport.download_blobs_cancellable(
                 BlobDownloadBatchRequest {
                     workspace_id: "workspace".to_owned(),
@@ -2155,35 +2627,26 @@ mod tests {
                         limit_bytes: 8,
                     }],
                 },
-                || {
-                    let cancelled = request_cancelled.load(Ordering::SeqCst);
-                    let check_count = request_checks.fetch_add(1, Ordering::SeqCst) + 1;
-                    if check_count >= MID_BODY_CHECK_THRESHOLD {
-                        mid_body_tx.send(()).expect("mid-body signal");
-                    }
-                    cancelled
-                },
+                || request_cancelled.load(Ordering::SeqCst),
             );
             outcome_tx.send(outcome).expect("blob request outcome");
         });
 
-        mid_body_rx
-            .recv_timeout(Duration::from_secs(10))
-            .expect("client checks cancellation after reading partial body");
+        let partial_body_read = mid_body_rx.recv_timeout(Duration::from_secs(10));
         cancelled.store(true, Ordering::SeqCst);
         let outcome_before_release = outcome_rx.recv_timeout(Duration::from_secs(1));
 
-        release_body_tx.send(()).expect("release TLS server");
+        let _ = release_body_tx.send(());
         request_thread.join().expect("blob request thread");
         server_thread.join().expect("TLS server thread");
 
+        partial_body_read.expect("client reads partial body before cancellation");
         let outcome = outcome_before_release
             .expect("cancellation must settle while the next body chunk is still stalled");
         assert!(
             matches!(&outcome, Err(RelayError::Local(reason)) if reason == "relay-io-cancelled"),
             "a cancelled body must not expose the bytes read before cancellation: {outcome:?}"
         );
-        assert!(checks.load(Ordering::SeqCst) >= 7);
     }
 
     #[test]

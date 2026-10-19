@@ -1,4 +1,6 @@
-import { rm, writeFile } from "node:fs/promises";
+import { createFolderAppDetection } from "./folderAppDetection";
+import { settleYDocsAfterFileObservation } from "./workspaceActivity";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -15,6 +17,8 @@ import type { CloudSyncFailure } from "./relaySyncEngine";
 import { captureForWorkspace } from "./engineCaptureGate";
 import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createTestScratch } from "./testTemp";
+import type { ActiveAgentRun } from "../agents/activeAgentRun";
+import type { AgentRunStateEvent } from "../ipc/bridgeContract";
 
 // The shared-view pin drives the real gate, which never reaches the engine
 // for a shared view — these sessions prove it by throwing on any use.
@@ -54,13 +58,42 @@ function workspace(): ActivityWorkspace {
 }
 
 describe("workspaceActivity capture hooks", () => {
+  it("pushes held status changes without generic activity and discards a retired capture's update", async () => {
+    let hooks!: WorkspaceCaptureHooks;
+    const notify = vi.fn();
+    const onHeldFiles = vi.fn();
+    const activity = createWorkspaceActivity(notify, {
+      onHeldFiles,
+      captureFor: (_workspace, value) => {
+        hooks = value;
+        return { shareView: false, capture: { start: vi.fn(), stop: vi.fn(async () => {}), settleAndCloseAllLiveSessions: vi.fn(async () => {}) } as never };
+      },
+    });
+    const held = { workspaceId: "activity-test", sourceVersionId: "main", objectId: "held", path: "held.md",
+      observedSha256: "digest", observedSize: 4, reason: "ydoc-resolution-not-representable" as const,
+      observedAtMs: 1, attemptCount: 1, retryRequested: false };
+    await activity.open(workspace());
+    notify.mockClear();
+    hooks.onHeldFiles([held]);
+    expect(activity.getStatus("activity-test").heldFiles).toEqual([held]);
+    expect(onHeldFiles).toHaveBeenCalledExactlyOnceWith("activity-test", [held]);
+    expect(notify).not.toHaveBeenCalled();
+    hooks.onHeldFiles([held]);
+    expect(onHeldFiles).toHaveBeenCalledOnce();
+    hooks.onHeldFiles([]);
+    expect(onHeldFiles).toHaveBeenLastCalledWith("activity-test", []);
+    await activity.stopAll();
+    hooks.onHeldFiles([held]);
+    expect(onHeldFiles).toHaveBeenCalledTimes(2);
+  });
   it("attaches observation after capture fails and queues sync only for capture announcements", async () => {
     let observation!: WorkspaceObservationCallbacks;
     const queueSync = vi.fn();
+    const queueWatchedUpload = vi.fn();
     const activity = createWorkspaceActivity(vi.fn(), {
       observationFor: (w, callbacks) => { observation = callbacks; return idleObservation(w, callbacks); },
       captureFor: () => { throw new Error("capture failed"); },
-      engineFor: () => ({ start: async () => {}, stop: async () => {}, queueSync, snapshot: () => ({}) }) as never,
+      engineFor: () => ({ start: async () => {}, stop: async () => {}, queueSync, queueWatchedUpload, snapshot: () => ({}) }) as never,
     });
     const status = await activity.open(workspace());
     expect(status.historyRecordingUnavailable).toBe(true);
@@ -68,6 +101,7 @@ describe("workspaceActivity capture hooks", () => {
     expect(queueSync).not.toHaveBeenCalled();
     observation.captured();
     expect(queueSync).toHaveBeenCalledOnce();
+    expect(queueWatchedUpload).toHaveBeenCalledExactlyOnceWith();
     await activity.stopAll();
   });
 
@@ -92,7 +126,7 @@ describe("workspaceActivity capture hooks", () => {
     expect(steps).toEqual(fails ? ["drain", "unconfirmed", "resync", "sessions", "capture"] : ["drain", "sessions", "capture"]);
   });
 
-  it("bounds an unavailable observation baseline and exposes the history-off notice state", async () => {
+  it("bounds a slow first scan without reporting a file observation failure", async () => {
     vi.useFakeTimers();
     try {
       const notify = vi.fn();
@@ -103,8 +137,9 @@ describe("workspaceActivity capture hooks", () => {
       await vi.advanceTimersByTimeAsync(4_999);
       expect(notify).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(1);
-      expect((await opening).historyRecordingUnavailable).toBe(true);
-      expect(notify).toHaveBeenCalledWith({ workspaceId: "activity-test" });
+      expect(await opening).toMatchObject({ historyRecordingUnavailable: false });
+      expect(activity.getStatus("activity-test").fileObservationFailure).toBeUndefined();
+      expect(notify).not.toHaveBeenCalled();
       await activity.stopAll();
     } finally { vi.useRealTimers(); }
   });
@@ -116,7 +151,7 @@ describe("workspaceActivity capture hooks", () => {
         read: async () => ({ cursor: { generation: "degraded", revision: 0 }, ready: false, degraded: true, resync: false, facts: [] }),
       }),
     });
-    expect((await activity.open(workspace())).historyRecordingUnavailable).toBe(true);
+    expect(await activity.open(workspace())).toMatchObject({ historyRecordingUnavailable: false, fileObservationFailure: "unavailable" });
     await activity.stopAll();
   });
 
@@ -196,6 +231,75 @@ describe("workspaceActivity capture hooks", () => {
     await activity.stopAll();
   });
 
+  it.each(["coalesced with the pull", "with no pull echo"])("delivers a local edit %s without another pull", async scenario => {
+    const notify = vi.fn();
+    const onWatcherBatch = vi.fn();
+    const observeFileEvents = vi.fn();
+    let wake!: () => void;
+    const read = vi.fn().mockResolvedValue({ cursor: { generation: "first", revision: 1 }, ready: true, resync: false, facts: [] });
+    const activity = createPhysicalWorkspaceActivity(notify, {
+      observationFor: (_w, callbacks) => observeWorkspaceFiles({ callbacks, read, onError: vi.fn(),
+        subscribe(onWake) { wake = onWake; return () => {}; } }),
+      onWatcherBatch,
+      captureFor: () => ({ shareView: false, capture: { start() {}, observeFileEvents,
+        settleAndCloseAllLiveSessions: async () => {}, stop: async () => {} } as never }),
+    });
+    const w = workspace();
+    const state = new WorkspaceActivityState();
+    await activity.open(w, state);
+    await writeFile(join(root, "automation.ts"), "pulled definition");
+    activity.pullStarting(state);
+    await activity.handlePulledPaths(state, ["automation.ts"]);
+    expect(onWatcherBatch).toHaveBeenCalledExactlyOnceWith(w, [{ path: "automation.ts", operation: "update" }]);
+    activity.pullFinished(state);
+    onWatcherBatch.mockClear();
+    if (scenario === "with no pull echo") {
+      wake();
+      await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+      expect(onWatcherBatch).not.toHaveBeenCalled();
+    }
+    await writeFile(join(root, "automation.ts"), "local definition");
+    const seenDefinitions: Promise<string>[] = [];
+    onWatcherBatch.mockImplementation((_workspace, events) => {
+      for (const event of events) seenDefinitions.push(readFile(join(root, event.path), "utf8"));
+    });
+    read.mockResolvedValueOnce({ cursor: { generation: "first", revision: 2 }, ready: true, resync: false,
+      facts: [{ path: "automation.ts", kind: "changed" }] });
+    wake();
+    await vi.waitFor(() => expect(observeFileEvents).toHaveBeenCalledOnce());
+    expect(onWatcherBatch).toHaveBeenCalledExactlyOnceWith(w, [{ path: "automation.ts", operation: "update" }]);
+    expect(await Promise.all(seenDefinitions)).toEqual(["local definition"]);
+    expect(notify).toHaveBeenLastCalledWith({ workspaceId: w.workspaceId, paths: ["automation.ts"], pathSetChanged: false });
+    await activity.stop(state);
+  });
+
+  it.each([true, false])("clears a persistent failed read after recovery with ready=%s", async ready => {
+    vi.useFakeTimers();
+    try {
+      const recovered = {
+        cursor: { generation: "recovered", revision: 1 }, ready, resync: false, facts: [],
+      };
+      const read = vi.fn().mockRejectedValue(new Error("read failed"));
+      const activity = createPhysicalWorkspaceActivity(vi.fn(), {
+        observationFor: (_w, callbacks) => observeWorkspaceFiles({ callbacks, read, subscribe: () => () => {}, onError: vi.fn() }),
+      });
+      const state = new WorkspaceActivityState();
+      const w = workspace();
+      const opening = activity.open(w, state);
+      await vi.advanceTimersByTimeAsync(0);
+      expect((await opening).historyRecordingUnavailable).toBe(false);
+      expect(activity.getStatus(w, state).fileObservationFailure).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(7_750);
+      expect(activity.getStatus(w, state)).toMatchObject({ historyRecordingUnavailable: false, fileObservationFailure: "read-failed" });
+      read.mockResolvedValue(recovered);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(activity.getStatus(w, state).fileObservationFailure).toBeUndefined();
+      await activity.retryFileObservation(state);
+      expect(activity.getStatus(w, state).fileObservationFailure).toBeUndefined();
+      await activity.stop(state);
+    } finally { vi.useRealTimers(); }
+  });
+
   it("forwards the agent-run slot to the open workspace's capture", async () => {
     const setActiveAgentRun = vi.fn(async () => undefined);
     const activity = createWorkspaceActivity(() => {}, {
@@ -257,6 +361,172 @@ describe("workspaceActivity capture hooks", () => {
     expect(setActiveAgentRun).toHaveBeenLastCalledWith(null);
     expect(activity.hasAgentRun("activity-test")).toBe(false);
     expect(await activity.claimAgentRun("activity-test", second)).toBe(true);
+    await activity.stopAll();
+  });
+});
+
+describe("workspaceActivity agent run state", () => {
+  function heldCapture() {
+    const held: Array<() => void> = [];
+    let holdNext = false;
+    const setActiveAgentRun = vi.fn(async (_run: ActiveAgentRun | null) => {
+      if (!holdNext) return;
+      holdNext = false;
+      await new Promise<void>((release) => held.push(release));
+    });
+    return {
+      setActiveAgentRun,
+      holdNext: () => { holdNext = true; },
+      release: () => held.shift()?.(),
+      decision: () => ({
+        shareView: false,
+        capture: {
+          start: vi.fn(),
+          setActiveAgentRun,
+          settleAndCloseAllLiveSessions: vi.fn(async () => undefined),
+          stop: vi.fn(async () => undefined),
+        } as never,
+      }),
+    };
+  }
+  const run = (agentRunId: string, agentId = "dohc-mcp"): ActiveAgentRun =>
+    ({ agentId, onBehalfOf: "local", agentRunId, depth: 0 });
+  const id = "activity-test";
+
+  async function opened() {
+    const capture = heldCapture();
+    const pushed: AgentRunStateEvent[] = [];
+    const activity = createWorkspaceActivity(() => {}, {
+      captureFor: capture.decision,
+      onAgentRunState: (event) => pushed.push(event),
+    });
+    await activity.open(workspace());
+    return { activity, capture, pushed };
+  }
+
+  it("stops recording when restoring the agent author fails during reopen", async () => {
+    const setActiveAgentRun = vi.fn(async (_run: ActiveAgentRun | null) => {});
+    const start = vi.fn();
+    const stop = vi.fn(async () => {});
+    const observeFileEvents = vi.fn();
+    let observation!: WorkspaceObservationCallbacks;
+    const activity = createPhysicalWorkspaceActivity(vi.fn(), {
+      observationFor: (w, callbacks) => {
+        observation = callbacks;
+        return idleObservation(w, callbacks);
+      },
+      captureFor: () => ({ shareView: false, capture: {
+        start, stop, observeFileEvents, setActiveAgentRun,
+        settleAndCloseAllLiveSessions: async () => {},
+      } as never }),
+    });
+    const w = workspace();
+    const state = new WorkspaceActivityState();
+    try {
+      await activity.open(w, state);
+      await activity.claimAgentRun(w, state, { ...run("dispatch-1"), dispatch: "run" });
+      await activity.close(w, state, { preserveAgentRun: true });
+      start.mockClear();
+      stop.mockClear();
+      setActiveAgentRun.mockRejectedValueOnce(new Error("author unavailable"));
+      const status = await activity.open(w, state);
+      expect(status.historyRecordingUnavailable).toBe(true);
+      expect(stop).toHaveBeenCalledOnce();
+      expect(start).not.toHaveBeenCalled();
+      expect(activity.dispatchedAgentRun(state)).toBe(true);
+      observation.facts([{ path: "note.md", kind: "changed" }]);
+      expect(observeFileEvents).not.toHaveBeenCalled();
+    } finally {
+      await activity.close(w, state);
+    }
+  });
+
+  it("pushes once when a run starts and once when it ends, read from the slot", async () => {
+    const { activity, pushed } = await opened();
+    expect(activity.agentRunState(id)).toEqual({ workspaceId: id, revision: 0, active: false });
+    await activity.setAgentRun(id, run("run-1"));
+    // One run replacing another is no change in whether the agent works.
+    await activity.setAgentRun(id, run("run-2"));
+    expect(activity.agentRunState(id)).toEqual({ workspaceId: id, revision: 1, active: true });
+    await activity.setAgentRun(id, null);
+    expect(pushed).toEqual([
+      { workspaceId: id, revision: 1, active: true },
+      { workspaceId: id, revision: 2, active: false },
+    ]);
+    expect(activity.agentRunState(id)).toEqual({ workspaceId: id, revision: 2, active: false });
+    await activity.stopAll();
+  });
+
+  it("shows a chat dispatch run and leaves the runner self-test out", async () => {
+    const { activity, pushed } = await opened();
+    expect(await activity.claimAgentRun(id, { ...run("dispatch-1"), dispatch: "run" })).toBe(true);
+    expect(activity.agentRunState(id).active).toBe(true);
+    await activity.clearAgentRun(id, "dispatch-1");
+    expect(await activity.claimAgentRun(id, { ...run("self-test"), dispatch: "self-test" })).toBe(true);
+    expect(activity.agentRunState(id).active).toBe(false);
+    await activity.clearAgentRun(id, "self-test");
+    expect(pushed.map((event) => event.active)).toEqual([true, false]);
+    await activity.stopAll();
+  });
+
+  it("reads whether dohc dispatched the run from the slot", async () => {
+    const { activity } = await opened();
+    expect(activity.dispatchedAgentRun(id)).toBe(false);
+    await activity.claimAgentRun(id, run("cli-run"));
+    expect(activity.dispatchedAgentRun(id)).toBe(false);
+    await activity.clearAgentRun(id, "cli-run");
+    await activity.claimAgentRun(id, { ...run("dispatch-1"), dispatch: "run" });
+    expect(activity.dispatchedAgentRun(id)).toBe(true);
+    await activity.clearAgentRun(id, "dispatch-1");
+    await activity.claimAgentRun(id, { ...run("self-test"), dispatch: "self-test" });
+    expect(activity.dispatchedAgentRun(id)).toBe(true);
+    await activity.clearAgentRun(id, "self-test");
+    expect(activity.dispatchedAgentRun(id)).toBe(false);
+    await activity.stopAll();
+  });
+
+  it("pushes nothing for a refused claim and returns to idle after a failed one", async () => {
+    const { activity, capture, pushed } = await opened();
+    expect(await activity.claimAgentRun(id, run("run-1"))).toBe(true);
+    expect(await activity.claimAgentRun(id, run("run-2"))).toBe(false);
+    expect(pushed).toHaveLength(1);
+    await activity.clearAgentRun(id, "run-1");
+    capture.setActiveAgentRun.mockRejectedValueOnce(new Error("capture refused the run"));
+    await expect(activity.claimAgentRun(id, run("run-3"))).rejects.toThrow("capture refused the run");
+    expect(activity.agentRunState(id).active).toBe(false);
+    expect(pushed.at(-1)).toMatchObject({ active: false });
+    await activity.stopAll();
+  });
+
+  it("keeps a newer run when an older run's clear settles after it", async () => {
+    const { activity, capture, pushed } = await opened();
+    expect(await activity.claimAgentRun(id, run("run-1"))).toBe(true);
+    capture.holdNext();
+    const ending = activity.clearAgentRun(id, "run-1");
+    await activity.setAgentRun(id, run("run-2"));
+    capture.release();
+    await ending;
+    expect(activity.agentRunState(id).active).toBe(true);
+    // Ending an older run does nothing for a run it does not hold.
+    await activity.clearAgentRun(id, "run-1");
+    expect(activity.agentRunState(id).active).toBe(true);
+    expect(pushed).toEqual([{ workspaceId: id, revision: 1, active: true }]);
+    await activity.stopAll();
+  });
+
+  it("pushes idle when the workspace closes during a run, and nothing for a write that lands after", async () => {
+    const { activity, capture, pushed } = await opened();
+    await activity.setAgentRun(id, run("run-1"));
+    await activity.clearAgentRun(id, "run-1");
+    capture.holdNext();
+    const starting = activity.setAgentRun(id, run("run-2"));
+    await vi.waitFor(() => expect(capture.setActiveAgentRun).toHaveBeenLastCalledWith(run("run-2")));
+    await activity.setAgentRun(id, run("run-3"));
+    await activity.close(id);
+    capture.release();
+    await starting;
+    expect(pushed.map((event) => event.active)).toEqual([true, false, true, false]);
+    expect(activity.agentRunState(id)).toEqual({ workspaceId: id, revision: 4, active: false });
     await activity.stopAll();
   });
 });
@@ -342,6 +612,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       queueSync: () => {
         queued += 1;
       },
+      queueWatchedUpload: () => {},
       queuePull: () => {},
       retryNow: async () => undefined,
       snapshot: () => ({
@@ -388,6 +659,7 @@ describe("workspaceActivity cloud sync nudge", () => {
     const engine = {
       start: async () => {},
       queueSync: () => {},
+      queueWatchedUpload: () => {},
       queuePull: () => {},
       retryNow: async () => { passes += 1; },
       snapshot: () => ({
@@ -413,6 +685,7 @@ describe("workspaceActivity cloud sync nudge", () => {
     const engine = {
       start: async () => {},
       queueSync: () => {},
+      queueWatchedUpload: () => {},
       queuePull: () => {},
       retryNow: async () => undefined,
       snapshot: () => ({
@@ -448,6 +721,7 @@ describe("workspaceActivity cloud sync nudge", () => {
     const engine = {
       start: async () => {},
       queueSync: () => {},
+      queueWatchedUpload: () => {},
       queuePull: () => {},
       retryNow: async () => undefined,
       snapshot: () => ({
@@ -482,6 +756,7 @@ describe("workspaceActivity cloud sync nudge", () => {
     const engine = {
       start: async () => {},
       queueSync: () => {},
+      queueWatchedUpload: () => {},
       queuePull: () => {},
       retryNow: async () => undefined,
       snapshot: () => ({
@@ -535,6 +810,7 @@ describe("workspaceActivity cloud sync nudge", () => {
         return {
           start: async () => undefined,
           queueSync: () => undefined,
+          queueWatchedUpload: () => {},
           queuePull: () => undefined,
           retryNow: async () => undefined,
           snapshot: () => ({
@@ -594,6 +870,7 @@ describe("workspaceActivity cloud sync nudge", () => {
         engineFor: () => ({
           start: async () => undefined,
           queueSync: () => undefined,
+          queueWatchedUpload: () => {},
           queuePull: () => undefined,
           retryNow: async () => undefined,
           snapshot: () => ({
@@ -764,6 +1041,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       engineFor: () => ({
         start: async () => undefined,
         queueSync: () => undefined,
+        queueWatchedUpload: () => {},
         queuePull: () => undefined,
         retryNow: async () => undefined,
         snapshot: () => ({
@@ -913,3 +1191,51 @@ describe("workspaceActivity cloud sync nudge", () => {
     await activity.stopAll();
   });
 });
+
+it("still settles healthy workspaces when an outage checkpoint fails",async()=>{
+ let release!:()=>void;const healthyDrain=new Promise<void>(done=>{release=done;});const settled=vi.fn(async()=>{});
+ const quit=settleYDocsAfterFileObservation([Promise.reject(Error("checkpoint disk full")),healthyDrain],settled);await Promise.resolve();expect(settled).not.toHaveBeenCalled();release();await quit;expect(settled).toHaveBeenCalledOnce();
+});
+
+it("reads current pause metadata even while activity preserves a failure status", async () => {
+  let atMs = 42;
+  const activity = createPhysicalWorkspaceActivity(vi.fn(), {
+    observationFor: w => idleObservation(w, {} as never),
+    cloudStateFor: () => ({ enabled: false, connected: false, syncPause: { atMs,
+      author: { kind: "person", personId: "local:person", self: true } } }),
+  });
+  const state = new WorkspaceActivityState();
+  state.preservedStatus = { state: "local-changes", pendingChangeCount: 1, lastSyncedAtMs: null,
+    historyRecordingUnavailable: true, historyShareView: false, liveSessionsGeneration: 0 };
+  expect(activity.getStatus(workspace(), state).syncPause?.atMs).toBe(42);
+  atMs = 84;
+  expect(activity.getStatus(workspace(), state)).toMatchObject({ historyRecordingUnavailable: true,
+    syncPause: { atMs: 84, author: { self: true } } });
+});
+ it.each(["appeared", "changed", "disappeared"] as const)("round2 policy %s reaches listing refresh but no file-work consumer", async kind => {
+  const notify = vi.fn();
+  const observeFileEvents = vi.fn();
+  const handleWatcherEvents = vi.fn();
+  const sources = vi.fn(async () => ["index.html"]);
+  const apps = createFolderAppDetection({ sources, updated: vi.fn(), failed: vi.fn() });
+  const onWatcherBatch = vi.fn((w, events) => { handleWatcherEvents(events); apps.settledEvents(w, events); });
+  let observation!: WorkspaceObservationCallbacks;
+  const w = workspace();
+  const activity = createWorkspaceActivity(notify, {
+    observationFor: (w, callbacks) => { observation = callbacks; return idleObservation(w, callbacks); },
+    onWatcherBatch,
+    captureFor: () => ({ shareView: false, capture: { start() {}, observeFileEvents, settleAndCloseAllLiveSessions: async () => {}, stop: async () => {} } as never }),
+  });
+  try {
+    await activity.open(w);
+    await apps.read(w, ".");
+    notify.mockClear();
+    observation.facts([{ path: ".dohc/visibility.toml", kind }]);
+    await apps.retire(w.attachmentId);
+    expect.soft(observeFileEvents).not.toHaveBeenCalled();
+    expect.soft(onWatcherBatch).not.toHaveBeenCalled();
+    expect.soft(handleWatcherEvents).not.toHaveBeenCalled();
+    expect.soft(sources).toHaveBeenCalledOnce();
+    expect(notify).toHaveBeenCalledExactlyOnceWith({ workspaceId: w.workspaceId, paths: [".dohc/visibility.toml"], pathSetChanged: kind !== "changed" });
+  } finally { await activity.stopAll(); await apps.retire(w.attachmentId); }
+ });

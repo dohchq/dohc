@@ -1,3 +1,4 @@
+import {selfHostLiveProfile} from "../../sync-relay/src/selfHostLiveProfile";
 import { describe, expect, it } from "vitest";
 import { MAX_RELAY_URL_LENGTH } from "@dohc/workspace-contracts/relay-values";
 import { loadShareWebConfig } from "./config";
@@ -8,10 +9,23 @@ describe("share-web configuration", () => {
     DOHC_SHARE_WEB_RELAY_URL: "http://relay:1788",
     DOHC_SHARE_WEB_PUBLIC_RELAY_URL: "https://relay.example.test",
     DOHC_SHARE_WEB_PUBLIC_HOSTS: "share.example.test",
+    DOHC_SHARE_WEB_INTERNAL_HOSTS: "share-web:1790",
     DOHC_SHARE_WEB_PUBLIC_ORIGIN: "https://share.example.test",
     DOHC_SHARE_WEB_AUTH_URL: "http://workspace-api:1786",
   };
 
+  it("keeps internal deletion hosts separate from public hosts",()=>{
+    expect(loadShareWebConfig({...accountEnvironment,DOHC_SHARE_WEB_INTERNAL_HOSTS:undefined}).internalHosts.size).toBe(0);
+    const config=loadShareWebConfig({...accountEnvironment,DOHC_SHARE_WEB_INTERNAL_HOSTS:"share-web:1790"});
+    expect([...config.internalHosts]).toEqual(["share-web:1790"]);
+    expect(config.publicHosts.has("share-web:1790")).toBe(false);
+    expect(()=>loadShareWebConfig({...accountEnvironment,DOHC_SHARE_WEB_INTERNAL_HOSTS:"share-web:1790,"})).toThrow(/INTERNAL_HOSTS/);
+  });
+  it.each(["test", "production"])("requires internal deletion hosts with an exchange key in %s",nodeEnv=>{
+    const env={...accountEnvironment,NODE_ENV:nodeEnv,DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY:"x".repeat(32)};
+    for(const hosts of [undefined, ""]) expect(()=>loadShareWebConfig({...env,DOHC_SHARE_WEB_INTERNAL_HOSTS:hosts})).toThrow("DOHC_SHARE_WEB_INTERNAL_HOSTS must be set");
+    expect(loadShareWebConfig(env).internalHosts).toEqual(new Set(["share-web:1790"]));
+  });
   it("uses the supported self-host live profile while retaining explicit deployment requirements", () => {
     const env = {...accountEnvironment, DOHC_SELF_HOST_LIVE: "1", DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY: "x".repeat(32)};
     const config = loadShareWebConfig(env);
@@ -26,6 +40,15 @@ describe("share-web configuration", () => {
     expect(() => loadShareWebConfig({...env, DOHC_SHARE_WEB_NAMED_EDITOR_LIMITS: "{}"})).toThrow();
     expect(() => loadShareWebConfig({...env, DOHC_SELF_HOST_LIVE: "yes"})).toThrow("DOHC_SELF_HOST_LIVE");
     expect(loadShareWebConfig({...accountEnvironment, DOHC_SELF_HOST_LIVE: "0"}).linkLive).toBeUndefined();
+  });
+
+
+  it("rejects different named and link gateway buffer budgets", () => {
+    const env = {...accountEnvironment, DOHC_SELF_HOST_LIVE: "1", DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY: "x".repeat(32)};
+    const config = loadShareWebConfig(env);
+    expect(() => loadShareWebConfig({...env, DOHC_SHARE_WEB_NAMED_LIVE_LIMITS: JSON.stringify({
+      ...config.namedLiveGatewayLimits!, maxBufferedBytes: config.namedLiveGatewayLimits!.maxBufferedBytes + 1,
+    })})).toThrow("Live gateways must share one buffer budget.");
   });
 
   it("requires the explicit link live profile before accepting a release marker", () => {
@@ -55,8 +78,8 @@ describe("share-web configuration", () => {
   });
 
   it("keeps named live transport disabled until complete bounds are provisioned", () => {
-    const limits = {maxConnections: 8, maxConnectionsPerSession: 3, maxConnectionsPerPrincipal: 4, maxConnectionsPerGrant: 5,
-      maxFrameBytes: 2048, maxPendingBytes: 4096, maxPendingFrames: 4, maxFragments: 8, maxBufferedChunks: 16,
+    const limits = {maxConnections: 8, maxConnectionsPerWorkspace: 96, reservedOwnerConnections: 0, maxConnectionsPerSession: 3, maxConnectionsPerPrincipal: 4, maxConnectionsPerGrant: 5, maxBufferedBytes: 134217728,
+      maxFrameBytes: 2048, maxPendingBytes: 4 * 1024 * 1024, maxPendingFrames: 4, maxFragments: 8, maxBufferedChunks: 16,
       upgradeTimeoutMs: 2000, idleTimeoutMs: 2000, drainTimeoutMs: 100};
     const env = {...accountEnvironment, DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY: "x".repeat(32),
       DOHC_SHARE_WEB_NAMED_BROWSER_SESSION_LIMITS: JSON.stringify({maxPendingRequests: 2, maxRequestBytes: 2048, maxResponseBytes: 5000, timeoutMs: 1000})};
@@ -158,6 +181,19 @@ describe("share-web configuration", () => {
     expect(config.port).toBe(0);
   });
 
+  it("canonicalizes exact trusted IPv4 and IPv6 addresses once at startup", () => {
+    const config = loadShareWebConfig({...accountEnvironment,
+      DOHC_SHARE_WEB_TRUSTED_PROXIES: "127.0.0.1,::FFFF:7F00:1,2001:0DB8:0:0:0:0:0:1,0:0:0:0:0:0:0:1",
+    });
+    expect(config.trustedProxies).toEqual(new Set(["127.0.0.1", "2001:db8::1", "::1"]));
+  });
+
+  it.each(["proxy.test", "127.0.0.0/8", "127.0.0.1:80", "[::1]", "fe80::1%eth0", "127.1", "2130706433", "127.000.0.1", "*"])(
+    "rejects a trusted proxy that is not an exact IP: %s", proxy => {
+      expect(() => loadShareWebConfig({...accountEnvironment, DOHC_SHARE_WEB_TRUSTED_PROXIES: proxy}))
+        .toThrow(/exact comma-separated peer addresses/u);
+    },
+  );
   it("uses no trusted proxies when the list is unset", () => {
     const config = loadShareWebConfig({
       NODE_ENV: "test",
@@ -222,6 +258,7 @@ describe("share-web configuration", () => {
         DOHC_SHARE_WEB_RELAY_URL: "https://relay.example.test",
         DOHC_SHARE_WEB_PUBLIC_RELAY_URL: "https://relay.example.test",
         DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY: relayExchangeKey,
+        DOHC_SHARE_WEB_INTERNAL_HOSTS: "share-web:1790",
         DOHC_SHARE_WEB_PUBLIC_HOSTS: "share.example.test",
       });
 
@@ -251,4 +288,16 @@ describe("share-web configuration", () => {
       }),
     ).toThrow(/requires NODE_ENV=development or test/u);
   });
+});
+
+it.each(["named", "link"])("rejects a %s browser credit window larger than the gateway queue", mode => {
+  const profile = selfHostLiveProfile(), editor = {...profile.editor, provider: {...profile.editor.provider,
+    frames: {...profile.frames, maxQueuedBytes: profile.frames.maxQueuedBytes + 1}}};
+  const env = {NODE_ENV: "test", DOHC_SELF_HOST_LIVE: "1", DOHC_SHARE_WEB_RELAY_URL: "http://relay:1788",
+    DOHC_SHARE_WEB_PUBLIC_RELAY_URL: "https://relay.example.test", DOHC_SHARE_WEB_PUBLIC_HOSTS: "share.example.test",
+    DOHC_SHARE_WEB_PUBLIC_ORIGIN: "https://share.example.test", DOHC_SHARE_WEB_AUTH_URL: "http://workspace-api:1786",
+    DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY: "x".repeat(32), DOHC_SHARE_WEB_INTERNAL_HOSTS: "share-web:1790"};
+  const override = mode === "named" ? {DOHC_SHARE_WEB_NAMED_EDITOR_LIMITS: JSON.stringify(editor)} :
+    {DOHC_SHARE_WEB_LINK_LIVE_LIMITS: JSON.stringify({requests: profile.requests, gateway: profile.gateway, editor})};
+  expect(() => loadShareWebConfig({...env, ...override})).toThrow("browser frames exceed gateway capacity");
 });

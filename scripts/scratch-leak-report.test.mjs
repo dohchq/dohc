@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import {
   chmod,
+  lstat,
   mkdtemp,
   mkdir,
   readdir,
@@ -16,7 +17,30 @@ import test from "node:test";
 import {
   SCRATCH_SENTINEL,
   inspectScratchRun,
+  testScratchParent,
 } from "../tools/rust-engine-program/scratch-leak-report.mjs";
+
+// The gate hands its root down from this user's private parent. Every account
+// shares /tmp, so a parent another account owns or can enter is refused.
+test("the gate's scratch parent is private to this user", { skip: process.platform === "win32" }, async () => {
+  const base = await mkdtemp(join(tmpdir(), "dohc-scratch-parent-"));
+  try {
+    const uid = process.getuid();
+    const parent = testScratchParent({ base });
+    assert.equal(parent, join(base, `dohc-scratch-${uid}`));
+    assert.equal((await lstat(parent)).mode & 0o777, 0o700);
+    assert.equal(testScratchParent({ base }), parent, "an existing private parent is reused");
+
+    await chmod(parent, 0o755);
+    assert.throws(() => testScratchParent({ base }), /lets other accounts in/);
+
+    // A parent named for another user, but owned by this one.
+    await mkdir(join(base, `dohc-scratch-${uid + 1}`), { mode: 0o700 });
+    assert.throws(() => testScratchParent({ base, uid: uid + 1 }), /belongs to user/);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
 
 // The payload is a length, not content: `inspectScratchRun` reads `lstat().size`
 // and never opens a file. `truncate` sets that length without writing the

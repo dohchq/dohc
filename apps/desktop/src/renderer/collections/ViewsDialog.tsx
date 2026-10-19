@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { isComposingKey } from "../ui/keys";
 import type {
   CollectionSchema,
   ViewDefinition,
@@ -143,7 +144,7 @@ export function ViewsDialog(props: {
                   value={editName}
                   onChange={(event) => setEditName(event.target.value)}
                   onKeyDown={(event) => {
-                    if (event.key === "Enter") void saveRename(view.name);
+                    if (event.key === "Enter" && !isComposingKey(event)) void saveRename(view.name);
                   }}
                   className={inputClass}
                 />

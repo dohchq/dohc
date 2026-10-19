@@ -11,15 +11,18 @@ import {
   type SyncRelayGrantedShareRow,
   type SyncRelayGrantedInventoryCursor,
   type SyncRelayGrantedInventoryPage,
+  type SyncRelayReceivedInventoryCursor,
+  type SyncRelayReceivedInventoryPage,
   type SyncRelayLinkInventoryCursor,
   type SyncRelayLinkInventoryPage,
   type SyncRelayLinkInventoryRow,
+  type SyncRelayHistoryAccount,
   type SyncRelayIndependentGrantInventoryCursor,
   type SyncRelayIndependentGrantInventoryPage,
 } from "./types";
 import { type StorageContext } from "./context";
 import { nextShareDiscussionRevision } from "./discussion";
-import { readCurrentShareGrant } from "./currentShareGrant";
+import { currentShareGrantSql, readCurrentShareGrant } from "./currentShareGrant";
 import {
   rowToShareGrantRow,
   rowToLinkCredentialRow,
@@ -27,9 +30,10 @@ import {
   rowToShareRow,
   rowToShareWithGrantRow,
 } from "./rows";
-import { shareAccessRank } from "@dohc/security-contract/share-selector";
 import { LINK_SESSION_RENEWAL_GRACE_MS } from "../linkSecurity";
-import { RETIRED_LINK_CREDENTIAL_HISTORY_LIMIT, GRANTED_INVENTORY_PAGE_SIZE, LINK_INVENTORY_PAGE_SIZE, LINK_INVENTORY_INDEPENDENT_GRANT_LIMIT } from "./limits";
+import { linkAccessLevels, parseStoredAnyShareSelectorJson } from "../shareFilter";
+import { RETIRED_LINK_CREDENTIAL_HISTORY_LIMIT, GRANTED_INVENTORY_PAGE_SIZE, RECEIVED_INVENTORY_PAGE_SIZE, LINK_INVENTORY_PAGE_SIZE, LINK_INVENTORY_INDEPENDENT_GRANT_LIMIT } from "./limits";
+import { forgetReplicaCurrentViewCaches } from "../replicaCurrentViewReads";
 
 function dependentGrantIdsMatch(
   dependents: readonly SyncRelayShareGrantRow[],
@@ -256,8 +260,10 @@ export function retuneShareGrant(storage: StorageContext, input: {
     return storage.tx(() => {
       input.guard();
       const grant = storage.getShareGrant(input.grantId);
-      const from = grant ? shareAccessRank(grant.access) : -1;
-      const to = shareAccessRank(input.access);
+      const share = grant && storage.getShare(grant.shareId);
+      const levels = linkAccessLevels(share ? parseStoredAnyShareSelectorJson(share.selectorJson) : null);
+      const from = grant ? levels.indexOf(grant.access) : -1;
+      const to = levels.indexOf(input.access);
       if (
         !grant ||
         grant.shareId !== input.shareId ||
@@ -321,8 +327,7 @@ export function retuneShareGrant(storage: StorageContext, input: {
       } else {
         nextShareDiscussionRevision(storage, grant.shareId);
         for (const dependent of dependents) {
-          const dependentRank = shareAccessRank(dependent.access);
-          if (dependentRank > to) {
+          if (levels.indexOf(dependent.access) > to) {
             storage.db
               .prepare(
                 `UPDATE sync_relay_share_grants
@@ -396,6 +401,7 @@ export function revokeShareGrantInTransaction(storage: StorageContext, input: Re
         AND NOT EXISTS (SELECT 1 FROM sync_relay_share_grants
           WHERE share_id = ? AND status = 'active' AND revoked_at_ms IS NULL)`)
         .run(grant.shareId, grant.shareId);
+      forgetReplicaCurrentViewCaches(storage,storage.getShare(input.shareId)!.workspaceId);
       return { ok: true, grant: storage.getShareGrant(grant.grantId)! };
   }
 
@@ -689,6 +695,16 @@ export function claimPendingSharesForEmail(storage: StorageContext, email: strin
     });
   }
 
+export function hasPendingInvite(storage: StorageContext, email: string): boolean {
+    return !!storage.db
+      .prepare(
+        `SELECT 1 FROM sync_relay_share_grants AS g JOIN sync_relay_shares AS s ON s.share_id = g.share_id
+         WHERE g.principal_kind = 'email' AND g.principal_email = ? AND ${currentShareGrantSql("g", "s")}
+         LIMIT 1`,
+      )
+      .get(email.trim().toLowerCase());
+  }
+
 export function getShare(storage: StorageContext, shareId: string): SyncRelayShareRow | null {
     const row = storage.db
       .prepare(
@@ -930,6 +946,27 @@ export function listLinkGrantsByWorkspace(
     };
   }
 
+// Owner-only account attribution. Primary grant ids and the account index bound the lookup.
+export function lookupHistoryAccounts(
+  storage: StorageContext, workspaceId: string, grantIds: readonly string[], userIds: readonly string[],
+): SyncRelayHistoryAccount[] {
+  if (grantIds.length + userIds.length > 200) throw new Error("History lookup exceeds its limit");
+  const join = `FROM sync_relay_share_grants dependent
+    JOIN sync_relay_share_grants link ON link.grant_id = dependent.parent_grant_id AND link.principal_kind = 'link'
+    JOIN sync_relay_shares s ON s.share_id = dependent.share_id AND s.share_id = link.share_id
+    WHERE s.workspace_id = ? AND dependent.status = 'revoked' AND dependent.principal_kind = 'user'`;
+  const rows = [
+    ...(grantIds.length ? storage.db.prepare(`SELECT dependent.grant_id, dependent.principal_user_id, dependent.parent_grant_id
+      ${join} AND dependent.grant_id IN (${grantIds.map(() => "?").join(",")})`).all(workspaceId, ...grantIds) : []),
+    ...(userIds.length ? storage.db.prepare(`SELECT MIN(dependent.grant_id) AS grant_id, dependent.principal_user_id, dependent.parent_grant_id
+      ${join} AND dependent.principal_user_id IN (${userIds.map(() => "?").join(",")})
+      GROUP BY dependent.principal_user_id`).all(workspaceId, ...userIds) : []),
+  ];
+  return [...new Map(rows.map(row => [String(row.grant_id), {
+    grantId: String(row.grant_id), recipientUserId: String(row.principal_user_id), parentGrantId: String(row.parent_grant_id),
+  }])).values()];
+}
+
 export function listActiveIndependentShareGrants(storage: StorageContext, input: {
     workspaceId: string;
     shareIds: readonly string[];
@@ -987,6 +1024,22 @@ export function listActiveIndependentShareGrants(storage: StorageContext, input:
     };
   }
 
+/** Pages share identities, so multiple grants cannot split one received share across pages. */
+export function listReceivedShareIdsPage(storage: StorageContext, recipientUserId: string,
+  cursor?: SyncRelayReceivedInventoryCursor): SyncRelayReceivedInventoryPage {
+  const removedIds = storage.listRemovedSharesForRecipient(recipientUserId).map(row => row.shareId);
+  const rows = storage.db.prepare(`SELECT share_id FROM (SELECT DISTINCT g.share_id
+    FROM sync_relay_share_grants g JOIN sync_relay_shares s ON s.share_id = g.share_id
+    JOIN sync_relay_workspaces w ON w.workspace_id = s.workspace_id AND w.owner_user_id = s.granter_user_id
+    WHERE g.principal_kind = 'user' AND g.principal_user_id = ? AND g.status = 'active'
+    UNION SELECT value AS share_id FROM json_each(?))
+    ${cursor ? "WHERE share_id > ?" : ""}
+    ORDER BY share_id LIMIT ${RECEIVED_INVENTORY_PAGE_SIZE + 1}`)
+    .all(recipientUserId, JSON.stringify(removedIds), ...(cursor ? [cursor.shareId] : [])) as { share_id: string }[];
+  const shareIds = rows.slice(0, RECEIVED_INVENTORY_PAGE_SIZE).map(row => row.share_id);
+  return { shareIds, nextCursor: rows.length > RECEIVED_INVENTORY_PAGE_SIZE ? { shareId: shareIds.at(-1)! } : null };
+}
+
 export function listSharesReceivedBy(storage: StorageContext, recipientUserId: string): SyncRelayShareWithGrantRow[] {
     return storage.db
       .prepare(
@@ -1010,7 +1063,7 @@ export function revokeShare(storage: StorageContext, shareId: string, revokedAtM
 
 export function revokeShareInTransaction(storage: StorageContext, shareId: string, revokedAtMs: number): boolean {
       const existing = storage.db
-        .prepare("SELECT 1 AS present FROM sync_relay_shares WHERE share_id = ?")
+        .prepare("SELECT workspace_id FROM sync_relay_shares WHERE share_id = ?")
         .get(shareId);
       if (existing === undefined) return false;
       storage.db.prepare("DELETE FROM sync_relay_share_labels WHERE share_id = ?").run(shareId);
@@ -1031,6 +1084,7 @@ export function revokeShareInTransaction(storage: StorageContext, shareId: strin
              )`,
         )
         .run(Math.trunc(revokedAtMs), shareId);
+      forgetReplicaCurrentViewCaches(storage,String(existing.workspace_id));
       storage.db.prepare(`UPDATE sync_relay_share_removals SET voided = 1
         WHERE share_id = ? AND (removed_grant_id IS NOT NULL OR ? > 0)`)
         .run(shareId, Number(revoked.changes ?? 0));

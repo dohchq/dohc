@@ -1,3 +1,4 @@
+import { hasPendingYDocDeliveries, settleYDocDeliveries } from "../pendingYDocDeliveries";
 import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";
@@ -1200,11 +1201,167 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     expect(onLineageReplacementFailure).toHaveBeenCalledExactlyOnceWith(
       failure,
       losingDoc,
+      expect.any(Function),
     );
     expect(binding.doc).toBe(losingDoc);
     const shippedBefore = mock.shipped.length;
     typeIntoBody(losingDoc, "Late losing edit.");
     expect(mock.shipped).toHaveLength(shippedBefore);
+    await binding.destroy();
+  });
+
+  it("tries a failed replacement again with the same generation and winner, then installs it once", async () => {
+    const mock = mockTransport(["Losing root."]);
+    mock.releaseReplacement();
+    const preserved: string[] = [];
+    let preservationFails = true;
+    const retries: Array<() => Promise<void>> = [];
+    const binding = await bindEngineYDoc(mock.transport, undefined, {
+      onDocumentReplacing: (retired) => {
+        preserved.push(bodyText(retired));
+        if (preservationFails) throw new Error("storage refused");
+      },
+      onLineageReplacementFailure: (_error, _retired, retry) => retries.push(retry),
+    });
+    const losingDoc = binding.doc!;
+    typeIntoBody(losingDoc, "Typed before the refusal.");
+    await binding.flushPendingLocalUpdates();
+    const shippedBefore = mock.shipped.length;
+    const winner = new Y.Doc();
+    typeIntoBody(winner, "Winning root.");
+    const replacement = {
+      update: Y.encodeStateAsUpdate(winner),
+      recoveredPaths: [],
+      artifactAssets: [],
+      lineageGeneration: 2,
+    };
+
+    await expect(mock.replaceLineage(replacement)).rejects.toThrow("storage refused");
+    // No acknowledgement, no winner, and nothing of the losing document sent.
+    expect(mock.acknowledgedGenerations).toEqual([]);
+    expect(binding.doc).toBe(losingDoc);
+    typeIntoBody(losingDoc, "Typed while frozen.");
+    expect(mock.shipped).toHaveLength(shippedBefore);
+    expect(retries).toHaveLength(1);
+
+    preservationFails = false;
+    await retries[0]!();
+    expect(preserved).toHaveLength(2);
+    expect(preserved[1]).toContain("Typed before the refusal.");
+    expect(preserved[1]).toContain("Typed while frozen.");
+    expect(mock.acknowledgedGenerations).toEqual([2]);
+    expect(bodyText(binding.doc!)).toContain("Winning root.");
+    expect(bodyText(binding.doc!)).not.toContain("Typed before the refusal.");
+    expect(mock.shipped).toHaveLength(shippedBefore);
+
+    // Trying the installed generation again does nothing.
+    await retries[0]!();
+    expect(preserved).toHaveLength(2);
+    expect(mock.acknowledgedGenerations).toEqual([2]);
+
+    typeIntoBody(binding.doc!, "Typed on the winner.");
+    await binding.flushPendingLocalUpdates();
+    expect(mock.shippedGenerations.at(-1)).toBe(2);
+    expect(mock.shipped).toHaveLength(shippedBefore + 1);
+    await binding.destroy();
+  });
+
+  it("does not install an older failed replacement over a newer one", async () => {
+    const mock = mockTransport(["Losing root."]);
+    mock.releaseReplacement();
+    let preservationFails = true;
+    const retries = new Map<number, () => Promise<void>>();
+    const generations: number[] = [];
+    const binding = await bindEngineYDoc(mock.transport, undefined, {
+      onDocumentReplacing: () => {
+        if (preservationFails) throw new Error("storage refused");
+      },
+      onLineageReplacementFailure: (_error, _retired, retry) => {
+        retries.set(generations.at(-1)!, retry);
+      },
+    });
+    const replace = (text: string, lineageGeneration: number) => {
+      const winner = new Y.Doc();
+      typeIntoBody(winner, text);
+      generations.push(lineageGeneration);
+      return mock.replaceLineage({
+        update: Y.encodeStateAsUpdate(winner), recoveredPaths: [], artifactAssets: [], lineageGeneration,
+      });
+    };
+
+    await expect(replace("Older winner.", 2)).rejects.toThrow("storage refused");
+    await expect(replace("Newer winner.", 3)).rejects.toThrow("storage refused");
+    preservationFails = false;
+
+    await retries.get(2)!();
+    expect(mock.acknowledgedGenerations).toEqual([]);
+    expect(bodyText(binding.doc!)).toContain("Losing root.");
+
+    await retries.get(3)!();
+    expect(mock.acknowledgedGenerations).toEqual([3]);
+    expect(bodyText(binding.doc!)).toContain("Newer winner.");
+
+    await retries.get(2)!();
+    expect(mock.acknowledgedGenerations).toEqual([3]);
+    expect(bodyText(binding.doc!)).not.toContain("Older winner.");
+    await binding.destroy();
+  });
+
+  it("installs a newer replacement queued behind an older one that fails", async () => {
+    const mock = mockTransport(["Losing root."]);
+    mock.releaseReplacement();
+    let failOlder!: (error: Error) => void;
+    const olderPreservation = new Promise<void>((_resolve, reject) => {
+      failOlder = reject;
+    });
+    let preservations = 0;
+    const binding = await bindEngineYDoc(mock.transport, undefined, {
+      onDocumentReplacing: () => (preservations++ === 0 ? olderPreservation : undefined),
+      onLineageReplacementFailure: vi.fn(),
+    });
+    const replace = (text: string, lineageGeneration: number) => {
+      const winner = new Y.Doc();
+      typeIntoBody(winner, text);
+      return mock.replaceLineage({
+        update: Y.encodeStateAsUpdate(winner), recoveredPaths: [], artifactAssets: [], lineageGeneration,
+      });
+    };
+
+    const older = replace("Older winner.", 2);
+    const newer = replace("Newer winner.", 3);
+    failOlder(new Error("storage refused"));
+    await expect(older).rejects.toThrow("storage refused");
+    await newer;
+    expect(mock.acknowledgedGenerations).toEqual([3]);
+    expect(bodyText(binding.doc!)).toContain("Newer winner.");
+    await binding.destroy();
+  });
+
+  it("does not acknowledge when the check right before it refuses", async () => {
+    const mock = mockTransport(["Losing root."]);
+    mock.releaseReplacement();
+    let stored = false;
+    const retries: Array<() => Promise<void>> = [];
+    const binding = await bindEngineYDoc(mock.transport, undefined, {
+      beforeReplacementAcknowledged: () => {
+        if (!stored) throw new Error("storage refused");
+      },
+      onLineageReplacementFailure: (_error, _retired, retry) => retries.push(retry),
+    });
+    const losingDoc = binding.doc!;
+    const winner = new Y.Doc();
+    typeIntoBody(winner, "Winning root.");
+
+    await expect(mock.replaceLineage({
+      update: Y.encodeStateAsUpdate(winner), recoveredPaths: [], artifactAssets: [], lineageGeneration: 2,
+    })).rejects.toThrow("storage refused");
+    expect(mock.acknowledgedGenerations).toEqual([]);
+    expect(binding.doc).toBe(losingDoc);
+
+    stored = true;
+    await retries[0]!();
+    expect(mock.acknowledgedGenerations).toEqual([2]);
+    expect(bodyText(binding.doc!)).toContain("Winning root.");
     await binding.destroy();
   });
 
@@ -1238,4 +1395,13 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     expect(bodyText(binding.doc!)).not.toContain("First winner.");
     await binding.destroy();
   });
+});
+
+it("holds only unresolved checkpoint debt after healthy typing is delivered",async()=>{
+ const fixture=mockTransport();let unresolved=false;const checkpoint=vi.fn(async()=>{});
+ const binding=await bindEngineYDoc(fixture.transport,undefined,{hasUnresolvedCheckpoint:()=>unresolved,checkpointForExit:checkpoint});
+ try {const text=(binding.doc!.getXmlFragment("body").get(0) as Y.XmlElement).get(0) as Y.XmlText;text.insert(0,"typed ");await binding.flushPendingLocalUpdates();
+ expect(hasPendingYDocDeliveries()).toBe(false);expect(await settleYDocDeliveries()).toBe(true);expect(checkpoint).not.toHaveBeenCalled();
+ unresolved=true;expect(hasPendingYDocDeliveries()).toBe(true);expect(await settleYDocDeliveries()).toBe(true);expect(checkpoint).toHaveBeenCalledOnce();expect(hasPendingYDocDeliveries()).toBe(false);
+ }finally{await binding.destroy();fixture.mainDoc.destroy();}
 });

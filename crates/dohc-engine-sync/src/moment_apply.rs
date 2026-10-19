@@ -3,6 +3,7 @@ use dohc_engine_domain::collections::{COLLECTION_SCHEMA_FILENAME, is_collection_
 use dohc_engine_files::{
     PathClassification, classify_engine_file_path_normalized, search_policy::SearchPolicySnapshot,
 };
+use dohc_engine_storage::text;
 use dohc_engine_storage::{EngineStore, FaultInjector, get_binary_blob, hex_sha256};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,10 @@ use crate::file_search::{
 };
 use crate::{ApplyOutcome, LeaseProbe, ReplicationEnvelope, SyncError, apply_envelope_with};
 
+#[cfg(test)]
+mod openhold_measurement;
+
+pub(crate) mod open_artifacts;
 pub(crate) mod pending;
 #[cfg(test)]
 mod pending_tests;
@@ -89,7 +94,14 @@ enum MomentAuthor {
     Agent {
         #[serde(rename = "agentId")]
         agent_id: String,
-        #[serde(rename = "agentName", skip_serializing_if = "Option::is_none")]
+        /// The name a live author snapshot declared for its agent. One outside
+        /// the snapshot's bounds applies as none.
+        #[serde(
+            rename = "agentName",
+            default,
+            deserialize_with = "agent_snapshot_name",
+            skip_serializing_if = "Option::is_none"
+        )]
         agent_name: Option<String>,
         #[serde(
             rename = "onBehalfOf",
@@ -189,6 +201,21 @@ fn agent_author_depth<'de, D: serde::Deserializer<'de>>(
         .map(|value| dohc_engine_domain::agent_author_depth(Some(&value)))
 }
 
+fn agent_snapshot_name<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    serde_json::Value::deserialize(deserializer).map(|value| match value {
+        serde_json::Value::String(name)
+            if !name.is_empty()
+                && name.len() <= dohc_engine_domain::MAX_AUTHOR_FIELD_BYTES
+                && !name.bytes().any(|b| b.is_ascii_control()) =>
+        {
+            Some(name)
+        }
+        _ => None,
+    })
+}
+
 fn optional_author_principal<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<String>, D::Error> {
@@ -215,7 +242,7 @@ pub struct MomentMaterializationChange {
     pub content_kind: &'static str,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MomentApplyResult {
     pub conflicts_opened: i64,
     pub materialization_changes: Vec<MomentMaterializationChange>,
@@ -225,7 +252,7 @@ pub struct MomentApplyResult {
 }
 
 impl ContentKind {
-    fn from_wire(value: Option<&str>) -> Self {
+    pub(crate) fn from_wire(value: Option<&str>) -> Self {
         if value == Some("binary") {
             Self::Binary
         } else {
@@ -233,10 +260,17 @@ impl ContentKind {
         }
     }
 
-    const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Text => "text",
             Self::Binary => "binary",
+        }
+    }
+
+    pub(crate) const fn blob_kind(self) -> crate::BlobKind {
+        match self {
+            Self::Text => crate::BlobKind::Text,
+            Self::Binary => crate::BlobKind::Binary,
         }
     }
 }
@@ -343,10 +377,15 @@ pub fn apply_moment_envelope_detailed(
     envelope.validate()?;
     let search_policy = search_policy_for_store(store);
     apply_envelope_with(store, envelope, faults, |tx, envelope| {
-        let mut payload: MomentAppendPayload = Deserialize::deserialize(&envelope.payload)
-            .map_err(|_| SyncError::InvalidInput {
-                reason: "moment.append payload is malformed",
-            })?;
+        let (mut payload, withheld) = applied_payload(tx, envelope)?;
+        // An older build captured `.DS_Store` and other paths the floor now
+        // ignores. Its moments there apply as nothing, so they never stop
+        // sync or file a refusal.
+        if crate::path_policy::floor_ignores(&payload.path)
+            && crate::path_policy::floor_ignores(&payload.payload_after_path)
+        {
+            return Ok(MomentApplyResult::default());
+        }
         if matches!(
             envelope.settlement_admission,
             Some(crate::SettlementAdmission::Accepted { .. })
@@ -392,6 +431,15 @@ pub fn apply_moment_envelope_detailed(
         if payload.conflict_id.is_some() || payload.conflict_effect_index.is_some() {
             return crate::conflict_resolve_v1::verify_imported_conflict_effect_in_tx(tx, envelope);
         }
+        if payload.operation != "delete" {
+            crate::hosted::wait_for_departed_occupant_in_tx(
+                tx,
+                &envelope.workspace_id,
+                &payload.version_id,
+                &payload.object_id,
+                &payload.payload_after_path,
+            )?;
+        }
         let key = DocKey::new(
             &envelope.workspace_id,
             &payload.version_id,
@@ -404,15 +452,48 @@ pub fn apply_moment_envelope_detailed(
             && !(payload.operation == "write"
                 && is_ydoc_settlement_moment_id(&payload.moment_id)
                 && is_bound_owner(tx, &key));
-        apply_moment_append(
+        let applied = apply_moment_append(
             tx,
             envelope,
             &payload,
             search_policy.as_ref(),
             MomentApplyMode::Ordinary,
             content_held,
-        )
+            content_held
+                .then(|| leases.bound_claim(&key))
+                .flatten()
+                .as_deref(),
+        )?;
+        if let Some(before) = &withheld {
+            crate::hosted::record_withheld_before_in_tx(
+                tx,
+                &envelope.workspace_id,
+                &payload.moment_id,
+                before,
+            )?;
+        }
+        Ok(applied)
     })
+}
+
+/// The moment as this replica applies it, and the before side it withholds.
+/// The journal keeps the row as sent; only a hosted replica's history forgets
+/// an object the feed withholds.
+fn applied_payload(
+    tx: &Transaction<'_>,
+    envelope: &ReplicationEnvelope,
+) -> Result<(MomentAppendPayload, Option<crate::hosted::WithheldBefore>), SyncError> {
+    let withheld = crate::hosted::withheld_before(tx, envelope)?;
+    let forgotten = withheld.as_ref().map(|_| {
+        let mut payload = envelope.payload.clone();
+        crate::hosted::forget_before(&mut payload);
+        payload
+    });
+    let payload = Deserialize::deserialize(forgotten.as_ref().unwrap_or(&envelope.payload))
+        .map_err(|_| SyncError::InvalidInput {
+            reason: "moment.append payload is malformed",
+        })?;
+    Ok((payload, withheld))
 }
 
 pub(crate) fn redelivered_materialization_changes(
@@ -480,10 +561,19 @@ pub(crate) fn stored_materialization_changes(
 }
 
 fn materialization_decision_id(envelope: &ReplicationEnvelope) -> String {
-    let coordinate = format!(
-        "{}\0{}\0{}",
-        envelope.workspace_id, envelope.origin_id, envelope.origin_seq
-    );
+    materialization_decision_id_at(
+        &envelope.workspace_id,
+        &envelope.origin_id,
+        envelope.origin_seq,
+    )
+}
+
+pub(crate) fn materialization_decision_id_at(
+    workspace_id: &str,
+    origin_id: &str,
+    origin_seq: i64,
+) -> String {
+    let coordinate = format!("{workspace_id}\0{origin_id}\0{origin_seq}");
     format!(
         "sync-materialization:{}",
         dohc_engine_storage::hex_sha256(coordinate.as_bytes())
@@ -561,6 +651,7 @@ fn apply_moment_append(
     search_policy: Option<&SearchPolicySnapshot>,
     mode: MomentApplyMode,
     content_held: bool,
+    live_claim: Option<&str>,
 ) -> Result<MomentApplyResult, SyncError> {
     require_version(tx, &envelope.workspace_id, &payload.version_id)?;
 
@@ -667,10 +758,34 @@ fn apply_moment_append(
         && (local
             .as_ref()
             .is_some_and(|snapshot| snapshot.digest == payload.payload_after_blob_sha256)
-            || holds_earlier_lineage_artifact(tx, envelope, payload)?)
+            || if content_held {
+                live_claim.is_some_and(|_| {
+                    is_ydoc_settlement_moment_id(&payload.moment_id)
+                        && after_kind == ContentKind::Text
+                        && payload.path == payload.payload_after_path
+                        && payload
+                            .payload_before_path
+                            .as_deref()
+                            .is_none_or(|path| path == payload.payload_after_path)
+                        && payload
+                            .before_path
+                            .as_deref()
+                            .is_none_or(|path| path == payload.payload_after_path)
+                }) && holds_earlier_lineage_artifact(tx, envelope, payload, live_claim)?
+            } else {
+                holds_earlier_lineage_artifact(tx, envelope, payload, None)?
+            })
     {
         ensure_file_object(tx, &envelope.workspace_id, payload)?;
         insert_moment(tx, &envelope.workspace_id, payload, &remote_before, true)?;
+        if content_held
+            && let Some(claim) = live_claim
+            && local
+                .as_ref()
+                .is_some_and(|head| head.digest != payload.payload_after_blob_sha256)
+        {
+            open_artifacts::enqueue(tx, envelope, payload, claim)?;
+        }
         return Ok(MomentApplyResult {
             conflicts_opened: 0,
             materialization_changes: Vec::new(),
@@ -683,7 +798,7 @@ fn apply_moment_append(
         });
     }
 
-    let mut owner_settlement_committed = false;
+    let mut owner_settlement = None;
     if mode == MomentApplyMode::Ordinary {
         let key = DocKey::new(
             &envelope.workspace_id,
@@ -777,7 +892,7 @@ fn apply_moment_append(
             // predecessor may be history-only and was never materialized.
             head_fast_forward = false;
             content_fast_forward = true;
-            owner_settlement_committed = true;
+            owner_settlement = Some(owner);
         }
     }
 
@@ -846,6 +961,12 @@ fn apply_moment_append(
                 ],
             )
             .map_err(SyncError::persist)?;
+            dohc_engine_storage::capture_file_holds::clear_orphaned_in(
+                tx,
+                &envelope.workspace_id,
+                &payload.version_id,
+                alias_path,
+            )?;
             tx.execute(
                 "DELETE FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
                 params![envelope.workspace_id, payload.version_id, payload.object_id],
@@ -901,6 +1022,12 @@ fn apply_moment_append(
                     ],
                 )
                 .map_err(SyncError::persist)?;
+                dohc_engine_storage::capture_file_holds::clear_orphaned_in(
+                    tx,
+                    &envelope.workspace_id,
+                    &payload.version_id,
+                    before_path,
+                )?;
             }
         }
         tx.execute(
@@ -915,6 +1042,12 @@ fn apply_moment_append(
             ],
         )
         .map_err(SyncError::persist)?;
+        dohc_engine_storage::capture_file_holds::clear_orphaned_in(
+            tx,
+            &envelope.workspace_id,
+            &payload.version_id,
+            &payload.payload_after_path,
+        )?;
         let byte_length = match after_kind {
             ContentKind::Text => after_text
                 .as_ref()
@@ -927,7 +1060,7 @@ fn apply_moment_append(
         upsert_snapshot(tx, &envelope.workspace_id, payload, after_kind, byte_length)?;
         // The audited host settlement is now this owner's committed head.
         // Complete its matching binding even while the editor retains its lease.
-        if owner_settlement_committed
+        if owner_settlement.is_some()
             && !dohc_engine_domain::collection_record_id_mismatch_in_tx(
                 tx,
                 &envelope.workspace_id,
@@ -972,22 +1105,60 @@ fn apply_moment_append(
             // write is a suppressed self-write, so no capture apply indexes
             // it later: a bound record's index must ride this transaction.
             if let Some(text) = after_text.as_deref() {
-                // Moment-only edits diff the prior file snapshot. Audited owner
-                // settlements use the field index the live feed has advanced.
+                // Moment-only edits diff the prior file snapshot. Owner
+                // settlements preserve the visible draft over the checkpoint.
                 // Unparseable frontmatter must still clear the index.
                 let empty = || serde_json::Value::Object(serde_json::Map::new());
-                let before_frontmatter = if owner_settlement_committed {
-                    // Accepted frames advance the field index before the file.
-                    // Diff that index so only changes not indexed by the feed
-                    // (such as an enrolled restore checkpoint) get history.
-                    dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(
+                let (mut frontmatter, provenance) =
+                    dohc_engine_domain::collections::markdown_frontmatter_json_with_provenance(
+                        text,
+                    )
+                    .unwrap_or_else(|| (empty(), Default::default()));
+                let mut provenance = Some(provenance);
+                let before_frontmatter = if let Some(owner) = &owner_settlement {
+                    // The index follows the visible draft, including pending
+                    // edits that this settled checkpoint does not contain.
+                    let indexed = dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(
                         tx,
                         &envelope.workspace_id,
                         &payload.version_id,
                         &payload.object_id,
                     )
-                    .map_err(crate::ydoc_apply::map_domain_hard_error)?
-                    .unwrap_or_else(empty)
+                    .map_err(crate::ydoc_apply::map_domain_hard_error)?;
+                    if let Some(indexed_fields) =
+                        indexed.as_ref().filter(|_| owner.pending_bytes > 0)
+                    {
+                        let key = DocKey::new(
+                            &envelope.workspace_id,
+                            &payload.version_id,
+                            &payload.object_id,
+                        )
+                        .map_err(SyncError::corrupt)?;
+                        let visible = dohc_engine_collab::load_doc_in(tx, &key)
+                            .map_err(SyncError::corrupt)?;
+                        let replayed = match dohc_engine_collab::owner_outbox::draft::apply_pending_to_checkpoint_in(
+                            tx,
+                            &owner.binding,
+                            &visible,
+                        ) {
+                            Ok(()) => visible.frontmatter_provenance().ok(),
+                            Err(dohc_engine_collab::OwnerOutboxError::Storage(error)) => {
+                                return Err(error.into());
+                            }
+                            Err(_) => None,
+                        };
+                        // Replay-state errors, including a draft frontmatter that
+                        // cannot be shown, must not invent an indexed change.
+                        // Otherwise the draft's own frontmatter text says which
+                        // fields hold YAML that their JSON values cannot show.
+                        frontmatter = if replayed.is_some() {
+                            visible.frontmatter_json()
+                        } else {
+                            indexed_fields.clone()
+                        };
+                        provenance = replayed;
+                    }
+                    indexed.unwrap_or_else(empty)
                 } else {
                     local
                         .as_ref()
@@ -999,11 +1170,6 @@ fn apply_moment_append(
                         })
                         .unwrap_or_else(empty)
                 };
-                let (frontmatter, provenance) =
-                    dohc_engine_domain::collections::markdown_frontmatter_json_with_provenance(
-                        text,
-                    )
-                    .unwrap_or_else(|| (empty(), Default::default()));
                 record_facts = dohc_engine_domain::index_collection_frontmatter_apply_in_tx(
                     tx,
                     &envelope.workspace_id,
@@ -1013,7 +1179,7 @@ fn apply_moment_append(
                     &frontmatter,
                     &before_frontmatter,
                     &frontmatter,
-                    Some(&provenance),
+                    provenance.as_ref(),
                     Some(&envelope.origin_id),
                     None,
                     Some((&envelope.origin_id, envelope.origin_seq)),
@@ -1214,11 +1380,42 @@ fn recorded_preimage_matches(
     ).map_err(SyncError::corrupt)
 }
 
+fn origin_update_is_on_live_claim(
+    tx: &Transaction<'_>,
+    envelope: &ReplicationEnvelope,
+    payload: &MomentAppendPayload,
+    live_claim: &str,
+) -> Result<bool, SyncError> {
+    // Select the latest coordinate from the covering index, then read one
+    // primary-key row. Refusal and claim checks cannot select an older update.
+    let claim: Option<String> = tx.query_row(
+        "SELECT json_extract(r.payload_json,'$.lineageClaimId') FROM \
+         replication_log r \
+         JOIN ydoc_docs d ON d.workspace_id=?1 AND d.version_id=?3 AND d.object_id=?4 \
+         WHERE r.workspace_id=?1 AND r.origin_id=?2 AND r.origin_seq=(\
+           SELECT MAX(origin_seq) FROM replication_log INDEXED BY replication_ydoc_origin_document \
+           WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq<?5 AND op_kind='ydoc.update' \
+             AND json_extract(payload_json,'$.versionId')=?3 AND json_extract(payload_json,'$.objectId')=?4) \
+           AND r.apply_disposition='applied' AND d.lineage_claim_status='exact' \
+           AND json_extract(r.payload_json,'$.lineageClaimId')=d.lineage_claim_id \
+           AND d.lineage_claim_id=?6 AND d.content_kind IN ('plaintext','richdoc') \
+           AND NOT EXISTS (SELECT 1 FROM ydoc_deferred_updates p \
+             WHERE p.workspace_id=?1 AND p.version_id=?3 AND p.object_id=?4 AND p.lineage_claim_id IS NOT ?6)",
+        params![envelope.workspace_id,envelope.origin_id,payload.version_id,payload.object_id,envelope.origin_seq,live_claim],
+        |row| row.get(0),
+    ).optional().map_err(SyncError::corrupt)?.flatten();
+    Ok(claim.is_some())
+}
+
 fn holds_earlier_lineage_artifact(
     tx: &Transaction<'_>,
     envelope: &ReplicationEnvelope,
     payload: &MomentAppendPayload,
+    live_claim: Option<&str>,
 ) -> Result<bool, SyncError> {
+    if let Some(claim) = live_claim {
+        return origin_update_is_on_live_claim(tx, envelope, payload, claim);
+    }
     // The ordered origin log identifies the claim this artifact follows.
     // Never use equal bytes from a replaced or independently claimed base.
     let claim: Option<String> = tx.query_row(
@@ -1373,6 +1570,7 @@ pub(crate) fn apply_conflict_parent_shadow_in_tx(
         search_policy,
         MomentApplyMode::ConflictParent,
         false,
+        None,
     )
 }
 
@@ -2052,10 +2250,7 @@ pub(crate) fn retain_refused_moment_blobs(
     tx: &Transaction<'_>,
     envelope: &ReplicationEnvelope,
 ) -> Result<(), SyncError> {
-    let payload: MomentAppendPayload =
-        Deserialize::deserialize(&envelope.payload).map_err(|_| SyncError::InvalidInput {
-            reason: "moment.append payload is malformed",
-        })?;
+    let (payload, _) = applied_payload(tx, envelope)?;
     for (role, digest, kind) in [
         (
             "payload-before",
@@ -2103,12 +2298,7 @@ pub(crate) fn retain_refused_moment_blobs(
 }
 
 fn require_blob_text(tx: &Transaction<'_>, sha: &str) -> Result<String, SyncError> {
-    let row: Option<(i64, String)> = tx
-        .query_row(
-            "SELECT byte_length,text FROM blobs WHERE sha256=?1",
-            [sha],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
+    let row: Option<(i64, String)> = text::with_length(tx, sha)
         .optional()
         .map_err(SyncError::corrupt)?;
     let (byte_length, text) = row.ok_or(SyncError::BlobInvalid)?;
@@ -2130,14 +2320,15 @@ fn require_binary_blob(tx: &Transaction<'_>, sha: &str) -> Result<i64, SyncError
 }
 
 fn select_snapshot_by_object(
-    tx: &Transaction<'_>,
+    tx: &rusqlite::Connection,
     workspace_id: &str,
     version_id: &str,
     object_id: &str,
 ) -> Result<Option<Snapshot>, SyncError> {
-    tx.query_row(
+    let snapshot = text::ReadSnapshot::new(tx).map_err(SyncError::corrupt)?;
+    let row = tx.query_row(
         "SELECT s.object_id,s.version_id,s.path,COALESCE(s.content_kind,'text'), \
-                s.blob_sha256,s.binary_sha256,b.text,COALESCE(b.byte_length,bb.byte_length), \
+                s.blob_sha256,s.binary_sha256,b.sha256,COALESCE(b.byte_length,bb.byte_length), \
                 s.updated_at_ms,s.latest_moment_id,s.metadata_origin,
                 s.metadata_summary,s.metadata_correlation_id \
          FROM snapshots s \
@@ -2149,7 +2340,11 @@ fn select_snapshot_by_object(
     )
     .optional()
     .map_err(SyncError::corrupt)?
-    .transpose()
+    .transpose()?;
+    snapshot.finish(
+        hydrate_snapshots(tx, row.into_iter().collect()).map(|rows| rows.into_iter().next()),
+        SyncError::corrupt,
+    )
 }
 
 fn select_snapshot_by_path(
@@ -2161,7 +2356,7 @@ fn select_snapshot_by_path(
     let aliased = tx
         .query_row(
             "SELECT s.object_id,s.version_id,s.path,COALESCE(s.content_kind,'text'), \
-                    s.blob_sha256,s.binary_sha256,b.text,COALESCE(b.byte_length,bb.byte_length), \
+                    s.blob_sha256,s.binary_sha256,b.sha256,COALESCE(b.byte_length,bb.byte_length), \
                     s.updated_at_ms,s.latest_moment_id,s.metadata_origin,
                     s.metadata_summary,s.metadata_correlation_id \
              FROM path_aliases a \
@@ -2179,12 +2374,12 @@ fn select_snapshot_by_path(
         if snapshot.path != path {
             return Err(SyncError::CoordinateDiverged);
         }
-        return Ok(Some(snapshot));
+        return hydrate_snapshots(tx, vec![snapshot]).map(|rows| rows.into_iter().next());
     }
     let mut statement = tx
         .prepare(
             "SELECT s.object_id,s.version_id,s.path,COALESCE(s.content_kind,'text'), \
-                    s.blob_sha256,s.binary_sha256,b.text,COALESCE(b.byte_length,bb.byte_length), \
+                    s.blob_sha256,s.binary_sha256,b.sha256,COALESCE(b.byte_length,bb.byte_length), \
                     s.updated_at_ms,s.latest_moment_id,s.metadata_origin,
                     s.metadata_summary,s.metadata_correlation_id \
              FROM snapshots s \
@@ -2201,7 +2396,28 @@ fn select_snapshot_by_path(
     if rows.len() > 1 {
         return Err(SyncError::CoordinateDiverged);
     }
-    rows.into_iter().next().transpose()
+    let rows = rows.into_iter().collect::<Result<Vec<_>, _>>()?;
+    hydrate_snapshots(tx, rows).map(|rows| rows.into_iter().next())
+}
+
+fn hydrate_snapshots(
+    conn: &rusqlite::Connection,
+    mut rows: Vec<Snapshot>,
+) -> Result<Vec<Snapshot>, SyncError> {
+    let mut bodies = text::read_batch(
+        conn,
+        rows.iter()
+            .filter(|row| row.kind == ContentKind::Text)
+            .map(|row| row.digest.as_str()),
+        None,
+    )
+    .map_err(SyncError::corrupt)?;
+    for row in &mut rows {
+        if row.kind == ContentKind::Text {
+            row.text = text::take(&mut bodies, &row.digest);
+        }
+    }
+    Ok(rows)
 }
 
 fn snapshot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Snapshot, SyncError>> {
@@ -2222,7 +2438,7 @@ fn snapshot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Snapsho
         return Ok(Err(SyncError::CoordinateDiverged));
     };
     let text = match (kind, text) {
-        (ContentKind::Text, Some(text)) => text,
+        (ContentKind::Text, Some(_)) => String::new(),
         (ContentKind::Binary, _) => String::new(),
         _ => return Ok(Err(SyncError::CoordinateDiverged)),
     };

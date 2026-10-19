@@ -1,4 +1,5 @@
 import { activityPin } from "../src/testPins";
+import { DOCUMENT_END } from "./helpers/keys";
 import { expect, test } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -8,7 +9,7 @@ import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
   explorerRow,
-  openFileChatsPanel,
+  openAboutPanel,
   openWorkspaceFromFirstRun,
   revealExplorerPath,
   seedWorkspaceManifest,
@@ -101,7 +102,7 @@ test("search finds file content and a chat message; .env.local content never sur
     // versioned-text store may open a second writable engine.db connection.
     await revealExplorerPath(page, "notes/roadmap.md");
     await explorerRow(page, "notes/roadmap.md").click();
-    await openFileChatsPanel(page);
+    await openAboutPanel(page);
     await page.getByTestId("linked-chat-new").click();
     const titleInput = page.getByTestId("linked-chat-new-title");
     await titleInput.fill("Roadmap sync");
@@ -186,7 +187,7 @@ test("a newly saved editor change is searchable before relaunch", async () => {
     await expect(editor).toBeVisible();
     await expect(page.getByTestId("markdown-edit-toggle")).toHaveCount(0);
     await editor.click();
-    await page.keyboard.press("ControlOrMeta+End");
+    await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.type(` ${sentinel}`);
     await expect(editor).toContainText(sentinel);
     await expect(saveState).toHaveAttribute("data-state", "saved", {

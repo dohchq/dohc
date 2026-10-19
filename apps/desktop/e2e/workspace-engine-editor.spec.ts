@@ -1,8 +1,11 @@
-import { expect, test } from "@playwright/test";
-import { readFile, rm } from "node:fs/promises";
+import { holdSystemClipboard } from "./helpers/systemClipboard";
+import { DOCUMENT_END } from "./helpers/keys";
+import { test, expect } from "@playwright/test";
+import { readFile, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
+import { activityPin } from "../src/testPins";
 import {
   momentTextsForPath,
   replicationOpKindCount,
@@ -45,7 +48,13 @@ async function openEngineDoc(page: import("@playwright/test").Page, path: string
   await expect(page.getByTestId("markdown-editor")).toBeVisible();
 }
 
-async function restoreRestartTyping(page: import("@playwright/test").Page, rootPath: string, workspaceId: string, path: string, human: string, external: string) {
+// The kept typing's notice: its toast, then its row in Notices.
+function recoveryToast(page: import("@playwright/test").Page) {
+  return page.getByTestId("workspace-shell-notice").filter({hasText: "Typing kept in History"});
+}
+
+async function restoreRestartTyping(desktop: Awaited<ReturnType<typeof launchDesktopApp>>, rootPath: string, workspaceId: string, path: string, human: string, external: string, open: "notice" | "history") {
+  const {page, app} = desktop;
   let recoveryId = "";
   await expect.poll(async () => {
     const status = await page.evaluate(async workspaceId => {
@@ -63,14 +72,37 @@ async function restoreRestartTyping(page: import("@playwright/test").Page, rootP
   if (!orders) throw new Error("recovery must link to its committed outside capture");
   expect(orders.captureOrder).toBeLessThan(orders.recoveryOrder);
   expect(await readFile(join(rootPath,path), "utf8")).toContain(external);
-  await openHistoryView(page);
-  await page.locator(`[data-testid="engine-moment-open"][data-moment-id="${recoveryId}"]`).click();
+  if (open === "notice") {
+    const toast = recoveryToast(page);
+    await expect(toast).toContainText(`The file "${path}" changed outside dohc. Your typing is in History. Open the recovery change and choose Restore.`, {timeout: 30_000});
+    await toast.getByTestId("workspace-shell-error-action").click();
+    await expect(page.getByTestId(activityPin("history"))).toHaveAttribute("aria-current", "page");
+    await expect(page.getByTestId("engine-moment-diff-page")).toHaveAttribute("data-moment-id", recoveryId);
+    await expect(page.getByTestId("engine-diff-source")).toHaveText("Typing kept");
+  } else {
+    await openHistoryView(page);
+    await page.locator(`[data-testid="engine-moment-open"][data-moment-id="${recoveryId}"]`).click();
+  }
   await expect(page.getByTestId("engine-diff-lines")).toContainText(human);
+  // A shared live file's way back: Copy your version copies the kept file whole.
+  await holdSystemClipboard(test.info(), async (remainingMs) => {
+    await page.getByTestId("engine-diff-copy-typing").click({ timeout: remainingMs() });
+    // Windows hands clipboard text back with CRLF line endings.
+    await expect.poll(async () => (await app.evaluate(({clipboard}) => clipboard.readText())).replace(/\r\n/g, "\n"), { timeout: remainingMs() }).toBe(detail.moment?.beforeText);
+  });
+  // Opening the recovery and copying it keep it listed until Restore.
+  const kept = await page.evaluate(async workspaceId => (window as unknown as {dohcDesktop: DohcDesktopBridge}).dohcDesktop.getCaptureRecoveryStatus({workspaceId}), workspaceId);
+  expect(kept.captureRecoveries.map(recovery => recovery.momentId)).toContain(recoveryId);
   await page.getByTestId("engine-diff-restore-file").click();
   await page.getByTestId("engine-diff-confirm-restore").click();
   await expect(page.getByTestId("engine-diff-restore-status")).toContainText("Restored the earlier state");
   await expect.poll(() => readFile(join(rootPath,path), "utf8")).toContain(human);
   await expect.poll(() => page.evaluate(async workspaceId => (window as unknown as {dohcDesktop: DohcDesktopBridge}).dohcDesktop.getCaptureRecoveryStatus({workspaceId}), workspaceId)).toEqual({captureRecoveries: []});
+  // The restore cleared the recovery, so its notice goes too.
+  await expect(recoveryToast(page)).toHaveCount(0);
+  await page.getByTestId("notice-center-toggle").click();
+  await expect(page.locator("[data-notice-row]").filter({hasText: "Typing kept in History"})).toHaveCount(0);
+  await page.getByTestId("notice-center-toggle").click();
 }
 
 test("rich doc edits through the engine Y.Doc: settle lands on .md + engine.db, only ydoc.update journals, reopen resumes", async () => {
@@ -97,7 +129,7 @@ test("rich doc edits through the engine Y.Doc: settle lands on .md + engine.db, 
 
     const editor = page.getByTestId("markdown-editor");
     await editor.click();
-    await page.keyboard.press("ControlOrMeta+End");
+    await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.type(sentinel);
 
     // The debounced settle projects the edit into engine.db and writes the.md.
@@ -204,7 +236,7 @@ async function quitDesktop(desktop: Awaited<ReturnType<typeof launchDesktopApp>>
   await desktop.close();
 }
 
-test("an external edit to an idle open document is imported after restart", async () => {
+test("@restart-durability-idle-external an external edit to an idle open document is imported after restart", async () => {
   test.setTimeout(120_000);
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
@@ -223,7 +255,14 @@ test("an external edit to an idle open document is imported after restart", asyn
   } finally {await cleanupDesktopWorkspace(desktop, temp);}
 });
 
-test("an external edit to an open document remains recoverable after overlapping typing and restart", async () => {
+// The `<stem> (recovered …).md` siblings beside `<stem>.md` in one folder.
+async function recoveredSiblings(rootPath: string, folder: string, stem: string): Promise<string[]> {
+  const prefix = `${stem} (recovered `;
+  const names = await readdir(join(rootPath, folder));
+  return names.filter(name => name.startsWith(prefix) && name.endsWith(".md")).map(name => `${folder}/${name}`);
+}
+
+test("@restart-durability-overlapping-typing overlapping typing on an externally edited document survives restart as a recovered copy", async () => {
   test.setTimeout(120_000);
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
@@ -241,22 +280,40 @@ test("an external edit to an open document remains recoverable after overlapping
     await writeWorkspaceFiles(temp, [{path, contents: `# Rich\n\n${external}\n`}]);
     // The live lease defers capture. Settlement must preserve the outside bytes.
     await page.getByTestId("markdown-editor").click();
-    await page.keyboard.press("ControlOrMeta+End");
+    await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.type(human);
     await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "error");
     expect(await readFile(join(temp.rootPath, path), "utf8")).toContain(external);
     await expect(page.getByTestId("markdown-editor")).toContainText(human);
     await quitDesktop(desktop);
+    // Teardown captured the outside bytes and folded the closed document onto
+    // them. The typing is not lost with it: it comes back as an ordinary
+    // sibling file, complete, that the explorer lists and History explains.
     desktop = await launchDesktopApp({workspace: temp});
     await openWorkspaceFromFirstRun(desktop.page, temp);
     await waitForWorkspaceFile(desktop.page, workspace.workspaceId, path);
     await expect(desktop.page.getByTestId("markdown-editor")).toContainText(external);
-    await restoreRestartTyping(desktop.page, temp.rootPath, workspace.workspaceId, path, human, external);
+    await expect(desktop.page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved");
+    expect(await readFile(join(temp.rootPath, path), "utf8")).toBe(`# Rich\n\n${external}\n`);
+    await expect.poll(() => recoveredSiblings(temp.rootPath, "notes", "rich")).toHaveLength(1);
+    const [recovered] = await recoveredSiblings(temp.rootPath, "notes", "rich");
+    const copy = await readFile(join(temp.rootPath, recovered!), "utf8");
+    expect(copy.split("\n").filter(line => line.length > 0)).toEqual(["# Rich", `Base paragraph.${human}`]);
+    await waitForWorkspaceFile(desktop.page, workspace.workspaceId, recovered!);
+    await expect(explorerRow(desktop.page, recovered!)).toBeVisible();
+    expect(momentTextsForPath(temp.rootPath, recovered!)).toEqual([copy]);
+    await restoreRestartTyping(desktop, temp.rootPath, workspace.workspaceId, path, human, external, "notice");
+    // History explains the sibling on screen, not only in the database: the
+    // row names the recovery and credits the live edit, not a person.
+    await openHistoryView(desktop.page);
+    const recoveredRow = desktop.page.locator(`[data-testid="engine-moment-open"][data-moment-path="${recovered!}"]`).first();
+    await expect(recoveredRow).toContainText(`Recovered unsaved edits from ${path} after a later write changed the file.`);
+    await expect(recoveredRow.getByTestId("engine-moment-source")).toHaveText("Live edit");
     await quitDesktop(desktop);
   } finally {await cleanupDesktopWorkspace(desktop, temp);}
 });
 
-test("kept typing survives capture before the renderer reopens after restart", async () => {
+test("@restart-durability-capture-before-reopen kept typing survives capture before the renderer reopens after restart", async () => {
   test.setTimeout(120_000);
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
@@ -274,7 +331,7 @@ test("kept typing survives capture before the renderer reopens after restart", a
     await writeWorkspaceFiles(temp, [{path, contents: `# Rich\n\n${external}\n`}]);
     // The live lease defers capture. Settlement must preserve the outside bytes.
     await page.getByTestId("markdown-editor").click();
-    await page.keyboard.press("ControlOrMeta+End");
+    await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.type(human);
     await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "error");
     expect(await readFile(join(temp.rootPath, path), "utf8")).toContain(external);
@@ -297,7 +354,13 @@ test("kept typing survives capture before the renderer reopens after restart", a
     await openEngineDoc(desktop.page, path);
     await waitForWorkspaceFile(desktop.page, workspace.workspaceId, path);
     await expect(desktop.page.getByTestId("markdown-editor")).toContainText(external);
-    await restoreRestartTyping(desktop.page, temp.rootPath, workspace.workspaceId, path, human, external);
+    await expect(desktop.page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved");
+    expect(await readFile(join(temp.rootPath, path), "utf8")).toBe(`# Rich\n\n${external}\n`);
+    await expect.poll(() => recoveredSiblings(temp.rootPath, "notes", "rich")).toHaveLength(1);
+    const [recovered] = await recoveredSiblings(temp.rootPath, "notes", "rich");
+    const copy = await readFile(join(temp.rootPath, recovered!), "utf8");
+    expect(copy.split("\n").filter(line => line.length > 0)).toEqual(["# Rich", `Base paragraph.${human}`]);
+    await restoreRestartTyping(desktop, temp.rootPath, workspace.workspaceId, path, human, external, "history");
     await quitDesktop(desktop);
   } finally {await cleanupDesktopWorkspace(desktop, temp);}
 });
@@ -386,7 +449,7 @@ test("creating a version while a rich doc is live flushes + closes the session (
 
     const editor = page.getByTestId("markdown-editor");
     await editor.click();
-    await page.keyboard.press("ControlOrMeta+End");
+    await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.type(sentinel);
 
     // Create a version through the bridge while the doc is still live. The main-

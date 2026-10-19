@@ -1,21 +1,23 @@
 // @vitest-environment jsdom
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import type { DohcDesktopBridge, PushShareDirectWritesResult, ShareDirectWritesPushedEvent } from "../../ipc/bridgeContract";
+import type { DohcDesktopBridge, PushShareDirectWritesResult, ShareDirectWritesPushedEvent, ShareDirectWriteAnswerDelivery } from "../../ipc/bridgeContract";
 import { useShareDirectWrites, type DirectWriteNotice, type ShareViewRefresh } from "./useShareDirectWrites";
 import { deferred } from "../../testing/deferred";
 
-let pushed: ((event: ShareDirectWritesPushedEvent) => void) | null = null;
-const pushShareDirectWrites = vi.fn<(payload: { workspaceId: string }) => Promise<PushShareDirectWritesResult>>();
+let pushed: ((event: ShareDirectWritesPushedEvent, delivery: ShareDirectWriteAnswerDelivery) => void) | null = null;
+const delivery = { claim: vi.fn(async () => true), acknowledge: vi.fn(async () => true), release: vi.fn(async () => true) };
+const pushShareDirectWrites = vi.fn<(payload: { workspaceId: string }) => Promise<void>>();
 const NOTHING: PushShareDirectWritesResult = { status: "pushed", writes: [] };
 
 beforeEach(() => {
   pushed = null;
   pushShareDirectWrites.mockReset();
-  pushShareDirectWrites.mockResolvedValue(NOTHING);
+  pushShareDirectWrites.mockResolvedValue(undefined);
+  for (const method of Object.values(delivery)) { method.mockReset(); method.mockResolvedValue(true); }
   window.dohcDesktop = {
     pushShareDirectWrites,
-    onShareDirectWritesPushed: (listener: (event: ShareDirectWritesPushedEvent) => void) => {
+    onShareDirectWritesPushed: (listener: (event: ShareDirectWritesPushedEvent, delivery: ShareDirectWriteAnswerDelivery) => void) => {
       pushed = listener;
       return () => { pushed = null; };
     },
@@ -29,7 +31,7 @@ afterEach(() => {
 
 async function setup(options: { enabled?: boolean; ready?: boolean; workspaceId?: string; opened?: PushShareDirectWritesResult; ended?: boolean } = {}) {
   const workspaceId = options.workspaceId ?? "share-view";
-  if (options.opened) pushShareDirectWrites.mockResolvedValueOnce(options.opened);
+  if (options.opened) respond(options.opened);
   const notices: DirectWriteNotice[] = [];
   const refreshShareView = vi.fn(async (): Promise<ShareViewRefresh> => (options.ended ? "ended" : "current"));
   const checkShareAccess = vi.fn(async (): Promise<ShareViewRefresh> => (options.ended ? "ended" : "current"));
@@ -37,6 +39,7 @@ async function setup(options: { enabled?: boolean; ready?: boolean; workspaceId?
   const hook = renderHook(() =>
     useShareDirectWrites({
       workspaceId,
+      sharedView: true,
       enabled: options.enabled ?? true,
       ready: options.ready ?? true,
       ownerName: "ana@example.com",
@@ -51,8 +54,12 @@ async function setup(options: { enabled?: boolean; ready?: boolean; workspaceId?
   return { notices, refreshShareView, checkShareAccess, sendShareChanges, hook };
 }
 
+function respond(result: PushShareDirectWritesResult) {
+  pushShareDirectWrites.mockImplementationOnce(async () => { pushed?.({ answerId: crypto.randomUUID(), workspaceId: "share-view", result }, delivery); });
+}
+
 async function answer(result: PushShareDirectWritesResult, workspaceId = "share-view") {
-  await act(async () => { pushed?.({ workspaceId, result }); });
+  await act(async () => { pushed?.({ answerId: crypto.randomUUID(), workspaceId, result }, delivery); });
 }
 
 it("pushes when the view opens and shows what that push answered", async () => {
@@ -71,43 +78,49 @@ it("keeps listening without pushing when the share view cannot write", async () 
   expect(pushShareDirectWrites).not.toHaveBeenCalled();
 });
 
-it("listens while opening and gates Try again on the latest readiness", async () => {
-  const showNotice = vi.fn<(notice: DirectWriteNotice) => void>();
-  const hook = renderHook(({ ready }) => useShareDirectWrites({
-    workspaceId: "share-view",
-    enabled: true,
-    ready,
-    ownerName: "ana@example.com",
-    refreshShareView: async () => "current",
-    checkShareAccess: async () => "current",
-    sendShareChanges: async () => undefined,
-    showNotice,
-  }), { initialProps: { ready: false } });
+it("subscribes only for ready shared views", async () => {
+  const input = { workspaceId: "share-view", sharedView: false, enabled: false, ready: true, ownerName: "Owner",
+    refreshShareView: async () => "current" as const, checkShareAccess: async () => "current" as const,
+    sendShareChanges: async () => {}, showNotice: vi.fn() };
+  const hook = renderHook(props => useShareDirectWrites(props), { initialProps: input });
+  expect(pushed).toBeNull();
+  expect(pushShareDirectWrites).not.toHaveBeenCalled();
+  hook.rerender({ ...input, sharedView: true, ready: false });
+  expect(pushed).toBeNull();
+  hook.rerender({ ...input, sharedView: true, enabled: true });
   expect(pushed).not.toBeNull();
-  expect(pushShareDirectWrites).not.toHaveBeenCalled();
-  await answer({ status: "failed", writes: [], errorMessage: "offline", lasting: false });
-  expect(showNotice).toHaveBeenCalledOnce();
-  const notice = showNotice.mock.calls[0]![0];
-  await act(async () => { notice.retry?.(); });
-  expect(pushShareDirectWrites).not.toHaveBeenCalled();
-  const listener = pushed;
-  hook.rerender({ ready: true });
   await act(async () => {});
-  expect(pushed).toBe(listener);
   expect(pushShareDirectWrites).toHaveBeenCalledOnce();
-  await act(async () => { notice.retry?.(); });
-  expect(pushShareDirectWrites).toHaveBeenCalledTimes(2);
-  hook.rerender({ ready: false });
-  await act(async () => { notice.retry?.(); });
-  expect(pushShareDirectWrites).toHaveBeenCalledTimes(2);
+});
+
+it("does not toast an answer claimed by another window", async () => {
+  const { notices } = await setup({ enabled: false });
+  delivery.claim.mockResolvedValueOnce(false);
+  await answer({ status: "pushed", writes: [{ result: "refused", paths: ["tasks/automations.yaml"], reason: "" }] });
+  expect(delivery.claim).toHaveBeenCalledOnce();
+  expect(notices).toHaveLength(0);
+  expect(delivery.acknowledge).not.toHaveBeenCalled();
+});
+
+it("releases a claim whose reply arrives after the view closed", async () => {
+  const { notices, hook } = await setup({ enabled: false });
+  const claimed = deferred<boolean>();
+  delivery.claim.mockReturnValueOnce(claimed.promise);
+  await answer({ status: "pushed", writes: [{ result: "refused", paths: ["tasks/automations.yaml"], reason: "" }] });
+  expect(delivery.claim).toHaveBeenCalledOnce();
+  hook.unmount();
+  await act(async () => claimed.resolve(true));
+  expect(notices).toHaveLength(0);
+  expect(delivery.acknowledge).not.toHaveBeenCalled();
+  expect(delivery.release).toHaveBeenCalledOnce();
 });
 
 it("waits for readiness before reporting unavailable, then shows only the access ended notice", async () => {
-  pushShareDirectWrites.mockResolvedValueOnce({ status: "unavailable" });
+  respond({ status: "unavailable" });
   const showNotice = vi.fn<(notice: DirectWriteNotice) => void>();
   const refreshShareView = vi.fn(async (ready: boolean): Promise<ShareViewRefresh> => ready ? "ended" : "stale");
   const hook = renderHook(({ ready }) => useShareDirectWrites({
-    workspaceId: "share-view",
+    sharedView: true, workspaceId: "share-view",
     enabled: true,
     ready,
     ownerName: "ana@example.com",
@@ -200,6 +213,11 @@ it("reports a record name race once and tells where the losing draft is kept", a
 
 it("counts several refused writes and gives the first reason", async () => {
   const { notices } = await setup();
+  const shownAtAcknowledge: number[] = [];
+  delivery.acknowledge.mockImplementation(async () => {
+    shownAtAcknowledge.push(notices.length);
+    return true;
+  });
   await answer({
     status: "pushed",
     writes: [
@@ -210,6 +228,12 @@ it("counts several refused writes and gives the first reason", async () => {
   expect(notices[0]!.message).toBe(
     "The sync relay did not accept 2 of your changes: trip/a/collection.yaml is not a valid collection.yaml. Send them as a proposal.",
   );
+  // Main forgets the answer only once its Notice is shown.
+  await vi.waitFor(() => expect(delivery.acknowledge).toHaveBeenCalledOnce());
+  expect(delivery.claim).toHaveBeenCalledOnce();
+  expect(delivery.claim.mock.invocationCallOrder[0]!).toBeLessThan(delivery.acknowledge.mock.invocationCallOrder[0]!);
+  expect(shownAtAcknowledge).toEqual([1]);
+  expect(delivery.release).not.toHaveBeenCalled();
 });
 
 it("offers Try again for a failure that may pass, and keeps the writes answered before it", async () => {
@@ -280,7 +304,7 @@ it("says the changes did not go, with Try again, when the metadata check finds t
 
 it("ignores an answer that arrives after the view closed", async () => {
   let finish!: (result: PushShareDirectWritesResult) => void;
-  pushShareDirectWrites.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+  pushShareDirectWrites.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = () => resolve(); }));
   const { notices, hook } = await setup();
   hook.unmount();
   await act(async () => {
@@ -291,11 +315,11 @@ it("ignores an answer that arrives after the view closed", async () => {
 
 it("keeps an unavailable push's pending refresh when writing stops in the same workspace", async () => {
   const refresh = deferred<ShareViewRefresh>();
-  pushShareDirectWrites.mockResolvedValueOnce({ status: "unavailable" });
+  respond({ status: "unavailable" });
   const showNotice = vi.fn();
   const refreshShareView = vi.fn(() => refresh.promise);
   const hook = renderHook(({ enabled }) => useShareDirectWrites({
-    workspaceId: "share-view",
+    sharedView: true, workspaceId: "share-view",
     enabled,
     ready: true,
     ownerName: "ana@example.com",
@@ -313,10 +337,10 @@ it("keeps an unavailable push's pending refresh when writing stops in the same w
 
 it("discards an unavailable push's pending refresh after A to B to A", async () => {
   const refresh = deferred<ShareViewRefresh>();
-  pushShareDirectWrites.mockResolvedValueOnce({ status: "unavailable" });
+  respond({ status: "unavailable" });
   const showNotice = vi.fn();
   const hook = renderHook(({ workspaceId }) => useShareDirectWrites({
-    workspaceId, enabled: true, ready: true, ownerName: "ana@example.com",
+    sharedView: true, workspaceId, enabled: true, ready: true, ownerName: "ana@example.com",
     refreshShareView: () => refresh.promise,
     checkShareAccess: () => refresh.promise,
     sendShareChanges: async () => undefined, showNotice,
@@ -341,9 +365,9 @@ it("does not retry a failure after the view closes", async () => {
 it.each(["ended", "changed"] as const)("reports locally refused writes after access %s without a dead retry", async access => {
   const showNotice = vi.fn();
   const checkShareAccess = vi.fn(async () => access);
-  renderHook(() => useShareDirectWrites({ workspaceId: "share-view", enabled: false, ready: true, ownerName: "Ana",
+  renderHook(() => useShareDirectWrites({ sharedView: true, workspaceId: "share-view", enabled: false, ready: true, ownerName: "Ana",
     refreshShareView: async () => "stale", checkShareAccess, sendShareChanges: async () => undefined, showNotice }));
-  await act(async () => pushed?.({ workspaceId: "share-view", result: { status: "failed", writes: [], lasting: false, errorMessage: "access refused locally" } }));
+  await act(async () => pushed?.({ answerId: crypto.randomUUID(), workspaceId: "share-view", result: { status: "failed", writes: [], lasting: false, errorMessage: "access refused locally" } }, delivery));
   expect(checkShareAccess).toHaveBeenCalledOnce();
   expect(showNotice).toHaveBeenCalledOnce();
   expect(showNotice.mock.calls[0]![0]).toMatchObject({ retry: null, send: null });

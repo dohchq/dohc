@@ -1,6 +1,27 @@
+import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import { describe, expect, it } from "vitest";
 import { activityPathsAffectWorkspaceListing, WorkspacePathOpenFailure } from "./bridgeContract";
+import { DiscardLiveDraftRecoveryPayload, liveDraftRecoveryOperations } from "./bridgeContract";
+
+describe("live draft recovery replies", () => {
+  const record = {recordId: "a".repeat(64), path: "notes/a.md", objectId: "object", text: "Unseen copy", updateBase64: "AAA="};
+  it("declares all remaining recovery records on both list and dismiss", () => {
+    for (const operation of [liveDraftRecoveryOperations.listLiveDraftRecovery, liveDraftRecoveryOperations.discardLiveDraftRecovery]) {
+      expect(operation.result.parse([record])).toEqual([record]);
+      expect(operation.result.safeParse([{...record, recordId: "../draft"}]).success).toBe(false);
+      expect(operation.result.safeParse([{...record, path: "../outside.md"}]).success).toBe(false);
+      expect(operation.result.safeParse([{...record, text: undefined}]).success).toBe(false);
+      expect(operation.guard).toBe("active-workspace");
+    }
+  });
+  it("requires the reviewed snapshot even when naming an exact recovery record", () => {
+    const input = {workspaceId: "workspace", path: record.path, objectId: record.objectId, snapshotSha256: "b".repeat(64), discardedAtMs: 1, recordId: record.recordId};
+    expect(DiscardLiveDraftRecoveryPayload.parse(input)).toEqual(input);
+    expect(DiscardLiveDraftRecoveryPayload.safeParse({...input, snapshotSha256: undefined}).success).toBe(false);
+    expect(DiscardLiveDraftRecoveryPayload.safeParse({...input, recordId: "../draft"}).success).toBe(false);
+  });
+});
 
 import {
   ENGINE_YDOC_UPDATE_MAX_BYTES,
@@ -63,6 +84,7 @@ import {
   StopAgentRunPayload,
   ResumeThreadDispatchPayload,
   SendChatMessagePayload,
+  StartChannelThreadPayload,
   SendChatMessageResult,
   SetChatReactionPayload,
   ShowWorkbenchMenuPayload,
@@ -72,6 +94,7 @@ import {
   StartDmPayload,
   SyncDmsResult,
   SyncStatusResult,
+  OwnerLiveDocument,
   engineStoreRefusalCopy,
   engineStoreRefusalRecovery,
   ListWorkspaceVersionsResult,
@@ -1692,7 +1715,7 @@ describe("chat IPC contract", () => {
     const preview = {
       id: "thread-1", title: "Launch", createdAtMs: 1, updatedAtMs: 2, channelId: "channel-1",
       messageCount: 1, lastReadSequence: 0, unreadCount: 1,
-      openingMessage: {
+      openingMessage: { presentation: { group: "fixture", hue: null, self: false },
         id: "message-1", authorKind: "automation", authorDisplayName: "Stamp the finish date",
         authorOwnerDisplayName: "Ice", createdAtMs: 1, bodySnippet: "Finished Book hotel", reactions: [],
         automation: { automationId: "collection:Trip/Tasks#stamp", collectionPath: "Trip/Tasks" },
@@ -1715,7 +1738,7 @@ describe("chat IPC contract", () => {
         messageCount: 2,
         lastReadSequence: 1,
         unreadCount: 1,
-        openingMessage: {
+        openingMessage: { presentation: { group: "fixture", hue: null, self: false },
           id: "message-1",
           authorKind: "agent",
           authorDisplayName: "Sam",
@@ -2129,25 +2152,25 @@ describe("settings IPC contract", () => {
     expect(
       SetWorkspaceSettingsPayload.safeParse({
         workspaceId: "WS-settings",
-        settings: DEFAULT_WORKSPACE_SETTINGS,
+        patch: {},
       }).success,
     ).toBe(false);
     expect(
       SetWorkspaceSettingsPayload.safeParse({
         workspaceId: "",
-        settings: DEFAULT_WORKSPACE_SETTINGS,
+        patch: {},
       }).success,
     ).toBe(false);
     expect(
       SetWorkspaceSettingsPayload.safeParse({
         workspaceId: "ws-settings",
-        settings: {
-          ...DEFAULT_WORKSPACE_SETTINGS,
-          agents: {
-            ...DEFAULT_WORKSPACE_SETTINGS.agents,
-            mcpAutoStart: "yes",
-          },
-        },
+        patch: { privacy: { confirmExternalLinks: "yes" } },
+      }).success,
+    ).toBe(false);
+    expect(
+      SetWorkspaceSettingsPayload.safeParse({
+        workspaceId: "ws-settings",
+        patch: { agents: { mcpAutoStart: false } },
       }).success,
     ).toBe(false);
   });
@@ -2241,7 +2264,7 @@ describe("workspace UI state IPC contract", () => {
       },
     ],
     activeEditorGroup: "primary",
-    chatsVisible: true,
+    aboutVisible: true,
   };
 
   it("drops invalid open editor heights without rejecting the saved state", () => {
@@ -3392,6 +3415,27 @@ describe("try-in-version IPC contract", () => {
 });
 
 describe("sync status IPC contract", () => {
+  it("preserves file-read failure separately from history availability", () => {
+    const status = { state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null,
+      historyRecordingUnavailable: false, historyShareView: false, liveSessionsGeneration: 0 };
+    for (const reason of ["read-failed", "unavailable"] as const) {
+      expect(SyncStatusResult.parse({ ...status, fileObservationFailure: reason })).toMatchObject({
+        historyRecordingUnavailable: false, fileObservationFailure: reason,
+      });
+    }
+    expect(SyncStatusResult.safeParse({ ...status, fileObservationFailure: "history-off" }).success).toBe(false);
+  });
+  it("carries a document the server refused or whose server copy diverged to the status and the live documents list", () => {
+    const status = { state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null,
+      historyRecordingUnavailable: false, historyShareView: false, liveSessionsGeneration: 0, ownerLiveDelivery: "retrying" };
+    const row = { path: "docs/a.md", status: "unavailable", canResume: true };
+    for (const reason of ["session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted"] as const) {
+      expect(SyncStatusResult.parse({ ...status, ownerLiveDeliveryReason: reason }).ownerLiveDeliveryReason).toBe(reason);
+      expect(OwnerLiveDocument.parse({ ...row, reason }).reason).toBe(reason);
+    }
+    expect(SyncStatusResult.safeParse({ ...status, ownerLiveDeliveryReason: "session-host-blocked" }).success).toBe(false);
+    expect(OwnerLiveDocument.safeParse({ ...row, reason: "session-host-blocked" }).success).toBe(false);
+  });
   it("refuses a status that cannot say why history is off", () => {
     const status = {
       state: "synced",
@@ -3507,10 +3551,10 @@ describe("engine history and linked Chats IPC contract", () => {
     expect(
       ListEngineMomentsPayload.parse({
         workspaceId: "ws-engine",
-        limit: 200,
-        beforeMomentOrder: 41,
+        limit: 50,
+        cursor: historyCursor(41),
       }).limit,
-    ).toBe(200);
+    ).toBe(50);
     const page = ListEngineMomentsResult.parse({
       moments: [
         {
@@ -3525,13 +3569,13 @@ describe("engine history and linked Chats IPC contract", () => {
           momentOrder: 7,
         },
       ],
-      nextBeforeMomentOrder: null,
+      nextCursor: null,
       latestMomentOrder: 7,
       activeVersionId: "main",
-      protectedTruncated: true,
+      ...historyPageFields,
     });
     expect(page.moments[0].summary).toBe("Reconciled offline edits");
-    expect(page.protectedTruncated).toBe(true);
+    expect(page.startCursor).toEqual(historyCursor());
     expect(
       EngineMomentDetailRecord.parse({
         id: "moment_2",
@@ -3599,7 +3643,7 @@ describe("engine history and linked Chats IPC contract", () => {
 
   it("round-trips a sent chat message with main-derived authorship", () => {
     const result = SendChatMessageResult.parse({
-      message: {
+      message: { presentation: { group: "fixture", hue: null, self: false },
         id: "message-1",
         threadId: "thread-1",
         authorKind: "human",
@@ -3613,7 +3657,7 @@ describe("engine history and linked Chats IPC contract", () => {
     // "the agent name" in the UI).
     expect(
       SendChatMessageResult.parse({
-        message: {
+        message: { presentation: { group: "fixture", hue: null, self: false },
           id: "message-2",
           threadId: "thread-1",
           authorKind: "agent",
@@ -4505,4 +4549,42 @@ describe("exclusive app creation IPC contract", () => {
       .toEqual({ ...path, emptyFolderOnly: true });
     expect(DeleteWorkspacePathPayload.safeParse({ ...path, emptyFolderOnly: "true" }).success).toBe(false);
   });
+});
+
+ it("refreshes only visibility.toml among internal metadata paths", () => {
+  expect(activityPathsAffectWorkspaceListing([".dohc/visibility.toml"], "linux")).toBe(true);
+  expect(activityPathsAffectWorkspaceListing([".DOHC/VISIBILITY.TOML"], "win32")).toBe(true);
+  expect(activityPathsAffectWorkspaceListing([".dohc/files.toml", ".dohc/ui-state.json", ".dohc/engine"], "win32")).toBe(false);
+});
+
+describe("poll send payloads", () => {
+  const doors = [
+    { name: "send", schema: SendChatMessagePayload, target: { threadId: "thread" } },
+    { name: "start", schema: StartChannelThreadPayload, target: { channelId: "channel" } },
+  ];
+  it.each(doors)("keeps poll fields on $name without normalizing choices", ({ schema, target }) => {
+    const payload = { workspaceId: "workspace", ...target, body: "When?", needsDecision: true, options: [" Monday ", "Monday", " ", "two\nlines"] };
+    expect(schema.parse(payload)).toEqual(payload);
+    expect(schema.parse({ ...payload, needsDecision: false, options: [] })).toEqual({ ...payload, needsDecision: false, options: [] });
+    const { needsDecision: _decision, ...implied } = payload;
+    expect(schema.parse(implied)).toEqual(implied);
+  });
+  it.each(doors)("leaves an empty choice for the engine to word on $name", ({ schema, target }) => {
+    const payload = { workspaceId: "workspace", ...target, body: "When?", options: [""] };
+    expect(schema.parse(payload)).toEqual(payload);
+  });
+  for (const { name, schema, target } of doors) {
+    it("accepts the poll choice limits on " + name, () => {
+      const payload = { workspaceId: "workspace", ...target, body: "When?" };
+      expect(schema.parse({ ...payload, options: Array.from({ length: 12 }, (_, i) => String(i)) })).toHaveProperty("options");
+      expect(schema.parse({ ...payload, options: ["x".repeat(200)] })).toHaveProperty("options");
+    });
+    it.each([
+      { reason: "13 choices", options: Array.from({ length: 13 }, (_, i) => String(i)) },
+      { reason: "a 201-character choice", options: ["x".repeat(201)] },
+      { reason: "a non-string choice", options: [42] },
+    ])("refuses $reason on " + name, ({ options }) => {
+      expect(schema.safeParse({ workspaceId: "workspace", ...target, body: "When?", options }).success).toBe(false);
+    });
+  }
 });

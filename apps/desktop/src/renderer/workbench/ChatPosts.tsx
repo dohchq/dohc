@@ -1,6 +1,6 @@
-import { AgentBadge, useIsOwnAuthor } from "./AgentBadge";
+import { AgentBadge } from "./AgentBadge";
 import { AutomationBadge } from "./AutomationBadge";
-import { Bookmark, CircleCheck, CircleHelp, FileText, TriangleAlert, Zap } from "lucide-react";
+import { Bookmark, CircleCheck, CircleHelp, FileText, MessageSquare, Reply, Zap } from "lucide-react";
 import { memo, type ReactNode, useEffect, useRef, useState } from "react";
 import type {
   ChannelThreadRecord,
@@ -13,31 +13,23 @@ import type {
 } from "../../ipc/bridgeContract";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { basenameOf } from "../path";
+import { Ref } from "../ui/Ref";
 import { SkeletonRows } from "../ui/SkeletonRows";
-import { formatChatTime } from "../time";
+import { formatChatTime, formatClockDigits, formatShortTime } from "../time";
 import { CopyButton } from "../ui/CopyButton";
-import { ChatAvatar } from "./ChatAvatar";
+import { AgentName, ChatAvatar } from "./ChatAvatar";
+import { AgentColorAvatar, AgentColorName, AgentColorScope } from "./AgentColorPicker";
 import {
-  ChatFileIcon,
   MentionText,
   MessageReactions,
+  TOOLBAR_BUTTON,
   chatAuthorLabel,
+  continuesRun,
   type ChatReactionControls,
 } from "./chatMessages";
 import { SaveAsFileActions, titleRepeatsFirstLine } from "./PostCard";
 import { runnerProgram, type ChatsNav } from "./ChatsView";
 import { buildThreadCommentTree, type ThreadCommentNode } from "./threadCommentTree";
-
-function pathBasename(pathHint: string | undefined): string {
-  if (!pathHint) return "attachment";
-  return basenameOf(pathHint.replace(/\\/g, "/").replace(/\/+$/, "")) || "attachment";
-}
-
-// The dispatcher writes a failure as the agent, so the thread has a record.
-// It reads as a notice from dohc, never as something the agent said.
-function isRunnerFailure(body: string): boolean {
-  return body.startsWith("⚠ Agent run failed");
-}
 
 // "4s", "1m 20s", "2h 5m".
 function formatRunDuration(ms: number): string {
@@ -193,50 +185,24 @@ function AttachmentChip(props: {
   attachment: ChatAttachmentRecord;
   onOpenPath?: (path: string, headingAnchor?: string) => void;
 }) {
-  const label = pathBasename(props.attachment.pathHint);
-  const title = `${props.attachment.pathHint ?? label}${
-    props.attachment.headingText ? `#${props.attachment.headingText}` : ""
-  }`;
-  const className =
-    "inline-flex items-center gap-1 rounded-full border border-line bg-panel-2 px-2 py-0.5 font-mono text-[10px] text-muted";
-  const content = (
-    <>
-      <ChatFileIcon path={props.attachment.pathHint ?? ""} className="shrink-0" />
-      <span className="max-w-56 truncate">{label}</span>
-      {props.attachment.headingText ? (
-        <span className="max-w-48 truncate text-subtle">
-          #{props.attachment.headingText}
-        </span>
-      ) : null}
-    </>
-  );
-  if (props.attachment.pathHint && props.onOpenPath) {
-    return (
-      <button
-        type="button"
-        data-testid="chats-attachment-chip"
-        title={title}
-        onClick={() => {
-          const path = props.attachment.pathHint ?? "";
-          if (props.attachment.headingAnchor) {
-            props.onOpenPath?.(path, props.attachment.headingAnchor);
-          } else {
-            props.onOpenPath?.(path);
-          }
-        }}
-        className={`${className} cursor-pointer hover:border-muted/50 hover:text-ink dohc-focus-visible`}
-      >
-        {content}
-      </button>
-    );
-  }
+  const { pathHint, headingAnchor, headingText } = props.attachment;
+  const onOpenPath = props.onOpenPath;
+  // A shared view can hold an attachment whose path it may not read: the
+  // chip names it only as an attachment and opens nothing.
+  if (!pathHint) return <Ref path="" title="attachment" testId="chats-attachment-chip" />;
   return (
-    <span
-      data-testid="chats-attachment-chip"
-      className={className}
-    >
-      {content}
-    </span>
+    <Ref
+      path={pathHint}
+      heading={headingText}
+      // An attachment is named by what it shows, the file and its heading.
+      label={`${basenameOf(pathHint.replace(/\\/g, "/").replace(/\/+$/, "")) || "attachment"}${
+        headingText ? `#${headingText}` : ""
+      }`}
+      testId="chats-attachment-chip"
+      onOpen={onOpenPath
+        ? () => (headingAnchor ? onOpenPath(pathHint, headingAnchor) : onOpenPath(pathHint))
+        : undefined}
+    />
   );
 }
 
@@ -456,7 +422,6 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   onNavCommand?: (nav: ChatsNav) => void;
   setMessageNode: (messageId: string, element: HTMLElement | null) => void;
 }) {
-  const isOwn = useIsOwnAuthor();
   const {
     nav,
     messages,
@@ -498,21 +463,25 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   const hasExplicitTitle = !titleRepeatsFirstLine(nav.thread.title, openingMessage.body.split("\n", 1)[0] ?? "");
   const commentCount = messages.length - 1;
 
-  // A comment: avatar column, then a bubble that holds the name and body,
-  // then the quiet action row, then any replies as a nested list. The DOM
-  // shape is what the e2e helpers walk: the bubble is the item's direct
-  // child, the action row is a direct div, replies are a sibling ol.
+  // A comment: a row that holds the avatar, the name and body, and a hover
+  // toolbar, then any replies as a nested list. Comments from one author
+  // within five minutes read as one run: the avatar and name once, then bare
+  // lines whose time shows in the avatar's place on hover. The DOM shape is
+  // what the e2e helpers walk: the row (chats-comment-bubble) is the item's
+  // direct child and holds the body and every action; replies are a sibling ol.
   const renderThreadComment = (
     node: ThreadCommentNode,
     depth: number,
     parent: ChatMessageRecord | null,
+    previous: ThreadCommentNode | undefined,
   ): ReactNode => {
     const comment = node.message;
     const commentTime = formatChatTime(comment.createdAtMs);
     const commentDecision = decisionsByMessage.get(comment.id);
     const commentAttachments = attachmentsByMessage.get(comment.id) ?? [];
     const isAgent = comment.authorKind === "agent";
-    const isSystem = isAgent && isRunnerFailure(comment.body);
+    const continues = previous !== undefined && previous.replies.length === 0 &&
+      continuesRun(previous.message, comment);
     const replyCount = node.replies.length;
     const commentBookmark = bookmarkFor("message", comment.id);
     const commentBookmarkKey = `message:${comment.id}`;
@@ -525,31 +494,16 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
         data-parent-message-id={comment.parentMessageId}
         data-thread-depth={depth}
         data-author-kind={comment.authorKind}
-        className={`group relative flex min-w-0 flex-col pl-9 transition-shadow ${
+        data-continues={continues ? "true" : "false"}
+        className={`relative flex min-w-0 flex-col pl-[38px] transition-shadow ${
+          continues ? "" : "mt-4 first:mt-0"
+        } ${
           flashMessageId === comment.id
-            ? "rounded-xl ring-2 ring-agent/30 ring-offset-2 ring-offset-bg"
+            ? "rounded-lg ring-2 ring-agent/30 ring-offset-2 ring-offset-bg"
             : ""
         }`}
       >
-        <span className="absolute left-0 top-0">
-          {isSystem ? (
-            <span
-              role="img"
-              aria-label="Run failed"
-              className="grid size-7 place-items-center rounded-full border border-warning/40 bg-bg text-warning"
-            >
-              <TriangleAlert size={12} strokeWidth={1.9} aria-hidden />
-            </span>
-          ) : (
-            <ChatAvatar
-              name={comment.authorDisplayName}
-              kind={comment.authorKind}
-              own={isOwn(comment.authorKind, comment, reactionControls.viewerAuthorId)}
-              size="comment"
-            />
-          )}
-        </span>
-        {parent ? (
+        {parent && !continues ? (
           <button
             type="button"
             data-testid="chats-reply-context"
@@ -567,37 +521,51 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             ↳ replying to {chatAuthorLabel(parent)}
           </button>
         ) : null}
+        <AgentColorScope name={chatAuthorLabel(comment)} kind={comment.authorKind} presentation={comment.presentation}>
         <div
           data-testid="chats-comment-bubble"
-          style={
-            isAgent
-              ? {
-                  borderLeftColor:
-                    "color-mix(in oklab, var(--dohc-agent) 55%, var(--dohc-line))",
-                }
-              : undefined
-          }
-          data-system={isSystem ? "true" : undefined}
-          className={`w-fit max-w-[92%] rounded-2xl border px-3.5 py-2 ${
-            isSystem
-              ? "border-dashed border-warning/40 bg-warning/5"
-              : isAgent
-                ? "border-l-2 border-line bg-bg"
-                : "border-line bg-bg"
-          }`}
+          className="group relative -ml-[46px] -mr-2 rounded-lg py-1 pl-[46px] pr-2 transition-colors duration-75 hover:bg-hover"
         >
-          <div className="flex flex-wrap items-baseline gap-1.5">
+          {/* A continued comment's slot runs from the row's edge to the
+              avatar's right edge, so "12:45" fits at every hour. The full
+              time is its tooltip, and the sr-only name line reads it. */}
+          <span
+            data-testid={continues ? "chats-comment-run-time" : undefined}
+            className={`absolute top-1 flex ${continues ? "left-0 w-9 justify-end" : "left-2 w-7 justify-center"}`}
+          >
+            {continues ? (
+              <time
+                aria-hidden
+                dateTime={commentTime.iso}
+                title={commentTime.label}
+                className="whitespace-nowrap font-mono text-[10px] leading-[22px] text-subtle opacity-0 group-hover:opacity-100"
+              >
+                {formatClockDigits(comment.createdAtMs)}
+              </time>
+            ) : (
+              <AgentColorAvatar>
+                <ChatAvatar presentation={comment.presentation}
+                  name={comment.authorDisplayName}
+                  kind={comment.authorKind}
+                  size="comment"
+                />
+              </AgentColorAvatar>
+            )}
+          </span>
+          {/* A continued comment keeps its author and time for screen
+              readers; the run already shows them. */}
+          <div className={continues ? "sr-only" : "flex flex-wrap items-baseline gap-1.5 leading-[18px]"}>
             <span
               data-testid="chats-message-author"
-              data-author-kind={isSystem ? "system" : comment.authorKind}
-              className={`text-[13px] font-semibold ${
-                isAgent && !isSystem ? "text-agent" : "text-ink"
-              }`}
+              data-author-kind={comment.authorKind}
+              className="text-[13px] font-semibold text-ink"
             >
-              {isSystem ? "dohc" : chatAuthorLabel(comment)}
+              <AgentName kind={comment.authorKind} presentation={comment.presentation}>
+                <AgentColorName>{chatAuthorLabel(comment)}</AgentColorName>
+              </AgentName>
             </span>
-            {isAgent && !isSystem ? <AgentBadge testIdPrefix="chats-comment" author={comment} viewerAuthorId={reactionControls.viewerAuthorId} /> : null}
-            {comment.authorKind === "automation" && !isSystem ? (
+            {isAgent && !continues ? <AgentBadge testIdPrefix="chats-comment" author={comment} viewerAuthorId={reactionControls.viewerAuthorId} presentation={comment.presentation} /> : null}
+            {comment.authorKind === "automation" && !continues ? (
               <AutomationBadge
                 testIdPrefix="chats-comment"
                 author={comment}
@@ -608,15 +576,15 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             <time
               data-testid="chats-message-time"
               dateTime={commentTime.iso}
-              title={commentTime.iso}
-              className="text-[11px] text-subtle"
+              title={commentTime.label}
+              className="font-mono text-[11px] text-subtle"
             >
-              {commentTime.label}
+              {formatShortTime(comment.createdAtMs)}
             </time>
           </div>
           <p
             data-testid="chats-message-body"
-            className="mb-0 mt-0.5 select-text cursor-text whitespace-pre-wrap break-words text-[13px] leading-relaxed text-ink"
+            className="mb-0 mt-px select-text cursor-text whitespace-pre-wrap break-words text-[14px] leading-[22px] text-ink"
           >
             <MentionText
               body={comment.body}
@@ -650,55 +618,60 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               />
             </div>
           ) : null}
-        </div>
-        <div className="flex flex-wrap items-center gap-3 px-2 pt-1 text-[11px] text-subtle">
+          {replyCount > 0 ? (
+            <span data-testid="chats-reply-count" className="mt-1 block font-mono text-[11px] text-subtle">
+              {replyCount} {replyCount === 1 ? "reply" : "replies"}
+            </span>
+          ) : null}
           <MessageReactions
             testIdPrefix="chats"
             messageId={comment.id}
             records={reactionsByMessage.get(comment.id) ?? []}
             controls={reactionControls}
-            flush
-          />
-          {!threadLocked ? (
-            <button
-              type="button"
-              data-testid="chats-comment-reply"
-              onClick={() => beginReply(comment)}
-              className="rounded font-medium hover:text-ink dohc-focus-visible"
-            >
-              Reply
-            </button>
-          ) : null}
-          <BookmarkAction
-            active={Boolean(commentBookmark)}
-            busy={bookmarkBusy.has(commentBookmarkKey)}
-            destinationPath={commentBookmark?.destinationPath}
-            onToggle={
-              threadLocked
-                ? undefined
-                : (mode) =>
-                    void toggleBookmark({
-                      target: {
-                        kind: "message",
-                        threadId: nav.thread.id,
-                        messageId: comment.id,
-                      },
-                      mode,
-                    })
+            hoverToolbar
+            toolbarActions={
+              <>
+                {!threadLocked ? (
+                  <button
+                    type="button"
+                    data-testid="chats-comment-reply"
+                    aria-label="Reply"
+                    title="Reply"
+                    onClick={() => beginReply(comment)}
+                    className={TOOLBAR_BUTTON}
+                  >
+                    <Reply size={14} strokeWidth={1.9} aria-hidden />
+                  </button>
+                ) : null}
+                <BookmarkAction
+                  active={Boolean(commentBookmark)}
+                  busy={bookmarkBusy.has(commentBookmarkKey)}
+                  destinationPath={commentBookmark?.destinationPath}
+                  onToggle={
+                    threadLocked
+                      ? undefined
+                      : (mode) =>
+                          void toggleBookmark({
+                            target: {
+                              kind: "message",
+                              threadId: nav.thread.id,
+                              messageId: comment.id,
+                            },
+                            mode,
+                          })
+                  }
+                  onOpen={
+                    commentBookmark && props.onOpenPath
+                      ? () => props.onOpenPath?.(commentBookmark.destinationPath)
+                      : undefined
+                  }
+                  testId="chats-message-bookmark"
+                />
+              </>
             }
-            onOpen={
-              commentBookmark && props.onOpenPath
-                ? () => props.onOpenPath?.(commentBookmark.destinationPath)
-                : undefined
-            }
-            testId="chats-message-bookmark"
           />
-          {replyCount > 0 ? (
-            <span data-testid="chats-reply-count">
-              {replyCount} {replyCount === 1 ? "reply" : "replies"}
-            </span>
-          ) : null}
         </div>
+        </AgentColorScope>
         {runRecords[comment.id] ? (
           <RunLine
             run={runRecords[comment.id]}
@@ -709,12 +682,12 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
           <ol
             data-testid="chats-replies"
             aria-label={`Replies to ${chatAuthorLabel(comment)}`}
-            className={`relative mt-3 list-none space-y-3 p-0 ${
-              depth < 3 ? "" : "-ml-9"
+            className={`relative mt-3 list-none p-0 ${
+              depth < 3 ? "" : "-ml-[38px]"
             }`}
           >
-            {node.replies.map((reply) =>
-              renderThreadComment(reply, depth + 1, comment),
+            {node.replies.map((reply, index) =>
+              renderThreadComment(reply, depth + 1, comment, node.replies[index - 1]),
             )}
           </ol>
         ) : null}
@@ -723,14 +696,15 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   };
   return (
     <>
+      <AgentColorScope name={chatAuthorLabel(openingMessage)} kind={openingMessage.authorKind} presentation={openingMessage.presentation}>
       <article
         ref={(node) => setMessageNode(openingMessage.id, node)}
         data-testid="chats-message"
         data-message-id={openingMessage.id}
         data-author-kind={openingMessage.authorKind}
-        className={`group rounded-xl border border-line bg-panel px-4 pb-1 pt-3.5 transition-shadow ${
+        className={`group relative flex gap-2.5 px-2 transition-shadow ${
           flashMessageId === openingMessage.id
-            ? "ring-2 ring-agent/30 ring-offset-2 ring-offset-bg"
+            ? "rounded-lg ring-2 ring-agent/30 ring-offset-2 ring-offset-bg"
             : ""
         }`}
       >
@@ -742,147 +716,149 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             ? "My agent · thread"
             : `#${nav.channel.name} · thread`}
         </p>
-        <div className="flex items-center gap-2.5">
-          <ChatAvatar
+        <AgentColorAvatar>
+          <ChatAvatar presentation={openingMessage.presentation}
             name={openingMessage.authorDisplayName}
             kind={openingMessage.authorKind}
-            own={isOwn(openingMessage.authorKind, openingMessage, reactionControls.viewerAuthorId)}
+            size="row"
           />
-          <div className="flex min-w-0 flex-1 flex-col leading-tight">
-            <span className="flex items-center gap-1.5">
-              <span
-                data-testid="chats-message-author"
-                data-author-kind={openingMessage.authorKind}
-                className={`truncate text-[14px] font-semibold ${
-                  openingIsAgent ? "text-agent" : "text-ink"
-                }`}
-              >
-                {chatAuthorLabel(openingMessage)}
-              </span>
-              {openingIsAgent ? <AgentBadge testIdPrefix="chats-message" author={openingMessage} viewerAuthorId={reactionControls.viewerAuthorId} /> : null}
-              {openingMessage.authorKind === "automation" ? (
-                <AutomationBadge
-                  testIdPrefix="chats-message"
-                  author={openingMessage}
-                  viewerAuthorId={reactionControls.viewerAuthorId}
-                  onOpenPath={props.onOpenPath}
-                />
-              ) : null}
+        </AgentColorAvatar>
+        <div className="min-w-0 flex-1">
+          <span className="flex items-baseline gap-1.5 leading-[18px]">
+            <span
+              data-testid="chats-message-author"
+              data-author-kind={openingMessage.authorKind}
+              className="truncate text-[13px] font-semibold text-ink"
+            >
+              <AgentName kind={openingMessage.authorKind} presentation={openingMessage.presentation}>
+                <AgentColorName>{chatAuthorLabel(openingMessage)}</AgentColorName>
+              </AgentName>
             </span>
-            <span className="flex items-center gap-1.5 text-[12px] text-subtle">
-              <span className="truncate font-mono text-[11px]">
-                {nav.channel.kind === "agent" ? "My agent" : `#${nav.channel.name}`}
-              </span>
-              <span aria-hidden>·</span>
-              <time
-                data-testid="chats-message-time"
-                dateTime={openingTime.iso}
-                title={openingTime.iso}
-                className="shrink-0"
-              >
-                {openingTime.label}
-              </time>
-            </span>
-          </div>
-        </div>
-        <h1
-          data-testid="chats-thread-post-title"
-          className={hasExplicitTitle ? "mb-0 mt-2.5 text-[16px] font-semibold leading-snug text-ink" : "sr-only"}
-        >
-          {nav.thread.title}
-        </h1>
-        {/* A plain post is its body; the title above repeats it for the
-            heading only. */}
-        <p
-          data-testid="chats-message-body"
-          className="mb-0 mt-2 select-text cursor-text whitespace-pre-wrap break-words text-[14px] leading-relaxed text-ink"
-        >
-          <MentionText
-            body={openingMessage.body}
-            candidates={mentionCandidates}
-            attachments={openingAttachments}
-            testId="chats-message-body"
-            onOpenPath={props.onOpenPath}
-          />
-        </p>
-        {openingAttachments.length > 0 ? (
-          <div
-            data-testid="chats-message-attachments"
-            className="mt-3 flex flex-wrap items-center gap-1.5"
-          >
-            {openingAttachments.map((attachment) => (
-              <AttachmentChip
-                key={attachment.attachmentId}
-                attachment={attachment}
+            {openingIsAgent ? <AgentBadge testIdPrefix="chats-message" author={openingMessage} viewerAuthorId={reactionControls.viewerAuthorId} presentation={openingMessage.presentation} /> : null}
+            {openingMessage.authorKind === "automation" ? (
+              <AutomationBadge
+                testIdPrefix="chats-message"
+                author={openingMessage}
+                viewerAuthorId={reactionControls.viewerAuthorId}
                 onOpenPath={props.onOpenPath}
               />
-            ))}
-          </div>
-        ) : null}
-        <div className="mt-2.5 flex flex-wrap items-center gap-2 border-t border-line py-1.5">
+            ) : null}
+            <span className="truncate font-mono text-[11px] text-subtle">
+              {nav.channel.kind === "agent" ? "My agent" : `#${nav.channel.name}`}
+            </span>
+            <time
+              data-testid="chats-message-time"
+              dateTime={openingTime.iso}
+              title={openingTime.label}
+              className="shrink-0 font-mono text-[11px] text-subtle"
+            >
+              {formatShortTime(openingMessage.createdAtMs)}
+            </time>
+          </span>
+          <h1
+            data-testid="chats-thread-post-title"
+            className={hasExplicitTitle ? "mb-0 mt-1 text-[16px] font-semibold leading-[22px] text-ink" : "sr-only"}
+          >
+            {nav.thread.title}
+          </h1>
+          {/* A plain post is its body; the title above repeats it for the
+              heading only. */}
+          <p
+            data-testid="chats-message-body"
+            className="mb-0 mt-1 select-text cursor-text whitespace-pre-wrap break-words text-[14px] leading-[22px] text-ink"
+          >
+            <MentionText
+              body={openingMessage.body}
+              candidates={mentionCandidates}
+              attachments={openingAttachments}
+              testId="chats-message-body"
+              onOpenPath={props.onOpenPath}
+            />
+          </p>
+          {openingAttachments.length > 0 ? (
+            <div
+              data-testid="chats-message-attachments"
+              className="mt-3 flex flex-wrap items-center gap-1.5"
+            >
+              {openingAttachments.map((attachment) => (
+                <AttachmentChip
+                  key={attachment.attachmentId}
+                  attachment={attachment}
+                  onOpenPath={props.onOpenPath}
+                />
+              ))}
+            </div>
+          ) : null}
+          {openingDecision || runRecords[openingMessage.id] ? (
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              {openingDecision ? (
+                <DecisionStatus
+                  decision={openingDecision}
+                  onResolve={
+                    !threadLocked && openingDecision.state === "open"
+                      ? (option) => beginResolve(openingMessage, option)
+                      : undefined
+                  }
+                  testIdPrefix="chats-message"
+                />
+              ) : null}
+              {runRecords[openingMessage.id] ? (
+                <RunOpening
+                  run={runRecords[openingMessage.id]}
+                  askedBy={automationAsking(runRecords[openingMessage.id], messagesById)}
+                />
+              ) : null}
+            </div>
+          ) : null}
           <MessageReactions
             testIdPrefix="chats"
             messageId={openingMessage.id}
             records={reactionsByMessage.get(openingMessage.id) ?? []}
             controls={reactionControls}
-            flush
-          />
-          {openingDecision ? (
-            <DecisionStatus
-              decision={openingDecision}
-              onResolve={
-                !threadLocked && openingDecision.state === "open"
-                  ? (option) => beginResolve(openingMessage, option)
-                  : undefined
-              }
-              testIdPrefix="chats-message"
-            />
-          ) : null}
-          {runRecords[openingMessage.id] ? (
-            <RunOpening
-              run={runRecords[openingMessage.id]}
-              askedBy={automationAsking(runRecords[openingMessage.id], messagesById)}
-            />
-          ) : null}
-          <SaveAsFileActions
-            testIdPrefix="chats-message-bookmark"
-            bookmark={openingBookmark}
-            busy={bookmarkBusy.has(`message:${openingMessage.id}`)}
-            onToggle={
-              threadLocked
-                ? undefined
-                : (mode) =>
-                    void toggleBookmark({
-                      target: {
-                        kind: "message",
-                        threadId: nav.thread.id,
-                        messageId: openingMessage.id,
-                      },
-                      mode,
-                    })
-            }
-            onOpen={
-              openingBookmark && props.onOpenPath
-                ? () => props.onOpenPath?.(openingBookmark.destinationPath)
-                : undefined
+            hoverToolbar
+            toolbarActions={
+              <SaveAsFileActions
+                testIdPrefix="chats-message-bookmark"
+                bookmark={openingBookmark}
+                busy={bookmarkBusy.has(`message:${openingMessage.id}`)}
+                onToggle={
+                  threadLocked
+                    ? undefined
+                    : (mode) =>
+                        void toggleBookmark({
+                          target: {
+                            kind: "message",
+                            threadId: nav.thread.id,
+                            messageId: openingMessage.id,
+                          },
+                          mode,
+                        })
+                }
+                onOpen={
+                  openingBookmark && props.onOpenPath
+                    ? () => props.onOpenPath?.(openingBookmark.destinationPath)
+                    : undefined
+                }
+              />
             }
           />
         </div>
       </article>
+      </AgentColorScope>
 
       <div
         data-testid="chats-comments-divider"
-        className="mb-1 mt-5 flex items-center gap-2 border-t border-line pt-3"
+        className="mb-3.5 mt-[18px] flex items-center gap-2 px-2 font-mono text-[11px] text-subtle before:h-px before:flex-1 before:bg-line after:h-px after:flex-1 after:bg-line"
       >
-        <span className="text-[12px] text-subtle">
-          {commentCount === 0
-            ? "No comments yet"
-            : `${commentCount} ${commentCount === 1 ? "comment" : "comments"}`}
+        <span className="inline-flex items-center gap-1">
+          <MessageSquare size={12} strokeWidth={1.9} aria-hidden />
+          <span aria-hidden>{commentCount}</span>
+          <span className="sr-only">{`${commentCount} ${commentCount === 1 ? "comment" : "comments"}`}</span>
         </span>
       </div>
 
-      <ol data-testid="chats-comments" className="m-0 list-none space-y-4 p-0 pt-2">
-        {commentTree.map((node) => renderThreadComment(node, 0, null))}
+      <ol data-testid="chats-comments" className="m-0 list-none px-2 py-0">
+        {commentTree.map((node, index) => renderThreadComment(node, 0, null, commentTree[index - 1]))}
       </ol>
     </>
   );

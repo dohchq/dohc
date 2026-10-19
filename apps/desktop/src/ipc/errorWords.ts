@@ -20,6 +20,23 @@ const REINSTALL = "This copy of dohc is missing a file it needs. Reinstall dohc.
 // Trying again cannot help with this one; updating dohc can.
 const NEWER_DOHC = "It needs a newer version of dohc. Update dohc to open it.";
 
+/**
+ * The code of macOS refusing dohc a folder the person has not allowed in
+ * Privacy & Security. The engine sends it as a refusal's message; main sets
+ * it on a file system error (`privacyDenial.ts`).
+ */
+export const PRIVACY_DENIED = "privacy-denied";
+export const PRIVACY_DENIED_WORDS =
+  "macOS blocked dohc from this folder. Allow dohc in System Settings › Privacy & Security › Files & Folders.";
+
+/**
+ * The engine's refusal when a volume gives a new file sharing permissions it
+ * was created without, as a network share can, so a secret or a file's own
+ * access could not be kept.
+ */
+export const VOLUME_SHARES_NEW_FILES_WORDS =
+  "The disk this workspace is on adds sharing permissions to new files, so dohc can't keep this file private. Move the workspace to a disk on this Mac.";
+
 // Every code the engine refuses with: `ErrorCode` in dohc-engine-protocol.
 const ENGINE_CODE_WORDS = {
   AUTH_FAILED: "The server did not accept your sign-in. Sign in again.",
@@ -59,7 +76,7 @@ const ENGINE_CODE_WORDS = {
   INVALID_CHANNEL: "This channel cannot be shared.",
   RELAY_METHOD_NOT_ALLOWED: "The server does not support this.",
   RELAY_INVALID_RESPONSE: UNREADABLE_ANSWER,
-  COLLECTION_RECONCILIATION_LEASE_HELD: null,
+  RELAY_HTTPS_REQUIRED: "Your server's address does not use https. Disconnect, then connect your server again with its https address.",
   INTERNAL: null,
 } as const satisfies Record<DaemonErrorCode, Words>;
 
@@ -73,6 +90,7 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
     "Workspace is still updating. Try again.": UPDATING,
     "History is still updating. Try again.": UPDATING,
     "file-locked": "Another program has this file open. Close it there, then try again.",
+    "volume-shares-new-files": VOLUME_SHARES_NEW_FILES_WORDS,
     "workspace-owned": "Another copy of dohc has this workspace open. Close it there, then try again.",
     "share-read-only": ENGINE_CODE_WORDS.SHARE_READ_ONLY,
     "relay-origin-diverged": ENGINE_CODE_WORDS.ORIGIN_DIVERGED,
@@ -145,6 +163,9 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
     EPERM: "dohc does not have permission to use this file or folder.",
     ENOENT: "The file or folder is not there anymore.",
     EBUSY: "Another program is using this file or folder.",
+    // Import to SQLite never replaces a file. The caller's sentence names
+    // the database's path.
+    "Database already exists": "That file already exists. Rename or move it, then try again.",
   },
   TypeError: { "*": null },
   RangeError: { "*": null },
@@ -228,8 +249,21 @@ export interface ReadError {
 
 export function readError(error: unknown): ReadError {
   const { text, name, code, message } = parse(error);
+  if (code === PRIVACY_DENIED || (name === "DaemonRefusalError" && message === PRIVACY_DENIED)) {
+    return { words: PRIVACY_DENIED_WORDS, mapped: true, cause: text };
+  }
+  if (name === "DaemonRefusalError" && message.startsWith("capture-file-held: ")) {
+    const path = message.slice("capture-file-held: ".length);
+    return { words: captureHeldLiveMessage(path), mapped: false, cause: text };
+  }
   if (name === "ReservedWorkspaceIdError") {
     return { title: RESERVED_WORKSPACE_ID_TITLE, words: message, mapped: false, cause: text };
+  }
+  if (name === "DaemonRefusalError" && code === "INVALID_PARAMS" && [
+    "Each choice is one line of at most 200 characters.",
+    "Each choice appears once.",
+  ].includes(message)) {
+    return { words: message, mapped: false, cause: text };
   }
   const plain = name === "Error" && code === undefined;
   const entry = ERROR_WORDS[name];
@@ -263,6 +297,16 @@ export function readCollectionReopenWait(error: unknown): { words: string; waitM
     ? { words: message, waitMs: retryAfterMs } : null;
 }
 
+/** macOS refused dohc a folder: System Settings, not dohc, can fix it. */
+export function isPrivacyDenied(error: unknown): boolean {
+  return readError(error).words === PRIVACY_DENIED_WORDS;
+}
+
+/** The volume adds sharing permissions to new files, so dohc refused to write one. */
+export function isVolumeSharesNewFiles(error: unknown): boolean {
+  return readError(error).words === VOLUME_SHARES_NEW_FILES_WORDS;
+}
+
 /** A refusal only a newer dohc can get past, so Try again would do nothing. */
 export function needsNewerDohc(error: unknown): boolean {
   return readError(error).words === NEWER_DOHC;
@@ -281,6 +325,20 @@ export function isShareReadOnlyRefusal(error: unknown): boolean {
   return name === "SharedFileReadOnlyError" || (name === "DaemonRefusalError" && code === "SHARE_READ_ONLY");
 }
 
+/** The engine refuses to move, delete or restore a shared live file this way. */
+export function isSharedLiveFileRefusal(error: unknown): boolean {
+  return parse(error).name === "LiveDocumentMutationError";
+}
+
+export function isCaptureFileHeldRefusal(error: unknown): boolean {
+  const { name, code, message } = parse(error);
+  return name === "DaemonRefusalError" && code === "CONFLICT" && message.startsWith("capture-file-held: ");
+}
+
+export function captureHeldLiveMessage(path: string): string {
+  return `dohc cannot open "${path}" for live editing. dohc cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.`;
+}
+
 /** Access and connection failures can hide a changed grant behind an IPC error. */
 export function shouldRecheckShareAccess(error: unknown): boolean {
   const { name, code, message } = parse(error);
@@ -289,5 +347,5 @@ export function shouldRecheckShareAccess(error: unknown): boolean {
   if (name === "DaemonRefusalError" && code !== undefined &&
     ["AUTH_FAILED", "FORBIDDEN", "SHARE_UNAVAILABLE", "SHARE_READ_ONLY", "SHARE_OPERATION_REJECTED",
       "SESSION_EXPIRED", "WORKSPACE_UNAVAILABLE", "IDENTITY_NOT_RECOGNIZED"].includes(code)) return true;
-  return /\b(?:unauthorized|forbidden|authorization failed|does not have Edit access|access to this share (?:ended|changed)|share is no longer available|network (?:error|request failed|failure)|fetch failed|failed to fetch|ECONN\w*|ENOTFOUND|ETIMEDOUT)\b|Share request failed \((?:401|403|404)\)/i.test(message);
+  return /\b(?:unauthorized|forbidden|authorization failed|does not have Edit access|access to this share (?:ended|changed)|shared file session changed|share is no longer available|network (?:error|request failed|failure)|fetch failed|failed to fetch|ECONN\w*|ENOTFOUND|ETIMEDOUT)\b|Share request failed \((?:401|403|404)\)/i.test(message);
 }

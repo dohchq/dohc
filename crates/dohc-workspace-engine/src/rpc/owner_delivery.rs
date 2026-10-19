@@ -182,7 +182,11 @@ fn invalid() -> WireError {
 }
 
 impl EngineService {
-    fn notify_owner_sessions(&self, workspace: &WorkspaceHandle, binding: &LiveObjectBinding) {
+    pub(super) fn notify_owner_sessions(
+        &self,
+        workspace: &WorkspaceHandle,
+        binding: &LiveObjectBinding,
+    ) {
         let sessions = crate::lock(&self.sessions);
         for (session_id, session) in sessions.iter() {
             if &session.workspace == workspace
@@ -236,6 +240,7 @@ impl EngineService {
             .owner_ydoc_append_draft(
                 guard.open.workspace_id.clone(),
                 dohc_engine_collab::owner_outbox::draft::OwnerDraftAppendInput {
+                    person_edit: false,
                     binding: params.binding,
                     expected_revision: params.expected_revision,
                     append_key: params.append_key,
@@ -747,6 +752,7 @@ impl EngineService {
                 .owner_ydoc_refuse_entry(
                     guard.open.workspace_id.clone(),
                     input,
+                    now_ms()?,
                     cancellation.token(),
                     guard.reservation.clone(),
                 )

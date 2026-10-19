@@ -134,11 +134,17 @@ async function computer(input: {
     await client.waitForExit();
   };
   cleanup.push(closeEngine);
+  // Like automationReplicas, queue complete passes from every caller.
+  let syncChain: Promise<void> = Promise.resolve();
   return {
     root: input.root, nextRequestId, client, workspace, lifetime: lifetime.signal, request,
     async sync() {
-      for (let more = true; more;) more = (await replication.push()).hasMore;
-      for (let more = true; more;) more = (await replication.pull()).hasMore;
+      const run = syncChain.then(async () => {
+        for (let more = true; more;) more = (await replication.push()).hasMore;
+        for (let more = true; more;) more = (await replication.pull()).hasMore;
+      });
+      syncChain = run.catch(() => undefined);
+      await run;
     },
     record: async (recordId: string) =>
       await request("collections.getRecord", { collectionPath: "Tasks", recordId, historyLimit: 10 }, workspace) as unknown as CollectionGetRecordResult,
@@ -325,7 +331,7 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
   } satisfies Pick<EngineClient, "sendRequest" | "sendLiveOwnerAdoption" | "sendLiveApplication" | "readLiveApplicationAck" | "openLiveAppliedSync" | "readNextLiveApplied">;
   const consumer = new OwnerCommittedDelivery(storage, history, {client: native as EngineClient, workspace: owner.workspace, host, deadlineMs: DEADLINE_MS, nextRequestId: owner.nextRequestId,
     bounds: {maxBytes: profile.nativeIngress.maxAdoptionBytes, maxEvents: profile.nativeIngress.maxAdoptionEvents},
-    ownerAdmission: {shares: new Map([[WORKSPACE, "native-share"]]), maxEntriesPerDrain: 128, maxBytesPerDrain: profile.nativeIngress.maxAdoptionBytes, validate}});
+    ownerAdmission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([[WORKSPACE, "native-share"]]), maxEntriesPerDrain: 128, maxBytesPerDrain: profile.nativeIngress.maxAdoptionBytes, validate}});
   await consumer.drain(document);
   const row = storage.joinAutomationWorkspace({workspaceId: WORKSPACE, nowMs: Date.now()})!;
   const copy = await computer({root: join(root, "server"), relayUrl, bearerToken: deriveAutomationReplicaBearer(row, {key, namespace}), identity: {kind: "join", replicationEpoch: row.replicationEpoch, streamIdentity: row.streamIdentity}});
@@ -434,7 +440,8 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
     recordDelivery: {namespace, capture}, readOwnerShares: relay.readOwnerShares, lookupUserDisplayName: () => "Owner",
     noticeLimiter: new TokenBucketLimiter(10, 1, 100), onError: (context, error) => errors.push(`${context}: ${String(error)}`),
     startReplicas: async options => {hooks = options; const stop = hostedReplica.client.onEvent(event => options.onEngineEvent?.(event));
-      return {unavailable: false, replica: () => hostedReplica, reconcile: () => undefined, failedSyncs: () => new Map(), settled: async () => undefined, close: async () => stop()};},
+      return {unavailable: false, replica: () => hostedReplica, reconcile: () => undefined, deleteWorkspaces: async () => undefined,
+      failedSyncs: () => new Map(), settled: async () => undefined, close: async () => stop()};},
   };
   let running = await startAutomationServer(serverOptions);
   cleanup.push(() => running.close());
@@ -537,7 +544,7 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
   for (const side of [owner, recipient]) expect(await readFile(join(side.root, "Tasks/one.md"), "utf8")).toContain("Status: Doing");
   expect(await sharedValue(firstGrant)).toBe("Doing");
   const restoredClaim = await press(firstGrant.shareId, "button-native-before-stop");
-  expect(await running.runs.restore(scope, [{collectionPath: "Tasks", id: "mark", definitionHash: hash}], false)).toMatchObject({undone: 1, left: 0, errorMessage: null});
+  expect(await running.runs.restore(scope, [{collectionPath: "Tasks", id: "mark", definitionHash: hash}], false, "restore-test")).toMatchObject({undone: 1, left: 0, errorMessage: null});
   await vi.waitFor(async () => expect((await running.runs.get(scope, markId, restoredClaim))?.undone).toBe(true), {timeout: DEADLINE_MS});
   await consumer.settle(document); await owner.sync(); await recipient.sync();
   for (const side of [owner, recipient]) expect(await readFile(join(side.root, "Tasks/one.md"), "utf8")).toContain("Status: Doing");
@@ -573,6 +580,7 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
   };
   const handlers = new Map<string, (event: {sender: string}, payload: unknown) => unknown>();
   registerStopAndRestoreIpc({
+    currentAutomations: () => executor!, canReleaseRuns: () => true,
     registerHandler: (channel, handler) => handlers.set(channel, handler), assertTrustedSender: () => undefined,
     withRendererWorkspaceOperation: async (_sender: string, _workspaceId, _message, work) => work({
       workspace: {workspaceId: WORKSPACE, rootPath: owner.root}, state: {collectionAutomations: executor!}, assertCurrent: () => undefined,
@@ -587,9 +595,14 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
     localPerson: async () => ({kind: "human", humanId: "owner"}), queuePull: () => undefined,
     syncNow: async () => {await owner.sync(); await copy.sync();}, deletePath: async () => undefined,
     notifyRenderer: () => undefined, assertOriginalWorkspace: () => undefined,
-    serverRuns: {restore: (_workspaceId, definitions, again) => running.runs.restore(scope, definitions, again)},
+    serverRuns: {
+      restore: (_workspaceId, definitions, again, retentionId) => running.runs.restore(scope, definitions, again, retentionId),
+      releaseRestore: async (_workspaceId, retentionId) => {await running.runs.restore(scope, [], false, retentionId); return true;},
+    },
     requireEngineCapture: async () => ({capture: {
       readMoment,
+      findRestoreReceipt: async () => {throw new Error("This fixture has no unjournaled restore to recover.");},
+      publicationApplied: async () => {throw new Error("This fixture has no unjournaled restore to recover.");},
       listObjectMomentsAfter: async (objectId, momentId) => {
         const page = await ownerHistory.listMoments({workspaceId: WORKSPACE, versionId: "main", objectId, limit: 100});
         const before = page.moments.findIndex(moment => moment.momentId === momentId);
@@ -738,7 +751,8 @@ it.skipIf(engine.missing)("finds one filtered record among 5000 without refreshi
     recordDelivery: {namespace: "find-5000", capture}, readOwnerShares: relay.readOwnerShares, lookupUserDisplayName: () => "Owner",
     noticeLimiter: new TokenBucketLimiter(10, 1, 100), onError: (_context, error) => {throw error;},
     createExecutor: input => {options = input; return new CollectionAutomations(input);},
-    startReplicas: async input => {hooks = input; return {unavailable: false, replica: () => replica, reconcile: () => undefined, failedSyncs: () => new Map(), settled: async () => undefined, close: async () => undefined};}});
+    startReplicas: async input => {hooks = input; return {unavailable: false, replica: () => replica, reconcile: () => undefined, deleteWorkspaces: async () => undefined,
+      failedSyncs: () => new Map(), settled: async () => undefined, close: async () => undefined};}});
   cleanup.push(() => running.close());
   hooks!.onChanged?.(WORKSPACE);
   await vi.waitFor(() => expect(options).toBeDefined(), {timeout: DEADLINE_MS});
@@ -858,7 +872,7 @@ it.skipIf(engine.missing).each(["recipient-only", "owner-and-recipient"] as cons
   } satisfies Pick<EngineClient, "sendRequest" | "sendLiveOwnerAdoption" | "sendLiveApplication" | "readLiveApplicationAck" | "openLiveAppliedSync" | "readNextLiveApplied">;
   const consumer = new OwnerCommittedDelivery(storage, history, {client: native as EngineClient, workspace: owner.workspace, host, deadlineMs: DEADLINE_MS, nextRequestId: owner.nextRequestId,
     bounds: {maxBytes: profile.nativeIngress.maxAdoptionBytes, maxEvents: profile.nativeIngress.maxAdoptionEvents},
-    ownerAdmission: {shares: new Map([[WORKSPACE, "native-share"]]), maxEntriesPerDrain: 128, maxBytesPerDrain: profile.nativeIngress.maxAdoptionBytes, validate}});
+    ownerAdmission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([[WORKSPACE, "native-share"]]), maxEntriesPerDrain: 128, maxBytesPerDrain: profile.nativeIngress.maxAdoptionBytes, validate}});
   await consumer.drain(document);
   const nativeRegistration = consumer.captureRegistration(binding);
   const common = {storage, bounds: profile.namedLive.host, validate,
@@ -894,11 +908,15 @@ it.skipIf(engine.missing).each(["recipient-only", "owner-and-recipient"] as cons
   const recipientHost = captureNamedLiveFrameHost({...common, ticket: ticket!, actor: liveBrowserActor(viewer), trustedAccount: {accountId: "reader", name: "Reader"}});
   await edit(recipientHost, "RecipientNote", {kind: "account", accountId: "reader"});
   const recipientMoment = (await moments())[0]!;
-  const expectedAuthors = authors === "recipient-only"
-    ? [{kind: "human", humanId: "reader", humanName: "Reader"}]
-    : [{kind: "human", humanId: "owner", humanName: "Owner"}, {kind: "human", humanId: "reader", humanName: "Reader"}];
-  expect(recipientMoment.authors).toEqual(expect.arrayContaining(expectedAuthors));
-  expect(recipientMoment.authors).toHaveLength(expectedAuthors.length);
+  // Until publication, the hosting computer credits the owner snapshot's
+  // account holder and the recipient once, by the grant the relay accepted the
+  // edit under. The relay admits each snapshot's account holder instead, and
+  // publication replaces the host's credit with those authors.
+  const ownerCredit = authors === "recipient-only" ? [] : [{kind: "human", humanId: "owner", humanName: "Owner"}];
+  const localAuthors = [...ownerCredit, {kind: "named", userId: "reader", grantId: "native-grant", grantGeneration: 1}];
+  const admittedAuthors = [...ownerCredit, {kind: "human", humanId: "reader", humanName: "Reader"}];
+  expect(recipientMoment.authors).toEqual(expect.arrayContaining(localAuthors));
+  expect(recipientMoment.authors).toHaveLength(localAuthors.length);
   await owner.sync();
   // A later operation proves that no refused batch blocks the owner's log.
   await owner.request("versionedText.write", {versionId: "main", path: "after.txt", text: "After recipient settlement", origin: "api", publish: true}, owner.workspace);
@@ -910,8 +928,8 @@ it.skipIf(engine.missing).each(["recipient-only", "owner-and-recipient"] as cons
   expect(JSON.parse(published.payloadJson).authors).toBeUndefined();
   expect(JSON.parse(published.payloadJson).settlementReference).toBeDefined();
   expect(published.settlementAdmission).toMatchObject({status: "accepted"});
-  expect(published.admittedAuthorSnapshot).toEqual(expect.arrayContaining(expectedAuthors));
-  expect(published.admittedAuthorSnapshot).toHaveLength(expectedAuthors.length);
+  expect(published.admittedAuthorSnapshot).toEqual(expect.arrayContaining(admittedAuthors));
+  expect(published.admittedAuthorSnapshot).toHaveLength(admittedAuthors.length);
   const ownerDatabase = new DatabaseSync(join(owner.root, ".dohc/engine/engine.db"), {readOnly: true});
   try {
     expect(ownerDatabase.prepare("SELECT COUNT(*) AS total FROM replication_pending_refusals WHERE workspace_id=?").get(WORKSPACE)?.total).toBe(0);
@@ -921,12 +939,22 @@ it.skipIf(engine.missing).each(["recipient-only", "owner-and-recipient"] as cons
     identity: {kind: "join", replicationEpoch: identity.replicationEpoch, streamIdentity: identity.streamIdentity}});
   await peer.sync();
   const imported = (await peer.request("moments.list", {limit: 100}, peer.workspace)).moments as unknown as Array<{momentId: string; authors?: unknown}>;
-  expect(imported.find(moment => moment.momentId === recipientMoment.momentId)?.authors).toEqual(expect.arrayContaining(expectedAuthors));
+  // The peer imports the relay's admitted authors and its retained audit
+  // evidence adds no credit to the moment. The relay confirms each person.
+  const confirmedAuthors = (admittedAuthors as Array<Record<string, unknown>>)
+    .map(author => author.kind === "human" ? {...author, relayConfirmed: true} : author);
+  const importedAuthors = imported.find(moment => moment.momentId === recipientMoment.momentId)?.authors;
+  expect(importedAuthors).toEqual(expect.arrayContaining(confirmedAuthors));
+  expect(importedAuthors).toHaveLength(confirmedAuthors.length);
   const peerHistory = new VersionedLiveAdapter(peer.client, peer.workspace, {workspaceId: WORKSPACE});
-  expect(await peerHistory.getMoment({workspaceId: WORKSPACE, momentId: recipientMoment.momentId}))
-    .toMatchObject({syncRecordOnly: true, authors: expect.arrayContaining(expectedAuthors)});
-  expect((await moments()).find(moment => moment.momentId === recipientMoment.momentId)?.authors)
-    .toEqual(recipientMoment.authors);
+  const peerMoment = await peerHistory.getMoment({workspaceId: WORKSPACE, momentId: recipientMoment.momentId});
+  expect(peerMoment).toMatchObject({syncRecordOnly: true, authors: expect.arrayContaining(confirmedAuthors)});
+  expect(peerMoment?.authors).toHaveLength(confirmedAuthors.length);
+  // Publication refreshed the hosting computer's moment to the admitted
+  // authors, and the relay's acceptance confirms each person there too.
+  const refreshedAuthors = (await moments()).find(moment => moment.momentId === recipientMoment.momentId)?.authors;
+  expect(refreshedAuthors).toEqual(expect.arrayContaining(confirmedAuthors));
+  expect(refreshedAuthors).toHaveLength(confirmedAuthors.length);
   expect(await readFile(join(peer.root, "Tasks/one.md"), "utf8")).toContain("RecipientNote: Keep this text");
   await session.close({settle: false});
   const restore = async (side: typeof owner) => {
@@ -965,8 +993,8 @@ it.skipIf(engine.missing).each(["recipient-only", "owner-and-recipient"] as cons
       undoRuns: async () => ({undone: 0, left: 0, keptFields: [], missing: 0, otherKept: 0, errorMessage: null}),
     }, [{path: "Tasks/one.md", objectId: document.objectId, momentId: creationMoment.momentId, created: true}]);
   };
-  // The relay-admitted settlement and live audit both retain the recipient.
-  expect(imported).toContainEqual(expect.objectContaining({authors: [{kind: "human", humanId: "reader", humanName: "Reader"}]}));
+  // The relay-admitted settlement and the relay-checked live audit both retain the confirmed recipient.
+  expect(imported).toContainEqual(expect.objectContaining({authors: [{kind: "human", humanId: "reader", humanName: "Reader", relayConfirmed: true}]}));
   if (authors === "owner-and-recipient") {
     expect(await restore(peer)).toMatchObject({status: "restored", restored: [],
       review: [{path: "Tasks/one.md", reason: "changed-since"}], unfinished: null});
@@ -985,4 +1013,30 @@ it.skipIf(engine.missing).each(["recipient-only", "owner-and-recipient"] as cons
       unfinished: {step: "files", message: "live-document-binding-active"}});
   }
 
+}, 120_000);
+
+it.skipIf(engine.missing)("finishes a written but unadopted creation on native relay replay", async () => {
+  const root = await tempRoot("automation-unadopted");
+  const server = await computer({ root, relayUrl: "http://127.0.0.1:1", bearerToken: "test:owner", identity: { kind: "claim" } });
+  const adapter = new VersionedLiveAdapter(server.client, server.workspace, { workspaceId: WORKSPACE });
+  await adapter.writeTextFile({ workspaceId: WORKSPACE, versionId: "main", path: "Tasks/collection.yaml", text: "name: Tasks\nfields: {Status: {type: text}}\n", publish: true, metadata: { origin: "api" } });
+  const replica = { workspaceId: WORKSPACE, client: server.client, workspace: server.workspace, signal: server.lifetime };
+  const native = replicaRecordEngine(replica);
+  let deduped = false;
+  const write = native.adapter.writeTextFile.bind(native.adapter);
+  native.adapter.writeTextFile = async input => { const result = await write(input); deduped ||= result.deduped === true; return result; };
+  const context = replicaRecordEditContext(replica, native, new AbortController().signal);
+  const db = new DatabaseSync(join(root, ".dohc/engine/engine.db"));
+  db.exec("PRAGMA busy_timeout=10000");
+  db.exec("CREATE TRIGGER block_adoption BEFORE INSERT ON collection_records WHEN NEW.file_path = 'Tasks/made.md' BEGIN SELECT RAISE(FAIL, 'test adoption failure'); END");
+  const input = { collectionPath: "Tasks", name: "made", recordId: TWO, fields: { Status: "New" }, author: AUTOMATION, idempotencyKeyPrefix: "unadopted" };
+  try {
+    await expect(createCollectionRecord(context, input)).resolves.toMatchObject({ kind: "partial" });
+    expect((await adapter.readTextFile({ workspaceId: WORKSPACE, versionId: "main", path: "Tasks/made.md" }))?.text).toContain(TWO);
+    expect(db.prepare("SELECT count(*) AS n FROM collection_records WHERE record_id = ?").get(TWO)?.n).toBe(0);
+    db.exec("DROP TRIGGER block_adoption");
+    await expect(createCollectionRecord(context, input)).resolves.toEqual({ path: "Tasks/made.md", recordId: TWO });
+    expect(deduped).toBe(true);
+    expect((await adapter.getCollectionRecord({ collectionPath: "Tasks", recordId: TWO, historyLimit: 1 })).record.values).toContainEqual(expect.objectContaining({ field: "Status", value: "New" }));
+  } finally { db.exec("DROP TRIGGER IF EXISTS block_adoption"); db.close(); }
 }, 120_000);

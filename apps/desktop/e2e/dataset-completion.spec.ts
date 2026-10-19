@@ -1,5 +1,6 @@
+import { holdSystemClipboard } from "./helpers/systemClipboard";
 import { activityPin, settingsNavPin, editorTabTestId } from "../src/testPins";
-import { expect, test, type Page, type Locator } from "@playwright/test";
+import { test, expect, type Page, type Locator } from "@playwright/test";
 import { randomBytes, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { readFile, writeFile } from "node:fs/promises";
@@ -45,7 +46,7 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     desktop = await launchDesktopApp({ workspace, env: { DOHC_TEST_SYNC_DEBOUNCE_MS: "150", DOHC_TEST_SYNC_BACKOFF_MS: "250" } });
     const { page } = desktop;
     await openWorkspaceFromFirstRun(page, workspace);
-    await page.keyboard.press("Control+k");
+    await page.keyboard.press("ControlOrMeta+k");
     await page.getByTestId("command-palette").getByRole("option", { name: "New collection", exact: true }).click();
     const create = page.getByTestId("new-collection-dialog");
     await create.getByLabel("Collection name").fill("Registrations");
@@ -103,8 +104,10 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     await expect(share.getByTestId("share-link-url")).toBeVisible();
     const linkUrl = (await share.getByTestId("share-link-url").textContent())!;
     expect(new URL(linkUrl).origin).toBe(sharedDatasetViewerOrigin);
-    await share.getByRole("button", { name: "Copy", exact: true }).click();
-    await expect(share.getByRole("button", { name: "Copied", exact: true })).toBeVisible();
+    await holdSystemClipboard(test.info(), async (remainingMs) => {
+      await share.getByRole("button", { name: "Copy", exact: true }).click({ timeout: remainingMs() });
+      await expect(share.getByRole("button", { name: "Copied", exact: true })).toBeVisible({ timeout: remainingMs() });
+    });
     await share.getByRole("button", { name: "Close", exact: true }).click();
     await expect(page.getByTestId("site-preview-page").getByRole("button", { name: "Open in browser", exact: true })).toBeVisible();
     await page.getByTestId("site-preview-publish").click();
@@ -204,7 +207,7 @@ test("@dataset-completion history reverses an authored rule against current reco
     desktop = await launchDesktopApp({ workspace });
     const { page } = desktop;
     const { workspaceId } = await openWorkspaceFromFirstRun(page, workspace);
-    await page.keyboard.press("Control+k");
+    await page.keyboard.press("ControlOrMeta+k");
     await page.getByTestId("command-palette").getByRole("option", { name: "New collection", exact: true }).click();
     const create = page.getByTestId("new-collection-dialog");
     await create.getByLabel("Collection name").fill("Registrations");
@@ -279,7 +282,7 @@ test("@dataset-completion board and calendar page all records and save governed 
     desktop = await launchDesktopApp({ workspace });
     const { page } = desktop;
     const { workspaceId } = await openWorkspaceFromFirstRun(page, workspace);
-    await page.keyboard.press("Control+k");
+    await page.keyboard.press("ControlOrMeta+k");
     await page.getByTestId("command-palette").getByRole("option", { name: "New collection", exact: true }).click();
     const create = page.getByTestId("new-collection-dialog");
     await create.getByLabel("Collection name").fill("Tasks");
@@ -355,8 +358,8 @@ test("@dataset-completion board and calendar page all records and save governed 
     const eventBox = await event.boundingBox();
     const dayBox = await calendarRow.locator(".rbc-day-bg").nth((originalDay + 1) % 7).boundingBox();
     if (!eventBox || !dayBox) throw Error("The calendar event and destination day must be visible.");
-    // The date background sits beneath the calendar row. Move the real pointer to
-    // its coordinates so the calendar's foreground drag surface receives the drop.
+    // The date background sits beneath the calendar row. Move Playwright's pointer
+    // to its coordinates so the calendar's foreground drag surface receives the drop.
     await page.mouse.move(eventBox.x + eventBox.width / 2, eventBox.y + eventBox.height / 2);
     await page.mouse.down();
     await page.mouse.move(dayBox.x + dayBox.width / 2, dayBox.y + dayBox.height / 2, { steps: 20 });

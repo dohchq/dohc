@@ -1,7 +1,9 @@
+import { isReceivedObject } from "@dohc/workspace-contracts/workspace-ref";
 import { asRecord } from "@dohc/workspace-core/records";
 export type ShareAccess = "view" | "comment" | "edit";
 
 export interface ViewMeta {
+  receivedSource?: string;
   subjectName?: string | null;
   access: ShareAccess;
   effectiveSelector: {
@@ -21,6 +23,7 @@ export interface RelayOp {
 }
 
 export interface SharedFile {
+  objectId?: string;
   path: string;
   blobSha256: string;
   contentKind: "text" | "binary";
@@ -399,6 +402,7 @@ function storedFile(value: unknown): SharedFile | null {
   }
   return {
     path,
+    ...(isReceivedObject(payload.objectId) ? { objectId: payload.objectId } : {}),
     blobSha256,
     contentKind: payload.contentKind === "binary" ? "binary" : "text",
   };
@@ -479,6 +483,7 @@ export function foldLogOps(
     }
     files.set(afterPath, {
       path: afterPath,
+      ...(isReceivedObject(payload.objectId) ? { objectId: payload.objectId } : {}),
       blobSha256: afterBlobSha256,
       contentKind: payload.payloadAfterContentKind === "binary" ? "binary" : "text",
     });

@@ -15,7 +15,7 @@
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join, resolve } from "node:path";
-import { mkdirSync, writeFileSync, readdirSync, unlinkSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, readdirSync, unlinkSync } from "node:fs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "../../../..");
@@ -82,6 +82,11 @@ const {
 } = await import(projectionUrl);
 const Y = await import(pathToFileURL(join(dirname(yjsPath), "yjs.mjs")).href);
 await unregisterTsx();
+// marked as the projection package pins it, 17.0.6.
+const markedPath = createRequire(
+  join(repoRoot, "packages/ydoc-projection/package.json"),
+).resolve("marked");
+const marked = await import(pathToFileURL(markedPath).href);
 
 const b64 = (u8) => Buffer.from(u8).toString("base64");
 
@@ -347,6 +352,7 @@ const RICHDOC_PROJECTION_CASES = [
     markdown: [
       "- first",
       "  - nested [link](notes/item)",
+      "",
       "    3. deep ordered",
       "    4. next deep",
       "  - nested sibling",
@@ -642,6 +648,10 @@ const RICHDOC_PROJECTION_CASES = [
         paragraph("~~~ts"),
         paragraph("$$not a math block$$"),
         paragraph("[label]: not a definition"),
+        paragraph("[](https://e.example \"Map<K, &#59; V>\")"),
+        paragraph("before\n[](https://h.example \"kept\")"),
+        paragraph("[](<https://e.example/&#59;> \"a &amp; b\")"),
+        paragraph("[a]: <https://e.example/?q=&#59;>"),
         paragraph("![alt](not-an-image)"),
         xmlElement("bulletList", {}, [
           xmlElement("listItem", {}, [paragraph("- nested literal")]),
@@ -762,6 +772,49 @@ const RICHDOC_PROJECTION_CASES = [
       )),
       xmlElement("blockquote", {}, [xmlElement("codeBlock", { language: "lang`tick" }, [])]),
       paragraph("After code"),
+    ]),
+  },
+  {
+    // Raw HTML the document holds as text settles as inert text, across marks,
+    // with literal references, links and atoms in it, and real ones beside it.
+    // ydoc.rs raw_html_text_settles_as_inert_text_the_importer_reopens and the
+    // importer's RAW_HTML_SETTLED test expect the same bytes.
+    name: "raw-html-literal-text",
+    makeDoc: () => directRichdoc([
+      paragraph([
+        xmlRuns([
+          ["Lit <span title=\"q 'é' &#92;\">\\* {{atom:a}} https://in.example/a_b www.in.example a@b.co <https://auto.example> &#123;"],
+          ["x", { bold: {} }],
+          ["*  \nnext</span> and "],
+          ["out", { link: linkAttrs("https://out.example") }],
+          [" end "],
+        ]),
+        xmlElement("inlineAtom", { atomId: "rate", params: "150", source: "atom:rate 150" }),
+        xmlText(" ü."),
+      ]),
+      paragraph([xmlRuns([["<b>a=b \\*c</b>", { highlight: {} }]])]),
+      paragraph([xmlRuns([["code "], ["<b>*x*</b>", { code: {} }]])]),
+      paragraph([
+        xmlText("<!-- $x$ ==y== --> "),
+        xmlElement("mathInline", { tex: "z" }),
+        xmlText("."),
+      ]),
+      paragraph("<b>x</b> &#123; &#92; <i>y</i>"),
+      paragraph([
+        xmlRuns([
+          ["<!-- a: b,\n\n \t\n{{atom:a}} \\* https://in.example *y* --> "],
+          ["real", { bold: {} }],
+          ["."],
+        ]),
+      ]),
+      paragraph([
+        xmlRuns([
+          ["<pre>one\n   ", { bold: {} }],
+          ["\ntwo</pre> and "],
+          ["real", { bold: {} }],
+          ["."],
+        ]),
+      ]),
     ]),
   },
 ];
@@ -889,6 +942,91 @@ function makeNestedFrontmatter() {
   };
 }
 
+// The importer and the projector each keep their own reader for two of
+// marked's rules: the inline `link` rule for a link with no text, and the
+// block `def` rule. marked itself reads these seeded texts, so neither
+// reader is its own oracle. A link range is UTF-16 offsets for the importer
+// and UTF-8 byte offsets for the projector, from the same text, and a
+// definition is the length of marked's `raw` in each. marked counts UTF-16
+// units, so a range can end between the two halves of one character. Such a
+// text keeps its UTF-16 ranges, has no UTF-8 ranges, and says why.
+function makeMarkedOracle() {
+  const probe = new marked.Tokenizer();
+  probe.lexer = new marked.Lexer({ ...marked.getDefaults(), tokenizer: probe });
+  const random = rng(0x5eed91);
+  const pick = (pool) => pool[Math.floor(random() * pool.length)];
+  const phrase = (pool, max) =>
+    Array.from({ length: 1 + Math.floor(random() * max) }, () => pick(pool)).join("");
+  const bytes = (value, at) => Buffer.byteLength(value.slice(0, at));
+  const LINK = [
+    "[](", "[](", "[](", "[](<", "[](u \"", "[", "]", "(", ")", "))", "<", ">",
+    "<a>", "\"", "'", "\\", " ", "\t", "\n", "a", "u", "é", "日本", "😀",
+    "\u00a0", "\u2028", "&#59;", "\\\"", "\\)", " \"t\"", " (t)", " 't'",
+  ];
+  const DEFINITION = [
+    "u", "https://e.example", "<a b>", "<", ">", " ", "  ", "\t", "\n", "\"t\"",
+    "'t'", "(t)", "\"", "'", "(", ")", "\\", "\\\"", "]", "[", ":", "é", "😀",
+    "\u00a0", "#", "-", "x",
+  ];
+  const links = [
+    "[]((a)", "[](a(b)c \"title\")", "[](a\\(b\\)c \"x\\\"y\")",
+    "[](<a(b)> \"title\")", "[](u \"title with ) and <K, V>\")",
+    "[](u (title with ( characters))", "<span>before [](u \"<K, V>\") after</span>",
+    "[]( (a)b)", `[](u "${"[](".repeat(20)}`, `${"[](".repeat(20)}))`,
+    `${"[](".repeat(20)})`, "[](u\u00a0\"t\")", "[](u \n \"t\")", "[](u\n\n\"t\")",
+    "[](\t\nu\t)", "a [](x) b [](y \"z\") c [](<w>)", "[](u \"a\\\")\\\")",
+    "[](u \"a\n2. b\")", "[](😀) [](é \"日本\")",
+    ...Array.from({ length: 800 }, (_, index) => phrase(LINK, index % 8 === 0 ? 160 : 20)),
+  ];
+  const definitions = [
+    "[a]: <https://e.example/?q=&#59;>", "[x]: https://h.example \"kept\"",
+    "[x]:\nhttps://e.example\n\"t\"", "[x]: u\nmore", "[label]: not a definition",
+    "[^1]: Footnote body.", "[x]: u 'a\nb'", "[x]: u (t)", "   [x]: u", "    [x]: u",
+    "[ ]: u", "[x\\]]: u", "[x]: <a b> \"t\"", "[é 日本]: <😀> \"😀\"",
+    ...Array.from({ length: 400 }, () =>
+      `${pick(["", " ", "   ", "    "])}[${phrase(["x", "é", " ", "\\]", "😀", "\n"], 4)}]${pick([":", ": ", ":\n", " :", ""])}${phrase(DEFINITION, 10)}`),
+  ];
+  const whole = (value, offsets) => offsets.every((at) => value.slice(0, at).isWellFormed());
+  const emptyLinks = links.map((text) => {
+    const utf16 = [];
+    for (let at = text.indexOf("[]("); at >= 0; at = text.indexOf("[](", at)) {
+      const raw = probe.link(text.slice(at))?.raw;
+      if (raw === undefined) {
+        at += 1;
+      } else {
+        utf16.push([at, at + raw.length]);
+        at += raw.length;
+      }
+    }
+    if (!whole(text, utf16.flat())) {
+      return {
+        text,
+        utf16,
+        utf8: null,
+        utf8Excluded:
+          "marked ends a range between the two halves of a surrogate pair, where UTF-8 has no byte boundary",
+      };
+    }
+    return { text, utf16, utf8: utf16.map(([from, to]) => [bytes(text, from), bytes(text, to)]) };
+  });
+  return {
+    seed: -4,
+    contentKind: "richdoc",
+    kind: "markedOracle",
+    updates: [],
+    expected: {
+      marked: JSON.parse(readFileSync(join(dirname(markedPath), "../package.json"), "utf8")).version,
+      emptyLinks,
+      definitions: definitions.map((text) => {
+        const raw = probe.def(text)?.raw;
+        return raw === undefined
+          ? { text, utf16: null, utf8: null }
+          : { text, utf16: raw.length, utf8: Buffer.byteLength(raw) };
+      }),
+    },
+  };
+}
+
 // Clear old generated fixtures in the selected output directory only.
 for (const f of readdirSync(outputDir)) {
   if (f.endsWith(".json")) unlinkSync(join(outputDir, f));
@@ -938,11 +1076,12 @@ projectionFixtures.forEach(emit);
 emit(makeOffsetProbe());
 emit(makeSurrogateProbe());
 emit(makeNestedFrontmatter());
+emit(makeMarkedOracle());
 
 writeFileSync(
   join(outputDir, "_manifest.json"),
   JSON.stringify({ fixtures: manifest }, null, 1),
 );
 console.log(
-  `generated ${manifest.length} fixtures (${SEEDS} plaintext + ${SEEDS} random richdoc + ${projectionFixtures.length} richdoc projection + 3 probes)`,
+  `generated ${manifest.length} fixtures (${SEEDS} plaintext + ${SEEDS} random richdoc + ${projectionFixtures.length} richdoc projection + 3 probes + marked oracle)`,
 );

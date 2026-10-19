@@ -1,19 +1,21 @@
 use super::{
     MomentBeforeState, VersionedTextStore, alias_object_id, blob_text, committed, get_moment,
-    get_version, hash_author_fields, hash_fields, lookup_request, map_moment_row, map_version_row,
-    next_moment_order, record_request, upsert_snapshot, validate_addressable_plaintext_path,
-    validate_identifier, validate_moment_metadata, version_exists, version_is_active,
+    get_version, hash_author_fields, hash_fields, hydrate_moments, lookup_request, map_moment_row,
+    map_version_row, next_moment_order, record_request, upsert_snapshot,
+    validate_addressable_plaintext_path, validate_identifier, validate_moment_metadata,
+    version_exists, version_is_active,
 };
 use crate::conflicts::{
     binary_delete_job_id, binary_rename_delete_job_id, binary_rename_write_job_id,
+    binary_write_job_id,
 };
 use crate::error::DomainError;
 use crate::records::{
     MomentOp, MomentRecord, RollbackTextFileMutation, SnapshotRecord, VersionRecord,
 };
+use dohc_engine_storage::text;
 use dohc_engine_storage::{
     FaultInjector, MaterializationJobSpec, Preimage, enqueue_delete_job, enqueue_job,
-    put_binary_blob,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::collections::{HashMap, HashSet};
@@ -160,6 +162,12 @@ impl<'a> VersionedTextStore<'a> {
             let restore_generation = next_moment_order(tx)?;
             before_remove(tx, &prep.moment)?;
             tx.execute(
+                "DELETE FROM engine_requests WHERE request_id='sync-ydoc-provisional-author:'||json_array(?1,?2,?3) \
+                 AND payload_hash=?4 AND kind='sync-ydoc-provisional-author'",
+                params![ws, input.version_id, prep.moment.object_id, input.mutation_moment_id],
+            )
+            .map_err(DomainError::sql_persist)?;
+            tx.execute(
                 "DELETE FROM moments WHERE workspace_id = ?1 AND moment_id = ?2",
                 params![ws, input.mutation_moment_id],
             )
@@ -287,7 +295,7 @@ impl<'a> VersionedTextStore<'a> {
                 && let Some(written_moment_sha) = prep.moment.after_binary_sha256.as_deref().or(prep.moment.after_blob_sha256.as_deref())
             {
                 let publication_job_id = if prep.moment.after_content_kind == "binary" {
-                    input.mutation_moment_id.clone()
+                    binary_write_job_id(&input.mutation_moment_id)
                 } else { format!("authored-mat_{}", input.mutation_moment_id) };
                 let active = version_is_active(tx, ws, &input.version_id)?;
                 let job: Option<(String, i64, String, String, String)> = tx
@@ -365,10 +373,7 @@ impl<'a> VersionedTextStore<'a> {
                             reason: "text rollback snapshot has no text blob",
                         },
                     )?;
-                    tx.execute(
-                        "INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?1, ?2, ?3)",
-                        params![blob_sha256, before.text.len() as i64, before.text],
-                    )
+                    text::insert(tx, blob_sha256, before.text.len() as i64, &before.text, true)
                     .map_err(DomainError::sql_persist)?;
                 }
                 tx.execute(
@@ -381,6 +386,14 @@ impl<'a> VersionedTextStore<'a> {
                 upsert_snapshot(tx, before)?;
             }
 
+            dohc_engine_storage::capture_file_holds::clear_orphaned_in(
+                tx, ws, &input.version_id, &input.path,
+            )?;
+            if let Some(before) = &prep.before {
+                dohc_engine_storage::capture_file_holds::clear_orphaned_in(
+                    tx, ws, &input.version_id, &before.path,
+                )?;
+            }
             let current_present = prep.moment.operation != MomentOp::Delete;
             let restored = prep.before.as_ref();
             let restored_path = restored
@@ -578,7 +591,7 @@ fn enqueue_binary_rollback_restore(
                         reason: "binary rollback snapshot has no binary hash",
                     })?
             } else {
-                put_binary_blob(tx, before.text.as_bytes()).map_err(DomainError::from)?
+                text::put_materialization(tx, before.text.as_bytes()).map_err(DomainError::from)?
             };
             enqueue_job(
                 tx,
@@ -759,6 +772,8 @@ fn select_moment_by_order(
     object_id: &str,
     max_order: i64,
 ) -> Result<Option<MomentRecord>, DomainError> {
+    let snapshot = text::ReadSnapshot::new(conn).map_err(DomainError::sql_corrupt)?;
+
     let row = conn
         .query_row(
             concat!("SELECT moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
@@ -766,9 +781,9 @@ fn select_moment_by_order(
              before_latest_moment_id, metadata_origin, metadata_summary, \
              metadata_correlation_id, author_json, sync_record_only, \
              COALESCE(after_content_kind, 'text'), after_binary.sha256, \
-             COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             CASE WHEN after_text_blob.byte_length <= 131072 AND LENGTH(CAST(after_text_blob.text AS BLOB)) <= 131072 THEN after_text_blob.text END, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             CASE WHEN before_text_blob.byte_length <= 131072 AND LENGTH(CAST(before_text_blob.text AS BLOB)) <= 131072 THEN before_text_blob.text END, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length), \
-             COALESCE(LENGTH(CAST(after_text_blob.text AS BLOB)), LENGTH(after_binary.bytes)), \
-             COALESCE(LENGTH(CAST(before_text_blob.text AS BLOB)), LENGTH(before_binary.bytes)), \
+             COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             after_text_blob.sha256, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             before_text_blob.sha256, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length), \
+             COALESCE(after_text_blob.byte_length, LENGTH(after_binary.bytes)), \
+             COALESCE(before_text_blob.byte_length, LENGTH(before_binary.bytes)), \
              m.payload_before_path \
              FROM moments m \
              LEFT JOIN binary_blobs after_binary ON after_binary.sha256 = m.after_binary_sha256 \
@@ -782,7 +797,11 @@ fn select_moment_by_order(
         )
         .optional()
         .map_err(DomainError::sql_corrupt)?;
-    row.transpose()
+    snapshot.finish(
+        hydrate_moments(conn, row.transpose()?.into_iter().collect())
+            .map(|rows| rows.into_iter().next()),
+        DomainError::sql_corrupt,
+    )
 }
 
 fn inherited_object_moment(

@@ -159,6 +159,162 @@ fn rename_looks_like_remove_plus_add() {
     assert_eq!(retire_paths(&p), ["old-name.md"]);
 }
 
+/// APFS keeps finding a file through its old spelling after a rename that
+/// changes only case or Unicode normalization. The old spelling must still
+/// retire, or it stays tracked beside the new one and every pass is degraded.
+/// A case-sensitive volume passes trivially. Windows keeps the old behavior
+/// until the check passes a Windows run.
+#[cfg(not(windows))]
+#[test]
+fn respelled_rename_retires_the_old_spelling() {
+    for (before, after) in [
+        ("notes.md", "Notes.md"),
+        ("caf\u{e9}.md", "cafe\u{301}.md"),
+        ("drafts/a.md", "drafts/A.md"),
+    ] {
+        let ws = Scratch::new();
+        ws.write(before, b"portable content\n");
+        let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+        let mut ctrl = ReconcileController::new();
+        let token = CancellationToken::new();
+        let _ = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
+
+        ws.rename(before, after);
+        // Case-sensitive APFS keeps the old spelling of a rename that changes
+        // only Unicode normalization: nothing was renamed there.
+        let first = after.split('/').next().unwrap();
+        if !std::fs::read_dir(ws.path())
+            .expect("list")
+            .any(|entry| entry.expect("entry").file_name() == first)
+        {
+            continue;
+        }
+
+        let p = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
+        assert_eq!(ingest_paths(&p, IngestReason::Added), [after], "{after}");
+        assert_eq!(retire_paths(&p), [before], "{before}");
+        assert!(p.unconfirmed_removed.is_empty() && !p.degraded, "{p:?}");
+        assert!(!ctrl.tracks_path(before));
+    }
+}
+
+/// A folder renamed only by case is not proven a respell: its files keep
+/// their old handling, so nothing retires and peers get no delete. Skips
+/// where the volume keeps case apart.
+#[cfg(not(windows))]
+#[test]
+fn a_folder_respell_retires_nothing() {
+    let ws = Scratch::new();
+    ws.write("drafts/a.md", b"portable content\n");
+    if !ws.path().join("DRAFTS/a.md").exists() {
+        eprintln!("SKIP: this volume keeps case apart");
+        return;
+    }
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut ctrl = ReconcileController::new();
+    let token = CancellationToken::new();
+    let _ = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
+    std::fs::rename(ws.path().join("drafts"), ws.path().join("Drafts")).expect("rename folder");
+
+    let p = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
+    assert!(retire_paths(&p).is_empty(), "{p:?}");
+    assert_eq!(p.unconfirmed_removed, ["drafts/a.md"]);
+    assert!(ctrl.tracks_path("drafts/a.md"));
+}
+
+#[cfg(not(windows))]
+#[test]
+fn the_tracked_spelling_is_not_another_spelling() {
+    let ws = Scratch::new();
+    ws.write("notes/a.md", b"a");
+    assert!(!dohc_engine_files::stored_under_other_spelling(
+        ws.path(),
+        "notes/a.md"
+    ));
+    std::fs::rename(ws.path().join("notes"), ws.path().join("Notes")).expect("rename");
+    assert!(
+        !dohc_engine_files::stored_under_other_spelling(ws.path(), "notes/a.md"),
+        "a folder respell is not proven"
+    );
+    std::fs::rename(ws.path().join("Notes/a.md"), ws.path().join("Notes/A.md")).expect("rename");
+    assert_eq!(
+        dohc_engine_files::stored_under_other_spelling(ws.path(), "Notes/a.md"),
+        ws.path().join("Notes/a.md").exists(),
+        "only a volume that still finds the old spelling stores another one"
+    );
+    assert!(!dohc_engine_files::stored_under_other_spelling(
+        ws.path(),
+        "Notes/A.md"
+    ));
+}
+
+/// On a disk that keeps case apart, `notes.md` and `Notes.md` can be two
+/// links to one file. Each is its own spelling, so neither reads as gone,
+/// even after the other link was opened last. Skips where the disk ignores
+/// case.
+#[cfg(not(windows))]
+#[test]
+fn a_case_variant_hard_link_is_not_another_spelling() {
+    let ws = Scratch::new();
+    ws.write("notes.md", b"a");
+    if std::fs::hard_link(ws.path().join("notes.md"), ws.path().join("Notes.md")).is_err() {
+        eprintln!("SKIP: this disk ignores case");
+        return;
+    }
+    for (opened, probed) in [("Notes.md", "notes.md"), ("notes.md", "Notes.md")] {
+        std::fs::read(ws.path().join(opened)).expect("open the other link");
+        assert!(
+            !dohc_engine_files::stored_under_other_spelling(ws.path(), probed),
+            "{probed}"
+        );
+    }
+}
+
+/// A link to a folder whose name differs only in case is not a rename, even
+/// when the link leaves the workspace.
+#[test]
+fn a_symlink_is_never_another_spelling() {
+    let ws = Scratch::new();
+    let outside = Scratch::new();
+    outside.write("Notes/a.md", b"outside");
+    if !ws.try_symlink_dir("notes", &outside.path().join("Notes")) {
+        eprintln!("SKIP: platform refused a directory symlink");
+        return;
+    }
+    assert!(!dohc_engine_files::stored_under_other_spelling(
+        ws.path(),
+        "notes/a.md"
+    ));
+}
+
+/// A head captured before the floor named `.DS_Store` comes back in the
+/// rehydration seed. The scanner never lists it again, so it must not wait for
+/// a retire it cannot confirm while the file stays on disk.
+#[test]
+fn rehydrated_entries_the_floor_excludes_do_not_degrade_capture() {
+    let ws = Scratch::new();
+    ws.write("notes.md", b"kept\n");
+    ws.write(".DS_Store", b"finder");
+    ws.write("photos/._trip.jpg", b"appledouble");
+    let entry = |bytes: &[u8]| ManifestEntry {
+        size: bytes.len() as u64,
+        sha256: dohc_engine_storage::hex_sha256(bytes),
+        mtime_ms: 0,
+    };
+    let manifest = ScanManifest::from_entries([
+        ("notes.md".to_owned(), entry(b"kept\n")),
+        (".DS_Store".to_owned(), entry(b"finder")),
+        ("photos/._trip.jpg".to_owned(), entry(b"appledouble")),
+    ]);
+    let mut ctrl = ReconcileController::rehydrated(manifest, dohc_engine_files::ScanGeneration(1));
+    assert_eq!(ctrl.tracked_len(), 1);
+
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let p = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &CancellationToken::new());
+    assert!(p.is_empty(), "{p:?}");
+    assert!(p.unconfirmed_removed.is_empty() && !p.degraded, "{p:?}");
+}
+
 #[test]
 fn cancellation_mid_scan_leaves_consistent_resumable_state() {
     let ws = Scratch::new();
@@ -309,7 +465,7 @@ fn size_cap_grow_retains_never_retires_the_false_delete_regression() {
     assert!(ingest_paths(&grown, IngestReason::Added).is_empty());
     assert!(ingest_paths(&grown, IngestReason::Changed).is_empty());
     assert_eq!(
-        grown.retained_over_cap,
+        grown.retained_unread,
         ["doc.md"],
         "distinct retain disposition"
     );
@@ -321,7 +477,7 @@ fn size_cap_grow_retains_never_retires_the_false_delete_regression() {
     let shrunk = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
     assert_eq!(ingest_paths(&shrunk, IngestReason::Changed), ["doc.md"]);
     assert!(retire_paths(&shrunk).is_empty());
-    assert!(shrunk.retained_over_cap.is_empty());
+    assert!(shrunk.retained_unread.is_empty());
 }
 
 #[test]
@@ -338,7 +494,7 @@ fn genuinely_deleted_over_cap_absent_file_is_still_removed() {
     ws.remove("gone.md");
     let p = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
     assert_eq!(retire_paths(&p), ["gone.md"]);
-    assert!(p.retained_over_cap.is_empty());
+    assert!(p.retained_unread.is_empty());
     assert_eq!(ctrl.tracked_len(), 0);
 }
 
@@ -385,9 +541,9 @@ struct PermissionDeniedAt {
 }
 
 impl ScanIoFaultInjector for PermissionDeniedAt {
-    fn error_kind(&self, path: &str, operation: ScanIoOperation) -> Option<ErrorKind> {
+    fn error(&self, path: &str, operation: ScanIoOperation) -> Option<std::io::Error> {
         (path == self.path && operation == ScanIoOperation::Metadata)
-            .then_some(ErrorKind::PermissionDenied)
+            .then(|| ErrorKind::PermissionDenied.into())
     }
 }
 
@@ -477,7 +633,7 @@ fn persistently_degraded_path_stops_forcing_perpetual_rescans() {
 struct ReappearedProbe;
 
 impl AbsenceProbe for ReappearedProbe {
-    fn confirms_absent(&self, _absolute_path: &Path) -> bool {
+    fn confirms_absent(&self, _root: &Path, _relative: &str) -> bool {
         false
     }
 }
@@ -485,7 +641,7 @@ impl AbsenceProbe for ReappearedProbe {
 struct TransientUnreadableProbe;
 
 impl AbsenceProbe for TransientUnreadableProbe {
-    fn confirms_absent(&self, _absolute_path: &Path) -> bool {
+    fn confirms_absent(&self, _root: &Path, _relative: &str) -> bool {
         false
     }
 }
@@ -806,5 +962,183 @@ fn mtime_inside_the_granularity_margin_is_not_recorded() {
         scanner.pool().gauge().hashed(),
         baseline_hashed + 1,
         "an mtime within the coarse-timestamp granule below scan start must not pair, so the rescan re-hashes"
+    );
+}
+
+/// Treats the named paths as evicted by a cloud provider such as iCloud
+/// Drive. Only a file provider can make a real dataless file.
+struct EvictedAt(&'static [&'static str]);
+
+impl ScanIoFaultInjector for EvictedAt {
+    fn error(&self, _path: &str, _operation: ScanIoOperation) -> Option<std::io::Error> {
+        None
+    }
+
+    fn evicted(&self, path: &str) -> bool {
+        self.0.contains(&path)
+    }
+}
+
+fn evicted_scanner(paths: &'static [&'static str]) -> Scanner {
+    Scanner::new_with_io_faults(ScanBounds::default(), Arc::new(EvictedAt(paths)))
+        .expect("evicted scanner")
+}
+
+#[test]
+fn a_tracked_evicted_file_is_retained_unread_even_when_its_seed_hash_forces_a_reoffer() {
+    let ws = Scratch::new();
+    ws.write("photo.bin", b"cloud only");
+    ws.write("narrowed.md", b"opted out");
+    // Any read would now fail the scan, so a clean plan proves neither file
+    // was read.
+    #[cfg(unix)]
+    for rel in ["photo.bin", "narrowed.md"] {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(ws.path().join(rel), std::fs::Permissions::from_mode(0o000))
+            .expect("chmod");
+    }
+    // A restart's seed records no mtimes. The engine seeds a path the policy
+    // narrowed with a hash that can never match, so capture re-offers it.
+    let manifest = ScanManifest::from_entries([
+        (
+            "photo.bin".to_owned(),
+            ManifestEntry {
+                size: 10,
+                sha256: dohc_engine_storage::hex_sha256(b"cloud only"),
+                mtime_ms: 0,
+            },
+        ),
+        (
+            "narrowed.md".to_owned(),
+            ManifestEntry {
+                size: 9,
+                sha256: "policy-narrowed-reoffer".to_owned(),
+                mtime_ms: 0,
+            },
+        ),
+    ]);
+    let mut ctrl = ReconcileController::rehydrated(manifest, dohc_engine_files::ScanGeneration(1));
+    let prepared = plan(
+        ctrl.reconcile(
+            &evicted_scanner(&["photo.bin", "narrowed.md"]),
+            ws.path(),
+            &CancellationToken::new(),
+        )
+        .expect("reconcile"),
+    );
+    assert!(!prepared.degraded, "{prepared:?}");
+    assert!(prepared.ops.is_empty(), "{prepared:?}");
+    // Retained paths reach the driver's policy pass, which retires a narrowed
+    // one without reading it.
+    assert_eq!(prepared.retained_unread, ["narrowed.md", "photo.bin"]);
+}
+
+#[test]
+fn renaming_an_evicted_file_reads_it_under_its_new_name() {
+    let ws = Scratch::new();
+    ws.write("a.md", b"note");
+    let mut ctrl = ReconcileController::new();
+    let normal = Scanner::new(ScanBounds::default()).expect("scanner");
+    reconcile_and_apply(&mut ctrl, &normal, ws.path(), &CancellationToken::new());
+
+    ws.rename("a.md", "b.md");
+    ctrl.mark_dirty();
+    let prepared = plan(
+        ctrl.reconcile_if_dirty(
+            &evicted_scanner(&["b.md"]),
+            ws.path(),
+            &CancellationToken::new(),
+        )
+        .expect("reconcile"),
+    );
+    assert_eq!(ingest_paths(&prepared, IngestReason::Added), ["b.md"]);
+    assert_eq!(retire_paths(&prepared), ["a.md"]);
+    assert!(prepared.retained_unread.is_empty());
+}
+
+#[test]
+fn an_evicted_file_the_manifest_never_tracked_is_read() {
+    let ws = Scratch::new();
+    ws.write("late.md", b"arrived from another Mac");
+    let mut ctrl = ReconcileController::new();
+    let prepared = plan(
+        ctrl.reconcile(
+            &evicted_scanner(&["late.md"]),
+            ws.path(),
+            &CancellationToken::new(),
+        )
+        .expect("reconcile"),
+    );
+    assert_eq!(ingest_paths(&prepared, IngestReason::Added), ["late.md"]);
+    assert!(prepared.retained_unread.is_empty());
+}
+
+#[test]
+fn an_untracked_evicted_file_the_policy_narrows_is_never_read() {
+    let ws = Scratch::new();
+    ws.write(
+        ".dohc/files.toml",
+        b"version = 1\n[[rule]]\npath = \"private/**\"\ntracked = false\n",
+    );
+    ws.write("private/photo.bin", b"cloud only");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            ws.path().join("private/photo.bin"),
+            std::fs::Permissions::from_mode(0o000),
+        )
+        .expect("chmod");
+    }
+    let mut ctrl = ReconcileController::new();
+    let prepared = plan(
+        ctrl.reconcile(
+            &evicted_scanner(&["private/photo.bin"]),
+            ws.path(),
+            &CancellationToken::new(),
+        )
+        .expect("reconcile"),
+    );
+    assert!(!prepared.degraded, "{prepared:?}");
+    assert!(prepared.ops.is_empty(), "{prepared:?}");
+}
+
+#[test]
+fn an_evicted_file_edited_elsewhere_is_rehashed_once_it_downloads() {
+    let ws = Scratch::new();
+    ws.write("resized.md", b"before");
+    ws.write("same-size.md", b"before");
+    ws.age_mtime("resized.md", 60);
+    ws.age_mtime("same-size.md", 60);
+    let normal = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut ctrl = ReconcileController::new();
+    reconcile_and_apply(&mut ctrl, &normal, ws.path(), &CancellationToken::new());
+
+    ctrl.mark_dirty();
+    let evicted = plan(
+        ctrl.reconcile_if_dirty(
+            &evicted_scanner(&["resized.md", "same-size.md"]),
+            ws.path(),
+            &CancellationToken::new(),
+        )
+        .expect("evicted reconcile"),
+    );
+    assert_eq!(evicted.retained_unread, ["resized.md", "same-size.md"]);
+    apply_then_ack(&mut ctrl, &evicted, &mut AcceptAll, &NoFaults).expect("apply/ack");
+
+    // Another Mac edits both, and each downloads with the new bytes and a
+    // new mtime. One keeps its size, so only the mtime can reveal the edit.
+    ws.write("resized.md", b"after, longer");
+    ws.write("same-size.md", b"AFTER!");
+    ws.age_mtime("resized.md", 30);
+    ws.age_mtime("same-size.md", 30);
+    ctrl.mark_dirty();
+    let downloaded = plan(
+        ctrl.reconcile_if_dirty(&normal, ws.path(), &CancellationToken::new())
+            .expect("reconcile"),
+    );
+    assert_eq!(
+        ingest_paths(&downloaded, IngestReason::Changed),
+        ["resized.md", "same-size.md"]
     );
 }

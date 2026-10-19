@@ -52,7 +52,7 @@ fn text_sha(text: &str) -> String {
 
 #[test]
 fn imported_live_moment_preserves_public_author_snapshots() {
-    for author in [
+    for mut author in [
         json!({"kind":"unattributed"}),
         json!({"kind":"human", "humanId":"recipient", "humanName":"Recipient"}),
         json!({"kind":"link", "publicPrincipalId":"public-recipient", "label":"Edit link participant"}),
@@ -84,11 +84,82 @@ fn imported_live_moment_preserves_public_author_snapshots() {
         ));
         let actual: String = store.read_with(|conn| conn.query_row(
             "SELECT author_json FROM moments WHERE workspace_id='ws' AND moment_id='live-settlement'", [], |row| row.get(0))).unwrap();
+        if author["kind"] == "human" {
+            author["relayConfirmed"] = json!(true);
+        }
         assert_eq!(
             serde_json::from_str::<Value>(&actual).unwrap(),
             json!([author])
         );
     }
+}
+
+/// An older build captured Finder's `.DS_Store`. Its moment there applies as
+/// nothing, without a refusal, and the origin's next moment still applies.
+#[test]
+fn an_older_peers_moment_at_an_ignored_path_applies_as_nothing() {
+    let (_scratch, mut store) = test_store();
+    hydrate_texts(&mut store, &["finder", "notes"]);
+    let ignored = envelope(
+        "older-peer",
+        0,
+        "ws",
+        absent_text_payload("ds-store", "finder", ".DS_Store", "finder"),
+    );
+    assert!(matches!(
+        apply_moment_envelope(&mut store, &ignored, &NoFaults).unwrap(),
+        ApplyOutcome {
+            primary: ApplyDisposition::Applied(0),
+            ref refusals,
+            ..
+        } if refusals.is_empty()
+    ));
+    let next = envelope(
+        "older-peer",
+        1,
+        "ws",
+        absent_text_payload("notes", "notes", "notes.md", "notes"),
+    );
+    assert!(matches!(
+        apply_moment_envelope(&mut store, &next, &NoFaults)
+            .unwrap()
+            .primary,
+        ApplyDisposition::Applied(_)
+    ));
+    let ignored_rows: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT (SELECT COUNT(*) FROM path_aliases WHERE path='.DS_Store') \
+                 + (SELECT COUNT(*) FROM moments WHERE moment_id='ds-store')",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(ignored_rows, 0);
+}
+
+#[test]
+fn client_declared_human_cannot_preserve_relay_confirmation() {
+    let (_scratch, mut store) = test_store();
+    hydrate_texts(&mut store, &["local fields"]);
+    let payload = with_author(
+        absent_text_payload("local-settlement", "record", "record.md", "local fields"),
+        json!({"kind":"human","humanId":"recipient","relayConfirmed":true}),
+    );
+    let op = envelope("local-device", 0, "ws", payload);
+    assert!(matches!(
+        apply_moment_envelope(&mut store, &op, &NoFaults)
+            .unwrap()
+            .primary,
+        ApplyDisposition::Applied(_)
+    ));
+    let actual: String = store.read_with(|conn| conn.query_row(
+        "SELECT author_json FROM moments WHERE workspace_id='ws' AND moment_id='local-settlement'", [], |row| row.get(0))).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&actual).unwrap(),
+        json!([{"kind":"human","humanId":"recipient"}])
+    );
 }
 
 #[test]
@@ -307,6 +378,71 @@ fn a_peer_keeps_the_depth_an_agent_moment_names() {
         serde_json::from_str::<Value>(history.author_json.as_deref().expect("author")).unwrap(),
         json!([author]),
     );
+}
+
+/// A second owner device imports a settled live moment through ordinary sync.
+/// Its History keeps the name the snapshot declared for the agent, after a
+/// restart too. A name outside the snapshot's bounds applies as none.
+#[test]
+fn an_owner_device_keeps_a_declared_agent_name_through_import_and_restart() {
+    let agent = json!({
+        "kind": "agent",
+        "agentId": "trip-agent-hosted",
+        "onBehalfOf": "owner",
+        "depth": 1,
+    });
+    let longest = "n".repeat(dohc_engine_domain::MAX_AUTHOR_FIELD_BYTES);
+    let over = format!("{longest}n");
+    for (name, kept) in [
+        (json!("Trip helper"), true),
+        (json!(longest), true),
+        (json!(over), false),
+        (json!(""), false),
+        (json!("Trip\nhelper"), false),
+        (Value::Null, false),
+        (json!(42), false),
+    ] {
+        let (scratch, mut device) = test_store();
+        let mut declared = agent.clone();
+        declared["agentName"] = name.clone();
+        let mut payload = absent_text_payload("settled", "object", "trip.md", "content");
+        payload["authors"] = json!([declared]);
+        hydrate_texts(&mut device, &["content"]);
+        assert_eq!(
+            apply_moment_envelope(
+                &mut device,
+                &envelope("owner-a", 0, "ws", payload),
+                &NoFaults
+            )
+            .expect("owner device import"),
+            ApplyOutcome::new(ApplyDisposition::Applied(0)),
+            "name {name}",
+        );
+        let expected = json!([if kept { declared } else { agent.clone() }]);
+        let history_authors = |store: &mut EngineStore| {
+            let page = VersionedTextStore::new(store)
+                .list_moments(&ListMomentsQuery {
+                    workspace_id: "ws".to_owned(),
+                    version_id: Some("main".to_owned()),
+                    object_id: Some("object".to_owned()),
+                    limit: 10,
+                    before_moment_order: None,
+                })
+                .expect("History");
+            let moment = page.moments.first().expect("imported moment");
+            serde_json::from_str::<Value>(moment.author_json.as_deref().expect("authors"))
+                .expect("author JSON")
+        };
+        assert_eq!(history_authors(&mut device), expected, "name {name}");
+        drop(device);
+        let path = engine_db_path(&scratch).expect("db path");
+        let mut restarted = EngineStore::open(&path, 1_000).expect("reopen store");
+        assert_eq!(
+            history_authors(&mut restarted),
+            expected,
+            "restarted {name}"
+        );
+    }
 }
 
 #[test]
@@ -892,13 +1028,15 @@ fn observed_owner_settlement_scenario(fields: OwnerSettlementFields) {
     let old_id = format!("moment-ydoc-{}", "b".repeat(64));
     let latest_id = format!("moment-ydoc-{}", "c".repeat(64));
     let retain_audit = |store: &EngineStore, id: &str, text: &str, cursor: i64| {
-        // The audit parser is covered separately. Seed its committed output
-        // to isolate ordinary moment admission against native owner state.
+        // The audit parser is covered separately. Seed its committed output,
+        // with no accepted events to credit, to isolate ordinary moment
+        // admission against native owner state.
         let binding = serde_json::to_string(&observed.binding).unwrap();
         let record = format!(
-            "{{\"momentId\":{},\"relayDatabaseNamespace\":\"relay\",\"binding\":{},\"terminalCursor\":{cursor}}}",
+            "{{\"momentId\":{},\"relayDatabaseNamespace\":\"relay\",\"binding\":{},\"previousCursor\":{cursor},\"terminalCursor\":{cursor},\"acceptedEventCount\":0,\"acceptedIntervalDigest\":\"{}\"}}",
             serde_json::to_string(id).unwrap(),
-            binding
+            binding,
+            "0".repeat(64)
         );
         store.read_with(|conn| conn.execute("INSERT INTO live_audit_settlements(settlement_id,workspace_id,record_digest,record_json,markdown_digest) VALUES (?1,'ws',?2,?3,?4)", params![id, hex_sha256(record.as_bytes()), record, text_sha(text)])).unwrap();
     };
@@ -1760,6 +1898,326 @@ fn restore_settlement_skipped_by_a_later_generation_is_refused_and_released() {
     );
 }
 
+#[test]
+fn held_settlement_current_path_recovery_is_refused_and_released() {
+    held_settlement_recovery(RecoveryBinding::Renamed, false);
+}
+
+#[test]
+fn held_settlement_selector_paths_recovery_is_refused_and_released() {
+    held_settlement_recovery(RecoveryBinding::Selectors, false);
+}
+
+#[test]
+fn held_settlement_later_generation_after_rename_is_refused_and_released() {
+    held_settlement_recovery(RecoveryBinding::Renamed, true);
+}
+
+#[test]
+fn held_settlement_same_binding_recovery_applies_and_releases() {
+    held_settlement_recovery(RecoveryBinding::Unchanged, false);
+}
+
+#[test]
+fn held_settlement_rename_away_and_back_applies_and_releases() {
+    held_settlement_recovery(RecoveryBinding::RenamedBack, false);
+}
+
+#[derive(Clone, Copy)]
+enum RecoveryBinding {
+    Renamed,
+    Selectors,
+    Unchanged,
+    RenamedBack,
+}
+
+fn held_settlement_recovery(case: RecoveryBinding, later_generation: bool) {
+    use dohc_engine_collab::owner_outbox::{
+        OwnerOutboxQuarantineInput,
+        draft::append_draft_in_tx,
+        enrollment::{OwnerEnrollmentInput, OwnerEnrollmentPreparation, enroll_in_tx, prepare_in},
+    };
+    let RestoreOwner {
+        _scratch,
+        mut store,
+        mut observed,
+        checkpoint,
+        initial_text,
+        initial_moment,
+    } = restore_owner();
+    let (host, text) = restored_host(&checkpoint, "held host settlement");
+    hydrate_texts(&mut store, &[&text]);
+    let id = format!("moment-ydoc-{}", "b".repeat(64));
+    retain_restore_audit(&store, &observed.binding, "relay", &id, &text, 1);
+    let settlement = restore_settlement("host", &id, &initial_text, &initial_moment, &text);
+    assert_eq!(
+        apply_moment_envelope(&mut store, &settlement, &NoFaults).unwrap(),
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
+    );
+    assert_eq!(
+        store.table_row_count("owner_pending_settlements").unwrap(),
+        1
+    );
+    let waiting =
+        crate::moment_apply::pending::drain_and_claim(&mut store, "ws", &NoFaults, &NoLiveLeases)
+            .unwrap();
+    assert!(waiting.report_id.is_none());
+
+    // Recovery requires a quarantined delivery parent. Use the real draft,
+    // quarantine and enrollment APIs rather than rewriting binding_json.
+    let original_binding = observed.binding.clone();
+    let mut next = original_binding.clone();
+    match case {
+        RecoveryBinding::Renamed | RecoveryBinding::RenamedBack => {
+            next.current_path = "renamed.md".into();
+        }
+        RecoveryBinding::Selectors => next.selector_paths = vec!["folder".into()],
+        RecoveryBinding::Unchanged => {}
+    }
+    let bindings = if matches!(case, RecoveryBinding::RenamedBack) {
+        vec![next, original_binding]
+    } else {
+        vec![next]
+    };
+    let recovery_host = Ydoc::wire();
+    recovery_host.apply(&checkpoint).unwrap();
+    if !later_generation {
+        recovery_host.apply(&host.encode_full_state()).unwrap();
+    }
+    for (step, next) in bindings.iter().enumerate() {
+        let dohc_engine_storage::TxnOutcome::Committed(parent) = store
+            .write_with(&NoFaults, |tx| {
+                append_draft_in_tx(
+                    tx,
+                    "ws",
+                    &observed.binding,
+                    observed.revision,
+                    format!("before-rebind-{step}"),
+                    checkpoint.clone(),
+                    3,
+                )
+            })
+            .unwrap()
+        else {
+            panic!("draft must commit")
+        };
+        dohc_engine_collab::owner_outbox::quarantine(
+            &mut store,
+            "ws",
+            OwnerOutboxQuarantineInput {
+                outbox_id: parent.outbox_id,
+                reason: "binding-changed".into(),
+                observed_binding: None,
+            },
+            4,
+        )
+        .unwrap();
+        store
+            .read_with(|conn| conn.execute("UPDATE ydoc_docs SET path=?1", [&next.current_path]))
+            .unwrap();
+        let OwnerEnrollmentPreparation::Capture { captured } = store
+            .read_with(|conn| prepare_in(conn, next, "relay", true))
+            .unwrap()
+        else {
+            panic!("recovery must capture")
+        };
+        let input = OwnerEnrollmentInput {
+            binding: next.clone(),
+            relay_database_namespace: "relay".into(),
+            captured,
+            journal_cursor: if later_generation || step + 1 < bindings.len() {
+                0
+            } else {
+                1
+            },
+            checkpoint: recovery_host.encode_full_state(),
+            host_vector: recovery_host.encode_state_vector(),
+            recovery: true,
+        };
+        let dohc_engine_storage::TxnOutcome::Committed(recovered) = store
+            .write_with(&NoFaults, |tx| {
+                enroll_in_tx(tx, "ws", &input, &observed.limits, 5)
+            })
+            .unwrap()
+        else {
+            panic!("recovery must commit")
+        };
+        assert_eq!(&recovered.binding, next);
+        assert_eq!(recovered.binding.restore_fence_generation, 0);
+        observed.binding = recovered.binding;
+        observed.revision = recovered.revision;
+    }
+    let mut next = observed.binding.clone();
+    if later_generation {
+        let waiting = crate::moment_apply::pending::drain_and_claim(
+            &mut store,
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+        assert!(
+            waiting.report_id.is_none(),
+            "rename still waits for the cursor"
+        );
+        next.restore_fence_generation = 1;
+        let advanced = enroll_restore(&mut store, &next, &host, 0, &observed.limits);
+        assert_eq!(advanced.binding, next);
+    }
+    let before = snapshot(&store, "object");
+    let mut report =
+        crate::moment_apply::pending::drain_and_claim(&mut store, "ws", &NoFaults, &NoLiveLeases)
+            .unwrap();
+    assert!(
+        report.report_id.is_some(),
+        "a stale binding must reach a final decision"
+    );
+    let applies = matches!(
+        case,
+        RecoveryBinding::Unchanged | RecoveryBinding::RenamedBack
+    );
+    if applies {
+        assert!(!report.changes.is_empty());
+        assert_eq!(disposition(&store, "host").as_deref(), Some("applied"));
+        assert_eq!(snapshot(&store, "object").unwrap().3, id);
+        assert!(
+            crate::list_refusal_notices(&store, "ws")
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .read_with(|conn| conn.query_row(
+                    "SELECT COUNT(*) FROM moments WHERE moment_id=?1",
+                    [&id],
+                    |row| row.get::<_, i64>(0),
+                ))
+                .unwrap(),
+            1
+        );
+        // A crash can leave an applied report to reclaim after another rename.
+        let mut rebound = next.clone();
+        rebound.current_path = "renamed-again.md".into();
+        store
+            .read_with(|conn| {
+                conn.execute(
+                    "UPDATE ydoc_owner_bindings SET binding_json=?1",
+                    [serde_json::to_string(&rebound).unwrap()],
+                )
+            })
+            .unwrap();
+        report = crate::moment_apply::pending::drain_and_claim(
+            &mut store,
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+        assert!(report.report_id.is_some());
+        assert_eq!(disposition(&store, "host").as_deref(), Some("applied"));
+        assert!(
+            crate::list_refusal_notices(&store, "ws")
+                .unwrap()
+                .is_empty()
+        );
+    } else {
+        assert!(report.changes.is_empty());
+        assert_eq!(disposition(&store, "host").as_deref(), Some("refused"));
+        let reason = store
+            .read_with(|conn| {
+                conn.query_row(
+                "SELECT reason_message FROM replication_pending_refusals WHERE origin_id='host'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            })
+            .unwrap();
+        assert_eq!(
+            reason,
+            if later_generation {
+                crate::moment_apply::pending::SUPERSEDED
+            } else {
+                "This file's name, location, or sharing changed before this save arrived. Open the file to continue."
+            }
+        );
+        assert_eq!(snapshot(&store, "object"), before);
+        assert_eq!(
+            store
+                .read_with(|conn| conn.query_row(
+                    "SELECT COUNT(*) FROM moments WHERE moment_id=?1",
+                    [&id],
+                    |row| row.get::<_, i64>(0),
+                ))
+                .unwrap(),
+            0
+        );
+        if !later_generation {
+            let notices = crate::list_refusal_notices(&store, "ws").unwrap();
+            assert_eq!(
+                notices[0].document.as_ref().unwrap().path.as_deref(),
+                Some(next.current_path.as_str())
+            );
+        }
+    }
+    crate::commit_relay_cursor(
+        &mut store,
+        "ws",
+        &crate::RelayCursor {
+            bootstrap_complete: true,
+            cursor: 1,
+            replication_epoch: "epoch".into(),
+            stream_identity: "stream".into(),
+            settlement_report_id: report.report_id,
+        },
+        &NoFaults,
+        &NoLiveLeases,
+        6,
+    )
+    .unwrap();
+    assert_eq!(
+        store.table_row_count("owner_pending_settlements").unwrap(),
+        0
+    );
+    assert_eq!(
+        store
+            .table_row_count("owner_pending_settlement_blobs")
+            .unwrap(),
+        0
+    );
+    if !applies {
+        assert_eq!(store.read_with(|conn| conn.query_row(
+        "SELECT COUNT(*) FROM replication_refused_moment_blobs WHERE origin_id='host' AND role='payload-after' AND text_sha256=?1",
+        [text_sha(&text)], |row| row.get::<_, i64>(0),
+    )).unwrap(), 1);
+        if !later_generation {
+            let notices = crate::list_refusal_notices(&store, "ws").unwrap();
+            assert_eq!(
+                notices[0].document.as_ref().unwrap().path.as_deref(),
+                Some(next.current_path.as_str())
+            );
+            next.current_path = "moved-again.md".into();
+            store
+                .read_with(|conn| {
+                    conn.execute(
+                        "UPDATE ydoc_owner_bindings SET binding_json=?1",
+                        [serde_json::to_string(&next).unwrap()],
+                    )
+                })
+                .unwrap();
+            let notices = crate::list_refusal_notices(&store, "ws").unwrap();
+            assert_eq!(
+                notices[0].document.as_ref().unwrap().path.as_deref(),
+                Some("moved-again.md")
+            );
+            store
+                .read_with(|conn| conn.execute("DELETE FROM ydoc_owner_bindings", []))
+                .unwrap();
+            let notices = crate::list_refusal_notices(&store, "ws").unwrap();
+            assert!(notices[0].document.as_ref().unwrap().path.is_none());
+        }
+    }
+}
+
 /// An owner observed at restore generation 0 and accepted cursor 0.
 struct RestoreOwner {
     _scratch: ScratchDir,
@@ -1771,6 +2229,16 @@ struct RestoreOwner {
 }
 
 fn restore_owner() -> RestoreOwner {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../dohc-engine-collab/tests/owner-source/owner-source-seed.json"
+    ))
+    .unwrap();
+    let original: Vec<u8> = serde_json::from_value(fixture["bytes"].clone()).unwrap();
+    let initial_text = fixture["markdown"].as_str().unwrap().to_owned();
+    restore_owner_from(&original, &initial_text, "owner.md")
+}
+
+fn restore_owner_from(original: &[u8], initial_text: &str, path: &str) -> RestoreOwner {
     use dohc_engine_collab::live_object_binding::LiveObjectBinding;
     use dohc_engine_collab::owner_outbox::{
         OwnerOutboxLimits,
@@ -1778,18 +2246,12 @@ fn restore_owner() -> RestoreOwner {
     };
     let (scratch, mut store) = test_store();
     crate::adopt_join_identity(&mut store, "ws", "local", "epoch", "stream", 1, &NoFaults).unwrap();
-    let fixture: Value = serde_json::from_str(include_str!(
-        "../../dohc-engine-collab/tests/owner-source/owner-source-seed.json"
-    ))
-    .unwrap();
-    let original: Vec<u8> = serde_json::from_value(fixture["bytes"].clone()).unwrap();
-    let initial_text = fixture["markdown"].as_str().unwrap().to_owned();
     let initial_moment = format!("moment-ydoc-{}", "a".repeat(64));
     seed_text_moment(
         &mut store,
         "object",
-        "owner.md",
-        &initial_text,
+        path,
+        initial_text,
         &initial_moment,
         None,
         true,
@@ -1799,13 +2261,13 @@ fn restore_owner() -> RestoreOwner {
         &mut store,
         &key,
         YdocContentKind::Richdoc,
-        &original,
+        original,
         &NoFaults,
         2,
     )
     .unwrap();
     store
-        .read_with(|conn| conn.execute("UPDATE ydoc_docs SET path='owner.md'", []))
+        .read_with(|conn| conn.execute("UPDATE ydoc_docs SET path=?1", [path]))
         .unwrap();
     let checkpoint = store
         .read_with(|conn| dohc_engine_collab::load_doc_in(conn, &key))
@@ -1816,9 +2278,9 @@ fn restore_owner() -> RestoreOwner {
             workspace_id: "ws".into(),
             main_version_id: "main".into(),
             object_id: "object".into(),
-            lineage_claim_id: hex_sha256(&original),
-            current_path: "owner.md".into(),
-            selector_paths: vec!["owner.md".into()],
+            lineage_claim_id: hex_sha256(original),
+            current_path: path.into(),
+            selector_paths: vec![path.into()],
             restore_fence_generation: 0,
         },
         relay_database_namespace: "relay".into(),
@@ -1845,9 +2307,582 @@ fn restore_owner() -> RestoreOwner {
         store,
         observed,
         checkpoint,
-        initial_text,
+        initial_text: initial_text.into(),
         initial_moment,
     }
+}
+
+#[test]
+fn observed_owner_settlement_preserves_pending_field_history_through_acceptance() {
+    pending_field_settlement(false);
+}
+
+#[test]
+fn observed_owner_settlement_replay_preserves_pending_field_history_through_acceptance() {
+    pending_field_settlement(true);
+}
+
+fn apply_test_owner_frame(owner: &mut RestoreOwner, update: Vec<u8>, cursor: i64) {
+    use dohc_engine_collab::owner_outbox::accepted::{OwnerAcceptedFrameInput, apply_frame_in_tx};
+    let observed = &owner.observed;
+    let dohc_engine_storage::TxnOutcome::Committed(result) = owner
+        .store
+        .write_with(&NoFaults, |tx| {
+            apply_frame_in_tx(
+                tx,
+                "ws",
+                &OwnerAcceptedFrameInput {
+                    binding: observed.binding.clone(),
+                    relay_database_namespace: "relay".into(),
+                    expected_revision: observed.revision,
+                    expected_native_head_sequence: observed.native_head_sequence,
+                    previous_accepted_cursor: observed.accepted_cursor,
+                    journal_cursor: cursor,
+                    update_bytes: update,
+                },
+                10 + cursor,
+            )
+        })
+        .unwrap()
+    else {
+        panic!("frame must commit")
+    };
+    owner.observed.revision = result.revision;
+    owner.observed.native_head_sequence = result.native_head_sequence;
+    owner.observed.accepted_cursor = result.accepted_cursor;
+}
+
+fn assert_pending_status(owner: &RestoreOwner) {
+    owner.store.read_with(|conn| {
+        let indexed = dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(conn, "ws", "main", "object").unwrap().unwrap();
+        let visible = dohc_engine_collab::owner_outbox::draft::open_draft_in(conn, &owner.observed.binding, owner.observed.revision).unwrap();
+        assert_eq!(indexed["status"], json!("done"));
+        assert_eq!(indexed["status"], visible.doc.frontmatter_json()["status"]);
+        let mut stmt = conn.prepare("SELECT previous_value_json,next_value_json,author_origin_id FROM collection_field_history WHERE field_name='status' ORDER BY history_id")?;
+        let history = stmt.query_map([], |r| Ok((r.get::<_, Option<String>>(0)?,r.get::<_, Option<String>>(1)?,r.get::<_, Option<String>>(2)?)))?.collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(history, vec![(Some("\"open\"".into()), Some("\"done\"".into()), None)]);
+        Ok::<_, rusqlite::Error>(())
+    }).unwrap();
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PendingFieldSettlement {
+    Direct,
+    Replay,
+    Quarantined,
+    QuarantinedRefusal,
+    StorageFailure,
+    Oversize,
+    ReplayFailure,
+    NonFiniteFields,
+    RequotedNonFinite,
+}
+
+#[test]
+fn observed_owner_quarantine_refusal_then_settlement_keeps_checkpoint_history() {
+    pending_field_settlement_case(PendingFieldSettlement::QuarantinedRefusal);
+}
+
+#[test]
+fn observed_owner_settlement_replay_storage_error_rolls_back_the_moment() {
+    pending_field_settlement_case(PendingFieldSettlement::StorageFailure);
+}
+
+#[test]
+fn observed_owner_quarantine_then_settlement_preserves_history_actor() {
+    pending_field_settlement_case(PendingFieldSettlement::Quarantined);
+}
+
+#[test]
+fn observed_owner_oversize_checkpoint_and_drafts_do_not_fail_settlement() {
+    pending_field_settlement_case(PendingFieldSettlement::Oversize);
+}
+
+#[test]
+fn observed_owner_indexing_replay_failure_does_not_stop_frames_or_settlement() {
+    pending_field_settlement_case(PendingFieldSettlement::ReplayFailure);
+}
+
+#[test]
+fn observed_owner_settlement_flags_restored_source_beside_draft_values() {
+    pending_field_settlement_case(PendingFieldSettlement::NonFiniteFields);
+}
+
+#[test]
+fn observed_owner_settlement_keeps_draft_quoted_value_over_equal_checkpoint_value() {
+    pending_field_settlement_case(PendingFieldSettlement::RequotedNonFinite);
+}
+
+fn pending_field_settlement(replay: bool) {
+    pending_field_settlement_case(if replay {
+        PendingFieldSettlement::Replay
+    } else {
+        PendingFieldSettlement::Direct
+    });
+}
+
+fn pending_field_settlement_case(case: PendingFieldSettlement) {
+    let replay = case == PendingFieldSettlement::Replay;
+
+    use dohc_engine_collab::owner_outbox::draft::append_draft_in_tx;
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../dohc-engine-collab/tests/owner-source/owner-source-seed.json"
+    ))
+    .unwrap();
+    let doc = Ydoc::wire();
+    doc.apply(&serde_json::from_value::<Vec<u8>>(fixture["bytes"].clone()).unwrap())
+        .unwrap();
+    doc.frontmatter_set("id", "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa")
+        .unwrap();
+    doc.frontmatter_set("status", "open").unwrap();
+    let requoted = case == PendingFieldSettlement::RequotedNonFinite;
+    let non_finite = requoted || case == PendingFieldSettlement::NonFiniteFields;
+    // The accepted `.nan` that the draft leaves alone.
+    let untouched = if requoted { "effort" } else { "estimate" };
+    let text = doc.project(YdocContentKind::Richdoc).unwrap().content;
+    let mut owner = restore_owner_from(&doc.encode_full_state(), &text, "tasks/owner.md");
+    seed_text_moment(
+        &mut owner.store,
+        "schema",
+        "tasks/collection.yaml",
+        if non_finite {
+            "fields:\n  status:\n    type: text\n  estimate:\n    type: number\n  \
+             effort:\n    type: number\n"
+        } else {
+            "fields:\n  status:\n    type: text\n"
+        },
+        "schema",
+        None,
+        true,
+    );
+    owner
+        .store
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_domain::reconcile_collections_in_tx(tx, "ws", "main")
+        })
+        .unwrap();
+    let host = Ydoc::wire();
+    host.apply(&owner.checkpoint).unwrap();
+    apply_test_owner_frame(
+        &mut owner,
+        host.richdoc_append_paragraph("accepted body"),
+        1,
+    );
+    if non_finite {
+        // A restore keeps source text that the generated emitter would quote.
+        let current = host.project(YdocContentKind::Richdoc).unwrap().content;
+        let restored = current.replacen("---\n", "---\nestimate: .nan\neffort: .nan\n", 1);
+        apply_test_owner_frame(
+            &mut owner,
+            host.rewrite_content_to_markdown(YdocContentKind::Richdoc, &restored)
+                .unwrap(),
+            2,
+        );
+    }
+    let draft = Ydoc::wire();
+    draft.apply(&host.encode_full_state()).unwrap();
+    let vector = draft.encode_state_vector();
+    draft.frontmatter_set("status", "done").unwrap();
+    if requoted {
+        // The draft quotes the accepted value. Its JSON value stays the same.
+        let shown = draft.project(YdocContentKind::Richdoc).unwrap().content;
+        let quoted = shown.replacen("\nestimate: .nan\n", "\nestimate: \".nan\"\n", 1);
+        assert_ne!(quoted, shown);
+        draft
+            .frontmatter_set_preserving_markdown_source("estimate", ".nan", &quoted)
+            .unwrap();
+        assert_eq!(
+            draft.frontmatter_json()["estimate"],
+            host.frontmatter_json()["estimate"]
+        );
+    } else if non_finite {
+        draft.frontmatter_set("effort", "7").unwrap();
+    }
+    if case == PendingFieldSettlement::Oversize {
+        draft.richdoc_append_paragraph(&"pending body ".repeat(170_000));
+        owner.observed.limits.max_pending_bytes = 3_000_000;
+        owner
+            .store
+            .read_with(|conn| {
+                conn.execute(
+                    "UPDATE ydoc_owner_bindings SET max_pending_bytes=3000000",
+                    [],
+                )
+            })
+            .unwrap();
+    }
+    let pending = draft.diff(&vector).unwrap();
+    owner
+        .store
+        .write_with(&NoFaults, |tx| {
+            append_draft_in_tx(
+                tx,
+                "ws",
+                &owner.observed.binding,
+                owner.observed.revision,
+                "pending-status".into(),
+                pending.clone(),
+                12,
+            )
+        })
+        .unwrap();
+    assert_pending_status(&owner);
+    let draft_fields = non_finite.then(|| record_fields(&owner));
+    if let Some(fields) = &draft_fields {
+        // The draft indexed the restored value from JSON, without its source.
+        let accepted = fields.iter().find(|field| field.0 == untouched).unwrap();
+        assert!(
+            !accepted
+                .3
+                .as_deref()
+                .unwrap_or_default()
+                .contains("number-not-finite")
+        );
+    }
+    if requoted {
+        let fields = draft_fields.as_ref().unwrap();
+        let estimate = fields.iter().find(|field| field.0 == "estimate").unwrap();
+        assert!(
+            estimate
+                .3
+                .as_deref()
+                .is_some_and(|code| code.contains("expected-number"))
+        );
+        let shown = visible_draft_text(&owner);
+        assert!(shown.contains("\nestimate: \".nan\"\n"));
+    }
+    if matches!(
+        case,
+        PendingFieldSettlement::Quarantined | PendingFieldSettlement::QuarantinedRefusal
+    ) {
+        if case == PendingFieldSettlement::QuarantinedRefusal {
+            // Refuse a body-only entry while an independent field edit survives.
+            // It must not bring the frozen field edit back into the index.
+            let independent = Ydoc::wire();
+            independent.apply(&host.encode_full_state()).unwrap();
+            owner
+                .store
+                .write_with(&NoFaults, |tx| {
+                    append_draft_in_tx(
+                        tx,
+                        "ws",
+                        &owner.observed.binding,
+                        owner.observed.revision,
+                        "pending-body".into(),
+                        independent.richdoc_append_paragraph("in-flight body"),
+                        13,
+                    )
+                })
+                .unwrap();
+        }
+        let descriptor = owner
+            .store
+            .read_with(|conn| {
+                dohc_engine_collab::owner_outbox::draft::descriptor_for_key_in(
+                    conn,
+                    &DocKey::new("ws", "main", "object").unwrap(),
+                )
+            })
+            .unwrap()
+            .unwrap();
+        for _ in 0..2 {
+            dohc_engine_collab::owner_outbox::quarantine(
+                &mut owner.store,
+                "ws",
+                dohc_engine_collab::owner_outbox::OwnerOutboxQuarantineInput {
+                    outbox_id: descriptor.outbox_id.clone().unwrap(),
+                    reason: "restore-fenced".into(),
+                    observed_binding: None,
+                },
+                20,
+            )
+            .unwrap();
+        }
+        assert_quarantined_status(&owner);
+        if case == PendingFieldSettlement::QuarantinedRefusal {
+            let outbox = descriptor.outbox_id.unwrap();
+            let queued =
+                dohc_engine_collab::owner_outbox::read_pending(&owner.store, "ws", &outbox)
+                    .unwrap();
+            let entry = queued
+                .entries
+                .iter()
+                .find(|entry| entry.append_key == "pending-body")
+                .unwrap();
+            let refusal = dohc_engine_collab::owner_outbox::OwnerOutboxRefuseInput {
+                outbox_id: outbox,
+                delivery_id: entry.delivery_id.clone(),
+                update_digest: entry.update_digest.clone(),
+                reason: "access-revoked".into(),
+            };
+            for _ in 0..2 {
+                owner
+                    .store
+                    .write_with(&NoFaults, |tx| {
+                        dohc_engine_collab::owner_outbox::refuse_entry_in_tx(tx, "ws", &refusal, 21)
+                    })
+                    .unwrap();
+            }
+            assert_quarantined_status(&owner);
+        }
+    }
+    if case == PendingFieldSettlement::Oversize {
+        let vector = host.encode_state_vector();
+        // Deleted CRDT payload stays in the checkpoint, but the settled text is small.
+        host.richdoc_append_paragraph(&"x".repeat(19 * 1024 * 1024));
+        host.rewrite_content_to_markdown_for_fold(YdocContentKind::Richdoc, &text)
+            .unwrap();
+        assert!(host.encode_full_state().len() < dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES);
+        apply_test_owner_frame(&mut owner, host.diff(&vector).unwrap(), 2);
+        let visible = Ydoc::wire();
+        visible.apply(&host.encode_full_state()).unwrap();
+        visible.apply(&pending).unwrap();
+        assert!(
+            visible.encode_full_state().len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES
+        );
+    }
+    if case == PendingFieldSettlement::ReplayFailure {
+        // A retained entry can no longer be replayed. Indexing must not roll back sync.
+        owner.store.read_with(|conn| conn.execute("UPDATE owner_ydoc_outbox_entries SET byte_length=byte_length+1 WHERE pending=1", [])).unwrap();
+        apply_test_owner_frame(
+            &mut owner,
+            host.frontmatter_set("status", "remote").unwrap(),
+            2,
+        );
+        assert_retained_status(&owner);
+    }
+    let later_frame = replay.then(|| host.richdoc_append_paragraph("settled before its frame"));
+    let settled = host.project(YdocContentKind::Richdoc).unwrap().content;
+    assert!(!non_finite || settled.contains("\nestimate: .nan\neffort: .nan\n"));
+    let cursor = if replay {
+        2
+    } else {
+        owner.observed.accepted_cursor
+    };
+    let id = format!("moment-ydoc-{}", "b".repeat(64));
+    hydrate_texts(&mut owner.store, &[&settled]);
+    retain_restore_audit(
+        &owner.store,
+        &owner.observed.binding,
+        "relay",
+        &id,
+        &settled,
+        cursor,
+    );
+    let settlement = envelope(
+        "host",
+        0,
+        "ws",
+        present_text_payload(
+            &id,
+            "object",
+            "write",
+            "tasks/owner.md",
+            "tasks/owner.md",
+            &owner.initial_text,
+            &owner.initial_moment,
+            &settled,
+        ),
+    );
+    if case == PendingFieldSettlement::StorageFailure {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let denied = Arc::new(AtomicBool::new(false));
+        let captured = denied.clone();
+        let before = snapshot(&owner.store, "object");
+        let moments = owner.store.table_row_count("moments").unwrap();
+        let log = owner.store.table_row_count("replication_log").unwrap();
+        owner
+            .store
+            .read_with(|conn| {
+                conn.authorizer(Some(move |ctx: AuthContext<'_>| {
+                    if matches!(
+                        ctx.action,
+                        AuthAction::Read {
+                            table_name: "owner_ydoc_outbox_entries",
+                            column_name: "byte_length"
+                        }
+                    ) && !captured.swap(true, Ordering::SeqCst)
+                    {
+                        Authorization::Deny
+                    } else {
+                        Authorization::Allow
+                    }
+                }))
+            })
+            .unwrap();
+        let result = crate::apply_moment_envelope_detailed(
+            &mut owner.store,
+            &settlement,
+            &NoFaults,
+            &crate::AlwaysLive,
+        );
+        owner
+            .store
+            .read_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
+            .unwrap();
+        assert!(denied.load(Ordering::SeqCst));
+        assert!(matches!(result, Err(SyncError::Storage(_))));
+        assert_eq!(snapshot(&owner.store, "object"), before);
+        assert_eq!(owner.store.table_row_count("moments").unwrap(), moments);
+        assert_eq!(owner.store.table_row_count("replication_log").unwrap(), log);
+        assert_pending_status(&owner);
+    }
+    let result = crate::apply_moment_envelope_detailed(
+        &mut owner.store,
+        &settlement,
+        &NoFaults,
+        &crate::AlwaysLive,
+    )
+    .unwrap();
+    assert!(matches!(result.primary, ApplyDisposition::Applied(ref r) if r.record_facts.is_none()));
+    if let Some(mut fields) = draft_fields {
+        // Accepted `.nan` takes its parse flag. Draft values keep their index.
+        let (accepted, others): (Vec<_>, Vec<_>) = record_fields(&owner)
+            .into_iter()
+            .partition(|field| field.0 == untouched);
+        assert!(
+            accepted[0]
+                .3
+                .as_deref()
+                .is_some_and(|code| code.contains("number-not-finite"))
+        );
+        fields.retain(|field| field.0 != untouched);
+        assert_eq!(others, fields);
+    }
+    if requoted {
+        // The draft's quoted value still shows over the checkpoint's `.nan`.
+        let shown = visible_draft_text(&owner);
+        assert!(shown.contains("\nestimate: \".nan\"\n"));
+    }
+    if let Some(update) = later_frame {
+        assert_eq!(
+            owner
+                .store
+                .table_row_count("owner_pending_settlements")
+                .unwrap(),
+            1
+        );
+        apply_test_owner_frame(&mut owner, update, cursor);
+        assert_pending_status(&owner);
+        let drained = super::moment_apply::pending::drain_and_claim(
+            &mut owner.store,
+            "ws",
+            &NoFaults,
+            &crate::AlwaysLive,
+        )
+        .unwrap();
+        assert!(drained.record_facts.is_empty());
+        assert_eq!(drained.changes.len(), 1);
+    }
+    match case {
+        PendingFieldSettlement::Quarantined | PendingFieldSettlement::QuarantinedRefusal => {
+            assert_quarantined_status(&owner)
+        }
+        PendingFieldSettlement::ReplayFailure => assert_retained_status(&owner),
+        PendingFieldSettlement::Oversize => {
+            owner.store.read_with(|conn| {
+                let visible = dohc_engine_collab::load_doc_in(conn, &DocKey::new("ws", "main", "object").unwrap()).unwrap();
+                dohc_engine_collab::owner_outbox::draft::apply_pending_to_checkpoint_in(conn, &owner.observed.binding, &visible).unwrap();
+                let indexed = dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(conn, "ws", "main", "object").unwrap().unwrap();
+                assert_eq!(indexed["status"], visible.frontmatter_json()["status"]);
+                Ok::<_, rusqlite::Error>(())
+            }).unwrap();
+        }
+        _ => assert_pending_status(&owner),
+    }
+    assert_eq!(
+        snapshot(&owner.store, "object").unwrap().2,
+        text_sha(&settled)
+    );
+    if matches!(
+        case,
+        PendingFieldSettlement::Quarantined
+            | PendingFieldSettlement::QuarantinedRefusal
+            | PendingFieldSettlement::Oversize
+            | PendingFieldSettlement::ReplayFailure
+    ) {
+        return;
+    }
+    let accepted_cursor = owner.observed.accepted_cursor + 1;
+    apply_test_owner_frame(&mut owner, pending, accepted_cursor);
+    assert_pending_status(&owner);
+}
+
+fn assert_quarantined_status(owner: &RestoreOwner) {
+    owner.store.read_with(|conn| {
+        let indexed = dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(conn, "ws", "main", "object").unwrap().unwrap();
+        assert_eq!(indexed["status"], json!("open"));
+        let mut stmt = conn.prepare("SELECT previous_value_json,next_value_json,author_origin_id FROM collection_field_history WHERE field_name='status' ORDER BY history_id")?;
+        let history = stmt.query_map([], |r| Ok((r.get::<_, Option<String>>(0)?,r.get::<_, Option<String>>(1)?,r.get::<_, Option<String>>(2)?)))?.collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(history, vec![(Some("\"open\"".into()), Some("\"done\"".into()), None), (Some("\"done\"".into()), Some("\"open\"".into()), Some("owner-draft-quarantine".into()))]);
+        assert!(matches!(dohc_engine_collab::owner_outbox::draft::open_draft_in(conn, &owner.observed.binding, owner.observed.revision), Err(dohc_engine_collab::OwnerOutboxError::Frozen)));
+        Ok::<_, rusqlite::Error>(())
+    }).unwrap();
+}
+
+fn assert_retained_status(owner: &RestoreOwner) {
+    owner
+        .store
+        .read_with(|conn| {
+            let indexed =
+                dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(
+                    conn, "ws", "main", "object",
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(indexed["status"], json!("done"));
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM collection_field_history WHERE field_name='status'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(count, 1);
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+}
+
+fn record_fields(owner: &RestoreOwner) -> Vec<(String, String, String, Option<String>)> {
+    owner
+        .store
+        .read_with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT field_name,value_json,validation_status,validation_reason_json \
+                 FROM collection_record_fields ORDER BY field_name",
+            )?;
+            let fields = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok::<_, rusqlite::Error>(fields)
+        })
+        .unwrap()
+}
+
+fn visible_draft_text(owner: &RestoreOwner) -> String {
+    owner
+        .store
+        .read_with(|conn| {
+            let draft = dohc_engine_collab::owner_outbox::draft::open_draft_in(
+                conn,
+                &owner.observed.binding,
+                owner.observed.revision,
+            )
+            .unwrap();
+            let projection = draft.doc.project(YdocContentKind::Richdoc).unwrap();
+            Ok::<_, rusqlite::Error>(projection.content)
+        })
+        .unwrap()
 }
 
 /// The host's state once a restore that appends `paragraph` is accepted.
@@ -1869,10 +2904,11 @@ fn retain_restore_audit(
     terminal_cursor: i64,
 ) {
     let record = format!(
-        "{{\"momentId\":{},\"relayDatabaseNamespace\":{},\"binding\":{},\"terminalCursor\":{terminal_cursor}}}",
+        "{{\"momentId\":{},\"relayDatabaseNamespace\":{},\"binding\":{},\"previousCursor\":{terminal_cursor},\"terminalCursor\":{terminal_cursor},\"acceptedEventCount\":0,\"acceptedIntervalDigest\":\"{}\"}}",
         serde_json::to_string(id).unwrap(),
         serde_json::to_string(namespace).unwrap(),
-        serde_json::to_string(binding).unwrap()
+        serde_json::to_string(binding).unwrap(),
+        "0".repeat(64)
     );
     store.read_with(|conn| conn.execute("INSERT INTO live_audit_settlements(settlement_id,workspace_id,record_digest,record_json,markdown_digest) VALUES (?1,'ws',?2,?3,?4)", params![id, hex_sha256(record.as_bytes()), record, text_sha(text)])).unwrap();
 }
@@ -1977,6 +3013,14 @@ fn public_create_author_survives_replay_but_is_not_republished_without_proof() {
                 )
                 .unwrap();
             assert_eq!(count, 1);
+            let stored: String = tx
+                .query_row(
+                    "SELECT author_json FROM moments WHERE moment_id='accepted-create'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(serde_json::from_str::<Value>(&stored).unwrap(), authors);
             let (exported, _) =
                 crate::outbound::moment_append_payload_in_tx(tx, "ws", "accepted-create").unwrap();
             assert!(exported.get("authors").is_none());
@@ -4060,6 +5104,72 @@ fn moment_append_head_fast_forward_write_delete_and_rename_updates_alias_snapsho
 }
 
 #[test]
+fn fix1_remote_delete_releases_capture_hold() {
+    let (_scratch, mut store) = test_store();
+    seed_text_moment(
+        &mut store,
+        "object-delete",
+        "delete.md",
+        "before",
+        "local-head",
+        None,
+        true,
+    );
+    let outside = format!("{} too deep\n", "> ".repeat(121));
+    store.write_with(&NoFaults, |tx| tx.execute(
+        "INSERT INTO capture_file_holds VALUES ('ws','main','object-delete','delete.md',?1,?2,'ydoc-resolution-not-representable',3,1,0)",
+        params![text_sha(&outside), outside.len() as i64]).map_err(dohc_engine_storage::StorageError::persist_public)).unwrap();
+    let delete = envelope(
+        "delete-peer",
+        0,
+        "ws",
+        present_text_payload(
+            "remote-delete",
+            "object-delete",
+            "delete",
+            "delete.md",
+            "delete.md",
+            "before",
+            "local-head",
+            "before",
+        ),
+    );
+    assert_eq!(
+        apply_moment_envelope(&mut store, &delete, &NoFaults).unwrap(),
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
+    );
+    assert!(
+        store
+            .read_with(|conn| dohc_engine_storage::capture_file_holds::hold_in(
+                conn,
+                "ws",
+                "delete.md"
+            ))
+            .unwrap()
+            .is_none()
+    );
+    let result = VersionedTextStore::new(&mut store)
+        .capture_ingest(
+            &dohc_engine_domain::CaptureIngest {
+                workspace_id: "ws".into(),
+                version_id: "main".into(),
+                path: "delete.md".into(),
+                text: "New outside file.\n".into(),
+                metadata_origin: "capture".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 4_000,
+                request_id: None,
+                claim_foreign_head: false,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    assert_eq!(result.snapshot.text, "New outside file.\n");
+}
+
+#[test]
 fn moment_append_live_lease_blocks_all_mutations_and_write_waits_for_ydoc_rewrite() {
     for (operation, after_path, after_text) in [
         ("write", "head.md", "changed"),
@@ -4248,7 +5358,16 @@ fn moment_append_live_lease_blocks_all_mutations_and_write_waits_for_ydoc_rewrit
 }
 
 #[test]
+fn open_document_covered_settlement_is_history_only_with_crash_replay() {
+    assert_covered_artifact_crash_replay(true);
+}
+
+#[test]
 fn covered_artifact_is_history_only_with_live_edits_and_crash_replay() {
+    assert_covered_artifact_crash_replay(false);
+}
+
+fn assert_covered_artifact_crash_replay(changed: bool) {
     use dohc_engine_storage::FaultPoint;
     use dohc_engine_testkit::ScriptedFaults;
     for advanced in [false, true] {
@@ -4319,14 +5438,58 @@ fn covered_artifact_is_history_only_with_live_edits_and_crash_replay() {
                     })
                 ));
             }
-            let before = snapshot(&store, "object");
+            let disk = scratch.path().join("head.md");
+            let disk_before = "artifact on disk";
+            std::fs::write(&disk, disk_before).unwrap();
+            let jobs = |store: &EngineStore| {
+                store
+                    .read_with(|conn| {
+                        conn.query_row("SELECT COUNT(*) FROM materialization_jobs", [], |r| {
+                            r.get::<_, i64>(0)
+                        })
+                    })
+                    .unwrap()
+            };
+            let jobs_before = jobs(&store);
+            let before = (
+                snapshot(&store, "object"),
+                aliases(&store, "object"),
+                indexed(&store, "object"),
+            );
             let leases = LeaseRegistry::new();
-            let _held = leases.acquire(&key).unwrap();
+            let held = leases.acquire(&key).unwrap();
+            held.bind_claim(base.payload["lineageClaimId"].as_str())
+                .unwrap();
+            let (seq, artifact) = if changed {
+                let delta = doc.plaintext_insert(8, " settled on peer");
+                let sha = store.put_binary_blob(&delta).unwrap();
+                let mut update = base.clone();
+                update.origin_seq = 1;
+                update.payload["updateBlobSha256"] = json!(sha);
+                update.payload["isBaseState"] = json!(false);
+                apply_ydoc_envelope(
+                    &mut store,
+                    &mut Default::default(),
+                    &update,
+                    &NoFaults,
+                    &leases,
+                )
+                .unwrap();
+                hydrate_texts(&mut store, &["artifact settled on peer"]);
+                (2, "artifact settled on peer")
+            } else {
+                (1, "artifact")
+            };
             let op = envelope(
                 "peer",
-                1,
+                seq,
                 "ws",
-                absent_text_payload("artifact-history", "object", "head.md", "artifact"),
+                absent_text_payload(
+                    "moment-ydoc-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "object",
+                    "head.md",
+                    artifact,
+                ),
             );
             let faults = ScriptedFaults::crash_at(point);
             let result =
@@ -4336,6 +5499,20 @@ fn covered_artifact_is_history_only_with_live_edits_and_crash_replay() {
             assert!(faults.fired());
             drop(store);
             let mut store = EngineStore::open(&engine_db_path(&scratch).unwrap(), 2_100).unwrap();
+            let committed: (i64, i64, i64) = store.read_with(|conn|conn.query_row("SELECT (SELECT COUNT(*) FROM moments WHERE moment_id='moment-ydoc-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'), (SELECT COUNT(*) FROM replication_log WHERE origin_id='peer' AND origin_seq=?1), (SELECT COUNT(*) FROM ydoc_pending_artifacts)", [seq], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))).unwrap();
+            let durable = point == FaultPoint::StorageAfterCommitBeforeAck;
+            assert_eq!(
+                committed,
+                if durable {
+                    (1, 1, i64::from(changed || advanced))
+                } else {
+                    (0, 0, 0)
+                }
+            );
+            assert_eq!(
+                read_replication_acked_seq(&store, "ws", "peer").unwrap(),
+                if durable { seq } else { seq - 1 }
+            );
             let result =
                 crate::apply_moment_envelope_detailed(&mut store, &op, &NoFaults, &leases).unwrap();
             if let ApplyDisposition::Applied(applied) = result.primary {
@@ -4344,12 +5521,32 @@ fn covered_artifact_is_history_only_with_live_edits_and_crash_replay() {
             } else {
                 assert!(matches!(result.primary, ApplyDisposition::Skipped));
             }
-            assert_eq!(snapshot(&store, "object"), before);
-            assert_eq!(read_replication_acked_seq(&store, "ws", "peer").unwrap(), 1);
+            assert_eq!(
+                (
+                    snapshot(&store, "object"),
+                    aliases(&store, "object"),
+                    indexed(&store, "object")
+                ),
+                before
+            );
+            assert_eq!(
+                read_replication_acked_seq(&store, "ws", "peer").unwrap(),
+                seq
+            );
             assert!(conflict_ids(&store).is_empty());
+            assert_eq!(std::fs::read_to_string(&disk).unwrap(), disk_before);
+            assert_eq!(jobs(&store), jobs_before);
             let rows:i64 = store.read_with(|conn|conn.query_row(
-                "SELECT COUNT(*) FROM moments WHERE moment_id='artifact-history' AND sync_record_only=1", [], |r|r.get(0))).unwrap();
+                "SELECT COUNT(*) FROM moments WHERE moment_id='moment-ydoc-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' AND sync_record_only=1", [], |r|r.get(0))).unwrap();
             assert_eq!(rows, 1);
+            assert!(matches!(
+                crate::apply_moment_envelope_detailed(&mut store, &op, &NoFaults, &leases)
+                    .unwrap()
+                    .primary,
+                ApplyDisposition::Skipped
+            ));
+            let journaled: i64 = store.read_with(|conn| conn.query_row("SELECT COUNT(*) FROM replication_log WHERE origin_id='peer' AND origin_seq=?1", [seq], |r| r.get(0))).unwrap();
+            assert_eq!(journaled, 1);
             assert!(
                 crate::moment_apply::stored_materialization_changes(&store, &op)
                     .unwrap()
@@ -4367,6 +5564,306 @@ fn covered_artifact_is_history_only_with_live_edits_and_crash_replay() {
             );
         }
     }
+}
+
+#[test]
+fn open_document_uncovered_or_structural_moments_still_hold() {
+    for case in [
+        "rename",
+        "write-path-change",
+        "delete",
+        "binary",
+        "drawing",
+        "refused",
+        "foreign",
+        "missing",
+        "session-predecessor",
+        "other-version",
+        "bound-owner",
+        "occupied",
+        "unclaimed",
+    ] {
+        assert_open_document_exclusion(case);
+    }
+}
+
+fn assert_open_document_exclusion(case: &str) {
+    let (_scratch, mut store) = test_store();
+    let mut owner_scratch = None;
+    let key = DocKey::new("ws", "main", "object").unwrap();
+    let doc = Ydoc::wire();
+    let path = if case == "drawing" {
+        "drawing.excalidraw"
+    } else {
+        "head.md"
+    };
+    let bytes = if case == "drawing" {
+        dohc_engine_collab::import_portable_scene(&json!({"type":"excalidraw", "version":2, "source":"https://excalidraw.com", "elements":[], "appState":{}, "files":{}}).to_string()).unwrap().initial_update
+    } else {
+        doc.plaintext_insert(0, "before")
+    };
+    let sha = store.put_binary_blob(&bytes).unwrap();
+    let base = ReplicationEnvelope {
+        op_kind: "ydoc.update".into(),
+        relay_seq: Some(1),
+        payload: json!({"versionId":"main","objectId":"object","path":path,"contentKind":if case == "drawing" { "scene" } else { "plaintext" },"updateBlobSha256":sha,"lineageClaimId":sha,"isBaseState":true}),
+        ..envelope("peer", 0, "ws", json!({}))
+    };
+    apply_ydoc_envelope(
+        &mut store,
+        &mut Default::default(),
+        &base,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap();
+    hydrate_texts(&mut store, &["changed"]);
+    let mut op = envelope(
+        "peer",
+        1,
+        "ws",
+        absent_text_payload(
+            "moment-ydoc-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "object",
+            path,
+            "changed",
+        ),
+    );
+    match case {
+        "rename" => {
+            let before = snapshot(&store, "object").unwrap();
+            let text: String = store
+                .read_with(|conn| {
+                    conn.query_row("SELECT text FROM blobs WHERE sha256=?1", [&before.2], |r| {
+                        r.get(0)
+                    })
+                })
+                .unwrap();
+            op.payload = present_text_payload(
+                "moment-ydoc-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "object",
+                "rename",
+                path,
+                "renamed.md",
+                &text,
+                &before.3,
+                &text,
+            );
+        }
+        "write-path-change" => {
+            op.payload["payloadBeforePath"] = json!("old.md");
+            op.payload["payloadBeforeBlobSha256"] = json!(text_sha("changed"));
+        }
+        "delete" => {
+            let before = snapshot(&store, "object").unwrap();
+            let text: String = store
+                .read_with(|conn| {
+                    conn.query_row("SELECT text FROM blobs WHERE sha256=?1", [&before.2], |r| {
+                        r.get(0)
+                    })
+                })
+                .unwrap();
+            op.payload = present_text_payload(
+                "moment-ydoc-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "object",
+                "delete",
+                path,
+                path,
+                &text,
+                &before.3,
+                &text,
+            );
+        }
+        "binary" => {
+            let binary = store.put_binary_blob(&[0, 255]).unwrap();
+            op.payload["payloadAfterContentKind"] = json!("binary");
+            op.payload["payloadAfterBlobSha256"] = json!(binary);
+        }
+        "refused" | "dismissed-refusal" | "foreign" | "session-predecessor" => {
+            let mut latest = base.clone();
+            latest.origin_seq = 1;
+            latest.payload["isBaseState"] = json!(false);
+            let successor = Ydoc::wire();
+            successor.plaintext_insert(0, "successor");
+            let successor_claim = store
+                .put_binary_blob(&successor.encode_full_state())
+                .unwrap();
+            if !matches!(case, "refused" | "dismissed-refusal") {
+                latest.payload["lineageClaimId"] = json!(successor_claim);
+            }
+            let result = crate::apply_envelope_with(&mut store, &latest, &NoFaults, |_, _| {
+                if matches!(case, "refused" | "dismissed-refusal") {
+                    Err(SyncError::LiveDocumentBindingActive)
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap();
+            assert!(matches!(
+                result.primary,
+                ApplyDisposition::Applied(()) | ApplyDisposition::Refused(_)
+            ));
+            if case == "session-predecessor" {
+                store
+                    .read_with(|conn| {
+                        conn.execute(
+                            "UPDATE ydoc_docs SET lineage_claim_id=?1 WHERE object_id='object'",
+                            [successor_claim],
+                        )
+                    })
+                    .unwrap();
+            }
+            op.origin_seq = 2;
+        }
+        "unclaimed" => {
+            store.read_with(|conn|conn.execute("UPDATE ydoc_docs SET lineage_claim_status='unclaimed',lineage_claim_id=NULL WHERE object_id='object'", [])).unwrap();
+        }
+        "missing" => {
+            op.origin_id = "other-peer".into();
+            op.origin_seq = 0;
+        }
+        "bound-owner" => {
+            op.payload["momentId"] = json!("bound-owner-held");
+            let owner = restore_owner();
+            store = owner.store;
+            owner_scratch = Some(owner._scratch);
+            let claim = dohc_engine_collab::read_marker(&store, &key)
+                .unwrap()
+                .unwrap()
+                .lineage_claim_id
+                .unwrap();
+            let mut latest = base.clone();
+            latest.payload["lineageClaimId"] = json!(claim);
+            crate::apply_envelope_with(&mut store, &latest, &NoFaults, |_, _| Ok(())).unwrap();
+            hydrate_texts(&mut store, &["changed"]);
+            op.payload["path"] = json!("owner.md");
+            op.payload["payloadAfterPath"] = json!("owner.md");
+        }
+        "occupied" => {
+            store.read_with(|conn| conn.execute_batch("UPDATE snapshots SET path='elsewhere.md' WHERE object_id='object'; UPDATE path_aliases SET path='elsewhere.md' WHERE object_id='object';")).unwrap();
+            seed_text_moment(
+                &mut store,
+                "occupant",
+                path,
+                "occupant",
+                "occupant-head",
+                None,
+                true,
+            );
+        }
+        _ => {}
+    }
+    if case == "bare-write" {
+        op.payload["momentId"] = json!("bare-write");
+    }
+    if case == "dismissed-refusal" {
+        store
+            .read_with(|conn| conn.execute("DELETE FROM replication_pending_refusals", []))
+            .unwrap();
+    }
+
+    let leases = LeaseRegistry::new();
+    let held_key = if case == "other-version" {
+        DocKey::new("ws", "fork", "object").unwrap()
+    } else {
+        key.clone()
+    };
+    let held = leases.acquire(&held_key).unwrap();
+    let claim = dohc_engine_collab::read_marker(&store, &key)
+        .unwrap()
+        .unwrap()
+        .lineage_claim_id
+        .unwrap_or(sha.clone());
+    held.bind_claim(Some(if case == "session-predecessor" {
+        &sha
+    } else {
+        &claim
+    }))
+    .unwrap();
+    if case == "parked-successor" {
+        let successor = Ydoc::wire();
+        successor.plaintext_insert(0, "successor");
+        let successor_sha = store
+            .put_binary_blob(&successor.encode_full_state())
+            .unwrap();
+        let foreign = ReplicationEnvelope {
+            origin_id: "successor-peer".into(),
+            origin_seq: 0,
+            relay_seq: Some(2),
+            payload: json!({"versionId":"main","objectId":"object","path":path,"contentKind":"plaintext",
+                "updateBlobSha256":successor_sha,"lineageClaimId":successor_sha,"isBaseState":true}),
+            ..base.clone()
+        };
+        apply_ydoc_envelope(
+            &mut store,
+            &mut Default::default(),
+            &foreign,
+            &NoFaults,
+            &leases,
+        )
+        .unwrap();
+        let delta_sha = store
+            .put_binary_blob(&doc.plaintext_insert(6, " changed"))
+            .unwrap();
+        let queued = ReplicationEnvelope {
+            origin_seq: 1,
+            relay_seq: Some(3),
+            payload: json!({"versionId":"main","objectId":"object","path":path,"contentKind":"plaintext",
+                "updateBlobSha256":delta_sha,"lineageClaimId":sha,"isBaseState":false}),
+            ..base.clone()
+        };
+        apply_ydoc_envelope(
+            &mut store,
+            &mut Default::default(),
+            &queued,
+            &NoFaults,
+            &leases,
+        )
+        .unwrap();
+        hydrate_texts(&mut store, &["before changed"]);
+        op.origin_seq = 2;
+        op.payload["payloadAfterBlobSha256"] = json!(text_sha("before changed"));
+        let parked: i64 = store
+            .read_with(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |r| {
+                    r.get(0)
+                })
+            })
+            .unwrap();
+        assert_eq!(parked, 2);
+    }
+    let before = (
+        snapshot(&store, "object"),
+        aliases(&store, "object"),
+        indexed(&store, "object"),
+    );
+    let ack = read_replication_acked_seq(&store, "ws", &op.origin_id).unwrap();
+    assert!(
+        matches!(
+            crate::apply_moment_envelope_detailed(&mut store, &op, &NoFaults, &leases),
+            Err(SyncError::RetryableState {
+                reason: "ydoc-session-live"
+            })
+        ),
+        "{case}"
+    );
+    assert_eq!(
+        read_replication_acked_seq(&store, "ws", &op.origin_id).unwrap(),
+        ack,
+        "{case}"
+    );
+    assert_eq!(
+        (
+            snapshot(&store, "object"),
+            aliases(&store, "object"),
+            indexed(&store, "object")
+        ),
+        before,
+        "{case}"
+    );
+    assert!(conflict_ids(&store).is_empty(), "{case}");
+    drop(store);
+    drop(owner_scratch);
 }
 
 #[test]
@@ -6349,4 +7846,406 @@ fn moment_append_rejects_an_empty_binary_digest_as_storage_corruption_even_if_hy
         read_replication_acked_seq(&store, "ws", "peer").expect("ack"),
         -1
     );
+}
+
+#[test]
+fn open_document_bare_write_still_holds() {
+    assert_open_document_exclusion("bare-write");
+}
+#[test]
+fn open_document_dismissed_refusal_still_holds() {
+    assert_open_document_exclusion("dismissed-refusal");
+}
+#[test]
+fn open_document_parked_successor_still_holds() {
+    assert_open_document_exclusion("parked-successor");
+}
+
+pub(crate) fn ended_recovery_fixture() -> (ScratchDir, EngineStore, DocKey, Ydoc, String) {
+    let (scratch, mut store) = test_store();
+    let key = DocKey::new("ws", "main", "object").unwrap();
+    let doc = Ydoc::wire();
+    doc.plaintext_insert(0, "before");
+    let claim = store.put_binary_blob(&doc.encode_full_state()).unwrap();
+    let mut base = envelope(
+        "peer",
+        0,
+        "ws",
+        json!({"versionId":"main","objectId":"object","path":"head.md","contentKind":"plaintext","updateBlobSha256":claim,"lineageClaimId":claim,"isBaseState":true}),
+    );
+    base.op_kind = "ydoc.update".into();
+    base.relay_seq = Some(1);
+    apply_ydoc_envelope(
+        &mut store,
+        &mut Default::default(),
+        &base,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap();
+    let leases = LeaseRegistry::new();
+    let held = leases.acquire(&key).unwrap();
+    held.bind_claim(Some(&claim)).unwrap();
+    let delta = doc.plaintext_insert(6, " remote");
+    base.origin_seq = 1;
+    base.relay_seq = Some(2);
+    base.payload["isBaseState"] = json!(false);
+    base.payload["updateBlobSha256"] = json!(store.put_binary_blob(&delta).unwrap());
+    apply_ydoc_envelope(
+        &mut store,
+        &mut Default::default(),
+        &base,
+        &NoFaults,
+        &leases,
+    )
+    .unwrap();
+    hydrate_texts(&mut store, &["before remote"]);
+    let moment = envelope(
+        "peer",
+        2,
+        "ws",
+        absent_text_payload(
+            &format!("moment-ydoc-{}", "a".repeat(64)),
+            "object",
+            "head.md",
+            "before remote",
+        ),
+    );
+    crate::apply_moment_envelope_detailed(&mut store, &moment, &NoFaults, &leases).unwrap();
+    drop(held);
+    (scratch, store, key, doc, claim)
+}
+
+fn recover_ended(store: &mut EngineStore) -> Result<crate::OpenArtifactDrain, SyncError> {
+    crate::drain_open_document_artifacts(
+        store,
+        &mut Default::default(),
+        "ws",
+        &NoLiveLeases,
+        &NoFaults,
+    )
+}
+
+#[test]
+fn ended_recovery_storage_failure_propagates_without_notice_or_fingerprint() {
+    let (_scratch, mut store, _, _, _) = ended_recovery_fixture();
+    store.write_with(&NoFaults, |tx| {
+        tx.execute_batch("CREATE TRIGGER fail_projection BEFORE INSERT ON moments WHEN NEW.moment_id GLOB 'moment-ydoc-apply-*' BEGIN SELECT RAISE(ABORT,'projection unavailable'); END;").unwrap();
+        Ok::<_,SyncError>(())
+    }).unwrap();
+    assert!(matches!(
+        recover_ended(&mut store),
+        Err(SyncError::Storage(
+            dohc_engine_storage::StorageError::PersistFailed { .. }
+        ))
+    ));
+    store
+        .read_with(|conn| {
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_pending_refusals",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT last_attempt_state FROM ydoc_pending_artifacts",
+                    [],
+                    |r| r.get::<_, Option<String>>(0)
+                )
+                .unwrap(),
+                None
+            );
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn ended_recovery_append_storage_failure_propagates() {
+    let (_scratch, mut store, _, _, _) = ended_recovery_fixture();
+    store.write_with(&NoFaults, |tx| {
+        tx.execute_batch("CREATE TRIGGER fail_append BEFORE INSERT ON ydoc_updates BEGIN SELECT RAISE(ABORT,'append unavailable'); END;").unwrap();
+        Ok::<_,SyncError>(())
+    }).unwrap();
+    assert!(matches!(
+        recover_ended(&mut store),
+        Err(SyncError::Storage(
+            dohc_engine_storage::StorageError::PersistFailed { .. }
+        ))
+    ));
+    store
+        .read_with(|conn| {
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_pending_refusals",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT last_attempt_state FROM ydoc_pending_artifacts",
+                    [],
+                    |r| r.get::<_, Option<String>>(0)
+                )
+                .unwrap(),
+                None
+            );
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn ended_recovery_notice_persist_failure_propagates() {
+    let (_scratch, mut store, _, _, _) = ended_recovery_fixture();
+    store.write_with(&NoFaults, |tx| {
+        tx.execute("UPDATE replication_log SET payload_json='{}' WHERE origin_seq=1", []).unwrap();
+        tx.execute_batch("CREATE TRIGGER fail_notice BEFORE INSERT ON replication_pending_refusals BEGIN SELECT RAISE(ABORT,'notice unavailable'); END;").unwrap();
+        Ok::<_,SyncError>(())
+    }).unwrap();
+    assert!(matches!(
+        recover_ended(&mut store),
+        Err(SyncError::Storage(
+            dohc_engine_storage::StorageError::PersistFailed { .. }
+        ))
+    ));
+    let state: Option<String> = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT last_attempt_state FROM ydoc_pending_artifacts",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        state, None,
+        "notice and fingerprint must roll back together"
+    );
+}
+
+#[test]
+fn ended_recovery_pending_materialization_keeps_queue_and_unattempted_mark() {
+    let (_scratch, mut store, _, _, _) = ended_recovery_fixture();
+    store.write_with(&NoFaults, |tx| {
+        tx.execute("UPDATE ydoc_docs SET settle_prior_update_seq=0,settle_seq=(SELECT m.moment_order FROM moments m JOIN snapshots s ON s.latest_moment_id=m.moment_id WHERE s.object_id='object')", []).unwrap();
+        tx.execute("INSERT INTO materialization_jobs(job_id,target_path,content_sha256,preimage_present,target_generation,created_at_ms,workspace_id) SELECT 'ydoc-mat_'||latest_moment_id,path,blob_sha256,1,999,0,workspace_id FROM snapshots WHERE object_id='object' ON CONFLICT(job_id) DO UPDATE SET status='pending',completed_at_ms=NULL", []).unwrap();
+        Ok::<_,SyncError>(())
+    }).unwrap();
+    recover_ended(&mut store).unwrap();
+    store
+        .read_with(|conn| {
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_pending_refusals",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT last_attempt_state FROM ydoc_pending_artifacts",
+                    [],
+                    |r| r.get::<_, Option<String>>(0)
+                )
+                .unwrap(),
+                None
+            );
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn ended_recovery_notice_identity_survives_wording_change() {
+    let (_scratch, mut store, _, _, _) = ended_recovery_fixture();
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE replication_log SET payload_json='{}' WHERE origin_seq=1",
+                [],
+            )
+            .unwrap();
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    recover_ended(&mut store).unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            let code: String = tx
+                .query_row(
+                    "SELECT reason_code FROM replication_pending_refusals",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(code, "document-artifact-recovery-failed");
+            tx.execute(
+                "UPDATE replication_pending_refusals SET reason_message='Translated notice'",
+                [],
+            )
+            .unwrap();
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let notices = crate::refusal_notices::list_refusal_notices(&store, "ws");
+    // The document association and cleanup must use the code, not English copy.
+    assert_eq!(
+        notices.unwrap()[0].document.as_ref().unwrap().object_id,
+        "object"
+    );
+    store.write_with(&NoFaults, |tx| {
+        tx.execute("UPDATE ydoc_docs SET settled_update_seq=head_update_seq,last_settled_sha=(SELECT blob_sha256 FROM snapshots WHERE object_id='object')", []).unwrap();
+        assert_eq!(tx.query_row("SELECT COUNT(*) FROM replication_pending_refusals", [], |r|r.get::<_,i64>(0)).unwrap(),0);
+        Ok::<_,SyncError>(())
+    }).unwrap();
+}
+
+#[test]
+fn ended_recovery_retries_inserted_durable_update_blob() {
+    let (_scratch, mut store, key, doc, claim) = ended_recovery_fixture();
+    let (sha, bytes): (String,Vec<u8>)=store.read_with(|conn|conn.query_row("SELECT b.sha256,b.bytes FROM binary_blobs b JOIN replication_log r ON b.sha256=json_extract(r.payload_json,'$.updateBlobSha256') WHERE r.origin_seq=1", [], |r|Ok((r.get(0)?,r.get(1)?)))).unwrap();
+    dohc_engine_collab::apply_remote_update(
+        &mut store,
+        &mut Default::default(),
+        &key,
+        &dohc_engine_collab::RemoteUpdate {
+            origin_id: "peer".into(),
+            origin_seq: 1,
+            bytes: bytes.clone(),
+        },
+        None,
+        None,
+        &NoFaults,
+        2000,
+    )
+    .unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("DELETE FROM ydoc_deferred_updates WHERE origin_seq=1", [])
+                .unwrap();
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let tail = doc.plaintext_insert(13, " tail");
+    let tail_sha = store.put_binary_blob(&tail).unwrap();
+    let mut update = envelope(
+        "peer",
+        3,
+        "ws",
+        json!({"versionId":"main","objectId":"object","path":"head.md","contentKind":"plaintext","updateBlobSha256":tail_sha,"lineageClaimId":claim,"isBaseState":false}),
+    );
+    update.op_kind = "ydoc.update".into();
+    update.relay_seq = Some(4);
+    apply_ydoc_envelope(
+        &mut store,
+        &mut Default::default(),
+        &update,
+        &NoFaults,
+        &crate::AlwaysLive,
+    )
+    .unwrap();
+    // Model a missing durable blob while preserving the parked tail's blob.
+    store
+        .read_with(|conn| conn.execute_batch("PRAGMA foreign_keys=OFF"))
+        .unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("DELETE FROM binary_blobs WHERE sha256=?1", [&sha])
+                .unwrap();
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    recover_ended(&mut store).unwrap();
+    let attempted: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT last_attempt_state FROM ydoc_pending_artifacts",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    recover_ended(&mut store).unwrap();
+    assert_eq!(
+        store
+            .read_with(|conn| conn.query_row(
+                "SELECT last_attempt_state FROM ydoc_pending_artifacts",
+                [],
+                |r| r.get::<_, String>(0)
+            ))
+            .unwrap(),
+        attempted
+    );
+    store.put_binary_blob(&bytes).unwrap();
+    store
+        .read_with(|conn| conn.execute_batch("PRAGMA foreign_keys=ON"))
+        .unwrap();
+    recover_ended(&mut store).unwrap();
+    assert_eq!(
+        snapshot(&store, "object").unwrap().2,
+        text_sha("before remote tail")
+    );
+    let remaining:i64=store.read_with(|conn|conn.query_row("SELECT (SELECT COUNT(*) FROM ydoc_pending_artifacts)+(SELECT COUNT(*) FROM ydoc_deferred_updates)+(SELECT COUNT(*) FROM replication_pending_refusals)", [], |r|r.get(0))).unwrap();
+    assert_eq!(remaining, 0);
+}
+
+#[test]
+fn ended_recovery_notice_is_not_an_operation_refusal() {
+    let (_scratch, mut store, _, _, _) = ended_recovery_fixture();
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE replication_log SET payload_json='{}' WHERE origin_seq=1",
+                [],
+            )
+            .unwrap();
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    recover_ended(&mut store).unwrap();
+    assert_eq!(
+        crate::refusal_notices::list_refusal_notices(&store, "ws")
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        crate::apply::read_pending_refusals(&store, "ws")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn ended_recovery_restore_fence_waits_without_notice_or_fingerprint() {
+    let (_scratch, mut store, _, _, _) = ended_recovery_fixture();
+    store.write_with(&NoFaults, |tx| {
+        tx.execute("INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,input_json,receipt_json) VALUES ('ws','main','object','relay','restore','{}','{}')",[]).unwrap();
+        Ok::<_,SyncError>(())
+    }).unwrap();
+    recover_ended(&mut store).unwrap();
+    let result:(i64,Option<String>,i64)=store.read_with(|conn| conn.query_row("SELECT (SELECT COUNT(*) FROM replication_pending_refusals),last_attempt_state,(SELECT COUNT(*) FROM ydoc_deferred_updates) FROM ydoc_pending_artifacts",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))).unwrap();
+    assert_eq!(result, (0, None, 1));
 }

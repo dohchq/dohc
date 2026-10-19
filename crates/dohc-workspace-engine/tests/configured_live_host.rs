@@ -130,7 +130,7 @@ impl Daemon {
             id,
             method: method.into(),
             workspace,
-            deadline_ms: None,
+            deadline_ms: Some(30_000),
             idempotency_key: None,
             progress: false,
             params,
@@ -268,6 +268,258 @@ fn production_entrypoint_settles_bootstrap_and_replays_receipt_coverage() {
     assert_eq!(refused.error.code, ErrorCode::InvalidParams);
     drop(daemon.0.stdin.take());
     assert!(daemon.0.wait().unwrap().success());
+}
+
+#[test]
+fn production_entrypoint_unloads_a_settled_document_and_reloads_its_accepted_edits() {
+    use dohc_engine_storage::hex_sha256;
+    let scratch = ScratchDir::new().unwrap();
+    let root = scratch.path().join("workspace");
+    std::fs::create_dir(&root).unwrap();
+    let database = root.join(".dohc/engine/engine.db");
+    std::fs::create_dir_all(database.parent().unwrap()).unwrap();
+    let mut seeded = dohc_engine_storage::EngineStore::open(&database, 0).unwrap();
+    let root_token = dohc_workspace_engine::root_binding::write_new_root_binding(&root).unwrap();
+    seeded
+        .bind_root_token(&root_token, &dohc_engine_storage::NoFaults)
+        .unwrap();
+    dohc_engine_domain::VersionedTextStore::new(&mut seeded)
+        .ensure_main_version("workspace", "main", 0, &dohc_engine_storage::NoFaults)
+        .unwrap();
+    drop(seeded);
+    let path = scratch.path().join("host.json");
+    let mut config = configuration(&root);
+    config["settlement"] = json!({"maxApplicationsPerSettlement":4});
+    std::fs::write(&path, config.to_string()).unwrap();
+    let mut daemon = Daemon(command(Some(&path)).spawn().unwrap());
+    daemon.send(Envelope::Hello(Hello {
+        protocol_version: PROTOCOL_VERSION,
+        auth_token: "configured-test-secret".into(),
+        capabilities: vec!["blobs".into()],
+        last_session_generation: None,
+        max_frame_bytes: None,
+    }));
+    assert!(matches!(daemon.read(), Envelope::HelloAck(_)));
+    let Envelope::Response(hosts) = daemon.request(1, "liveApplication.hosts", None, json!({}))
+    else {
+        panic!("discovery")
+    };
+    let workspace: dohc_engine_protocol::wire::WorkspaceHandle =
+        serde_json::from_value(hosts.result["workspaces"][0]["workspaceHandle"].clone()).unwrap();
+    let main: String = rusqlite::Connection::open_with_flags(
+        &database,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap()
+    .query_row(
+        "SELECT main_version_id FROM versioned_workspaces WHERE workspace_id='workspace'",
+        [],
+        |row| row.get(0),
+    )
+    .unwrap();
+    let fixtures: Value = serde_json::from_str(include_str!(
+        "../../dohc-engine-collab/tests/live-bootstrap-fixtures/live-bootstrap.json"
+    ))
+    .unwrap();
+    let fixture = fixtures
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == "rich-unicode")
+        .unwrap();
+    let bytes: Vec<u8> = serde_json::from_value(fixture["bytes"].clone()).unwrap();
+    let markdown = fixture["markdown"].as_str().unwrap();
+    let binding = json!({"workspaceId":"workspace","mainVersionId":main,"objectId":"object","lineageClaimId":hex_sha256(&bytes),"currentPath":"note.md","selectorPaths":["note.md"],"restoreFenceGeneration":0});
+    let register = |daemon: &mut Daemon, id: u64| {
+        let Envelope::Response(registered) = daemon.request(
+            id,
+            "liveApplication.register",
+            Some(workspace.clone()),
+            json!({"binding":binding}),
+        ) else {
+            panic!("registration")
+        };
+        registered.result["registrationId"].clone()
+    };
+    let unload = |daemon: &mut Daemon, id: u64| {
+        daemon.request(
+            id,
+            "liveApplication.unloadDocument",
+            Some(workspace.clone()),
+            json!({"objectId":"object"}),
+        )
+    };
+    let registration = register(&mut daemon, 2);
+    let response=daemon.streamed(3,"liveApplication.bootstrap",workspace.clone(),json!({"registrationId":registration,"baselineStreamId":1,"baseline":{"bootstrapId":"baseline","bootstrapMomentId":"baseline-moment","baselineMomentRelaySequence":0,"baselineRegisteredAtMs":1,"baselineDigest":hex_sha256(&bytes),"baselineByteLength":bytes.len(),"projectedMarkdownDigest":hex_sha256(markdown.as_bytes()),"projectedMarkdownByteLength":markdown.len()}}),&[(1,&bytes)]);
+    assert!(matches!(response, Envelope::Response(_)), "{response:?}");
+    assert!(matches!(
+        daemon.request(
+            4,
+            "liveApplication.settle",
+            Some(workspace.clone()),
+            json!({"registrationId":registration,"terminalReceipt":null})
+        ),
+        Envelope::Response(_)
+    ));
+    let receipt = json!({"deliveryId":"accepted","updateDigest":hex_sha256(&[0,0]),"journalCursor":2,"acceptingHostEpoch":1});
+    let response=daemon.streamed(5,"liveApplication.apply",workspace.clone(),json!({"registrationId":registration,"rangeCount":0,"rangeStreamId":3,"rangeDigest":hex_sha256(&[]),"updateStreamId":2,"updateByteLength":2,"accepted":{"receipt":receipt,"binding":binding,"authority":{"principalKind":"owner","principalId":"person","grantId":null,"grantGeneration":null},"receivedAtMs":2}}),&[(2,&[0,0]),(3,&[])]);
+    assert!(matches!(response, Envelope::Response(_)), "{response:?}");
+
+    // An accepted edit past the last settlement keeps the document loaded.
+    let Envelope::Response(pending) = unload(&mut daemon, 6) else {
+        panic!("pending unload")
+    };
+    assert_eq!(
+        pending.result,
+        json!({"status":"pending","reason":"settlement-pending"})
+    );
+    let settle = json!({"registrationId":registration,"terminalReceipt":receipt});
+    let Envelope::Response(covered) = daemon.request(
+        7,
+        "liveApplication.settle",
+        Some(workspace.clone()),
+        settle.clone(),
+    ) else {
+        panic!("coverage")
+    };
+    assert_eq!(covered.result["settlement"]["terminalCursor"], 2);
+    let Envelope::Response(unloaded) = unload(&mut daemon, 8) else {
+        panic!("unload")
+    };
+    assert_eq!(unloaded.result, json!({"status":"unloaded"}));
+    let Envelope::Error(stale) =
+        daemon.request(9, "liveApplication.settle", Some(workspace.clone()), settle)
+    else {
+        panic!("a stale registration must refuse")
+    };
+    assert_eq!(stale.error.code, ErrorCode::WorkspaceUnavailable);
+    let Envelope::Error(repeated) = unload(&mut daemon, 10) else {
+        panic!("an unloaded document has nothing to unload")
+    };
+    assert_eq!(repeated.error.code, ErrorCode::WorkspaceUnavailable);
+
+    // The next open reloads the accepted edit and its settlement.
+    let reloaded = register(&mut daemon, 11);
+    assert_ne!(reloaded, registration);
+    let Envelope::Response(ack) = daemon.request(
+        12,
+        "liveApplication.ack",
+        Some(workspace.clone()),
+        json!({"registrationId":reloaded,"deliveryId":"accepted","updateDigest":hex_sha256(&[0,0])}),
+    ) else {
+        panic!("ack after reload")
+    };
+    assert_eq!(ack.result["status"], "applied");
+    let Envelope::Response(replayed) = daemon.request(
+        13,
+        "liveApplication.settle",
+        Some(workspace.clone()),
+        json!({"registrationId":reloaded,"terminalReceipt":receipt}),
+    ) else {
+        panic!("settlement after reload")
+    };
+    for field in ["momentId", "terminalCursor", "applicationCount"] {
+        assert_eq!(
+            replayed.result["settlement"][field],
+            covered.result["settlement"][field]
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(root.join("note.md")).unwrap(),
+        markdown
+    );
+    drop(daemon.0.stdin.take());
+    assert!(daemon.0.wait().unwrap().success());
+}
+
+#[test]
+fn production_entrypoint_starts_empty_and_changes_membership_without_restarting() {
+    let scratch = ScratchDir::new().unwrap();
+    let first = scratch.path().join("first");
+    let second = scratch.path().join("second");
+    std::fs::create_dir(&first).unwrap();
+    std::fs::create_dir(&second).unwrap();
+    let mut config = configuration(&first);
+    config["workspaces"] = json!([]);
+    let path = scratch.path().join("host.json");
+    std::fs::write(&path, config.to_string()).unwrap();
+    let mut daemon = Daemon(command(Some(&path)).spawn().unwrap());
+    daemon.hello("configured-test-secret");
+    assert!(matches!(daemon.read(), Envelope::HelloAck(_)));
+    let listed = |daemon: &mut Daemon, id: u64| -> Vec<Value> {
+        let Envelope::Response(hosts) =
+            daemon.request(id, "liveApplication.hosts", None, json!({}))
+        else {
+            panic!("discovery")
+        };
+        hosts.result["workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|workspace| workspace["workspaceId"].clone())
+            .collect()
+    };
+    assert!(listed(&mut daemon, 1).is_empty());
+    let mut handles = Vec::new();
+    for (index, (root, workspace_id)) in [(&first, "first"), (&second, "second")]
+        .into_iter()
+        .enumerate()
+    {
+        let Envelope::Response(attached) = daemon.request(
+            2 + index as u64,
+            "liveApplication.attachWorkspace",
+            None,
+            json!({"root":root,"workspaceId":workspace_id,"maxRegistrations":2}),
+        ) else {
+            panic!("attach {workspace_id}")
+        };
+        handles.push(attached.result["workspaceHandle"].clone());
+    }
+    assert_eq!(listed(&mut daemon, 4), [json!("first"), json!("second")]);
+    let detach = |daemon: &mut Daemon, id: u64, handle: &Value| {
+        daemon.request(
+            id,
+            "liveApplication.detachWorkspace",
+            Some(serde_json::from_value(handle.clone()).unwrap()),
+            json!({}),
+        )
+    };
+    assert!(matches!(
+        detach(&mut daemon, 5, &handles[0]),
+        Envelope::Response(_)
+    ));
+    assert_eq!(listed(&mut daemon, 6), [json!("second")]);
+    let Envelope::Error(stale) = detach(&mut daemon, 7, &handles[0]) else {
+        panic!("a detached handle must refuse")
+    };
+    assert_eq!(stale.error.code, ErrorCode::WorkspaceUnavailable);
+    assert!(matches!(
+        detach(&mut daemon, 8, &handles[1]),
+        Envelope::Response(_)
+    ));
+    // The same connection kept every operation; the daemon never restarted.
+    assert!(listed(&mut daemon, 9).is_empty());
+    daemon.0.stdin.take();
+    assert!(daemon.0.wait().unwrap().success());
+
+    // A daemon without a configured host offers none of these operations.
+    let mut ordinary = Daemon(command(None).spawn().unwrap());
+    ordinary.hello("configured-test-secret");
+    assert!(matches!(ordinary.read(), Envelope::HelloAck(_)));
+    for (id, method) in [
+        "liveApplication.attachWorkspace",
+        "liveApplication.detachWorkspace",
+        "liveApplication.unloadDocument",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let Envelope::Error(error) = ordinary.request(1 + id as u64, method, None, json!({}))
+        else {
+            panic!("{method} must refuse without a configured host")
+        };
+        assert_eq!(error.error.code, ErrorCode::Forbidden, "{method}");
+    }
 }
 
 #[test]

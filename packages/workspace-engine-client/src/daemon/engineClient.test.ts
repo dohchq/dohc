@@ -18,9 +18,27 @@ import {
   FrameDecoder,
   FrameType,
   encodeFrame,
+  isHostedDocumentUnready,
+  isLiveDocumentWithoutLineage,
   type EngineClientConnectOptions,
   type EngineClientConnection,
 } from "./engineClient";
+
+it("tells a hosted document that is not ready from any other conflict", () => {
+  const refusal = (code: string, message: string) => new EngineRequestError(1, { code, message, retry: "no" } as never);
+  expect(isHostedDocumentUnready(refusal("CONFLICT", "hosted-document-unready"))).toBe(true);
+  expect(isHostedDocumentUnready(refusal("CONFLICT", "live-application-conflict"))).toBe(false);
+  expect(isHostedDocumentUnready(refusal("INVALID_PARAMS", "hosted-document-unready"))).toBe(false);
+  expect(isHostedDocumentUnready(new Error("hosted-document-unready"))).toBe(false);
+});
+
+it("tells a document without lineage from any other conflict", () => {
+  const refusal = (code: string, message: string) => new EngineRequestError(1, { code, message, retry: "no" } as never);
+  expect(isLiveDocumentWithoutLineage(refusal("CONFLICT", "live-document-without-lineage"))).toBe(true);
+  expect(isLiveDocumentWithoutLineage(refusal("CONFLICT", "live-application-conflict"))).toBe(false);
+  expect(isLiveDocumentWithoutLineage(refusal("INVALID_PARAMS", "live-document-without-lineage"))).toBe(false);
+  expect(isLiveDocumentWithoutLineage(new Error("live-document-without-lineage"))).toBe(false);
+});
 
 const LIMITS = {
   maxFrameBytes: 1024 * 1024,
@@ -31,9 +49,92 @@ const LIMITS = {
   maxJsonDepth: 32,
 };
 
+it("streams a replica page's exact admitted metadata and binary spans beyond control collection bounds", async () => {
+  const peer=new FakePeerConnection(), transport=client(peer,{privateLiveApplication:{aggregateBytes:128*1024*1024,maxUploads:1}});
+  peer.acknowledge();await transport.ready();
+  const update=Uint8Array.from([0,255,128,1]), checkpoint=Uint8Array.from([8,9,10]);
+  const metadata={accepted:{receipt:{deliveryId:"replica",updateDigest:createHash("sha256").update(update).digest("hex"),journalCursor:9,acceptingHostEpoch:parseHostEpoch(1)},
+    binding:{workspaceId:"ws",mainVersionId:"main",objectId:"object",lineageClaimId:"a".repeat(64),currentPath:"a.md",selectorPaths:["a.md"],restoreFenceGeneration:1},
+    authority:{principalKind:"owner" as const,principalId:"owner",grantId:null,grantGeneration:null},receivedAtMs:10},
+    firstSeen:Array.from({length:2000},(_,i)=>({clientId:i+1,startClock:0,endClock:1}))};
+  let wireId=0;const chunks:Buffer[]=[];
+  peer.onEnvelope=e=>{if(e.type==="request"){expect(e.method).toBe("replica.applyJournalPage");expect(e.params).not.toHaveProperty("registrationId");wireId=e.id;}};
+  peer.onBlobChunk=f=>{chunks.push(f.payload);if(f.fin) peer.send({type:"response",id:wireId,result:{revision:2,logCursor:3,journalCursor:9,applied:1,skipped:0,blockedCursor:null}});};
+  try {
+    const result=await transport.applyReplicaJournalPage({id:71,workspace:"private",deadlineMs:30_000},0,0,[{
+      admitted:{metadata,updateBytes:update},relayDatabaseNamespace:"relay",evidenceDigest:"b".repeat(64),journalCursor:9,authority:null,
+      restore:{operationId:"restore",checkpointDigest:"c".repeat(64),checkpointBytes:checkpoint,proof:{
+        proposalDigest:"d".repeat(64),candidateDigest:metadata.accepted.receipt.updateDigest,
+        preparation:{fence:{operation:{operationId:"restore",relayDatabaseNamespace:"relay",oldBinding:{...metadata.accepted.binding,restoreFenceGeneration:0},
+          hostId:"host",newFence:1,origin:{kind:"bootstrap",id:"bootstrap"},terminal:null,appliedSequence:0},localHeadSequence:1,recordedAtMs:10},
+          point:{journalCursor:0,receiptDigest:"e".repeat(64),markdownDigest:"f".repeat(64),projectionDigest:"a".repeat(64)}},
+        nativeSourceManifestDigest:"b".repeat(64),admitted:metadata,checkpointDigest:"c".repeat(64),sourceRanges:[],recordedAtMs:10}}}]);
+    expect(result.journalCursor).toBe(9);
+    const bytes=Buffer.concat(chunks);let offset=0;
+    const field=()=>{const size=bytes.readUInt32LE(offset);offset+=4;const value=bytes.subarray(offset,offset+size);offset+=size;return value;};
+    const rows=JSON.parse(field().toString());expect(rows[0].admitted).toEqual({metadata,updateBytes:[]});
+    expect(field()).toEqual(Buffer.from(update));expect(field()).toEqual(Buffer.from(checkpoint));expect(offset).toBe(bytes.length);
+    expect(chunks.length).toBeGreaterThan(1);
+  } finally {transport.close();}
+});
+
 describe("private owner delivery transport", () => {
   const request={id:970,workspace:"workspace",deadlineMs:30_000};
   const target={binding:{workspaceId:"workspace",mainVersionId:"main",objectId:"object",lineageClaimId:"cd".repeat(32),currentPath:"a.md",selectorPaths:["a.md"],restoreFenceGeneration:0},relayDatabaseNamespace:"relay"};
+  const stopTarget={...target,document:{mainVersionId:"main",objectId:"object",currentPath:"a.md"},retirementOwed:true};
+  it.each([-1,0.5,Number.MAX_SAFE_INTEGER+1,NaN,Infinity])("rejects an invalid retirement cursor before sending: %s",async cursor => {
+    const peer=new FakePeerConnection(),transport=client(peer);peer.acknowledge();await transport.ready();
+    const sent=vi.fn();peer.onEnvelope=sent;
+    try {await expect(transport.ownerYDocRelease(request,target.binding,cursor)).rejects.toThrow("Invalid retirement cursor");expect(sent).not.toHaveBeenCalled();}
+    finally {transport.close();}
+  });
+  it.each(["valid", "negative", "extra", "unretired", "requested", "unbound"])("checks the deferred Stop contract: %s", async scenario => {
+    const peer=new FakePeerConnection(),transport=client(peer);peer.acknowledge();await transport.ready();
+    const row={...stopTarget,state:scenario==="requested" ? "requested" : "released",retirementOwed:scenario==="unretired",
+      ...(scenario==="unbound" ? {binding:null,relayDatabaseNamespace:""} : {}),
+      deferred:{unsentEdits:scenario==="negative" ? -1 : 65,editable:false,...(scenario==="extra" ? {secret:"no"} : {})}};
+    peer.onEnvelope=e=>{if (e.type==="request") peer.send({type:"response",id:e.id,result:{stops:[row]}});};
+    try {if (scenario==="valid") expect(await transport.ownerYDocRelease(request, target.binding, 0)).toEqual(row);
+      else await expect(transport.ownerYDocRelease(request, target.binding, 0)).rejects.toThrow(TypeError);
+    } finally {transport.close();}
+  });
+  it("sends Stop request, release, list and cancellation with exact coordinates", async () => {
+    const peer = new FakePeerConnection(), transport = client(peer);
+    peer.acknowledge(); await transport.ready();
+    peer.onEnvelope = e => {
+      if (e.type !== "request") return;
+      const action = e.method.split(".").at(-1);
+      expect(e.method).toBe(`ydoc.ownerStop.${action}`);
+      expect(e.params).toEqual(action === "release" ? {binding: target.binding,acceptedCursor:0} : action === "list" ? {} : {path: "a.md"});
+      peer.send({type: "response", id: e.id, result: {stops: action === "clear" ? [] : [{...stopTarget, state: action === "release" ? "released" : "requested"}]}});
+    };
+    try {
+      expect((await transport.ownerYDocStopRequest(request, "a.md")).state).toBe("requested");
+      expect((await transport.ownerYDocRelease(request, target.binding, 0)).state).toBe("released");
+      expect(await transport.ownerYDocStopList(request)).toEqual([{...stopTarget, state: "requested"}]);
+      await transport.ownerYDocStopClear(request, "a.md");
+    } finally {transport.close();}
+  });
+  it.each(["binding", "state", "extra", "namespace"])("rejects an invalid Stop release response: %s", async scenario => {
+    const peer = new FakePeerConnection(), transport = client(peer);
+    peer.acknowledge(); await transport.ready();
+    const row = {...stopTarget, state: "released", ...(scenario === "binding" ? {binding: {...stopTarget.binding, restoreFenceGeneration: 1}} : scenario === "state" ? {state: "requested"} : scenario === "extra" ? {extra: true} : {relayDatabaseNamespace: ""})};
+    peer.onEnvelope = e => {if (e.type === "request") peer.send({type: "response", id: e.id, result: {stops: [row]}});};
+    try {await expect(transport.ownerYDocRelease(request, target.binding, 0)).rejects.toThrow(TypeError);}
+    finally {transport.close();}
+  });
+  it("requests a Stop by its saved key and acknowledges an unenrolled retirement",async () => {
+    const peer=new FakePeerConnection(),transport=client(peer);peer.acknowledge();await transport.ready();
+    const row={...stopTarget,binding:null,relayDatabaseNamespace:"",state:"released"};
+    peer.onEnvelope=e=>{
+      if (e.type!=="request") return;
+      expect(e.params).toEqual({document:stopTarget.document});
+      peer.send({type:"response",id:e.id,result:{stops:e.method.endsWith("retired") ? [] : [row]}});
+    };
+    try {expect(await transport.ownerYDocStopRequest(request,stopTarget.document)).toEqual(row);
+      await transport.ownerYDocStopRetired(request,stopTarget.document);
+    } finally {transport.close();}
+  });
   it.each([null, "active", "sealed", "quarantined", "absent bytes", "extra", "binding extra", "cursor mismatch"])("decodes listed draft %s and retains page policy", async (scenario) => {
     const peer = new FakePeerConnection(), transport = client(peer, { privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 } });
     peer.acknowledge(); await transport.ready();
@@ -2322,6 +2423,53 @@ describe("EngineClient", () => {
     await expect(operation).rejects.toMatchObject({
       wireError: { code: "CANCELLED" },
     });
+    transport.close();
+  });
+
+  it("settles a cancelled request with the result of work that landed first", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const envelopes: Envelope[] = [];
+    peer.onEnvelope = (envelope) => envelopes.push(envelope);
+
+    const operation = transport.sendRequest(request(4_243, "sync.commitCursor"));
+    await transport.cancelRequest(4_243);
+
+    expect(envelopes).toMatchObject([
+      { type: "request", id: 1, method: "sync.commitCursor" },
+      { type: "cancel", id: 1 },
+    ]);
+    peer.send({ type: "response", id: 1, result: { committed: true } });
+    await expect(operation).resolves.toEqual({
+      id: 4_243,
+      result: { committed: true },
+    });
+    transport.close();
+  });
+
+  it("ends a cancelled settlement the daemon withholds at its own deadline", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const envelopes: Envelope[] = [];
+    peer.onEnvelope = (envelope) => envelopes.push(envelope);
+
+    const settlement = transport.sendRequest({
+      ...request(4_244, "liveApplication.settle"),
+      deadlineMs: 25,
+    });
+    await transport.cancelRequest(4_244);
+    expect(envelopes).toMatchObject([
+      { type: "request", id: 1, method: "liveApplication.settle", deadlineMs: 25 },
+      { type: "cancel", id: 1 },
+    ]);
+
+    // The settlement landed, so the daemon withholds its stale answer and the
+    // caller's own deadline is what ends the wait.
+    await expect(settlement).rejects.toBeInstanceOf(EngineRequestDeadlineError);
     transport.close();
   });
 

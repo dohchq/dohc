@@ -54,6 +54,24 @@ interface ActivityWindow {
   };
 }
 
+// Sends a workspace's event only to live windows whose current session shows
+// that workspace.
+export function sendToWorkspaceWindows<Contents extends {
+  isDestroyed(): boolean;
+  send(channel: string, payload: unknown): void;
+}>(options: {
+  windows: Iterable<{ webContents: Contents }>;
+  workspaceIdOf: (webContents: Contents) => string | undefined;
+  channel: string;
+  event: { workspaceId: string };
+}): void {
+  for (const window of options.windows) {
+    if (window.webContents.isDestroyed()) continue;
+    if (options.workspaceIdOf(window.webContents) !== options.event.workspaceId) continue;
+    window.webContents.send(options.channel, options.event);
+  }
+}
+
 export function workspaceActivityPayload(
   scope?: WorkspaceActivityScope,
 ): WorkspaceActivityEvent {

@@ -1,4 +1,4 @@
-import { desktopPins } from "../src/testPins";
+import { activityPin } from "../src/testPins";
 import { expect, test, type Page } from "@playwright/test";
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -42,28 +42,6 @@ async function shoot(page: Page, name: string): Promise<void> {
   await setTheme(page, "light");
 }
 
-// The dispatch scan provisions the owner-only agent channel after the
-// workspace opens. Wait on that real result before mounting Chats.
-async function waitForAgentChannel(page: Page): Promise<void> {
-  await expect
-    .poll(() =>
-      page.evaluate(async () => {
-        const api = (window as unknown as {
-          dohcDesktop: {
-            getWorkspaceRegistry(): Promise<{ workspaces: Array<{ workspaceId: string }> }>;
-            listChatChannels(payload: { workspaceId: string }): Promise<{ channels: Array<{ kind: string }> }>;
-          };
-        }).dohcDesktop;
-        const registry = await api.getWorkspaceRegistry();
-        const workspace = registry.workspaces[0];
-        if (!workspace) return false;
-        const result = await api.listChatChannels({ workspaceId: workspace.workspaceId });
-        return result.channels.some((channel) => channel.kind === "agent");
-      }),
-    )
-    .toBe(true);
-}
-
 test("@ui-audit adding an agent, its screen, and an answered question", async () => {
   test.setTimeout(240_000);
   await mkdir(SHOT_DIR, { recursive: true });
@@ -76,13 +54,15 @@ test("@ui-audit adding an agent, its screen, and an answered question", async ()
     desktop = await launchDesktopApp({ workspace: temp, env });
     await openWorkspaceFromFirstRun(desktop.page, temp);
     const page = desktop.page;
-    await waitForAgentChannel(page);
 
-    await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
+    await page.getByTestId(activityPin("chats")).click();
     await expect(page.getByTestId("chats-view")).toBeVisible();
 
-    // No runner yet: Agents says so and offers Add an agent.
-    await expect(page.getByTestId("chats-my-agent-state")).toContainText("not set up");
+    // No runner yet: Agents has no agent of yours and offers Add an agent,
+    // which creates its channel.
+    await expect(page.getByTestId("chats-add-agent-open")).toBeVisible();
+    await expect(page.getByTestId("chats-channel").filter({ hasText: "general" })).toBeVisible();
+    await expect(page.getByTestId("chats-my-agent")).toHaveCount(0);
     await shoot(page, "agents-not-set-up");
 
     await page.getByTestId("chats-add-agent-open").click();

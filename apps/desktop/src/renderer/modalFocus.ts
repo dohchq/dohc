@@ -1,5 +1,5 @@
 const FOCUSABLE_SELECTOR =
-  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [contenteditable]:not([contenteditable="false"]), [tabindex]:not([tabindex="-1"])';
+  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), details > summary:first-of-type, [contenteditable]:not([contenteditable="false"]), [tabindex]:not([tabindex="-1"])';
 
 // Toasts sit above every dialog. F6 moves focus from the dialog to its toasts
 // and back, and Tab cycles within whichever of the two holds focus, so focus
@@ -32,15 +32,17 @@ export function trapModalTabKey(
   }
 
   const active = document.activeElement;
-  const activeIsInside = active !== null && container.contains(active);
-  if (event.shiftKey) {
-    if (!activeIsInside || active === container || active === first) {
-      event.preventDefault();
-      last.focus();
-    }
-  } else if (!activeIsInside || active === last) {
+  const boundary = event.shiftKey ? first : last;
+  const direction = event.shiftKey
+    ? Node.DOCUMENT_POSITION_PRECEDING
+    : Node.DOCUMENT_POSITION_FOLLOWING;
+  if (
+    !active ||
+    !container.contains(active) ||
+    !(active.compareDocumentPosition(boundary) & direction)
+  ) {
     event.preventDefault();
-    first.focus();
+    (event.shiftKey ? last : first).focus();
   }
 }
 
@@ -72,14 +74,25 @@ export function switchModalRegion(event: KeyboardEvent, dialog: HTMLElement | nu
 export function modalFocusableElements(container: HTMLElement): HTMLElement[] {
   return [
     ...container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
-  ].filter(
-    (element) =>
-      element.closest('[aria-hidden="true"]') === null &&
-      !element.matches(":disabled"),
-  );
+  ].filter((element) => {
+    if (
+      element.closest('[hidden], [aria-hidden="true"]') !== null ||
+      element.matches(':disabled, input[type="hidden"]') ||
+      (element.hasAttribute("tabindex") && element.tabIndex < 0)
+    ) return false;
+    // Closed details expose only their first summary, including when nested.
+    for (
+      let details = element.closest("details:not([open])");
+      details;
+      details = details.parentElement?.closest("details:not([open])") ?? null
+    ) {
+      if (!details.querySelector(":scope > summary")?.contains(element)) return false;
+    }
+    return true;
+  });
 }
 
-const BLOCKING_MODAL_SELECTOR = "[role='dialog'], [data-dohc-modal='true']";
+const BLOCKING_MODAL_SELECTOR = "[aria-modal='true'], [data-dohc-modal='true']";
 
 export function hasBlockingModal() {
   return document.querySelector(BLOCKING_MODAL_SELECTOR) !== null;

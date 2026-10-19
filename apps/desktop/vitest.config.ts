@@ -1,7 +1,14 @@
-import { availableParallelism } from "node:os";
+import { realpathSync } from "node:fs";
+import { availableParallelism, tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import { dirname } from "node:path";
-import { configDefaults, defineConfig } from "vitest/config";
+import { fileURLToPath } from "node:url";
+import { defineConfig } from "vitest/config";
+import { desktopTestFiles } from "./vitest.projects.ts";
+
+// macOS $TMPDIR is a link into /private. Tests that make folders under
+// os.tmpdir() must hold the path that code resolving links sees.
+if (process.platform !== "win32") process.env.TMPDIR = realpathSync(tmpdir());
 
 // At most 8 concurrent workers. Fifteen of these suites open their own temp
 // `.dohc/engine/engine.db`, and past roughly eight the filesystem is the
@@ -10,6 +17,21 @@ import { configDefaults, defineConfig } from "vitest/config";
 const WORKER_CAP = Math.min(8, Math.max(2, Math.floor(availableParallelism() / 4)));
 const require = createRequire(import.meta.url);
 const PURE_INSPECTOR_TEST = "src/renderer/FileInspector.test.tsx";
+const SHARED_WORKER_SETUP = "./src/testSharedWorkerSetup.ts";
+const tests = desktopTestFiles(dirname(fileURLToPath(import.meta.url)), {
+  exclude: [PURE_INSPECTOR_TEST],
+  // vitest.projects.ts chooses most isolated files from their source. These
+  // files need their own worker for a reason their source does not show.
+  isolated: [
+    // The report bound lasts as long as the window, and the module holds the
+    // count. An earlier file in a shared worker would spend part of it.
+    "src/renderer/rendererErrorReport.bound.test.ts",
+  ],
+});
+// A full verification run, the nightly included, sets this and gives every
+// file a worker of its own, so a test that passes only after another file in
+// its shared worker fails there.
+const ISOLATE_ALL = process.env.DOHC_DESKTOP_TEST_ISOLATION === "all";
 
 const common = {
   // Source-backed examples outside this package use the same React instance as their desktop tests.
@@ -36,6 +58,13 @@ const common = {
   },
 };
 
+const desktop = {
+  ...common.test,
+  // Renderer hit testing and waits, plus scratch-directory cleanup.
+  setupFiles: ["./vitest.setup.ts", "./src/testSetup.ts"],
+  globalSetup: ["./src/testGlobalSetup.ts"],
+};
+
 // e2e/ runs under Playwright (playwright.config.ts), never vitest.
 export default defineConfig({
   ...common,
@@ -47,15 +76,37 @@ export default defineConfig({
       {
         ...common,
         test: {
-          ...common.test,
+          ...desktop,
           name: "desktop",
-          include: ["src/**/*.test.{ts,tsx}"],
-          exclude: [...configDefaults.exclude, PURE_INSPECTOR_TEST],
-          // Renderer hit testing and waits, plus scratch-directory cleanup.
-          setupFiles: ["./vitest.setup.ts", "./src/testSetup.ts"],
-          globalSetup: ["./src/testGlobalSetup.ts"],
+          include: ISOLATE_ALL ? [...tests.isolated, ...tests.sharedDom, ...tests.sharedNode] : tests.isolated,
         },
       },
+      // Files in a shared project run one after another in the same worker.
+      // Each file starts from the worker's baseline: its environment
+      // variables, globals, and real timers, and in jsdom an empty document,
+      // empty storage, and its DOM prototypes.
+      ...ISOLATE_ALL ? [] : [
+        {
+          ...common,
+          test: {
+            ...desktop,
+            name: "desktop-shared-dom",
+            include: tests.sharedDom,
+            isolate: false,
+            setupFiles: [...desktop.setupFiles, SHARED_WORKER_SETUP, "./src/testSharedDomSetup.ts"],
+          },
+        },
+        {
+          ...common,
+          test: {
+            ...desktop,
+            name: "desktop-shared-node",
+            include: tests.sharedNode,
+            isolate: false,
+            setupFiles: [...desktop.setupFiles, SHARED_WORKER_SETUP],
+          },
+        },
+      ],
       {
         ...common,
         test: {

@@ -7,12 +7,13 @@ import {expect, vi} from "vitest";
 import {createEngineClient} from "../../../packages/workspace-engine-client/src/daemon/engineClient.js";
 import type {OrderedLiveUpdateCutPolicy} from "../../../packages/ydoc-projection/src/orderedLiveUpdateCut.js";
 import type {ServiceActivationConfig} from "../../sync-relay/src/serviceActivationDriver.js";
+import type {ServiceHostWorkspace} from "../../sync-relay/src/storage/serviceHostEnrollment.js";
 import type {PublicTransitionHarness, PublicTransitionFixture} from "./publicTransitionRuntime.integration-helper.js";
 import {assertPublicApplication} from "./publicTransitionRuntime.integration-helper.js";
 import {workloadHash as hash, type LoadedPublicTransitions} from "./publicTransitionWorkload.integration-helper.js";
 
 const transport = vi.hoisted(() => ({relayUrl: "", transforms: [] as {from: string; to: string; insecureLoopbackForTests: true}[]}));
-// Same transport seam as serviceActivationNative: native ordinary sync stays real,
+// Same transport seam as serviceActivationNative: native hosted sync stays real,
 // with its logical HTTPS relay replaced only by this fixture's owned loopback listener.
 vi.mock("../../../packages/workspace-engine-client/src/daemon/engineClient.js", async importOriginal => {
   const actual = await importOriginal<typeof import("../../../packages/workspace-engine-client/src/daemon/engineClient.js")>();
@@ -41,6 +42,8 @@ export interface AutomaticViewAdmission {
 interface Options {
   h: PublicTransitionHarness; selected: LoadedPublicTransitions["cases"]["view"];
   admission: AutomaticViewAdmission; executable: string; relayUrl: string; ownerToken: string;
+  /** The credential the relay derives for the service host's replica of the workspace. */
+  serviceBearer(workspace: ServiceHostWorkspace): string;
   native: Record<string, unknown>; validation: OrderedLiveUpdateCutPolicy; maxRegistrations: number;
   replaceHost(config: unknown): Promise<void>;
   newView(url: string): Promise<{context: BrowserContext; page: Page}>;
@@ -65,8 +68,9 @@ export async function runPublicAutomaticView(options: Options) {
     const opened = await owner.sendRequest({id: requestId++, method: "workspace.open", params: {rootDir: ownerRoot, workspaceId, captureMode: "none",
       relay: {baseUrl: options.relayUrl, bearerToken: options.ownerToken, allowInsecureLoopbackForTests: true}}, deadlineMs: h.timeoutMs});
     const handle = (opened.result as {workspace: string}).workspace;
-    const rpc = async <T = unknown>(method: string, params: Parameters<typeof owner.sendRequest>[0]["params"]) => {
-      const response = await owner.sendRequest({id: requestId++, workspace: handle, method, params, deadlineMs: h.timeoutMs});
+    const rpc = async <T = unknown>(method: string, params: Parameters<typeof owner.sendRequest>[0]["params"], idempotencyKey?: string) => {
+      const response = await owner.sendRequest({id: requestId++, workspace: handle, method, params, deadlineMs: h.timeoutMs,
+        ...(idempotencyKey === undefined ? {} : {idempotencyKey})});
       return response.result as T;
     };
     await rpc("sync.claim", {workspaceId});
@@ -82,10 +86,10 @@ export async function runPublicAutomaticView(options: Options) {
     }
     // Establish ordinary enrollment before the owner creates a replicated live lineage.
     await pushAll();
-    const written = await rpc<{object: {id: string}}>("versionedText.write", {workspaceId, versionId: mainVersionId, path, text: selected.baseline.markdown.toString(), origin: "api", requestId: randomUUID()});
+    const written = await rpc<{object: {id: string}}>("versionedText.write", {workspaceId, versionId: mainVersionId, path, text: selected.baseline.markdown.toString(), origin: "api"}, randomUUID());
     const objectId = written.object.id as string;
-    const editor = await rpc<{sessionId: string}>("ydoc.open", {versionId: mainVersionId, path, expectedObjectId: objectId, contentKind: "richdoc"});
-    await rpc("ydoc.recordUpdate", {sessionId: editor.sessionId, updateBase64: selected.baseline.checkpoint.toString("base64"), seed: true});
+    const editor = await rpc<{sessionId: string; lineageClaimId: string | null}>("ydoc.open", {versionId: mainVersionId, path, expectedObjectId: objectId, contentKind: "richdoc"});
+    await rpc("ydoc.recordUpdate", {sessionId: editor.sessionId, updateBase64: selected.baseline.checkpoint.toString("base64"), seed: true, expectedLineageClaimId: editor.lineageClaimId});
     await rpc("ydoc.settle", {sessionId: editor.sessionId}); await rpc("ydoc.close", {sessionId: editor.sessionId});
     await pushAll();
     const link = await h.ownerRequest(`/sync/${workspaceId}/shares/links`, {paths: [path], access: "edit"});
@@ -94,10 +98,13 @@ export async function runPublicAutomaticView(options: Options) {
     if (!identity) throw new Error("Ordinary owner bootstrap identity missing.");
     transport.relayUrl = options.relayUrl;
     const {hostId, instanceId} = h.host().coordinate;
+    // Enrollment puts the document in the service host's scope and gives the host its credential.
+    const enrolled = h.storage.enrollServiceHostDocument({workspaceId, path, shareId: link.shareId, ownerUserId: h.ownerUserId,
+      nowMs: Date.now(), guard: h.storage.captureStanding()});
     await options.replaceHost({version: 1, ...options.native, engineExecutable: options.executable, hostId, instanceId,
-      workspaces: [{root: serviceRoot, workspaceId, maxRegistrations: options.maxRegistrations, ordinaryReplication: {
-        relay: {baseUrl: "https://public-proof-relay.example.test", bearerToken: options.ownerToken},
-        identity: {kind: "join", replicationEpoch: identity.replicationEpoch, streamIdentity: identity.streamIdentity}, maxPagesPerPull: admission.maxPagesPerPull}}],
+      workspaces: [{root: serviceRoot, workspaceId, maxRegistrations: options.maxRegistrations, hostedReplication: {
+        relay: {baseUrl: "https://public-proof-relay.example.test", bearerToken: options.serviceBearer(enrolled)},
+        identity: {replicationEpoch: identity.replicationEpoch, streamIdentity: identity.streamIdentity}, maxPagesPerPull: admission.maxPagesPerPull}}],
       adoption: admission.adoption, activation: {...admission.activation, validation: options.validation, targets: [{workspaceId, path, shareId: link.shareId}]}});
     const fixture: PublicTransitionFixture = {document: {workspaceId, mainVersionId, objectId, lineageClaimId: hash(selected.baseline.checkpoint)}, path, link};
     await browserExpect.poll(() => h.storage.resolveCurrentLiveDocumentBinding({document: fixture.document,

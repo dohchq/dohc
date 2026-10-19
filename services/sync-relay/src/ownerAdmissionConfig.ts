@@ -17,7 +17,7 @@ const positive = (value: unknown) => {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > 2_147_483_647) throw new Error("Invalid private owner admission budget.");
   return value;
 };
-export function readOwnerAdmissionConfig(path: string,workspaceIds: readonly string[]) {
+export function readOwnerAdmissionConfig(path: string,workspaceIds: readonly string[], trustedAccount: OwnerOutboxAdmission["trustedAccount"]) {
   if (!isAbsolute(path)) throw new Error("Private owner admission configuration path must be absolute.");
   const fd = openSync(path,"r"), buffer = Buffer.alloc(1_048_577);
   let length = 0;
@@ -41,7 +41,7 @@ export function readOwnerAdmissionConfig(path: string,workspaceIds: readonly str
     maxIndexOperations: positive(validation.maxIndexOperations),
   };
   const validate = liveValidation.validator(policy);
-  const admission: OwnerOutboxAdmission = {shares,maxEntriesPerDrain: positive(row.maxEntriesPerDrain),maxBytesPerDrain: positive(row.maxBytesPerDrain),validate};
+  const admission: OwnerOutboxAdmission = {trustedAccount,shares,maxEntriesPerDrain: positive(row.maxEntriesPerDrain),maxBytesPerDrain: positive(row.maxBytesPerDrain),validate};
   return {admission,maxDocumentsPerPass: positive(row.maxDocumentsPerPass),pollIntervalMs: positive(row.pollIntervalMs),passDeadlineMs: positive(row.passDeadlineMs)};
 }
 

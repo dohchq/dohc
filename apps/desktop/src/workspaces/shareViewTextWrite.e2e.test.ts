@@ -194,6 +194,7 @@ function shareViewFilesOwner(input: {
     schedulingRootPath: input.rootPath,
     rootPath: input.rootPath,
     shareId: SHARE_ID,
+    recipientUserId: "recipient-a",
     granterEmail: "granter@example.com",
     grantedSelector: { paths: ["docs"], versionId: null, access: "edit" },
     ended: false,
@@ -307,6 +308,7 @@ describe("share-view text writes through the real store", () => {
       const view = await harness("dohc-share-text-capture-posture-", "edit");
 
       await expect(flushCapture(view)).resolves.toEqual({
+        heldFiles: [],
         running: false,
         settled: false,
         degraded: true,

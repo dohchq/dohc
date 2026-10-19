@@ -76,6 +76,15 @@ describe("resolveWorkspaceRelayAuthorId", () => {
   });
 });
 
+it("retains the pinned chat author while paused, without accepting another account", async () => {
+  const paused = { workspaceId: "workspace-1", pausedRemote: workspace().remote };
+  expect(resolveWorkspaceRelayAuthorId(paused, credentials)).toBe("user-1");
+  expect(resolveWorkspaceRelayAuthorId(paused, { ...credentials, userId: "other" })).toBeUndefined();
+  expect(resolveWorkspaceRelayAuthorId(paused, null)).toBeUndefined();
+  expect(await resolveChatRelayIdentity({ workspace: paused, credentials, store, target: { threadId: "local" } }))
+    .toMatchObject({ authorUserId: "user-1" });
+});
+
 describe("persisted relay account pins", () => {
   it("rejects same-server account mismatches", () => {
     expect(workspaceRemoteMatchesCredentials(workspace().remote!, credentials)).toBe(

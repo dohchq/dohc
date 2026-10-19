@@ -56,7 +56,8 @@ export type Notice = {
 // Notices remains.
 export interface WorkspaceErrorNotice {
   copyLabel?: string;
-  tone?: "success";
+  // Omitted for a failure. A warning needs the person, though nothing failed.
+  tone?: "success" | "warning";
   // A success toast that stays until it is closed, rather than fading.
   stays?: boolean;
   id: string;
@@ -68,6 +69,7 @@ export interface WorkspaceErrorNotice {
   canRetry: boolean;
   // A step that fixes the cause, such as opening the file it names.
   actionLabel?: string;
+  additionalActionLabels?: string[];
   seen: boolean;
 }
 
@@ -208,12 +210,13 @@ export const AUTOMATION_HOLDS_UNREADABLE =
 type LiveDeliveryRecovery = "retry" | "live-documents" | "restart";
 function liveDeliveryCopy(
   reason: SyncStatusResult["ownerLiveDeliveryReason"],
-): { title: string; body: string; recovery: LiveDeliveryRecovery } {
+): { title: string; body: string; recovery: LiveDeliveryRecovery; Icon: typeof Bell } {
   if (reason === "document-unavailable") {
     return {
       title: "Live editing paused",
       body: "A document this workspace was editing live is no longer available. Open Live documents to review it.",
       recovery: "live-documents",
+      Icon: RefreshCw,
     };
   }
   if (reason === "workspace-changed") {
@@ -221,6 +224,47 @@ function liveDeliveryCopy(
       title: "Live editing paused",
       body: "This workspace changed while live editing was running. Open Live documents to review affected documents.",
       recovery: "live-documents",
+      Icon: RefreshCw,
+    };
+  }
+  // Resume in Live documents is the owner's Try again for this document.
+  // Nothing retries until then, so it shows the warning, not the retry mark.
+  if (reason === "session-host-refused") {
+    return {
+      title: "Live editing stopped",
+      body: "The server stopped live editing for a document in this workspace. Your copy and its history are unchanged. People you shared it with can't edit it live for now. Open Live documents to try again.",
+      recovery: "live-documents",
+      Icon: AlertTriangle,
+    };
+  }
+  // Nothing the owner does in dohc continues a server copy that diverged, so
+  // nothing offers a Resume. Live documents shows which documents it stopped.
+  if (reason === "session-host-diverged") {
+    return {
+      title: "Live editing stopped",
+      body: "The server stopped live editing because its copy of this workspace no longer matches the synced one. Edits people made live may not have reached your files. People you shared its documents with can't edit them live. Contact the server's operator.",
+      recovery: "live-documents",
+      Icon: AlertTriangle,
+    };
+  }
+  // A Resume alone fails again: the server can start only a document that
+  // dohc has opened once, so the owner's first step is to open it.
+  if (reason === "live-document-without-lineage") {
+    return {
+      title: "Live editing can't start",
+      body: "The server can't start live editing for a document in this workspace until you open it once in dohc. Open Live documents to see which document. After you open it, resume live editing there.",
+      recovery: "live-documents",
+      Icon: AlertTriangle,
+    };
+  }
+  // The server's copy misses an edit made while live editing was off, and
+  // nothing the owner does in dohc fixes that yet, so nothing offers a Resume.
+  if (reason === "live-edit-unadmitted") {
+    return {
+      title: "Live editing can't resume",
+      body: "A document in this workspace changed while live editing was off, so the server can't resume live editing for it. You can keep editing it in dohc. People you shared it with can't edit it live. Open Live documents to see which document.",
+      recovery: "live-documents",
+      Icon: AlertTriangle,
     };
   }
   if (reason === "restart-required") {
@@ -228,12 +272,14 @@ function liveDeliveryCopy(
       title: "Live editing paused",
       body: "Restart dohc to enable live editing. Your edits are saved on this device.",
       recovery: "restart",
+      Icon: RefreshCw,
     };
   }
   return {
     title: "Live editing retrying",
     body: "dohc is retrying live editing for this workspace. Your edits are saved on this device.",
     recovery: "retry",
+    Icon: RefreshCw,
   };
 }
 
@@ -243,12 +289,13 @@ const OWNER_LIVE_REFUSALS_TITLE = "Some shares could not start live editing";
 const OWNER_LIVE_REFUSALS_BODY =
   "Open Live documents to see which files are affected and try again.";
 
-// An oversized unclaimed lineage cannot share changes made in dohc.
+// An oversized unclaimed lineage shares its latest saved file at each push,
+// never its live edits. An open copy elsewhere takes it only after closing.
 type SharingDeclined = NonNullable<SyncStatusResult["sharingDeclined"]>[number];
-const SHARING_DECLINED_TITLE = "Too large to share your edits";
+const SHARING_DECLINED_TITLE = "Too large to edit live with others";
 function sharingDeclinedBody(declined: SharingDeclined): string {
   const fileName = declined.path.split("/").pop() ?? declined.path;
-  return `People you share ${fileName} with don't get the edits you make in dohc while it is this large. Make it smaller, then open it again to share your edits.`;
+  return `People you share ${fileName} with get your saved edits when dohc syncs. If they have it open in dohc, they see your edits after they close it. Close ${fileName} and open it again to fix this.`;
 }
 function sharingDeclinedDetails(workspaceId: string, declined: SharingDeclined): string {
   return errorDetails([
@@ -302,22 +349,27 @@ function toneClass(tone: Notice["tone"]): string {
 // finished. The states page renders it too, so it is its own piece.
 export function WorkspaceErrorToast(props: {
   error: WorkspaceErrorNotice;
-  onAction?: (id: string) => void;
+  onAction?: (id: string, index?: number) => void;
   onRetry?: (id: string) => void;
   onHide?: (id: string) => void;
 }) {
   const { error } = props;
+  // A success or a warning is a notice: nothing failed.
+  const notice = error.tone !== undefined;
   return (
     <div
-      data-testid={error.tone === "success" ? "workspace-shell-notice" : "workspace-shell-error"}
-      role={error.tone === "success" ? "status" : "alert"}
+      data-testid={notice ? "workspace-shell-notice" : "workspace-shell-error"}
+      role={notice ? "status" : "alert"}
       className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
     >
-      {error.tone === "success" ? <CheckCircle2 size={14} aria-hidden className="mt-0.5 shrink-0 text-success" /> : <AlertTriangle size={14} aria-hidden className="mt-0.5 shrink-0 text-danger" />}
+      {error.tone === "success"
+        ? <CheckCircle2 size={14} aria-hidden className="mt-0.5 shrink-0 text-success" />
+        : <AlertTriangle size={14} aria-hidden className={`mt-0.5 shrink-0 ${error.tone === "warning" ? "text-warning" : "text-danger"}`} />}
       <span className="min-w-0 flex-1 select-text cursor-text break-words leading-snug">
         {error.title ? <span className="block font-medium">{error.title}</span> : null}
         <span className={error.title ? "block mt-0.5 text-muted" : undefined}>{error.message}</span>
       </span>
+      {(error.actionLabel && props.onAction) || (error.additionalActionLabels?.length && props.onAction) || (error.canRetry && props.onRetry) ? <div className="flex shrink-0 flex-col gap-1">
       {error.actionLabel && props.onAction ? (
         <button
           type="button"
@@ -328,6 +380,13 @@ export function WorkspaceErrorToast(props: {
           {error.actionLabel}
         </button>
       ) : null}
+      {props.onAction ? error.additionalActionLabels?.map((label, index) => (
+        <button type="button" key={label} data-testid="workspace-shell-error-additional-action"
+          onClick={() => props.onAction?.(error.id, index + 1)}
+          className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink">
+          {label}
+        </button>
+      )) : null}
       {error.canRetry && props.onRetry ? (
         <button
           type="button"
@@ -338,18 +397,19 @@ export function WorkspaceErrorToast(props: {
           Try again
         </button>
       ) : null}
+      </div> : null}
       {error.filePaths === undefined || error.filePaths.length > 0 ? <CopyButton
         key={error.id}
         iconOnly
         pinName
-        label={error.copyLabel ?? (error.tone === "success" ? "Copy notice details" : "Copy error details")}
+        label={error.copyLabel ?? (notice ? "Copy notice details" : "Copy error details")}
         testId="workspace-shell-error-copy"
         getText={() => error.details}
       /> : null}
       {props.onHide ? (
         <button
           type="button"
-          aria-label={error.tone === "success" ? "Dismiss workspace notice" : "Dismiss workspace error"}
+          aria-label={notice ? "Dismiss workspace notice" : "Dismiss workspace error"}
           onClick={() => props.onHide?.(error.id)}
           className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
         >
@@ -475,7 +535,7 @@ export function NoticeCenter(props: {
   // pushing the workspace around.
   workspaceErrors?: readonly WorkspaceErrorNotice[];
   onRetryWorkspaceError?: (id: string) => void;
-  onWorkspaceErrorAction?: (id: string) => void;
+  onWorkspaceErrorAction?: (id: string, index?: number) => void;
   onHideWorkspaceError?: (id: string) => void;
   onDismissWorkspaceError?: (id: string) => void;
   // Told each time an error's toast comes on screen.
@@ -898,6 +958,9 @@ export function NoticeCenter(props: {
                 onClick: () => props.onWorkspaceErrorAction?.(error.id),
               }]
             : []),
+          ...(props.onWorkspaceErrorAction ? (error.additionalActionLabels ?? []).map((label, index) => ({
+            label, onClick: () => props.onWorkspaceErrorAction?.(error.id, index + 1),
+          })) : []),
           ...(error.canRetry && props.onRetryWorkspaceError
             ? [{
                 label: "Try again",
@@ -910,7 +973,7 @@ export function NoticeCenter(props: {
           : {}),
         timeMs: error.atMs,
         copyText: error.filePaths?.length === 0 ? undefined : error.details,
-        copyLabel: error.copyLabel,
+        copyLabel: error.copyLabel ?? (error.tone === "warning" ? "Copy notice details" : undefined),
         filePaths: error.filePaths,
         Icon: error.tone === "success" ? CheckCircle2 : AlertTriangle,
       });
@@ -967,7 +1030,7 @@ export function NoticeCenter(props: {
         body: liveDelivery.body,
         ...(liveDeliveryAction ? { actions: [liveDeliveryAction] } : {}),
         copyText: liveDeliveryDetails,
-        Icon: RefreshCw,
+        Icon: liveDelivery.Icon,
       });
     }
 
@@ -1390,7 +1453,7 @@ export function NoticeCenter(props: {
               aria-live="polite"
               className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
             >
-              <RefreshCw size={14} aria-hidden className="mt-0.5 shrink-0 text-warning" />
+              <liveDelivery.Icon size={14} aria-hidden className="mt-0.5 shrink-0 text-warning" />
               <span className="min-w-0 flex-1 select-text cursor-text break-words leading-snug">
                 {liveDelivery.title}. {liveDelivery.body}
               </span>

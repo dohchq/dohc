@@ -7,8 +7,9 @@ import {
   type AppendLogBatchResult,
   type FetchLogPageResult,
   type SyncRelayLogRow,
+  type SqliteDb,
 } from "./types";
-import { SyncRelayConflictError, SyncRelayBlobMissingError } from "./errors";
+import { SyncRelayConflictError, logBlobsMissing } from "./errors";
 import { referencedBlobShas, versionIdFromVersionCreatePayload } from "./blobReferences";
 import {
   OBJECT_PATH_UPSERT_SQL,
@@ -21,12 +22,33 @@ import {
 } from "./currentFiles";
 import { rowToLogRow } from "./rows";
 import { notifyDesktopReadiness } from "../desktopReadinessChanges";
+import {confirmLiveApplication} from "./liveApplicationAuthorship";
+import {REFUSED_OP_KIND} from "./relayAdmission";
+import { parseLiveAuthorSnapshot, type LiveAuthorSnapshot } from "@dohc/live-session-contract/live-authorship";
+import { SHARE_MEMBER_ORIGIN_PREFIX } from "../relayLogInputs";
+import { stableJsonStringify } from "../canonicalJson";
+
+function withAdmittedChatName(op: SyncRelayLogInput, snapshot: LiveAuthorSnapshot): SyncRelayLogInput {
+  const human = snapshot.find(author => author.kind === "human");
+  if (!human) throw new Error("named chat admission requires an account author");
+  const payload = JSON.parse(op.payloadJson) as Record<string, unknown>;
+  if (op.opKind === "chat.reaction.set" || payload.authorKind === "human") {
+    payload.authorDisplayName = human.humanName;
+    delete payload.authorOwnerDisplayName;
+  } else {
+    payload.authorOwnerDisplayName = human.humanName;
+  }
+  return {...op, payloadJson: stableJsonStringify(payload), admittedAuthorSnapshot: snapshot};
+}
+
+const logPageStatements = new WeakMap<SqliteDb, ReturnType<SqliteDb["prepare"]>>();
 
 export function appendLogBatch(storage: StorageContext, input: {
     workspaceId: string;
     originId: string;
     ops: SyncRelayLogInput[];
     guard?: (context: AppendLogBatchGuardContext) => void;
+    admit?: (ops: SyncRelayLogInput[]) => void;
   }): AppendLogBatchResult {
     return storage.tx(() => appendLogBatchInTransaction(storage, input));
   }
@@ -37,6 +59,7 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
   originId: string;
   ops: SyncRelayLogInput[];
   guard?: (context: AppendLogBatchGuardContext) => void;
+  admit?: (ops: SyncRelayLogInput[]) => void;
 }): AppendLogBatchResult {
       for (const op of input.ops) {
         if (!Number.isSafeInteger(op.recordedAtMs)) throw new Error("recordedAtMs must be an integer in the safe wire range");
@@ -59,7 +82,7 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
          WHERE workspace_id = ? AND origin_id = ?`,
       );
       const existingStmt = storage.db.prepare(
-        `SELECT op_kind, payload_json, recorded_at_ms, settlement_admission_json
+        `SELECT op_kind, payload_json, recorded_at_ms, settlement_admission_json, admitted_author_snapshot_json
          FROM sync_relay_log
          WHERE workspace_id = ? AND origin_id = ? AND origin_seq = ?`,
       );
@@ -69,13 +92,21 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
       let currentMax = Number(
         maxStmt.get(input.workspaceId, input.originId)?.max_seq ?? -1,
       );
-      for (const op of input.ops) {
+      for (const inputOp of input.ops) {
+        const admittedChat = input.originId.startsWith(SHARE_MEMBER_ORIGIN_PREFIX) &&
+          (inputOp.opKind === "chat.message.append" || inputOp.opKind === "chat.reaction.set") &&
+          inputOp.admittedAuthorSnapshot !== undefined;
+        let op = admittedChat ? withAdmittedChatName(inputOp, inputOp.admittedAuthorSnapshot!) : inputOp;
         if (op.originSeq <= currentMax) {
           const existing = existingStmt.get(
             input.workspaceId,
             input.originId,
             op.originSeq,
           );
+          // Account names belong to the first admission, even after a rename.
+          if (admittedChat && existing?.admitted_author_snapshot_json != null) {
+            op = withAdmittedChatName(inputOp, parseLiveAuthorSnapshot(JSON.parse(String(existing.admitted_author_snapshot_json))));
+          }
           if (
             existing &&
             existing.op_kind === op.opKind &&
@@ -103,7 +134,22 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
         }
       }
 
-      for(const op of newOps)commitHostedSettlement(storage,op,input.workspaceId,input.originId);
+      input.admit?.(newOps);
+      for (const op of newOps) {
+        // Only the relay writes a refusal, and only as one.
+        if ((op.opKind === REFUSED_OP_KIND) !== (op.relayAdmission === "refused")) {
+          throw new Error(`${REFUSED_OP_KIND} rows are written only by the relay`);
+        }
+      }
+
+      let batchCoordinates: Map<number, SyncRelayLogInput> | undefined;
+      for (const op of newOps) {
+        commitHostedSettlement(storage, op, input.workspaceId, input.originId);
+        if (op.opKind === "live.audit.application") {
+          batchCoordinates ??= new Map(newOps.map(entry => [entry.originSeq, entry]));
+          confirmLiveApplication(storage, op, input.workspaceId, input.originId, batchCoordinates);
+        }
+      }
       addedLogBytes=newOps.reduce((bytes,op)=>bytes+Buffer.byteLength(op.payloadJson)+
         (op.admittedAuthorSnapshot===undefined?0:Buffer.byteLength(JSON.stringify(op.admittedAuthorSnapshot)))+
         (op.settlementAdmission===undefined?0:Buffer.byteLength(JSON.stringify(op.settlementAdmission))),0);
@@ -133,18 +179,14 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
       }
       if (referencedShas.size > 0) {
         const missing = storage.missingBlobs(input.workspaceId, [...referencedShas]);
-        if (missing.length > 0) {
-          throw new SyncRelayBlobMissingError(
-            `log append references ${missing.length} blob(s) not stored on the relay ` +
-              `(first: ${missing[0]}); (re-)upload the blob(s) and retry`,
-          );
-        }
+        if (missing.length > 0) throw logBlobsMissing(missing);
       }
 
       const insertStmt = storage.db.prepare(
         `INSERT INTO sync_relay_log (
-          workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, admitted_author_snapshot_json, settlement_admission_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, admitted_author_snapshot_json, settlement_admission_json,
+          relay_admission
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       );
       const objectPathStmt = storage.db.prepare(OBJECT_PATH_UPSERT_SQL);
       const objectMomentStmt = storage.db.prepare(OBJECT_MOMENT_INSERT_SQL);
@@ -160,9 +202,12 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
           op.recordedAtMs,
           op.admittedAuthorSnapshot === undefined ? null : JSON.stringify(op.admittedAuthorSnapshot),
           op.settlementAdmission === undefined ? null : JSON.stringify(op.settlementAdmission),
+          op.relayAdmission ?? null,
         );
         inserted += 1;
-        if(op.settlementAdmission?.status === "refused")continue;
+        // A departed publication must move neither projection: either one
+        // alone would bring the document back where it no longer is.
+        if(op.settlementAdmission?.status === "refused" || op.relayAdmission !== undefined)continue;
         // Keep "where is this object now?" answerable by primary
         // key. The relay_seq this row just took IS the order the guard in the
         // upsert compares, so a later moment always wins and an out-of-order
@@ -243,15 +288,18 @@ export function fetchLogPage(storage: StorageContext, input: {
     sinceRelaySeq: number;
     limit: number;
   }): FetchLogPageResult {
-    const rows = storage.db
-      .prepare(
-        `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json
+    let statement = logPageStatements.get(storage.db);
+    if (!statement) {
+      statement = storage.db.prepare(
+        `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json, relay_admission
          FROM sync_relay_log
          WHERE workspace_id = ? AND relay_seq > ?
          ORDER BY relay_seq
          LIMIT ?`,
-      )
-      .all(input.workspaceId, input.sinceRelaySeq, input.limit + 1);
+      );
+      logPageStatements.set(storage.db, statement);
+    }
+    const rows = statement.all(input.workspaceId, input.sinceRelaySeq, input.limit + 1);
     const pageRows = rows.slice(0, input.limit).map(rowToLogRow);
     const last = pageRows[pageRows.length - 1];
     return {
@@ -270,7 +318,7 @@ export function fetchLogPageDescending(storage: StorageContext, input: {
       input.beforeRelaySeq === null
         ? storage.db
             .prepare(
-              `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json
+              `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json, relay_admission
                FROM sync_relay_log
                WHERE workspace_id = ?
                ORDER BY relay_seq DESC
@@ -279,7 +327,7 @@ export function fetchLogPageDescending(storage: StorageContext, input: {
             .all(input.workspaceId, input.limit)
         : storage.db
             .prepare(
-              `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json
+              `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json, relay_admission
                FROM sync_relay_log
                WHERE workspace_id = ? AND relay_seq < ?
                ORDER BY relay_seq DESC
@@ -296,7 +344,7 @@ export function fetchLogCoordinate(storage: StorageContext, input: {
   }): SyncRelayLogRow | null {
     const row = storage.db
       .prepare(
-        `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json
+        `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json, relay_admission
          FROM sync_relay_log
          WHERE workspace_id = ? AND origin_id = ? AND origin_seq = ?`,
       )
@@ -315,4 +363,91 @@ export function hasRefusedSettlement(storage: StorageContext, input: {
       AND json_extract(settlement_admission_json,'$.reason')=?
       AND json_extract(payload_json,'$.momentId')=? LIMIT 1`)
     .get(input.workspaceId,input.originId,input.originSeq,input.settlementId,input.reason,input.momentId) !== undefined;
+}
+
+export const CHAT_HISTORY_SCAN_WINDOW = 2_000;
+export const CHAT_HISTORY_SCAN_BYTES = 4 * 1024 * 1024;
+
+export function fetchChatMessages(storage: StorageContext, input: {
+  workspaceId: string; channelWireId: string; cursor: number | null; direction: "older" | "newer"; limit: number;
+}): FetchLogPageResult & {latestCursor: number} {
+  const older = input.direction === "older";
+  const coordinates = storage.db.prepare(`SELECT relay_seq, octet_length(payload_json) AS payload_bytes FROM sync_relay_log
+    WHERE workspace_id = ? ${input.cursor === null ? "" : `AND relay_seq ${older ? "<" : ">"} ?`}
+    ORDER BY relay_seq ${older ? "DESC" : "ASC"} LIMIT ?`)
+    .iterate(input.workspaceId, ...(input.cursor === null ? [] : [input.cursor]), CHAT_HISTORY_SCAN_WINDOW);
+  const window: number[] = [];
+  let payloadBytes = 0, byteLimited = false;
+  for (const row of coordinates) {
+    const bytes = Number(row.payload_bytes);
+    if (window.length > 0 && payloadBytes + bytes > CHAT_HISTORY_SCAN_BYTES) {byteLimited = true; break;}
+    window.push(Number(row.relay_seq));
+    payloadBytes += bytes;
+    if (payloadBytes >= CHAT_HISTORY_SCAN_BYTES) {byteLimited = true; break;}
+  }
+  if (window.length === 0) return {rows: [], nextCursor: input.cursor ?? 0, latestCursor: input.cursor ?? 0, hasMore: false};
+  const first = window[0]!, edge = window[window.length - 1]!;
+  const matches = storage.db.prepare(`WITH window_messages AS MATERIALIZED (
+      SELECT m.* FROM sync_relay_log m
+      WHERE m.workspace_id = ? AND m.relay_seq BETWEEN ? AND ?
+        AND m.op_kind = 'chat.message.append' AND json_valid(m.payload_json)
+    ), window_threads AS MATERIALIZED (
+      SELECT DISTINCT json_extract(payload_json, '$.threadId') AS thread_id FROM window_messages
+    ), channel_threads AS MATERIALIZED (
+      SELECT w.thread_id FROM window_threads w
+      WHERE json_extract((SELECT t.payload_json FROM sync_relay_log t
+        WHERE t.workspace_id = ? AND t.op_kind = 'chat.thread.create' AND json_valid(t.payload_json)
+          AND json_extract(t.payload_json, '$.threadId') = w.thread_id
+        ORDER BY t.relay_seq LIMIT 1), '$.channelWireId') = ?
+    )
+    SELECT * FROM window_messages
+    WHERE json_extract(payload_json, '$.threadId') IN (SELECT thread_id FROM channel_threads)
+    ORDER BY relay_seq ${older ? "DESC" : "ASC"} LIMIT ?`)
+    .all(input.workspaceId, Math.min(first, edge), Math.max(first, edge), input.workspaceId, input.channelWireId, input.limit + 1);
+  const rows = matches.slice(0, input.limit).map(rowToLogRow);
+  const truncated = matches.length > input.limit;
+  return {rows, nextCursor: truncated ? rows[rows.length - 1]!.relaySeq : edge,
+    latestCursor: Math.max(first, edge), hasMore: truncated || byteLimited || window.length === CHAT_HISTORY_SCAN_WINDOW};
+}
+
+export function fetchChatMessage(storage: StorageContext, input: {
+  workspaceId: string; originId: string; messageId: string;
+}): SyncRelayLogRow | null {
+  const row = storage.db.prepare(`SELECT * FROM sync_relay_log
+    WHERE workspace_id = ? AND origin_id = ? AND op_kind = 'chat.message.append'
+      AND json_extract(payload_json, '$.messageId') = ? ORDER BY relay_seq LIMIT 1`)
+    .get(input.workspaceId, input.originId, input.messageId);
+  return row ? rowToLogRow(row) : null;
+}
+
+export function appendBrowserChatBatch(storage: StorageContext, input: {
+  workspaceId: string; originId: string; messageId: string; ops: SyncRelayLogInput[];
+  guard?: (context: AppendLogBatchGuardContext) => void;
+}): AppendLogBatchResult {
+  return storage.tx(() => {
+    const existing = fetchChatMessage(storage, input);
+    const storedPayload = existing ? JSON.parse(existing.payloadJson) as Record<string, unknown> : null;
+    if (existing) {
+      const previous = fetchLogCoordinate(storage, {...input, originSeq: existing.originSeq - 1});
+      const createdThread = previous?.opKind === "chat.thread.create" &&
+        (JSON.parse(previous.payloadJson) as {threadId?: unknown}).threadId ===
+        (JSON.parse(existing.payloadJson) as {threadId?: unknown}).threadId;
+      if (input.ops.length !== (createdThread ? 2 : 1)) {
+        throw new SyncRelayConflictError("retry changes thread creation");
+      }
+    }
+    const firstSequence = existing ? existing.originSeq - input.ops.length + 1 : Number(storage.db.prepare(
+      `SELECT COALESCE(MAX(origin_seq), -1) AS seq FROM sync_relay_log WHERE workspace_id = ? AND origin_id = ?`,
+    ).get(input.workspaceId, input.originId)?.seq ?? -1) + 1;
+    const ops = input.ops.map((op, index) => {
+      const payload = JSON.parse(op.payloadJson) as Record<string, unknown>;
+      const recordedAtMs = existing?.recordedAtMs ?? op.recordedAtMs;
+      return {...op, originSeq: firstSequence + index, recordedAtMs,
+        payloadJson: JSON.stringify({...payload, createdAtMs: recordedAtMs,
+          ...(storedPayload && op.opKind === "chat.message.append" ?
+            payload.authorKind === "human" ? {authorDisplayName: storedPayload.authorDisplayName} :
+              {authorOwnerDisplayName: storedPayload.authorOwnerDisplayName} : {})})};
+    });
+    return appendLogBatchInTransaction(storage, {...input, ops});
+  });
 }

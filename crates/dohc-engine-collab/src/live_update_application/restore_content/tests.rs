@@ -85,7 +85,7 @@ fn empty_bootstrap_outbox_does_not_require_owner_adoption() {
     let outbox =
         crate::owner_outbox::outbox_id(b, &b.lineage_claim_id, &serde_json::to_string(b).unwrap());
     f.store.write_with(&NoFaults,|tx| -> Result<(),ApplicationError> {
-        tx.execute("INSERT INTO owner_ydoc_outboxes VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?5,?5,?9,'active',0,NULL,1,NULL,NULL,0)",
+        tx.execute("INSERT INTO owner_ydoc_outboxes (outbox_id,workspace_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,base_update_digest,base_blob_digest,base_byte_length,state,pending_bytes,oldest_entry_at_ms,next_sequence,quarantine_reason,observed_binding_json,created_at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?5,?5,?9,'active',0,NULL,1,NULL,NULL,0)",
             params![outbox,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.current_path,serde_json::to_string(&b.selector_paths).unwrap(),b.restore_fence_generation,f.doc.encode_full_state().len() as i64]).map_err(write_sql)?;
         Ok(())
     }).unwrap();
@@ -133,7 +133,7 @@ fn append_history_copies(f: &mut Fixture, copies: i64, bytes: Vec<u8>) -> Vec<Li
                     update_bytes: bytes.clone(),
                 };
                 event.validate()?;
-                accepted_history::append(tx, &held, &event, 100_000_000)?;
+                accepted_history::append_native(tx, &held, &event, 100_000_000)?;
                 if f.sequence > 0 {
                     insert_application(tx, &held, &event, f.sequence)?;
                 }
@@ -430,7 +430,7 @@ fn ordinary_checkpoint_streams_cumulative_metadata_above_working_reserve() {
                     },
                     update_bytes: bytes.clone(),
                 };
-                accepted_history::append(tx, &held, &event, 8 * 1024 * 1024)?;
+                accepted_history::append_native(tx, &held, &event, 8 * 1024 * 1024)?;
                 last = Some(event.metadata.accepted.receipt);
             }
             Ok(last.unwrap())
@@ -725,7 +725,7 @@ fn append_after_restore_avoids_historical_json_and_checkpoint_document_reads() {
                 _ => Authorization::Allow,
             }))
             .map_err(read_sql)?;
-            let appended = accepted_history::append(tx, &held, &event, 8 * 1024 * 1024);
+            let appended = accepted_history::append_native(tx, &held, &event, 8 * 1024 * 1024);
             tx.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
                 .map_err(read_sql)?;
             appended
@@ -894,6 +894,9 @@ impl Fixture {
         Self::with_doc(doc, source)
     }
     fn with_doc(doc: Ydoc, source: &str) -> Self {
+        Self::with_doc_at(doc, source, "a.md")
+    }
+    fn with_doc_at(doc: Ydoc, source: &str, path: &str) -> Self {
         let dir = ScratchDir::new_named("native-restore-proposal").unwrap();
         let mut store = EngineStore::open(&dir.join("engine.db"), 0).unwrap();
         dohc_engine_domain::VersionedTextStore::new(&mut store)
@@ -905,8 +908,8 @@ impl Fixture {
             main_version_id: "main".into(),
             object_id: "object".into(),
             lineage_claim_id: hex_sha256(&bytes),
-            current_path: "a.md".into(),
-            selector_paths: vec!["a.md".into()],
+            current_path: path.into(),
+            selector_paths: vec![path.into()],
             restore_fence_generation: 0,
         };
         let host = ApplicationHostCoordinate {
@@ -966,13 +969,14 @@ impl Fixture {
         self.accept(bytes, cursor)
     }
     fn accept(&mut self, bytes: Vec<u8>, cursor: i64) -> NativeRestorePoint {
-        self.accept_declared(bytes, cursor, None)
+        self.accept_declared(bytes, cursor, None, vec![])
     }
     fn accept_declared(
         &mut self,
         bytes: Vec<u8>,
         cursor: i64,
         agent_declaration: Option<AgentDeclaration>,
+        first_seen: Vec<LiveUpdateStructRange>,
     ) -> NativeRestorePoint {
         let receipt = LiveUpdateReceipt {
             delivery_id: format!("event-{cursor}"),
@@ -990,7 +994,7 @@ impl Fixture {
                     },
                     received_at_ms: cursor,
                 },
-                first_seen: vec![],
+                first_seen,
                 canonical_version: Some(2),
                 author_snapshot: Some(
                     (agent_declaration)
@@ -1107,6 +1111,7 @@ fn desktop_automation_draft_without_server_declaration_can_stop_and_restore() {
         &mut WriterDocCache::new(),
         "workspace",
         OwnerDraftAppendInput {
+            person_edit: false,
             binding: f.binding.clone(),
             expected_revision: 1,
             append_key: "desktop-automation".into(),
@@ -1229,6 +1234,49 @@ fn prepares_one_forward_restore_of_an_exact_source_point_and_replays_after_resta
         expected
     );
     assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 1);
+}
+
+/// Part 5's held fence: a restore fence trusted the binding's durable
+/// `available` flag, which a released held document keeps. A hosted document
+/// its scope holds but not ready refuses a new fence; a saved one replays.
+#[test]
+fn a_hosted_document_that_is_not_ready_refuses_a_new_restore_fence() {
+    let mut f = Fixture::new("# Baseline\n");
+    f.edit("# Edited\n", 7);
+    let set = |f: &mut Fixture, sql: &str| {
+        f.store
+            .write_with(&NoFaults, |tx| tx.execute_batch(sql).map_err(write_sql))
+            .unwrap();
+    };
+    set(
+        &mut f,
+        "INSERT OR IGNORE INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+           VALUES ('workspace','service-host:host','epoch','stream',1); \
+         INSERT INTO hosted_replicas (workspace_id,scope_generation,created_at_ms) VALUES ('workspace',1,1); \
+         INSERT INTO hosted_documents (workspace_id,object_id,path,state,held_reason,scope_generation) \
+           VALUES ('workspace','object','a.md','held','hosted-backfill-work-waiting',1);",
+    );
+    let input = f.fence_input();
+    let fence = |f: &mut Fixture| {
+        f.owner
+            .fence_restore(&mut f.store, input.clone(), f.host.clone(), 50, &NoFaults)
+    };
+    assert!(matches!(
+        fence(&mut f),
+        Err(ApplicationError::HostedDocumentUnready)
+    ));
+    assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 0);
+
+    set(
+        &mut f,
+        "UPDATE hosted_documents SET state='ready',held_reason=NULL",
+    );
+    let receipt = fence(&mut f).unwrap();
+    set(
+        &mut f,
+        "UPDATE hosted_documents SET state='held',held_reason='hosted-backfill-work-waiting'",
+    );
+    assert_eq!(fence(&mut f).unwrap(), receipt);
 }
 
 #[test]
@@ -2610,6 +2658,24 @@ fn adoption_origin_stamp_keeps_sqlite_json_bytes_and_is_bounded_before_serializi
 /// and reopen change nothing.
 #[test]
 fn interval_keeps_declared_agents_through_dedupe_compaction_and_reopen() {
+    fn paragraph(doc: &Ydoc, text: &str) -> (Vec<u8>, Vec<LiveUpdateStructRange>) {
+        let before = doc.state_vector();
+        let bytes = doc.richdoc_append_paragraph(text);
+        let mut ranges: Vec<_> = doc
+            .state_vector()
+            .iter()
+            .filter_map(|(client, clock)| {
+                let start = before.get(client);
+                (*clock > start).then_some(LiveUpdateStructRange {
+                    client_id: client.get() as i64,
+                    start_clock: i64::from(start),
+                    end_clock: i64::from(*clock),
+                })
+            })
+            .collect();
+        ranges.sort_by_key(|range| range.client_id);
+        (bytes, ranges)
+    }
     let agent = |agent_id: &str, depth| {
         Some(AgentDeclaration {
             agent_id: agent_id.into(),
@@ -2626,11 +2692,11 @@ fn interval_keeps_declared_agents_through_dedupe_compaction_and_reopen() {
         serde_json::from_str::<Value>(&authors.json()).unwrap()
     };
     let mut f = Fixture::new("Original");
-    let first = f.doc.richdoc_append_paragraph("Agent edit");
-    f.accept_declared(first.clone(), 3, agent("trip-agent", 0));
-    let person = f.doc.richdoc_append_paragraph("Person edit");
-    f.accept_declared(person, 5, None);
-    f.accept_declared(first, 7, agent("review-agent", 2));
+    let (first, first_seen) = paragraph(&f.doc, "Agent edit");
+    f.accept_declared(first.clone(), 3, agent("trip-agent", 0), first_seen);
+    let (person, first_seen) = paragraph(&f.doc, "Person edit");
+    f.accept_declared(person, 5, None, first_seen);
+    f.accept_declared(first, 7, agent("review-agent", 2), vec![]);
     assert_eq!(
         f.store
             .read_with(|conn| conn.query_row(
@@ -3412,6 +3478,353 @@ fn resume_commit_boundaries_leave_a_stop_or_one_historical_receipt() {
                     |_, _, _, _| panic!("saved resume")
                 )
                 .unwrap()
+        );
+    }
+}
+
+fn observed_collection_restore_fixture() -> Fixture {
+    use dohc_engine_domain::{VersionedTextStore, WriteText};
+    let doc = Ydoc::wire();
+    let fixtures: Value = serde_json::from_str(include_str!(
+        "../../../tests/live-bootstrap-fixtures/live-bootstrap.json"
+    ))
+    .unwrap();
+    let seed = fixtures
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == "rich-unicode")
+        .unwrap();
+    doc.apply(&serde_json::from_value::<Vec<u8>>(seed["bytes"].clone()).unwrap())
+        .unwrap();
+    doc.frontmatter_set("id", "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa")
+        .unwrap();
+    doc.frontmatter_set("status", "open").unwrap();
+    let text = doc.project(ContentKind::Richdoc).unwrap().content;
+    let mut f = Fixture::with_doc_at(doc, &text, "tasks/a.md");
+    VersionedTextStore::new(&mut f.store)
+        .write_text(
+            &WriteText {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                object_id: "schema".into(),
+                path: "tasks/collection.yaml".into(),
+                text: "fields:\n  status:\n    type: text\n".into(),
+                moment_id: "schema".into(),
+                metadata_origin: "user".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_domain::reconcile_collections_in_tx(tx, "workspace", "main")
+        })
+        .unwrap();
+    // A device can retain its observed binding when it registers as host.
+    // Seed that retained observation alongside the production bootstrap.
+    f.store.write_with(&NoFaults, |tx| {
+        let checkpoint = f.doc.encode_full_state();
+        let digest = hex_sha256(&checkpoint);
+        dohc_engine_storage::put_binary_blob_with_sha(tx, &checkpoint, &digest)?;
+        tx.execute(
+            "INSERT INTO ydoc_owner_bindings (workspace_id,main_version_id,object_id,lineage_claim_id,binding_json,relay_database_namespace,binding_revision,accepted_cursor,native_head_sequence,checkpoint_digest,max_pending_bytes,max_pending_age_ms) VALUES ('workspace','main','object',?1,?2,'namespace',1,0,0,?3,1000000,60000)",
+            params![f.binding.lineage_claim_id, serde_json::to_string(&f.binding).unwrap(), digest],
+        ).map_err(read_sql)?;
+        Ok::<_, ApplicationError>(())
+    }).unwrap();
+    // Registration accepts the retained observation rather than clearing it.
+    f.handle = f
+        .owner
+        .register(
+            &mut f.store,
+            "namespace".into(),
+            f.host.clone(),
+            f.binding.clone(),
+        )
+        .unwrap();
+    f
+}
+
+#[test]
+fn restore_fence_quarantines_observed_collection_drafts_with_history() {
+    use crate::owner_outbox::draft;
+    let mut f = observed_collection_restore_fixture();
+    let pending = Ydoc::wire();
+    pending.apply(&f.doc.encode_full_state()).unwrap();
+    let update = pending.frontmatter_set("status", "done").unwrap();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            draft::append_draft_in_tx(
+                tx,
+                "workspace",
+                &f.binding,
+                1,
+                "pending-status".into(),
+                update,
+                4,
+            )
+        })
+        .unwrap();
+    let operation = f.fence_input();
+    for now in [50, 51] {
+        f.owner
+            .fence_restore(
+                &mut f.store,
+                operation.clone(),
+                f.host.clone(),
+                now,
+                &NoFaults,
+            )
+            .unwrap();
+    }
+    f.store.read_with(|conn| {
+        let indexed = dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(conn, "workspace", "main", "object").unwrap().unwrap();
+        assert_eq!(indexed["status"], "open");
+        let state: String = conn.query_row("SELECT state FROM owner_ydoc_outboxes", [], |r| r.get(0))?;
+        assert_eq!(state, "quarantined");
+        let mut stmt = conn.prepare("SELECT previous_value_json,next_value_json,author_origin_id FROM collection_field_history WHERE field_name='status' ORDER BY history_id")?;
+        let history = stmt.query_map([], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?)))?.collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(history, vec![
+            (Some(serde_json::json!("open").to_string()), Some(serde_json::json!("done").to_string()), None),
+            (Some(serde_json::json!("done").to_string()), Some(serde_json::json!("open").to_string()), Some("owner-draft-quarantine".into())),
+        ]);
+        Ok::<_, rusqlite::Error>(())
+    }).unwrap();
+}
+
+#[test]
+fn restore_fence_keeps_host_progress_when_its_observed_checkpoint_is_stale() {
+    use crate::owner_outbox::draft;
+    let mut f = observed_collection_restore_fixture();
+    let pending = Ydoc::wire();
+    pending.apply(&f.doc.encode_full_state()).unwrap();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            draft::append_draft_in_tx(
+                tx,
+                "workspace",
+                &f.binding,
+                1,
+                "pending-body".into(),
+                pending.richdoc_append_paragraph("pending body"),
+                4,
+            )
+        })
+        .unwrap();
+    let update = f.doc.frontmatter_set("status", "review").unwrap();
+    f.accept(update, 1);
+    f.store
+        .read_with(|conn| {
+            let (observed_head, checkpoint_digest): (i64, String) = conn.query_row(
+                "SELECT native_head_sequence, checkpoint_digest FROM ydoc_owner_bindings",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let key = DocKey::new("workspace", "main", "object").unwrap();
+            let marker = crate::read_marker_in(conn, &key).unwrap().unwrap();
+            assert_ne!(observed_head, marker.head_update_seq);
+            let checkpoint = Ydoc::wire();
+            checkpoint
+                .apply(
+                    &dohc_engine_storage::get_binary_blob(conn, &checkpoint_digest)
+                        .unwrap()
+                        .unwrap(),
+                )
+                .unwrap();
+            assert_eq!(checkpoint.frontmatter_json()["status"], "open");
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+    let operation = f.fence_input();
+    for now in [50, 51] {
+        f.owner
+            .fence_restore(
+                &mut f.store,
+                operation.clone(),
+                f.host.clone(),
+                now,
+                &NoFaults,
+            )
+            .unwrap();
+    }
+    f.store.read_with(|conn| {
+        let indexed = dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(conn, "workspace", "main", "object").unwrap().unwrap();
+        assert_eq!(indexed["status"], "review");
+        let state: String = conn.query_row("SELECT state FROM owner_ydoc_outboxes", [], |r| r.get(0))?;
+        assert_eq!(state, "quarantined");
+        let mut stmt = conn.prepare("SELECT previous_value_json,next_value_json,author_origin_id FROM collection_field_history WHERE field_name='status' ORDER BY history_id")?;
+        let history = stmt.query_map([], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?)))?.collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(history, vec![
+            (Some(serde_json::json!("open").to_string()), Some(serde_json::json!("review").to_string()), None),
+        ]);
+        Ok::<_, rusqlite::Error>(())
+    }).unwrap();
+}
+
+/// A hosted pass releases a held document this way: its handle stops
+/// applying, and its binding stays available, so the update it accepted
+/// still proves for the host's push.
+#[test]
+fn a_released_registration_still_proves_the_update_it_accepted() {
+    use crate::owner_outbox::publication::{contains_in, PublicationContentKind, PublicationProof};
+    let mut f = Fixture::new("Original");
+    let update = f
+        .doc
+        .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "Accepted")
+        .unwrap();
+    f.accept(update.clone(), 1);
+    f.owner.release(&f.binding.object_id);
+    let key = DocKey::new("workspace", "main", "object").unwrap();
+    let proof = f
+        .store
+        .read_with(|conn| {
+            contains_in(
+                conn,
+                &key,
+                &f.binding.current_path,
+                Some(&f.binding.lineage_claim_id),
+                PublicationContentKind::Ydoc,
+                &hex_sha256(&update),
+                &mut 4_000_000,
+            )
+        })
+        .unwrap();
+    assert_eq!(proof, PublicationProof::Contained);
+    let next = f
+        .doc
+        .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "Refused")
+        .unwrap();
+    let event = AdmittedLiveUpdate {
+        metadata: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate {
+                receipt: LiveUpdateReceipt {
+                    delivery_id: "event-2".into(),
+                    update_digest: hex_sha256(&next),
+                    journal_cursor: 2,
+                    accepting_host_epoch: 1,
+                },
+                binding: f.binding.clone(),
+                authority: ServerDerivedLiveUpdateAuthority::Owner {
+                    principal_id: "owner".into(),
+                },
+                received_at_ms: 2,
+            },
+            first_seen: vec![],
+            canonical_version: None,
+            author_snapshot: None,
+            first_seen_deletes: None,
+            checkpoint_coverage: None,
+        },
+        update_bytes: next,
+    };
+    assert_eq!(
+        apply_committed(
+            &mut f.store,
+            &mut WriterDocCache::new(),
+            &f.handle,
+            event,
+            &NoFaults,
+            100_000_000,
+            |_, _, _, _| Ok(()),
+        )
+        .unwrap(),
+        ApplicationResult::Pending(ApplicationPending::ApplicabilityUnavailable)
+    );
+}
+
+/// Opus's slice 2 review: a reconnect or a close wrote `available=0`, and a
+/// document held meanwhile could not register again, so the update it
+/// accepted could never prove and its queued write stalled the host's push.
+/// On a hosted replica both retire registrations in memory only, like a
+/// release; an ordinary host still marks the binding unavailable.
+#[test]
+fn a_hosted_reconnect_or_close_keeps_a_held_documents_accepted_update_provable() {
+    use crate::owner_outbox::publication::{contains_in, PublicationContentKind, PublicationProof};
+    for (hosted, reconnect) in [(true, false), (true, true), (false, false)] {
+        let mut f = Fixture::new("Original");
+        let update = f
+            .doc
+            .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "Accepted")
+            .unwrap();
+        f.accept(update.clone(), 1);
+        let set = |f: &mut Fixture, sql: &str| {
+            f.store
+                .write_with(&NoFaults, |tx| tx.execute_batch(sql).map_err(write_sql))
+                .unwrap();
+        };
+        if hosted {
+            set(
+                &mut f,
+                "INSERT OR IGNORE INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+                   VALUES ('workspace','service-host:host','epoch','stream',1); \
+                 INSERT INTO hosted_replicas (workspace_id,scope_generation,created_at_ms) VALUES ('workspace',1,1); \
+                 INSERT INTO hosted_documents (workspace_id,object_id,path,state,scope_generation) \
+                   VALUES ('workspace','object','a.md','ready',1);",
+            );
+        }
+        let held =
+            "UPDATE hosted_documents SET state='held',held_reason='hosted-backfill-work-waiting'";
+        let mut reconnected = f.host.clone();
+        reconnected.connection_id = "reconnected".into();
+        if reconnect {
+            set(&mut f, held);
+            assert!(matches!(
+                f.owner.register(
+                    &mut f.store,
+                    "namespace".into(),
+                    reconnected.clone(),
+                    f.binding.clone()
+                ),
+                Err(ApplicationError::HostedDocumentUnready)
+            ));
+        } else {
+            f.owner.invalidate(&mut f.store).unwrap();
+            if hosted {
+                set(&mut f, held);
+                assert!(matches!(
+                    f.owner.register(
+                        &mut f.store,
+                        "namespace".into(),
+                        reconnected,
+                        f.binding.clone()
+                    ),
+                    Err(ApplicationError::HostedDocumentUnready)
+                ));
+            }
+        }
+        let available: bool = f
+            .store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT available FROM live_device_application_bindings",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(available, hosted, "hosted {hosted}, reconnect {reconnect}");
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        let proof = f.store.read_with(|conn| {
+            contains_in(
+                conn,
+                &key,
+                &f.binding.current_path,
+                Some(&f.binding.lineage_claim_id),
+                PublicationContentKind::Ydoc,
+                &hex_sha256(&update),
+                &mut 4_000_000,
+            )
+        });
+        assert_eq!(
+            proof.ok() == Some(PublicationProof::Contained),
+            hosted,
+            "hosted {hosted}, reconnect {reconnect}"
         );
     }
 }
