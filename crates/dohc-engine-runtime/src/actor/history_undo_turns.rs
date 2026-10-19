@@ -351,7 +351,7 @@ impl ActorHandle {
                 })?;
                 if let Some(cursor)=existing { return Ok(cursor); }
                 let outcome = store.write_background_with(f.as_ref(),|tx| -> Result<(),RuntimeError> {
-                    let active: String = tx.query_row("SELECT version_id FROM active_versions WHERE workspace_id=?1",[&p.workspace],|r|r.get(0)).map_err(StorageError::corrupt_public)?;
+                    let active = dohc_engine_domain::get_active_version_in(tx, &p.workspace)?.version_id;
                     if active!=p.version { return Err(DomainError::UndoRefused {path:p.operation.clone(),reason:"active version changed"}.into()); }
                     let prior: Option<String> = tx.query_row("SELECT r.kind FROM history_undo_plans p JOIN engine_requests r ON r.request_id=p.request_id WHERE p.workspace_id=?1 AND p.operation_id=?2",params![p.workspace,p.operation],|r|r.get(0)).optional().map_err(StorageError::corrupt_public)?;
                     if let Some(kind) = prior { return Err(DomainError::UndoRefused {path:p.operation.clone(),reason:if kind=="history-undo-complete" {"Operation already undone"} else {"Undo in progress"}}.into()); }

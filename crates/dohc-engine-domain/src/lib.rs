@@ -211,4 +211,4 @@ pub(crate) fn received_object_token(id: &str) -> bool {
     })
 }
 
-pub use store::{ensure_no_pending_undo_in, validate_moment_metadata};
+pub use store::{ensure_no_pending_undo_in, get_active_version_in, validate_moment_metadata};
