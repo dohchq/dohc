@@ -1231,6 +1231,14 @@ test("a password saved in the login keychain unlocks the release keychain withou
   await unlockReleaseKeychain(plan, "Packaging", keychain);
   assert.deepEqual(unlocks.at(-1), [KEYCHAIN, "pässwörd"]);
   open = false;
+  saved = "password: 0xC3A4 \n";
+  await unlockReleaseKeychain(plan, "Packaging", keychain);
+  assert.deepEqual(unlocks.at(-1), [KEYCHAIN, "ä"], "hex with no printable character has no quoted form");
+  open = false;
+  saved = "password: \n";
+  await unlockReleaseKeychain(plan, "Packaging", keychain);
+  assert.deepEqual(unlocks.at(-1), [KEYCHAIN, ""], "an empty password");
+  open = false;
   saved = 'password: "0x41  "A""\n';
   await unlockReleaseKeychain(plan, "Packaging", keychain);
   assert.deepEqual(unlocks.at(-1), [KEYCHAIN, '0x41  "A"'], "a quoted password that looks like hex stays as typed");

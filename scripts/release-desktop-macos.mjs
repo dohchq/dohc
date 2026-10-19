@@ -108,14 +108,16 @@ function unlockWithPassword(keychain, password) {
 }
 
 // -w prints a password with non-ASCII text or a control character as bare hex,
-// which a password of hex digits also looks like. -g marks that form with 0x
-// and quotes every other password.
+// which a password of hex digits also looks like. -g marks that form with 0x,
+// quotes every other password, and prints nothing after the label for an
+// empty one. It prints the password on stderr, so never log this output.
 function savedPassword(output) {
-  const line = output.split("\n").find(entry => entry.startsWith("password: ")) ?? "";
-  const hex = /^password: 0x([0-9A-F]+) {2}"/.exec(line);
+  const line = output.split("\n").find(entry => entry.startsWith("password: "));
+  const hex = line && /^password: 0x([0-9A-F]+)(?: |$)/.exec(line);
   if (hex) return Buffer.from(hex[1], "hex");
-  const quoted = /^password: "(.*)"$/.exec(line);
-  return quoted ? Buffer.from(quoted[1]) : null;
+  const quoted = line && /^password: "(.*)"$/.exec(line);
+  if (quoted) return Buffer.from(quoted[1]);
+  return line === "password: " ? Buffer.alloc(0) : null;
 }
 
 /** Locks the release keychain, and returns why it could not, or null. */
