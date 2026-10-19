@@ -491,23 +491,10 @@ function makeBaseBridge(
     linksIn: vi.fn(async () => null),
     linksResolve: vi.fn(async () => ({ versionId: "main", results: [], mountsCovered: true })),
     listChatFileMentions: vi.fn(async () => ({ mentions: [] as never[] })),
-    // Typed to the payload the shell really sends: `includeChatMentions` is
-    // the flag that decides whether main runs this read through
-    // requireEngineCapture, so a pin on it has to be able to read it back.
-    readWorkspaceGraph: vi.fn(async (_payload: {
-      workspaceId: string;
-      includeChatMentions?: boolean;
-    }) => ({
-      nodes: [
-        { path: "a.md", title: "A", incoming: 0, outgoing: 1 },
-        { path: "b.md", title: "B", incoming: 1, outgoing: 0 },
-      ],
-      edges: [{ source: "a.md", target: "b.md", kind: "wikilink" as const }],
-      unresolvedLinks: 0,
-      scannedFileCount: 2,
-      omittedFileCount: 0,
-      truncatedFileCount: 0,
-    })),
+    linksEdges: vi.fn(async () => ({ versionId: "main", files: [
+      {objectId:"a.md",path:"a.md",title:"A"},{objectId:"b.md",path:"b.md",title:"B"}],
+      entries: [{source:"a.md",target:"b.md",kind:"wikilink" as const,ordinal:0}],
+      unchecked:[],complete:true,indexBuilding:false,mountsCovered:true,nextCursor:null })),
     writeWorkspaceText: vi.fn(
       async (_payload: WriteWorkspaceTextPayload): Promise<WriteWorkspaceTextResult> => ({
         status: "written",

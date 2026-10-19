@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { WorkspaceGraph } from "./workspaceGraph";
+import type { WorkspaceGraph } from "./chatMentionGraphOverlay";
 import {
   addChatMentionsToWorkspaceGraph,
   type AuthorizedChatFileGraphMention,
@@ -14,10 +14,6 @@ function baseGraph(): WorkspaceGraph {
     edges: [
       { source: "docs/source.md", target: "docs/plan.md", kind: "markdown" },
     ],
-    unresolvedLinks: 0,
-    scannedFileCount: 2,
-    omittedFileCount: 0,
-    truncatedFileCount: 0,
   };
 }
 
@@ -259,10 +255,6 @@ describe("addChatMentionsToWorkspaceGraph", () => {
         outgoing: 0,
       })),
       edges: [],
-      unresolvedLinks: 0,
-      scannedFileCount: 2000,
-      omittedFileCount: 0,
-      truncatedFileCount: 0,
     };
     const targetPath = "docs/0000.md";
     const graph = addChatMentionsToWorkspaceGraph(

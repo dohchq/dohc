@@ -159,7 +159,6 @@ export const CHANNELS = {
   createCollectionRecord: "desktop:create-collection-record",
   showExplorerMenu: "desktop:show-explorer-menu",
   showWorkbenchMenu: "desktop:show-workbench-menu",
-  readWorkspaceGraph: "desktop:read-workspace-graph",
   listWorkspaceHeadings: "desktop:list-workspace-headings",
   listCollections: "desktop:list-collections",
   getCollection: "desktop:get-collection",

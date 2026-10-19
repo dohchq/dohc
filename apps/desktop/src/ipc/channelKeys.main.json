@@ -169,7 +169,6 @@
   "readShareProposalFileContent",
   "readWorkspaceDatabase",
   "readWorkspaceDatabasePage",
-  "readWorkspaceGraph",
   "readWorkspaceText",
   "rebuildEngineStore",
   "refreshShareMounts",

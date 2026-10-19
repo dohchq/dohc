@@ -1439,9 +1439,7 @@ describe("shared view chats surface", () => {
   // The graph's chat-mentions toggle, on its own. The test above proves the
   // panel is gone, and the panel's own gate hides it whatever this toggle
   // reads — so reverting this gate alone changed nothing any pin could see.
-  // It is the most expensive one to lose: `includeChatMentions: true` is what
-  // sends readWorkspaceGraph through requireEngineCapture, so an ungated
-  // toggle fails the whole graph — a surface a shared view legitimately has.
+  // Chat access stays independent of the file graph.
   it("offers no chat mentions in the graph on a shared view", async () => {
     const bridge = makeShareBridge(Promise.resolve(STORED_STATE));
     const user = userEvent.setup();
@@ -1453,13 +1451,10 @@ describe("shared view chats surface", () => {
     // The graph itself still works — that is the point.
     expect((await screen.findAllByTestId("graph-file-row")).length).toBeGreaterThan(0);
     expect(screen.queryByTestId("graph-chat-mentions-toggle")).toBeNull();
-    expect(bridge.readWorkspaceGraph).toHaveBeenCalledWith({
+    expect(bridge.linksEdges).toHaveBeenCalledWith({
       workspaceId: WORKSPACE.workspaceId,
-      includeChatMentions: false,
     });
-    expect(bridge.readWorkspaceGraph).not.toHaveBeenCalledWith(
-      expect.objectContaining({ includeChatMentions: true }),
-    );
+    expect(bridge.listChatFileMentions).not.toHaveBeenCalled();
   });
 
   // Ctrl+Alt+B, on its own: whether the shell claims the chord from whatever

@@ -1,4 +1,4 @@
-import { LinksInInput, LinksInResult, LinksResolveInput, LinksResolveResult } from "@dohc/workspace-contracts/links";
+import { LinksEdgesInput, LinksEdgesResult, LinksInInput, LinksInResult, LinksResolveInput, LinksResolveResult } from "@dohc/workspace-contracts/links";
 import type { HistoryOperationsStore, HistoryOperation, HistoryUndoResult } from "@dohc/workspace-contracts/engine";
 import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "./engineTextLimits";
 import type { SharedFileUpdate, SharedFileUpdateState } from "../ydoc/ydocWireContract";
@@ -914,6 +914,9 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     });
   }
 
+  async linkEdges(input: LinksEdgesInput): Promise<LinksEdgesResult> {
+    return LinksEdgesResult.parse(await this.requester.request("links.edges", LinksEdgesInput.parse(input), { workspace: this.workspace }));
+  }
   async incomingLinks(input: LinksInInput): Promise<LinksInResult> {
     return LinksInResult.parse(await this.requester.request("links.in", LinksInInput.parse(input), { workspace: this.workspace }));
   }

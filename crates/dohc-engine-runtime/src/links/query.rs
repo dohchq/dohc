@@ -11,14 +11,14 @@ use tokio_util::sync::CancellationToken;
 type CursorPosition = (String, usize, bool, bool);
 type CursorPayload = (String, String, String, String, usize, bool, bool);
 
-fn invalid() -> RuntimeError {
+pub(super) fn invalid() -> RuntimeError {
     StorageError::InvalidInput {
         reason: "invalid links cursor or subject",
     }
     .into()
 }
 
-fn cursor_key() -> Result<&'static SecretDataKey, RuntimeError> {
+pub(super) fn cursor_key() -> Result<&'static SecretDataKey, RuntimeError> {
     static KEY: OnceLock<Result<SecretDataKey, dohc_engine_crypto::CryptoError>> = OnceLock::new();
     KEY.get_or_init(SecretDataKey::generate)
         .as_ref()
@@ -42,7 +42,7 @@ fn encode_cursor(
     .to_string())
 }
 
-fn decode_cursor(
+pub(super) fn decode_cursor(
     ws: &str,
     version: &str,
     subject: &str,

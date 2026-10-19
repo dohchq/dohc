@@ -1,3 +1,4 @@
+import { installGraphFixture } from "../testing/graphPage.fixture";
 // @vitest-environment jsdom
 import "./DesktopWorkspaceShell.testSupport";
 import "./CollectionPage";
@@ -2594,14 +2595,14 @@ describe("ui-state merge-on-load", () => {
     );
     // The listing is held so the close cannot happen before the navigation.
     bridge.listWorkspaceFiles = vi.fn(() => listing.promise);
-    bridge.readWorkspaceGraph = vi.fn(async () => ({
+    installGraphFixture(bridge, {
       nodes: [dmNode],
       edges: [],
       unresolvedLinks: 0,
       scannedFileCount: 1,
       omittedFileCount: 0,
       truncatedFileCount: 0,
-    }));
+    });
     bridge.syncDms = vi.fn(() => sync.promise);
     renderShell(bridge);
 
@@ -2642,14 +2643,14 @@ describe("ui-state merge-on-load", () => {
     const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.readWorkspaceGraph = vi.fn(async () => ({
+    installGraphFixture(bridge, {
       nodes: [DM_GRAPH_NODE, { path: "a.md", title: "A", incoming: 0, outgoing: 0 }],
       edges: [],
       unresolvedLinks: 0,
       scannedFileCount: 1,
       omittedFileCount: 0,
       truncatedFileCount: 0,
-    }));
+    });
     bridge.syncDms = vi.fn(() => sync.promise);
     renderShell(bridge);
 
@@ -2692,14 +2693,14 @@ describe("ui-state merge-on-load", () => {
     const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.readWorkspaceGraph = vi.fn(async () => ({
+    installGraphFixture(bridge, {
       nodes: [DM_GRAPH_NODE, fileThreadNode],
       edges: [],
       unresolvedLinks: 0,
       scannedFileCount: 1,
       omittedFileCount: 0,
       truncatedFileCount: 0,
-    }));
+    });
     bridge.syncDms = vi.fn(() => sync.promise);
     renderShell(bridge);
 
@@ -2747,14 +2748,14 @@ describe("ui-state merge-on-load", () => {
     const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.readWorkspaceGraph = vi.fn(async () => ({
+    installGraphFixture(bridge, {
       nodes: [DM_GRAPH_NODE, first, second],
       edges: [],
       unresolvedLinks: 0,
       scannedFileCount: 1,
       omittedFileCount: 0,
       truncatedFileCount: 0,
-    }));
+    });
     bridge.syncDms = vi.fn(() => sync.promise);
     renderShell(bridge);
 
@@ -2807,14 +2808,14 @@ describe("ui-state merge-on-load", () => {
     const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.readWorkspaceGraph = vi.fn(async () => ({
+    installGraphFixture(bridge, {
       nodes: [DM_GRAPH_NODE],
       edges: [],
       unresolvedLinks: 0,
       scannedFileCount: 1,
       omittedFileCount: 0,
       truncatedFileCount: 0,
-    }));
+    });
     bridge.syncDms = vi.fn(() => sync.promise);
     renderShell(bridge);
 
@@ -2844,14 +2845,14 @@ describe("ui-state merge-on-load", () => {
     const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.readWorkspaceGraph = vi.fn(async () => ({
+    installGraphFixture(bridge, {
       nodes: [DM_GRAPH_NODE],
       edges: [],
       unresolvedLinks: 0,
       scannedFileCount: 1,
       omittedFileCount: 0,
       truncatedFileCount: 0,
-    }));
+    });
     bridge.syncDms = vi.fn(() => sync.promise);
     renderShell(bridge);
 
@@ -2887,14 +2888,14 @@ describe("ui-state merge-on-load", () => {
     const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.readWorkspaceGraph = vi.fn(async () => ({
+    installGraphFixture(bridge, {
       nodes: [DM_GRAPH_NODE],
       edges: [],
       unresolvedLinks: 0,
       scannedFileCount: 1,
       omittedFileCount: 0,
       truncatedFileCount: 0,
-    }));
+    });
     bridge.syncDms = vi.fn(() => sync.promise);
     renderShell(bridge);
 
@@ -2968,14 +2969,14 @@ describe("ui-state merge-on-load", () => {
     const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.readWorkspaceGraph = vi.fn(async () => ({
+    installGraphFixture(bridge, {
       nodes: [DM_GRAPH_NODE, channel],
       edges: [],
       unresolvedLinks: 0,
       scannedFileCount: 1,
       omittedFileCount: 0,
       truncatedFileCount: 0,
-    }));
+    });
     bridge.syncDms = vi.fn(() => sync.promise);
     renderShell(bridge);
 
@@ -3134,14 +3135,14 @@ describe("ui-state merge-on-load", () => {
       ],
       fileThreads: [],
     }));
-    bridge.readWorkspaceGraph = vi.fn(async () => ({
+    installGraphFixture(bridge, {
       nodes: [DM_GRAPH_NODE],
       edges: [],
       unresolvedLinks: 0,
       scannedFileCount: 1,
       omittedFileCount: 0,
       truncatedFileCount: 0,
-    }));
+    });
     return Object.assign(bridge, {
       syncAnswers,
       listPersonalChatFeed: vi.fn(async () => ({
@@ -3528,14 +3529,14 @@ describe("ui-state merge-on-load", () => {
         aboutVisible: false,
       }),
     );
-    bridge.readWorkspaceGraph = vi.fn(async () => ({
+    installGraphFixture(bridge, {
       nodes: [DM_GRAPH_NODE, heading],
       edges: [],
       unresolvedLinks: 0,
       scannedFileCount: 1,
       omittedFileCount: 0,
       truncatedFileCount: 0,
-    }));
+    });
     bridge.syncDms = vi.fn(() => sync.promise);
     renderShell(bridge);
 

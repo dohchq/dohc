@@ -350,14 +350,9 @@ impl EngineService {
                 }
             }
             "workspace.open" => Box::pin(self.workspace_open(&ctx, request.params)).await?,
-            "links.in" | "links.resolve" => {
-                self.links_read(
-                    &ctx,
-                    request.workspace,
-                    request.params,
-                    request.method == "links.in",
-                )
-                .await?
+            "links.in" | "links.resolve" | "links.edges" => {
+                self.links_read(&ctx, request.workspace, request.params, &request.method)
+                    .await?
             }
             "files.resolve" => {
                 self.files_resolve(&ctx, request.workspace, request.params)
@@ -1150,6 +1145,7 @@ impl EngineService {
             && !matches!(
                 method,
                 "workspace.close"
+                    | "links.edges"
                     | "links.in"
                     | "links.resolve"
                     | "files.changesSince"
@@ -1349,6 +1345,7 @@ mod tests {
             "versions.ensureMain"
         ));
         for method in [
+            "links.edges",
             "links.in",
             "links.resolve",
             "files.resolve",

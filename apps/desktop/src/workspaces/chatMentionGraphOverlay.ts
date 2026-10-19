@@ -1,7 +1,5 @@
-import type {
-  WorkspaceGraph,
-  WorkspaceGraphEdgeKind,
-} from "./workspaceGraph";
+type WorkspaceGraphEdgeKind = "wikilink" | "markdown";
+export type WorkspaceGraph = { nodes: { path: string; title: string; incoming: number; outgoing: number }[]; edges: { source: string; target: string; kind: WorkspaceGraphEdgeKind }[] };
 
 /**
  * One chat mention that the caller has already authorized for both the source

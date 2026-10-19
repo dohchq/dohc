@@ -480,6 +480,7 @@ export function createDesktopCliServer<State>(
           })),
       openWorkspace: openCliWorkspace,
       links: {
+        edges: (workspace, input) => readLinks(workspace, current => dependencies.links.edges(current, input)),
         incoming: (workspace, input) => readLinks(workspace, current => dependencies.links.incoming(current, input)),
         resolve: (workspace, input) => readLinks(workspace, current => dependencies.links.resolve(current, input)),
       },

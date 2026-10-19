@@ -49,3 +49,16 @@ it("resolves a mounted source through its store and projects found and creation 
   expect(linksResolve).toHaveBeenCalledWith(target, { source: "notes/source.md", literals });
   expect(owner).not.toHaveBeenCalled();
 });
+
+it("queries projected standalone edges and leaves host mounts uncovered", async () => {
+  const page={versionId:"main",files:[],entries:[],unchecked:[],complete:true,indexBuilding:false,mountsCovered:true,nextCursor:"next"};
+  const linkEdges=vi.fn(async()=>page), linksEdges=vi.fn(async()=>page);
+  const reader=createWorkspaceLinksReader(async (_ws,run)=>run({linkEdges} as unknown as VersionedLiveAdapter),()=>({linksEdges} as unknown as ShareViewFiles));
+  const owner={workspaceId:"ws",rootPath:"root",kind:"personal",mode:"local-first",shareMounts:[{}]} as RegistryEntry;
+  expect(await reader.edges(owner,{cursor:"old"})).toEqual({...page,mountsCovered:false});
+  expect(linkEdges).toHaveBeenCalledWith({cursor:"old"});
+  const shared={...owner,shareMounts:[],shareView:{shareId:"share",access:"view"}} as unknown as RegistryEntry;
+  expect(await reader.edges(shared,{})).toEqual(page);
+  expect(linksEdges).toHaveBeenCalledWith({kind:"standalone",workspaceId:"ws"},{});
+  expect(linkEdges).toHaveBeenCalledOnce();
+});

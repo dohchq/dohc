@@ -184,6 +184,9 @@
     ],
     "linksResolve": [
       "links.resolve"
+    ],
+    "linksEdges": [
+      "links.edges"
     ]
   },
   "public": {
@@ -266,6 +269,7 @@
     "history operation": "history.operation.read",
     "history undo": "history.operation.undo",
     "links in": "links.in",
-    "links resolve": "links.resolve"
+    "links resolve": "links.resolve",
+    "links edges": "links.edges"
   }
 }

@@ -98,7 +98,7 @@ import { createDesktopSharedChannelSync } from "./workspaces/desktopSharedChanne
 import { createWorkspaceFilesIpc } from "./ipc/workspaceFilesIpc";
 import { settingsOperations } from "./ipc/settingsOperations";
 import { workspaceFileOperations } from "./ipc/workspaceFileOperations";
-import { registerWorkspaceGraphIpcHandlers } from "./ipc/workspaceGraphIpc";
+import { registerWorkspaceHeadingsIpcHandlers } from "./ipc/workspaceFilesIpc";
 import { registerNativeMenusIpcHandlers } from "./ipc/nativeMenusIpc";
 import {
   createWorkspaceRootApproval,
@@ -516,7 +516,6 @@ import {
   createWorkspaceDatabaseAccess,
 } from "./workspaces/workspaceDatabase";
 import { registerDesktopDatabaseIpcHandlers } from "./ipc/desktopDatabaseIpc";
-import { WorkspaceGraphIndex } from "./workspaces/workspaceGraph";
 
 import { createDesktopChatBookmarks, type DesktopChatBookmarkProjectionState } from "./workspaces/desktopChatBookmarks";
 import { readCachedUserSettingsFile } from "./settings/userSettingsStore";
@@ -903,7 +902,6 @@ function sendRendererActivity(scope?: WorkspaceActivityScope): void {
   const activityEvent = workspaceActivityPayload(scope);
   workspaceFileListings.invalidate(activityEvent);
   invalidateDatasetAddresses(activityEvent);
-  invalidateWorkspaceGraphIndexes(activityEvent);
   broadcastWorkspaceActivity({
     windows: BrowserWindow.getAllWindows(),
     activeWorkspaceIdOf: (webContentsId) => {
@@ -1683,7 +1681,6 @@ interface DesktopWorkspaceAuthorityState extends DesktopChatBookmarkProjectionSt
   // Takes Button presses from shared views while this computer runs the
   // workspace's schedules.
   relayedPresses: RelayedPressHost;
-  workspaceGraph: WorkspaceGraphIndex;
   sitePreviews: ReturnType<typeof createSitePreviewLifecycle<SitePreviewResultBody>>;
   tryInVersionSessions: ReturnType<typeof createTryInVersionSessions>;
   shareMountCommands: ReturnType<typeof createShareMountCommandsFor>;
@@ -1732,7 +1729,6 @@ function createDesktopWorkspaceAuthorityState(
     collectionAutomations,
     datasetHost,
     relayedPresses: createRelayedPressHostFor(binding.workspaceId),
-    workspaceGraph: new WorkspaceGraphIndex(),
     sitePreviews: createSitePreviewLifecycle<SitePreviewResultBody>({
       allowOrigin: allowLoopbackFrameOrigin,
       notifyReplaced: (senderId, replacement) => {
@@ -1882,22 +1878,6 @@ function withCurrentWorkspaceAttachmentOperation<Result>(
   }
 }
 
-function invalidateWorkspaceGraphIndexes(event: {
-  workspaceId?: string;
-  paths?: readonly string[];
-}): void {
-  const invalidate = (workspaceId: string) =>
-    withWorkspaceAttachment({ workspaceId }, (lease) =>
-      lease.state.workspaceGraph.invalidate(event.paths),
-    );
-  if (event.workspaceId) {
-    invalidate(event.workspaceId);
-    return;
-  }
-  for (const workspaceId of workspaceAuthorities.workspaceIds()) {
-    invalidate(workspaceId);
-  }
-}
 
 type SitePreviewLifecycle = Omit<
   ReturnType<typeof createSitePreviewLifecycle<SitePreviewResultBody>>,
@@ -5234,6 +5214,7 @@ function withShareViewFilesOperation<Result>(
 }
 
 shareViewFiles = {
+  linksEdges: (target, input) => withShareViewFilesOperation(target, files => files.linksEdges(target, input)),
   linksIn: (target, input) => withShareViewFilesOperation(target, files => files.linksIn(target, input)),
   linksResolve: (target, input) => withShareViewFilesOperation(target, files => files.linksResolve(target, input)),
   narrow: (lease, target, assertCurrent, commit) =>
@@ -6002,6 +5983,7 @@ function registerIpcHandlers(): void {
     relayJson: (credentials, path) => relayShareJsonWithCredentials(credentials, path),
   });
   registerOperations(operationBoundary, linksOperations, {
+    linksEdges: ({ workspaceId: _workspaceId, ...input }, { operation }) => workspaceLinks.edges(operation.workspace, input),
     linksIn: ({ workspaceId: _workspaceId, ...input }, { operation }) => workspaceLinks.incoming(operation.workspace, input),
     linksResolve: ({ workspaceId: _workspaceId, ...input }, { operation }) => workspaceLinks.resolve(operation.workspace, input),
   });
@@ -6183,22 +6165,8 @@ function registerIpcHandlers(): void {
     shell,
   });
 
-  registerWorkspaceGraphIpcHandlers<
-    WebContents,
-    IpcMainInvokeEvent,
-    DesktopRendererWorkspaceOperation["workspace"],
-    DesktopRendererWorkspaceOperation
-  >({
-    registerHandler: handleIpc,
-    assertTrustedSender,
-    withRendererWorkspaceOperation,
-    workspaceFileListings,
-    listOwnedWorkspaceFilesFor,
-    readOwnedWorkspaceTextFor,
-    requireEngineCapture,
-    syncWorkspaceSharedChannels,
-    linkedChatStoreFor,
-    resolveEngineFiles,
+  registerWorkspaceHeadingsIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation>({
+    registerHandler: handleIpc, assertTrustedSender, withRendererWorkspaceOperation, readOwnedWorkspaceTextFor,
   });
 
   windowIpc.registerExternalUrl();
