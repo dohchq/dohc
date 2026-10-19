@@ -169,7 +169,6 @@ export const CHANNELS = {
   readWorkspaceDatabase: "desktop:read-workspace-database",
   readWorkspaceDatabasePage: "desktop:read-workspace-database-page",
   applyDatabaseEdit: "desktop:apply-database-edit",
-  importToDatabase: "desktop:import-to-database",
   listSites: "desktop:list-sites",
   getSitePackage: "desktop:get-site-package",
   startSitePreview: "desktop:start-site-preview",

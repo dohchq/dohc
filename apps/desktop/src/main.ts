@@ -188,6 +188,7 @@ import { createLocalChangeAuthor } from "@dohc/workspace-core";
 import { CreateCollectionRecordPayload } from "./ipc/bridgeContract";
 import { collectionRecordWrites, type CollectionRecordEditContext } from "@dohc/automation-executor/collection-record-edits";
 import { createRecordByHand, desktopRecordEditContext, type DesktopRecordEditHost, type LocalPersonAuthor } from "./workspaces/desktopRecordEdits";
+import { deleteWorkspacePathByHand } from "./workspaces/workspaceFileMoves";
 import { createWorkspaceFileMutationOwner } from "./workspaces/workspaceFileMutationOwner";
 import { workspaceSearchHandlers } from "./ipc/workspaceSearchIpc";
 import { scheduleHostHandlers } from "./ipc/scheduleHostIpc";
@@ -6863,6 +6864,14 @@ function registerIpcHandlers(): void {
     registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, assertWritableWorkspace,
     shareViewFiles, workerDatabaseReader, editWorkspaceDatabaseInWorker,
+    deleteDatabaseImport: async (operation, path, markChanged, admit) => deleteWorkspacePathByHand(
+      { workspace: operation.workspace, assertCurrent: () => operation.signal.throwIfAborted() },
+      path, await localPerson(), {
+        capture: activity.engineCaptureFor(operation.workspace.workspaceId, operation.workspace.rootPath),
+        requestId: randomUUID(), trashItem: path => shell.trashItem(path), markChanged, admit,
+        markDeleted: path => engineYDocSessionIpc.fileMutationPort().markDeletedUnderPath(operation.workspace.attachmentId, path),
+      },
+    ),
   });
 
   const siteIpcHandlers = createSitesIpcHandlers({
