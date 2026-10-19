@@ -88,11 +88,16 @@ impl Receipt {
     }
     // The discriminator owns this envelope; other request kinds still fail their fingerprint check.
     fn save(&self, conn: &Connection, done: bool, result: &Value) -> Result<(), RuntimeError> {
-        conn.execute(
+        let changed = conn.execute(
             "INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) VALUES(?1,?2,0,?3,'history-link-rewrites')
-             ON CONFLICT(request_id) DO UPDATE SET payload_hash=excluded.payload_hash,committed_at=excluded.committed_at",
-            params![self.key, json!([self.binding, done, result]).to_string(), crate::links::now_ms()],
+             ON CONFLICT(request_id) DO UPDATE SET payload_hash=excluded.payload_hash,committed_at=excluded.committed_at
+             WHERE engine_requests.kind='history-link-rewrites'
+               AND CASE WHEN json_valid(engine_requests.payload_hash) THEN json_extract(engine_requests.payload_hash,'$[0]') END=?4",
+            params![self.key, json!([self.binding, done, result]).to_string(), crate::links::now_ms(), self.binding],
         ).map_err(StorageError::persist_public)?;
+        if changed != 1 {
+            return Err(DomainError::IdempotencyKeyReuseMismatch.into());
+        }
         Ok(())
     }
 }

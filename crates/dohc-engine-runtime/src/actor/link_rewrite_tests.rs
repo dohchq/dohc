@@ -1134,3 +1134,31 @@ async fn undo_stops_remaining_forward_turns_before_taking_its_snapshot() {
     }
     f.close().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_competing_request_binding_cannot_be_overwritten_with_source_progress() {
+    let f = Fixture::new(1, 1);
+    probes().lock().unwrap().get_mut(&f.ws).unwrap().hook = Some(Arc::new(|conn, _| {
+        conn.execute("UPDATE engine_requests SET kind='another-method',payload_hash='another-binding' WHERE request_id='competing-request'", []).unwrap();
+    }));
+    assert!(matches!(
+        f.pass("competing-request", Arc::new(NoFaults)).await,
+        Err(RuntimeError::Domain(
+            DomainError::IdempotencyKeyReuseMismatch
+        ))
+    ));
+    assert_eq!(f.text("source-0000.md").await, BODY);
+    let ws = f.ws.clone();
+    f.actor.run(move |store, _| {
+        store.read_with(|conn| {
+            let receipt: (String, String) = conn.query_row(
+                "SELECT kind,payload_hash FROM engine_requests WHERE request_id='competing-request'",
+                [], |r| Ok((r.get(0)?,r.get(1)?))).map_err(StorageError::corrupt_public)?;
+            assert_eq!(receipt, ("another-method".into(), "another-binding".into()));
+            assert_eq!(operation_moments_in(conn, &ws, "main", OP)?.len(), 1,
+                "the source moment and all publication roll back with the receipt conflict");
+            Ok::<_, RuntimeError>(())
+        })
+    }).await.unwrap();
+    f.close().await;
+}
