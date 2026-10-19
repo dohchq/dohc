@@ -872,7 +872,7 @@ describe("share-web sessions", () => {
     };
 
     const held = handler(
-      request("/api/view/log?since=7&limit=500&hold=30000", {
+      request("/api/view/log?since=7&limit=500&hold=30000&current=true", {
         headers: sessionHeaders,
       }),
     );
@@ -1440,7 +1440,7 @@ describe("share-web relay call", () => {
     { name: "discussion activity", path: "/api/view/discussion/activity?since=0&hold=0&limit=100" },
     { name: "meta", path: "/api/view/meta" },
     { name: "current", path: "/api/view/current" },
-    { name: "log", path: "/api/view/log?since=0&hold=0" },
+    { name: "log", path: "/api/view/log?since=0&hold=0&current=true" },
     { name: "blob", path: `/api/view/blob/${blobSha}` },
   ];
 
@@ -1676,7 +1676,7 @@ describe("share-web protected discussion proxy", () => {
     composerState: "available",
     profileName: null,
   };
-  const logPath = "/api/view/log?since=0&hold=30000&limit=100";
+  const logPath = "/api/view/log?since=0&hold=30000&limit=100&current=true";
   const publicLog = { ops: [], nextCursor: 0, hasMore: false };
   const holdRoutes = [
     { kind: "activity", path: activityPath, publicBody: publicActivity },
@@ -1891,7 +1891,7 @@ describe("share-web protected discussion proxy", () => {
     try {
       const state = await discussionSession(handler);
       const init = { headers: sessionHeaders(state.session, state.cookies), signal: browserAbort.signal };
-      const path = "/api/view/log?since=0&hold=30000";
+      const path = "/api/view/log?since=0&hold=30000&current=true";
       pending = Array.from({ length: 8 }, () => handler(request(path, init)));
       await started;
       expect((await handler(request(path, init))).status).toBe(404);
