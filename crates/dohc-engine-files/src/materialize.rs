@@ -4329,6 +4329,72 @@ fn placement_is_held(
     Ok(false)
 }
 
+/// The existing disk-placement segment rule, including tracked peer names.
+fn materialize_segment_is_safe(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment != "."
+        && segment != ".."
+        && !segment.contains('\\')
+        && !segment.contains(':')
+}
+
+/// Admission for a new document opened by a link click. Existing tracked
+/// files keep the disk writer's broader rule.
+pub fn creation_segment_is_safe(segment: &str) -> bool {
+    if !materialize_segment_is_safe(segment)
+        || segment.contains('/')
+        || segment.chars().any(char::is_control)
+    {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        let name = segment.trim_end_matches(['.', ' ']);
+        let base = name
+            .split('.')
+            .next()
+            .unwrap_or(name)
+            .trim_end_matches(['.', ' ']);
+        let base = base.to_ascii_lowercase();
+        let named_device = matches!(
+            base.as_str(),
+            "con" | "prn" | "aux" | "nul" | "conin$" | "conout$" | "clock$"
+        );
+        let numbered_device = ["com", "lpt"].into_iter().any(|prefix| {
+            base.strip_prefix(prefix).is_some_and(|number| {
+                number.chars().count() == 1
+                    && number
+                        .chars()
+                        .any(|c| matches!(c, '1'..='9' | '¹' | '²' | '³'))
+            })
+        });
+        if named_device || numbered_device {
+            return false;
+        }
+        // Desktop: ^[^.\s]{1,8}~\d+(?:\.[^.\s]{1,3})?$
+        let (base, extension) = name
+            .split_once('.')
+            .map_or((name, None), |(b, e)| (b, Some(e)));
+        if let Some((stem, digits)) = base.rsplit_once('~') {
+            let plain = |text: &str| {
+                !text
+                    .chars()
+                    .any(|c| c == '.' || c.is_whitespace() || c == '\u{feff}')
+            };
+            if (1..=8).contains(&stem.encode_utf16().count())
+                && plain(stem)
+                && !digits.is_empty()
+                && digits.bytes().all(|byte| byte.is_ascii_digit())
+                && extension
+                    .is_none_or(|ext| (1..=3).contains(&ext.encode_utf16().count()) && plain(ext))
+            {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Resolve a workspace-relative forward-slash path to an absolute target under
 /// `root`, rejecting escapes, absolute inputs, and path-floor entries.
 fn resolve_target(root: &Path, rel: &str) -> Result<PathBuf, MaterializeError> {
@@ -4337,14 +4403,7 @@ fn resolve_target(root: &Path, rel: &str) -> Result<PathBuf, MaterializeError> {
     }
     let mut out = root.to_path_buf();
     for segment in rel.split('/') {
-        // Reject empty (`a//b`), current (`.`), parent (`..`), and any segment
-        // containing a backslash or drive-colon (Windows escape shapes).
-        if segment.is_empty()
-            || segment == "."
-            || segment == ".."
-            || segment.contains('\\')
-            || segment.contains(':')
-        {
+        if !materialize_segment_is_safe(segment) {
             return Err(MaterializeError::UnsafeTargetPath);
         }
         out.push(segment);
@@ -7207,6 +7266,96 @@ mod tests {
             assert_eq!(failed_attempt, 1);
             std::fs::write(&self.0, b"external edit").expect("external editor saves");
         }
+    }
+
+    #[test]
+    fn disk_targets_reject_colon_segments() {
+        let scratch = Scratch::new("colon-segments");
+        for path in ["x.md:evil", "notes/x:evil.md"] {
+            assert!(matches!(
+                resolve_target(&scratch.root, path),
+                Err(MaterializeError::UnsafeTargetPath)
+            ));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn tracked_short_name_still_writes_probes_and_deletes() {
+        let scratch = Scratch::new("tracked-short-name");
+        let path = "draft~2.md";
+        assert_eq!(
+            crate::policy::classify_engine_file_path(path),
+            crate::policy::PathClassification::Tracked
+        );
+        std::fs::write(scratch.root.join(path), b"old\n").unwrap();
+        let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
+        let original = store.put_binary_blob(b"old\n").unwrap();
+        let updated = store.put_binary_blob(b"new\n").unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                enqueue_job(
+                    tx,
+                    &MaterializationJobSpec {
+                        job_id: "short-write".into(),
+                        workspace_id: "ws".into(),
+                        target_path: path.into(),
+                        content_sha256: updated.clone(),
+                        preimage: Preimage::Present(original.clone()),
+                        target_generation: 1,
+                        now_ms: 1,
+                    },
+                )
+            })
+            .unwrap();
+        let write = store
+            .load_materialization_job("short-write")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            materialize_one(&store, &scratch.root, &write, &options_with(&StdReplacer)).unwrap(),
+            JobOutcome::Completed
+        );
+        assert_eq!(std::fs::read(scratch.root.join(path)).unwrap(), b"new\n");
+        assert_eq!(
+            probe_projection_target(&scratch.root, path, ProjectionTargetKind::Plaintext),
+            ProjectionTargetState::Text {
+                sha256: updated.clone()
+            }
+        );
+        assert!(matches!(
+            projection_target_stamp(&scratch.root, path),
+            ProjectionTargetStamp::File { byte_length: 4, .. }
+        ));
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_storage::enqueue_delete_job(
+                    tx,
+                    &MaterializationJobSpec {
+                        job_id: "short-delete".into(),
+                        workspace_id: "ws".into(),
+                        target_path: path.into(),
+                        content_sha256: updated.clone(),
+                        preimage: Preimage::Present(updated.clone()),
+                        target_generation: 2,
+                        now_ms: 2,
+                    },
+                )
+            })
+            .unwrap();
+        let delete = store
+            .load_materialization_job("short-delete")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            materialize_one(&store, &scratch.root, &delete, &options_with(&StdReplacer)).unwrap(),
+            JobOutcome::Completed
+        );
+        assert!(!scratch.root.join(path).exists());
+        assert_eq!(
+            projection_target_stamp(&scratch.root, path),
+            ProjectionTargetStamp::Absent
+        );
     }
 
     #[test]
