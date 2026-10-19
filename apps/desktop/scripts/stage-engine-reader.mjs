@@ -121,7 +121,8 @@ export async function stageEngineReader(options = {}) {
     for (const file of platform === "win32" || options.selfHost ? ["reader.cjs", "manifest.json"] : ["node", "reader.cjs", "manifest.json"]) {
       await chmod(join(staging, file), file === "node" ? 0o555 : 0o444);
     }
-    await chmod(staging, 0o555);
+    // A read-only folder protects nothing on Windows and stops git clean removing it.
+    if (process.platform !== "win32") await chmod(staging, 0o555);
     const generation = manifest.buildSha256, destination = join(base, generation);
     const hostNode = options.selfHost ? process.execPath : undefined;
     const existing = await verifyGeneration(resources, platform, generation, hostNode).catch(() => null);

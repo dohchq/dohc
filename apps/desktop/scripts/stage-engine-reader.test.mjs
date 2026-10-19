@@ -4,7 +4,7 @@ import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile }
 import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { load } from "js-yaml";
@@ -70,6 +70,7 @@ for (const platform of ["win32", "linux"]) test(`${platform} packaged resources 
     await writeFile(join(resources, "app-compiler/node.exe"), await readPinnedCompilerNode({ stagedNodePath: join(desktop, "resources/app-compiler/node.exe") }));
   }
   const staged = await stageEngineReader({ resources, platform, arch: "x64" });
+  if (process.platform === "win32") assert.ok((await stat(dirname(staged.bundle))).mode & 0o200, "a Windows generation folder stays removable");
   const before = await stat(staged.bundle);
   assert.deepEqual(await stageEngineReader({ resources, platform, arch: "x64" }), staged);
   assert.equal((await stat(staged.bundle)).mtimeMs, before.mtimeMs);
