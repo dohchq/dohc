@@ -224,6 +224,8 @@ impl ActorHandle {
             .run(move |store, _| {
                 #[cfg(test)]
                 let started = Instant::now();
+                #[cfg(test)]
+                tests::begin_turn(&probe_request);
                 if store.is_passive() {
                     return Err(DomainError::InvalidInput {
                         reason: "Undo needs the owner",
@@ -338,6 +340,8 @@ impl ActorHandle {
                 let outcome = self.run(move |store,_| {
                 #[cfg(test)]
                 let started = Instant::now();
+                #[cfg(test)]
+                tests::begin_turn(&p.request);
                 if let Some((plan,_,_)) = store.read_with(|conn| load(conn,&p.workspace,&p.operation,&p.request,p.author.as_deref()))? { return Ok(Arc::new(plan)); }
                 let outcome = store.write_background_with(f.as_ref(),|tx| -> Result<(),RuntimeError> {
                     let busy: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM engine_requests p JOIN engine_requests r ON r.request_id=json_extract(CASE WHEN p.kind='history-undo-plan' THEN p.payload_hash ELSE '{}' END,'$.request') WHERE p.kind='history-undo-plan' AND r.kind='history-undo-pending' AND json_extract(CASE WHEN p.kind='history-undo-plan' THEN p.payload_hash ELSE '{}' END,'$.workspace')=?1 AND json_extract(CASE WHEN p.kind='history-undo-plan' THEN p.payload_hash ELSE '{}' END,'$.operation')=?2)",params![p.workspace,p.operation],|r|r.get(0)).map_err(StorageError::corrupt_public)?;
@@ -402,6 +406,8 @@ impl ActorHandle {
                 let _guards = (_capture,_sessions);
                 #[cfg(test)]
                 let started = Instant::now();
+                #[cfg(test)]
+                tests::begin_turn(&p.request);
                 #[cfg(test)]
                 let mut check_time = std::time::Duration::ZERO;
                 let outcome = with_local_file_mutation_cache_reset(cache, || {
