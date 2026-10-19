@@ -1063,53 +1063,82 @@ fn retirement_settle_as(
         NativeHistoryReconstruction {
             working_reserve_bytes: 8 * 1024 * 1024,
         },
-        |store, audit| {
-            let (text, vector) = match audit.accepted_prefix() {
-                Some(doc) => (
-                    doc.project(ContentKind::Richdoc)?.content,
-                    hex_sha256(&doc.encode_state_vector()),
-                ),
-                None => {
-                    let doc = store.read_with(|conn| durable::load_doc_in(conn, &doc_key))?;
-                    (
-                        doc.project(ContentKind::Richdoc)?.content,
-                        hex_sha256(&doc.encode_state_vector()),
-                    )
-                }
-            };
-            let result = store.write_with(&NoFaults, |tx| -> Result<_, ApplicationError> {
-                let written = dohc_engine_domain::write_projected_text_in_tx(
-                    tx,
-                    dohc_engine_domain::ProjectedWriteText {
-                        workspace_id: "workspace",
-                        version_id: "main",
-                        object_id: "object",
-                        path: std::borrow::Cow::Borrowed("owner.md"),
-                        text: std::borrow::Cow::Borrowed(&text),
-                        moment_id: moment,
-                        metadata_origin: "ydoc",
-                        metadata_summary: None,
-                        metadata_correlation_id: None,
-                        author_json: None,
-                        now_ms: 30,
-                        request_id: None,
-                    },
-                )
-                .map_err(|_| ApplicationError::Corrupt)?;
-                tx.execute(
-                    "UPDATE ydoc_docs SET last_settled_sha=?1 WHERE object_id='object'",
-                    [&written.snapshot.blob_sha256],
-                )
-                .map_err(write_sql)?;
-                let id = audit.record_in_tx(tx, moment, &written.snapshot.blob_sha256, &vector, 30)?;
-                Ok(audit.result(id, moment.into(), written.snapshot.blob_sha256, false))
-            })?;
-            let TxnOutcome::Committed(result) = result else {
-                return Err(ApplicationError::Interrupted);
-            };
-            Ok(result)
-        },
+        |store, audit| record_projection(store, audit, &doc_key, moment),
     )
+}
+
+/// The ordinary form of settlement through the fixture's handle, recording
+/// its moment as `moment`.
+fn settle_as(
+    f: &mut Fixture,
+    terminal: Option<LiveUpdateReceipt>,
+    moment: &str,
+) -> Result<LiveSettlementResult, ApplicationError> {
+    let doc_key = f.key.clone();
+    with_settlement(
+        &mut f.store,
+        &f.handle,
+        terminal,
+        128,
+        NativeHistoryReconstruction {
+            working_reserve_bytes: 8 * 1024 * 1024,
+        },
+        |store, audit| record_projection(store, audit, &doc_key, moment),
+    )
+}
+
+/// Project the accepted prefix when the audit names one, otherwise the native
+/// head, and record it as `moment`.
+fn record_projection(
+    store: &mut EngineStore,
+    audit: &LiveSettlementAudit,
+    doc_key: &DocKey,
+    moment: &str,
+) -> Result<LiveSettlementResult, ApplicationError> {
+    let (text, vector) = match audit.accepted_prefix() {
+        Some(doc) => (
+            doc.project(ContentKind::Richdoc)?.content,
+            hex_sha256(&doc.encode_state_vector()),
+        ),
+        None => {
+            let doc = store.read_with(|conn| durable::load_doc_in(conn, doc_key))?;
+            (
+                doc.project(ContentKind::Richdoc)?.content,
+                hex_sha256(&doc.encode_state_vector()),
+            )
+        }
+    };
+    let result = store.write_with(&NoFaults, |tx| -> Result<_, ApplicationError> {
+        let written = dohc_engine_domain::write_projected_text_in_tx(
+            tx,
+            dohc_engine_domain::ProjectedWriteText {
+                workspace_id: "workspace",
+                version_id: "main",
+                object_id: "object",
+                path: std::borrow::Cow::Borrowed("owner.md"),
+                text: std::borrow::Cow::Borrowed(&text),
+                moment_id: moment,
+                metadata_origin: "ydoc",
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 30,
+                request_id: None,
+            },
+        )
+        .map_err(|_| ApplicationError::Corrupt)?;
+        tx.execute(
+            "UPDATE ydoc_docs SET last_settled_sha=?1 WHERE object_id='object'",
+            [&written.snapshot.blob_sha256],
+        )
+        .map_err(write_sql)?;
+        let id = audit.record_in_tx(tx, moment, &written.snapshot.blob_sha256, &vector, 30)?;
+        Ok(audit.result(id, moment.into(), written.snapshot.blob_sha256, false))
+    })?;
+    let TxnOutcome::Committed(result) = result else {
+        return Err(ApplicationError::Interrupted);
+    };
+    Ok(result)
 }
 
 /// Every row of `tables`, so a step that must write nothing can be checked.

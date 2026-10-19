@@ -595,7 +595,11 @@ pub(crate) fn inherited_entries(
 }
 
 /// Whether this host applied `delivery` in `namespace`.
-fn applied(conn: &Connection, namespace: &str, delivery: &str) -> Result<bool, ApplicationError> {
+pub(crate) fn applied(
+    conn: &Connection,
+    namespace: &str,
+    delivery: &str,
+) -> Result<bool, ApplicationError> {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM live_device_update_applications WHERE relay_database_namespace=?1
            AND delivery_id=?2)",

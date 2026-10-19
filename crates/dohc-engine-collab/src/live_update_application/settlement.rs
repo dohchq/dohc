@@ -447,7 +447,6 @@ where
         terminal,
         max_applications,
         reconstruction,
-        None,
         settle,
     )
 }
@@ -486,19 +485,16 @@ where
         terminal,
         max_applications,
         reconstruction,
-        Some(key.accepted_through),
         settle,
     )
 }
 
-/// `carried_through` is F for a retirement's settlement.
 fn settle_held<E, T>(
     store: &mut EngineStore,
     held: &Registration,
     terminal: Option<LiveUpdateReceipt>,
     max_applications: usize,
     reconstruction: NativeHistoryReconstruction,
-    carried_through: Option<i64>,
     settle: impl FnOnce(&mut EngineStore, &LiveSettlementAudit) -> Result<T, E>,
 ) -> Result<T, E>
 where
@@ -560,7 +556,11 @@ where
             Some((start,end,start_sequence,end_sequence,_)) if end == terminal_cursor => (start,start_sequence,Some(end_sequence)),
             Some((_,end,_,end_sequence,refused_start)) if end < terminal_cursor => {
                 let cursor = if let Some(start) = refused_start { verified_previous_cursor(conn,held,start,origin_cursor,max_applications)? } else {end};
-                (cursor,end_sequence,None)
+                // A successor's adoption verified its captured head, which
+                // holds the rows ordinary sync added after its predecessor's
+                // last settlement. Its first settlement covers from there.
+                let floor = owner_origin.as_ref().filter(|origin| origin.successor).map_or(end_sequence,|origin| end_sequence.max(origin.sequence));
+                (cursor,floor,None)
             },
             Some(_) => return Err(ApplicationError::Corrupt),
             None => (origin_cursor,origin_sequence,None),
@@ -575,9 +575,9 @@ where
         }
         if head < previous_sequence { return Err(invalid("settlement application coverage is incomplete")); }
         // Every native sequence since the last settlement is an accepted
-        // application or one of this owner's own updates still waiting for
-        // the relay. Its own later application counts by journal cursor.
-        let tail = private_tail(conn,held,previous_sequence,head,carried_through.map(|through| (terminal_cursor,through)))?;
+        // application or an update this owner answers for and has not
+        // applied. Its later application counts by journal cursor.
+        let tail = private_tail(conn,held,previous_sequence,head)?;
         sequences.extend(tail.sequences.iter().copied());
         if sequences.len() as i64 != head-previous_sequence { return Err(invalid("settlement application coverage is incomplete")); }
         let accepted = if tail.any {
@@ -648,43 +648,42 @@ type ReceiptIdentity = (String, String, i64, i64, i64, String);
 /// A native source names one binding and its origin. A larger one is corrupt.
 const MAX_NATIVE_SOURCE_BYTES: i64 = 262_144;
 
-/// This owner's own native updates that the relay has not accepted: pending
-/// adopted entries of the current outbox with no application of their
-/// delivery. A retirement's settlement also counts the ones the relay
-/// accepted after its terminal, through F, which it will never apply.
+/// The native updates this owner answers for and has not applied, which a
+/// settlement keeps out of what it projects: the current activation's own
+/// adopted entries of the current outbox, pending, refused, or accepted, and
+/// the Carried deliveries its released chain left it. A saved receipt proves
+/// acceptance, never application.
 #[derive(Default)]
-struct PrivateTail {
+pub(super) struct PrivateTail {
     /// Their native sequences after `previous_sequence`, each verified
     /// against its own journal row.
-    sequences: Vec<i64>,
+    pub(super) sequences: Vec<i64>,
     /// Whether any exists at all, before or after `previous_sequence`.
-    any: bool,
+    pub(super) any: bool,
     /// Whether the adoption seed is among them.
     seed: bool,
     terminal: bool,
 }
 
-/// `carried` is a retirement's terminal cursor and F.
-fn private_tail(
+pub(super) fn private_tail(
     conn: &Connection,
     held: &Registration,
     previous_sequence: i64,
     head: i64,
-    carried: Option<(i64, i64)>,
 ) -> Result<PrivateTail, ApplicationError> {
     let b = &held.binding;
     let key = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)?;
-    let adoption = owner_activations::current_activation(
+    let Some((activation, _)) = owner_activations::current_activation(
         conn,
         Some(&held.namespace),
         &key,
         &b.lineage_claim_id,
     )?
-    .map(|(activation, _)| activation.activation_id);
-    let Some(adoption) = adoption else {
+    else {
         return Ok(PrivateTail::default());
     };
-    let tail = "FROM owner_ydoc_outbox_entries e JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE o.workspace_id=?1 AND o.main_version_id=?2 AND o.object_id=?3 AND o.lineage_claim_id=?4 AND o.restore_fence_generation=?5 AND o.current_path=?6 AND (e.pending=1 OR (e.pending=0 AND e.terminal_reason IS NOT NULL AND e.terminal_blob_digest=e.update_digest AND e.accepted_receipt_json IS NULL) OR (?11 IS NOT NULL AND e.pending=0 AND e.terminal_reason IS NULL AND json_extract(e.accepted_receipt_json,'$.journalCursor')>?10 AND json_extract(e.accepted_receipt_json,'$.journalCursor')<=?11)) AND e.native_source_json IS NOT NULL AND NOT EXISTS(SELECT 1 FROM live_device_update_applications a WHERE a.relay_database_namespace=?7 AND a.delivery_id=e.delivery_id)";
+    let adoption = activation.activation_id;
+    let tail = "FROM owner_ydoc_outbox_entries e JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE o.workspace_id=?1 AND o.main_version_id=?2 AND o.object_id=?3 AND o.lineage_claim_id=?4 AND o.restore_fence_generation=?5 AND o.current_path=?6 AND (e.pending=1 OR (e.pending=0 AND e.terminal_reason IS NOT NULL AND e.terminal_blob_digest=e.update_digest AND e.accepted_receipt_json IS NULL) OR (e.pending=0 AND e.terminal_reason IS NULL AND e.accepted_receipt_json IS NOT NULL AND json_extract(e.native_source_json,'$.adoptionId')=?10)) AND e.native_source_json IS NOT NULL AND NOT EXISTS(SELECT 1 FROM live_device_update_applications a WHERE a.relay_database_namespace=?7 AND a.delivery_id=e.delivery_id)";
     let gap = head - previous_sequence;
     let bound = params![
         b.workspace_id,
@@ -696,10 +695,9 @@ fn private_tail(
         held.namespace,
         previous_sequence,
         gap + 2,
-        carried.map(|(terminal, _)| terminal),
-        carried.map(|(_, through)| through)
+        adoption
     ];
-    let any: bool = conn
+    let mut any: bool = conn
         .query_row(&format!("SELECT EXISTS(SELECT 1 {tail})"), bound, |row| {
             row.get(0)
         })
@@ -747,6 +745,30 @@ fn private_tail(
                 return Err(ApplicationError::Corrupt);
             }
             sequences.push(source.native_sequence);
+        }
+    }
+    // Each validated by the shared resolution, and private until applied
+    // even below the coverage floor.
+    for inherited in super::retirement::inherited_entries(
+        conn,
+        &held.namespace,
+        &key,
+        &b.lineage_claim_id,
+        activation.predecessor_activation_id.as_deref(),
+    )? {
+        if super::retirement::applied(conn, &held.namespace, &inherited.entry.delivery_id)? {
+            continue;
+        }
+        let sequence = inherited.entry.source.native_sequence;
+        if sequence > head {
+            return Err(ApplicationError::Corrupt);
+        }
+        any = true;
+        if sequence > previous_sequence {
+            if sequences.len() as i64 >= gap {
+                return Err(ApplicationError::Corrupt);
+            }
+            sequences.push(sequence);
         }
     }
     Ok(PrivateTail {

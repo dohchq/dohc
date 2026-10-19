@@ -500,3 +500,251 @@ fn a_second_successor_drains_both_predecessors_carried_deliveries() {
         &delivery,
     ]);
 }
+
+/// A collaborator's paragraph `index`, as ordinary sync brings it while live
+/// editing is stopped: a native row no live delivery applied.
+fn catch_up_row(f: &mut Fixture, index: i64) {
+    let bytes = f.doc.richdoc_append_paragraph(&format!("Caught up {index}"));
+    let remote = crate::RemoteUpdate { origin_id: "peer".into(), origin_seq: index, bytes };
+    let applied = crate::apply_remote_update(&mut f.store, &mut WriterDocCache::new(), &f.key, &remote, None, None, &NoFaults, 40 + index)
+        .unwrap();
+    assert!(matches!(applied.outcome, TxnOutcome::Committed(crate::ReplicationApplyOutcome::Applied { .. })));
+}
+
+/// A root whose native update the host applied at 3 and, with `carried`,
+/// whose updates C1 and C2 the relay accepted at 5 and 6 without the host
+/// applying them, released after its settlement through F. Ordinary sync then
+/// adds `catch_up` rows before S1 captures and adopts, its seed pending.
+/// Returns the covered receipt and the Carried deliveries.
+fn resumed_after_catch_up(carried: bool, catch_up: i64) -> (Fixture, LiveUpdateReceipt, Vec<CarriedDelivery>) {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let covered = native_tail_edit(&mut f, "# Covered\n", 11);
+    native_tail_apply(&mut f, covered.update.clone(), covered.delivery_id.clone(), 3);
+    let covered = receipt_of(&covered.delivery_id, &covered.update_digest, 3);
+    acknowledge_entry(&mut f, &covered);
+    let mut accepted = Vec::new();
+    if carried {
+        for (text, cursor) in [("# Carried\n", 5), ("# Carried again\n", 6)] {
+            let entry = native_tail_edit(&mut f, text, 10 + cursor);
+            let receipt = receipt_of(&entry.delivery_id, &entry.update_digest, cursor);
+            acknowledge_entry(&mut f, &receipt);
+            accepted.push(receipt);
+        }
+    }
+    host_document(&mut f, true, true);
+    retirement_settle(&mut f, 10, Some(covered.clone())).unwrap();
+    release_parked(&mut f);
+    let carried: Vec<CarriedDelivery> = accepted.iter().map(|receipt| carried_delivery(&f, receipt)).collect();
+    assert_eq!(manifest(&f, "adoption"), carried);
+    importable(&mut f);
+    returned(&mut f);
+    for index in 1..=catch_up {
+        catch_up_row(&mut f, index);
+    }
+    file_matches_local(&mut f, "returned");
+    successor(&mut f);
+    f.adopt().unwrap();
+    (f, covered, carried)
+}
+
+/// The text a settlement recorded as `moment`.
+fn moment_text(f: &Fixture, moment: &str) -> String {
+    f.store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT b.text FROM moments m JOIN blobs b ON b.sha256=m.after_blob_sha256 WHERE m.moment_id=?1",
+                [moment],
+                |r| r.get(0),
+            )
+        })
+        .unwrap()
+}
+
+/// The native head the current activation's adoption verified.
+fn adopted_head(f: &Fixture) -> i64 {
+    f.store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT local_ydoc_sequence FROM live_owner_activations WHERE activation_id=?1",
+                [&f.cut.adoption_id],
+                |r| r.get(0),
+            )
+        })
+        .unwrap()
+}
+
+/// The native sequence a stored settlement's coverage started after.
+fn coverage_floor(f: &Fixture, settlement: &str) -> i64 {
+    f.store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT previous_ydoc_sequence FROM live_device_settlements WHERE settlement_id=?1",
+                [settlement],
+                |r| r.get(0),
+            )
+        })
+        .unwrap()
+}
+
+/// Everything a settlement records.
+const SETTLEMENT_WRITES: [&str; 4] = [
+    "live_device_settlements",
+    "live_settlement_attribution_unavailable",
+    "live_settlement_publication_states",
+    "moments",
+];
+
+/// `settle` replays `stored`, before and after a restart: the same result,
+/// with no writes.
+fn replays(f: &mut Fixture, stored: &LiveSettlementResult, settle: impl Fn(&mut Fixture) -> Result<LiveSettlementResult, ApplicationError>) {
+    let stored = serde_json::to_value(stored).unwrap();
+    for restart in [false, true] {
+        if restart {
+            reopen(f);
+        }
+        let before = rows(f, &SETTLEMENT_WRITES);
+        assert_eq!(serde_json::to_value(settle(f).unwrap()).unwrap(), stored, "restart={restart}");
+        assert_eq!(rows(f, &SETTLEMENT_WRITES), before, "restart={restart}: a replay writes nothing");
+    }
+}
+
+/// Sol's round 4b ruling, 2(a): a successor's settlement projects accepted
+/// state at its terminal, never a delivery it has not applied, whatever
+/// receipt it saved. With C1 applied and C2 not, only C1's content settles;
+/// once C2 applies, the next settlement holds it; once S1's own seed applies,
+/// the next holds what ordinary sync brought before its capture. The seed's
+/// receipt is saved before C1 applies or after it, before the suffix drains
+/// either way, and ordinary sync adds rows before the capture or none.
+#[test]
+fn a_successor_settles_only_what_it_applied() {
+    for (receipt_first, catch_up) in [(true, 0), (false, 0), (true, 2)] {
+        let case = format!("receipt_first={receipt_first} catch_up={catch_up}");
+        let (mut f, _, carried) = resumed_after_catch_up(true, catch_up);
+        let (c1, c2) = (&carried[0], &carried[1]);
+        let early = receipt_first.then(|| accept_seed(&mut f, 11));
+        apply_carried(&mut f, c1);
+        let seed = early.unwrap_or_else(|| accept_seed(&mut f, 11));
+        let first = settle_as(&mut f, Some(c1.receipt.clone()), "first-settled").unwrap();
+        assert_eq!((first.previous_cursor, first.terminal_cursor), (3, 5), "{case}");
+        let text = moment_text(&f, "first-settled");
+        assert!(text.contains("Carried") && !text.contains("again") && !text.contains("Caught up"), "{case}: {text}");
+        apply_carried(&mut f, c2);
+        settle_as(&mut f, Some(c2.receipt.clone()), "second-settled").unwrap();
+        let text = moment_text(&f, "second-settled");
+        assert!(text.contains("Carried again") && !text.contains("Caught up"), "{case}: {text}");
+        let own = own_seed_event(&f, 11);
+        applies(&mut f, own);
+        settle_as(&mut f, Some(seed), "resumed").unwrap();
+        assert_eq!(moment_text(&f, "resumed").contains("Caught up"), catch_up > 0, "{case}");
+    }
+}
+
+/// The current activation's own native update stays out of its settlement
+/// while the relay's receipt is all it has: acknowledgement alone exposes
+/// nothing. Applied, it settles.
+#[test]
+fn an_acknowledged_own_update_settles_once_applied() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let remote = remote_event(&mut f, 3);
+    let terminal = remote.metadata.accepted.receipt.clone();
+    applies(&mut f, remote);
+    let own = native_tail_edit(&mut f, "# Own edit\n", 11);
+    let accepted = receipt_of(&own.delivery_id, &own.update_digest, 5);
+    acknowledge_entry(&mut f, &accepted);
+    settle_as(&mut f, Some(terminal), "acknowledged").unwrap();
+    let text = moment_text(&f, "acknowledged");
+    assert!(text.contains("Remote paragraph 3") && !text.contains("Own edit"), "{text}");
+    native_tail_apply(&mut f, own.update.clone(), own.delivery_id.clone(), 5);
+    settle_as(&mut f, Some(accepted), "applied").unwrap();
+    assert!(moment_text(&f, "applied").contains("Own edit"));
+}
+
+/// An unapplied inherited delivery keeps the tail private below the coverage
+/// floor too. S1, its seed abandoned so nothing of its own is private, and
+/// nothing applied: C1 and C2 alone make its tail private, and its settlement
+/// at B projects only the accepted state its predecessor settled.
+#[test]
+fn an_inherited_delivery_below_the_floor_stays_private() {
+    let (mut f, covered, carried) = resumed_after_catch_up(true, 0);
+    abandon_seed(&mut f);
+    let floor = adopted_head(&f);
+    assert!(carried.iter().all(|delivery| delivery.native_sequence <= floor));
+    let tail = {
+        let held = f.handle.registration.lock().unwrap();
+        f.store.read_with(|conn| settlement::private_tail(conn, &held, floor, floor)).unwrap()
+    };
+    assert!(tail.any && tail.sequences.is_empty());
+    let key = retirement_key(&f, 10);
+    let projected = with_retirement_settlement(
+        &mut f.store,
+        &retirement_scope(),
+        &key,
+        &retirement_host(),
+        Some(covered),
+        128,
+        NativeHistoryReconstruction { working_reserve_bytes: 8 * 1024 * 1024 },
+        |_, audit| -> Result<_, ApplicationError> {
+            Ok(audit.accepted_prefix().map(|doc| doc.project(ContentKind::Richdoc).map(|projection| projection.content)))
+        },
+    )
+    .unwrap()
+    .expect("an accepted prefix")
+    .unwrap();
+    assert_eq!(projected, moment_text(&f, "retired"));
+    assert!(!projected.contains("Carried"), "{projected}");
+}
+
+/// The before-image is lineage-wide and a stored settlement keeps its
+/// identity. A successor with nothing applied since its predecessor's
+/// settlement at B, and nothing private, settles at B: that replays the
+/// predecessor's settlement as stored, its coverage starting where the
+/// predecessor's did rather than at the successor's adopted head, with no
+/// writes, after a restart too.
+#[test]
+fn a_successor_replays_its_predecessors_settlement_as_stored() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let remote = remote_event(&mut f, 3);
+    let terminal = remote.metadata.accepted.receipt.clone();
+    applies(&mut f, remote);
+    host_document(&mut f, true, true);
+    let settled = retirement_settle(&mut f, 10, Some(terminal.clone())).unwrap();
+    release_parked(&mut f);
+    importable(&mut f);
+    returned(&mut f);
+    successor(&mut f);
+    f.adopt().unwrap();
+    assert!(seeds(&f).is_empty());
+    assert!(coverage_floor(&f, &settled.settlement_id) < adopted_head(&f));
+    replays(&mut f, &settled, |f| settle_as(f, Some(terminal.clone()), "retired"));
+}
+
+/// Ordinary sync's rows between a release and the successor's adoption are
+/// covered by the successor's verified capture, with Carried deliveries and
+/// without. Its first settlement starts coverage at its adopted head and its
+/// journal interval at its predecessor's settlement, and no application is
+/// recorded for those rows. Replayed after a restart, it answers what it
+/// stored and writes nothing.
+#[test]
+fn catch_up_rows_before_adoption_need_no_application() {
+    for carried in [false, true] {
+        let (mut f, covered, inherited) = resumed_after_catch_up(carried, 2);
+        let adopted = adopted_head(&f);
+        let seed = accept_seed(&mut f, 11);
+        let terminal = if carried {
+            apply_carried(&mut f, &inherited[0]);
+            inherited[0].receipt.clone()
+        } else {
+            let own = own_seed_event(&f, 11);
+            applies(&mut f, own);
+            seed
+        };
+        let first = settle_as(&mut f, Some(terminal.clone()), "resumed").unwrap();
+        assert_eq!(first.previous_cursor, 3, "carried={carried}");
+        assert_eq!(coverage_floor(&f, &first.settlement_id), adopted, "carried={carried}");
+        assert_eq!(applied_deliveries(&f), [covered.delivery_id.clone(), terminal.delivery_id.clone()], "carried={carried}");
+        replays(&mut f, &first, |f| settle_as(f, Some(terminal.clone()), "resumed"));
+    }
+}

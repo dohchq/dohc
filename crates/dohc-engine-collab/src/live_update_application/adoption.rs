@@ -1973,6 +1973,8 @@ pub(super) struct AdoptedOrigin {
     pub source_digest: String,
     pub sequence: i64,
     pub terminal: Option<LiveUpdateReceipt>,
+    /// It adopted its released chain's retained prefix.
+    pub successor: bool,
 }
 
 pub(super) fn read_origin(
@@ -2003,14 +2005,23 @@ pub(super) fn read_origin_with(
         ).map_err(read_sql)?;
         budget.charge(usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?)?;
     }
+    type OriginRow = (String, String, String, i64, i64, String, String, bool);
     // Only the columns charged above.
-    let raw: Option<(String,String,String,i64,i64,String,String)> = conn.query_row(
-        &format!("SELECT binding_json,source_moment_id,source_digest,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,activation_id FROM {}
+    let raw: Option<OriginRow> = conn.query_row(
+        &format!("SELECT binding_json,source_moment_id,source_digest,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,activation_id,boundary_json IS NOT NULL FROM {}
          WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5", owner_activations::CURRENT_ACTIVATIONS),
         params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],
-        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional().map_err(read_sql)?;
-    let Some((binding, source_moment, source_digest, sequence, cursor, terminal, adoption_id)) =
-        raw
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?))).optional().map_err(read_sql)?;
+    let Some((
+        binding,
+        source_moment,
+        source_digest,
+        sequence,
+        cursor,
+        terminal,
+        adoption_id,
+        successor,
+    )) = raw
     else {
         return Ok(None);
     };
@@ -2053,5 +2064,6 @@ pub(super) fn read_origin_with(
         source_digest,
         sequence,
         terminal,
+        successor,
     }))
 }
