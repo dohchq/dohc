@@ -27,10 +27,7 @@ use crate::capture_sink::{
     CaptureProvenance, CapturedRoot, PolicyState, SelfWriteSuppression, StoreCaptureSink,
     StoreCaptureSinkParams,
 };
-use crate::{
-    CAPTURE_INITIAL_SETTLED_EVENT, CAPTURE_MOMENT_RECORDED_EVENT,
-    CAPTURE_NO_ATOMIC_PLACEMENT_EVENT, EngineEvents,
-};
+use crate::{CAPTURE_MOMENT_RECORDED_EVENT, CAPTURE_NO_ATOMIC_PLACEMENT_EVENT, EngineEvents};
 use dohc_engine_collab::LeaseRegistry;
 use dohc_engine_domain::COLLECTION_SCHEMA_FILENAME;
 use dohc_engine_files::{
@@ -2341,10 +2338,7 @@ impl DriverEnv for RealEnv {
                 () = &mut initial_deadline, if early_import => {
                     initial_cancel.cancel();
                     self.status.mark_initial_apply_timed_out();
-                    self.events.emit(
-                        CAPTURE_INITIAL_SETTLED_EVENT,
-                        serde_json::json!({ "workspaceId": self.workspace_id }),
-                    );
+                    self.events.emit_initial_settled(&self.workspace_id);
                     // `workspace.open` already received this edge for an early
                     // import. Re-sending is harmless and makes the timeout's
                     // observable transition explicit if that contract changes.
@@ -2384,10 +2378,7 @@ impl DriverEnv for RealEnv {
         }
         self.initial_links_hold.take();
         if initial_start && !initial_settle_timed_out {
-            self.events.emit(
-                CAPTURE_INITIAL_SETTLED_EVENT,
-                serde_json::json!({ "workspaceId": self.workspace_id }),
-            );
+            self.events.emit_initial_settled(&self.workspace_id);
         }
         #[cfg(feature = "harness")]
         if let Some(probe) = &self.apply_probe {

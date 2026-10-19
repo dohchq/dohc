@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 // The label alone, so the document view does not load the table and board code.
 import { recordLabel } from "@dohc/collection-views/record-label";
 import type { CollectionRecord } from "@dohc/workspace-contracts";
+import { isWorkspaceUpdatingError } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
 import { SecondaryButton } from "../ui/controls";
 import { RecordButton } from "./RecordButton";
@@ -45,6 +46,9 @@ export function RecordButtonsRow(props: {
       } catch (error) {
         if (!alive || request !== requests.current) return;
         setFound(null);
+        // The engine is still reading a new workspace's files. Main announces
+        // the end as activity for the whole workspace, which reads again below.
+        if (isWorkspaceUpdatingError(error)) return;
         report.current("dohc could not read this record's buttons.", error, () => void read());
       }
     };

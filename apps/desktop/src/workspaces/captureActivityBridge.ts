@@ -5,6 +5,8 @@ import type { WorkspaceActivityScope } from "../ipc/workspaceActivityBroadcast";
 /** Emitted by the daemon once per settled capture batch / reconcile pass. */
 export const CAPTURE_MOMENT_RECORDED_EVENT = "capture.momentRecorded";
 export const COLLECTIONS_PROJECTED_EVENT = "collections.projected";
+/** The engine answers reads it refused while it read a new workspace's files. */
+export const CAPTURE_INITIAL_SETTLED_EVENT = "capture.initialSettled";
 export const CAPTURE_NO_ATOMIC_PLACEMENT_EVENT = "capture.noAtomicPlacement";
 
 /**
@@ -102,7 +104,8 @@ export function bridgeCaptureEventsToRenderer(
   }
 
   const unsubscribe = daemon.onEvent((event) => {
-    if (event.name !== CAPTURE_MOMENT_RECORDED_EVENT && event.name !== COLLECTIONS_PROJECTED_EVENT) return;
+    if (event.name !== CAPTURE_MOMENT_RECORDED_EVENT && event.name !== COLLECTIONS_PROJECTED_EVENT &&
+      event.name !== CAPTURE_INITIAL_SETTLED_EVENT) return;
     const scope = scopeOf(event.payload);
     if (!scope) {
       pendingGlobal = true;
