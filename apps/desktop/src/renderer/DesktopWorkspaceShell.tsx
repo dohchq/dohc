@@ -1192,11 +1192,12 @@ export function DesktopWorkspaceShell(props: {
     setSearchScrollTarget((current) => (current?.nonce === nonce ? null : current));
   }, []);
 
-  // Restore per-workspace workbench state from .dohc/ui-state.json. Defaults
-  // render immediately (launch budgets key off shell visibility); the stored
-  // state merges when the IPC resolves: it applies only if the user touched
-  // nothing in the meantime — a pre-load user action wins (and gets an
-  // immediate write, since wb may never change again to arm the debounced
+  // Restore per-workspace workbench state from .dohc/ui-state.json. The shell
+  // renders at once under the opening cover (launch budgets key off shell
+  // visibility); the cover lifts in the commit that applies the stored state,
+  // or the defaults when it is missing or unreadable. The stored state applies
+  // only if the user touched nothing in the meantime — a pre-load user action
+  // wins (and gets an immediate write, since wb may never change again to arm the debounced
   // one). The touched flag is a ref set synchronously inside every workbench
   // mutation (mutateWb below): comparing committed state against defaults
   // would race React's commit — a queued-but-uncommitted user action would
