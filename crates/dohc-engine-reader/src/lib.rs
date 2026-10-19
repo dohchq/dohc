@@ -1,4 +1,6 @@
 //! Fixed Markdown reader process. Configuration belongs to trusted engine startup.
+#[allow(unsafe_code)]
+mod platform;
 mod process;
 mod session;
 mod wire;
@@ -177,10 +179,19 @@ impl Reader {
         let mut s = self.shared.state.lock().unwrap();
         expire(&mut s);
         let bytes = request.retained();
+        let metadata = [
+            &request.current_path,
+            &request.document.workspace_id,
+            &request.document.main_version_id,
+            &request.document.object_id,
+            &request.document.lineage_claim_id,
+        ];
         let failure = if s.closed {
             Some(Failure::Unavailable)
         } else if request.source.len() > 2 * 1024 * 1024
             || request.checkpoint.len() > wire::UPDATE
+            // Even worst-case JSON escaping must fit the 64 KiB control frame.
+            || metadata.iter().map(|s| s.len()).sum::<usize>() > 8192
             || bytes > 64 * 1024 * 1024
         {
             Some(Failure::TooLarge)

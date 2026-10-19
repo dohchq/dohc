@@ -1,3 +1,5 @@
+import { createWorkspaceLinksReader } from "./workspaces/workspaceLinks";
+import { linksOperations } from "./ipc/linksOperations";
 import { shareHandoffOperations, shareMountOperations, shareProposalOperations, sharedChannelOperations, relayShareOperations } from "./ipc/shareOperations";
 import { createOperationHistory } from "./workspaces/workspaceHistoryOperations";
 import { createReceivedFileReferenceScopes } from "./workspaces/workspaceFileReferenceScopes";
@@ -2948,6 +2950,7 @@ async function withEngineAdapter<T>(
   );
 }
 
+const workspaceLinks = createWorkspaceLinksReader(withEngineAdapter, () => shareViewFiles);
 const resolveEngineFiles = createEngineFileResolver(withEngineAdapter, createReceivedFileReferenceScopes<EngineWorkspace>({
   findWorkspace,
   currentAttachment: workspaceId => workspaceAuthorities.currentBinding(workspaceId).attachmentId,
@@ -4743,6 +4746,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
       return { result, waiting };
     },
   }),
+  links: workspaceLinks,
   findWorkspace,
   listWorkspaces,
   openWorkspaceActivity,
@@ -5230,6 +5234,8 @@ function withShareViewFilesOperation<Result>(
 }
 
 shareViewFiles = {
+  linksIn: (target, input) => withShareViewFilesOperation(target, files => files.linksIn(target, input)),
+  linksResolve: (target, input) => withShareViewFilesOperation(target, files => files.linksResolve(target, input)),
   narrow: (lease, target, assertCurrent, commit) =>
     withShareViewFilesOperation(target, files => files.narrow(lease, target, assertCurrent, commit)),
   end: (lease, target, assertCurrent) =>
@@ -5994,6 +6000,10 @@ function registerIpcHandlers(): void {
     withRendererWorkspaceOperation, remoteForWorkspace,
     currentCredentialGeneration: () => credentialCacheGeneration,
     relayJson: (credentials, path) => relayShareJsonWithCredentials(credentials, path),
+  });
+  registerOperations(operationBoundary, linksOperations, {
+    linksIn: ({ workspaceId: _workspaceId, ...input }, { operation }) => workspaceLinks.incoming(operation.workspace, input),
+    linksResolve: ({ workspaceId: _workspaceId, ...input }, { operation }) => workspaceLinks.resolve(operation.workspace, input),
   });
   registerOperations(operationBoundary, shareCopyOperations, {
     getShareCopyDetails: (input, { event }) => shareCopyHandler(event.sender, input),

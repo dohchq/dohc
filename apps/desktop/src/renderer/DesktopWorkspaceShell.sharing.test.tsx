@@ -1564,7 +1564,7 @@ describe("shared view chats surface", () => {
     // The premise: the file really opened, so the panel that issues the call
     // really mounted.
     await screen.findByTestId("tab-b.md");
-    await waitFor(() => expect(bridge.getBacklinks).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.linksIn).toHaveBeenCalled());
     expect(bridge.listChatFileMentions).not.toHaveBeenCalled();
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
@@ -1690,7 +1690,7 @@ describe("chats surface after a failed capture build", () => {
     // The premise: the file really opened, so the panel that issues the call
     // really mounted.
     await screen.findByTestId("tab-b.md");
-    await waitFor(() => expect(bridge.getBacklinks).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.linksIn).toHaveBeenCalled());
     expect(bridge.listChatFileMentions).not.toHaveBeenCalled();
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });

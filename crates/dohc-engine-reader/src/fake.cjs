@@ -14,6 +14,7 @@ function answer(r) {
   const fault = r.currentPath;
   if (fault === 'crash') return process.exit(17);
   if (fault === 'hang') return;
+  if (fault === 'memory') {const allocations = []; for (let i = 0; i < 40; i++) allocations.push(Buffer.alloc(16 * 1024 * 1024, 1));}
   if (fault === 'stderr') process.stderr.write(Buffer.alloc(100000, 120));
   if (fault === 'malformed') return process.stdout.write(Buffer.alloc(12));
   if (fault === 'oversize') {const h = frame(1, 0, Buffer.alloc(0)); h.writeUInt32LE(65537, 8); return process.stdout.write(h);}
@@ -73,4 +74,4 @@ process.stdin.on('data', chunk => {
     else request = r;
   }
 });
-process.stdin.on('end', () => process.exit(0));
+process.stdin.on('end', () => {if (mode === 'ignore-eof') setInterval(() => {}, 1000); else process.exit(0)});

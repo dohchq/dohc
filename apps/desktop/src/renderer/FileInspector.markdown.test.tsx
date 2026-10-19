@@ -14,7 +14,7 @@ import {
   it,
   vi,
 } from "vitest";
-import type { GetBacklinksResult } from "../ipc/bridgeContract";
+import { linkQueryPage } from "../testing/linkQueryPage.fixture";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 import { FileInspector } from "./FileInspector";
 
@@ -95,7 +95,7 @@ describe("FileInspector renders markdown through the shared component map", () =
     })),
     writeWorkspaceText: vi.fn(async () => ({ path: "a.md", recorded: true })),
     openFileExternally: vi.fn(async () => undefined),
-    getBacklinks: vi.fn(async (): Promise<GetBacklinksResult> => ({ sources: [] })),
+    linksIn: vi.fn(async () => linkQueryPage({ sources: [] })),
     listWorkspaceFiles: vi.fn(async () => ({
       files: [{ path: "a.md", kind: "file" }],
       folders: [],
@@ -150,7 +150,7 @@ describe("FileInspector renders markdown through the shared component map", () =
       text: "# Large document\n\nThis is the bounded prefix.\n",
       truncated: true,
     });
-    bridgeMock.getBacklinks.mockResolvedValueOnce({
+    bridgeMock.linksIn.mockResolvedValueOnce(linkQueryPage({
       sources: [
         {
           sourcePath: "notes/launch.md",
@@ -165,7 +165,7 @@ describe("FileInspector renders markdown through the shared component map", () =
           ],
         },
       ],
-    });
+    }));
     const view = render(<FileInspector workspaceId="ws-1" path="large.md" />);
 
     const source = await screen.findByTestId("markdown-source-view");

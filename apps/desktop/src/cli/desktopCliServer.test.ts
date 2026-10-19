@@ -17,7 +17,7 @@ import { documentMarkdown, markdownToYDoc } from "@dohc/ydoc-projection";
 import { directDocumentProjection } from "../workspaces/documentProjection";
 import { CHATS_METHOD, WORKSPACE_METHOD, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { executeCli } from "@dohc/cli";
-import { CLI_PROTOCOL_VERSION, cliTransportResponseSchema, type CliRequestWithoutToken } from "@dohc/cli/protocol";
+import { CLI_JSON_SCHEMA_VERSION, CLI_PROTOCOL_VERSION, cliTransportResponseSchema, type CliRequestWithoutToken } from "@dohc/cli/protocol";
 import { VersionedTextStoreError } from "@dohc/workspace-contracts/engine";
 import { createDesktopCliServer } from "./desktopCliServer";
 import { handleCliRequestLine } from "./cliServer";
@@ -114,6 +114,7 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
     notifyRenderer: () => undefined,
   });
   const dependencies: Dependencies = {
+    links: { incoming: vi.fn(async () => null), resolve: vi.fn(async () => ({ versionId: "main", results: [], mountsCovered: true })) },
     automations: () => ({ automationIdAt: vi.fn(), runs: vi.fn(), run: vi.fn(), retry: vi.fn() }),
     buttons: () => ({ inspect: vi.fn(async () => []), press: vi.fn() }),
     findWorkspace: (id) => rows.get(id) ?? null,
@@ -1190,4 +1191,56 @@ describe.each(["cli", "mcp"] as const)("share copy through %s", door => {
     await expect(context.shareCopy!({ shareId: "share", grantId: "grant" })).rejects.toThrow("This workspace changed while this ran. Try again.");
     expect(f.remote).not.toHaveBeenCalled();
   });
+});
+
+it("gives CLI and MCP the IPC link answer in a share without Chats capture", async () => {
+  const f = fixture(await createTestScratch("links-share-cli-"));
+  f.setCapture(null); f.setDaemon(null);
+  f.dependencies.sharedViewOf = () => ({ shareId: "share" }) as ReturnType<Dependencies["sharedViewOf"]>;
+  const resolved = { versionId: "main", results: [{ path: "target.md", fragment: "heading" }], mountsCovered: true };
+  const input = { source: "source.md", literals: [{ kind: "wikilink" as const, literal: "target#heading" }] };
+  f.dependencies.links.resolve = vi.fn(async () => resolved);
+  await f.create().startDesktopCliServer();
+  const token = "a".repeat(64);
+  const send = async (request: CliRequestWithoutToken) => {
+    const response = cliTransportResponseSchema.parse(JSON.parse(await handleCliRequestLine(JSON.stringify({ ...request, token }), token, f.options())));
+    if (!response.ok) throw new Error(response.error);
+    return response.result;
+  };
+  const cli = await executeCli({ argv: ["links", "resolve", "source.md", JSON.stringify(input.literals), "--json"], cwd: f.workspace.rootPath, env: {}, request: send });
+  expect(cli.exitCode).toBe(0);
+  expect(JSON.parse(cli.stdout)).toMatchObject(resolved);
+  const { linksResolve } = await import("@dohc/mcp/tools");
+  expect(await linksResolve({ root: f.workspace.rootPath, home: "state", request: send }, input)).toEqual(resolved);
+  expect(f.dependencies.openWorkspaceActivity).not.toHaveBeenCalled();
+  expect(f.dependencies.linkedChatStoreFor).not.toHaveBeenCalled();
+  expect(f.dependencies.links.resolve).toHaveBeenCalledTimes(2);
+  const held = deferred();
+  f.dependencies.links.resolve = vi.fn(async () => { await held.promise; return resolved; });
+  const pending = f.options().links!.resolve(f.workspace, input);
+  await vi.waitFor(() => expect(f.dependencies.links.resolve).toHaveBeenCalledOnce());
+  const retired = f.authorities.invalidate(f.workspace.workspaceId);
+  held.release();
+  // Finished work reports as finished when the workspace closes during it.
+  await expect(pending).resolves.toEqual(resolved);
+  await retired;
+});
+
+it("returns an incoming page directly through CLI and MCP", async () => {
+  const f = fixture(await createTestScratch("links-in-cli-"));
+  const page = { versionId: "main", subject: { path: "a.md", objectId: "a" }, entries: [], unchecked: [], complete: true, indexBuilding: false, mountsCovered: true, nextCursor: null };
+  f.dependencies.links.incoming = vi.fn(async () => page);
+  await f.create().startDesktopCliServer();
+  const token = "a".repeat(64);
+  const send = async (request: CliRequestWithoutToken) => {
+    const response = cliTransportResponseSchema.parse(JSON.parse(await handleCliRequestLine(JSON.stringify({ ...request, token }), token, f.options())));
+    if (!response.ok) throw new Error(response.error);
+    return response.result;
+  };
+  const subject = { path: "a.md" };
+  const cli = await executeCli({ argv: ["links", "in", JSON.stringify(subject), "--json"], cwd: f.workspace.rootPath, env: {}, request: send });
+  expect(cli.exitCode).toBe(0);
+  expect(JSON.parse(cli.stdout)).toEqual({ schemaVersion: CLI_JSON_SCHEMA_VERSION, ...page });
+  const { linksIn } = await import("@dohc/mcp/tools");
+  expect(await linksIn({ root: f.workspace.rootPath, home: "state", request: send }, { subject })).toEqual(page);
 });

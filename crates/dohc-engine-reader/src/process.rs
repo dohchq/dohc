@@ -6,14 +6,14 @@ use std::{
     fs::File,
     io::{self, Read},
     path::Path,
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
     sync::{Arc, mpsc},
     thread::{self, JoinHandle},
     time::Instant,
 };
 pub(super) type Event = std::result::Result<Option<Outcome>, Failure>;
 pub(super) struct Worker {
-    child: Child,
+    child: crate::platform::Process,
     input: Option<mpsc::Sender<Request>>,
     pub output: mpsc::Receiver<Event>,
     #[cfg(test)]
@@ -28,6 +28,9 @@ impl Worker {
         deadline: Instant,
     ) -> std::result::Result<Self, Failure> {
         let unavailable = |_| Failure::Unavailable;
+        if shared.state.lock().unwrap().closed {
+            return Err(Failure::Unavailable);
+        }
         if [&c.node, &c.bundle, &c.manifest]
             .iter()
             .any(|p| !p.is_absolute())
@@ -80,8 +83,8 @@ impl Worker {
             "SystemRoot",
             std::env::var_os("SystemRoot").ok_or(Failure::Unavailable)?,
         );
-        prepare(&mut command);
-        let child = command.spawn().map_err(unavailable)?;
+        let (child, stdout, stdin, mut stderr) =
+            crate::platform::spawn(&mut command).map_err(unavailable)?;
         let (input, requests) = mpsc::channel::<Request>();
         let (events, output) = mpsc::channel();
         let mut w = Self {
@@ -95,7 +98,6 @@ impl Worker {
         };
         #[cfg(test)]
         crate::tests::started(&shared, w.child.id(), w.cwd.as_ref().unwrap().path());
-        let mut stderr = w.child.stderr.take().unwrap();
         w.threads.push(
             thread::Builder::new()
                 .name("reader-stderr".into())
@@ -104,11 +106,7 @@ impl Worker {
                 })
                 .map_err(unavailable)?,
         );
-        let mut session = Session::new(
-            w.child.stdout.take().unwrap(),
-            w.child.stdin.take().unwrap(),
-            manifest,
-        );
+        let mut session = Session::new(stdout, stdin, manifest);
         w.threads.push(
             thread::Builder::new()
                 .name("reader-pipes".into())
@@ -172,24 +170,13 @@ fn file_sha(path: &Path, cap: u64, deadline: Instant) -> std::result::Result<Str
 }
 impl Drop for Worker {
     fn drop(&mut self) {
-        // PR 3c extends this owner with Job/group attach and group termination.
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.child.terminate();
         drop(self.input.take());
         for thread in self.threads.drain(..) {
             let _ = thread.join();
         }
         drop(self.cwd.take());
         #[cfg(test)]
-        crate::tests::reaped(&self.shared, &mut self.child);
+        crate::tests::reaped(&self.shared);
     }
-}
-fn prepare(command: &mut Command) {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    }
-    #[cfg(not(windows))]
-    let _ = command;
 }
