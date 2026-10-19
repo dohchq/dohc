@@ -1729,18 +1729,24 @@ fn base_repair_publication_blocked_pull_matches_main() {
             SyncPassOutcome::Complete { pushed: 0, .. }
         ));
         assert!(client.transport().pushes.lock().unwrap().is_empty());
-        assert_eq!(
-            client
-                .pull_chat_workspace(
-                    &mut engine,
-                    &mut dohc_engine_collab::WriterDocCache::new(),
-                    "ws",
-                    &NoFaults,
-                    &NoLiveLeases,
-                    1200,
-                )
-                .unwrap_err(),
-            RelayError::Local("retryable-state".into())
+        let refusal = client
+            .pull_chat_workspace(
+                &mut engine,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                "ws",
+                &NoFaults,
+                &NoLiveLeases,
+                1200,
+            )
+            .unwrap_err();
+        let detail = refusal.to_string();
+        assert!(
+            detail.contains("Y.Doc base is waiting for its authenticated relay position"),
+            "{detail}"
+        );
+        assert!(detail.contains("object Some(\"blocked\")"), "{detail}");
+        assert!(
+            matches!(refusal, RelayError::Local(code) if code.split(':').next() == Some("retryable-state"))
         );
         let lineage: String = engine
             .read_with(|conn| {

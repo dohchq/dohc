@@ -2497,6 +2497,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 Holding::ByDocument { .. } => BTreeSet::new(),
             };
             let mut still_retryable = Vec::new();
+            let mut retryable_refusals = Vec::new();
             let mut made_progress = false;
             for op in round {
                 let key = holding.key(op);
@@ -2521,6 +2522,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 };
                 match routed {
                     Err(SyncError::RetryableState { reason }) => {
+                        retryable_refusals.push((op, reason));
                         holding.stop_at_withheld_parent(op, reason);
                         if let Some(key) = key {
                             if retained_while_held(op, reason) {
@@ -2578,7 +2580,24 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     .iter()
                     .any(|op| !holding.key(op).is_some_and(|key| durable.contains(&key)))
                 {
-                    return Err(RelayError::Local("retryable-state".to_owned()));
+                    let details = retryable_refusals
+                        .iter()
+                        .filter(|(op, _)| {
+                            holding.unready(op).is_none()
+                                && !holding.key(op).is_some_and(|key| durable.contains(&key))
+                        })
+                        .map(|(op, reason)| {
+                            format!(
+                                "{}; object {:?}; origin {:?} seq {}",
+                                SyncError::RetryableState { reason },
+                                crate::hosted::hosted_document(op),
+                                op.origin_id,
+                                op.origin_seq,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    return Err(RelayError::Local(format!("retryable-state: {details}")));
                 }
                 // A hosted document that would pass the retention limit is
                 // held at its first op still to apply, as one that is not
@@ -6553,6 +6572,9 @@ fn local(error: SyncError) -> RelayError {
     if matches!(error, SyncError::Storage(StorageError::FileLocked)) {
         return RelayError::StoreBusy;
     }
+    if matches!(error, SyncError::RetryableState { .. }) {
+        return RelayError::Local(format!("{}: {error}", error.code()));
+    }
     RelayError::Local(error.code().to_owned())
 }
 
@@ -7093,5 +7115,21 @@ mod conflict_resolve_blob_ref_tests {
             (state_vector_sha, BTreeSet::from([BlobKind::Ydoc])),
         ]);
         assert_eq!(refs, expected);
+    }
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::*;
+
+    #[test]
+    fn local_retryable_refusal_keeps_its_reason() {
+        let error = local(SyncError::RetryableState {
+            reason: "ydoc-resulting-head-pending",
+        });
+        assert!(
+            matches!(&error, RelayError::Local(code) if code.split(':').next() == Some("retryable-state"))
+        );
+        assert!(error.to_string().contains("ydoc-resulting-head-pending"));
     }
 }

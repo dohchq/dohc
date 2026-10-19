@@ -100,23 +100,6 @@ pub(crate) fn store_busy(error: &RuntimeError) -> bool {
 }
 
 pub(super) fn map_runtime(error: RuntimeError) -> WireError {
-    if let RuntimeError::Domain(DomainError::UndoRefused { .. }) = &error {
-        return WireError::new(ErrorCode::Conflict, error.to_string());
-    }
-    if let RuntimeError::CaptureFileHeld { path } = &error {
-        return WireError::new(ErrorCode::Conflict, format!("capture-file-held: {path}"));
-    }
-    if matches!(
-        &error,
-        RuntimeError::Sync(SyncError::RetryableState {
-            reason: "settlement-materialization-pending"
-        })
-    ) {
-        return WireError::new(ErrorCode::Overloaded, "settlement-materialization-pending");
-    }
-    if let RuntimeError::Domain(DomainError::WritePreconditionFailed { .. }) = &error {
-        return WireError::new(ErrorCode::Conflict, "write-precondition-failed");
-    }
     let error = match error {
         RuntimeError::LiveApplication(ApplicationError::Storage(error)) => {
             RuntimeError::Storage(error)
@@ -126,6 +109,31 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         }
         error => error,
     };
+    let wire = map_runtime_inner(&error);
+    if !matches!(error, RuntimeError::Domain(_)) {
+        log_internal_refusal(wire.code, &error);
+    }
+    wire
+}
+
+fn map_runtime_inner(error: &RuntimeError) -> WireError {
+    if let RuntimeError::Domain(DomainError::UndoRefused { .. }) = error {
+        return WireError::new(ErrorCode::Conflict, error.to_string());
+    }
+    if let RuntimeError::CaptureFileHeld { path } = error {
+        return WireError::new(ErrorCode::Conflict, format!("capture-file-held: {path}"));
+    }
+    if matches!(
+        error,
+        RuntimeError::Sync(SyncError::RetryableState {
+            reason: "settlement-materialization-pending"
+        })
+    ) {
+        return WireError::new(ErrorCode::Overloaded, "settlement-materialization-pending");
+    }
+    if let RuntimeError::Domain(DomainError::WritePreconditionFailed { .. }) = error {
+        return WireError::new(ErrorCode::Conflict, "write-precondition-failed");
+    }
     // A materialization that exhausted its replace retries against a lock an
     // external program holds on the ARTIFACT. The settle committed and the
     // write job is durably pending, so the only missing piece is a later
@@ -138,7 +146,7 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
     // "file-locked" too — and the desktop would then tell the user another
     // program has their DOCUMENT open while it retried a database contention.
     if matches!(
-        &error,
+        error,
         RuntimeError::Materialize(dohc_engine_files::MaterializeError::FileLocked)
     ) {
         return WireError::new(ErrorCode::Overloaded, "file-locked");
@@ -152,7 +160,7 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
     // clears by itself. It carries its own message because the desktop
     // must not read it as the user's file being held: nothing outside dohc is
     // involved, and there is nothing for a person to do.
-    if store_busy(&error) {
+    if store_busy(error) {
         return WireError::new(ErrorCode::Overloaded, "engine-store-busy");
     }
     // Keep the storage refusal code so the desktop can offer move-aside
@@ -162,9 +170,8 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         | dohc_engine_storage::StorageError::ForeignDatabase
         | dohc_engine_storage::StorageError::MigrationFailed { .. }
         | dohc_engine_storage::StorageError::MigratedByNewerBuild { .. }),
-    ) = &error
+    ) = error
     {
-        eprintln!("engine: store refused: {}", error_chain(refused));
         // A migration refusal names its cause after the code, the way other
         // refusals carry a detail: the desktop matches the code prefix and
         // shows the rest. The cause is the storage crate's constant text
@@ -178,7 +185,7 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         };
         return WireError::new(ErrorCode::Internal, message);
     }
-    match &error {
+    match error {
         RuntimeError::RecoveryImportRefused { reason } => {
             return WireError::new(
                 ErrorCode::InvalidParams,
@@ -238,7 +245,7 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
             return WireError::new(ErrorCode::InvalidParams, format!("invalid-input: {reason}"));
         }
         RuntimeError::Relay(RelayError::ClaimRefused(reason)) => {
-            let mut wire = map_runtime(RuntimeError::Relay((**reason).clone()));
+            let mut wire = map_runtime_inner(&RuntimeError::Relay((**reason).clone()));
             wire.message = "relay-claim-refused".to_owned();
             wire.retry = dohc_engine_protocol::Retryability::No;
             return wire;
@@ -273,7 +280,7 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         }
         _ => {}
     }
-    if let RuntimeError::LiveApplication(ref application) = error {
+    if let RuntimeError::LiveApplication(application) = error {
         let code = match application {
             ApplicationError::ConfiguredByteBudgetExceeded => ErrorCode::LimitExceeded,
             ApplicationError::InvalidInput(_)
@@ -307,20 +314,22 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         RuntimeError::Relay(error) => map_relay_code(error),
         RuntimeError::Search(error) => map_search_code(error),
         materialize @ RuntimeError::Materialize(_) => {
-            eprintln!(
-                "engine: materialization refusal: {}",
-                error_chain(&materialize)
-            );
             return WireError::new(ErrorCode::Internal, materialize.code());
         }
-        other => {
-            // The wire carries a constant message. The cause goes to stderr,
-            // which the desktop copies into its log.
-            eprintln!("engine: internal refusal: {}", error_chain(&other));
-            ErrorCode::Internal
-        }
+        _ => ErrorCode::Internal,
     };
     WireError::new(code, "workspace operation failed")
+}
+
+fn internal_refusal(code: ErrorCode, error: &(dyn std::error::Error + 'static)) -> Option<String> {
+    (code == ErrorCode::Internal)
+        .then(|| format!("engine: internal refusal: {}", error_chain(error)))
+}
+
+fn log_internal_refusal(code: ErrorCode, error: &(dyn std::error::Error + 'static)) {
+    if let Some(line) = internal_refusal(code, error) {
+        eprintln!("{line}");
+    }
 }
 
 /// The error followed by each of its sources, for the daemon's stderr.
@@ -335,7 +344,7 @@ fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
     text
 }
 
-fn map_relay_code(error: RelayError) -> ErrorCode {
+fn map_relay_code(error: &RelayError) -> ErrorCode {
     match error {
         RelayError::Unauthorized => ErrorCode::AuthFailed,
         RelayError::Forbidden => ErrorCode::Forbidden,
@@ -366,7 +375,7 @@ fn map_relay_code(error: RelayError) -> ErrorCode {
         RelayError::BlobReferenceMissing => ErrorCode::BlobReferenceMissing,
         RelayError::BlobInvalid => ErrorCode::BlobInvalid,
         RelayError::IdentityRequired => ErrorCode::IdentityRequired,
-        RelayError::ClaimRefused(reason) => map_relay_code(*reason),
+        RelayError::ClaimRefused(reason) => map_relay_code(reason),
         RelayError::StreamIdentityMismatch => ErrorCode::StreamIdentityMismatch,
         RelayError::AuthorshipMismatch => ErrorCode::AuthorshipMismatch,
         RelayError::UnknownChatOperation => ErrorCode::UnknownChatOperation,
@@ -402,7 +411,7 @@ fn map_relay_code(error: RelayError) -> ErrorCode {
     }
 }
 
-fn map_domain(error: DomainError) -> WireError {
+fn map_domain(error: &DomainError) -> WireError {
     use ErrorCode::{Internal, InvalidParams};
     use dohc_engine_crypto::CryptoError;
 
@@ -454,8 +463,8 @@ fn map_domain(error: DomainError) -> WireError {
         DomainError::Chat {
             code: "invalid-poll-options",
             reason,
-        } => (InvalidParams, reason),
-        DomainError::Chat { code, .. } => (InvalidParams, code),
+        } => (InvalidParams, *reason),
+        DomainError::Chat { code, .. } => (InvalidParams, *code),
         DomainError::Crypto(error) => {
             let code = match error {
                 CryptoError::InvalidIvLength
@@ -475,10 +484,11 @@ fn map_domain(error: DomainError) -> WireError {
         | DomainError::TextHeadNotBinary => (InvalidParams, "workspace operation failed"),
         _ => (Internal, "workspace operation failed"),
     };
+    log_internal_refusal(code, error);
     WireError::new(code, message)
 }
 
-fn map_collab_code(error: CollabError) -> ErrorCode {
+fn map_collab_code(error: &CollabError) -> ErrorCode {
     match error {
         CollabError::ConfiguredByteBudgetExceeded
         | CollabError::AuthorCapacity
@@ -521,7 +531,7 @@ fn map_collab_code(error: CollabError) -> ErrorCode {
     }
 }
 
-fn map_sync_code(error: SyncError) -> ErrorCode {
+fn map_sync_code(error: &SyncError) -> ErrorCode {
     match error {
         SyncError::Storage(_)
         | SyncError::SequenceGap
@@ -547,7 +557,7 @@ fn map_sync_code(error: SyncError) -> ErrorCode {
     }
 }
 
-fn map_search_code(error: SearchError) -> ErrorCode {
+fn map_search_code(error: &SearchError) -> ErrorCode {
     match error {
         SearchError::Bounds(_) => ErrorCode::InvalidParams,
         SearchError::Storage(_) | SearchError::Store(_) | SearchError::Corrupt(_) => {
@@ -576,6 +586,69 @@ pub(super) fn workspace_unavailable() -> WireError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn internal_refusal_includes_the_cause_chain_and_keeps_the_wire_message() {
+        use dohc_engine_files::MaterializeError;
+        use dohc_engine_storage::StorageError;
+
+        for error in [
+            RuntimeError::Relay(RelayError::Local(
+                "retryable-state: ydoc-resulting-head-pending; object apollo".into(),
+            )),
+            RuntimeError::Sync(SyncError::RetryableState {
+                reason: "ydoc-resulting-head-pending",
+            }),
+            RuntimeError::Collab(CollabError::Corrupt {
+                reason: "missing lineage".into(),
+            }),
+            RuntimeError::Search(SearchError::Store(StorageError::corrupt_public(
+                std::io::Error::other("missing search table"),
+            ))),
+            RuntimeError::Domain(DomainError::CaptureNotOwned),
+            RuntimeError::Domain(DomainError::StateCorrupt {
+                reason: "missing workspace row",
+            }),
+            RuntimeError::Materialize(MaterializeError::UnsafeTargetPath),
+        ] {
+            let expected = format!("engine: internal refusal: {}", error_chain(&error));
+            let wire = map_runtime_inner(&error);
+            assert_eq!(wire.code, ErrorCode::Internal);
+            assert_eq!(internal_refusal(wire.code, &error), Some(expected));
+            assert!(!wire.message.contains("ydoc-resulting-head-pending"));
+        }
+        let relay = map_runtime(RuntimeError::Relay(RelayError::Local(
+            "retryable-state: ydoc-resulting-head-pending; object apollo".into(),
+        )));
+        assert_eq!(relay.message, "workspace operation failed");
+        let error = SyncError::Storage(StorageError::corrupt_public(std::io::Error::other(
+            "missing table",
+        )));
+        assert!(
+            internal_refusal(ErrorCode::Internal, &error)
+                .unwrap()
+                .contains("missing table")
+        );
+    }
+
+    #[test]
+    fn routine_refusals_have_no_internal_log_line() {
+        for error in [
+            RuntimeError::Sync(SyncError::InvalidInput {
+                reason: "invalid id",
+            }),
+            RuntimeError::Domain(DomainError::FileNotFound),
+            RuntimeError::Collab(CollabError::AuthorCapacity),
+            RuntimeError::Relay(RelayError::QuotaExceeded),
+            RuntimeError::Sync(SyncError::RetryableState {
+                reason: "settlement-materialization-pending",
+            }),
+        ] {
+            let wire = map_runtime_inner(&error);
+            assert_ne!(wire.code, ErrorCode::Internal);
+            assert_eq!(internal_refusal(wire.code, &error), None);
+        }
+    }
+
     #[test]
     fn checked_delete_replication_dependents_have_a_known_reason() {
         let wire = super::map_runtime(dohc_engine_runtime::RuntimeError::Domain(
@@ -1196,12 +1269,12 @@ mod tests {
         // ingest refusal before it reaches here; pinned so a second caller
         // cannot reintroduce the split.
         assert_eq!(
-            map_sync_code(SyncError::BlobTooLarge {
+            map_sync_code(&SyncError::BlobTooLarge {
                 constraint: "MAX_CAPTURE_BINARY_FILE_BYTES",
                 limit_bytes: 5 * 1024 * 1024,
                 observed_bytes: 5 * 1024 * 1024 + 1,
             }),
-            map_relay_code(RelayError::BlobTooLarge {
+            map_relay_code(&RelayError::BlobTooLarge {
                 constraint: "MAX_CAPTURE_BINARY_FILE_BYTES",
                 limit_bytes: 5 * 1024 * 1024,
                 observed: ObservedBytes::Exact(5 * 1024 * 1024 + 1),
@@ -1290,13 +1363,13 @@ mod tests {
         ];
         for (relay, expected) in cases {
             assert_eq!(
-                map_relay_code(relay),
+                map_relay_code(&relay),
                 expected,
                 "collapsing a relay condition prevents generated clients from recovering"
             );
         }
         assert_eq!(
-            map_relay_code(RelayError::Partitioned),
+            map_relay_code(&RelayError::Partitioned),
             ErrorCode::WorkspaceUnavailable
         );
         // A relay that answered "not found" and one nobody could reach share
