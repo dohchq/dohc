@@ -1506,6 +1506,32 @@ fn a_hosted_replica_created_after_an_epoch_rotation_needs_no_workspace_init() {
     assert_eq!(replica(&store).main_cursor, 5);
 }
 
+/// Models a feed no relay produces after a rotation: `doc-a` stays in scope
+/// although every row of it is below the floor. It is held at no path, and
+/// only the document written above the floor is materialized.
+#[test]
+fn a_document_in_scope_with_every_row_below_the_floor_is_held_at_no_path() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let feed = hosted_feed();
+    feed.epoch_log_floor.store(4, Ordering::SeqCst);
+    feed.create("owner-2", 0, "doc-c", "c.md", "after rotation");
+    feed.share("doc-c", "c.md");
+    let client = RelaySyncClient::new(feed);
+    sync(&client, &mut store);
+
+    assert_eq!(
+        hold(&store, "doc-a"),
+        Some(HostedHold::ScopePathMismatch {
+            scope_path: "a.md".to_owned(),
+            head_path: None
+        })
+    );
+    assert_eq!(
+        content(&store).0,
+        BTreeMap::from([("doc-c".to_owned(), "after rotation".to_owned())])
+    );
+}
+
 /// Models an inconsistent feed that no dohc engine writes: a hand-written
 /// writer rotated the epoch, then continued `doc-a`'s Y.Doc lineage above the
 /// floor with a delta and a new head. Its base is below the floor, so the feed
