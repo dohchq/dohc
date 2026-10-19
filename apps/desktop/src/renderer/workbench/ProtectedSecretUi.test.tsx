@@ -64,7 +64,7 @@ describe("EngineHistoryView automation rows", () => {
     const row = screen.getByTestId("engine-moment-open");
     expect(row.firstElementChild?.querySelector('[title="Stamp the finish date"] .lucide-zap')).not.toBeNull();
     expect(row.getAttribute("aria-label")).toBe("Open diff for Tasks/new.md");
-    expect(row.getAttribute("aria-describedby")).toBe(source.id);
+    expect(document.getElementById(row.getAttribute("aria-describedby")!)?.textContent).toContain("Automation Stamp the finish date in Tasks");
   });
 });
 

@@ -162,10 +162,18 @@ export function groupAgentAuthorName(
     : undefined;
 }
 
+// The one agent that made a moment, by its stable id. Two agents can share a
+// name, so a run never compares names.
+function soleAgentId(moment: EngineMomentRecord): string | undefined {
+  const [author, ...others] = moment.authors ?? [];
+  return author?.kind === "agent" && others.length === 0 ? author.agentId : undefined;
+}
+
 // Whether `older` continues the run `newer` is in: the same agent editing the
 // same file, on the same day.
 function continuesRun(newer: EngineMomentRecord, older: EngineMomentRecord): boolean {
-  return newer.agentAuthorName !== undefined && newer.agentAuthorName === older.agentAuthorName &&
+  const agentId = soleAgentId(newer);
+  return agentId !== undefined && agentId === soleAgentId(older) &&
     newer.path === older.path && newer.operation === "write" && older.operation === "write" &&
     dayKey(newer.recordedAtMs) === dayKey(older.recordedAtMs);
 }
@@ -404,22 +412,34 @@ function momentRowPlace(moment: EngineMomentRecord, title: string): string {
   return title.includes(basenameOf(moment.path)) ? dirnameOf(moment.path) : moment.path;
 }
 
+// What a screen reader hears after a change's name: what it did, who made
+// it, and when. An agent and an automation say what they are, so they never
+// read as a person.
+export function momentDescription(moment: EngineMomentRecord): string {
+  const label = engineMomentSourceLabel(moment);
+  const who = moment.agentAuthorName !== undefined
+    ? label === "Agent" ? label : `Agent ${label}`
+    : moment.automationAuthor ? `Automation ${label}` : label;
+  return `${engineMomentSummary(moment)}, ${who}, ${formatChatTime(moment.recordedAtMs).label}`;
+}
+
 // Who made a top-level change, after its title. An agent's or an
 // automation's name shows; anyone else shows the file's folder, and their
-// avatar's title and the hidden source name them.
-function MomentDetail(props: { moment: EngineMomentRecord; id: string }) {
+// avatar's title and the hidden source name them. Each gives way before the
+// title does.
+function MomentDetail(props: { moment: EngineMomentRecord }) {
   const { moment } = props;
   const label = engineMomentSourceLabel(moment);
   if (moment.agentAuthorName !== undefined) {
     return (
-      <span data-testid="engine-moment-source" id={props.id} className="min-w-0 max-w-[50%] shrink-0 truncate text-[11px]">
+      <span data-testid="engine-moment-source" className="min-w-0 shrink-[999] truncate text-[11px]">
         <AgentName kind="agent" presentation={moment.authorPresentations?.[0] ?? neutralPresentation}>{label}</AgentName>
       </span>
     );
   }
   if (moment.automationAuthor) {
     return (
-      <span data-testid="engine-moment-source" id={props.id} className="min-w-0 flex-1 basis-0 truncate text-[11px] text-muted">
+      <span data-testid="engine-moment-source" className="min-w-0 flex-1 basis-0 truncate text-[11px] text-muted">
         <span className="sr-only">Automation </span>
         {label}
       </span>
@@ -430,33 +450,42 @@ function MomentDetail(props: { moment: EngineMomentRecord; id: string }) {
       <span className="min-w-0 flex-1 basis-0 truncate text-[11px] text-subtle">
         {momentRowPlace(moment, momentRowTitle(moment))}
       </span>
-      <span data-testid="engine-moment-source" id={props.id} className="sr-only">{label}</span>
+      <span data-testid="engine-moment-source" className="sr-only">{label}</span>
     </>
   );
 }
 
+// Words a control's description reads, kept out of the page: a referenced
+// hidden element still describes, and nothing reads it twice.
+function HiddenWords(props: { id: string; children: string }) {
+  return <span id={props.id} hidden>{props.children}</span>;
+}
+
+// What a collapsed run or pass says when the open change is inside it.
+const HOLDS_OPEN = "Includes the open change";
+
 // One change in the timeline. The states page renders it too. A run's head
-// carries `fold`: its count opens the run's earlier edits.
+// carries `fold`: its count opens the run's earlier edits, and `holdsOpen`
+// marks a collapsed run whose open change is one of them.
 export function MomentRow(props: {
   moment: EngineMomentRecord;
   // A file in a multi-file pass, or an earlier edit in an agent's run.
   nested?: "pass" | "run";
   // The change open in the focused editor group.
   selected?: boolean;
-  fold?: { count: number; expanded: boolean; onToggle: () => void };
+  fold?: { count: number; expanded: boolean; holdsOpen?: boolean; onToggle: () => void };
   onOpenMoment: (momentId: string, filePath: string) => void;
 }) {
   const { moment, nested, fold } = props;
   const selected = props.selected === true;
   const recordedAt = formatChatTime(moment.recordedAtMs);
-  // The row's name says what it opens, so an automation that wrote the
-  // change is its description.
-  const sourceId = useId();
-  const describedBySource = moment.automationAuthor !== undefined && !nested;
+  // The row's name says what it opens; the change itself is its description.
+  const descriptionId = useId();
+  const holdsOpenId = useId();
   const open = (
     <button
       type="button"
-      aria-describedby={describedBySource ? sourceId : undefined}
+      aria-describedby={descriptionId}
       aria-current={selected ? "true" : undefined}
       data-testid="engine-moment-open"
       data-moment-id={moment.id}
@@ -489,7 +518,7 @@ export function MomentRow(props: {
         {nested === "pass" ? (
           <span className="shrink-0 text-[11px] text-subtle">{engineOperationLabel(moment)}</span>
         ) : nested ? null : (
-          <MomentDetail moment={moment} id={sourceId} />
+          <MomentDetail moment={moment} />
         )}
       </span>
       {/* A pass's files share their group's time. */}
@@ -505,21 +534,28 @@ export function MomentRow(props: {
       )}
     </button>
   );
-  if (!fold) return open;
+  const description = <HiddenWords id={descriptionId}>{momentDescription(moment)}</HiddenWords>;
+  if (!fold) return <>{open}{description}</>;
+  // A collapsed run holding the open change takes the selected ink; the
+  // change keeps aria-current for itself, and the count says where it is.
+  const holdsOpen = fold.holdsOpen === true;
   return (
-    <div className={`grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-x-1.5 rounded-md transition-colors duration-75 ${rowTone(selected)}`}>
+    <div className={`grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-x-1.5 rounded-md transition-colors duration-75 ${rowTone(selected || holdsOpen)}`}>
       {open}
       <button
         type="button"
         data-testid="engine-moment-run-toggle"
         aria-expanded={fold.expanded}
         aria-label={`${fold.count} changes`}
+        aria-describedby={holdsOpen ? holdsOpenId : undefined}
         title={`${fold.count} changes`}
         onClick={fold.onToggle}
         className="relative col-start-2 row-start-1 grid h-6 min-w-6 place-items-center rounded-md px-0.5 hover:bg-hover focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
       >
         <span className={COUNT}>{fold.count}</span>
       </button>
+      {description}
+      {holdsOpen ? <HiddenWords id={holdsOpenId}>{HOLDS_OPEN}</HiddenWords> : null}
     </div>
   );
 }
@@ -534,12 +570,13 @@ function RunRow(props: {
   onOpenMoment: (momentId: string, filePath: string) => void;
 }) {
   const [newest, ...earlier] = props.group.moments;
+  const holdsOpen = !props.expanded && earlier.some((moment) => moment.id === props.openMomentId);
   return (
     <div data-testid="engine-moment-run">
       <MomentRow
         moment={newest!}
         selected={newest!.id === props.openMomentId}
-        fold={{ count: props.group.moments.length, expanded: props.expanded, onToggle: props.onToggle }}
+        fold={{ count: props.group.moments.length, expanded: props.expanded, holdsOpen, onToggle: props.onToggle }}
         onOpenMoment={props.onOpenMoment}
       />
       {props.expanded ? (
@@ -573,21 +610,25 @@ function GroupRow(props: {
   // neutral groups show no author (never a guess).
   const agentAuthorName = groupAgentAuthorName(group.moments);
   const Chevron = expanded ? ChevronDown : ChevronRight;
+  // A collapsed pass holding the open change says so, as a run does.
+  const holdsOpen = !expanded && group.moments.some((moment) => moment.id === props.openMomentId);
+  const holdsOpenId = useId();
   return (
     <div data-testid="engine-moment-group">
       <button
         type="button"
         data-testid="engine-moment-group-toggle"
         aria-expanded={expanded}
+        aria-describedby={holdsOpen ? holdsOpenId : undefined}
         onClick={props.onToggle}
-        className={`${ROW} flex ${rowTone(false)}`}
+        className={`${ROW} flex ${rowTone(holdsOpen)}`}
       >
         <span className={`${MARK_BOX} text-subtle`}>
           <Chevron size={14} aria-hidden />
         </span>
         <span className="min-w-0 truncate text-ink">{group.summary}</span>
         {agentAuthorName !== undefined ? (
-          <span data-testid="engine-moment-group-source" className="min-w-0 max-w-[50%] shrink-0 truncate text-[11px] text-agent">
+          <span data-testid="engine-moment-group-source" className="min-w-0 shrink-[999] truncate text-[11px] text-agent">
             {chatAuthorLabel({ authorKind: "agent", authorDisplayName: agentAuthorName })}
           </span>
         ) : null}
@@ -600,6 +641,7 @@ function GroupRow(props: {
           {formatClock(group.recordedAtMs)}
         </time>
       </button>
+      {holdsOpen ? <HiddenWords id={holdsOpenId}>{HOLDS_OPEN}</HiddenWords> : null}
       {expanded ? (
         <div data-testid="engine-moment-group-files">
           {group.moments.map((moment) => (

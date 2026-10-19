@@ -38,6 +38,11 @@ function isEditableShortcutTarget(target: EventTarget | null) {
   );
 }
 
+// A step arrow. At the end of the file's History it reads as disabled but
+// keeps focus, and its action does nothing.
+const STEP_ARROW =
+  "size-7 aria-disabled:cursor-default aria-disabled:opacity-40 aria-disabled:hover:bg-transparent aria-disabled:hover:text-subtle";
+
 // The change's file, its folder quieter than its name.
 function MomentPath({ path }: { path: string }) {
   const slash = path.lastIndexOf("/");
@@ -225,11 +230,12 @@ export function EngineMomentDiffPage({
   }, [tabPath]);
   // A step reads the next change in this page's place, which drops focus
   // while it loads. Focus goes back to the step's arrow, so the next step
-  // needs no click.
+  // needs no click. At either end that arrow stays focusable, so the page
+  // keeps focus and the other bracket still steps back.
   const stepFocus = useRef<"newer" | "older" | null>(null);
   useEffect(() => {
     if (state.status === "loading" || stepFocus.current === null) return;
-    const arrow = pageRef.current?.querySelector<HTMLButtonElement>(`[data-testid="engine-diff-${stepFocus.current}"]:not(:disabled)`);
+    const arrow = pageRef.current?.querySelector<HTMLButtonElement>(`[data-testid="engine-diff-${stepFocus.current}"]`);
     stepFocus.current = null;
     arrow?.focus();
   }, [state]);
@@ -591,9 +597,9 @@ export function EngineMomentDiffPage({
               aria-label="Newer change"
               aria-keyshortcuts="]"
               title="Newer change  ]"
-              disabled={!steps.newer}
+              aria-disabled={!steps.newer || undefined}
               onClick={() => stepTo("newer")}
-              className="size-7"
+              className={STEP_ARROW}
             >
               <ChevronUp size={14} aria-hidden />
             </IconButton>
@@ -602,9 +608,9 @@ export function EngineMomentDiffPage({
               aria-label="Older change"
               aria-keyshortcuts="["
               title="Older change  ["
-              disabled={!steps.older}
+              aria-disabled={!steps.older || undefined}
               onClick={() => stepTo("older")}
-              className="size-7"
+              className={STEP_ARROW}
             >
               <ChevronDown size={14} aria-hidden />
             </IconButton>

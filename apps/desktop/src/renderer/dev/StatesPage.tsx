@@ -1766,10 +1766,10 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="history-timeline" title="History timeline">
-        <Specimen label="one line per change: an agent's folded edits, open; a person; origins; a protected file">
+        <Specimen label="one line per change: an agent's folded edits, holding the open one; a person; origins; a protected file">
           <div className="flex h-[300px] w-[240px] flex-col overflow-hidden rounded-lg border border-line bg-panel">
             <EngineHistoryView entries={TIMELINE_STORY} hasMore={false} loadingMore={false} onLoadMore={noop} onOpenMoment={noop}
-              openMomentId="story-nova-3" onRetry={noop} />
+              openMomentId="story-nova-2" onRetry={noop} />
           </div>
         </Specimen>
         <Specimen label="the agent's run, listed: its earlier edit open; count hovered">

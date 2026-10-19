@@ -211,6 +211,53 @@ describe("History timeline changes", () => {
     expect(screen.getByTestId("engine-moment-open").getAttribute("aria-current")).toBe("true");
     expect(run.firstElementChild!.className.split(" ")).toContain("bg-selected");
   });
+
+  const describedBy = (control: HTMLElement) => {
+    const id = control.getAttribute("aria-describedby");
+    return id === null ? null : document.getElementById(id)?.textContent;
+  };
+
+  // The open change may be one a collapsed row hides. The row shows it holds
+  // it without opening; aria-current stays on the change itself.
+  it("marks a collapsed run that holds the open change, until it opens", () => {
+    view({ entries: [agentEdit("m-2", 0), agentEdit("m-1", 5)], openMomentId: "m-1" });
+    const row = screen.getByTestId("engine-moment-run").firstElementChild!;
+    const toggle = screen.getByTestId("engine-moment-run-toggle");
+    expect(row.className.split(" ")).toContain("bg-selected");
+    expect(screen.getByTestId("engine-moment-open").hasAttribute("aria-current")).toBe(false);
+    expect(describedBy(toggle)).toBe("Includes the open change");
+    fireEvent.click(toggle);
+    expect(row.className.split(" ")).not.toContain("bg-selected");
+    expect(describedBy(toggle)).toBeNull();
+    expect(screen.getAllByTestId("engine-moment-open")[1]!.getAttribute("aria-current")).toBe("true");
+  });
+
+  it("marks a collapsed pass that holds the open change, until it opens", () => {
+    view({ entries: [file("p-2", { correlationId: "pass" }), file("p-1", { correlationId: "pass", path: "notes/other.md" })], openMomentId: "p-1" });
+    const toggle = screen.getByTestId("engine-moment-group-toggle");
+    expect(toggle.className.split(" ")).toContain("bg-selected");
+    expect(describedBy(toggle)).toBe("Includes the open change");
+    fireEvent.click(toggle);
+    expect(toggle.className.split(" ")).not.toContain("bg-selected");
+    expect(screen.getAllByTestId("engine-moment-open")[1]!.getAttribute("aria-current")).toBe("true");
+  });
+
+  // The name says what a row opens. Its description tells one edit of the
+  // file from the next: what it did, who made it, and when.
+  it("describes each change by what it did, who made it, and when", () => {
+    view({ entries: [
+      agentEdit("m-3", 0),
+      agentEdit("m-2", 5),
+      file("m-1", { recordedAtMs: DAY - 3_600_000, namedAuthor: { userId: "sam", label: "Sam Rivera" },
+        authors: [{ kind: "named", userId: "sam", grantId: "grant-sam", grantGeneration: 1 }] }),
+    ] });
+    fireEvent.click(screen.getByTestId("engine-moment-run-toggle"));
+    const [newest, earlier, person] = screen.getAllByTestId("engine-moment-open").map(describedBy);
+    expect(newest).toMatch(/^Updated plan\.md, Agent Nova, /);
+    expect(earlier).toMatch(/^Updated plan\.md, Agent Nova, /);
+    expect(earlier).not.toBe(newest);
+    expect(person).toMatch(/^Edited plan\.md, Sam Rivera, /);
+  });
 });
 
 describe("History timeline sources", () => {
