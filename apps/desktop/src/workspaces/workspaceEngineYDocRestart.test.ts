@@ -5148,6 +5148,40 @@ it("pays a busy close debt too, which is what lets the chip say settling", async
   await capture.stop();
 });
 
+// dohc#2301. A close debt's retry opens a fresh session, which knows nothing
+// of the file the closed one had. It carries the closed session's answer: yes
+// for a document that had its file, so the engine keeps a deleted file
+// deleted, and nothing for a draft that never had one, which it may create.
+it.each([
+  { name: "a document that had its file", draft: false, said: true },
+  { name: "a draft that never had a file", draft: true, said: undefined },
+] as const)("a close debt's retry passes on whether the file existed: $name", async ({ draft, said }) => {
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-debt-file-existed-",
+    draft
+      ? { wrapProvider: (base) => async (options) => ({ ...(await base(options)), head: "absent" as const }) }
+      : undefined,
+  );
+  if (draft) {
+    // A crash kept this draft's edits in its lineage. No file was written.
+    const kept = new Y.Doc();
+    kept.getText("plainText").insert(0, "kept ");
+    state.journal.push(Y.encodeStateAsUpdate(kept));
+  }
+  const { session } = await openWithOneEdit(capture, "busy edit");
+
+  state.replicated = true;
+  state.closeSettleFailure = busyRefusal();
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+  state.closeSettleFailure = null;
+  await expect.poll(() => state.settledContents.length, { timeout: 15_000 }).toBe(1);
+
+  expect(state.generationOptions.map((options) => options.fileExisted)).toEqual([undefined, said]);
+  await capture.stop();
+});
+
 it("pays a locked close debt even when a replicated release succeeds", async () => {
   // A replicated lineage compacts on release without the
   // local-only pending-job guard, so the close releases over the locked

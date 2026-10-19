@@ -2253,6 +2253,9 @@ export function createWorkspaceEngineCapture(
     ) => boolean | void | Promise<boolean | void>;
     onSettleStart: (token: number, generation: number) => void;
     onSettleError: (error: unknown, token: number, generation: number) => void;
+    // The document already had its file in an earlier session, as when a
+    // close debt reopens it. Every generation then tells the engine so.
+    fileExisted?: boolean;
     // The first generation's answers to "does the entered version have a
     // snapshot for this path", "did the daemon resume durable CRDT state", and
     // "does that state hold updates the file may not".
@@ -2264,6 +2267,9 @@ export function createWorkspaceEngineCapture(
     head: "present" | "absent";
     lineage: "existing" | "absent";
     unsettled: boolean;
+    // Whether this document's file has existed so far, for a later session
+    // that continues the document.
+    fileExisted: () => boolean;
   }> {
     const sessions = options.rustEngineSessions;
     const openProvider =
@@ -2577,7 +2583,7 @@ export function createWorkspaceEngineCapture(
     // generation expects dies with its daemon, so every later generation
     // tells the engine, which then refuses to create the file from nothing.
     // A file deleted outside dohc stays deleted across a daemon restart.
-    let fileExisted = false;
+    let fileExisted = input.fileExisted === true;
     const settleCovers = new Map<string, number>();
     const settleOwed = (): boolean =>
       !settleForgiven && updatesSettled < updatesCounted;
@@ -3188,6 +3194,9 @@ export function createWorkspaceEngineCapture(
       openGeneration(true),
       absentHeadDiskState(rootPath, input.path),
     ]);
+    // Set before the generation is installed: a reconnect can start at any
+    // later await, and its replacement must already carry this.
+    if (firstGeneration.head === "present" || firstDisk !== "missing") fileExisted = true;
     current = firstGeneration;
     checkpointContentKind = current.contentKind;
     canonicalDoc = current.doc;
@@ -3214,7 +3223,6 @@ export function createWorkspaceEngineCapture(
     const contentKind = current.contentKind;
     const sessionPath = current.path;
     const openedHead = current.head;
-    fileExisted = openedHead === "present" || firstDisk !== "missing";
     const openedLineage = current.lineage;
     const openedUnsettled = current.unsettled;
 
@@ -3619,6 +3627,7 @@ export function createWorkspaceEngineCapture(
       head: openedHead,
       lineage: openedLineage,
       unsettled: openedUnsettled,
+      fileExisted: () => fileExisted,
     };
   }
 
@@ -4582,7 +4591,7 @@ export function createWorkspaceEngineCapture(
           );
         };
         let entry: LiveYDocSession | null = null;
-        const { session, head, lineage, unsettled } = await openRestartSafeRustYDocSession({
+        const { session, head, lineage, unsettled, fileExisted } = await openRestartSafeRustYDocSession({
           versionId,
           path: input.path,
           ...(input.contentKind ? { contentKind: input.contentKind } : {}),
@@ -4967,6 +4976,9 @@ export function createWorkspaceEngineCapture(
               await openRestartSafeRustYDocSession({
                 versionId,
                 path: input.path,
+                // The closed session's answer, never a blanket yes: a debt can
+                // belong to a draft that never had a file to keep deleted.
+                fileExisted: fileExisted(),
                 ...(input.contentKind
                   ? { contentKind: input.contentKind }
                   : {}),

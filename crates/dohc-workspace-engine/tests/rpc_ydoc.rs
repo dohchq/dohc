@@ -4240,29 +4240,17 @@ async fn a_replacement_session_after_a_restart_does_not_recreate_a_deleted_file(
 
     let restarted = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&restarted, &scratch, WS, 100).await;
-    let mut retired = Value::Null;
-    for attempt in 0..40 {
-        call(
-            &restarted,
-            &handle,
-            200 + attempt * 2,
-            "capture.flush",
-            json!({}),
-        )
-        .await;
-        retired = call(
-            &restarted,
-            &handle,
-            201 + attempt * 2,
-            "versionedText.read",
-            json!({ "versionId": "main", "path": RECORDED }),
-        )
-        .await;
-        if retired["text"] == Value::Null {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
+    // The watcher reports ready only after the startup scan's changes have
+    // applied, and that scan retires the file deleted while the daemon was
+    // down.
+    let retired = call(
+        &restarted,
+        &handle,
+        200,
+        "versionedText.read",
+        json!({ "versionId": "main", "path": RECORDED }),
+    )
+    .await;
     assert_eq!(
         retired["text"],
         Value::Null,
