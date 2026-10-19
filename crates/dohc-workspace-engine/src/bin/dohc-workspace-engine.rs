@@ -161,12 +161,12 @@ async fn run_stdio(auth_token: String, passive: bool, replica: bool) -> Result<(
             }
         },
     };
-    if !replica {
-        if let Some(config) = reader_config(std::env::var_os("DOHC_ENGINE_READER_CONFIG"), |message| {
-            eprintln!("{message}")
-        }) {
-            service.configure_reader(config);
-        }
+    if let Some(config) = reader_config(
+        replica,
+        std::env::var_os("DOHC_ENGINE_READER_CONFIG"),
+        |message| eprintln!("{message}"),
+    ) {
+        service.configure_reader(config);
     }
     let supervisor = Arc::new(Supervisor::new(
         SupervisorConfig::default(),
@@ -191,9 +191,13 @@ async fn run_stdio(auth_token: String, passive: bool, replica: bool) -> Result<(
 }
 
 fn reader_config(
+    replica: bool,
     value: Option<std::ffi::OsString>,
     warn: impl FnOnce(&str),
 ) -> Option<dohc_engine_reader::Config> {
+    if replica {
+        return None;
+    }
     let value = value?;
     let config = value
         .to_str()
@@ -1400,13 +1404,32 @@ fn constant_time_eq(candidate: &[u8], expected: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn replica_startup_ignores_reader_environment() {
+        for value in [
+            "invalid",
+            r#"{"node":"/runtime/node","bundle":"/reader/reader.cjs","manifest":"/reader/manifest.json"}"#,
+        ] {
+            assert!(
+                super::reader_config(true, Some(value.into()), |_| {
+                    panic!("replica must not parse reader configuration")
+                })
+                .is_none()
+            );
+        }
+    }
+
+    #[test]
     fn reader_environment_is_optional_and_invalid_values_warn_once() {
         let mut warnings = Vec::new();
-        assert!(super::reader_config(None, |message| warnings.push(message.to_owned())).is_none());
+        assert!(
+            super::reader_config(false, None, |message| warnings.push(message.to_owned()))
+                .is_none()
+        );
         assert!(warnings.is_empty());
         let valid = r#"{"node":"/runtime/node","bundle":"/reader/reader.cjs","manifest":"/reader/manifest.json"}"#;
         let config =
-            super::reader_config(Some(valid.into()), |_| panic!("valid config warned")).unwrap();
+            super::reader_config(false, Some(valid.into()), |_| panic!("valid config warned"))
+                .unwrap();
         assert_eq!(config.bundle, std::path::Path::new("/reader/reader.cjs"));
         for value in [
             "",
@@ -1416,7 +1439,7 @@ mod tests {
         ] {
             warnings.clear();
             assert!(
-                super::reader_config(Some(value.into()), |message| warnings
+                super::reader_config(false, Some(value.into()), |message| warnings
                     .push(message.to_owned()))
                 .is_none()
             );
@@ -1430,9 +1453,11 @@ mod tests {
             use std::os::unix::ffi::OsStringExt;
             warnings.clear();
             assert!(
-                super::reader_config(Some(std::ffi::OsString::from_vec(vec![255])), |message| {
-                    warnings.push(message.to_owned())
-                })
+                super::reader_config(
+                    false,
+                    Some(std::ffi::OsString::from_vec(vec![255])),
+                    |message| { warnings.push(message.to_owned()) }
+                )
                 .is_none()
             );
             assert_eq!(warnings.len(), 1);
