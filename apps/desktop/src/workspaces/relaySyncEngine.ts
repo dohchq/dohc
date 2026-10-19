@@ -24,6 +24,8 @@ export interface RelaySyncOperations {
     materializePage: MaterializeRelayPullPage,
   ): Promise<PullWorkspaceFromRelayResult>;
   recoverOrigin(): Promise<RecoverRelayOriginResult>;
+  // Collections updates wait for a pull that has not committed its last page.
+  collectionsWaiting?(): Promise<boolean>;
 }
 
 export interface CloudSyncEngineOptions {
@@ -114,6 +116,9 @@ export interface CloudSyncSnapshot {
   syncFailure: CloudSyncFailure | null;
   // A pass someone asked for with retryNow is running.
   retrying: boolean;
+  // Between passes, Collections updates wait for a pull that has not
+  // committed its last page. Local writes still save.
+  collectionsWaiting: boolean;
 }
 
 export interface CloudSyncEngine {
@@ -148,6 +153,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   let authExpired = false;
   let syncFailure: CloudSyncFailure | null = null;
   let retrying = false;
+  let collectionsWaiting = false;
   let sharingDeclined: SharingDeclined[] = [];
   let ownerAdmissionPending: OwnerAdmissionPending[] = [];
   let stopped = false;
@@ -476,7 +482,20 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   // What the snapshot shows a person. `syncing` and `lastSyncedAtMs` move on
   // every pass, so they do not count.
   function visibleState(): string {
-    return JSON.stringify([pendingChangeCount, conflictCount, sharingDeclined, ownerAdmissionPending]);
+    return JSON.stringify([pendingChangeCount, conflictCount, sharingDeclined, ownerAdmissionPending,
+      collectionsWaiting]);
+  }
+
+  // A failed pass can leave a pull unfinished, and only a later pass can
+  // finish it, so the engine is asked after a failure and while it waits.
+  // A failed read keeps the last answer.
+  async function readCollectionsWaiting(failed: boolean): Promise<void> {
+    if (!operations.collectionsWaiting || (!failed && !collectionsWaiting)) return;
+    try {
+      collectionsWaiting = await operations.collectionsWaiting();
+    } catch (error) {
+      console.error(`[desktop] Collections wait check failed for ${options.rootDir}:`, error);
+    }
   }
 
   // A quiet pass serves queuePull. Each change event refreshes Chats, so a
@@ -520,15 +539,18 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         const eventsBefore = changeEvents;
         const stateBefore = visibleState();
         let applied = false;
+        let failed = false;
         syncing = true;
         retrying = retry !== undefined;
         if (!quiet) emitChange();
         try {
           applied = await doPass(retryClaim);
         } catch (error) {
+          failed = true;
           handleFailure(error, displacedDueAtMs, retry?.countsAsAttempt ?? true);
           if (rethrow) throw error;
         } finally {
+          await readCollectionsWaiting(failed);
           syncing = false;
           retrying = false;
           if (!quiet || applied || changeEvents !== eventsBefore || visibleState() !== stateBefore) {
@@ -589,6 +611,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         sharingDeclined: sharingDeclined.map((declined) => ({ ...declined })),
         syncFailure: syncFailure ? { ...syncFailure } : null,
         retrying,
+        collectionsWaiting,
       };
     },
 

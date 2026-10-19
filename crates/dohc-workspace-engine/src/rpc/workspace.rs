@@ -100,9 +100,6 @@ pub(crate) struct OpenWorkspace {
     /// update has not run yet. The next text write, push, or terminal page's
     /// commit runs it.
     pub(super) collections_owed: std::sync::atomic::AtomicBool,
-    /// A pull applied a page and its terminal page has not committed, so
-    /// the Collections may hold half a pull. Owed work waits for that commit.
-    pub(super) pull_between_pages: std::sync::atomic::AtomicBool,
     /// Pulls that may be placing a page, counted from under the capture gate
     /// before their first relay step until they are between pages, finish,
     /// or fail.
@@ -161,16 +158,13 @@ impl OpenWorkspace {
             session_ops: Arc::clone(&self.session_ops),
             cursors_issued: Default::default(),
             collections_owed: Default::default(),
-            pull_between_pages: Default::default(),
             pulls_in_flight: Default::default(),
         }
     }
 
-    /// The Collections may hold half a pull, or a pull may place a page
-    /// before an update started now would run.
+    /// A pull may place a page before an update started now would run.
     fn mid_pull(&self) -> bool {
-        self.pull_between_pages.load(Ordering::SeqCst)
-            || self.pulls_in_flight.load(Ordering::SeqCst) > 0
+        self.pulls_in_flight.load(Ordering::SeqCst) > 0
     }
 
     pub(super) fn request_collection_reconcile(&self) {
@@ -553,11 +547,12 @@ impl EngineService {
     /// forever, so the wait for it is bounded. An update that cannot run now
     /// stays owed to the next text write, push, or terminal page's commit. The
     /// update reconciles the whole workspace, so whichever step runs it
-    /// repairs every change still owed. While a pull is between pages it
-    /// stays owed: dangling-link cleanup would remove a relation whose target
-    /// a later page brings back. A pull counts itself under the gate before
-    /// it places a page, so the check under the gate admits no update that a
-    /// page could overtake.
+    /// repairs every change still owed. Until an ordinary pull commits its
+    /// terminal page it stays owed: dangling-link cleanup would remove a
+    /// relation whose target a later page brings back. The store refuses the
+    /// update while the pull's token stands. A pull counts itself under the
+    /// gate before it places a page, so the check under the gate admits no
+    /// update that a page could overtake.
     pub(super) async fn settle_owed_collections(&self, ctx: &RequestContext, open: &OpenWorkspace) {
         if !open.collections_owed.load(Ordering::SeqCst) || open.mid_pull() {
             return;
@@ -619,6 +614,10 @@ impl EngineService {
             )
             .await
             .map_err(map_runtime)?;
+        if reconciliation.waits_for_pull {
+            open.collections_owed.store(true, Ordering::SeqCst);
+            return Ok(());
+        }
         crate::events::emit_automation_claimed(
             &self.events,
             &open.workspace_id,
@@ -827,14 +826,17 @@ impl EngineService {
                     })?;
                     driver.set_author_json(author_json);
                 }
-                if params.abandon_ordinary_pull {
-                    Self::read_under_ctx(
+                if params.abandon_ordinary_pull
+                    && Self::read_under_ctx(
                         &cancellation,
                         "workspace.open (abandon ordinary pull)",
                         open.actor
                             .abandon_ordinary_pull(params.workspace_id.clone()),
                     )
-                    .await?;
+                    .await?
+                {
+                    // The update the pull held back can run now.
+                    self.collections_changed(ctx, &open).await;
                 }
                 return Ok(json!({ "workspace": handle }));
             }
@@ -1029,15 +1031,15 @@ impl EngineService {
             return Err(bound_to_another_workspace());
         }
         // Before startup maintenance, capture or a Collections worker can
-        // reconcile against what the pull left.
-        if params.abandon_ordinary_pull {
-            Self::read_under_ctx(
+        // reconcile against what the pull left. Capture reconciles once it
+        // starts; a workspace that keeps its Collections itself owes it.
+        let abandoned_pull = params.abandon_ordinary_pull
+            && Self::read_under_ctx(
                 &cancellation,
                 "workspace.open (abandon ordinary pull)",
                 actor.abandon_ordinary_pull(params.workspace_id.clone()),
             )
             .await?;
-        }
         if requested_mode == WorkspaceOpenMode::Passive {
             Self::read_under_ctx(
                 &cancellation,
@@ -1286,11 +1288,16 @@ impl EngineService {
                 session_ops: Arc::new(tokio::sync::Mutex::new(())),
                 cursors_issued: Default::default(),
                 collections_owed: Default::default(),
-                pull_between_pages: Default::default(),
                 pulls_in_flight: Default::default(),
             }),
         );
         open_guard.disarm();
+        if abandoned_pull
+            && let Ok(opened) = self.open(Some(&handle))
+            && self.reconciles_collections_itself(&opened)
+        {
+            self.collections_changed(ctx, &opened).await;
+        }
         Ok(json!({ "workspace": handle }))
     }
 

@@ -70,6 +70,9 @@ export class WorkspaceActivityState {
   agentRun: { workspace: ActivityWorkspace; run: ActiveAgentRun } | null = null;
   preservedStatus: SyncStatusResult | null = null;
   liveSessionsGeneration = 0;
+  // Sync paused while Collection updates waited, and the reopen that ends
+  // the wait did not finish. The next successful open clears it.
+  syncPauseReopenFailed = false;
 }
 
 export interface WorkspaceActivityOptions {
@@ -230,6 +233,9 @@ export function createWorkspaceActivity(
     if (preserved) return { ...preserved, syncPause, liveSessionsGeneration };
     const w = state.entry;
     const snap = w?.engine?.snapshot();
+    const collectionsWaitingForSync: SyncStatusResult["collectionsWaitingForSync"] =
+      state.syncPauseReopenFailed ? "reopen"
+        : snap?.collectionsWaiting && !snap.syncing ? "sync" : undefined;
     const conflictCount = snap?.conflictCount ?? 0;
     const status = deriveSyncStatus({
       pendingChangeCount: snap?.pendingChangeCount ?? 0,
@@ -265,6 +271,7 @@ export function createWorkspaceActivity(
       heldFiles: w?.heldFiles ?? [],
       sharingDeclined: snap?.sharingDeclined ?? [],
       ownerAdmissionPending: snap?.ownerAdmissionPending ?? [],
+      ...(collectionsWaitingForSync ? { collectionsWaitingForSync } : {}),
       ...(snap?.syncFailure ? { syncFailure: snap.syncFailure } : {}),
       liveSessionsGeneration,
     };
@@ -485,7 +492,19 @@ export function createWorkspaceActivity(
       }
     }
     state.preservedStatus = null;
+    state.syncPauseReopenFailed = false;
     return statusFor(workspace, state);
+  }
+
+  // The pause saved, but the workspace did not reopen while Collection
+  // updates waited for an unfinished pull.
+  function recordSyncPauseReopenFailed(
+    workspace: ActivityWorkspace,
+    state: WorkspaceActivityState,
+  ): void {
+    if (state.syncPauseReopenFailed) return;
+    state.syncPauseReopenFailed = true;
+    notify({ workspaceId: workspace.workspaceId });
   }
 
   // Enable-sync path: build the engine now (registry remote was just set) and
@@ -860,6 +879,7 @@ export function createWorkspaceActivity(
     close,
     enableCloud,
     prepareSyncPause,
+    recordSyncPauseReopenFailed,
     reconcileCloud,
     stopEngine,
     getStatus,

@@ -232,21 +232,38 @@ pub(crate) fn begin_ordinary_pull(
 /// Make an unfinished ordinary pull's applied pages local truth: nothing
 /// waits for its terminal commit any more. Applied work, the stored cursor
 /// and deferred relay work stay as they are; a later pull starts afresh.
+/// Answers whether a pull was unfinished.
 pub fn abandon_ordinary_pull(
     store: &mut EngineStore,
     workspace_id: &str,
     faults: &dyn FaultInjector,
-) -> Result<TxnOutcome<()>, SyncError> {
+) -> Result<TxnOutcome<bool>, SyncError> {
     bounded(workspace_id, "workspace_id must be non-empty and bounded")?;
     store.write_with(faults, |tx| {
-        tx.execute(
-            "UPDATE sync_identity SET ordinary_pull_token=NULL \
-             WHERE workspace_id=?1 AND ordinary_pull_token IS NOT NULL",
-            [workspace_id],
-        )
-        .map_err(SyncError::persist)?;
-        Ok::<(), SyncError>(())
+        let cleared = tx
+            .execute(
+                "UPDATE sync_identity SET ordinary_pull_token=NULL \
+                 WHERE workspace_id=?1 AND ordinary_pull_token IS NOT NULL",
+                [workspace_id],
+            )
+            .map_err(SyncError::persist)?;
+        Ok::<bool, SyncError>(cleared > 0)
     })
+}
+
+/// An ordinary pull applied pages and has not committed its terminal cursor,
+/// so the workspace may hold half of it.
+pub fn ordinary_pull_unfinished_in(
+    conn: &Connection,
+    workspace_id: &str,
+) -> Result<bool, SyncError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sync_identity \
+         WHERE workspace_id=?1 AND ordinary_pull_token IS NOT NULL)",
+        [workspace_id],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
 }
 
 /// Drop the deferred work and applied settlements a committed pass reported.

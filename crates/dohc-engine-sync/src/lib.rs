@@ -60,8 +60,8 @@ pub use conflict_resolve_v1::{
 };
 pub use cursor::{
     CursorCommit, CursorKind, OrdinaryPullCompletion, RelayCursor, ShareCursor, SharedPeerPosition,
-    abandon_ordinary_pull, commit_relay_cursor, commit_share_cursor, read_pushed_seq,
-    read_relay_cursor, read_share_cursor, read_shared_peer_position,
+    abandon_ordinary_pull, commit_relay_cursor, commit_share_cursor, ordinary_pull_unfinished_in,
+    read_pushed_seq, read_relay_cursor, read_share_cursor, read_shared_peer_position,
 };
 pub use enrolment::{originate_closing_ydoc_base_in_tx, originate_live_ydoc_base_in_tx};
 use error::ShareDisposition;

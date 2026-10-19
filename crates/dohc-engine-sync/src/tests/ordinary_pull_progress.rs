@@ -336,9 +336,13 @@ fn abandoning_the_pull_keeps_what_it_applied_and_where_it_stopped() {
     assert!(before > 0);
     assert!(matches!(
         abandon_ordinary_pull(&mut engine, "ws", &NoFaults).unwrap(),
-        TxnOutcome::Committed(())
+        TxnOutcome::Committed(true)
     ));
     assert_eq!(pull_token(&engine), None);
+    assert!(matches!(
+        abandon_ordinary_pull(&mut engine, "ws", &NoFaults).unwrap(),
+        TxnOutcome::Committed(false)
+    ));
     assert_eq!(applied(&engine), before);
     assert_eq!(read_relay_cursor(&engine, "ws").unwrap(), None);
     // The abandoned pass's own cursor still commits its position.
@@ -347,21 +351,151 @@ fn abandoning_the_pull_keeps_what_it_applied_and_where_it_stopped() {
         read_relay_cursor(&engine, "ws").unwrap().map(|c| c.cursor),
         Some(1)
     );
-    let (_, next) = pass(&client, &mut engine);
+    // Resuming sync pulls under a fresh token, replays what it already
+    // applied once, and finishes normally.
+    let (has_more, next) = pass(&client, &mut engine);
+    assert!(!has_more);
     assert_ne!(completion(&next).token, completion(&cursor).token);
+    assert_eq!(pull_token(&engine).as_ref(), Some(&completion(&next).token));
+    commit(&client, &mut engine, &next);
+    assert_eq!(pull_token(&engine), None);
+    assert_eq!(applied(&engine), before);
 }
 
-/// Crashes the `nth` write transaction before it commits.
-struct CrashWrite {
+#[test]
+fn a_pass_that_fails_after_applying_an_envelope_stays_unfinished_across_reopening() {
+    let (_scratch, path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    let applied = |engine: &EngineStore| {
+        engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_log WHERE origin_id='padding-peer'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .unwrap()
+    };
+    let client = RelaySyncClient::new(padded_relay(2));
+    let second_envelope = CrashAt {
+        point: FaultPoint::SyncBeforeApplyCommit,
+        nth: 1,
+        seen: AtomicUsize::new(0),
+    };
+    assert!(
+        client
+            .pull_chat_workspace(
+                &mut engine,
+                &mut Default::default(),
+                "ws",
+                &second_envelope,
+                &NoLiveLeases,
+                2_000,
+            )
+            .is_err()
+    );
+    assert_eq!(applied(&engine), 1, "the first envelope committed");
+    let token = pull_token(&engine).expect("the failed pass still owns its progress");
+
+    drop(engine);
+    let mut engine = EngineStore::open(&path, 3_000).unwrap();
+    assert_eq!(pull_token(&engine).as_ref(), Some(&token));
+    let (has_more, retry) = pass(&client, &mut engine);
+    assert!(!has_more);
+    assert_ne!(completion(&retry).token, token);
+    commit(&client, &mut engine, &retry);
+    assert_eq!(pull_token(&engine), None);
+    assert_eq!(
+        applied(&engine),
+        2,
+        "the retry applies the first envelope once"
+    );
+}
+
+#[test]
+fn a_failed_fetch_changes_no_pull_progress() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    let offline = RelaySyncClient::new(PagedRelay::new([]));
+    let fetch = |engine: &mut EngineStore| {
+        offline.pull_chat_workspace(
+            engine,
+            &mut Default::default(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            2_000,
+        )
+    };
+    assert!(fetch(&mut engine).is_err());
+    assert_eq!(
+        pull_token(&engine),
+        None,
+        "with no earlier pass nothing waits"
+    );
+    let token = begin(&mut engine);
+    assert!(fetch(&mut engine).is_err());
+    assert_eq!(
+        pull_token(&engine),
+        Some(token),
+        "an earlier pass's progress still waits"
+    );
+}
+
+#[test]
+fn a_crash_before_the_cursor_commit_waits_until_a_retry_and_an_empty_terminal_page_finish() {
+    let (_scratch, path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    let client = RelaySyncClient::new(padded_relay(1));
+    let crash = ScriptedFaults::crash_at(FaultPoint::SyncBetweenApplyAndCursorCommit);
+    let crashed = match client
+        .pull_chat_workspace(
+            &mut engine,
+            &mut Default::default(),
+            "ws",
+            crash.as_ref(),
+            &NoLiveLeases,
+            2_000,
+        )
+        .unwrap()
+    {
+        SyncPassOutcome::CrashedAfterApply { pending_cursor, .. } => pending_cursor,
+        other => panic!("{other:?}"),
+    };
+    assert!(completion(&crashed).terminal);
+    drop(engine);
+    let mut engine = EngineStore::open(&path, 3_000).unwrap();
+    assert_eq!(
+        pull_token(&engine).as_ref(),
+        Some(&completion(&crashed).token)
+    );
+
+    let (_, retry) = pass(&client, &mut engine);
+    commit(&client, &mut engine, &retry);
+    assert_eq!(pull_token(&engine), None);
+    // A later pass finds the end of the log: an empty terminal page.
+    let (has_more, empty) = pass(&client, &mut engine);
+    assert!(!has_more);
+    assert_eq!(
+        pull_token(&engine).as_ref(),
+        Some(&completion(&empty).token)
+    );
+    commit(&client, &mut engine, &empty);
+    assert_eq!(pull_token(&engine), None);
+}
+
+/// Crashes the `nth` time a pass reaches `point`, before its transaction
+/// commits.
+struct CrashAt {
+    point: FaultPoint,
     nth: usize,
     seen: AtomicUsize,
 }
 
-impl dohc_engine_storage::FaultInjector for CrashWrite {
+impl dohc_engine_storage::FaultInjector for CrashAt {
     fn poll(&self, point: FaultPoint) -> dohc_engine_storage::FaultAction {
-        if point == FaultPoint::StorageBeforePersist
-            && self.seen.fetch_add(1, Ordering::SeqCst) == self.nth
-        {
+        if point == self.point && self.seen.fetch_add(1, Ordering::SeqCst) == self.nth {
             dohc_engine_storage::FaultAction::Crash
         } else {
             dohc_engine_storage::FaultAction::Continue
@@ -371,7 +505,8 @@ impl dohc_engine_storage::FaultInjector for CrashWrite {
 
 #[test]
 fn a_rolled_back_transition_keeps_the_previous_state_and_its_pull() {
-    let crash = |nth| CrashWrite {
+    let crash = |nth| CrashAt {
+        point: FaultPoint::StorageBeforePersist,
         nth,
         seen: AtomicUsize::new(0),
     };

@@ -14,7 +14,8 @@ use serde_json::Value;
 use serde_json::json;
 
 fn method_requires_initial_capture_ready(method: &str) -> bool {
-    (method.starts_with("sync.") && method != "sync.remoteChanges")
+    (method.starts_with("sync.")
+        && !matches!(method, "sync.remoteChanges" | "sync.collectionsWaiting"))
         || method.starts_with("share.")
         || method.starts_with("search.")
         || method.starts_with("collections.")
@@ -375,6 +376,10 @@ impl EngineService {
                 Box::pin(self.sync_probe(&ctx, request.workspace, request.params)).await?
             }
             "sync.remoteChanges" => self.sync_remote_changes(&ctx, request.workspace).await?,
+            "sync.collectionsWaiting" => {
+                self.sync_collections_waiting(&ctx, request.workspace)
+                    .await?
+            }
             "sync.dismissRefusal" => {
                 self.sync_dismiss_refusal(&ctx, request.workspace, request.params)
                     .await?
@@ -1549,6 +1554,7 @@ mod tests {
             "share.view.recordIdentity",
             "sync.adoptJoinIdentity",
             "sync.claim",
+            "sync.collectionsWaiting",
             "sync.resetClaimRefusal",
             "sync.materializePendingCursor",
             "sync.commitCursor",

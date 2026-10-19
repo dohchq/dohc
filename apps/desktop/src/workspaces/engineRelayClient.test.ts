@@ -136,6 +136,8 @@ class MockDaemon implements EngineDaemonClient {
           };
         case "sync.resetClaimRefusal":
           return { reset: true };
+        case "sync.collectionsWaiting":
+          return { waiting: true };
         case "sync.claim":
           return { claimed: true };
         case "sync.adoptJoinIdentity":
@@ -395,6 +397,7 @@ describe("EngineRelayClient", () => {
     });
     await expect(client.claim()).resolves.toBeUndefined();
     await expect(client.probe()).resolves.toEqual({ hasContent: true });
+    await expect(client.collectionsWaiting()).resolves.toBe(true);
 
     const open = daemon.requests.find(
       (request) => request.method === "workspace.open",
@@ -415,6 +418,7 @@ describe("EngineRelayClient", () => {
       "sync.recoverOrigin",
       "sync.claim",
       "sync.probe",
+      "sync.collectionsWaiting",
     ]);
     expectStatefulRequestsScoped(daemon.requests);
     expect(
@@ -437,6 +441,7 @@ describe("EngineRelayClient", () => {
       },
       { method: "sync.claim", params: { workspaceId: "workspace-a" } },
       { method: "sync.probe", params: { workspaceId: "workspace-a" } },
+      { method: "sync.collectionsWaiting", params: { workspaceId: "workspace-a" } },
     ]);
     await sessions.closeAll();
   });

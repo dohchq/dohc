@@ -3208,6 +3208,8 @@ async fn two_page_pull_keeps_relation_to_target_arriving_on_second_page() {
         }),
     )
     .await;
+    // The terminal commit ends the pull, and capture then reconciles.
+    flush_capture(&transport, &handle, &mut id).await;
 
     let source_record = call(
         &transport,

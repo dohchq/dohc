@@ -207,6 +207,36 @@ describe("relaySyncEngine", () => {
     await sync.stop();
   });
 
+  it("asks whether Collections wait after a failed pass, and after each pass until they stop", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const collectionsWaiting = vi.fn<NonNullable<RelaySyncOperations["collectionsWaiting"]>>();
+    const sync = engine({ capture: capture(), operations: { ...mockOperations(), collectionsWaiting } });
+    await sync.start();
+    expect(collectionsWaiting).not.toHaveBeenCalled();
+    expect(sync.snapshot().collectionsWaiting).toBe(false);
+
+    pullMock.mockRejectedValueOnce(new RelayUnreachableError());
+    collectionsWaiting.mockResolvedValueOnce(true);
+    await sync.retryNow({ countsAsAttempt: true });
+    expect(sync.snapshot()).toMatchObject({ collectionsWaiting: true, syncing: false });
+    // A pass whose last commit belongs to an older pull leaves the wait.
+    collectionsWaiting.mockResolvedValueOnce(true);
+    await sync.retryNow({ countsAsAttempt: true });
+    expect(sync.snapshot().collectionsWaiting).toBe(true);
+    // A read that fails keeps the last answer.
+    collectionsWaiting.mockRejectedValueOnce(new Error("daemon busy"));
+    await sync.retryNow({ countsAsAttempt: true });
+    expect(sync.snapshot().collectionsWaiting).toBe(true);
+    collectionsWaiting.mockResolvedValueOnce(false);
+    await sync.retryNow({ countsAsAttempt: true });
+    expect(sync.snapshot().collectionsWaiting).toBe(false);
+    expect(collectionsWaiting).toHaveBeenCalledTimes(4);
+    // Nothing waits and the pass succeeded, so it does not ask.
+    await sync.retryNow({ countsAsAttempt: true });
+    expect(collectionsWaiting).toHaveBeenCalledTimes(4);
+    await sync.stop();
+  });
+
   it("keeps a failure until the continuation pass pulls successfully and resets backoff", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const afterSuccessfulPull = vi.fn();

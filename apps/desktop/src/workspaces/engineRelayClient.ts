@@ -37,7 +37,9 @@ import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import {
   DaemonRefusalError,
   decodeKeyEnvelopeResult,
+  decodeWorkspaceResult,
   KEY_ENVELOPE_METHOD,
+  WORKSPACE_METHOD,
   WorkspaceDaemonRequester,
   type JsonValue,
   type KeyEnvelopeDownloadResult,
@@ -506,6 +508,8 @@ export interface EngineRelayWorkspaceClient {
   commitCursor(
     cursor: Record<string, JsonValue | undefined>,
   ): Promise<CommitRelayCursorResult>;
+  // Collections updates wait for a pull that has not committed its last page.
+  collectionsWaiting(): Promise<boolean>;
   recoverOrigin(): Promise<RecoverRelayOriginResult>;
   claim(): Promise<void>;
   bootstrapJoinIdentity(
@@ -851,6 +855,11 @@ export class EngineRelayClient {
         };
       },
       commitCursor,
+      collectionsWaiting: async () =>
+        decodeWorkspaceResult(
+          WORKSPACE_METHOD.syncCollectionsWaiting,
+          await request(WORKSPACE_METHOD.syncCollectionsWaiting, { workspaceId: workspace.workspaceId }),
+        ).waiting,
       recoverOrigin: async () => {
         const result = resultRecord(
           await request("sync.recoverOrigin", {

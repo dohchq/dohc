@@ -1390,6 +1390,11 @@ const SYNC_STATUS_BASE_FIELDS = {
   recoveryUnavailable: z.boolean().optional(),
   keptFiles: z.array(z.tuple([z.string(), z.string()])).optional(),
   heldFiles: z.array(CaptureFileHold).optional(),
+  // Collection updates wait for a pull that has not finished. "sync" while
+  // sync runs, so the next successful pass finishes it. "reopen" after sync
+  // paused but the workspace did not reopen, which is what ends the wait.
+  // Local writes are saved either way.
+  collectionsWaitingForSync: z.enum(["sync", "reopen"]).optional(),
   // Why the last sync pass failed, present until a pass succeeds. Local work
   // is saved either way. A refused claim waits for Try again; network failures back off.
   syncFailure: z

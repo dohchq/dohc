@@ -1911,13 +1911,29 @@ impl ActorHandle {
     }
 
     /// Make an unfinished ordinary pull's applied pages local truth, for a
-    /// workspace that opens with no ordinary sync configured.
-    pub async fn abandon_ordinary_pull(&self, workspace_id: String) -> Result<(), RuntimeError> {
+    /// workspace that opens with no ordinary sync configured. Answers whether
+    /// a pull was unfinished.
+    pub async fn abandon_ordinary_pull(&self, workspace_id: String) -> Result<bool, RuntimeError> {
         self.run(move |store, _cache| {
             match dohc_engine_sync::abandon_ordinary_pull(store, &workspace_id, &NoFaults)? {
-                TxnOutcome::Committed(()) => Ok(()),
+                TxnOutcome::Committed(abandoned) => Ok(abandoned),
                 TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
             }
+        })
+        .await
+    }
+
+    /// Collections updates wait for an unfinished ordinary pull.
+    pub async fn ordinary_pull_unfinished(
+        &self,
+        workspace_id: String,
+    ) -> Result<bool, RuntimeError> {
+        self.run(move |store, _cache| {
+            store
+                .read_with(|conn| {
+                    dohc_engine_sync::ordinary_pull_unfinished_in(conn, &workspace_id)
+                })
+                .map_err(RuntimeError::from)
         })
         .await
     }

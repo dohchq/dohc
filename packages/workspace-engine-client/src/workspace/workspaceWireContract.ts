@@ -62,6 +62,7 @@ export const WORKSPACE_METHOD = {
   automationsClaimSchedule: "automations.claimSchedule",
   automationsScheduleMarks: "automations.scheduleMarks",
   syncRemoteChanges: "sync.remoteChanges",
+  syncCollectionsWaiting: "sync.collectionsWaiting",
   automationsRunNow: "automations.runNow",
 } as const;
 
@@ -487,6 +488,7 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.automationsClaimSchedule]: AutomationClaimScheduleParams;
   [WORKSPACE_METHOD.automationsScheduleMarks]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.syncRemoteChanges]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.syncCollectionsWaiting]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.automationsRunNow]: AutomationRunNowParams;
 };
 
@@ -1449,6 +1451,10 @@ const WorkspaceResultSchemas = {
    */
   [WORKSPACE_METHOD.syncRemoteChanges]: mutableStruct({
     applied: Schema.Int,
+  }),
+  /** Collections updates wait for an ordinary pull to commit its last page. */
+  [WORKSPACE_METHOD.syncCollectionsWaiting]: mutableStruct({
+    waiting: Schema.Boolean,
   }),
   [WORKSPACE_METHOD.automationsRunNow]: mutableStruct({
     claim: AutomationClaimSummarySchema,

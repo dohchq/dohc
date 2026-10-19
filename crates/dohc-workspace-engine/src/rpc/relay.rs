@@ -957,36 +957,20 @@ impl EngineService {
             )
             .await?;
         let passive = open.mode == super::workspace::WorkspaceOpenMode::Passive;
-        // Reconcile only after the terminal pull page. A relation target may
-        // be on a later page, and dangling-link cleanup must not observe the
-        // pull's partial state. The bounded outcome does not expose whether an
-        // earlier page applied a collection change, so the terminal page
-        // queues one reconciliation even when that page itself was empty. A
-        // workspace that keeps its Collections itself reconciles when the
-        // page's cursor commits.
-        let terminal = matches!(
-            &outcome,
-            RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
-                has_more: false,
-                ..
-            })
-        );
-        let reconcile_at_commit = terminal && self.reconciles_collections_itself(&open);
-        if terminal && !reconcile_at_commit && !passive {
-            open.request_collection_reconcile();
-        }
-        // An earlier page is in place before its commit.
-        if !terminal
-            && self.reconciles_collections_itself(&open)
+        // Reconcile only once the terminal page's cursor commits, which ends
+        // the pull's token. A relation target may be on a later page, and
+        // dangling-link cleanup must not observe the pull's partial state. The
+        // bounded outcome does not expose whether an earlier page applied a
+        // collection change, so the terminal page queues one reconciliation
+        // even when that page itself was empty.
+        let reconcile_at_commit = !passive
             && matches!(
                 &outcome,
-                RelayOperationOutcome::Sync(
-                    SyncPassOutcome::Complete { .. } | SyncPassOutcome::CrashedAfterApply { .. }
-                )
-            )
-        {
-            open.pull_between_pages.store(true, Ordering::SeqCst);
-        }
+                RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
+                    has_more: false,
+                    ..
+                })
+            );
         drop(pulling);
         // Post-commit: every applied envelope's record changes are durable,
         // even on a crash after apply (the cursor retries; the durable layer
@@ -1050,7 +1034,6 @@ impl EngineService {
             result["pendingCursor"] = issued;
         } else if reconcile_at_commit {
             // Nothing to materialize or commit: the page's changes are in place.
-            open.pull_between_pages.store(false, Ordering::SeqCst);
             self.collections_changed(ctx, &open).await;
         }
         Ok(result)
@@ -1248,14 +1231,10 @@ impl EngineService {
         if share_view && reconcile_collections {
             open.request_collection_reconcile();
         }
-        // A relay page's cursor carries whether its page was terminal in a
-        // workspace that keeps its Collections itself.
-        if !share_view && self.reconciles_collections_itself(&open) {
-            open.pull_between_pages
-                .store(!reconcile_collections, Ordering::SeqCst);
-        }
         // Only a terminal page's commit may reconcile: an earlier page can
-        // hold a relation whose target is on a later one.
+        // hold a relation whose target is on a later one. An older pass's
+        // terminal commit asks too, and the store keeps the update waiting
+        // while a newer pass's token stands.
         let terminal_commit = reconcile_collections
             && !share_view
             && matches!(outcome, RelayOperationOutcome::CursorCommitted { .. });
@@ -1298,6 +1277,27 @@ impl EngineService {
         )
         .await?;
         Ok(json!({ "applied": applied }))
+    }
+
+    /// `sync.collectionsWaiting`: whether Collections updates wait for an
+    /// ordinary pull to commit its terminal page. A paused workspace still
+    /// answers, so it needs no relay configuration and no finished initial
+    /// capture.
+    pub(super) async fn sync_collections_waiting(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+    ) -> Result<Value, WireError> {
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let waiting = Self::read_under_ctx(
+            &cancellation,
+            "sync.collectionsWaiting",
+            open.actor
+                .ordinary_pull_unfinished(open.workspace_id.clone()),
+        )
+        .await?;
+        Ok(json!({ "waiting": waiting }))
     }
 
     pub(super) async fn sync_refusal_notices(
@@ -2160,6 +2160,21 @@ mod tests {
             .await
         }
 
+        fn open_params(
+            scratch: &dohc_engine_testkit::ScratchDir,
+            workspace_id: &str,
+            reconcile_collections: bool,
+            relay: &Value,
+        ) -> Value {
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace_id,
+                "captureMode": "none",
+                "reconcileCollections": reconcile_collections,
+                "relay": relay,
+            })
+        }
+
         async fn open_at(
             scratch: dohc_engine_testkit::ScratchDir,
             workspaces: &'static dohc_engine_runtime::WorkspaceSupervisor,
@@ -2167,18 +2182,29 @@ mod tests {
             reconcile_collections: bool,
             relay: Value,
         ) -> Self {
+            let params = Self::open_params(&scratch, workspace_id, reconcile_collections, &relay);
+            Self::open_with(
+                scratch,
+                workspaces,
+                workspace_id,
+                reconcile_collections,
+                relay,
+                params,
+            )
+            .await
+        }
+
+        async fn open_with(
+            scratch: dohc_engine_testkit::ScratchDir,
+            workspaces: &'static dohc_engine_runtime::WorkspaceSupervisor,
+            workspace_id: &'static str,
+            reconcile_collections: bool,
+            relay: Value,
+            params: Value,
+        ) -> Self {
             let service = Arc::new(EngineService::with_supervisor(workspaces));
             let opened = service
-                .workspace_open(
-                    &RequestContext::unbounded(),
-                    json!({
-                        "rootDir": scratch.path().to_string_lossy(),
-                        "workspaceId": workspace_id,
-                        "captureMode": "none",
-                        "reconcileCollections": reconcile_collections,
-                        "relay": relay,
-                    }),
-                )
+                .workspace_open(&RequestContext::unbounded(), params)
                 .await
                 .expect("workspace open");
             let handle: WorkspaceHandle =
@@ -2216,6 +2242,34 @@ mod tests {
                 workspace_id,
                 reconcile_collections,
                 relay,
+            )
+            .await
+        }
+
+        /// Stop this daemon, then open the workspace locally, as desktop does
+        /// once sync is paused: no relay, and the unfinished pull abandoned.
+        async fn reopen_paused(self) -> Self {
+            let CursorFixture {
+                scratch,
+                workspaces,
+                service,
+                handle,
+                workspace_id,
+                reconcile_collections,
+                ..
+            } = self;
+            service.workspace_close(Some(handle)).await.expect("close");
+            drop(service);
+            let mut params =
+                Self::open_params(&scratch, workspace_id, reconcile_collections, &Value::Null);
+            params["abandonOrdinaryPull"] = json!(true);
+            Self::open_with(
+                scratch,
+                workspaces,
+                workspace_id,
+                reconcile_collections,
+                Value::Null,
+                params,
             )
             .await
         }
@@ -2403,6 +2457,106 @@ mod tests {
 
         fn owed(&self) -> bool {
             self.open.collections_owed.load(Ordering::SeqCst)
+        }
+
+        fn engine_db(&self) -> rusqlite::Connection {
+            let conn = rusqlite::Connection::open(&self.open.db_path).expect("engine db");
+            conn.busy_timeout(std::time::Duration::from_secs(5))
+                .expect("busy timeout");
+            conn
+        }
+
+        /// Start an ordinary pull pass as the store does before its first
+        /// page-dependent write, and return its token.
+        fn begin_pass(&self, token: &str) -> String {
+            self.engine_db()
+                .execute(
+                    "UPDATE sync_identity SET ordinary_pull_token=?2 WHERE workspace_id=?1",
+                    [self.workspace_id, token],
+                )
+                .expect("begin pass");
+            token.to_owned()
+        }
+
+        fn pull_token(&self) -> Option<String> {
+            self.engine_db()
+                .query_row(
+                    "SELECT ordinary_pull_token FROM sync_identity WHERE workspace_id=?1",
+                    [self.workspace_id],
+                    |row| row.get(0),
+                )
+                .expect("read pull token")
+        }
+
+        /// Commit a page of the pass `token` began, under the workspace's
+        /// identity, as that pass's own cursor.
+        async fn commit_pass(
+            &self,
+            cursor: i64,
+            token: &str,
+            terminal: bool,
+        ) -> Result<Value, WireError> {
+            let (replication_epoch, stream_identity) = self
+                .engine_db()
+                .query_row(
+                    "SELECT replication_epoch, stream_identity FROM sync_identity \
+                     WHERE workspace_id=?1",
+                    [self.workspace_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("identity");
+            let issued = self
+                .service
+                .issue_pending_cursor(
+                    &self.handle,
+                    &self.open,
+                    IssuedCursor::Relay(RelayCursor {
+                        cursor,
+                        replication_epoch,
+                        stream_identity,
+                        bootstrap_complete: true,
+                        settlement_report_id: None,
+                        ordinary_pull: Some(dohc_engine_sync::OrdinaryPullCompletion {
+                            token: token.to_owned(),
+                            terminal,
+                        }),
+                    }),
+                )
+                .expect("issue a cursor");
+            let issued = issued["token"].as_str().expect("token").to_owned();
+            lock(&self.service.pending_cursors)
+                .get_mut(&issued)
+                .expect("issued")
+                .reconcile_collections = terminal;
+            let request = self.request(0, "sync.commitCursor", &issued);
+            self.service
+                .sync_commit_cursor(
+                    &RequestContext::unbounded(),
+                    request.workspace,
+                    request.params,
+                )
+                .await
+        }
+
+        /// What reconciliation can change: bindings, relations, derived
+        /// fields and automation claims.
+        fn collections_state(&self) -> Vec<i64> {
+            let conn = self.engine_db();
+            [
+                "SELECT COUNT(*) FROM collection_records",
+                "SELECT COUNT(*) FROM collection_relation_edges",
+                "SELECT COUNT(*) FROM collection_record_fields",
+                "SELECT COUNT(*) FROM automation_claims",
+            ]
+            .iter()
+            .map(|query| conn.query_row(query, [], |row| row.get(0)).expect(query))
+            .collect()
+        }
+
+        fn source_relates_to_target(&self) -> bool {
+            std::fs::read_to_string(self.open.root.join("tasks/source.md"))
+                .expect("source")
+                .contains(&format!("related: {TARGET}"))
         }
 
         /// Issue a relay cursor as a pull does, and return its token.
@@ -2717,14 +2871,10 @@ mod tests {
         f.close().await;
     }
 
-    /// An earlier terminal commit left cleanup owed when a two-page pull
-    /// moves a relation's target: page one removes it from its old path, and
-    /// page two supplies it at its new one. Page one's commit, and a write
-    /// between the pages, leave the debt alone, so page two's commit pays it
-    /// with the relation intact.
-    #[tokio::test]
-    async fn owed_collections_work_waits_for_the_terminal_page() {
-        let f = CursorFixture::new("owed-partial-pull", true).await;
+    /// A relation whose target a two-page pull moves: page one removes it
+    /// from its old path, and page two supplies it at its new one.
+    async fn moving_pull_fixture(workspace_id: &'static str) -> (CursorFixture, String) {
+        let f = CursorFixture::new(workspace_id, true).await;
         f.prepare().await;
         let markdown = record(SOURCE, Some(TARGET));
         f.pulled("schema", "tasks/collection.yaml", RELATION_SCHEMA)
@@ -2735,27 +2885,149 @@ mod tests {
         f.source_lineage(&markdown).await;
         f.commit(7, true).await.expect("the earlier pull");
         assert_eq!(f.edges(), 1);
-        f.open.collections_owed.store(true, Ordering::SeqCst);
-
+        let token = f.begin_pass("moving-pull");
         f.pulled_removal("tasks/target.md").await;
-        f.commit(8, false).await.expect("page one");
-        assert!(f.owed(), "a partial pull leaves the debt owed");
-        f.write("notes.txt", "Notes\n")
+        f.commit_pass(8, &token, false).await.expect("page one");
+        assert_eq!(f.pull_token(), Some(token.clone()));
+        (f, token)
+    }
+
+    /// A record written inside the Collection while the pull is unfinished,
+    /// related to the target the pull moves.
+    async fn write_inside_the_collection(f: &CursorFixture) {
+        const WRITTEN: &str = "rec_cccccccccccccccccccccccccc";
+        let before = f.collections_state();
+        f.write("tasks/written.md", &record(WRITTEN, Some(TARGET)))
             .await
-            .expect("a write between pages");
-        assert!(f.owed(), "a write between pages leaves the debt owed");
-        assert_eq!(f.edges(), 1, "and the relation intact");
+            .expect("a write inside the Collection completes");
+        assert!(f.open.root.join("tasks/written.md").exists());
+        assert!(f.owed(), "the update waits for the pull");
+        assert_eq!(
+            f.collections_state(),
+            before,
+            "no binding, cleanup, derived field or claim"
+        );
+        assert!(f.source_relates_to_target());
+    }
+
+    /// Page two supplies the target and commits terminally, and the
+    /// Collections reconcile against the whole pull.
+    async fn finish_moving_pull(f: CursorFixture, token: &str) {
         f.pulled("moved", "tasks/moved.md", &record(TARGET, None))
             .await;
-        f.commit(9, true).await.expect("page two");
+        f.commit_pass(9, token, true).await.expect("page two");
+        assert_eq!(f.pull_token(), None);
         assert!(!f.owed());
-        assert_eq!(f.edges(), 1, "the source still relates to the target");
+        assert_eq!(f.edges(), 2, "both records relate to the moved target");
         assert!(
-            std::fs::read_to_string(f.open.root.join("tasks/source.md"))
-                .expect("source")
-                .contains(&format!("related: {TARGET}")),
+            f.source_relates_to_target(),
             "the relation stays in the source file"
         );
+        f.close().await;
+    }
+
+    /// Page one's commit, and a write inside the Collection between the
+    /// pages, leave the Collections alone, so page two's commit reconciles
+    /// with the relation intact.
+    #[tokio::test]
+    async fn owed_collections_work_waits_for_the_terminal_page() {
+        let (f, token) = moving_pull_fixture("owed-partial-pull").await;
+        write_inside_the_collection(&f).await;
+        finish_moving_pull(f, &token).await;
+    }
+
+    /// The daemon stops between the pages. After the restart a write inside
+    /// the Collection still waits, because the store kept the pull's token.
+    #[tokio::test]
+    async fn a_restart_between_pages_keeps_collections_waiting_for_the_pull() {
+        let (f, token) = moving_pull_fixture("owed-restart-mid-pull").await;
+        let f = f.restart().await;
+        assert!(!f.owed(), "a workspace opens with nothing owed");
+        assert_eq!(f.pull_token(), Some(token.clone()));
+        write_inside_the_collection(&f).await;
+        finish_moving_pull(f, &token).await;
+    }
+
+    /// An older pass's terminal cursor commits after a newer pass began. The
+    /// newer pass's token stands, so the Collections keep waiting.
+    #[tokio::test]
+    async fn an_older_terminal_commit_leaves_a_newer_pull_waiting() {
+        let (f, token) = moving_pull_fixture("owed-older-terminal").await;
+        let newer = f.begin_pass("newer-pull");
+        f.commit_pass(9, &token, true)
+            .await
+            .expect("the older pass's terminal commit");
+        assert_eq!(f.pull_token(), Some(newer.clone()));
+        write_inside_the_collection(&f).await;
+        let ctx = RequestContext::unbounded();
+        let waiting = f
+            .service
+            .sync_collections_waiting(&ctx, Some(f.handle.clone()))
+            .await
+            .expect("collections waiting");
+        assert_eq!(waiting, json!({ "waiting": true }));
+        finish_moving_pull(f, &newer).await;
+    }
+
+    /// What page one applied is local truth once the pull is abandoned: the
+    /// target is gone, so the waiting update cleans the source's relation.
+    fn assert_abandoned_pull_reconciled(f: &CursorFixture) {
+        assert_eq!(f.pull_token(), None);
+        assert!(!f.owed(), "the waiting update ran");
+        let source_edges: i64 = f
+            .engine_db()
+            .query_row(
+                "SELECT COUNT(*) FROM collection_relation_edges WHERE source_record_id=?1",
+                [SOURCE],
+                |row| row.get(0),
+            )
+            .expect("source edges");
+        assert_eq!(source_edges, 0);
+        assert!(!f.source_relates_to_target());
+    }
+
+    /// Sync pauses with the pull unfinished, or the daemon stopped after the
+    /// pause was saved and before the workspace reopened. The next local open
+    /// abandons the pull before anything reconciles, then runs the waiting
+    /// update with no relay.
+    #[tokio::test]
+    async fn a_local_reopen_abandons_the_pull_and_runs_the_waiting_update() {
+        let (f, _token) = moving_pull_fixture("abandon-on-reopen").await;
+        write_inside_the_collection(&f).await;
+        let f = f.reopen_paused().await;
+        assert_abandoned_pull_reconciled(&f);
+        f.close().await;
+    }
+
+    /// The owner binding is already open without relay when an open abandons
+    /// the pull. The waiting update runs on that binding.
+    #[tokio::test]
+    async fn abandoning_on_an_open_binding_runs_the_waiting_update() {
+        let f = CursorFixture::with_relay("abandon-open-binding", true, Value::Null).await;
+        f.prepare().await;
+        let markdown = record(SOURCE, Some(TARGET));
+        f.pulled("schema", "tasks/collection.yaml", RELATION_SCHEMA)
+            .await;
+        f.pulled("source", "tasks/source.md", &markdown).await;
+        f.pulled("target", "tasks/target.md", &record(TARGET, None))
+            .await;
+        f.source_lineage(&markdown).await;
+        let ctx = RequestContext::unbounded();
+        f.service.collections_changed(&ctx, &f.open).await;
+        assert_eq!(f.edges(), 1);
+        f.begin_pass("left-by-a-relay");
+        f.pulled_removal("tasks/target.md").await;
+        write_inside_the_collection(&f).await;
+
+        let mut params = CursorFixture::open_params(&f.scratch, f.workspace_id, true, &Value::Null);
+        params["abandonOrdinaryPull"] = json!(true);
+        let opened = f
+            .service
+            .workspace_open(&ctx, params)
+            .await
+            .expect("reopen the open binding");
+        assert_eq!(opened["workspace"], json!(f.handle));
+        assert_abandoned_pull_reconciled(&f);
         f.close().await;
     }
 
@@ -3212,29 +3484,6 @@ mod tests {
     #[tokio::test]
     async fn a_write_outside_every_collection_runs_an_owed_update() {
         a_later_write_runs_an_owed_update("owed-unrelated-write", "notes.txt").await;
-    }
-
-    /// The daemon stopped with an update owed: the pulled records are in the
-    /// store, and their Collections never reconciled. The pull may have
-    /// stopped between pages, so a write after the restart leaves the
-    /// Collections alone, and the next terminal page's commit reconciles them.
-    #[tokio::test]
-    async fn a_restart_leaves_an_owed_update_to_the_next_terminal_commit() {
-        let f = CursorFixture::new("owed-restart", true).await;
-        f.prepare().await;
-        f.pulled("schema", "tasks/collection.yaml", RELATION_SCHEMA)
-            .await;
-        f.pulled("target", "tasks/target.md", &record(TARGET, None))
-            .await;
-        f.pulled("source", "tasks/source.md", &record(SOURCE, Some(TARGET)))
-            .await;
-        let f = f.restart().await;
-        assert!(!f.owed(), "a workspace opens with nothing owed");
-        f.write("notes.txt", "Notes\n").await.expect("the write");
-        assert_eq!(f.edges(), 0, "a write after the restart does not reconcile");
-        f.commit(7, true).await.expect("the terminal page");
-        assert_eq!(f.edges(), 1, "the terminal commit reconciles");
-        f.close().await;
     }
 
     #[tokio::test]

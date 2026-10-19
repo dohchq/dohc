@@ -614,7 +614,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       retryNow: async () => undefined,
       snapshot: () => ({
         syncFailure: null,
-        retrying: false,
+        retrying: false, collectionsWaiting: false,
         syncing: false,
         lastSyncedAtMs: null,
         pendingChangeCount: 0,
@@ -659,7 +659,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       queuePull: () => {},
       retryNow: async () => { passes += 1; },
       snapshot: () => ({
-        syncFailure: failure, retrying: false, syncing: false, lastSyncedAtMs: null, pendingChangeCount: 0,
+        syncFailure: failure, retrying: false, collectionsWaiting: false, syncing: false, lastSyncedAtMs: null, pendingChangeCount: 0,
         // A conflict shows first in the status, and must not hide a failed pass.
         conflictCount: 1, authExpired: false, sharingDeclined: [],
       }),
@@ -685,7 +685,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       retryNow: async () => undefined,
       snapshot: () => ({
         syncFailure: null,
-        retrying: false,
+        retrying: false, collectionsWaiting: false,
         syncing: false,
         lastSyncedAtMs: null,
         pendingChangeCount: 2,
@@ -721,6 +721,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       snapshot: () => ({
         syncFailure: { cause: "server-unreachable" as const, detail: "down", sinceMs: 1, attempts: 2 },
         retrying,
+        collectionsWaiting: false,
         claimingIdentity,
         syncing: true,
         lastSyncedAtMs: null,
@@ -754,7 +755,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       retryNow: async () => undefined,
       snapshot: () => ({
         syncFailure: null,
-        retrying: false,
+        retrying: false, collectionsWaiting: false,
         syncing: false,
         lastSyncedAtMs: null,
         pendingChangeCount: 0,
@@ -807,7 +808,7 @@ describe("workspaceActivity cloud sync nudge", () => {
           retryNow: async () => undefined,
           snapshot: () => ({
             syncFailure: null,
-            retrying: false,
+            retrying: false, collectionsWaiting: false,
             syncing: false,
             lastSyncedAtMs: null,
             pendingChangeCount: 0,
@@ -866,7 +867,7 @@ describe("workspaceActivity cloud sync nudge", () => {
           retryNow: async () => undefined,
           snapshot: () => ({
             syncFailure: null,
-            retrying: false,
+            retrying: false, collectionsWaiting: false,
             syncing: false,
             lastSyncedAtMs: null,
             pendingChangeCount: 0,
@@ -1036,7 +1037,7 @@ describe("workspaceActivity cloud sync nudge", () => {
         retryNow: async () => undefined,
         snapshot: () => ({
           syncFailure: null,
-          retrying: false,
+          retrying: false, collectionsWaiting: false,
           syncing: false,
           lastSyncedAtMs: null,
           pendingChangeCount: 0,

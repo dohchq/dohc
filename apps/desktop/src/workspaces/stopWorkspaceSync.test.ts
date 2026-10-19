@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import { createRegistryStore } from "./registryStore";
 import { workspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
-import { createWorkspaceSyncStop } from "./stopWorkspaceSync";
+import { createWorkspaceSyncStop, reopenWithoutSync } from "./stopWorkspaceSync";
 import { createWorkspaceActivity, WorkspaceActivityState, type ActivityWorkspace } from "./workspaceActivity";
 import { idleObservation } from "./workspaceActivity.testSupport";
 import { createTestScratch } from "./testTemp";
@@ -16,7 +16,7 @@ import type { WorkspaceObservationCallbacks } from "./workspaceFileObservation";
 const remote = { serverUrl: "https://server.test", ownerUserId: "owner" };
 const credentials: CloudCredentials = { ...remote, userId: remote.ownerUserId, token: "token", email: "owner@test", relayUrl: "https://relay.test" };
 
-async function fixture(synced = true) {
+async function fixture(synced = true, collectionsWaiting = false) {
   const rootPath = await createTestScratch("stop-workspace-sync-");
   const registryPath = join(rootPath, "registry.json");
   const store = createRegistryStore(registryPath);
@@ -46,7 +46,7 @@ async function fixture(synced = true) {
         syncPause: entry.syncPause ? workspaceSyncPauseStatus(entry.syncPause, "local-person") : undefined };
     },
     engineFor: () => store.find(workspace.workspaceId)?.remote ? ({
-      start: engineStart, stop: engineStop, queueSync: vi.fn(), snapshot: () => ({}),
+      start: engineStart, stop: engineStop, queueSync: vi.fn(), snapshot: () => ({ collectionsWaiting }),
     } as never) : null,
     captureFor: () => {
       let activeRun: ActiveAgentRun | null = null;
@@ -69,14 +69,18 @@ async function fixture(synced = true) {
   const pauseRemote = vi.fn((id: string, pause: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPause) => { steps.push("pause"); store.pauseRemote(id, pause); });
   const cleanupFailed = vi.fn();
   const person = vi.fn(async () => ({ kind: "person" as const, personId: "local-person" }));
+  const openActivity = vi.fn(() => service.open(workspace, state));
+  const reopen = {
+    closeActivity: () => service.close(workspace, state, { notify: false, preserveAgentRun: true }), closeRelay,
+    openActivity, notify: () => { steps.push("notify"); },
+  };
   const stop = createWorkspaceSyncStop({
-    person, cleanupFailed, nowMs: () => 42,
+    ...reopen, person, cleanupFailed, nowMs: () => 42,
     pauseStatus: pause => workspaceSyncPauseStatus(pause, "local-person"),
     withOwnerHostPaused: async work => { steps.push("host-pause"); try { return await work(); } finally { steps.push("host-resume"); } },
     prepare: () => service.prepareSyncPause(workspace, state), resume: () => service.enableCloud(workspace, state), pauseRemote,
-    closeActivity: () => service.close(workspace, state, { notify: false, preserveAgentRun: true }), closeRelay,
-    openActivity: () => service.open(workspace, state), status: () => service.getStatus(workspace, state),
-    notify: () => { steps.push("notify"); },
+    status: () => service.getStatus(workspace, state),
+    reopenFailed: () => service.recordSyncPauseReopenFailed(workspace, state),
   });
   const operation = () => ({
     get workspace() { return { ...store.find(workspace.workspaceId)!, attachmentId: workspace.attachmentId }; },
@@ -84,6 +88,7 @@ async function fixture(synced = true) {
   });
   return { workspace, store, registryPath, steps, settle, engineStart, engineStop, watcherStop, closeRelay,
     pauseRemote, resumeAdmission, service, state, stop, operation, cleanupFailed, person, runStates, captureRuns, capturedWrites,
+    openActivity, reopen,
     write: () => observation.facts([{ path: "note.md", kind: "changed" }]), retire: () => { current = false; } };
 }
 
@@ -259,6 +264,36 @@ describe("stop one workspace's sync", () => {
     const h = await fixture();
     h.closeRelay.mockImplementationOnce(async () => h.retire());
     await expect(h.stop(h.operation())).resolves.toMatchObject({ workspaceSynced: false, syncPause: { atMs: 42 } });
+    await h.service.close(h.workspace, h.state);
+  });
+
+  it("ends a Collections wait by reopening without sync", async () => {
+    const h = await fixture(true, true);
+    expect(h.service.getStatus(h.workspace, h.state).collectionsWaitingForSync).toBe("sync");
+    await h.stop(h.operation());
+    expect(h.service.getStatus(h.workspace, h.state).collectionsWaitingForSync).toBeUndefined();
+    await h.service.close(h.workspace, h.state);
+  });
+
+  it("keeps a Collections wait after a failed reopen, and Try again repeats the reopen", async () => {
+    const h = await fixture(true, true);
+    h.openActivity.mockRejectedValueOnce(new Error("open failed"));
+    await expect(h.stop(h.operation())).resolves.toMatchObject({ workspaceSynced: false });
+    expect(h.cleanupFailed).toHaveBeenCalledWith("workspace", expect.objectContaining({ message: "open failed" }));
+    expect(h.service.getStatus(h.workspace, h.state).collectionsWaitingForSync).toBe("reopen");
+    // After a pause there is no sync to retry: the retry reopens.
+    await expect(reopenWithoutSync(h.reopen, h.operation().workspace)).resolves.toEqual({ reopened: true });
+    expect(h.service.isOpen(h.state)).toBe(true);
+    expect(h.service.getStatus(h.workspace, h.state).collectionsWaitingForSync).toBeUndefined();
+    await h.service.close(h.workspace, h.state);
+  });
+
+  it("reports nothing waiting when a reopen fails with no Collections wait", async () => {
+    const h = await fixture();
+    h.openActivity.mockRejectedValueOnce(new Error("open failed"));
+    await h.stop(h.operation());
+    expect(h.service.getStatus(h.workspace, h.state).collectionsWaitingForSync).toBeUndefined();
+    await h.service.open(h.workspace, h.state);
     await h.service.close(h.workspace, h.state);
   });
 

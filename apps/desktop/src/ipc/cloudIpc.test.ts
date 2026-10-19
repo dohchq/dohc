@@ -164,6 +164,7 @@ async function harness() {
     pauseRemote: (id, syncPause) => { const entry = registry.get(id)!; entry.pausedRemote = entry.remote; delete entry.remote; entry.syncPause = syncPause; },
     closeActivity: async () => {}, closeRelay: async () => {}, openActivity: async () => {},
     status: id => ({ ...status, ...(registry.get(id)?.syncPause ? { syncPause: pauseStatus(registry.get(id)!.syncPause!) } : {}) }), notify: () => {}, cleanupFailed: vi.fn(),
+    reopenFailed: vi.fn(),
   });
   stopWorkspaceSync.mockImplementation(stopOperation);
   const openActivity = vi.fn<Dependencies["openWorkspaceActivity"]>(async (_entry, options) => { steps.push("open"); await options.afterActivityOpen(); });
@@ -636,7 +637,7 @@ it("queues a stop during join until the joined workspace is enabled", async () =
     withOwnerHostPaused: work => work(), prepare: h.preparePause, resume: h.enable,
     pauseRemote: id => { const entry = h.registry.get(id)!; entry.pausedRemote = entry.remote; delete entry.remote; },
     closeActivity: async () => {}, closeRelay: async () => {}, openActivity: async () => {},
-    status: () => status, notify: () => {}, cleanupFailed: vi.fn(),
+    status: () => status, notify: () => {}, cleanupFailed: vi.fn(), reopenFailed: vi.fn(),
   })(operation));
   expect(h.preparePause).not.toHaveBeenCalled();
   held.resolve(); await joining;
