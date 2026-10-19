@@ -90,6 +90,15 @@ No arguments.
 
 Returns `{ ok: true, workspaceId, workspaceSynced: false, syncPause?: { atMs, author } } | { ok: false, reason }`.
 
+### `dohc_chat_file_mentions`
+
+Read a bounded page of accessible chat mentions of files. Optional subject selects one file. Continue nextCursor until null; complete and sharedChannelRowsUncovered report coverage.
+
+- `subject`: `{ path: string } | { objectId: string }`
+- `cursor`: `string`
+
+Returns `{ versionId, subject: { objectId, path } | null, entries: { attachment, message, thread, channelId?, channelWireId?, channelName?, channelSlug?, channelKind? }[], unchecked, complete, indexBuilding, mountsCovered, sharedChannelRowsUncovered, nextCursor } | null`.
+
 ### `dohc_links_edges`
 
 Read a bounded page of file links and isolated Markdown files. Continue nextCursor until null. indexBuilding reports active indexing; unchecked names uncertified sources; mountsCovered reports mount coverage.
@@ -881,6 +890,19 @@ Use at most one of --all, --group, or --thread.
 - `--thread <thread>`: Export one thread.
 
 With `--json`, prints `{ schemaVersion, files: { threadId, path }[] }`.
+
+#### `dohc chat file-mentions`
+
+```sh
+dohc chat file-mentions [options]
+```
+
+Read one bounded page of file mentions.
+
+- `--subject <subject>`: A file path or objectId as JSON.
+- `--cursor <cursor>`: Continue the previous page.
+
+With `--json`, prints `{ schemaVersion, versionId, subject: { objectId, path } | null, entries: { attachment, message, thread, channelId?, channelWireId?, channelName?, channelSlug?, channelKind? }[], unchecked, complete, indexBuilding, mountsCovered, sharedChannelRowsUncovered, nextCursor }` or `null`.
 
 ### `dohc dataset`
 

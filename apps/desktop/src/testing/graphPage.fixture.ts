@@ -18,7 +18,7 @@ type SampleNode = {
   outgoing?: number;
 };
 export function installGraphFixture(
-  bridge: { -readonly [K in "linksEdges" | "listChatFileMentions"]: DohcDesktopBridge[K] },
+  bridge: { -readonly [K in "linksEdges" | "chatFileMentionsPage"]: DohcDesktopBridge[K] },
   graph: {
     nodes: SampleNode[];
     edges: LinksEdgesResult["entries"] | { source: string; target: string; kind: "wikilink" | "markdown" }[];
@@ -36,21 +36,22 @@ export function installGraphFixture(
     versionId: "main", files, entries: graph.edges.map((edge, ordinal) => ({ ...edge, ordinal })),
     unchecked: [], complete: true, indexBuilding: false, mountsCovered: true, nextCursor: null,
   }));
-  bridge.listChatFileMentions = vi.fn(async ({ path, paths }) => ({
-    mentions: (paths ?? [path!]).flatMap((path: string) => graph.nodes.filter(node => node.kind === "chat-thread").flatMap(node => {
+  bridge.chatFileMentionsPage = vi.fn(async ({ subject }) => ({
+    versionId: "main", subject: null, unchecked: [], complete: true, indexBuilding: false, mountsCovered: true, sharedChannelRowsUncovered: 0, nextCursor: null,
+    entries: files.filter(file => !subject || ("path" in subject ? subject.path === file.path : subject.objectId === file.objectId)).flatMap(({ path }) => graph.nodes.filter(node => node.kind === "chat-thread").flatMap(node => {
       const headings: (SampleNode | undefined)[] = [
         undefined, ...graph.nodes.filter(row => row.kind === "heading" && row.filePath === path),
       ];
       return headings.map(heading => ({
         thread: { id: node.threadId!, title: node.title, createdAtMs: 1, updatedAtMs: 1 },
         attachment: {
-          attachmentId: node.path, threadId: node.threadId!, messageId: "m", targetKind: "file",
+          attachmentId: JSON.stringify([node.path,path,heading?.headingAnchor]), threadId: node.threadId!, messageId: "m", targetKind: "file",
           objectId: path, pathHint: path, createdAtMs: 1,
           ...(heading ? { headingText: heading.title, headingAnchor: heading.headingAnchor, headingOccurrence: 0 } : {}),
         },
         message: {
-          id: "m", threadId: node.threadId!, authorKind: "human", authorDisplayName: "Alice",
-          body: "Mention", createdAtMs: 1, presentation: { group: "Alice", hue: null, self: false },
+          id: "m", authorDisplayName: "Alice",
+          preview: "Mention", createdAtMs: 1,
         },
         channelId: node.channelId, channelWireId: node.channelWireId, channelName: node.channelName,
         channelSlug: node.channelSlug, channelKind: node.channelKind,

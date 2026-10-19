@@ -19,11 +19,11 @@ function stubBacklinks(result: BacklinksFixture) {
 
 function stubBacklinksWithChatFailure(result: BacklinksFixture) {
   const linksIn = vi.fn(async () => result);
-  const listChatFileMentions = vi.fn(async () => {
+  const chatFileMentionsPage = vi.fn(async () => {
     throw new Error("Chats are unavailable for this workspace");
   });
-  vi.stubGlobal("dohcDesktop", { linksIn: () => linksIn().then(linkQueryPage), listChatFileMentions });
-  return { linksIn, listChatFileMentions };
+  vi.stubGlobal("dohcDesktop", { linksIn: () => linksIn().then(linkQueryPage), chatFileMentionsPage });
+  return { linksIn, chatFileMentionsPage };
 }
 
 function backlinksSource(title: string): BacklinksFixture {
@@ -80,7 +80,7 @@ describe("BacklinksPanel", () => {
   });
 
   it("keeps ordinary backlinks when chat mention lookup fails", async () => {
-    const { listChatFileMentions } = stubBacklinksWithChatFailure(TWO_SOURCES);
+    const { chatFileMentionsPage } = stubBacklinksWithChatFailure(TWO_SOURCES);
     render(
       <BacklinksPanel
         workspaceId="ws-1"
@@ -90,28 +90,23 @@ describe("BacklinksPanel", () => {
     );
 
     await screen.findByTestId("backlinks");
-    expect(listChatFileMentions).toHaveBeenCalledWith({
+    expect(chatFileMentionsPage).toHaveBeenCalledWith({
       workspaceId: "ws-1",
-      path: "notes/target.md",
+      subject: { path: "notes/target.md" },
     });
     expect(screen.getByTestId("backlinks-count").textContent).toBe("3");
     expect(screen.getAllByTestId("backlink-source")).toHaveLength(2);
     expect(screen.queryByTestId("chat-file-mentions")).toBeNull();
   });
 
-  // `listChatFileMentions` is a Chats call: it goes through
-  // requireEngineCapture in main, so a workspace with no capture — a shared
-  // view — can only be refused. The refusal is swallowed by the .catch above,
-  // which is why nothing else can see this call. Backlinks themselves are not
-  // an engine call and must still be read.
   it("asks for no chat mentions when the caller says they are unavailable", async () => {
-    const { linksIn, listChatFileMentions } =
+    const { linksIn, chatFileMentionsPage } =
       stubBacklinksWithChatFailure(TWO_SOURCES);
     render(<BacklinksPanel workspaceId="ws-1" path="notes/target.md" />);
 
     await screen.findByTestId("backlinks");
     expect(linksIn).toHaveBeenCalled();
-    expect(listChatFileMentions).not.toHaveBeenCalled();
+    expect(chatFileMentionsPage).not.toHaveBeenCalled();
     expect(screen.getByTestId("backlinks-count").textContent).toBe("3");
   });
 
@@ -356,33 +351,33 @@ describe("BacklinksPanel", () => {
 });
 
 it("paints engine pages without waiting for chat refresh, including sources beyond the old scan limit", async () => {
-  const chats = deferred<{ mentions: [] }>();
+  const chats = deferred<{ entries: [] }>();
   const second = deferred<ReturnType<typeof linkQueryPage>>();
   const first = linkQueryPage(backlinksSource("File5001"));
   first.nextCursor = "next";
   const linksIn = vi.fn().mockResolvedValueOnce(first).mockReturnValueOnce(second.promise);
-  vi.stubGlobal("dohcDesktop", { linksIn, listChatFileMentions: () => chats.promise });
+  vi.stubGlobal("dohcDesktop", { linksIn, chatFileMentionsPage: () => chats.promise });
   render(<BacklinksPanel workspaceId="ws" path="target.md" chatMentionsAvailable />);
   await waitFor(() => expect(linksIn).toHaveBeenCalledTimes(2));
   expect(screen.queryByText("File5001")).toBeNull();
   await act(async () => { second.resolve(linkQueryPage(backlinksSource("File5002"))); });
   await screen.findAllByText("File5002");
   expect(linksIn).toHaveBeenCalledWith({ workspaceId: "ws", subject: { path: "target.md" }, cursor: "next" });
-  await act(async () => chats.resolve({ mentions: [] }));
+  await act(async () => chats.resolve({ entries: [] }));
 });
 
 it("clears displayed chat mentions when Chats becomes unavailable", async () => {
   const linksIn = vi.fn(async () => linkQueryPage({ sources: [] }));
-  const listChatFileMentions = vi.fn(async () => ({ mentions: [{
+  const chatFileMentionsPage = vi.fn(async () => ({ entries: [{
     attachment: { attachmentId: "mention" }, thread: { title: "Planning" },
-    message: { authorDisplayName: "Alice", createdAtMs: 0, body: "A chat mention" },
+    message: { authorDisplayName: "Alice", createdAtMs: 0, preview: "A chat mention" },
   }] }));
-  vi.stubGlobal("dohcDesktop", { linksIn, listChatFileMentions });
+  vi.stubGlobal("dohcDesktop", { linksIn, chatFileMentionsPage });
   const view = render(<BacklinksPanel workspaceId="ws" path="a.md" chatMentionsAvailable />);
   await screen.findByTestId("chat-file-mentions");
   view.rerender(<BacklinksPanel workspaceId="ws" path="a.md" chatMentionsAvailable={false} />);
   expect(screen.queryByTestId("chat-file-mentions")).toBeNull();
-  expect(listChatFileMentions).toHaveBeenCalledOnce();
+  expect(chatFileMentionsPage).toHaveBeenCalledOnce();
 });
 
 it("keeps the previous list until every refresh page has arrived", async () => {
@@ -577,4 +572,21 @@ it.each(["focus", "refreshKey"])("keeps a Notices retry working after a same-doc
     expect(linksIn).toHaveBeenCalledTimes(count + 1);
     expect(screen.getByTestId("backlink-source").textContent).toContain("Retried");
   } finally { vi.useRealTimers(); }
+});
+
+it("streams chat pages for one subject and discards a previous document's continuation",async()=>{
+  const later=deferred<unknown>();
+  const row={attachment:{attachmentId:"a",threadId:"t",messageId:"m",objectId:"file",pathHint:"notes/target.md"},message:{id:"m",authorDisplayName:"Ada",preview:"First preview",createdAtMs:1},thread:{id:"t",title:"Discussion"}};
+  const chatFileMentionsPage=vi.fn().mockResolvedValueOnce({entries:[row],nextCursor:"next"}).mockReturnValueOnce(later.promise).mockResolvedValue({entries:[],nextCursor:null});
+  vi.stubGlobal("dohcDesktop",{linksIn:vi.fn(async()=>linkQueryPage({sources:[]})),chatFileMentionsPage});
+  const view=render(<BacklinksPanel workspaceId="ws" path="notes/target.md" chatMentionsAvailable/>);
+  await screen.findByText("First preview");
+  await waitFor(()=>expect(chatFileMentionsPage).toHaveBeenCalledTimes(2));
+  expect(chatFileMentionsPage.mock.calls[1]![0]).toEqual({workspaceId:"ws",subject:{path:"notes/target.md"},cursor:"next"});
+  view.rerender(<BacklinksPanel workspaceId="ws" path="notes/other.md" chatMentionsAvailable/>);
+  await waitFor(()=>expect(chatFileMentionsPage).toHaveBeenCalledTimes(3));
+  await act(async()=>later.resolve({entries:[{...row,message:{...row.message,preview:"Late preview"}}],nextCursor:"third"}));
+  expect(screen.queryByText("First preview")).toBeNull();
+  expect(screen.queryByText("Late preview")).toBeNull();
+  expect(chatFileMentionsPage).toHaveBeenCalledTimes(3);
 });

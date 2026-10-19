@@ -763,20 +763,13 @@ async fn attachments_and_file_threads_keep_their_wire_contracts() {
         &handle,
         &mut id,
         "chats.attachments.listFileMentions",
-        json!({
-            "objectId": "object-1",
-            "pathHint": "notes/reused.md",
-            "pageLimit": 10
-        }),
+        json!({ "scope": "owner", "sharedChannelRowsUncovered": 0 }),
     )
     .await;
     assert_eq!(
-        mentions["mentions"][0]["message"]["attachments"]
-            .as_array()
-            .expect("hydrated attachments")
-            .len(),
-        1,
-        "hydrate only the selected attachment -> nested message attachment list is empty.",
+        mentions["entries"],
+        json!([]),
+        "A missing object never falls back to its old path hint."
     );
     call(
         &transport,
@@ -819,12 +812,40 @@ async fn attachments_and_file_threads_keep_their_wire_contracts() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn file_mentions_cap_at_2000_newest_and_hydrate_all_message_attachments() {
+async fn file_mentions_are_compact_bounded_sealed_and_continue_beyond_2000() {
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let db_path = engine_db_path(&scratch).expect("db path");
     let mut store = EngineStore::open(&db_path, 1).expect("store");
     store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
+    {
+        use dohc_engine_domain::{VersionedTextStore, WriteText};
+        let mut files = VersionedTextStore::new(&mut store);
+        files
+            .ensure_main_version("rpc-b2-cap", "main", 1, &NoFaults)
+            .unwrap();
+        for (object, path) in [("wanted", "notes/current.md"), ("other", "notes/reused.md")] {
+            files
+                .write_text(
+                    &WriteText {
+                        workspace_id: "rpc-b2-cap".into(),
+                        version_id: "main".into(),
+                        object_id: object.into(),
+                        path: path.into(),
+                        text: "File".into(),
+                        moment_id: format!("file-{object}"),
+                        metadata_origin: "test".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 1,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+        }
+    }
     store
         .write_with(&NoFaults, |tx| {
             tx.execute(
@@ -837,7 +858,10 @@ async fn file_mentions_cap_at_2000_newest_and_hydrate_all_message_attachments() 
             for index in 0..=2_000_i64 {
                 let thread_id = format!("thread-{index:04}");
                 let message_id = format!("message-{index:04}");
-                let attachment_id = format!("attachment-{index:04}");
+                let attachment_id = format!(
+                    "attachment-{index:04}-{}",
+                    "x".repeat(if index % 2 == 0 { 480 } else { 0 })
+                );
                 tx.execute(
                     "INSERT INTO chat_threads \
                      (workspace_id,thread_id,title,created_at_ms,updated_at_ms,channel_id) \
@@ -848,8 +872,8 @@ async fn file_mentions_cap_at_2000_newest_and_hydrate_all_message_attachments() 
                 tx.execute(
                     "INSERT INTO chat_messages \
                      (workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,body,created_at_ms) \
-                     VALUES ('rpc-b2-cap',?1,0,?2,'human','Ada','Body',?3)",
-                    rusqlite::params![thread_id, message_id, index],
+                     VALUES ('rpc-b2-cap',?1,0,?2,'human','Ada',?4,?3)",
+                    rusqlite::params![thread_id, message_id, index, "\u{1f4ac}".repeat(800)],
                 )
                 .map_err(StorageError::persist_public)?;
                 tx.execute(
@@ -867,6 +891,15 @@ async fn file_mentions_cap_at_2000_newest_and_hydrate_all_message_attachments() 
                 [],
             )
             .map_err(StorageError::persist_public)?;
+            // More than one raw window of missing object identities must still advance.
+            for index in 0..513_i64 {
+                tx.execute("INSERT INTO chat_attachments (workspace_id,attachment_id,thread_id,message_id,target_kind,object_id,path_hint,created_at_ms) VALUES ('rpc-b2-cap',?1,'thread-2000','message-2000','file','aaa-missing','notes/reused.md',?2)",
+                    rusqlite::params![format!("missing-{index:04}"),index]).map_err(StorageError::persist_public)?;
+            }
+            tx.execute("INSERT INTO chat_attachments (workspace_id,attachment_id,thread_id,message_id,target_kind,path_hint,created_at_ms) VALUES ('rpc-b2-cap','path-only','thread-2000','message-2000','file','notes/reused.md',3000)",[]).map_err(StorageError::persist_public)?;
+            tx.execute("INSERT INTO chat_threads (workspace_id,thread_id,title,created_at_ms,updated_at_ms,channel_id) VALUES ('rpc-b2-cap','hidden-thread','Hidden',1,1,'missing-channel')",[]).map_err(StorageError::persist_public)?;
+            tx.execute("INSERT INTO chat_messages (workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,body,created_at_ms) VALUES ('rpc-b2-cap','hidden-thread',0,'hidden-message','human','Ada','Hidden',1)",[]).map_err(StorageError::persist_public)?;
+            tx.execute("INSERT INTO chat_attachments (workspace_id,attachment_id,thread_id,message_id,target_kind,object_id,created_at_ms) VALUES ('rpc-b2-cap','hidden-attachment','hidden-thread','hidden-message','file','wanted',4000)",[]).map_err(StorageError::persist_public)?;
             Ok::<_, StorageError>(())
         })
         .expect("seed");
@@ -879,7 +912,7 @@ async fn file_mentions_cap_at_2000_newest_and_hydrate_all_message_attachments() 
     let mut mentions = Vec::new();
     let mut checked_first_continuation = false;
     loop {
-        let mut params = json!({ "objectId": "wanted", "pageLimit": 500 });
+        let mut params = json!({ "subject": { "objectId": "wanted" }, "scope": "owner", "sharedChannelRowsUncovered": 0 });
         if let Some(value) = &cursor {
             params["cursor"] = json!(value);
         }
@@ -891,8 +924,14 @@ async fn file_mentions_cap_at_2000_newest_and_hydrate_all_message_attachments() 
             params,
         )
         .await;
+        assert!(page.to_string().len() <= 64 * 1024);
+        assert!(
+            page["entries"].as_array().unwrap().len() + page["unchecked"].as_array().unwrap().len()
+                <= 100
+        );
+        assert_eq!(page["complete"], json!(true));
         mentions.extend(
-            page["mentions"]
+            page["entries"]
                 .as_array()
                 .expect("mention page")
                 .iter()
@@ -901,59 +940,91 @@ async fn file_mentions_cap_at_2000_newest_and_hydrate_all_message_attachments() 
         cursor = page["nextCursor"].as_str().map(str::to_owned);
         if !checked_first_continuation {
             checked_first_continuation = true;
-            use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
             let encoded = cursor.as_ref().expect("first continuation");
-            let mut decoded: Value =
-                serde_json::from_slice(&URL_SAFE_NO_PAD.decode(encoded).unwrap()).unwrap();
-            assert_eq!(decoded["consumed"], json!(mentions.len()));
-            decoded["consumed"] = json!(i64::MAX);
-            let exhausted = call(
-                &transport,
-                &handle,
-                &mut id,
-                "chats.attachments.listFileMentions",
-                json!({ "objectId": "wanted", "pageLimit": 500,
-                    "cursor": URL_SAFE_NO_PAD.encode(serde_json::to_vec(&decoded).unwrap()) }),
-            )
-            .await;
-            assert_eq!(exhausted, json!({ "mentions": [], "nextCursor": null }));
-            decoded["consumed"] = json!(-1);
-            let error = call_error(
-                &transport,
-                &handle,
-                &mut id,
-                "chats.attachments.listFileMentions",
-                json!({ "objectId": "wanted", "pageLimit": 500,
-                    "cursor": URL_SAFE_NO_PAD.encode(serde_json::to_vec(&decoded).unwrap()) }),
-            )
-            .await;
-            assert_eq!(error.code, ErrorCode::InvalidParams);
-            assert_eq!(error.message, "invalid-cursor");
+            for params in [
+                json!({"subject":{"objectId":"wanted"},"scope":"another-grant","sharedChannelRowsUncovered":0,"cursor":encoded}),
+                json!({"subject":{"objectId":"other"},"scope":"owner","sharedChannelRowsUncovered":0,"cursor":encoded}),
+                json!({"scope":"owner","sharedChannelRowsUncovered":0,"cursor":format!("{encoded}x")}),
+            ] {
+                let error = call_error(
+                    &transport,
+                    &handle,
+                    &mut id,
+                    "chats.attachments.listFileMentions",
+                    params,
+                )
+                .await;
+                assert_eq!(error.code, ErrorCode::InvalidParams);
+            }
         }
 
         if cursor.is_none() {
             break;
         }
     }
-    assert_eq!(
-        mentions.len(),
-        2_000,
-        "omit the logical 2,000 cap -> the oldest selected row is exposed."
-    );
+    assert_eq!(mentions.len(), 2_001);
     assert_eq!(mentions[0]["message"]["id"], json!("message-2000"));
+    assert_eq!(
+        mentions.last().unwrap()["message"]["id"],
+        json!("message-0000")
+    );
+    assert_eq!(
+        mentions[0]["attachment"]["pathHint"],
+        json!("notes/current.md")
+    );
     assert!(
         mentions
             .iter()
-            .all(|mention| mention["message"]["id"] != json!("message-0000"))
+            .all(|row| row["message"].get("body").is_none()
+                && row["message"].get("attachments").is_none())
     );
-    assert_eq!(
-        mentions[0]["message"]["attachments"]
-            .as_array()
-            .expect("all attachments")
-            .len(),
-        2,
-        "hydrate only matching attachments -> the newest message loses its other target.",
+    let mut params = json!({"scope":"owner","sharedChannelRowsUncovered":3});
+    let first = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.attachments.listFileMentions",
+        params.clone(),
+    )
+    .await;
+    assert!(
+        first["entries"].as_array().unwrap().is_empty(),
+        "raw budget must apply before identity and channel filtering"
     );
+    assert!(first["nextCursor"].is_string());
+    assert_eq!(first["complete"], json!(false));
+    assert_eq!(first["sharedChannelRowsUncovered"], json!(3));
+    let mut all = Vec::new();
+    let mut next = first["nextCursor"].as_str().map(str::to_owned);
+    while let Some(cursor) = next {
+        params["cursor"] = json!(cursor);
+        let page = call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.attachments.listFileMentions",
+            params.clone(),
+        )
+        .await;
+        assert!(page.to_string().len() <= 64 * 1024);
+        assert!(page["entries"].as_array().unwrap().len() <= 100);
+        assert_eq!(page["complete"], json!(false));
+        all.extend(page["entries"].as_array().unwrap().iter().cloned());
+        next = page["nextCursor"].as_str().map(str::to_owned);
+    }
+    assert_eq!(all.len(), 2003);
+    let path_only = all
+        .iter()
+        .find(|row| row["attachment"]["attachmentId"] == "path-only")
+        .unwrap();
+    assert_eq!(path_only["attachment"]["objectId"], json!("other"));
+    assert!(all.iter().all(|row| row["thread"]["id"] != "hidden-thread"));
+    assert!(all.iter().all(|row| {
+        !row["attachment"]["attachmentId"]
+            .as_str()
+            .unwrap()
+            .starts_with("missing-")
+    }));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

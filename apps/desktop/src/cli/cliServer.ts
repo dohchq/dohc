@@ -1,3 +1,4 @@
+import { ChatFileMentionsInput, ChatFileMentionsPage } from "@dohc/workspace-contracts/chat-file-mentions";
 import type { LinksEdgesInput, LinksEdgesResult, LinksInInput, LinksInResult, LinksResolveInput, LinksResolveResult } from "@dohc/workspace-contracts/links";
 import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
 import { creationPartialMessage } from "@dohc/cli/creation";
@@ -337,6 +338,7 @@ export interface CliServerOptions {
   stateDir: string;
   listWorkspaces(): readonly CliRegistryWorkspace[];
   openWorkspace(workspace: CliRegistryWorkspace): Promise<CliWorkspaceContext>;
+  chatFileMentions?(workspace: CliRegistryWorkspace, input: ChatFileMentionsInput): Promise<ChatFileMentionsPage>;
   links?: {
     edges(workspace: CliRegistryWorkspace, input: LinksEdgesInput): Promise<LinksEdgesResult>;
     incoming(workspace: CliRegistryWorkspace, input: LinksInInput): Promise<LinksInResult>;
@@ -3454,11 +3456,15 @@ async function dispatchWorkspace(
 }
 
 async function dispatchLinks(
-  request: Extract<CliRequest, { verb: "linksIn" | "linksResolve" | "linksEdges" }>,
+  request: Extract<CliRequest, { verb: "chatFileMentions" | "linksIn" | "linksResolve" | "linksEdges" }>,
   options: CliServerOptions,
 ): Promise<unknown> {
   const workspace = await resolveCliWorkspace(request.args.cwd, options.listWorkspaces());
   if (!workspace) throw new CliCommandError("not inside a dohc workspace");
+  if (request.verb === "chatFileMentions") {
+    if (!options.chatFileMentions) throw new CliCommandError("Chat mentions are unavailable.");
+    return options.chatFileMentions(workspace, { subject: request.args.subject, cursor: request.args.cursor });
+  }
   if (!options.links) throw new CliCommandError("Workspace links are unavailable.");
   if (request.verb === "linksEdges") return options.links.edges(workspace, { cursor: request.args.cursor });
   return request.verb === "linksIn"
@@ -3566,7 +3572,7 @@ export async function handleCliRequestLine(
     const completion = { replayed: false };
     const unvalidated = request.verb === "accountDeletePreview" || request.verb === "accountDelete"
       ? await dispatchAccount(request, options)
-      : request.verb === "linksEdges" || request.verb === "linksIn" || request.verb === "linksResolve"
+      : request.verb === "chatFileMentions" || request.verb === "linksEdges" || request.verb === "linksIn" || request.verb === "linksResolve"
         ? await dispatchLinks(request, options)
         : await dispatch(request, await workspaceContextForRequest(request, options), options, completion);
     const result = parseCliResult(parsed.data.verb, unvalidated);

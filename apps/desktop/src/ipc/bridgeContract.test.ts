@@ -33,7 +33,7 @@ import { UPDATE_STATUSES } from "../updates/updateMachine";
 import {
   ListChatChannelsResult,
   ListPersonalChatFeedResult,
-  ListChatFileMentionsResult,
+  ChatFileMentionsPageResult,
   ChatChannelRecord,
   ChatFeedItemRecord,
   ChatFileMentionRecord,
@@ -4097,7 +4097,6 @@ describe("partial-freshness marker on aggregate chat reads", () => {
   const RESULTS = {
     ListChatChannelsResult: () => ({ channels: [], fileThreads: [] }),
     ListPersonalChatFeedResult: () => ({ items: [] }),
-    ListChatFileMentionsResult: () => ({ mentions: [] }),
   } as const;
 
   it("carries the remainder when a pass left rows, and omits it when none", () => {
@@ -4114,7 +4113,7 @@ describe("partial-freshness marker on aggregate chat reads", () => {
 
   it("refuses a zero remainder, on every surface that reports one", () => {
     for (const [name, base] of Object.entries(RESULTS)) {
-      const schema = { ListChatChannelsResult, ListPersonalChatFeedResult, ListChatFileMentionsResult }[
+      const schema = { ListChatChannelsResult, ListPersonalChatFeedResult, ChatFileMentionsPageResult }[
         name as keyof typeof RESULTS
       ];
       expect(

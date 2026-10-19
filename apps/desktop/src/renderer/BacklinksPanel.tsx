@@ -5,7 +5,6 @@ import type {
 } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { Ref } from "./ui/Ref";
-import { useAsyncResponseEffect } from "./useAsyncResponseEffect";
 
 import type { LinksInResult } from "@dohc/workspace-contracts/links";
 type BacklinksResult = { sources: BacklinkSource[]; indexBuilding: boolean };
@@ -80,10 +79,7 @@ export function BacklinksPanel(props: {
   path: string;
   // Bumps on workspace activity (saves, agent edits) so mentions recompute.
   refreshKey?: number;
-  // Chat mentions are a CHATS call: `listChatFileMentions` goes through
-  // requireEngineCapture, so a workspace with no capture — a shared view, most
-  // visibly — can only refuse it. Opt-in, and named the way GraphView names
-  // the same fact, so both chat affordances read one word.
+  // Callers opt into chat reads separately from file reads.
   chatMentionsAvailable?: boolean;
   onError?: (message: string, error: unknown, retry: (() => void) | null) => void;
   onOpenPath?: (path: string) => void;
@@ -190,17 +186,47 @@ export function BacklinksPanel(props: {
     return () => { active = false; clearTimeout(timer); };
   }, [chatMentionsAvailable, workspaceId, path, refreshKey, focusNonce]);
 
-  useAsyncResponseEffect(() => {
-    const read = chatMentionsAvailable ? bridge().listChatFileMentions : undefined;
-    return typeof read === "function" ? read({ workspaceId, path }) : Promise.resolve({ mentions: [] });
-  }, {
-    onSuccess: result => setLoadedChats({ workspaceId, path, mentions: result.mentions }),
-    onError: () => setLoadedChats({ workspaceId, path, mentions: [] }),
+  const [chatWalkInFlight, setChatWalkInFlight] = useState(false);
+  useEffect(() => {
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let retries = 0;
+    if (!chatMentionsAvailable) { setChatWalkInFlight(false); return; }
+    const read = bridge().chatFileMentionsPage;
+    if (typeof read !== "function") return;
+    setChatWalkInFlight(true);
+    const retained = loadedChats?.workspaceId === workspaceId && loadedChats.path === path && loadedChats.mentions.length > 0;
+    const retry = () => {
+      if (currentDocument.current?.workspaceId === workspaceId && currentDocument.current.path === path)
+        setFocusNonce(nonce => nonce + 1);
+    };
+    const walk = async () => {
+      let cursor: string | undefined;
+      let indexBuilding = false;
+      const mentions = new Map<string, ChatFileMentionRecord>();
+      try {
+        do {
+          const page = await read({ workspaceId, subject: { path }, ...(cursor ? { cursor } : {}) });
+          if (!active) return;
+          for (const row of page?.entries ?? []) mentions.set(row.attachment.attachmentId, row);
+          indexBuilding ||= page?.indexBuilding ?? false;
+          cursor = page?.nextCursor ?? undefined;
+          if (!retained || !cursor) setLoadedChats({ workspaceId, path, mentions: [...mentions.values()] });
+        } while (cursor);
+        if (indexBuilding && retries < 5) {
+          timer = setTimeout(() => { retries++; void walk(); }, Math.min(250 * 2 ** retries, 8000));
+        } else { setChatWalkInFlight(false); }
+      } catch (error) {
+        if (active) { setChatWalkInFlight(false); reportError.current?.("dohc could not load chat mentions.", error, retry); }
+      }
+    };
+    void walk();
+    return () => { active = false; clearTimeout(timer); };
   }, [chatMentionsAvailable, workspaceId, path, refreshKey, focusNonce]);
 
   const linkedTotal = sources.reduce((sum, source) => sum + source.snippets.length, 0);
   const total = linkedTotal + chatMentions.length;
-  const isGathering = current?.indexBuilding === true && walkInFlight;
+  const isGathering = (current?.indexBuilding === true && walkInFlight) || chatWalkInFlight;
   if (total === 0 && !isGathering) return null;
 
   return (
@@ -249,7 +275,7 @@ export function BacklinksPanel(props: {
                     </span>
                   </button>
                   <p className="dohc-backlinks__snippet m-0 line-clamp-2 text-left">
-                    {mention.message.body}
+                    {mention.message.preview}
                   </p>
                 </li>
               ))}

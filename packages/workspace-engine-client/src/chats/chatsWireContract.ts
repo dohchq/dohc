@@ -1,3 +1,4 @@
+import { ChatFileMentionsPage } from "@dohc/workspace-contracts/chat-file-mentions";
 import { ProtocolShapeError, mutableStruct } from "../wireSchema";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
@@ -108,7 +109,6 @@ export type ChatThreadWireRecord = typeof ChatThreadWireRecordSchema.Type;
 export type ChatThreadReadState = typeof ChatThreadReadStateSchema.Type;
 export type ChatUnreadFileThread = typeof ChatUnreadFileThreadSchema.Type;
 export type ChatFollow = typeof ChatFollowSchema.Type;
-export type ChatFileMention = typeof ChatFileMentionSchema.Type;
 
 export type ChatChannelThreadSummary =
   typeof ChatChannelThreadSummarySchema.Type;
@@ -226,10 +226,7 @@ type ChatReactionSetParams = ChatsJsonObject & {
   nowMs?: number;
 };
 type ChatThreadPageParams = ChatPageParams & { threadId: string };
-type ChatFileMentionsParams = ChatPageParams & {
-  objectId?: string;
-  pathHint?: string;
-};
+type ChatFileMentionsParams = ChatsJsonObject & { subject?: { path: string } | { objectId: string }; cursor?: string; scope: string; sharedChannelRowsUncovered: number };
 type ChatMentionsParams = ChatPageParams & {
   handle: string;
   unreadByAgentOnly?: boolean;
@@ -672,9 +669,11 @@ const ChatFeedReadStateSchema = mutableStruct({
 });
 const ChatFileMentionSchema = mutableStruct({
   attachment: ChatAttachmentSchema,
-  message: ChatMessageSchema,
-  thread: ChatThreadSchema,
-  channel: Schema.optionalKey(ChatChannelSchema),
+  message: mutableStruct({ id: Schema.String, authorDisplayName: Schema.String, preview: Schema.String, createdAtMs: AnyInt }),
+  thread: mutableStruct({ id: Schema.String, title: Schema.String, createdAtMs: AnyInt, updatedAtMs: AnyInt }),
+  channelId: Schema.optionalKey(Schema.String), channelWireId: Schema.optionalKey(Schema.String),
+  channelName: Schema.optionalKey(Schema.String), channelSlug: Schema.optionalKey(Schema.String),
+  channelKind: Schema.optionalKey(Schema.Literals(["channel","dm","agent"])),
 });
 const ChatMentionSchema = mutableStruct({
   threadId: Schema.String,
@@ -796,9 +795,12 @@ const ChatsResultSchemas = {
   [CHATS_METHOD.attachmentsListForThread]: pageSchema({
     attachments: Schema.mutable(Schema.Array(ChatAttachmentSchema)),
   }),
-  [CHATS_METHOD.attachmentsListFileMentions]: pageSchema({
-    mentions: Schema.mutable(Schema.Array(ChatFileMentionSchema)),
-  }),
+  [CHATS_METHOD.attachmentsListFileMentions]: Schema.NullOr(mutableStruct({
+    versionId: Schema.String, subject: Schema.NullOr(mutableStruct({ objectId: Schema.String, path: Schema.String })),
+    entries: Schema.mutable(Schema.Array(ChatFileMentionSchema)), unchecked: Schema.mutable(Schema.Array(Schema.String)),
+    complete: Schema.Boolean, indexBuilding: Schema.Boolean, mountsCovered: Schema.Boolean,
+    sharedChannelRowsUncovered: AnyInt, nextCursor: Schema.NullOr(Schema.String),
+  })),
   [CHATS_METHOD.mentionsListForHandle]: pageSchema({
     mentions: Schema.mutable(Schema.Array(ChatMentionSchema)),
   }),
@@ -922,6 +924,7 @@ export function decodeChatsResult<M extends ChatsMethod>(
   if (!Object.hasOwn(ChatsResultSchemas, method)) {
     throw new ProtocolShapeError(`Unsupported chats method: ${method}`);
   }
+  if (method === CHATS_METHOD.attachmentsListFileMentions) ChatFileMentionsPage.parse(value);
   const schema = ChatsResultSchemas[method];
   const label = `${method} result`;
   if (method === CHATS_METHOD.dispatchRunRecordsForThread) {

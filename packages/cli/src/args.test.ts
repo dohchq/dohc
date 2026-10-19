@@ -341,3 +341,9 @@ describe("parseCliArguments", () => {
     ).toThrow("export accepts only one");
   });
 });
+
+it("parses an optional chat mention subject and cursor without changing the chat capability",()=>{
+  expect(parseCliArguments(["chat","file-mentions"],{})).toMatchObject({verb:"chatFileMentions"});
+  expect(parseCliArguments(["chat","file-mentions","--subject",'{"path":"notes/a.md"}',"--cursor","sealed"],{})).toMatchObject({verb:"chatFileMentions",subject:{path:"notes/a.md"},cursor:"sealed"});
+  expect(()=>parseCliArguments(["chat","file-mentions","--subject",'{"workspaceId":"other","objectId":"file"}'],{})).toThrow();
+});

@@ -188,7 +188,7 @@ describe("About rail (right side)", () => {
       listChatMessages: vi.fn<DohcDesktopBridge["listChatMessages"]>(),
       listChatReactions: vi.fn<DohcDesktopBridge["listChatReactions"]>(async () => ({ reactions: [], viewerAuthorId: "Reader" })),
       markChatThreadRead: vi.fn<DohcDesktopBridge["markChatThreadRead"]>(async () => ({ lastReadSequence: 300, revision: 1 })),
-      listChatFileMentions: vi.fn<DohcDesktopBridge["listChatFileMentions"]>(),
+      chatFileMentionsPage: vi.fn<DohcDesktopBridge["chatFileMentionsPage"]>(),
     });
     const thread = { id: "file-thread", title: "Long file conversation", createdAtMs: 1, updatedAtMs: 1 };
     const messages = Array.from({ length: 300 }, (_, index) => ({
@@ -199,8 +199,8 @@ describe("About rail (right side)", () => {
     }));
     bridge.listFileChats.mockResolvedValue({ fileObjectId: "object-b", threads: [thread] });
     vi.mocked(bridge.listChatMessages).mockResolvedValue({ messages });
-    bridge.listChatFileMentions.mockResolvedValue({ mentions: [{
-      thread, message: messages[0]!,
+    bridge.chatFileMentionsPage.mockResolvedValue({ versionId: "main", subject: null, unchecked: [], complete: true, indexBuilding: false, mountsCovered: true, sharedChannelRowsUncovered: 0, nextCursor: null, entries: [{
+      thread, message: { id: messages[0]!.id, preview: messages[0]!.body, authorDisplayName: "Reader", createdAtMs: 1 },
       attachment: { attachmentId: "file-attachment", threadId: thread.id,
         messageId: messages[0]!.id, targetKind: "file", objectId: "object-b",
         pathHint: "b.md", createdAtMs: 1 },

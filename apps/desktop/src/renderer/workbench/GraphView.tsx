@@ -777,7 +777,8 @@ export function GraphView(props: {
   reportError.current = props.onError;
   const [walking, setWalking] = useState(true);
   const completedRequest = useRef<typeof requestIdentity | null>(null);
-  const [chatRows, setChatRows] = useState<{ workspaceId: string; graph: GraphData; rows: ChatFileMentionRecord[] } | null>(null);
+  const [chatRows, setChatRows] = useState<{ workspaceId: string; rows: ChatFileMentionRecord[]; complete: boolean; indexBuilding: boolean; mountsCovered: boolean; unchecked: string[] } | null>(null);
+  const [chatWalking, setChatWalking] = useState(false);
   useEffect(() => {
     let active = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -842,33 +843,52 @@ export function GraphView(props: {
     return () => { active = false; clearTimeout(timer); if (frame !== undefined) cancelAnimationFrame(frame); resumePaint?.(); };
   }, [requestIdentity, load, props.workspaceId, chatMentionsEnabled]);
 
-  // Keyed on the drawn files, sorted because the active file is drawn first,
-  // so opening a file that draws the same set asks for nothing again.
-  const mentionPathsKey = useMemo(() => {
-    const graph = state.workspaceId === props.workspaceId ? state.graph : null;
-    return JSON.stringify(graph ? visibleGraphNodes(graph, props.activePath, variant).filter(node => node.kind === "file").map(node => node.path).sort() : []);
-  }, [state.graph, state.workspaceId, props.workspaceId, props.activePath, variant]);
-
   useEffect(() => {
     let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let frame: number | undefined;
+    let resumePaint: (() => void) | undefined;
     const graph = state.workspaceId === props.workspaceId ? state.graph : null;
-    if (!chatMentionsEnabled || !graph) { setChatRows(null); return; }
+    if (!chatMentionsEnabled || !graph) { setChatRows(null); setChatWalking(false); return; }
     if (walking || completedRequest.current !== requestIdentity) return;
+    const current = () => active && requestIdentityRef.current === requestIdentity;
     const retry = () => { if (requestIdentityRef.current === requestIdentity) load(); };
-    void (async () => {
+    const retained = chatRows?.workspaceId === props.workspaceId && chatRows.rows.length > 0;
+    let retries = 0;
+    setChatWalking(true);
+    const walk = async () => {
+      const rows = new Map<string, ChatFileMentionRecord>();
+      const unchecked = new Set<string>();
+      let complete = true, indexBuilding = false, mountsCovered = true;
+      let cursor: string | undefined;
       try {
-        const paths = JSON.parse(mentionPathsKey) as string[];
-        if (!paths.length) return;
-        const result = await bridge().listChatFileMentions({ workspaceId: props.workspaceId, paths });
-        if (!active || requestIdentityRef.current !== requestIdentity) return;
-        setChatRows({ workspaceId: props.workspaceId, graph, rows: result.mentions });
+        do {
+          const page = await bridge().chatFileMentionsPage({ workspaceId: props.workspaceId, ...(cursor ? { cursor } : {}) });
+          if (!current()) return;
+          for (const row of page?.entries ?? []) rows.set(row.attachment.attachmentId, row);
+          for (const path of page?.unchecked ?? []) unchecked.add(path);
+          complete &&= page?.complete ?? true;
+          indexBuilding ||= page?.indexBuilding ?? false;
+          mountsCovered &&= page?.mountsCovered ?? true;
+          cursor = page?.nextCursor ?? undefined;
+          if (!retained || !cursor) setChatRows({ workspaceId: props.workspaceId, rows: [...rows.values()],
+            complete, indexBuilding, mountsCovered, unchecked: [...unchecked] });
+          if (cursor) await new Promise<void>(resolve => {
+            resumePaint = resolve;
+            frame = requestAnimationFrame(() => { timer = setTimeout(resolve, 0); });
+          });
+          if (!current()) return;
+        } while (cursor);
+        if (indexBuilding && retries < 5) {
+          timer = setTimeout(() => { retries++; void walk(); }, Math.min(250 * 2 ** retries, 8000));
+        } else { setChatWalking(false); }
       } catch (error) {
-        if (active && requestIdentityRef.current === requestIdentity)
-          reportError.current?.("dohc could not load chat mentions.", error, retry);
+        if (current()) { setChatWalking(false); reportError.current?.("dohc could not load chat mentions.", error, retry); }
       }
-    })();
-    return () => { active = false; };
-  }, [chatMentionsEnabled, walking, state.graph, state.workspaceId, props.workspaceId, mentionPathsKey, requestIdentity, load]);
+    };
+    void walk();
+    return () => { active = false; clearTimeout(timer); if (frame !== undefined) cancelAnimationFrame(frame); resumePaint?.(); };
+  }, [chatMentionsEnabled, walking, state.graph, state.workspaceId, props.workspaceId, requestIdentity, load]);
 
   const scopedState: GraphState =
     state.workspaceId === props.workspaceId &&
@@ -882,8 +902,10 @@ export function GraphView(props: {
           error: null,
         };
   const baseGraph = scopedState.graph ?? EMPTY_GRAPH;
-  const graph = useMemo(() => chatMentionsEnabled && chatRows?.workspaceId === props.workspaceId && chatRows.graph === baseGraph
-    ? withChatMentions(baseGraph, chatRows.rows) : baseGraph, [baseGraph, chatRows, chatMentionsEnabled, props.workspaceId]);
+  const graph = useMemo(() => chatMentionsEnabled && chatRows?.workspaceId === props.workspaceId
+    ? { ...withChatMentions(baseGraph, chatRows.rows), complete: baseGraph.complete && chatRows.complete,
+      indexBuilding: baseGraph.indexBuilding || chatRows.indexBuilding, mountsCovered: baseGraph.mountsCovered && chatRows.mountsCovered,
+      unchecked: [...new Set([...baseGraph.unchecked, ...chatRows.unchecked])] } : baseGraph, [baseGraph, chatRows, chatMentionsEnabled, props.workspaceId]);
   const rows = useMemo(
     () => visibleGraphNodes(graph, props.activePath, variant),
     [graph, props.activePath, variant],
@@ -958,7 +980,7 @@ export function GraphView(props: {
         </button>
       </div>
 
-      {walking && scopedState.graph ? <p role="status" className="px-3 py-1 text-xs text-muted">Gathering linked mentions</p> : null}
+      {(walking || chatWalking) && scopedState.graph ? <p role="status" className="px-3 py-1 text-xs text-muted">Gathering linked mentions</p> : null}
 
       {scopedState.status === "loading" && !scopedState.graph ? (
         <div className="flex flex-1 items-center justify-center px-4 text-xs text-muted">

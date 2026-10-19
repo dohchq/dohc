@@ -1,3 +1,4 @@
+import { createChatFileMentionsReader } from "./workspaces/chatFileMentions";
 import { createWorkspaceLinksReader } from "./workspaces/workspaceLinks";
 import { linksOperations } from "./ipc/linksOperations";
 import { shareHandoffOperations, shareMountOperations, shareProposalOperations, sharedChannelOperations, relayShareOperations } from "./ipc/shareOperations";
@@ -4763,6 +4764,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
     },
   }),
   links: workspaceLinks,
+  chatFileMentions: (workspace, input) => workspaceChatFileMentions(workspace.workspaceId, input),
   findWorkspace,
   listWorkspaces,
   openWorkspaceActivity,
@@ -6016,6 +6018,34 @@ const stopWorkspaceSync = createWorkspaceSyncStop({
   reopenFailed: workspace => activity.recordSyncPauseReopenFailed(workspace.workspaceId),
 });
 
+async function requireEngineCapture(
+  workspaceOrId: string | RegistryEntry,
+  feature: EngineFeature,
+) {
+  const workspace =
+    typeof workspaceOrId === "string"
+      ? requireWorkspace(workspaceOrId)
+      : workspaceOrId;
+  // Idempotent: guarantees the watcher + capture are live before any
+  // engine operation touches the chain.
+  await openWorkspaceActivity(workspace);
+  const capture = activity.engineCaptureFor(workspace.workspaceId);
+  if (!capture) {
+    throw new Error(captureRefusal(feature));
+  }
+  return { workspace, capture };
+}
+
+const chatScope = createChatScopeCapability({
+  workspaceAuthorities, canonicalWorkspaceFor, requireEngineCapture, linkedChatStoreFor,
+  openWorkspaceActivity, receivedShareEngine, resolveEngineFiles, readOwnedWorkspaceText,
+});
+
+const workspaceChatFileMentions = createChatFileMentionsReader({
+  requireChatScope: chatScope.requireChatScope, syncWorkspaceSharedChannels, readWorkspace: findWorkspace,
+  principalGeneration: () => credentialCacheGeneration,
+});
+
 function registerIpcHandlers(): void {
   registerSystemMotionIpc(operationBoundary, () => systemPreferences.getAnimationSettings());
   registerSystemPrivacySettingsIpc(operationBoundary, process.platform, (url) => shell.openExternal(url));
@@ -6906,28 +6936,6 @@ function registerIpcHandlers(): void {
   // Named versions. Every handler resolves the workspace through
   // requireWorkspace (renderer identity is never trusted) and is gated on the
   // engine capture being attached.
-  async function requireEngineCapture(
-    workspaceOrId: string | RegistryEntry,
-    feature: EngineFeature,
-  ) {
-    const workspace =
-      typeof workspaceOrId === "string"
-        ? requireWorkspace(workspaceOrId)
-        : workspaceOrId;
-    // Idempotent: guarantees the watcher + capture are live before any
-    // engine operation touches the chain.
-    await openWorkspaceActivity(workspace);
-    const capture = activity.engineCaptureFor(workspace.workspaceId);
-    if (!capture) {
-      throw new Error(captureRefusal(feature));
-    }
-    return { workspace, capture };
-  }
-
-  const chatScope = createChatScopeCapability({
-    workspaceAuthorities, canonicalWorkspaceFor, requireEngineCapture, linkedChatStoreFor,
-    openWorkspaceActivity, receivedShareEngine, resolveEngineFiles, readOwnedWorkspaceText,
-  });
 
   registerOperations(operationBoundary, folderAppOfferOperations, {
     getFolderApp: (payload, { operation }) => folderAppDetection.read(operation.workspace, payload.folder),
@@ -6945,7 +6953,7 @@ function registerIpcHandlers(): void {
     assertTrustedSender, chatScope, requireEngineCapture, linkedChatStoreFor, chatWrites,
     stateDir, assertWritableWorkspace, warmCredentialCache, localUserId,
     localInstallationId, currentCredentials: () => cachedCredentials, chatRelayIdentityFor,
-    readWorkspace: findWorkspace,
+    readWorkspace: findWorkspace, currentCredentialGeneration: () => credentialCacheGeneration,
     syncWorkspaceSharedChannels, syncSharedChannelsForChatTarget,
     syncRendererWorkspaceSharedChannels, withRendererWorkspaceOperation, resolveEngineFiles,
     activity, desktopChatBookmarks, notifyRenderer,

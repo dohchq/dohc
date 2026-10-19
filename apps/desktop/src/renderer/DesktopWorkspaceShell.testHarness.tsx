@@ -490,7 +490,7 @@ function makeBaseBridge(
     // no-call pin on that read pass for the wrong reason.
     linksIn: vi.fn(async () => null),
     linksResolve: vi.fn(async () => ({ versionId: "main", results: [], mountsCovered: true })),
-    listChatFileMentions: vi.fn(async () => ({ mentions: [] as never[] })),
+    chatFileMentionsPage: vi.fn(async () => ({ versionId: "main", subject: null, entries: [], unchecked: [], complete: true, indexBuilding: false, mountsCovered: true, sharedChannelRowsUncovered: 0, nextCursor: null })),
     linksEdges: vi.fn(async () => ({ versionId: "main", files: [
       {objectId:"a.md",path:"a.md",title:"A"},{objectId:"b.md",path:"b.md",title:"B"}],
       entries: [{source:"a.md",target:"b.md",kind:"wikilink" as const,ordinal:0}],
@@ -1006,7 +1006,7 @@ export function makeShareBridge(
   for (const call of [
     "listChatChannels",
     "listChannelThreads",
-    "listChatFileMentions",
+    "chatFileMentionsPage",
     "syncDms",
   ] as const) {
     bridge[call].mockRejectedValue(

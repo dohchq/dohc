@@ -1301,7 +1301,7 @@ describe("shared view chats surface", () => {
 
     expect(bridge.listChatChannels).not.toHaveBeenCalled();
     expect(bridge.syncDms).not.toHaveBeenCalled();
-    expect(bridge.listChatFileMentions).not.toHaveBeenCalled();
+    expect(bridge.chatFileMentionsPage).not.toHaveBeenCalled();
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
@@ -1454,7 +1454,7 @@ describe("shared view chats surface", () => {
     expect(bridge.linksEdges).toHaveBeenCalledWith({
       workspaceId: WORKSPACE.workspaceId,
     });
-    expect(bridge.listChatFileMentions).not.toHaveBeenCalled();
+    expect(bridge.chatFileMentionsPage).not.toHaveBeenCalled();
   });
 
   // Ctrl+Alt+B, on its own: whether the shell claims the chord from whatever
@@ -1548,7 +1548,7 @@ describe("shared view chats surface", () => {
   });
 
   // The last ungated chat call. Linked mentions ride on every markdown open
-  // and every window refocus, and `listChatFileMentions` goes through
+  // and every window refocus, and `chatFileMentionsPage` goes through
   // requireEngineCapture like every other Chats call — so a shared view was
   // still issuing one refused call per file open. Its own `.catch` swallowed
   // the refusal, which is exactly why nothing caught it.
@@ -1560,7 +1560,7 @@ describe("shared view chats surface", () => {
     // really mounted.
     await screen.findByTestId("tab-b.md");
     await waitFor(() => expect(bridge.linksIn).toHaveBeenCalled());
-    expect(bridge.listChatFileMentions).not.toHaveBeenCalled();
+    expect(bridge.chatFileMentionsPage).not.toHaveBeenCalled();
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
@@ -1570,9 +1570,9 @@ describe("shared view chats surface", () => {
 
     await screen.findByTestId("tab-b.md");
     await waitFor(() =>
-      expect(bridge.listChatFileMentions).toHaveBeenCalledWith({
+      expect(bridge.chatFileMentionsPage).toHaveBeenCalledWith({
         workspaceId: WORKSPACE.workspaceId,
-        path: "b.md",
+        subject: {path: "b.md"},
       }),
     );
   });
@@ -1626,7 +1626,7 @@ describe("chats surface after a failed capture build", () => {
       "listChatChannels",
       "listChannelThreads",
       "listFileChats",
-      "listChatFileMentions",
+      "chatFileMentionsPage",
       "syncDms",
     ] as const) {
       bridge[call].mockRejectedValue(
@@ -1676,7 +1676,7 @@ describe("chats surface after a failed capture build", () => {
   });
 
   // The linked-mentions panel rides every markdown open, and
-  // listChatFileMentions goes through requireEngineCapture like every other
+  // chatFileMentionsPage goes through requireEngineCapture like every other
   // Chats call. Its own `.catch` swallows the refusal, which is why nothing
   // caught it (the last ungated call, from the other cause).
   it("asks for no chat mentions when a file opens", async () => {
@@ -1687,7 +1687,7 @@ describe("chats surface after a failed capture build", () => {
     // really mounted.
     await screen.findByTestId("tab-b.md");
     await waitFor(() => expect(bridge.linksIn).toHaveBeenCalled());
-    expect(bridge.listChatFileMentions).not.toHaveBeenCalled();
+    expect(bridge.chatFileMentionsPage).not.toHaveBeenCalled();
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 

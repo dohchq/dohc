@@ -346,9 +346,9 @@ test("@restart-durability-capture-before-reopen kept typing survives capture bef
     // This existing read flushes capture before an editor can hold a lease.
     await desktop.page.evaluate(async ({ workspaceId, path }) => {
       const api = (window as unknown as { dohcDesktop: {
-        listChatFileMentions(input: { workspaceId: string; path: string }): Promise<unknown>;
+        chatFileMentionsPage(input: { workspaceId: string; path: string }): Promise<unknown>;
       } }).dohcDesktop;
-      await api.listChatFileMentions({ workspaceId, path });
+      await api.chatFileMentionsPage({ workspaceId, path });
     }, { workspaceId: workspace.workspaceId, path });
     await expect(desktop.page.getByTestId("markdown-editor")).toHaveCount(0);
     await openEngineDoc(desktop.page, path);

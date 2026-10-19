@@ -53,7 +53,7 @@ export {
 } from "./ydoc/ydocWireContract";
 
 export { ChatsLiveAdapter } from "./chats/chatsLiveAdapter";
-export { CHATS_METHOD, decodeChatsResult, type ChatChannel, type ChatChannelSummary, type ChatDispatch, type ChatDispatchClaim, type ChatFileMention, type ChatRecoveriesPage, type ChatRunMessagesPage, type ChatUnreadFileThread } from "./chats/chatsWireContract";
+export { CHATS_METHOD, decodeChatsResult, type ChatChannel, type ChatChannelSummary, type ChatDispatch, type ChatDispatchClaim, type ChatRecoveriesPage, type ChatRunMessagesPage, type ChatUnreadFileThread } from "./chats/chatsWireContract";
 
 export { VersionedLiveAdapter } from "./versioned/versionedLiveAdapter";
 export {

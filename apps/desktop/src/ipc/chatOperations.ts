@@ -32,8 +32,8 @@ import {
   ListChatReactionsResult,
   SetChatReactionPayload,
   SetChatReactionResult,
-  ListChatFileMentionsPayload,
-  ListChatFileMentionsResult,
+  ChatFileMentionsPagePayload,
+  ChatFileMentionsPageResult,
   ListChatMessagesPayload,
   ListChatMessagesResult,
   SendChatMessagePayload,
@@ -150,11 +150,11 @@ export const chatOperations = {
     inactiveMessage: "This workspace is no longer active.",
     payload: SetChatReactionPayload, result: SetChatReactionResult,
   },
-  listChatFileMentions: {
-    capabilityId: "chat.read", channel: "desktop:list-chat-file-mentions",
+  chatFileMentionsPage: {
+    capabilityId: "chat.read", channel: "desktop:chat-file-mentions-page",
     scope: "workspace", guard: "active-workspace",
     inactiveMessage: "Chats stopped because this window changed workspaces.",
-    payload: ListChatFileMentionsPayload, result: ListChatFileMentionsResult,
+    payload: ChatFileMentionsPagePayload, result: ChatFileMentionsPageResult,
   },
   listChatMessages: {
     capabilityId: "chat.read", channel: "desktop:list-chat-messages",
