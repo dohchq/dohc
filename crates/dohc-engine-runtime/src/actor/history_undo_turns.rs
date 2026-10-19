@@ -292,6 +292,13 @@ impl ActorHandle {
                 store
                     .read_with(|conn| conn.execute_batch("BEGIN"))
                     .map_err(StorageError::corrupt_public)?;
+                // Another caller can persist between admission and this snapshot.
+                if let Some((plan, _, _)) =
+                    store.read_with(|conn| load(conn, &w, &o, &r, a.as_deref()))?
+                {
+                    let body = serde_json::to_string(&plan).map_err(|_| corrupt())?;
+                    return Ok::<_, RuntimeError>((plan, body));
+                }
                 let version = VersionedTextStore::new(&mut store)
                     .get_active_version(&w)?
                     .version_id;
