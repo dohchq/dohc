@@ -4471,14 +4471,15 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
           initialUpdate: Y.encodeStateAsUpdate(doc),
           contentKind: "plaintext",
           path: options.path,
-          get head() {
+          head: "absent" as const,
+          // Read first just after the session is installed.
+          get lineage() {
             if (!reportedDeath) {
               reportedDeath = true;
               options.onSessionError?.(reconnectFailure);
             }
             return "absent" as const;
           },
-          lineage: "absent" as const,
           unsettled: false,
           evict: async () => {
             evicts += 1;

@@ -13,12 +13,20 @@ struct Total {
     count: u64,
 }
 thread_local! {
+    static FORCE_ENABLED: Cell<bool> = const { Cell::new(false) };
     static PARENT: Cell<u64> = const { Cell::new(0) };
     static CORRELATION: RefCell<Option<String>> = const { RefCell::new(None) };
     static TOTALS: RefCell<BTreeMap<&'static str, Total>> = const { RefCell::new(BTreeMap::new()) };
 }
 static NEXT: AtomicU64 = AtomicU64::new(1);
+/// Enable the existing fault-injection counters for an actor proof.
+pub fn enable_for_current_thread() {
+    FORCE_ENABLED.set(true);
+}
 fn enabled() -> bool {
+    if FORCE_ENABLED.get() {
+        return true;
+    }
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("DOHC_CAPTURE_PHASE_DIAGNOSTICS").is_ok_and(|v| v == "1"))
 }

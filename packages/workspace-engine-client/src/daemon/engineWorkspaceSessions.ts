@@ -4,6 +4,7 @@ import {
   isDaemonReconnectError,
   isEngineStoreBusyRefusal,
   isWorkspaceUpdatingRefusal,
+  isYdocFileNotReadRefusal,
   isYdocOpenOperationCrashedRefusal,
   isYdocOpenStorageFailureRefusal,
   isYdocSessionBusyRefusal,
@@ -65,7 +66,9 @@ export interface EngineDaemonClientSource {
   onClientChanged?(handler: () => void): () => void;
 }
 
-const INITIAL_CAPTURE_SETTLED_EVENT = "capture.initialSettled";
+// The import's progress wakes a document that waits for its own file; the
+// settle wakes every other fenced read.
+const INITIAL_CAPTURE_WAKE_EVENTS = new Set(["capture.importProgress", "capture.initialSettled"]);
 // Matches the daemon's EARLY_IMPORT_APPLY_DEADLINE. Initial capture is
 // separate from the much shorter budget for recovering a failed transport.
 const INITIAL_CAPTURE_WAIT_MS = 120_000;
@@ -74,11 +77,11 @@ type StoreBusyRetryState = { deadline?: number; attempts: number };
 
 class InitialCaptureBindingChangedError extends Error {}
 
-function isInitialCaptureSettledEvent(
+function isInitialCaptureWake(
   event: Event,
   workspaceId: string,
 ): boolean {
-  if (event.name !== INITIAL_CAPTURE_SETTLED_EVENT) return false;
+  if (!INITIAL_CAPTURE_WAKE_EVENTS.has(event.name)) return false;
   if (typeof event.payload !== "object" || event.payload === null) return false;
   return (event.payload as { workspaceId?: unknown }).workspaceId === workspaceId;
 }
@@ -261,6 +264,7 @@ export function isEngineWorkspaceOpenRefusedError(error: unknown): boolean {
     error instanceof EngineWorkspaceShuttingDownError ||
     error instanceof YdocOpenTimedOutError ||
     isWorkspaceUpdatingRefusal(error) ||
+    isYdocFileNotReadRefusal(error) ||
     isYdocSessionBusyRefusal(error) ||
     isYdocArtifactAssetsPendingRefusal(error) ||
     isYdocArtifactAssetsInvalidRefusal(error) ||
@@ -500,8 +504,8 @@ export class EngineWorkspaceSessions {
           this.activeBudget() !== undefined &&
           binding.client.onEvent
         ) {
-          // Subscribe before the operation: settlement can occur while the
-          // daemon's refusal is travelling back to this client.
+          // Subscribe before the operation: capture can progress or settle
+          // while the daemon's refusal is travelling back to this client.
           initialCaptureWake = new Promise<void | "rebind">((resolve) => {
             unsubscribeClientChanged = this.source.onClientChanged?.(() => {
               try {
@@ -511,7 +515,7 @@ export class EngineWorkspaceSessions {
               }
             });
             unsubscribeInitialCapture = binding.client.onEvent?.((event) => {
-              if (!isInitialCaptureSettledEvent(event, workspace.workspaceId)) return;
+              if (!isInitialCaptureWake(event, workspace.workspaceId)) return;
               let current = false;
               try {
                 current =
@@ -628,8 +632,8 @@ export class EngineWorkspaceSessions {
     checkBinding();
     const bindingSignal = entry.captureWaitController.signal;
     try {
-      // Settlement notifications are advisory. At the bound, allow one
-      // final fenced read; another capture refusal cannot start a new wait.
+      // Capture wakes are advisory. At the bound, allow one final fenced
+      // read; another capture refusal cannot start a new wait.
       const exit = await Effect.runPromiseExit(Effect.raceFirst(
         Effect.promise(() => wake),
         Effect.as(Effect.sleep(deadline - started), "deadline" as const),

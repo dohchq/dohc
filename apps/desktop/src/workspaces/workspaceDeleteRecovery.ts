@@ -24,7 +24,7 @@ const Record = z.object({
   copies: z.array(z.object({
     path: z.string(), dev: z.number(), ino: z.number(), birthtimeMs: z.number(), size: z.number(),
   })).optional(),
-  engine: z.object({ materialized: z.boolean(), momentCount: z.number() }).optional(), progress: UndoResult.optional(), result: UndoResult.optional(),
+  engine: z.object({ materialized: z.boolean(), momentCount: z.number(), notRestored: z.array(z.string()).optional() }).optional(), progress: UndoResult.optional(), result: UndoResult.optional(),
 });
 export type RecoveryRecord = z.infer<typeof Record>;
 export type DeleteRecoveryPlan = { operationId: string; record?: RecoveryRecord; noUndo?: string };
@@ -296,8 +296,8 @@ export async function undoDeleteRecovery(root: string, record: RecoveryRecord, a
       }
     }
     assertCurrent();
-    const receipt = record.tracked ? await engineUndo() : { materialized: true, momentCount: 0 };
-    record.engine = { materialized: receipt.materialized, momentCount: receipt.momentCount };
+    const receipt = record.tracked ? await engineUndo() : { materialized: true, momentCount: 0, notRestored: [] };
+    record.engine = { materialized: receipt.materialized, momentCount: receipt.momentCount, notRestored: [...receipt.notRestored] };
     await saveRecoveryRecord(root, record);
     markChanged();
   }
@@ -306,10 +306,17 @@ export async function undoDeleteRecovery(root: string, record: RecoveryRecord, a
     tracked: { state: record.engine.materialized ? "restored" : "restoring", momentCount: record.engine.momentCount },
     restored: record.progress?.restored ?? [], remaining: record.progress?.remaining.filter(item => !pendingPaths?.has(item.path)) ?? [] };
   if (record.progress) record.progress = result;
+  for (const path of record.engine.notRestored ?? []) {
+    if (!result.remaining.some(item => item.path === path)) result.remaining.push({ path,
+      reason: "dohc could not restore this file. Restore it from History." });
+  }
   const keepSource = new Set<string>();
   const linkedModes = new Map<string, number>();
   const place = async (path: string, empty = false): Promise<void> => {
     assertCurrent();
+    if (record.engine?.notRestored?.includes(path)) {
+      return;
+    }
     const trashPath = `.dohc/trash/${record.staged}${path.slice(record.base.length)}`;
     let retryable = false;
     let folder = empty;

@@ -80,6 +80,7 @@ pub(crate) struct OpenWorkspace {
     collection_projection:
         Arc<Mutex<Option<crate::collection_projection::CollectionProjectionWorker>>>,
     automation_recovery: Arc<Mutex<Option<automation_recovery::AutomationRecovery>>>,
+    undo_recovery: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// Held by every capture reconcile+apply and by versions.setActive across
     /// its forced full scan plus switch transaction. This drains an in-flight
     /// apply and prevents a new one from resolving the destination version
@@ -153,6 +154,7 @@ impl OpenWorkspace {
             projects_collections: self.projects_collections,
             collection_projection: Arc::clone(&self.collection_projection),
             automation_recovery: Arc::clone(&self.automation_recovery),
+            undo_recovery: Arc::clone(&self.undo_recovery),
             capture_apply_gate: Arc::clone(&self.capture_apply_gate),
             capture_holds: Arc::clone(&self.capture_holds),
             session_ops: Arc::clone(&self.session_ops),
@@ -195,7 +197,7 @@ impl OpenWorkspace {
     /// Take and cancel the background tasks without an await point, so an
     /// aborted RPC future cannot leave them running. Return
     /// the join handles for callers that must await the full drain.
-    fn begin_capture_shutdown(&self) -> [Option<tokio::task::JoinHandle<()>>; 4] {
+    fn begin_capture_shutdown(&self) -> [Option<tokio::task::JoinHandle<()>>; 5] {
         self.observation.request_shutdown();
         let projection = lock(&self.collection_projection)
             .take()
@@ -206,7 +208,11 @@ impl OpenWorkspace {
         let recovery = lock(&self.automation_recovery)
             .take()
             .and_then(automation_recovery::AutomationRecovery::begin_shutdown);
+        let undo = lock(&self.undo_recovery)
+            .take()
+            .inspect(|task| task.abort());
         [
+            undo,
             capture,
             recovery,
             projection,
@@ -1266,6 +1272,7 @@ impl EngineService {
         } else {
             None
         };
+        let session_ops = Arc::new(tokio::sync::Mutex::new(()));
         lock(&self.handles).insert(
             handle.clone(),
             Arc::new(OpenWorkspace {
@@ -1286,14 +1293,55 @@ impl EngineService {
                 projects_collections: params.project_collections,
                 collection_projection: Arc::new(Mutex::new(collection_projection)),
                 automation_recovery: Arc::new(Mutex::new(automation_recovery)),
+                undo_recovery: Arc::new(Mutex::new(None)),
                 capture_apply_gate,
                 capture_holds: CaptureHolds::default(),
-                session_ops: Arc::new(tokio::sync::Mutex::new(())),
+                session_ops,
                 cursors_issued: Default::default(),
                 collections_owed: Default::default(),
                 pulls_in_flight: Default::default(),
             }),
         );
+        if requested_mode == WorkspaceOpenMode::Full {
+            let open = self.open(Some(&handle))?;
+            let recovery = open.clone();
+            let fence = self.version_fence();
+            let recovery_handle = handle.clone();
+            *lock(&open.undo_recovery) = Some(tokio::spawn(async move {
+                let outcome = async {
+                    let pending = recovery
+                        .actor
+                        .pending_history_undos(recovery.workspace_id.clone())
+                        .await
+                        .map_err(map_runtime)?;
+                    for (operation_id, request_id, author_json) in pending {
+                        let cancellation = OperationCancellation::new(&RequestContext::unbounded());
+                        if let Err(error) = fence
+                            .fence_version_snapshot(
+                                &cancellation,
+                                recovery.clone(),
+                                &recovery_handle,
+                                "history.undo",
+                                "Undo settlement",
+                                super::versions::VersionFenceIntent::Undo {
+                                    operation_id,
+                                    request_id,
+                                    author_json,
+                                },
+                            )
+                            .await
+                        {
+                            eprintln!("engine: Undo recovery will retry on open: {error:?}");
+                        }
+                    }
+                    Ok::<_, WireError>(())
+                }
+                .await;
+                if let Err(error) = outcome {
+                    eprintln!("engine: Undo recovery will retry on open: {error:?}");
+                }
+            }));
+        }
         open_guard.disarm();
         if abandoned_pull
             && let Ok(opened) = self.open(Some(&handle))
@@ -1459,6 +1507,10 @@ impl EngineService {
         release
     }
 }
+
+#[cfg(test)]
+#[path = "history_undo_recovery_tests.rs"]
+mod history_undo_recovery_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2351,6 +2403,7 @@ mod tests {
                 lock(&open.automation_recovery).is_some(),
                 seed_claim && !read_only
             );
+            assert_eq!(lock(&open.undo_recovery).is_some(), !read_only);
 
             // The synchronous cleanup fallback has no Tokio runtime. Taking
             // background tasks must cancel through their captured runtime handle.
@@ -2359,15 +2412,24 @@ mod tests {
                 .expect("background cancellation needs no runtime");
             assert_eq!(
                 tasks.iter().flatten().count(),
-                usize::from(capture_enabled) + usize::from(seed_claim && !read_only) + 1,
+                usize::from(capture_enabled)
+                    + usize::from(seed_claim && !read_only)
+                    + usize::from(!read_only)
+                    + 1,
             );
-            for task in tasks.into_iter().flatten() {
-                task.await
-                    .expect("background task joins after cancellation");
+            for (index, task) in tasks.into_iter().enumerate() {
+                let Some(task) = task else { continue };
+                if let Err(error) = task.await {
+                    assert!(
+                        index == 0 && error.is_cancelled(),
+                        "background task joins after cancellation: {error}"
+                    );
+                }
             }
             let open = service.open(Some(&handle)).expect("binding still open");
             assert!(lock(&open.capture).is_none());
             assert!(lock(&open.automation_recovery).is_none());
+            assert!(lock(&open.undo_recovery).is_none());
             if capture_enabled {
                 let attached = service
                     .workspace_open(

@@ -27,7 +27,9 @@ use crate::reconcile::{CaptureOp, IngestReason, ReconcileController, ReconcilePl
 use dohc_engine_storage::FaultInjector;
 #[cfg(feature = "fault-injection")]
 use dohc_engine_storage::FaultPoint;
-use std::collections::BTreeSet;
+use std::borrow::Cow;
+use std::collections::{BTreeSet, VecDeque};
+use std::sync::Mutex;
 
 /// A contained per-path domain apply failure. It is deliberately content-free.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -199,81 +201,154 @@ pub fn apply_reconcile_plan(
     sink: &mut dyn CaptureSink,
     faults: &dyn FaultInjector,
 ) -> CaptureApplyResult {
-    apply_reconcile_plan_cancellable(plan, sink, faults, &CancellationToken::new())
+    apply_reconcile_plan_cancellable(plan, sink, faults, &CancellationToken::new(), None)
+}
+
+/// The most waiting paths an import keeps. Further requests are dropped, and
+/// those callers open once the import settles.
+const MAX_IMPORT_PRIORITY_REQUESTS: usize = 16;
+
+/// Lets callers waiting on single paths steer a running import of new files.
+///
+/// A request moves its path's pending ingest ahead of the rest of an all-Added
+/// plan and applies it alone. `committed` runs after every durable unit, so a
+/// caller that subscribed before its last check knows when to check again.
+/// Both are advisory: a dropped request or wake only delays the caller until
+/// the import settles.
+pub struct ImportPriority {
+    requested: Mutex<VecDeque<String>>,
+    committed: Box<dyn Fn() + Send + Sync>,
+}
+
+impl ImportPriority {
+    pub fn new(committed: impl Fn() + Send + Sync + 'static) -> Self {
+        Self {
+            requested: Mutex::new(VecDeque::new()),
+            committed: Box::new(committed),
+        }
+    }
+
+    /// Ask the running import to capture `path` next.
+    pub fn request(&self, path: &str) {
+        let mut requested = self
+            .requested
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if requested.len() < MAX_IMPORT_PRIORITY_REQUESTS && !requested.iter().any(|p| p == path) {
+            requested.push_back(path.to_owned());
+        }
+    }
+
+    fn take(&self) -> Option<String> {
+        self.requested
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop_front()
+    }
 }
 
 /// Apply a prepared plan, stopping cooperatively between bounded sink calls.
 /// The unprocessed suffix is reported failed so acknowledgement leaves it
 /// dirty for the next startup instead of losing it during close.
+///
+/// `priority` reorders only a plan of Added ingests, which are independent of
+/// each other. A plan with retires keeps its order, so a respelled path's
+/// retire still runs before its new spelling's ingest.
 pub fn apply_reconcile_plan_cancellable(
     plan: &ReconcilePlan,
     sink: &mut dyn CaptureSink,
     faults: &dyn FaultInjector,
     cancel: &CancellationToken,
+    priority: Option<&ImportPriority>,
 ) -> CaptureApplyResult {
     let mut receipt = Receipt::with_capacity(plan.ops.len());
+    let reorderable = priority.is_some()
+        && plan.ops.iter().all(|op| {
+            matches!(
+                op,
+                CaptureOp::Ingest {
+                    reason: IngestReason::Added,
+                    ..
+                }
+            )
+        });
+    let committed = || {
+        if let Some(priority) = priority {
+            (priority.committed)();
+        }
+    };
+    let mut ops = Cow::Borrowed(plan.ops.as_slice());
     // Peers must receive a respelled path's retire before the new spelling's
     // ingest: on a disk that ignores case, a later retire deletes the new
     // file. When that retire has to wait, so does the ingest. Respelled
     // retires come first in a plan, so the set is complete once they ran.
     let mut unretired: BTreeSet<String> = BTreeSet::new();
-    let next_waiting = |from: usize, unretired: &BTreeSet<String>| {
+    let next_waiting = |ops: &[CaptureOp], from: usize, unretired: &BTreeSet<String>| {
         if unretired.is_empty() {
-            return plan.ops.len();
+            return ops.len();
         }
-        plan.ops[from..]
+        ops[from..]
             .iter()
             .position(|op| {
                 matches!(op, CaptureOp::Ingest { path, .. }
                     if unretired.contains(&path_collision_key(path)))
             })
-            .map_or(plan.ops.len(), |offset| from + offset)
+            .map_or(ops.len(), |offset| from + offset)
     };
-    let mut waiting = plan.ops.len();
+    let mut waiting = ops.len();
     let mut waits_known = true;
     let mut cursor = 0;
     let mut try_batch = true;
-    while cursor < plan.ops.len() {
+    while cursor < ops.len() {
         if cancel.is_cancelled() {
-            receipt.fail_all(&plan.ops[cursor..]);
+            receipt.fail_all(&ops[cursor..]);
             break;
+        }
+        let mut alone = false;
+        if reorderable
+            && let Some(path) = priority.and_then(ImportPriority::take)
+            && let Some(offset) = ops[cursor..].iter().position(|op| op.path() == path)
+        {
+            ops.to_mut()[cursor..=cursor + offset].rotate_right(1);
+            alone = true;
         }
         // Only ingests wait, so the boundary is found once the loop reaches
         // one, after every respelled retire before it ran.
-        if !waits_known && matches!(&plan.ops[cursor], CaptureOp::Ingest { .. }) {
-            waiting = next_waiting(cursor, &unretired);
+        if !waits_known && matches!(&ops[cursor], CaptureOp::Ingest { .. }) {
+            waiting = next_waiting(&ops, cursor, &unretired);
             waits_known = true;
         }
         if cursor == waiting {
-            receipt.fail_all(&plan.ops[cursor..=cursor]);
+            receipt.fail_all(&ops[cursor..=cursor]);
             cursor += 1;
-            waiting = next_waiting(cursor, &unretired);
+            waiting = next_waiting(&ops, cursor, &unretired);
             continue;
         }
-        if try_batch {
-            match sink.ingest_batch(&plan.ops[cursor..waiting]) {
+        if try_batch && !alone {
+            match sink.ingest_batch(&ops[cursor..waiting]) {
                 Some(BatchIngestResult::Committed(outcomes)) => {
                     let count = outcomes.len();
-                    if !valid_batch_prefix(&plan.ops[cursor..waiting], count) {
-                        receipt.fail_all(&plan.ops[cursor..]);
+                    if !valid_batch_prefix(&ops[cursor..waiting], count) {
+                        receipt.fail_all(&ops[cursor..]);
                         break;
                     }
-                    let boundary = &plan.ops[cursor + count - 1];
+                    let boundary = &ops[cursor + count - 1];
                     if should_crash(faults) {
                         return receipt.crashed(boundary.path());
                     }
-                    for (op, outcome) in plan.ops[cursor..cursor + count].iter().zip(outcomes) {
+                    for (op, outcome) in ops[cursor..cursor + count].iter().zip(outcomes) {
                         receipt.fold(op, outcome.map(Applied::from));
                     }
+                    committed();
                     cursor += count;
                     continue;
                 }
                 Some(BatchIngestResult::Uncertain { attempted }) => {
-                    if !valid_batch_prefix(&plan.ops[cursor..waiting], attempted) {
-                        receipt.fail_all(&plan.ops[cursor..]);
+                    if !valid_batch_prefix(&ops[cursor..waiting], attempted) {
+                        receipt.fail_all(&ops[cursor..]);
                         break;
                     }
-                    receipt.fail_all(&plan.ops[cursor..cursor + attempted]);
+                    receipt.fail_all(&ops[cursor..cursor + attempted]);
                     cursor += attempted;
                     continue;
                 }
@@ -281,7 +356,7 @@ pub fn apply_reconcile_plan_cancellable(
             }
         }
 
-        let op = &plan.ops[cursor];
+        let op = &ops[cursor];
         let outcome = match op {
             CaptureOp::Ingest {
                 path,
@@ -311,7 +386,11 @@ pub fn apply_reconcile_plan_cancellable(
         if outcome.is_ok() && should_crash(faults) {
             return receipt.crashed(op.path());
         }
+        let applied = outcome.is_ok();
         receipt.fold(op, outcome);
+        if applied {
+            committed();
+        }
         cursor += 1;
     }
     receipt.finish(plan.degraded)

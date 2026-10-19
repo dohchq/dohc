@@ -49,11 +49,18 @@ fn history_undo_result_json(result: &dohc_engine_runtime::HistoryUndoResult) -> 
     json!({
         "operationId": result.operation_id, "versionId": result.version_id,
         "momentCount": result.moments.len(), "compensationOperationId": result.compensation_operation_id,
-        "deduped": result.deduped, "materialized": result.materialized,
+        "deduped": result.deduped, "materialized": result.materialized, "notRestored": result.not_restored,
     })
 }
 
-enum VersionFenceIntent {
+pub(super) struct VersionFence {
+    sessions: Arc<Mutex<HashMap<String, YdocSession>>>,
+    leases: dohc_engine_collab::LeaseRegistry,
+    self_writes: SelfWriteSuppression,
+    events: EngineEvents,
+    capture_apply_probe: Option<capture_driver::CaptureApplyProbe>,
+}
+pub(super) enum VersionFenceIntent {
     Undo {
         operation_id: String,
         request_id: String,
@@ -68,7 +75,7 @@ enum VersionFenceIntent {
     },
 }
 
-enum VersionFenceOutcome {
+pub(super) enum VersionFenceOutcome {
     UndoCommitted(dohc_engine_runtime::HistoryUndoResult),
     AlreadyActive,
     CreateReplay(VersionRecord),
@@ -319,6 +326,17 @@ pub(super) fn version_record_json(version: &VersionRecord) -> Value {
 }
 
 impl EngineService {
+    pub(super) fn version_fence(&self) -> VersionFence {
+        VersionFence {
+            sessions: self.sessions.clone(),
+            leases: self.leases.clone(),
+            self_writes: self.self_writes.clone(),
+            events: self.events.clone(),
+            capture_apply_probe: self.capture_apply_probe.clone(),
+        }
+    }
+}
+impl VersionFence {
     /// Acquire the capture and session barriers in the one per-workspace order
     /// used by version fencing and workspace teardown.
     async fn acquire_workspace_barriers(
@@ -369,7 +387,8 @@ impl EngineService {
             _sessions: sessions,
         })
     }
-
+}
+impl EngineService {
     /// Acquire the ordering guard shared with `ydoc.open` before probing a
     /// path lease. The caller must retain the returned owned guard until its
     /// actor mutation has completed: check-without-lease -> mutation and
@@ -479,6 +498,7 @@ impl EngineService {
             return Ok(version_record_json(&version));
         }
         let fence = self
+            .version_fence()
             .fence_version_snapshot(
                 &cancellation,
                 open,
@@ -526,23 +546,8 @@ impl EngineService {
         let request_id = crate::rpc::request::required_idempotency_key(request.idempotency_key)?;
         let author_json = crate::rpc::request::validated_author(params.author.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        if let Some(replay) = Self::read_under_ctx(
-            &cancellation,
-            "history.undo (availability)",
-            open.actor.preflight_history_undo(
-                open.workspace_id.clone(),
-                params.operation_id.clone(),
-                request_id.clone(),
-                author_json.clone(),
-            ),
-        )
-        .await?
-        {
-            return Ok(history_undo_result_json(
-                &self.resume_history_undo(&open, replay).await,
-            ));
-        }
         let result = self
+            .version_fence()
             .fence_version_snapshot(
                 &cancellation,
                 open,
@@ -561,7 +566,8 @@ impl EngineService {
             _ => unreachable!("Undo fence returns its own result"),
         }
     }
-
+}
+impl VersionFence {
     async fn resume_history_undo(
         &self,
         open: &Arc<OpenWorkspace>,
@@ -621,10 +627,9 @@ impl EngineService {
     /// Y.Doc/session mutation gate — the same helper used by workspace.close.
     /// Once both are held, no capture apply or session admission can straddle
     /// the session sweep, forced reconcile, and version transaction. After the
-    /// fenced preflight, the destructive continuation moves into an owned task:
-    /// dropping the request future detaches it instead of releasing either
-    /// guard over a partially completed switch.
-    async fn fence_version_snapshot(
+    /// fenced preflight, fork and switch continue in an owned task. Undo runs
+    /// inline on the request cancellation token and stops between committed turns.
+    pub(super) async fn fence_version_snapshot(
         &self,
         cancellation: &OperationCancellation,
         open: Arc<OpenWorkspace>,
@@ -643,7 +648,7 @@ impl EngineService {
                 request_id,
                 author_json,
             } => {
-                if let Some(replay) = Self::read_under_ctx(
+                if let Some(replay) = EngineService::read_under_ctx(
                     cancellation,
                     "history.undo (fenced availability)",
                     open.actor.preflight_history_undo(
@@ -655,10 +660,12 @@ impl EngineService {
                 )
                 .await?
                 {
-                    return Ok(VersionFenceOutcome::UndoCommitted(replay));
+                    return Ok(VersionFenceOutcome::UndoCommitted(
+                        self.resume_history_undo(&open, replay).await,
+                    ));
                 }
                 (
-                    Self::read_under_ctx(
+                    EngineService::read_under_ctx(
                         cancellation,
                         "history.undo (active version)",
                         open.actor.active_version(open.workspace_id.clone()),
@@ -673,7 +680,7 @@ impl EngineService {
                 // held: a competing create may have won between the cheap
                 // outer check and acquisition. Reject or replay before any
                 // session is closed.
-                if let Some(version) = Self::read_under_ctx(
+                if let Some(version) = EngineService::read_under_ctx(
                     cancellation,
                     "versions.createNamed (fenced preflight)",
                     open.actor
@@ -683,7 +690,7 @@ impl EngineService {
                 {
                     return Ok(VersionFenceOutcome::CreateReplay(version));
                 }
-                let active = Self::read_under_ctx(
+                let active = EngineService::read_under_ctx(
                     cancellation,
                     "versions.createNamed (active version)",
                     open.actor.active_version(open.workspace_id.clone()),
@@ -694,7 +701,7 @@ impl EngineService {
             VersionFenceIntent::Switch {
                 target_version_id, ..
             } => {
-                let active = Self::read_under_ctx(
+                let active = EngineService::read_under_ctx(
                     cancellation,
                     "versions.setActive (fenced active recheck)",
                     open.actor.active_version(open.workspace_id.clone()),
@@ -709,7 +716,7 @@ impl EngineService {
 
         let undo_group = if let VersionFenceIntent::Undo { operation_id, .. } = &intent {
             Some(
-                Self::read_under_ctx(
+                EngineService::read_under_ctx(
                     cancellation,
                     "history.undo (scope)",
                     open.actor
@@ -759,7 +766,7 @@ impl EngineService {
             .collect();
 
         if let Some(source_version_id) = fork_source_version_id.as_ref()
-            && let Some(content_kind) = Self::read_under_ctx(
+            && let Some(content_kind) = EngineService::read_under_ctx(
                 cancellation,
                 "versions.createNamed (source ydoc preflight)",
                 open.actor.ydoc_version_unsettled_content_kind(
@@ -811,9 +818,15 @@ impl EngineService {
             })),
         };
         let probe = self.capture_apply_probe.clone();
-        let fence = tokio::spawn(async move {
+        let undo = matches!(&intent, VersionFenceIntent::Undo { .. });
+        let request_token = cancellation.token();
+        let fence = async move {
             let _barriers = barriers;
-            let token = CancellationToken::new();
+            let token = if undo {
+                request_token
+            } else {
+                CancellationToken::new()
+            };
             for session_id in session_ids {
                 close_ydoc_session_for_version_fence(
                     &sessions,
@@ -933,20 +946,21 @@ impl EngineService {
                         })
                         .collect::<Result<std::collections::HashMap<_, _>, WireError>>()?;
                     let placement_now = now_ms()?;
-                    let result = open
-                        .actor
-                        .history_undo_commit(
-                            open.workspace_id.clone(),
-                            operation_id,
-                            request_id,
-                            author_json,
-                            open.root.clone(),
-                            Arc::new(NoFaults),
-                            placement_now,
-                        )
-                        .await
-                        .map_err(map_runtime)?;
                     drop(_barriers);
+                    let result = Box::pin(open.actor.history_undo_in_turns(
+                        open.workspace_id.clone(),
+                        operation_id,
+                        request_id,
+                        author_json,
+                        open.root.clone(),
+                        Arc::new(NoFaults),
+                        placement_now,
+                        [open.capture_apply_gate.clone(), open.session_ops.clone()],
+                        Arc::new(self_writes.scoped(&open.root)),
+                        token,
+                    ))
+                    .await
+                    .map_err(map_runtime)?;
                     let pending = result.clone();
                     tokio::spawn(async move {
                         if let Some(probe) = &probe {
@@ -1030,13 +1044,18 @@ impl EngineService {
                 }
             };
             Ok(VersionFenceOutcome::Committed(version))
-        });
-        // The fence ignores cancellation once it starts: answer with its outcome.
-        fence
+        };
+        if undo {
+            // Fork and switch share this future type with the inline Undo continuation.
+            return Box::pin(fence).await;
+        }
+        // Version switches finish even if their request leaves.
+        tokio::spawn(fence)
             .await
             .map_err(|_| WireError::new(ErrorCode::Internal, "version fence task failed"))?
     }
-
+}
+impl EngineService {
     pub(super) async fn versions_compare_files(
         &self,
         ctx: &RequestContext,
@@ -1179,6 +1198,7 @@ impl EngineService {
         }
 
         let fence = self
+            .version_fence()
             .fence_version_snapshot(
                 &cancellation,
                 open,
@@ -1281,12 +1301,12 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn history_operation_vacated_path_is_reserved_during_placement() {
+    async fn history_operation_restored_path_is_leased_during_final_placement() {
         undo_placement_proof(1).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn history_operation_retry_held_during_partial_placement() {
+    async fn history_operation_retry_held_after_immediate_rename_placement() {
         undo_placement_proof(2).await;
     }
 
@@ -1463,13 +1483,13 @@ mod tests {
         .unwrap();
         if mode == 1 {
             let admission = service
-                .ensure_path_not_leased(&open, "main", "new.md")
+                .ensure_path_not_leased(&open, "main", "old.md")
                 .await;
             if admission.is_ok() {
                 probe.release_undo_placement();
                 let _ = undo.await;
                 service.workspace_close(Some(handle)).await.unwrap();
-                panic!("a vacated path with pending Undo deletion must refuse writes");
+                panic!("the restored object must stay leased until final placement");
             }
         }
         let reply = tokio::time::timeout(Duration::from_secs(2), &mut undo).await;
@@ -1481,8 +1501,8 @@ mod tests {
         }
         let result = reply.unwrap().unwrap().unwrap();
         assert_eq!(result["materialized"], false);
-        assert!(scratch.path().join("new.md").exists());
-        assert!(!scratch.path().join("old.md").exists());
+        assert!(scratch.path().join("old.md").exists());
+        assert!(!scratch.path().join("new.md").exists());
         if mode == 2 {
             let replay = open
                 .actor
@@ -1496,23 +1516,8 @@ mod tests {
                 .unwrap()
                 .unwrap();
             let member = &replay.moments[0];
-            let id = dohc_engine_domain::binary_rollback_job_identity(
-                "undo-placement",
-                "main",
-                &member.moment_id,
-            );
-            open.actor
-                .materialize_replay_selected_for_fence(
-                    open.root.clone(),
-                    "undo-placement".into(),
-                    Arc::new(service.self_writes.scoped(&open.root)),
-                    vec![dohc_engine_domain::binary_rename_write_job_id(&id)],
-                    5,
-                )
-                .await
-                .unwrap();
             assert!(scratch.path().join("old.md").exists());
-            assert!(scratch.path().join("new.md").exists());
+            assert!(!scratch.path().join("new.md").exists());
             let retried = service
                 .capture_retry_held(
                     &RequestContext::unbounded(),
@@ -1527,10 +1532,7 @@ mod tests {
                 std::fs::read_to_string(scratch.path().join("old.md")).unwrap(),
                 "Content"
             );
-            assert_eq!(
-                std::fs::read_to_string(scratch.path().join("new.md")).unwrap(),
-                "Content"
-            );
+            assert!(!scratch.path().join("new.md").exists());
             let pending = open
                 .actor
                 .preflight_history_undo(
@@ -1542,7 +1544,10 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            assert!(!pending.materialized);
+            assert!(
+                pending.materialized,
+                "the rename was placed before the reply"
+            );
             assert_eq!(pending.moments[0].moment_id, member.moment_id);
             assert_eq!(
                 open.actor
@@ -1612,7 +1617,7 @@ mod tests {
             .expect("committed retry must not wait for placement")
             .expect("committed retry must not reconcile again");
         assert_eq!(retry["deduped"], true);
-        assert_eq!(retry["materialized"], false);
+        assert_eq!(retry["materialized"], true);
         assert_eq!(
             retry["compensationOperationId"],
             result["compensationOperationId"]
