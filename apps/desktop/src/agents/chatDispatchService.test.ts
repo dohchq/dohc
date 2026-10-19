@@ -30,6 +30,7 @@ import {
   EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 import { createTestScratch } from "../workspaces/testTemp";
+import { deferred } from "../testing/deferred";
 import {
   APP_QUIT_EXIT_CODE,
   CHAT_DISPATCH_BUDGET_MAX,
@@ -54,6 +55,8 @@ import { UNNAMED_AGENT_ID } from "./activeAgentRun";
 
 const WORKSPACE_ID = "workspace-chat-dispatch";
 const CHAT_START_MS = Date.parse("2026-07-10T04:05:06.000Z");
+
+type ChatDispatchServiceOptions = Parameters<typeof createChatDispatchService>[0];
 
 interface SpawnCall {
   command: string;
@@ -143,6 +146,8 @@ interface Fixture {
   chat: LinkedChatStore;
   dispatch: AwaitableAgentDispatchStore;
   service: ChatDispatchService;
+  // What built the service, so a test can start another one on the same engine.
+  serviceOptions: ChatDispatchServiceOptions;
   runner: RunnerSettings;
   spawnCalls: SpawnCall[];
   killCalls: Array<{ pid: number; signal: NodeJS.Signals }>;
@@ -547,7 +552,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     closeDispatch,
   } = dispatchDaemon;
 
-  const service = createChatDispatchService({
+  const serviceOptions: ChatDispatchServiceOptions = {
     workspaceFor: (workspaceId) => (workspaceId === WORKSPACE_ID ? workspace : null),
     listOpenWorkspaces: () => [],
     listSyncWorkspaces: () =>
@@ -645,7 +650,8 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
         },
       },
     },
-  });
+  };
+  const service = createChatDispatchService(serviceOptions);
 
   const fixture: Fixture = {
     root,
@@ -655,6 +661,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     chat,
     dispatch,
     service,
+    serviceOptions,
     runner,
     spawnCalls,
     killCalls,
@@ -2787,6 +2794,88 @@ describe("chatDispatchService", () => {
       signal: "SIGKILL",
     });
     expect(fixture.errors).toContain(persistenceError);
+  });
+
+  it("admits no scan after stop and never looks up the workspace", async () => {
+    const fixture = await createFixture();
+    const workspaceFor = vi.fn(fixture.serviceOptions.workspaceFor);
+    const service = createChatDispatchService({ ...fixture.serviceOptions, workspaceFor });
+    service.start();
+    await service.stop();
+    await createAgentThread(fixture, { body: "Asked while dohc quits.", authorUserId: "user_local" });
+    const requests = fixture.dispatchRequests.length;
+
+    await service.scanWorkspace(WORKSPACE_ID);
+
+    expect(workspaceFor).not.toHaveBeenCalled();
+    expect(fixture.dispatchRequests).toHaveLength(requests);
+    expect(fixture.spawnCalls).toEqual([]);
+    expect(fixture.errors).toEqual([]);
+  });
+
+  it("skips a scan queued before stop without looking up the workspace", async () => {
+    const fixture = await createFixture();
+    const scanning = deferred();
+    const held = deferred();
+    let authorityClosing = false;
+    const workspaceFor = vi.fn((workspaceId: string) => {
+      if (authorityClosing) throw new Error("Workspace authority owner is closing.");
+      return fixture.serviceOptions.workspaceFor(workspaceId);
+    });
+    const service = createChatDispatchService({
+      ...fixture.serviceOptions,
+      workspaceFor,
+      identityFor: async (workspace) => {
+        scanning.resolve();
+        await held.promise;
+        return await fixture.serviceOptions.identityFor(workspace);
+      },
+    });
+    service.start();
+    const running = service.scanWorkspace(WORKSPACE_ID);
+    await scanning.promise;
+    const queued = service.scanWorkspace(WORKSPACE_ID);
+    const stopping = service.stop();
+    // From here a workspace lookup would ask authority that quit is closing.
+    authorityClosing = true;
+    held.resolve();
+
+    await Promise.all([running, queued, stopping]);
+    expect(workspaceFor).toHaveBeenCalledOnce();
+    expect(fixture.spawnCalls).toEqual([]);
+    expect(fixture.errors).toEqual([]);
+  });
+
+  it("keeps a trigger recorded after stop for the next start, which runs it once", async () => {
+    const fixture = await createFixture();
+    await activate(fixture);
+    await fixture.service.stop();
+    // A scan never queues an agent's own message, so only the explicit
+    // record can, as an automation wake's record does.
+    const wake = await createAgentThread(fixture, { body: "Woken as dohc quits.", actor: "agent" });
+    const trigger = { workspaceId: WORKSPACE_ID, triggerMessageId: wake.messageId, threadId: wake.threadId };
+    await fixture.dispatch.recordTrigger(trigger);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    expect(fixture.spawnCalls).toEqual([]);
+    expect((await fixture.dispatch.listPending(WORKSPACE_ID)).map((pending) => pending.triggerMessageId))
+      .toEqual([wake.messageId]);
+
+    const restarted = createChatDispatchService(fixture.serviceOptions);
+    restarted.start();
+    try {
+      await restarted.scanWorkspace(WORKSPACE_ID);
+      expect(fixture.spawnCalls).toHaveLength(1);
+      expect((await fixture.dispatch.openRuns(WORKSPACE_ID)).map((open) => open.run.triggerMessageId))
+        .toEqual([wake.messageId]);
+      // Recording the same wake again neither queues it again nor starts another run.
+      await fixture.dispatch.recordTrigger(trigger);
+      expect(await fixture.dispatch.listPending(WORKSPACE_ID)).toEqual([]);
+      await restarted.scanWorkspace(WORKSPACE_ID);
+      expect(fixture.spawnCalls).toHaveLength(1);
+    } finally {
+      for (const call of fixture.spawnCalls) call.process.markExitedSilently();
+      await restarted.stop();
+    }
   });
 
   it("times out a run, posts the timeout notice, and escalates its process group", async () => {

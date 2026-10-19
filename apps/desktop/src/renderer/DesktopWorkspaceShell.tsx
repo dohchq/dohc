@@ -670,7 +670,7 @@ export function DesktopWorkspaceShell(props: {
   // `openWorkspace` installs main's exact renderer session before it waits
   // for watcher readiness. Its response is the renderer's existing proof that
   // both happened; there is no separate admission IPC. Exact-session bootstrap
-  // reads that lose the admission race retry after that proof. The local
+  // reads wait for that proof before they reach main. The local
   // generation also keeps an A -> B -> A prop sequence from reusing A's earlier
   // proof (DesktopRoot normally gives each workspace a fresh keyed shell).
   const workspaceSelection = useRef({ workspaceId, generation: 0 });
@@ -1196,11 +1196,12 @@ export function DesktopWorkspaceShell(props: {
     setSearchScrollTarget((current) => (current?.nonce === nonce ? null : current));
   }, []);
 
-  // Restore per-workspace workbench state from .dohc/ui-state.json. Defaults
-  // render immediately (launch budgets key off shell visibility); the stored
-  // state merges when the IPC resolves: it applies only if the user touched
-  // nothing in the meantime — a pre-load user action wins (and gets an
-  // immediate write, since wb may never change again to arm the debounced
+  // Restore per-workspace workbench state from .dohc/ui-state.json. The shell
+  // renders at once under the opening cover (launch budgets key off shell
+  // visibility); the cover lifts in the commit that applies the stored state,
+  // or the defaults when it is missing or unreadable. The stored state applies
+  // only if the user touched nothing in the meantime — a pre-load user action
+  // wins (and gets an immediate write, since wb may never change again to arm the debounced
   // one). The touched flag is a ref set synchronously inside every workbench
   // mutation (mutateWb below): comparing committed state against defaults
   // would race React's commit — a queued-but-uncommitted user action would
@@ -1218,6 +1219,10 @@ export function DesktopWorkspaceShell(props: {
     selectionGeneration: number;
     waitsForFile: boolean;
   } | null>(null);
+  // Lift the opening cover in the same commit as the saved layout or defaults.
+  // Admission and the saved-layout read never wait on this state.
+  const workbenchRestored =
+    restoredSurfaceCommit?.selectionGeneration === workspaceSelectionGeneration;
   // The tab paths the stored state restored — the only ones a file listing is
   // allowed to close. Empty until the load applies, and empty forever when the
   // user acted first and the stored tabs were discarded. STATE, not a ref: the
@@ -1358,13 +1363,11 @@ export function DesktopWorkspaceShell(props: {
 
   useAsyncResponseEffect(
     async () => {
-      try {
-        return await bridge().getWorkspaceUiState({ workspaceId });
-      } catch (error) {
-        await workspaceAdmission.promise;
-        if (workspaceAdmission.superseded) throw error;
-        return bridge().getWorkspaceUiState({ workspaceId });
+      await workspaceAdmission.promise;
+      if (workspaceAdmission.superseded) {
+        throw new DOMException("The workspace selection changed.", "AbortError");
       }
+      return bridge().getWorkspaceUiState({ workspaceId });
     },
     {
       onSuccess: (stored) => {
@@ -5299,7 +5302,7 @@ export function DesktopWorkspaceShell(props: {
         />
         <div
           data-testid="workspace-workbench"
-          inert={!workspaceIsReady || storeUpdateRequired ? true : undefined}
+          inert={!workbenchRestored || storeUpdateRequired ? true : undefined}
           className="flex min-w-0 flex-1"
         >
 
@@ -5956,7 +5959,7 @@ export function DesktopWorkspaceShell(props: {
             />
           </div>
         </div>
-      ) : !workspaceIsReady ? (
+      ) : !workbenchRestored ? (
         <div
           data-testid="workspace-preparing"
           role="status"
@@ -5965,7 +5968,9 @@ export function DesktopWorkspaceShell(props: {
         >
           <RefreshCw size={16} aria-hidden className="animate-spin text-subtle" />
           <p className="text-sm font-medium text-ink">Preparing this workspace</p>
-          <p className="text-xs text-muted">
+          {/* The check is over while the saved layout loads. Hidden, not
+              removed, so the heading does not move. */}
+          <p className={`text-xs text-muted ${workspaceIsReady ? "invisible" : ""}`}>
             dohc is checking your existing files before editing starts.
           </p>
         </div>

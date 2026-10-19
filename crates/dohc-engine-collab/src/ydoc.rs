@@ -3438,7 +3438,8 @@ fn parse_markdown_blocks_at<'src>(
                 || (in_list && next.trim_end_matches([' ', '\t']) == "-")
                 || list_marker(next, paragraph_reading).is_some_and(|marker| {
                     (!marker.text.trim().is_empty() || matches!(marker.kind, ListKind::Task(_)))
-                        && (!matches!(marker.kind, ListKind::Ordered(_)) || marker.start == 1)
+                        && (!matches!(marker.kind, ListKind::Ordered(_))
+                            || matches!(marker.spelling, "1." | "1)"))
                 })
                 || parse_heading(next).is_some()
                 || (tables && table_starts(&lines[index..]))
@@ -3863,6 +3864,7 @@ enum ListKind {
 #[derive(Clone, Copy)]
 struct ListMarker<'a> {
     kind: ListKind,
+    spelling: &'a str,
     indent: usize,
     start: i64,
     width: usize,
@@ -3914,6 +3916,7 @@ fn list_marker(line: &str, reading: MarkdownReading) -> Option<ListMarker<'_>> {
             None
         };
         return Some(ListMarker {
+            spelling: &rest[..1],
             kind: if task.is_some() {
                 ListKind::Task(bullet)
             } else {
@@ -3939,6 +3942,7 @@ fn list_marker(line: &str, reading: MarkdownReading) -> Option<ListMarker<'_>> {
         0
     };
     Some(ListMarker {
+        spelling: &rest[..width - 1],
         kind: ListKind::Ordered(rest.as_bytes()[width - 2] as char),
         indent,
         start,
@@ -3954,6 +3958,7 @@ fn structural_item_start(text: &str) -> bool {
         matches!(
             byte,
             b' ' | b'\t'
+                | b'&'
                 | b'#'
                 | b'>'
                 | b'`'
@@ -6452,15 +6457,7 @@ fn render_nodes(
                 table_cell,
             },
         )?;
-        if parent_tag == "doc"
-            && element_tag(node) == Some("paragraph")
-            && rendered.starts_with(' ')
-        {
-            output.push_str("&#32;")?;
-            output.push_str(&rendered[1..])?;
-        } else {
-            output.push_str(&rendered)?;
-        }
+        output.push_str(&rendered)?;
     }
     Ok(output.into_string())
 }
@@ -6492,7 +6489,17 @@ fn render_node(node: &MarkdownNode, context: RenderContext<'_>) -> ProjectionRes
                         Ok(String::new())
                     }
                 } else {
-                    render_inline(children, false, true, table_cell)
+                    let rendered = render_inline(children, false, true, table_cell)?;
+                    if matches!(context.parent_tag, "doc" | "listItem" | "taskItem")
+                        && rendered.starts_with(' ')
+                    {
+                        let mut output = ProjectionBuffer::new();
+                        output.push_str("&#32;")?;
+                        output.push_str(&rendered[1..])?;
+                        Ok(output.into_string())
+                    } else {
+                        Ok(rendered)
+                    }
                 }
             }
             "heading" => {

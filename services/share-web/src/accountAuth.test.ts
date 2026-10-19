@@ -216,6 +216,47 @@ describe("browser account transport", () => {
     expect((await handler(async () => { throw new Error("upstream secret"); })(request("session"))).status).toBe(503);
   });
 
+  it.each([
+    [403, "EMAIL_NOT_VERIFIED", 403, { ok: false, code: "EMAIL_NOT_VERIFIED" }],
+    [401, "INVALID_EMAIL_OR_PASSWORD", 401, { ok: false }],
+    [401, "EMAIL_NOT_VERIFIED", 401, { ok: false }],
+    [403, "OTHER_REFUSAL", 401, { ok: false }],
+    [422, "EMAIL_NOT_VERIFIED", 401, { ok: false }],
+  ])("projects only the password-matched unverified sign-in refusal (%s, %s)", async (status, code, expectedStatus, body) => {
+    const result = await handler(async () => Response.json({ code, message: "upstream-secret", email: "private@example.test" }, {
+      status, headers: { "set-cookie": sessionCookie, "set-auth-token": "secret", "x-upstream": "secret" },
+    }))(request("sign-in"));
+    expect(result.status).toBe(expectedStatus);
+    expect(await result.json()).toEqual(body);
+    expect(result.headers.getSetCookie()).toEqual([]);
+    expect(result.headers.get("set-auth-token")).toBeNull();
+    expect(result.headers.get("x-upstream")).toBeNull();
+    expect(result.headers.get("cache-control")).toBe("private, no-store");
+  });
+
+  it("keeps malformed, redirected and non-sign-in unverified refusals opaque", async () => {
+    for (const operation of ["session", "sign-out"]) {
+      const result = await handler(async () => Response.json({ code: "EMAIL_NOT_VERIFIED" }, { status: 403 }))(request(operation));
+      expect(result.status).toBe(401);
+      expect(await result.json()).toEqual({ ok: false });
+    }
+    for (const upstream of [
+      Response.json({ code: "EMAIL_NOT_VERIFIED" }, { status: 403, headers: { location: "https://evil.test" } }),
+      new Response('{"code":"EMAIL_NOT_VERIFIED"}', { status: 403, headers: { "content-type": "text/plain" } }),
+      new Response('{invalid', { status: 403, headers: { "content-type": "application/json" } }),
+      Response.json([{ code: "EMAIL_NOT_VERIFIED" }], { status: 403 }),
+    ]) {
+      const result = await handler(async () => upstream)(request("sign-in"));
+      expect(result.status).toBe(401);
+      expect(await result.json()).toEqual({ ok: false });
+    }
+    const small = createAccountAuthHandler({ ...accountAuth, fetchAuth: async () => Response.json({ code: "EMAIL_NOT_VERIFIED" }, { status: 403 }),
+      maxRequestBytes: 1024, maxResponseBytes: 8, timeoutMs: 10_000 });
+    const oversized = await small(request("sign-in"));
+    expect(oversized.status).toBe(401);
+    expect(await oversized.json()).toEqual({ ok: false });
+  });
+
   it("refuses invalid UTF-8 without repairing request credentials or upstream identity", async () => {
     const invalid = (prefix: string, suffix: string) => Buffer.concat([Buffer.from(prefix), Buffer.from([255]), Buffer.from(suffix)]);
     const fetchAuth = vi.fn(async () => upstreamSignIn());

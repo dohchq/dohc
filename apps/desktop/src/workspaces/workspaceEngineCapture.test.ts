@@ -34,6 +34,7 @@ import {
   type WorkspaceEngineCapture,
   type WorkspaceEngineCaptureOptions,
   type WorkspaceEngineCaptureFailure,
+  type EngineDiskWriter,
 } from "./workspaceEngineCapture";
 import {
   DaemonRefusalError,
@@ -162,9 +163,9 @@ it.each([["text", "error"], ["text", "conflict"], ["binary", "conflict"], ["bina
 const itNonRoot = process.getuid?.() === 0 ? it.skip : it;
 
 interface CaptureOptions {
+  diskWriter?: EngineDiskWriter;
   preserveUnsentState?: WorkspaceEngineCaptureOptions["preserveUnsentState"];
   store?: CaptureVersionedTextStore;
-  now?: () => number;
   createId?: () => string;
   onError?: (context: string, error: unknown) => void;
   onCaptureOutcome?: (failure: WorkspaceEngineCaptureFailure, detail?: string | null) => void;
@@ -187,6 +188,82 @@ function capture(root: string, options: CaptureOptions = {}) {
     ...rest,
   });
 }
+
+function caseInsensitiveDisk(root: string, path: string, text: string) {
+  const key = (path: string) => path.toLowerCase();
+  const files = new Map([[key(join(root, path)), text]]);
+  const operations: string[] = [];
+  const writer: EngineDiskWriter = {
+    async writeTextFile(path, text) {
+      operations.push("write");
+      files.set(key(path), text);
+    },
+    async writeBinaryFile() {
+      throw new Error("Unexpected binary write");
+    },
+    async deletePath(path) {
+      operations.push("delete");
+      files.delete(key(path));
+    },
+  };
+  return { writer, operations, read: (path: string) => files.get(key(join(root, path))) };
+}
+
+describe("protected materialization order", () => {
+  it("keeps a protected merge's case-variant target on a case-insensitive disk", async () => {
+    const root = await createTestScratch("dohc-protected-merge-order-");
+    const loopback = new VersionedLoopbackEngine();
+    const send = loopback.sendRequest.bind(loopback);
+    vi.spyOn(loopback, "sendRequest").mockImplementation(async (request) =>
+      request.method === "conflicts.list"
+        ? { id: request.id, result: { conflicts: [], nextAfterConflictId: null } }
+        : await send(request),
+    );
+    loopback.seedSecretFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: "foo.env",
+      text: "VALUE=main\n",
+    });
+    await write(root, "foo.env", "VALUE=main\n");
+    const sessions = mockLiveSessions(loopback);
+    const stores = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID },
+      sessions,
+    );
+    const disk = caseInsensitiveDisk(root, "foo.env", "VALUE=main\n");
+    const engine = capture(root, {
+      store: stores.store,
+      rustEngineSessions: sessions,
+      diskWriter: disk.writer,
+    });
+    try {
+      const draftId = (await engine.createVersion("Draft")).activeVersionId;
+      await stores.secretStore.deleteSecretFile({
+        workspaceId: WORKSPACE_ID,
+        versionId: draftId,
+        path: "foo.env",
+        metadata: { origin: "api" },
+      });
+      loopback.seedSecretFile({
+        workspace: WORKSPACE_ID,
+        versionId: draftId,
+        path: "Foo.env",
+        text: "VALUE=draft\n",
+      });
+      await engine.switchVersion("main");
+
+      await expect(engine.mergeVersionIntoMain(draftId)).resolves.toMatchObject({
+        mergedFileCount: 2,
+        conflictCount: 0,
+      });
+      expect(disk.read("Foo.env")).toBe("VALUE=draft\n");
+      expect(disk.operations).toEqual(["delete", "write"]);
+    } finally {
+      await engine.stop();
+    }
+  });
+});
 
 describe("probeEngineStoreRefusal", () => {
   it("probes through the exact attachment session key", async () => {

@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DocumentMenu, FEEDBACK_MS } from "./DocumentMenu";
 import { CustomizeContext } from "./settings/customize";
+import { deferred } from "../testing/deferred";
 // The HTML/PDF actions load ./editor/documentExport lazily, on demand — a
 // Tiptap + ProseMirror + KaTeX graph the app deliberately keeps off its open
 // path. Import it here so vitest transforms and executes that graph while
@@ -98,6 +99,93 @@ afterEach(() => {
 });
 
 describe("DocumentMenu", () => {
+  describe("pending serialization", () => {
+    it.each([
+      ["Escape", "resolve"], ["outside press", "resolve"], ["trigger", "resolve"],
+      ["Escape", "reject"], ["outside press", "reject"], ["trigger", "reject"],
+    ])("cancels Copy on %s: a late %s neither overwrites a newer clipboard entry nor reports", async (dismiss, outcome) => {
+      const user = userEvent.setup();
+      stubClipboard();
+      const markdown = deferred<string>();
+      const reportError = vi.fn();
+      const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        render(<DocumentMenu workspaceId="ws-1" suggestedName="Plan" getMarkdown={() => markdown.promise} reportError={reportError} />);
+        await user.click(screen.getByTestId("document-menu-trigger"));
+        await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+        if (dismiss === "Escape") await user.keyboard("{Escape}");
+        else if (dismiss === "outside press") await user.click(document.body);
+        else await user.click(screen.getByTestId("document-menu-trigger"));
+        expect(screen.queryByRole("menu")).toBeNull();
+        await navigator.clipboard.writeText("Newer clipboard entry");
+
+        await act(async () => {
+          if (outcome === "resolve") markdown.resolve(MARKDOWN);
+          else markdown.reject(new Error("serializer failed"));
+          await markdown.promise.catch(() => undefined);
+        });
+
+        expect(writeText).toHaveBeenCalledExactlyOnceWith("Newer clipboard entry");
+        expect(reportError).not.toHaveBeenCalled();
+      } finally {
+        logged.mockRestore();
+      }
+    });
+
+    it("finishes a chosen Copy before its confirmation closes the menu", async () => {
+      const user = userEvent.setup();
+      stubClipboard();
+      const markdown = deferred<string>();
+      render(<DocumentMenu workspaceId="ws-1" suggestedName="Plan" getMarkdown={() => markdown.promise} />);
+      await user.click(screen.getByTestId("document-menu-trigger"));
+      await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+      vi.useFakeTimers();
+      try {
+        // DocumentMenu opts out of Menu's close-on-pick: Copy closes only
+        // after its confirmation. A pick is not a cancellation.
+        expect(screen.queryByRole("menu")).not.toBeNull();
+        expect(writeText).not.toHaveBeenCalled();
+        await act(async () => {
+          markdown.resolve(MARKDOWN);
+          await markdown.promise;
+        });
+        expect(writeText).toHaveBeenCalledExactlyOnceWith(MARKDOWN);
+        expect(screen.getByText("Copied")).toBeTruthy();
+        act(() => { vi.advanceTimersByTime(FEEDBACK_MS); });
+        expect(screen.queryByRole("menu")).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it.each(["resolve", "reject"])("ignores serialization that %ss after switching documents", async (outcome) => {
+      const user = userEvent.setup();
+      stubClipboard();
+      const markdown = deferred<string>();
+      const reportError = vi.fn();
+      const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const view = render(<DocumentMenu workspaceId="ws-1" documentKey="a" suggestedName="Note" getMarkdown={() => markdown.promise} reportError={reportError} />);
+        await user.click(screen.getByTestId("document-menu-trigger"));
+        await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+        // Same workspace and title: documentKey alone must retire the action.
+        view.rerender(<DocumentMenu workspaceId="ws-1" documentKey="b" suggestedName="Note" getMarkdown={() => "New document"} reportError={reportError} />);
+        await user.keyboard("{Escape}");
+        await act(async () => {
+          if (outcome === "resolve") markdown.resolve(MARKDOWN);
+          else markdown.reject(new Error("old document failed"));
+          await markdown.promise.catch(() => undefined);
+        });
+        expect(writeText).not.toHaveBeenCalled();
+        expect(reportError).not.toHaveBeenCalled();
+        expect(screen.queryByText("Copied")).toBeNull();
+        expect(screen.queryByText("Couldn't copy")).toBeNull();
+      } finally {
+        logged.mockRestore();
+      }
+    });
+  });
+
   it("discards a serialization that completes after switching documents", async () => {
     const user = userEvent.setup();
     stubClipboard();
@@ -757,18 +845,17 @@ describe("DocumentMenu", () => {
     expect(screen.queryByText('Document not open')).toBeNull();expect(screen.queryByText("Couldn't copy")).toBeNull();
   });
 
-  it.each(['copy-markdown', 'export-markdown'])('finishes %s when the menu closes during serialization', async item => {
+  it('finishes a Markdown export when the menu closes during serialization', async () => {
     const user = userEvent.setup();
     stubClipboard();
     let finish!: (text: string) => void;
     const pending = new Promise<string>(resolve => {finish = resolve;});
     render(<DocumentMenu workspaceId="ws-1" suggestedName="Plan" getMarkdown={() => pending}/>);
     await user.click(screen.getByTestId('document-menu-trigger'));
-    await user.click(screen.getByTestId(`document-menu-item-${item}`));
+    await user.click(screen.getByTestId('document-menu-item-export-markdown'));
     await user.keyboard('{Escape}');
     await act(async () => {finish(MARKDOWN); await pending;});
-    if (item === 'copy-markdown') expect(writeText).toHaveBeenCalledWith(MARKDOWN);
-    else expect(exportDocumentFile).toHaveBeenCalledWith(expect.objectContaining({content: MARKDOWN}));
+    expect(exportDocumentFile).toHaveBeenCalledWith(expect.objectContaining({content: MARKDOWN}));
     expect(screen.queryByRole('menu')).toBeNull();
   });
 });

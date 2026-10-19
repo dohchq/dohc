@@ -3,6 +3,7 @@ import {act} from "react";
 import {createRoot, type Root} from "react-dom/client";
 import {afterEach, beforeEach, expect, it, vi} from "vitest";
 import NamedApp from "./NamedApp";
+import {createAccountAuthHandler} from "../../src/accountAuth";
 import {heldJsonResponse, jsonResponse, settle, setControlValue} from "./testing";
 
 const publicationId = "a".repeat(64), target = {workspaceId: "ws_1", publicationId};
@@ -55,10 +56,23 @@ it("explains an unavailable link without calling the account endpoints", async (
   const fetch = vi.fn(); vi.stubGlobal("fetch", fetch); await render(null);
   expect(container.textContent).toContain("This app link is unavailable"); expect(container.querySelector("form")).toBeNull(); expect(fetch).not.toHaveBeenCalled();
 });
-it("reports a failed sign-in and keeps the form", async () => {
-  vi.stubGlobal("fetch", account(() => false, path => path === "/api/account/sign-in" ? jsonResponse({ok: false}, 401) : jsonResponse({}, 404)));
+it.each([
+  [403, "EMAIL_NOT_VERIFIED", "Choose a password from an emailed link before you sign in. Use Forgot your password? to get a link."],
+  [401, "INVALID_EMAIL_OR_PASSWORD", "dohc could not sign you in. Check your email and password, then retry."],
+])("explains upstream sign-in refusal %s %s and keeps the form", async (status, code, message) => {
+  const origin = "https://share.example.test";
+  const serve = createAccountAuthHandler({publicOrigin: origin, upstreamUrl: "http://workspace-api:1786",
+    maxRequestBytes: 1024, maxResponseBytes: 1024, timeoutMs: 10_000,
+    fetchAuth: async () => jsonResponse({code, message: "upstream-secret"}, status)});
+  vi.stubGlobal("fetch", account(() => false, (path, init) => path === "/api/account/sign-in" ? serve(new Request(origin + path, {
+    ...init, headers: {...init?.headers, host: "share.example.test", origin},
+  })) : jsonResponse({}, 404)));
   await render(); await fillSignIn(); await click("Sign in");
-  expect(container.querySelector('[role="alert"]')?.textContent).toContain("Check your email and password");
+  expect(container.querySelector('[role="alert"]')?.textContent).toBe(message);
+  const recovery = container.querySelector('a[href="/account/forgot-password"]');
+  if (status === 403) expect(recovery?.textContent).toBe("Forgot your password?");
+  else expect(recovery).toBeNull();
+  expect(container.textContent).not.toContain("upstream-secret");
   expect(container.querySelector("form")).not.toBeNull(); expect(container.textContent).not.toContain("Alice");
 });
 it("offers a retry when the account check fails", async () => {

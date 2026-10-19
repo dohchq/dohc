@@ -48,12 +48,19 @@ pub(super) fn after_hash(config: &Config) {
     #[cfg(unix)]
     {
         fs::rename(path, path.with_extension("old")).unwrap();
+        // The runtime's replacement still runs, so a missing check would start it.
         if index == 0 {
-            fs::hard_link(std::env::current_exe().unwrap(), path).unwrap();
+            executable(path, "exit 1");
         } else {
             fs::write(path, "changed after hash").unwrap();
         }
     }
+}
+#[cfg(unix)]
+fn executable(path: &std::path::Path, script: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::write(path, format!("#!/bin/sh\n{script}\n")).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 #[cfg(unix)]
@@ -147,11 +154,15 @@ fn replacement_after_hash_is_blocked_or_refused_before_spawn() {
         let (dir, mut c) = fixture("ok");
         if index == 0 {
             let alias = dir.path().join("runtime.exe");
-            let executable = std::env::current_exe().unwrap();
-            fs::hard_link(&executable, &alias).unwrap();
+            // Not a link to this test's executable on Unix: macOS Gatekeeper kills a test that
+            // starts while such a link is renamed or removed.
+            #[cfg(windows)]
+            fs::hard_link(std::env::current_exe().unwrap(), &alias).unwrap();
+            #[cfg(unix)]
+            executable(&alias, "exit 0");
             let mut manifest: Value =
                 serde_json::from_slice(&fs::read(&c.manifest).unwrap()).unwrap();
-            manifest["runtime"]["sha256"] = wire::sha(&fs::read(&executable).unwrap()).into();
+            manifest["runtime"]["sha256"] = wire::sha(&fs::read(&alias).unwrap()).into();
             fs::write(&c.manifest, manifest.to_string()).unwrap();
             c.node = alias;
         }

@@ -634,7 +634,9 @@ export function parseRichdocMarkdown(markdown: string, reading: 'source' | 'proj
       const leading = (code === '9' || code === '32')
         && (offset === 0 || source[offset - 1] === '\n')
       if ((code === '9' || code === '32') && source[offset - 1] === ' '
-        && /^ *$/u.test(source.slice(source.lastIndexOf('\n', offset - 1) + 1, offset))) itemWhitespaceEntities.add(sentinel)
+      && (reading === 'projection'
+        ? /^ *(?:> *)*(?:(?:[-+*]|\d{1,9}[.)]) (?:\[[ xX]\] )?)?$/u
+        : /^ *$/u).test(source.slice(source.lastIndexOf('\n', offset - 1) + 1, offset))) itemWhitespaceEntities.add(sentinel)
       if (code && !BLOCK_ESCAPE_CODES.has(Number(code)) && !leading) {
         tagReferences.add(sentinel)
       }
@@ -1043,8 +1045,10 @@ export function serializeRichdocBody(root: JSONContent): string {
           encodeBlockEscape,
           definition,
         )
-        if (parentType === 'doc' && content[0]?.text?.startsWith(' ')) {
-          content = [{ ...content[0], text: encodeLeadingWhitespace(' ') + content[0].text.slice(1) }, ...content.slice(1)]
+        if ((parentType === 'doc' || parentType === 'listItem' || parentType === 'taskItem')
+          && content[0]?.text?.startsWith(' ') && !content[0].marks?.some(mark => mark.type === 'code')) {
+          const rest = content[0].text.slice(1)
+          content = [{ type: 'text', text: encodeLeadingWhitespace(' ') }, ...(rest ? [{ ...content[0], text: rest }] : []), ...content.slice(1)]
         }
       }
       content = renderInlineCodeRuns(

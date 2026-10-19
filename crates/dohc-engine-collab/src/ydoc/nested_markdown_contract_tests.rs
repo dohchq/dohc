@@ -70,6 +70,40 @@ fn nested_contract_r23_content_tabs_keep_inline_spelling() {
     }
 }
 
+fn nested_contract_body(doc: &Ydoc) -> Value {
+    let body = doc.doc.get_or_insert_xml_fragment(ROOT_BODY);
+    out_json(&doc.doc.transact(), Out::YXmlFragment(body))
+}
+
+fn nested_contract_marked_start(doc: &Ydoc, case: &Value) {
+    let Some(mark) = case["markedStart"].as_object() else {
+        return;
+    };
+    let fragment = doc.doc.get_or_insert_xml_fragment(ROOT_BODY);
+    let mut txn = doc.doc.transact_mut();
+    let mut node = fragment.get(&txn, 0).unwrap();
+    loop {
+        match node {
+            XmlOut::Element(element) => node = element.get(&txn, 0).unwrap(),
+            XmlOut::Text(text) => {
+                let len = text.len(&txn);
+                text.remove_range(&mut txn, 0, len);
+                text.insert_with_attributes(
+                    &mut txn,
+                    0,
+                    case["markedText"].as_str().unwrap(),
+                    yrs::types::Attrs::from([(
+                        mark["type"].as_str().unwrap().into(),
+                        json_to_any(mark.get("attrs").unwrap_or(&json!({}))),
+                    )]),
+                );
+                return;
+            }
+            _ => panic!("expected paragraph text"),
+        }
+    }
+}
+
 fn nested_contract_case(case: &Value) {
     let name = case["name"].as_str().unwrap();
     let doc = Ydoc::wire();
@@ -103,12 +137,23 @@ fn nested_contract_case(case: &Value) {
         assert!(result.is_err(), "{name}: unsupported source was accepted");
     } else {
         result.unwrap();
+        nested_contract_marked_start(&doc, case);
         assert_eq!(
             doc.project_richdoc().unwrap(),
             case["canonical"].as_str().unwrap(),
             "{name}"
         );
         let canonical = case["canonical"].as_str().unwrap();
+        let body = nested_contract_body(&doc);
+        if case["markedStart"].is_object() {
+            // Editor mark fixtures check projection; Markdown import keeps inline syntax as text.
+            let replay = Ydoc::wire();
+            replay.apply(&doc.encode_full_state()).unwrap();
+            assert_eq!(replay.project_richdoc().unwrap(), canonical, "{name}");
+            doc.validate_public_baseline(&doc.encode_full_state())
+                .unwrap();
+            return;
+        }
         if case["exactSource"] == true {
             let source = case["source"].as_str().unwrap();
             doc.preserve_folded_markdown_source(source).unwrap();
@@ -123,6 +168,9 @@ fn nested_contract_case(case: &Value) {
             MarkdownReading::ProjectedSource,
         )
         .unwrap();
+        if case["stableTree"] == true {
+            assert_eq!(nested_contract_body(&doc), body, "{name}: reread tree");
+        }
         let canonical = case["nativeRereadCanonical"].as_str().unwrap_or(canonical);
         assert_eq!(doc.project_richdoc().unwrap(), canonical);
         let replay = Ydoc::wire();
@@ -343,6 +391,7 @@ fn regenerate_nested_contract_seeds() {
             )
             .unwrap();
         }
+        nested_contract_marked_start(&doc, case);
         assert_eq!(
             doc.project_richdoc().unwrap(),
             case["canonical"].as_str().unwrap()
