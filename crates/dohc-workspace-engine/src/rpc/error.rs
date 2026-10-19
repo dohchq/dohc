@@ -100,6 +100,14 @@ pub(crate) fn store_busy(error: &RuntimeError) -> bool {
 }
 
 pub(super) fn map_runtime(error: RuntimeError) -> WireError {
+    let (wire, line) = map_runtime_logged(error);
+    if let Some(line) = line {
+        eprintln!("{line}");
+    }
+    wire
+}
+
+fn map_runtime_logged(error: RuntimeError) -> (WireError, Option<String>) {
     let error = match error {
         RuntimeError::LiveApplication(ApplicationError::Storage(error)) => {
             RuntimeError::Storage(error)
@@ -110,10 +118,8 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         error => error,
     };
     let wire = map_runtime_inner(&error);
-    if !matches!(error, RuntimeError::Domain(_)) {
-        log_internal_refusal(wire.code, &error);
-    }
-    wire
+    let line = internal_refusal(wire.code, &error);
+    (wire, line)
 }
 
 fn map_runtime_inner(error: &RuntimeError) -> WireError {
@@ -322,17 +328,23 @@ fn map_runtime_inner(error: &RuntimeError) -> WireError {
 }
 
 fn internal_refusal(code: ErrorCode, error: &(dyn std::error::Error + 'static)) -> Option<String> {
-    (code == ErrorCode::Internal)
-        .then(|| format!("engine: internal refusal: {}", error_chain(error)))
-}
-
-fn log_internal_refusal(code: ErrorCode, error: &(dyn std::error::Error + 'static)) {
-    if let Some(line) = internal_refusal(code, error) {
-        eprintln!("{line}");
+    if code != ErrorCode::Internal {
+        return None;
     }
+    let mut line = format!("engine: internal refusal: {error}");
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if !line.ends_with(&text) {
+            line.push_str(": ");
+            line.push_str(&text);
+        }
+        source = cause.source();
+    }
+    Some(line)
 }
 
-/// The error followed by each of its sources, for the daemon's stderr.
+/// The error followed by each of its sources, for migration wire messages.
 fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
     let mut text = error.to_string();
     let mut source = error.source();
@@ -484,7 +496,6 @@ fn map_domain(error: &DomainError) -> WireError {
         | DomainError::TextHeadNotBinary => (InvalidParams, "workspace operation failed"),
         _ => (Internal, "workspace operation failed"),
     };
-    log_internal_refusal(code, error);
     WireError::new(code, message)
 }
 
@@ -587,65 +598,110 @@ pub(super) fn workspace_unavailable() -> WireError {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn internal_refusal_includes_the_cause_chain_and_keeps_the_wire_message() {
+    fn internal_refusal_maps_the_wire_and_logs_each_cause_once() {
         use dohc_engine_files::MaterializeError;
         use dohc_engine_storage::StorageError;
 
-        for error in [
-            RuntimeError::Relay(RelayError::Local(
-                "retryable-state: ydoc-resulting-head-pending; object apollo".into(),
-            )),
-            RuntimeError::Sync(SyncError::RetryableState {
-                reason: "ydoc-resulting-head-pending",
-            }),
-            RuntimeError::Collab(CollabError::Corrupt {
-                reason: "missing lineage".into(),
-            }),
-            RuntimeError::Search(SearchError::Store(StorageError::corrupt_public(
-                std::io::Error::other("missing search table"),
-            ))),
-            RuntimeError::Domain(DomainError::CaptureNotOwned),
-            RuntimeError::Domain(DomainError::StateCorrupt {
-                reason: "missing workspace row",
-            }),
-            RuntimeError::Materialize(MaterializeError::UnsafeTargetPath),
+        for (error, message, line) in [
+            (
+                RuntimeError::Relay(RelayError::Local(
+                    "retryable-state: replication state is not ready: ydoc-resulting-head-pending (object apollo, origin peer seq 7)".into(),
+                )),
+                "workspace operation failed",
+                "engine: internal refusal: relay error: local sync state failed: retryable-state: replication state is not ready: ydoc-resulting-head-pending (object apollo, origin peer seq 7)",
+            ),
+            (
+                RuntimeError::Sync(SyncError::RetryableState {
+                    reason: "ydoc-resulting-head-pending",
+                }),
+                "workspace operation failed",
+                "engine: internal refusal: synchronization error: replication state is not ready: ydoc-resulting-head-pending",
+            ),
+            (
+                RuntimeError::Collab(CollabError::Corrupt {
+                    reason: "missing lineage".into(),
+                }),
+                "workspace operation failed",
+                "engine: internal refusal: collaboration error: corrupt Y.Doc lineage: missing lineage",
+            ),
+            (
+                RuntimeError::Search(SearchError::Store(StorageError::corrupt_public(
+                    std::io::Error::other("missing search table"),
+                ))),
+                "workspace operation failed",
+                "engine: internal refusal: search error: search storage-core failure: engine store is corrupt: missing search table",
+            ),
+            (
+                RuntimeError::Domain(DomainError::CaptureNotOwned),
+                "workspace operation failed",
+                "engine: internal refusal: domain error: capture does not own this path current head",
+            ),
+            (
+                RuntimeError::Domain(DomainError::StateCorrupt {
+                    reason: "missing workspace row",
+                }),
+                "state-corrupt",
+                "engine: internal refusal: domain error: engine store is corrupt: missing workspace row",
+            ),
+            (
+                RuntimeError::Materialize(MaterializeError::UnsafeTargetPath),
+                "unsafe-target-path",
+                "engine: internal refusal: materialization error: job target path is not a safe workspace-relative path",
+            ),
+            (
+                RuntimeError::Storage(StorageError::MigrationFailed {
+                    source: Some(Box::new(std::io::Error::other("missing table"))),
+                }),
+                "migration-failed: engine migration failed to apply: missing table",
+                "engine: internal refusal: storage error: engine migration failed to apply: missing table",
+            ),
         ] {
-            let expected = format!("engine: internal refusal: {}", error_chain(&error));
-            let wire = map_runtime_inner(&error);
-            assert_eq!(wire.code, ErrorCode::Internal);
-            assert_eq!(internal_refusal(wire.code, &error), Some(expected));
-            assert!(!wire.message.contains("ydoc-resulting-head-pending"));
+            let (wire, logged) = map_runtime_logged(error);
+            assert_eq!(
+                (wire.code, wire.message.as_str(), logged.as_deref()),
+                (ErrorCode::Internal, message, Some(line)),
+            );
         }
-        let relay = map_runtime(RuntimeError::Relay(RelayError::Local(
-            "retryable-state: ydoc-resulting-head-pending; object apollo".into(),
-        )));
-        assert_eq!(relay.message, "workspace operation failed");
-        let error = SyncError::Storage(StorageError::corrupt_public(std::io::Error::other(
-            "missing table",
-        )));
-        assert!(
-            internal_refusal(ErrorCode::Internal, &error)
-                .unwrap()
-                .contains("missing table")
-        );
     }
 
     #[test]
     fn routine_refusals_have_no_internal_log_line() {
-        for error in [
-            RuntimeError::Sync(SyncError::InvalidInput {
-                reason: "invalid id",
-            }),
-            RuntimeError::Domain(DomainError::FileNotFound),
-            RuntimeError::Collab(CollabError::AuthorCapacity),
-            RuntimeError::Relay(RelayError::QuotaExceeded),
-            RuntimeError::Sync(SyncError::RetryableState {
-                reason: "settlement-materialization-pending",
-            }),
+        for (error, code, message) in [
+            (
+                RuntimeError::Sync(SyncError::InvalidInput {
+                    reason: "invalid id",
+                }),
+                ErrorCode::InvalidParams,
+                "workspace operation failed",
+            ),
+            (
+                RuntimeError::Domain(DomainError::FileNotFound),
+                ErrorCode::InvalidParams,
+                "file-not-found",
+            ),
+            (
+                RuntimeError::Collab(CollabError::AuthorCapacity),
+                ErrorCode::LimitExceeded,
+                "ydoc-author-capacity",
+            ),
+            (
+                RuntimeError::Relay(RelayError::QuotaExceeded),
+                ErrorCode::QuotaExceeded,
+                "workspace operation failed",
+            ),
+            (
+                RuntimeError::Sync(SyncError::RetryableState {
+                    reason: "settlement-materialization-pending",
+                }),
+                ErrorCode::Overloaded,
+                "settlement-materialization-pending",
+            ),
         ] {
-            let wire = map_runtime_inner(&error);
-            assert_ne!(wire.code, ErrorCode::Internal);
-            assert_eq!(internal_refusal(wire.code, &error), None);
+            let (wire, logged) = map_runtime_logged(error);
+            assert_eq!(
+                (wire.code, wire.message.as_str(), logged.as_deref()),
+                (code, message, None),
+            );
         }
     }
 

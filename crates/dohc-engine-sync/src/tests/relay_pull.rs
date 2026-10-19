@@ -1744,7 +1744,7 @@ fn base_repair_publication_blocked_pull_matches_main() {
             detail.contains("Y.Doc base is waiting for its authenticated relay position"),
             "{detail}"
         );
-        assert!(detail.contains("object Some(\"blocked\")"), "{detail}");
+        assert!(detail.contains("object blocked, origin "), "{detail}");
         assert!(
             matches!(refusal, RelayError::Local(code) if code.split(':').next() == Some("retryable-state"))
         );
