@@ -3,6 +3,7 @@ import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import {
+  chmod,
   mkdir,
   mkdtemp as createTemporaryDirectory,
   readFile,
@@ -1444,4 +1445,33 @@ test("release-desktop-macos refuses incomplete arguments when run as a command",
     runReleaseScript("release-desktop-macos.mjs", ["--channel", "nightly"]),
     (error) => error.code === 1 && /Usage: pnpm release:macos/.test(error.stderr),
   );
+});
+
+// A Linux desktop build leaves apps/desktop/resources/engine-reader/<generation>
+// read-only (stage-engine-reader.mjs), and checkout cannot clean a workspace
+// that holds it. Every job can land on the Linux runner, so each one makes it
+// writable before checkout.
+test("every release job lets checkout remove an earlier build's read-only reader folder", async () => {
+  for (const [name, job] of Object.entries(releaseWorkflow.jobs)) {
+    const checkout = job.steps.findIndex(step => step.uses?.startsWith("actions/checkout@"));
+    assert.ok(checkout > 0, `${name} prepares its workspace before checkout`);
+    const prepare = job.steps[checkout - 1];
+    assert.equal(prepare.if, "runner.os != 'Windows'", `${name} skips the step on Windows, where the folder stays writable`);
+    assert.equal(prepare.shell, "bash");
+    assert.match(prepare.run, /reader="\$\{GITHUB_WORKSPACE\}\/apps\/desktop\/resources\/engine-reader"/);
+  }
+  if (process.platform === "win32") return;
+  // Run the step itself against a workspace an earlier build left behind.
+  const workspace = await createTemporaryDirectory(join(tmpdir(), "dohc-release-workspace-"));
+  const generation = join(workspace, "apps/desktop/resources/engine-reader/generation");
+  await mkdir(generation, { recursive: true });
+  await writeFile(join(generation, "reader.cjs"), "reader");
+  await chmod(join(generation, "reader.cjs"), 0o444);
+  await chmod(generation, 0o555);
+  const step = releaseWorkflow.jobs.build.steps.find(candidate => candidate.name === "Let checkout remove an earlier build's reader folder");
+  await promisify(execFile)("bash", ["-euo", "pipefail", "-c", step.run], { env: { ...process.env, GITHUB_WORKSPACE: workspace } });
+  await rm(workspace, { recursive: true });
+  assert.equal(existsSync(workspace), false, "the workspace and the reader folder in it are removable");
+  // A fresh runner has no workspace yet.
+  await promisify(execFile)("bash", ["-euo", "pipefail", "-c", step.run], { env: { ...process.env, GITHUB_WORKSPACE: workspace } });
 });
