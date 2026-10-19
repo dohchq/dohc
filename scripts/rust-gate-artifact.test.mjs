@@ -28,6 +28,7 @@ import {
   chmodSync,
   cpSync,
   mkdirSync,
+  realpathSync,
 } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -318,6 +319,26 @@ test("the caps and the scratch root reach every cargo child", () => {
 
     // And the evidence line records caps, ahead of the head stamp.
     assert.match(run.evidence, /, jobs \d+, test-threads \d+, head /);
+  } finally {
+    rmSync(stub, { recursive: true, force: true });
+  }
+});
+
+test("macOS reader tests run the staged pinned Node; other hosts keep node on PATH", () => {
+  const stub = stubToolchain();
+  try {
+    runGate(stub);
+    const commands = readFileSync(join(stub, "commands.txt"), "utf8").trim().split(/\r?\n/);
+    const child = readFileSync(join(stub, "envdump.txt"), "utf8");
+    const darwin = platform() === "darwin";
+    const nextestRun = commands.indexOf("nextest run --locked --workspace --no-fail-fast");
+    assert.ok(nextestRun > 0);
+    assert.equal(commands[nextestRun - 1] === "tools/rust-engine-program/reader-test-node.mjs", darwin);
+    assert.equal(commands.includes("tools/rust-engine-program/reader-test-node.mjs"), darwin);
+    // The gate resolves its own location, so compare against the real path.
+    const staged = join(realpathSync(repoRoot), "target/reader-test-node/node");
+    assert.equal(child.includes(`DOHC_READER_TEST_NODE=${staged}`), darwin);
+    assert.equal(child.includes("DOHC_READER_TEST_NODE="), darwin);
   } finally {
     rmSync(stub, { recursive: true, force: true });
   }

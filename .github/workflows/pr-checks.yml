@@ -92,6 +92,9 @@ jobs:
               - 'services/sync-relay/**'
               - 'packages/app-backend-runtime/**'
               - 'packages/live-session-contract/**'
+              # On macOS the reader tests run the app compiler's pinned Node.
+              - 'apps/desktop/scripts/stage-app-compiler.mjs'
+              - 'apps/desktop/scripts/pinned-node.mjs'
               - '**/package.json'
               - '.node-version'
               - '.nvmrc'

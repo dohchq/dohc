@@ -28,13 +28,17 @@ pub(super) fn reaped(shared: &Shared) {
 fn runtime() -> (PathBuf, Value) {
     static RUNTIME: OnceLock<(PathBuf, Value)> = OnceLock::new();
     RUNTIME.get_or_init(|| {
-        let output = Command::new("node").args(["-p", "JSON.stringify({path:process.execPath,version:process.versions.node,platform:process.platform,arch:process.arch,unicode:process.versions.unicode,icu:process.versions.icu})"]).output().unwrap();
+        // The reader refuses a Node under a linked or shared-writable directory, such as
+        // Homebrew's Cellar. The Rust gate stages a pinned Node on macOS and names it here.
+        let hint = "set DOHC_READER_TEST_NODE=\"$(node tools/rust-engine-program/reader-test-node.mjs)\"";
+        let selected = std::env::var_os("DOHC_READER_TEST_NODE").unwrap_or_else(|| "node".into());
+        let output = Command::new(&selected).args(["-p", "JSON.stringify({path:process.execPath,version:process.versions.node,platform:process.platform,arch:process.arch,unicode:process.versions.unicode,icu:process.versions.icu})"]).output();
+        let output = output.unwrap_or_else(|e| panic!("cannot run test Node {selected:?}: {e}; {hint}"));
         assert!(output.status.success());
         let mut v: Value = serde_json::from_slice(&output.stdout).unwrap();
         let node = PathBuf::from(v.as_object_mut().unwrap().remove("path").unwrap().as_str().unwrap());
-        // A Node under a linked or shared-writable directory, such as Homebrew's Cellar, is refused.
         let checked = platform::open_asset(&node).map(|_| ());
-        assert!(checked.is_ok(), "test Node {} fails the reader's asset checks: {checked:?}", node.display());
+        assert!(checked.is_ok(), "test Node {} fails the reader's asset checks: {checked:?}; {hint}", node.display());
         v["sha256"] = wire::sha(&fs::read(&node).unwrap()).into();
         (node, v)
     }).clone()
