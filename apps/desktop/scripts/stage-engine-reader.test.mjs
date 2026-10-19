@@ -67,7 +67,7 @@ for (const platform of ["win32", "linux"]) test(`${platform} packaged resources 
   const resources = join(root, "source/resources");
   if (platform === "win32") {
     await mkdir(join(resources, "app-compiler"), { recursive: true });
-    await writeFile(join(resources, "app-compiler/node.exe"), await readPinnedCompilerNode({ stagedNodePath: join(desktop, "resources/app-compiler/node.exe") }));
+    await writeFile(join(resources, "app-compiler/node.exe"), await readPinnedCompilerNode({ stagedNodePaths: [join(desktop, "resources/app-compiler/node.exe")] }));
   }
   const staged = await stageEngineReader({ resources, platform, arch: "x64" });
   if (process.platform === "win32") assert.ok((await stat(dirname(staged.bundle))).mode & 0o200, "a Windows generation folder stays removable");
