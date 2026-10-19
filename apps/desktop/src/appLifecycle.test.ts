@@ -977,13 +977,14 @@ describe("desktop shutdown", () => {
     expect(DISPATCH_STOP_LIMIT_MS).toBeLessThan(WILL_QUIT_BUDGET_MS);
   });
 
-  it("keeps refusal Notice work ahead of authority close after dispatch reaches its limit", async () => {
+  it.each(["refusal Notice work", "an agent wake"] as const)("keeps %s ahead of authority close after dispatch reaches its limit", async (work) => {
     vi.useFakeTimers();
-    const notices = deferred();
+    const held = deferred();
     const f = fixture((d) => {
       d.shutdown.budgetMs = WILL_QUIT_BUDGET_MS;
       d.shutdown.deadlineExitCode = 1;
-      d.shutdown.stopNoticeRefusals = () => notices.promise;
+      if (work === "an agent wake") d.shutdown.stopAutomationWakes = () => held.promise;
+      else d.shutdown.stopNoticeRefusals = () => held.promise;
       d.services.dispatch.stop = () => new Promise<void>(() => undefined);
     });
     await boot(f);
@@ -991,7 +992,7 @@ describe("desktop shutdown", () => {
     await vi.advanceTimersByTimeAsync(DISPATCH_STOP_LIMIT_MS);
     expect(f.dependencies.shutdown.closeWorkspaces).not.toHaveBeenCalled();
     expect(f.app.exit).not.toHaveBeenCalled();
-    notices.resolve();
+    held.resolve();
     await vi.advanceTimersByTimeAsync(0);
     expect(f.dependencies.shutdown.closeWorkspaces).toHaveBeenCalledOnce();
     expect(f.app.exit).toHaveBeenCalledExactlyOnceWith(0);
