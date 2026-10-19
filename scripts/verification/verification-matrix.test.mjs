@@ -85,6 +85,7 @@ function createVerificationFixtures(directory) {
     put(path, readFileSync(join(repoRoot, path)));
   }
   put("scripts/verification/js-tests-real.mjs", readFileSync(join(root, "scripts/verification/js-tests.mjs")));
+  put("scripts/verification/linux.mjs", "export const linuxDistro=()=>null;export const linuxRustJob=()=>{throw Error('not expected');};");
   put("scripts/verification/rust-reuse.mjs", "export const rustIdentity=()=>({incremental:process.env.CARGO_INCREMENTAL});export const finishRustEvidence=(_report,initial,final)=>{if(JSON.stringify(initial)!==JSON.stringify(final))throw Error('Rust identity changed');return {kind:'fixture'};};export const refreshRustReuse=()=>{throw Error('unexpected reuse');};");
   put("scripts/verification/js-tests.mjs", `
     import assert from 'node:assert/strict';
