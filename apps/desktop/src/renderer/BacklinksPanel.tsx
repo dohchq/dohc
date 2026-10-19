@@ -4,6 +4,7 @@ import type {
   ChatFileMentionRecord,
 } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
+import { Ref } from "./ui/Ref";
 import { useAsyncResponseEffect } from "./useAsyncResponseEffect";
 
 import type { LinksInResult } from "@dohc/workspace-contracts/links";
@@ -267,14 +268,10 @@ export function BacklinksPanel(props: {
                   className="dohc-backlinks__source-link"
                   data-testid="backlink-source"
                   data-path={source.sourcePath}
+                  aria-label={`${source.sourceTitle} ${source.sourcePath}`}
                   onClick={() => props.onOpenPath?.(source.sourcePath)}
                 >
-                  <span className="dohc-backlinks__source-title">
-                    {source.sourceTitle}
-                  </span>
-                  <span className="dohc-backlinks__source-path">
-                    {source.sourcePath}
-                  </span>
+                  <Ref path={source.sourcePath} title={source.sourceTitle} folder />
                 </button>
                 <ul className="dohc-backlinks__snippets">
                   {source.snippets.map((snippet, index) => {

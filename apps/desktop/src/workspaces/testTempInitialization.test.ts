@@ -36,6 +36,17 @@ describe("test scratch initialization", () => {
     expect(await initialization("next-file")).toEqual({ scans: 1, rootCreates: 2, rootRemoved: true, nextExists: true });
   });
 
+  // Every account shares /tmp. A parent another account could enter is refused
+  // before anything is swept or written in it.
+  it.skipIf(process.platform === "win32")("refuses a scratch parent other accounts can enter, and writes nothing in it", async () => {
+    expect(await initialization("loose-parent")).toEqual({
+      scans: 0,
+      rootCreates: 0,
+      refused: true,
+      entries: ["fixture-123-0000000000000001"],
+    });
+  });
+
   it.each(["scan-failure", "mkdir-failure"])("preserves a rejected startup after %s", async (mode) => {
     expect(await initialization(mode)).toEqual({
       scans: 1,

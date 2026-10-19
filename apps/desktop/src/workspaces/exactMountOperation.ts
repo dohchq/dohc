@@ -18,14 +18,14 @@ export function createExactMountOperationRunner<
     const attachmentId = Reflect.get(input.workspace, "attachmentId");
     if (typeof attachmentId !== "symbol") {
       throw new Error(
-        "Share mount work requires an exact workspace attachment.",
+        "Open this workspace again before using this share.",
       );
     }
     return dependencies.withOperation(
       input.workspace.workspaceId,
       async (operation) => {
         if (operation.workspace.attachmentId !== attachmentId) {
-          throw new Error("Share mount work belongs to a retired workspace.");
+          throw new Error("This workspace was closed. Open it again.");
         }
         await dependencies.engineReady();
         const assertCurrent = (): void => {

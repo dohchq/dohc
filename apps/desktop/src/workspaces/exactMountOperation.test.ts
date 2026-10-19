@@ -39,7 +39,7 @@ describe("exact mount operations", () => {
     const h = harness();
     expect(() =>
       h.run({ ...h.input, workspace: { workspaceId: "workspace" } }, h.mutate),
-    ).toThrow("exact workspace attachment");
+    ).toThrow("Open this workspace again before using this share.");
     expect(h.withOperation).not.toHaveBeenCalled();
     expect(h.mutate).not.toHaveBeenCalled();
   });
@@ -56,7 +56,7 @@ describe("exact mount operations", () => {
         },
         h.mutate,
       ),
-    ).rejects.toThrow("retired workspace");
+    ).rejects.toThrow("This workspace was closed. Open it again.");
     expect(h.engineReady).not.toHaveBeenCalled();
     expect(h.mutate).not.toHaveBeenCalled();
   });

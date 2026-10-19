@@ -1,3 +1,4 @@
+import { agentColorsForPresentation } from "../settings/userSettingsStore";
 import { chatOperations } from "./chatOperations";
 import { isReceivedObject } from "@dohc/workspace-contracts/workspace-ref";
 import { workspaceFileRefs } from "../workspaces/workspaceFileReferenceScopes";
@@ -161,6 +162,7 @@ export function registerChatsIpcHandlers<
   linkedChatStoreFor(workspace: RegistryEntry): DesktopLinkedChatStore;
   chatWrites: ChatWrites;
   assertWritableWorkspace(workspace: RegistryEntry): void;
+  stateDir(): string;
   warmCredentialCache(): Promise<void>;
   localUserId(): string;
   localInstallationId(): string;
@@ -210,7 +212,9 @@ export function registerChatsIpcHandlers<
   async function presentationRequest(workspace: RegistryEntry, store: DesktopLinkedChatStore, assertCurrent: () => void) {
     await warmCredentialCache();
     assertCurrent();
-    return createActorPresentationRequest({
+    const agentColors = await agentColorsForPresentation(dependencies.stateDir());
+    assertCurrent();
+    return createActorPresentationRequest({ agentColors,
       readWorkspace: () => dependencies.readWorkspace(workspace.workspaceId), store, assertCurrent,
       installationId: localInstallationId(), credentials: currentCredentials(),
     });

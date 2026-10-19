@@ -324,6 +324,7 @@ impl RelayError {
             | RelayError::HttpStatus(_)
             | RelayError::Partitioned
             | RelayError::InvalidResponse
+            | RelayError::HttpsRequired
             // TRANSIENT, and therefore never skipped: the op says nothing
             // wrong, the store was simply busy. Advancing the cursor past it
             // would drop content the next pull would have applied.
@@ -457,6 +458,10 @@ pub enum RelayError {
     Partitioned,
     #[error("relay response failed validation")]
     InvalidResponse,
+    /// The relay address is not an https origin, so the engine refused it
+    /// before sending the bearer token anywhere.
+    #[error("relay address must use https")]
+    HttpsRequired,
     /// The engine's own database was busy while a relay operation used it.
     ///
     /// Typed rather than folded into `Local`, which carries a code STRING: the

@@ -6,6 +6,7 @@ import {authorizeShareGrantAction} from "./shareAuthorization";
 import {fileSideOf, targetVersionId} from "./shareFilter";
 import type {StorageContext} from "./storage/context";
 import type {CurrentShareGrantPrincipal} from "./storage/currentShareGrant";
+import {replicaGrantFloor, replicaViewReachesFloor} from "./storage/replicaGrantFloors";
 import {currentViewFileAtFence, forgetReplicaCurrentViewStoredCache, readReplicaCurrentViewRowText} from "./storage/replicaCurrentViews";
 
 export interface ReplicaCurrentViewReadInput {
@@ -151,14 +152,17 @@ export function replicaCurrentViewReadCacheSize(storage: StorageContext) {
 }
 
 // The accessor, grant and text never leave this synchronous read transaction.
-function withCurrentView<T>(storage: StorageContext, input: ReplicaCurrentViewReadInput,
+export function withReplicaCurrentView<T>(storage: StorageContext, input: ReplicaCurrentViewReadInput,
   source: ReplicaCurrentViewSource | undefined,
   read: (snapshot: {
     files: ReplicaCurrentViewFile[];
     rows: Map<string, ViewFile>;
+    workspace: string;
+    floor: ReturnType<typeof replicaGrantFloor>;
+    visiblePath: (version: string, path: string) => string | null;
     readText: (row: ViewFile) => string | null;
     inventoryEtag: () => string;
-  }) => T, requestedPath?: string,
+  }) => T, requestedPath?: string, includeRows = false,
 ): T | Unavailable {
   return storage.readTx(() => {
     if (!Number.isSafeInteger(input.generation) || input.generation < 1) return {status:"denied"};
@@ -176,6 +180,8 @@ function withCurrentView<T>(storage: StorageContext, input: ReplicaCurrentViewRe
     const snapshot = source ? source.currentReadView(workspace) : stored && {view:stored,previous:stored};
     if (!snapshot) { forgetReplicaCurrentViewCaches(storage,workspace); return {status:"not-ready"}; }
     const {view} = snapshot;
+    const floor = replicaGrantFloor(storage,input.grantId,workspace);
+    if (floor && !replicaViewReachesFloor(view,floor)) return {status:"updating"};
     if (view.workspaceId !== workspace || [view.revision, view.logCursor, view.journalCursor].some(n => !Number.isSafeInteger(n) || n < 0) ||
       view.logCursor > standing.logSeq || view.journalCursor > standing.journalCursor) return {status:"updating"};
     const latest = touchLatestIndex(storage,workspace);
@@ -192,8 +198,9 @@ function withCurrentView<T>(storage: StorageContext, input: ReplicaCurrentViewRe
     const project = (path: string) => projection ? projection.projectPath(path) : path;
     const files = new Map<string, ReplicaCurrentViewFile>(), rows = new Map<string, ViewFile>();
     if (snapshot.previous && snapshot.previous.workspaceId !== workspace) return {status:"updating"};
-    const previous = snapshot.previous && indexView(snapshot.previous,index.files);
-    if (snapshot.previous && !previous) return {status:"updating"};
+    const previousView = snapshot.previous && (!floor || replicaViewReachesFloor(snapshot.previous,floor)) ? snapshot.previous : undefined;
+    const previous = previousView && indexView(previousView,index.files);
+    if (previousView && !previous) return {status:"updating"};
     // An open needs only the incoming row and a row that can carry the saved path.
     const direct = realPath === undefined ? undefined : index.files.get(version)?.get(realPath);
     const saved = realPath === undefined ? undefined : previous?.files.get(version)?.get(realPath);
@@ -228,7 +235,7 @@ function withCurrentView<T>(storage: StorageContext, input: ReplicaCurrentViewRe
       if (path === null || requestedPath !== undefined && path !== requestedPath) continue;
       if (!current(indexed)) {files.set(path, {path, status:"updating"}); continue;}
       files.set(path,projectedFile(indexed,path));
-      if (requestedPath !== undefined) rows.set(path, file);
+      if (requestedPath !== undefined || includeRows) rows.set(path, file);
     }
     for (const omitted of index.omitted) {
       if (!visible(omitted.row.versionId, omitted.path)) continue;
@@ -250,7 +257,8 @@ function withCurrentView<T>(storage: StorageContext, input: ReplicaCurrentViewRe
       if (requestedPath === undefined || path === requestedPath) files.set(path, {path, status:"updating"});
     }
     const sorted = [...files.values()].sort((a,b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
-    return read({files:sorted, rows, inventoryEtag:()=>inventoryEtag(index,sorted), readText:row => {
+    return read({files:sorted, rows, workspace, floor,
+      visiblePath:(v,path)=>visible(v,path) ? project(path) : null, inventoryEtag:()=>inventoryEtag(index,sorted), readText:row => {
       const textKey = JSON.stringify([row.sha256,row.byteLength]);
       const text = index.texts.get(row.sha256);
       if (text !== undefined) {
@@ -279,12 +287,12 @@ function withCurrentView<T>(storage: StorageContext, input: ReplicaCurrentViewRe
 
 export function listReplicaCurrentViewFiles(storage: StorageContext, input: ReplicaCurrentViewReadInput,
   source?: ReplicaCurrentViewSource): ReplicaCurrentViewList {
-  return withCurrentView(storage, input, source, ({files,inventoryEtag}) => ({status:"ready" as const, files,etag:inventoryEtag()}));
+  return withReplicaCurrentView(storage, input, source, ({files,inventoryEtag}) => ({status:"ready" as const, files,etag:inventoryEtag()}));
 }
 
 export function readReplicaCurrentViewFile(storage: StorageContext, input: ReplicaCurrentViewReadInput & {path: string},
   source?: ReplicaCurrentViewSource): ReplicaCurrentViewRead {
-  return withCurrentView(storage, input, source, ({files, rows, readText}): ReplicaCurrentViewRead => {
+  return withReplicaCurrentView(storage, input, source, ({files, rows, readText}): ReplicaCurrentViewRead => {
     const file = files.find(f => f.path === input.path);
     if (!file) return {status:"not-found"};
     if (file.status === "updating") return {status:"updating"};

@@ -20,6 +20,10 @@ use crate::hash::{
     HashInput, HashOutcome, HashPool, HashRun, PostHashExpectation, PostHashProbe, mtime_ms,
 };
 use crate::media::media_type_for_path;
+use crate::search_policy::{
+    PathFloor, SearchPolicySnapshot, classify_engine_file_path, read_engine_search_policy,
+    resolve_effective_policy,
+};
 use std::borrow::Cow;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -53,6 +57,9 @@ pub struct FileEntry {
 pub enum SkipReason {
     /// The file exceeded `max_file_bytes` under [`OverCapPolicy::Skip`].
     OverCap,
+    /// A cloud provider such as iCloud Drive evicted the content of a file
+    /// the prior manifest tracks. Reading it would download it again.
+    Evicted,
 }
 
 /// A file that was seen but not tracked.
@@ -84,6 +91,12 @@ pub enum ScanIoOperation {
 /// Supplies a synthetic io error for a specific bounded scan unit.
 pub trait ScanIoFaultInjector: Send + Sync {
     fn error(&self, path: &str, operation: ScanIoOperation) -> Option<std::io::Error>;
+
+    /// Whether to treat `path` as evicted. Only a file provider can make a
+    /// real one.
+    fn evicted(&self, _path: &str) -> bool {
+        false
+    }
 }
 
 /// A completed scan: the tracked files (sorted by path) plus the seen-but-
@@ -179,6 +192,13 @@ impl Scanner {
     /// [`FileEntry`]). A reused file cannot surface a read failure, so a file
     /// that became unreadable without changing size or mtime stays tracked at
     /// its last-known-good content instead of degrading the scan.
+    ///
+    /// A tracked file whose content a cloud provider evicted is not read
+    /// either, since reading it downloads it: it is skipped as
+    /// [`SkipReason::Evicted`], so the reconcile retains its last-known
+    /// content and a policy narrowing still retires it. An untracked evicted
+    /// file is hashed, which downloads it, so a rename or a rebuilt store
+    /// still sees its content, unless `.dohc/files.toml` narrows it.
     pub fn scan_with_prior(
         &self,
         root: &Path,
@@ -196,7 +216,21 @@ impl Scanner {
                 // Deterministic order: sort by path before hashing so result
                 // indices are stable regardless of readdir order.
                 files.sort_by(|a, b| a.rel.cmp(&b.rel));
+                let mut policy = None;
+                let (evicted, files): (Vec<_>, Vec<_>) = files.into_iter().partition(|file| {
+                    file.evicted
+                        && (prior.get(&file.rel).is_some() || {
+                            let policy =
+                                policy.get_or_insert_with(|| read_engine_search_policy(&root));
+                            policy_narrows(policy, &file.rel)
+                        })
+                });
                 let mut skipped = skipped;
+                skipped.extend(evicted.into_iter().map(|file| SkippedPath {
+                    path: file.rel,
+                    size: file.size,
+                    reason: SkipReason::Evicted,
+                }));
                 skipped.sort_by(|a, b| a.path.cmp(&b.path));
                 let mut failed = failed;
                 failed.sort_by(|a, b| a.path.cmp(&b.path));
@@ -540,6 +574,7 @@ impl Scanner {
                     }
                 }
                 files.push(Candidate {
+                    evicted: self.evicted(&rel, &metadata),
                     rel,
                     abs: path,
                     size,
@@ -631,6 +666,7 @@ impl Scanner {
                         abs,
                         size,
                         mtime_ms: mtime_ms(&m),
+                        evicted: self.evicted(rel, &m),
                     });
                 }
             }
@@ -641,6 +677,27 @@ impl Scanner {
             skipped,
             failed,
         })
+    }
+
+    /// Whether macOS marks the file dataless: its content lives only with a
+    /// cloud provider. Reading `st_flags` does not download it.
+    fn evicted(&self, path: &str, metadata: &std::fs::Metadata) -> bool {
+        #[cfg(target_os = "macos")]
+        let dataless = {
+            use std::os::macos::fs::MetadataExt;
+            const SF_DATALESS: u32 = 0x4000_0000;
+            metadata.st_flags() & SF_DATALESS != 0
+        };
+        #[cfg(not(target_os = "macos"))]
+        let dataless = {
+            let _ = metadata;
+            false
+        };
+        dataless
+            || self
+                .io_faults
+                .as_ref()
+                .is_some_and(|faults| faults.evicted(path))
     }
 
     fn injected(&self, path: &str, operation: ScanIoOperation) -> Option<std::io::Error> {
@@ -664,11 +721,27 @@ impl Scanner {
     }
 }
 
+/// Whether `.dohc/files.toml` stops the engine tracking `path`. A policy
+/// capture cannot read counts as narrowing, since capture holds until it can.
+/// The secret floor is never narrowed.
+fn policy_narrows(policy: &SearchPolicySnapshot, path: &str) -> bool {
+    if policy.holds_file_capture() {
+        return true;
+    }
+    let Some(rules) = &policy.files_policy else {
+        return false;
+    };
+    classify_engine_file_path(path) == PathFloor::Tracked
+        && !resolve_effective_policy(path, Some(rules), None).tracked
+}
+
 struct Candidate {
     rel: String,
     abs: PathBuf,
     size: u64,
     mtime_ms: i64,
+    /// A cloud provider such as iCloud Drive evicted the content.
+    evicted: bool,
 }
 
 struct Enumerated {

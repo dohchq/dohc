@@ -7,6 +7,7 @@ import { accessOperations } from "./ipc/accessOperations";
 import { settingsOperations } from "./ipc/settingsOperations";
 import { workspaceFileOperations } from "./ipc/workspaceFileOperations";
 import { devToolsGranted } from "./ipc/devToolsIpc";
+import { insecureLoopbackServersForTests } from "./workspaces/cloudConfiguration";
 import {OwnerAppPublicationRequest, OwnerAppPublicationResult} from "./ipc/ownerAppPublicationContract";
 import { datasetOperations } from "./ipc/datasetOperations";
 import {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "@dohc/cli/app-responses";
@@ -28,6 +29,7 @@ import {
   serverAccountOperations,
   SitePreviewReplacedEvent,
   DesktopUserSettingsResult,
+  AgentColorChangedEvent,
   ShareDirectWritesPushedEvent,
   shareDirectWriteDeliveryOperations,
   EngineYDocLineageReplacementEvent,
@@ -148,6 +150,7 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(accessOperations, invoke),
   platform: process.platform,
   devTools: devToolsGranted(process.argv),
+  insecureLoopbackServersForTests: insecureLoopbackServersForTests(process.env),
   windowRole:
     new URLSearchParams(window.location.search).get("view") === "manager"
       ? "manager"
@@ -460,6 +463,7 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.setTitlebarTheme, payload),
   onWindowFullScreen: (listener) =>
     onEvent(CHANNELS.windowFullScreen, WindowFullScreenEvent, listener),
+  onAgentColorChanged: listener => onEvent(CHANNELS.agentColorChanged, AgentColorChangedEvent, listener),
   onUserSettingsChanged: (listener) =>
     onEvent(CHANNELS.userSettingsChanged, DesktopUserSettingsResult, listener),
   stepWindowZoom: (payload) =>

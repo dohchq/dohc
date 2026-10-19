@@ -29,6 +29,14 @@ export const PRIVACY_DENIED = "privacy-denied";
 export const PRIVACY_DENIED_WORDS =
   "macOS blocked dohc from this folder. Allow dohc in System Settings › Privacy & Security › Files & Folders.";
 
+/**
+ * The engine's refusal when a volume gives a new file sharing permissions it
+ * was created without, as a network share can, so a secret or a file's own
+ * access could not be kept.
+ */
+export const VOLUME_SHARES_NEW_FILES_WORDS =
+  "The disk this workspace is on adds sharing permissions to new files, so dohc can't keep this file private. Move the workspace to a disk on this Mac.";
+
 // Every code the engine refuses with: `ErrorCode` in dohc-engine-protocol.
 const ENGINE_CODE_WORDS = {
   AUTH_FAILED: "The server did not accept your sign-in. Sign in again.",
@@ -68,6 +76,7 @@ const ENGINE_CODE_WORDS = {
   INVALID_CHANNEL: "This channel cannot be shared.",
   RELAY_METHOD_NOT_ALLOWED: "The server does not support this.",
   RELAY_INVALID_RESPONSE: UNREADABLE_ANSWER,
+  RELAY_HTTPS_REQUIRED: "Your server's address does not use https. Disconnect, then connect your server again with its https address.",
   INTERNAL: null,
 } as const satisfies Record<DaemonErrorCode, Words>;
 
@@ -81,6 +90,7 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
     "Workspace is still updating. Try again.": UPDATING,
     "History is still updating. Try again.": UPDATING,
     "file-locked": "Another program has this file open. Close it there, then try again.",
+    "volume-shares-new-files": VOLUME_SHARES_NEW_FILES_WORDS,
     "workspace-owned": "Another copy of dohc has this workspace open. Close it there, then try again.",
     "share-read-only": ENGINE_CODE_WORDS.SHARE_READ_ONLY,
     "relay-origin-diverged": ENGINE_CODE_WORDS.ORIGIN_DIVERGED,
@@ -290,6 +300,11 @@ export function readCollectionReopenWait(error: unknown): { words: string; waitM
 /** macOS refused dohc a folder: System Settings, not dohc, can fix it. */
 export function isPrivacyDenied(error: unknown): boolean {
   return readError(error).words === PRIVACY_DENIED_WORDS;
+}
+
+/** The volume adds sharing permissions to new files, so dohc refused to write one. */
+export function isVolumeSharesNewFiles(error: unknown): boolean {
+  return readError(error).words === VOLUME_SHARES_NEW_FILES_WORDS;
 }
 
 /** A refusal only a newer dohc can get past, so Try again would do nothing. */

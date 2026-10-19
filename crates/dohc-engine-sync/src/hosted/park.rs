@@ -8,6 +8,7 @@
 //! file is gone. On its return, its heads come back once nothing holds their
 //! paths, the same gate a replayed row meets.
 
+use dohc_engine_storage::text;
 use std::collections::HashMap;
 
 use dohc_engine_storage::{EngineStore, FaultInjector, TxnOutcome};
@@ -389,7 +390,7 @@ pub(crate) fn unpark_returned(
             occupancy.take(object_id, &parked_paths(tx, workspace_id, object_id)?);
             let heads = tx
                 .prepare(
-                    "SELECT p.version_id,p.path,p.content_kind,b.text FROM hosted_parked_snapshots p \
+                    "SELECT p.version_id,p.path,p.content_kind,b.sha256 FROM hosted_parked_snapshots p \
                      LEFT JOIN blobs b ON b.sha256=p.blob_sha256 \
                      WHERE p.workspace_id=?1 AND p.object_id=?2",
                 )
@@ -399,7 +400,7 @@ pub(crate) fn unpark_returned(
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
-                        row.get::<_, Option<String>>(3)?,
+                        text::optional_from_row(tx, row, 3)?,
                     ))
                 })
                 .map_err(SyncError::corrupt)?

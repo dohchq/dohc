@@ -68,6 +68,7 @@ import {
   isYDocPathNotInVersionError,
   isYDocRemovalInProgressError,
   isYDocSessionUnreleasedError,
+  isVolumeSharesNewFilesCause,
   type EngineYDocSaveEvent,
   type WorkspaceEngineCapture,
   type WorkspaceEngineYDocProviderSession,
@@ -95,7 +96,7 @@ export type EngineYDocSessionProvider = Omit<WorkspaceEngineYDocProviderSession,
 };
 export interface EngineYDocSessionCapture {
   waitForAdmission?(path: string, signal: AbortSignal): Promise<boolean>;
-  openYDocSession(input: Omit<Parameters<WorkspaceEngineCapture["openYDocSession"]>[0], "onSaveState"> & {onSaveState?: (state: EngineYDocSaveStateName, token: number, event: EngineYDocSaveEvent, authorCapacity?: boolean, readOnlyCause?: ReadOnlyTransitionCause) => void}): Promise<EngineYDocSessionProvider>;
+  openYDocSession(input: Omit<Parameters<WorkspaceEngineCapture["openYDocSession"]>[0], "onSaveState"> & {onSaveState?: (state: EngineYDocSaveStateName, token: number, event: EngineYDocSaveEvent, authorCapacity?: boolean, readOnlyCause?: ReadOnlyTransitionCause, failure?: unknown) => void}): Promise<EngineYDocSessionProvider>;
 }
 
 type SharedAdmissionWait = {cancel: AbortController; authorityId: symbol; generation: number};
@@ -136,9 +137,11 @@ interface EngineYDocSessionIpcOptions {
   localPersonId: () => string;
 }
 
-// Why the file refuses writes. A missing file, or one that cannot be
-// checked, names no reason.
-function saveFailureReason(absolutePath: string): SaveFailureReason {
+// Why the file refuses writes. The engine names a volume that adds sharing
+// permissions to new files; otherwise the file is checked. A missing file, or
+// one that cannot be checked, names no reason.
+function saveFailureReason(absolutePath: string, failure: unknown): SaveFailureReason {
+  if (isVolumeSharesNewFilesCause(failure)) return "volume-shares-new-files";
   try {
     accessSync(absolutePath, fsConstants.W_OK);
     return null;
@@ -701,7 +704,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
                 editRefusal: { workspaceId: workspace.workspaceId, path: canonicalPath, requestId, message },
               }));
             },
-            onSaveState: (state, token, event, authorCapacity, readOnlyCause) => {
+            onSaveState: (state, token, event, authorCapacity, readOnlyCause, failure) => {
               if (state === "read-only") currentReadOnlyCause = readOnlyCause ?? "reconnecting";
               const seq =
                 event === "start"
@@ -713,7 +716,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
               // one or two access calls, made only on a failure, so the notice
               // can name it.
               const saveFailure = state === "error" && event === "outcome" && !authorCapacity
-                ? { reason: saveFailureReason(join(workspace.rootPath, canonicalPath)) }
+                ? { reason: saveFailureReason(join(workspace.rootPath, canonicalPath), failure) }
                 : undefined;
               publish(() => emit({
                 state, seq, ...(authorCapacity ? { authorCapacity: true } : {}),

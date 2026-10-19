@@ -1,7 +1,18 @@
-import { useSyncExternalStore } from "react";
+import { useSyncExternalStore, type ReactNode } from "react";
 import { Sparkles, Zap } from "lucide-react";
 import type { ActorPresentation } from "../../ipc/bridgeContract";
-import { presentationClasses, subscribePresentation } from "./actorPresentation";
+import { agentTextClass, presentationClasses, subscribePresentation } from "./actorPresentation";
+
+/** An agent's name or mark in its avatar's hue, repainting with it. Olive without a token. */
+export function useAgentInk(token: ActorPresentation | undefined): string {
+  return useSyncExternalStore(subscribePresentation, () => token ? agentTextClass(token) : "text-agent");
+}
+
+/** An author's name beside their avatar: an agent's in its avatar's hue, anyone else's as it is. */
+export function AgentName(props: { kind: "human" | "agent" | "automation"; presentation: ActorPresentation; children: ReactNode }) {
+  const ink = useAgentInk(props.kind === "agent" ? props.presentation : undefined);
+  return props.kind === "agent" ? <span className={ink}>{props.children}</span> : <>{props.children}</>;
+}
 
 // One avatar for every chat surface: a person's initials on a tint of their
 // admitted hue, the agent's sparkle in the agent voice, or an automation's bare
@@ -17,6 +28,10 @@ const SIZES = {
 } as const;
 
 const ICON = { post: 16, row: 14, comment: 12, strip: 10 } as const;
+
+// An agent is a rounded square and a person is round, whatever their colors.
+// The drawing rounds a 28px square by 8px; an 18px strip takes 4px.
+const AGENT_RADIUS = { post: "rounded-lg", row: "rounded-lg", comment: "rounded-lg", strip: "rounded" } as const;
 
 const segmenter = typeof Intl.Segmenter === "function"
   ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
@@ -62,12 +77,12 @@ export function ChatAvatar(props: {
     <span
       aria-hidden
       title={props.name}
-      className={`inline-grid shrink-0 place-items-center rounded-full border font-mono font-semibold ${
+      className={`inline-grid shrink-0 place-items-center border font-mono font-semibold ${
         SIZES[size]
       } ${
         agent
-          ? classes
-          : `border-line ${classes}`
+          ? `${AGENT_RADIUS[size]} ${classes}`
+          : `rounded-full border-line ${classes}`
       } ${props.className ?? ""}`}
     >
       {agent ? <Sparkles size={ICON[size]} strokeWidth={1.9} aria-hidden /> : initials(props.name)}

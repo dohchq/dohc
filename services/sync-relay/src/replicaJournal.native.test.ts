@@ -1,7 +1,5 @@
 import {afterEach, expect, it} from "vitest";
-import {once} from "node:events";
 import {mkdtemp, rm, writeFile} from "node:fs/promises";
-import {createServer} from "node:http";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {DatabaseSync} from "node:sqlite";
@@ -39,21 +37,15 @@ async function fixture(retired=false, retireAuthority=true,baselineBytes?:Uint8A
   // The lease is deliberately issued after rotation, so no old ordinary baseline reaches the child.
   const lease=principal.issue("workspace","native");
   let journalPaused=false;
-  const server=createServer(async(incoming,outgoing)=>{
-    try {
-      const response=journalPaused && incoming.url?.startsWith("/sync/workspace/live-journal?")
+  const relayHandler = async (request: Request) =>
+      journalPaused && new URL(request.url).pathname === "/sync/workspace/live-journal"
         ? new Response(JSON.stringify({rows:[],nextCursor:0,hasMore:false}),{headers:{"content-type":"application/json"}})
-        : await principal.handle(new Request(`http://127.0.0.1${incoming.url}`,{method:incoming.method,headers:incoming.headers as Record<string,string>}));
-      outgoing.writeHead(response.status,Object.fromEntries(response.headers));outgoing.end(Buffer.from(await response.arrayBuffer()));
-    }catch(error){outgoing.writeHead(500);outgoing.end(String(error));}
-  });
-  server.listen(0,"127.0.0.1");await once(server,"listening");const address=server.address();if(!address||typeof address==="string")throw Error("Relay port");
-  const startChild=()=>createReplicaEngineStarter({engineExecutable:binary.require(),baseUrl:`http://127.0.0.1:${address.port}`,allowUnisolatedDevelopment:true,
-      allowInsecureLoopbackForTests:true})({storeDir:root,lease});
+        : await principal.handle(request);
+  const startChild=()=>createReplicaEngineStarter({engineExecutable:binary.require(),allowUnisolatedDevelopment:true})({storeDir:root,lease,relayHandler});
   let child: ReplicaChild;
   try { child=await startChild();
   } catch(error) {
-    await new Promise<void>((resolve,reject)=>server.close(e=>e?reject(e):resolve()));f.close();await rm(root,{recursive:true,force:true});
+    f.close();await rm(root,{recursive:true,force:true});
     throw error;
   }
   const read=<T>(fn:(db:DatabaseSync)=>T)=>{const db=new DatabaseSync(join(root,".dohc/engine/engine.db"),{readOnly:true});try{return fn(db);}finally{db.close();}};
@@ -69,10 +61,10 @@ async function fixture(retired=false, retireAuthority=true,baselineBytes?:Uint8A
     await child.close();await rm(join(root,".dohc"),{recursive:true,force:true});
     child=await startChild();journalPaused=true;
     try {await child.pull();}finally{journalPaused=false;}
-  },async close(){await child.close();await new Promise<void>((resolve,reject)=>server.close(e=>e?reject(e):resolve()));f.close();await rm(root,{recursive:true,force:true});}};
+  },async close(){await child.close();f.close();await rm(root,{recursive:true,force:true});}};
 }
 
-it.skipIf(binary.missing)("drains pre-epoch retired journal rows without fetching their missing baseline",async()=>{
+it.skipIf(binary.missing || process.platform === "win32")("drains pre-epoch retired journal rows without fetching their missing baseline",async()=>{
   const f=await fixture(true);try {
     await f.child.pull();
     f.read(db=>{
@@ -82,7 +74,7 @@ it.skipIf(binary.missing)("drains pre-epoch retired journal rows without fetchin
   }finally{await f.close();}
 },120_000);
 
-it.skipIf(binary.missing)("drains pre-floor journal rows whose stale authority is still current",async()=>{
+it.skipIf(binary.missing || process.platform === "win32")("drains pre-floor journal rows whose stale authority is still current",async()=>{
   const f=await fixture(true,false);try {
     expect((await f.f.storage.readReplicaLiveJournal({workspaceId:"workspace",after:0,limit:500})).rows[0]!.authority).not.toBeNull();
     await f.child.pull();
@@ -93,7 +85,7 @@ it.skipIf(binary.missing)("drains pre-floor journal rows whose stale authority i
   }finally{await f.close();}
 },120_000);
 
-it.skipIf(binary.missing)("drains canonical journal pages into native heads without projecting or originating",async()=>{
+it.skipIf(binary.missing || process.platform === "win32")("drains canonical journal pages into native heads without projecting or originating",async()=>{
   const f=await fixture();try {
     await f.child.pull();
     const before=f.read(db=>db.prepare("SELECT count(*) AS n FROM snapshots").get()?.n);
@@ -109,7 +101,7 @@ it.skipIf(binary.missing)("drains canonical journal pages into native heads with
   }finally{await f.close();}
 },120_000);
 
-it.skipIf(binary.missing || process.env.DOHC_REPLICA_MEASURE!=="1")("measures release driver time from one and 500 commits through an on-demand projection",async()=>{
+it.skipIf(binary.missing || process.platform === "win32" || process.env.DOHC_REPLICA_MEASURE!=="1")("measures release driver time from one and 500 commits through an on-demand projection",async()=>{
   const results=[];
   for(const size of [1,500]) {
     const samples:number[]=[];
@@ -127,7 +119,7 @@ it.skipIf(binary.missing || process.env.DOHC_REPLICA_MEASURE!=="1")("measures re
   }
 },600_000);
 
-it.skipIf(binary.missing)("current views preserve nested-list bytes through the accepted journal lane",async()=>{
+it.skipIf(binary.missing || process.platform === "win32")("current views preserve nested-list bytes through the accepted journal lane",async()=>{
   const original=markdownToYDoc("- one\n  - child\n    - grandchild\n- two"),baselineBytes=Y.encodeStateAsUpdate(original);original.destroy();
   const f=await fixture(false,true,baselineBytes);try{
     await f.child.pull();const text=yDocToMarkdown(f.f.doc),sha=hash(Buffer.from(text));

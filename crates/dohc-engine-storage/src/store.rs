@@ -37,6 +37,7 @@ pub struct EngineStore {
     database_path: PathBuf,
     passive: bool,
     completed_batch: CompletionBatch,
+    flushes: crate::flush::Flushes,
 }
 
 /// The outcome of a transactional unit run through
@@ -95,6 +96,7 @@ impl EngineStore {
     ) -> Result<Self, StorageError> {
         let opened =
             crate::schema::open_engine_db_with_store_role(path, now_ms, root_token, work, true)?;
+        let flushes = crate::flush::Flushes::for_database(&opened.conn);
         Ok(Self {
             conn: opened.conn,
             checkpoints: None,
@@ -105,6 +107,7 @@ impl EngineStore {
             database_path: path.to_path_buf(),
             passive: true,
             completed_batch: Arc::default(),
+            flushes,
         })
     }
 
@@ -129,6 +132,7 @@ impl EngineStore {
         work: Option<Arc<AtomicU64>>,
     ) -> Result<Self, StorageError> {
         let opened = open_engine_db(path, now_ms, work)?;
+        let flushes = crate::flush::Flushes::for_database(&opened.conn);
         Ok(EngineStore {
             conn: opened.conn,
             checkpoints: None,
@@ -139,6 +143,7 @@ impl EngineStore {
             #[cfg(feature = "fault-injection")]
             harness_commits: 0,
             completed_batch: Arc::default(),
+            flushes,
         })
     }
 
@@ -151,6 +156,7 @@ impl EngineStore {
         work: Option<Arc<AtomicU64>>,
     ) -> Result<Self, StorageError> {
         let opened = crate::schema::open_engine_db_for_actor(path, now_ms, root_token, work)?;
+        let flushes = crate::flush::Flushes::for_database(&opened.conn);
         Ok(EngineStore {
             checkpoint_changes: opened.conn.total_changes(),
             conn: opened.conn,
@@ -161,6 +167,7 @@ impl EngineStore {
             harness_commits: 0,
             passive: false,
             completed_batch: Arc::default(),
+            flushes,
         })
     }
 
@@ -175,6 +182,7 @@ impl EngineStore {
     ) -> Result<Self, StorageError> {
         let opened =
             crate::schema::open_engine_db_with_root_token(path, now_ms, Some(token), work)?;
+        let flushes = crate::flush::Flushes::for_database(&opened.conn);
         Ok(EngineStore {
             conn: opened.conn,
             checkpoints: None,
@@ -185,6 +193,7 @@ impl EngineStore {
             harness_commits: 0,
             passive: false,
             completed_batch: Arc::default(),
+            flushes,
         })
     }
 
@@ -202,6 +211,7 @@ impl EngineStore {
     ) -> Result<Self, StorageError> {
         let opened = open_engine_db_read_only(path, work)?;
         let passive = crate::schema::store_is_passive(&opened.conn)?;
+        let flushes = crate::flush::Flushes::read_only();
         Ok(EngineStore {
             conn: opened.conn,
             checkpoints: None,
@@ -212,6 +222,7 @@ impl EngineStore {
             harness_commits: 0,
             passive,
             completed_batch: Arc::default(),
+            flushes,
         })
     }
 
@@ -328,6 +339,53 @@ impl EngineStore {
     /// filesystem-backed policy reads.
     pub fn database_path(&self) -> &Path {
         &self.database_path
+    }
+
+    /// Flush `file` so that it persists before every later commit of this
+    /// store. On Apple silicon a file whose `st_dev` matches the database
+    /// file's takes a barrier and leaves a drain owed for
+    /// [`Self::drain_flushes`]; any other file is drained now. Elsewhere this
+    /// is `sync_all`.
+    pub fn flush_before_commits(&self, file: &std::fs::File) -> std::io::Result<()> {
+        self.flushes.flush(file)
+    }
+
+    /// Make every file flushed with a barrier durable by draining the drive
+    /// cache once, through the database's real folder. A no-op when no drain
+    /// is owed. A failed drain stays owed until one succeeds. It does not
+    /// sync the WAL, so NORMAL commits are no more durable after it.
+    pub fn drain_flushes(&self) -> std::io::Result<()> {
+        self.flushes.drain()
+    }
+
+    /// Take the flushes recorded since the last call.
+    #[cfg(feature = "fault-injection")]
+    pub fn take_flush_trace(&self) -> Vec<crate::FlushEvent> {
+        self.flushes.take_trace()
+    }
+
+    /// Make the next owed drain fail.
+    #[cfg(feature = "fault-injection")]
+    pub fn fail_next_drain(&self) {
+        self.flushes.fail_next_drain();
+    }
+
+    /// Call `observer` with each flush as it runs, in place of any earlier one.
+    #[cfg(feature = "fault-injection")]
+    pub fn observe_flushes(&self, observer: impl Fn(crate::FlushEvent) + Send + 'static) {
+        self.flushes
+            .observe(crate::flush::FlushObserver(Box::new(observer)));
+    }
+
+    /// Order flushes on `device` instead of the database file's, as if the
+    /// database lived there. `None` drains every file.
+    #[cfg(all(
+        feature = "fault-injection",
+        target_os = "macos",
+        target_arch = "aarch64"
+    ))]
+    pub fn order_flushes_on_device(&self, device: Option<u64>) {
+        self.flushes.order_on_device(device);
     }
 
     /// Bind a fresh store to its root's token, or verify an existing binding.
@@ -544,13 +602,7 @@ impl EngineStore {
 
     /// Read a materialization payload from its existing text or binary blob.
     pub fn get_materialization_blob(&self, sha256: &str) -> Result<Option<Vec<u8>>, StorageError> {
-        let row: Option<(i64, String)> = self
-            .conn
-            .query_row(
-                "SELECT byte_length, text FROM blobs WHERE sha256 = ?1",
-                [sha256],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
+        let row: Option<(i64, String)> = crate::text::with_length(&self.conn, sha256)
             .optional()
             .map_err(StorageError::corrupt)?;
         if let Some((byte_length, text)) = row {
@@ -564,7 +616,7 @@ impl EngineStore {
             }
             return Ok(Some(text.into_bytes()));
         }
-        self.get_binary_blob(sha256)
+        crate::get_binary_blob(&self.conn, sha256)
     }
 
     /// Whether a binary blob with this key exists.
@@ -1029,6 +1081,11 @@ impl EngineStore {
 
 impl Drop for EngineStore {
     fn drop(&mut self) {
+        // Best effort. The actor drains before each reply; this covers work no
+        // reply covered.
+        if let Err(error) = self.drain_flushes() {
+            eprintln!("engine store: drain on close: {error}");
+        }
         // Join the checkpointer before closing the writer and its ownership lock.
         self.checkpoints.take();
     }

@@ -134,6 +134,26 @@ describe("BacklinksPanel", () => {
     expect(onOpenPath).toHaveBeenCalledWith("notes/beta.md");
   });
 
+  it("names each source by its title and full path, whatever the title", async () => {
+    stubBacklinks({
+      sources: [
+        { sourcePath: "notes/alpha.md", sourceTitle: "alpha.md", snippets: [{ text: "x", line: 1, highlightStart: 0, highlightEnd: 1 }] },
+        { sourcePath: "alpha.md", sourceTitle: "alpha.md", snippets: [{ text: "x", line: 1, highlightStart: 0, highlightEnd: 1 }] },
+        { sourcePath: "notes/beta.md", sourceTitle: "Beta", snippets: [{ text: "x", line: 1, highlightStart: 0, highlightEnd: 1 }] },
+      ],
+    });
+    render(<BacklinksPanel workspaceId="ws-1" path="notes/target.md" />);
+
+    await screen.findByTestId("backlinks");
+    const rows = screen.getAllByTestId("backlink-source");
+    expect(rows.map((row) => row.getAttribute("aria-label"))).toEqual([
+      "alpha.md notes/alpha.md",
+      "alpha.md alpha.md",
+      "Beta notes/beta.md",
+    ]);
+    expect(screen.getByRole("button", { name: "alpha.md notes/alpha.md" })).toBe(rows[0]);
+  });
+
   it("collapses and expands via the header button", async () => {
     stubBacklinks(TWO_SOURCES);
     render(<BacklinksPanel workspaceId="ws-1" path="notes/target.md" />);

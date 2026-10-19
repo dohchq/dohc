@@ -7,6 +7,7 @@
     ".": "./src/index.ts",
     "./artifact-markdown-guard": "./src/artifact-markdown-guard.ts",
     "./body-fragment": "./src/body-fragment.ts",
+    "./engine-markdown-reader": "./src/engine-markdown-reader.ts",
     "./browser-editor": "./src/browser-editor.ts",
     "./frontmatter": "./src/frontmatter.ts",
     "./frontmatter-map": "./src/frontmatter-map.ts",
@@ -18,6 +19,7 @@
     "./named-live-browser-transport": "./src/namedLiveBrowserTransport.ts"
   },
   "scripts": {
+    "build:engine-reader": "node scripts/build-engine-reader.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
@@ -39,7 +41,9 @@
     "yjs": "13.6.30"
   },
   "devDependencies": {
+    "@babel/parser": "7.29.8",
     "@types/node": "^24.13.3",
+    "esbuild": "0.28.1",
     "typescript": "^7.0.2",
     "vitest": "^4.1.11"
   }

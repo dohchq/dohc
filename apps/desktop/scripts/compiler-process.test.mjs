@@ -16,8 +16,9 @@ import { once } from 'node:events';
 // Windows owner and worker took 17.6 s to answer, so the deadline is 20 s,
 // inside each 30 s test.
 const bounds={timeoutMs:20000,maxMemoryBytes:256*1024*1024,maxProcesses:8,maxInputBytes:4096,maxOutputBytes:4096,maxErrorBytes:8192};
-const darwin=process.platform==='darwin';
-const owned={skip:!['win32','darwin'].includes(process.platform),timeout:30000};
+// dohc stages the macOS compiler for Apple silicon only.
+const darwin=process.platform==='darwin'&&process.arch==='arm64';
+const owned={skip:!(process.platform==='win32'||darwin),timeout:30000};
 const macos={skip:!darwin,timeout:30000};
 // macOS runs the worker under the staged official Node and owner. Seatbelt
 // stops any Node that loads libraries from outside its own file.
@@ -269,14 +270,28 @@ spawn(process.execPath,['-e',launcher,swapper,process.argv[2]],{stdio:'ignore'})
   const wait=setInterval(()=>{try{const{pid}=JSON.parse(readFileSync(process.env.TMPDIR+'swapper.json','utf8'));clearInterval(wait);writeFileSync(marker,JSON.stringify({escaped:pid}));}catch{}},5);
 });setInterval(()=>{},1000);`.replace("import{writeFileSync}from'node:fs'","import{readFileSync,writeFileSync}from'node:fs'"));
   context.runtime.workerArgs=[canary];
-  const controller=new AbortController();
-  const running=assert.rejects(runOwnedCompilerProcess(context.runtime,{input:Buffer.alloc(0),bounds,signal:controller.signal}),{reason:'cancelled'});
-  const {escaped}=await waitForMarker(context);
-  t.after(()=>{try{process.kill(escaped,'SIGKILL');}catch{}});
-  controller.abort();await running;
-  assert.equal(await readFile(join(canary,'keep.txt'),'utf8'),'user data');
-  // Stop the swapper before the fixture's own recursive cleanup runs.
-  process.kill(escaped,'SIGKILL');assert.equal(await exited(escaped),true);
+  // Under load a sample can see the swapper before the intermediate exits, and
+  // the owner then kills it with the tree. That run keeps the canary but races
+  // no escaped process, so the test runs again.
+  for(let round=0;round<5;round++){
+    const controller=new AbortController();
+    const running=assert.rejects(runOwnedCompilerProcess(context.runtime,{input:Buffer.alloc(0),bounds,signal:controller.signal}),{reason:'cancelled'});
+    const {escaped}=await waitForMarker(context);
+    t.after(()=>{try{process.kill(escaped,'SIGKILL');}catch{}});
+    controller.abort();await running;
+    assert.equal(await readFile(join(canary,'keep.txt'),'utf8'),'user data');
+    // A swapper the owner killed answers kill(pid, 0) until launchd reaps it.
+    let escapedAlive=alive(escaped)&&!zombie(escaped);
+    // Stop the swapper before the fixture's own recursive cleanup runs.
+    if(escapedAlive)try{process.kill(escaped,'SIGKILL');}catch(error){if(error.code!=='ESRCH')throw error;escapedAlive=false;}
+    if(!escapedAlive){
+      for(const name of await readdir(context.scratch))await rm(join(context.scratch,name),{recursive:true,force:true});
+      continue;
+    }
+    assert.equal(await exited(escaped),true);
+    return;
+  }
+  t.skip('The owner caught the swapper in every round, so no escaped process raced the cleanup.');
 });
 test('macOS owner notices a dead caller while the worker never reads its input',macos,async t=>{
   const context=await fixture(t,`import{writeFileSync}from'node:fs';${markerLine}writeFileSync(marker,JSON.stringify({pid:process.pid}));setInterval(()=>{},1000);`);

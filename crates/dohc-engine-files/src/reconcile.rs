@@ -93,12 +93,13 @@ pub struct ReconcilePlan {
     pub from_generation: ScanGeneration,
     pub to_generation: ScanGeneration,
     pub ops: Vec<CaptureOp>,
-    /// Previously-tracked paths that are still on disk but now exceed the size
-    /// cap. A distinct, no-op disposition: not an `Ingest` (can't re-hash),
+    /// Previously-tracked paths that are still on disk but whose content the
+    /// scan did not read: over the size cap, or evicted by a cloud provider.
+    /// A distinct, no-op disposition: not an `Ingest` (not re-hashed),
     /// never a `Retire` (the file exists). The engine keeps them tracked at
     /// their last-known-good content. Surfaced for
     /// R07 materialization so it can leave these files untouched.
-    pub retained_over_cap: Vec<String>,
+    pub retained_unread: Vec<String>,
     /// Missing paths retained because a scan failure or final lstat result did
     /// not prove absence. Their prior manifest entries remain last-known-good.
     pub unconfirmed_removed: Vec<String>,
@@ -222,7 +223,7 @@ impl ReconcilePlan {
             from_generation,
             to_generation,
             ops,
-            retained_over_cap: diff.retained_over_cap,
+            retained_unread: diff.retained_unread,
             unconfirmed_removed: diff.unconfirmed_removed,
             respelled_retires,
             degraded,
@@ -237,7 +238,7 @@ impl ReconcilePlan {
         self.ops.len()
     }
 
-    /// Whether the plan has no actionable ops (retained-over-cap is a no-op
+    /// Whether the plan has no actionable ops (retained-unread is a no-op
     /// disposition and does not count here).
     pub fn is_empty(&self) -> bool {
         self.ops.is_empty()
@@ -700,7 +701,7 @@ impl ReconcileController {
         }
         // NotOwned paths are dropped even when they never appeared in
         // `plan.ops`: an over-cap policy retire is applied as a direct side
-        // effect (such paths are `retained_over_cap`, deliberately absent
+        // effect (such paths are `retained_unread`, deliberately absent
         // from the ops), and leaving its manifest entry would claim the path
         // is still tracked at content whose head has just been deleted — so a
         // later policy widen would diff clean and never re-ingest it.
@@ -946,7 +947,7 @@ mod ack_receipt_tests {
             from_generation: controller.generation,
             to_generation: controller.generation.next(),
             ops: Vec::new(),
-            retained_over_cap: Vec::new(),
+            retained_unread: Vec::new(),
             unconfirmed_removed: Vec::new(),
             respelled_retires: BTreeMap::new(),
             degraded: false,
@@ -990,7 +991,7 @@ mod ack_receipt_tests {
             from_generation: controller.generation,
             to_generation: controller.generation.next(),
             ops: Vec::new(),
-            retained_over_cap: vec!["over-cap.md".to_owned()],
+            retained_unread: vec!["over-cap.md".to_owned()],
             unconfirmed_removed: Vec::new(),
             respelled_retires: BTreeMap::new(),
             degraded: false,

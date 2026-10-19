@@ -18,7 +18,9 @@ function channel(overrides: Partial<ChatChannelSummary>): ChatChannelSummary {
 import { createWorkspaceAuthorityOwner, type PhysicalWorkspace } from "../workspaces/workspaceAuthorityOwner";
 import { createRendererWorkspaceOperationRunner, type ExactRendererWorkspaceOperation } from "../window/rendererWorkspaceOperation";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
-import type { JoinedSharedChannel, RegistryEntry } from "../workspaces/registryStore";
+import { createRegistryStore, type JoinedSharedChannel, type RegistryEntry } from "../workspaces/registryStore";
+import { join } from "node:path";
+import { createTestScratch } from "../workspaces/testTemp";
 import { deferred } from "../testing/deferred";
 import { RelayClaimRefusedError, RelayIdentityMissingError } from "@dohc/workspace-contracts/relay";
 
@@ -129,6 +131,31 @@ async function harness(workspaceId = "workspace") {
 }
 
 describe("registered shared-channel handlers", () => {
+  it("reports a workspace forgotten before the IPC skip acknowledgment writes", async () => {
+    const h = await harness();
+    const registry = createRegistryStore(join(await createTestScratch("forgotten-workspace-ipc-"), "registry.json"));
+    h.workspace.shareView = {
+      shareId: "share", granterEmail: null, genericChatWritable: false,
+      grantedSelector: { paths: [], versionId: null, access: "view" },
+    };
+    registry.register(h.workspace);
+    h.acknowledge.mockImplementation((workspaceId: string, shareId: string | undefined, generation: number) => {
+      // The registry no longer holds the workspace when the write runs.
+      registry.remove(workspaceId);
+      registry.acknowledgeShareSkips(workspaceId, shareId, generation);
+    });
+    try {
+      await expect(h.invoke(sharedChannelOperations.dismissShareSkips.channel, {
+        workspaceId: h.workspace.workspaceId, generation: 1,
+      })).rejects.toThrow("This workspace is not open. Open it again.");
+      expect(registry.find(h.workspace.workspaceId)).toBeNull();
+      expect(h.acknowledge).toHaveBeenCalledOnce();
+      expect(h.notify).not.toHaveBeenCalled();
+    } finally {
+      await h.authorities.close();
+    }
+  });
+
   it.each(Object.values(sharedChannelOperations))("rejects an untrusted sender on $channel before parsing or work", async row => {
     const h = await harness();
     await expect(h.invoke(row.channel, null, false)).rejects.toThrow("untrusted");

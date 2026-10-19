@@ -1,8 +1,19 @@
 import type { CommandId } from "../renderer/commands/commandRows";
+import type { ShortcutId } from "../shortcuts/shortcutRegistry";
 
 // Closed tuples and channel names shared by main, the bridge contract, and the
 // preload. This module has no runtime imports so main-side modules can read a tuple
 // without loading the whole contract.
+
+// Edit > Find on macOS. The shell hands each to the editor that has focus,
+// which runs what the shortcut of the same id runs.
+export const EDITOR_MENU_COMMANDS = [
+  "editor-find",
+  "editor-replace",
+  "find-again-next",
+  "find-again-previous",
+] as const satisfies readonly ShortcutId[];
+export type EditorMenuCommand = (typeof EDITOR_MENU_COMMANDS)[number];
 
 export const MENU_COMMANDS = [
   "new-file",
@@ -24,7 +35,12 @@ export const MENU_COMMANDS = [
   "close-tab",
   "next-tab",
   "previous-tab",
-] as const satisfies readonly (CommandId | "command-palette")[];
+  ...EDITOR_MENU_COMMANDS,
+] as const satisfies readonly (CommandId | "command-palette" | EditorMenuCommand)[];
+
+export function isEditorMenuCommand(command: unknown): command is EditorMenuCommand {
+  return (EDITOR_MENU_COMMANDS as readonly unknown[]).includes(command);
+}
 
 // Explorer context menu: the renderer names what was right-clicked, main pops
 // a native menu built from main-owned labels over this closed set, and the
@@ -253,6 +269,7 @@ export const CHANNELS = {
   setTitlebarTheme: "desktop:set-titlebar-theme",
   windowFullScreen: "desktop:window-full-screen",
   stepWindowZoom: "desktop:step-window-zoom",
+  agentColorChanged: "desktop:agent-color-changed",
   userSettingsChanged: "desktop:user-settings-changed",
   folderAppChanged: "desktop:folder-app-changed",
   searchResults: "desktop:search-results",

@@ -49,6 +49,7 @@ import { DangerButton, EmptyState, IconButton, Pill, PrimaryButton, RetryRow, Se
 import { ObjectGlyph, type ObjectKind } from "../ui/KindGlyph";
 import { MENU_FRAME, MENU_SEPARATOR, Menu, type MenuEntry } from "../ui/Menu";
 import { MoreMenu } from "../ui/MoreMenu";
+import { Ref } from "../ui/Ref";
 import { SegmentedControl } from "../ui/SegmentedControl";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { SAVE_STATE, StateMark, type SaveStateKey } from "../ui/StateMark";
@@ -56,6 +57,7 @@ import { FolderChip, Step } from "../ui/Step";
 import { Titlebar } from "../Titlebar";
 import { ActivityBar } from "../workbench/ActivityBar";
 import { AgentBadge } from "../workbench/AgentBadge";
+import { AgentColorContext, AgentColorSwatches } from "../workbench/AgentColorPicker";
 import { AppRows } from "../workbench/AppsView";
 import { chatTabPath, collectionTabPath, HISTORY_TAB_PATH, siteTabPath, VIEW_IDS } from "../workbench/workbenchState";
 import { AutomationBadge } from "../workbench/AutomationBadge";
@@ -115,6 +117,8 @@ import { closeStatesPage } from "./statesRoute";
 const SAMPLE_ADA: ActorPresentation = { group: "states-ada", hue: "teal", self: false };
 const SAM_PALETTE_SLOT = 1;
 const SAMPLE_SAM: ActorPresentation = { ...relayPresentation(SAM_PALETTE_SLOT), group: "states-sam" };
+const SAMPLE_NOVA: ActorPresentation = { group: "states-nova", hue: null, self: false };
+const SAMPLE_ORBIT: ActorPresentation = { group: "states-orbit", hue: "plum", self: false };
 
 const KBD = "rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle";
 
@@ -852,6 +856,15 @@ const CHAT_RUN: ChatMessageRecord[] = [
   { id: "run-2", threadId: "about-chat", ...SAM, body: "Can we cut the last paragraph?", createdAtMs: CHAT_RUN_AT + 2 * 60_000 },
 ];
 
+// A person, an agent in the default olive, and an agent with a chosen color.
+const AGENT_COLOR_CHAT: ChatMessageRecord[] = [
+  { id: "color-sam", threadId: "about-chat", ...SAM, body: "Can you two check the funnel numbers?", createdAtMs: CHAT_RUN_AT },
+  { id: "color-nova", threadId: "about-chat", authorKind: "agent", authorDisplayName: "Nova", presentation: SAMPLE_NOVA,
+    body: "The signups match last week.", createdAtMs: CHAT_RUN_AT + 60_000 },
+  { id: "color-orbit", threadId: "about-chat", authorKind: "agent", authorDisplayName: "Orbit", presentation: SAMPLE_ORBIT,
+    body: "Checkout dropped 4%.", createdAtMs: CHAT_RUN_AT + 2 * 60_000 },
+];
+
 // Its second message hovered, so "12:45" shows in the avatar's column.
 function ChatRunSpecimen() {
   return (
@@ -1376,6 +1389,11 @@ function Pane(props: { theme: "light" | "dark" }) {
             <ChatAvatar presentation={neutralPresentation} key={size} name="Agent" kind="agent" size={size} />
           ))}
         </Specimen>
+        <Specimen label="coloured agent: post, row, comment, strip">
+          {avatarSizes.map((size) => (
+            <ChatAvatar presentation={SAMPLE_ORBIT} key={size} name="Orbit" kind="agent" size={size} />
+          ))}
+        </Specimen>
         <Specimen label="automation: post, row, comment, strip">
           {avatarSizes.map((size) => (
             <ChatAvatar presentation={neutralPresentation} key={size} name="Nightly digest" kind="automation" size={size} />
@@ -1431,11 +1449,14 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="hue-control" title="Hue control">
-        <Specimen label="person, olive chosen">
-          <HueControl label="Your color" value="olive" shape="person" onChange={noop} />
+        <Specimen label="person, rose chosen">
+          <HueControl label="Your color" value="rose" shape="person" onChange={noop} />
         </Specimen>
-        <Specimen label="agent, none chosen">
+        <Specimen label="agent, Default chosen">
           <HueControl label="Your agent's color" value={null} shape="agent" onChange={noop} />
+        </Specimen>
+        <Specimen label="agent, teal chosen">
+          <HueControl label="Your agent's color" value="teal" shape="agent" onChange={noop} />
         </Specimen>
       </Section>
 
@@ -2736,10 +2757,60 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Last, so the parts above keep their places. */}
+      {/* Last, so the parts above keep their places. A new part goes after. */}
       <Section part="chat-messages" title="Chat messages">
         <Specimen label="a file's chats in About: a run, its second message hovered at 12:45 PM">
           <ChatRunSpecimen />
+        </Specimen>
+      </Section>
+
+      <Section part="ref" title="Reference">
+        <Specimen label="rest, hover, keyboard focus, selected, missing">
+          <Ref path="data/funnel.csv" onOpen={noop} />
+          <span data-force-state="hover" data-force-target="button"><Ref path="data/funnel.csv" onOpen={noop} /></span>
+          <span data-force-state="focus-visible" data-force-target="button"><Ref path="data/funnel.csv" onOpen={noop} /></span>
+          <Ref path="data/funnel.csv" selected onOpen={noop} />
+          <Ref path="research/competitors.md" missing onOpen={noop} />
+        </Specimen>
+        <Specimen label="a title, with and without its folder; a heading">
+          <Ref path="research/competitors.md" title="Competitor landscape" />
+          <Ref path="research/competitors.md" title="Competitor landscape" folder />
+          <Ref path="research/competitors.md" heading="pricing" />
+        </Specimen>
+        <Specimen label="a long name in a narrow row" className="w-56">
+          <Ref path={STRIP_LONG} folder />
+        </Specimen>
+        <Specimen label="in a sentence">
+          <p className="m-0 w-[420px] text-[14px] leading-[22px] text-ink">
+            Numbers are in <Ref path="data/funnel.csv" onOpen={noop} /> and the flow is sketched in{" "}
+            <Ref path="sketches/flow.excalidraw" onOpen={noop} />.
+          </p>
+        </Specimen>
+        <Specimen label="kind">
+          <div className="flex w-[420px] flex-wrap gap-1.5">
+            {KINDS.map((kind) => (
+              <Ref key={kind.displayKind} path={KIND_SAMPLES[kind.displayKind]} kind={kind} />
+            ))}
+          </div>
+        </Specimen>
+      </Section>
+
+      <Section part="agent-color" title="Agent color">
+        <Specimen label="a person and two agents, Default and plum; keyboard focus on the plum agent's avatar">
+          <div data-force-state="focus-visible" data-force-target='[data-message-id="color-orbit"] [data-testid="agent-color-trigger"]'>
+            <AgentColorContext.Provider value={noop}>
+              <AboutPanelSpecimen>
+                <div className="flex h-[220px] flex-col">
+                  <ChatMessageList testIdPrefix={`states-agent-color-${theme}`} messages={AGENT_COLOR_CHAT} loading={false} emptyLabel="No messages yet." />
+                </div>
+              </AboutPanelSpecimen>
+            </AgentColorContext.Provider>
+          </div>
+        </Specimen>
+        <Specimen label="open, plum chosen, keyboard focus on Default">
+          <div className={`w-fit ${SHADOW_ROOM}`} data-force-state="focus-visible" data-force-target='[aria-label="Default"]'>
+            <AgentColorSwatches label="Color for Orbit" value="plum" onChange={noop} />
+          </div>
         </Specimen>
       </Section>
     </section>

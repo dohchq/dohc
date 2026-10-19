@@ -15,6 +15,7 @@ const bridgeMock = {
   onCloudSessionChanged: vi.fn(),
   openExternalUrl: vi.fn(),
   platform: "linux",
+  insecureLoopbackServersForTests: false,
   // A panel with no owner above it raises its own notices through the shell's
   // notice center, which follows the update feed while it is mounted.
   getUpdateState: vi.fn(),
@@ -44,6 +45,7 @@ beforeEach(() => {
   bridgeMock.openExternalUrl.mockResolvedValue(undefined);
   bridgeMock.getUpdateState.mockResolvedValue({ status: "idle", message: "Up to date" });
   bridgeMock.onUpdateState.mockReturnValue(() => undefined);
+  bridgeMock.insecureLoopbackServersForTests = false;
 });
 
 afterEach(() => {
@@ -174,16 +176,21 @@ describe("CloudLogin", () => {
     expect(bridgeMock.cloudLoginStart).not.toHaveBeenCalled();
   });
 
-  it("asks for https when the address is plain http off this machine", async () => {
+  it.each([
+    ["off this machine", "http://dohc.example.test", false],
+    ["on this machine", "http://localhost:1786", false],
+    ["off this machine under the e2e switch", "http://dohc.example.test", true],
+  ])("asks for https when the address is plain http %s", async (_where, address, insecureLoopback) => {
+    bridgeMock.insecureLoopbackServersForTests = insecureLoopback;
     render(<CloudLogin />);
     await screen.findByTestId("cloud-server-url");
     fireEvent.change(screen.getByTestId("cloud-server-url"), {
-      target: { value: "http://dohc.example.test" },
+      target: { value: address },
     });
     fireEvent.click(screen.getByTestId("cloud-connect-start"));
 
     expect(screen.getByTestId("cloud-connection-error").textContent).toBe(
-      "Enter an https address. dohc allows http only for localhost.",
+      "dohc connects to servers only over https. Enter an https address.",
     );
     expect(bridgeMock.cloudLoginStart).not.toHaveBeenCalled();
   });
@@ -204,7 +211,8 @@ describe("CloudLogin", () => {
     );
   });
 
-  it("uses loopback only when the user enters it", async () => {
+  it("uses a plain http loopback server under the e2e switch", async () => {
+    bridgeMock.insecureLoopbackServersForTests = true;
     render(<CloudLogin />);
     await screen.findByTestId("cloud-server-url");
     fireEvent.change(screen.getByTestId("cloud-server-url"), {
@@ -490,8 +498,8 @@ describe("CloudLogin", () => {
     vi.useFakeTimers();
     const onConnected = vi.fn();
     bridgeMock.cloudStatus
-      .mockResolvedValueOnce({ connected: false, serverUrl: "http://localhost:1786" })
-      .mockResolvedValueOnce({ ...CONNECTED, serverUrl: "http://localhost:1786" });
+      .mockResolvedValueOnce({ connected: false, serverUrl: "https://dohc.example.test" })
+      .mockResolvedValueOnce({ ...CONNECTED, serverUrl: "https://dohc.example.test" });
     bridgeMock.cloudLoginPoll.mockResolvedValueOnce({ status: "complete", email: "ice@dohc.dev" });
 
     render(<CloudLogin onConnected={onConnected} />);
@@ -513,9 +521,9 @@ describe("CloudLogin", () => {
     vi.useFakeTimers();
     const onConnected = vi.fn();
     bridgeMock.cloudStatus
-      .mockResolvedValueOnce({ connected: false, serverUrl: "http://localhost:1786" })
+      .mockResolvedValueOnce({ connected: false, serverUrl: "https://dohc.example.test" })
       .mockRejectedValueOnce(new Error("offline"))
-      .mockResolvedValueOnce({ ...CONNECTED, serverUrl: "http://localhost:1786" });
+      .mockResolvedValueOnce({ ...CONNECTED, serverUrl: "https://dohc.example.test" });
     bridgeMock.cloudLoginPoll.mockResolvedValueOnce({
       status: "complete",
       email: "ice@dohc.dev",
@@ -556,7 +564,7 @@ describe("CloudLogin", () => {
     const onConnected = vi.fn();
     bridgeMock.cloudStatus.mockResolvedValue({
       connected: false,
-      serverUrl: "http://localhost:1786",
+      serverUrl: "https://dohc.example.test",
     });
     bridgeMock.cloudLoginPoll.mockResolvedValueOnce({
       status: "complete",

@@ -335,12 +335,19 @@ fn is_folder(root_dir: &std::path::Path, path: &str) -> bool {
 /// folder already gone, which an interrupted pass removed, and stops at the
 /// first that stays: one with content, or one that cannot go, which a later
 /// write there reports.
-fn remove_emptied_folders(root_dir: &std::path::Path, path: &str, top: Option<&str>) {
+fn remove_emptied_folders(
+    store: &EngineStore,
+    root_dir: &std::path::Path,
+    path: &str,
+    top: Option<&str>,
+) {
     let top = top.map(path_key);
     let mut parent = path;
     while let Some((folder, _)) = parent.rsplit_once('/') {
-        if !matches!(remove_empty_directory_target(root_dir, folder), Ok(true))
-            && std::fs::symlink_metadata(root_dir.join(folder)).is_ok()
+        if !matches!(
+            remove_empty_directory_target(store, root_dir, folder),
+            Ok(true)
+        ) && std::fs::symlink_metadata(root_dir.join(folder)).is_ok()
         {
             break;
         }
@@ -1252,7 +1259,7 @@ pub(super) fn materialize_relay_page_on_store(
                 .filter(|path| is_inside(&path_key(path), &key))
             {
                 changed = true;
-                remove_emptied_folders(root_dir, path, Some(&change.path));
+                remove_emptied_folders(store, root_dir, path, Some(&change.path));
             }
         }
         let secret = change.content_kind == "secret";
@@ -1330,7 +1337,7 @@ pub(super) fn materialize_relay_page_on_store(
     )?;
     if hosted {
         for path in &deleted {
-            remove_emptied_folders(root_dir, path, None);
+            remove_emptied_folders(store, root_dir, path, None);
         }
     }
     Ok(())

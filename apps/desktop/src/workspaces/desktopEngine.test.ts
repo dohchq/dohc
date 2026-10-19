@@ -154,6 +154,18 @@ describe("desktop engine construction", () => {
     } finally { await f.close(); }
   });
 
+  it.each(["opens a workspace", "settles idle"] as const)("runs the startup smoke only when the launch %s", async (launch) => {
+    const f = fixture();
+    const workspace = { workspaceId: "smoke-gate-workspace", rootPath: await createTestScratch("smoke-gate-") };
+    try {
+      await f.engine.start();
+      if (launch === "opens a workspace") await f.engine.sessions!.run(workspace, async () => undefined);
+      f.engine.launchSettled();
+      await expect(f.options().startupSmoke).resolves.toBe(launch === "settles idle" ? "run" : "skip");
+      if (launch === "settles idle") await f.client.smokeClosed.promise;
+    } finally { await f.close(); }
+  });
+
   it("passes account changes to relay-session cleanup", async () => {
     const f = fixture();
     try {
@@ -283,7 +295,7 @@ describe("desktop engine construction", () => {
       const priorStop = stops.at(-1)!;
       request = relay.probe();
       await closeEntered.promise;
-      expect(() => discovered.assertCurrent()).toThrow("Owner host daemon retired.");
+      expect(() => discovered.assertCurrent()).toThrow("This live editing session ended.");
       expect(priorStop).toHaveBeenCalledOnce();
       const startsBeforeClose = ownerHostMock.start.mock.calls.length;
       if (mode === "quitting") f.setQuitting(true);
@@ -337,7 +349,7 @@ describe("desktop engine construction", () => {
       const close = mode === "cloud" ? f.engine.closeAllRelayTransportWorkspaces() : f.engine.closeRelayTransportWorkspace(workspace);
       await closeEntered.promise;
       expect(stopped[0]).toHaveBeenCalledOnce();
-      expect(() => first.assertCurrent()).toThrow("Owner host daemon retired.");
+      expect(() => first.assertCurrent()).toThrow("This live editing session ended.");
       if (mode === "shutdown") f.setQuitting(true);
       const shutdownDone = mode === "shutdown" || mode === "overlapping-cloud" ? f.engine.closeAllRelayTransportWorkspaces() : Promise.resolve();
       f.options().onLaunch?.();
@@ -355,7 +367,7 @@ describe("desktop engine construction", () => {
       expect(() => next.assertCurrent()).not.toThrow();
       expect(next.client).toBe(first.client);
       await f.engine.closeAllRelayTransportWorkspaces();
-      expect(() => next.assertCurrent()).toThrow("Owner host daemon retired.");
+      expect(() => next.assertCurrent()).toThrow("This live editing session ended.");
       const reopened = await ownerHostMock.start.mock.calls.at(-1)![0].bindings();
       expect(reopened.workspaces).toEqual([{ workspaceId: "owner", workspaceHandle: "owner-3" }]);
       expect(() => reopened.assertCurrent()).not.toThrow();
@@ -482,7 +494,7 @@ describe("desktop engine restart coordination", () => {
     const f = fixture(); const relaunched = deferred();
     await f.addWorkspace("workspace");
     try {
-      await f.engine.start(); await f.client.smokeClosed.promise;
+      await f.engine.start(); f.engine.launchSettled(); await f.client.smokeClosed.promise;
       const sessions = f.engine.sessions; const relay = f.engine.relayClient; const daemon = f.engine.daemon;
       const replacement = new Client();
       f.setLaunch(async () => replacement);
@@ -529,6 +541,7 @@ describe("desktop engine restart coordination", () => {
     try {
       vi.useFakeTimers();
       await f.engine.start();
+      f.engine.launchSettled();
       await opened.promise;
       await vi.advanceTimersByTimeAsync(11_000);
       expect(cancel).not.toHaveBeenCalled();
@@ -630,7 +643,7 @@ describe("desktop engine composed sessions and events", () => {
     const workspace = { workspaceId: "workspace", rootPath: await createTestScratch("dohc-desktop-engine-") };
     let closing: Promise<void> | undefined;
     try {
-      await f.engine.start(); await f.client.smokeClosed.promise;
+      await f.engine.start(); f.engine.launchSettled(); await f.client.smokeClosed.promise;
       f.engine.relayClient!.bind({ ...workspace, relay: { baseUrl: "https://relay.test", token: "token" } });
       await f.engine.sessions!.run(workspace, async () => undefined);
       f.client.respond = async (request) => {
@@ -645,7 +658,7 @@ describe("desktop engine composed sessions and events", () => {
     } finally { held.resolve(); await closing; await f.close(); }
   });
 
-  it("routes automation events to the current workspace and Collection projections to the renderer", async () => {
+  it("routes automation events to the current workspace, and Collection projections and a finished first read to the renderer", async () => {
     const f = fixture(); await f.addWorkspace("workspace");
     try {
       await f.engine.start();
@@ -669,6 +682,12 @@ describe("desktop engine composed sessions and events", () => {
       f.client.emit("collections.projected", { workspaceId: "workspace", paths: ["Log/a.md"], projectedCount: 1 });
       await vi.advanceTimersByTimeAsync(100);
       expect(f.dependencies.notifyRenderer).toHaveBeenCalledWith({ workspaceId: "workspace", paths: ["Log/a.md"], pathSetChanged: false });
+      // The engine answers what it refused while it read a new workspace's
+      // files, so the whole workspace reads again.
+      vi.mocked(f.dependencies.notifyRenderer).mockClear();
+      f.client.emit("capture.initialSettled", { workspaceId: "workspace" });
+      await vi.advanceTimersByTimeAsync(100);
+      expect(f.dependencies.notifyRenderer).toHaveBeenCalledExactlyOnceWith({ workspaceId: "workspace", pathSetChanged: false });
     } finally { vi.useRealTimers(); await f.close(); }
   });
 });

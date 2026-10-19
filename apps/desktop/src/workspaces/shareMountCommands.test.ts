@@ -33,7 +33,7 @@ const assertCurrent = () => undefined;
 
 function retiringCaller() {
   let current = true;
-  const retired = new Error("retired workspace authority");
+  const retired = new Error("This workspace was closed. Open it again.");
   const assertCurrent = () => {
     if (!current) throw retired;
   };
@@ -159,6 +159,7 @@ function harness() {
   };
 
   const files: ShareViewFiles = {
+    lookup: vi.fn(async () => ({ files: [], folders: [] })),
     linksIn: vi.fn(async () => null),
     linksResolve: vi.fn(async () => ({ versionId: "main", results: [], mountsCovered: true })),
     narrow: vi.fn(async () => undefined),

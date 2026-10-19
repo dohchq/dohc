@@ -47,15 +47,22 @@ describe("owner watched held read", () => {
     const start = h(request("owner", "/sync/a/log?since=0&hold=30000")).then(r => { started = r; return r; });
     await vi.advanceTimersByTimeAsync(0);
     expect(activity.stats().waiters).toBe(1);
-    watches.hold("a", "reader-request", 50);
+    watches.holdReader({
+      ok: true,
+      share: { shareId: "share", workspaceId: "a", granterUserId: "owner", selectorJson: '{"paths":["/"]}', createdAtMs: 1 },
+      grant: { grantId: "grant", shareId: "share", principalKind: "user", principalUserId: "reader", principalEmail: null,
+        access: "view", generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null },
+      effectiveSelector: { versionId: "main", paths: ["/"], access: "view" },
+    });
     await vi.advanceTimersByTimeAsync(0);
     expect(started).toBeDefined();
     expect(await (await start).json()).toMatchObject({ watched: true });
+    await vi.advanceTimersByTimeAsync(10_000);
     let response: Response | undefined;
     const end = h(request("owner", "/sync/a/log?since=0&hold=30000&watched=1")).then(r => { response = r; return r; });
-    await vi.advanceTimersByTimeAsync(49);
+    await vi.advanceTimersByTimeAsync(24_000);
     expect(response).toBeUndefined();
-    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(1_000);
     expect(response).toBeDefined();
     expect(await (await end).text()).toBe('{"ok":true,"ops":[],"nextCursor":0,"hasMore":false}');
     expect(watches.stats()).toEqual({ workspaces: 0, holders: 0 });

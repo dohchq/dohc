@@ -51,6 +51,7 @@ import {
   isConflictStaleTargetRefusal,
   isEngineStoreBusyRefusal,
   isFileLockedRefusal,
+  isVolumeSharesNewFilesRefusal,
   isYdocUpdateAdmissionRefusal,
   ydocUpdateDependsOn,
   isTransientEngineRefusal,
@@ -577,8 +578,9 @@ export interface WorkspaceEngineCapture {
     // file, which is silent data loss.
     // Tokens identify settles across daemon generations. Lifecycle events are
     // separate from visible state: a busy outcome still reports "settling".
-    // Opening and corrective status reports claim no edits.
-    onSaveState?: (state: EngineYDocSaveState, token: number, event: EngineYDocSaveEvent, authorCapacity?: boolean) => void;
+    // Opening and corrective status reports claim no edits. `failure` is the
+    // error a failed settle met; capture sends no read-only cause.
+    onSaveState?: (state: EngineYDocSaveState, token: number, event: EngineYDocSaveEvent, authorCapacity?: boolean, readOnlyCause?: undefined, failure?: unknown) => void;
   }): Promise<WorkspaceEngineYDocProviderSession>;
   // WS-G2-C-2: flush + release any live Y.Doc session at OR under a
   // path before a destructive op that does not run through the capture chain
@@ -863,6 +865,12 @@ function hasRefusalInCauseChain(
 
 function isFileLockedCause(error: unknown): boolean {
   return hasRefusalInCauseChain(error, isFileLockedRefusal);
+}
+
+// The volume adds sharing permissions to new files, so the engine refused to
+// write this one.
+export function isVolumeSharesNewFilesCause(error: unknown): boolean {
+  return hasRefusalInCauseChain(error, isVolumeSharesNewFilesRefusal);
 }
 
 // Blocked by something that clears on its own — a program outside dohc
@@ -2360,7 +2368,7 @@ export function createWorkspaceEngineCapture(
       options.onTypingCheckpointRecovered?.(input.path);
       if (!dead && current !== null) checkpointBase = null;
       if (checkpointTimer !== null) {clearTimeout(checkpointTimer); checkpointTimer = null;}
-      void checkpointWriter.flush(null).catch(error => onError("Typing checkpoint retirement", error));
+      void checkpointWriter.flush(null).catch(error => onError("Remove saved typing", error));
     };
     let queuedUpdateBytes = 0;
     let queuedUpdateCount = 0;
@@ -4254,9 +4262,10 @@ export function createWorkspaceEngineCapture(
           token: number,
           event: EngineYDocSaveEvent,
           authorCapacity?: boolean,
+          failure?: unknown,
         ): void => {
           try {
-            input.onSaveState?.(state, token, event, authorCapacity);
+            input.onSaveState?.(state, token, event, authorCapacity, undefined, failure);
           } catch {
             // Observer boundary: a renderer-facing status hook must never
             // re-enter the session or wedge the settle chain.
@@ -4505,6 +4514,7 @@ export function createWorkspaceEngineCapture(
             saveToken,
             "outcome",
             hasRefusalInCauseChain(error, isYdocAuthorCapacityRefusal),
+            error,
           );
         };
         let entry: LiveYDocSession | null = null;
@@ -6993,7 +7003,7 @@ export function createWorkspaceEngineCapture(
           (input.createOnly && (input.expectedObjectId || input.recoverExistingText)) ||
           (input.expectedObjectId && input.recoverExistingText)
         ) {
-          throw new Error("Generated Markdown write authority is ambiguous.");
+          throw new Error("The document save request has conflicting options: createOnly, expectedObjectId, or recoverExistingText.");
         }
         if (input.createOnly && current) {
           throw new Error(`Generated Markdown destination already exists: ${path}`);
@@ -7087,7 +7097,7 @@ export function createWorkspaceEngineCapture(
         }
         if (Boolean(input.expectedObjectId) === Boolean(input.recoverExistingText)) {
           throw new Error(
-            "Generated Markdown archive requires exactly one ownership authority.",
+            "The document archive request requires exactly one of expectedObjectId or recoverExistingText.",
           );
         }
         await settleAndCloseLiveYDocSessions(
@@ -7636,9 +7646,11 @@ export function createWorkspaceEngineCapture(
           } catch (error) {
             // A refused store was never opened, so nothing is pending in
             // it. Failing the stop here would block the move-aside rebuild,
-            // which closes the capture first.
-            const cancelled = captureWaitAbort.signal.aborted &&
-              error === captureWaitAbort.signal.reason;
+            // which closes the capture first. Quit abandons a store whose
+            // workspace never finished opening for the same reason.
+            const cancelled = (captureWaitAbort.signal.aborted &&
+              error === captureWaitAbort.signal.reason) ||
+              error instanceof EngineWorkspaceShuttingDownError;
             if (!cancelled && engineStoreRefusalOf(error) === null) throw error;
           }
         }

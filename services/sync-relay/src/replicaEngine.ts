@@ -1,5 +1,5 @@
 import {decodeReplicaCurrentView} from "@dohc/workspace-engine-client/daemon";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
@@ -8,16 +8,15 @@ import { parseCanonicalAdmittedLiveUpdateMetadata } from "@dohc/live-session-con
 import type { ReplicaLiveJournalPage } from "./storage/liveUpdateJournal";
 import { replicaFrontiers, type ReplicaJournalRow, type ReplicaPageResult, EngineClient, DuplexEngineClientConnection } from "@dohc/workspace-engine-client/daemon";
 import type { ReplicaChild, ReplicaChildInput } from "./replicaSupervisor";
+import { serveReplicaRelay } from "./replicaRelaySocket";
 
 export interface ReplicaEngineOptions {
   readonly engineExecutable: string;
-  readonly baseUrl: string;
   readonly allowUnisolatedDevelopment?: boolean;
-  readonly allowInsecureLoopbackForTests?: boolean;
   readonly deadlineMs?: number;
 }
 
-/** The child receives only private paths, an RPC token, and its GET credential. PR 4 adds Linux isolation. */
+/** The child receives only private paths, an RPC token, and its GET credential. PR 4b adds Linux isolation. */
 export function createReplicaEngineStarter(options: ReplicaEngineOptions) {
   // PR 4 must replace this all-platform opt-in with Linux isolation.
   if (!options.allowUnisolatedDevelopment) {
@@ -26,12 +25,15 @@ export function createReplicaEngineStarter(options: ReplicaEngineOptions) {
   if (!isAbsolute(options.engineExecutable)) throw new TypeError("Replica engine executable must be absolute.");
   const deadlineMs = options.deadlineMs ?? 120_000;
   if (!Number.isSafeInteger(deadlineMs) || deadlineMs < 1) throw new TypeError("Invalid replica deadline.");
-  return async ({ storeDir, lease }: ReplicaChildInput): Promise<ReplicaChild> => {
+  return async ({ storeDir, lease, relayHandler }: ReplicaChildInput): Promise<ReplicaChild> => {
     if (!(await stat(options.engineExecutable)).isFile()) throw new TypeError("Replica engine executable must be a file.");
     const authToken = randomBytes(32).toString("hex");
-    const child = spawn(options.engineExecutable, ["--store-role", "passive"], { cwd: storeDir, env: { DOHC_ENGINE_AUTH_TOKEN: authToken,
+    const relay = await serveReplicaRelay(storeDir, lease, relayHandler);
+    let child: ChildProcessWithoutNullStreams;
+    try { child = spawn(options.engineExecutable, ["--replica"], { cwd: storeDir, env: { DOHC_ENGINE_AUTH_TOKEN: authToken,
       ...(process.platform === "win32" ? { SystemRoot: process.env.SystemRoot } : {}) },
-      windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+      windowsHide: true, stdio: ["pipe", "pipe", "pipe"] }); }
+    catch (error) { await relay.close(); throw error; }
     const termination = new Promise<void>(resolve => child.once("close", () => resolve()));
     const stream = Duplex.from({ readable: child.stdout, writable: child.stdin });
     const client = new EngineClient(new DuplexEngineClientConnection(stream), { authToken, protocolVersion: 2,
@@ -49,13 +51,16 @@ export function createReplicaEngineStarter(options: ReplicaEngineOptions) {
         return response.result as Record<string, unknown>;
       } finally { clearTimeout(timer); }
     }
-    const close = async () => { stopped = true; client.close(); child.kill("SIGKILL"); await termination; };
+    let closing: Promise<void> | undefined;
+    const close = () => closing ??= (async () => { stopped = true; client.close(); child.kill("SIGKILL");
+      await termination; await relay.close(); })();
     try {
       await client.ready();
+      const ping = await request("engine.ping", {});
+      if (ping.mode !== "replica" || ping.sandboxLevel !== "none") throw new Error("Replica engine mode is unavailable.");
       const opened = await request("workspace.open", { rootDir: storeDir, workspaceId: lease.workspaceId,
         storeMode: "passive", captureMode: "none", recoverRunningDispatches: false,
-        relay: { baseUrl: options.baseUrl, bearerToken: lease.bearer,
-          ...(options.allowInsecureLoopbackForTests ? { allowInsecureLoopbackForTests: true } : {}) } });
+        relay: { socketPath: relay.socketPath, bearerToken: lease.bearer } });
       workspace = String(opened.workspace);
       await request("sync.adoptJoinIdentity", { workspaceId: lease.workspaceId,
         replicationEpoch: lease.replicationEpoch, streamIdentity: lease.streamIdentity });
@@ -79,10 +84,9 @@ export function createReplicaEngineStarter(options: ReplicaEngineOptions) {
         await pullOrdinary();
         const frontiers = replicaFrontiers(await request("replica.frontiers", {}));
         await drainReplicaJournal(frontiers.journalCursor, async after => {
-          const url = new URL(`/sync/${encodeURIComponent(lease.workspaceId)}/live-journal`, options.baseUrl);
-          url.searchParams.set("after", String(after)); url.searchParams.set("limit", "500");
-          const response = await fetch(url, { headers: {authorization: `Bearer ${lease.bearer}`}, signal: AbortSignal.timeout(deadlineMs) });
-          if (!response.ok) throw new Error(`Replica journal read failed (${response.status}).`);
+          const response = await relayHandler(new Request(`http://localhost/sync/${encodeURIComponent(lease.workspaceId)}/live-journal?after=${after}&limit=500`, {
+            headers: {authorization: `Bearer ${lease.bearer}`}, signal: AbortSignal.timeout(deadlineMs)}));
+          if (response.status !== 200) throw new Error(`Replica journal read failed (${response.status}).`);
           return await response.json() as ReplicaLiveJournalPage;
         }, async (after, page) => {
           const rows: ReplicaJournalRow[] = page.rows.map(r => ({...r,

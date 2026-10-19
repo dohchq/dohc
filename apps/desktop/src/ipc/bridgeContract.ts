@@ -449,6 +449,7 @@ export const RetryOwnerLiveSharePayload = WorkspaceIdPayload.extend({shareId: OW
 export type RetryOwnerLiveSharePayload = z.infer<typeof RetryOwnerLiveSharePayload>;
 
 export const ListWorkspaceFilesPayload = WorkspaceIdPayload.extend({
+  filePath: PATH_STRING.optional(),
   // Activity refreshes may reuse main's last complete listing. Every other
   // caller omits this and forces a disk/share walk, so direct mutations and
   // the Explorer's explicit refresh cannot observe a pre-watcher cache.
@@ -1570,10 +1571,17 @@ const SHARED_AUTHOR_ID = z.string().min(1).refine(
 // Display only. This token grants no workspace or author authority.
 export const ActorPresentation = z.object({
   group: z.string(),
-  hue: z.enum(["rust", "amber", "teal", "blue", "indigo", "plum", "rose", "olive"]).nullable(),
+  hue: z.enum(["rust", "amber", "teal", "blue", "indigo", "plum", "rose"]).nullable(),
   self: z.boolean(),
 });
 export type ActorPresentation = z.infer<typeof ActorPresentation>;
+export const AgentColorChangedEvent = z.object({
+  workspaceId: WorkspaceIdPayload.shape.workspaceId,
+  group: z.string(),
+  hue: ActorPresentation.shape.hue,
+}).strict();
+export type AgentColorChangedEvent = z.infer<typeof AgentColorChangedEvent>;
+export const SetAgentColorPayload = AgentColorChangedEvent;
 
 // A Collection automation's name or its Collection's, as History reads it.
 export const AUTOMATION_AUTHOR_TEXT_MAX = 4096;
@@ -3265,7 +3273,7 @@ const SitePackageInfo = z
     ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "shared site roots must stay inside their authority mount root",
+        message: "Shared app folders must stay inside the shared folder.",
         path: ["root"],
       });
     }
@@ -6853,7 +6861,7 @@ export type EngineYDocLineageReplacementEvent = z.infer<
 export const ReadOnlyTransitionCause = z.enum(["access-ended", "reconnecting", "lineage-failure"]);
 export type ReadOnlyTransitionCause = z.infer<typeof ReadOnlyTransitionCause>;
 
-export const SaveFailureReason = z.enum(["read-only", "privacy-denied"]).nullable();
+export const SaveFailureReason = z.enum(["read-only", "privacy-denied", "volume-shares-new-files"]).nullable();
 export type SaveFailureReason = z.infer<typeof SaveFailureReason>;
 
 export const EngineYDocSaveStateEvent = z.object({
@@ -7016,6 +7024,9 @@ export interface DohcDesktopBridge
   // renderer shows the debug panel on it; every dev channel is separately
   // gated in main, so this is a hint, not authority.
   devTools: boolean;
+  // Constant: the e2e switch that lets sign-in use a plain http server on
+  // this machine. The address field checks with it; main decides again.
+  insecureLoopbackServersForTests: boolean;
   reloadRenderer(): Promise<void>;
   devForgetWorkspaces(): Promise<DevForgetWorkspacesResult>;
   devRevealPath(payload: DevRevealPathPayload): Promise<void>;
@@ -7182,6 +7193,7 @@ export interface DohcDesktopBridge
   detectAgentTools(payload: AgentRunPayload): Promise<AgentToolsResult>;
   setTitlebarTheme(payload: SetTitlebarThemePayload): Promise<void>;
   onWindowFullScreen(listener: (event: WindowFullScreenEvent) => void): () => void;
+  onAgentColorChanged(listener: (event: AgentColorChangedEvent) => void): () => void;
   onUserSettingsChanged(
     listener: (result: DesktopUserSettingsResult) => void,
   ): () => void;

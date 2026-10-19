@@ -15,6 +15,7 @@ use crate::store::{
     hash_fields, lookup_request, record_merge_request, validate_delete_input, validate_path,
     validate_write_input, write_result_from_moment, write_text_in_tx,
 };
+use dohc_engine_storage::text;
 use dohc_engine_storage::{FaultInjector, Preimage, StorageError, TxnOutcome};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -937,7 +938,7 @@ fn select_snapshot(
         Option<i64>,
     );
     let sql = format!(
-        "SELECT s.object_id, s.path, b.text, s.blob_sha256, s.updated_at_ms, \
+        "SELECT s.object_id, s.path, b.sha256, s.blob_sha256, s.updated_at_ms, \
          s.latest_moment_id, s.metadata_origin, s.metadata_summary, \
          s.metadata_correlation_id, COALESCE(s.content_kind, 'text'), \
          s.binary_sha256, bb.byte_length FROM {table} s \
@@ -950,7 +951,7 @@ fn select_snapshot(
             Ok((
                 row.get(0)?,
                 row.get(1)?,
-                row.get(2)?,
+                text::optional_from_row(conn, row, 2)?,
                 row.get(3)?,
                 row.get(4)?,
                 row.get(5)?,

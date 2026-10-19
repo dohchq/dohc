@@ -21,6 +21,7 @@ import {
   readCollectionReopenWait,
   readError,
   shouldRecheckShareAccess,
+  VOLUME_SHARES_NEW_FILES_WORDS,
   withErrorWords,
 } from "./errorWords";
 
@@ -162,6 +163,18 @@ describe("error words", () => {
     );
   });
 
+  it("says why dohc can't keep a file private on a volume that shares new files, after the caller's sentence", () => {
+    const engine = acrossIpc(refusal("INTERNAL", "volume-shares-new-files"), "desktop:write-workspace-file");
+    expect(readError(engine)).toEqual({
+      words: VOLUME_SHARES_NEW_FILES_WORDS,
+      mapped: true,
+      cause: "DaemonRefusalError [INTERNAL]: volume-shares-new-files",
+    });
+    expect(withErrorWords("Couldn't save .env.", engine)).toBe(
+      "Couldn't save .env. The disk this workspace is on adds sharing permissions to new files, so dohc can't keep this file private. Move the workspace to a disk on this Mac.",
+    );
+  });
+
   it("keeps an EPERM main did not name a privacy refusal as a permission problem", () => {
     const eperm = acrossIpc(Object.assign(new Error("EPERM: operation not permitted, rename 'a' -> 'b'"), { code: "EPERM" }));
     expect(isPrivacyDenied(eperm)).toBe(false);
@@ -221,6 +234,11 @@ describe("error words", () => {
     });
     expect(readError(acrossIpc(refusal("SHARE_READ_ONLY", "workspace operation failed"))).words)
       .toBe("This share is read-only.");
+  });
+
+  it("names https when the engine refuses a server address", () => {
+    expect(readError(acrossIpc(refusal("RELAY_HTTPS_REQUIRED", "workspace operation failed"))).words)
+      .toBe("Your server's address does not use https. Disconnect, then connect your server again with its https address.");
   });
 
   it("reads the app compiler and the Collection worker by their codes", () => {

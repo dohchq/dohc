@@ -85,12 +85,10 @@ Apple deprecated Seatbelt in macOS 10.8, and it still works on macOS 27.
 ## The runtime
 
 Both platforms run the official Node 24.16.0, pinned by sha256 in `stage-app-compiler.mjs`.
-Staging checks a macOS release archive against `SHASUMS256.txt`, then checks the `node` binary inside it against its own pin.
+Staging checks the macOS arm64 release archive against `SHASUMS256.txt`, then checks the `node` binary inside it against its own pin.
 Node 24 needs macOS 13.5, so publishing and local launch refuse older macOS.
 The rest of dohc keeps Electron's minimum.
-An x64 dohc that Rosetta runs on an Apple silicon Mac also refuses, and names the Apple silicon download.
-Main reads `app.runningUnderARM64Translation`, which reports `sysctl.proc_translated`.
-The sandbox is unverified under Rosetta. A native Intel Mac builds apps.
+dohc ships for Apple silicon only, so staging refuses macOS x64 and an x64 process on a Mac refuses to build apps.
 
 electron-builder signs `node` and `compiler-owner` with the hardened runtime and its default inherited entitlements.
 It can name entitlements only for the main app, login items and one plist shared by every other binary, Electron's helpers included.

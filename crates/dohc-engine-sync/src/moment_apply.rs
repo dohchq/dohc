@@ -3,6 +3,7 @@ use dohc_engine_domain::collections::{COLLECTION_SCHEMA_FILENAME, is_collection_
 use dohc_engine_files::{
     PathClassification, classify_engine_file_path_normalized, search_policy::SearchPolicySnapshot,
 };
+use dohc_engine_storage::text;
 use dohc_engine_storage::{EngineStore, FaultInjector, get_binary_blob, hex_sha256};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -2297,12 +2298,7 @@ pub(crate) fn retain_refused_moment_blobs(
 }
 
 fn require_blob_text(tx: &Transaction<'_>, sha: &str) -> Result<String, SyncError> {
-    let row: Option<(i64, String)> = tx
-        .query_row(
-            "SELECT byte_length,text FROM blobs WHERE sha256=?1",
-            [sha],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
+    let row: Option<(i64, String)> = text::with_length(tx, sha)
         .optional()
         .map_err(SyncError::corrupt)?;
     let (byte_length, text) = row.ok_or(SyncError::BlobInvalid)?;
@@ -2329,9 +2325,10 @@ fn select_snapshot_by_object(
     version_id: &str,
     object_id: &str,
 ) -> Result<Option<Snapshot>, SyncError> {
-    tx.query_row(
+    let snapshot = text::ReadSnapshot::new(tx).map_err(SyncError::corrupt)?;
+    let row = tx.query_row(
         "SELECT s.object_id,s.version_id,s.path,COALESCE(s.content_kind,'text'), \
-                s.blob_sha256,s.binary_sha256,b.text,COALESCE(b.byte_length,bb.byte_length), \
+                s.blob_sha256,s.binary_sha256,b.sha256,COALESCE(b.byte_length,bb.byte_length), \
                 s.updated_at_ms,s.latest_moment_id,s.metadata_origin,
                 s.metadata_summary,s.metadata_correlation_id \
          FROM snapshots s \
@@ -2343,7 +2340,11 @@ fn select_snapshot_by_object(
     )
     .optional()
     .map_err(SyncError::corrupt)?
-    .transpose()
+    .transpose()?;
+    snapshot.finish(
+        hydrate_snapshots(tx, row.into_iter().collect()).map(|rows| rows.into_iter().next()),
+        SyncError::corrupt,
+    )
 }
 
 fn select_snapshot_by_path(
@@ -2355,7 +2356,7 @@ fn select_snapshot_by_path(
     let aliased = tx
         .query_row(
             "SELECT s.object_id,s.version_id,s.path,COALESCE(s.content_kind,'text'), \
-                    s.blob_sha256,s.binary_sha256,b.text,COALESCE(b.byte_length,bb.byte_length), \
+                    s.blob_sha256,s.binary_sha256,b.sha256,COALESCE(b.byte_length,bb.byte_length), \
                     s.updated_at_ms,s.latest_moment_id,s.metadata_origin,
                     s.metadata_summary,s.metadata_correlation_id \
              FROM path_aliases a \
@@ -2373,12 +2374,12 @@ fn select_snapshot_by_path(
         if snapshot.path != path {
             return Err(SyncError::CoordinateDiverged);
         }
-        return Ok(Some(snapshot));
+        return hydrate_snapshots(tx, vec![snapshot]).map(|rows| rows.into_iter().next());
     }
     let mut statement = tx
         .prepare(
             "SELECT s.object_id,s.version_id,s.path,COALESCE(s.content_kind,'text'), \
-                    s.blob_sha256,s.binary_sha256,b.text,COALESCE(b.byte_length,bb.byte_length), \
+                    s.blob_sha256,s.binary_sha256,b.sha256,COALESCE(b.byte_length,bb.byte_length), \
                     s.updated_at_ms,s.latest_moment_id,s.metadata_origin,
                     s.metadata_summary,s.metadata_correlation_id \
              FROM snapshots s \
@@ -2395,7 +2396,28 @@ fn select_snapshot_by_path(
     if rows.len() > 1 {
         return Err(SyncError::CoordinateDiverged);
     }
-    rows.into_iter().next().transpose()
+    let rows = rows.into_iter().collect::<Result<Vec<_>, _>>()?;
+    hydrate_snapshots(tx, rows).map(|rows| rows.into_iter().next())
+}
+
+fn hydrate_snapshots(
+    conn: &rusqlite::Connection,
+    mut rows: Vec<Snapshot>,
+) -> Result<Vec<Snapshot>, SyncError> {
+    let mut bodies = text::read_batch(
+        conn,
+        rows.iter()
+            .filter(|row| row.kind == ContentKind::Text)
+            .map(|row| row.digest.as_str()),
+        None,
+    )
+    .map_err(SyncError::corrupt)?;
+    for row in &mut rows {
+        if row.kind == ContentKind::Text {
+            row.text = text::take(&mut bodies, &row.digest);
+        }
+    }
+    Ok(rows)
 }
 
 fn snapshot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Snapshot, SyncError>> {
@@ -2416,7 +2438,7 @@ fn snapshot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Snapsho
         return Ok(Err(SyncError::CoordinateDiverged));
     };
     let text = match (kind, text) {
-        (ContentKind::Text, Some(text)) => text,
+        (ContentKind::Text, Some(_)) => String::new(),
         (ContentKind::Binary, _) => String::new(),
         _ => return Ok(Err(SyncError::CoordinateDiverged)),
     };

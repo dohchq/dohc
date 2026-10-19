@@ -34,7 +34,8 @@ export type DaemonErrorCode =
   | "AMBIGUOUS_SELECTOR"
   | "INVALID_CHANNEL"
   | "RELAY_METHOD_NOT_ALLOWED"
-  | "RELAY_INVALID_RESPONSE";
+  | "RELAY_INVALID_RESPONSE"
+  | "RELAY_HTTPS_REQUIRED";
 
 export interface DaemonWireError extends Omit<WireError, "code"> {
   code: DaemonErrorCode;
@@ -196,6 +197,14 @@ export function isConflictStaleTargetRefusal(error: unknown): boolean {
 // is the wire's retry-after-backoff contract, and the message names the lock.
 export function isFileLockedRefusal(error: unknown): boolean {
   return refusalMessageOf(error, "OVERLOADED") === "file-locked";
+}
+
+// The volume gave a file the engine created sharing permissions it was
+// created without, so the engine refused to write a secret or a file's own
+// access there (`MaterializeError::VolumeSharesNewFiles`). Moving the
+// workspace fixes it; a retry alone does not.
+export function isVolumeSharesNewFilesRefusal(error: unknown): boolean {
+  return refusalMessageOf(error, "INTERNAL") === "volume-shares-new-files";
 }
 
 // The engine's own database was busy and its bounded retry budget ran out
@@ -412,6 +421,7 @@ export const DAEMON_ERROR_CODES: readonly DaemonErrorCode[] = [
   "INVALID_CHANNEL",
   "RELAY_METHOD_NOT_ALLOWED",
   "RELAY_INVALID_RESPONSE",
+  "RELAY_HTTPS_REQUIRED",
   "INTERNAL",
 ];
 

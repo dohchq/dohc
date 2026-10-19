@@ -451,6 +451,7 @@ function makeBaseBridge(
       source: "stored" as const,
     })),
     setTitlebarTheme: vi.fn(async () => undefined),
+    onAgentColorChanged: vi.fn(() => () => undefined),
     onUserSettingsChanged: vi.fn(() => () => {}),
     onChatDispatchNotices: vi.fn(() => () => {}),
     // This computer's agent is idle until a test pushes a run.

@@ -617,7 +617,7 @@ impl ActorHandle {
         self.tx
             .send(Command::Run(Box::new(move |store, cache| {
                 let outcome = work(store, cache);
-                let _ = reply.send(outcome);
+                let _ = reply.send(drained(store, outcome));
             })))
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)?;
@@ -639,7 +639,7 @@ impl ActorHandle {
             .send(Command::RunWithRegistrations(Box::new(
                 move |store, cache, registrations| {
                     let outcome = work(store, cache, registrations);
-                    let _ = reply.send(outcome);
+                    let _ = reply.send(drained(store, outcome));
                 },
             )))
             .await
@@ -658,7 +658,7 @@ impl ActorHandle {
         self.tx
             .blocking_send(Command::Run(Box::new(move |store, cache| {
                 let outcome = work(store, cache);
-                let _ = reply.send(outcome);
+                let _ = reply.send(drained(store, outcome));
             })))
             .map_err(|_| RuntimeError::ActorUnavailable)?;
         reply_rx
@@ -966,6 +966,27 @@ fn worker_main(
     drop(store);
 }
 
+/// Pay the drain that barrier flushes left owed before a result leaves the
+/// actor, so the files a command projected are as durable at its reply as a
+/// drain per file made them. The drain does not sync the WAL: the command's
+/// NORMAL commits are no more durable than before. A drain that fails stays
+/// owed, so the next reply drains again even when its command flushed
+/// nothing. The work's own error comes first; a failed drain turns a success
+/// into an I/O error.
+fn drained<R>(store: &EngineStore, outcome: Result<R, RuntimeError>) -> Result<R, RuntimeError> {
+    let drain = store.drain_flushes().map_err(|error| {
+        RuntimeError::Materialize(dohc_engine_files::MaterializeError::Io {
+            path: store.database_path().to_string_lossy().into_owned(),
+            kind: error.kind(),
+            raw_os_error: error.raw_os_error(),
+            // macOS checks privacy when a path opens, and the drain uses a
+            // folder the store opened earlier.
+            privacy_denied: false,
+        })
+    });
+    outcome.and_then(|value| drain.map(|()| value))
+}
+
 #[cfg(any(windows, target_vendor = "apple"))]
 type WriterLock = file_guard::FileGuard<Box<std::fs::File>>;
 #[cfg(not(any(windows, target_vendor = "apple")))]
@@ -1191,6 +1212,198 @@ mod saturation_tests {
         .await
         .expect("the next idle slot starts links after the last hold drops");
         actor.close().unwrap();
+    }
+
+    /// A reply waits for the drain its command's barriers left owed. A failed
+    /// drain fails that reply and stays owed, so the next reply drains even
+    /// when its command flushed nothing. A command that fails after a flush
+    /// still drains before its error goes back, and its error comes first.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[tokio::test]
+    async fn every_reply_pays_the_drain_its_command_left_owed() {
+        use dohc_engine_storage::FlushKind::{Barrier, Drain};
+        let scratch = ScratchDir::new().unwrap();
+        let db = engine_db_path(&scratch).unwrap();
+        drop(EngineStore::open(&db, 1).unwrap());
+        let note = scratch.join("note.md");
+        std::fs::write(&note, b"projected").unwrap();
+        let supervisor = crate::WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 2).unwrap().actor;
+        let flush = move |store: &EngineStore| {
+            store
+                .flush_before_commits(&std::fs::File::open(&note).unwrap())
+                .unwrap();
+        };
+        let trace = || {
+            actor.run(|store, _| {
+                Ok(store
+                    .take_flush_trace()
+                    .into_iter()
+                    .map(|event| event.kind)
+                    .collect::<Vec<_>>())
+            })
+        };
+
+        let once = flush.clone();
+        actor
+            .run(move |store, _| {
+                once(store);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(trace().await.unwrap(), [Barrier, Drain]);
+
+        let failing = flush.clone();
+        let refused = actor
+            .run(move |store, _| {
+                failing(store);
+                store.fail_next_drain();
+                Ok(())
+            })
+            .await;
+        assert!(
+            matches!(&refused, Err(RuntimeError::Materialize(error)) if error.code() == "materialize-io"),
+            "{refused:?}"
+        );
+        actor.run(|_, _| Ok(())).await.expect("the retry drains");
+        assert_eq!(
+            trace().await.unwrap(),
+            [Barrier, Drain],
+            "a retry that flushes nothing pays the failed drain"
+        );
+
+        let failed = flush.clone();
+        let error = actor
+            .run(move |store, _| {
+                failed(store);
+                Err::<(), _>(RuntimeError::Cancelled)
+            })
+            .await;
+        assert!(matches!(error, Err(RuntimeError::Cancelled)), "{error:?}");
+        assert_eq!(trace().await.unwrap(), [Barrier, Drain]);
+
+        let both = flush.clone();
+        let error = actor
+            .run(move |store, _| {
+                both(store);
+                store.fail_next_drain();
+                Err::<(), _>(RuntimeError::Cancelled)
+            })
+            .await;
+        assert!(
+            matches!(error, Err(RuntimeError::Cancelled)),
+            "the work's error wins: {error:?}"
+        );
+        assert_eq!(trace().await.unwrap(), [Barrier], "the drain stays owed");
+        // That reply flushed nothing and still paid the owed drain.
+        assert_eq!(trace().await.unwrap(), [Drain]);
+        supervisor.close(&db).unwrap();
+    }
+
+    /// The drain runs on the database's folder as the store opened it. A
+    /// workspace renamed, or renamed and replaced by a new folder, while a
+    /// drain is owed still drains the original folder, and later replies keep
+    /// working.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[tokio::test]
+    async fn a_moved_workspace_still_drains_the_folder_its_store_opened() {
+        use dohc_engine_storage::FlushKind::{Barrier, Drain};
+        use std::os::unix::fs::MetadataExt;
+        for replace in [false, true] {
+            let scratch = ScratchDir::new().unwrap();
+            let root = scratch.join("workspace");
+            let moved = scratch.join("moved");
+            std::fs::create_dir_all(root.join(".dohc/engine")).unwrap();
+            let db = root.join(".dohc/engine/engine.db");
+            drop(EngineStore::open(&db, 1).unwrap());
+            std::fs::write(root.join("note.md"), b"projected").unwrap();
+            let engine = std::fs::metadata(root.join(".dohc/engine")).unwrap();
+            let supervisor = crate::WorkspaceSupervisor::new();
+            let actor = supervisor.open(&db, 2).unwrap().actor;
+            let trace = || {
+                actor.run(|store, _| {
+                    Ok(store
+                        .take_flush_trace()
+                        .into_iter()
+                        .map(|event| (event.kind, event.device, event.inode))
+                        .collect::<Vec<_>>())
+                })
+            };
+            let original = (Drain, engine.dev(), engine.ino());
+
+            let (from, to) = (root.clone(), moved.clone());
+            actor
+                .run(move |store, _| {
+                    let note = std::fs::File::open(from.join("note.md")).unwrap();
+                    store.flush_before_commits(&note).unwrap();
+                    std::fs::rename(&from, &to).unwrap();
+                    if replace {
+                        std::fs::create_dir_all(from.join(".dohc/engine")).unwrap();
+                    }
+                    Ok(())
+                })
+                .await
+                .expect("the reply drains the folder the store opened");
+            let drained = trace().await.unwrap();
+            assert_eq!(drained.len(), 2, "{drained:?}");
+            assert_eq!(drained[0].0, Barrier);
+            assert_eq!(drained[1], original, "replace={replace}");
+
+            let note = moved.join("note.md");
+            actor
+                .run(move |store, _| {
+                    let note = std::fs::File::open(&note).unwrap();
+                    store.flush_before_commits(&note).unwrap();
+                    Ok(())
+                })
+                .await
+                .expect("later replies still drain");
+            assert_eq!(trace().await.unwrap()[1], original);
+            supervisor
+                .close(&moved.join(".dohc/engine/engine.db"))
+                .unwrap();
+        }
+    }
+
+    /// smbfs drains a regular file but refuses `F_FULLFSYNC` on a folder. A
+    /// store whose folder refuses the trial drain at open takes no barriers:
+    /// every file drains at once, no drain is owed, and replies keep
+    /// succeeding, reads included.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[tokio::test]
+    async fn a_folder_that_refuses_a_drain_turns_barriers_off() {
+        use dohc_engine_storage::FlushKind::Full;
+        let scratch = ScratchDir::new().unwrap();
+        let db = engine_db_path(&scratch).unwrap();
+        drop(EngineStore::open(&db, 1).unwrap());
+        dohc_engine_storage::refuse_folder_flushes(db.parent().unwrap()).unwrap();
+        let note = scratch.join("note.md");
+        std::fs::write(&note, b"projected").unwrap();
+        let supervisor = crate::WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 2).unwrap().actor;
+        for _ in 0..2 {
+            let file = note.clone();
+            let kinds = actor
+                .run(move |store, _| {
+                    store
+                        .flush_before_commits(&std::fs::File::open(&file).unwrap())
+                        .unwrap();
+                    Ok(store
+                        .take_flush_trace()
+                        .into_iter()
+                        .map(|event| event.kind)
+                        .collect::<Vec<_>>())
+                })
+                .await
+                .expect("a reply after a flush succeeds");
+            assert_eq!(kinds, [Full]);
+            actor
+                .run(|_, _| Ok(()))
+                .await
+                .expect("a reply that flushed nothing succeeds");
+        }
+        supervisor.close(&db).unwrap();
     }
 
     #[tokio::test]

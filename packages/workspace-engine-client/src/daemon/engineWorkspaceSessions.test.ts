@@ -1580,7 +1580,7 @@ describe("EngineWorkspaceSessions", () => {
         { ...workspace, rootPath: await tempRoot() },
         async () => undefined,
       ),
-    ).rejects.toThrow("Rust engine workspace authority changed");
+    ).rejects.toThrow("This workspace no longer matches the open session. Open the workspace again.");
     expect(
       client.requests.filter((request) => request.method === "workspace.open"),
     ).toHaveLength(1);
@@ -3136,19 +3136,22 @@ describe("EngineWorkspaceSessions", () => {
       const workspace = await tempWorkspace("workspace-open-reconnect-quit");
       let opens = 0;
       const sleep = vi.fn(async () => {});
-      const client: EngineDaemonClient = {
-        close: () => undefined,
-        async sendRequest() {
-          opens += 1;
-          // Quit lands while the first open is in flight.
-          if (opens === 1) sessions.beginShutdown();
-          throw daemonRefusal("CONFLICT", "workspace handle is stale", "afterReconnect");
-        },
-      };
+      // A reopen on a relaunched daemon: quit abandons a first open outright.
+      let client: EngineDaemonClient = new MockClient("before-relaunch");
       const sessions = new EngineWorkspaceSessions(
         { currentClient: () => client },
         { sleep },
       );
+      await sessions.run(workspace, async () => undefined);
+      client = {
+        close: () => undefined,
+        async sendRequest() {
+          opens += 1;
+          // Quit lands while the reopen is in flight.
+          if (opens === 1) sessions.beginShutdown();
+          throw daemonRefusal("CONFLICT", "workspace handle is stale", "afterReconnect");
+        },
+      };
 
       await expect(
         sessions.withRetryBudget(
@@ -3170,19 +3173,22 @@ describe("EngineWorkspaceSessions", () => {
       const workspace = await tempWorkspace("workspace-open-backoff-quit");
       let opens = 0;
       const sleep = vi.fn(async () => {});
-      const client: EngineDaemonClient = {
-        close: () => undefined,
-        async sendRequest() {
-          opens += 1;
-          // Quit lands while the first open is in flight.
-          if (opens === 1) sessions.beginShutdown();
-          throw daemonRefusal("OVERLOADED", "engine queue is full", "afterBackoff");
-        },
-      };
+      // A reopen on a relaunched daemon: quit abandons a first open outright.
+      let client: EngineDaemonClient = new MockClient("before-relaunch");
       const sessions = new EngineWorkspaceSessions(
         { currentClient: () => client },
         { sleep },
       );
+      await sessions.run(workspace, async () => undefined);
+      client = {
+        close: () => undefined,
+        async sendRequest() {
+          opens += 1;
+          // Quit lands while the reopen is in flight.
+          if (opens === 1) sessions.beginShutdown();
+          throw daemonRefusal("OVERLOADED", "engine queue is full", "afterBackoff");
+        },
+      };
 
       await expect(
         sessions.withRetryBudget(
@@ -3283,6 +3289,38 @@ describe("EngineWorkspaceSessions", () => {
       expect(isEngineWorkspaceOpenRefusedError(outcome)).toBe(true);
     });
 
+    it("stops waiting on a workspace's first open when quit begins", async () => {
+      // Nothing was accepted through a session that never opened, and the
+      // daemon finishes the open on its own after the app exits. Waiting on
+      // it ran quit past its budget on a busy disk (#2187).
+      const workspace = await tempWorkspace("workspace-first-open-quit");
+      const opened = deferred<Response>();
+      const requests: Request[] = [];
+      const client: EngineDaemonClient = {
+        close: () => undefined,
+        async sendRequest(request) {
+          requests.push(request);
+          if (request.method === "workspace.open") return await opened.promise;
+          throw new Error(`Unexpected method: ${request.method}`);
+        },
+      };
+      const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
+      const starter = sessions.run(workspace, async () => "unreachable");
+      const waiter = sessions.run(workspace, async () => "unreachable");
+      await vi.waitFor(() => expect(requests).toHaveLength(1));
+
+      sessions.beginShutdown();
+      await expect(starter).rejects.toBeInstanceOf(EngineWorkspaceShuttingDownError);
+      await expect(waiter).rejects.toBeInstanceOf(EngineWorkspaceShuttingDownError);
+      await sessions.closeWorkspace(workspace);
+      await expect(sessions.run(workspace, async () => "unreachable")).rejects.toBeInstanceOf(EngineWorkspaceShuttingDownError);
+      expect(requests.map(request => request.method), "a fresh session at quit must not start another open").toEqual(["workspace.open"]);
+
+      opened.resolve({ id: requests[0]!.id, result: { workspace: "late" } });
+      await sessions.closeAll();
+      expect(requests.map(request => request.method), "the daemon closes an abandoned open itself").toEqual(["workspace.open"]);
+    });
+
     it("keeps retrying work outside a bounded region at quit", async () => {
       // `beginShutdown` is a global flag doing a scoped job. It must
       // abandon a pending document open — which holds no edit — and it
@@ -3299,6 +3337,8 @@ describe("EngineWorkspaceSessions", () => {
         { currentClient: () => client },
         { sleep },
       );
+      // An accepted write implies an open workspace.
+      await sessions.run(workspace, async () => undefined);
       sessions.beginShutdown();
 
       // NO withRetryBudget: this is a live document's write, not the open.
@@ -3341,6 +3381,7 @@ describe("EngineWorkspaceSessions", () => {
           },
         },
       );
+      await sessions.run(workspace, async () => undefined);
       sessions.beginShutdown();
 
       // The daemon is relaunching: it refuses for 100 ms, then answers. Only a

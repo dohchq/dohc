@@ -13,6 +13,7 @@ use dohc_engine_domain::{
     preflight_undo_operation_in, replayed_undo_operation_in, undo_correlation_id,
     undo_operation_in_tx, undo_request_is_replay_in, validate_operation_id,
 };
+use dohc_engine_storage::text;
 use dohc_engine_storage::{
     EngineStore, FaultInjector, JobStatus, MaterializationJobSpec, Preimage, StorageError,
     TxnOutcome, enqueue_delete_job, enqueue_job,
@@ -520,12 +521,19 @@ fn commit_history_undo_on_store(
             |tx, m| {
                 let (path, text, kind, sha): (String, Option<String>, String, String) = tx
                     .query_row(
-                        "SELECT s.path,b.text,s.content_kind,
+                        "SELECT s.path,b.sha256,s.content_kind,
                     CASE s.content_kind WHEN 'binary' THEN s.binary_sha256 ELSE s.blob_sha256 END
                  FROM snapshots s LEFT JOIN blobs b ON b.sha256=s.blob_sha256
                  WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3",
                         params![ws, version_id, m.object_id],
-                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                        |r| {
+                            Ok((
+                                r.get(0)?,
+                                text::optional_from_row(tx, r, 1)?,
+                                r.get(2)?,
+                                r.get(3)?,
+                            ))
+                        },
                     )
                     .map_err(StorageError::corrupt_public)?;
                 let head = if kind == "text" {

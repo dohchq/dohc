@@ -352,3 +352,14 @@ fn capture_file_hold_worker_keeps_quiet_sources_imports_late_writes_and_releases
         1
     );
 }
+#[test]
+fn refused_releases_back_off_from_thirty_seconds_to_fifteen_minutes() {
+    let mut wait = None;
+    let mut waits = Vec::new();
+    for _ in 0..8 {
+        let next = next_retry(wait);
+        waits.push(next.as_secs());
+        wait = Some(next);
+    }
+    assert_eq!(waits, [30, 60, 120, 240, 480, 900, 900, 900]);
+}

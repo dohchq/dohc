@@ -46,7 +46,7 @@ Returns `{ ok: true, definitions } | { ok: false, reason }`.
 
 ### `dohc_publish_app`
 
-Create a share link, prepare an immutable app revision, and approve publication with local owner authority. createLink requires a stable operationId; retries return the existing grant, never another link. Paths default to the app root at View access. A URL is a bearer credential at its stated access level, usable by anyone holding it. Keep its secret yourself. Append the returned appQuery before the fragment of any link URL, including one returned by createLink. Never send its secret to dohc. Rotation remains in the desktop. Agent labels are agent-declared provenance.
+Create a share link, prepare an immutable app revision, and approve publication as its owner on this computer. createLink requires a stable operationId; retries return the existing grant, never another link. Paths default to the app root at View access. A URL is a bearer credential at its stated access level, usable by anyone holding it. Keep its secret yourself. Append the returned appQuery before the fragment of any link URL, including one returned by createLink. Never send its secret to dohc. Rotation remains in the desktop. Agent labels are agent-declared provenance.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -607,7 +607,7 @@ Share answers use the current observation; the CLI never refreshes share invento
 
 Queries use only the CLI's registered workspace, with no workspace enumeration. The granted lane contains that workspace owner's grants; the received lane contains the signed-in account's received shares. A received object's answer shows only the recipient's own grant.
 
-Collection answers read current Collection authority and return capability facts, not share grants.
+Collection answers report current access and capabilities, not share grants.
 
 #### `dohc access object`
 

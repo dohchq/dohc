@@ -108,26 +108,27 @@ mod tests {
         let name = dir.path().file_name().unwrap().to_str().unwrap();
         let (_, nonce) = name.rsplit_once('-').expect("name carries a nonce segment");
         assert!(
-            u64::from_str_radix(nonce, 16).is_ok(),
+            nonce.chars().all(|c| c.is_ascii_hexdigit()),
             "nonce must be hex, got {nonce}"
         );
         nonce.to_string()
     }
 
+    /// The nonce is 4 hex digits so a socket path in a scratch directory stays
+    /// under macOS's 104 bytes. It only keeps retries rare: `create_dir`
+    /// refuses a name that already exists, such as one a stale process with
+    /// the same pid left, and the next attempt takes a new sequence and nonce.
     #[test]
-    fn scratch_names_carry_a_per_allocation_nonce() {
+    fn scratch_names_carry_a_short_nonce_and_never_repeat() {
         let first = ScratchDir::new().unwrap();
         let second = ScratchDir::new().unwrap();
 
-        assert_eq!(
-            nonce_of(&first).len(),
-            16,
-            "nonce must be a full u64 in hex"
-        );
+        assert_eq!(nonce_of(&first).len(), 4, "nonce must be 4 hex digits");
+        assert_eq!(nonce_of(&second).len(), 4, "nonce must be 4 hex digits");
         assert_ne!(
-            nonce_of(&first),
-            nonce_of(&second),
-            "each allocation draws fresh entropy, so a stale same-pid directory cannot collide"
+            first.path().file_name(),
+            second.path().file_name(),
+            "two allocations never share a name"
         );
     }
 }

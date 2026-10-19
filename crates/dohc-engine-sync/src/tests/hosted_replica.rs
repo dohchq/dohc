@@ -2662,6 +2662,7 @@ fn a_push_response_refuses_only_its_own_batch_and_only_for_a_hosted_push() {
             0,
             &[],
             std::slice::from_ref(&refused),
+            &[],
             &NoFaults,
             &NoLiveLeases,
             3_000
@@ -2683,6 +2684,7 @@ fn a_push_response_refuses_only_its_own_batch_and_only_for_a_hosted_push() {
                 0,
                 &[],
                 std::slice::from_ref(&wrong),
+                &[],
                 &NoFaults,
                 &NoLiveLeases,
                 3_000

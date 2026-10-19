@@ -84,27 +84,30 @@ const server = createServer(async (incoming, outgoing) => {
     const chunks: Buffer[] = []; for await (const chunk of incoming) chunks.push(Buffer.from(chunk));
     const request = new Request(`http://127.0.0.1${incoming.url}`, {method: incoming.method, headers: incoming.headers as Record<string, string>,
       ...(chunks.length ? {body: Buffer.concat(chunks)} : {})});
-    const isReplica = incoming.headers.authorization?.includes("dohc-replica-read-v1.");
-    if (holdPage && holdBeforeRead && isReplica && incoming.url?.includes("/live-journal?")) {
-      holdPage = false; gates.get("page")!.enter(); await gates.get("page")!.released;
-    }
-    const response = await (isReplica ? supervisor.handle(request) : ownerRoute(request));
+    const response = await ownerRoute(request);
     const bytes = Buffer.from(await response.arrayBuffer());
     if (process.env.DOHC_REPLICA_RETAIN === "1") appendFileSync(join(root, "requests.log"), JSON.stringify({method: incoming.method, path: incoming.url, status: response.status,
       ...(response.status >= 400 ? {body: bytes.toString()} : {})}) + "\n");
-    if (holdPage && isReplica && incoming.url?.includes("/live-journal?") && JSON.parse(bytes.toString()).rows.length > 0) {
-      holdPage = false; gates.get("page")!.enter(); await gates.get("page")!.released;
-    }
     outgoing.writeHead(response.status, { ...Object.fromEntries(response.headers), "content-length": bytes.length }); outgoing.end(bytes);
   } catch (error) {outgoing.writeHead(500); outgoing.end(String(error));}
 });
 server.listen(0, "127.0.0.1"); await once(server, "listening");
 const address = server.address(); assert(address && typeof address !== "string");
 const baseUrl = `http://127.0.0.1:${address.port}`;
-const startReplica = createReplicaEngineStarter({engineExecutable: executable, baseUrl, allowUnisolatedDevelopment: true, allowInsecureLoopbackForTests: true});
+const startReplica = createReplicaEngineStarter({engineExecutable: executable, allowUnisolatedDevelopment: true});
 const supervisor = createReplicaSupervisor({storage, storeRoot: join(root, "replicas"), idleMs: 600_000,
   onError: (_, error) => errors.push(String(error)), startChild: async input => {
-    starts++; replicaDir = input.storeDir; replica = await startReplica(input); return replica;
+    starts++; replicaDir = input.storeDir; replica = await startReplica({...input, relayHandler: async request => {
+      const journal = new URL(request.url).pathname.endsWith("/live-journal");
+      if (holdPage && holdBeforeRead && journal) {
+        holdPage = false; gates.get("page")!.enter(); await gates.get("page")!.released;
+      }
+      const response = await input.relayHandler(request);
+      if (holdPage && journal && (await response.clone().json()).rows.length > 0) {
+        holdPage = false; gates.get("page")!.enter(); await gates.get("page")!.released;
+      }
+      return response;
+    }}); return replica;
   }});
 async function rpc(method: string, params: Record<string, unknown> = {}) {
   try {return (await client.sendRequest({id: id++, method, workspace: handle, deadlineMs: 120_000, params: params as never})).result as Record<string, any>;}
@@ -398,10 +401,11 @@ async function command(name: string, input: Record<string, any>): Promise<Record
       const doc = document("doc-0"), current = storage.resolveCurrentLiveDocumentBinding({document: doc, actor});
       assert.equal(current.kind, "current"); if (current.kind !== "current") throw Error("authority");
       const lookup = {operationId: "restore", workspaceId: "workspace", ownerUserId: "owner"};
+      const restoreAtMs = Date.now();
       beginStopRestore(storage as StorageContext, {...lookup, document: doc, deliveryKind: "bootstrap", shareId: "share", grantId: "grant",
         expectedGrantGeneration: 1, expectedDependentGrantIds: [], expectedFence: current.binding.restoreFenceGeneration,
-        restorePointCursor: 0, restorePointReceiptDigest: doc.lineageClaimId}, Date.now());
-      advanceStopRestoreFence(storage as StorageContext, lookup, Date.now());
+        restorePointCursor: 0, restorePointReceiptDigest: doc.lineageClaimId}, restoreAtMs);
+      advanceStopRestoreFence(storage as StorageContext, lookup, restoreAtMs);
       const prepared = await consumer.prepareRestore(lookup); assert.equal(prepared.kind, "prepared"); if (prepared.kind !== "prepared") throw Error("restore");
       const restored = await consumer.completeRestore(lookup, prepared.proposalDigest);
       const cut = storage.readLiveUpdateJournalCut({document: doc}); assert.equal(cut.kind, "cut"); if (cut.kind !== "cut") throw Error("cut");

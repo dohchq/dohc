@@ -9,14 +9,15 @@ const require = createRequire(import.meta.url);
 const vitest = pathToFileURL(require.resolve("vitest/package.json"));
 const directory = resolve(process.argv[2]);
 const desktop = fileURLToPath(new URL("../../", import.meta.url));
-const parent = join(directory, "dohc-test-scratch");
+const parent = join(directory, process.platform === "win32" ? "dohc-test-scratch" : `dohc-scratch-${process.getuid()}`);
 const events = join(directory, "events.jsonl");
 const aged = join(parent, "fixture-123-0000000000000001");
 // A recent run of a live process, and an empty one its dead process abandoned.
 const recent = join(parent, `fixture-${process.pid}-0000000000000002`);
 const deadPid = spawnSync(process.execPath, ["-e", ""]).pid;
 const abandoned = join(parent, `fixture-${deadPid}-0000000000000003`);
-mkdirSync(aged, { recursive: true });
+mkdirSync(parent, { recursive: true, mode: 0o700 });
+mkdirSync(aged);
 mkdirSync(recent);
 mkdirSync(abandoned);
 const old = new Date(Date.now() - 49 * 60 * 60 * 1000);

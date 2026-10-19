@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { OPENING_TITLE, OPENING_WORDS_DELAY_MS, OpeningState, ViewActions } from "./fileInspectorUi";
+import { OPENING_TITLE, OPENING_WORDS_DELAY_MS, OpeningState, OrphanedDraftNotices, REPLACED_HISTORY_DRAFT_NOTICE, ViewActions } from "./fileInspectorUi";
+import { captureOrphanedDraft, resetOrphanedDrafts } from "./orphanedDrafts";
 import { PENDING_SHARE_WORDS_DELAY_MS, StateMark, type SaveStateKey } from "./ui/StateMark";
 import { EditorTabs } from "./workbench/EditorTabs";
 import { EditorGroupFrame } from "./workbench/tabRowActions";
@@ -259,5 +260,32 @@ describe("ViewActions", () => {
     render(<ViewActions onShare={noop} />);
     expect(screen.getByTestId("file-share")).toBeTruthy();
     expect(screen.queryByTestId("editor-tab-actions")).toBeNull();
+  });
+});
+
+describe("OrphanedDraftNotices", () => {
+  // The rows only need a bridge to exist; nothing here reaches main.
+  beforeEach(() => vi.stubGlobal("dohcDesktop", new Proxy({}, { get: () => () => undefined })));
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    resetOrphanedDrafts();
+  });
+
+  it("says a replaced history's edits are set aside only once storage keeps them", async () => {
+    const kept = captureOrphanedDraft("ws-1", "kept.md", "earlier edits");
+    render(<OrphanedDraftNotices workspaceId="ws-1" path="kept.md" replacedDraftIds={[kept]} />);
+    expect((await screen.findByTestId("orphaned-draft-notice")).textContent).toContain(REPLACED_HISTORY_DRAFT_NOTICE);
+  });
+
+  it("asks for a copy of a replaced history's edits that storage refused", async () => {
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
+    });
+    const refused = captureOrphanedDraft("ws-1", "refused.md", "earlier edits");
+    render(<OrphanedDraftNotices workspaceId="ws-1" path="refused.md" replacedDraftIds={[refused]} />);
+    const row = await screen.findByTestId("orphaned-draft-notice");
+    expect(row.textContent).not.toContain(REPLACED_HISTORY_DRAFT_NOTICE);
+    expect(row.textContent).toContain("Copy your text to keep it.");
   });
 });

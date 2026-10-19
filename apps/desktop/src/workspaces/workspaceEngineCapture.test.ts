@@ -24,6 +24,7 @@ import {
   assertGeneratedMarkdownPath,
   createDefaultDiskWriter,
   createWorkspaceEngineCapture,
+  isVolumeSharesNewFilesCause,
   isYDocPathNotInVersionError,
   probeEngineStoreRefusal,
   YDocOpenRacedError,
@@ -45,7 +46,7 @@ import {
   type Response,
 } from "@dohc/workspace-engine-client";
 import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
-import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
+import { EngineWorkspaceSessions, EngineWorkspaceShuttingDownError } from "@dohc/workspace-engine-client/daemon";
 import {
   createCaptureLiveStores,
   type CaptureVersionedTextStore,
@@ -2012,11 +2013,20 @@ describe("workspaceEngineCapture batch capture", () => {
         null,
       ),
     },
-  ])("reports an $label failure once with its logical save token", async ({ failure, authorCapacity }) => {
+    {
+      label: "volume-sharing",
+      authorCapacity: false,
+      failure: new DaemonRefusalError(
+        { code: "INTERNAL", message: "volume-shares-new-files", retry: "no" },
+        null,
+      ),
+    },
+  ])("reports an $label failure once with its logical save token and its error", async ({ failure, authorCapacity }) => {
     const root = await createTestScratch("dohc-engine-capture-");
     await write(root, "note.md", EDITOR_TEXT);
     const states: Array<{ state: string; token: number; authorCapacity?: boolean }> = [];
     const events: string[] = [];
+    const failures: unknown[] = [];
     const engine = capture(root, {
       openRustYDocProviderSession: async (options: EngineYdocProviderSessionOptions) =>
         ({
@@ -2040,9 +2050,10 @@ describe("workspaceEngineCapture batch capture", () => {
     const session = await engine.openYDocSession({
       path: "note.md",
       onRemoteUpdate: () => undefined,
-      onSaveState: (state, token, event, authorCapacity) => {
+      onSaveState: (state, token, event, authorCapacity, _readOnlyCause, settleFailure) => {
         states.push({ state, token, authorCapacity });
         events.push(event);
+        if (state === "error") failures.push(settleFailure);
       },
     });
     await vi.waitFor(() => expect(states.some(({ state }) => state === "error")).toBe(true));
@@ -2054,6 +2065,8 @@ describe("workspaceEngineCapture batch capture", () => {
       { state: "error", token: 1, authorCapacity },
     ]);
     expect(events).toEqual(["status", "start", "outcome"]);
+    expect(failures).toEqual([failure]);
+    expect(isVolumeSharesNewFilesCause(failures[0])).toBe(failure.message === "volume-shares-new-files");
   });
 
   it("keeps an edit made outside dohc when the open document's session closes", async () => {
@@ -2503,6 +2516,34 @@ describe("workspaceEngineCapture batch capture", () => {
       }
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  // Quit abandons a workspace open that has not finished (#2187). Its store
+  // holds nothing yet, so the stop must finish or the workspace close skips
+  // the closes after it.
+  it("stops a capture at quit whose workspace never finished opening", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+    const liveStore = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID },
+      sessions,
+    ).store;
+    const unopened = new Proxy(liveStore, {
+      get(target, property) {
+        if (property === "listPendingCollectionAdoptions" || property === "flushCapture") {
+          return async () => { throw new EngineWorkspaceShuttingDownError(); };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const engine = capture(root, { store: unopened, rustEngineSessions: sessions, onError: () => {} });
+    try {
+      engine.beginShutdown();
+      await expect(engine.stop()).resolves.toBeUndefined();
+    } finally {
+      await liveStore.close();
     }
   });
 
