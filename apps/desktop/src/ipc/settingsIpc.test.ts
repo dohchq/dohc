@@ -614,10 +614,10 @@ describe("registered workspace settings and UI state", () => {
     dispose.unshift(() => h.sessions.retireAfterCrash(fresh));
     await uiStateStore.writeUiStateFile(h.root, state);
     const uiReads = vi.spyOn(uiStateStore, "readUiStateFile");
-    await expect(h.invoke(CHANNELS.getWorkspaceUiState, workspacePayload, fresh)).rejects.toThrow("UI state read stopped because this window changed workspaces.");
+    await expect(h.invoke(settingsOperations.getWorkspaceUiState.channel, workspacePayload, fresh)).rejects.toThrow("UI state read stopped because this window changed workspaces.");
     expect(uiReads).not.toHaveBeenCalled();
     await h.open(fresh, "workspace-a");
-    await expect(h.invoke(CHANNELS.getWorkspaceUiState, workspacePayload, fresh)).resolves.toEqual(state);
+    await expect(h.invoke(settingsOperations.getWorkspaceUiState.channel, workspacePayload, fresh)).resolves.toEqual(state);
   });
 
   it.each(["null", "[]", "7", "\"text\"", "{broken"])("returns null for unavailable or non-object UI state: %s", async raw => {
