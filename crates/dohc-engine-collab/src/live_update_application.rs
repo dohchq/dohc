@@ -917,8 +917,10 @@ pub enum ApplicationPending {
     /// terminal that materializes releases the interval, after which the same
     /// delivery applies.
     SettlementRequired,
-    /// The current native service activation's adoption seed has no receipt
-    /// yet. Only the seed's own delivery applies until it has one.
+    /// An earlier delivery applies first: the released chain left an earlier
+    /// Carried delivery unapplied, or the current native service activation's
+    /// adoption seed has no receipt yet. Until it has one, only the seed's own
+    /// delivery and the released chain's rows through F apply.
     DeliveryPending,
     /// As [`DeliveryPending`](Self::DeliveryPending), but the seed's outbox is
     /// quarantined, so delivery never retries it. The activation stays held
@@ -1615,6 +1617,8 @@ pub fn apply_committed(
                 ));
             }
             let receipt = &event.metadata.accepted.receipt;
+            let suffix =
+                retirement::retained_suffix(tx, &held.namespace, &key, &b.lineage_claim_id)?;
             match seed_hold(tx, &held.namespace, b)? {
                 // Retirement proved the seed never delivered, which stays
                 // true only while nothing applies after the cut.
@@ -1623,11 +1627,17 @@ pub fn apply_committed(
                         ApplicationPending::ApplicabilityUnavailable,
                     ));
                 }
+                // The released chain's journal rows through F precede the
+                // successor's seed, so they drain while it waits.
                 Some(SeedHold::Pending {
                     delivery,
                     digest,
                     quarantined,
-                }) if delivery != receipt.delivery_id || digest != receipt.update_digest => {
+                }) if (delivery != receipt.delivery_id || digest != receipt.update_digest)
+                    && suffix
+                        .as_ref()
+                        .is_none_or(|suffix| receipt.journal_cursor > suffix.through) =>
+                {
                     return Ok(ApplicationResult::Pending(if quarantined {
                         ApplicationPending::SeedQuarantined
                     } else {
@@ -1635,6 +1645,16 @@ pub fn apply_committed(
                     }));
                 }
                 _ => {}
+            }
+            // Nothing overtakes the earliest Carried delivery still unapplied,
+            // the seed included, whether or not its receipt is saved.
+            if suffix
+                .and_then(|suffix| suffix.earliest_carried)
+                .is_some_and(|earliest| receipt.journal_cursor > earliest)
+            {
+                return Ok(ApplicationResult::Pending(
+                    ApplicationPending::DeliveryPending,
+                ));
             }
             check_provenance(tx, &held.namespace, &event)?;
             if adoption::read_origin(tx, &held)?.is_some_and(|origin| {
@@ -1879,7 +1899,8 @@ struct OwnDraft {
 
 /// What the current activation's adoption seed holds back.
 enum SeedHold {
-    /// The relay's receipt for it is outstanding. Only its own delivery applies.
+    /// The relay's receipt for it is outstanding. Only its own delivery, and
+    /// its released chain's retained suffix, apply.
     Pending {
         delivery: String,
         digest: String,

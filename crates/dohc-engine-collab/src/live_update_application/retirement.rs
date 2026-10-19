@@ -594,6 +594,73 @@ pub(crate) fn inherited_entries(
     Ok(inherited)
 }
 
+/// Whether this host applied `delivery` in `namespace`.
+fn applied(conn: &Connection, namespace: &str, delivery: &str) -> Result<bool, ApplicationError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM live_device_update_applications WHERE relay_database_namespace=?1
+           AND delivery_id=?2)",
+        params![namespace, delivery],
+        |row| row.get(0),
+    )
+    .map_err(read_sql)
+}
+
+/// The order the released chain a lineage's activation follows still asks
+/// of its applications.
+pub(crate) struct RetainedSuffix {
+    /// F: the chain's journal rows through it may apply while the
+    /// successor's seed waits for its receipt.
+    pub through: i64,
+    /// The earliest Carried receipt the chain left that nothing applied yet.
+    /// Nothing after it applies.
+    pub earliest_carried: Option<i64>,
+}
+
+/// The retained suffix of the adopted chain the lineage's activation follows,
+/// or its next activation while none is current. Only an unapplied Carried
+/// delivery needs the shared resolution, which validates every listed one.
+pub(crate) fn retained_suffix(
+    conn: &Connection,
+    namespace: &str,
+    doc: &DocKey,
+    lineage: &str,
+) -> Result<Option<RetainedSuffix>, ApplicationError> {
+    let Some(tail) = owner_activations::capture_predecessor(conn, namespace, doc, lineage)? else {
+        return Ok(None);
+    };
+    let (adopted, through, outstanding): (bool, i64, bool) = conn
+        .query_row(
+            "SELECT released_boundary_json<>'null',released_accepted_cursor,
+                EXISTS(SELECT 1 FROM json_each(carried_manifest_json) c WHERE NOT EXISTS(
+                  SELECT 1 FROM live_device_update_applications a WHERE a.relay_database_namespace=?1
+                    AND a.delivery_id=json_extract(c.value,'$.receipt.deliveryId')))
+             FROM live_owner_activations
+             WHERE relay_database_namespace=?1 AND activation_id=?2 AND released_at_ms IS NOT NULL",
+            params![namespace, tail],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(read_sql)?;
+    // A chain that never adopted retains no suffix.
+    if !adopted {
+        return Ok(None);
+    }
+    let mut earliest_carried = None;
+    if outstanding {
+        for inherited in inherited_entries(conn, namespace, doc, lineage, Some(&tail))? {
+            let cursor = inherited.receipt.journal_cursor;
+            if !applied(conn, namespace, &inherited.receipt.delivery_id)?
+                && earliest_carried.is_none_or(|earliest| cursor < earliest)
+            {
+                earliest_carried = Some(cursor);
+            }
+        }
+    }
+    Ok(Some(RetainedSuffix {
+        through,
+        earliest_carried,
+    }))
+}
+
 /// An entry's retained native source, valid for that entry: within its
 /// bound, keyed by its append key, naming the document's lineage and the
 /// entry's own bytes. Anything else is corrupt.
@@ -1707,15 +1774,7 @@ fn classify(
             }
             continue;
         }
-        let applied: bool = conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM live_device_update_applications WHERE relay_database_namespace=?1
-                   AND delivery_id=?2)",
-                params![namespace, entry.delivery_id],
-                |row| row.get(0),
-            )
-            .map_err(read_sql)?;
-        if applied {
+        if applied(conn, namespace, &entry.delivery_id)? {
             return Err(ApplicationError::Conflict);
         }
         carried.push(CarriedDelivery {
@@ -1895,20 +1954,12 @@ pub(super) fn retained_coverage(
                     && inherited.entry.sequence == sequence
                     && inherited.receipt == *saved
             });
-            let applied: bool = conn
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM live_device_update_applications WHERE relay_database_namespace=?1
-                       AND delivery_id=?2)",
-                    params![namespace, delivery],
-                    |row| row.get(0),
-                )
-                .map_err(read_sql)?;
             if terminal
                 || !listed
                 || saved.delivery_id != delivery
                 || saved.update_digest != digest
                 || saved.journal_cursor <= through
-                || applied
+                || applied(conn, namespace, &delivery)?
             {
                 return Err(ApplicationError::Conflict);
             }

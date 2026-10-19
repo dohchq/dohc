@@ -31,9 +31,14 @@ fn resolve(f: &Fixture, tail: &str) -> Result<usize, ApplicationError> {
 /// successor S1, adopted with its seed pending and nothing applied. Returns
 /// the covered receipt and C1's and C2's Carried deliveries.
 fn carried_twice() -> (Fixture, LiveUpdateReceipt, CarriedDelivery, CarriedDelivery) {
+    carried_twice_at(6)
+}
+
+/// [`carried_twice`], with C2 accepted at `cursor`.
+fn carried_twice_at(cursor: i64) -> (Fixture, LiveUpdateReceipt, CarriedDelivery, CarriedDelivery) {
     let (mut f, covered, c1, _) = covered_and_carried();
     let second = native_tail_edit(&mut f, "# Carried again\n", 13);
-    let c2 = receipt_of(&second.delivery_id, &second.update_digest, 6);
+    let c2 = receipt_of(&second.delivery_id, &second.update_digest, cursor);
     acknowledge_entry(&mut f, &c2);
     host_document(&mut f, true, true);
     retirement_settle(&mut f, 10, Some(covered.clone())).unwrap();
@@ -70,11 +75,88 @@ fn accept_seed(f: &mut Fixture, cursor: i64) -> LiveUpdateReceipt {
     accepted
 }
 
+/// A Carried delivery as the relay delivers it, at its own cursor.
+fn carried_event(f: &Fixture, carried: &CarriedDelivery) -> AdmittedLiveUpdate {
+    let delivery = carried.receipt.delivery_id.clone();
+    native_tail_event(f, entry_update(f, &delivery), delivery, carried.receipt.journal_cursor)
+}
+
 /// The current activation applies a Carried delivery at its own cursor.
 fn apply_carried(f: &mut Fixture, carried: &CarriedDelivery) {
-    let delivery = carried.receipt.delivery_id.clone();
-    let event = native_tail_event(f, entry_update(f, &delivery), delivery, carried.receipt.journal_cursor);
-    assert!(matches!(apply_event(f, event).unwrap(), ApplicationResult::Applied(..)));
+    let event = carried_event(f, carried);
+    applies(f, event);
+}
+
+/// `event` applies for the first time.
+fn applies(f: &mut Fixture, event: AdmittedLiveUpdate) -> LiveUpdateHostApplicationAck {
+    let ApplicationResult::Applied(ack, _) = apply_event(f, event).unwrap() else {
+        panic!("applied");
+    };
+    assert!(!ack.application_replayed);
+    ack
+}
+
+/// Everything an application could write.
+const APPLICATION_WRITES: [&str; 12] = [
+    "live_device_update_applications",
+    "live_device_application_first_seen",
+    "live_accepted_updates",
+    "live_accepted_checkpoints",
+    "ydoc_updates",
+    "ydoc_docs",
+    "ydoc_snapshots",
+    "binary_blobs",
+    "owner_ydoc_outboxes",
+    "owner_ydoc_outbox_entries",
+    "remote_changes",
+    "collection_field_history",
+];
+
+/// `event` waits for an earlier delivery, and writes nothing.
+fn held(f: &mut Fixture, event: AdmittedLiveUpdate) {
+    let before = rows(f, &APPLICATION_WRITES);
+    let delivery = event.metadata.accepted.receipt.delivery_id.clone();
+    assert_eq!(
+        apply_event(f, event).unwrap(),
+        ApplicationResult::Pending(ApplicationPending::DeliveryPending),
+        "{delivery}"
+    );
+    assert_eq!(rows(f, &APPLICATION_WRITES), before, "{delivery}");
+}
+
+/// The current activation's own seed, as the relay delivers it at `cursor`.
+fn own_seed_event(f: &Fixture, cursor: i64) -> AdmittedLiveUpdate {
+    let seed: String = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT delivery_id FROM owner_ydoc_outbox_entries
+                 WHERE json_extract(native_source_json,'$.origin.kind')='adoptionSeed'
+                   AND json_extract(native_source_json,'$.adoptionId')=?1",
+                [&f.cut.adoption_id],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    native_tail_event(f, entry_update(f, &seed), seed, cursor)
+}
+
+/// Each delivery accepted history holds, in its order.
+fn accepted_deliveries(f: &Fixture) -> Vec<String> {
+    f.store
+        .read_with(|conn| {
+            conn.prepare("SELECT delivery_id FROM live_accepted_updates ORDER BY event_count")?
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .unwrap()
+}
+
+/// Each delivery, applied and recorded in accepted history in this order.
+fn applied_in_order(f: &Fixture, deliveries: &[&str]) {
+    let expected: Vec<String> = deliveries.iter().map(|delivery| (*delivery).to_owned()).collect();
+    assert_eq!(applied_deliveries(f), expected);
+    assert_eq!(accepted_deliveries(f), expected);
 }
 
 /// Sol's round 4b ruling, 2(b): the current activation answers for its
@@ -284,4 +366,137 @@ fn inherited_carried_evidence_refuses_without_writes() {
         assert!(matches!(adopted, Err(ApplicationError::Conflict | ApplicationError::Corrupt)), "{case}: {adopted:?}");
         assert_eq!(rows(&f, &SUCCESSION_WRITES), before, "{case}");
     }
+}
+
+/// Sol's round 4b ruling, 2(c): the retained suffix drains while the
+/// successor's seed waits for its receipt. C2 cannot overtake C1, each
+/// applies once under its original delivery with its accepted history, and a
+/// row past F still waits for the seed.
+#[test]
+fn the_retained_suffix_drains_in_journal_order_while_the_seed_waits() {
+    let (mut f, covered, c1, c2) = carried_twice();
+    let seed = pending_seed_delivery(&f);
+    let early = carried_event(&f, &c2);
+    held(&mut f, early);
+    apply_carried(&mut f, &c1);
+    apply_carried(&mut f, &c2);
+    applied_in_order(&f, &[&covered.delivery_id, &c1.receipt.delivery_id, &c2.receipt.delivery_id]);
+    assert_eq!(pending_seed_delivery(&f), seed, "the seed still waits for its receipt");
+    let past = remote_event(&mut f, 11);
+    held(&mut f, past);
+}
+
+/// Journal rows between Carried deliveries keep their order: a row before
+/// the earliest unapplied one applies, and a row after it waits for it.
+#[test]
+fn rows_between_carried_deliveries_apply_in_journal_order() {
+    let (mut f, covered, c1, c2) = carried_twice_at(8);
+    let (r4, r7, r9) = (remote_event(&mut f, 4), remote_event(&mut f, 7), remote_event(&mut f, 9));
+    applies(&mut f, r4);
+    held(&mut f, r7.clone());
+    apply_carried(&mut f, &c1);
+    applies(&mut f, r7);
+    held(&mut f, r9.clone());
+    apply_carried(&mut f, &c2);
+    applies(&mut f, r9);
+    applied_in_order(&f, &[
+        &covered.delivery_id,
+        "remote-4",
+        &c1.receipt.delivery_id,
+        "remote-7",
+        &c2.receipt.delivery_id,
+        "remote-9",
+    ]);
+}
+
+/// The successor's seed applies only after the retained suffix drains,
+/// whether its receipt is still pending or was saved first.
+#[test]
+fn the_seed_cannot_overtake_the_retained_suffix() {
+    for receipt_first in [false, true] {
+        let (mut f, covered, c1, c2) = carried_twice();
+        let seed = own_seed_event(&f, 11);
+        if receipt_first {
+            accept_seed(&mut f, 11);
+        }
+        held(&mut f, seed.clone());
+        apply_carried(&mut f, &c1);
+        held(&mut f, seed.clone());
+        apply_carried(&mut f, &c2);
+        let delivery = seed.metadata.accepted.receipt.delivery_id.clone();
+        applies(&mut f, seed);
+        applied_in_order(&f, &[&covered.delivery_id, &c1.receipt.delivery_id, &c2.receipt.delivery_id, &delivery]);
+    }
+}
+
+/// An applied Carried delivery, delivered again exactly, returns its saved
+/// ACK and writes nothing, before and after the suffix drains and after a
+/// restart. A replay that changes its bytes, digest, receipt or cursor, or
+/// names another delivery at its cursor, conflicts and writes nothing.
+#[test]
+fn an_applied_carried_delivery_replays_exactly_or_conflicts() {
+    let (mut f, _, c1, c2) = carried_twice();
+    let event = carried_event(&f, &c1);
+    let ack = applies(&mut f, event.clone());
+    let saved = LiveUpdateHostApplicationAck { application_replayed: true, ..ack };
+    for drained in [false, true] {
+        if drained {
+            apply_carried(&mut f, &c2);
+            reopen(&mut f);
+        }
+        let before = rows(&f, &APPLICATION_WRITES);
+        assert_eq!(apply_event(&mut f, event.clone()).unwrap(), ApplicationResult::Applied(saved.clone(), vec![]));
+        assert_eq!(rows(&f, &APPLICATION_WRITES), before, "drained={drained}: a retry writes nothing");
+    }
+    let other = entry_update(&f, &c2.receipt.delivery_id);
+    let mut changes: Vec<(&str, AdmittedLiveUpdate)> = Vec::new();
+    let mut cursor = event.clone();
+    cursor.metadata.accepted.receipt.journal_cursor = 9;
+    changes.push(("cursor", cursor));
+    let mut epoch = event.clone();
+    epoch.metadata.accepted.receipt.accepting_host_epoch = 2;
+    changes.push(("receipt", epoch));
+    changes.push(("bytes and digest", native_tail_event(&f, other, c1.receipt.delivery_id.clone(), 5)));
+    changes.push(("another delivery at its cursor", native_tail_event(&f, entry_update(&f, &c1.receipt.delivery_id), "other".into(), 5)));
+    for (case, changed) in changes {
+        let before = rows(&f, &APPLICATION_WRITES);
+        assert!(matches!(apply_event(&mut f, changed), Err(ApplicationError::Conflict)), "{case}");
+        assert_eq!(rows(&f, &APPLICATION_WRITES), before, "{case}");
+    }
+}
+
+/// A successor of a successor drains what both predecessors carried, in
+/// journal order: C2 from the first, and the seed S1 had accepted at 7 but
+/// never applied. Its own seed waits for both.
+#[test]
+fn a_second_successor_drains_both_predecessors_carried_deliveries() {
+    let (mut f, covered, c1, c2) = carried_twice();
+    let first = f.cut.adoption_id.clone();
+    let accepted = accept_seed(&mut f, 7);
+    apply_carried(&mut f, &c1);
+    host_document(&mut f, true, true);
+    retirement_settle_as(&mut f, 10, Some(c1.receipt.clone()), "first-retired").unwrap();
+    release_parked(&mut f);
+    let s1_seed = carried_delivery(&f, &accepted);
+    assert_eq!(manifest(&f, &first), vec![c2.clone(), s1_seed.clone()]);
+    returned(&mut f);
+    file_matches_local(&mut f, "first-released");
+    successor(&mut f);
+    f.adopt().unwrap();
+    let own = own_seed_event(&f, 11);
+    let inherited_seed = carried_event(&f, &s1_seed);
+    held(&mut f, inherited_seed);
+    held(&mut f, own.clone());
+    apply_carried(&mut f, &c2);
+    held(&mut f, own.clone());
+    apply_carried(&mut f, &s1_seed);
+    let delivery = own.metadata.accepted.receipt.delivery_id.clone();
+    applies(&mut f, own);
+    applied_in_order(&f, &[
+        &covered.delivery_id,
+        &c1.receipt.delivery_id,
+        &c2.receipt.delivery_id,
+        &s1_seed.receipt.delivery_id,
+        &delivery,
+    ]);
 }
