@@ -89,7 +89,7 @@ async function probes() {
       if (path) assert(path.startsWith("/replicas/") || path === operatorPath, `unexpected Unix listener: ${line}`);
     }
     const denied = ["data", "environ", "sibling", "proc-unix", "tcp", "postgres", "dns", "udp", "internet", "chmod", "xattr", "truncate", "kill", "kill-group", "tgkill",
-      "prlimit", "priority", "scheduler", "ptrace", "io-uring", "bpf", "fork", "exec", "as", "fsize", "nofile"];
+      "prlimit", "priority", "scheduler", "ptrace", "io-uring", "bpf", "ipc", "fork", "exec", "as", "fsize", "nofile"];
     for (const action of denied) {
       const address = action === "tcp" ? "127.0.0.1:1788" : "postgres:5432";
       const control = await command("/app/probe", [action, "control", String(process.pid), address], store);
