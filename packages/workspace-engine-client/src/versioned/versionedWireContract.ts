@@ -1025,7 +1025,7 @@ const HistoryMomentMetadataSchema = mutableStruct({
 });
 export type HistoryMomentMetadata = typeof HistoryMomentMetadataSchema.Type;
 const HistoryOperationSchema = mutableStruct({operationId: Schema.String, versionId: Schema.String, momentCount: Schema.Int});
-const HistoryUndoSchema = mutableStruct({...HistoryOperationSchema.fields, compensationOperationId: Schema.String, deduped: Schema.Boolean, materialized: Schema.Boolean});
+const HistoryUndoSchema = mutableStruct({...HistoryOperationSchema.fields, compensationOperationId: Schema.String, deduped: Schema.Boolean, materialized: Schema.Boolean, notRestored: Schema.Array(Schema.String)});
 const HistoryPageResultSchema = mutableStruct({
   activeVersion: VersionRecordSchema,
   moments: Schema.mutable(Schema.Array(HistoryMomentMetadataSchema)),

@@ -19,6 +19,7 @@ pub(crate) struct Checkpoints {
     requests: Option<SyncSender<()>>,
     thread: Option<JoinHandle<()>>,
     stopped: Arc<AtomicBool>,
+    full_requested: Arc<AtomicBool>,
     completed: Arc<(std::sync::Mutex<u64>, std::sync::Condvar)>,
     #[cfg(test)]
     writer_max: std::sync::atomic::AtomicI64,
@@ -51,6 +52,8 @@ impl Checkpoints {
         let (requests, rx) = mpsc::sync_channel(1);
         let stopped = Arc::new(AtomicBool::new(false));
         let worker_stopped = Arc::clone(&stopped);
+        let full_requested = Arc::new(AtomicBool::new(false));
+        let worker_full = full_requested.clone();
         let completed = Arc::new((std::sync::Mutex::new(0), std::sync::Condvar::new()));
         let worker_completed = Arc::clone(&completed);
         let thread = std::thread::Builder::new()
@@ -67,10 +70,12 @@ impl Checkpoints {
                         phase.field("starting_log", log);
                         phase.field("starting_backfilled", backfilled);
                     }
+                    let full = worker_full.swap(false, Ordering::AcqRel);
                     if frames(&conn).is_ok_and(|(log, backfilled)| {
-                        log - backfilled >= BACKGROUND_CHECKPOINT_FRAMES
+                        log > backfilled
+                            && (full || log - backfilled >= BACKGROUND_CHECKPOINT_FRAMES)
                     }) {
-                        catch_up(&conn, &worker_stopped);
+                        catch_up(&conn, &worker_stopped, full);
                     }
                     let (sequence, signal) = &*worker_completed;
                     *sequence.lock().unwrap() += 1;
@@ -93,6 +98,7 @@ impl Checkpoints {
             requests: Some(requests),
             thread: Some(thread),
             stopped,
+            full_requested,
             completed,
             #[cfg(test)]
             writer_max: std::sync::atomic::AtomicI64::new(0),
@@ -101,14 +107,43 @@ impl Checkpoints {
         })
     }
 
+    pub(crate) fn next_cycle(&self) -> impl Fn() + Send + Sync + use<> {
+        let completed = self.completed.clone();
+        move || {
+            let before = *completed.0.lock().unwrap();
+            let (sequence, signal) = &*completed;
+            let _wait = signal
+                .wait_timeout_while(
+                    sequence.lock().unwrap(),
+                    std::time::Duration::from_millis(100),
+                    |s| *s <= before,
+                )
+                .unwrap();
+        }
+    }
+
+    pub(crate) fn request_full(&self) {
+        // Preserve full requests when the channel already holds ordinary work.
+        self.full_requested.store(true, Ordering::Release);
+        self.request();
+    }
+
     // Quiesce before BEGIN so a large commit cannot keep the worker one
     // transaction behind. Refuse before mutation if the bounded handoff expires.
-    pub(crate) fn prepare_for_write(&self, conn: &Connection) -> Result<(), crate::StorageError> {
+    pub(crate) fn prepare_for_write(
+        &self,
+        conn: &Connection,
+        background: bool,
+    ) -> Result<(), crate::StorageError> {
         #[cfg(feature = "fault-injection")]
         let mut phase = crate::capture_phase::Phase::new("write_admission", None, 0, true);
         let deadline = std::time::Instant::now() + MAX_CHECKPOINT_HANDOFF_WAIT;
         loop {
             let (log, backfilled) = frames(conn).map_err(crate::StorageError::persist)?;
+            if background && log >= MAX_PENDING_WAL_FRAMES && log != backfilled {
+                self.request_full();
+                return Err(crate::StorageError::FileLocked);
+            }
             #[cfg(feature = "fault-injection")]
             {
                 phase.field("log", log);
@@ -120,7 +155,9 @@ impl Checkpoints {
                 return Ok(());
             }
             if log >= 0 && (0..=MAX_WRITER_BACKFILL_FRAMES).contains(&(log - backfilled)) {
-                self.checkpoint_on_writer_if_needed(conn);
+                if !background {
+                    self.checkpoint_on_writer_if_needed(conn);
+                }
                 let (latest, finished) = frames(conn).map_err(crate::StorageError::persist)?;
                 if latest >= 0 && latest == finished {
                     // Full backfill alone does not release readers at the
@@ -346,9 +383,9 @@ impl Drop for Checkpoints {
     }
 }
 
-// A PASSIVE result describes its starting header. Include writes that arrived
-// during its I/O, and leave a bounded tail for the writer to recycle the WAL.
-fn catch_up(conn: &Connection, stopped: &AtomicBool) {
+// A PASSIVE result describes its starting header. Full requests include writes
+// that arrived during I/O; ordinary requests leave a bounded tail for the writer.
+fn catch_up(conn: &Connection, stopped: &AtomicBool, full: bool) {
     while !stopped.load(Ordering::Acquire) {
         let Ok((log, backfilled)) = frames(conn) else {
             break;
@@ -356,7 +393,10 @@ fn catch_up(conn: &Connection, stopped: &AtomicBool) {
         if log < 0 || log == backfilled {
             break;
         }
-        if log >= WRITER_CHECKPOINT_FRAMES && log - backfilled <= MAX_WRITER_BACKFILL_FRAMES {
+        if !full
+            && log >= WRITER_CHECKPOINT_FRAMES
+            && log - backfilled <= MAX_WRITER_BACKFILL_FRAMES
+        {
             break;
         }
         #[cfg(feature = "fault-injection")]

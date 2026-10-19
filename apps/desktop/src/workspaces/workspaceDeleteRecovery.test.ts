@@ -54,7 +54,7 @@ async function fixture(tracked = ["folder/tracked.txt"], systemAccepts = false) 
     if (refuse) throw new Error(refuse);
     if (!committed) placement = placementGate.then(async () => { for (const path of tracked) await write(path, "tracked"); });
     committed ??= { operationId: input.operationId, versionId: "main", momentCount: tracked.length,
-      compensationOperationId: "dohc-operation:undo:one", deduped: false, materialized: false };
+      notRestored: [], compensationOperationId: "dohc-operation:undo:one", deduped: false, materialized: false };
     if (interrupted) { interrupted = false; faults.failRecord = true; }
     return committed;
   }) };
@@ -74,6 +74,15 @@ function recovery(result: Awaited<ReturnType<Awaited<ReturnType<typeof fixture>>
 }
 
 describe("delete recovery", () => {
+  it("reports skipped tracked members even when they have no manual trash entry", async () => {
+    const f = await fixture();
+    const id = recovery(await f.remove());
+    f.history.undoHistoryOperation.mockResolvedValue({ operationId: id, versionId: "main", notRestored: ["folder/tracked.txt"],
+      compensationOperationId: "dohc-operation:undo:one", momentCount: 0, deduped: false, materialized: true });
+    const result = await f.undo(id);
+    expect(result).toMatchObject({ ok: true, remaining: [{ path: "folder/tracked.txt", retry: false }] });
+    expect(await f.undo(id)).toEqual(result);
+  });
   it.each([false, true])("keeps History readable and the invalid-path Undo refusal (system accepts=%s)", async accepts => {
     const f = await fixture(undefined, accepts);
     await f.write("folder/.dohc", "untracked");

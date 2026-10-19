@@ -103,7 +103,7 @@ async function fixture(systemAccepts = false, tracked = ["folder/tracked.txt"]) 
     await rename(path, join(os, basename(path)));
   } };
   const history = { readHistoryPage: vi.fn(async () => ({ moments: tracked.map(path => ({ operation: "delete", path })), protectedMoments: [], nextCursor: null }) as never), undoHistoryOperation: vi.fn(async () => ({ operationId: "unused", versionId: "main", momentCount: 1,
-    compensationOperationId: "undo", deduped: false, materialized: false })) };
+    notRestored: [], compensationOperationId: "undo", deduped: false, materialized: false })) };
   const remove = (hand = false) => hand ? deleteWorkspacePathByHand(operation, "folder", person, options)
     : prepareDeleteWorkspacePathAs(operation, "folder", person, options).then(finish => finish());
   const undo = (id: string) => undoWorkspaceHistoryOperation(operation, { operationId: id }, person, { agent: false, history });
@@ -196,7 +196,7 @@ describe("delete recovery failures", () => {
     const f = await fixture();
     const id = await deleted(f);
     f.history.undoHistoryOperation.mockImplementationOnce(async () => { faults.failRecord = true; return {
-      operationId: id, versionId: "main", momentCount: 1, compensationOperationId: "undo", deduped: false, materialized: false,
+      operationId: id, versionId: "main", momentCount: 1, notRestored: [], compensationOperationId: "undo", deduped: false, materialized: false,
     }; });
     expect(await f.undo(id)).toMatchObject({ ok: false });
     expect(await f.undo(id)).toMatchObject({ ok: true, restored: ["folder/rowless.txt"] });
@@ -634,7 +634,7 @@ describe("delete recovery placement and receipts", () => {
     const id = await deleted(f);
     expect(await f.undo(id)).toMatchObject({ tracked: { state: "restoring", momentCount: 1 } });
     f.history.undoHistoryOperation.mockResolvedValueOnce({ operationId: id, versionId: "main", momentCount: 1,
-      compensationOperationId: "undo", deduped: true, materialized: true });
+      notRestored: [], compensationOperationId: "undo", deduped: true, materialized: true });
     expect(await f.undo(id)).toMatchObject({ tracked: { state: "restored", momentCount: 1 } });
   });
   it.each([false, true])("names a missing staged source before engine commit (whole folder=%s)", async whole => {
