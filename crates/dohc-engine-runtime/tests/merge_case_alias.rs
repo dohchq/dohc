@@ -288,25 +288,21 @@ async fn text_merge_replay(delete_first: bool) {
                 },
                 root.path().into(),
                 Arc::new(()),
-                if delete_first {
-                    ScriptedFaults::crash_at(
-                        dohc_engine_storage::FaultPoint::MaterializeAfterJobCommit,
-                    )
-                } else {
-                    Arc::new(NoFaults)
-                },
+                ScriptedFaults::crash_at(
+                    dohc_engine_storage::FaultPoint::MaterializeAfterJobCommit,
+                ),
                 CancellationToken::new(),
             )
             .await
             .unwrap();
     }
     supervisor.close(&db).unwrap();
-    if delete_first {
+    {
         let store = EngineStore::open(&db, 5).unwrap();
         let jobs = store.list_pending_materialization_jobs().unwrap();
         assert_eq!(jobs.len(), 2);
-        assert_eq!(jobs[0].target_path, "notes.md");
-        assert_eq!(jobs[1].target_path, "Notes.md");
+        assert_eq!(jobs[0].target_path, paths[0]);
+        assert_eq!(jobs[1].target_path, paths[1]);
     }
     let actor = supervisor.open(&db, 5).unwrap().actor;
     actor
@@ -326,7 +322,8 @@ async fn text_merge_replay(delete_first: bool) {
         return;
     }
     assert_eq!(
-        std::fs::read(root.join("Notes.md")).expect("text survives merge and reopen"),
+        std::fs::read(root.join("Notes.md"))
+            .expect("write-first replay keeps the old disk entry (#2297)"),
         b"old"
     );
     let names: Vec<_> = std::fs::read_dir(&root)

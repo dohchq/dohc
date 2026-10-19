@@ -963,7 +963,7 @@ pub(super) fn replay_pending_materializations(
                 continue;
             }
             let outcome = if let Some(self_writes) = scope.self_writes {
-                let (materialized, reported) = materialize_pending_job_inner(
+                let (materialized, reported) = materialize_pending_job(
                     store,
                     root_dir,
                     scope.workspace_id,
@@ -1143,77 +1143,6 @@ fn projection_write_pending(
     .map_err(StorageError::corrupt_public)
 }
 
-fn retire_live_projection_delete(
-    store: &EngineStore,
-    root_dir: &std::path::Path,
-    workspace_id: &str,
-    job: &MaterializationJob,
-    now_ms: i64,
-    holds: Option<&dohc_engine_files::PlacementHolds>,
-) -> Result<bool, RuntimeError> {
-    if job.operation != MaterializationOperation::Delete {
-        return Ok(false);
-    }
-    let Ok(previous) = std::fs::canonicalize(root_dir.join(&job.target_path)) else {
-        return Ok(false);
-    };
-    let key = dohc_engine_files::floor::path_collision_key(&job.target_path);
-    let has_alias = store.read_with(|conn| -> Result<bool, RuntimeError> {
-        let version = match dohc_engine_domain::store::get_active_version_in(conn, workspace_id) {
-            Ok(version) => version,
-            Err(DomainError::WorkspaceNotFound) => return Ok(false),
-            Err(error) => return Err(error.into()),
-        };
-        // NOCASE covers ASCII. Byte lengths and suffix checks retain Unicode
-        // and trailing-dot/space paths for the full collision-key check.
-        let mut statement = conn
-            .prepare_cached(
-                "SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2
-               AND (path=?3 COLLATE NOCASE OR length(path)!=length(CAST(path AS BLOB))
-                    OR instr(path,'./') OR instr(path,' /') OR rtrim(path,'. ')!=path)
-             UNION ALL SELECT path FROM secret_files WHERE workspace_id=?1 AND version_id=?2
-               AND (path=?3 COLLATE NOCASE OR length(path)!=length(CAST(path AS BLOB))
-                    OR instr(path,'./') OR instr(path,' /') OR rtrim(path,'. ')!=path)",
-            )
-            .map_err(StorageError::corrupt_public)?;
-        let mut rows = statement
-            .query(params![workspace_id, version.version_id, key])
-            .map_err(StorageError::corrupt_public)?;
-        let mut has_alias = false;
-        let mut pending_write = false;
-        while let Some(row) = rows.next().map_err(StorageError::corrupt_public)? {
-            let path: String = row.get(0).map_err(StorageError::corrupt_public)?;
-            if path == job.target_path {
-                return Ok(false);
-            }
-            if dohc_engine_files::floor::path_collision_key(&path) == key
-                && std::fs::canonicalize(root_dir.join(&path))
-                    .is_ok_and(|target| target == previous)
-            {
-                has_alias = true;
-                pending_write |= projection_write_pending(conn, workspace_id, &path)?;
-            }
-        }
-        Ok(has_alias && !pending_write)
-    })?;
-    if !has_alias {
-        return Ok(false);
-    }
-    let loaded_holds;
-    let holds = match holds {
-        Some(holds) => holds,
-        None => {
-            loaded_holds = dohc_engine_files::PlacementHolds::load(store, workspace_id)?;
-            &loaded_holds
-        }
-    };
-    if holds.blocks(&job.target_path) {
-        return Ok(false);
-    }
-    store.mark_materialization_complete(&job.job_id, now_ms)?;
-    Ok(true)
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(super) fn materialize_pending_job(
     store: &EngineStore,
@@ -1228,37 +1157,6 @@ pub(super) fn materialize_pending_job(
     if job.job_id.starts_with("restore-delete-mat_") {
         return (false, PostCommitMaterializeOutcome::Skipped);
     }
-    match retire_live_projection_delete(store, root_dir, workspace_id, job, now_ms, holds) {
-        Ok(true) => return (true, PostCommitMaterializeOutcome::Applied),
-        Ok(false) => {}
-        Err(error) => {
-            eprintln!("engine: checking materialization delete failed: {error}");
-            return (false, PostCommitMaterializeOutcome::Error);
-        }
-    }
-    materialize_pending_job_inner(
-        store,
-        root_dir,
-        workspace_id,
-        job,
-        self_writes,
-        now_ms,
-        faults,
-        holds,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn materialize_pending_job_inner(
-    store: &EngineStore,
-    root_dir: &std::path::Path,
-    workspace_id: &str,
-    job: &MaterializationJob,
-    self_writes: &dyn SelfWriteRecorder,
-    now_ms: i64,
-    faults: &dyn FaultInjector,
-    holds: Option<&dohc_engine_files::PlacementHolds>,
-) -> (bool, PostCommitMaterializeOutcome) {
     // Register before replacement: the watcher may observe the write as soon
     // as the atomic rename lands. Every non-applied outcome retracts the
     // identity because no self-write is then available to consume it.
@@ -1573,60 +1471,6 @@ mod delete_benchmarks {
                 );
             }
         }
-    }
-
-    #[test]
-    fn direct_alias_materialization_delete_waits_for_pending_write() {
-        let (root, mut store) = fixture(1, 0);
-        std::fs::write(root.join("LIVE-0.md"), "old").unwrap();
-        if !root.join("live-0.md").exists() {
-            eprintln!("skipping direct alias delete: this disk keeps case apart");
-            return;
-        }
-        store
-            .write_with(&NoFaults, |tx| {
-                let sha = dohc_engine_storage::put_binary_blob(tx, b"new")?;
-                enqueue_delete_job(
-                    tx,
-                    &MaterializationJobSpec {
-                        job_id: "delete-first".into(),
-                        workspace_id: "delete-benchmark".into(),
-                        target_path: "LIVE-0.md".into(),
-                        content_sha256: hex_sha256(b"old"),
-                        preimage: Preimage::Present(hex_sha256(b"old")),
-                        target_generation: 2,
-                        now_ms: 2,
-                    },
-                )?;
-                dohc_engine_storage::enqueue_job(
-                    tx,
-                    &MaterializationJobSpec {
-                        job_id: "write-second".into(),
-                        workspace_id: "delete-benchmark".into(),
-                        target_path: "live-0.md".into(),
-                        content_sha256: sha,
-                        preimage: Preimage::Absent,
-                        target_generation: 2,
-                        now_ms: 3,
-                    },
-                )
-            })
-            .unwrap();
-        for job in store.list_pending_materialization_jobs().unwrap() {
-            let (complete, outcome) = materialize_pending_job(
-                &store,
-                &root,
-                "delete-benchmark",
-                &job,
-                &(),
-                4,
-                &NoFaults,
-                None,
-            );
-            assert!(complete);
-            assert_eq!(outcome, PostCommitMaterializeOutcome::Applied);
-        }
-        assert_eq!(std::fs::read(root.join("live-0.md")).unwrap(), b"new");
     }
 
     #[tokio::test]
