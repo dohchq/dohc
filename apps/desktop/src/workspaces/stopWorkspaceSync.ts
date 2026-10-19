@@ -18,12 +18,17 @@ export interface SyncPauseReopen {
   closeActivity(workspaceId: string): Promise<unknown>;
   closeRelay(workspace: RegistryEntry): Promise<void>;
   openActivity(workspace: RegistryEntry): Promise<unknown>;
+  // The engine's answer, through the owner's open: Collection updates still
+  // wait for an unfinished pull.
+  collectionsWaiting(workspace: RegistryEntry): Promise<boolean>;
   notify(workspaceId: string): void;
 }
 
 // Reopening removes the daemon's relay configuration without touching data,
-// and the local open abandons an unfinished pull. Every step runs, even if
-// the window changes workspaces, and the first failure is reported.
+// and the local open abandons an unfinished pull. A file observation that
+// failed to open still lets the activity open, so the reopen counts only once
+// the engine answers that nothing waits. Every step runs, even if the window
+// changes workspaces, and the first failure is reported.
 export async function reopenWithoutSync(
   dependencies: SyncPauseReopen,
   workspace: RegistryEntry,
@@ -42,6 +47,9 @@ export async function reopenWithoutSync(
   }
   try {
     await dependencies.openActivity(workspace);
+    if (await dependencies.collectionsWaiting(workspace)) {
+      throw new Error("Collection updates still wait for the unfinished pull.");
+    }
     reopened = true;
   } catch (error) {
     failure ??= { error };

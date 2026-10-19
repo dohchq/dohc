@@ -784,7 +784,7 @@ it("settles live edits into Markdown before stopping sync and permits local edit
     openActivity: async () => {
       capture = createWorkspaceEngineCapture({ workspaceId: WORKSPACE_ID, rootPath: root,
         attachmentId: ATTACHMENT_ID, rustEngineSessions: sessions, onError: context => captureErrors.push(context) });
-    }, notify: () => {},
+    }, collectionsWaiting: async () => false, notify: () => {},
     status: () => ({ state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null,
       historyRecordingUnavailable: false, historyShareView: false, liveSessionsGeneration: 1,
       ...(registry.find(WORKSPACE_ID)?.syncPause ? { syncPause: workspaceSyncPauseStatus(registry.find(WORKSPACE_ID)!.syncPause!, "local") } : {}) }),

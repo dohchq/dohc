@@ -2403,6 +2403,11 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
     };
   },
   engineFor: engineForWorkspace,
+  collectionsWaitingFor: async workspace => {
+    const waiting = await withEngineAdapter(workspace, adapter => adapter.collectionsWaiting());
+    if (waiting === null) throw new Error("The workspace engine is not running.");
+    return waiting;
+  },
   // The engine capture gate (engineCaptureGate.ts) owns the shared-view rule:
   // main only states whether the workspace is one, and the decision
   // carries the cause.
@@ -2525,6 +2530,10 @@ const activity = {
   recordSyncPauseReopenFailed: (workspaceId: string): void =>
     withWorkspaceActivityState(workspaceId, (lease, workspace) =>
       workspaceActivity.recordSyncPauseReopenFailed(workspace, lease.state.activity),
+    ),
+  readCollectionsWaiting: (workspace: RegistryEntry): Promise<boolean> =>
+    workspaceAuthorities.withAuthority(workspace.workspaceId, lease =>
+      workspaceActivity.readCollectionsWaiting(canonicalWorkspaceFor(lease), lease.state.activity),
     ),
   reconcileCloud: (): void => {
     for (const workspaceId of workspaceAuthorities.workspaceIds()) {
@@ -5992,6 +6001,7 @@ const syncPauseReopen: SyncPauseReopen = {
   closeActivity: workspaceId => activity.close(workspaceId, { notify: false, preserveAgentRun: true }),
   closeRelay: workspace => closeRelayTransportWorkspace(workspace),
   openActivity: workspace => activity.open(workspace),
+  collectionsWaiting: workspace => activity.readCollectionsWaiting(workspace),
   notify: workspaceId => notifyRenderer({ workspaceId }),
 };
 

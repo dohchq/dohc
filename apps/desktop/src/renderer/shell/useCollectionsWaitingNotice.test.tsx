@@ -100,6 +100,32 @@ describe("useCollectionsWaitingNotice", () => {
     expect(view.toasts()).toEqual([]);
   });
 
+  it("keeps a dismissed wait dismissed through passes, and shows it again once the wait ended", () => {
+    const view = renderNotice({ waiting: "sync" });
+    act(() => {
+      view.result.current.notice.noteDismissed();
+      view.result.current.errors.dismissShellError(view.rows()[0]!.id);
+    });
+    // Each pass reports the same wait it found.
+    for (let pass = 0; pass < 3; pass += 1) {
+      view.rerender({ workspaceId: "ws-a", waiting: "sync" });
+    }
+    expect(view.rows()).toEqual([]);
+    view.rerender({ workspaceId: "ws-a", waiting: null });
+    view.rerender({ workspaceId: "ws-a", waiting: "sync" });
+    expect(view.toasts()).toHaveLength(1);
+    expect(view.rows()[0]!.message).toBe(collectionsWaitingMessage("sync"));
+  });
+
+  it("warns while updates wait and reports a failed reopen as a failure", () => {
+    const view = renderNotice({ waiting: "sync" });
+    expect(view.rows()[0]!.tone).toBe("warning");
+    view.rerender({ workspaceId: "ws-a", waiting: "reopen" });
+    expect(view.rows()).toHaveLength(1);
+    expect(view.rows()[0]!.message).toBe(collectionsWaitingMessage("reopen"));
+    expect(view.rows()[0]!.tone).toBeUndefined();
+  });
+
   it("files an ongoing wait without a toast when the shell remounts", () => {
     const first = renderNotice({ waiting: "sync" });
     act(() => first.result.current.errors.hideShellError(first.rows()[0]!.id));

@@ -380,6 +380,23 @@ describe("desktop CLI workspace context", () => {
     ]);
   });
 
+  it("reads whether Collection updates wait from the registered workspace's engine", async () => {
+    const f = fixture();
+    const unavailable = await f.create().openCliWorkspace(f.workspace);
+    await expect(unavailable.daemonReads.collectionsWaiting()).rejects.toThrow("engine is not running");
+    const collectionsWaiting = vi.fn(async () => true);
+    const seen: unknown[] = [];
+    f.dependencies.withEngineAdapter = async (workspace, work) => {
+      seen.push(workspace);
+      return work({ collectionsWaiting } as unknown as VersionedLiveAdapter);
+    };
+    const context = await f.create().openCliWorkspace(f.workspace);
+    expect(await context.daemonReads.collectionsWaiting()).toBe(true);
+    collectionsWaiting.mockResolvedValueOnce(false);
+    expect(await context.daemonReads.collectionsWaiting()).toBe(false);
+    expect(seen).toEqual([f.workspace, f.workspace]);
+  });
+
   it("refuses both collection reads when the engine adapter is unavailable", async () => {
     const f = fixture();
     const context = await f.create().openCliWorkspace(f.workspace);

@@ -650,6 +650,85 @@ describe("workspaceActivity cloud sync nudge", () => {
     await activity.stopAll();
   });
 
+  it("keeps the Collections wait through a running pass, so only its end clears it", async () => {
+    let syncing = false;
+    let collectionsWaiting = true;
+    const engine = {
+      start: async () => {}, queueSync: () => {}, queuePull: () => {}, retryNow: async () => undefined, stop: async () => {},
+      snapshot: () => ({
+        syncFailure: null, retrying: false, collectionsWaiting, syncing, lastSyncedAtMs: null, pendingChangeCount: 0,
+        conflictCount: 0, authExpired: false, sharingDeclined: [],
+      }),
+    };
+    const activity = createWorkspaceActivity(() => {}, {
+      engineFor: () => engine,
+      cloudStateFor: () => ({ enabled: true, connected: true }),
+    });
+    await activity.open(workspace());
+    expect(activity.getStatus("activity-test").collectionsWaitingForSync).toBe("sync");
+    syncing = true;
+    expect(activity.getStatus("activity-test").collectionsWaitingForSync).toBe("sync");
+    syncing = false;
+    collectionsWaiting = false;
+    expect(activity.getStatus("activity-test").collectionsWaitingForSync).toBeUndefined();
+    await activity.stopAll();
+  });
+
+  it("asks the engine at open when no sync engine runs, as when signed out", async () => {
+    let pullUnfinished = true;
+    const reads: Promise<boolean>[] = [];
+    const activity = createWorkspaceActivity(() => {}, {
+      engineFor: () => null,
+      cloudStateFor: () => ({ enabled: true, connected: false }),
+      // The same promise the test awaits, so the activity's answer lands first.
+      collectionsWaitingFor: () => {
+        const read = Promise.resolve(pullUnfinished);
+        reads.push(read);
+        return read;
+      },
+    });
+    await activity.open(workspace());
+    await reads[0];
+    expect(activity.getStatus("activity-test").collectionsWaitingForSync).toBe("sync");
+    // Abandoning the pull ends the wait the next open reads.
+    await activity.close("activity-test");
+    pullUnfinished = false;
+    await activity.open(workspace());
+    await reads[1];
+    expect(activity.getStatus("activity-test").collectionsWaitingForSync).toBeUndefined();
+    await activity.stopAll();
+  });
+
+  it("keeps a failed reopen after a pause until the engine answers that nothing waits", async () => {
+    const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+    const answers: Array<() => Promise<boolean>> = [
+      async () => { throw new Error("workspace-open-failed"); },
+      async () => false,
+    ];
+    const reads: Promise<boolean>[] = [];
+    const service = createPhysicalWorkspaceActivity(() => {}, {
+      observationFor: idleObservation,
+      collectionsWaitingFor: () => {
+        const read = answers.shift()!();
+        reads.push(read);
+        return read;
+      },
+    });
+    const state = new WorkspaceActivityState();
+    try {
+      service.recordSyncPauseReopenFailed(workspace(), state);
+      // The activity opens though the engine refused the owner open.
+      await service.open(workspace(), state);
+      await reads[0]!.catch(() => undefined);
+      expect(service.getStatus(workspace(), state).collectionsWaitingForSync).toBe("reopen");
+      await expect(service.readCollectionsWaiting(workspace(), state)).resolves.toBe(false);
+      expect(service.getStatus(workspace(), state).collectionsWaitingForSync).toBeUndefined();
+    } finally {
+      await service.stop(state);
+      quiet.mockRestore();
+    }
+  });
+
   it("syncs now only when the pass ends without a failure, whatever the status shows first", async () => {
     let failure: CloudSyncFailure | null = null;
     let passes = 0;

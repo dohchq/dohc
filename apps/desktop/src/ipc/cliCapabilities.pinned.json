@@ -75,6 +75,9 @@
     "keptCopies": [
       "file.kept.list"
     ],
+    "collectionsWaiting": [
+      "workspace.status"
+    ],
     "saveKeptCopy": [
       "file.kept.save"
     ],

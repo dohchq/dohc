@@ -1426,6 +1426,18 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     return result.applied;
   }
 
+  /**
+   * Collection updates wait for an ordinary pull that has not committed its
+   * last page. The engine answers from the pull's durable token.
+   */
+  async collectionsWaiting(): Promise<boolean> {
+    const result = await this.workspaceRequest(
+      WORKSPACE_METHOD.syncCollectionsWaiting,
+      {},
+    );
+    return result.waiting;
+  }
+
   async writeSecretFile(input: {
     workspaceId: string;
     versionId: string;

@@ -774,6 +774,29 @@ impl EngineService {
         .await
     }
 
+    /// Run a relay step that can abandon an unfinished ordinary pull: a final
+    /// claim refusal, which the step saves and then answers with, or a
+    /// replication identity change. Once the pull's token is gone, the
+    /// Collections update it held back runs, whatever the step answered.
+    async fn wake_after_abandoned_pull<T>(
+        &self,
+        ctx: &RequestContext,
+        open: &OpenWorkspace,
+        step: impl std::future::Future<Output = Result<T, WireError>>,
+    ) -> Result<T, WireError> {
+        let unfinished = || {
+            open.actor
+                .ordinary_pull_unfinished(open.workspace_id.clone())
+        };
+        // A token that cannot be read counts as set: the read after decides.
+        let held = unfinished().await.unwrap_or(true);
+        let answer = step.await;
+        if held && matches!(unfinished().await, Ok(false)) {
+            self.collections_changed(ctx, open).await;
+        }
+        answer
+    }
+
     pub(super) async fn sync_push(
         &self,
         ctx: &RequestContext,
@@ -1381,20 +1404,19 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let params: ClaimParams = parse(params)?;
         let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let claim = RelayOperation::Claim {
+            workspace_id: open.workspace_id.clone(),
+            account_id: params.account_id,
+            new_origin_id: sync_identifier("origin")?,
+            new_replication_epoch: sync_identifier("epoch")?,
+            new_stream_identity: sync_identifier("stream")?,
+            created_at_ms: now_ms()?,
+        };
         let outcome = self
-            .relay_execute(
+            .wake_after_abandoned_pull(
                 ctx,
                 &open,
-                configuration,
-                RelayOperation::Claim {
-                    workspace_id: open.workspace_id.clone(),
-                    account_id: params.account_id,
-                    new_origin_id: sync_identifier("origin")?,
-                    new_replication_epoch: sync_identifier("epoch")?,
-                    new_stream_identity: sync_identifier("stream")?,
-                    created_at_ms: now_ms()?,
-                },
-                "sync.claim",
+                self.relay_execute(ctx, &open, configuration, claim, "sync.claim"),
             )
             .await?;
         relay_outcome_json(outcome)
@@ -1557,17 +1579,15 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let params: RelayWorkspaceParams = parse(params)?;
         let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
-        let new_origin_id = recovered_origin_id()?;
+        let recover = RelayOperation::RecoverOrigin {
+            workspace_id: open.workspace_id.clone(),
+            new_origin_id: recovered_origin_id()?,
+        };
         let outcome = self
-            .relay_execute(
+            .wake_after_abandoned_pull(
                 ctx,
                 &open,
-                configuration,
-                RelayOperation::RecoverOrigin {
-                    workspace_id: open.workspace_id.clone(),
-                    new_origin_id,
-                },
-                "sync.recoverOrigin",
+                self.relay_execute(ctx, &open, configuration, recover, "sync.recoverOrigin"),
             )
             .await?;
         relay_outcome_json(outcome)
@@ -2488,6 +2508,16 @@ mod tests {
                 .expect("read pull token")
         }
 
+        /// What `sync.collectionsWaiting` answers.
+        async fn collections_waiting(&self) -> bool {
+            let waiting = self
+                .service
+                .sync_collections_waiting(&RequestContext::unbounded(), Some(self.handle.clone()))
+                .await
+                .expect("collections waiting");
+            waiting["waiting"].as_bool().expect("waiting")
+        }
+
         /// Commit a page of the pass `token` began, under the workspace's
         /// identity, as that pass's own cursor.
         async fn commit_pass(
@@ -2902,6 +2932,7 @@ mod tests {
             .expect("a write inside the Collection completes");
         assert!(f.open.root.join("tasks/written.md").exists());
         assert!(f.owed(), "the update waits for the pull");
+        assert!(f.collections_waiting().await, "and says so");
         assert_eq!(
             f.collections_state(),
             before,
@@ -2917,6 +2948,7 @@ mod tests {
             .await;
         f.commit_pass(9, token, true).await.expect("page two");
         assert_eq!(f.pull_token(), None);
+        assert!(!f.collections_waiting().await);
         assert!(!f.owed());
         assert_eq!(f.edges(), 2, "both records relate to the moved target");
         assert!(
@@ -2959,20 +2991,14 @@ mod tests {
             .expect("the older pass's terminal commit");
         assert_eq!(f.pull_token(), Some(newer.clone()));
         write_inside_the_collection(&f).await;
-        let ctx = RequestContext::unbounded();
-        let waiting = f
-            .service
-            .sync_collections_waiting(&ctx, Some(f.handle.clone()))
-            .await
-            .expect("collections waiting");
-        assert_eq!(waiting, json!({ "waiting": true }));
         finish_moving_pull(f, &newer).await;
     }
 
     /// What page one applied is local truth once the pull is abandoned: the
     /// target is gone, so the waiting update cleans the source's relation.
-    fn assert_abandoned_pull_reconciled(f: &CursorFixture) {
+    async fn assert_abandoned_pull_reconciled(f: &CursorFixture) {
         assert_eq!(f.pull_token(), None);
+        assert!(!f.collections_waiting().await);
         assert!(!f.owed(), "the waiting update ran");
         let source_edges: i64 = f
             .engine_db()
@@ -2995,7 +3021,7 @@ mod tests {
         let (f, _token) = moving_pull_fixture("abandon-on-reopen").await;
         write_inside_the_collection(&f).await;
         let f = f.reopen_paused().await;
-        assert_abandoned_pull_reconciled(&f);
+        assert_abandoned_pull_reconciled(&f).await;
         f.close().await;
     }
 
@@ -3027,16 +3053,95 @@ mod tests {
             .await
             .expect("reopen the open binding");
         assert_eq!(opened["workspace"], json!(f.handle));
-        assert_abandoned_pull_reconciled(&f);
+        assert_abandoned_pull_reconciled(&f).await;
+        f.close().await;
+    }
+
+    /// A claimed workspace on a loopback relay. An unfinished pull removed a
+    /// relation's target, and a write inside the Collection waits for it.
+    async fn abandonable_pull_fixture(workspace_id: &'static str) -> (PagedRelay, CursorFixture) {
+        let ctx = RequestContext::unbounded();
+        let relay = PagedRelay::start(Default::default());
+        relay.release();
+        let f = CursorFixture::with_relay(workspace_id, true, relay.configuration()).await;
+        f.prepare().await;
+        f.service
+            .sync_claim(
+                &ctx,
+                Some(f.handle.clone()),
+                json!({ "workspaceId": workspace_id }),
+            )
+            .await
+            .expect("claim");
+        let markdown = record(SOURCE, Some(TARGET));
+        f.pulled("schema", "tasks/collection.yaml", RELATION_SCHEMA)
+            .await;
+        f.pulled("source", "tasks/source.md", &markdown).await;
+        f.pulled("target", "tasks/target.md", &record(TARGET, None))
+            .await;
+        f.source_lineage(&markdown).await;
+        f.service.collections_changed(&ctx, &f.open).await;
+        assert_eq!(f.edges(), 1);
+        f.begin_pass("left-unfinished");
+        f.pulled_removal("tasks/target.md").await;
+        write_inside_the_collection(&f).await;
+        (relay, f)
+    }
+
+    /// The relay refuses a claim for good. The saved refusal stops this
+    /// replica's sync and abandons the pull, so the waiting update runs even
+    /// though the claim answers with the refusal.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_final_claim_refusal_runs_the_update_the_pull_held_back() {
+        let (relay, f) = abandonable_pull_fixture("abandon-claim-refused").await;
+        relay.refuse_claims.store(true, Ordering::SeqCst);
+        let refused = f
+            .service
+            .sync_claim(
+                &RequestContext::unbounded(),
+                Some(f.handle.clone()),
+                json!({ "workspaceId": f.workspace_id }),
+            )
+            .await;
+        assert!(refused.is_err(), "the claim answers with its refusal");
+        let claim_state: Option<String> = f
+            .engine_db()
+            .query_row(
+                "SELECT claim_state FROM sync_identity WHERE workspace_id=?1",
+                [f.workspace_id],
+                |row| row.get(0),
+            )
+            .expect("claim state");
+        assert_eq!(claim_state.as_deref(), Some("stream-identity-mismatch"));
+        assert_abandoned_pull_reconciled(&f).await;
+        f.close().await;
+    }
+
+    /// Recovering the origin changes the replication identity, which
+    /// abandons the pull, and the waiting update runs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_origin_recovery_runs_the_update_the_pull_held_back() {
+        let (_relay, f) = abandonable_pull_fixture("abandon-origin-recovered").await;
+        f.service
+            .sync_recover_origin(
+                &RequestContext::unbounded(),
+                Some(f.handle.clone()),
+                json!({ "workspaceId": f.workspace_id }),
+            )
+            .await
+            .expect("recover origin");
+        assert_abandoned_pull_reconciled(&f).await;
         f.close().await;
     }
 
     /// A loopback relay serving a workspace log. Its first log request sets
-    /// `started`, then waits for `release`.
+    /// `started`, then waits for `release`. While `refuse_claims` is set it
+    /// refuses every claim for good.
     struct PagedRelay {
         base_url: String,
         ops: Arc<std::sync::Mutex<Vec<Value>>>,
         started: Arc<std::sync::atomic::AtomicBool>,
+        refuse_claims: Arc<std::sync::atomic::AtomicBool>,
         release: Option<std::sync::mpsc::Sender<()>>,
         stop: Arc<std::sync::atomic::AtomicBool>,
         thread: Option<std::thread::JoinHandle<()>>,
@@ -3048,11 +3153,16 @@ mod tests {
             let base_url = format!("http://{}", listener.local_addr().expect("relay address"));
             let ops = Arc::new(std::sync::Mutex::new(Vec::new()));
             let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let refuse_claims = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let (release, released) = std::sync::mpsc::channel();
             let thread = std::thread::spawn({
-                let (ops, started, stop) =
-                    (Arc::clone(&ops), Arc::clone(&started), Arc::clone(&stop));
+                let (ops, started, refuse_claims, stop) = (
+                    Arc::clone(&ops),
+                    Arc::clone(&started),
+                    Arc::clone(&refuse_claims),
+                    Arc::clone(&stop),
+                );
                 move || {
                     let mut released = Some(released);
                     for stream in listener.incoming() {
@@ -3060,7 +3170,14 @@ mod tests {
                             break;
                         }
                         let Ok(stream) = stream else { continue };
-                        let _ = serve_paged_relay(stream, &ops, &blobs, &started, &mut released);
+                        let _ = serve_paged_relay(
+                            stream,
+                            &ops,
+                            &blobs,
+                            &started,
+                            &refuse_claims,
+                            &mut released,
+                        );
                     }
                 }
             });
@@ -3068,6 +3185,7 @@ mod tests {
                 base_url,
                 ops,
                 started,
+                refuse_claims,
                 release: Some(release),
                 stop,
                 thread: Some(thread),
@@ -3117,6 +3235,7 @@ mod tests {
         ops: &std::sync::Mutex<Vec<Value>>,
         blobs: &std::collections::HashMap<String, String>,
         started: &std::sync::atomic::AtomicBool,
+        refuse_claims: &std::sync::atomic::AtomicBool,
         released: &mut Option<std::sync::mpsc::Receiver<()>>,
     ) -> std::io::Result<()> {
         use std::io::{BufRead, Read, Write};
@@ -3181,7 +3300,12 @@ mod tests {
         } else {
             None
         };
+        let claim = method == "POST" && path == "/sync/workspaces";
         let (status, body) = match body {
+            _ if claim && refuse_claims.load(Ordering::SeqCst) => (
+                "409 Conflict",
+                json!({ "code": "stream_identity_mismatch" }).to_string(),
+            ),
             Some(body) => ("200 OK", body),
             None => ("404 Not Found", String::new()),
         };

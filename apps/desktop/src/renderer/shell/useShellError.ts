@@ -389,12 +389,13 @@ export function useShellError(workspaceId: string) {
   );
   const clearSyncFailure = useCallback(() => clearKind("cloud-sync"), [clearKind]);
   // One row while Collection updates wait for an unfinished pull. A newer
-  // report replaces it, keeping its toast unless the report toasts.
+  // report replaces it, keeping its toast unless the report toasts. The wait
+  // itself is a warning; a reopen that failed is a failure.
   const reportCollectionsWaiting = useCallback(
-    (notice: { message: string; toast: boolean }, retry: () => void, openSyncSettings: () => void) =>
+    (notice: { message: string; toast: boolean; failed: boolean }, retry: () => void, openSyncSettings: () => void) =>
       push(
         {
-          tone: "warning",
+          ...(notice.failed ? {} : { tone: "warning" as const }),
           message: notice.message,
           retry,
           action: { label: "Sync settings", run: openSyncSettings },

@@ -3,7 +3,8 @@ import type { SyncStatusResult } from "../../ipc/bridgeContract";
 
 type Waiting = NonNullable<SyncStatusResult["collectionsWaitingForSync"]>;
 
-type CollectionsWaitingNotice = { message: string; toast: boolean };
+// `failed` when the reopen after a pause failed, rather than a wait.
+type CollectionsWaitingNotice = { message: string; toast: boolean; failed: boolean };
 
 export function collectionsWaitingMessage(waiting: Waiting): string {
   return waiting === "sync"
@@ -57,7 +58,11 @@ export function useCollectionsWaitingNotice(input: {
   const file = useCallback(
     (forWorkspace: string, state: Waiting, toast: boolean) => {
       filedRef.current = `${forWorkspace}\0${state}`;
-      report({ message: collectionsWaitingMessage(state), toast }, () => retryRef.current(), openSyncSettings);
+      report(
+        { message: collectionsWaitingMessage(state), toast, failed: state === "reopen" },
+        () => retryRef.current(),
+        openSyncSettings,
+      );
     },
     [openSyncSettings, report],
   );

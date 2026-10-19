@@ -54,6 +54,9 @@ interface WatchedWorkspace {
   recoveryUnavailable: boolean;
   keptFiles: readonly (readonly [string, string])[];
   heldFiles: NonNullable<SyncStatusResult["heldFiles"]>;
+  // The engine's answer at open: Collection updates wait for an unfinished
+  // pull. A running sync engine asks again after its passes.
+  collectionsWaiting: boolean;
 }
 
 /**
@@ -71,7 +74,8 @@ export class WorkspaceActivityState {
   preservedStatus: SyncStatusResult | null = null;
   liveSessionsGeneration = 0;
   // Sync paused while Collection updates waited, and the reopen that ends
-  // the wait did not finish. The next successful open clears it.
+  // the wait did not finish. Only the engine answering that nothing waits
+  // clears it.
   syncPauseReopenFailed = false;
 }
 
@@ -93,6 +97,10 @@ export interface WorkspaceActivityOptions {
     capture: WorkspaceEngineCapture | null,
     engineOptions?: { joinBootstrap?: boolean },
   ) => CloudSyncEngine | null;
+  // The engine's answer: Collection updates wait for an unfinished pull. It
+  // reads through the owner's open, so it answers only once that open, which
+  // abandons a pull when sync is paused, succeeded.
+  collectionsWaitingFor?: (workspace: ActivityWorkspace) => Promise<boolean>;
   // Builds the watcher->engine capture for a workspace; a null capture
   // leaves the workspace with NO history recorder. Called once per open. The
   // hooks are
@@ -233,9 +241,12 @@ export function createWorkspaceActivity(
     if (preserved) return { ...preserved, syncPause, liveSessionsGeneration };
     const w = state.entry;
     const snap = w?.engine?.snapshot();
+    // The wait itself, held through a running pass: only an answer that
+    // nothing waits ends it. With no sync engine, as when signed out, the
+    // engine's answer at open stands.
     const collectionsWaitingForSync: SyncStatusResult["collectionsWaitingForSync"] =
       state.syncPauseReopenFailed ? "reopen"
-        : snap?.collectionsWaiting && !snap.syncing ? "sync" : undefined;
+        : (snap ? snap.collectionsWaiting : w?.collectionsWaiting) ? "sync" : undefined;
     const conflictCount = snap?.conflictCount ?? 0;
     const status = deriveSyncStatus({
       pendingChangeCount: snap?.pendingChangeCount ?? 0,
@@ -364,6 +375,7 @@ export function createWorkspaceActivity(
         recoveryUnavailable: false,
         keptFiles: [],
         heldFiles: [],
+        collectionsWaiting: false,
       };
       state.entry = entry;
       // Resolve the engine capture before the watcher starts, so the mode is
@@ -490,10 +502,33 @@ export function createWorkspaceActivity(
         // through onChange/notify rather than blocking the open.
         void engine.start();
       }
+      // A shared view pulls through its share and has no ordinary pull.
+      if (options.collectionsWaitingFor && !entry.historyShareView) {
+        void readCollectionsWaiting(workspace, state).catch(error =>
+          console.error(`[desktop] Collections wait check failed for ${workspace.workspaceId}:`, error));
+      }
     }
     state.preservedStatus = null;
-    state.syncPauseReopenFailed = false;
     return statusFor(workspace, state);
+  }
+
+  // Asks the engine whether Collection updates wait for an unfinished pull,
+  // and keeps the answer for this open. An answer that nothing waits also
+  // ends a failed reopen after a pause.
+  async function readCollectionsWaiting(
+    workspace: ActivityWorkspace,
+    state: WorkspaceActivityState,
+  ): Promise<boolean> {
+    if (!options.collectionsWaitingFor) throw new Error("dohc cannot ask the engine about Collection updates.");
+    const entry = state.entry;
+    const waiting = await options.collectionsWaitingFor(workspace);
+    if (state.entry !== entry) return waiting;
+    const reopened = !waiting && state.syncPauseReopenFailed;
+    if (entry && entry.collectionsWaiting === waiting && !reopened) return waiting;
+    if (entry) entry.collectionsWaiting = waiting;
+    if (reopened) state.syncPauseReopenFailed = false;
+    notify({ workspaceId: workspace.workspaceId });
+    return waiting;
   }
 
   // The pause saved, but the workspace did not reopen while Collection
@@ -880,6 +915,7 @@ export function createWorkspaceActivity(
     enableCloud,
     prepareSyncPause,
     recordSyncPauseReopenFailed,
+    readCollectionsWaiting,
     reconcileCloud,
     stopEngine,
     getStatus,
