@@ -31,6 +31,7 @@ fn apply_context<'a>(
         provenance: CaptureProvenance::default(),
         events: EngineEvents::default(),
         apply_probe: None,
+        import_priority: None,
     }
 }
 

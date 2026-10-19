@@ -137,6 +137,7 @@ async fn assert_gate_wait_leaves_link_drain_running(tick: bool) {
         events,
         apply_probe: None,
         scan: ScanGauge::default(),
+        import_priority: Arc::new(ImportPriority::new(|| {})),
         no_atomic_placement_announced: false,
     };
     let cancel = CancellationToken::new();
@@ -277,6 +278,7 @@ async fn failed_first_layer_start_releases_link_drain_in_the_open_workspace() {
         events,
         apply_probe: None,
         scan: ScanGauge::default(),
+        import_priority: Arc::new(ImportPriority::new(|| {})),
         no_atomic_placement_announced: false,
     };
     assert!(env.start_layer(&CancellationToken::new()).await.is_err());

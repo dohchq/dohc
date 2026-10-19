@@ -133,6 +133,7 @@ async fn seeded_deletes_survive_an_over_cap_policy_hold_and_recovery() {
                 },
                 events: events.clone(),
                 apply_probe: None,
+                import_priority: None,
             },
             &files.handle(),
             RootBoundRun { captured_root, run },
@@ -272,6 +273,7 @@ async fn prepared_and_converged_runs_refuse_a_replacement_workspace_root() {
             provenance: CaptureProvenance::default(),
             events: EngineEvents::default(),
             apply_probe: None,
+            import_priority: None,
         },
         &files.handle(),
         RootBoundRun { captured_root, run },
@@ -299,6 +301,7 @@ async fn prepared_and_converged_runs_refuse_a_replacement_workspace_root() {
             provenance: CaptureProvenance::default(),
             events: EngineEvents::default(),
             apply_probe: None,
+            import_priority: None,
         },
         &files.handle(),
         RootBoundRun {

@@ -2728,6 +2728,9 @@ export function createWorkspaceEngineCapture(
         },
         {
           retryTransportErrors: openOptions?.retryTransportErrors ?? true,
+          // A new folder's import refuses a file it has not captured yet. The
+          // open waits for the import's wake instead of the whole import.
+          retryInitialCapture: true,
         },
       );
 
