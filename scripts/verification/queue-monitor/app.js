@@ -47,12 +47,14 @@ function singleFlight(job) {
 
 // One request to the dashboard server. It gives up after 15 seconds, so a request left hanging by an
 // outage never holds up the next refresh. A failure says what went wrong in words, never a browser's error.
-async function call(url, options = {}) {
+// A phone that wakes or a connection that dropped fails one read, so a read that gets no answer tries once more.
+async function call(url, options = {}, again = !options.method) {
   let response, text;
   try {
     response = await fetch(url, { cache: "no-store", ...options, signal: AbortSignal.timeout(15_000) });
     text = await response.text();
   } catch (error) {
+    if (again && error.name !== "TimeoutError") return new Promise(done => setTimeout(done, 1000)).then(() => call(url, options, false));
     throw Object.assign(new Error(error.name === "TimeoutError" ? "the dashboard server did not answer in 15 seconds" : "can't reach the dashboard server"), { offline: true });
   }
   if (!response.ok) throw new Error(text.trim() || `the dashboard server answered ${response.status}`);
