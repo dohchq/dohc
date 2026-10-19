@@ -1,6 +1,6 @@
 use super::{
     alias_object_id, blob_text, get_moment, get_snapshot, hash_fields, lookup_request,
-    record_request, rename_text_in_tx, validate_identifier, validate_moment_metadata,
+    rename_text_in_tx, validate_identifier, validate_moment_metadata,
     validate_plaintext_storable_path, write_history_text_in_tx,
 };
 use crate::{DomainError, MomentRecord, RenameTextFile, WriteText};
@@ -255,17 +255,6 @@ fn checked_undo_request_in(
     Ok(Some(recorded))
 }
 
-pub fn undo_request_is_replay_in(
-    conn: &Connection,
-    ws: &str,
-    operation: &str,
-    request: &str,
-    author: Option<&str>,
-) -> Result<bool, DomainError> {
-    Ok(checked_undo_request_in(conn, ws, operation, request, author)?.is_some()
-        && conn.query_row("SELECT kind != 'history-undo-pending' FROM engine_requests WHERE request_id=?1", [request], |row| row.get::<_, bool>(0)).map_err(DomainError::sql_corrupt)?)
-}
-
 pub fn replayed_undo_operation_in(
     conn: &Connection,
     ws: &str,
@@ -287,7 +276,13 @@ pub fn replayed_undo_operation_in(
         return Ok(None);
     }
     if kind == "history-undo-complete" {
-        let version: String = conn.query_row("SELECT version_id FROM history_undo_plans WHERE request_id=?1", [request], |r| r.get(0)).map_err(DomainError::sql_corrupt)?;
+        let version: String = conn
+            .query_row(
+                "SELECT version_id FROM history_undo_plans WHERE request_id=?1",
+                [request],
+                |r| r.get(0),
+            )
+            .map_err(DomainError::sql_corrupt)?;
         return Ok(Some((
             version.clone(),
             undo_compensation_moments_in(conn, ws, &version, operation, request)?,
@@ -315,50 +310,6 @@ pub fn replayed_undo_operation_in(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn undo_operation_in_tx<F>(
-    tx: &Transaction<'_>,
-    ws: &str,
-    version: &str,
-    operation: &str,
-    request: &str,
-    author: Option<&str>,
-    now: i64,
-    mut after: F,
-) -> Result<(Vec<OperationMoment>, bool), DomainError>
-where
-    F: FnMut(&Transaction<'_>, &MomentRecord) -> Result<(), DomainError>,
-{
-    validate_operation_id(operation)?;
-    validate_identifier(request, "request_id")?;
-    validate_moment_metadata("restore", Some("Undo"), Some(operation), author)?;
-    let correlation = undo_correlation_id(ws, operation, request);
-    let fingerprint = undo_request_fingerprint(ws, operation, author);
-    if let Some((_, moments)) = replayed_undo_operation_in(tx, ws, operation, request, author)? {
-        return Ok((moments, true));
-    }
-    let originals = preflight_undo_operation_in(tx, ws, version, operation)?;
-    let mut last_order = -1;
-    for effect in originals {
-        last_order = undo_member_in_tx(
-            tx,
-            ws,
-            version,
-            &correlation,
-            author,
-            now,
-            effect,
-            &mut after,
-        )?
-        .moment_order;
-    }
-    record_request(tx, Some(request), &fingerprint, last_order, now)?;
-    Ok((
-        raw_operation_moments_in(tx, ws, version, &correlation)?,
-        false,
-    ))
-}
-
-#[allow(clippy::too_many_arguments)]
 pub fn undo_member_in_tx<F>(
     tx: &Transaction<'_>,
     ws: &str,
@@ -372,10 +323,7 @@ pub fn undo_member_in_tx<F>(
 where
     F: FnMut(&Transaction<'_>, &MomentRecord) -> Result<(), DomainError>,
 {
-    let id = format!(
-        "undo-{}",
-        hash_fields(&[correlation.as_bytes(), effect.moment_id.as_bytes()])
-    );
+    let id = undo_member_moment_id(correlation, &effect.moment_id);
     let moment = if effect.operation == "rename" {
         rename_text_in_tx(
             tx,
@@ -396,6 +344,7 @@ where
         )?
         .moment
     } else {
+        // Retained content can disappear after the off-actor preflight.
         let source = get_moment(tx, ws, &effect.moment_id)?.ok_or(DomainError::FileNotFound)?;
         if !source.before_present {
             return Err(DomainError::UndoRefused {
@@ -486,5 +435,12 @@ pub fn undo_compensation_moments_in(
         ws,
         version,
         &undo_correlation_id(ws, operation, request),
+    )
+}
+
+pub fn undo_member_moment_id(correlation: &str, moment: &str) -> String {
+    format!(
+        "undo-{}",
+        hash_fields(&[correlation.as_bytes(), moment.as_bytes()])
     )
 }

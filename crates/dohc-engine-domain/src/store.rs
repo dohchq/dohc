@@ -22,8 +22,8 @@ mod operations;
 pub use operations::{
     OPERATION_ID_PREFIX, OperationMoment, ensure_operation_published_in, operation_moments_in,
     preflight_undo_operation_in, replayed_undo_operation_in, undo_compensation_moments_in,
-    undo_correlation_id, undo_member_in_tx, undo_operation_in_tx, undo_progress_key,
-    undo_request_fingerprint, undo_request_is_replay_in, validate_operation_id,
+    undo_correlation_id, undo_member_in_tx, undo_member_moment_id, undo_progress_key,
+    undo_request_fingerprint, validate_operation_id,
 };
 mod history;
 pub use history::{
@@ -1189,6 +1189,7 @@ impl<'a> VersionedTextStore<'a> {
         let ws = workspace_id.to_owned();
         let ver = version_id.to_owned();
         let outcome = self.store.write_with(faults, |tx| {
+            ensure_no_pending_undo_in(tx, &ws)?;
             tx.execute(
                 "INSERT INTO active_versions (workspace_id, version_id) VALUES (?1, ?2) \
                  ON CONFLICT(workspace_id) DO UPDATE SET version_id = excluded.version_id",
@@ -1419,7 +1420,7 @@ pub(crate) fn validate_moment_id(value: &str) -> Result<(), DomainError> {
     Ok(())
 }
 
-pub(crate) fn validate_moment_metadata(
+pub fn validate_moment_metadata(
     metadata_origin: &str,
     summary: Option<&str>,
     correlation_id: Option<&str>,
@@ -2341,4 +2342,15 @@ mod tests {
             "the high-water query must not scan either growing table: {details:?}"
         );
     }
+}
+
+/// A pending Undo owns its version until every member has settled.
+pub fn ensure_no_pending_undo_in(conn: &Connection, ws: &str) -> Result<(), DomainError> {
+    let pending: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM engine_requests r INDEXED BY idx_engine_requests_kind JOIN history_undo_plans p ON p.request_id=r.request_id WHERE r.kind='history-undo-pending' AND p.workspace_id=?1)",[ws],|r|r.get(0)).map_err(DomainError::sql_corrupt)?;
+    if pending {
+        return Err(DomainError::InvalidInput {
+            reason: "An Undo is still running. Switch versions when it finishes.",
+        });
+    }
+    Ok(())
 }

@@ -13,8 +13,6 @@ use dohc_engine_domain::{
     preflight_undo_operation_in, replayed_undo_operation_in, undo_correlation_id,
     validate_operation_id,
 };
-#[cfg(test)]
-use dohc_engine_domain::{undo_operation_in_tx, undo_request_is_replay_in};
 use dohc_engine_storage::{
     EngineStore, FaultInjector, JobStatus, MaterializationJobSpec, Preimage, StorageError,
     TxnOutcome, enqueue_delete_job, enqueue_job,
@@ -237,30 +235,6 @@ impl ActorHandle {
         })
         .await
     }
-    #[allow(clippy::too_many_arguments)]
-    pub async fn history_undo_commit(
-        &self,
-        ws: String,
-        operation: String,
-        request: String,
-        author: Option<String>,
-        root: PathBuf,
-        faults: Arc<dyn FaultInjector>,
-        now: i64,
-    ) -> Result<HistoryUndoResult, RuntimeError> {
-        self.history_undo_in_turns(
-            ws,
-            operation,
-            request,
-            author,
-            root,
-            faults,
-            now,
-            [Arc::default(), Arc::default()],
-        )
-        .await
-    }
-
     pub async fn history_undo_place<F>(
         &self,
         ws: String,
@@ -424,139 +398,6 @@ fn rename_head_sha(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[cfg(test)]
-fn commit_history_undo_on_store(
-    store: &mut EngineStore,
-    ws: &str,
-    operation: &str,
-    request: &str,
-    author: Option<&str>,
-    root: &Path,
-    faults: &dyn FaultInjector,
-    now: i64,
-) -> Result<HistoryUndoResult, RuntimeError> {
-    let version_id = VersionedTextStore::new(store)
-        .get_active_version(ws)?
-        .version_id;
-    let probe =
-        dohc_engine_files::ProjectionProbe::new(root).map_err(StorageError::persist_public)?;
-    // The actor and workspace fence stay held, but disk reads do not hold SQLite's writer.
-    let proofs = store.read_with(|conn| -> Result<_, RuntimeError> {
-        let replay = undo_request_is_replay_in(conn, ws, operation, request, author)?;
-        if replay {
-            return Ok(Vec::new());
-        }
-        for m in operation_moments_in(conn, ws, &version_id, operation)? {
-            check_undo_ownership(conn, ws, &version_id, &m)?;
-        }
-        let originals = preflight_undo_operation_in(conn, ws, &version_id, operation)?;
-        originals
-            .into_iter()
-            .map(|m| {
-                let source = if m.operation == "rename" {
-                    let sha = rename_head_sha(conn, ws, &version_id, &m.object_id)?;
-                    let stamp = probe.stamp(&m.path);
-                    let digest = probe_undo_source(&probe, &m.path);
-                    if !matches!(stamp, dohc_engine_files::ProjectionTargetStamp::File { .. })
-                        || probe.stamp(&m.path) != stamp
-                        || !matches!(digest,
-                            dohc_engine_files::ProjectionTargetState::Text { sha256 }
-                            | dohc_engine_files::ProjectionTargetState::Binary { sha256 }
-                            if sha256 == sha)
-                    {
-                        return Err(DomainError::UndoRefused {
-                            path: m.path.clone(),
-                            reason: "source changed on disk",
-                        }
-                        .into());
-                    }
-                    Some(stamp)
-                } else {
-                    None
-                };
-                Ok((m, source))
-            })
-            .collect::<Result<Vec<_>, RuntimeError>>()
-    })?;
-    let policy = crate::search::read_engine_search_policy(root);
-    let objects = serde_json::to_string(
-        &proofs
-            .iter()
-            .map(|(m, _)| m.object_id.as_str())
-            .collect::<Vec<_>>(),
-    )
-    .map_err(|_| DomainError::StateCorrupt {
-        reason: "Undo object list",
-    })?;
-    let result = store.write_with(faults, |tx| {
-        for (m, source) in &proofs {
-            if let Some(stamp) = source {
-                if probe.stamp(&m.path) != *stamp {
-                    return Err(DomainError::UndoRefused {
-                        path: m.path.clone(),
-                        reason: "source changed on disk",
-                    }
-                    .into());
-                }
-            }
-            let target = m.before_path.as_deref().unwrap_or(&m.path);
-            if probe.stamp(target) != dohc_engine_files::ProjectionTargetStamp::Absent {
-                return Err(DomainError::UndoRefused {
-                    path: target.into(),
-                    reason: "old path occupied on disk",
-                }
-                .into());
-            }
-        }
-        if !proofs.is_empty() {
-            crate::search::index::begin_file_search_index_batch(
-                tx,
-                &policy,
-                ws,
-                &version_id,
-                &objects,
-            )
-            .map_err(super::search::search_domain)?;
-        }
-        undo_operation_in_tx(
-            tx,
-            ws,
-            &version_id,
-            operation,
-            request,
-            author,
-            now,
-            |tx, m| publish_undo_member(tx, ws, &version_id, &policy, m, now),
-        )
-        .map_err(RuntimeError::from)
-    })?;
-    let (moments, deduped) = match result {
-        TxnOutcome::Committed(r) => r,
-        TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
-    };
-    let last = moments.last().ok_or(DomainError::StateCorrupt {
-        reason: "Undo lost result",
-    })?;
-    let version_id: String = store.read_with(|conn| {
-        conn.query_row(
-            "SELECT version_id FROM moments WHERE workspace_id=?1 AND moment_id=?2",
-            params![ws, last.moment_id],
-            |r| r.get(0),
-        )
-        .map_err(StorageError::corrupt_public)
-    })?;
-    Ok(HistoryUndoResult {
-        operation_id: operation.into(),
-        version_id,
-        moments,
-        compensation_operation_id: undo_correlation_id(ws, operation, request),
-        deduped,
-        materialized: false,
-        not_restored: Vec::new(),
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
 fn place_undo_members(
     store: &mut EngineStore,
     ws: &str,
@@ -604,30 +445,51 @@ fn place_undo_members(
 
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
-pub(super) fn history_undo_on_store(
+pub(super) fn test_undo_in_turns(
     store: &mut EngineStore,
     ws: &str,
     operation: &str,
     request: &str,
     author: Option<&str>,
     root: &Path,
-    recorder: &dyn SelfWriteRecorder,
-    faults: &dyn FaultInjector,
+    faults: Arc<dyn FaultInjector>,
     now: i64,
 ) -> Result<HistoryUndoResult, RuntimeError> {
-    let mut result =
-        commit_history_undo_on_store(store, ws, operation, request, author, root, faults, now)?;
-    result.materialized = place_undo_members(
-        store,
-        ws,
-        &result.version_id,
-        &result.moments,
-        root,
-        recorder,
-        faults,
-        now,
-    )?;
-    Ok(result)
+    let db = store.database_path().to_path_buf();
+    // Hand writer ownership to the actor; leave the fixture with a read-only handle.
+    let reader = EngineStore::open_read_only(&db)?;
+    drop(std::mem::replace(store, reader));
+    let supervisor = crate::WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, now)?.actor;
+    let outcome = tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let result = actor
+            .history_undo_in_turns(
+                ws.into(),
+                operation.into(),
+                request.into(),
+                author.map(str::to_owned),
+                root.to_path_buf(),
+                faults,
+                now,
+                [Arc::default(), Arc::default()],
+                Arc::new(()),
+                crate::CancellationToken::new(),
+            )
+            .await?;
+        Ok(actor
+            .history_undo_place(
+                ws.into(),
+                result,
+                root.to_path_buf(),
+                Arc::new(()),
+                now,
+                |_| {},
+            )
+            .await)
+    });
+    supervisor.close_all()?;
+    *store = EngineStore::open(&db, now)?;
+    outcome
 }
 
 #[cfg(test)]
@@ -750,9 +612,9 @@ mod tests {
         store: &mut EngineStore,
         root: &Path,
         request: &str,
-        faults: &dyn FaultInjector,
+        faults: Arc<dyn FaultInjector>,
     ) -> Result<HistoryUndoResult, RuntimeError> {
-        history_undo_on_store(store, WS, OP, request, None, root, &(), faults, 10)
+        test_undo_in_turns(store, WS, OP, request, None, root, faults, 10)
     }
     fn count(store: &EngineStore) -> i64 {
         store
@@ -776,7 +638,7 @@ mod tests {
         rename(&mut store, root.path(), "old.md", "new.md", "rename", OP);
         let later = "x".repeat(64 * 1024);
         seed(&mut store, root.path(), "new.md", "typed", &later);
-        let result = undo(&mut store, root.path(), "undo", &NoFaults).unwrap();
+        let result = undo(&mut store, root.path(), "undo", Arc::new(NoFaults)).unwrap();
         assert!(result.materialized && !result.deduped);
         assert_eq!(
             std::fs::read_to_string(root.path().join("old.md")).unwrap(),
@@ -784,7 +646,7 @@ mod tests {
         );
         assert!(!root.path().join("new.md").exists());
         let n = count(&store);
-        let replay = undo(&mut store, root.path(), "undo", &NoFaults).unwrap();
+        let replay = undo(&mut store, root.path(), "undo", Arc::new(NoFaults)).unwrap();
         assert!(replay.deduped && replay.materialized);
         assert_eq!(replay.moments, result.moments);
         assert_eq!(count(&store), n);
@@ -817,7 +679,7 @@ mod tests {
                 );
             }
             let n = count(&store);
-            let error = undo(&mut store, root.path(), "undo", &NoFaults).unwrap_err();
+            let error = undo(&mut store, root.path(), "undo", Arc::new(NoFaults)).unwrap_err();
             assert!(
                 matches!(error, RuntimeError::Domain(DomainError::UndoRefused { .. })),
                 "{error:?}"
@@ -867,7 +729,7 @@ mod tests {
         std::fs::write(root.path().join("asset.bin"), [0, 255, 1]).unwrap();
         remove(&mut store, root.path(), "old.md", "delete-text");
         remove(&mut store, root.path(), "asset.bin", "delete-binary");
-        let result = undo(&mut store, root.path(), "undo", &NoFaults).unwrap();
+        let result = undo(&mut store, root.path(), "undo", Arc::new(NoFaults)).unwrap();
         assert!(result.materialized);
         assert_eq!(result.moments.len(), 2);
         assert_eq!(
@@ -952,7 +814,7 @@ mod tests {
                 flag.set(conn.execute_batch("BEGIN IMMEDIATE; ROLLBACK;").is_ok());
             }))
         });
-        let result = undo(&mut store, root.path(), "undo", &NoFaults);
+        let result = undo(&mut store, root.path(), "undo", Arc::new(NoFaults));
         UNDO_PROBE_OBSERVER.with(|slot| *slot.borrow_mut() = None);
         assert!(result.unwrap().materialized);
         assert!(observed.get());
@@ -963,7 +825,7 @@ mod tests {
         seed(&mut store, root.path(), "a.md", "one", "One");
         rename(&mut store, root.path(), "a.md", "b.md", "move-one", OP);
         assert!(
-            undo(&mut store, root.path(), "undo-one", &NoFaults)
+            undo(&mut store, root.path(), "undo-one", Arc::new(NoFaults))
                 .unwrap()
                 .materialized
         );
@@ -978,7 +840,12 @@ mod tests {
         let before = count(&store);
         assert!(
             matches!(
-                undo(&mut store, root.path(), "fresh-undo-one", &NoFaults),
+                undo(
+                    &mut store,
+                    root.path(),
+                    "fresh-undo-one",
+                    Arc::new(NoFaults)
+                ),
                 Err(RuntimeError::Domain(DomainError::UndoRefused { .. }))
             ),
             "old rename must not reverse the later operation"
@@ -1069,7 +936,7 @@ mod tests {
                 Ok::<_, RuntimeError>(())
             })
             .unwrap();
-        let result = undo(&mut store, root.path(), "undo", &NoFaults);
+        let result = undo(&mut store, root.path(), "undo", Arc::new(NoFaults));
         store
             .read_with(|conn| {
                 conn.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
@@ -1125,7 +992,7 @@ mod tests {
                 }))
             })
             .unwrap();
-        let result = undo(&mut store, root.path(), "undo", &NoFaults);
+        let result = undo(&mut store, root.path(), "undo", Arc::new(NoFaults));
         store
             .read_with(|conn| conn.commit_hook(None::<fn() -> bool>))
             .unwrap();
@@ -1211,7 +1078,7 @@ mod tests {
         seed(&mut store, root.path(), "notes.md", "one", "v1");
         remove(&mut store, root.path(), "notes.md", "delete-v1");
         assert!(
-            undo(&mut store, root.path(), "undo-v1", &NoFaults)
+            undo(&mut store, root.path(), "undo-v1", Arc::new(NoFaults))
                 .unwrap()
                 .materialized
         );
@@ -1244,7 +1111,7 @@ mod tests {
         let n = count(&store);
         assert!(
             matches!(
-                undo(&mut store, root.path(), "fresh-undo-v1", &NoFaults),
+                undo(&mut store, root.path(), "fresh-undo-v1", Arc::new(NoFaults)),
                 Err(RuntimeError::Domain(DomainError::UndoRefused { .. }))
             ),
             "an old delete must not restore v1 over the newer deletion of v2"
@@ -1252,15 +1119,14 @@ mod tests {
         assert_eq!(count(&store), n);
         assert!(!root.path().join("notes.md").exists());
         assert!(
-            history_undo_on_store(
+            test_undo_in_turns(
                 &mut store,
                 WS,
                 "dohc-operation:agent-delete",
                 "undo-v2",
                 None,
                 root.path(),
-                &(),
-                &NoFaults,
+                Arc::new(NoFaults),
                 12
             )
             .unwrap()
@@ -1315,7 +1181,7 @@ mod tests {
         let n = count(&store);
         assert!(
             matches!(
-                undo(&mut store, root.path(), "undo", &NoFaults),
+                undo(&mut store, root.path(), "undo", Arc::new(NoFaults)),
                 Err(RuntimeError::Domain(DomainError::UndoRefused { .. }))
             ),
             "a hidden pending member must not produce a partial Undo"
@@ -1346,7 +1212,7 @@ mod tests {
                 .is_empty()
         );
         let n = count(&store);
-        assert!(undo(&mut store, root.path(), "undo", &NoFaults).is_err());
+        assert!(undo(&mut store, root.path(), "undo", Arc::new(NoFaults)).is_err());
         assert_eq!(count(&store), n);
         assert_eq!(
             std::fs::read_to_string(root.path().join("new.md")).unwrap(),
@@ -1401,7 +1267,7 @@ mod tests {
         );
         let n = count(&store);
         assert!(matches!(
-            undo(&mut store, root.path(), "undo", &NoFaults),
+            undo(&mut store, root.path(), "undo", Arc::new(NoFaults)),
             Err(RuntimeError::Domain(DomainError::UndoRefused {
                 reason: "operation publication pending",
                 ..
@@ -1426,7 +1292,7 @@ mod tests {
             1
         );
         assert!(
-            undo(&mut store, root.path(), "undo", &NoFaults)
+            undo(&mut store, root.path(), "undo", Arc::new(NoFaults))
                 .unwrap()
                 .materialized
         );
@@ -1441,14 +1307,14 @@ mod tests {
         seed(&mut store, root.path(), "old.md", "one", "One");
         rename(&mut store, root.path(), "old.md", "new.md", "rename", OP);
         assert!(matches!(
-            undo(&mut store, root.path(), "undo", &CrashCommit),
+            undo(&mut store, root.path(), "undo", Arc::new(CrashCommit)),
             Err(RuntimeError::OperationCrashed)
         ));
         assert_eq!(count(&store), 3);
         assert!(root.path().join("new.md").exists());
         drop(store);
         let mut store = EngineStore::open(&engine_db_path(&root).unwrap(), 11).unwrap();
-        let result = undo(&mut store, root.path(), "undo", &NoFaults).unwrap();
+        let result = undo(&mut store, root.path(), "undo", Arc::new(NoFaults)).unwrap();
         assert!(result.materialized && result.deduped);
         assert_eq!(count(&store), 3);
         assert_eq!(
@@ -1486,29 +1352,27 @@ mod tests {
             let request = format!("undo-{i}");
             let started = std::time::Instant::now();
             assert!(matches!(
-                history_undo_on_store(
+                test_undo_in_turns(
                     &mut store,
                     WS,
                     &op,
                     &request,
                     None,
                     root.path(),
-                    &(),
-                    &CrashCommit,
+                    Arc::new(CrashCommit),
                     10
                 ),
                 Err(RuntimeError::OperationCrashed)
             ));
             samples.push(started.elapsed().as_secs_f64() * 1000.0);
-            let result = history_undo_on_store(
+            let result = test_undo_in_turns(
                 &mut store,
                 WS,
                 &op,
                 &request,
                 None,
                 root.path(),
-                &(),
-                &NoFaults,
+                Arc::new(NoFaults),
                 11,
             )
             .unwrap();

@@ -215,7 +215,7 @@ async fn run(
     faults: Arc<dyn FaultInjector>,
 ) -> Result<HistoryUndoResult, RuntimeError> {
     actor
-        .history_undo_commit(
+        .history_undo_in_turns(
             WS.into(),
             OP.into(),
             request.into(),
@@ -223,6 +223,9 @@ async fn run(
             root.to_path_buf(),
             faults,
             10,
+            [Arc::default(), Arc::default()],
+            Arc::new(()),
+            crate::CancellationToken::new(),
         )
         .await
 }
@@ -325,7 +328,7 @@ async fn crash_resumes_the_remaining_members_and_replay_writes_nothing() {
     );
     assert!(matches!(
         actor
-            .history_undo_commit(
+            .history_undo_in_turns(
                 WS.into(),
                 OP.into(),
                 "turn-crash".into(),
@@ -333,7 +336,10 @@ async fn crash_resumes_the_remaining_members_and_replay_writes_nothing() {
                 root.to_path_buf(),
                 Arc::new(NoFaults),
                 30
-            )
+            [Arc::default(), Arc::default()],
+            Arc::new(()),
+            crate::CancellationToken::new(),
+        )
             .await,
         Err(RuntimeError::Domain(
             DomainError::IdempotencyKeyReuseMismatch
@@ -507,6 +513,8 @@ async fn two_thousand_members_bound_store_work_and_ydoc_wait_with_p95_under_fift
             Arc::new(NoFaults),
             10,
             gates,
+            Arc::new(()),
+            crate::CancellationToken::new(),
         )
         .await
         .unwrap();
