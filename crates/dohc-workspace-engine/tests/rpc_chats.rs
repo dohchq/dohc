@@ -941,11 +941,11 @@ async fn file_mentions_are_compact_bounded_sealed_and_continue_beyond_2000() {
         if !checked_first_continuation {
             checked_first_continuation = true;
             let encoded = cursor.as_ref().expect("first continuation");
-            for params in [
+            for (index, params) in [
                 json!({"subject":{"objectId":"wanted"},"scope":"another-grant","sharedChannelRowsUncovered":0,"cursor":encoded}),
                 json!({"subject":{"objectId":"other"},"scope":"owner","sharedChannelRowsUncovered":0,"cursor":encoded}),
                 json!({"scope":"owner","sharedChannelRowsUncovered":0,"cursor":format!("{encoded}x")}),
-            ] {
+            ].into_iter().enumerate() {
                 let error = call_error(
                     &transport,
                     &handle,
@@ -954,7 +954,8 @@ async fn file_mentions_are_compact_bounded_sealed_and_continue_beyond_2000() {
                     params,
                 )
                 .await;
-                assert_eq!(error.code, ErrorCode::InvalidParams);
+                assert_eq!(error.code, if index == 0 { ErrorCode::Conflict } else { ErrorCode::InvalidParams });
+                if index == 0 { assert_eq!(error.message, "Chat access changed. Try again."); }
             }
         }
 

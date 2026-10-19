@@ -7,6 +7,8 @@ use dohc_engine_storage::StorageError;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum RuntimeError {
+    #[error("Chat access changed. Try again.")]
+    ChatMentionAccessChanged,
     #[error("links-edges-source-changed")]
     LinksEdgesSourceChanged,
     #[error("capture-file-held: {path}")]
@@ -125,6 +127,7 @@ impl RuntimeError {
     /// The stable machine code, preserving the storage code where wrapped.
     pub fn code(&self) -> &'static str {
         match self {
+            RuntimeError::ChatMentionAccessChanged => "chat-mention-access-changed",
             RuntimeError::LinksEdgesSourceChanged => "links-edges-source-changed",
             RuntimeError::CaptureFileHeld { .. } => "capture-file-held",
             RuntimeError::CaptureNotOwnedAfterHold { .. } => "capture-not-owned",

@@ -1,7 +1,7 @@
 use crate::links::query::cursor_key;
 use crate::{ActorHandle, RuntimeError};
 use dohc_engine_crypto::{SealedSecret, open, seal};
-use dohc_engine_domain::{FileResolution, FileResolveTarget, VersionedTextStore};
+use dohc_engine_domain::{DomainError, FileResolution, FileResolveTarget, VersionedTextStore};
 use dohc_engine_storage::StorageError;
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -47,6 +47,12 @@ fn encode(
     ])
     .to_string())
 }
+fn invalid_cursor() -> RuntimeError {
+    DomainError::InvalidInput {
+        reason: "invalid chat file mention cursor",
+    }
+    .into()
+}
 fn decode(
     ws: &str,
     version: &str,
@@ -61,22 +67,19 @@ fn decode(
         });
     };
     if cursor.len() > 32768 {
-        return Err(invalid());
+        return Err(invalid_cursor());
     }
     let (iv, tag, body, len): (String, String, String, usize) =
-        serde_json::from_str(&cursor).map_err(|_| invalid())?;
-    let sealed = SealedSecret::from_base64(&iv, &tag, &body, len).map_err(|_| invalid())?;
-    let bytes = open(cursor_key()?, ws, PURPOSE, &sealed).map_err(|_| invalid())?;
+        serde_json::from_str(&cursor).map_err(|_| invalid_cursor())?;
+    let sealed = SealedSecret::from_base64(&iv, &tag, &body, len).map_err(|_| invalid_cursor())?;
+    let bytes = open(cursor_key()?, ws, PURPOSE, &sealed).map_err(|_| invalid_cursor())?;
     let (format, v, s, a, pos): (u8, String, Value, String, Position) =
-        serde_json::from_slice(bytes.as_bytes()).map_err(|_| invalid())?;
+        serde_json::from_slice(bytes.as_bytes()).map_err(|_| invalid_cursor())?;
     if a != scope {
-        return Err(StorageError::InvalidInput {
-            reason: "Chat access changed. Try again.",
-        }
-        .into());
+        return Err(RuntimeError::ChatMentionAccessChanged);
     }
     if format != 1 || v != version || s != *subject || pos.phase > 1 {
-        return Err(invalid());
+        return Err(invalid_cursor());
     }
     Ok(pos)
 }

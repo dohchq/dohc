@@ -123,6 +123,9 @@ fn map_runtime_logged(error: RuntimeError) -> (WireError, Option<String>) {
 }
 
 fn map_runtime_inner(error: &RuntimeError) -> WireError {
+    if matches!(error, RuntimeError::ChatMentionAccessChanged) {
+        return WireError::new(ErrorCode::Conflict, "Chat access changed. Try again.");
+    }
     if matches!(error, RuntimeError::LinksEdgesSourceChanged) {
         return WireError::new(ErrorCode::Conflict, "links-edges-source-changed");
     }
@@ -619,6 +622,13 @@ pub(super) fn workspace_unavailable() -> WireError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn changed_chat_authority_has_a_restartable_wire_reason() {
+        let error = super::map_runtime(dohc_engine_runtime::RuntimeError::ChatMentionAccessChanged);
+        assert_eq!(error.code, dohc_engine_protocol::ErrorCode::Conflict);
+        assert_eq!(error.message, "Chat access changed. Try again.");
+    }
+
     #[test]
     fn changed_edge_source_has_a_restartable_wire_reason() {
         let error = super::map_runtime(dohc_engine_runtime::RuntimeError::LinksEdgesSourceChanged);
