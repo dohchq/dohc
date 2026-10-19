@@ -1400,3 +1400,12 @@ pub(in super::super) fn proof(request: &str, members: usize, forward: bool) -> s
     serde_json::json!({"turns":phases,"p95Ns":times[(times.len()*95).div_ceil(100)-1],
         "maxNs":times.last(),"inverseRows":inverses})
 }
+
+pub(in super::super) fn notify_inverse(request: &str, notify: Arc<tokio::sync::Notify>) {
+    probes()
+        .lock()
+        .unwrap()
+        .entry(request.into())
+        .or_default()
+        .notify = Some(notify);
+}

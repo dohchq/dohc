@@ -135,12 +135,6 @@ impl ActorHandle {
                 store.read_with(|conn| conn.execute_batch("BEGIN")).map_err(StorageError::corrupt_public)?;
                 #[cfg(test)]
                 let _turn = tests::Turn::start(&ws, "plan");
-                if store.is_passive() {
-                    return Err(DomainError::InvalidInput {
-                        reason: "link rewrites need the owner",
-                    }
-                    .into());
-                }
                 let prior = store.read_with(|conn| r.read(conn))?;
                 if let Some((true, reply)) = prior {
                     return Ok((None, reply));
@@ -224,6 +218,7 @@ impl ActorHandle {
                 leases.is_held(&key).then(|| object.clone())
             })
             .collect();
+        let initially_open = Arc::new(initially_open);
         let mut unchecked = plan.candidates.unchecked.clone();
         let mut cursor = 0;
         while cursor < plan.candidates.sources.len() {
