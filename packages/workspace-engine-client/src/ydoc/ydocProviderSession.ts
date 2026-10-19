@@ -80,6 +80,8 @@ export interface EngineYdocProviderSessionOptions {
   // Forwarded to the adapter: false when the caller already holds the
   // document's canonical state and will replay it into this generation.
   seedAbsentLineage?: boolean;
+  // Forwarded to the adapter: an earlier generation had this document's file.
+  fileExisted?: boolean;
   onRemoteUpdate: (update: Uint8Array) => void;
   onRemoteApplyError?: (error: RemoteYdocApplyError) => void;
   onLocalEditError?: (error: unknown) => void;
@@ -196,6 +198,7 @@ export async function openEngineYdocProviderSession(
       ...(options.seedAbsentLineage !== undefined
         ? { seedAbsentLineage: options.seedAbsentLineage }
         : {}),
+      ...(options.fileExisted ? { fileExisted: true } : {}),
     });
   } catch (error) {
     if (ownsAdapter) adapter.dispose();

@@ -2572,6 +2572,12 @@ export function createWorkspaceEngineCapture(
     let updatesCounted = 0;
     let updatesSettled = 0;
     let settleForgiven = false;
+    // Whether this document's file has existed: the first generation opened
+    // over a recorded file or a file on disk, or a settle wrote it. What a
+    // generation expects dies with its daemon, so every later generation
+    // tells the engine, which then refuses to create the file from nothing.
+    // A file deleted outside dohc stays deleted across a daemon restart.
+    let fileExisted = false;
     const settleCovers = new Map<string, number>();
     const settleOwed = (): boolean =>
       !settleForgiven && updatesSettled < updatesCounted;
@@ -2620,6 +2626,7 @@ export function createWorkspaceEngineCapture(
             // now names another object, refuse rather than replay this
             // document into it.
             ...(sessionObjectId ? { expectedObjectId: sessionObjectId } : {}),
+            ...(fileExisted ? { fileExisted: true } : {}),
             ...(input.contentKind
               ? { contentKind: input.contentKind }
               : {}),
@@ -2718,7 +2725,10 @@ export function createWorkspaceEngineCapture(
                 updatesSettled = Math.max(updatesSettled, covered);
               }
               settleForgiven = false;
-              if (result.materialized) diskHeadSha256 = result.sha256;
+              if (result.materialized) {
+                diskHeadSha256 = result.sha256;
+                fileExisted = true;
+              }
               return input.onSettled(result, token, generation);
             },
           });
@@ -3173,7 +3183,12 @@ export function createWorkspaceEngineCapture(
     // Rebinds after a daemon death run on the session's own operation chain,
     // outside that budget, and keep the full ladder.
     await options.waitForTypingRecovery?.();
-    current = await openGeneration(true);
+    // The disk is read beside the open, so neither waits on the other.
+    const [firstGeneration, firstDisk] = await Promise.all([
+      openGeneration(true),
+      absentHeadDiskState(rootPath, input.path),
+    ]);
+    current = firstGeneration;
     checkpointContentKind = current.contentKind;
     canonicalDoc = current.doc;
     Y.applyUpdate(recordedDoc, Y.encodeStateAsUpdate(canonicalDoc));
@@ -3199,6 +3214,7 @@ export function createWorkspaceEngineCapture(
     const contentKind = current.contentKind;
     const sessionPath = current.path;
     const openedHead = current.head;
+    fileExisted = openedHead === "present" || firstDisk !== "missing";
     const openedLineage = current.lineage;
     const openedUnsettled = current.unsettled;
 
@@ -4420,10 +4436,10 @@ export function createWorkspaceEngineCapture(
           // this, a still-later transient close failure for the same
           // session, over edits made after this recovery, would read as
           // belonging to the deleted incarnation and get wrongly cancelled.
-          // The proof holds because the engine refuses a settle when the
-          // file this session opened over, or last settled, is missing
-          // (rpc_ydoc.rs, `a_settle_after_an_external_delete_refuses…` and
-          // `a_new_files_settle_after_an_external_delete…`).
+          // The proof holds because the engine refuses a settle while a file
+          // this document had is missing: one it opened over or settled,
+          // or one an earlier generation had (`fileExisted`). rpc_ydoc.rs
+          // tests both, `…after_an_external_delete…` and `…after_a_restart…`.
           //
           // Only a tombstone that predates this settle's own start (codex
           // P1 follow-up on the synchronous recording): this callback

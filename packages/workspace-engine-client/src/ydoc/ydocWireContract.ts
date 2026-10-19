@@ -39,6 +39,9 @@ export type YdocOpenParams = JsonObject & {
   expectedObjectId?: string;
   contentKind?: YdocContentKind;
   seedFromArtifact?: boolean;
+  // An earlier session on this document opened over its file or wrote it.
+  // With no head, the engine then refuses a settle that would create it.
+  fileExisted?: boolean;
 };
 
 // Declared write provenance beside the actor origin: the kind of actor that

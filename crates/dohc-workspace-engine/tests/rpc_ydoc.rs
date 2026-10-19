@@ -4169,6 +4169,185 @@ async fn a_new_files_settle_after_an_external_delete_does_not_recreate_it() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_replacement_session_after_a_restart_does_not_recreate_a_deleted_file() {
+    // dohc#2301, across a daemon restart. What a session expects dies with
+    // the daemon. The desktop then opens a replacement and replays its text,
+    // and the replacement finds no head and no file: New File's head was
+    // never recorded, and capture retires a recorded head once no session
+    // holds it. The desktop says the file existed, so the replacement's
+    // settle must refuse. Without that, the settle creates the file, as it
+    // must for a document that never had one.
+    const WS: &str = "ws-rpc-ydoc-restart-deleted";
+    const RECORDED: &str = "notes/recorded.md";
+    let scratch = ScratchDir::new().expect("scratch");
+    write_file(scratch.path(), RECORDED, b"recorded before the restart\n");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, WS, 1).await;
+
+    // New File, typing, and a delete outside dohc that the first save
+    // refuses. The recorded file is deleted later, while the daemon is down.
+    let (new_path, opened_new) =
+        stage_headless_session_over_an_empty_artifact(&transport, &handle, &scratch, "restart")
+            .await;
+    let opened_recorded = call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": RECORDED, "contentKind": "plaintext" }),
+    )
+    .await;
+    assert_eq!(opened_recorded["head"], json!("present"));
+    let paths = [new_path.as_str(), RECORDED];
+    for (id, opened) in (10..).step_by(10).zip([&opened_new, &opened_recorded]) {
+        call(
+            &transport,
+            &handle,
+            id,
+            "ydoc.recordUpdate",
+            json!({
+                "expectedLineageClaimId": null,
+                "sessionId": opened["sessionId"],
+                "updateBase64": plaintext_update("typed before the restart ")
+            }),
+        )
+        .await;
+    }
+    std::fs::remove_file(scratch.path().join(&new_path)).expect("delete outside dohc");
+    let new_session = opened_new["sessionId"].as_str().expect("session id");
+    assert_settle_refuses_over_deleted_file(
+        &transport,
+        &handle,
+        &scratch,
+        30,
+        &new_path,
+        new_session,
+    )
+    .await;
+    for (id, opened) in (40..).zip([&opened_new, &opened_recorded]) {
+        call(
+            &transport,
+            &handle,
+            id,
+            "ydoc.evict",
+            json!({ "sessionId": opened["sessionId"] }),
+        )
+        .await;
+    }
+    call(&transport, &handle, 50, "workspace.close", json!({})).await;
+    drop(transport);
+    std::fs::remove_file(scratch.path().join(RECORDED)).expect("delete while dohc is down");
+
+    let restarted = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&restarted, &scratch, WS, 100).await;
+    let mut retired = Value::Null;
+    for attempt in 0..40 {
+        call(
+            &restarted,
+            &handle,
+            200 + attempt * 2,
+            "capture.flush",
+            json!({}),
+        )
+        .await;
+        retired = call(
+            &restarted,
+            &handle,
+            201 + attempt * 2,
+            "versionedText.read",
+            json!({ "versionId": "main", "path": RECORDED }),
+        )
+        .await;
+        if retired["text"] == Value::Null {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(
+        retired["text"],
+        Value::Null,
+        "capture must retire {RECORDED}"
+    );
+
+    for (id, path) in (300..).step_by(10).zip(paths) {
+        let opened = call(
+            &restarted,
+            &handle,
+            id,
+            "ydoc.open",
+            json!({
+                "versionId": "main",
+                "path": path,
+                "contentKind": "plaintext",
+                "fileExisted": true
+            }),
+        )
+        .await;
+        assert_eq!(opened["head"], json!("absent"), "{path}");
+        let session_id = opened["sessionId"].as_str().expect("session id");
+        call(
+            &restarted,
+            &handle,
+            id + 1,
+            "ydoc.recordUpdate",
+            json!({
+                "expectedLineageClaimId": null,
+                "sessionId": session_id,
+                "updateBase64": plaintext_update("typed after the restart ")
+            }),
+        )
+        .await;
+        assert_settle_refuses_over_deleted_file(
+            &restarted,
+            &handle,
+            &scratch,
+            id + 2,
+            path,
+            session_id,
+        )
+        .await;
+        call(
+            &restarted,
+            &handle,
+            id + 3,
+            "ydoc.evict",
+            json!({ "sessionId": session_id }),
+        )
+        .await;
+    }
+
+    // The same open without the client's word expects nothing, so its
+    // settle creates the file. A draft that never had a file keeps that.
+    let unflagged = call(
+        &restarted,
+        &handle,
+        400,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": new_path, "contentKind": "plaintext" }),
+    )
+    .await;
+    let created = call(
+        &restarted,
+        &handle,
+        401,
+        "ydoc.settle",
+        json!({ "sessionId": unflagged["sessionId"], "summary": "type" }),
+    )
+    .await;
+    assert_eq!(created["materialized"], json!(true));
+    assert!(scratch.path().join(&new_path).exists());
+    call(
+        &restarted,
+        &handle,
+        402,
+        "ydoc.close",
+        json!({ "sessionId": unflagged["sessionId"], "settle": false }),
+    )
+    .await;
+    call(&restarted, &handle, 403, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn creating_a_new_file_through_a_ydoc_session_settles_to_disk() {
     let scratch = ScratchDir::new().expect("scratch");
     write_file(scratch.path(), "notes/seed.md", b"seed");

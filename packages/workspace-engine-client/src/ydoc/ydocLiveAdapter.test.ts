@@ -820,6 +820,20 @@ describe("seeding an absent lineage", () => {
   });
 });
 
+it.each([undefined, true] as const)("tells the engine a replacement's file existed only when it did (%s)", async fileExisted => {
+  const engine = seedPlaintextEngine("seed");
+  const provider = await openEngineYdocProviderSession({
+    transport: {...forwardYdocBlobEgress(engine), onEvent: handler => engine.onEvent(handler),
+      sendRequest: request => engine.sendRequest(request)},
+    workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind: "plaintext",
+    ...(fileExisted ? {fileExisted} : {}),
+    onRemoteUpdate: () => {}, scheduleSettle: () => () => {},
+  });
+  await provider.evict();
+  const open = engine.requests.find(request => request.method === YDOC_METHOD.open);
+  expect(open?.params).toEqual({versionId: VERSION, path: PATH, contentKind: "plaintext", ...(fileExisted ? {fileExisted} : {})});
+});
+
 describe("scene artifact seed admission", () => {
   it("forwards the first-generation intent and disables it for a replay generation", async () => {
     const engine = new YdocLoopbackEngine();

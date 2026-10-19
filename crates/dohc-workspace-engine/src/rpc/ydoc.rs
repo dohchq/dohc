@@ -84,8 +84,9 @@ pub(crate) struct YdocSession {
     author_settlement: AuthorSettlementQueue,
     pub(super) last_settled_sha: Option<String>,
     /// The head sha observed at open — the settle preimage expectation
-    /// until the session's first settle replaces it. With no head, the sha of
-    /// the empty artifact New File leaves, when the open found one.
+    /// until the session's first settle replaces it. With no head, the empty
+    /// artifact's sha when the open found one or the client said the file
+    /// existed.
     pub(super) open_head_sha: Option<String>,
     pub(super) owner_seed_source: Option<dohc_engine_collab::owner_base_source::OwnerSeedSource>,
     _lease: Lease,
@@ -241,6 +242,10 @@ struct YdocOpenParams {
     content_kind: Option<String>,
     #[serde(default)]
     seed_from_artifact: bool,
+    /// The client's earlier session on this document opened over its file
+    /// or wrote it. With no head, settles then refuse to create the file.
+    #[serde(default)]
+    file_existed: bool,
 }
 
 #[derive(Serialize)]
@@ -1070,11 +1075,14 @@ impl EngineService {
         for facts in &state.record_facts {
             emit_record_events(&self.events, &open.workspace_id, facts);
         }
-        // With no head, the empty artifact New File leaves is what this
-        // session opens over. Its settles may replace that artifact, but not
-        // write it back after someone deletes it.
+        // With no head, the session expects New File's empty artifact when
+        // the open finds it, or when the client says the file existed. Its
+        // settles may replace the file but not create it, so a file deleted
+        // outside dohc stays deleted. Compared with no expectation, this
+        // changes only a missing file's answer, to a refusal.
         let open_head_sha = match state.head_blob_sha256.clone() {
             Some(head) => Some(head),
+            None if params.file_existed => Some(dohc_engine_storage::hex_sha256(b"")),
             None => {
                 let artifact_path = open.root.join(&params.path);
                 tokio::task::spawn_blocking(move || {

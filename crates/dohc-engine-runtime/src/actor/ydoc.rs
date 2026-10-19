@@ -2654,10 +2654,10 @@ pub(super) fn ydoc_settle_on_store(
         }
         _ => expected_head_sha,
     };
-    // What the disk must hold for this settle to write. A session that
-    // opened over New File's empty artifact before capture recorded it
-    // expects that artifact and no head, so only the disk check holds it:
-    // once the artifact is deleted, the settle must not write it back.
+    // What the disk must hold for this settle to write. A session with no
+    // head can expect New File's empty artifact, because the open found it
+    // or the client said the file existed. Only the disk check holds that
+    // expectation: once the file is deleted, the settle must not write it back.
     let expected_disk_sha = expected_head_sha.clone();
     let expected_head_sha =
         expected_head_sha.filter(|sha| head_probe.is_some() || *sha != empty_sha);

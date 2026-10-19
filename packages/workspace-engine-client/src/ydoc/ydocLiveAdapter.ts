@@ -264,6 +264,9 @@ export interface OpenYdocAdapterSessionInput {
   // into a populated doc appends a second copy of the file instead of
   // resuming it. Callers that pass false own re-establishing the content.
   seedAbsentLineage?: boolean;
+  // An earlier session on this document had its file. A settle then never
+  // creates the file, so a file deleted outside dohc stays deleted.
+  fileExisted?: boolean;
 }
 
 export interface ApplyLocalUpdateOptions {
@@ -1580,6 +1583,7 @@ export class YdocLiveAdapter {
       ...(input.contentKind === "scene"
         ? { seedFromArtifact: input.seedAbsentLineage !== false }
         : {}),
+      ...(input.fileExisted ? { fileExisted: true } : {}),
     };
     const startedAtMs = performance.now();
     let delivery: Awaited<ReturnType<YdocLiveAdapter["requestWithBlob"]>>;

@@ -1101,6 +1101,136 @@ it("refuses to reopen onto another object that moved onto the path", async () =>
   await typed.close();
 });
 
+// dohc#2301. What a generation expects of its file dies with the daemon, and
+// a replacement can find no head and no file: New File's head was never
+// recorded, or capture retired a deleted file's head while no session held
+// it. The engine then creates the file unless the replacement says the file
+// existed. Each case returns what every generation's open said.
+async function fileExistedAcrossRestart(input: {
+  head: "present" | "absent";
+  lineage: "existing" | "absent";
+  disk: string | null;
+  settleFirst: boolean;
+}): Promise<Array<boolean | undefined>> {
+  const rootPath = await createTestScratch("dohc-ydoc-file-existed-");
+  if (input.disk !== null) await writeFile(join(rootPath, "note.md"), input.disk);
+  const loopback = new VersionedLoopbackEngine();
+  const client = (): EngineDaemonClient & EngineTransport => ({
+    close: () => undefined,
+    onEvent: () => () => undefined,
+    async sendRequest(request: Request): Promise<Response> {
+      if (request.method === "workspace.open") {
+        return { id: request.id, result: { workspace: "file-existed" } };
+      }
+      if (request.method === "workspace.close") {
+        return { id: request.id, result: { closed: true } };
+      }
+      const lifecycle = daemonCaptureLifecycleAnswer(request);
+      if (lifecycle) return lifecycle;
+      return await loopback.sendRequest(request);
+    },
+  });
+  const firstClient = client();
+  const restartedClient = client();
+  let currentClient = firstClient;
+  const sessions = new EngineWorkspaceSessions(
+    { currentClient: () => currentClient },
+    { sleep: async () => undefined },
+  );
+  const opens: Array<boolean | undefined> = [];
+  let daemonExits = false;
+  // The lineage the engine keeps across the restart.
+  const recorded = new Y.Doc();
+  const openProvider = async (
+    options: EngineYdocProviderSessionOptions,
+  ): Promise<EngineYdocProviderSession> => {
+    opens.push(options.fileExisted);
+    const first = options.transport === firstClient;
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, Y.encodeStateAsUpdate(recorded));
+    let tokens = 0;
+    return {
+      doc,
+      initialUpdate: Y.encodeStateAsUpdate(doc),
+      objectId: "note-object",
+      lineageClaimId: null,
+      contentKind: "plaintext",
+      path: options.path,
+      head: first ? input.head : "absent",
+      lineage: first ? input.lineage : "existing",
+      unsettled: false,
+      evict: async () => undefined,
+      async applyLocalUpdate(update) {
+        if (first && daemonExits) {
+          currentClient = restartedClient;
+          throw Object.assign(new Error("daemon exited"), { code: "transport-error" });
+        }
+        Y.applyUpdate(doc, update);
+        Y.applyUpdate(recorded, update);
+      },
+      async settleNow() {
+        const token = ++tokens;
+        options.onSettleStart?.(token);
+        const markdown = doc.getText("plainText").toString();
+        await writeFile(join(rootPath, options.path), markdown);
+        const result = {
+          momentId: `moment-${token}`,
+          path: options.path,
+          content: markdown,
+          sha256: createHash("sha256").update(markdown).digest("hex"),
+          materialized: true,
+          projection: {
+            contentKind: "plaintext" as const,
+            sourceStateVectorSha256: "a".repeat(64),
+            destructive: false,
+          },
+        };
+        await options.onSettled?.(result, token);
+        return result;
+      },
+      async close() {
+        return;
+      },
+    };
+  };
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "file-existed",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const renderer = new Y.Doc();
+  Y.applyUpdate(renderer, session.initialUpdate);
+  const type = (text: string): void => {
+    const before = Y.encodeStateVector(renderer);
+    renderer.getText("plainText").insert(0, text);
+    session.applyLocalUpdate(Y.encodeStateAsUpdate(renderer, before));
+  };
+  if (input.settleFirst) {
+    type("saved ");
+    await session.settleNow();
+  }
+  daemonExits = true;
+  type("typed ");
+  await session.settleNow();
+  await session.close({ settle: false });
+  await capture.stop();
+  return opens;
+}
+
+it.each([
+  { name: "New File's empty file", head: "absent", lineage: "absent", disk: "", settleFirst: false, said: true },
+  { name: "a recorded file", head: "present", lineage: "existing", disk: "recorded", settleFirst: false, said: true },
+  { name: "a draft with no file that saved one", head: "absent", lineage: "existing", disk: null, settleFirst: true, said: true },
+  { name: "a draft with no file", head: "absent", lineage: "existing", disk: null, settleFirst: false, said: undefined },
+] as const)("a replacement after a restart says whether $name existed", async (input) => {
+  expect(await fileExistedAcrossRestart(input)).toEqual([undefined, input.said]);
+});
+
 // The session recorded a word, and sync turned on before its settle ran. The
 // generation is gone, its settle fails, and the sync pass claims exactly what
 // was recorded. The replacement needs no replay, so the settle the lost
