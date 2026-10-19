@@ -123,6 +123,9 @@ fn map_runtime_logged(error: RuntimeError) -> (WireError, Option<String>) {
 }
 
 fn map_runtime_inner(error: &RuntimeError) -> WireError {
+    if matches!(error, RuntimeError::LinksEdgesSourceChanged) {
+        return WireError::new(ErrorCode::Conflict, "links-edges-source-changed");
+    }
     if let RuntimeError::Domain(DomainError::UndoRefused { .. }) = error {
         return WireError::new(ErrorCode::Conflict, error.to_string());
     }
@@ -616,6 +619,13 @@ pub(super) fn workspace_unavailable() -> WireError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn changed_edge_source_has_a_restartable_wire_reason() {
+        let error = super::map_runtime(dohc_engine_runtime::RuntimeError::LinksEdgesSourceChanged);
+        assert_eq!(error.code, dohc_engine_protocol::ErrorCode::Conflict);
+        assert_eq!(error.message, "links-edges-source-changed");
+    }
+
     #[test]
     fn internal_refusal_maps_the_wire_and_logs_each_cause_once() {
         use dohc_engine_files::MaterializeError;

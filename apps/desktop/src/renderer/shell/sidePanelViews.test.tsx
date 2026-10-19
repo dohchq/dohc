@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen, within } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_SIDEBAR_SETTINGS } from "../../settings/userSettings";
 import { SidebarViewsControl } from "../settings/SidebarViewsControl";
 import { ActivityBar } from "../workbench/ActivityBar";
 import { VIEW_IDENTITY } from "../workbench/viewIdentity";
 import { VIEW_IDS } from "../workbench/workbenchState";
+import type { SidePanelContext } from "./ShellSidePanel";
 import { SIDE_PANEL_VIEWS } from "./sidePanelViews";
 
 afterEach(cleanup);
@@ -40,4 +41,12 @@ describe("the side-panel view registry", () => {
     expect(settings.map((row) => row.dataset.view)).toEqual([...VIEW_IDS]);
     expect(settings[1]!.textContent).toContain("Chats");
   });
+});
+
+it("routes panel graph failures and retry to the shell notice hook", () => {
+  const reportShellError = vi.fn();
+  const element = SIDE_PANEL_VIEWS.graph.render({ workspaceId: "ws", reportShellError } as unknown as SidePanelContext) as React.ReactElement<{children: React.ReactElement<{onError: typeof reportShellError}>}>;
+  const retry = vi.fn(), error = new Error("offline");
+  element.props.children.props.onError("dohc could not load the graph.", error, retry);
+  expect(reportShellError).toHaveBeenCalledWith("dohc could not load the graph.", error, retry);
 });

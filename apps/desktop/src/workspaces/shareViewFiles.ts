@@ -1,4 +1,4 @@
-import { LinksInInput, LinksResolveInput, LinksInResult, LinksResolveResult } from "@dohc/workspace-contracts/links";
+import { LinksEdgesInput, LinksEdgesResult, LinksInInput, LinksResolveInput, LinksInResult, LinksResolveResult } from "@dohc/workspace-contracts/links";
 import { errorMessage } from "./workspaceError";
 import type { ShareUnconfirmedChanges } from "./shareViewInfo";
 import { createHash } from "node:crypto";
@@ -180,6 +180,7 @@ export type ShareViewReconcileOutcome =
     };
 
 export interface ShareViewFiles {
+  linksEdges(target: ShareViewFilesTarget, input: LinksEdgesInput): Promise<LinksEdgesResult>;
   linksIn(target: ShareViewFilesTarget, input: LinksInInput): Promise<LinksInResult>;
   linksResolve(target: ShareViewFilesTarget, input: LinksResolveInput): Promise<LinksResolveResult>;
   end(lease: WorkspaceOperationLease, target: ShareViewFilesTarget, assertCurrent: () => void): Promise<void>;
@@ -1165,6 +1166,14 @@ export function createShareViewFiles(
       });
     },
 
+    async linksEdges(requested, input) {
+      return withCurrentTarget(requested, target => withStore(target, async store => {
+        const page = await store.linkEdges(LinksEdgesInput.parse(input));
+        const tracked = (path: string) => classifyEngineFilePath(path).kind === "tracked";
+        return { ...page, files: page.files.filter(row => tracked(row.path)),
+          entries: page.entries.filter(row => tracked(row.source) && tracked(row.target)), unchecked: page.unchecked.filter(tracked) };
+      }));
+    },
     async linksIn(requested, input) {
       return withCurrentTarget(requested, target => withStore(target, async store => {
         const page = await store.incomingLinks(LinksInInput.parse(input));

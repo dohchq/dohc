@@ -246,7 +246,7 @@ type DemoDesktopBridge = Pick<
   | "getUpdateState"
   | "searchWorkspace"
   | "cancelWorkspaceSearch"
-  | "readWorkspaceGraph"
+  | "linksEdges"
   | "createWorkspaceFile"
   | "createWorkspaceFolder"
   | "moveWorkspacePath"
@@ -452,26 +452,13 @@ const demoBridge = {
     return { status: "accepted" as const };
   },
   async cancelWorkspaceSearch() {},
-  async readWorkspaceGraph() {
-    const nodes = context.documents.map((document, index) => ({
-      path: document.path,
-      title: document.title,
-      incoming: index === 0 ? Math.max(0, context.documents.length - 1) : 1,
-      outgoing: index === 0 ? Math.max(0, context.documents.length - 1) : 1,
-    }));
-    const edges = context.documents.slice(1).map((document) => ({
-      source: context.documents[0]?.path ?? document.path,
-      target: document.path,
-      kind: "wikilink" as const,
-    }));
-    return {
-      nodes,
-      edges,
-      unresolvedLinks: 0,
-      scannedFileCount: nodes.length,
-      omittedFileCount: 0,
-      truncatedFileCount: 0,
-    };
+  async linksEdges() {
+    // Explicit sample data for the demo, independent of the engine index.
+    return { versionId: "demo", files: context.documents.slice(0, 50).map(document => ({
+      objectId: document.path, path: document.path, title: document.title,
+    })), entries: context.documents.slice(1, 50).map((document, ordinal) => ({
+      source: context.documents[0]?.path ?? document.path, target: document.path, kind: "wikilink" as const, ordinal,
+    })), unchecked: [], complete: true, indexBuilding: false, mountsCovered: true, nextCursor: null };
   },
   async createWorkspaceFile(payload: { relativePath: string }) {
     const filePaths = context.documents.map((document) => document.path);

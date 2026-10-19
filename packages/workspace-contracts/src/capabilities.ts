@@ -29,6 +29,7 @@ function capability(description: string, exposure: {
 }
 
 export const CAPABILITIES = {
+  "links.edges": capability("Read a bounded page of file links.", { ipc: ["linksEdges"], mcp: { owner: ["dohc_links_edges"], view: ["dohc_links_edges"], comment: ["dohc_links_edges"], edit: ["dohc_links_edges"] } }),
   "links.in": capability("Read documents that link to a file.", { ipc: ["linksIn"], mcp: { owner: ["dohc_links_in"], view: ["dohc_links_in"], comment: ["dohc_links_in"], edit: ["dohc_links_in"] } }),
   "links.resolve": capability("Resolve links from one document.", { ipc: ["linksResolve"], mcp: { owner: ["dohc_links_resolve"], view: ["dohc_links_resolve"], comment: ["dohc_links_resolve"], edit: ["dohc_links_resolve"] } }),
   "settings.user.read": capability("Read this computer's user settings.", {ipc: ["getUserSettings"]}),

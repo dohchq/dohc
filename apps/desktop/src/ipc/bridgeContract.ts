@@ -1107,82 +1107,6 @@ export const WriteWorkspaceTextResult = z.discriminatedUnion("status", [
 ]);
 export type WriteWorkspaceTextResult = z.infer<typeof WriteWorkspaceTextResult>;
 
-const WorkspaceGraphNodeBase = z.object({
-  path: PATH_STRING,
-  title: z.string().max(120),
-  outgoing: z.number().int().nonnegative(),
-  incoming: z.number().int().nonnegative(),
-});
-const WorkspaceGraphFileNode = WorkspaceGraphNodeBase.extend({
-  // Legacy file graphs predate `kind`; accepting its absence keeps the base
-  // graph contract compatible while still rejecting chat/heading metadata.
-  kind: z.literal("file").optional(),
-  filePath: PATH_STRING.optional(),
-  threadId: z.never().optional(),
-  channelId: z.never().optional(),
-  channelWireId: z.never().optional(),
-  channelName: z.never().optional(),
-  channelSlug: z.never().optional(),
-  channelKind: z.never().optional(),
-  headingAnchor: z.never().optional(),
-}).strict();
-const WorkspaceGraphHeadingNode = WorkspaceGraphNodeBase.extend({
-  kind: z.literal("heading"),
-  filePath: PATH_STRING,
-  headingAnchor: z.string().min(1).max(400),
-  threadId: z.never().optional(),
-  channelId: z.never().optional(),
-  channelWireId: z.never().optional(),
-  channelName: z.never().optional(),
-  channelSlug: z.never().optional(),
-  channelKind: z.never().optional(),
-}).strict();
-const WorkspaceGraphChatThreadNode = WorkspaceGraphNodeBase.extend({
-  kind: z.literal("chat-thread"),
-  threadId: OPAQUE_ID,
-  channelId: OPAQUE_ID.optional(),
-  channelWireId: z.string().min(1).max(256).optional(),
-  channelName: z.string().min(1).max(100).optional(),
-  channelSlug: CHAT_CHANNEL_SLUG.optional(),
-  channelKind: z.enum(["channel", "dm", "agent"]).optional(),
-  filePath: z.never().optional(),
-  headingAnchor: z.never().optional(),
-}).strict();
-const WorkspaceGraphNode = z.union([
-  WorkspaceGraphHeadingNode,
-  WorkspaceGraphChatThreadNode,
-  WorkspaceGraphFileNode,
-]);
-
-const WorkspaceGraphEdge = z.object({
-  source: PATH_STRING,
-  target: PATH_STRING,
-  kind: z.enum([
-    "wikilink",
-    "markdown",
-    "chat-mentions-file",
-    "chat-mentions-heading",
-    "heading-in-file",
-  ]),
-});
-
-export const ReadWorkspaceGraphPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  includeChatMentions: z.boolean().optional(),
-});
-export type ReadWorkspaceGraphPayload = z.infer<typeof ReadWorkspaceGraphPayload>;
-
-export const WorkspaceGraphResult = z.object({
-  // Partial-freshness marker; see ListChatFileMentionsResult.
-  sharedChannelRowsUncovered: z.number().int().positive().optional(),
-  nodes: z.array(WorkspaceGraphNode).max(2000),
-  edges: z.array(WorkspaceGraphEdge).max(10000),
-  unresolvedLinks: z.number().int().nonnegative(),
-  scannedFileCount: z.number().int().nonnegative(),
-  omittedFileCount: z.number().int().nonnegative(),
-  truncatedFileCount: z.number().int().nonnegative(),
-});
-export type WorkspaceGraphResult = z.infer<typeof WorkspaceGraphResult>;
 
 export const ListWorkspaceHeadingsPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -1961,7 +1885,10 @@ export type ChatMessageRecord = z.infer<typeof ChatMessageRecord>;
 
 export const ListChatFileMentionsPayload = z.object({
   workspaceId: WORKSPACE_ID,
-  path: PATH_STRING,
+  path: PATH_STRING.optional(),
+  paths: z.array(PATH_STRING).min(1).max(500).optional(),
+}).refine(input => (input.path !== undefined) !== (input.paths !== undefined), {
+  message: "Choose a file or a batch of files.",
 });
 export type ListChatFileMentionsPayload = z.infer<
   typeof ListChatFileMentionsPayload
@@ -7068,9 +6995,6 @@ export interface DohcDesktopBridge
   // File.path since Electron 32). The paths feed importWorkspaceFiles'
   // droppedPaths — see the trust-delta note on that payload.
   getDroppedFilePaths(files: File[]): string[];
-  readWorkspaceGraph(
-    payload: ReadWorkspaceGraphPayload,
-  ): Promise<WorkspaceGraphResult>;
   listWorkspaceHeadings(
     payload: ListWorkspaceHeadingsPayload,
   ): Promise<ListWorkspaceHeadingsResult>;

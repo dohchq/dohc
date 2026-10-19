@@ -49,3 +49,22 @@ export type LinksInInput = z.infer<typeof LinksInInput>;
 export type LinksResolveInput = z.infer<typeof LinksResolveInput>;
 export type LinksInResult = z.infer<typeof LinksInResult>;
 export type LinksResolveResult = z.infer<typeof LinksResolveResult>;
+
+export const LinksEdgesInput = z.object({ cursor: z.string().max(32768).optional() }).strict();
+export const LinksEdgesResult = z.object({
+  versionId: z.string(),
+  files: z.array(z.object({ objectId: z.string().min(1).max(500), path, title: z.string().max(640) }).strict()),
+  entries: z.array(z.object({ source: path, target: path, kind: z.enum(["wikilink", "markdown"]), ordinal: z.number().int().nonnegative() }).strict()),
+  unchecked: z.array(path),
+  complete: z.boolean(),
+  indexBuilding: z.boolean(),
+  mountsCovered: z.boolean(),
+  nextCursor: z.string().max(32768).nullable(),
+}).strict().superRefine((page, ctx) => {
+  if (page.files.length + page.entries.length + page.unchecked.length > 100)
+    ctx.addIssue({ code: "custom", message: "Link page exceeds 100 records." });
+  if (new TextEncoder().encode(JSON.stringify(page)).byteLength > 64 * 1024)
+    ctx.addIssue({ code: "custom", message: "Link page exceeds 64 KiB." });
+});
+export type LinksEdgesInput = z.infer<typeof LinksEdgesInput>;
+export type LinksEdgesResult = z.infer<typeof LinksEdgesResult>;

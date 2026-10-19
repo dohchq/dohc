@@ -196,7 +196,7 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
     if (!handler) throw new Error(`Missing chat handler: ${channel}`);
     return await handler(event, payload);
   }
-  return { invoke, workspace, thread, message, bookmark, storeMethods, captureMethods, capture, ensureGroupFolder,
+  return { invoke, workspace, thread, message, bookmark, syncWorkspaceSharedChannels, storeMethods, captureMethods, capture, ensureGroupFolder,
     authorities, chatScope, requireEngineCapture, linkedChatStoreFor, openWorkspaceActivity,
     activity, syncSharedChannelsForChatTarget, resolveEngineFiles, readOwnedWorkspaceText,
     warmCredentialCache, chatRelayIdentityFor, scanChatDispatch, projectChatBookmarks, desktopChatBookmarks,
@@ -253,6 +253,7 @@ describe("chat sender binding", () => {
     ...mutations.map(({ channel, payload }) => ({ channel, payload })),
     { channel: chatOperations.listFileChats.channel, payload: { path: "notes/a.md" } },
     { channel: chatOperations.listChatFileMentions.channel, payload: { path: "notes/a.md" } },
+    { channel: chatOperations.listChatFileMentions.channel, payload: { paths: ["notes/a.md", "image.svg"] } },
     { channel: chatOperations.listChatBookmarks.channel, payload: {} },
     { channel: chatOperations.saveChatBookmark.channel, payload: { target: { kind: "thread", threadId: "thread" }, mode: "live" } },
     { channel: chatOperations.archiveChatBookmark.channel, payload: { bookmarkId: "bookmark" } },
@@ -581,6 +582,28 @@ describe("targeted file resolution", () => {
     expect(await test.invoke(chatOperations.listChatChannels.channel, { workspaceId: "workspace" })).toMatchObject({
       fileThreads: [{ id: "thread", path: "notes/a.md" }],
     });
+  });
+
+  it("syncs shared channels once for a drawn-file batch and retains subject identity", async () => {
+    const test = fixture();
+    test.resolveEngineFiles.mockResolvedValue([
+      { status: "found", objectId: "a", path: "a.md" },
+      { status: "found", objectId: "image", path: "image.svg" },
+    ]);
+    test.storeMethods.listFileMentions.mockImplementation(async ({ objectId }) => [{
+      attachment: { attachmentId: objectId!, threadId: test.thread.id, messageId: test.message.id,
+        targetKind: "file", objectId, pathHint: "old.md", createdAtMs: 1 },
+      thread: test.thread, message: test.message,
+    }]);
+    const result = await test.invoke(chatOperations.listChatFileMentions.channel, {
+      workspaceId: "workspace", paths: ["a.md", "image.svg"],
+    });
+    expect(result).toMatchObject({ mentions: [
+      { attachment: { objectId: "a", pathHint: "a.md" } },
+      { attachment: { objectId: "image", pathHint: "image.svg" } },
+    ] });
+    expect(test.syncWorkspaceSharedChannels).toHaveBeenCalledTimes(1);
+    expect(test.resolveEngineFiles).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({workspaceId:"workspace"}), [{path:"a.md"},{path:"image.svg"}]);
   });
 
   it("keeps mention attachment identity when a path is reused", async () => {
