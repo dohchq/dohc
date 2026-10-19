@@ -238,3 +238,47 @@ async fn terminal_unchecked_is_sticky_and_escaped_metadata_stays_within_the_enve
     }
     assert_eq!(files, 125);
 }
+
+#[tokio::test]
+async fn edges_resume_a_source_after_the_shared_record_budget_without_repeating_its_file() {
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    let mut store = open(&db);
+    write(&mut store, "a", "a.md", &"[[target]] ".repeat(150), 1);
+    write(&mut store, "target", "target.md", "", 2);
+    drain(&mut store);
+    drop(store);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).unwrap().actor;
+    let _hold = actor.hold_link_drain();
+    let first = edges(&actor, None).await;
+    bounded(&first);
+    assert_eq!(first["files"].as_array().unwrap().len(), 1);
+    assert_eq!(first["entries"].as_array().unwrap().len(), 99);
+    let cursor = first["nextCursor"].as_str().unwrap().to_owned();
+    let last = edges(&actor, Some(cursor)).await;
+    bounded(&last);
+    assert_eq!(last["entries"][0]["ordinal"], 99);
+    assert_eq!(last["entries"].as_array().unwrap().len(), 51);
+    assert_eq!(
+        last["files"],
+        json!([{"objectId":"target","path":"target.md","title":"target.md"}])
+    );
+    assert_eq!(last["nextCursor"], Value::Null);
+    assert!(
+        actor
+            .link_edges(
+                "ws".into(),
+                Some("x".repeat(32769)),
+                CancellationToken::new()
+            )
+            .await
+            .is_err()
+    );
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    assert!(matches!(
+        actor.link_edges("ws".into(), None, cancelled).await,
+        Err(crate::RuntimeError::Cancelled)
+    ));
+}
