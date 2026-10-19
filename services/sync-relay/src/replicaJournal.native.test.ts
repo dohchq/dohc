@@ -124,8 +124,8 @@ it.skipIf(binary.missing || process.platform !== "linux")("current views preserv
   const f=await fixture(false,true,baselineBytes);try{
     await f.child.pull();const text=yDocToMarkdown(f.f.doc),sha=hash(Buffer.from(text));
     const db=new DatabaseSync(join(f.root,".dohc/engine/engine.db"));try{db.exec("BEGIN");db.prepare("INSERT OR IGNORE INTO blobs VALUES(?,?,?)").run(sha,Buffer.byteLength(text),text);db.prepare("INSERT OR IGNORE INTO path_aliases VALUES('workspace','main',?,'object')").run(f.f.input.evidence.currentPath);db.prepare("INSERT OR REPLACE INTO snapshots(workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin) VALUES('workspace','main','object',?,?,0,'baseline','test')").run(f.f.input.evidence.currentPath,sha);db.exec("COMMIT");}finally{db.close();}
-    const initial=await f.child.currentView([{versionId:"main",paths:["docs"]}],[]);expect(initial.texts[0]!.text).toBe(text);
+    const initial=await f.child.currentView([{versionId:"main",paths:["docs"]}],[],undefined,undefined,undefined,"docs");expect(initial.texts[0]!.text).toBe(text);
     f.commit("nested-edit");await f.child.pull();
-    const changed=await f.child.currentView([{versionId:"main",paths:["docs"]}],[]);expect(changed.journalCursor).toBe(1);expect(changed.texts[0]!.text).toBe(yDocToMarkdown(f.f.doc));expect(changed.texts[0]!.text).toContain("grandchild");expect(changed.files[0]!.restoreGeneration).toBe(1);
+    const changed=await f.child.currentView([{versionId:"main",paths:["docs"]}],[],undefined,undefined,undefined,"docs");expect(changed.journalCursor).toBe(1);expect(changed.texts[0]!.text).toBe(yDocToMarkdown(f.f.doc));expect(changed.texts[0]!.text).toContain("grandchild");expect(changed.files[0]!.restoreGeneration).toBe(1);
   }finally{await f.close();}
 },120_000);

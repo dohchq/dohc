@@ -343,7 +343,7 @@ it("a landed restore that renamed its file does not leave the old path updating"
 it("live and persisted reads agree, and the newer live text wins", async () => {
   const f = await fixture(); let latest = f.view();
   const supervisor = createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("read-view"),
-    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...latest,moved:false,nextCursor:null,refusedFiles:[]})})});
+    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...latest,delta:false,removed:[],moved:false,nextCursor:null,refusedFiles:[]})})});
   try {
     await supervisor.activate("w");
     const read = () => f.storage.readReplicaCurrentViewFile({...f.input,path:"docs/a.md"},supervisor);
@@ -368,7 +368,7 @@ it("an external revoke cannot mix grant, manifest and text snapshots", async () 
 it("a stored view ahead of memory wins", async () => {
   const f = await fixture(); let activeLease = f.lease;
   const supervisor = createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("stored-newer"),
-    startChild:async input=>{activeLease=input.lease;return {pull:async()=>{},close:async()=>{},currentView:async()=>({...f.view(),moved:false,nextCursor:null,refusedFiles:[]})};}});
+    startChild:async input=>{activeLease=input.lease;return {pull:async()=>{},close:async()=>{},currentView:async()=>({...f.view(),delta:false,removed:[],moved:false,nextCursor:null,refusedFiles:[]})};}});
   try {
     await supervisor.activate("w");
     expect(f.storage.readReplicaCurrentViewFile({...f.input,path:"docs/a.md"},supervisor)).toMatchObject({text:"current"});
@@ -382,7 +382,7 @@ it("a stored view ahead of memory wins", async () => {
 it.each(["epoch", "stream"])("rechecks %s on the live read", async identity => {
   const f = await fixture(); const latest = f.view();
   const supervisor = createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("identity-read"),
-    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...latest,moved:false,nextCursor:null,refusedFiles:[]})})});
+    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...latest,delta:false,removed:[],moved:false,nextCursor:null,refusedFiles:[]})})});
   try {
     await supervisor.activate("w"); expect(f.storage.listReplicaCurrentViewFiles(f.input,supervisor)).toMatchObject({status:"ready"});
     f.db.prepare(`UPDATE sync_relay_workspaces SET ${identity === "epoch" ? "replication_epoch" : "stream_identity"}='replacement'`).run();

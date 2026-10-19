@@ -1,7 +1,9 @@
 import {currentViewFileVisible, ReplicaCurrentViewRefused} from "./storage/replicaCurrentViews";
-import {historyObjectKey, sameHistoryState, historyStructuralReason, type ReplicaHistoryObservation} from "./storage/replicaHistoryPins";
+import {historyObjectKey,type ReplicaHistoryObservation} from "./storage/replicaHistoryPins";
 import type {ReplicaCurrentView, ReplicaCurrentViewPage, ReplicaCurrentViewPosition, ReplicaCurrentViewCursor, ReplicaCurrentViewSelector} from "@dohc/workspace-engine-client/daemon";
-import { randomUUID } from "node:crypto";
+import {ReplicaManifest} from "./replicaManifest";
+import {publishPersistedReplicaIndex} from "./replicaCurrentViewReads";
+import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, mkdtemp, readdir, realpath, rm, statfs } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { SyncRelayStorage } from "./storage";
@@ -15,7 +17,7 @@ export interface ReplicaChild {
   readonly pid?: number;
   readonly exited?: Promise<void | Error>;
   pull(): Promise<void>;
-  currentView(selectors: ReplicaCurrentViewSelector[], knownTextShas: string[], position?: ReplicaCurrentViewPosition, cursor?: ReplicaCurrentViewCursor): Promise<ReplicaCurrentViewPage>;
+  currentView(selectors: ReplicaCurrentViewSelector[], knownTextShas: string[], position: ReplicaCurrentViewPosition|undefined, cursor: ReplicaCurrentViewCursor|undefined, since: ReplicaCurrentViewPosition|undefined, selectorDigest: string): Promise<ReplicaCurrentViewPage>;
   close(): Promise<void>;
 }
 export interface ReplicaChildInput {
@@ -48,6 +50,9 @@ interface Entry {
   retirement?: Promise<void>;
   idle?: ReturnType<typeof setTimeout>;
   newest?: ReplicaCurrentView;
+  manifest?: ReplicaManifest;
+  selectorDigest?: string;
+  knownStored?: string[];
   pendingView?: boolean;
   reportedOmissions?: Set<string>;
   quiet?: ReturnType<typeof setTimeout>;
@@ -120,8 +125,15 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
     if (!entry.pendingView || !view) return false;
     try {
       const observations=[...(entry.historyObservations?.values() ?? [])].map(o=>beforeStructuralChange ? {...o,beforeStructuralChange:true} : o);
-      entry.newest = previous ? options.storage.advanceReplicaCurrentView(entry.lease,view,previous)
+      const saved = previous ? options.storage.advanceReplicaCurrentView(entry.lease,view,previous)
         : options.storage.storeReplicaCurrentView(entry.lease, view,observations);
+      publishPersistedReplicaIndex(saved,view,!!previous);
+      const stored=options.storage.readReplicaCurrentView(entry.lease.workspaceId);
+      if(stored)publishPersistedReplicaIndex(stored,view,!!previous);
+      if(!previous && entry.knownStored) {
+        const shas=new Set(view.files.filter(f=>f.contentKind==="text").map(f=>f.sha256));
+        entry.knownStored=entry.knownStored.filter(sha=>shas.has(sha));
+      }
       entry.pendingView = false;
       entry.historyObservations?.clear();
       armHistory(entry);
@@ -132,6 +144,14 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
       report(entry, error);
       return false;
     }
+  }
+  function persistVisible(entry: Entry, beforeStructuralChange = false) {
+    const previous=entry.newest;
+    if (!previous) return false;
+    const selectors=options.storage.replicaCurrentViewSelectors(entry.lease.workspaceId);
+    const files=previous.files.filter(file=>currentViewFileVisible(selectors,file)), shas=new Set(files.map(file=>file.sha256));
+    return persist(entry,{...previous,files,texts:previous.texts.filter(text=>shas.has(text.sha256)),
+      omitted:previous.omitted.filter(file=>currentViewFileVisible(selectors,file))},beforeStructuralChange);
   }
   async function flush(entry: Entry, sampleHistory = false) {
     clearTimeout(entry.quiet); clearTimeout(entry.ceiling);
@@ -152,61 +172,37 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
       }
     } catch (error) {report(entry, error); void retire(entry).catch(e => report(entry, e));}
   }
-  function acceptView(entry: Entry, view: ReplicaCurrentView, spilled: boolean) {
+  function acceptView(entry: Entry, page: ReplicaCurrentView, spilled: boolean, delta: boolean, removed:ReplicaCurrentViewPage["removed"]) {
     if (!principal.current(entry.lease)) return;
-    const previous = entry.newest ?? options.storage.readReplicaCurrentView(entry.lease.workspaceId) ?? undefined;
-    const next = new Map(view.files.map(f=>[historyObjectKey(f),f]));
-    const omitted = new Set(view.omitted.map(historyObjectKey));
-    if (entry.pendingView && previous?.files.some(f=>!omitted.has(historyObjectKey(f)) && historyStructuralReason(f,next.get(historyObjectKey(f))))) {
-      const selectors=options.storage.replicaCurrentViewSelectors(entry.lease.workspaceId);
-      const files=previous.files.filter(file=>currentViewFileVisible(selectors,file)), shas=new Set(files.map(file=>file.sha256));
-      persist(entry,{...previous,files,texts:previous.texts.filter(text=>shas.has(text.sha256)),
-        omitted:previous.omitted.filter(file=>currentViewFileVisible(selectors,file))},true);
+    const previous=entry.newest ?? options.storage.readReplicaCurrentView(entry.lease.workspaceId) ?? undefined;
+    const manifest=entry.manifest ?? (previous ? new ReplicaManifest().apply(previous,false,[]).next : new ReplicaManifest());
+    const result=manifest.apply(page,delta,removed);
+    const {view,changed,structural,predecessor}=result;
+    if (entry.pendingView && previous && predecessor) {
+      persistVisible(entry,true);
     }
     entry.historyObservations ??= new Map();
-    const prior = new Map(previous?.files.map(f=>[historyObjectKey(f),f]) ?? []), now=Date.now();
-    let changed=!previous;
-    let structural=!previous;
-    for (const key of new Set([...prior.keys(),...next.keys()])) {
-      if (omitted.has(key)) continue;
-      const old=prior.get(key), file=next.get(key);
-      if (old && file && sameHistoryState(old,file)) continue;
-      changed=true;
-      if (!old || !file || historyStructuralReason(old,file) || old.contentKind !== file.contentKind) structural=true;
-      const identity=file ?? old!;
+    const now=Date.now();
+    for(const identity of result.observations) {
+      const key=historyObjectKey(identity);
       entry.historyObservations.set(key,{versionId:identity.versionId,objectId:identity.objectId,
         firstChangedAtMs:entry.historyObservations.get(key)?.firstChangedAtMs ?? now,changedAtMs:now});
     }
-    const priorOmitted=new Map(previous?.omitted.map(f=>[historyObjectKey(f),f]) ?? []);
-    if (view.omitted.length !== priorOmitted.size) changed=structural=true;
-    for (const file of view.omitted) {
-      const old=priorOmitted.get(historyObjectKey(file));
-      if (!old || old.path !== file.path || old.reason !== file.reason) changed=structural=true;
-      else if (old.sha256 !== file.sha256) changed=true;
-    }
-    if (previous && JSON.stringify(previous.omitted)!==JSON.stringify(view.omitted)) changed=true;
-    const fresh = !entry.newest;
+    const fresh=!entry.newest;
     if (spilled) {
-      entry.pendingView = true;
-      persist(entry, view);
+      entry.pendingView=true;
+      if(persist(entry,view)) {entry.manifest=result.next;entry.newest=view;entry.knownStored=view.files.filter(f=>f.contentKind==="text").map(f=>f.sha256);}
       return;
     }
-    const held = new Map(previous?.texts.map(t => [t.sha256, t.text]) ?? []);
-    for (const text of view.texts) held.set(text.sha256, text.text);
-    const needed = new Set(view.files.filter(f => f.contentKind === "text").map(f => f.sha256));
-    view.texts = [...held].filter(([sha]) => needed.has(sha)).map(([sha256, text]) => ({sha256, text}));
-    entry.newest = view;
-    if (!changed && !entry.pendingView && previous && (previous.revision !== view.revision || previous.logCursor !== view.logCursor || previous.journalCursor !== view.journalCursor)) {
+    entry.manifest=result.next;entry.newest=view;
+    if (!changed && !entry.pendingView && previous && (previous.revision!==view.revision || previous.logCursor!==view.logCursor || previous.journalCursor!==view.journalCursor)) {
       entry.pendingView=true;persist(entry,view,false,previous);return;
     }
-    if (!changed) {if (fresh) armHistory(entry); return;}
-    entry.pendingView = true;
-    if (fresh || structural) {
-      persist(entry);
-      return;
-    }
-    clearTimeout(entry.quiet); entry.quiet = setTimeout(()=>{void flush(entry);}, 2000); entry.quiet.unref();
-    entry.ceiling ??= setTimeout(()=>{void flush(entry);}, 30_000); entry.ceiling.unref();
+    if (!changed) {if(fresh)armHistory(entry);return;}
+    entry.pendingView=true;
+    if(fresh || structural) {persist(entry);return;}
+    clearTimeout(entry.quiet);entry.quiet=setTimeout(()=>{void flush(entry);},2000);entry.quiet.unref();
+    entry.ceiling ??= setTimeout(()=>{void flush(entry);},30_000);entry.ceiling.unref();
   }
 
   async function retire(entry: Entry): Promise<void> {
@@ -262,10 +258,11 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
     await visit(entry.storeDir!);
   }
   function monitorDisk(entry: Entry) {
-    entry.disk = setTimeout(() => {
+    const timer = setTimeout(() => {
       if (entry.stopping) return;
-      entry.diskCheck = checkDisk(entry).then(() => {if (!entry.stopping) monitorDisk(entry);}, error => exhaust(entry, error));
+      entry.diskCheck = checkDisk(entry).then(() => {if (!entry.stopping && entry.disk===timer) monitorDisk(entry);}, error => exhaust(entry, error));
     }, limits.diskCheckMs);
+    entry.disk=timer;
     entry.disk.unref();
   }
 
@@ -307,21 +304,28 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
             entry.journalFrontier = standing.journalCursor;
             await checkDisk(entry);
             if (principal.current(entry.lease)) {
-              const selectors = options.storage.replicaCurrentViewSelectors(entry.lease.workspaceId);
               for (;;) {
+                const selectors = options.storage.replicaCurrentViewSelectors(entry.lease.workspaceId);
+                const selectorDigest=createHash("sha256").update(JSON.stringify(selectors)).digest("hex");
+                const since=entry.selectorDigest===selectorDigest && entry.manifest?.view ? {revision:entry.manifest.view.revision,logCursor:entry.manifest.view.logCursor,journalCursor:entry.manifest.view.journalCursor} : undefined;
                 if (entry.stopping || !principal.current(entry.lease)) return;
                 let position: ReplicaCurrentViewPosition | undefined, cursor: ReplicaCurrentViewCursor | undefined;
-                const known = new Set(entry.newest?.files.filter(f => f.contentKind === "text").map(f => f.sha256) ?? []);
-                const held = new Map(entry.newest?.texts.map(t => [t.sha256, t.text]) ?? []);
-                let textBytes = [...held.values()].reduce((n, text) => n + Buffer.byteLength(text), 0);
+                const known = new Set(entry.knownStored ?? []);
+                const held = entry.manifest?.texts;
+                let textBytes = entry.manifest?.textBytes ?? 0;
                 let spilled = false;
                 let latest: ReplicaCurrentView | undefined;
-                let moved = false;
+                let moved = false, delta=false;
+                const removed:ReplicaCurrentViewPage["removed"]=[];
                 do {
-                  const page = await entry.child!.currentView(selectors, [...known], position, cursor);
+                  const page = await entry.child!.currentView(selectors, [...known], position, cursor, since, selectorDigest);
                   if (page.moved) {moved = true; break;}
                   if (!principal.current(entry.lease) || entry.stopping) return;
+                  if(page.workspaceId!==entry.lease.workspaceId || page.delta && !since)throw new Error("Replica current view has no matching base.");
+                  if([page.revision,page.logCursor,page.journalCursor].some(n=>!Number.isSafeInteger(n)||n<0) || since && (page.revision<since.revision || page.logCursor<since.logCursor || page.journalCursor<since.journalCursor))throw new Error("Replica current view moved behind its base.");
+                  if(position && (position.revision!==page.revision || position.logCursor!==page.logCursor || position.journalCursor!==page.journalCursor || delta!==!!page.delta)) throw new Error("Replica current view mixed positions.");
                   position ??= {revision:page.revision,logCursor:page.logCursor,journalCursor:page.journalCursor};
+                  delta=page.delta; removed.push(...page.removed);
                   for (const refusal of page.refusedFiles) {
                     const key = JSON.stringify([refusal.objectId, refusal.sha256]);
                     entry.reportedOmissions ??= new Set();
@@ -339,11 +343,11 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
                     known.add(text.sha256);
                   }
                   if (spilled || textBytes > limits.maxViewTextBytes) {
-                    if (!spilled) persist(entry);
+                    if (!spilled) persistVisible(entry);
                     const staged = spilled ? {...page, omitted: page.refusedFiles} : latest;
                     const texts = new Map(staged.texts.map(t => [t.sha256, t.text]));
                     for (const file of staged.files) {
-                      if (file.contentKind === "text" && held.has(file.sha256)) texts.set(file.sha256, held.get(file.sha256)!);
+                      if (file.contentKind === "text" && held?.has(file.sha256)) texts.set(file.sha256, held.get(file.sha256)!);
                     }
                     try {
                       options.storage.stageReplicaCurrentView(entry.lease, {...staged,
@@ -364,7 +368,9 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
                   cursor=page.nextCursor??undefined;
                 } while(cursor);
                 if (moved) {options.storage.discardReplicaCurrentView(entry.lease);continue;}
-                acceptView(entry, latest!, spilled);
+                if(selectorDigest!==createHash("sha256").update(JSON.stringify(options.storage.replicaCurrentViewSelectors(entry.lease.workspaceId))).digest("hex")) {options.storage.discardReplicaCurrentView(entry.lease);continue;}
+                acceptView(entry, latest!, spilled, delta, removed);
+                entry.selectorDigest=selectorDigest;
                 break;
               }
             }
@@ -382,11 +388,12 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
           await rm(entry.storeDir!, { recursive: true, force: true });
           if (entry.stopping) throw error;
           await mkdir(entry.storeDir!, { mode: 0o700 });
+          clearTimeout(entry.disk); entry.disk=undefined;
           monitorDisk(entry);
           if (entry.stopping || !standingCurrent(entry.lease)) throw error;
           entry.lease = principal.issue(entry.lease.workspaceId, randomUUID());
           options.storage.bindReplicaCurrentView(entry.lease);
-          entry.newest=undefined; entry.pendingView=false;
+          entry.newest=undefined; entry.manifest=undefined; entry.selectorDigest=undefined; entry.pendingView=false;
           entry.dirty = true;
         }
       }

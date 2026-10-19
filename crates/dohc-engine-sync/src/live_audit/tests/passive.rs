@@ -1240,6 +1240,9 @@ fn current_view_keeps_nested_list_bytes_and_projects_a_journal_edit() {
         known_text_shas: String::new(),
         position: None,
         cursor: None,
+        since: None,
+        selector_digest: String::new(),
+        incarnation: String::new(),
     };
     let before = collect_current_view(&replica, "ws", &request).unwrap();
     assert_eq!(before.texts[0].text, canonical);
@@ -1286,6 +1289,9 @@ fn measure_current_view_lanes() {
         known_text_shas: String::new(),
         position: None,
         cursor: None,
+        since: None,
+        selector_digest: String::new(),
+        incarnation: String::new(),
     };
     for bytes in [50_000, 1_000_000] {
         let text = "x".repeat(bytes);
