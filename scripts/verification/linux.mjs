@@ -28,9 +28,9 @@ const scopeMemory = `-p MemoryHigh=${scopeMaxGb - 2}G -p MemoryMax=${scopeMaxGb}
 const hostFloorGb = 3;
 // The queue fails an attempt that passes its two-hour limit, so the job stops waiting for its slots
 // and memory in time to finish inside it, as a machine failure the queue retries. Until the attempt's
-// own Windows jobs end, about 45 minutes in, they hold a cargo lane and memory, so the wait outlasts them.
-// A full run's Linux job takes about 45 minutes; clippy takes a few.
-const admissionMs = full => (full ? 45 : 75) * 60_000;
+// own Windows jobs end, about 45 minutes in, or 60 in a full run, they hold a cargo lane and memory, so the
+// wait outlasts them. A full run's Linux job then takes about 45 minutes; clippy takes a few.
+const admissionMs = full => (full ? 55 : 75) * 60_000;
 
 /** The WSL distro this host verifies Linux in, or null. */
 export function linuxDistro(env = process.env, platform = process.platform) {
