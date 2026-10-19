@@ -100,27 +100,36 @@ afterEach(() => {
 
 describe("DocumentMenu", () => {
   describe("pending serialization", () => {
-    it.each(["Escape", "outside press", "trigger"])("cancels Copy on %s without overwriting a newer clipboard entry", async (dismiss) => {
+    it.each([
+      ["Escape", "resolve"], ["outside press", "resolve"], ["trigger", "resolve"],
+      ["Escape", "reject"], ["outside press", "reject"], ["trigger", "reject"],
+    ])("cancels Copy on %s: a late %s neither overwrites a newer clipboard entry nor reports", async (dismiss, outcome) => {
       const user = userEvent.setup();
       stubClipboard();
       const markdown = deferred<string>();
       const reportError = vi.fn();
-      render(<DocumentMenu workspaceId="ws-1" suggestedName="Plan" getMarkdown={() => markdown.promise} reportError={reportError} />);
-      await user.click(screen.getByTestId("document-menu-trigger"));
-      await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
-      if (dismiss === "Escape") await user.keyboard("{Escape}");
-      else if (dismiss === "outside press") await user.click(document.body);
-      else await user.click(screen.getByTestId("document-menu-trigger"));
-      expect(screen.queryByRole("menu")).toBeNull();
-      await navigator.clipboard.writeText("Newer clipboard entry");
+      const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        render(<DocumentMenu workspaceId="ws-1" suggestedName="Plan" getMarkdown={() => markdown.promise} reportError={reportError} />);
+        await user.click(screen.getByTestId("document-menu-trigger"));
+        await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+        if (dismiss === "Escape") await user.keyboard("{Escape}");
+        else if (dismiss === "outside press") await user.click(document.body);
+        else await user.click(screen.getByTestId("document-menu-trigger"));
+        expect(screen.queryByRole("menu")).toBeNull();
+        await navigator.clipboard.writeText("Newer clipboard entry");
 
-      await act(async () => {
-        markdown.resolve(MARKDOWN);
-        await markdown.promise;
-      });
+        await act(async () => {
+          if (outcome === "resolve") markdown.resolve(MARKDOWN);
+          else markdown.reject(new Error("serializer failed"));
+          await markdown.promise.catch(() => undefined);
+        });
 
-      expect(writeText).toHaveBeenCalledExactlyOnceWith("Newer clipboard entry");
-      expect(reportError).not.toHaveBeenCalled();
+        expect(writeText).toHaveBeenCalledExactlyOnceWith("Newer clipboard entry");
+        expect(reportError).not.toHaveBeenCalled();
+      } finally {
+        logged.mockRestore();
+      }
     });
 
     it("finishes a chosen Copy before its confirmation closes the menu", async () => {
@@ -146,35 +155,6 @@ describe("DocumentMenu", () => {
         expect(screen.queryByRole("menu")).toBeNull();
       } finally {
         vi.useRealTimers();
-      }
-    });
-
-    it("reports a serialization failure after close once with a working retry", async () => {
-      const user = userEvent.setup();
-      stubClipboard();
-      const markdown = deferred<string>();
-      const getMarkdown = vi.fn<() => string | Promise<string>>().mockReturnValueOnce(markdown.promise).mockReturnValue("# Revised\n");
-      const reportError = vi.fn();
-      const logged = vi.spyOn(console, "error").mockImplementation(() => {});
-      try {
-        render(<DocumentMenu workspaceId="ws-1" suggestedName="Plan" getMarkdown={getMarkdown} reportError={reportError} />);
-        await user.click(screen.getByTestId("document-menu-trigger"));
-        await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
-        await user.keyboard("{Escape}");
-        const failure = new Error("serializer failed");
-        await act(async () => {
-          markdown.reject(failure);
-          await markdown.promise.catch(() => undefined);
-        });
-        expect(reportError).toHaveBeenCalledExactlyOnceWith("dohc could not copy this document.", failure, expect.any(Function));
-        expect(writeText).not.toHaveBeenCalled();
-        const retry = reportError.mock.calls[0]?.[2] as () => void;
-        await act(async () => retry());
-        expect(writeText).toHaveBeenCalledExactlyOnceWith("# Revised\n");
-        expect(reportError).toHaveBeenCalledTimes(1);
-        expect(screen.queryByRole("menu")).toBeNull();
-      } finally {
-        logged.mockRestore();
       }
     });
 
