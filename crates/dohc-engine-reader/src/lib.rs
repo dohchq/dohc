@@ -17,7 +17,8 @@ use std::{
 use tokio::sync::oneshot;
 
 /// Absolute paths supplied by the host, never a renderer or workspace field.
-#[derive(Clone)]
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub node: PathBuf,
     pub bundle: PathBuf,
@@ -160,12 +161,14 @@ impl Reader {
     fn with_deadlines(config: Option<Config>, deadlines: Deadlines) -> Self {
         let shared = Arc::new(Shared::default());
         let owned = shared.clone();
-        let owner = config.and_then(|config| {
-            thread::Builder::new()
-                .name("markdown-reader".into())
-                .spawn(move || drive(owned, config, deadlines))
-                .ok()
-        });
+        let owner = config
+            .filter(|_| cfg!(any(windows, target_os = "linux")))
+            .and_then(|config| {
+                thread::Builder::new()
+                    .name("markdown-reader".into())
+                    .spawn(move || drive(owned, config, deadlines))
+                    .ok()
+            });
         shared.state.lock().unwrap().closed = owner.is_none();
         Self {
             shared,

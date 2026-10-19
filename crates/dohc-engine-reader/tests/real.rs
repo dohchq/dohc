@@ -6,12 +6,16 @@ fn directory() -> PathBuf {
         .into()
 }
 fn config() -> Config {
+    if let Ok(value) = std::env::var("DOHC_ENGINE_READER_CONFIG") {
+        return serde_json::from_str(&value).unwrap();
+    }
     Config {
         node: runtime().0,
         bundle: directory().join("bundle/reader.cjs"),
         manifest: directory().join("bundle/manifest.json"),
     }
 }
+
 fn input(name: &str, proof: bool) -> Request {
     let mut r = request("note.md");
     r.document.main_version_id = "main".into();

@@ -4969,6 +4969,7 @@ const { refreshDispatchTray, refreshSystemThemeDesktopIcons, dispatchKeepsRunnin
 });
 
 const desktopEngine = createDesktopEngine({
+  resourcesBasePath,
   onWorkspaceOpened: workspaceId => {
     const workspace = findWorkspace(workspaceId);
     if (workspace) void withWorkspaceAttachment({workspaceId}, lease => recoverOutageTyping(canonicalWorkspaceFor(lease)));

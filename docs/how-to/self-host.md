@@ -35,6 +35,10 @@ The release includes the isolated app runtime. The release build checks its comp
 
 ## Prepare the host
 
+The amd64 image includes the Markdown reader runtime. Other architectures leave the reader unavailable.
+To override `DOHC_ENGINE_READER_CONFIG`, point its runtime, bundle and manifest paths at root-owned regular files.
+Keep those files and their parent directories unwritable by the service user and other accounts.
+
 Install Docker Engine with Linux container support, Docker Compose 2.24.4 or newer, and Node.js 24.16 or newer.
 Development read replicas require Linux 5.19 or later with Landlock ABI 2 or later enabled.
 Other hosts refuse replicas. The relay must run under Docker's default seccomp profile or an equivalent outer filter.

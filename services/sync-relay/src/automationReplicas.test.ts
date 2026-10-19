@@ -22,6 +22,7 @@ vi.mock("@dohc/workspace-engine-client/daemon", async (importOriginal) => ({
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
+  vi.unstubAllEnvs();
   // Every cleanup runs even after one fails; the first failure is reported once all have run.
   let failure: { error: unknown } | undefined;
   for (const close of cleanup.splice(0).reverse()) {
@@ -354,11 +355,13 @@ describe("the automation replicas", () => {
   });
 
   it("keeps the owner ingress configuration through replica cleanup and an engine restart", async () => {
+    vi.stubEnv("DOHC_ENGINE_READER_CONFIG", "operator-reader");
     const {storage, raw} = await relay();
     const engine = fakeEngine();
     let wanted = [WORKSPACE];
     const {replicas: running, root} = await replicas(storage, () => wanted, {ms: 0});
     const configPath = (spawn.mock.calls[0]![0] as {env: Record<string, string>}).env.DOHC_ENGINE_OWNER_HOST_CONFIG!;
+    expect(spawn.mock.calls[0]![0].env.DOHC_ENGINE_READER_CONFIG).toBe("operator-reader");
     expect(existsSync(configPath)).toBe(true);
     await mkdir(join(root, "unused-replica"));
     raw.prepare("DELETE FROM sync_relay_workspaces WHERE workspace_id = ?").run(WORKSPACE);
@@ -369,6 +372,7 @@ describe("the automation replicas", () => {
     engine.engines[0]!.exit();
     await running.settled();
     expect(spawn).toHaveBeenCalledTimes(2);
+    expect(spawn.mock.calls[1]![0].env.DOHC_ENGINE_READER_CONFIG).toBe("operator-reader");
     expect((spawn.mock.calls[1]![0] as {env: Record<string, string>}).env.DOHC_ENGINE_OWNER_HOST_CONFIG).toBe(configPath);
     expect(running.unavailable).toBe(false);
     await running.close();
