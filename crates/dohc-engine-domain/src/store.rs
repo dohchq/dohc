@@ -691,6 +691,8 @@ impl<'a> VersionedTextStore<'a> {
             });
         }
         self.store.read_with(|conn| {
+            let snapshot = text::ReadSnapshot::new(conn).map_err(DomainError::sql_corrupt)?;
+
             if let Some(version_id) = &query.version_id
                 && !version_exists(conn, &query.workspace_id, version_id)?
             {
@@ -702,20 +704,20 @@ impl<'a> VersionedTextStore<'a> {
 
             // Probe limit+1 to detect a following page.
             let probe = query.limit.saturating_add(1);
-            let mut sql = format!("SELECT moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
+            let mut sql = String::from("SELECT moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
                  operation, after_blob_sha256, before_present, before_blob_sha256, \
                  before_latest_moment_id, metadata_origin, metadata_summary, \
                  metadata_correlation_id, author_json, sync_record_only, \
                  COALESCE(after_content_kind, 'text'), after_binary.sha256, \
-                 COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             CASE WHEN after_text_blob.byte_length <= 131072 AND LENGTH(CAST({body_after_text_blob} AS BLOB)) <= 131072 THEN {body_after_text_blob} END, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             CASE WHEN before_text_blob.byte_length <= 131072 AND LENGTH(CAST({body_before_text_blob} AS BLOB)) <= 131072 THEN {body_before_text_blob} END, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length), \
-             COALESCE(LENGTH(CAST({body_after_text_blob} AS BLOB)), LENGTH(after_binary.bytes)), \
-             COALESCE(LENGTH(CAST({body_before_text_blob} AS BLOB)), LENGTH(before_binary.bytes)), \
+                 COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             after_text_blob.sha256, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             before_text_blob.sha256, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length), \
+             COALESCE(after_text_blob.byte_length, LENGTH(after_binary.bytes)), \
+             COALESCE(before_text_blob.byte_length, LENGTH(before_binary.bytes)), \
              m.payload_before_path \
                  FROM moments m \
                  LEFT JOIN binary_blobs after_binary ON after_binary.sha256 = m.after_binary_sha256 \
                  LEFT JOIN binary_blobs before_binary ON before_binary.sha256 = m.before_binary_sha256 \n             LEFT JOIN blobs after_text_blob ON after_text_blob.sha256 = m.after_blob_sha256 \n             LEFT JOIN blobs before_text_blob ON before_text_blob.sha256 = m.before_blob_sha256 \
                  WHERE workspace_id = ?1 AND NOT EXISTS (SELECT 1 FROM materialization_jobs j \
-                 WHERE j.workspace_id=m.workspace_id AND j.job_id='restore-delete-mat_'||m.moment_id)", body_after_text_blob = text::body_column("after_text_blob"), body_before_text_blob = text::body_column("before_text_blob"));
+                 WHERE j.workspace_id=m.workspace_id AND j.job_id='restore-delete-mat_'||m.moment_id)");
             let mut binds: Vec<Box<dyn rusqlite::ToSql>> =
                 vec![Box::new(query.workspace_id.clone())];
             if let Some(version_id) = &query.version_id {
@@ -747,17 +749,21 @@ impl<'a> VersionedTextStore<'a> {
                 moments.push(row.map_err(DomainError::sql_corrupt)??);
             }
 
+            let mut moments = hydrate_moments(conn, moments)?;
             let next_before_moment_order = if moments.len() as i64 > query.limit {
                 moments.truncate(query.limit as usize);
                 moments.last().map(|m| m.moment_order)
             } else {
                 None
             };
-            Ok(MomentPage {
-                moments,
-                next_before_moment_order,
-                latest_moment_order: latest,
-            })
+            snapshot.finish(
+                Ok(MomentPage {
+                    moments,
+                    next_before_moment_order,
+                    latest_moment_order: latest,
+                }),
+                DomainError::sql_corrupt,
+            )
         })
     }
 
@@ -773,8 +779,8 @@ impl<'a> VersionedTextStore<'a> {
             .collect()
     }
 
-    /// One page of snapshot metadata, ordered by path. The gateway sizes text
-    /// without hydrating its body. Keyset: strictly after
+    /// One page of snapshot metadata, ordered by path, using recorded byte lengths
+    /// without reading bodies. Keyset: strictly after
     /// `after_path` (None = from the start).
     pub fn list_snapshot_metadata(
         &self,
@@ -785,13 +791,13 @@ impl<'a> VersionedTextStore<'a> {
     ) -> Result<Vec<SnapshotMetadata>, DomainError> {
         self.store.read_with(|conn| {
             let mut stmt = conn
-                .prepare_cached(&format!(
+                .prepare_cached(
                     "SELECT s.object_id, s.path, \
                      CASE COALESCE(s.content_kind, 'text') \
                        WHEN 'binary' THEN bb.sha256 ELSE s.blob_sha256 END, \
                      CASE COALESCE(s.content_kind, 'text') \
                        WHEN 'binary' THEN bb.byte_length \
-                       ELSE LENGTH(CAST({body_b} AS BLOB)) END, \
+                       ELSE b.byte_length END, \
                      s.updated_at_ms, s.latest_moment_id, s.metadata_origin, \
                      s.metadata_summary, s.metadata_correlation_id, \
                      COALESCE(s.content_kind, 'text'), bb.sha256, \
@@ -803,8 +809,7 @@ impl<'a> VersionedTextStore<'a> {
                      LEFT JOIN binary_blobs bb ON bb.sha256 = s.binary_sha256 \
                      WHERE s.workspace_id = ?1 AND s.version_id = ?2 AND s.path > ?3 \
                      ORDER BY s.path LIMIT ?4",
-                    body_b = text::body_column("b")
-                ))
+                )
                 .map_err(DomainError::sql_corrupt)?;
             let rows = stmt
                 .query_map(
@@ -860,17 +865,18 @@ impl<'a> VersionedTextStore<'a> {
         version_id: &str,
     ) -> Result<Vec<SnapshotRecord>, DomainError> {
         self.store.read_with(|conn| {
+            let snapshot = text::ReadSnapshot::new(conn).map_err(DomainError::sql_corrupt)?;
+
             let mut stmt = conn
-                .prepare_cached(&format!(
-                    "SELECT s.object_id, s.path, {body_b}, s.blob_sha256, s.updated_at_ms, \
+                .prepare_cached(
+                    "SELECT s.object_id, s.path, b.sha256, s.blob_sha256, s.updated_at_ms, \
                      s.latest_moment_id, s.metadata_origin, s.metadata_summary, \
                      s.metadata_correlation_id, COALESCE(s.content_kind, 'text'), \
                      bb.sha256 FROM snapshots s \
                      LEFT JOIN blobs b ON b.sha256 = s.blob_sha256 \
                      LEFT JOIN binary_blobs bb ON bb.sha256 = s.binary_sha256 \
                      WHERE s.workspace_id = ?1 AND s.version_id = ?2 ORDER BY s.path",
-                    body_b = text::body_column("b")
-                ))
+                )
                 .map_err(DomainError::sql_corrupt)?;
             let ws = workspace_id.to_owned();
             let ver = version_id.to_owned();
@@ -883,7 +889,7 @@ impl<'a> VersionedTextStore<'a> {
             for row in rows {
                 out.push(row.map_err(DomainError::sql_corrupt)??);
             }
-            Ok(out)
+            snapshot.finish(hydrate_snapshots(conn, out), DomainError::sql_corrupt)
         })
     }
 
@@ -895,17 +901,18 @@ impl<'a> VersionedTextStore<'a> {
         version_id: &str,
     ) -> Result<Vec<SnapshotRecord>, DomainError> {
         self.store.read_with(|conn| {
+            let snapshot = text::ReadSnapshot::new(conn).map_err(DomainError::sql_corrupt)?;
+
             let mut stmt = conn
-                .prepare_cached(&format!(
-                    "SELECT f.object_id, f.path, {body_b}, f.blob_sha256, f.updated_at_ms, \
+                .prepare_cached(
+                    "SELECT f.object_id, f.path, b.sha256, f.blob_sha256, f.updated_at_ms, \
                      f.latest_moment_id, f.metadata_origin, f.metadata_summary, \
                      f.metadata_correlation_id, COALESCE(f.content_kind, 'text'), \
                      bb.sha256 FROM fork_base_snapshots f \
                      LEFT JOIN blobs b ON b.sha256 = f.blob_sha256 \
                      LEFT JOIN binary_blobs bb ON bb.sha256 = f.binary_sha256 \
                      WHERE f.workspace_id = ?1 AND f.version_id = ?2 ORDER BY f.path",
-                    body_b = text::body_column("b")
-                ))
+                )
                 .map_err(DomainError::sql_corrupt)?;
             let ws = workspace_id.to_owned();
             let ver = version_id.to_owned();
@@ -918,7 +925,7 @@ impl<'a> VersionedTextStore<'a> {
             for row in rows {
                 out.push(row.map_err(DomainError::sql_corrupt)??);
             }
-            Ok(out)
+            snapshot.finish(hydrate_snapshots(conn, out), DomainError::sql_corrupt)
         })
     }
 
@@ -1830,24 +1837,27 @@ fn get_snapshot(
     version_id: &str,
     object_id: &str,
 ) -> Result<Option<SnapshotRecord>, DomainError> {
+    let snapshot = text::ReadSnapshot::new(conn).map_err(DomainError::sql_corrupt)?;
+
     let row = conn
         .query_row(
-            &format!(
-                "SELECT s.object_id, s.path, {body_b}, s.blob_sha256, s.updated_at_ms, \
+            "SELECT s.object_id, s.path, b.sha256, s.blob_sha256, s.updated_at_ms, \
          s.latest_moment_id, s.metadata_origin, s.metadata_summary, \
          s.metadata_correlation_id, COALESCE(s.content_kind, 'text'), \
          bb.sha256 FROM snapshots s \
          LEFT JOIN blobs b ON b.sha256 = s.blob_sha256 \
          LEFT JOIN binary_blobs bb ON bb.sha256 = s.binary_sha256 \
          WHERE s.workspace_id = ?1 AND s.version_id = ?2 AND s.object_id = ?3",
-                body_b = text::body_column("b")
-            ),
             params![workspace_id, version_id, object_id],
             |row| map_snapshot_row(row, workspace_id, version_id),
         )
         .optional()
         .map_err(DomainError::sql_corrupt)?;
-    row.transpose()
+    snapshot.finish(
+        hydrate_snapshots(conn, row.transpose()?.into_iter().collect())
+            .map(|rows| rows.into_iter().next()),
+        DomainError::sql_corrupt,
+    )
 }
 
 fn upsert_snapshot(conn: &Connection, snapshot: &SnapshotRecord) -> Result<(), DomainError> {
@@ -1966,27 +1976,33 @@ pub(crate) fn get_moment(
     workspace_id: &str,
     moment_id: &str,
 ) -> Result<Option<MomentRecord>, DomainError> {
+    let snapshot = text::ReadSnapshot::new(conn).map_err(DomainError::sql_corrupt)?;
+
     let row = conn
         .query_row(
-            &format!("SELECT moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
+            "SELECT moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
              operation, after_blob_sha256, before_present, before_blob_sha256, \
              before_latest_moment_id, metadata_origin, metadata_summary, \
              metadata_correlation_id, author_json, sync_record_only, \
              COALESCE(after_content_kind, 'text'), after_binary.sha256, \
-             COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             CASE WHEN after_text_blob.byte_length <= 131072 AND LENGTH(CAST({body_after_text_blob} AS BLOB)) <= 131072 THEN {body_after_text_blob} END, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             CASE WHEN before_text_blob.byte_length <= 131072 AND LENGTH(CAST({body_before_text_blob} AS BLOB)) <= 131072 THEN {body_before_text_blob} END, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length), \
-             COALESCE(LENGTH(CAST({body_after_text_blob} AS BLOB)), LENGTH(after_binary.bytes)), \
-             COALESCE(LENGTH(CAST({body_before_text_blob} AS BLOB)), LENGTH(before_binary.bytes)), \
+             COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             after_text_blob.sha256, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             before_text_blob.sha256, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length), \
+             COALESCE(after_text_blob.byte_length, LENGTH(after_binary.bytes)), \
+             COALESCE(before_text_blob.byte_length, LENGTH(before_binary.bytes)), \
              m.payload_before_path \
              FROM moments m \
              LEFT JOIN binary_blobs after_binary ON after_binary.sha256 = m.after_binary_sha256 \
              LEFT JOIN binary_blobs before_binary ON before_binary.sha256 = m.before_binary_sha256 \n             LEFT JOIN blobs after_text_blob ON after_text_blob.sha256 = m.after_blob_sha256 \n             LEFT JOIN blobs before_text_blob ON before_text_blob.sha256 = m.before_blob_sha256 \
-             WHERE workspace_id = ?1 AND moment_id = ?2", body_after_text_blob = text::body_column("after_text_blob"), body_before_text_blob = text::body_column("before_text_blob")),
+             WHERE workspace_id = ?1 AND moment_id = ?2",
             params![workspace_id, moment_id],
             map_moment_row,
         )
         .optional()
         .map_err(DomainError::sql_corrupt)?;
-    row.transpose()
+    snapshot.finish(
+        hydrate_moments(conn, row.transpose()?.into_iter().collect())
+            .map(|rows| rows.into_iter().next()),
+        DomainError::sql_corrupt,
+    )
 }
 
 fn moment_by_order(
@@ -2032,6 +2048,64 @@ fn map_version_row(
     }))
 }
 
+type MomentRow = (MomentRecord, Option<String>, Option<String>);
+
+fn hydrate_moments(
+    conn: &Connection,
+    rows: Vec<MomentRow>,
+) -> Result<Vec<MomentRecord>, DomainError> {
+    let mut bodies = text::read_batch(
+        conn,
+        rows.iter().flat_map(|(_, after, before)| {
+            [after.as_deref(), before.as_deref()].into_iter().flatten()
+        }),
+        Some(131072),
+    )
+    .map_err(DomainError::sql_corrupt)?;
+    rows.into_iter()
+        .map(|(mut moment, after, before)| {
+            for (key, target) in [
+                (after, &mut moment.after_text),
+                (before, &mut moment.before_text),
+            ] {
+                if let Some(key) = key {
+                    let body = bodies.get_mut(&key).expect("requested body");
+                    if body.recorded != body.actual {
+                        return Err(DomainError::StateCorrupt {
+                            reason: "moment blob length does not match its content",
+                        });
+                    }
+                    *target = body.take_text();
+                }
+            }
+            Ok(moment)
+        })
+        .collect()
+}
+
+fn hydrate_snapshots(
+    conn: &Connection,
+    mut rows: Vec<SnapshotRecord>,
+) -> Result<Vec<SnapshotRecord>, DomainError> {
+    let mut bodies = text::read_batch(
+        conn,
+        rows.iter()
+            .filter(|row| row.content_kind == "text")
+            .filter_map(|row| row.blob_sha256.as_deref()),
+        None,
+    )
+    .map_err(DomainError::sql_corrupt)?;
+    for row in &mut rows {
+        if row.content_kind == "text" {
+            row.text = text::take(
+                &mut bodies,
+                row.blob_sha256.as_deref().expect("validated text key"),
+            );
+        }
+    }
+    Ok(rows)
+}
+
 fn map_snapshot_row(
     row: &rusqlite::Row<'_>,
     workspace_id: &str,
@@ -2039,7 +2113,7 @@ fn map_snapshot_row(
 ) -> rusqlite::Result<Result<SnapshotRecord, DomainError>> {
     let object_id: String = row.get(0)?;
     let path: String = row.get(1)?;
-    let text: Option<String> = row.get(2)?;
+    let text_key: Option<String> = row.get(2)?;
     let blob_sha256: Option<String> = row.get(3)?;
     let updated_at_ms: i64 = row.get(4)?;
     let latest_moment_id: String = row.get(5)?;
@@ -2048,8 +2122,8 @@ fn map_snapshot_row(
     let metadata_correlation_id: Option<String> = row.get(8)?;
     let content_kind: String = row.get(9)?;
     let binary_sha256: Option<String> = row.get(10)?;
-    let text = match content_kind.as_str() {
-        "text" => text.ok_or(DomainError::StateCorrupt {
+    let text_key = match content_kind.as_str() {
+        "text" => text_key.ok_or(DomainError::StateCorrupt {
             reason: "text snapshot is missing its blob",
         }),
         "binary" if binary_sha256.is_some() => Ok(String::new()),
@@ -2060,12 +2134,12 @@ fn map_snapshot_row(
             reason: "snapshot has an unknown content kind",
         }),
     };
-    Ok(text.map(|text| SnapshotRecord {
+    Ok(text_key.map(|_| SnapshotRecord {
         workspace_id: workspace_id.to_owned(),
         version_id: version_id.to_owned(),
         object_id,
         path,
-        text,
+        text: String::new(),
         blob_sha256,
         content_kind,
         binary_sha256,
@@ -2077,7 +2151,7 @@ fn map_snapshot_row(
     }))
 }
 
-fn map_moment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<MomentRecord, DomainError>> {
+fn map_moment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<MomentRow, DomainError>> {
     let moment_order: i64 = row.get(0)?;
     let moment_id: String = row.get(1)?;
     let version_id: String = row.get(2)?;
@@ -2098,16 +2172,15 @@ fn map_moment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<MomentReco
     let after_binary_sha256: Option<String> = row.get(17)?;
     let before_content_kind: String = row.get(18)?;
     let before_binary_sha256: Option<String> = row.get(19)?;
-    let after_text: Option<String> = row.get(20)?;
+    let after_text_key: Option<String> = row.get(20)?;
     let after_byte_length: Option<i64> = row.get(21)?;
-    let before_text: Option<String> = row.get(22)?;
+    let before_text_key: Option<String> = row.get(22)?;
     let before_byte_length: Option<i64> = row.get(23)?;
     let after_actual_length: Option<i64> = row.get(24)?;
     let before_actual_length: Option<i64> = row.get(25)?;
     let before_path: Option<String> = row.get(26)?;
-    // Recorded and actual lengths must agree per side — a corrupted
-    // recorded length (lying small or large) fails closed for text and
-    // binary alike, matching the in-band reads.
+    // Check binary actual lengths here. Text lengths are recorded in both
+    // columns; hydrate_moments checks them against the body before returning.
     if after_byte_length != after_actual_length || before_byte_length != before_actual_length {
         return Ok(Err(DomainError::StateCorrupt {
             reason: "moment blob length does not match its content",
@@ -2171,35 +2244,39 @@ fn map_moment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<MomentReco
                 }
             }
         }
-        Ok(MomentRecord {
-            moment_order,
-            moment_id,
-            version_id,
-            object_id,
-            path,
-            recorded_at_ms,
-            operation,
-            after_content_kind,
-            after_blob_sha256,
-            after_binary_sha256,
-            before_present: before_state == MomentBeforeState::Present,
-            before_blob_sha256,
-            before_content_kind,
-            before_binary_sha256,
-            before_latest_moment_id,
-            metadata_origin,
-            metadata_summary,
-            metadata_correlation_id,
-            author_json,
-            // A record-only marker is a non-NULL, NON-ZERO value; NULL or 0 both
-            // mean 'materialized' (matching the aligned fork SQL).
-            sync_record_only: matches!(sync_record_only, Some(v) if v != 0),
-            after_text,
-            after_byte_length,
-            before_text,
-            before_byte_length,
-            before_path,
-        })
+        Ok((
+            MomentRecord {
+                moment_order,
+                moment_id,
+                version_id,
+                object_id,
+                path,
+                recorded_at_ms,
+                operation,
+                after_content_kind,
+                after_blob_sha256,
+                after_binary_sha256,
+                before_present: before_state == MomentBeforeState::Present,
+                before_blob_sha256,
+                before_content_kind,
+                before_binary_sha256,
+                before_latest_moment_id,
+                metadata_origin,
+                metadata_summary,
+                metadata_correlation_id,
+                author_json,
+                // A record-only marker is a non-NULL, NON-ZERO value; NULL or 0 both
+                // mean 'materialized' (matching the aligned fork SQL).
+                sync_record_only: matches!(sync_record_only, Some(v) if v != 0),
+                after_text: None,
+                after_byte_length,
+                before_text: None,
+                before_byte_length,
+                before_path,
+            },
+            after_text_key,
+            before_text_key,
+        ))
     }))
 }
 
