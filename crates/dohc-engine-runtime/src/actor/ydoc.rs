@@ -3385,7 +3385,12 @@ pub(super) fn ydoc_unload_pending(
     let Some(marker) = dohc_engine_collab::read_marker(store, key)? else {
         return Ok(None);
     };
-    let projection = close_projection(store, key, &marker, Some(root_dir), None)?;
+    let projection = match close_projection(store, key, &marker, Some(root_dir), None) {
+        Err(RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState { .. })) => {
+            return Ok(Some(UnloadPending::Settlement));
+        }
+        result => result?,
+    };
     let covered =
         dohc_engine_collab::local_close_is_covered(store, key, &marker, projection.as_ref())?;
     Ok((!covered).then_some(UnloadPending::Settlement))

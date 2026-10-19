@@ -3834,11 +3834,15 @@ fn project_ydoc_inner(
             .project(content_kind)
             .map_err(|error| map_projection_error(error, "ydoc projection is invalid"))?;
         if content_kind == dohc_engine_collab::ContentKind::Richdoc {
-            let source = if resolve_witness
-                && dohc_engine_collab::reader_resolver::needs_reader(doc)
-            {
-                dohc_engine_collab::reader_resolver::resolve(conn, key, doc, None, resolver)
-                    .map_err(map_collab_hard_error)?
+            let source = if resolve_witness && doc.has_reader_source() {
+                dohc_engine_collab::reader_resolver::resolve(
+                    conn,
+                    key,
+                    doc,
+                    &projection.content,
+                    resolver,
+                )
+                .map_err(map_collab_hard_error)?
             } else {
                 doc.settled_markdown_source(&projection.content, || local_snapshot_text(conn, key))?
             };

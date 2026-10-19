@@ -45,13 +45,102 @@ fn fixture() -> (Connection, DocKey, Ydoc, String, ReaderResolver) {
         ReaderResolver::new(Arc::new(Reader::new(None))),
     )
 }
+
+fn canonical_fold_clears_the_reader_marker(staging: bool) {
+    let (_, _, doc, _, _) = fixture();
+    assert!(doc.has_reader_source());
+    if staging {
+        let canonical = doc.project(ContentKind::Richdoc).unwrap().content;
+        let update = doc.replace_frontmatter_for_fold(&canonical).unwrap();
+        doc.apply(&update).unwrap();
+    } else {
+        doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, "Canonical paragraph\n")
+            .unwrap();
+    }
+    assert!(
+        doc.markdown_source_reference().is_none(),
+        "staging={staging}"
+    );
+    assert!(!doc.has_reader_source(), "staging={staging}");
+}
+
+#[test]
+fn canonical_folds_clear_the_reader_marker_with_the_witness() {
+    canonical_fold_clears_the_reader_marker(false);
+}
+
+#[test]
+fn canonical_staging_clears_the_reader_marker_with_the_witness() {
+    canonical_fold_clears_the_reader_marker(true);
+}
+
+#[test]
+fn restore_generation_sql_errors_keep_their_storage_cause() {
+    let (conn, key, doc, _, resolver) = fixture();
+    conn.execute("DROP TABLE live_restore_fences", []).unwrap();
+    assert!(matches!(
+        lookup(&conn, &key, &doc, &resolver),
+        Err(CollabError::Storage(_))
+    ));
+}
+
+#[test]
+fn expired_proofs_must_match_the_engine_projection() {
+    use std::{fs, process::Command};
+    let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+    let node = std::env::var_os("DOHC_READER_TEST_NODE").unwrap_or_else(|| "node".into());
+    let output = Command::new(node).args(["-p", "JSON.stringify({path:process.execPath,version:process.versions.node,platform:process.platform,arch:process.arch,unicode:process.versions.unicode,icu:process.versions.icu})"]).output().unwrap();
+    assert!(output.status.success());
+    let mut runtime: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let node = std::path::PathBuf::from(
+        runtime
+            .as_object_mut()
+            .unwrap()
+            .remove("path")
+            .unwrap()
+            .as_str()
+            .unwrap(),
+    );
+    runtime["sha256"] = crate::hex_sha256(&fs::read(&node).unwrap()).into();
+    let identity = serde_json::json!({"version":1,"runtime":runtime,"buildSha256":"test","parentCwd":std::env::current_dir().unwrap()});
+    let script = include_str!("../../dohc-engine-reader/src/fake.cjs")
+        .replace("MANIFEST", &identity.to_string())
+        .replace("MODE", "\"normal\"")
+        .replace("const fault = r.currentPath;", "const fault = 'expired';");
+    let bundle = scratch.path().join("fake.cjs");
+    fs::write(&bundle, &script).unwrap();
+    let mut manifest = identity;
+    manifest["bundleSha256"] = crate::hex_sha256(script.as_bytes()).into();
+    manifest["sources"] = serde_json::json!([]);
+    let manifest_path = scratch.path().join("manifest.json");
+    fs::write(&manifest_path, manifest.to_string()).unwrap();
+    let resolver = ReaderResolver::new(Arc::new(Reader::new(Some(dohc_engine_reader::Config {
+        node,
+        bundle,
+        manifest: manifest_path,
+    }))));
+    let (conn, key, doc, _, _) = fixture();
+    let proof = pending(lookup(&conn, &key, &doc, &resolver));
+    run(proof.resolve());
+    assert!(
+        matches!(proof.result.get(), Some(Err(Failure::Unavailable))),
+        "{:?}",
+        proof.result.get()
+    );
+}
 fn lookup(
     conn: &Connection,
     key: &DocKey,
     doc: &Ydoc,
     resolver: &ReaderResolver,
 ) -> Result<Option<String>, CollabError> {
-    resolve(conn, key, doc, None, Some(resolver))
+    resolve(
+        conn,
+        key,
+        doc,
+        &doc.project(ContentKind::Richdoc)?.content,
+        Some(resolver),
+    )
 }
 fn pending(result: Result<Option<String>, CollabError>) -> Arc<PendingProof> {
     match result {
@@ -71,16 +160,6 @@ fn prime(conn: &Connection, key: &DocKey, doc: &Ydoc, resolver: &ReaderResolver)
 fn exact_output_needs_a_snapshot_and_never_anchors_itself() {
     let (conn, key, doc, _, resolver) = fixture();
     conn.execute("DELETE FROM snapshots", []).unwrap();
-    assert!(matches!(
-        resolve(
-            &conn,
-            &key,
-            &doc,
-            Some("native shortcut".into()),
-            Some(&resolver)
-        ),
-        Err(CollabError::MarkdownReaderUnavailable)
-    ));
     assert!(matches!(
         lookup(&conn, &key, &doc, &resolver),
         Err(CollabError::MarkdownReaderUnavailable)
@@ -309,21 +388,21 @@ fn native_stale_witnesses_keep_the_existing_canonical_path() {
         .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "Original paragraph\n")
         .unwrap();
     native.richdoc_append_paragraph("Edit");
-    assert!(!needs_reader(&native));
+    assert!(!native.has_reader_source());
 }
 
 #[test]
-fn retained_capacity_cannot_bypass_the_cache_byte_bound() {
+fn dispatch_drops_the_request_even_while_the_verdict_is_retained() {
     let (conn, key, doc, _, resolver) = fixture();
-    let pending = pending(lookup(&conn, &key, &doc, &resolver));
-    let entry = resolver.entries.lock().unwrap().pop_front().unwrap();
-    let mut request = pending.request.clone();
-    request.checkpoint.reserve_exact(MAX_BYTES);
+    let proof = pending(lookup(&conn, &key, &doc, &resolver));
+    assert!(proof.request.lock().unwrap().is_some());
+    run(proof.resolve());
+    assert!(proof.request.lock().unwrap().is_none());
     assert!(matches!(
-        resolver.lookup(entry.key, request),
-        Err(CollabError::MarkdownReaderUnavailable)
+        proof.result.get(),
+        Some(Err(Failure::Unavailable))
     ));
-    assert!(resolver.entries.lock().unwrap().is_empty());
+    assert_eq!(resolver.entries.lock().unwrap().len(), 1);
 }
 
 fn run(future: impl std::future::Future<Output = ()>) {

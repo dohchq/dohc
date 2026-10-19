@@ -108,6 +108,11 @@ class Refusal extends Error {
   constructor(readonly reason: LiveMarkdownValidationRefusal) { super(reason) }
 }
 function refuse(reason: LiveMarkdownValidationRefusal): never { throw new Refusal(reason) }
+/** ProseMirror's schema verdicts; allocation and stack RangeErrors stay fatal. */
+export function isProseMirrorSchemaError(error: unknown): boolean {
+  return error instanceof RangeError
+    && /^(Invalid content for node |Invalid collection of marks for node |Unsupported attribute |Expected value of type |No value supplied for attribute |Unknown node type: |Invalid node type: )/.test(error.message)
+}
 function refusal<S extends RefusedRegistration['source'] | RefusedJournal['source']>(
   reason: LiveMarkdownValidationRefusal, source: S,
 ): { readonly kind: 'refused'; readonly reason: LiveMarkdownValidationRefusal; readonly source: S } {
@@ -750,7 +755,7 @@ function validatePublicState(
       if (Object.keys(json).length !== 1 || json.type !== 'doc') refuse('invalid-schema')
     } else rootNode.check()
   } catch (error) {
-    if (engineReader) throw error
+    if (engineReader && !isProseMirrorSchemaError(error)) throw error
     if (error instanceof Refusal) throw error
     refuse('invalid-schema')
   }
@@ -762,7 +767,7 @@ function validatePublicState(
       prosemirrorJSONToYXmlFragment(getDohcProseMirrorSchema(), rootNode.toJSON(), rebuiltBody)
       if (!semanticEqual(originalFingerprint, bodyFingerprint(rebuiltBody, null))) refuse('invalid-schema')
     } catch (error) {
-      if (engineReader) throw error
+      if (engineReader && !isProseMirrorSchemaError(error)) throw error
       if (error instanceof Refusal) throw error
       refuse('invalid-schema')
     } finally { rebuilt.destroy() }

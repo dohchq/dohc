@@ -5,7 +5,7 @@ import {readMarkdownSourceWitness} from './artifact-markdown.js'
 import {sameFrontmatterValue, FRONTMATTER_SOURCE_META_KEY, MARKDOWN_CRLF_META_KEY} from './frontmatter.js'
 import {recordFrontmatterSourceItems, writeFrontmatterMap} from './frontmatter-map.js'
 import {DOHC_SCHEMA_VERSION, getDohcProseMirrorSchema, getDohcYDocFrontmatter, markdownToYDoc, yDocToMarkdown} from './import-export.js'
-import {createLiveMarkdownJournalValidator, type LiveMarkdownRegistrationInput} from './liveDocumentValidation.js'
+import {createLiveMarkdownJournalValidator, isProseMirrorSchemaError, type LiveMarkdownRegistrationInput} from './liveDocumentValidation.js'
 import type {OrderedLiveUpdateCutPolicy} from './orderedLiveUpdateCut.js'
 
 const MAX_SOURCE_BYTES = 2 * 1024 * 1024
@@ -15,7 +15,13 @@ const sha = (bytes: Uint8Array) => Array.from(digest(bytes), byte => byte.toStri
 const textSha = (text: string) => sha(utf8.encode(text))
 const schema = getDohcProseMirrorSchema()
 const root = (doc: Y.Doc) => yXmlFragmentToProseMirrorRootNode(doc.getXmlFragment('body'), schema)
-const checkRoot = (node: ReturnType<typeof root>) => {if (node.childCount > 0) node.check()}
+function checkRoot(node: ReturnType<typeof root>): void {
+  try {if (node.childCount > 0) node.check()}
+  catch (error) {
+    if (!isProseMirrorSchemaError(error)) throw error
+    throw new Refusal('invalid-schema')
+  }
+}
 
 /** source must be the engine's compared snapshot, never a value read from witness metadata. */
 export interface EngineMarkdownInput extends LiveMarkdownRegistrationInput {readonly source: Uint8Array}

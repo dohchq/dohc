@@ -208,7 +208,7 @@ it.each(rows)('constructs and replays the desktop reading: $name', row => {
   const base = markdownToYDoc(row.earlier, {clientID: 1234})
   const checkpoint = Y.encodeStateAsUpdate(base)
   if (!row.accepted) {
-    try {expect(() => reader.construct({...context, source: row.source, checkpoint})).toThrow()}
+    try {expect(reader.construct({...context, source: row.source, checkpoint})).toEqual({kind: 'refused', reason: 'invalid-schema'})}
     finally {base.destroy()}
     return
   }
@@ -237,6 +237,31 @@ it.each(rows)('constructs and replays the desktop reading: $name', row => {
   expect(Y.encodeStateAsUpdate(base)).toEqual(checkpoint)
   base.destroy()
 })
+
+it('refuses schema check failures in the reader and its strict journal', () => {
+  const source = '[`code`](https://example.com)', doc = markdownToYDoc(source)
+  try {
+    bind(doc, source)
+    const checkpoint = Y.encodeStateAsUpdate(doc)
+    expect(reader.prove({...context, source, checkpoint}))
+      .toEqual({kind: 'refused', reason: 'invalid-schema'})
+    expect(createLiveMarkdownJournalValidator(policy, true)({...context, checkpoint, suffix: [], candidate: new Uint8Array([0, 0])}))
+      .toMatchObject({kind: 'refused', reason: 'invalid-schema'})
+  } finally {doc.destroy()}
+})
+
+it.each([new RangeError('Array buffer allocation failed'), new RangeError('Maximum call stack size exceeded'), new Error('unexpected check failure')])(
+  'keeps resource and unexpected check failures fatal: %s', error => {
+    const doc = markdownToYDoc('Body')
+    bind(doc, 'Body')
+    const checkpoint = Y.encodeStateAsUpdate(doc)
+    const trap = vi.spyOn(Object.getPrototypeOf(tree(doc)), 'check').mockImplementation(() => {throw error})
+    try {
+      expect(() => reader.prove({...context, source: 'Body', checkpoint})).toThrow(error)
+      expect(() => createLiveMarkdownJournalValidator(policy, true)({...context, checkpoint, suffix: [], candidate: new Uint8Array([0, 0])})).toThrow(error)
+    } finally {trap.mockRestore(); doc.destroy()}
+  },
+)
 
 it.each(forgedSources)('requires the actual snapshot for the #2116 vector: %s', source => {
   const doc = markdownToYDoc(source)

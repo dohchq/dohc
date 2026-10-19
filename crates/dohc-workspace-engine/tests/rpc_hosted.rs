@@ -34,6 +34,79 @@ use serde_json::{Value, json};
 const BEARER: &str = "relay-test-token";
 const WORKSPACE: &str = "hosted-ws";
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_departed_reader_hold_does_not_stop_native_parking_or_the_hosted_pass() {
+    use dohc_engine_collab::{ContentKind, DocKey, Ydoc};
+    use dohc_engine_storage::{EngineStore, NoFaults};
+    let data: Value = serde_json::from_str(include_str!(
+        "../../dohc-engine-collab/tests/reader-resolver.json"
+    ))
+    .unwrap();
+    let source = data["source"].as_str().unwrap();
+    let mut relay = HostedRelay::default();
+    relay.log.push(json!({
+        "relaySeq": 1, "workspaceId": WORKSPACE, "originId": "owner", "originSeq": 0,
+        "opKind": "workspace.init", "payload": {}, "recordedAtMs": 1_001,
+    }));
+    relay.create("owner", 1, "doc-a", "a.md", source);
+    relay.create("owner", 2, "doc-z", "z.txt", "Native note");
+    relay.share("doc-a", "a.md");
+    relay.share("doc-z", "z.txt");
+    let relay = FakeRelay::start(relay);
+    let scratch = ScratchDir::new().unwrap();
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, &relay).await;
+    let mut host = Host {
+        transport,
+        handle,
+        id: 1,
+    };
+    host.create().await;
+    host.sync().await;
+    let mut store = EngineStore::open(&engine_db_path(&scratch).unwrap(), 2_000).unwrap();
+    let key = DocKey::new(WORKSPACE, "main", "doc-a").unwrap();
+    let checkpoint = base64::engine::general_purpose::STANDARD
+        .decode(data["claimedCheckpoint"].as_str().unwrap())
+        .unwrap();
+    dohc_engine_collab::claim_base_at_relay(
+        &mut store,
+        &key,
+        ContentKind::Richdoc,
+        &checkpoint,
+        &dohc_engine_collab::BaseRelayCoordinate {
+            origin_id: "owner".into(),
+            origin_seq: 3,
+            relay_seq: 4,
+        },
+        &NoFaults,
+        2_001,
+    )
+    .unwrap();
+    let doc = Ydoc::wire();
+    doc.apply(&checkpoint).unwrap();
+    let update = doc.richdoc_append_paragraph("Unsettled reader body");
+    store
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_collab::record_update_in_tx(tx, &key, &update, None, None, 2_002)
+        })
+        .unwrap();
+    drop(store);
+    {
+        let mut relay = relay.relay();
+        relay.unshare("doc-a");
+        relay.unshare("doc-z");
+    }
+    let pass = host.pull().await;
+    assert_eq!(pass["departed"], json!(["doc-a"]), "{pass}");
+    assert_eq!(document_state(&scratch, "doc-a").as_deref(), Some("ready"));
+    assert_eq!(document_state(&scratch, "doc-z").as_deref(), Some("parked"));
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("a.md")).unwrap(),
+        source
+    );
+    assert!(!scratch.path().join("z.txt").exists());
+}
+
 struct TestRequest {
     method: String,
     target: String,

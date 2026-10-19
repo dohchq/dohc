@@ -9,7 +9,13 @@ use std::{
 use tokio::sync::OnceCell;
 
 const MAX_ENTRIES: usize = 16;
-const MAX_BYTES: usize = 64 * 1024 * 1024;
+
+fn transient(failure: &Failure) -> bool {
+    matches!(
+        failure,
+        Failure::Crashed | Failure::TimedOut | Failure::Overloaded | Failure::Superseded
+    )
+}
 
 #[derive(PartialEq, Eq)]
 struct Key {
@@ -18,8 +24,8 @@ struct Key {
     restore_generation: Option<i64>,
     moment: String,
     path: String,
-    source: String,
     source_sha: String,
+    source_length: usize,
     projection_sha: String,
     content_digest: String,
 }
@@ -31,11 +37,12 @@ mod tests;
 /// A miss leaves the writer before the caller starts or waits for the process.
 pub struct PendingProof {
     reader: Arc<Reader>,
-    request: Request,
+    request: Mutex<Option<Request>>,
     result: OnceCell<Result<bool, Failure>>,
     source_sha: String,
     source_length: usize,
     projection_sha: String,
+    canonical_sha: String,
     checkpoint_sha: String,
 }
 impl std::fmt::Debug for PendingProof {
@@ -47,7 +54,13 @@ impl PendingProof {
     pub async fn resolve(&self) {
         self.result
             .get_or_init(|| async {
-                match self.reader.request(self.request.clone()).await? {
+                let request = self
+                    .request
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .ok_or(Failure::Superseded)?;
+                match self.reader.request(request).await? {
                     Outcome::Proved {
                         proof,
                         checkpoint_sha256,
@@ -63,7 +76,8 @@ impl PendingProof {
                         checkpoint_sha256,
                     } if checkpoint_sha256 == self.checkpoint_sha
                         && proof.source_sha256 == self.source_sha
-                        && proof.source_byte_length == self.source_length =>
+                        && proof.source_byte_length == self.source_length
+                        && proof.projection_sha256 == self.canonical_sha =>
                     {
                         Ok(false)
                     }
@@ -77,7 +91,6 @@ impl PendingProof {
 struct Entry {
     key: Key,
     pending: Arc<PendingProof>,
-    bytes: usize,
     retries: u8,
 }
 
@@ -95,7 +108,12 @@ impl ReaderResolver {
         }
     }
 
-    fn lookup(&self, key: Key, request: Request) -> Result<Option<String>, CollabError> {
+    fn lookup(
+        &self,
+        key: Key,
+        request: Request,
+        canonical_sha: String,
+    ) -> Result<bool, CollabError> {
         let mut entries = self.entries.lock().unwrap();
         let mut retries = 0;
         if let Some(index) = entries.iter().position(|entry| entry.key == key) {
@@ -106,24 +124,13 @@ impl ReaderResolver {
                     return Err(CollabError::MarkdownReaderUnavailable);
                 }
                 Some(Ok(fresh)) => {
-                    let source = fresh.then(|| entry.key.source.clone());
+                    let fresh = *fresh;
                     entries.push_back(entry);
-                    return Ok(source);
+                    return Ok(fresh);
                 }
-                Some(Err(
-                    Failure::Crashed
-                    | Failure::TimedOut
-                    | Failure::Overloaded
-                    | Failure::Superseded,
-                )) if entry.retries == 0 => retries = 1,
-                Some(Err(_)) => {
-                    if !matches!(
-                        entry.pending.result.get(),
-                        Some(Err(Failure::Crashed
-                            | Failure::TimedOut
-                            | Failure::Overloaded
-                            | Failure::Superseded))
-                    ) {
+                Some(Err(failure)) if transient(failure) && entry.retries == 0 => retries = 1,
+                Some(Err(failure)) => {
+                    if !transient(failure) {
                         entries.push_back(entry);
                     }
                     return Err(CollabError::MarkdownReaderUnavailable);
@@ -135,27 +142,7 @@ impl ReaderResolver {
                 }
             }
         }
-        let bytes = request.source.capacity() + request.checkpoint.capacity()
-            + [
-                &key.document.workspace_id, &key.document.version_id, &key.document.object_id,
-                &key.moment, &key.path, &key.source, &key.source_sha,
-                &key.projection_sha, &key.content_digest,
-                &request.document.workspace_id, &request.document.main_version_id,
-                &request.document.object_id, &request.document.lineage_claim_id,
-                &request.current_path,
-            ].into_iter().map(|value| value.capacity() + 32).sum::<usize>()
-            + [
-                &key.marker.lineage_claim_id, &key.marker.lineage_parent_claim_id,
-                &key.marker.lineage_epoch_tag, &key.marker.path, &key.marker.base_origin_id,
-            ].into_iter().flatten().map(|value| value.capacity() + 32).sum::<usize>()
-            // Entry, Arc/OnceCell, allocator overhead, and three copied SHA strings.
-            + std::mem::size_of::<Entry>() + std::mem::size_of::<PendingProof>() + 4096;
-        if bytes > MAX_BYTES {
-            return Err(CollabError::MarkdownReaderUnavailable);
-        }
-        while entries.len() >= MAX_ENTRIES
-            || entries.iter().map(|entry| entry.bytes).sum::<usize>() + bytes > MAX_BYTES
-        {
+        while entries.len() >= MAX_ENTRIES {
             let Some(index) = entries
                 .iter()
                 .position(|entry| Arc::strong_count(&entry.pending) == 1)
@@ -169,23 +156,18 @@ impl ReaderResolver {
             source_sha: key.source_sha.clone(),
             source_length: request.source.len(),
             projection_sha: key.projection_sha.clone(),
+            canonical_sha,
             checkpoint_sha: crate::hex_sha256(&request.checkpoint),
-            request,
+            request: Mutex::new(Some(request)),
             result: OnceCell::new(),
         });
         entries.push_back(Entry {
             key,
             pending: pending.clone(),
-            bytes,
             retries,
         });
         Err(CollabError::MarkdownReaderPending(pending))
     }
-}
-
-/// Only engine-reader construction opts into snapshot-bound source resolution.
-pub fn needs_reader(doc: &Ydoc) -> bool {
-    doc.has_reader_source()
 }
 
 /// The caller reobserves this authority on every use, including cache hits.
@@ -193,12 +175,9 @@ pub fn resolve(
     conn: &Connection,
     key: &DocKey,
     doc: &Ydoc,
-    native: Option<String>,
+    canonical: &str,
     resolver: Option<&ReaderResolver>,
 ) -> Result<Option<String>, CollabError> {
-    if !needs_reader(doc) {
-        return Ok(native);
-    }
     let resolver = resolver.ok_or(CollabError::MarkdownReaderUnavailable)?;
     let reference = doc
         .markdown_source_reference()
@@ -240,8 +219,7 @@ pub fn resolve(
         .ok_or(CollabError::MarkdownReaderUnavailable)?;
     let checkpoint = doc.encode_full_state();
     let content_digest = crate::replay_parity::reader_checkpoint_content_digest(&checkpoint)?;
-    let restore_generation = crate::live_update_application::restore_generation(conn, key)
-        .map_err(|_| CollabError::RestoreFenced)?;
+    let restore_generation = crate::live_update_application::restore_generation(conn, key)?;
     if reference.source_sha256 != source_sha
         && crate::durable::last_settled_sha(conn, key)?.as_deref() != Some(&source_sha)
     {
@@ -259,18 +237,20 @@ pub fn resolve(
         source: source.as_bytes().to_vec(),
         checkpoint,
     };
-    resolver.lookup(
+    let fresh = resolver.lookup(
         Key {
             document: key.clone(),
             marker,
             restore_generation,
             moment,
             path,
-            source,
             source_sha,
+            source_length: source.len(),
             projection_sha: reference.projection_sha256,
             content_digest,
         },
         request,
-    )
+        crate::hex_sha256(canonical.as_bytes()),
+    )?;
+    Ok(fresh.then_some(source))
 }

@@ -93,7 +93,7 @@ async fn outside_races_dispatch_the_third_observed_proof_before_holding() {
                         conn,
                         &key,
                         &doc,
-                        None,
+                        &doc.project(ContentKind::Richdoc)?.content,
                         cache.reader_resolver.as_deref(),
                     )
                 })
