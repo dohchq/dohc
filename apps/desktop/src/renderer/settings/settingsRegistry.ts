@@ -2,6 +2,7 @@ import {
   Bot,
   Cloud,
   FolderOpen,
+  Keyboard,
   MonitorCog,
   Settings,
   Shield,
@@ -9,6 +10,7 @@ import {
   Wrench,
   type LucideIcon,
 } from "lucide-react";
+import { SHORTCUT_NAMES } from "../../shortcuts/shortcutNames";
 
 type SettingsScope = "User" | "Workspace" | "Mixed";
 
@@ -41,6 +43,15 @@ export const SETTINGS_SECTIONS = [
     group: "you",
     keywords: ["theme", "light", "dark", "system", "zoom", "accent", "color", "font", "editor", "text", "size", "sidebar", "views", "order", "hide"],
     Icon: MonitorCog,
+  },
+  {
+    id: "keyboard",
+    label: "Keyboard",
+    scope: "User",
+    group: "you",
+    // A search for a shortcut's name, such as "bold", finds the page.
+    keywords: ["keyboard", "shortcut", "shortcuts", "keys", ...SHORTCUT_NAMES],
+    Icon: Keyboard,
   },
   {
     id: "agents",
