@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import {createHash} from "node:crypto";
 import {spawn} from "node:child_process";
 import {once} from "node:events";
 import {existsSync, readFileSync} from "node:fs";
@@ -241,7 +242,7 @@ async function measure() {
         const start = performance.now(), page = await rpc("sync.pull", {workspaceId: "w"});
         await rpc("sync.commitCursor", {workspaceId: "w", pendingCursor: page.pendingCursor});
         const pull = performance.now() - start, cutStart = performance.now();
-        const cut = decodeReplicaCurrentView(await rpc("replica.cut", {selectors, knownTextShas: "", position: null, cursor: null}));
+        const cut = decodeReplicaCurrentView(await rpc("replica.cut", {selectors, selectorDigest: createHash("sha256").update(JSON.stringify(selectors)).digest("hex"), incarnation: lease.incarnation, knownTextShas: "", position: null, cursor: null}));
         assert.equal(cut.logCursor, logCursor); assert.equal(cut.files.length, 4); const cutMs = performance.now() - cutStart;
         if (pair >= 0) results.push({sandbox, pull, cut: cutMs});
       } finally {client.close(); child.kill("SIGKILL"); await exited; await socket.close(); principal.revoke(lease); await rm(store, {recursive: true, force: true});}

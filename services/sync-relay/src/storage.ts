@@ -635,7 +635,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   sampleReplicaHistory(lease: Parameters<typeof replicaCurrentViews.sampleReplicaHistory>[1]) { return replicaCurrentViews.sampleReplicaHistory(this,lease); }
   listReplicaHistoryPins(input: replicaCurrentViewReads.ReplicaCurrentViewReadInput, source?: replicaCurrentViewReads.ReplicaCurrentViewSource) { return replicaHistoryReads.listReplicaHistoryPins(this,input,source); }
   readReplicaHistoryPin(input: replicaCurrentViewReads.ReplicaCurrentViewReadInput & {pinId: string}, source?: replicaCurrentViewReads.ReplicaCurrentViewSource) { return replicaHistoryReads.readReplicaHistoryPin(this,input,source); }
-  listReplicaCurrentViewFiles(input: replicaCurrentViewReads.ReplicaCurrentViewReadInput, source?: replicaCurrentViewReads.ReplicaCurrentViewSource) {
+  listReplicaCurrentViewFiles(input: Parameters<typeof replicaCurrentViewReads.listReplicaCurrentViewFiles>[1], source?: replicaCurrentViewReads.ReplicaCurrentViewSource) {
     return replicaCurrentViewReads.listReplicaCurrentViewFiles(this, input, source);
   }
   readReplicaCurrentViewFile(input: replicaCurrentViewReads.ReplicaCurrentViewReadInput & {path: string}, source?: replicaCurrentViewReads.ReplicaCurrentViewSource) {
