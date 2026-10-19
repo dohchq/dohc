@@ -69,7 +69,7 @@ fn store_work_probe_counts_each_inverse_row_in_one_statement() {
     assert!(work.reads >= 2 && work.writes >= 1);
 }
 // Start on the actor, so queued Y.Doc work cannot enter this turn's counters.
-pub(in super::super) fn begin_turn(request: &str) {
+pub(in crate::actor) fn begin_turn(request: &str) {
     STORE_WORK.with(|cell| cell.set(StoreWork::default()));
     probes()
         .lock()
@@ -102,7 +102,7 @@ struct Phase {
     storage: Option<serde_json::Value>,
     store_work: Option<StoreWork>,
 }
-pub(in super::super) fn record_phase(
+pub(in crate::actor) fn record_phase(
     request: &str,
     phase: &str,
     member: Option<usize>,
@@ -173,7 +173,7 @@ fn disk_observers() -> &'static Mutex<std::collections::HashMap<PathBuf, DiskObs
         OnceLock::new();
     OBSERVERS.get_or_init(Mutex::default)
 }
-pub(in super::super) fn set_disk_observer(root: PathBuf, observer: Option<DiskObserver>) {
+pub(in crate::actor) fn set_disk_observer(root: PathBuf, observer: Option<DiskObserver>) {
     let mut observers = disk_observers().lock().unwrap();
     if let Some(observer) = observer {
         observers.insert(root, observer);
@@ -1346,25 +1346,28 @@ async fn two_thousand_members_bound_store_work_and_ydoc_wait() {
     assert_eq!(inverses, 2000, "the probe must observe every inverse row");
 }
 
-pub(in super::super) fn enable_work_probe(store: &EngineStore) {
-    store.read_with(|conn| {
-        dohc_engine_storage::capture_phase::enable_for_current_thread();
-        conn.execute_batch(INVERSE_PROBE).unwrap();
-        conn.trace_v2(
-            rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT
-                | rusqlite::trace::TraceEventCodes::SQLITE_TRACE_ROW,
-            Some(trace_store_work),
-        );
-    });
+pub(in crate::actor) fn enable_work_probe(store: &EngineStore) {
+    store
+        .read_with(|conn| {
+            dohc_engine_storage::capture_phase::enable_for_current_thread();
+            conn.execute_batch(INVERSE_PROBE).unwrap();
+            conn.trace_v2(
+                rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT
+                    | rusqlite::trace::TraceEventCodes::SQLITE_TRACE_ROW,
+                Some(trace_store_work),
+            );
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
 }
-pub(in super::super) fn turn_count(request: &str) -> usize {
+pub(in crate::actor) fn turn_count(request: &str) -> usize {
     probes()
         .lock()
         .unwrap()
         .get(request)
         .map_or(0, |p| p.phases.iter().filter(|p| p.actor).count())
 }
-pub(in super::super) fn proof(request: &str, members: usize, forward: bool) -> serde_json::Value {
+pub(in crate::actor) fn proof(request: &str, members: usize, forward: bool) -> serde_json::Value {
     let phases = probes().lock().unwrap()[request].phases.clone();
     let mut inverses = 0;
     let mut times = Vec::new();
@@ -1401,7 +1404,7 @@ pub(in super::super) fn proof(request: &str, members: usize, forward: bool) -> s
         "maxNs":times.last(),"inverseRows":inverses})
 }
 
-pub(in super::super) fn notify_inverse(request: &str, notify: Arc<tokio::sync::Notify>) {
+pub(in crate::actor) fn notify_inverse(request: &str, notify: Arc<tokio::sync::Notify>) {
     probes()
         .lock()
         .unwrap()

@@ -1,4 +1,4 @@
-use super::super::history_undo_turns::tests as undo_probe;
+use super::super::history_operations::turns::tests as undo_probe;
 use super::*;
 use dohc_engine_domain::{RenameTextFile, write_text_in_tx};
 use dohc_engine_storage::{FaultAction, FaultPoint, NoFaults};

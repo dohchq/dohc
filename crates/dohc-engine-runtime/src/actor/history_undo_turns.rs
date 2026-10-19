@@ -573,4 +573,4 @@ impl ActorHandle {
 
 #[cfg(test)]
 #[path = "history_undo_turn_tests.rs"]
-pub(super) mod tests;
+pub(in crate::actor) mod tests;
