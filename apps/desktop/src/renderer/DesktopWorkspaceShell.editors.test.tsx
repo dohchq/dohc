@@ -2609,6 +2609,7 @@ describe("ui-state merge-on-load", () => {
     // Start a canonical DM navigation and leave it in flight.
     await user.click(screen.getByTestId("activity-graph"));
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    await waitFor(() => expect(screen.getAllByTestId("graph-file-row").some(row => row.dataset.path?.startsWith("chat-thread:"))).toBe(true));
     const rows = await screen.findAllByTestId("graph-file-row");
     await user.click(rows.find((row) => row.dataset.path === dmNode.path)!);
     await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
@@ -2657,6 +2658,7 @@ describe("ui-state merge-on-load", () => {
     // Start a canonical DM navigation and leave it in flight.
     await user.click(screen.getByTestId("activity-graph"));
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    await waitFor(() => expect(screen.getAllByTestId("graph-file-row").some(row => row.dataset.path?.startsWith("chat-thread:"))).toBe(true));
     const rows = await screen.findAllByTestId("graph-file-row");
     await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
     await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
@@ -2707,6 +2709,7 @@ describe("ui-state merge-on-load", () => {
     // Start a canonical DM navigation and leave it in flight.
     await user.click(screen.getByTestId("activity-graph"));
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    await waitFor(() => expect(screen.getAllByTestId("graph-file-row").some(row => row.dataset.path?.startsWith("chat-thread:"))).toBe(true));
     const rows = await screen.findAllByTestId("graph-file-row");
     await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
     await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
@@ -2763,6 +2766,7 @@ describe("ui-state merge-on-load", () => {
     // the sidebar. Every navigation from here leaves the active tab alone.
     await user.click(screen.getByTestId("activity-graph"));
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    await waitFor(() => expect(screen.getAllByTestId("graph-file-row").some(row => row.dataset.path?.startsWith("chat-thread:"))).toBe(true));
     const rows = await screen.findAllByTestId("graph-file-row");
     await user.click(rows.find((row) => row.dataset.path === first.path)!);
     const chatsTab = await screen.findByTestId(`tab-dohc://chats/channel/${encodeURIComponent(first.channelId)}`);
@@ -2821,6 +2825,7 @@ describe("ui-state merge-on-load", () => {
 
     await user.click(screen.getByTestId("activity-graph"));
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    await waitFor(() => expect(screen.getAllByTestId("graph-file-row").some(row => row.dataset.path?.startsWith("chat-thread:"))).toBe(true));
     const rows = await screen.findAllByTestId("graph-file-row");
     await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
     await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
@@ -2858,6 +2863,7 @@ describe("ui-state merge-on-load", () => {
 
     await user.click(screen.getByTestId("activity-graph"));
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    await waitFor(() => expect(screen.getAllByTestId("graph-file-row").some(row => row.dataset.path?.startsWith("chat-thread:"))).toBe(true));
     const rows = await screen.findAllByTestId("graph-file-row");
     await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
     await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
@@ -2928,6 +2934,7 @@ describe("ui-state merge-on-load", () => {
     // Start a canonical DM navigation and leave it in flight.
     await user.click(screen.getByTestId("activity-graph"));
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    await waitFor(() => expect(screen.getAllByTestId("graph-file-row").some(row => row.dataset.path?.startsWith("chat-thread:"))).toBe(true));
     const rows = await screen.findAllByTestId("graph-file-row");
     await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
     await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
@@ -2984,6 +2991,7 @@ describe("ui-state merge-on-load", () => {
     // the sidebar.
     await user.click(screen.getByTestId("activity-graph"));
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    await waitFor(() => expect(screen.getAllByTestId("graph-file-row").some(row => row.dataset.path?.startsWith("chat-thread:"))).toBe(true));
     const rows = await screen.findAllByTestId("graph-file-row");
     await user.click(rows.find((row) => row.dataset.path === channel.path)!);
     expect((await screen.findByTestId(`tab-dohc://chats/channel/${encodeURIComponent(channel.channelId)}`)).dataset.active).toBe("true");
@@ -3242,6 +3250,7 @@ describe("ui-state merge-on-load", () => {
     await screen.findByTestId("chats-personal-feed");
     await user.click(screen.getByTestId("activity-graph"));
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    await waitFor(() => expect(screen.getAllByTestId("graph-file-row").some(row => row.dataset.path?.startsWith("chat-thread:"))).toBe(true));
     const rows = await screen.findAllByTestId("graph-file-row");
     const callsBefore = bridge.syncDms.mock.calls.length;
     await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
@@ -3274,6 +3283,7 @@ describe("ui-state merge-on-load", () => {
     // Start a canonical DM navigation from the graph and leave it in flight.
     await user.click(screen.getByTestId("activity-graph"));
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    await waitFor(() => expect(screen.getAllByTestId("graph-file-row").some(row => row.dataset.path?.startsWith("chat-thread:"))).toBe(true));
     const rows = await screen.findAllByTestId("graph-file-row");
     const dmCallsBefore = bridge.syncDms.mock.calls.length;
     await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
@@ -3323,6 +3333,7 @@ describe("ui-state merge-on-load", () => {
     // Start a canonical DM navigation from the graph and leave it in flight.
     await user.click(screen.getByTestId("activity-graph"));
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    await waitFor(() => expect(screen.getAllByTestId("graph-file-row").some(row => row.dataset.path?.startsWith("chat-thread:"))).toBe(true));
     const rows = await screen.findAllByTestId("graph-file-row");
     const dmCallsBefore = bridge.syncDms.mock.calls.length;
     await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
@@ -3363,6 +3374,7 @@ describe("ui-state merge-on-load", () => {
     // Start a canonical DM navigation from the graph and leave it in flight.
     await user.click(screen.getByTestId("activity-graph"));
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    await waitFor(() => expect(screen.getAllByTestId("graph-file-row").some(row => row.dataset.path?.startsWith("chat-thread:"))).toBe(true));
     const rows = await screen.findAllByTestId("graph-file-row");
     const dmCallsBefore = bridge.syncDms.mock.calls.length;
     await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
@@ -3411,6 +3423,7 @@ describe("ui-state merge-on-load", () => {
 
     await user.click(screen.getByTestId("activity-graph"));
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    await waitFor(() => expect(screen.getAllByTestId("graph-file-row").some(row => row.dataset.path?.startsWith("chat-thread:"))).toBe(true));
     const rows = await screen.findAllByTestId("graph-file-row");
     const dmCallsBefore = bridge.syncDms.mock.calls.length;
     await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
@@ -3482,6 +3495,7 @@ describe("ui-state merge-on-load", () => {
     // Start a canonical DM navigation from the graph and leave it in flight.
     await user.click(screen.getByTestId("activity-graph"));
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    await waitFor(() => expect(screen.getAllByTestId("graph-file-row").some(row => row.dataset.path?.startsWith("chat-thread:"))).toBe(true));
     const rows = await screen.findAllByTestId("graph-file-row");
     const dmCallsBefore = bridge.syncDms.mock.calls.length;
     await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
@@ -3513,7 +3527,7 @@ describe("ui-state merge-on-load", () => {
   // `if (target)` branch cancels the pending DM.
   it("discards an in-flight DM navigation when a heading jump lands in the active file", async () => {
     const heading = {
-      path: "a.md#plan",
+      path: 'heading:["a.md","plan",0]',
       kind: "heading" as const,
       filePath: "a.md",
       headingAnchor: "plan",
@@ -3543,6 +3557,7 @@ describe("ui-state merge-on-load", () => {
     // Start a canonical DM navigation and leave it in flight.
     await user.click(screen.getByTestId("activity-graph"));
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    await waitFor(() => expect(screen.getAllByTestId("graph-file-row").some(row => row.dataset.path?.startsWith("chat-thread:"))).toBe(true));
     const rows = await screen.findAllByTestId("graph-file-row");
     await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
     await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
