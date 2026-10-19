@@ -313,8 +313,12 @@ pub fn stored_under_other_spelling(root: &Path, relative: &str) -> bool {
 /// [`stored_under_other_spelling`]. NTFS keeps normalization forms distinct.
 fn stored_spelling(root: &Path, relative: &str) -> Option<String> {
     let root = root.canonicalize().ok()?;
+    stored_spelling_in(&root, relative)
+}
+
+pub(crate) fn stored_spelling_in(root: &Path, relative: &str) -> Option<String> {
     let stored = root.join(relative).canonicalize().ok()?;
-    let stored = stored.strip_prefix(&root).ok()?;
+    let stored = stored.strip_prefix(root).ok()?;
     let tracked: Vec<&str> = relative.split('/').collect();
     if stored.components().count() != tracked.len() {
         return None;
@@ -327,7 +331,7 @@ fn stored_spelling(root: &Path, relative: &str) -> Option<String> {
         stored.set_file_name(dohc_windows_files::stored_leaf_name(&root.join(relative)).ok()?);
         stored
     };
-    let mut lookup = root.clone();
+    let mut lookup = root.to_path_buf();
     let mut spelling = Vec::with_capacity(tracked.len());
     let leaf = tracked.len() - 1;
     for (index, (stored, tracked)) in stored.components().zip(tracked).enumerate() {
