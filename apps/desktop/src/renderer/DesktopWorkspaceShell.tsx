@@ -1,3 +1,4 @@
+import type { GraphNode } from "./workbench/graphData";
 import { useTypingRecoveryNotices } from "./shell/useTypingRecoveryNotices";
 import { useFolderAppOffers } from "./offers/useFolderAppOffers";
 import { withClosedEngineDocSession } from "./collab/engineDocLease";
@@ -41,7 +42,6 @@ import type {
   SyncStatusResult,
   TryInVersionRunState,
   WorkbenchMenuCommand,
-  WorkspaceGraphResult,
   WorkspaceFileEntry,
   WorkspaceActivityEvent,
   WorkspaceSummary,
@@ -2709,7 +2709,7 @@ export function DesktopWorkspaceShell(props: {
     [openCanonicalDmInTab, openChatThreadInPanel, openChatsNavInTab, openChatsTab],
   );
   const openGraphChatThread = useCallback(
-    (node: WorkspaceGraphResult["nodes"][number]) => {
+    (node: GraphNode) => {
       const target = graphChatOpenTarget(node);
       if (target.surface === "file") {
         openChatThreadInPanel(target.thread);
@@ -5448,6 +5448,7 @@ export function DesktopWorkspaceShell(props: {
                   onOpenChatThread={openGraphChatThread}
                   chatMentionsAvailable={captureAvailable}
                   variant="page"
+                  onError={reportShellError}
                 />
               </Suspense>
             );

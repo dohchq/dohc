@@ -6,9 +6,10 @@ const documentColumns = 'workspace_id,main_version_id,object_id,lineage_claim_id
 const documentWhere = 'workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?';
 const day = 86_400_000;
 
-function errorCode(error: unknown): string {
-  const fault = error as {code?: unknown; name?: unknown} | null;
-  return typeof fault?.code === 'string' ? fault.code : typeof fault?.name === 'string' ? fault.name : 'UnknownError';
+function errorDetails(error: unknown) {
+  const fault = error as {code?: unknown; name?: unknown; errcode?: unknown} | null;
+  return {errorCode: typeof fault?.code === 'string' ? fault.code : typeof fault?.name === 'string' ? fault.name : 'UnknownError',
+    ...(typeof fault?.errcode === 'number' ? {errcode: fault.errcode} : {})};
 }
 
 function describeRow(row: Record<string, unknown>) {
@@ -69,8 +70,7 @@ function* checkPass(db: SqliteDb, reported: Set<string>, report: typeof console.
           yield;
         } while (true);
       } catch (error) {
-        reported.add(identity);
-        report('[sync-relay] live journal unreadable', {document, errorCode: errorCode(error)});
+        report('[sync-relay] live journal unreadable', {document, ...errorDetails(error)});
       }
     }
     yield;
@@ -87,7 +87,7 @@ export function startLiveJournalCheck(db: SqliteDb, report = console.error) {
       pass ??= checkPass(db, reported, report);
       if (!pass.next().done) {schedule(1); return;}
     } catch (error) {
-      report('[sync-relay] live journal check failed', {errorCode: errorCode(error)});
+      report('[sync-relay] live journal check failed', errorDetails(error));
     }
     pass = undefined;
     schedule(day);

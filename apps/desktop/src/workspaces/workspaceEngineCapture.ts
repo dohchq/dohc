@@ -19,7 +19,7 @@ import {
 } from "@dohc/workspace-core/versionCompare";
 import { resolveEffectivePolicy } from "@dohc/security-contract/effective-policy";
 // The path floor is a cross-process security contract with a Rust twin, not
-// engine state — the same reason workspaceFiles/workspaceGraph/workspaceSearch
+// engine state — the same reason workspaceFiles/workspaceSearch
 // and the relay's shareFilter already read it from here.
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import {
@@ -769,7 +769,11 @@ export interface WorkspaceEngineCaptureOptions {
   store?: CaptureVersionedTextStore;
   // Injectable for tests; production uses the daemon's encrypted secret store.
   secretStore?: SecretFileStore;
-  now?: () => number;
+  // Milliseconds on a monotonic clock, which times when the capture's delete
+  // records and expected removals expire. A wall clock that steps forward
+  // would expire them early. Injectable for tests; production reads
+  // performance.now().
+  monotonic?: () => number;
   // Injectable id seam (oracle/tests) for the correlationId stamped on every
   // capture/version/restore write. Omitted ⇒ a real randomUUID, identical to
   // today's behavior.
@@ -1733,7 +1737,7 @@ export function createWorkspaceEngineCapture(
   options: WorkspaceEngineCaptureOptions,
 ): WorkspaceEngineCapture {
   const { workspaceId, rootPath, attachmentId } = options;
-  const now = options.now ?? (() => Date.now());
+  const monotonic = options.monotonic ?? (() => performance.now());
   const createId = options.createId ?? (() => randomUUID());
   const teardownRetry = options.teardownRetryMs ?? {
     initial: TEARDOWN_RETRY_INITIAL_MS,
@@ -1871,7 +1875,7 @@ export function createWorkspaceEngineCapture(
     // no-debt tombstone map. A close-retry ladder's own doubling delay
     // caps at the same 10s as that TTL, so a delete landing right after
     // one retry can otherwise expire before the next retry arrives to ask.
-    armRemovalSuppression: (expected: boolean, deletedAtMs: number) => void;
+    armRemovalSuppression: (expected: boolean, deletedSeq: number) => void;
   }
   const liveYDocSessions = new Map<string, LiveYDocSession>();
 
@@ -1969,15 +1973,21 @@ export function createWorkspaceEngineCapture(
   // recreates the path; invalidating the tombstone on recreation would
   // let the old session's late debt arm and settle its stale canonical
   // doc over the new file). The memory discriminates by which session is
-  // registering instead: `deletedAtMs` is compared against that session's
-  // own open time at the consuming door, so a session that opened before
+  // registering instead: `deletedSeq` is compared against that session's
+  // own open at the consuming door, so a session that opened before
   // the delete (the stale one) still cancels, and a session that opened
   // after it (the recreation's own) arms normally — see
   // `consumeRecentExternalDeleteWithNoDebt`.
   const recentExternalDeletesWithNoDebt = new Map<
     string,
-    { deletedAtMs: number; expiresAtMs: number; expected: boolean }
+    { deletedSeq: number; expiresAtMs: number; expected: boolean }
   >();
+  // The order this capture saw a session open, a delete arrive and a settle
+  // start in. "Which came first" reads this, never the clock: a millisecond
+  // clock ties when two of them land in one millisecond, and a wall clock
+  // can step backward.
+  let observationSeq = 0;
+  const nextObservationSeq = (): number => ++observationSeq;
   // Swept in place, at most once per PRUNE window (#681 round 9, codex
   // P2 — round 8's version rebuilt the whole map, via a spread + filter +
   // new Map, on every insert. A bulk deletion of a large tree calls
@@ -1992,7 +2002,7 @@ export function createWorkspaceEngineCapture(
   const RECENT_EXTERNAL_DELETE_PRUNE_INTERVAL_MS = 1_000;
   let recentExternalDeletesPrunedAtMs = -Infinity;
   function pruneRecentExternalDeletesWithNoDebt(): void {
-    const nowMs = now();
+    const nowMs = monotonic();
     if (nowMs - recentExternalDeletesPrunedAtMs < RECENT_EXTERNAL_DELETE_PRUNE_INTERVAL_MS) {
       return;
     }
@@ -2001,12 +2011,11 @@ export function createWorkspaceEngineCapture(
       if (entry.expiresAtMs <= nowMs) recentExternalDeletesWithNoDebt.delete(path);
     }
   }
-  function noteExternalDeleteWithNoDebt(path: string, expected: boolean): void {
+  function noteExternalDeleteWithNoDebt(path: string, expected: boolean, deletedSeq: number): void {
     pruneRecentExternalDeletesWithNoDebt();
-    const deletedAtMs = now();
     recentExternalDeletesWithNoDebt.set(path, {
-      deletedAtMs,
-      expiresAtMs: deletedAtMs + EXPECTED_ENGINE_EVENT_EXPIRY_MS,
+      deletedSeq,
+      expiresAtMs: monotonic() + EXPECTED_ENGINE_EVENT_EXPIRY_MS,
       expected,
     });
   }
@@ -2024,14 +2033,14 @@ export function createWorkspaceEngineCapture(
   // must never trust a sweep that may have been skipped this window.
   function consumeRecentExternalDeleteWithNoDebt(
     path: string,
-    sessionOpenedAtMs: number,
+    sessionOpenedSeq: number,
   ): { expected: boolean } | null {
     pruneRecentExternalDeletesWithNoDebt();
     const entry = recentExternalDeletesWithNoDebt.get(path);
     if (
       entry === undefined ||
-      entry.expiresAtMs <= now() ||
-      sessionOpenedAtMs >= entry.deletedAtMs
+      entry.expiresAtMs <= monotonic() ||
+      sessionOpenedSeq > entry.deletedSeq
     ) {
       return null;
     }
@@ -3727,7 +3736,7 @@ export function createWorkspaceEngineCapture(
 
   // Whether an engine-originated removal of `path` is registered and unexpired.
   function peekExpectedEvent(path: string): boolean {
-    const nowMs = now();
+    const nowMs = monotonic();
     if (!observationDrainUnavailable) expectedEvents = expectedEvents.filter((event) => event.expiresAtMs > nowMs);
     return expectedEvents.some((event) => event.path === path);
   }
@@ -3737,7 +3746,7 @@ export function createWorkspaceEngineCapture(
   ): () => void {
     const registered: RegisteredExpectedEngineEvent[] = events.map((event) => ({
       ...event,
-      expiresAtMs: now() + EXPECTED_ENGINE_EVENT_EXPIRY_MS,
+      expiresAtMs: monotonic() + EXPECTED_ENGINE_EVENT_EXPIRY_MS,
     }));
     expectedEvents.push(...registered);
     return () => {
@@ -4215,15 +4224,15 @@ export function createWorkspaceEngineCapture(
       });
 
       async function openYDocSessionTask(): Promise<WorkspaceEngineYDocProviderSession | RecordEditSession> {
-        // This session's own place in time, captured before anything else
-        // runs: the registration door
+        // This session's own place in the observation order, taken before
+        // anything else runs: the registration door
         // (`scheduleDetachedLockedSettle`, far below) compares this against
-        // a delete tombstone's own timestamp to tell a stale incarnation
+        // a delete tombstone's own place to tell a stale incarnation
         // (opened before the delete — its content is what the deletion
         // orphaned) from this path's later recreation (opened after it —
         // arms normally, since a tombstone recorded before this session
         // began says nothing about what this session holds).
-        const sessionOpenedAtMs = now();
+        const sessionOpenedSeq = nextObservationSeq();
         const removal = removalWindowFor(input.path);
         if (removal) {
           throw new YDocRemovalInProgressError(
@@ -4342,9 +4351,9 @@ export function createWorkspaceEngineCapture(
         // after the write already materialized, but before this callback
         // runs, must survive the clear. Keyed on start, not completion:
         // the write could have landed any time from here on, so a
-        // tombstone recorded at or after this moment might be exactly
-        // that delete.
-        const settleStartedAtMs = new Map<string, number>();
+        // tombstone recorded after this point might be exactly that
+        // delete.
+        const settleStartedSeq = new Map<string, number>();
         const noteUpdate = (): void => {
           updatesSeen += 1;
         };
@@ -4375,8 +4384,8 @@ export function createWorkspaceEngineCapture(
           // redeem.
           const claim = settleClaims.get(settleId(token, generation));
           settleClaims.delete(settleId(token, generation));
-          const startedAtMs = settleStartedAtMs.get(settleId(token, generation));
-          settleStartedAtMs.delete(settleId(token, generation));
+          const startedSeq = settleStartedSeq.get(settleId(token, generation));
+          settleStartedSeq.delete(settleId(token, generation));
           if (claim !== undefined && claim > updatesSettled) updatesSettled = claim;
           lastSettledSha = result.sha256;
           // The settle committed, but the engine says the FILE did not move
@@ -4419,8 +4428,8 @@ export function createWorkspaceEngineCapture(
           const staleTombstone = recentExternalDeletesWithNoDebt.get(input.path);
           if (
             staleTombstone !== undefined &&
-            startedAtMs !== undefined &&
-            staleTombstone.deletedAtMs <= startedAtMs
+            startedSeq !== undefined &&
+            staleTombstone.deletedSeq < startedSeq
           ) {
             recentExternalDeletesWithNoDebt.delete(input.path);
           }
@@ -4500,7 +4509,7 @@ export function createWorkspaceEngineCapture(
         const onSettleStart = (token: number, generation: number) => {
           settleStarts += 1;
           settleClaims.set(settleId(token, generation), updatesSeen);
-          settleStartedAtMs.set(settleId(token, generation), now());
+          settleStartedSeq.set(settleId(token, generation), nextObservationSeq());
           const saveToken = ++saveStateTokens;
           settleSaveStateTokens.set(settleId(token, generation), saveToken);
           reportSaveState("settling", saveToken, "start");
@@ -4533,7 +4542,7 @@ export function createWorkspaceEngineCapture(
           // This settle carried nothing to History, so its claim is dropped
           // unredeemed — and only its claim, whichever settle finishes first.
           settleClaims.delete(settleId(token, generation));
-          settleStartedAtMs.delete(settleId(token, generation));
+          settleStartedSeq.delete(settleId(token, generation));
           const saveToken = takeSaveToken(token, generation);
           if (typeof error === "object" && error !== null) {
             settleFailureTokens.set(error, saveToken);
@@ -4748,8 +4757,8 @@ export function createWorkspaceEngineCapture(
         // `consumeRecentExternalDeleteWithNoDebt` applies still holds — a
         // session opened after the delete is this path's later recreation,
         // not the incarnation the delete orphaned.
-        const armRemovalSuppression = (expected: boolean, deletedAtMs: number): void => {
-          if (writeCancelled || sessionOpenedAtMs >= deletedAtMs) return;
+        const armRemovalSuppression = (expected: boolean, deletedSeq: number): void => {
+          if (writeCancelled || sessionOpenedSeq > deletedSeq) return;
           standDownFromWrite(removalStandDownMessage({ expected }));
         };
 
@@ -4768,7 +4777,7 @@ export function createWorkspaceEngineCapture(
           if (writeCancelled) return true;
           const tombstone = consumeRecentExternalDeleteWithNoDebt(
             input.path,
-            sessionOpenedAtMs,
+            sessionOpenedSeq,
           );
           if (tombstone === null) return false;
           standDownFromWrite(removalStandDownMessage(tombstone));
@@ -5129,7 +5138,7 @@ export function createWorkspaceEngineCapture(
           if (stopped) return;
           const tombstone = writeCancelled
             ? null
-            : consumeRecentExternalDeleteWithNoDebt(input.path, sessionOpenedAtMs);
+            : consumeRecentExternalDeleteWithNoDebt(input.path, sessionOpenedSeq);
           if (tombstone !== null) {
             onError(
               `ydoc close retry of ${input.path}`,
@@ -5695,12 +5704,13 @@ export function createWorkspaceEngineCapture(
       for (const event of batch) {
         if (event.operation !== "delete") continue;
         const expected = peekExpectedEvent(event.path);
+        const deletedSeq = nextObservationSeq();
         if (!detachedLockedDebts.has(event.path)) {
-          noteExternalDeleteWithNoDebt(event.path, expected);
+          noteExternalDeleteWithNoDebt(event.path, expected, deletedSeq);
         }
         const live = liveYDocSessions.get(event.path);
         if (live?.status === "failing-close") {
-          live.armRemovalSuppression(expected, now());
+          live.armRemovalSuppression(expected, deletedSeq);
         }
       }
       // Registry maintenance, not capture: the daemon performs the
@@ -5732,9 +5742,10 @@ export function createWorkspaceEngineCapture(
           }
           if (!absent) continue;
           const expected = peekExpectedEvent(path);
-          if (!detachedLockedDebts.has(path)) noteExternalDeleteWithNoDebt(path, expected);
+          const deletedSeq = nextObservationSeq();
+          if (!detachedLockedDebts.has(path)) noteExternalDeleteWithNoDebt(path, expected, deletedSeq);
           const live = liveYDocSessions.get(path);
-          if (live?.status === "failing-close") live.armRemovalSuppression(expected, now());
+          if (live?.status === "failing-close") live.armRemovalSuppression(expected, deletedSeq);
           cancelSuspendedDebts(suspendDetachedDebts(candidate => candidate === path),
             expected ? `dohc's own removal of ${path}` : `an external delete of ${path}`);
         }

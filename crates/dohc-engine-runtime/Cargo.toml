@@ -13,6 +13,7 @@ description = "Workspace actor runtime for the engine: one actor per engine.db o
 fault-injection = ["dohc-engine-storage/fault-injection", "dohc-engine-domain/fault-injection"]
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dohc-engine-storage = { path = "../dohc-engine-storage" }
 dohc-engine-crypto = { path = "../dohc-engine-crypto" }

@@ -122,6 +122,7 @@
     "desktop:join-shared-channel",
     "desktop:leave-dm",
     "desktop:leave-shared-channel",
+    "desktop:links-edges",
     "desktop:links-in",
     "desktop:links-resolve",
     "desktop:list-automation-buttons",
@@ -212,7 +213,6 @@
     "desktop:read-usage-record",
     "desktop:read-workspace-database",
     "desktop:read-workspace-database-page",
-    "desktop:read-workspace-graph",
     "desktop:read-workspace-text",
     "desktop:rebuild-engine-store",
     "desktop:refresh-share-mounts",
@@ -348,6 +348,7 @@
     "desktop:undo-history-operation": "trusted-sender",
     "desktop:set-agent-color": "active-workspace",
     "desktop:links-in": "active-workspace",
-    "desktop:links-resolve": "active-workspace"
+    "desktop:links-resolve": "active-workspace",
+    "desktop:links-edges": "active-workspace"
   }
 }

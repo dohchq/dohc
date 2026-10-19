@@ -2205,3 +2205,13 @@ it("forwards link batches through the workspace handle and rejects malformed rep
   result = { entries: [] };
   await expect(adapter.incomingLinks({ subject: { path: "target.md" } })).rejects.toThrow();
 });
+
+it("binds edge pages to the workspace handle and validates the shared record budget", async () => {
+  const requests: Request[] = [];
+  let result: JsonValue = {versionId:"main",files:[{objectId:"a",path:"a.md",title:"A"}],entries:[],unchecked:[],complete:false,indexBuilding:true,mountsCovered:false,nextCursor:"sealed"};
+  const adapter = new VersionedLiveAdapter({close(){},async sendRequest(request){requests.push(request);return {id:request.id,result};}}, WORKSPACE, {workspaceId:WORKSPACE});
+  expect(await adapter.linkEdges({cursor:"previous"})).toEqual(result);
+  expect(requests[0]).toMatchObject({method:"links.edges",workspace:WORKSPACE,params:{cursor:"previous"}});
+  result = {...result,unchecked:Array.from({length:100},()=> "pending.md")};
+  await expect(adapter.linkEdges({})).rejects.toThrow("100 records");
+});

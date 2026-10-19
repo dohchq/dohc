@@ -149,6 +149,7 @@ export interface CaptureTextFileMetadata {
 
 export type CaptureVersionedTextStore = VersionedTextStore & {
   resolveFiles: VersionedLiveAdapter["resolveFiles"];
+  linkEdges: VersionedLiveAdapter["linkEdges"];
   incomingLinks: VersionedLiveAdapter["incomingLinks"];
   resolveLinks: VersionedLiveAdapter["resolveLinks"];
   listUnconfirmedSharePaths(input: { workspaceId: string; shareId: string; grantedSelector: ShareViewSelector }): Promise<ShareUnconfirmedChanges>;
@@ -958,6 +959,7 @@ export function createCaptureLiveStores(
     checkMove: ({ author, ...input }: { workspaceId: string; versionId: string; path: string; author?: MomentWriteAuthor }) =>
       runRead(async (adapter) => await adapter.checkMove({ ...input, ...(author ? { author: adapterAuthor(author) } : {}) })),
 
+    linkEdges: input => runRead(adapter => adapter.linkEdges(input)),
     incomingLinks: input => runRead(adapter => adapter.incomingLinks(input)),
     resolveLinks: input => runRead(adapter => adapter.resolveLinks(input)),
     async resolveFiles(input: Parameters<VersionedLiveAdapter["resolveFiles"]>[0]) {

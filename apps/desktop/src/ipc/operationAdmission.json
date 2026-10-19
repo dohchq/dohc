@@ -168,5 +168,6 @@
   "desktop:cancel-relay-share-discussion-activity": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:owner-restore": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:links-in": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
-  "desktop:links-resolve": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null }
+  "desktop:links-resolve": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:links-edges": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null }
 }

@@ -218,8 +218,6 @@ const bridge: DohcDesktopBridge = {
     }
     return paths;
   },
-  readWorkspaceGraph: (payload) =>
-    ipcRenderer.invoke(CHANNELS.readWorkspaceGraph, payload),
   listWorkspaceHeadings: (payload) =>
     ipcRenderer.invoke(CHANNELS.listWorkspaceHeadings, payload),
   readWorkspaceDatabase: (payload) =>

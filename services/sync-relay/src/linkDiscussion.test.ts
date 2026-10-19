@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { hashLinkBearer } from "./linkSecurity";
 import { DiscussionActivityHub } from "./discussionActivity";
 import {
-  DISCUSSION_DISPLAY_NAME_LOOKUP_DEADLINE_MS,
+  ACCOUNT_NAME_LOOKUP_DEADLINE_MS,
   type SyncRelayHandler,
 } from "./server";
 import type { OpenSyncRelayStorageOptions, SyncRelayStorage } from "./storage";
@@ -2771,7 +2771,7 @@ describe("share discussion HTTP boundary", () => {
       expect(vi.getTimerCount()).toBe(timerBaseline + 1);
 
       await vi.advanceTimersByTimeAsync(
-        DISCUSSION_DISPLAY_NAME_LOOKUP_DEADLINE_MS - 1,
+        ACCOUNT_NAME_LOOKUP_DEADLINE_MS - 1,
       );
       releaseLookup("  Owner Name  ");
       const response = await pending;
@@ -2856,7 +2856,7 @@ describe("share discussion HTTP boundary", () => {
         expect(vi.getTimerCount(), caseLabel).toBe(timerBaseline + 1);
 
         await vi.advanceTimersByTimeAsync(
-          DISCUSSION_DISPLAY_NAME_LOOKUP_DEADLINE_MS - 1,
+          ACCOUNT_NAME_LOOKUP_DEADLINE_MS - 1,
         );
         expect(settled, caseLabel).toBe(false);
         expect(

@@ -140,7 +140,7 @@ it("a persist error clears the pending view before reporting a failed restore fl
   const failure=new Error("injected flip failure"),observed:Array<{error:unknown;read:unknown;view:unknown}>=[];
   vi.spyOn(f.storage,"flipReplicaCurrentView").mockImplementation(()=>{throw failure;});
   const supervisor=createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("history-persist-failure"),
-    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...incoming,moved:false,nextCursor:null,refusedFiles:[]})}),
+    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...incoming,delta:false,removed:[],moved:false,nextCursor:null,refusedFiles:[]})}),
     onError:(_workspace,error)=>observed.push({error,view:supervisor.currentReadView("w")?.view,
       read:f.storage.readReplicaHistoryPin({...f.input,grantId:"late",pinId:pin},supervisor)})});
   try {
@@ -183,7 +183,7 @@ it("position-only views let a floor-ahead grant finish updating",async()=>{
   expect(f.storage.readReplicaCurrentViewFile({...f.input,grantId:"late",path:"docs/a.md"})).toEqual({status:"updating"});
   const store=vi.spyOn(f.storage,"storeReplicaCurrentView");
   const supervisor=createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("history-positions"),
-    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...f.view(),moved:false,nextCursor:null,refusedFiles:[]})})});
+    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...f.view(),delta:false,removed:[],moved:false,nextCursor:null,refusedFiles:[]})})});
   try {
     await supervisor.activate("w");
     expect(f.list({grantId:"late"})).toMatchObject({status:"ready"});
@@ -223,7 +223,7 @@ it("a pending file edit survives cursor-only views and retirement uses one flip"
   const f=await fixture();f.save();let latest=f.latest;
   const advance=vi.spyOn(f.storage,"advanceReplicaCurrentView"),store=vi.spyOn(f.storage,"storeReplicaCurrentView"),sample=vi.spyOn(f.storage,"sampleReplicaHistory");
   const supervisor=createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("history-header-pending"),
-    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...latest,moved:false,nextCursor:null,refusedFiles:[]})})});
+    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...latest,delta:false,removed:[],moved:false,nextCursor:null,refusedFiles:[]})})});
   try {
     await supervisor.activate("w");latest=f.view("changed");await supervisor.activate("w");
     replacementEvidence(f.db,"log");latest=f.view("changed");await supervisor.activate("w");
@@ -372,7 +372,7 @@ it("cursor-only views at 20,000 files read and rewrite no file rows",async()=>{
   f.save({...f.view(),files});
   let incoming=f.latest;
   const supervisor=createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("history-header-only"),
-    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...incoming,moved:false,nextCursor:null,refusedFiles:[]})})});
+    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...incoming,delta:false,removed:[],moved:false,nextCursor:null,refusedFiles:[]})})});
   const context=f.storage as StorageContext,tx=context.replicaViewTx.bind(context);
   vi.spyOn(context,"replicaViewTx").mockImplementation(run=>{
     const start=performance.now();try{return tx(run);}finally{if(active){transactions++;txMs+=performance.now()-start;}}
@@ -397,7 +397,7 @@ it("cursor-only views at 20,000 files read and rewrite no file rows",async()=>{
 it.each(["last-share","epoch","stream"])("retirement after %s ends standing reports no error",async change=>{
   const f=await fixture();f.save();const onError=vi.fn();
   const supervisor=createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("history-retired-standing"),onError,
-    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...f.latest,moved:false,nextCursor:null,refusedFiles:[]})})});
+    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...f.latest,delta:false,removed:[],moved:false,nextCursor:null,refusedFiles:[]})})});
   try {
     await supervisor.activate("w");f.at(130_000);
     if(change==="last-share")f.db.exec("UPDATE sync_relay_share_grants SET status='revoked',revoked_at_ms=130000");
@@ -499,7 +499,7 @@ it("a restarted supervisor arms and samples History without flipping an unchange
   const f=await fixture(); f.save(); f.restart();
   const flip=vi.spyOn(f.storage,"flipReplicaCurrentView"),store=vi.spyOn(f.storage,"storeReplicaCurrentView");
   const supervisor=createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("history-only"),
-    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...f.latest,moved:false,nextCursor:null,refusedFiles:[]})})});
+    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...f.latest,delta:false,removed:[],moved:false,nextCursor:null,refusedFiles:[]})})});
   const header=()=>f.db.prepare("SELECT * FROM sync_relay_replica_cuts").get();
   const before=header();
   try {
@@ -513,7 +513,7 @@ it("a restarted supervisor arms and samples History without flipping an unchange
 it("retirement samples an already due pin before releasing the lease",async()=>{
   const f=await fixture(); f.save();
   const supervisor=createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("history-retire"),
-    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...f.latest,moved:false,nextCursor:null,refusedFiles:[]})})});
+    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...f.latest,delta:false,removed:[],moved:false,nextCursor:null,refusedFiles:[]})})});
   await supervisor.activate("w"); f.at(130_000); await supervisor.evict("w");
   expect(f.pins()).toMatchObject([{reason:"quiet"}]); await supervisor.close();
 });
@@ -915,7 +915,7 @@ it("owners import zero pins and pin storage does not consume the owner's quota",
 it("the supervisor wakes for quiet pins and preserves an unflushed state before a move", async () => {
   const f = await fixture(); let latest = f.view();
   const supervisor = createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("history"),
-    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...latest,moved:false,nextCursor:null,refusedFiles:[]})})});
+    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...latest,delta:false,removed:[],moved:false,nextCursor:null,refusedFiles:[]})})});
   try {
     await supervisor.activate("w"); await vi.advanceTimersByTimeAsync(30_000);
     expect(f.pins()).toMatchObject([{reason:"quiet"}]);
@@ -1035,7 +1035,7 @@ it.each([false,true])("saves only still-shared pending predecessors when restore
   };
   let latest=view("baseline");
   const supervisor=createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("history-revoked-predecessor"),onError:(_,e)=>errors.push(e),
-    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...latest,moved:false,nextCursor:null,refusedFiles:[]})})});
+    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...latest,delta:false,removed:[],moved:false,nextCursor:null,refusedFiles:[]})})});
   try {
     await supervisor.activate("w");latest=view("pending");await supervisor.activate("w");
     f.db.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({paths:survivor?["docs/public"]:[],versionId:null}));
@@ -1052,7 +1052,7 @@ it("refreshes a hidden head before the History timer samples it",async()=>{
   const f=await fixture(false),errors:unknown[]=[];
   let latest=f.view("baseline"), pulls=0;
   const supervisor=createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("history-hidden-timer"),onError:(_,e)=>errors.push(e),
-    startChild:async()=>({pull:async()=>{pulls++;},close:async()=>{},currentView:async()=>({...latest,moved:false,nextCursor:null,refusedFiles:[]})})});
+    startChild:async()=>({pull:async()=>{pulls++;},close:async()=>{},currentView:async()=>({...latest,delta:false,removed:[],moved:false,nextCursor:null,refusedFiles:[]})})});
   try {
     await supervisor.activate("w");latest=f.view("edited");await supervisor.activate("w");
     await vi.advanceTimersByTimeAsync(2000);
@@ -1073,7 +1073,7 @@ it("pins an unflushed pre-restore head even after the relay raises its generatio
     VALUES ('w','main','object','${lineage}','docs/a.md','current','open',1,1,1,'${lineage}',0,'${lineage}',x'01')`);
   let latest=f.view("initial",{lineageClaimId:lineage,restoreGeneration:1});
   const supervisor=createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("history-restore"),
-    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...latest,moved:false,nextCursor:null,refusedFiles:[]})})});
+    startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>({...latest,delta:false,removed:[],moved:false,nextCursor:null,refusedFiles:[]})})});
   try {
     await supervisor.activate("w"); latest=f.view("unflushed",{lineageClaimId:lineage,restoreGeneration:1}); await supervisor.activate("w");
     f.at(101_000); f.db.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=2");

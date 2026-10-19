@@ -121,6 +121,23 @@ With package version `0.1.0`, a nightly becomes `0.1.1-nightly.YYYYMMDD.RUN.ATTE
 The date uses UTC. GitHub supplies the run number and attempt.
 Each published release retains its tag, source commit, notes, and installers in GitHub Releases.
 
+## Publish a nightly
+
+The public alpha is the nightly channel. A nightly publishes only when all of these hold:
+
+- The dispatch selects `platforms=windows-linux`, so every installation the workflow builds for receives the update.
+- The Windows and Linux packages each pass their packaged smoke.
+- No other nightly published on the same UTC day.
+
+Before packaging, the workflow refuses a dispatch that breaks the platform or day rule.
+The publish job checks both rules again before it creates the release.
+A run that publishes after 00:00 UTC therefore counts for the day it published on.
+A dry run skips both rules, so a dry run can test one platform at any time.
+If any package fails, the publish job does not run.
+
+To publish, dispatch `Desktop Release` from `main` with `channel=nightly`, `platforms=windows-linux`, and `dry_run=false`.
+Then [add the macOS files](#add-the-macos-files) the same day. The Mac command always signs and notarizes.
+
 ## Build a Windows nightly
 
 Dispatch `Desktop Release` from `main` with `channel=nightly`, `platforms=windows`, and `dry_run=true`.
@@ -130,10 +147,9 @@ Download the run's `desktop-Windows-x64` artifact after every job passes.
 Verify its files with the artifact command below.
 Pass `--channel nightly` and the run's generated version to that command.
 The Windows package job checks the executable with an isolated profile and test workspace before uploading it.
-For publication, dispatch again with `dry_run=false`.
-The new dispatch generates a new nightly version.
+A Windows-only nightly dispatch cannot publish. [Publish a nightly](#publish-a-nightly) with `platforms=windows-linux`.
+Each dispatch generates a new nightly version.
 The published prerelease records the source commit and includes generated release notes.
-Then [add the macOS files](#add-the-macos-files).
 
 ## Build a Linux nightly
 
@@ -142,7 +158,7 @@ The Linux runner performs every job for this selection. A Windows runner is not 
 Download the run's `desktop-Linux-x64` artifact after every job passes.
 It contains the AppImage, the `.deb`, and the nightly Linux update manifest, which lists both.
 Verify the files with `--platform linux`, `--arch x64`, the generated version, and `--channel nightly`.
-The Linux package job checks artifact hashes and runs the packaged fuse smoke before uploading.
+The Linux package job checks artifact hashes and runs the packaged fuse smoke and the engine upgrade check before uploading.
 
 Use `platforms=windows-linux` to prepare both packages from one commit and generated version.
 Both runners must be available. The Windows runner performs the coordinator jobs.
@@ -662,6 +678,18 @@ It then boots that package with an isolated profile and checks that the window c
 Windows-only selections skip that Linux check.
 The Windows job runs the packaged executable with an isolated profile and test workspace.
 It checks startup, editing, disk persistence, and restart before uploading artifacts.
+
+The Linux job also checks that a workspace survives an engine upgrade, because any nightly can add an engine migration.
+It extracts the engine from the newest published nightly's AppImage.
+That engine captures a test workspace with an edited Markdown file, a binary file, a nested folder, and a non-ASCII file name.
+The packaged engine then opens the same workspace.
+The check fails when a file's hash or latest moment changes, a recorded moment or its content disappears or changes, bytes on disk change, or a new edit is not captured.
+It covers the engine store and workspace files, not app settings or the desktop profile.
+It runs only on Linux, dry runs included.
+It fails when the newest published nightly has no AppImage or no executable engine.
+It skips with a notice when no nightly is published, or when the newest one predates the packaged engine.
+Those nightlies are listed in `scripts/select-upgrade-nightly.mjs`.
+To repeat a failure locally, set `DOHC_UPGRADE_PREVIOUS_ENGINE` to the older engine and run `pnpm --filter @dohc/desktop exec vitest run src/workspaces/engineUpgrade.e2e.test.ts`.
 
 The workflow's checks do not prove code signing, OS installer registration, update
 installation, or an upgrade that preserves a user's profile. Release owners

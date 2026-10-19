@@ -42,7 +42,7 @@ export function releaseReplicaCurrentView(storage: StorageContext, lease: Replic
 }
 export function replicaCurrentViewSelectors(storage: StorageContext, workspace: string): ReplicaCurrentViewSelector[] {
   return statement(storage,`SELECT DISTINCT s.selector_json FROM sync_relay_shares s JOIN sync_relay_share_grants g ON g.share_id=s.share_id
-    WHERE s.workspace_id=? AND ${currentShareGrantSql("g", "s")}`).all(workspace).flatMap(row => {
+    WHERE s.workspace_id=? AND ${currentShareGrantSql("g", "s")} ORDER BY s.selector_json`).all(workspace).flatMap(row => {
     const selector = parseStoredAnyShareSelectorJson(String(row.selector_json));
     if (!selector || "kind" in selector && selector.kind === "chat" ||
         selectorTargetsBlockedChannel(storage, workspace, selector) ||

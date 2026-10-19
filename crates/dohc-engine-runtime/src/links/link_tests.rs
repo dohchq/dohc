@@ -1623,3 +1623,6 @@ mod incoming_tests;
 
 #[path = "query_tests.rs"]
 mod query_tests;
+
+#[path = "edges_tests.rs"]
+mod edges_tests;

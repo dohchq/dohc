@@ -115,7 +115,7 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
     notifyRenderer: () => undefined,
   });
   const dependencies: Dependencies = {
-    links: { incoming: vi.fn(async () => null), resolve: vi.fn(async () => ({ versionId: "main", results: [], mountsCovered: true })) },
+    links: { edges: vi.fn(async () => ({versionId:"main",files:[],entries:[],unchecked:[],complete:true,indexBuilding:false,mountsCovered:true,nextCursor:null})), incoming: vi.fn(async () => null), resolve: vi.fn(async () => ({ versionId: "main", results: [], mountsCovered: true })) },
     automations: () => ({ automationIdAt: vi.fn(), runs: vi.fn(), run: vi.fn(), retry: vi.fn() }),
     buttons: () => ({ inspect: vi.fn(async () => []), press: vi.fn() }),
     findWorkspace: (id) => rows.get(id) ?? null,
@@ -1297,4 +1297,23 @@ it("returns an incoming page directly through CLI and MCP", async () => {
   expect(JSON.parse(cli.stdout)).toEqual({ schemaVersion: CLI_JSON_SCHEMA_VERSION, ...page });
   const { linksIn } = await import("@dohc/mcp/tools");
   expect(await linksIn({ root: f.workspace.rootPath, home: "state", request: send }, { subject })).toEqual(page);
+});
+
+it("returns an edge page directly through CLI and MCP", async () => {
+  const f = fixture(await createTestScratch("links-edges-cli-"));
+  const page = { versionId: "main", files: [], entries: [], unchecked: [], complete: true, indexBuilding: false, mountsCovered: true, nextCursor: null };
+  f.dependencies.links.edges = vi.fn(async () => page);
+  await f.create().startDesktopCliServer();
+  const token = "a".repeat(64);
+  const send = async (request: CliRequestWithoutToken) => {
+    const response = cliTransportResponseSchema.parse(JSON.parse(await handleCliRequestLine(JSON.stringify({ ...request, token }), token, f.options())));
+    if (!response.ok) throw new Error(response.error);
+    return response.result;
+  };
+
+  const cli = await executeCli({ argv: ["links", "edges", "--json"], cwd: f.workspace.rootPath, env: {}, request: send });
+  expect(cli.exitCode).toBe(0);
+  expect(JSON.parse(cli.stdout)).toEqual({ schemaVersion: CLI_JSON_SCHEMA_VERSION, ...page });
+  const { linksEdges } = await import("@dohc/mcp/tools");
+  expect(await linksEdges({ root: f.workspace.rootPath, home: "state", request: send }, {})).toEqual(page);
 });

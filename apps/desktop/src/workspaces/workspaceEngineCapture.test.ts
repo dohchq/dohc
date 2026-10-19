@@ -166,7 +166,6 @@ interface CaptureOptions {
   diskWriter?: EngineDiskWriter;
   preserveUnsentState?: WorkspaceEngineCaptureOptions["preserveUnsentState"];
   store?: CaptureVersionedTextStore;
-  now?: () => number;
   createId?: () => string;
   onError?: (context: string, error: unknown) => void;
   onCaptureOutcome?: (failure: WorkspaceEngineCaptureFailure, detail?: string | null) => void;

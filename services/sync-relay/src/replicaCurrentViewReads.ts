@@ -8,6 +8,7 @@ import type {StorageContext} from "./storage/context";
 import type {CurrentShareGrantPrincipal} from "./storage/currentShareGrant";
 import {replicaGrantFloor, replicaViewReachesFloor} from "./storage/replicaGrantFloors";
 import {currentViewFileAtFence, forgetReplicaCurrentViewStoredCache, readReplicaCurrentViewRowText} from "./storage/replicaCurrentViews";
+import {ReplicaMap} from "./replicaMap";
 
 export interface ReplicaCurrentViewReadInput {
   readonly grantId: string;
@@ -36,11 +37,11 @@ const shaPattern = /^[a-f0-9]{64}$/;
 type ViewFile = ReplicaCurrentView["files"][number];
 type ReadyFile = Extract<ReplicaCurrentViewFile,{status:"ready"}>;
 type IndexedFile = {row: ViewFile; lineage: string; path: NonNullable<ReturnType<typeof prepareSharePath>>; projected: Map<string, ReadyFile>};
-type ViewIndex = {files: Map<string, Map<string, IndexedFile>>; texts: Map<string, string>;
+type ViewIndex = {files: ReplicaMap<ReplicaMap<IndexedFile>>; texts: ReplicaMap<string>;
   textChecks: Map<string, boolean>;
-  lineages: Map<string,IndexedFile>; omittedPaths: Map<string,string>;
+  lineages: ReplicaMap<IndexedFile>; omittedPaths: ReplicaMap<string>;
   inventories: Array<{files: ReplicaCurrentViewFile[]; etag: string}>;
-  decoded: Map<string,{text:string; bytes:number}>; decodedBytes: number; omitted: Array<{row: ReplicaCurrentView["omitted"][number]; path: NonNullable<ReturnType<typeof prepareSharePath>>}>};
+  decoded: Map<string,{text:string; bytes:number}>; decodedBytes: number; omitted: ReplicaMap<{row: ReplicaCurrentView["omitted"][number]; path: NonNullable<ReturnType<typeof prepareSharePath>>}>};
 const indexes = new WeakMap<ReplicaCurrentView, ViewIndex | null>();
 const latestIndexes = new WeakMap<StorageContext, Map<string, ViewIndex["files"]>>();
 const MAX_INDEX_WORKSPACES = 4;
@@ -61,26 +62,46 @@ function readFences(storage: StorageContext, where: string, args: unknown[]) {
   return statement.all(...args);
 }
 
-function indexView(view: ReplicaCurrentView, previous?: ViewIndex["files"]): ViewIndex | null {
+type Row = ViewFile | ReplicaCurrentView["omitted"][number];
+const preparedPaths = new WeakMap<Row,IndexedFile["path"]>();
+function validRow(file:Row, path:IndexedFile["path"]|null, same=false) {
+  if (!path || path.path !== file.path || !file.objectId || !same && !shaPattern.test(file.sha256)) return false;
+  return "contentKind" in file ? same || ["text","binary"].includes(file.contentKind) && Number.isSafeInteger(file.byteLength) && file.byteLength >= 0 &&
+    (file.lineageClaimId === null ? file.restoreGeneration === null : shaPattern.test(file.lineageClaimId) && Number.isSafeInteger(file.restoreGeneration) && file.restoreGeneration! >= 1)
+    : file.reason === "text-frame-limit";
+}
+
+function validateChanges(changes:ReplicaCurrentView) {
+  for(const file of [...changes.files,...changes.omitted]) {
+    const path=prepareSharePath(file.path);
+    if(!path || !validRow(file,path))throw new Error("Invalid replica read index.");
+    Object.freeze(file);
+    preparedPaths.set(file,path);
+  }
+  const shas=new Set<string>();
+  for(const text of changes.texts) {
+    if(shas.has(text.sha256) || !shaPattern.test(text.sha256))throw new Error("Invalid replica read index.");
+    shas.add(text.sha256);Object.freeze(text);
+  }
+}
+
+function indexView(view: ReplicaCurrentView, previous?: ViewIndex["files"], heldTexts?:ReplicaMap<string>): ViewIndex | null {
   if (indexes.has(view)) return indexes.get(view)!;
   indexes.set(view,null);
   const paths = new Set<string>(), objects = new Set<string>();
   const byteLengths = new Map<string,number>();
-  const lineages: ViewIndex["lineages"] = new Map(), omittedPaths = new Map<string,string>();
-  const files: ViewIndex["files"] = new Map(), texts = new Map<string,string>(), omitted: ViewIndex["omitted"] = [];
+  const lineages = new Map<string,IndexedFile>(), omittedPaths = new Map<string,string>();
+  const files = new Map<string,Map<string,IndexedFile>>(), texts = new Map<string,string>(), omitted = new Map<string,{row:ReplicaCurrentView["omitted"][number];path:IndexedFile["path"]}>();
   for (const file of [...view.files, ...view.omitted]) {
     const key = JSON.stringify([file.versionId,file.path]), object = JSON.stringify([file.versionId,file.objectId]);
     const prior = "contentKind" in file ? previous?.get(file.versionId)?.get(file.path) : undefined;
     const same = prior && "contentKind" in file && prior.row.objectId === file.objectId && prior.row.contentKind === file.contentKind &&
       prior.row.sha256 === file.sha256 && prior.row.byteLength === file.byteLength && prior.row.lineageClaimId === file.lineageClaimId &&
       prior.row.restoreGeneration === file.restoreGeneration;
-    const path = same ? prior.path : prepareSharePath(file.path);
-    if (!path || path.path !== file.path || !file.objectId || !same && !shaPattern.test(file.sha256) || paths.has(key) || objects.has(object)) return null;
+    const path = same ? prior.path : preparedPaths.get(file) ?? prepareSharePath(file.path);
+    if (!path || !validRow(file,path,!!same) || paths.has(key) || objects.has(object)) return null;
     paths.add(key); objects.add(object); Object.freeze(file);
     if ("contentKind" in file) {
-      if (!same && (!["text","binary"].includes(file.contentKind) || !Number.isSafeInteger(file.byteLength) || file.byteLength < 0 ||
-        (file.lineageClaimId === null ? file.restoreGeneration !== null : !shaPattern.test(file.lineageClaimId) ||
-          !Number.isSafeInteger(file.restoreGeneration) || file.restoreGeneration! < 1))) return null;
       if (byteLengths.has(file.sha256) && byteLengths.get(file.sha256) !== file.byteLength) return null;
       byteLengths.set(file.sha256,file.byteLength);
       let version = files.get(file.versionId);
@@ -89,8 +110,7 @@ function indexView(view: ReplicaCurrentView, previous?: ViewIndex["files"]): Vie
       projectedFile(indexed,file.path);
       version.set(file.path,indexed); lineages.set(indexed.lineage,indexed);
     } else {
-      if (file.reason !== "text-frame-limit") return null;
-      omitted.push({row:file,path});
+      omitted.set(object,{row:file,path});
       omittedPaths.set(key,file.objectId);
     }
   }
@@ -100,8 +120,37 @@ function indexView(view: ReplicaCurrentView, previous?: ViewIndex["files"]): Vie
   }
   // Metadata and verified text only. No grant or selector decision is cached.
   Object.freeze(view.files); Object.freeze(view.omitted); Object.freeze(view.texts); Object.freeze(view);
-  const index: ViewIndex = {files,texts,textChecks:new Map<string,boolean>(),lineages,omittedPaths,inventories:[],decoded:new Map<string,{text:string; bytes:number}>(),decodedBytes:0,omitted}; indexes.set(view,index);
+  const index: ViewIndex = {files:new ReplicaMap([...files].map(([version,rows])=>[version,new ReplicaMap(rows)])),texts:heldTexts ?? new ReplicaMap(texts),textChecks:new Map<string,boolean>(),lineages:new ReplicaMap(lineages),omittedPaths:new ReplicaMap(omittedPaths),inventories:[],decoded:new Map<string,{text:string; bytes:number}>(),decodedBytes:0,omitted:new ReplicaMap(omitted)}; indexes.set(view,index);
   return index;
+}
+
+/** Validate changes; update an existing index only when at most half the rows changed. */
+export function publishReplicaCurrentViewIndex(view:ReplicaCurrentView, previous:ReplicaCurrentView|undefined,
+  changes:ReplicaCurrentView, before:Array<Row>, texts:ReplicaMap<string>, smallChange:boolean) {
+  const prior=previous && indexes.get(previous);
+  if(!prior || !smallChange) {validateChanges(changes);return;}
+  const delta=indexView(changes,prior.files,texts);
+  if (!delta) throw new Error("Invalid replica read index.");
+  const files=prior.files.fork(), lineages=prior.lineages.fork(), omittedPaths=prior.omittedPaths.fork(), omitted=prior.omitted.fork();
+  const versions=new Set([...before,...changes.files,...changes.omitted].map(f=>f.versionId));
+  for(const version of versions) files.set(version,files.get(version)?.fork() ?? new ReplicaMap());
+  for(const old of before) {
+    if("contentKind" in old) {files.get(old.versionId)?.delete(old.path);lineages.delete(lineageKey(old.versionId,old.objectId,old.lineageClaimId));}
+    else {omittedPaths.delete(pathKey(old.versionId,old.path));omitted.delete(JSON.stringify([old.versionId,old.objectId]));}
+  }
+  for(const [version,rows] of delta.files) for(const [path,row] of rows) {files.get(version)!.set(path,row);lineages.set(row.lineage,row);}
+  for(const version of versions)if(!files.get(version)!.size)files.delete(version);
+  for(const [key,row] of delta.omitted) {omitted.set(key,row);omittedPaths.set(pathKey(row.row.versionId,row.row.path),row.row.objectId);}
+  indexes.set(view,{...delta,files,lineages,omittedPaths,omitted,texts});
+}
+
+export function publishPersistedReplicaIndex(readSaved:()=>ReplicaCurrentView|null, source:ReplicaCurrentView, unchanged:boolean) {
+  if(!unchanged)return;
+  const index=indexes.get(source);
+  if(!index)return;
+  const saved=readSaved();
+  if(!saved || saved===source)return;
+  indexes.set(saved,{...index,texts:new ReplicaMap(),textChecks:new Map(),inventories:[],decoded:new Map(),decodedBytes:0});
 }
 
 function projectedFile(indexed: IndexedFile, path: string) {
@@ -237,7 +286,7 @@ export function withReplicaCurrentView<T>(storage: StorageContext, input: Replic
       files.set(path,projectedFile(indexed,path));
       if (requestedPath !== undefined || includeRows) rows.set(path, file);
     }
-    for (const omitted of index.omitted) {
+    for (const omitted of index.omitted.values()) {
       if (!visible(omitted.row.versionId, omitted.path)) continue;
       const path = project(omitted.row.path);
       if (path !== null && (requestedPath === undefined || path === requestedPath)) files.set(path, {path, status:"updating"});
@@ -287,7 +336,8 @@ export function withReplicaCurrentView<T>(storage: StorageContext, input: Replic
 
 export function listReplicaCurrentViewFiles(storage: StorageContext, input: ReplicaCurrentViewReadInput,
   source?: ReplicaCurrentViewSource): ReplicaCurrentViewList {
-  return withReplicaCurrentView(storage, input, source, ({files,inventoryEtag}) => ({status:"ready" as const, files,etag:inventoryEtag()}));
+  return withReplicaCurrentView(storage, input, source, ({files,inventoryEtag}):ReplicaCurrentViewList =>
+    ({status:"ready",files,etag:inventoryEtag()}));
 }
 
 export function readReplicaCurrentViewFile(storage: StorageContext, input: ReplicaCurrentViewReadInput & {path: string},
