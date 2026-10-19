@@ -5727,6 +5727,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       desktopChatBookmarks.stop();
     },
     stopNoticeRefusals: () => noticeStore().stopWorkspaceRefusals(),
+    stopAutomationWakes: () => automationWakeConsumer.stop(),
     stopSearch: () => workspaceSearchOwner.dispose(),
     stopSitePreviews: stopAllSitePreviews,
     settleYDocs: async () => {
