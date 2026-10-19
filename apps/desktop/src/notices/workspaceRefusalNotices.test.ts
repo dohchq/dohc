@@ -236,13 +236,18 @@ describe("workspace refusal notices", () => {
     }
   });
 
-  it("starts a store made after the stop with its refusal work stopped", async () => {
+  it("creates the store at quit and stops refusal work before any read", async () => {
     const f = await fixture();
     try {
       await f.openEditor();
-      // As main makes its store after quit: stopped before anything uses it.
-      const late = f.createStore();
-      void late.stopWorkspaceRefusals();
+      let cached: NoticeStore | undefined;
+      const noticeStore = () => cached ??= f.createStore();
+      const stopNoticeRefusals = () => noticeStore().stopWorkspaceRefusals();
+      const stopped = stopNoticeRefusals();
+      const late = noticeStore();
+      expect(f.requests("sync.refusalNotices")).toBe(0);
+      expect(f.acquisitions).toEqual([]);
+      await stopped;
       await f.closeEditor();
       await f.openEditor();
       expect(await late.list()).toEqual({ account: null, notices: [] });
