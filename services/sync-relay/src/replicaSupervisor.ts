@@ -134,12 +134,14 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
     }
   }
   async function flush(entry: Entry, sampleHistory = false) {
+    clearTimeout(entry.quiet); clearTimeout(entry.ceiling);
+    entry.quiet = entry.ceiling = undefined;
     try {
       const selectors = options.storage.replicaCurrentViewSelectors(entry.lease.workspaceId);
       const pending = entry.newest;
       // Restore can fence a pending view while the next journal page is in flight.
       if (pending && [...pending.files, ...pending.omitted].some(file => !currentViewFileVisible(selectors, file))) {
-        await schedule(entry);
+        await schedule(entry).catch(() => {});
       }
       if (!entry.stopping) {
         const persisted=persist(entry);
