@@ -1,5 +1,5 @@
 use super::*;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 pub(super) mod restore;
 
@@ -132,9 +132,11 @@ impl LiveSettlementAudit {
         &self.binding
     }
     /// The accepted document this settlement projects instead of the native
-    /// head. Present only while this owner's own native edits wait for the
-    /// relay: the moment, file, and published record then hold accepted
-    /// content alone, and the native settled boundary does not advance.
+    /// head. Present while the native head holds an update this owner answers
+    /// for and has not applied: its own pending, refused, or acknowledged
+    /// edits, and what its released chain left it. The moment, file, and
+    /// published record then hold accepted content alone, and the native
+    /// settled boundary does not advance.
     pub fn accepted_prefix(&self) -> Option<&crate::Ydoc> {
         self.accepted.as_ref()
     }
@@ -559,6 +561,9 @@ where
                 // A successor's adoption verified its captured head, which
                 // holds the rows ordinary sync added after its predecessor's
                 // last settlement. Its first settlement covers from there.
+                // Every row through that head is in accepted(B) or the seed,
+                // and an abandoned seed allows no later application, so it
+                // never moves the terminal past B into this branch.
                 let floor = owner_origin.as_ref().filter(|origin| origin.successor).map_or(end_sequence,|origin| end_sequence.max(origin.sequence));
                 (cursor,floor,None)
             },
@@ -581,8 +586,9 @@ where
         sequences.extend(tail.sequences.iter().copied());
         if sequences.len() as i64 != head-previous_sequence { return Err(invalid("settlement application coverage is incomplete")); }
         let accepted = if tail.any {
-            // Accepting the pending seed must not roll back the owner's file
-            // to an accepted state that lacks its pre-adoption head.
+            // A pending seed refuses settlement. Once acknowledged, the seed
+            // stays private like any edit until it applies, and the file
+            // holds accepted state without it.
             if tail.seed { return Err(invalid("the owner's adoption seed must be accepted before a settlement")); }
             Some(accepted_history::read_state(conn,held,terminal_cursor,reconstruction)?)
         } else {
@@ -651,13 +657,14 @@ const MAX_NATIVE_SOURCE_BYTES: i64 = 262_144;
 /// The native updates this owner answers for and has not applied, which a
 /// settlement keeps out of what it projects: the current activation's own
 /// adopted entries of the current outbox, pending, refused, or accepted, and
-/// the Carried deliveries its released chain left it. A saved receipt proves
-/// acceptance, never application.
+/// the Carried deliveries and refusals its released chain left it. A saved
+/// receipt proves acceptance, never application.
 #[derive(Default)]
 pub(super) struct PrivateTail {
-    /// Their native sequences after `previous_sequence`, each verified
-    /// against its own journal row.
-    pub(super) sequences: Vec<i64>,
+    /// Their distinct native sequences after `previous_sequence`, each entry
+    /// verified on its own. A seed names its captured head, which another
+    /// entry's update can hold too.
+    pub(super) sequences: BTreeSet<i64>,
     /// Whether any exists at all, before or after `previous_sequence`.
     pub(super) any: bool,
     /// Whether the adoption seed is among them.
@@ -683,7 +690,8 @@ pub(super) fn private_tail(
         return Ok(PrivateTail::default());
     };
     let adoption = activation.activation_id;
-    let tail = "FROM owner_ydoc_outbox_entries e JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE o.workspace_id=?1 AND o.main_version_id=?2 AND o.object_id=?3 AND o.lineage_claim_id=?4 AND o.restore_fence_generation=?5 AND o.current_path=?6 AND (e.pending=1 OR (e.pending=0 AND e.terminal_reason IS NOT NULL AND e.terminal_blob_digest=e.update_digest AND e.accepted_receipt_json IS NULL) OR (e.pending=0 AND e.terminal_reason IS NULL AND e.accepted_receipt_json IS NOT NULL AND json_extract(e.native_source_json,'$.adoptionId')=?10)) AND e.native_source_json IS NOT NULL AND NOT EXISTS(SELECT 1 FROM live_device_update_applications a WHERE a.relay_database_namespace=?7 AND a.delivery_id=e.delivery_id)";
+    let chain = activation.predecessor_activation_id.as_deref();
+    let tail = "FROM owner_ydoc_outbox_entries e JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE o.workspace_id=?1 AND o.main_version_id=?2 AND o.object_id=?3 AND o.lineage_claim_id=?4 AND o.restore_fence_generation=?5 AND o.current_path=?6 AND (e.pending=1 OR (e.pending=0 AND e.terminal_reason IS NOT NULL AND e.terminal_blob_digest=e.update_digest AND e.accepted_receipt_json IS NULL) OR (e.pending=0 AND e.terminal_reason IS NULL AND e.accepted_receipt_json IS NOT NULL AND json_extract(e.native_source_json,'$.adoptionId')=?9)) AND e.native_source_json IS NOT NULL AND NOT EXISTS(SELECT 1 FROM live_device_update_applications a WHERE a.relay_database_namespace=?7 AND a.delivery_id=e.delivery_id)";
     let gap = head - previous_sequence;
     let bound = params![
         b.workspace_id,
@@ -694,7 +702,6 @@ pub(super) fn private_tail(
         b.current_path,
         held.namespace,
         previous_sequence,
-        gap + 2,
         adoption
     ];
     let mut any: bool = conn
@@ -703,9 +710,38 @@ pub(super) fn private_tail(
         })
         .map_err(read_sql)?;
     let seed: bool = conn.query_row(&format!("SELECT EXISTS(SELECT 1 {tail} AND e.pending=1 AND json_extract(e.native_source_json,'$.origin.kind')='adoptionSeed')"),bound,|row|row.get(0)).map_err(read_sql)?;
-    let mut query = conn.prepare(&format!("SELECT e.append_key,e.update_digest,length(CAST(e.native_source_json AS BLOB)),e.native_source_json,e.pending,e.accepted_receipt_json IS NOT NULL {tail} AND (json_extract(e.native_source_json,'$.nativeSequence')>?8 OR (json_extract(e.native_source_json,'$.nativeSequence')=?8 AND json_extract(e.native_source_json,'$.origin.kind')='adoptionSeed')) ORDER BY e.outbox_id,e.sequence LIMIT ?9")).map_err(read_sql)?;
+    let mut sequences = BTreeSet::new();
+    // Coverage counts native sequences, never entries.
+    let count = |sequences: &mut BTreeSet<i64>, sequence: i64| {
+        if sequence > previous_sequence {
+            sequences.insert(sequence);
+            if sequences.len() as i64 > gap {
+                return Err(ApplicationError::Corrupt);
+            }
+        }
+        Ok(())
+    };
+    // Each validated by the shared resolution, and private until applied
+    // even below the coverage floor.
+    for inherited in super::retirement::inherited_entries(
+        conn,
+        &held.namespace,
+        &key,
+        &b.lineage_claim_id,
+        chain,
+    )? {
+        if super::retirement::applied(conn, &held.namespace, &inherited.entry.delivery_id)? {
+            continue;
+        }
+        let sequence = inherited.entry.source.native_sequence;
+        if sequence > head {
+            return Err(ApplicationError::Corrupt);
+        }
+        any = true;
+        count(&mut sequences, sequence)?;
+    }
+    let mut query = conn.prepare(&format!("SELECT e.append_key,e.update_digest,length(CAST(e.native_source_json AS BLOB)),e.native_source_json,e.pending,e.accepted_receipt_json IS NOT NULL,e.outbox_id,e.sequence {tail} AND (json_extract(e.native_source_json,'$.nativeSequence')>?8 OR (json_extract(e.native_source_json,'$.nativeSequence')=?8 AND json_extract(e.native_source_json,'$.origin.kind')='adoptionSeed')) ORDER BY e.outbox_id,e.sequence")).map_err(read_sql)?;
     let mut rows = query.query(bound).map_err(read_sql)?;
-    let mut sequences = Vec::new();
     let mut terminal = false;
     while let Some(row) = rows.next().map_err(read_sql)? {
         let length: i64 = row.get(2).map_err(read_sql)?;
@@ -726,10 +762,22 @@ pub(super) fn private_tail(
         source
             .verify_retained_row(conn)
             .map_err(|_| ApplicationError::Corrupt)?;
+        // Another activation's entry is private only as a refusal its
+        // released chain left: its content never reaches accepted state.
         if source.binding != *b
-            || source.adoption_id != adoption
             || source.update_digest != digest
             || source.native_sequence > head
+            || source.adoption_id != adoption
+                && !(refused
+                    && super::retirement::chain_refusal(
+                        conn,
+                        &held.namespace,
+                        &key,
+                        &b.lineage_claim_id,
+                        chain,
+                        &row.get::<_, String>(6).map_err(read_sql)?,
+                        row.get(7).map_err(read_sql)?,
+                    )?)
         {
             return Err(ApplicationError::Corrupt);
         }
@@ -740,36 +788,7 @@ pub(super) fn private_tail(
         terminal |= refused
             && (source.native_sequence > previous_sequence
                 || adoption_seed && previous_sequence == source.native_sequence);
-        if source.native_sequence > previous_sequence {
-            if sequences.len() as i64 >= gap {
-                return Err(ApplicationError::Corrupt);
-            }
-            sequences.push(source.native_sequence);
-        }
-    }
-    // Each validated by the shared resolution, and private until applied
-    // even below the coverage floor.
-    for inherited in super::retirement::inherited_entries(
-        conn,
-        &held.namespace,
-        &key,
-        &b.lineage_claim_id,
-        activation.predecessor_activation_id.as_deref(),
-    )? {
-        if super::retirement::applied(conn, &held.namespace, &inherited.entry.delivery_id)? {
-            continue;
-        }
-        let sequence = inherited.entry.source.native_sequence;
-        if sequence > head {
-            return Err(ApplicationError::Corrupt);
-        }
-        any = true;
-        if sequence > previous_sequence {
-            if sequences.len() as i64 >= gap {
-                return Err(ApplicationError::Corrupt);
-            }
-            sequences.push(sequence);
-        }
+        count(&mut sequences, source.native_sequence)?;
     }
     Ok(PrivateTail {
         sequences,

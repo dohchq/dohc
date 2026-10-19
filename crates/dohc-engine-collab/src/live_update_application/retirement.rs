@@ -594,6 +594,29 @@ pub(crate) fn inherited_entries(
     Ok(inherited)
 }
 
+/// Whether the entry at `sequence` of `outbox_id` is a delivery a host
+/// refused, in the strict representation, that an activation of the released
+/// chain ending at `tail` queued.
+pub(crate) fn chain_refusal(
+    conn: &Connection,
+    namespace: &str,
+    doc: &DocKey,
+    lineage: &str,
+    tail: Option<&str>,
+    outbox_id: &str,
+    sequence: i64,
+) -> Result<bool, ApplicationError> {
+    let Some(tail) = tail else {
+        return Ok(false);
+    };
+    let Some(source) = refused_entry(conn, namespace, doc, lineage, outbox_id, sequence)?
+        .and_then(|refusal| refusal.source)
+    else {
+        return Ok(false);
+    };
+    Ok(chained_retiring(conn, namespace, doc, lineage, tail, &source.adoption_id)?.is_some())
+}
+
 /// Whether this host applied `delivery` in `namespace`.
 pub(crate) fn applied(
     conn: &Connection,

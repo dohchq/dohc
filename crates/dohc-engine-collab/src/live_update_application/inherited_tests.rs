@@ -748,3 +748,223 @@ fn catch_up_rows_before_adoption_need_no_application() {
         replays(&mut f, &first, |f| settle_as(f, Some(terminal.clone()), "resumed"));
     }
 }
+
+/// What a settlement audit at `terminal` projects, through the fixture's
+/// handle or, with `retiring`, in the retirement form, recording nothing:
+/// accepted state while its tail keeps anything private, otherwise none.
+fn audited(f: &mut Fixture, retiring: bool, terminal: Option<LiveUpdateReceipt>) -> Result<Option<String>, ApplicationError> {
+    fn project(_: &mut EngineStore, audit: &LiveSettlementAudit) -> Result<Option<String>, ApplicationError> {
+        Ok(match audit.accepted_prefix() {
+            Some(doc) => Some(doc.project(ContentKind::Richdoc)?.content),
+            None => None,
+        })
+    }
+    let reconstruction = NativeHistoryReconstruction { working_reserve_bytes: 8 * 1024 * 1024 };
+    if retiring {
+        let key = retirement_key(f, 10);
+        with_retirement_settlement(&mut f.store, &retirement_scope(), &key, &retirement_host(), terminal, 128, reconstruction, project)
+    } else {
+        with_settlement(&mut f.store, &f.handle, terminal, 128, reconstruction, project)
+    }
+}
+
+/// The settlement audit at the stored settlement's terminal B keeps the tail
+/// private and projects what that settlement stored as `moment`, before and
+/// after a restart, with no writes.
+fn audits_as_stored(f: &mut Fixture, retiring: bool, moment: &str, case: &str) {
+    let stored = moment_text(f, moment);
+    for restart in [false, true] {
+        if restart {
+            reopen(f);
+        }
+        let before = rows(f, &SETTLEMENT_WRITES);
+        let projected = audited(f, retiring, None);
+        assert_eq!(projected.as_ref().ok().and_then(Option::as_deref), Some(stored.as_str()), "{case} restart={restart}: {projected:?}");
+        assert_eq!(rows(f, &SETTLEMENT_WRITES), before, "{case} restart={restart}: an audit writes nothing");
+    }
+}
+
+/// `damage` leaves the settlement audit at B Corrupt, in the ordinary form,
+/// with no writes.
+fn audit_is_corrupt(f: &mut Fixture, damage: impl FnOnce(&mut Fixture), case: &str) {
+    damage(f);
+    let before = rows(f, &[&SETTLEMENT_WRITES[..], &APPLICATION_WRITES[..]].concat());
+    let audit = audited(f, false, None);
+    assert!(matches!(audit, Err(ApplicationError::Corrupt)), "{case}: {audit:?}");
+    assert_eq!(rows(f, &[&SETTLEMENT_WRITES[..], &APPLICATION_WRITES[..]].concat()), before, "{case}");
+}
+
+/// The native sequence the entry `delivery` queued.
+fn native_sequence_of(f: &Fixture, delivery: &str) -> i64 {
+    f.store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT json_extract(native_source_json,'$.nativeSequence') FROM owner_ydoc_outbox_entries WHERE delivery_id=?1",
+                [delivery],
+                |r| r.get(0),
+            )
+        })
+        .unwrap()
+}
+
+/// A root that applies nothing: the relay accepts its `count` native updates
+/// at 5 and on, it settles at B with no terminal, so that settlement's
+/// coverage starts at its adopted head, and it releases with them Carried.
+/// S1 then captures straight away, with no catch-up rows, and adopts: its
+/// seed waits at the last Carried update's native sequence.
+fn carried_since_the_floor(count: i64) -> (Fixture, Vec<CarriedDelivery>) {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let floor = adopted_head(&f);
+    let mut accepted = Vec::new();
+    for index in 0..count {
+        let entry = native_tail_edit(&mut f, &format!("# Carried {index}\n"), 11 + index);
+        let receipt = receipt_of(&entry.delivery_id, &entry.update_digest, 5 + index);
+        acknowledge_entry(&mut f, &receipt);
+        accepted.push(receipt);
+    }
+    host_document(&mut f, true, true);
+    let settled = retirement_settle(&mut f, 10, None).unwrap();
+    assert_eq!(coverage_floor(&f, &settled.settlement_id), floor);
+    release_parked(&mut f);
+    let carried: Vec<CarriedDelivery> = accepted.iter().map(|receipt| carried_delivery(&f, receipt)).collect();
+    assert_eq!(manifest(&f, "adoption"), carried);
+    importable(&mut f);
+    returned(&mut f);
+    file_matches_local(&mut f, "returned");
+    successor(&mut f);
+    f.adopt().unwrap();
+    let last = carried.last().unwrap().native_sequence;
+    assert_eq!(native_sequence_of(&f, &pending_seed_delivery(&f)), last, "the seed shares the last Carried sequence");
+    (f, carried)
+}
+
+/// Opus's and Sol's 4b1c reviews: coverage counts distinct native sequences.
+/// S1's seed names its captured head, the native sequence of its
+/// predecessor's last Carried update, and every row since the stored floor is
+/// unapplied. Settled at B, in the ordinary and the retirement form, a
+/// pending seed still refuses the settlement. Acknowledged, the settlement
+/// replays the stored range and projects what the predecessor settled, before
+/// and after a restart, with no writes. The seed keeps its own validation:
+/// damaged, it is Corrupt though its sequence is already counted.
+#[test]
+fn a_seed_at_a_carried_sequence_settles_at_b() {
+    for count in [1, 2] {
+        for retiring in [false, true] {
+            let case = format!("count={count} retiring={retiring}");
+            let (mut f, _) = carried_since_the_floor(count);
+            let before = rows(&f, &SETTLEMENT_WRITES);
+            let pending = audited(&mut f, retiring, None);
+            assert!(
+                matches!(pending, Err(ApplicationError::InvalidInput("the owner's adoption seed must be accepted before a settlement"))),
+                "{case}: {pending:?}"
+            );
+            assert_eq!(rows(&f, &SETTLEMENT_WRITES), before, "{case}");
+            accept_seed(&mut f, 11);
+            audits_as_stored(&mut f, retiring, "retired", &case);
+            assert!(!moment_text(&f, "retired").contains("Carried"), "{case}");
+        }
+        let (mut f, _) = carried_since_the_floor(count);
+        let seed = pending_seed_delivery(&f);
+        accept_seed(&mut f, 11);
+        audit_is_corrupt(&mut f, |f| write(f, &format!(
+            "UPDATE owner_ydoc_outbox_entries SET append_key='owner-adoption:'||printf('%.64c','f') WHERE delivery_id='{seed}'"
+        )), &format!("count={count}: a damaged seed at a counted sequence"));
+    }
+}
+
+/// A chain seed shares a native sequence with its predecessor's last update.
+/// S1's seed, accepted and never applied, is Carried beside C2 at C2's
+/// sequence; S2 inherits both and its own seed names that sequence too.
+/// Acknowledged, S2's settlement at B replays the stored range, before and
+/// after a restart, with no writes.
+#[test]
+fn a_chain_seed_shares_its_predecessors_last_sequence() {
+    let (mut f, carried) = carried_since_the_floor(2);
+    let first = f.cut.adoption_id.clone();
+    let accepted = accept_seed(&mut f, 7);
+    release_parked(&mut f);
+    let s1_seed = carried_delivery(&f, &accepted);
+    assert_eq!(manifest(&f, &first), [carried.clone(), vec![s1_seed.clone()]].concat());
+    assert_eq!(s1_seed.native_sequence, carried[1].native_sequence);
+    returned(&mut f);
+    successor(&mut f);
+    f.adopt().unwrap();
+    assert_eq!(native_sequence_of(&f, &pending_seed_delivery(&f)), s1_seed.native_sequence);
+    accept_seed(&mut f, 11);
+    audits_as_stored(&mut f, false, "retired", "a chain seed");
+}
+
+/// P adopts with no seed, a host refuses its native update, P settles at B
+/// with nothing applied, and it releases. S adopts through the Refused
+/// coverage and its seed waits at the refused update's native sequence.
+fn refused_then_resumed() -> Fixture {
+    let mut f = refused_root(false);
+    host_document(&mut f, true, true);
+    retirement_settle(&mut f, 10, None).unwrap();
+    release_and_return(&mut f);
+    successor(&mut f);
+    f.adopt().unwrap();
+    let refused: String = f
+        .store
+        .read_with(|conn| conn.query_row("SELECT delivery_id FROM owner_ydoc_outbox_entries WHERE sequence=1", [], |r| r.get(0)))
+        .unwrap();
+    assert_eq!(native_sequence_of(&f, &pending_seed_delivery(&f)), native_sequence_of(&f, &refused));
+    f
+}
+
+/// Sol's 4b1c review: a refusal the released chain left stays private on
+/// replay. P's refused update lies above the stored floor and names P, not
+/// S. Settled at B, it keeps the tail private, and the projection holds only
+/// accepted state, never the refused content S's local Y.Doc still holds:
+/// with S's seed acknowledged, and with it abandoned so that the refusal
+/// alone keeps the tail private, below the floor too. Before and after a
+/// restart, with no writes.
+#[test]
+fn a_predecessors_refusal_stays_private_on_replay() {
+    for abandoned in [false, true] {
+        let case = format!("abandoned={abandoned}");
+        let mut f = refused_then_resumed();
+        if abandoned {
+            abandon_seed(&mut f);
+            let head = adopted_head(&f);
+            let tail = {
+                let held = f.handle.registration.lock().unwrap();
+                f.store.read_with(|conn| settlement::private_tail(conn, &held, head, head)).unwrap()
+            };
+            assert!(tail.any && tail.sequences.is_empty(), "{case}");
+        } else {
+            accept_seed(&mut f, 11);
+        }
+        audits_as_stored(&mut f, abandoned, "retired", &case);
+        assert!(!moment_text(&f, "retired").contains("Refused"), "{case}");
+    }
+}
+
+/// A damage to the predecessor's refused entry.
+type ChainRefusalDamage = (&'static str, fn(&mut Fixture));
+
+/// Only a strict refusal by an activation of the released chain stays
+/// private. One whose source names an activation outside the chain, one
+/// failing the strict representation, and another activation's pending entry
+/// leave the settlement Corrupt, with no writes.
+#[test]
+fn another_activations_entry_outside_a_chain_refusal_is_corrupt() {
+    let damages: [ChainRefusalDamage; 3] = [
+        ("outside the chain", |f| {
+            // Released activations of the lineage that follow each other, so
+            // the chain keeps its one tail.
+            release_unadopted(f, "namespace", "object", "stray", None);
+            release_unadopted(f, "namespace", "object", "stray-back", Some("stray"));
+            write(f, "UPDATE live_owner_activations SET predecessor_activation_id='stray-back' WHERE activation_id='stray'");
+            rewrite_source(f, |source| source.adoption_id = "stray".into());
+        }),
+        ("invalid reason", |f| write(f, "UPDATE owner_ydoc_outbox_entries SET terminal_reason='refused'||char(10) WHERE sequence=1")),
+        ("pending", |f| write_unchecked(f, "UPDATE owner_ydoc_outbox_entries SET pending=1 WHERE sequence=1")),
+    ];
+    for (case, damage) in damages {
+        let mut f = refused_then_resumed();
+        accept_seed(&mut f, 11);
+        audit_is_corrupt(&mut f, damage, case);
+    }
+}
