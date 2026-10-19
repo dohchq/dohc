@@ -21,7 +21,10 @@ fn fixture(count: usize) -> (ScratchDir, EngineStore) {
     (scratch, store)
 }
 fn request() -> CurrentViewRequest {
-    serde_json::from_value(serde_json::json!({"selectors":[{"versionId":"main","paths":[]}],"selectorDigest":"selectors","incarnation":"one"})).unwrap()
+    serde_json::from_value(
+        serde_json::json!({"selectors":[{"versionId":"main","paths":[]}],"incarnation":"one"}),
+    )
+    .unwrap()
 }
 fn position(view: &ReplicaCurrentView) -> CurrentViewPosition {
     CurrentViewPosition {
@@ -88,7 +91,7 @@ fn replica_delta_one_edit_in_twenty_thousand_and_all_base_fallbacks() {
         20_000
     );
     request.since = cache.position.clone();
-    request.selector_digest = "other".into();
+    request.selectors[0].paths = vec!["docs".into()];
     assert!(!complete(&store, &mut request, &mut cache).delta);
     request.since = cache.position.clone();
     request.incarnation = "two".into();
@@ -159,4 +162,49 @@ fn replica_delta_path_replacement_removes_the_displaced_object() {
     assert_eq!(delta.files[0].object_id, "o000001");
     assert_eq!(delta.removed.len(), 1);
     assert_eq!(delta.removed[0].object_id, "o000000");
+}
+
+#[test]
+fn replica_delta_keeps_writes_after_the_first_page() {
+    let (_scratch, mut store) = fixture(16_002);
+    let mut cache = CurrentViewCache::default();
+    let mut request = request();
+    let first = collect_current_view_cached(&store, "ws", &request, &mut cache).unwrap();
+    request.position = Some(position(&first));
+    request.cursor = first.next_cursor;
+    // A tracked write at the same frontier must survive collection completion.
+    edit(&mut store, 1);
+    let full = complete(&store, &mut request, &mut cache);
+    request.since = Some(position(&full));
+    let delta = complete(&store, &mut request, &mut cache);
+    assert!(delta.delta);
+    assert_eq!(delta.files.len(), 1);
+    assert_eq!(delta.files[0].object_id, "o000000");
+}
+
+#[test]
+fn replica_delta_removal_page_retains_scene_dependencies() {
+    let (_scratch, mut store) = fixture(16_002);
+    let mut cache = CurrentViewCache::default();
+    let mut request = request();
+    let full = complete(&store, &mut request, &mut cache);
+    let scene = ("main".to_string(), "o000000".to_string());
+    // Exercise scene dependency scheduling independently of scene projection.
+    cache.scenes.insert(scene.clone());
+    *cache.manifest.get_mut(&scene).unwrap() = "old scene projection".into();
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("DELETE FROM path_aliases WHERE object_id<>'o000000'", [])
+                .map_err(StorageError::persist_public)?;
+            dohc_engine_storage::replica::advance_frontiers(tx, "ws", 2, 0)
+        })
+        .unwrap();
+    request.since = Some(position(&full));
+    let delta = complete(&store, &mut request, &mut cache);
+    assert_eq!(delta.removed.len(), 16_001);
+    assert_eq!(
+        delta.files.len(),
+        1,
+        "scene dependency survives the removal-only page"
+    );
 }

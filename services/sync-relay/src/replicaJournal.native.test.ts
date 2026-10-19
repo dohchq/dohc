@@ -9,10 +9,35 @@ import {registered, cleanupLiveDeliveryFixtures, hash} from "../../../packages/y
 import {yDocToMarkdown,markdownToYDoc} from "../../../packages/ydoc-projection/src/import-export";
 import {createReplicaReadPrincipal} from "./replicaReadPrincipal";
 import {createReplicaEngineStarter} from "./replicaEngine";
-import type {ReplicaChild} from "./replicaSupervisor";
+import {createReplicaSupervisor,type ReplicaChild} from "./replicaSupervisor";
 
 const binary=requireEngineBinaryOrSkip();
 afterEach(cleanupLiveDeliveryFixtures);
+it.skipIf(binary.missing || process.platform !== "linux")("supervisor adopts a real child's second revision with delta true",async()=>{
+  const f=await fixture();await f.child.close();
+  const cuts:Array<{delta:boolean;files:number}>=[],errors:unknown[]=[];
+  const start=createReplicaEngineStarter({engineExecutable:binary.require(),allowDevelopment:true});
+  const supervisor=createReplicaSupervisor({storage:f.f.storage,storeRoot:join(f.root,"supervised"),onError:(_w,e)=>errors.push(e),startChild:async input=>{
+    const child=await start(input);let seeded=false;
+    return {...child,pull:async()=>{
+      await child.pull();
+      if(!seeded) {
+        // This journal-only fixture needs an ordinary head for current-view collection.
+        const text=yDocToMarkdown(f.f.doc),sha=hash(Buffer.from(text)),db=new DatabaseSync(join(input.storeDir,".dohc/engine/engine.db"));
+        try {db.exec("BEGIN");db.prepare("INSERT OR IGNORE INTO blobs VALUES(?,?,?)").run(sha,Buffer.byteLength(text),text);db.prepare("INSERT OR IGNORE INTO path_aliases VALUES('workspace','main',?,'object')").run(f.f.input.evidence.currentPath);db.prepare("INSERT OR REPLACE INTO snapshots(workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin) VALUES('workspace','main','object',?,?,0,'baseline','test')").run(f.f.input.evidence.currentPath,sha);db.exec("COMMIT");}finally{db.close();}
+        seeded=true;
+      }
+    },currentView:async(...args)=>{const page=await child.currentView(...args);cuts.push({delta:page.delta,files:page.files.length});return page;}};
+  }});
+  try {
+    await supervisor.activate("workspace");expect(cuts).toEqual([{delta:false,files:1}]);
+    const cursor=f.commit("second-revision");await supervisor.activate("workspace");
+    expect(cuts.slice(1)).toContainEqual({delta:true,files:1});
+    expect(supervisor.currentReadView("workspace")!.view.journalCursor).toBe(cursor);
+    expect(supervisor.currentView("workspace")!.view.files).toHaveLength(1);
+    expect(errors).toEqual([]);
+  } finally {await supervisor.close();await f.close();}
+},120_000);
 async function fixture(retired=false, retireAuthority=true,baselineBytes?:Uint8Array) {
   const f=registered({deployment:true,baselineBytes});
   f.storage.claimWorkspaceIdentity({workspaceId:"workspace",replicationEpoch:"epoch",streamIdentity:"stream"});
@@ -124,8 +149,8 @@ it.skipIf(binary.missing || process.platform !== "linux")("current views preserv
   const f=await fixture(false,true,baselineBytes);try{
     await f.child.pull();const text=yDocToMarkdown(f.f.doc),sha=hash(Buffer.from(text));
     const db=new DatabaseSync(join(f.root,".dohc/engine/engine.db"));try{db.exec("BEGIN");db.prepare("INSERT OR IGNORE INTO blobs VALUES(?,?,?)").run(sha,Buffer.byteLength(text),text);db.prepare("INSERT OR IGNORE INTO path_aliases VALUES('workspace','main',?,'object')").run(f.f.input.evidence.currentPath);db.prepare("INSERT OR REPLACE INTO snapshots(workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin) VALUES('workspace','main','object',?,?,0,'baseline','test')").run(f.f.input.evidence.currentPath,sha);db.exec("COMMIT");}finally{db.close();}
-    const initial=await f.child.currentView([{versionId:"main",paths:["docs"]}],[],undefined,undefined,undefined,"docs");expect(initial.texts[0]!.text).toBe(text);
+    const initial=await f.child.currentView([{versionId:"main",paths:["docs"]}],[],undefined,undefined,undefined);expect(initial.texts[0]!.text).toBe(text);
     f.commit("nested-edit");await f.child.pull();
-    const changed=await f.child.currentView([{versionId:"main",paths:["docs"]}],[],undefined,undefined,undefined,"docs");expect(changed.journalCursor).toBe(1);expect(changed.texts[0]!.text).toBe(yDocToMarkdown(f.f.doc));expect(changed.texts[0]!.text).toContain("grandchild");expect(changed.files[0]!.restoreGeneration).toBe(1);
+    const changed=await f.child.currentView([{versionId:"main",paths:["docs"]}],[],undefined,undefined,undefined);expect(changed.journalCursor).toBe(1);expect(changed.texts[0]!.text).toBe(yDocToMarkdown(f.f.doc));expect(changed.texts[0]!.text).toContain("grandchild");expect(changed.files[0]!.restoreGeneration).toBe(1);
   }finally{await f.close();}
 },120_000);

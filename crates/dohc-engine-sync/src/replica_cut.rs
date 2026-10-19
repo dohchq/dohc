@@ -33,7 +33,6 @@ pub struct CurrentViewRequest {
     pub cursor: Option<CurrentViewCursor>,
     #[serde(default)]
     pub since: Option<CurrentViewPosition>,
-    pub selector_digest: String,
     pub incarnation: String,
 }
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -107,19 +106,19 @@ pub struct CurrentViewCache {
     entries: BTreeMap<(String, String, String), (String, String)>,
     bytes: usize,
     tracking: bool,
-    identity: (String, String, String),
+    identity: (String, String),
     position: Option<CurrentViewPosition>,
     collecting: Option<CurrentViewPosition>,
     since: Option<CurrentViewPosition>,
     delta: bool,
-    manifest: BTreeMap<(String, String), (CurrentViewCursor, String)>,
-    pending: BTreeMap<(String, String), (CurrentViewCursor, String)>,
-    removed: Vec<CurrentViewCursor>,
+    manifest: BTreeMap<(String, String), String>,
+    pending: BTreeMap<(String, String), String>,
+    removed: Vec<CurrentViewRemoved>,
     scenes: BTreeSet<(String, String)>,
 }
 
 fn track_touched(conn: &rusqlite::Connection) -> Result<(), SyncError> {
-    conn.execute_batch("CREATE TEMP TABLE IF NOT EXISTS replica_cut_touched(workspace TEXT,version TEXT,object TEXT,PRIMARY KEY(workspace,version,object)) WITHOUT ROWID;").map_err(SyncError::corrupt)?;
+    conn.execute_batch("CREATE TEMP TABLE IF NOT EXISTS replica_cut_touched(workspace TEXT,version TEXT,object TEXT,PRIMARY KEY(workspace,version,object)) WITHOUT ROWID; CREATE TEMP TABLE IF NOT EXISTS replica_cut_collecting(workspace TEXT,version TEXT,object TEXT,PRIMARY KEY(workspace,version,object)) WITHOUT ROWID;").map_err(SyncError::corrupt)?;
     for (table, version) in [
         ("path_aliases", "version_id"),
         ("snapshots", "version_id"),
@@ -190,11 +189,13 @@ pub fn collect_current_view_cached(
         let frontier = read_frontiers(&tx, workspace)?;
         let position = CurrentViewPosition {revision: frontier.revision, log_cursor: frontier.log_cursor, journal_cursor: frontier.journal_cursor};
         if request.cursor.is_some() && request.position.is_none() { return Err(SyncError::InvalidInput {reason: "a current view cursor requires its applied position"}); }
-        let identity=(request.incarnation.clone(),request.selector_digest.clone(),serde_json::to_string(&request.selectors).map_err(SyncError::corrupt)?);
+        let identity=(request.incarnation.clone(),serde_json::to_string(&request.selectors).map_err(SyncError::corrupt)?);
         let moved = request.position.as_ref().is_some_and(|p| *p != position) || request.cursor.is_some() && (cache.collecting.as_ref()!=Some(&position) || cache.identity!=identity || cache.since!=request.since);
         if !moved && request.cursor.is_none() {
             cache.delta=cache.position.as_ref().is_some_and(|p| request.since.as_ref()==Some(p)) && cache.identity==identity;
             cache.identity=identity; cache.collecting=Some(position.clone());cache.since=request.since.clone(); cache.pending.clear(); cache.removed.clear();
+            tx.execute("INSERT INTO replica_cut_touched SELECT * FROM replica_cut_collecting WHERE workspace=?1 ON CONFLICT DO NOTHING",[workspace]).map_err(SyncError::corrupt)?;
+            tx.execute("DELETE FROM replica_cut_collecting WHERE workspace=?1",[workspace]).map_err(SyncError::corrupt)?;
             if cache.delta {
                 // Scene projections depend on versioned assets as well as their own head.
                 if tx.query_row("SELECT EXISTS(SELECT 1 FROM replica_cut_touched WHERE workspace=?1)",[workspace],|r|r.get::<_,bool>(0)).map_err(SyncError::corrupt)? {
@@ -204,12 +205,14 @@ pub fn collect_current_view_cached(
                 let keys=stmt.query_map([workspace],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).map_err(SyncError::corrupt)?;
                 for key in keys {
                     let key=key.map_err(SyncError::corrupt)?;
-                    if let Some((old,_))=cache.manifest.get(&key) {
+                    if cache.manifest.contains_key(&key) {
                         let path=tx.query_row("SELECT a.path FROM path_aliases a JOIN snapshots s USING(workspace_id,version_id,object_id,path) WHERE a.workspace_id=?1 AND a.version_id=?2 AND a.object_id=?3",params![workspace,key.0,key.1],|r|r.get::<_,String>(0)).optional().map_err(SyncError::corrupt)?;
-                        if path.is_none_or(|p| !selected(request,&key.0,&p)) {cache.removed.push(old.clone());}
+                        if path.is_none_or(|p| !selected(request,&key.0,&p)) {cache.removed.push(CurrentViewRemoved {version_id:key.0,object_id:key.1});}
                     }
                 }
             } else {cache.position=None; cache.manifest.clear();cache.scenes.clear();}
+            tx.execute("INSERT INTO replica_cut_collecting SELECT * FROM replica_cut_touched WHERE workspace=?1",[workspace]).map_err(SyncError::corrupt)?;
+            tx.execute("DELETE FROM replica_cut_touched WHERE workspace=?1",[workspace]).map_err(SyncError::corrupt)?;
         }
         if request.known_text_shas.len() % 64 != 0 || !request.known_text_shas.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) { return Err(SyncError::InvalidInput {reason: "invalid known current view text digests"}); }
         let mut known: BTreeSet<String> = request.known_text_shas.as_bytes().chunks(64).map(|b| String::from_utf8_lossy(b).into_owned()).collect();
@@ -223,12 +226,12 @@ pub fn collect_current_view_cached(
             let key=CurrentViewRemoved {version_id:removed.version_id.clone(),object_id:removed.object_id.clone()};
             let size=serde_json::to_vec(&key).map_err(SyncError::corrupt)?.len()+1;
             if encoded_bytes+size>8*1024*1024 || view.removed.len()>=16_000 {
-                view.next_cursor=Some(CurrentViewCursor {path:String::new(),object_id:String::new(),version_id:String::new(),removed:Some(i)}); return Ok(view);
+                view.next_cursor=Some(CurrentViewCursor {path:String::new(),object_id:String::new(),version_id:String::new(),removed:Some(i)}); tx.commit().map_err(SyncError::corrupt)?; return Ok(view);
             }
             encoded_bytes+=size; view.removed.push(key);
         }
         if !view.removed.is_empty() {last=Some(CurrentViewCursor{path:String::new(),object_id:String::new(),version_id:String::new(),removed:Some(cache.removed.len())});}
-        let from=if cache.delta {"replica_cut_touched t CROSS JOIN snapshots s ON s.workspace_id=t.workspace AND s.version_id=t.version AND s.object_id=t.object CROSS JOIN path_aliases a ON a.workspace_id=s.workspace_id AND a.version_id=s.version_id AND a.object_id=s.object_id AND a.path=s.path"} else {"path_aliases a JOIN snapshots s ON s.workspace_id=a.workspace_id AND s.version_id=a.version_id AND s.object_id=a.object_id AND s.path=a.path"};
+        let from=if cache.delta {"replica_cut_collecting t CROSS JOIN snapshots s ON s.workspace_id=t.workspace AND s.version_id=t.version AND s.object_id=t.object CROSS JOIN path_aliases a ON a.workspace_id=s.workspace_id AND a.version_id=s.version_id AND a.object_id=s.object_id AND a.path=s.path"} else {"path_aliases a JOIN snapshots s ON s.workspace_id=a.workspace_id AND s.version_id=a.version_id AND s.object_id=a.object_id AND s.path=a.path"};
         let filter=if cache.delta {" AND t.workspace=?1"} else {""};
         let mut stmt = tx.prepare(&format!("SELECT a.version_id,a.object_id,a.path,s.content_kind,COALESCE(s.blob_sha256,s.binary_sha256),COALESCE(b.byte_length,bb.byte_length) FROM {from} LEFT JOIN blobs b ON b.sha256=s.blob_sha256 LEFT JOIN binary_blobs bb ON bb.sha256=s.binary_sha256 WHERE a.workspace_id=?1 AND (a.version_id,a.path) > (?2,?3){filter} ORDER BY a.version_id,a.path")).map_err(SyncError::corrupt)?;
         let mut rows = stmt.query(params![workspace, request.cursor.as_ref().map_or("", |c| c.version_id.as_str()),request.cursor.as_ref().map_or("", |c| c.path.as_str())]).map_err(SyncError::corrupt)?;
@@ -274,9 +277,10 @@ pub fn collect_current_view_cached(
             let cursor = CurrentViewCursor {path: path.clone(), object_id: object.clone(), version_id: version.clone(),removed:Some(cache.removed.len())};
             let file = CurrentViewFile {version_id: version, object_id: object, path, content_kind: kind, sha256: sha.clone(), byte_length: len, lineage_claim_id: lineage, restore_generation: generation};
             let object_key=(file.version_id.clone(),file.object_id.clone());
-            let fingerprint=serde_json::to_string(&file).map_err(SyncError::corrupt)?;
-            if cache.delta && cache.manifest.get(&object_key).is_some_and(|(_,saved)|*saved==fingerprint) {continue;}
-            let file_bytes = serde_json::to_vec(&file).map_err(SyncError::corrupt)?.len();
+            let encoded=serde_json::to_vec(&file).map_err(SyncError::corrupt)?;
+            let fingerprint=hex_sha256(&encoded);
+            if cache.delta && cache.manifest.get(&object_key).is_some_and(|saved|*saved==fingerprint) {continue;}
+            let file_bytes = encoded.len();
             let cursor_bytes = serde_json::to_vec(&cursor).map_err(SyncError::corrupt)?.len();
             let empty_text_bytes = serde_json::to_vec(&CurrentViewText {sha256: sha.clone(), text: String::new()}).map_err(SyncError::corrupt)?.len();
             let oversized_snapshot = file.content_kind == "text" && text.is_none() && len + empty_text_bytes + file_bytes + header_bytes + cursor_bytes + 2 > 14 * 1024 * 1024;
@@ -293,7 +297,7 @@ pub fn collect_current_view_cached(
                 if encoded_bytes + refusal_size + cursor_bytes > 8 * 1024 * 1024 || view.refused_files.len() >= 16_000 {view.next_cursor = last; break;}
                 encoded_bytes += refusal_size;
                 view.refused_files.push(refusal);
-                cache.pending.insert(object_key,(cursor.clone(),fingerprint));
+                cache.pending.insert(object_key,fingerprint);
                 last = Some(cursor);
                 continue;
             }
@@ -301,7 +305,7 @@ pub fn collect_current_view_cached(
             encoded_bytes += size;
             if let Some(text) = text { known.insert(sha.clone()); view.texts.push(text); }
             view.files.push(file);
-            cache.pending.insert(object_key,(cursor.clone(),fingerprint));
+            cache.pending.insert(object_key,fingerprint);
             last = Some(cursor);
 
 
@@ -310,7 +314,7 @@ pub fn collect_current_view_cached(
         if view.next_cursor.is_none() {
             for key in &cache.removed {cache.manifest.remove(&(key.version_id.clone(),key.object_id.clone()));}
             for (key,value) in std::mem::take(&mut cache.pending) {cache.manifest.insert(key,value);} cache.position=Some(position);
-            tx.execute("DELETE FROM replica_cut_touched WHERE workspace=?1",[workspace]).map_err(SyncError::corrupt)?;
+            tx.execute("DELETE FROM replica_cut_collecting WHERE workspace=?1",[workspace]).map_err(SyncError::corrupt)?;
         }
         tx.commit().map_err(SyncError::corrupt)?;
         Ok(view)

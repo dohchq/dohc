@@ -27,7 +27,7 @@ export type ReplicaCurrentViewFile = {
   sha256?: string;
 } | {path: string; status: "updating"};
 type Unavailable = {status: "denied" | "not-ready" | "updating"};
-export type ReplicaCurrentViewList = Unavailable | {status: "ready"; files: ReplicaCurrentViewFile[]; etag: string; nextCursor?:{view:string;path:string}};
+export type ReplicaCurrentViewList = Unavailable | {status: "ready"; files: ReplicaCurrentViewFile[]; etag: string};
 export type ReplicaCurrentViewRead = Unavailable | {status: "not-found" | "not-text"} |
   {status: "ready"; file: Extract<ReplicaCurrentViewFile, {status: "ready"}>; text: string};
 
@@ -193,7 +193,6 @@ export function withReplicaCurrentView<T>(storage: StorageContext, input: Replic
     visiblePath: (version: string, path: string) => string | null;
     readText: (row: ViewFile) => string | null;
     inventoryEtag: () => string;
-    position: string;
   }) => T, requestedPath?: string, includeRows = false,
 ): T | Unavailable {
   return storage.readTx(() => {
@@ -289,7 +288,7 @@ export function withReplicaCurrentView<T>(storage: StorageContext, input: Replic
       if (requestedPath === undefined || path === requestedPath) files.set(path, {path, status:"updating"});
     }
     const sorted = [...files.values()].sort((a,b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
-    return read({files:sorted, rows, workspace, floor, position:etag([view.workspaceId,view.revision,view.logCursor,view.journalCursor]),
+    return read({files:sorted, rows, workspace, floor,
       visiblePath:(v,path)=>visible(v,path) ? project(path) : null, inventoryEtag:()=>inventoryEtag(index,sorted), readText:row => {
       const textKey = JSON.stringify([row.sha256,row.byteLength]);
       const text = index.texts.get(row.sha256);
@@ -317,17 +316,10 @@ export function withReplicaCurrentView<T>(storage: StorageContext, input: Replic
   });
 }
 
-export function listReplicaCurrentViewFiles(storage: StorageContext, input: ReplicaCurrentViewReadInput & {limit?:number;cursor?:{view:string;path:string}},
+export function listReplicaCurrentViewFiles(storage: StorageContext, input: ReplicaCurrentViewReadInput,
   source?: ReplicaCurrentViewSource): ReplicaCurrentViewList {
-  return withReplicaCurrentView(storage, input, source, ({files,inventoryEtag,position}):ReplicaCurrentViewList => {
-    const tag=inventoryEtag(),view=etag([position,tag,input.grantId,input.generation]);
-    if(input.cursor && input.cursor.view!==view)return {status:"updating"};
-    if(input.limit===undefined)return {status:"ready",files,etag:tag};
-    if(!Number.isSafeInteger(input.limit)||input.limit<1||input.limit>1_000)throw new TypeError("Invalid replica page size.");
-    const remaining=input.cursor?files.filter(f=>f.path>input.cursor!.path):files;
-    const page=remaining.slice(0,input.limit);
-    return {status:"ready",files:page,etag:tag,...(remaining.length>page.length?{nextCursor:{view,path:page.at(-1)!.path}}:{})};
-  });
+  return withReplicaCurrentView(storage, input, source, ({files,inventoryEtag}):ReplicaCurrentViewList =>
+    ({status:"ready",files,etag:inventoryEtag()}));
 }
 
 export function readReplicaCurrentViewFile(storage: StorageContext, input: ReplicaCurrentViewReadInput & {path: string},

@@ -1,9 +1,65 @@
 import {afterEach,expect,it,vi} from "vitest";
 import {createReplicaSupervisor} from "./replicaSupervisor";
-import {closeTestStorages,sha256,tempRoot,testStorage} from "./testing";
+import {closeTestStorages,sha256,tempRoot,testStorage,inspectDatabase,storagePath} from "./testing";
 import type {ReplicaCurrentViewPage} from "@dohc/workspace-engine-client/daemon";
+import {ReplicaCurrentViewRefused,forgetReplicaCurrentViewStoredCache} from "./storage/replicaCurrentViews";
+import type {StorageContext} from "./storage/context";
+import {ReplicaManifest} from "./replicaManifest";
 
 afterEach(async()=>{vi.useRealTimers();await closeTestStorages();});
+it("fix1: removing an omission does not observe an old unavailable History row",()=>{
+  const omitted={versionId:"main",objectId:"large",path:"docs/large.md",sha256:sha256("large"),reason:"text-frame-limit" as const};
+  const page={workspaceId:"w",revision:1,logCursor:0,journalCursor:0,files:[],texts:[],omitted:[omitted]};
+  const manifest=new ReplicaManifest().apply(page,false,[]).next;
+  expect(manifest.apply({...page,revision:2,omitted:[]},true,[omitted]).observations).toEqual([]);
+});
+it("fix1: a refused deletion forces a full retry and preserves its History observation",async()=>{
+  const f=await fixture(2);
+  const save=vi.spyOn(f.storage,"storeReplicaCurrentView"),advance=vi.spyOn(f.storage,"advanceReplicaCurrentView");
+  const db=inspectDatabase(storagePath(f.storage));
+  try {
+    db.exec("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,relay_seq) VALUES('w','device',1,'workspace.init','{}',1,1)");
+    save.mockImplementationOnce(()=>{throw new ReplicaCurrentViewRefused();});
+    f.update({removed:[f.files[0]!],logCursor:1});await f.supervisor.activate("w");
+    forgetReplicaCurrentViewStoredCache(f.storage as unknown as StorageContext,"w");
+    expect(f.storage.readReplicaCurrentView("w")!.files).toHaveLength(2);
+    expect(f.storage.readReplicaCurrentView("w")!.logCursor).toBe(0);
+    f.storage.createShare({share:{shareId:"new",workspaceId:"w",granterUserId:"owner",selectorJson:'{"paths":["docs"],"versionId":null}',createdAtMs:2},grant:{grantId:"new",shareId:"new",principalKind:"user",principalUserId:"reader",principalEmail:null,access:"view",generation:1,status:"active",createdAtMs:2,revokedAtMs:null,parentGrantId:null}});
+    db.exec("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,relay_seq) VALUES('w','device',2,'workspace.init','{}',2,2)");
+    f.override(async(_known,since)=>({workspaceId:"w",revision:3,logCursor:2,journalCursor:0,files:since?[]:[f.files[1]!],texts:[],refusedFiles:[],delta:!!since,removed:[],moved:false,nextCursor:null}));
+    await f.supervisor.activate("w");
+    expect(advance).not.toHaveBeenCalled();
+    expect(save).toHaveBeenCalledTimes(2);
+    expect(save.mock.calls[1]![2]).toEqual(expect.arrayContaining([expect.objectContaining({objectId:f.files[0]!.objectId})]));
+    forgetReplicaCurrentViewStoredCache(f.storage as unknown as StorageContext,"w");
+    expect(f.storage.readReplicaCurrentView("w")!.files.map(f=>f.objectId)).toEqual([f.files[1]!.objectId]);
+    expect(f.storage.readReplicaCurrentViewFile({...f.input,grantId:"new",path:f.files[0]!.path})).toEqual({status:"not-found"});
+  } finally {await f.supervisor.close();}
+});
+it("fix1: a refused spilled selector widening retries the widened full manifest",async()=>{
+  const f=await fixture(2,false,8),text="large new selected text",other={...f.files[0]!,objectId:"other",path:"other/new.md",sha256:sha256(text),byteLength:text.length};
+  const original=f.storage.storeReplicaCurrentView.bind(f.storage);
+  try {
+    f.storage.createShare({share:{shareId:"other",workspaceId:"w",granterUserId:"owner",selectorJson:'{"paths":["other"],"versionId":null}',createdAtMs:1},grant:{grantId:"other",shareId:"other",principalKind:"user",principalUserId:"reader",principalEmail:null,access:"view",generation:1,status:"active",createdAtMs:1,revokedAtMs:null,parentGrantId:null}});
+    f.override(async(known,since)=>({workspaceId:"w",revision:1,logCursor:0,journalCursor:0,files:since?[]:[...f.files,other],texts:since||known.includes(other.sha256)?[]:[{sha256:other.sha256,text}],refusedFiles:[],delta:!!since,removed:[],moved:false,nextCursor:null}));
+    const save=vi.spyOn(f.storage,"storeReplicaCurrentView").mockImplementationOnce(()=>{throw new ReplicaCurrentViewRefused();}).mockImplementation(original);
+    await f.supervisor.activate("w");await f.supervisor.activate("w");
+    expect(f.storage.readReplicaCurrentView("w")!.files.map(f=>f.path)).toContain(other.path);
+    expect(save).toHaveBeenCalledTimes(2);
+  } finally {await f.supervisor.close();}
+});
+it("fix1: a full fallback advertises held text and counts each held byte once",async()=>{
+  const f=await fixture(2,false,32),text="held text content here",file={...f.files[0]!,sha256:sha256(text),byteLength:text.length};
+  try {
+    f.update({files:[file],texts:[{sha256:file.sha256,text}]});await f.supervisor.activate("w");
+    const stage=vi.spyOn(f.storage,"stageReplicaCurrentView");
+    f.override(async known=>{
+      expect(known).toContain(file.sha256);
+      return {workspaceId:"w",revision:3,logCursor:0,journalCursor:0,files:[file,f.files[1]!],texts:known.includes(file.sha256)?[]:[{sha256:file.sha256,text}],refusedFiles:[],delta:false,removed:[],moved:false,nextCursor:null};
+    });
+    await f.supervisor.activate("w");expect(stage).not.toHaveBeenCalled();
+  } finally {await f.supervisor.close();}
+});
 async function fixture(count=20_000,extra=false,maxViewTextBytes=64*1024*1024) {
   const storage=await testStorage();storage.claimWorkspace({workspaceId:"w",ownerUserId:"owner",createdAtMs:1});
   storage.claimWorkspaceIdentity({workspaceId:"w",replicationEpoch:"e",streamIdentity:"s"});
@@ -13,8 +69,8 @@ async function fixture(count=20_000,extra=false,maxViewTextBytes=64*1024*1024) {
   const files=Array.from({length:count},(_,i)=>({versionId:"main",objectId:`o${i}`,path:`docs/${String(i).padStart(6,"0")}.md`,contentKind:"text" as const,sha256:sha256(""),byteLength:0,lineageClaimId:null,restoreGeneration:null}));
   let page:ReplicaCurrentViewPage={workspaceId:"w",revision:1,logCursor:0,journalCursor:0,files,texts:[{sha256:sha256(""),text:""}],refusedFiles:[],delta:false,removed:[],moved:false,nextCursor:null};
   const errors:unknown[]=[];
-  let read=async(_known:string[])=>structuredClone(page);
-  const supervisor=createReplicaSupervisor({storage,storeRoot:await tempRoot("r1"),maxViewTextBytes,onError:(_w,e)=>errors.push(e),startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:(_s,known)=>read(known)})});
+  let read=async(_known:string[],_since?:{revision:number;logCursor:number;journalCursor:number})=>structuredClone(page);
+  const supervisor=createReplicaSupervisor({storage,storeRoot:await tempRoot("r1"),maxViewTextBytes,onError:(_w,e)=>errors.push(e),startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:(_s,known,_p,_c,since)=>read(known,since)})});
   const input={grantId:"g",generation:1,principal:{kind:"user" as const,userId:"reader"}};
   await supervisor.activate("w");
   const update=(changes:Partial<ReplicaCurrentViewPage>)=>{page={...page,revision:page.revision+1,delta:true,files:[],texts:[],removed:[],...changes};};
@@ -57,17 +113,6 @@ it("R1: a duplicate-path delta fails atomically",async()=>{
   f.update({files:[{...f.files[0]!,path:f.files[1]!.path}]});
   await expect(f.supervisor.activate("w")).rejects.toThrow("Duplicate replica path");
   expect(prior.view.files.map(f=>f.path)).toEqual(f.files.map(f=>f.path));await f.supervisor.close();
-});
-it("R1: an inventory continuation rejects a replacement view and never mixes paths",async()=>{
-  const f=await fixture(100);
-  try {
-    let cursor:{view:string;path:string}|undefined;const paths:string[]=[];
-    do {const result=f.storage.listReplicaCurrentViewFiles({...f.input,limit:7,cursor},f.supervisor);expect(result.status).toBe("ready");if(result.status!=="ready")throw Error(result.status);paths.push(...result.files.map(f=>f.path));cursor=result.nextCursor;}while(cursor);
-    expect(paths).toEqual(f.files.map(f=>f.path));expect(new Set(paths).size).toBe(100);
-    const first=f.storage.listReplicaCurrentViewFiles({...f.input,limit:7},f.supervisor);if(first.status!=="ready")throw Error(first.status);
-    f.update({files:[{...f.files[0]!,path:"docs/renamed.md"}]});await f.supervisor.activate("w");
-    expect(f.storage.listReplicaCurrentViewFiles({...f.input,limit:7,cursor:first.nextCursor},f.supervisor)).toEqual({status:"updating"});
-  } finally {await f.supervisor.close();}
 });
 it("R1: a selector ending mid-page recollects new grants within the same drain",async()=>{
   const f=await fixture(2,true);let calls=0;

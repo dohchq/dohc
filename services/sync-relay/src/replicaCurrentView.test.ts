@@ -8,6 +8,24 @@ import {createReplicaReadPrincipal} from "./replicaReadPrincipal";
 
 afterEach(async()=>{vi.useRealTimers();cleanupLiveDeliveryFixtures();await closeTestStorages();});
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+it("fix1: a fence-adjusted store forces a full child cut before advancing its header",async()=>{
+  const f=registered({deployment:true});let supervisor:ReturnType<typeof createReplicaSupervisor>|undefined;
+  try {
+    f.storage.claimWorkspaceIdentity({workspaceId:"workspace",replicationEpoch:"e",streamIdentity:"s"});
+    const file={versionId:"main",objectId:"object",path:f.input.evidence.currentPath,contentKind:"text" as const,sha256:sha("old"),byteLength:3,lineageClaimId:f.input.evidence.document.lineageClaimId,restoreGeneration:1};
+    let revision=1;
+    supervisor=createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("adjusted-base"),startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async(_s,_known,_p,_c,since)=>{
+      if(revision===3)expect(since).toBeUndefined();
+      return {workspaceId:"workspace",revision,logCursor:0,journalCursor:0,files:[revision===1?file:{...file,path:file.path.replace(/[^/]+$/,"renamed.md"),restoreGeneration:revision===3?2:1}],texts:revision===1?[{sha256:file.sha256,text:"old"}]:[],refusedFiles:[],delta:revision===2,removed:[],moved:false,nextCursor:null};
+    }})});
+    await supervisor.activate("workspace");
+    f.write(db=>db.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=2"));
+    revision=2;await supervisor.activate("workspace");
+    expect(f.storage.readReplicaCurrentView("workspace")!.files[0]!.path).toBe(file.path);
+    revision=3;await supervisor.activate("workspace");
+    expect(f.storage.readReplicaCurrentView("workspace")!.files[0]).toMatchObject({path:file.path.replace(/[^/]+$/,"renamed.md"),restoreGeneration:2});
+  } finally {await supervisor?.close();f.close();}
+});
 it.each([false, true])("round6: omitted current paths win over carried restore rows (reverse=%s)", reverse => {
   const f = registered({deployment:true});
   try {

@@ -1241,7 +1241,6 @@ fn current_view_keeps_nested_list_bytes_and_projects_a_journal_edit() {
         position: None,
         cursor: None,
         since: None,
-        selector_digest: String::new(),
         incarnation: String::new(),
     };
     let before = collect_current_view(&replica, "ws", &request).unwrap();
@@ -1290,7 +1289,6 @@ fn measure_current_view_lanes() {
         position: None,
         cursor: None,
         since: None,
-        selector_digest: String::new(),
         incarnation: String::new(),
     };
     for bytes in [50_000, 1_000_000] {

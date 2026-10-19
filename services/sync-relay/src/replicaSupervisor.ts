@@ -1,5 +1,5 @@
 import {currentViewFileVisible, ReplicaCurrentViewRefused} from "./storage/replicaCurrentViews";
-import {historyObjectKey,type ReplicaHistoryObservation} from "./storage/replicaHistoryPins";
+import {historyObjectKey,sameHistoryState,type ReplicaHistoryObservation} from "./storage/replicaHistoryPins";
 import type {ReplicaCurrentView, ReplicaCurrentViewPage, ReplicaCurrentViewPosition, ReplicaCurrentViewCursor, ReplicaCurrentViewSelector} from "@dohc/workspace-engine-client/daemon";
 import {ReplicaManifest} from "./replicaManifest";
 import {publishPersistedReplicaIndex} from "./replicaCurrentViewReads";
@@ -17,7 +17,7 @@ export interface ReplicaChild {
   readonly pid?: number;
   readonly exited?: Promise<void | Error>;
   pull(): Promise<void>;
-  currentView(selectors: ReplicaCurrentViewSelector[], knownTextShas: string[], position: ReplicaCurrentViewPosition|undefined, cursor: ReplicaCurrentViewCursor|undefined, since: ReplicaCurrentViewPosition|undefined, selectorDigest: string): Promise<ReplicaCurrentViewPage>;
+  currentView(selectors: ReplicaCurrentViewSelector[], knownTextShas: string[], position: ReplicaCurrentViewPosition|undefined, cursor: ReplicaCurrentViewCursor|undefined, since: ReplicaCurrentViewPosition|undefined): Promise<ReplicaCurrentViewPage>;
   close(): Promise<void>;
 }
 export interface ReplicaChildInput {
@@ -52,6 +52,8 @@ interface Entry {
   newest?: ReplicaCurrentView;
   manifest?: ReplicaManifest;
   selectorDigest?: string;
+  storedView?: ReplicaCurrentView;
+  resync?: boolean;
   knownStored?: string[];
   pendingView?: boolean;
   reportedOmissions?: Set<string>;
@@ -119,7 +121,7 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
       },Math.max(1,due-Date.now())); entry.history.unref();
     }
   }
-  function persist(entry: Entry, view = entry.newest, beforeStructuralChange = false, previous?: ReplicaCurrentView): boolean {
+  function persist(entry: Entry, view = entry.newest, beforeStructuralChange = false, previous?: ReplicaCurrentView, adopting = false): boolean {
     clearTimeout(entry.quiet); clearTimeout(entry.ceiling);
     entry.quiet = entry.ceiling = undefined;
     if (!entry.pendingView || !view) return false;
@@ -127,19 +129,21 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
       const observations=[...(entry.historyObservations?.values() ?? [])].map(o=>beforeStructuralChange ? {...o,beforeStructuralChange:true} : o);
       const saved = previous ? options.storage.advanceReplicaCurrentView(entry.lease,view,previous)
         : options.storage.storeReplicaCurrentView(entry.lease, view,observations);
-      publishPersistedReplicaIndex(saved,view,!!previous);
+      const exact=!!previous || saved.files.length===view.files.length && saved.files.every((f,i)=>sameHistoryState(f,view.files[i]!) && f.byteLength===view.files[i]!.byteLength);
       const stored=options.storage.readReplicaCurrentView(entry.lease.workspaceId);
-      if(stored)publishPersistedReplicaIndex(stored,view,!!previous);
-      if(!previous && entry.knownStored) {
-        const shas=new Set(view.files.filter(f=>f.contentKind==="text").map(f=>f.sha256));
-        entry.knownStored=entry.knownStored.filter(sha=>shas.has(sha));
+      if(stored)publishPersistedReplicaIndex(stored,view,exact);
+      entry.storedView=exact && (view===entry.newest || adopting) ? view : undefined;
+      if(!entry.storedView)entry.resync=true;
+      if(!previous && (adopting || entry.knownStored)) {
+        const shas=new Set(saved.files.filter(f=>f.contentKind==="text").map(f=>f.sha256));
+        entry.knownStored=adopting ? [...shas] : entry.knownStored!.filter(sha=>shas.has(sha));
       }
       entry.pendingView = false;
-      entry.historyObservations?.clear();
+      if(entry.storedView)entry.historyObservations?.clear();
       armHistory(entry);
       return true;
     } catch (error) {
-      entry.newest = undefined; entry.pendingView = false;
+      entry.newest = undefined; entry.pendingView = false; entry.storedView=undefined; entry.resync=true;
       if (!(error instanceof ReplicaCurrentViewRefused)) throw error;
       report(entry, error);
       return false;
@@ -150,8 +154,10 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
     if (!previous) return false;
     const selectors=options.storage.replicaCurrentViewSelectors(entry.lease.workspaceId);
     const files=previous.files.filter(file=>currentViewFileVisible(selectors,file)), shas=new Set(files.map(file=>file.sha256));
+    const omitted=previous.omitted.filter(file=>currentViewFileVisible(selectors,file));
+    if(files.length===previous.files.length && omitted.length===previous.omitted.length)return persist(entry,previous,beforeStructuralChange);
     return persist(entry,{...previous,files,texts:previous.texts.filter(text=>shas.has(text.sha256)),
-      omitted:previous.omitted.filter(file=>currentViewFileVisible(selectors,file))},beforeStructuralChange);
+      omitted},beforeStructuralChange);
   }
   async function flush(entry: Entry, sampleHistory = false) {
     clearTimeout(entry.quiet); clearTimeout(entry.ceiling);
@@ -172,10 +178,9 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
       }
     } catch (error) {report(entry, error); void retire(entry).catch(e => report(entry, e));}
   }
-  function acceptView(entry: Entry, page: ReplicaCurrentView, spilled: boolean, delta: boolean, removed:ReplicaCurrentViewPage["removed"]) {
+  function acceptView(entry: Entry, page: ReplicaCurrentView, spilled: boolean, delta: boolean, removed:ReplicaCurrentViewPage["removed"], manifest:ReplicaManifest, selectorDigest:string) {
     if (!principal.current(entry.lease)) return;
     const previous=entry.newest ?? options.storage.readReplicaCurrentView(entry.lease.workspaceId) ?? undefined;
-    const manifest=entry.manifest ?? (previous ? new ReplicaManifest().apply(previous,false,[]).next : new ReplicaManifest());
     const result=manifest.apply(page,delta,removed);
     const {view,changed,structural,predecessor}=result;
     if (entry.pendingView && previous && predecessor) {
@@ -191,16 +196,21 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
     const fresh=!entry.newest;
     if (spilled) {
       entry.pendingView=true;
-      if(persist(entry,view)) {entry.manifest=result.next;entry.newest=view;entry.knownStored=view.files.filter(f=>f.contentKind==="text").map(f=>f.sha256);}
+      if(persist(entry,view,false,undefined,true)) {
+        entry.manifest=result.next;entry.selectorDigest=selectorDigest;entry.newest=view;
+        if(!delta && entry.storedView===view)entry.resync=false;
+      }
       return;
     }
-    entry.manifest=result.next;entry.newest=view;
-    if (!changed && !entry.pendingView && previous && (previous.revision!==view.revision || previous.logCursor!==view.logCursor || previous.journalCursor!==view.journalCursor)) {
-      entry.pendingView=true;persist(entry,view,false,previous);return;
+    entry.newest=view;
+    const adopt=()=>{entry.manifest=result.next;entry.selectorDigest=selectorDigest;if(!delta && entry.storedView===view)entry.resync=false;};
+    if (!changed && !entry.pendingView && previous && entry.storedView===previous && !entry.resync && (previous.revision!==view.revision || previous.logCursor!==view.logCursor || previous.journalCursor!==view.journalCursor)) {
+      entry.pendingView=true;if(persist(entry,view,false,previous))adopt();return;
     }
-    if (!changed) {if(fresh)armHistory(entry);return;}
+    if (!changed && !entry.resync) {if(!entry.pendingView && entry.storedView===previous)entry.storedView=view;adopt();if(fresh)armHistory(entry);return;}
     entry.pendingView=true;
-    if(fresh || structural) {persist(entry);return;}
+    if(fresh || structural || entry.resync) {if(persist(entry))adopt();return;}
+    adopt();
     clearTimeout(entry.quiet);entry.quiet=setTimeout(()=>{void flush(entry);},2000);entry.quiet.unref();
     entry.ceiling ??= setTimeout(()=>{void flush(entry);},30_000);entry.ceiling.unref();
   }
@@ -307,18 +317,23 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
               for (;;) {
                 const selectors = options.storage.replicaCurrentViewSelectors(entry.lease.workspaceId);
                 const selectorDigest=createHash("sha256").update(JSON.stringify(selectors)).digest("hex");
-                const since=entry.selectorDigest===selectorDigest && entry.manifest?.view ? {revision:entry.manifest.view.revision,logCursor:entry.manifest.view.logCursor,journalCursor:entry.manifest.view.journalCursor} : undefined;
+                const stored=entry.resync || !entry.manifest ? options.storage.readReplicaCurrentView(entry.lease.workspaceId) : undefined;
+                const manifest=entry.resync || !entry.manifest ? (stored ? new ReplicaManifest().apply(stored,false,[]).next : new ReplicaManifest()) : entry.manifest;
+                if(!entry.manifest && !entry.resync && stored)entry.storedView=stored;
+                if(entry.resync && entry.manifest) {manifest.texts=entry.manifest.texts.fork();manifest.textBytes=entry.manifest.textBytes;}
+                const since=!entry.resync && entry.selectorDigest===selectorDigest && manifest.view ? {revision:manifest.view.revision,logCursor:manifest.view.logCursor,journalCursor:manifest.view.journalCursor} : undefined;
                 if (entry.stopping || !principal.current(entry.lease)) return;
                 let position: ReplicaCurrentViewPosition | undefined, cursor: ReplicaCurrentViewCursor | undefined;
                 const known = new Set(entry.knownStored ?? []);
                 const held = entry.manifest?.texts;
+                if(held)for(const sha of held.keys())known.add(sha);
                 let textBytes = entry.manifest?.textBytes ?? 0;
                 let spilled = false;
                 let latest: ReplicaCurrentView | undefined;
                 let moved = false, delta=false;
                 const removed:ReplicaCurrentViewPage["removed"]=[];
                 do {
-                  const page = await entry.child!.currentView(selectors, [...known], position, cursor, since, selectorDigest);
+                  const page = await entry.child!.currentView(selectors, [...known], position, cursor, since);
                   if (page.moved) {moved = true; break;}
                   if (!principal.current(entry.lease) || entry.stopping) return;
                   if(page.workspaceId!==entry.lease.workspaceId || page.delta && !since)throw new Error("Replica current view has no matching base.");
@@ -354,6 +369,7 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
                         texts: [...texts].map(([sha256, text]) => ({sha256, text}))});
                     } catch (error) {
                       if (error instanceof ReplicaCurrentViewRefused) {
+                        entry.resync=true;entry.storedView=undefined;
                         report(entry, error);
                         options.storage.discardReplicaCurrentView(entry.lease);
                         if (entry.dirty) continue draining;
@@ -369,8 +385,7 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
                 } while(cursor);
                 if (moved) {options.storage.discardReplicaCurrentView(entry.lease);continue;}
                 if(selectorDigest!==createHash("sha256").update(JSON.stringify(options.storage.replicaCurrentViewSelectors(entry.lease.workspaceId))).digest("hex")) {options.storage.discardReplicaCurrentView(entry.lease);continue;}
-                acceptView(entry, latest!, spilled, delta, removed);
-                entry.selectorDigest=selectorDigest;
+                acceptView(entry, latest!, spilled, delta, removed, manifest, selectorDigest);
                 break;
               }
             }
