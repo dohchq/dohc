@@ -29,9 +29,26 @@ function lookUpLabel(selection: string): string {
   return `Look up “${text.length > LOOK_UP_CHARS ? `${text.slice(0, LOOK_UP_CHARS)}…` : text}”`;
 }
 
+// The submenus of the same name in macOS's Edit menu.
+const SUBSTITUTIONS: MenuItemConstructorOptions = {
+  label: "Substitutions",
+  submenu: [
+    { role: "showSubstitutions" },
+    { type: "separator" },
+    { role: "toggleSmartQuotes" },
+    { role: "toggleSmartDashes" },
+    { role: "toggleTextReplacement" },
+  ],
+};
+const SPEECH: MenuItemConstructorOptions = {
+  label: "Speech",
+  submenu: [{ role: "startSpeaking" }, { role: "stopSpeaking" }],
+};
+
 // The right-click menu for text: spelling first, then Look up on macOS, then
 // the edit roles Chromium says apply. macOS text menus leave out Undo and
-// Redo and add Paste and Match Style. Empty when the target is neither
+// Redo, add Paste and Match Style, and end with Substitutions for a field
+// and Speech for a selection, as Edit does. Empty when the target is neither
 // editable nor selected, so no menu opens.
 export function textMenuTemplate(
   params: TextMenuParams,
@@ -41,9 +58,10 @@ export function textMenuTemplate(
   const mac = platform === "darwin";
   const flags = params.editFlags;
   // Selected spaces still copy, but there is nothing to look up or speak.
-  // A password never leaves its field, not even into a menu label.
-  const words =
-    params.formControlType === "input-password" ? "" : params.selectionText.trim();
+  // A password never leaves its field, not even into a menu label, and
+  // Chromium makes no substitutions in it.
+  const password = params.formControlType === "input-password";
+  const words = password ? "" : params.selectionText.trim();
   const misspelled = params.isEditable ? params.misspelledWord : "";
   const groups: MenuItemConstructorOptions[][] = [
     misspelled
@@ -75,9 +93,10 @@ export function textMenuTemplate(
       : params.selectionText
         ? [[{ role: "copy" as const, enabled: flags.canCopy }]]
         : []),
-    mac && words
-      ? [{ label: "Speech", submenu: [{ role: "startSpeaking" }, { role: "stopSpeaking" }] }]
-      : [],
+    [
+      ...(mac && params.isEditable && !password ? [SUBSTITUTIONS] : []),
+      ...(mac && words ? [SPEECH] : []),
+    ],
   ];
   return groups
     .filter((group) => group.length > 0)
@@ -102,6 +121,11 @@ export function installTextContextMenu(
       addToDictionary: (word) => contents.session.addWordToSpellCheckerDictionary(word),
       lookUp: () => contents.showDefinitionForSelection(),
     });
-    if (template.length > 0) Menu.buildFromTemplate(template).popup({ window });
+    if (template.length === 0) return;
+    // Given the frame, macOS adds its own items for the target, such as
+    // Services, Writing Tools and AutoFill. A password field's menu leaves
+    // them out, as macOS does for a secure text field.
+    const password = params.formControlType === "input-password";
+    Menu.buildFromTemplate(template).popup(password ? { window } : { window, frame: params.frame });
   });
 }
