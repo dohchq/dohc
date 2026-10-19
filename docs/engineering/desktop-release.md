@@ -121,6 +121,23 @@ With package version `0.1.0`, a nightly becomes `0.1.1-nightly.YYYYMMDD.RUN.ATTE
 The date uses UTC. GitHub supplies the run number and attempt.
 Each published release retains its tag, source commit, notes, and installers in GitHub Releases.
 
+## Publish a nightly
+
+The public alpha is the nightly channel. A nightly publishes only when all of these hold:
+
+- The dispatch selects `platforms=windows-linux`, so every installation the workflow builds for receives the update.
+- The Windows and Linux packages each pass their packaged smoke.
+- No other nightly published on the same UTC day.
+
+Before packaging, the workflow refuses a dispatch that breaks the platform or day rule.
+The publish job checks both rules again before it creates the release.
+A run that publishes after 00:00 UTC therefore counts for the day it published on.
+A dry run skips both rules, so a dry run can test one platform at any time.
+If any package fails, the publish job does not run.
+
+To publish, dispatch `Desktop Release` from `main` with `channel=nightly`, `platforms=windows-linux`, and `dry_run=false`.
+Then [add the macOS files](#add-the-macos-files) the same day. The Mac command always signs and notarizes.
+
 ## Build a Windows nightly
 
 Dispatch `Desktop Release` from `main` with `channel=nightly`, `platforms=windows`, and `dry_run=true`.
@@ -130,10 +147,9 @@ Download the run's `desktop-Windows-x64` artifact after every job passes.
 Verify its files with the artifact command below.
 Pass `--channel nightly` and the run's generated version to that command.
 The Windows package job checks the executable with an isolated profile and test workspace before uploading it.
-For publication, dispatch again with `dry_run=false`.
-The new dispatch generates a new nightly version.
+A Windows-only nightly dispatch cannot publish. [Publish a nightly](#publish-a-nightly) with `platforms=windows-linux`.
+Each dispatch generates a new nightly version.
 The published prerelease records the source commit and includes generated release notes.
-Then [add the macOS files](#add-the-macos-files).
 
 ## Build a Linux nightly
 

@@ -12,10 +12,11 @@ This skill provides instructions, not credentials or repository permissions.
 ## Prepare the release
 
 Confirm the requested channel, source commit, platforms, and publication intent from the conversation.
-Default testing builds to the nightly channel and Windows x64.
-Use `platforms=linux` for Linux-only builds and `platforms=windows-linux` for both platforms on one PC.
+Default releases to the nightly channel and `platforms=windows-linux`.
+A published nightly must select `platforms=windows-linux`, and only one nightly publishes per UTC day.
+For a dry run, select fewer platforms when the request names them: `platforms=windows` or `platforms=linux`.
 The workflow builds no macOS files. The Mac release command adds them after the workflow publishes.
-Check previous releases on the requested channel before selecting platforms.
+For a stable release, check previous releases on its channel before selecting platforms.
 Continue including platforms that already receive updates on that channel.
 A request to prepare a release authorizes preparation and a dry run.
 A request to cut or publish a nightly authorizes publishing that testing build, including its macOS files.
