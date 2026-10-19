@@ -926,14 +926,19 @@ async fn parked_rename_after_restart(held: bool) {
             crate::CancellationToken::new(),
         )
         .await;
-    // Decision 17 completes Undo, but a switch still reports the parked rename placement.
-    assert!(
-        matches!(
-            switched,
-            Err(RuntimeError::ActiveVersionMaterializationIncomplete { failed_jobs: 1 })
-        ),
-        "{switched:?}"
-    );
+    if held {
+        // Capture holds park jobs without making a version switch fail.
+        assert!(switched.is_ok(), "{switched:?}");
+    } else {
+        // Decision 17 completes Undo; the switch still reports the outside conflict.
+        assert!(
+            matches!(
+                switched,
+                Err(RuntimeError::ActiveVersionMaterializationIncomplete { failed_jobs: 1 })
+            ),
+            "{switched:?}"
+        );
+    }
     let switch_job = actor.run(move |store, _| {
         let write = store.load_materialization_job(&parked_write)?.unwrap();
         assert_ne!(write.status, JobStatus::Complete);
@@ -942,7 +947,7 @@ async fn parked_rename_after_restart(held: bool) {
         }).map_err(StorageError::corrupt_public)?;
         assert_eq!(incomplete.len(), 1, "only the parked rename path remains incomplete");
         assert_eq!(incomplete[0].1, write.target_path, "the switch reports that same parked path");
-        assert_eq!(incomplete[0].2, "pending");
+        if held { assert_eq!(incomplete[0].2, "pending"); }
         Ok(incomplete[0].0.clone())
     }).await.unwrap();
     assert_eq!(
