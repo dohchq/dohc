@@ -507,9 +507,12 @@ async function writeBody(request, waitMs) {
   return { body };
 }
 
-/** Serve the dashboard and its data on this host. Returns the server; `close()` stops it and its sampler. */
+/**
+ * Serve the dashboard and its data on this host. Returns the server; `close()` stops it and its sampler.
+ * `oneLane` refuses the lane switch: a Mac has one display, and Electron runs cannot share it.
+ */
 export function startMonitor({ root, port = monitorPort, host = "127.0.0.1", log = () => {}, sampleEveryMs, writeWaitMs = 10_000,
-  threadOf = threadDirectory(), slotRoot = verificationSlotRoot() }) {
+  threadOf = threadDirectory(), slotRoot = verificationSlotRoot(), oneLane = process.platform === "darwin" }) {
   const finished = new Map();
   const history = historyReader(root);
   // The verification slots live beside the build slots. A held slot above the setting is a lane still finishing its gate, so it is shown too.
@@ -533,6 +536,7 @@ export function startMonitor({ root, port = monitorPort, host = "127.0.0.1", log
     const host = request.headers.host;
     let answer;
     if (action === "lanes") {
+      if (oneLane) return send(409, "text/plain", "This Mac runs one lane: Electron runs cannot share its display.");
       if (!switchLanes.includes(body.lanes)) return send(400, "text/plain", "Choose 2 or 3 lanes.");
       if (!slotRoot) return send(409, "text/plain", "This host has no verification lane setting.");
       const { previous, changed } = await setLanes({ root, slotRoot, lanes: body.lanes, by: { name: "dashboard", host } });
