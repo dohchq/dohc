@@ -83,8 +83,9 @@ impl ReplicaMode {
 mod tests {
     use super::*;
 
+    // APFS refuses non-UTF-8 names, so no root this check refuses can exist on Apple hosts.
     #[test]
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_vendor = "apple")))]
     fn refuses_non_utf8_root_before_json_serialization() {
         use std::os::unix::ffi::OsStrExt;
         let root = dohc_engine_testkit::ScratchDir::new().unwrap();
