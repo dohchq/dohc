@@ -135,7 +135,7 @@ impl ActorHandle {
                 let mut remaining = OCCURRENCES + 1;
                 for mut source in aliases.into_iter().take(RECORDS) {
                     if actor_token.is_cancelled() { return Err(corrupt()); }
-                    if source.path.len() > 4096 || source.object.len() > 500 || source.title.chars().count() > 640 { return Err(corrupt()); }
+                    if source.path.len() > 4096 || source.object.len() > 500 || source.title.encode_utf16().count() > 640 { return Err(corrupt()); }
                     if markdown(&source.path) && let Some(key) = &source.key {
                         let ordinal = if source.path == after.path && !after.finished { after.ordinal } else { -1 };
                         let mut stmt = c.prepare_cached("SELECT ordinal,literal,kind FROM links WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND index_key=?4 AND ordinal>?5 ORDER BY ordinal LIMIT ?6").map_err(sql)?;
@@ -191,8 +191,8 @@ impl ActorHandle {
                     last.emitted = true;
                 }
                 if source.key.is_none() {
-                    if !add(&mut page,"unchecked",json!(source.path)) { stopped=true; break; }
                     last.incomplete = true;
+                    if !add(&mut page,"unchecked",json!(source.path)) { stopped=true; break; }
                     last.finished = true;
                     continue;
                 }
