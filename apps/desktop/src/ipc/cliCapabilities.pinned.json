@@ -1,5 +1,6 @@
 {
   "socket": {
+    "accessRefresh": ["access.refresh"],
     "accessObject": [
       "access.object.read"
     ],
@@ -196,6 +197,7 @@
     ]
   },
   "public": {
+    "access refresh": "access.refresh",
     "access object": "access.object.read",
     "access sharing": "access.sharing.read",
     "document read": "document.read",

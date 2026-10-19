@@ -99,6 +99,8 @@ function buildCliRequest(
       return { verb: command.verb, protocolVersion: common.protocolVersion, args: {
         cwd: common.cwd, actor: common.actor, server: command.server, previewToken: command.previewToken, password: password ?? "",
       } };
+    case "accessRefresh":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor } };
     case "accessObject":
       return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, ref: command.ref, cursor: command.cursor } };
     case "accessSharing":

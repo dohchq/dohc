@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { parseCliArguments } from "./args";
 
+it("parses Access refresh without operands", () => {
+  expect(parseCliArguments(["access", "refresh"], {})).toMatchObject({ verb: "accessRefresh" });
+  for (const extra of ["workspace", "sharing-open"]) expect(() => parseCliArguments(["access", "refresh", extra], {})).toThrow();
+});
+
 describe("parseCliArguments", () => {
   it("parses Access references and pages without workspace or account selectors", () => {
     expect(parseCliArguments(["access", "object", '{"kind":"path","path":"Notes/a.md"}', "--cursor", "page"], {}))
