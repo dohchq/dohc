@@ -25,7 +25,7 @@ function parseScalar(value) {
   return trimmed;
 }
 
-function parseUpdateManifest(raw, sourcePath = "manifest") {
+export function parseUpdateManifest(raw, sourcePath = "manifest") {
   const manifest = { files: [] };
   let currentFile = null;
   for (const line of raw.split(/\r?\n/)) {

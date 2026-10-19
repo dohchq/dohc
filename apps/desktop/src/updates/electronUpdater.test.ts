@@ -71,6 +71,23 @@ async function startWith(updater: ReturnType<typeof fakeUpdater> & { isUpdaterAc
   });
 }
 
+// electron-updater emits "error" with the provider's coded error, then
+// rejects the check with the same error.
+function failChecksWith(updater: ReturnType<typeof fakeUpdater>, error: Error) {
+  updater.checkForUpdates.mockImplementation(async () => {
+    updater.emit("checking-for-update");
+    updater.emit("error", error);
+    throw error;
+  });
+}
+
+function channelFileNotFound(): Error {
+  return Object.assign(
+    new Error("Cannot find nightly-mac.yml in the latest release artifacts (https://github.com/dohchq/dohc/releases/download/v0.1.1-nightly.20261019.42.1/nightly-mac.yml): HttpError: 404"),
+    { code: "ERR_UPDATER_CHANNEL_FILE_NOT_FOUND" },
+  );
+}
+
 describe("electron updater configuration", () => {
   it("derives latest/nightly channels from semver-compatible versions", () => {
     expect(resolveUpdateChannel("1.2.3")).toBe("latest");
@@ -169,6 +186,61 @@ describe("electron updater configuration", () => {
     expect(updater.channel).toBe("nightly");
     expect(updater.allowPrerelease).toBe(true);
     expect(updater.allowDowngrade).toBe(false);
+  });
+});
+
+describe("electron updater release without this platform's files", () => {
+  // The Mac files join a release after the workflow publishes it.
+  it("reports no update on macOS while the newest release has no Mac channel file", async () => {
+    const updater = fakeUpdater();
+    failChecksWith(updater, channelFileNotFound());
+    const controller = await startWith(updater, { platform: "darwin", currentVersion: "0.1.1-nightly.20261018.41.1" });
+
+    await expect(controller!.checkForUpdates()).resolves.toMatchObject({
+      checked: true,
+      state: { status: "up-to-date", canCheck: true },
+    });
+  });
+
+  it("reports a missing channel file as an error on Windows and Linux, whose files ship with the release", async () => {
+    for (const platform of ["win32", "linux"] as const) {
+      const updater = fakeUpdater();
+      failChecksWith(updater, channelFileNotFound());
+      const controller = await startWith(updater, { platform });
+
+      await expect(controller!.checkForUpdates()).resolves.toMatchObject({
+        checked: false,
+        state: { status: "error", message: expect.stringContaining("Cannot find nightly-mac.yml") },
+      });
+    }
+  });
+
+  it("reports a missing channel file as an error on macOS for a custom feed", async () => {
+    const updater = fakeUpdater();
+    failChecksWith(updater, channelFileNotFound());
+    const controller = await startWith(updater, { platform: "darwin", env: { DOHC_UPDATE_URL: "https://updates.example.test/dohc" } });
+
+    expect(updater.setFeedURL).toHaveBeenCalledWith({ provider: "generic", url: "https://updates.example.test/dohc" });
+    await expect(controller!.checkForUpdates()).resolves.toMatchObject({
+      checked: false,
+      state: { status: "error", message: expect.stringContaining("Cannot find nightly-mac.yml") },
+    });
+  });
+
+  it("still reports other update errors on macOS", async () => {
+    for (const error of [
+      new Error("sha512 checksum mismatch"),
+      Object.assign(new Error("Unable to find latest version on GitHub"), { code: "ERR_UPDATER_LATEST_VERSION_NOT_FOUND" }),
+    ]) {
+      const updater = fakeUpdater();
+      failChecksWith(updater, error);
+      const controller = await startWith(updater, { platform: "darwin" });
+
+      await expect(controller!.checkForUpdates()).resolves.toMatchObject({
+        checked: false,
+        state: { status: "error", message: expect.stringContaining(error.message) },
+      });
+    }
   });
 });
 
