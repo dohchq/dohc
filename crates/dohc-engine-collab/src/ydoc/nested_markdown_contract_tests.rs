@@ -70,6 +70,11 @@ fn nested_contract_r23_content_tabs_keep_inline_spelling() {
     }
 }
 
+fn nested_contract_body(doc: &Ydoc) -> Value {
+    let body = doc.doc.get_or_insert_xml_fragment(ROOT_BODY);
+    out_json(&doc.doc.transact(), Out::YXmlFragment(body))
+}
+
 fn nested_contract_case(case: &Value) {
     let name = case["name"].as_str().unwrap();
     let doc = Ydoc::wire();
@@ -109,6 +114,7 @@ fn nested_contract_case(case: &Value) {
             "{name}"
         );
         let canonical = case["canonical"].as_str().unwrap();
+        let body = nested_contract_body(&doc);
         if case["exactSource"] == true {
             let source = case["source"].as_str().unwrap();
             doc.preserve_folded_markdown_source(source).unwrap();
@@ -123,6 +129,9 @@ fn nested_contract_case(case: &Value) {
             MarkdownReading::ProjectedSource,
         )
         .unwrap();
+        if case["stableTree"] == true {
+            assert_eq!(nested_contract_body(&doc), body, "{name}: reread tree");
+        }
         let canonical = case["nativeRereadCanonical"].as_str().unwrap_or(canonical);
         assert_eq!(doc.project_richdoc().unwrap(), canonical);
         let replay = Ydoc::wire();
