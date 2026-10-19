@@ -407,6 +407,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dohc-engine-reader"
+version = "0.1.0"
+dependencies = [
+ "dohc-engine-protocol",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "dohc-engine-runtime"
 version = "0.1.0"
 dependencies = [

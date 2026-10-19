@@ -137,6 +137,34 @@ async function fixture() {
     texts:[{sha256:sha(text),text}]});
   return {storage,lease,db,view};
 }
+it("staging looks up incoming texts without enumerating retained pin bodies",async()=>{
+  const f=await fixture();
+  const context=f.storage as unknown as import("./storage/context").StorageContext;
+  const prepare=context.db.prepare.bind(context.db);
+  let returnedTexts=0;
+  vi.spyOn(context.db,"prepare").mockImplementation(query=>{
+    const statement=prepare(query);
+    if(!/^SELECT .*FROM sync_relay_replica_cut_texts /s.test(query))return statement;
+    return new Proxy(statement,{get(target,key){
+      const value=Reflect.get(target,key,target);
+      if(typeof value!=="function")return value;
+      return (...args:unknown[])=>{
+        const result=value.apply(target,args);
+        returnedTexts+=Array.isArray(result)?result.length:result?1:0;
+        return result;
+      };
+    }});
+  });
+  for(let index=0;index<40;index++)f.storage.storeReplicaCurrentView(f.lease,f.view(`body ${index}`,`docs/${index}.md`));
+  expect(f.db.prepare("SELECT count(*) AS n FROM sync_relay_history_pins").get()!.n).toBe(39);
+  returnedTexts=0;
+  const view=f.view("a new body");
+  const staged=f.storage.stageReplicaCurrentView(f.lease,view);
+  expect(returnedTexts).toBeLessThanOrEqual(view.texts.length);
+  f.storage.flipReplicaCurrentView(f.lease,staged);
+  expect(f.storage.readReplicaCurrentViewText("w",sha("body 0"))).toBeNull();
+  expect(f.storage.readReplicaCurrentViewText("w",sha("a new body"))).toBe("a new body");
+});
 it("stages privately, flips one complete view, and retains the pre-rename pin",async()=>{
   const f=await fixture();
   f.storage.storeReplicaCurrentView(f.lease,f.view());
@@ -155,6 +183,12 @@ it("rejects a stale incarnation and paths outside current selectors",async()=>{
   f.storage.storeReplicaCurrentView(f.lease,f.view());
   f.storage.bindReplicaCurrentView({...f.lease,incarnation:"replacement"});
   expect(()=>f.storage.storeReplicaCurrentView(f.lease,f.view("new"))).toThrow();
+});
+it("header-only fallback keeps full-store text length validation",async()=>{
+  const f=await fixture(),view=f.view();f.storage.storeReplicaCurrentView(f.lease,view);
+  const wrong={...view,files:view.files.map(file=>({...file,byteLength:file.byteLength+1}))};
+  expect(()=>f.storage.storeReplicaCurrentView(f.lease,wrong)).toThrow();
+  expect(f.storage.readReplicaCurrentView("w")!.files).toEqual(view.files);
 });
 it("deletes views when the last share ends or the epoch changes",async()=>{
   const f=await fixture();f.storage.storeReplicaCurrentView(f.lease,f.view());
@@ -335,7 +369,7 @@ it("round4: an empty null-version selector collects and grants nothing", async (
   expect(() => f.storage.storeReplicaCurrentView(f.lease, f.view())).toThrow();
 });
 
-it("round4: ending one of two shares removes its stored and cached text", async () => {
+it("round4: ending one of two shares hides its cached text and preserves the surviving cut", async () => {
   const f = await fixture();
   f.storage.createShare({share:{shareId:"other",workspaceId:"w",granterUserId:"owner",selectorJson:'{"paths":["other"],"versionId":null}',createdAtMs:1},
     grant:{grantId:"other-g",shareId:"other",principalKind:"user",principalUserId:"reader",principalEmail:null,access:"view",generation:1,status:"active",createdAtMs:1,revokedAtMs:null,parentGrantId:null}});
@@ -349,8 +383,8 @@ it("round4: ending one of two shares removes its stored and cached text", async 
     f.storage.revokeShareGrant({shareId:"s",grantId:"g",revokedAtMs:2});
     expect(cached.readText(sha("old"))).toBeNull();
     expect(supervisor.currentView("w")?.view.files ?? []).toEqual([]);
-    expect(f.db.prepare("SELECT * FROM sync_relay_replica_cuts").all()).toEqual([]);
-    expect(f.db.prepare("SELECT * FROM sync_relay_replica_cut_texts").all()).toEqual([]);
+    expect(f.db.prepare("SELECT * FROM sync_relay_replica_cuts").all()).toHaveLength(1);
+    expect(f.storage.readReplicaCurrentViewText("w",sha("old"))).toBeNull();
   } finally { await supervisor.close(); }
 });
 

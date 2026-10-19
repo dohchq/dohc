@@ -14,6 +14,7 @@ export function runOwnerCancellationFixture(root, sourceRoot, kind, signal, clea
   }
   put("apps/desktop/package.json", "{}");
   put("scripts/verification/rust-reuse.mjs", "export const rustIdentity=()=>({});export const finishRustEvidence=()=>({kind:'fixture'});export const refreshRustReuse=()=>{throw Error('unexpected reuse');};");
+  put("scripts/verification/linux.mjs", "export const linuxDistro=()=>null;export const linuxRustJob=()=>{throw Error('unexpected Linux job');};");
   put(".github/workflows/pr-checks.yml", "fixture workflow");
   put("node_modules/js-yaml/index.js", "exports.load=s=>s==='fixture workflow'?{jobs:{changes:{steps:[{with:{filters:'fixture filters'}}]}}}:{rust:[],js:['**'],repository:[]};");
   put("tools/rust-engine-program/build-slot-real.mjs", readFileSync(join(sourceRoot, "tools/rust-engine-program/build-slot.mjs")));

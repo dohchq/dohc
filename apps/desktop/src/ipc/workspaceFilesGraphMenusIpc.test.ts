@@ -269,7 +269,7 @@ describe("registered workspace file handlers", () => {
       workspaceFileOperations.moveWorkspacePath.channel, workspaceFileOperations.deleteWorkspacePath.channel, workspaceFileOperations.undoHistoryOperation.channel, workspaceFileOperations.exportWorkspaceZip.channel,
       workspaceFileOperations.exportDocumentFile.channel, workspaceFileOperations.importWorkspaceFiles.channel, workspaceFileOperations.readWorkspaceText.channel,
       workspaceFileOperations.writeWorkspaceText.channel, workspaceFileOperations.writeWorkspaceAsset.channel, workspaceFileOperations.pickImageFiles.channel,
-      workspaceFileOperations.openFileExternally.channel, CHANNELS.readWorkspaceGraph, CHANNELS.getBacklinks,
+      workspaceFileOperations.openFileExternally.channel, CHANNELS.readWorkspaceGraph,
       CHANNELS.listWorkspaceHeadings, CHANNELS.showExplorerMenu, CHANNELS.showWorkbenchMenu,
     ]);
     for (const channel of h.handlers.keys()) {
@@ -474,8 +474,6 @@ describe("registered graph and heading handlers", () => {
     });
     expect(h.capture).not.toHaveBeenCalled();
     expect(h.resolveFiles).not.toHaveBeenCalled();
-    await expect(h.invoke(CHANNELS.getBacklinks, { workspaceId: "workspace", path: "beta.md" }))
-      .resolves.toMatchObject({ sources: [expect.objectContaining({ sourcePath: "alpha.md" })] });
     const headings = await h.invoke(CHANNELS.listWorkspaceHeadings, { workspaceId: "workspace", path: "beta.md" }) as { headings: { occurrence: number }[] };
     expect(headings.headings.map((heading) => heading.occurrence)).toEqual([0, 1]);
   });

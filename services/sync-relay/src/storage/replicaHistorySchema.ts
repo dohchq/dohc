@@ -79,9 +79,11 @@ export function initializeReplicaHistorySchema(db: SqliteDb) {
     // 6a discards the view when one grant ends. Other grants must keep their History texts.
     for (const name of ["replica_current_view_grant_update","replica_current_view_grant_delete","replica_current_view_share_update","replica_current_view_share_delete"]) {
       const sql = String(db.prepare("SELECT sql FROM sqlite_schema WHERE name=?").get(name)!.sql);
+      const rewritten=sql.replaceAll("DELETE FROM sync_relay_replica_cut_texts WHERE workspace_id", `DELETE FROM sync_relay_replica_cut_texts WHERE (workspace_id,sha256) IN
+        (SELECT workspace_id,sha256 FROM sync_relay_replica_cut_text_refs WHERE ref_count=0) AND workspace_id`);
+      if (rewritten === sql) throw new Error(`History text cleanup rewrite did not match ${name}`);
       db.exec(`DROP TRIGGER ${name}`);
-      db.exec(sql.replaceAll("DELETE FROM sync_relay_replica_cut_texts WHERE workspace_id", `DELETE FROM sync_relay_replica_cut_texts WHERE (workspace_id,sha256) IN
-        (SELECT workspace_id,sha256 FROM sync_relay_replica_cut_text_refs WHERE ref_count=0) AND workspace_id`));
+      db.exec(rewritten);
     }
     db.prepare("INSERT INTO sync_relay_migrations VALUES (?,?)").run(migration,Date.now());
   }

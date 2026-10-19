@@ -621,6 +621,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   replicaCurrentViewSelectors(workspaceId: string) { return replicaCurrentViews.replicaCurrentViewSelectors(this,workspaceId); }
   stageReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.stageReplicaCurrentView>[1],view: Parameters<typeof replicaCurrentViews.stageReplicaCurrentView>[2], observations?: ReplicaHistoryObservation[]) { return replicaCurrentViews.stageReplicaCurrentView(this,lease,view,observations); }
   flipReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.flipReplicaCurrentView>[1],staged: Parameters<typeof replicaCurrentViews.flipReplicaCurrentView>[2]) { return replicaCurrentViews.flipReplicaCurrentView(this,lease,staged); }
+  advanceReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.advanceReplicaCurrentView>[1],view: Parameters<typeof replicaCurrentViews.advanceReplicaCurrentView>[2],previous: Parameters<typeof replicaCurrentViews.advanceReplicaCurrentView>[3]) { return replicaCurrentViews.advanceReplicaCurrentView(this,lease,view,previous); }
   storeReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.stageReplicaCurrentView>[1],view: Parameters<typeof replicaCurrentViews.stageReplicaCurrentView>[2], observations?: ReplicaHistoryObservation[]) {
     const saved=this.flipReplicaCurrentView(lease,this.stageReplicaCurrentView(lease,view,observations));
     const needed=new Set(saved.files.map(f=>f.sha256));
@@ -631,6 +632,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   readReplicaCurrentViewText(workspaceId: string,sha: string) { return replicaCurrentViews.readReplicaCurrentViewText(this,workspaceId,sha); }
   readReplicaStanding(workspaceId: string, shareGrantBindings?: string) { return replicaReads.readReplicaStanding(this, workspaceId, shareGrantBindings); }
   nextReplicaHistoryPinAt(workspaceId: string) { return nextReplicaHistoryPinAt(this,workspaceId); }
+  sampleReplicaHistory(lease: Parameters<typeof replicaCurrentViews.sampleReplicaHistory>[1]) { return replicaCurrentViews.sampleReplicaHistory(this,lease); }
   listReplicaHistoryPins(input: replicaCurrentViewReads.ReplicaCurrentViewReadInput, source?: replicaCurrentViewReads.ReplicaCurrentViewSource) { return replicaHistoryReads.listReplicaHistoryPins(this,input,source); }
   readReplicaHistoryPin(input: replicaCurrentViewReads.ReplicaCurrentViewReadInput & {pinId: string}, source?: replicaCurrentViewReads.ReplicaCurrentViewSource) { return replicaHistoryReads.readReplicaHistoryPin(this,input,source); }
   listReplicaCurrentViewFiles(input: replicaCurrentViewReads.ReplicaCurrentViewReadInput, source?: replicaCurrentViewReads.ReplicaCurrentViewSource) {

@@ -1,3 +1,4 @@
+import { LinksInInput, LinksResolveInput } from "@dohc/workspace-contracts/links";
 import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
 import { WorkspaceSyncPause, workspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 import { ShareCopyInput } from "@dohc/workspace-contracts/share-copy";
@@ -69,6 +70,8 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_list_changes: ["history.list"],
   dohc_list_kept_copies: ["file.kept.list"],
   dohc_save_kept_copy: ["file.kept.save"],
+  dohc_links_in: ["links.in"],
+  dohc_links_resolve: ["links.resolve"],
   dohc_read_change: ["history.read"],
   dohc_list_files: ["file.list"],
   dohc_read_file: ["file.read"],
@@ -1892,6 +1895,9 @@ async function requestCli<Verb extends CliVerb>(
     return { ok: false as const, reason: cliFailureReason(error, verb) };
   }
 }
+
+export async function linksIn(ctx: ToolContext, input: LinksInInput) { return requestCli(ctx, "linksIn", LinksInInput.parse(input)); }
+export async function linksResolve(ctx: ToolContext, input: LinksResolveInput) { return requestCli(ctx, "linksResolve", LinksResolveInput.parse(input)); }
 
 export async function readOperation(ctx: ToolContext, args: { operationId: string; cursor?: string }) {
   if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "History operations require the owning workspace. Open it to continue." };

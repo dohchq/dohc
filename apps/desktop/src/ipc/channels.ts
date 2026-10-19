@@ -160,7 +160,6 @@ export const CHANNELS = {
   showExplorerMenu: "desktop:show-explorer-menu",
   showWorkbenchMenu: "desktop:show-workbench-menu",
   readWorkspaceGraph: "desktop:read-workspace-graph",
-  getBacklinks: "desktop:get-backlinks",
   listWorkspaceHeadings: "desktop:list-workspace-headings",
   listCollections: "desktop:list-collections",
   getCollection: "desktop:get-collection",

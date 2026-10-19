@@ -1,3 +1,4 @@
+import { LinksInInput, LinksResolveInput, LinksInResult, LinksResolveResult } from "@dohc/workspace-contracts/links";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import {
   COLLECTION_SCHEMA_REASON_CODES,
@@ -394,6 +395,8 @@ const accountDeletePreviewArgsSchema = z.object(argsBase).strict();
 const accountDeleteArgsSchema = ServerAccountDeleteRequest.extend(argsBase).strict();
 
 export const cliRequestSchema = z.discriminatedUnion("verb", [
+  z.object({ ...requestBase, verb: z.literal("linksIn"), args: LinksInInput.extend(argsBase).strict() }).strict(),
+  z.object({ ...requestBase, verb: z.literal("linksResolve"), args: LinksResolveInput.extend(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("stopSync"), args: z.object({ ...argsBase, agent: documentAgentNameSchema.optional() }).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("shareCopy"), args: ShareCopyInput.extend(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("accountDeletePreview"), args: accountDeletePreviewArgsSchema }).strict(),
@@ -485,6 +488,8 @@ export const APP_RESPONSE_CAPABILITIES = {
 
 export const CLI_CAPABILITIES = {
   stopSync: ["workspace.sync.stop"],
+  linksIn: ["links.in"],
+  linksResolve: ["links.resolve"],
   shareCopy: ["share.copy.read"],
   accountDeletePreview: ["account.delete.preview"],
   accountDelete: ["account.delete"],
@@ -1340,6 +1345,8 @@ export const cliResultSchemas = {
       syncPause: WorkspaceSyncPauseStatus.optional() }).strict(),
     rawFailureSchema,
   ]),
+  linksIn: LinksInResult,
+  linksResolve: LinksResolveResult,
   shareCopy: ShareCopyResult,
   accountDeletePreview: ServerAccountDeletionPreview,
   accountDelete: ServerAccountDeleteResult,
