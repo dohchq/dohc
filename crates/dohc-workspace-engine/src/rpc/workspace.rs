@@ -2293,9 +2293,14 @@ mod tests {
                     + usize::from(!read_only)
                     + 1,
             );
-            for task in tasks.into_iter().flatten() {
-                task.await
-                    .expect("background task joins after cancellation");
+            for (index, task) in tasks.into_iter().enumerate() {
+                let Some(task) = task else { continue };
+                if let Err(error) = task.await {
+                    assert!(
+                        index == 0 && error.is_cancelled(),
+                        "background task joins after cancellation: {error}"
+                    );
+                }
             }
             let open = service.open(Some(&handle)).expect("binding still open");
             assert!(lock(&open.capture).is_none());

@@ -13,6 +13,7 @@ type Hook = (std::sync::mpsc::Sender<()>, Arc<Barrier>);
 struct Probe {
     times: Vec<Duration>,
     phases: Vec<Phase>,
+    actor_totals: Option<dohc_engine_storage::capture_phase::Snapshot>,
     hook: Option<Hook>,
     notify: Option<Arc<tokio::sync::Notify>>,
 }
@@ -27,6 +28,7 @@ struct Phase {
     elapsed_ns: u128,
     actor: bool,
     check_ns: Option<u128>,
+    storage: Option<serde_json::Value>,
 }
 pub(super) fn record_phase(
     request: &str,
@@ -35,19 +37,25 @@ pub(super) fn record_phase(
     elapsed: Duration,
     actor: bool,
 ) {
-    probes()
-        .lock()
-        .unwrap()
-        .entry(request.to_owned())
-        .or_default()
-        .phases
-        .push(Phase {
-            phase: phase.into(),
-            member,
-            elapsed_ns: elapsed.as_nanos(),
-            actor,
-            check_ns: None,
-        });
+    let current = actor.then(dohc_engine_storage::capture_phase::snapshot);
+    let mut probes = probes().lock().unwrap();
+    let probe = probes.entry(request.to_owned()).or_default();
+    // Counters include queued work since the previous recorded actor turn.
+    // Check their call counts before attributing a slow member.
+    let storage = current.and_then(|after| {
+        probe
+            .actor_totals
+            .replace(after.clone())
+            .map(|before| after.delta(&before))
+    });
+    probe.phases.push(Phase {
+        phase: phase.into(),
+        member,
+        elapsed_ns: elapsed.as_nanos(),
+        actor,
+        check_ns: None,
+        storage,
+    });
 }
 pub(super) fn record(
     request: &str,
@@ -433,6 +441,14 @@ async fn two_thousand_members_hold_each_turn_under_fifty_ms_and_admit_ydoc_updat
                 .check_ns
                 .map(|ns| (phase.elapsed_ns - ns) as f64 / 1_000_000.0)
         );
+        if phase.actor && phase.elapsed_ns > 50_000_000 {
+            eprintln!(
+                "UNDO storage phase={turn} activity={} member={:?} totals={}",
+                phase.phase,
+                phase.member,
+                serde_json::to_string(&phase.storage).unwrap()
+            );
+        }
     }
     let mut sorted = times.clone();
     sorted.sort();
