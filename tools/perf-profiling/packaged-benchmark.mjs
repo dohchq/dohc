@@ -2,7 +2,7 @@ import { observePresenceOwner, recordPresenceOwnerLastKey, waitForPresenceOwner,
 import { startTypingTrace, stopTypingTraceAfterFrames, measureTypingTrace, typingTraceMark } from './presence-typing-trace.mjs';
 import { acquireProfilingSlot } from './admission.mjs';
 import { summarize } from './summarize-packaged-benchmark.mjs';
-import { DEFAULT_MARGIN } from './compare-packaged-benchmark.mjs';
+import { DEFAULT_MARGIN, METRIC_VERSION } from './compare-packaged-benchmark.mjs';
 import { compareDocumentSize, documentCaseBlocked, documentExtensionTarget } from './document-size-summary.mjs';
 import { documentFixture, documentMatrix, runtimeEstimate, pairsForCase, documentControlFiles, DOCUMENT_CONTROL_OPENS } from './document-size-fixtures.mjs';
 import { measurePackagedDocument } from './packaged-document-size.mjs';
@@ -11,6 +11,7 @@ import { parseOptions, createEvidenceDirectory, benchmarkEnvironment, packagedLa
 import { runSoakCycles } from './packaged-soak.mjs';
 import { startRendererHeapSnapshots } from './renderer-heap-snapshots.mjs';
 import { observeExit, closeOwnedPackage, benchmarkCancellation, verifyRestartInput } from './packaged-process.mjs';
+import { snapshotMacProcesses } from './packaged-process-snapshot.mjs';
 import { run as runOwnedCommand } from '../../scripts/verification/process.mjs';
 import { observeStartupReadiness, startupTargetFromRegistry } from './startup-readiness.mjs';
 import { observeSurface, observeSearchSubmit, seededPostThreadId, collectionFixtureFiles, aggregateByKind } from './packaged-surfaces.mjs';
@@ -39,12 +40,15 @@ if (options.scenario === 'document-size' && options.documentMode === 'dry-run') 
   console.log(JSON.stringify(plan, null, 2));
   process.exit(0);
 }
-if (process.platform !== 'win32') throw Error('The packaged release benchmark requires Windows');
+if (!['win32', 'darwin'].includes(process.platform)) throw Error('The packaged release benchmark requires Windows or macOS');
+const mac = process.platform === 'darwin';
+// Only Windows has a job object that owns every seeding descendant.
+if (mac && ['chat-history', 'collection', 'go-to-mixed', 'presence', 'document-size'].includes(options.scenario)) throw Error(`--scenario ${options.scenario} requires Windows`);
 const root = resolve('.');
-const { output, binary, label, runCount, idleSeconds, keystrokes, switches, scenario, profileRenderer, profileMain, fixtureFiles, soakMinutes, heapSnapshotMinutes, chatMessages, records, findCap, writeCap, presencePeers } = options;
+const { output, binary, label, runCount, idleSeconds, keystrokes, switches, scenario, profileRenderer, profileMain, typingTrace, fixtureFiles, soakMinutes, heapSnapshotMinutes, chatMessages, records, findCap, writeCap, presencePeers } = options;
 await createEvidenceDirectory(output);
 const json = (path, value) => writeFile(path, JSON.stringify(value, null, 2));
-const settings = { runCount, idleSeconds, keystrokes, switches, scenario, profileRenderer, profileMain, fixtureFiles, soakMinutes, heapSnapshotMinutes, chatMessages, records,
+const settings = { metricVersion: METRIC_VERSION, runCount, idleSeconds, keystrokes, switches, scenario, profileRenderer, profileMain, typingTrace, fixtureFiles, soakMinutes, heapSnapshotMinutes, chatMessages, records,
   ...(scenario === 'collection' ? { findCap, writeCap } : {}),
   ...(scenario === 'presence' ? { presencePeers, selectionHz: 20, peerTypingHz: 5, presenceTiming: 'event-latency-v1' } : {}),
   ...(scenario === 'document-size' ? { documentMiB: options.documentMiB, relaySessions: options.relaySessions, updatesPerSecond: options.updatesPerSecond, churnEdits: options.churnEdits, documentMode: options.documentMode, label: options.label } : {}) };
@@ -76,8 +80,9 @@ async function sha256Tree(base, subpaths) {
   for (const file of files.sort()) hash.update(`${relative(base, file).replaceAll('\\', '/')}\0`).update(await readFile(file)).update('\0');
   return hash.digest('hex');
 }
-const asar = join(dirname(binary), 'resources/app.asar');
-const engineBinary = join(dirname(binary), 'resources/workspace-engine/dohc-workspace-engine.exe');
+const resources = join(dirname(binary), mac ? '../Resources' : 'resources');
+const asar = join(resources, 'app.asar');
+const engineBinary = join(resources, mac ? 'workspace-engine/dohc-workspace-engine' : 'workspace-engine/dohc-workspace-engine.exe');
 const cli = join(root, 'packages/cli');
 const cliLauncher = join(cli, 'bin/dohc.js');
 const cliHashedPaths = ['bin', 'src', 'package.json'];
@@ -106,13 +111,13 @@ Object.assign(receipt, {
   label, binary, binarySha256: await sha256(binary), asar, asarSha256: await sha256(asar),
   packageCommit: options.packageCommit,
   engineBinary, engineSha256: await sha256(engineBinary), engineCommit: options.engineCommit,
-  packageDescription: 'Windows packaged release; check companion build and signature receipt for ownership and signing status.',
+  packageDescription: `${mac ? 'macOS' : 'Windows'} packaged release; check companion build and signature receipt for ownership and signing status.`,
   harnessSha256: await sha256(fileURLToPath(import.meta.url)),
   ...(scenario === 'document-size' ? { documentSizeHarnessSha256: await sha256Tree(root, ['tools/perf-profiling/document-size-fixtures.mjs', 'tools/perf-profiling/packaged-document-size.mjs', 'tools/perf-profiling/document-size-pool.mjs', 'tools/perf-profiling/document-size-worker.mjs', 'tools/perf-profiling/document-size-relay.mjs', 'tools/perf-profiling/document-size-native.mjs', 'tools/perf-profiling/document-size-sockets.mjs', 'tools/perf-profiling/document-size-runner.mjs', 'tools/perf-profiling/document-size-summary.mjs','tools/perf-profiling/document-size-generator.mjs','tools/perf-profiling/document-size-reservation.mjs','tools/perf-profiling/packaged-document-peer.mjs']),
     relaySourceSha256: await sha256Tree(options.relayCheckout, ['services/sync-relay/src', 'packages/ydoc-projection/src', 'packages/live-session-contract/src']),
     runtimeEstimate: runtimeEstimate() } : {}),
-  samplerSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'packaged-process-snapshot.ps1')),
-  windowControllerSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'packaged-window-state.ps1')),
+  samplerSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), mac ? 'packaged-process-snapshot.mjs' : 'packaged-process-snapshot.ps1')),
+  windowControllerSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), mac ? 'packaged-window-state.js' : 'packaged-window-state.ps1')),
   windowClientSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'window-controller.mjs')),
   lifecycleSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'packaged-process.mjs')),
   startupReadinessSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'startup-readiness.mjs')),
@@ -268,7 +273,7 @@ async function launch(runDir, fixture, phase) {
   const started = performance.now();
   const startedAt = Date.now();
   benchmarkSignal.throwIfAborted();
-  const child = spawn(binary, packagedLaunchArgs(fixture.profile, profileArgs), { cwd: root, env: { ...env, ...fixture.presenceEnvironment }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: false });
+  const child = spawn(binary, packagedLaunchArgs(fixture.profile, profileArgs), { cwd: root, env: { ...env, ...fixture.presenceEnvironment }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: false, detached: mac });
   const launchStages = { spawnReturnedObservedMs: performance.now() - started };
   let logs = '';
   for (const stream of [child.stdout, child.stderr]) stream.on('data', chunk => { logs += chunk; });
@@ -326,9 +331,22 @@ async function shutdown(runDir, instance) {
   void instance.browser.close().catch(() => {});
   active = null;
 }
+// A large fixture's virtualized tree renders only the rows in view. Scroll the tree, outside the
+// timed open, until the document's row exists.
+async function revealTreeRow(page, name) {
+  const row = page.getByTestId('file-tree').getByRole('treeitem', { name, exact: true });
+  for (let step = 0; !(await row.count()); step++) {
+    if (step > 400) throw Error(`Explorer never rendered ${name}`);
+    await page.getByTestId('file-tree').evaluate((tree, down) => { tree.scrollTop = down ? tree.scrollTop + tree.clientHeight : 0; }, step > 0);
+    await painted(page);
+  }
+  await row.scrollIntoViewIfNeeded();
+  return row;
+}
 async function openDoc(page, name) {
+  const row = await revealTreeRow(page, name);
   const start = performance.now();
-  await page.getByTestId('file-tree').getByRole('treeitem', { name, exact: true }).click();
+  await row.click();
   await page.waitForFunction(name => document.querySelector('[data-testid="view-markdown"]')?.textContent?.includes(`Workspace 0 ${name === 'small.md' ? 'small' : 'large'}`), name, { timeout: 120000 });
   await painted(page);
   const openObservedMs = performance.now() - start;
@@ -353,7 +371,7 @@ async function openDoc(page, name) {
   await page.locator('[contenteditable="true"]').waitFor({ timeout: 120000 });
   return { openObservedMs, editActivationObservedMs };
 }
-async function typing(page, name, { rich = false, arm, beforeInput = () => {}, afterInput = () => {} } = {}) {
+async function typing(page, name, { rich = false, traced = rich, arm, beforeInput = () => {}, afterInput = () => {} } = {}) {
   const windowState = await setWindowState(active, 'visible');
   const { openObservedMs, editActivationObservedMs } = await openDoc(page, name);
   console.log(JSON.stringify({ label, phase: 'typing-start', name, openObservedMs, editActivationObservedMs }));
@@ -364,11 +382,11 @@ async function typing(page, name, { rich = false, arm, beforeInput = () => {}, a
   const editor = page.locator(rich ? '[contenteditable="true"].tiptap' : '[contenteditable="true"]');
   const mode = await editor.evaluate(element => element.classList.contains('tiptap') ? 'rich' : element.classList.contains('cm-content') ? 'source' : 'unknown');
   await editor.click({ position: { x: 30, y: 30 } });
-  await page.keyboard.press('Control+End');
+  await page.keyboard.press(mac ? 'Meta+ArrowDown' : 'Control+End');
   await painted(page);
   if (rich) await editor.evaluate(observePresenceOwner);
   const clockBefore = rich ? await samplePresenceClock(page, { retryAfterPaint: () => painted(page) }) : null;
-  const trace = rich ? await startTypingTrace(page) : null;
+  const trace = traced ? await startTypingTrace(page) : null;
   let traceResult;
   try {
     await page.evaluate(traced => {
@@ -483,6 +501,7 @@ async function switchTo(page, index) {
   return { to: index, selectedObservedMs, editablePaintObservedMs, allPhasesObservedMs: performance.now() - started, ...details, cpuProfilePath };
 }
 async function snapshot(pid) {
+  if (mac) return snapshotMacProcesses(pid, { signal: benchmarkSignal });
   const { stdout } = await exec('pwsh.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', join(dirname(fileURLToPath(import.meta.url)), 'packaged-process-snapshot.ps1'), '-AppProcessId', String(pid)], { windowsHide: true, signal: benchmarkSignal, timeout: 30000, maxBuffer: 4 * 1024 * 1024 });
   return JSON.parse(stdout);
 }
@@ -537,8 +556,8 @@ async function filesListed(page, rootEntries) {
   return { rootEntries, waitObservedMs: performance.now() - started };
 }
 const surfaces = {
-  goTo: { name: 'Go to', shortcut: 'Control+p', key: 'p', palette: '[data-testid="quick-open"]', input: '[data-testid="quick-open"] input[aria-label="File"]', option: '[data-testid="quick-open"] [role="option"]' },
-  commandPalette: { name: 'Command palette', shortcut: 'Control+Shift+P', key: 'p', palette: '[data-testid="command-palette"]', input: '[data-testid="command-palette"] input[aria-label="Command"]', option: '[data-testid="command-palette"] [role="option"]' },
+  goTo: { name: 'Go to', shortcut: 'ControlOrMeta+p', key: 'p', palette: '[data-testid="quick-open"]', input: '[data-testid="quick-open"] input[aria-label="File"]', option: '[data-testid="quick-open"] [role="option"]' },
+  commandPalette: { name: 'Command palette', shortcut: 'ControlOrMeta+Shift+P', key: 'p', palette: '[data-testid="command-palette"]', input: '[data-testid="command-palette"] input[aria-label="Command"]', option: '[data-testid="command-palette"] [role="option"]' },
 };
 const GO_TO_QUERY = 'fixture-004242';
 const CHAT_TITLE = 'Long history';
@@ -1140,7 +1159,11 @@ async function documentRelay(runDir, documentCase, deadline) {
     }
     data.typing = [];
     for (const name of ['small.md', 'large.md']) {
-      data.typing.push(await typing(fresh.page, name));
+      // A traced key's latency is its EventLatency slice, uncensored, as in presence. The editor stays
+      // the one the document opens in: rich for small.md, source after Edit for large.md.
+      const typed = await typing(fresh.page, name, typingTrace ? { traced: true, arm: 'trace' } : {});
+      if (typed.trace && !typed.trace.validation.pass) throw Error('Typing trace validation failed: ' + typed.trace.validation.problems.join('; '));
+      data.typing.push(typed);
       await json(join(output, 'result.json'), receipt);
     }
     data.durableEdits = [];

@@ -18,7 +18,7 @@ import {
   type PostData,
 } from "./PostCard";
 import { useIsOwnAuthor } from "./AgentBadge";
-import { ChatAvatar } from "./ChatAvatar";
+import { AgentName, ChatAvatar } from "./ChatAvatar";
 import { neutralPresentation, ownAgentPresentation } from "./actorPresentation";
 import { ChatLane } from "./ChatLane";
 import { usePersonalChatFeed } from "./usePersonalChatFeed";
@@ -3875,12 +3875,10 @@ export function ChatsView(props: {
                       />
                       <span className="min-w-0 flex-1">
                         <span className="flex items-baseline gap-1.5 leading-[18px]">
-                          <span
-                            className={`truncate text-[13px] font-semibold ${
-                              isAgent ? "text-agent" : "text-ink"
-                            }`}
-                          >
-                            {chatAuthorLabel(item.message)}
+                          <span className="truncate text-[13px] font-semibold text-ink">
+                            <AgentName kind={isAgent ? "agent" : "human"} presentation={item.message.presentation}>
+                              {chatAuthorLabel(item.message)}
+                            </AgentName>
                           </span>
                           <span className="truncate font-mono text-[11px] text-subtle">{where}</span>
                           <time

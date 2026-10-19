@@ -401,10 +401,11 @@ async function command(name: string, input: Record<string, any>): Promise<Record
       const doc = document("doc-0"), current = storage.resolveCurrentLiveDocumentBinding({document: doc, actor});
       assert.equal(current.kind, "current"); if (current.kind !== "current") throw Error("authority");
       const lookup = {operationId: "restore", workspaceId: "workspace", ownerUserId: "owner"};
+      const restoreAtMs = Date.now();
       beginStopRestore(storage as StorageContext, {...lookup, document: doc, deliveryKind: "bootstrap", shareId: "share", grantId: "grant",
         expectedGrantGeneration: 1, expectedDependentGrantIds: [], expectedFence: current.binding.restoreFenceGeneration,
-        restorePointCursor: 0, restorePointReceiptDigest: doc.lineageClaimId}, Date.now());
-      advanceStopRestoreFence(storage as StorageContext, lookup, Date.now());
+        restorePointCursor: 0, restorePointReceiptDigest: doc.lineageClaimId}, restoreAtMs);
+      advanceStopRestoreFence(storage as StorageContext, lookup, restoreAtMs);
       const prepared = await consumer.prepareRestore(lookup); assert.equal(prepared.kind, "prepared"); if (prepared.kind !== "prepared") throw Error("restore");
       const restored = await consumer.completeRestore(lookup, prepared.proposalDigest);
       const cut = storage.readLiveUpdateJournalCut({document: doc}); assert.equal(cut.kind, "cut"); if (cut.kind !== "cut") throw Error("cut");

@@ -3,7 +3,7 @@ import { AutomationBadge } from "./AutomationBadge";
 import { Bookmark, CircleHelp, FileText, MessageSquare } from "lucide-react";
 import type { ChannelThreadRecord, ChatBookmarkRecord, ChatReactionRecord } from "../../ipc/bridgeContract";
 import { formatChatTime, formatShortTime } from "../time";
-import { ChatAvatar } from "./ChatAvatar";
+import { AgentName, ChatAvatar } from "./ChatAvatar";
 import { neutralPresentation } from "./actorPresentation";
 import { chatAuthorLabel, MessageReactions, RowToolbar, TOOLBAR_BUTTON, type ChatReactionControls } from "./chatMessages";
 import { UnreadPill } from "./ChatsControls";
@@ -254,12 +254,14 @@ export function PostCard(props: {
           <span className="flex items-baseline gap-1.5 leading-[18px]">
             <span
               data-testid="chats-post-author"
-              className={`truncate text-[13px] font-semibold ${isAgent ? "text-agent" : "text-ink"}`}
+              className="truncate text-[13px] font-semibold text-ink"
             >
-              {message ? chatAuthorLabel(message) : "Unknown author"}
+              {message ? (
+                <AgentName kind={message.authorKind} presentation={message.presentation}>{chatAuthorLabel(message)}</AgentName>
+              ) : "Unknown author"}
             </span>
             {isAgent ? (
-              <AgentBadge testIdPrefix="chats-post" author={message!} viewerAuthorId={props.data.viewerAuthorId} />
+              <AgentBadge testIdPrefix="chats-post" author={message!} viewerAuthorId={props.data.viewerAuthorId} presentation={message!.presentation} />
             ) : null}
             {message?.authorKind === "automation" ? (
               <AutomationBadge

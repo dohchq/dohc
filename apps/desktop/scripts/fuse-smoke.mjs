@@ -40,7 +40,7 @@ export function assertReleaseFuses(actual, configured) {
  * esbuild, which proves signing, entitlements and the sandbox in the bundle.
  */
 export async function compilePackagedApp(resourcesRoot) {
-  const compile = await createInstalledAppCompiler(resourcesRoot, false);
+  const compile = await createInstalledAppCompiler(resourcesRoot);
   const bytes = Buffer.from('document.body.textContent = "packaged compile";');
   const request = { entryPath: "main.js", inputs: [{ path: "main.js", bytes, sha256: createHash("sha256").update(bytes).digest("hex") }],
     bounds: { maxInputFiles: 8, maxInputBytes: 8192, maxOutputBytes: 16384 } };
@@ -56,7 +56,7 @@ const PACKAGES = {
   linux: { name: "Linux", directory: "release/linux-unpacked", binary: "dohc", asar: "resources/app.asar", fuses: "dohc" },
   darwin: {
     name: "macOS",
-    directory: process.arch === "arm64" ? "release/mac-arm64/dohc.app" : "release/mac/dohc.app",
+    directory: "release/mac-arm64/dohc.app",
     binary: "Contents/MacOS/dohc",
     asar: "Contents/Resources/app.asar",
     fuses: ".",
@@ -78,14 +78,8 @@ async function smoke() {
   if (process.platform === "darwin") {
     const signature = spawnSync("codesign", ["--verify", "--deep", "--strict", packageDir], { encoding: "utf8" });
     if (signature.status !== 0) throw new Error(`The macOS package's signature does not verify:\n${signature.stderr}`);
-    // An x64 package would run its compiler through Rosetta on this Apple
-    // silicon runner, where dohc refuses to build apps.
-    const resources = join(packageDir, "Contents/Resources");
-    const compiler = JSON.parse(readFileSync(join(resources, "app-compiler/manifest.json"), "utf8"));
-    if (compiler.arch === "arm64" && process.arch === "arm64") {
-      await compilePackagedApp(resources);
-      console.log("Packaged app compile passed through the signed arm64 owner.");
-    }
+    await compilePackagedApp(join(packageDir, "Contents/Resources"));
+    console.log("Packaged app compile passed through the signed arm64 owner.");
   }
 
   const profile = mkdtempSync(join(tmpdir(), "dohc-fuse-smoke-"));

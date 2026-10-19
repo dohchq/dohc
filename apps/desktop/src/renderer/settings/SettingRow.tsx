@@ -310,19 +310,26 @@ const HUE_FILLS: Record<IdentityHue, string> = {
   rose: "bg-hue-rose",
 };
 
+const AGENT_HUES = [null, ...IDENTITY_HUES] as const;
+
 /**
- * One swatch per identity hue. A person's swatches are round and an agent's
- * are rounded squares, the shapes of their avatars. null checks none: dohc
- * picks the color.
+ * One swatch per identity hue. A person's swatches are round, and null checks
+ * none: dohc picks the color. An agent's are rounded squares, the shapes of
+ * their avatars, after an olive Default swatch that null checks.
+ *
+ * The arrows choose as they move, unless `arrowsMoveFocus`: then they move
+ * focus only and Enter or Space chooses, for a list where each choice saves.
  */
 export function HueControl(props: {
   label: string;
   value: IdentityHue | null;
   shape: "person" | "agent";
-  onChange: (value: IdentityHue) => void;
+  onChange: (value: IdentityHue | null) => void;
+  arrowsMoveFocus?: boolean;
 }) {
   const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  const currentIndex = Math.max(0, props.value === null ? 0 : IDENTITY_HUES.indexOf(props.value));
+  const hues: readonly (IdentityHue | null)[] = props.shape === "agent" ? AGENT_HUES : IDENTITY_HUES;
+  const currentIndex = Math.max(0, hues.indexOf(props.value));
 
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     const step = event.key === "ArrowRight" || event.key === "ArrowDown"
@@ -330,33 +337,37 @@ export function HueControl(props: {
       : event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 0;
     if (step === 0) return;
     event.preventDefault();
-    const index = (currentIndex + step + IDENTITY_HUES.length) % IDENTITY_HUES.length;
-    props.onChange(IDENTITY_HUES[index]!);
+    const focused = optionRefs.current.indexOf(event.target as HTMLButtonElement);
+    const index = ((focused >= 0 ? focused : currentIndex) + step + hues.length) % hues.length;
+    if (!props.arrowsMoveFocus) props.onChange(hues[index]!);
     optionRefs.current[index]?.focus();
   };
 
   return (
     <div role="radiogroup" aria-label={props.label} onKeyDown={handleKeyDown} className="flex items-center gap-1.5">
-      {IDENTITY_HUES.map((hue, index) => (
-        <button
-          key={hue}
-          ref={(element) => {
-            optionRefs.current[index] = element;
-          }}
-          type="button"
-          role="radio"
-          aria-label={hue[0]!.toUpperCase() + hue.slice(1)}
-          title={hue[0]!.toUpperCase() + hue.slice(1)}
-          aria-checked={props.value === hue}
-          tabIndex={index === currentIndex ? 0 : -1}
-          onClick={() => props.onChange(hue)}
-          className={`grid size-5 place-items-center text-bg transition-opacity hover:opacity-80 ${
-            props.shape === "person" ? "rounded-full" : "rounded-md"
-          } ${HUE_FILLS[hue]}`}
-        >
-          {props.value === hue ? <Check size={12} strokeWidth={2.5} aria-hidden /> : null}
-        </button>
-      ))}
+      {hues.map((hue, index) => {
+        const name = hue === null ? "Default" : hue[0]!.toUpperCase() + hue.slice(1);
+        return (
+          <button
+            key={hue ?? "default"}
+            ref={(element) => {
+              optionRefs.current[index] = element;
+            }}
+            type="button"
+            role="radio"
+            aria-label={name}
+            title={name}
+            aria-checked={props.value === hue}
+            tabIndex={index === currentIndex ? 0 : -1}
+            onClick={() => props.onChange(hue)}
+            className={`grid size-5 place-items-center text-bg transition-opacity hover:opacity-80 ${
+              props.shape === "person" ? "rounded-full" : "rounded-md"
+            } ${hue === null ? "bg-agent" : HUE_FILLS[hue]}`}
+          >
+            {props.value === hue ? <Check size={12} strokeWidth={2.5} aria-hidden /> : null}
+          </button>
+        );
+      })}
     </div>
   );
 }

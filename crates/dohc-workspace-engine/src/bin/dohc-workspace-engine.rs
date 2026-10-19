@@ -170,7 +170,7 @@ async fn run_stdio(auth_token: String, passive: bool, replica: bool) -> Result<(
         tokio::io::stdin(),
         tokio::io::stdout(),
         supervisor,
-        service.events().subscribe_with_files(),
+        service.events().subscribe_with_wakes(),
         || WorkspaceSupervisor::global().close_all(),
         live,
     )

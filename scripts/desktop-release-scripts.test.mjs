@@ -37,11 +37,6 @@ import {
 import { updateDesktopPackageVersion } from "./update-desktop-package-version.mjs";
 import { checkDesktopReleasePlatforms } from "./check-desktop-release-platforms.mjs";
 import {
-  mergeUpdateManifests,
-  parseUpdateManifest,
-  serializeUpdateManifest,
-} from "./merge-update-manifests.mjs";
-import {
   createMockUpdateServer,
   resolveServablePath,
 } from "./mock-update-server.mjs";
@@ -99,7 +94,6 @@ test("release platform selection defaults to Windows and keeps every native targ
   const all = desktopReleaseTargets("all");
   assert.deepEqual(all.map((target) => [target.arch, target.target]), [
     ["x64", "x86_64-pc-windows-msvc"],
-    ["x64", "x86_64-apple-darwin"],
     ["arm64", "aarch64-apple-darwin"],
     ["x64", "x86_64-unknown-linux-gnu"],
   ]);
@@ -271,61 +265,6 @@ test("writes GitHub output in action-compatible key value form", async () => {
   );
 });
 
-test("merges Electron updater manifests by version and unique file URL", () => {
-  const primary = parseUpdateManifest(`
-version: 0.1.0
-files:
-  - url: dohc-0.1.0-mac-arm64.zip
-    sha512: arm
-    size: 12
-path: dohc-0.1.0-mac-arm64.zip
-sha512: arm
-releaseDate: 2026-06-21T00:00:00.000Z
-`);
-  const secondary = parseUpdateManifest(`
-version: 0.1.0
-files:
-  - url: dohc-0.1.0-mac-x64.zip
-    sha512: x64
-    size: 13
-path: dohc-0.1.0-mac-x64.zip
-sha512: x64
-`);
-  const merged = mergeUpdateManifests(primary, secondary, "mac");
-  const serialized = serializeUpdateManifest(merged);
-
-  assert.deepEqual(
-    merged.files.map((file) => file.url),
-    ["dohc-0.1.0-mac-arm64.zip", "dohc-0.1.0-mac-x64.zip"],
-  );
-  assert.equal(merged.files[0].sha512, "arm");
-  assert.equal(merged.files[0].size, 12);
-  assert.equal(merged.files[1].sha512, "x64");
-  assert.equal(merged.files[1].size, 13);
-  assert.match(serialized, /releaseDate: 2026-06-21T00:00:00.000Z/);
-  assert.throws(
-    () =>
-      mergeUpdateManifests(
-        primary,
-        { ...secondary, version: "0.2.0" },
-        "mac",
-      ),
-    /different versions/,
-  );
-  assert.throws(
-    () =>
-      mergeUpdateManifests(
-        primary,
-        {
-          ...secondary,
-          files: [{ url: "dohc-0.1.0-mac-arm64.zip", sha512: "different", size: 12 }],
-        },
-        "mac",
-      ),
-    /Conflicting entries/,
-  );
-});
-
 test("mock update server serves files and blocks traversal/directory-link escapes", async () => {
   const root = await mkdtemp(join(tmpdir(), "dohc-update-server-"));
   const outside = await mkdtemp(join(tmpdir(), "dohc-outside-"));
@@ -407,32 +346,6 @@ test("update-desktop-package-version stamps the version when run as a command", 
   assert.match(stdout, /^updated /);
   const packageJson = JSON.parse(await readFile(join(root, "apps/desktop/package.json"), "utf8"));
   assert.equal(packageJson.version, "0.1.1-nightly.20260621.2.1");
-});
-
-test("merge-update-manifests writes the merged manifest when run as a command", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "dohc-merge-command-"));
-  const manifest = (arch) =>
-    [
-      "version: 0.1.0",
-      "files:",
-      `  - url: dohc-0.1.0-mac-${arch}.zip`,
-      `    sha512: ${arch}`,
-      "    size: 1",
-      `path: dohc-0.1.0-mac-${arch}.zip`,
-      `sha512: ${arch}`,
-      "",
-    ].join("\n");
-  await writeFile(join(directory, "arm64.yml"), manifest("arm64"));
-  await writeFile(join(directory, "x64.yml"), manifest("x64"));
-  await runReleaseScript("merge-update-manifests.mjs", [
-    "--platform", "mac",
-    join(directory, "arm64.yml"), join(directory, "x64.yml"), join(directory, "merged.yml"),
-  ]);
-  const merged = parseUpdateManifest(await readFile(join(directory, "merged.yml"), "utf8"));
-  assert.deepEqual(
-    merged.files.map((file) => file.url).sort(),
-    ["dohc-0.1.0-mac-arm64.zip", "dohc-0.1.0-mac-x64.zip"],
-  );
 });
 
 test("mock-update-server serves its root when run as a command", async () => {
@@ -589,12 +502,8 @@ test("desktop releases start only by dispatch, run on self-hosted runners, and p
   assert.match(windowsSmoke.run, /--package-commit '\$\{\{ github\.sha \}\}'/);
   const macSmoke = jobs.build.steps.find(step => step.if === "runner.os == 'macOS'" && step.run === "pnpm smoke:fuses:desktop");
   assert.ok(macSmoke, "the macOS package's signature, fuses and boot are checked");
-  const macDirectory = macSmoke.env.DOHC_SMOKE_PACKAGE_DIRECTORY
-    .match(/^\$\{\{ github\.workspace \}\}\/apps\/desktop\/release\/(\$\{\{ .+ \}\})\/dohc\.app$/u)?.[1];
-  assert.ok(macDirectory, "the macOS smoke boots a bundle electron-builder wrote under apps/desktop/release");
-  for (const [arch, directory] of [["arm64", "mac-arm64"], ["x64", "mac"]]) {
-    assert.equal(Function("matrix", `return (${macDirectory.slice(3, -2)});`)({ arch }), directory, `the ${arch} smoke boots its own bundle`);
-  }
+  assert.equal(macSmoke.env.DOHC_SMOKE_PACKAGE_DIRECTORY, "${{ github.workspace }}/apps/desktop/release/mac-arm64/dohc.app",
+    "the macOS smoke boots the Apple silicon bundle electron-builder wrote");
   const upload = releaseStep(jobs.build, "actions/upload-artifact@");
   const order = step => jobs.build.steps.indexOf(step);
   assert.ok(order(packageDesktop) < order(fuseSmoke), "the Linux fuse smoke boots the package electron-builder wrote");
@@ -724,7 +633,6 @@ test("desktop release stages the Rust engine and Collection compiler for the pac
   const build = releaseWorkflow.jobs.build;
   assert.equal(build.strategy.matrix.include, "${{ fromJSON(needs.preflight.outputs.matrix) }}", "preflight selects the package matrix");
   assert.deepEqual(desktopReleaseTargets("all").map(({ artifact_platform, arch, target }) => [artifact_platform, arch, target]).sort(), [
-    ["mac", "x64", "x86_64-apple-darwin"],
     ["mac", "arm64", "aarch64-apple-darwin"],
     ["win", "x64", "x86_64-pc-windows-msvc"],
     ["linux", "x64", "x86_64-unknown-linux-gnu"],
@@ -737,17 +645,13 @@ test("desktop release stages the Rust engine and Collection compiler for the pac
     .replace('"${{ matrix.target }}"', target)
     .trim().split(/\s+/);
   assert.equal(buildModule.parseTargetArgument(engineArgs), target);
-  // The Apple silicon runner packages macOS x64 with the x64 Collection compiler.
+  // Each target packages on a runner of its own architecture, so the install
+  // needs no --cpu and packaging checks the compiler the desktop build staged.
   const installs = build.steps.filter(step => /\bpnpm (install|i)\b/.test(step.run ?? ""));
-  assert.deepEqual(installs.map(step => step.run), ["pnpm install --frozen-lockfile --cpu=current --cpu=${{ matrix.arch }}"]);
-  // A later pnpm run or exec would otherwise reinstall without --cpu.
-  assert.equal(build.env.pnpm_config_verify_deps_before_run, "false");
-  for (const step of build.steps) assert.equal(step.env?.pnpm_config_verify_deps_before_run, undefined, `${step.name} keeps the install`);
-  const stageCompiler = releaseStep(build, "stage-app-compiler.mjs");
-  assert.equal(stageCompiler.run, "node apps/desktop/scripts/stage-app-compiler.mjs --arch=${{ matrix.arch }}");
+  assert.deepEqual(installs.map(step => step.run), ["pnpm install --frozen-lockfile"]);
+  assert.ok(!build.steps.some(step => step.run?.includes("stage-app-compiler.mjs")), "the desktop build stages the compiler");
   const order = step => build.steps.indexOf(step);
-  assert.ok(order(releaseStep(build, "pnpm build:desktop")) < order(stageCompiler), "target staging replaces the build's runner staging");
-  assert.ok(order(stageCompiler) < order(releaseStep(build, "electron-builder")), "packaging checks the target's compiler");
+  assert.ok(order(releaseStep(build, "pnpm build:desktop")) < order(releaseStep(build, "electron-builder")), "packaging checks the staged compiler");
 });
 
 test("desktop release workflow uploads only distributable release assets", () => {
@@ -899,6 +803,19 @@ test("the installer leaves out every source map", async () => {
   assert.ok(builder.files.includes("dist/**"));
   assert.ok(builder.files.includes("!dist/**/*.map"));
 });
+// Writes the update manifest fields the verifier reads, as electron-builder lays them out.
+function updateManifest({ version, files, path, sha512 }) {
+  const quote = JSON.stringify;
+  return [
+    `version: ${quote(version)}`,
+    "files:",
+    ...files.flatMap(file => [`  - url: ${quote(file.url)}`, `    sha512: ${quote(file.sha512)}`, `    size: ${file.size}`]),
+    `path: ${quote(path)}`,
+    `sha512: ${quote(sha512)}`,
+    "",
+  ].join("\n");
+}
+
 async function artifactFixture(platform = "win", arch = "x64") {
   const directory = await mkdtemp(join(tmpdir(), "dohc-artifact-test-"));
   const version = "0.1.0";
@@ -911,26 +828,28 @@ async function artifactFixture(platform = "win", arch = "x64") {
   if (platform === "mac") await writeFile(join(directory, `dohc-${version}-mac-${arch}.dmg`), "dmg fixture");
   const manifest = { version, files: [{ url: name, sha512, size: bytes.length }], path: name, sha512 };
   const manifestPath = join(directory, `latest${platform === "win" ? "" : `-${platform}`}.yml`);
-  await writeFile(manifestPath, serializeUpdateManifest(manifest));
+  await writeFile(manifestPath, updateManifest(manifest));
   return { options: { directory, platform, arch, version, channel: "latest" }, name, manifest, manifestPath };
 }
 
 test("release verification hashes distributable files for each configured platform", async () => {
-  for (const [platform, arch] of [["win", "x64"], ["linux", "x64"], ["mac", "x64"], ["mac", "arm64"]]) {
+  for (const [platform, arch] of [["win", "x64"], ["linux", "x64"], ["mac", "arm64"]]) {
     const { options } = await artifactFixture(platform, arch);
     const result = await verifyDesktopReleaseArtifacts(options);
     assert.equal(result.status, "passed");
     assert.equal(result.artifacts.length, platform === "mac" ? 2 : 1);
     assert.ok(result.excludes.includes("installation"));
   }
+  const intel = await artifactFixture("mac", "x64");
+  await assert.rejects(verifyDesktopReleaseArtifacts(intel.options), /Unsupported release target: mac-x64/);
 });
 
 test("release verification rejects changed bytes, version, and legacy updater metadata", async () => {
   const { options, name, manifest, manifestPath } = await artifactFixture();
   await assert.rejects(verifyDesktopReleaseArtifacts({ ...options, version: "0.2.0" }), /Manifest version/);
-  await writeFile(manifestPath, serializeUpdateManifest({ ...manifest, sha512: "incorrect" }));
+  await writeFile(manifestPath, updateManifest({ ...manifest, sha512: "incorrect" }));
   await assert.rejects(verifyDesktopReleaseArtifacts(options), /Manifest path and SHA-512/);
-  await writeFile(manifestPath, serializeUpdateManifest(manifest));
+  await writeFile(manifestPath, updateManifest(manifest));
   await writeFile(join(options.directory, name), "different package bytes!");
   await assert.rejects(verifyDesktopReleaseArtifacts(options), /size or SHA-512/);
 });
@@ -959,14 +878,14 @@ test("release verification rejects missing installers and wrong update architect
   const alternate = "other.exe";
   await writeFile(join(win.options.directory, alternate), await readFile(join(win.options.directory, win.name)));
   const manifest = { ...win.manifest, files: [{ ...win.manifest.files[0], url: alternate }], path: alternate };
-  await writeFile(win.manifestPath, serializeUpdateManifest(manifest));
+  await writeFile(win.manifestPath, updateManifest(manifest));
   await assert.rejects(verifyDesktopReleaseArtifacts(win.options), /does not list the x64 update artifact/);
 });
 
 test("release verification rejects artifact paths outside the release directory", async () => {
   const { options, name, manifest, manifestPath } = await artifactFixture();
   for (const url of ["../outside.exe", "https://example.com/installer.exe", "..%2Foutside.exe"]) {
-    await writeFile(manifestPath, serializeUpdateManifest({ ...manifest, files: [{ ...manifest.files[0], url }] }));
+    await writeFile(manifestPath, updateManifest({ ...manifest, files: [{ ...manifest.files[0], url }] }));
     await assert.rejects(verifyDesktopReleaseArtifacts(options), /local filename/);
   }
   const outside = await mkdtemp(join(tmpdir(), "dohc-artifact-outside-"));
@@ -974,6 +893,6 @@ test("release verification rejects artifact paths outside the release directory"
   await rm(join(options.directory, name));
   // Containment must fail before the file-type check; Windows junctions need no symlink privilege.
   await symlink(outside, join(options.directory, name), process.platform === "win32" ? "junction" : "dir");
-  await writeFile(manifestPath, serializeUpdateManifest(manifest));
+  await writeFile(manifestPath, updateManifest(manifest));
   await assert.rejects(verifyDesktopReleaseArtifacts(options), /escapes its directory/);
 });

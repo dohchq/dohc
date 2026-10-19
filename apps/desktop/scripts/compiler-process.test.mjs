@@ -16,8 +16,9 @@ import { once } from 'node:events';
 // Windows owner and worker took 17.6 s to answer, so the deadline is 20 s,
 // inside each 30 s test.
 const bounds={timeoutMs:20000,maxMemoryBytes:256*1024*1024,maxProcesses:8,maxInputBytes:4096,maxOutputBytes:4096,maxErrorBytes:8192};
-const darwin=process.platform==='darwin';
-const owned={skip:!['win32','darwin'].includes(process.platform),timeout:30000};
+// dohc stages the macOS compiler for Apple silicon only.
+const darwin=process.platform==='darwin'&&process.arch==='arm64';
+const owned={skip:!(process.platform==='win32'||darwin),timeout:30000};
 const macos={skip:!darwin,timeout:30000};
 // macOS runs the worker under the staged official Node and owner. Seatbelt
 // stops any Node that loads libraries from outside its own file.

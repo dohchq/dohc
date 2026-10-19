@@ -14,7 +14,7 @@ import {
 import { contrastRatio as contrast, luminance, mixHex as mix } from "./accentColor";
 import { MENU_FRAME } from "./ui/Menu";
 
-import { presentationColor, presentationClasses } from "./workbench/actorPresentation";
+import { agentTextClass, presentationColor, presentationClasses } from "./workbench/actorPresentation";
 
 const SURFACES = ["bg", "panel", "panel2"] as const;
 
@@ -317,6 +317,8 @@ it("keeps agent name, glyph and opaque border contrast on every surface in both 
       for (const surface of SURFACES) {
         expect(contrast(color, palette[mode][surface]), String(hue) + "/" + surface).toBeGreaterThanOrEqual(4.5);
       }
+      // The name and sparkle beside the avatar take the hue measured above.
+      expect(agentTextClass(token)).toBe(hue ? "text-hue-" + hue : "text-agent");
       const classes = presentationClasses(token, "agent");
       expect(classes).toContain(hue ? "border-hue-" + hue : "border-agent");
       expect(classes).not.toContain("/50");

@@ -79,6 +79,7 @@ const PARTS = [
   "composer-poll",
   "chat-messages",
   "ref",
+  "agent-color",
 ];
 // A fixed instant for the page's clock. The capture pauses the clock an
 // hour past it, so the real time that passes between installing and

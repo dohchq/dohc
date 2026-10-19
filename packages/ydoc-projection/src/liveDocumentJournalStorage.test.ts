@@ -15,7 +15,8 @@ import { openSyncRelayStorage, type LiveUpdateJournalCommitInput } from '../../.
 import type { StorageContext } from '../../../services/sync-relay/src/storage/context.js'
 import type { SqliteDb } from '../../../services/sync-relay/src/storage/types.js'
 import {attachLiveJournalHistory, createLiveJournalHistoryAuthority} from '../../../services/sync-relay/src/storage/liveJournalHistory.js'
-import {appendValidatedLiveJournal} from '../../../services/sync-relay/src/storage/liveUpdateJournal.js'
+import {appendValidatedLiveJournal, liveJournalCoverageWithin} from '../../../services/sync-relay/src/storage/liveUpdateJournal.js'
+import {startLiveJournalCheck} from '../../../services/sync-relay/src/storage/liveJournalCheck.js'
 
 function openJournalStorage(...args: Parameters<typeof openSyncRelayStorage>) {
   const storage = openSyncRelayStorage(...args)
@@ -712,6 +713,32 @@ it.each(['overlap', 'same-cursor adjacency'] as const)('rejects %s before the ch
     expect(() => f.storage.commitLiveUpdateJournal(next)).toThrow(/damaged/)
     expect(f.journalRows()).toEqual(before)
   } finally {f.close()}
+}, 30_000)
+
+it('cold check reports a hidden overlapping database row once per relay run', async () => {
+  const f = registered(), report = vi.fn()
+  vi.useFakeTimers()
+  let check: ReturnType<typeof startLiveJournalCheck> | undefined
+  try {
+    expect(f.storage.commitLiveUpdateJournal(f.capture(gcCandidate(91, 0, 100), 'outer')).result.kind).toBe('accepted')
+    const context = f.storage as StorageContext
+    f.raw.exec(`INSERT INTO sync_relay_live_update_struct_provenance
+      SELECT workspace_id,main_version_id,object_id,lineage_claim_id,client_id,1,2,journal_cursor
+      FROM sync_relay_live_update_struct_provenance WHERE client_id=91`)
+    // The inner row hides the outer row from the edit's left-neighbour lookup.
+    expect(liveJournalCoverageWithin(context, f.input.evidence.document,
+      [{clientId: 91, startClock: 50, endClock: 51}])).toEqual([{clientId: 91, startClock: 1, endClock: 2}])
+    check = startLiveJournalCheck((f.storage as StorageContext).db, report)
+    expect(report).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1100)
+    expect(report).toHaveBeenCalledExactlyOnceWith('[sync-relay] live journal damaged', {
+      document: f.input.evidence.document,
+      firstBadRow: {source: 'provenance', clientId: 91, startClock: 1, endClock: 2, journalCursor: 1},
+      previousRow: {source: 'provenance', clientId: 91, startClock: 0, endClock: 100, journalCursor: 1},
+    })
+    await vi.advanceTimersByTimeAsync(86_400_100)
+    expect(report).toHaveBeenCalledTimes(1)
+  } finally {check?.close(); vi.useRealTimers(); f.close()}
 }, 30_000)
 
 it('subtracts prior GC coverage, retaining adjacent first authors and separate clients', () => {

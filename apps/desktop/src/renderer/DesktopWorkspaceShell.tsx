@@ -4,6 +4,7 @@ import { withClosedEngineDocSession } from "./collab/engineDocLease";
 import { CreationPartialError } from "@dohc/cli/creation";
 import {shareSenderLabel} from "@dohc/security-contract/share-labels";
 import { AgentSettingsProvider } from "./workbench/AgentBadge";
+import { AgentColorContext, saveAgentColor } from "./workbench/AgentColorPicker";
 import { EngineMomentDiffPage } from "./workbench/EngineMomentDiffPage";
 import { StopAndRestoreDialog, useStopAndRestore } from "./StopAndRestoreDialog";
 import { useRecordHistory } from "./collections/useRecordHistory";
@@ -52,7 +53,7 @@ import {
   engineStoreRefusalRecovery,
   engineStoreRefusalSentence,
 } from "../ipc/bridgeContract";
-import { DROP_IMPORT_LIMITS, DROP_IMPORT_REFUSALS } from "../ipc/channels";
+import { DROP_IMPORT_LIMITS, DROP_IMPORT_REFUSALS, isEditorMenuCommand } from "../ipc/channels";
 import { isPrivacyDenied, readError, shouldRecheckShareAccess } from "../ipc/errorWords";
 import {
   formatSize,
@@ -147,6 +148,7 @@ import { FileInspector } from "./FileInspector";
 import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import type { HeadingTarget, ScrollTarget } from "./MarkdownView";
 import { preloadMarkdownEditor } from "./editor/LazyMarkdownEditor";
+import { sendToFocusedEditor } from "./editor/editorMenuCommands";
 import { NewFileDialog } from "./NewFileDialog";
 import { NewCollectionDialog } from "./collections/NewCollectionDialog";
 import { type ShareViewRefresh, useShareDirectWrites } from "./shell/useShareDirectWrites";
@@ -1325,6 +1327,10 @@ export function DesktopWorkspaceShell(props: {
         );
       }
     },
+    [reportShellError, workspaceId],
+  );
+  const setAgentColor = useMemo(
+    () => saveAgentColor(bridge(), workspaceId, reportShellError),
     [reportShellError, workspaceId],
   );
   const showPinnedAppMenu = useCallback(
@@ -3998,7 +4004,8 @@ export function DesktopWorkspaceShell(props: {
   useEffect(() => {
     return bridge().onMenuCommand((command) => {
       // App-menu commands originate outside the modal; only keydown is guarded.
-      if (command === "command-palette") setPaletteOpen(true);
+      if (isEditorMenuCommand(command)) sendToFocusedEditor(command);
+      else if (command === "command-palette") setPaletteOpen(true);
       else if (isCommandAvailable(command, commandContext)) commandHandlers[command]();
     });
   }, [commandContext, commandHandlers]);
@@ -4965,6 +4972,7 @@ export function DesktopWorkspaceShell(props: {
   );
   return (
     <AgentSettingsProvider settings={props.userSettings?.settings ?? null}>
+    <AgentColorContext.Provider value={setAgentColor}>
     <CustomizeContext.Provider value={customizeContext}>
     <CollectionFieldMarksProvider workspaceId={workspaceId}>
     <ShellErrorReporter.Provider value={reportShellFailure}>
@@ -6389,6 +6397,7 @@ export function DesktopWorkspaceShell(props: {
     </ShellErrorReporter.Provider>
     </CollectionFieldMarksProvider>
     </CustomizeContext.Provider>
+    </AgentColorContext.Provider>
     </AgentSettingsProvider>
   );
 }

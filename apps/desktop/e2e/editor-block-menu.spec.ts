@@ -34,7 +34,10 @@ test("the block menu keeps the row Enter acts on in view as the keys move it", a
     await expect(page.getByTestId("markdown-editor")).toBeVisible({ timeout: 20_000 });
 
     await page.locator(".dohc-notion-editor > p").first().hover();
-    const handle = page.locator('.dohc-block-affordance[data-dohc-block-index="1"] .dohc-block-handle');
+    // The heading is block 0; hovering the paragraph shows block 1's gutter.
+    const gutter = page.locator(".dohc-block-affordance").nth(1);
+    await expect(gutter).toHaveClass(/\bis-visible\b/);
+    const handle = gutter.locator(".dohc-block-handle");
     await handle.click();
     const menu = page.getByRole("menu", { name: "block actions" });
     await expect(menu).toBeFocused();

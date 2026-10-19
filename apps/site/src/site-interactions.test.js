@@ -67,7 +67,8 @@ describe('download architecture', () => {
   it.each([
     [undefined, 'mac', 'https://github.com/dohchq/dohc/releases', false],
     ['arm', 'mac-arm64', 'https://example.com/arm64.dmg', true],
-    ['x86', 'mac-x64', 'https://example.com/x64.dmg', true],
+    // dohc ships no Intel build, so an Intel Mac gets no preferred download.
+    ['x86', 'mac', 'https://github.com/dohchq/dohc/releases', false],
   ])('uses only positively reported Mac architecture (%s)', async (architecture, key, href, preferred) => {
     vi.stubGlobal('navigator', {
       userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',

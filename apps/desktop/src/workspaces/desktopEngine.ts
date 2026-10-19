@@ -13,7 +13,9 @@ import {
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
-import { bridgeCaptureEventsToRenderer, bridgeNoAtomicPlacement } from "./captureActivityBridge";
+import {
+  CAPTURE_INITIAL_SETTLED_EVENT, COLLECTIONS_PROJECTED_EVENT, bridgeCaptureEventsToRenderer, bridgeNoAtomicPlacement,
+} from "./captureActivityBridge";
 import { bridgeAutomationClaimsToExecutors } from "./automationClaimsBridge";
 import type { WorkspaceActivityScope } from "../ipc/workspaceActivityBroadcast";
 import type { RegistryEntry } from "./registryStore";
@@ -507,10 +509,12 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         },
       });
       await rustEngineDaemon.start();
-      // Collection projection completion is a separate derived-state wake.
-      // Workspace activity owns capture and file observation delivery.
+      // Collection projection completion is a separate derived-state wake, and
+      // so is the end of a new workspace's first read: reads refused during it
+      // can be answered now. Workspace activity owns capture and file
+      // observation delivery.
       bridgeCaptureEventsToRenderer({ onEvent: listener => rustEngineDaemon!.onEvent(event => {
-        if (event.name === "collections.projected") listener(event);
+        if (event.name === COLLECTIONS_PROJECTED_EVENT || event.name === CAPTURE_INITIAL_SETTLED_EVENT) listener(event);
       }) }, scope => notifyRenderer(scope ? { ...scope, pathSetChanged: false } : undefined));
       // The first placement that falls back on a drive without atomic
       // renames announces it at once; the capture health poll is a backstop.
