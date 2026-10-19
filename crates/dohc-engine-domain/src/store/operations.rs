@@ -1,7 +1,7 @@
 use super::{
     alias_object_id, blob_text, get_moment, get_snapshot, hash_fields, lookup_request,
-    rename_text_in_tx, validate_identifier, validate_moment_metadata,
-    validate_plaintext_storable_path, write_history_text_in_tx,
+    rename_text_in_tx, validate_identifier, validate_plaintext_storable_path,
+    write_history_text_in_tx,
 };
 use crate::{DomainError, MomentRecord, RenameTextFile, WriteText};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};

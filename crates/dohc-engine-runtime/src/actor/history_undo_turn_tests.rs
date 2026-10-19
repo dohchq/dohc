@@ -172,7 +172,7 @@ fn disk_observers() -> &'static Mutex<std::collections::HashMap<PathBuf, DiskObs
         OnceLock::new();
     OBSERVERS.get_or_init(Mutex::default)
 }
-pub(super) fn set_disk_observer(root: PathBuf, observer: Option<DiskObserver>) {
+pub(in super::super) fn set_disk_observer(root: PathBuf, observer: Option<DiskObserver>) {
     let mut observers = disk_observers().lock().unwrap();
     if let Some(observer) = observer {
         observers.insert(root, observer);
@@ -585,11 +585,13 @@ async fn abort_mid_turn_resumes_and_rename_is_placed_before_the_next_inverse() {
         .await
         .unwrap();
     // The second inverse has run its callback but has not committed yet.
-    assert!(root.join("old.md").exists());
-    assert!(!root.join("new.md").exists());
+    let old_exists = root.join("old.md").exists();
+    let new_exists = root.join("new.md").exists();
     task.abort();
     release.wait();
     assert!(task.await.unwrap_err().is_cancelled());
+    assert!(old_exists);
+    assert!(!new_exists);
     actor.run(|_, _| Ok(())).await.unwrap(); // Finish the atomic actor call after cancellation.
     close(supervisor).await;
     let supervisor = crate::WorkspaceSupervisor::new();
