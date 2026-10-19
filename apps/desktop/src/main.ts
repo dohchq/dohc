@@ -5726,6 +5726,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       desktopEngine.sessions?.beginShutdown();
       desktopChatBookmarks.stop();
     },
+    stopNoticeRefusals: () => noticeStore().stopWorkspaceRefusals(),
     stopSearch: () => workspaceSearchOwner.dispose(),
     stopSitePreviews: stopAllSitePreviews,
     settleYDocs: async () => {
