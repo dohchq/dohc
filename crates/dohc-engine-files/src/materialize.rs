@@ -2353,7 +2353,10 @@ fn stage_target(
 ) -> Result<Stage, MaterializeError> {
     let write = job.operation == MaterializationOperation::Write;
     let mut original_path = PathBuf::from(&job.target_path);
-    if let Some(leaf) = other_leaf_spelling(target) {
+    if let Some(leaf) = other_leaf_spelling(target)
+        .as_deref()
+        .or_else(|| target.file_name())
+    {
         original_path.set_file_name(leaf);
     }
     let spec = DisplacementSpec {
