@@ -103,6 +103,10 @@ export interface EngineYdocProviderSessionOptions {
   onSettleError?: (error: unknown, token: number) => void;
   // Return false when artifact verification failed, so close retries settlement.
   onSettled?: (result: YdocSettleResult, token: number) => boolean | void | Promise<boolean | void>;
+  // A close wrote the file while settling on its way out, through a settle
+  // that has no `onSettled`: the reused settle of a replicated lineage, or
+  // the settling close a refused release escalates to.
+  onCloseMaterialized?: () => void;
   settleDebounceMs?: number;
   scheduleSettle?: (fn: () => void, ms: number) => () => void;
 }
@@ -255,6 +259,14 @@ export async function openEngineYdocProviderSession(
       options.onSettleStart?.(token);
     } catch {
       // Observer boundary, like notifyError.
+    }
+  }
+
+  function notifyCloseMaterialized(): void {
+    try {
+      options.onCloseMaterialized?.();
+    } catch {
+      // Observer boundary, like notifySettleStart.
     }
   }
 
@@ -544,6 +556,7 @@ export async function openEngineYdocProviderSession(
               if (!result.materialized) {
                 throw new Error("dohc could not write the file (blocked target). The write is pending a retry.");
               }
+              notifyCloseMaterialized();
             } catch (error) {
               // Reuse has no success callback. Give failures an observable token.
               notifySettleStart(token);
@@ -584,7 +597,7 @@ export async function openEngineYdocProviderSession(
           if (closeOptions?.settleOnRefusal === false || session.ownerDraft) throw error;
           // Escalate to a settling close after a transient failure so
           // pending edits are preserved.
-          await session.close({ settle: true });
+          if ((await session.close({ settle: true })).materialized) notifyCloseMaterialized();
         }
         if (ownsAdapter) adapter.dispose();
         observedDoc.off("update", noteDocumentChange);

@@ -481,11 +481,11 @@ type RestartSafeYDocSession = WorkspaceEngineYDocProviderSession & {
 // Whether a document's file has existed. Once true, never false. One object
 // per document, shared by every session, replacement generation, close debt
 // and debt payment that continues it, so no open starts over from nothing
-// after the file has existed. Each one that sees the file sets it: an open
-// over a recorded file or a file on disk, a settle that wrote it, or the file
-// on disk after a payment's close. Every later open tells the engine, which
-// then refuses to create the file, so a file deleted outside dohc stays
-// deleted.
+// after the file has existed. `openGeneration` is the one place that sets it:
+// from every generation's open that found a recorded file or a file on disk,
+// and from every settle or close that wrote the file. Every later open tells
+// the engine, which then refuses to create the file, so a file deleted outside
+// dohc stays deleted.
 type DocumentFileFact = { existed: boolean };
 
 export interface WorkspaceEngineCapture {
@@ -2590,6 +2590,9 @@ export function createWorkspaceEngineCapture(
     // What a generation expects of its file dies with its daemon, so every
     // generation after the fact is set tells the engine instead.
     const { fileFact } = input;
+    const noteFileExisted = (): void => {
+      fileFact.existed = true;
+    };
     const settleCovers = new Map<string, number>();
     const settleOwed = (): boolean =>
       !settleForgiven && updatesSettled < updatesCounted;
@@ -2625,7 +2628,8 @@ export function createWorkspaceEngineCapture(
               onError(`Y.Doc rebind of ${input.path}`, rebindError);
             });
           };
-          const providerOpened = await openProvider({
+          // The disk is read beside the open, so neither waits on the other.
+          const [providerOpened, disk] = await Promise.all([openProvider({
             transport: binding.client as EngineTransport,
             workspace: binding.workspace,
             versionId: input.versionId,
@@ -2739,11 +2743,15 @@ export function createWorkspaceEngineCapture(
               settleForgiven = false;
               if (result.materialized) {
                 diskHeadSha256 = result.sha256;
-                fileFact.existed = true;
+                noteFileExisted();
               }
               return input.onSettled(result, token, generation);
             },
-          });
+            onCloseMaterialized: noteFileExisted,
+          }), absentHeadDiskState(rootPath, input.path)]);
+          // Recorded before this generation can be installed or reconnected
+          // from, so every later open already carries it.
+          if (providerOpened.head === "present" || disk !== "missing") noteFileExisted();
           opened = providerOpened;
           openingRemoteUpdates.set(opened, opening);
           return opened;
@@ -3195,15 +3203,7 @@ export function createWorkspaceEngineCapture(
     // Rebinds after a daemon death run on the session's own operation chain,
     // outside that budget, and keep the full ladder.
     await options.waitForTypingRecovery?.();
-    // The disk is read beside the open, so neither waits on the other.
-    const [firstGeneration, firstDisk] = await Promise.all([
-      openGeneration(true),
-      absentHeadDiskState(rootPath, input.path),
-    ]);
-    // Set before the generation is installed: a reconnect can start at any
-    // later await, and its replacement must already carry this.
-    if (firstGeneration.head === "present" || firstDisk !== "missing") fileFact.existed = true;
-    current = firstGeneration;
+    current = await openGeneration(true);
     checkpointContentKind = current.contentKind;
     canonicalDoc = current.doc;
     Y.applyUpdate(recordedDoc, Y.encodeStateAsUpdate(canonicalDoc));
@@ -4728,14 +4728,6 @@ export function createWorkspaceEngineCapture(
         // write however long anyone waits. L can still be outstanding.
         let writeCancelled = false;
 
-        // A close can settle on its way out, and it answers only that it
-        // closed. The file on disk is the one witness that it wrote the file.
-        const noteFileOnDisk = async (): Promise<void> => {
-          if ((await absentHeadDiskState(rootPath, input.path)) !== "missing") {
-            fileFact.existed = true;
-          }
-        };
-
         // The only way this debt lets go of a lease. Release first, forget
         // second: a refused release keeps the session, because dropping the
         // reference leaves the lease with no owner at all.
@@ -4751,15 +4743,11 @@ export function createWorkspaceEngineCapture(
           // path the user just deleted. `settleOnRefusal: false` hands the
           // refusal back instead, which is what keeps the lease retryable
           // without ever writing.
-          if (writeCancelled) {
-            await held.close({ settle: false, settleOnRefusal: false });
-          } else {
-            try {
-              await held.close({ settle: false });
-            } finally {
-              await noteFileOnDisk();
-            }
-          }
+          await held.close(
+            writeCancelled
+              ? { settle: false, settleOnRefusal: false }
+              : { settle: false },
+          );
           pendingRelease = null;
         };
 
@@ -4912,10 +4900,7 @@ export function createWorkspaceEngineCapture(
               settleFailure = error;
               throw error;
             }
-            if (result.materialized) {
-              settleCovers = covers;
-              fileFact.existed = true;
-            }
+            if (result.materialized) settleCovers = covers;
             return result.materialized;
           };
           try {
@@ -5045,8 +5030,6 @@ export function createWorkspaceEngineCapture(
               } catch (closeError) {
                 pendingRelease = retrySession;
                 throw closeError;
-              } finally {
-                await noteFileOnDisk();
               }
             }
             if (!materialized) {

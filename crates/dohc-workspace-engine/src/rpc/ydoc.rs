@@ -397,6 +397,9 @@ struct YdocCloseParams {
 #[serde(rename_all = "camelCase")]
 struct YdocCloseResult {
     closed: bool,
+    /// Whether this close's settle wrote the file. Absent when it did not settle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    materialized: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -1637,13 +1640,16 @@ impl EngineService {
             }
             serial = open.session_ops.lock() => serial,
         };
-        self.ydoc_settle_inner(
-            &cancellation,
-            handle.as_ref(),
-            &params.session_id,
-            params.summary.as_deref(),
-        )
-        .await
+        let settled = self
+            .ydoc_settle_inner(
+                &cancellation,
+                handle.as_ref(),
+                &params.session_id,
+                params.summary.as_deref(),
+            )
+            .await?;
+        serde_json::to_value(settled)
+            .map_err(|_| WireError::new(ErrorCode::Internal, "response encode failed"))
     }
 
     async fn ydoc_settle_inner(
@@ -1652,7 +1658,7 @@ impl EngineService {
         handle: Option<&WorkspaceHandle>,
         session_id: &str,
         _summary: Option<&str>,
-    ) -> Result<Value, WireError> {
+    ) -> Result<YdocSettleResult, WireError> {
         let (open, session) = self.ydoc_session(handle, session_id)?;
         let settled = open
             .actor
@@ -1695,7 +1701,7 @@ impl EngineService {
         if let Some(session) = lock(&self.sessions).get_mut(session_id) {
             session.last_settled_sha = Some(settled.sha256.clone());
         }
-        serde_json::to_value(YdocSettleResult {
+        Ok(YdocSettleResult {
             moment_id: settled.moment_id,
             path: settled.path,
             content: settled.content,
@@ -1707,7 +1713,6 @@ impl EngineService {
                 destructive: settled.projection.destructive,
             },
         })
-        .map_err(|_| WireError::new(ErrorCode::Internal, "response encode failed"))
     }
 
     pub(super) async fn ydoc_close(
@@ -1749,6 +1754,7 @@ impl EngineService {
             // NoMarker and strand the session/lease.
             !(session.lineage_absent && session.first_update_pending)
         };
+        let mut materialized = None;
         if params.settle.unwrap_or(default_settle) {
             let settled = self
                 .ydoc_settle_inner(
@@ -1759,7 +1765,7 @@ impl EngineService {
                 )
                 .await;
             match settled {
-                Ok(_) => {}
+                Ok(settled) => materialized = Some(settled.materialized),
                 // The refusal fires after the deferred rows drained: for the
                 // explicit settle RPC the client must resync (it keeps
                 // editing), but a close is final — the session ends, so the
@@ -1769,13 +1775,15 @@ impl EngineService {
                 // close refuses and strands the session/lease until the
                 // caller manually resyncs or closes the workspace.
                 Err(error) if error.message == "ydoc-remote-updates-pending" => {
-                    self.ydoc_settle_inner(
-                        cancellation,
-                        handle,
-                        &params.session_id,
-                        params.summary.as_deref(),
-                    )
-                    .await?;
+                    let settled = self
+                        .ydoc_settle_inner(
+                            cancellation,
+                            handle,
+                            &params.session_id,
+                            params.summary.as_deref(),
+                        )
+                        .await?;
+                    materialized = Some(settled.materialized);
                 }
                 Err(error) => return Err(error),
             }
@@ -1851,8 +1859,11 @@ impl EngineService {
         if let Err(error) = close_result {
             return Err(map_runtime(error));
         }
-        serde_json::to_value(YdocCloseResult { closed: true })
-            .map_err(|_| WireError::new(ErrorCode::Internal, "response encode failed"))
+        serde_json::to_value(YdocCloseResult {
+            closed: true,
+            materialized,
+        })
+        .map_err(|_| WireError::new(ErrorCode::Internal, "response encode failed"))
     }
 
     /// End one session without settling and without pruning: the entry — and

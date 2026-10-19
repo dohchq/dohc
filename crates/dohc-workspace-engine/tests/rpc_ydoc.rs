@@ -4324,14 +4324,16 @@ async fn a_replacement_session_after_a_restart_does_not_recreate_a_deleted_file(
     .await;
     assert_eq!(created["materialized"], json!(true));
     assert!(scratch.path().join(&new_path).exists());
-    call(
+    // A close answers whether its own settle wrote the file.
+    let closed = call(
         &restarted,
         &handle,
         402,
         "ydoc.close",
-        json!({ "sessionId": unflagged["sessionId"], "settle": false }),
+        json!({ "sessionId": unflagged["sessionId"] }),
     )
     .await;
+    assert_eq!(closed["materialized"], json!(true));
     call(&restarted, &handle, 403, "workspace.close", json!({})).await;
 }
 

@@ -247,7 +247,12 @@ const SettleResultSchema = mutableStruct({
   materialized: Schema.Boolean,
   projection: ProjectionProvenanceSchema,
 });
-const CloseResultSchema = mutableStruct({ closed: Schema.Literal(true) });
+// `materialized` answers whether the close's own settle wrote the file. It is
+// absent when the close did not settle.
+const CloseResultSchema = mutableStruct({
+  closed: Schema.Literal(true),
+  materialized: Schema.optionalKey(Schema.Boolean),
+});
 const EvictResultSchema = mutableStruct({ evicted: Schema.Literal(true) });
 const RemoteUpdatePayloadSchema = Schema.Union([
   mutableStruct({sessionId: Schema.String, updateBase64: Schema.String}),

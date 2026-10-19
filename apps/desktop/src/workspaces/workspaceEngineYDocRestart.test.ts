@@ -1231,6 +1231,97 @@ it.each([
   expect(await fileExistedAcrossRestart(input)).toEqual([undefined, input.said]);
 });
 
+// dohc#2301. A replacement that opens over a file records it, even when
+// nothing settles. A draft with no file meets an empty file at its first
+// reconnect, the file is deleted, and the second reconnect must still say the
+// file existed.
+it("a replacement that opens over a file records it for the next replacement", async () => {
+  const rootPath = await createTestScratch("dohc-ydoc-file-seen-on-reopen-");
+  const loopback = new VersionedLoopbackEngine();
+  const client = (): EngineDaemonClient & EngineTransport => ({
+    close: () => undefined,
+    onEvent: () => () => undefined,
+    async sendRequest(request: Request): Promise<Response> {
+      if (request.method === "workspace.open") {
+        return { id: request.id, result: { workspace: "file-seen-on-reopen" } };
+      }
+      if (request.method === "workspace.close") {
+        return { id: request.id, result: { closed: true } };
+      }
+      return daemonCaptureLifecycleAnswer(request) ?? (await loopback.sendRequest(request));
+    },
+  });
+  let currentClient = client();
+  const sessions = new EngineWorkspaceSessions(
+    { currentClient: () => currentClient },
+    { sleep: async () => undefined },
+  );
+  const opens: Array<boolean | undefined> = [];
+  // A crash kept this draft's edits in its lineage. No file was written.
+  const recorded = new Y.Doc();
+  recorded.getText("plainText").insert(0, "kept ");
+  let daemonExits = false;
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "file-seen-on-reopen",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: async (options) => {
+      opens.push(options.fileExisted);
+      const doc = new Y.Doc();
+      Y.applyUpdate(doc, Y.encodeStateAsUpdate(recorded));
+      return {
+        doc,
+        initialUpdate: Y.encodeStateAsUpdate(doc),
+        objectId: "note-object",
+        lineageClaimId: null,
+        contentKind: "plaintext",
+        path: options.path,
+        head: "absent",
+        lineage: "existing",
+        unsettled: false,
+        evict: async () => undefined,
+        async applyLocalUpdate(update) {
+          if (daemonExits) {
+            daemonExits = false;
+            currentClient = client();
+            throw Object.assign(new Error("daemon exited"), { code: "transport-error" });
+          }
+          Y.applyUpdate(doc, update);
+          Y.applyUpdate(recorded, update);
+        },
+        async settleNow() {
+          throw new Error("nothing settles in this test");
+        },
+        async close() {
+          return;
+        },
+      };
+    },
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const renderer = new Y.Doc();
+  Y.applyUpdate(renderer, session.initialUpdate);
+  const typeThroughRestart = async (text: string, reopens: number): Promise<void> => {
+    daemonExits = true;
+    const before = Y.encodeStateVector(renderer);
+    renderer.getText("plainText").insert(0, text);
+    session.applyLocalUpdate(Y.encodeStateAsUpdate(renderer, before));
+    await expect.poll(() => opens.length, { timeout: 15_000 }).toBe(reopens);
+  };
+
+  await writeFile(join(rootPath, "note.md"), "");
+  await typeThroughRestart("one ", 2);
+  await rm(join(rootPath, "note.md"));
+  await typeThroughRestart("two ", 3);
+
+  expect(opens).toEqual([undefined, undefined, true]);
+  await session.close({ settle: false });
+  await capture.stop();
+});
+
 // The session recorded a word, and sync turned on before its settle ran. The
 // generation is gone, its settle fails, and the sync pass claims exactly what
 // was recorded. The replacement needs no replay, so the settle the lost
@@ -5150,27 +5241,22 @@ it("pays a busy close debt too, which is what lets the chip say settling", async
 
 // A document open with a close debt left by a store-busy close. A draft is
 // one a crash kept: its lineage holds edits, and no file was ever written.
-// `firstPaymentCloseWrites` makes the first payment's close write the file,
-// as a release the daemon refuses does when it escalates to a settling close.
-async function closeWithDebt(
-  prefix: string,
-  draft: boolean,
-  firstPaymentCloseWrites = false,
-) {
-  let rootPath = "";
+// `closeWrites` makes the closing session's own close write the file, as when
+// the release the daemon refuses escalates to a settling close.
+async function closeWithDebt(prefix: string, draft: boolean, closeWrites = false) {
   let opens = 0;
   const locked = await lockedRebindCapture(prefix, {
     wrapProvider: (base) => async (options) => {
       const provider = await base(options);
       opens += 1;
-      const writesOnClose = firstPaymentCloseWrites && opens === 2;
+      const writesOnClose = closeWrites && opens === 1;
       return {
         ...provider,
         ...(draft ? { head: "absent" as const } : {}),
         ...(writesOnClose
           ? {
               async close(closeOptions) {
-                await writeFile(join(rootPath, options.path), "written on close");
+                options.onCloseMaterialized?.();
                 await provider.close(closeOptions);
               },
             }
@@ -5178,7 +5264,6 @@ async function closeWithDebt(
       };
     },
   });
-  rootPath = locked.rootPath;
   if (draft) {
     const kept = new Y.Doc();
     kept.getText("plainText").insert(0, "kept ");
@@ -5223,21 +5308,16 @@ it("a close debt's next payment says the file existed once an earlier payment wr
   await capture.stop();
 });
 
-// dohc#2301. A close answers only that it closed, so the file on disk is what
-// tells the debt that a payment's close wrote it.
-it("a close debt's next payment says the file existed once a payment's close wrote it", async () => {
+// dohc#2301. The close that leaves a debt can write the file itself: its
+// pre-close settle fails, the release the daemon refuses escalates to a
+// settling close, and that close writes. The provider reports the write, so
+// the debt's payment says the file existed.
+it("a close debt's payment says the file existed when the closing session's own close wrote it", async () => {
   const { capture, state } = await closeWithDebt("dohc-ydoc-debt-close-file-", true, true);
-  // The first payment's settle is refused, so only its close writes the file.
-  state.locked = true;
   state.closeSettleFailure = null;
-  await expect.poll(() => state.closeCalls.includes(2), { timeout: 15_000 }).toBe(true);
-  state.locked = false;
   await expect.poll(() => state.settledContents.length, { timeout: 15_000 }).toBe(1);
 
-  const said = state.generationOptions.map((options) => options.fileExisted);
-  expect(said.slice(0, 2)).toEqual([undefined, undefined]);
-  expect(said.length).toBeGreaterThan(2);
-  expect(said.slice(2).every((value) => value === true)).toBe(true);
+  expect(state.generationOptions.map((options) => options.fileExisted)).toEqual([undefined, true]);
   await capture.stop();
 });
 

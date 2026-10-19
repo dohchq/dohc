@@ -1384,19 +1384,24 @@ export class YdocAdapterSession {
     };
   }
 
-  async close(options?: { settle?: boolean; summary?: string }): Promise<void> {
-    if (this.closed) return;
+  // Answers whether this close's own settle wrote the file.
+  async close(
+    options?: { settle?: boolean; summary?: string },
+  ): Promise<{ materialized: boolean }> {
+    if (this.closed) return { materialized: false };
     await this.recordChain.catch(() => undefined);
     const params: YdocCloseParams = {
       sessionId: this.sessionId,
       ...(options?.settle !== undefined ? { settle: options.settle } : {}),
       ...(options?.summary ? { summary: options.summary } : {}),
     };
+    let materialized = false;
     try {
-      decodeYdocResult(
+      const closed = decodeYdocResult(
         YDOC_METHOD.close,
         await this.adapter.request(this.workspace, YDOC_METHOD.close, params),
       );
+      materialized = closed.materialized === true;
     } catch (error) {
       if (!isYdocSessionNotFoundRefusal(error)) throw error;
     }
@@ -1410,6 +1415,7 @@ export class YdocAdapterSession {
     for (const retired of this.retiredDocs) retired.destroy();
     this.retiredDocs.clear();
     this.adapter.releaseSession(this.sessionId);
+    return { materialized };
   }
 
   // End the session without settling and without pruning. The daemon drops
