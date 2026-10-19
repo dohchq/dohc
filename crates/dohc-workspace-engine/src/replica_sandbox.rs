@@ -129,6 +129,10 @@ mod linux {
 
     fn filter() -> Result<BpfProgram, Box<dyn std::error::Error>> {
         use libc::*;
+        // libc 0.2.189 omits this constant on AArch64; Linux numbers it 452 there too.
+        #[cfg(target_arch = "aarch64")]
+        #[allow(non_upper_case_globals)]
+        const SYS_fchmodat2: c_long = 452;
         let mut rules = BTreeMap::new();
         for syscall in [
             SYS_fchmod,
