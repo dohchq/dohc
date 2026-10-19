@@ -1236,10 +1236,10 @@ test("a password saved in the login keychain unlocks the release keychain withou
 test("the saved password reaches security on its input, in a session of its own, and never in its arguments", async t => {
   const bin = await mkdtemp(join(tmpdir(), "dohc-security-"));
   const record = join(bin, "record");
-  // A session leader's process group is its own process ID.
+  // A session leader's process group is its own process ID, and a new session has no terminal.
   await writeFile(join(bin, "security"), `#!/bin/sh
 printf '%s\\n' "$*" > "${record}"
-[ "$(ps -o pgid= -p $$ | tr -d ' ')" = "$$" ] && echo own-session >> "${record}"
+[ "$(ps -o pgid= -p $$ | tr -d ' ')" = "$$" ] && ! (true < /dev/tty) 2>/dev/null && echo own-session >> "${record}"
 cat >> "${record}"
 `, { mode: 0o755 });
   const path = process.env.PATH;
