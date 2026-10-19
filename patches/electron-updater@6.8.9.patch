@@ -1,8 +1,8 @@
 diff --git a/out/DebUpdater.js b/out/DebUpdater.js
-index cb55d12dfd89db27ed77fecf504c529a0bf43f67..611afc69aa2d4a4407f51971061becb1fe09bc7f 100644
+index cb55d12dfd89db27ed77fecf504c529a0bf43f67..e0082b68a96bde6fa387a84285ac89aa2af2febd 100644
 --- a/out/DebUpdater.js
 +++ b/out/DebUpdater.js
-@@ -51,16 +51,9 @@ class DebUpdater extends LinuxUpdater_1.LinuxUpdater {
+@@ -51,16 +51,10 @@ class DebUpdater extends LinuxUpdater_1.LinuxUpdater {
      static installWithCommandRunner(packageManager, installerPath, commandRunner, logger) {
          var _a;
          if (packageManager === "dpkg") {
@@ -16,9 +16,10 @@ index cb55d12dfd89db27ed77fecf504c529a0bf43f67..611afc69aa2d4a4407f51971061becb1
 -                logger.warn("dpkg installation failed, trying to fix broken dependencies with apt-get");
 -                commandRunner(["apt-get", "install", "-f", "-y"]);
 -            }
-+            // One authorization: a cancelled prompt fails the update instead of asking again, and
-+            // apt-get may add missing dependencies but never removes a package.
-+            commandRunner(["dpkg", "-i", installerPath, "||", "apt-get", "install", "-f", "-y", "--no-remove"]);
++            // One authorization: a cancelled prompt fails the update instead of asking again. apt-get
++            // may add missing dependencies but never removes a package, and dpkg then installs again
++            // so any other failure still fails the update.
++            commandRunner(["dpkg", "-i", installerPath, "||", "(", "apt-get", "install", "-f", "-y", "--no-remove", "&&", "dpkg", "-i", installerPath, ")"]);
          }
          else if (packageManager === "apt") {
              // Fallback: Use apt for direct install (less safe for unsigned .deb)

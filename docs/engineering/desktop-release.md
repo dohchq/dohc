@@ -186,8 +186,9 @@ The app downloads available updates. On Windows and macOS it installs them on qu
 On Linux an update installs only when the person selects Restart to update: the
 AppImage replaces itself, and the `.deb` installs with `dpkg` after the system
 asks once for an administrator password. If `dpkg` reports missing dependencies,
-`apt-get` adds them under the same password but never removes a package
-(`patches/electron-updater@6.8.9.patch`). A cancelled prompt fails the update.
+`apt-get` adds them under the same password but never removes a package, then
+`dpkg` installs again (`patches/electron-updater@6.8.9.patch`). A cancelled
+prompt or any other failed install fails the update.
 Controlling the feed controls update metadata and the artifacts offered to the app.
 Download hashes alone do not authenticate a feed whose metadata an attacker controls.
 Windows publisher checks depend on the packaged `app-update.yml` configuration.

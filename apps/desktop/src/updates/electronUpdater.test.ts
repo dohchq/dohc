@@ -156,7 +156,10 @@ describe("electron updater configuration", () => {
     };
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
     expect(() => DebUpdater.installWithCommandRunner("dpkg", "/tmp/dohc.deb", cancelled, logger)).toThrow("126");
-    expect(commands).toEqual([["dpkg", "-i", "/tmp/dohc.deb", "||", "apt-get", "install", "-f", "-y", "--no-remove"]]);
+    expect(commands).toEqual([[
+      "dpkg", "-i", "/tmp/dohc.deb", "||",
+      "(", "apt-get", "install", "-f", "-y", "--no-remove", "&&", "dpkg", "-i", "/tmp/dohc.deb", ")",
+    ]]);
   });
 
   it("sets nightly channel flags explicitly", async () => {
