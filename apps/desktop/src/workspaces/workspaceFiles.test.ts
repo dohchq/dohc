@@ -1155,6 +1155,8 @@ describe("importDroppedPaths", () => {
     expect(await readFile(join(root, "inbox", "Trip (2)", "plan.md"), "utf8")).toBe("incoming");
   });
 
+  // The screen checks each entry and its folder again, about 16 ms an entry on the shared
+  // Windows host, and this test screens about 2,000. That takes 20 to 30 s on a quiet host.
   it("takes 1,000 files and folders from a drop with folders, and refuses the whole drop past that", async () => {
     const outside = await createTestScratch("dohc-many-");
     const fits = join(outside, "fits");
@@ -1172,7 +1174,7 @@ describe("importDroppedPaths", () => {
     await expect(importDroppedPaths(root, [join(outside, "loose.md"), over], [root]))
       .rejects.toThrow("dohc imports up to 1,000 files and folders from one drop. Drop fewer folders at a time.");
     expect(await readdir(root)).toEqual(["fits"]);
-  });
+  }, 120_000);
 
   it("refuses a symlink pointing at a secret outside the workspace (exfil vector)", async () => {
     // A compromised renderer forging droppedPaths could plant a symlink to a
