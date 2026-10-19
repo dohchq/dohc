@@ -119,8 +119,13 @@ impl ActorHandle {
             binding: hex_sha256(json!([workspace, operation, author]).to_string().as_bytes()),
         });
         let (ws, op, r) = (workspace.clone(), operation.clone(), receipt.clone());
+        let admission_ws = workspace.clone();
         let db = self
-            .run(|store, _| {
+            .run(move |store, _| {
+                #[cfg(test)]
+                let _turn = tests::Turn::start(&admission_ws, "admission");
+                #[cfg(not(test))]
+                let _ = admission_ws;
                 if store.is_passive() {
                     return Err(DomainError::InvalidInput {
                         reason: "link rewrites need the owner",
@@ -139,7 +144,7 @@ impl ActorHandle {
                 if let Some((true, reply)) = prior {
                     return Ok((None, reply));
                 }
-                let version = VersionedTextStore::new(store)
+                let version = VersionedTextStore::new(&mut store)
                     .get_active_version(&ws)?
                     .version_id;
                 let plan = store.read_with(|conn| -> Result<_, RuntimeError> {
@@ -193,8 +198,15 @@ impl ActorHandle {
             return Ok(result);
         };
         let (r, f, initial) = (receipt.clone(), faults.clone(), result.clone());
-        self.run(move |store, _| save(store, &r, false, &initial, f.as_ref()))
-            .await?;
+        let reserve_ws = workspace.clone();
+        self.run(move |store, _| {
+            #[cfg(test)]
+            let _turn = tests::Turn::start(&reserve_ws, "reserve");
+            #[cfg(not(test))]
+            let _ = reserve_ws;
+            save(store, &r, false, &initial, f.as_ref())
+        })
+        .await?;
         let (plan, before, after) = tokio::task::spawn_blocking(move || {
             let old = plan.rename.before_path.as_deref().unwrap_or("");
             let before = Resolver::new(

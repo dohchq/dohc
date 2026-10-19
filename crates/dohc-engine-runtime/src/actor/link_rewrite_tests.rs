@@ -1028,6 +1028,27 @@ async fn two_thousand_sources_resume_yield_and_undo_in_turns() {
         "at most one Undo turn: {undo_gaps:?}"
     );
     let undo_proof = undo_probe::proof(&format!("{}-undo", f.ws), 2001, false);
+    let placed = f
+        .actor
+        .history_undo_place(
+            f.ws.clone(),
+            undo,
+            f.root.to_path_buf(),
+            Arc::new(()),
+            11,
+            |_| {},
+        )
+        .await;
+    assert!(placed.materialized);
+    assert!(f.root.join("old.md").is_file());
+    assert!(!f.root.join("new.md").exists());
+    for i in 0..2000 {
+        assert_eq!(
+            std::fs::read_to_string(f.root.join(format!("source-{i:04}.md"))).unwrap(),
+            BODY
+        );
+    }
+
     eprintln!(
         "REWRITE forward={} undo={} update_max_gap={:?} update_max_wait_ns={:?}",
         forward_proof["p95Ns"],
