@@ -1,3 +1,4 @@
+use super::super::history_undo_turns::tests as undo_probe;
 use super::*;
 use dohc_engine_domain::{RenameTextFile, write_text_in_tx};
 use dohc_engine_storage::{FaultAction, FaultPoint, NoFaults};
@@ -8,7 +9,7 @@ use std::{
         Mutex, OnceLock,
         atomic::{AtomicUsize, Ordering},
     },
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 type ReadHook = Arc<dyn Fn(&Connection, &str) + Send + Sync>;
@@ -29,6 +30,9 @@ pub(super) struct Turn {
 }
 impl Turn {
     pub(super) fn start(ws: &str, phase: &'static str) -> Self {
+        if phase != "plan" {
+            undo_probe::begin_turn(ws);
+        }
         Self {
             ws: ws.into(),
             phase,
@@ -38,6 +42,9 @@ impl Turn {
 }
 impl Drop for Turn {
     fn drop(&mut self) {
+        if self.phase != "plan" {
+            undo_probe::record_phase(&self.ws, self.phase, None, self.start.elapsed(), true);
+        }
         if let Some(probe) = probes().lock().unwrap().get_mut(&self.ws) {
             probe
                 .turns
@@ -204,14 +211,17 @@ impl Fixture {
         &self,
     ) -> Result<super::super::history_operations::HistoryUndoResult, RuntimeError> {
         self.actor
-            .history_undo_commit(
+            .history_undo_in_turns(
                 self.ws.clone(),
                 OP.into(),
-                "undo-request".into(),
+                format!("{}-undo", self.ws),
                 None,
                 self.root.to_path_buf(),
                 Arc::new(NoFaults),
                 10,
+                [Arc::default(), self.serial.clone()],
+                Arc::new(()),
+                CancellationToken::new(),
             )
             .await
     }
@@ -724,21 +734,24 @@ async fn crash_after_k_commits_undoes_only_committed_members_and_replays_one_com
     });
     assert!(
         f.actor
-            .history_undo_commit(
+            .history_undo_in_turns(
                 f.ws.clone(),
                 OP.into(),
-                "undo-request".into(),
+                format!("{}-undo", f.ws),
                 None,
                 f.root.to_path_buf(),
                 fault,
-                10
+                10,
+                [Arc::default(), f.serial.clone()],
+                Arc::new(()),
+                CancellationToken::new(),
             )
             .await
             .is_err()
     );
     f.restart().await;
     let replay = f.undo().await.unwrap();
-    assert!(replay.deduped);
+    assert!(!replay.deduped);
     assert_eq!(replay.moments.len(), 3);
     for i in 0..3 {
         assert_eq!(f.text(&format!("source-{i:04}.md")).await, BODY);
@@ -847,8 +860,25 @@ async fn case_only_and_delete_only_operations_refuse() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn two_thousand_sources_yield_between_turns_and_measure_undo_hold() {
-    let f = Fixture::new(2000, 4999);
+async fn two_thousand_sources_resume_yield_and_undo_in_turns() {
+    let mut f = Fixture::new(2000, 4999);
+    let crash = Arc::new(CrashNth {
+        point: FaultPoint::StorageAfterCommitBeforeAck,
+        nth: 1001,
+        seen: AtomicUsize::new(0),
+    });
+    assert!(matches!(
+        f.pass("performance", crash).await,
+        Err(RuntimeError::OperationCrashed)
+    ));
+    f.restart().await;
+    f.actor
+        .run(|store, _| {
+            undo_probe::enable_work_probe(store);
+            Ok(())
+        })
+        .await
+        .unwrap();
     let _index_hold = f.actor.hold_link_drain();
     let ws = f.ws.clone();
     f.actor.run(move |store, _| {
@@ -876,7 +906,9 @@ async fn two_thousand_sources_yield_between_turns_and_measure_undo_hold() {
         let mut waits = Vec::new();
         let mut positions = Vec::new();
         let mut claim = None;
+        let mut gaps = Vec::new();
         for (i, payload) in payloads.into_iter().enumerate() {
+            let before = undo_probe::turn_count(&typing_ws);
             let start = Instant::now();
             let _admission = serial.lock().await;
             let update = actor
@@ -901,6 +933,7 @@ async fn two_thousand_sources_yield_between_turns_and_measure_undo_hold() {
                 .unwrap();
             claim = update.lineage_claim_id;
             waits.push(start.elapsed().as_nanos());
+            gaps.push(undo_probe::turn_count(&typing_ws) - before);
             positions.push(
                 probes().lock().unwrap()[&typing_ws]
                     .turns
@@ -910,13 +943,17 @@ async fn two_thousand_sources_yield_between_turns_and_measure_undo_hold() {
             );
             tokio::task::yield_now().await;
         }
-        (waits, positions)
+        (waits, positions, gaps)
     });
     let start = Instant::now();
     let result = f.pass("performance", Arc::new(NoFaults)).await.unwrap();
     let pass_ns = start.elapsed().as_nanos();
     assert_eq!(result["documents"], 2000);
-    let (waits, positions) = updates.await.unwrap();
+    let (waits, positions, gaps) = updates.await.unwrap();
+    assert!(
+        gaps.iter().all(|g| *g <= 2),
+        "one read and one commit turn at most: {gaps:?}"
+    );
     assert!(
         positions.iter().any(|&n| n > 0 && n < 2000),
         "a Y.Doc update must commit between rewrite batches"
@@ -928,33 +965,27 @@ async fn two_thousand_sources_yield_between_turns_and_measure_undo_hold() {
         )
         .unwrap();
     }
-    let (ws, root) = (f.ws.clone(), f.root.to_path_buf());
-    let undo_hold = f
-        .actor
-        .run(move |store, _| {
-            let start = Instant::now();
-            super::super::history_operations::commit_history_undo_on_store(
-                store,
-                &ws,
-                OP,
-                "undo-perf",
-                None,
-                &root,
-                &NoFaults,
-                10,
-            )?;
-            Ok(start.elapsed())
-        })
-        .await
-        .unwrap();
+    let forward_proof = undo_probe::proof(&f.ws, 0, true);
+    let undo_start = Instant::now();
+    let undo = f.undo().await.unwrap();
+    assert_eq!(undo.moments.len(), 2001);
+    assert!(undo.not_restored.is_empty());
+    let undo_ns = undo_start.elapsed().as_nanos();
+    let undo_proof = undo_probe::proof(&format!("{}-undo", f.ws), 2001, false);
+    eprintln!(
+        "REWRITE forward={} undo={} update_max_gap={:?} update_max_wait_ns={:?}",
+        forward_proof,
+        undo_proof,
+        gaps.iter().max(),
+        waits.iter().max()
+    );
+    for i in 0..2000 {
+        assert_eq!(f.text(&format!("source-{i:04}.md")).await, BODY);
+    }
     let turns = probes().lock().unwrap().get(&f.ws).unwrap().turns.clone();
     if let Ok(directory) = std::env::var("DOHC_LINK_REWRITE_EVIDENCE_DIR") {
         std::fs::create_dir_all(&directory).unwrap();
-        std::fs::write(std::path::Path::new(&directory).join("actor-turns.json"), json!({"passNs":pass_ns,"turns":turns,"admissionProbeWaitNs":waits,"updateCommitPositions":positions,"undoHoldNs":undo_hold.as_nanos()}).to_string()).unwrap();
+        std::fs::write(std::path::Path::new(&directory).join("actor-turns.json"), json!({"passNs":pass_ns,"turns":turns,"admissionProbeWaitNs":waits,"updateCommitPositions":positions,"undoNs":undo_ns,"forward":forward_proof,"undo":undo_proof,"updateTurnGaps":gaps}).to_string()).unwrap();
     }
     f.close().await;
-    assert!(
-        undo_hold <= Duration::from_secs(1),
-        "STOP: 2,000-source Undo held the actor for {undo_hold:?}"
-    );
 }

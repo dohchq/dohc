@@ -16,7 +16,12 @@ use dohc_engine_domain::{
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError, TxnOutcome, hex_sha256};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
-use std::{collections::HashSet, path::PathBuf, sync::Arc};
+use std::{
+    collections::{HashSet, VecDeque},
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio_util::sync::CancellationToken;
 
 struct Plan {
@@ -220,107 +225,128 @@ impl ActorHandle {
             })
             .collect();
         let mut unchecked = plan.candidates.unchecked.clone();
-        for (index, (object, path)) in plan.candidates.sources.iter().enumerate() {
+        let mut cursor = 0;
+        while cursor < plan.candidates.sources.len() {
             if token.is_cancelled() {
                 return Err(RuntimeError::Cancelled);
             }
-            if initially_open.contains(object) {
-                unchecked.push(path.clone());
-                continue;
-            }
-            let (ws, p, read_object) = (workspace.clone(), plan.clone(), object.clone());
-            let (admitted, source) = self
+            let (ws, p, open) = (workspace.clone(), plan.clone(), initially_open.clone());
+            let (next_cursor, sources, skipped, admitted) = self
                 .run(move |store, _| {
                     #[cfg(test)]
                     let _turn = tests::Turn::start(&ws, "read");
+                    let started = Instant::now();
+                    let mut sources = Vec::new();
+                    let mut skipped = Vec::new();
                     let active = VersionedTextStore::new(store)
                         .get_active_version(&ws)?
                         .version_id;
                     if active != p.version || !store.read_with(|conn| valid(conn, &ws, &p))? {
-                        return Ok((false, None));
+                        return Ok((cursor, sources, skipped, false));
                     }
-                    Ok((
-                        true,
-                        store.read_with(|conn| {
-                            let source =
-                                incoming::read_source(conn, &ws, &p.version, &read_object)?;
-                            #[cfg(test)]
-                            tests::after_read(conn, &ws, &read_object);
-                            Ok::<_, StorageError>(source)
-                        })?,
-                    ))
+                    let mut next = cursor;
+                    while next < p.candidates.sources.len() && next - cursor < 16 {
+                        let (object, path) = &p.candidates.sources[next];
+                        if open.contains(object) {
+                            skipped.push(path.clone());
+                        } else {
+                            let source = store.read_with(|conn| {
+                                let source = incoming::read_source(conn, &ws, &p.version, object)?;
+                                #[cfg(test)]
+                                tests::after_read(conn, &ws, object);
+                                Ok::<_, StorageError>(source)
+                            })?;
+                            if let Some(source) = source {
+                                sources.push((object.clone(), path.clone(), source));
+                            } else {
+                                skipped.push(path.clone());
+                            }
+                        }
+                        next += 1;
+                        if started.elapsed() >= Duration::from_millis(5) {
+                            break;
+                        }
+                    }
+                    Ok((next, sources, skipped, true))
                 })
                 .await?;
+            unchecked.extend(skipped);
             if !admitted {
                 unchecked.extend(
-                    plan.candidates.sources[index..]
+                    plan.candidates.sources[cursor..]
                         .iter()
                         .map(|(_, p)| p.clone()),
                 );
                 break;
             }
-            let Some(source) = source else {
-                unchecked.push(path.clone());
-                continue;
-            };
+            cursor = next_cursor;
             let (p, before, after) = (plan.clone(), before.clone(), after.clone());
-            let prepared = tokio::task::spawn_blocking(move || {
-                let text = source.text().unwrap_or("").to_owned();
-                let parsed = source.parse()?;
-                let edit = if parsed.reason.is_some() {
-                    None
-                } else if parsed.occurrences.is_empty() {
-                    Some((text.clone(), 0))
-                } else {
-                    rewrite::forward(
-                        &text,
-                        parsed.head.as_ref().map_or("", |h| &h.path),
-                        p.rename.before_path.as_deref().unwrap_or(""),
-                        &p.rename.path,
-                        &before,
-                        &after,
-                    )
-                };
-                Ok::<_, RuntimeError>((parsed.head, edit))
+            let (mut prepared, skipped) = tokio::task::spawn_blocking(move || {
+                let mut prepared = VecDeque::new();
+                let mut skipped = Vec::new();
+                for (object, path, source) in sources {
+                    let text = source.text().unwrap_or("").to_owned();
+                    let parsed = source.parse()?;
+                    let edit = if parsed.reason.is_some() {
+                        None
+                    } else {
+                        rewrite::forward(
+                            &text,
+                            &path,
+                            p.rename.before_path.as_deref().unwrap_or(""),
+                            &p.rename.path,
+                            &before,
+                            &after,
+                        )
+                    };
+                    match (parsed.head, edit) {
+                        (Some(head), Some((text, links))) if links > 0 => {
+                            prepared.push_back((object, head, text, links))
+                        }
+                        (Some(_), Some(_)) => {}
+                        _ => skipped.push(path),
+                    }
+                }
+                Ok::<_, RuntimeError>((prepared, skipped))
             })
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)??;
-            let (Some(head), Some((text, links))) = prepared else {
-                unchecked.push(path.clone());
-                continue;
-            };
-            if links == 0 {
-                continue;
-            }
-            let serial = tokio::select! { () = token.cancelled() => return Err(RuntimeError::Cancelled), guard = Arc::clone(&session_ops).lock_owned() => guard };
-            let key = DocKey::new(&workspace, &plan.version, object)?;
-            let lease = match leases.acquire_internal(&key) {
-                Ok(lease) => lease,
-                Err(CollabError::LeaseHeld) => {
-                    unchecked.push(head.path);
-                    continue;
-                }
-                Err(error) => return Err(error.into()),
-            };
-            let next = json!({"documents":result["documents"].as_u64().unwrap_or(0)+1,"links":result["links"].as_u64().unwrap_or(0)+links as u64});
-            let (ws, op, author, root, p, r, next_result, token, f, object) = (
-                workspace.clone(),
-                operation.clone(),
-                author.clone(),
-                root.clone(),
-                plan.clone(),
-                receipt.clone(),
-                next.clone(),
-                token.clone(),
-                faults.clone(),
-                object.clone(),
-            );
-            let source_path = head.path.clone();
-            let committed = self
+            unchecked.extend(skipped);
+            while !prepared.is_empty() {
+                let serial = tokio::select! {
+                    () = token.cancelled() => return Err(RuntimeError::Cancelled),
+                    guard = Arc::clone(&session_ops).lock_owned() => guard,
+                };
+                let (ws, op, author, root, p, r, token, f, leases, mut next_result) = (
+                    workspace.clone(),
+                    operation.clone(),
+                    author.clone(),
+                    root.clone(),
+                    plan.clone(),
+                    receipt.clone(),
+                    token.clone(),
+                    faults.clone(),
+                    leases.clone(),
+                    result.clone(),
+                );
+                let committed = self
                 .run(move |store, cache| {
                     #[cfg(test)]
                     let _turn = tests::Turn::start(&ws, "commit");
-                    let _admission = (serial, lease);
+                    let _admission = serial;
+                    let started = Instant::now();
+                    let mut skipped = Vec::new();
+                    while let Some((object, head, text, links)) = prepared.pop_front() {
+                    let source_path = head.path.clone();
+                    let key = DocKey::new(&ws, &p.version, &object)?;
+                    let lease = match leases.acquire_internal(&key) {
+                        Ok(lease) => Some(lease),
+                        Err(CollabError::LeaseHeld) => None,
+                        Err(error) => return Err(error.into()),
+                    };
+                    let next = json!({"documents":next_result["documents"].as_u64().unwrap_or(0)+1,"links":next_result["links"].as_u64().unwrap_or(0)+links as u64});
+                    let committed = (|| -> Result<bool, RuntimeError> {
+                    if lease.is_none() { return Ok(false); }
                     if token.is_cancelled() {
                         return Err(RuntimeError::Cancelled);
                     }
@@ -365,7 +391,7 @@ impl ActorHandle {
                         return Ok(false);
                     }
                     let input = WriteText {
-                        workspace_id: ws,
+                        workspace_id: ws.clone(),
                         version_id: p.version.clone(),
                         object_id: object.clone(),
                         path: head.path,
@@ -380,8 +406,8 @@ impl ActorHandle {
                             "Updated links to {}",
                             p.rename.path.rsplit('/').next().unwrap_or(&p.rename.path)
                         )),
-                        metadata_correlation_id: Some(op),
-                        author_json: author,
+                        metadata_correlation_id: Some(op.clone()),
+                        author_json: author.clone(),
                         now_ms: crate::links::now_ms(),
                     };
                     with_local_file_mutation_cache_reset(cache, || {
@@ -394,7 +420,7 @@ impl ActorHandle {
                                 create_only: false,
                                 expected_sha256: Some(head.hash),
                             }),
-                            Some(&|tx| r.save(tx, false, &next_result)),
+                            Some(&|tx| r.save(tx, false, &next)),
                             f.as_ref(),
                             &token,
                         ) {
@@ -405,12 +431,14 @@ impl ActorHandle {
                             Err(error) => Err(error),
                         }
                     })
-                })
-                .await?;
-            if committed {
-                result = next;
-            } else {
-                unchecked.push(source_path);
+                    })()?;
+                    if committed { next_result = next; } else { skipped.push(source_path); }
+                    if started.elapsed() >= Duration::from_millis(5) { break; }
+                    }
+                    Ok((prepared, next_result, skipped))
+                }).await?;
+                (prepared, result) = (committed.0, committed.1);
+                unchecked.extend(committed.2);
             }
         }
         unchecked.sort();

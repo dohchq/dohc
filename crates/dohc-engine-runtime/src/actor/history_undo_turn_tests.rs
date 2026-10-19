@@ -69,7 +69,7 @@ fn store_work_probe_counts_each_inverse_row_in_one_statement() {
     assert!(work.reads >= 2 && work.writes >= 1);
 }
 // Start on the actor, so queued Y.Doc work cannot enter this turn's counters.
-pub(super) fn begin_turn(request: &str) {
+pub(in super::super) fn begin_turn(request: &str) {
     STORE_WORK.with(|cell| cell.set(StoreWork::default()));
     probes()
         .lock()
@@ -102,7 +102,7 @@ struct Phase {
     storage: Option<serde_json::Value>,
     store_work: Option<StoreWork>,
 }
-pub(super) fn record_phase(
+pub(in super::super) fn record_phase(
     request: &str,
     phase: &str,
     member: Option<usize>,
@@ -1344,4 +1344,59 @@ async fn two_thousand_members_bound_store_work_and_ydoc_wait() {
         "p95 includes every inverse and no empty turn"
     );
     assert_eq!(inverses, 2000, "the probe must observe every inverse row");
+}
+
+pub(in super::super) fn enable_work_probe(store: &EngineStore) {
+    store.read_with(|conn| {
+        dohc_engine_storage::capture_phase::enable_for_current_thread();
+        conn.execute_batch(INVERSE_PROBE).unwrap();
+        conn.trace_v2(
+            rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT
+                | rusqlite::trace::TraceEventCodes::SQLITE_TRACE_ROW,
+            Some(trace_store_work),
+        );
+    });
+}
+pub(in super::super) fn turn_count(request: &str) -> usize {
+    probes()
+        .lock()
+        .unwrap()
+        .get(request)
+        .map_or(0, |p| p.phases.iter().filter(|p| p.actor).count())
+}
+pub(in super::super) fn proof(request: &str, members: usize, forward: bool) -> serde_json::Value {
+    let phases = probes().lock().unwrap()[request].phases.clone();
+    let mut inverses = 0;
+    let mut times = Vec::new();
+    for p in phases.iter().filter(|p| p.actor) {
+        let w = p.store_work.unwrap();
+        let cap = if forward { 16 } else { 1 };
+        assert!(
+            w.reads <= 128 * cap && w.writes <= 128 * cap && w.rows <= 256 * cap,
+            "{}: reads={} writes={} rows={}",
+            p.phase,
+            w.reads,
+            w.writes,
+            w.rows
+        );
+        assert!(w.inverses <= if forward { 0 } else { 1 });
+        assert!(
+            w.commits
+                <= if forward {
+                    16
+                } else if p.phase == "rename-placement" {
+                    3
+                } else {
+                    1
+                }
+        );
+        inverses += w.inverses;
+        times.push(p.elapsed_ns);
+    }
+    if !forward {
+        assert_eq!(inverses, members);
+    }
+    times.sort();
+    serde_json::json!({"turns":phases,"p95Ns":times[(times.len()*95).div_ceil(100)-1],
+        "maxNs":times.last(),"inverseRows":inverses})
 }
