@@ -146,7 +146,9 @@ export function DocumentMenu(props: {
       return { markdown: await props.getMarkdown() };
     } catch (error) {
       console.error(`${what} failed`, error);
-      if (actions.isCurrent(action) && attempts.isCurrent(attempt)) showFeedback(id, failureLabel);
+      if (!actions.isCurrent(action)) return null;
+      if (attempts.isCurrent(attempt)) showFeedback(id, failureLabel);
+      else if (id === "copy-markdown") reportCopyFailure(error);
       return null;
     }
   }
@@ -159,7 +161,8 @@ export function DocumentMenu(props: {
       action,
       attempt,
     );
-    if (!serialized || !actions.isCurrent(action)) return;
+    // Copy stays open for feedback; dismissal cancels pending serialization.
+    if (!serialized || !actions.isCurrent(action) || !attempts.isCurrent(attempt)) return;
     const markdown = serialized.markdown;
     if (markdown === null) {
       if (!attempts.isCurrent(attempt)) return;
