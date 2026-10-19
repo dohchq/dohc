@@ -53,18 +53,21 @@ test("packaged agent probe runs on the compiler's pinned Node and checks its clo
   await requireAgentProbe(probeRoot, packagedCompiler);
   const owner = windowsProbeOwner(resourcesRoot);
   assert.equal(owner.node, join(packagedCompiler, "node.exe"));
-  const tool = join(root, "tool.cmd");
-  await writeFile(tool, "@echo off\r\necho tool 9.8.7\r\n");
-  const result = await runProbeProcess(resolveSpawnCommand(tool, ["--version"], { cwd: homedir() }), new AbortController().signal, owner);
-  assert.deepEqual(result, { exitCode: 0, stdout: "tool 9.8.7\r\n", stderr: "" });
+  // Tamper before running the probe to avoid rewriting a just-executed node.exe.
   const relayPath = join(probeRoot, "agentProbeRelay.mjs"), relay = await readFile(relayPath);
   await writeFile(relayPath, "changed");
   await assert.rejects(requireAgentProbe(probeRoot, packagedCompiler), /asset changed/);
   await writeFile(relayPath, relay);
+  const node = await readFile(owner.node);
   await writeFile(join(packagedCompiler, "node.exe"), "not Node");
   await assert.rejects(requireAgentProbe(probeRoot, packagedCompiler), /Node identity/);
   await rm(join(packagedCompiler, "node.exe"));
   assert.throws(() => windowsProbeOwner(resourcesRoot), /missing/);
+  await writeFile(owner.node, node);
+  const tool = join(root, "tool.cmd");
+  await writeFile(tool, "@echo off\r\necho tool 9.8.7\r\n");
+  const result = await runProbeProcess(resolveSpawnCommand(tool, ["--version"], { cwd: homedir() }), new AbortController().signal, owner);
+  assert.deepEqual(result, { exitCode: 0, stdout: "tool 9.8.7\r\n", stderr: "" });
 });
 
 test("agent probe staging recompiles when only its compile recipe changes",
