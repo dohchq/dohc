@@ -10,13 +10,20 @@ targets and deployment requirements.
 | --- | --- | --- | --- |
 | Windows | x64 | NSIS `.exe` | `.exe` |
 | macOS | arm64 (Apple silicon) | `.dmg` | `.zip` |
-| Linux | x64 | AppImage | `.AppImage` |
+| Linux | x64 | AppImage and `.deb` | `.AppImage` and `.deb` |
 
 The desktop release workflow builds each target from the matching Rust engine
 target. macOS releases support Apple silicon only; there is no Intel build.
 Stable releases require signing credentials for Windows and macOS.
 Nightly builds may be unsigned for testing. An unsigned build is not a stable
 release.
+
+Ubuntu 24.04 and later block the unprivileged user namespaces that Chromium's
+sandbox needs, so the AppImage refuses to start there and says why. The `.deb`
+installs an AppArmor profile that allows them. The profile covers every process
+dohc starts, including the engine, chat runners, and the commands agents run, so
+each of them can also create user namespaces. Point Ubuntu and Debian users to
+the `.deb`.
 
 ## Keep signing credentials on reviewed code
 
@@ -60,7 +67,7 @@ The runner can stay offline between releases.
 
 ### Use WSL2 for Linux builds
 
-Ubuntu on WSL2 can build the Linux x64 AppImage on a Windows PC.
+Ubuntu on WSL2 can build the Linux x64 AppImage and `.deb` on a Windows PC.
 Register a separate Linux runner inside the distribution with the `self-hosted`, `linux`, and `x64` labels.
 Keep its checkout and dependencies in the Linux filesystem, such as under `/home/<user>/`, rather than `/mnt/c`.
 Use Linux Node 24.16 or newer, pnpm 11.20.0, rustup, and native compiler tools.
@@ -77,7 +84,7 @@ The `all` selection can package Windows and WSL Linux concurrently.
 Before selecting `all`, confirm that the PC has enough resources for both builds.
 
 WSLg can display the packaged app, and Xvfb supports automated startup checks.
-These checks do not prove Linux desktop installation, protocol registration, or real AppImage upgrades.
+These checks do not prove Linux desktop installation, protocol registration, or real AppImage or `.deb` upgrades.
 Use a normal Linux desktop or desktop VM for those release rehearsals.
 
 ## Contributor access to releases
@@ -127,7 +134,7 @@ The published prerelease records the source commit and includes generated releas
 Dispatch `Desktop Release` from `main` with `channel=nightly`, `platforms=linux`, and `dry_run=true`.
 The Linux runner performs every job for this selection. A Windows runner is not required.
 Download the run's `desktop-Linux-x64` artifact after every job passes.
-It contains the AppImage and the nightly Linux update manifest.
+It contains the AppImage, the `.deb`, and the nightly Linux update manifest, which lists both.
 Verify the files with `--platform linux`, `--arch x64`, the generated version, and `--channel nightly`.
 The Linux package job checks artifact hashes and runs the packaged fuse smoke before uploading.
 
@@ -175,7 +182,13 @@ Packaged desktop builds normally check GitHub Releases.
 `DOHC_UPDATE_URL` replaces that feed with an operator-selected generic update URL.
 Set it only in a launch environment you control, and use a trusted HTTPS endpoint.
 
-The app downloads available updates and installs them on quit.
+The app downloads available updates. On Windows and macOS it installs them on quit.
+On Linux an update installs only when the person selects Restart to update: the
+AppImage replaces itself, and the `.deb` installs with `dpkg` after the system
+asks once for an administrator password. If `dpkg` reports missing dependencies,
+`apt-get` adds them under the same password but never removes a package, then
+`dpkg` installs again (`patches/electron-updater@6.8.9.patch`). A cancelled
+prompt or any other failed install fails the update.
 Controlling the feed controls update metadata and the artifacts offered to the app.
 Download hashes alone do not authenticate a feed whose metadata an attacker controls.
 Windows publisher checks depend on the packaged `app-update.yml` configuration.
@@ -183,7 +196,11 @@ Do not assume unsigned builds have the same update guarantees as signed releases
 
 Development builds honor the override only with `DOHC_DESKTOP_MOCK_UPDATES=1`.
 Before launch, test tampered updates against signed Windows and macOS release artifacts.
-Verify the Linux update trust model separately; the Windows verifier does not cover AppImage updates.
+Linux updates have no signature. The app checks only the SHA-512 that the same
+release's manifest lists, when the download finishes, as T3 Code does. Whoever can
+publish a GitHub release or set `DOHC_UPDATE_URL` can offer an AppImage that runs
+as the person, or a package that the `.deb` installs as root. A signed apt
+repository would add a signature for the `.deb`.
 
 ## Configure usage and error reports
 
@@ -436,10 +453,10 @@ node scripts/verify-desktop-release-artifacts.mjs `
 ```
 
 Use `mac` with `arm64` for a macOS release. Use `linux` with `x64`
-for an AppImage release. The command checks artifact bytes only.
+for an AppImage and `.deb` release. The command checks artifact bytes only.
 For Windows and macOS stable releases, confirm the signature with the platform
 tools before opening the installer. This workflow has no equivalent signing
-requirement for AppImage.
+requirement for the AppImage or the `.deb`.
 
 ## Installer rehearsal before launch
 

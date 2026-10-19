@@ -44,7 +44,7 @@ index 12f078abd42700857b239b0e53cd568c1b1836b7..0fd60ab98ca4ddd8d1607df99521df22
  
 +if [ $SANDBOX_BLOCKED -eq 1 ] ; then
 +  trap - EXIT
-+  error "dohc can't start its security sandbox because it can't create user namespaces on this system. Allow this AppImage to create user namespaces, then open dohc again."
++  error "dohc can't start its security sandbox because it can't create user namespaces on this system. On Ubuntu or Debian, install the dohc .deb package instead. Elsewhere, allow this AppImage to create user namespaces, then open dohc again."
 +fi
 +
  ${eulaEnabled
