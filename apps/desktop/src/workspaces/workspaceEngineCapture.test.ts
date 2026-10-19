@@ -1,4 +1,5 @@
 import { VersionedTextStoreError } from "@dohc/workspace-contracts/engine";
+import {startServerOwnerDelivery} from "./serverOwnerDelivery";
 import type { MomentAuthor } from "@dohc/workspace-contracts";
 import type {
   MaterializeRelayPullPage,
@@ -3604,6 +3605,82 @@ describe("workspaceEngineCapture agent attribution", () => {
 });
 
 describe("Rust engine session selection", () => {
+  it.each(["owner-outbox", "shutdown"])("does not wake watched uploads after %s acknowledgement", async mode => {
+    const root = await createTestScratch("dohc-durable-lane-");
+    const loopback = new VersionedLoopbackEngine();
+    await write(root, "note.md", "existing");
+    loopback.seedTextFile({workspace: WORKSPACE_ID, versionId: "main", path: "note.md", text: "existing"});
+    const entered = deferred<void>(), journal = deferred<void>();
+    const engine = capture(root, {rustEngineSessions: mockLiveSessions(loopback),
+      openRustYDocProviderSession: async options => {
+        const doc = new Y.Doc();
+        return {doc, initialUpdate: Y.encodeStateAsUpdate(doc), contentKind: "plaintext", path: "note.md",
+          head: "present", lineage: "existing", evict: async () => {}, close: async () => {},
+          applyLocalUpdate: async (_update: Uint8Array, applyOptions: {idempotencyKey: string}) => {
+            entered.resolve(); await journal.promise;
+            options.onLocalUpdateAcknowledged?.(applyOptions.idempotencyKey, mode === "owner-outbox" ? "owner-outbox" : "journal");
+          }, settleNow: vi.fn()} as never;
+      }});
+    const changed = vi.fn(); engine.onDurableLocalChange(changed);
+    let report!: (value: {hasMore: boolean; watched: boolean}) => void;
+    const push = vi.fn(async () => ({pushed: 1, hasMore: false, originsPushed: [], sharingDeclined: [], ownerAdmissionPending: []}));
+    const sync = createRelaySyncEngine({rootDir: root, relay: {baseUrl: "http://relay.test", token: "t"}, capture: engine,
+      operations: {push, pull: async () => ({fetched: 0, applied: 0, skipped: 0, conflictsOpened: 0, fastForwardedPaths: [], nextCursor: 0, sharingDeclined: []}), claim: async () => {}, recoverOrigin: vi.fn()},
+      onChange: vi.fn(), waitForChange: (_since, signal) => new Promise((resolve, reject) => {
+        report = resolve; signal.addEventListener("abort", () => reject(signal.reason), {once: true});
+      })});
+    const ownerPass = vi.fn(async () => ({documentCount: 0, acknowledged: false}));
+    const owner = startServerOwnerDelivery({workspaceIds: () => [WORKSPACE_ID], attemptTimeoutMs: 5000, retryDelayMs: 10_000, runPass: ownerPass, onError: vi.fn()});
+    const retry = vi.spyOn(owner, "retry");
+    const session = await engine.openYDocSession({path: "note.md", onRemoteUpdate: () => {}});
+    const editor = new Y.Doc(); editor.getText("content").insert(0, "edit");
+    try {
+      await sync.start(); await vi.waitFor(() => expect(report).toBeTypeOf("function"));
+      report({hasMore: false, watched: true});
+      await vi.waitFor(() => expect(ownerPass).toHaveBeenCalledTimes(1));
+      const recording = session.applyDecidedLocalUpdate(() => Y.encodeStateAsUpdate(editor));
+      await entered.promise;
+      if (mode === "shutdown") engine.beginShutdown();
+      journal.resolve(); await recording;
+      // Flush the sync chain too, without introducing an ordinary push.
+      await sync.stop();
+      expect(changed).not.toHaveBeenCalled();
+      expect(push).toHaveBeenCalledTimes(1);
+      expect(retry).not.toHaveBeenCalled();
+      expect(ownerPass).toHaveBeenCalledTimes(1);
+    } finally {
+      journal.resolve(); await sync.stop(); await owner.stop();
+      await session.close({settle: false}); await engine.stop(); editor.destroy();
+    }
+  });
+
+  it("reports a workspace durable edit after the journal resolves, without forcing a settle", async () => {
+    const root = await createTestScratch("dohc-durable-wake-");
+    const loopback = new VersionedLoopbackEngine();
+    await write(root, "note.md", "existing");
+    loopback.seedTextFile({workspace: WORKSPACE_ID, versionId: "main", path: "note.md", text: "existing"});
+    const journal = deferred<void>();
+    const entered = deferred<void>();
+    const settle = vi.fn();
+    const engine = capture(root, {rustEngineSessions: mockLiveSessions(loopback),
+      openRustYDocProviderSession: async () => {
+        const doc = new Y.Doc();
+        return {doc, initialUpdate: Y.encodeStateAsUpdate(doc), contentKind: "plaintext", path: "note.md",
+          head: "present", lineage: "existing", evict: async () => {}, close: async () => {},
+          applyLocalUpdate: async () => {entered.resolve(); await journal.promise;}, settleNow: settle} as never;
+      }});
+    const changed = vi.fn(); const detach = engine.onDurableLocalChange(changed);
+    const session = await engine.openYDocSession({path: "note.md", onRemoteUpdate: () => {}});
+    const editor = new Y.Doc(); editor.getText("content").insert(0, "edit");
+    session.applyLocalUpdate(Y.encodeStateAsUpdate(editor)); await entered.promise;
+    expect(changed).not.toHaveBeenCalled(); expect(settle).not.toHaveBeenCalled();
+    journal.resolve(); await engine.flush();
+    expect(changed).toHaveBeenCalledExactlyOnceWith("note.md"); expect(settle).not.toHaveBeenCalled();
+    detach(); editor.getText("content").insert(4, "more");
+    session.applyLocalUpdate(Y.encodeStateAsUpdate(editor)); await engine.flush();
+    expect(changed).toHaveBeenCalledTimes(1);
+    await session.close({settle: false}); await engine.stop(); editor.destroy();
+  });
   // An injected store can observe capture operations, but it cannot select the
   // retired in-process Y.Doc provider.
   async function openWith(
@@ -4668,7 +4745,7 @@ it.each(["agent", "typing"])("reopens after a daemon crash by replaying original
             throw Object.assign(new Error("daemon exited"), { code: "transport-error" });
           }
           replayed.push(captured);
-          options.onLocalUpdateAcknowledged?.(applyOptions?.idempotencyKey ?? "");
+          options.onLocalUpdateAcknowledged?.(applyOptions?.idempotencyKey ?? "", "journal");
         },
         settleNow: async () => ({ momentId: "moment-a", path: options.path, sha256: "a".repeat(64), content: doc.getText("plainText").toString(), materialized: true,
           projection: { contentKind: "plaintext", sourceStateVectorSha256: "b".repeat(64), destructive: false } }),
