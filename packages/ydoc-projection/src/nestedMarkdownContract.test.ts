@@ -6,13 +6,22 @@ import { marked } from 'marked'
 import { createHash } from 'node:crypto'
 import { MarkdownManager } from '@tiptap/markdown'
 import { StarterKit } from '@tiptap/starter-kit'
+import type { JSONContent } from '@tiptap/core'
 import { DohcTaskItem, dohcMarkdownExtensions, MarkdownListItem, MarkdownOrderedList, MarkdownTaskList } from './dohc-markdown-extensions.js'
 import { createLiveMarkdownJournalValidator, createLiveMarkdownRegistrationValidator } from './liveDocumentValidation.js'
 import { markdownToYDoc, yDocToMarkdown, serializeRichdocBody, parseRichdocMarkdown, getDohcProseMirrorSchema } from './import-export.js'
 
 const corpus = JSON.parse(readFileSync(new URL('../../../tools/rust-engine-program/nested-markdown-contract.json', import.meta.url), 'utf8')) as {
-  cases: Array<{ name: string; source: string; canonical?: string; rereadCanonical?: string; sourceCanonical?: string; witnessSeed?: boolean; foldRefuse?: boolean; refuse?: boolean; projected?: boolean; rustBase64?: string; stableTree?: boolean; itemSpaces?: number; later?: boolean; interrupts?: boolean; inItem?: boolean }>
+  cases: Array<{ name: string; source: string; canonical?: string; rereadCanonical?: string; sourceCanonical?: string; witnessSeed?: boolean; foldRefuse?: boolean; refuse?: boolean; projected?: boolean; rustBase64?: string; stableTree?: boolean; itemSpaces?: number; later?: boolean; interrupts?: boolean; inItem?: boolean; markedStart?: { type: string; attrs?: Record<string, string | null> }; markedText?: string }>
 }
+it.each(corpus.cases.filter(item => item.markedStart))('serializes marked leading spaces for $name', item => {
+  const root = parseRichdocMarkdown(item.source, 'projection')
+  let paragraph: JSONContent = root
+  while (paragraph.type !== 'paragraph') paragraph = paragraph.content![0]
+  paragraph.content = [{ type: 'text', text: item.markedText!, marks: [item.markedStart!] }]
+  expect(serializeRichdocBody(root)).toBe(item.canonical)
+  expect(parseRichdocMarkdown(serializeRichdocBody(root), 'projection')).toEqual(parseRichdocMarkdown(item.source, 'projection'))
+})
 it.each(corpus.cases)('shares the nested Markdown contract for $name', item => {
   if (item.refuse) {
     expect(() => markdownToYDoc(item.source)).toThrow(/not representable/)
@@ -85,7 +94,8 @@ it.each(corpus.cases.filter(item => !item.refuse))('validates the Rust-seeded $n
     const input = { document, currentPath: 'tasks/record.md', checkpoint }
     expect(replay.getMap('meta').has('dohcMarkdownSource')).toBe(!!item.witnessSeed)
     const expectedMarkdown = item.witnessSeed ? item.source : item.canonical!
-    expect(registration(input)).toMatchObject({ kind: 'accepted', evidence: { projectedMarkdown: expectedMarkdown } })
+    const verdict = registration(input)
+    expect(verdict, JSON.stringify(verdict)).toMatchObject({ kind: 'accepted', evidence: { projectedMarkdown: expectedMarkdown } })
     expect(journal({ ...input, suffix: [], candidate: Y.encodeStateAsUpdate(replay) })).toMatchObject({
       kind: 'accepted', evidence: { projectedMarkdownSha256: createHash('sha256').update(expectedMarkdown).digest('hex') },
     })

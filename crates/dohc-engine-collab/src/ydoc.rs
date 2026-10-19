@@ -3958,6 +3958,7 @@ fn structural_item_start(text: &str) -> bool {
         matches!(
             byte,
             b' ' | b'\t'
+                | b'&'
                 | b'#'
                 | b'>'
                 | b'`'
