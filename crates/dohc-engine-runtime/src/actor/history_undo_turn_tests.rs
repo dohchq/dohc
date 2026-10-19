@@ -1,5 +1,6 @@
 use super::super::tests::{OP, WS, fixture, remove, rename, seed};
 use super::*;
+use crate::actor::{CapturePassSettlement, CapturePlacementPath, WorkspaceRootGuard};
 use dohc_engine_storage::{FaultAction, FaultPoint, NoFaults};
 use dohc_engine_testkit::engine_db_path;
 use std::sync::{
