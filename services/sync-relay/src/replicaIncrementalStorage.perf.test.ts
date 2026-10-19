@@ -78,7 +78,6 @@ it.skipIf(process.env.DOHC_R2_PERF!=="1")("measures 31 alternating main/patch pa
       });
       await pairs("cold-first-open",state=>{state.restart();return timed(()=>expect(state.storage.readReplicaCurrentViewFile({...state.input,path:state.view.files[0]!.path})).toMatchObject({status:"ready",text:"x".repeat(50_000)}));});
       await pairs("cold-first-list",state=>{state.restart();return timed(()=>{const list=state.storage.listReplicaCurrentViewFiles(state.input);expect(list.status).toBe("ready");expect(list.files).toHaveLength(count);});});
-      await pairs("cold-first-page",state=>{state.restart();return timed(()=>{const list=state.storage.listReplicaCurrentViewFiles({...state.input,limit:256});expect(list.status).toBe("ready");expect(list.files.length).toBe(state.patch?Math.min(256,count):count);});});
     } finally {for(const state of states)state.close();}
     const live=await Promise.all([fixture(count,false),fixture(count,true)]);
     const supervisors:Array<{state:typeof live[number];supervisor:ReturnType<typeof createReplicaSupervisor>;prepare:(delta:boolean)=>void}>=[];

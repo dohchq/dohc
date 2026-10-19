@@ -155,6 +155,7 @@ it("R2: the work migration preserves a standing orphan pin and cleans unreferenc
   f.storage.stageReplicaCurrentView(f.lease,{...f.view,files:[{...f.view.files[0]!,sha256:sha256(text),byteLength:text.length}],texts:[{sha256:sha256(text),text}]});
   f.db.exec(`DROP TRIGGER replica_history_usage_insert; DROP TRIGGER replica_history_usage_delete; DROP TRIGGER replica_history_usage_update;
     DROP TRIGGER replica_history_identity_floor; DROP TABLE sync_relay_history_pin_usage;
+    ALTER TABLE sync_relay_replica_cuts ADD COLUMN omitted_json TEXT NOT NULL DEFAULT '[]';
     DROP INDEX replica_history_due; DROP INDEX replica_history_current_pin;
     DELETE FROM sync_relay_migrations WHERE migration_id='replica-history-incremental-v1';`);
   initializeReplicaHistoryWorkSchema(f.db);
@@ -162,57 +163,4 @@ it("R2: the work migration preserves a standing orphan pin and cleans unreferenc
     .toEqual([{superseded_at_ms:expect.any(Number),replaced_log_position:null,replaced_journal_position:null}]);
   expect(f.db.prepare("SELECT sha256,ref_count FROM sync_relay_replica_cut_text_refs").all()).toEqual([{sha256:sha256("shared"),ref_count:1}]);
   expect(f.db.prepare("SELECT sha256 FROM sync_relay_replica_cut_texts").all()).toEqual([{sha256:sha256("shared")}]);
-});
-it("R2: ending one share drains only its rows, pins, clocks and unshared text",async()=>{
-  const f=await fixture();
-  f.storage.createShare({share:{shareId:"other",workspaceId:"w",granterUserId:"owner",selectorJson:'{"paths":["other"],"versionId":null}',createdAtMs:1},
-    grant:{grantId:"other",shareId:"other",principalKind:"user",principalUserId:"reader",principalEmail:null,access:"view",generation:1,status:"active",createdAtMs:1,revokedAtMs:null,parentGrantId:null}});
-  const other={...f.view.files[0]!,objectId:"other",path:"other/a.md",sha256:sha256("other"),byteLength:5};
-  f.storage.storeReplicaCurrentView(f.lease,{...f.view,files:[...f.view.files,other],texts:[{sha256:other.sha256,text:"other"}]});
-  f.storage.storeReplicaCurrentView(f.lease,{...f.view,revision:2,files:[{...f.view.files[0]!,path:"docs/renamed.md"},...f.view.files.slice(1),other],texts:[]});
-  f.storage.revokeShareGrant({shareId:"s",grantId:"g",revokedAtMs:2});
-  expect(f.storage.readReplicaCurrentView("w")!.files).toEqual([other]);
-  expect(f.db.prepare("SELECT * FROM sync_relay_history_pins").all()).toEqual([]);
-  expect(f.db.prepare("SELECT object_id FROM sync_relay_history_clocks").all()).toEqual([{object_id:"other"}]);
-  expect(f.db.prepare("SELECT sha256 FROM sync_relay_replica_cut_text_refs").all()).toEqual([{sha256:other.sha256}]);
-});
-it("R2: cold pages have no duplicate paths and restart on a replaced view",async()=>{
-  const f=await fixture(100);f.restart();
-  const all:string[]=[];let cursor:string|undefined;
-  do {
-    const page=f.storage.listReplicaCurrentViewFiles({...f.input,limit:7,cursor} as typeof f.input);
-    expect(page.status).toBe("ready");if(page.status!=="ready")throw Error(page.status);
-    expect(page.files.length).toBeLessThanOrEqual(7);all.push(...page.files.map(f=>f.path));
-    cursor=(page as typeof page & {nextCursor?:string}).nextCursor;
-  } while(cursor);
-  expect(all).toEqual(f.view.files.map(f=>f.path));expect(new Set(all).size).toBe(100);
-  const page=f.storage.listReplicaCurrentViewFiles({...f.input,limit:7} as typeof f.input);
-  expect(page.status).toBe("ready");
-  const nextCursor=(page as {nextCursor?:string}).nextCursor;expect(nextCursor).toBeTruthy();
-  const lease=createReplicaReadPrincipal(f.storage).issue("w","new");f.storage.bindReplicaCurrentView(lease);
-  f.storage.storeReplicaCurrentView(lease,{...f.view,revision:2,files:f.view.files.slice(1)});
-  expect(f.storage.listReplicaCurrentViewFiles({...f.input,limit:7,cursor:nextCursor} as typeof f.input)).toEqual({status:"updating"});
-});
-it("R2: continuations are bound to their grant, expire, and cannot survive a restart",async()=>{
-  const f=await fixture(10);f.restart();
-  const page=f.storage.listReplicaCurrentViewFiles({...f.input,limit:3});
-  expect(page.status).toBe("ready");if(page.status!=="ready")throw Error(page.status);
-  const cursor=page.nextCursor!;expect(cursor).toBeTruthy();
-  expect(f.storage.listReplicaCurrentViewFiles({...f.input,limit:3,cursor:cursor.slice(0,-2)+"xx"})).toEqual({status:"updating"});
-  f.storage.createShare({share:{shareId:"same",workspaceId:"w",granterUserId:"owner",selectorJson:'{"paths":["docs"],"versionId":null}',createdAtMs:1},
-    grant:{grantId:"same",shareId:"same",principalKind:"user",principalUserId:"reader",principalEmail:null,access:"view",generation:1,status:"active",createdAtMs:1,revokedAtMs:null,parentGrantId:null}});
-  expect(f.storage.listReplicaCurrentViewFiles({...f.input,grantId:"same",limit:3,cursor})).toEqual({status:"updating"});
-  const fresh=f.storage.listReplicaCurrentViewFiles({...f.input,limit:3});if(fresh.status!=="ready")throw Error(fresh.status);
-  vi.useFakeTimers({toFake:["Date"]});vi.setSystemTime(Date.now()+300_001);
-  expect(f.storage.listReplicaCurrentViewFiles({...f.input,limit:3,cursor:fresh.nextCursor})).toEqual({status:"updating"});vi.useRealTimers();
-  f.restart();expect(f.storage.listReplicaCurrentViewFiles({...f.input,limit:3,cursor:fresh.nextCursor})).toEqual({status:"updating"});
-});
-it("R2: SQL pages include omissions and Unicode paths exactly once",async()=>{
-  const f=await fixture(1),paths=["docs/a.md","docs/\ue000.md","docs/\u{10000}.md"];
-  const files=paths.map((path,i)=>({...f.view.files[0]!,objectId:`u${i}`,path}));
-  const omitted={versionId:"main",objectId:"omitted",path:"docs/b.md",sha256:sha256("large"),reason:"text-frame-limit" as const};
-  f.storage.storeReplicaCurrentView(f.lease,{...f.view,files,omitted:[omitted]});f.restart();
-  const all:string[]=[];let cursor:string|undefined;
-  do {const page=f.storage.listReplicaCurrentViewFiles({...f.input,limit:1,cursor});if(page.status!=="ready")throw Error(page.status);all.push(...page.files.map(f=>f.path));cursor=page.nextCursor;}while(cursor);
-  expect(new Set(all)).toEqual(new Set([...paths,omitted.path]));expect(all).toHaveLength(4);
 });

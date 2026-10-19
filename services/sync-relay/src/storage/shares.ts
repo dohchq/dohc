@@ -34,7 +34,6 @@ import { LINK_SESSION_RENEWAL_GRACE_MS } from "../linkSecurity";
 import { linkAccessLevels, parseStoredAnyShareSelectorJson } from "../shareFilter";
 import { RETIRED_LINK_CREDENTIAL_HISTORY_LIMIT, GRANTED_INVENTORY_PAGE_SIZE, RECEIVED_INVENTORY_PAGE_SIZE, LINK_INVENTORY_PAGE_SIZE, LINK_INVENTORY_INDEPENDENT_GRANT_LIMIT } from "./limits";
 import { forgetReplicaCurrentViewCaches } from "../replicaCurrentViewReads";
-import {pruneReplicaCurrentView} from "./replicaCurrentViews";
 
 function dependentGrantIdsMatch(
   dependents: readonly SyncRelayShareGrantRow[],
@@ -403,7 +402,6 @@ export function revokeShareGrantInTransaction(storage: StorageContext, input: Re
           WHERE share_id = ? AND status = 'active' AND revoked_at_ms IS NULL)`)
         .run(grant.shareId, grant.shareId);
       forgetReplicaCurrentViewCaches(storage,storage.getShare(input.shareId)!.workspaceId);
-      pruneReplicaCurrentView(storage,storage.getShare(input.shareId)!.workspaceId);
       return { ok: true, grant: storage.getShareGrant(grant.grantId)! };
   }
 
@@ -1087,7 +1085,6 @@ export function revokeShareInTransaction(storage: StorageContext, shareId: strin
         )
         .run(Math.trunc(revokedAtMs), shareId);
       forgetReplicaCurrentViewCaches(storage,String(existing.workspace_id));
-      pruneReplicaCurrentView(storage,String(existing.workspace_id));
       storage.db.prepare(`UPDATE sync_relay_share_removals SET voided = 1
         WHERE share_id = ? AND (removed_grant_id IS NOT NULL OR ? > 0)`)
         .run(shareId, Number(revoked.changes ?? 0));

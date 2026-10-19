@@ -9,7 +9,6 @@ import type {CurrentShareGrantPrincipal} from "./storage/currentShareGrant";
 import {replicaGrantFloor, replicaViewReachesFloor} from "./storage/replicaGrantFloors";
 import {currentViewFileAtFence, forgetReplicaCurrentViewStoredCache, readReplicaCurrentViewRowText, readReplicaCurrentViewHead, isReplicaStoredHead, replicaFileFromRow} from "./storage/replicaCurrentViews";
 import {replicaStatement as statement} from "./storage/replicaStatements";
-import {inventoryPageCursor} from "./replicaInventoryCursor";
 import {ReplicaMap} from "./replicaMap";
 
 export interface ReplicaCurrentViewReadInput {
@@ -29,7 +28,7 @@ export type ReplicaCurrentViewFile = {
   sha256?: string;
 } | {path: string; status: "updating"};
 type Unavailable = {status: "denied" | "not-ready" | "updating"};
-export type ReplicaCurrentViewList = Unavailable | {status: "ready"; files: ReplicaCurrentViewFile[]; etag: string; nextCursor?:string};
+export type ReplicaCurrentViewList = Unavailable | {status: "ready"; files: ReplicaCurrentViewFile[]; etag: string};
 export type ReplicaCurrentViewRead = Unavailable | {status: "not-found" | "not-text"} |
   {status: "ready"; file: Extract<ReplicaCurrentViewFile, {status: "ready"}>; text: string};
 
@@ -87,7 +86,7 @@ function validateChanges(changes:ReplicaCurrentView) {
   }
 }
 
-function indexView(view: ReplicaCurrentView, previous?: ViewIndex["files"], heldTexts?:ReplicaMap<string>): ViewIndex | null {
+function indexView(view: ReplicaCurrentView, previous?: Lookup<Lookup<IndexedFile>>, heldTexts?:ReplicaMap<string>): ViewIndex | null {
   if (indexes.has(view)) return indexes.get(view)!;
   indexes.set(view,null);
   const paths = new Set<string>(), objects = new Set<string>();
@@ -126,53 +125,52 @@ function indexView(view: ReplicaCurrentView, previous?: ViewIndex["files"], held
   return index;
 }
 
-// These maps live only inside a read transaction. They retain no manifest or authorization.
-class QueryMap<V> extends ReplicaMap<V> {
-  constructor(private readonly lookup:(key:string)=>V|undefined, private readonly scan:()=>Generator<V>) {super();}
-  override get(key:string) {return this.lookup(key);}
-  override *values() {yield* this.scan();}
-}
-function storedIndex(storage:StorageContext, workspace:string, version:string, after="", end?:string, paths?:string[]):ViewIndex {
+type Lookup<V> = {get(key:string):V|undefined};
+type Scan<V> = Lookup<V> & {values():IterableIterator<V>};
+type ReadIndex = Omit<ViewIndex,"files"|"lineages"|"omittedPaths"|"omitted"> & {
+  files:Lookup<Scan<IndexedFile>>; lineages:Lookup<IndexedFile>; omittedPaths:Lookup<string>;
+  omitted:Scan<{row:ReplicaCurrentView["omitted"][number];path:IndexedFile["path"]}>;
+};
+class InvalidStoredRow extends Error {}
+// SQL accessors live only inside the authorization transaction and retain no manifest.
+function storedIndex(storage:StorageContext,workspace:string,version:string):ReadIndex {
   const indexed=(row:Record<string,unknown>|undefined):IndexedFile|undefined=>{
     if(!row)return;
     const file=replicaFileFromRow(row),path=prepareSharePath(file.path);
-    if(!validRow(file,path))throw new Error("Invalid stored replica row.");
-    return {row:file,path:path!,lineage:lineageKey(version,file.objectId,file.lineageClaimId),projected:new Map()};
+    if(!validRow(file,path))throw new InvalidStoredRow();
+    return {row:file,path:path!,lineage:lineageKey(file.versionId,file.objectId,file.lineageClaimId),projected:new Map()};
   };
   function* scan(table:string):Generator<Record<string,unknown>> {
-    let path=after;
-    const suffix=(end===undefined ? "" : " AND path<=?")+(paths ? " AND path IN (SELECT value FROM json_each(?))" : "");
-    const bounds=[...(end===undefined ? [] : [end]),...(paths ? [JSON.stringify(paths)] : [])];
+    let path="";
     for(;;) {
-      const rows=statement(storage,`SELECT * FROM ${table} WHERE workspace_id=? AND version_id=? AND path>?${suffix} ORDER BY path LIMIT 256`)
-        .all(workspace,version,path,...bounds);
+      const rows=statement(storage,`SELECT * FROM ${table} WHERE workspace_id=? AND version_id=? AND path>? ORDER BY path LIMIT 256`).all(workspace,version,path);
       yield* rows;
       if(rows.length<256)return;
       path=String(rows.at(-1)!.path);
     }
   }
-  const files=new QueryMap<IndexedFile>(path=>indexed(statement(storage,"SELECT * FROM sync_relay_replica_cut_files WHERE workspace_id=? AND version_id=? AND path=?").get(workspace,version,path)),
-    function*(){for(const row of scan("sync_relay_replica_cut_files"))yield indexed(row)!;});
-  const omission=(row:Record<string,unknown>)=>{
-      const file={versionId:version,objectId:String(row.object_id),path:String(row.path),sha256:String(row.sha256),reason:"text-frame-limit" as const};
-      const path=prepareSharePath(file.path);if(!validRow(file,path))throw new Error("Invalid stored replica omission.");
-      return {row:file,path:path!};
+  const files:Scan<IndexedFile>={
+    get:path=>indexed(statement(storage,"SELECT * FROM sync_relay_replica_cut_files WHERE workspace_id=? AND version_id=? AND path=?").get(workspace,version,path)),
+    *values(){for(const row of scan("sync_relay_replica_cut_files"))yield indexed(row)!;}
   };
-  const omitted=new QueryMap(key=>{
-    const [v,object]=JSON.parse(key) as [string,string];
-    const row=statement(storage,"SELECT * FROM sync_relay_replica_cut_omitted WHERE workspace_id=? AND version_id=? AND object_id=?").get(workspace,v,object);
-    return row ? omission(row) : undefined;
-  },function*(){
-    for(const row of scan("sync_relay_replica_cut_omitted"))yield omission(row);
-  });
-  return {files:new ReplicaMap([[version,files]]),lineages:new QueryMap(key=>{
+  const omission=(row:Record<string,unknown>)=>{
+    const file={versionId:version,objectId:String(row.object_id),path:String(row.path),sha256:String(row.sha256),reason:row.reason as "text-frame-limit"};
+    const path=prepareSharePath(file.path);if(!validRow(file,path))throw new InvalidStoredRow();
+    return {row:file,path:path!};
+  };
+  return {files:{get:v=>v===version?files:undefined},lineages:{get:key=>{
     const [v,object,lineage]=JSON.parse(key) as [string,string,string|null];
     return indexed(statement(storage,"SELECT * FROM sync_relay_replica_cut_files WHERE workspace_id=? AND version_id=? AND object_id=? AND lineage_claim_id IS ?").get(workspace,v,object,lineage));
-  },function*(){}),omittedPaths:new QueryMap(key=>{
+  }},omittedPaths:{get:key=>{
     const [v,path]=JSON.parse(key) as [string,string];
     const row=statement(storage,"SELECT object_id FROM sync_relay_replica_cut_omitted WHERE workspace_id=? AND version_id=? AND path=?").get(workspace,v,path);
     return row ? String(row.object_id) : undefined;
-  },function*(){}),omitted,texts:new ReplicaMap(),textChecks:new Map(),inventories:[],decoded:new Map(),decodedBytes:0};
+  }},omitted:{get:key=>{
+    const [v,object]=JSON.parse(key) as [string,string];
+    const row=statement(storage,"SELECT * FROM sync_relay_replica_cut_omitted WHERE workspace_id=? AND version_id=? AND object_id=?").get(workspace,v,object);
+    return row ? omission(row) : undefined;
+  },*values(){for(const row of scan("sync_relay_replica_cut_omitted"))yield omission(row);}},
+    texts:new ReplicaMap(),textChecks:new Map(),inventories:[],decoded:new Map(),decodedBytes:0};
 }
 
 /** Validate changes; update an existing index only when at most half the rows changed. */
@@ -216,7 +214,7 @@ function projectedFile(indexed: IndexedFile, path: string) {
   return result;
 }
 
-function inventoryEtag(index: ViewIndex, files: ReplicaCurrentViewFile[]) {
+function inventoryEtag(index: ReadIndex, files: ReplicaCurrentViewFile[]) {
   // Compare freshly authorized output, never a selector or a cached grant decision.
   const prior = index.inventories.find(saved => saved.files.length === files.length && files.every((file,i) =>
     file === saved.files[i] || file.status === "updating" && saved.files[i]!.status === "updating" && file.path === saved.files[i]!.path));
@@ -262,11 +260,9 @@ export function withReplicaCurrentView<T>(storage: StorageContext, input: Replic
     visiblePath: (version: string, path: string) => string | null;
     readText: (row: ViewFile) => string | null;
     inventoryEtag: () => string;
-    nextCursor?:string;
   }) => T, requestedPath?: string, includeRows = false,
-  paging?:{limit?:number;cursor?:string},
 ): T | Unavailable {
-  return storage.readTx(() => {
+  try {return storage.readTx(() => {
     if (!Number.isSafeInteger(input.generation) || input.generation < 1) return {status:"denied"};
     const authorized = authorizeShareGrantAction({storage, grantId:input.grantId, generation:input.generation, principal:input.principal, action:"read"});
     if (!authorized.ok) return {status:"denied"};
@@ -287,15 +283,12 @@ export function withReplicaCurrentView<T>(storage: StorageContext, input: Replic
     if (view.workspaceId !== workspace || [view.revision, view.logCursor, view.journalCursor].some(n => !Number.isSafeInteger(n) || n < 0) ||
       view.logCursor > standing.logSeq || view.journalCursor > standing.journalCursor) return {status:"updating"};
     const version = targetVersionId(selector);
-    const page=paging && inventoryPageCursor(storage,input,selector,view,stored,paging);
-    if(page?.status==="updating")return page;
-    const pagePaths=page && new Set(page.paths);
     const latest = touchLatestIndex(storage,workspace);
-    const indexFor=(v:ReplicaCurrentView,previous?:ViewIndex["files"])=>isReplicaStoredHead(v) ? storedIndex(storage,workspace,version,page?.after,page?.end,page?.paths) : indexView(v,previous);
+    const indexFor=(v:ReplicaCurrentView,previous?:Lookup<Lookup<IndexedFile>>):ReadIndex|null=>isReplicaStoredHead(v) ? storedIndex(storage,workspace,version) : indexView(v,previous);
     const index = indexFor(view,latest.get(workspace));
     if (!index) return {status:"updating"};
     // Keep only metadata for reuse, so retired live texts can be collected.
-    touchLatestIndex(storage,workspace,isReplicaStoredHead(view) ? new ReplicaMap() : index.files);
+    touchLatestIndex(storage,workspace,indexes.get(view)?.files);
     const visible = (v: string, path: string | NonNullable<ReturnType<typeof prepareSharePath>>) => {
       if (v !== version) return false;
       const canonical = visibleSharePath(selector, path);
@@ -320,10 +313,7 @@ export function withReplicaCurrentView<T>(storage: StorageContext, input: Replic
       const occupant = old && index.files.get(version)?.get(old.path)?.row;
       if (occupant?.lineageClaimId != null) objects.add(occupant.objectId);
     }
-    let fences = realPath === undefined ? page && isReplicaStoredHead(view) ? readFences(storage,`workspace_id=? AND main_version_id=? AND restore_fence_generation>1 AND
-      (current_path IN (SELECT value FROM json_each(?)) OR object_id IN (SELECT object_id FROM sync_relay_replica_cut_files
-      WHERE workspace_id=? AND version_id=? AND path IN (SELECT value FROM json_each(?))))`,[workspace,version,JSON.stringify(page.paths),workspace,version,JSON.stringify(page.paths)]) :
-      readFences(storage,"workspace_id=? AND main_version_id=? AND restore_fence_generation>1",[workspace,version]) : objects.size ?
+    let fences = realPath === undefined ? readFences(storage,"workspace_id=? AND main_version_id=? AND restore_fence_generation>1",[workspace,version]) : objects.size ?
       readFences(storage,"workspace_id=? AND main_version_id=? AND object_id IN (SELECT value FROM json_each(?))",[workspace,version,JSON.stringify([...objects])]) : [];
     const generations = new Map(fences.map(f=>[String(f.object_id),{lineageClaimId:String(f.lineage_claim_id),generation:Number(f.restore_fence_generation)}]));
     const generationFor = (row: ViewFile) => {
@@ -341,7 +331,6 @@ export function withReplicaCurrentView<T>(storage: StorageContext, input: Replic
       const file = row;
       if (!visible(file.versionId, indexed.path)) continue;
       const path = project(file.path);
-      if(pagePaths && !pagePaths.has(file.path))continue;
       if (path === null || requestedPath !== undefined && path !== requestedPath) continue;
       if (!current(indexed)) {files.set(path, {path, status:"updating"}); continue;}
       files.set(path,projectedFile(indexed,path));
@@ -352,7 +341,6 @@ export function withReplicaCurrentView<T>(storage: StorageContext, input: Replic
     for (const omitted of realPath===undefined ? index.omitted.values() : directOmitted ? [directOmitted] : []) {
       if (!visible(omitted.row.versionId, omitted.path)) continue;
       const path = project(omitted.row.path);
-      if(pagePaths && !pagePaths.has(omitted.row.path))continue;
       if (path !== null && (requestedPath === undefined || path === requestedPath)) files.set(path, {path, status:"updating"});
     }
     if (realPath !== undefined && files.size === 0) fences = readFences(storage,
@@ -364,14 +352,13 @@ export function withReplicaCurrentView<T>(storage: StorageContext, input: Replic
       const pending = inView ? inView.row.restoreGeneration! < generation : fence.admission_state === "closed";
       if (!pending) continue;
       const currentPath = String(fence.current_path);
-      if(pagePaths && !pagePaths.has(currentPath))continue;
       if (realPath !== undefined && currentPath !== realPath) continue;
       const path = project(currentPath);
       if (path === null || files.has(path) || !visible(String(fence.main_version_id), currentPath)) continue;
       if (requestedPath === undefined || path === requestedPath) files.set(path, {path, status:"updating"});
     }
     const sorted = [...files.values()].sort((a,b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
-    return read({files:sorted, rows, workspace, floor,nextCursor:page?.nextCursor,
+    return read({files:sorted, rows, workspace, floor,
       visiblePath:(v,path)=>visible(v,path) ? project(path) : null, inventoryEtag:()=>inventoryEtag(index,sorted), readText:row => {
       const textKey = JSON.stringify([row.sha256,row.byteLength]);
       const text = index.texts.get(row.sha256);
@@ -396,14 +383,12 @@ export function withReplicaCurrentView<T>(storage: StorageContext, input: Replic
       }
       return decoded;
     }});
-  });
+  });} catch(error) {if(error instanceof InvalidStoredRow)return {status:"updating"};throw error;}
 }
 
-export function listReplicaCurrentViewFiles(storage: StorageContext, input: ReplicaCurrentViewReadInput & {limit?:number;cursor?:string},
+export function listReplicaCurrentViewFiles(storage: StorageContext, input: ReplicaCurrentViewReadInput,
   source?: ReplicaCurrentViewSource): ReplicaCurrentViewList {
-  return withReplicaCurrentView(storage, input, source, ({files,inventoryEtag,nextCursor}):ReplicaCurrentViewList =>
-    ({status:"ready",files,etag:inventoryEtag(),...(nextCursor ? {nextCursor} : {})}),undefined,false,
-    input.limit!==undefined || input.cursor!==undefined ? input : undefined);
+  return withReplicaCurrentView(storage,input,source,({files,inventoryEtag}):ReplicaCurrentViewList=>({status:"ready",files,etag:inventoryEtag()}));
 }
 
 export function readReplicaCurrentViewFile(storage: StorageContext, input: ReplicaCurrentViewReadInput & {path: string},
