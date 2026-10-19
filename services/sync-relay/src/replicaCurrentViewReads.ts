@@ -63,6 +63,7 @@ function readFences(storage: StorageContext, where: string, args: unknown[]) {
 }
 
 type Row = ViewFile | ReplicaCurrentView["omitted"][number];
+const preparedPaths = new WeakMap<Row,IndexedFile["path"]>();
 function validRow(file:Row, path:IndexedFile["path"]|null, same=false) {
   if (!path || path.path !== file.path || !file.objectId || !same && !shaPattern.test(file.sha256)) return false;
   return "contentKind" in file ? same || ["text","binary"].includes(file.contentKind) && Number.isSafeInteger(file.byteLength) && file.byteLength >= 0 &&
@@ -72,8 +73,10 @@ function validRow(file:Row, path:IndexedFile["path"]|null, same=false) {
 
 function validateChanges(changes:ReplicaCurrentView) {
   for(const file of [...changes.files,...changes.omitted]) {
-    if(!validRow(file,prepareSharePath(file.path)))throw new Error("Invalid replica read index.");
+    const path=prepareSharePath(file.path);
+    if(!path || !validRow(file,path))throw new Error("Invalid replica read index.");
     Object.freeze(file);
+    preparedPaths.set(file,path);
   }
   const shas=new Set<string>();
   for(const text of changes.texts) {
@@ -95,7 +98,7 @@ function indexView(view: ReplicaCurrentView, previous?: ViewIndex["files"], held
     const same = prior && "contentKind" in file && prior.row.objectId === file.objectId && prior.row.contentKind === file.contentKind &&
       prior.row.sha256 === file.sha256 && prior.row.byteLength === file.byteLength && prior.row.lineageClaimId === file.lineageClaimId &&
       prior.row.restoreGeneration === file.restoreGeneration;
-    const path = same ? prior.path : prepareSharePath(file.path);
+    const path = same ? prior.path : preparedPaths.get(file) ?? prepareSharePath(file.path);
     if (!path || !validRow(file,path,!!same) || paths.has(key) || objects.has(object)) return null;
     paths.add(key); objects.add(object); Object.freeze(file);
     if ("contentKind" in file) {

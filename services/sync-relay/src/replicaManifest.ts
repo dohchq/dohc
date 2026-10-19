@@ -53,7 +53,9 @@ export class ReplicaManifest {
       else for(const [key,old] of this.rows) {compare(old,additions.get(key));additions.delete(key);}
       for(const file of additions.values())compare(undefined,file);
     }
-    const bulk=!delta && (!this.rows.size || before.length+changedRows.length>this.rows.size/2);
+    const oldSize=this.stored ? this.stored.files.length+this.stored.omitted.length : this.rows.size;
+    const smallChange=changeCount<=Math.max(oldSize,delta ? oldSize-before.length+changedRows.length : incoming.length)/2;
+    const bulk=!delta && (!this.rows.size || !smallChange);
     const rows=bulk ? new Map(entries) : next.rows, paths=bulk ? new Map<string,string>() : next.paths;
     const omissions=bulk ? new Map<string,ReplicaCurrentView["omitted"][number]>() : next.omissions;
     const lengths=bulk ? new Map<string,{bytes:number;count:number}>() : next.lengths, refs=bulk ? new Map<string,number>() : next.refs;
@@ -82,7 +84,7 @@ export class ReplicaManifest {
       get texts(){return texts??=[...next.texts].map(([sha256,text])=>({sha256,text}));}};
     publishReplicaCurrentViewIndex(view,this.view,{...page,
       files:changedRows.filter((f):f is ReplicaCurrentView["files"][number]=>"contentKind" in f),
-      omitted:changedRows.filter((f):f is ReplicaCurrentView["omitted"][number]=>!("contentKind" in f))},before,next.texts,changeCount<=Math.max(this.stored ? this.stored.files.length+this.stored.omitted.length : this.rows.size,next.rows.size)/2);
+      omitted:changedRows.filter((f):f is ReplicaCurrentView["omitted"][number]=>!("contentKind" in f))},before,next.texts,smallChange);
     next.view=view;
     return {next,view,changed,structural,predecessor,observations};
   }

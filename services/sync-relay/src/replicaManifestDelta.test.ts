@@ -5,8 +5,40 @@ import type {ReplicaCurrentViewPage} from "@dohc/workspace-engine-client/daemon"
 import {ReplicaCurrentViewRefused,forgetReplicaCurrentViewStoredCache} from "./storage/replicaCurrentViews";
 import type {StorageContext} from "./storage/context";
 import {ReplicaManifest} from "./replicaManifest";
+import * as shareSelector from "@dohc/security-contract/share-selector";
 
 afterEach(async()=>{vi.useRealTimers();await closeTestStorages();});
+it("prepares each replacement path once across collection and the first list",async()=>{
+  const f=await fixture(100);
+  try {
+    expect(f.storage.listReplicaCurrentViewFiles(f.input,f.supervisor).status).toBe("ready");
+    const prepare=vi.spyOn(shareSelector,"prepareSharePath");
+    const files=f.files.map(file=>({...file,path:file.path.replace("docs/","docs/replaced/")}));
+    const omitted={versionId:"main",objectId:"omitted",path:"docs/replaced/large.md",sha256:sha256("large"),reason:"text-frame-limit" as const};
+    const paths=new Set([...files.map(file=>file.path),omitted.path]);
+    const preparations=()=>prepare.mock.calls.filter(([path])=>paths.has(path)).length;
+    f.update({delta:false,files,refusedFiles:[omitted]});
+    await f.supervisor.activate("w");
+    expect(preparations()).toBe(101);
+    const source={currentReadView:()=>({view:f.supervisor.currentReadView("w")!.view})};
+    expect(f.storage.listReplicaCurrentViewFiles(f.input,source)).toMatchObject({status:"ready",files:expect.arrayContaining([expect.objectContaining({path:files[0]!.path}),expect.objectContaining({path:omitted.path,status:"updating"})])});
+    expect(preparations()).toBe(101);
+  } finally {vi.restoreAllMocks();await f.supervisor.close();}
+});
+it("clears History observations after a successful fence-adjusted save",async()=>{
+  const f=await fixture(2),original=f.storage.storeReplicaCurrentView.bind(f.storage);
+  try {
+    vi.useFakeTimers({toFake:["Date"]});vi.setSystemTime(1000);
+    const save=vi.spyOn(f.storage,"storeReplicaCurrentView").mockImplementationOnce((lease,view,observations)=>original(lease,{...view,files:view.files.slice(1)},observations));
+    const first={...f.files[0]!,path:"docs/first.md"};
+    f.update({files:[first]});await f.supervisor.activate("w");
+    expect(save).toHaveBeenCalledTimes(1);
+    vi.setSystemTime(2000);
+    f.update({delta:false,files:[{...first,path:"docs/second.md"},f.files[1]!]});await f.supervisor.activate("w");
+    expect(save).toHaveBeenCalledTimes(2);
+    expect(save.mock.calls[1]![2]).toEqual(expect.arrayContaining([expect.objectContaining({objectId:first.objectId,firstChangedAtMs:2000,changedAtMs:2000})]));
+  } finally {vi.restoreAllMocks();await f.supervisor.close();}
+});
 it("does not reload the stored manifest after a lazy restart header advance",async()=>{
   const f=await fixture(3);
   try {
