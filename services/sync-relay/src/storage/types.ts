@@ -789,6 +789,7 @@ export interface SyncRelayStorage {
   replicaCurrentViewSelectors(workspaceId: string): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentViewSelector[];
   stageReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease, view: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView, observations?: import("./replicaHistoryPins").ReplicaHistoryObservation[]): import("./replicaCurrentViews").StagedCurrentView;
   flipReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease, staged: import("./replicaCurrentViews").StagedCurrentView): void;
+  /** Supervisor only. The caller must prove that the stored files and omissions equal this view. */
   advanceReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease, view: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView, previous: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView;
   storeReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease, view: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView, observations?: import("./replicaHistoryPins").ReplicaHistoryObservation[]): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView;
   nextReplicaHistoryPinAt(workspaceId: string): number | null;
