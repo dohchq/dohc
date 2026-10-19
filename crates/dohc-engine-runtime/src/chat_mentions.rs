@@ -69,7 +69,10 @@ fn decode(
     let bytes = open(cursor_key()?, ws, PURPOSE, &sealed).map_err(|_| invalid())?;
     let (format, v, s, a, pos): (u8, String, Value, String, Position) =
         serde_json::from_slice(bytes.as_bytes()).map_err(|_| invalid())?;
-    if format != 1 || v != version || s != *subject || a != scope || pos.phase > 1 {
+    if a != scope {
+        return Err(StorageError::InvalidInput { reason: "Chat access changed. Try again." }.into());
+    }
+    if format != 1 || v != version || s != *subject || pos.phase > 1 {
         return Err(invalid());
     }
     Ok(pos)
@@ -107,6 +110,61 @@ fn window_sql(column: &str, after: bool) -> String {
     )
 }
 
+fn raw_window(
+    c: &rusqlite::Connection,
+    ws: &str,
+    subject: &Value,
+    after: &Position,
+    token: &CancellationToken,
+) -> Result<(Vec<(Attachment, Position)>, bool), RuntimeError> {
+    let mut pos = after.clone();
+    let mut window = Vec::new();
+    while pos.phase < 2 {
+        if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
+        let column = if pos.phase == 0 { "object_id" } else { "path_hint" };
+        let subject_key = if pos.phase == 0 { subject["objectId"].as_str() } else { subject["path"].as_str() };
+        if pos.finished {
+            let key: Option<String> = if let Some(key) = subject_key {
+                if pos.key.is_empty() { Some(key.into()) } else { None }
+            } else {
+                c.query_row(&next_key_sql(column), params![ws,pos.key], |r| r.get(0))
+                    .optional().map_err(|_| invalid())?
+            };
+            let Some(key) = key else {
+                pos.phase += 1;
+                pos.key.clear();
+                pos.id.clear();
+                continue;
+            };
+            pos.key = key;
+            pos.id.clear();
+            pos.time = i64::MAX;
+            pos.finished = false;
+        }
+        let sql = window_sql(column, !pos.id.is_empty());
+        let mut stmt = c.prepare_cached(&sql).map_err(|_| invalid())?;
+        let map = |r: &rusqlite::Row<'_>| Ok(Attachment {
+            id:r.get(0)?,thread:r.get(1)?,message:r.get(2)?,object:r.get(3)?,path:r.get(4)?,
+            heading:r.get(5)?,anchor:r.get(6)?,occurrence:r.get(7)?,time:r.get(8)?,
+        });
+        let limit = (WORK - window.len() + 1) as i64;
+        let rows = if pos.id.is_empty() {
+            stmt.query_map(params![ws,pos.key,limit],map)
+        } else {
+            stmt.query_map(params![ws,pos.key,limit,pos.time,pos.id],map)
+        }.map_err(|_| invalid())?.collect::<Result<Vec<_>,_>>().map_err(|_| invalid())?;
+        let count = rows.len();
+        for row in rows {
+            if window.len() == WORK { return Ok((window, true)); }
+            pos.time = row.time;
+            pos.id = row.id.clone();
+            window.push((row, pos.clone()));
+        }
+        if count < limit as usize { pos.finished = true; }
+    }
+    Ok((window, false))
+}
+
 impl ActorHandle {
     /// Each page visits at most 512 raw attachments, before filtering or hydration.
     pub async fn chat_file_mentions_page(
@@ -139,88 +197,41 @@ impl ActorHandle {
                 let mut page = json!({"versionId":version,"subject":subject,"entries":[],"unchecked":[],
                     "complete":!pos.incomplete,"indexBuilding":false,"mountsCovered":true,
                     "sharedChannelRowsUncovered":pos.uncovered,"nextCursor":null});
-                let mut examined = 0;
+                let (rows, mut more) = raw_window(c, &ws, &subject, &pos, &token)?;
+                // Reserve the longest possible continuation in this bounded window.
+                // Base64 adds four bytes per three plaintext bytes. The fixed allowance
+                // covers IV, tag, length and the escaped JSON envelope without sealing.
+                let cursor_bytes = std::iter::once(&pos).chain(rows.iter().map(|(_, next)| next))
+                    .map(|next| serde_json::to_vec(&(1, &version, &subject, &scope, next))
+                        .map(|bytes| bytes.len()).map_err(|_| invalid()))
+                    .collect::<Result<Vec<_>, _>>()?.into_iter().max().unwrap_or(0)
+                    .div_ceil(3) * 4 + 256;
+                let mut bytes = page.to_string().len() + cursor_bytes;
                 let mut records = 0;
-                let mut more = false;
-                'phases: while pos.phase < 2 {
-                    let column = if pos.phase == 0 { "object_id" } else { "path_hint" };
-                    let subject_key = if pos.phase == 0 { subject["objectId"].as_str() } else { subject["path"].as_str() };
-                    if pos.finished {
-                        let key: Option<String> = if let Some(key) = subject_key {
-                            if pos.key.is_empty() { Some(key.into()) } else { None }
-                        } else {
-                            c.query_row(&next_key_sql(column),
-                                params![ws,pos.key], |r| r.get(0)).optional().map_err(|_| invalid())?
-                        };
-                        let Some(key) = key else {
-                            pos.phase += 1;
-                            pos.key.clear();
-                            pos.id.clear();
-                            pos.finished = true;
-                            continue;
-                        };
-                        let mut key_pos = pos.clone();
-                        key_pos.key = key;
-                        key_pos.id.clear();
-                        key_pos.time = i64::MAX;
-                        key_pos.finished = false;
-                        let reserve = encode(&ws,&version,&subject,&scope,&key_pos)?;
-                        if page.to_string().len() + json!(reserve).to_string().len() + 16 > BYTES {
+                for (row, next) in rows {
+                    if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
+                    // Path windows include object-backed rows, which must not emit twice.
+                    if next.phase == 1 && row.object.is_some() { pos = next; continue; }
+                    let file: Option<(String,String)> = if let Some(object) = &row.object {
+                        c.query_row("SELECT object_id,path FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 ORDER BY path LIMIT 1",
+                            params![ws,version,object], |r| Ok((r.get(0)?,r.get(1)?))).optional().map_err(|_| invalid())?
+                    } else if let Some(path) = &row.path {
+                        c.query_row("SELECT object_id,path FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND path=?3",
+                            params![ws,version,path], |r| Ok((r.get(0)?,r.get(1)?))).optional().map_err(|_| invalid())?
+                    } else { None };
+                    let Some((object,path)) = file else { pos = next; continue; };
+                    if let Some(entry) = compact_entry(c, &ws, &row, &object, &path)? {
+                        let size = entry.to_string().len() + 1;
+                        if records == RECORDS || bytes + size > BYTES {
+                            if records == 0 { return Err(invalid()); }
                             more = true;
-                            break 'phases;
+                            break;
                         }
-                        pos = key_pos;
+                        bytes += size;
+                        page["entries"].as_array_mut().expect("entries").push(entry);
+                        records += 1;
                     }
-                    let sql = window_sql(column, !pos.id.is_empty());
-                    let mut stmt = c.prepare_cached(&sql).map_err(|_| invalid())?;
-                    let map = |r: &rusqlite::Row<'_>| Ok(Attachment {
-                        id:r.get(0)?,thread:r.get(1)?,message:r.get(2)?,object:r.get(3)?,path:r.get(4)?,
-                        heading:r.get(5)?,anchor:r.get(6)?,occurrence:r.get(7)?,time:r.get(8)?,
-                    });
-                    let limit = (WORK - examined + 1) as i64;
-                    let rows = if pos.id.is_empty() {
-                        stmt.query_map(params![ws,pos.key,limit],map)
-                    } else {
-                        stmt.query_map(params![ws,pos.key,limit,pos.time,pos.id],map)
-                    }.map_err(|_| invalid())?.collect::<Result<Vec<_>,_>>().map_err(|_| invalid())?;
-                    let count = rows.len();
-                    for row in rows {
-                        if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
-                        if examined == WORK { more = true; break 'phases; }
-                        examined += 1;
-                        let mut next = pos.clone();
-                        next.time = row.time;
-                        next.id = row.id.clone();
-                        let reserve = encode(&ws,&version,&subject,&scope,&next)?;
-                        // Filtered rows can enlarge the continuation too.
-                        if page.to_string().len() + json!(&reserve).to_string().len() + 16 > BYTES {
-                            more = true;
-                            break 'phases;
-                        }
-                        // Path windows include object-backed rows, which must not emit twice.
-                        if pos.phase == 1 && row.object.is_some() { pos = next; continue; }
-                        let file: Option<(String,String)> = if let Some(object) = &row.object {
-                            c.query_row("SELECT object_id,path FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 ORDER BY path LIMIT 1",
-                                params![ws,version,object], |r| Ok((r.get(0)?,r.get(1)?))).optional().map_err(|_| invalid())?
-                        } else if let Some(path) = &row.path {
-                            c.query_row("SELECT object_id,path FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND path=?3",
-                                params![ws,version,path], |r| Ok((r.get(0)?,r.get(1)?))).optional().map_err(|_| invalid())?
-                        } else { None };
-                        let Some((object,path)) = file else { pos = next; continue; };
-                        let entry = compact_entry(c, &ws, &row, &object, &path)?;
-                        if let Some(entry) = entry {
-                            let bytes = page.to_string().len() + entry.to_string().len() + json!(reserve).to_string().len() + 16;
-                            if records == RECORDS || bytes > BYTES {
-                                if records == 0 { return Err(invalid()); }
-                                more = true;
-                                break 'phases;
-                            }
-                            page["entries"].as_array_mut().expect("entries").push(entry);
-                            records += 1;
-                        }
-                        pos = next;
-                    }
-                    if count < limit as usize { pos.finished = true; }
+                    pos = next;
                 }
                 if more { page["nextCursor"] = json!(encode(&ws,&version,&subject,&scope,&pos)?); }
                 transaction.commit().map_err(|_| invalid())?;

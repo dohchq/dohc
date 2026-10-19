@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { ChatFileMentionsInput, ChatFileMentionsPage } from "@dohc/workspace-contracts/chat-file-mentions";
+import { ChatFileMentionsInput, type ChatFileMentionsPage } from "@dohc/workspace-contracts/chat-file-mentions";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import type { ChatScope } from "../ipc/chatScope";
@@ -18,36 +18,49 @@ export function createChatFileMentionsReader(deps: {
   ])).digest("hex");
   return async (workspaceId: string, input: ChatFileMentionsInput, assertCurrent: () => void = () => {}): Promise<ChatFileMentionsPage> => {
     const parsed = ChatFileMentionsInput.parse(input);
-    const scope = await deps.requireChatScope(workspaceId);
-    assertCurrent();
-    const workspace = scope.workspace;
-    const key = binding(workspace);
-    const check = () => {
+    let uncovered = 0;
+    for (let attempt = 0; ; attempt++) {
+      const scope = await deps.requireChatScope(workspaceId);
       assertCurrent();
-      const current = deps.readWorkspace(workspaceId);
-      if (!current || binding(current) !== key) throw new Error("Chat access changed. Try again.");
-    };
-    check();
-    // A received view reads its projected store. It never opens owner capture or sync.
-    const uncovered = scope.kind === "workspace" ? await deps.syncWorkspaceSharedChannels(workspaceId) : 0;
-    check();
-    const read = async () => {
+      const workspace = scope.workspace;
+      const key = binding(workspace);
+      const check = () => {
+        assertCurrent();
+        const current = deps.readWorkspace(workspaceId);
+        if (!current || binding(current) !== key) throw new Error("Chat access changed. Try again.");
+      };
       check();
-      const page = await scope.store.fileMentionsPage({
-        workspaceId, ...parsed, scope: key, sharedChannelRowsUncovered: uncovered,
-      });
+      // Continuations retain coverage in the sealed cursor. Received views never sync owner channels.
+      if (scope.kind === "workspace" && !parsed.cursor && attempt === 0) {
+        uncovered = await deps.syncWorkspaceSharedChannels(workspaceId);
+        assertCurrent();
+        const current = deps.readWorkspace(workspaceId);
+        // Sync can end a channel. Reacquire authority once before reading its new scope.
+        if (current && binding(current) !== key) continue;
+      }
       check();
-      const selector = recordedShareSelector(workspace.shareView?.grantedSelector);
-      const visible = (path: string) => classifyEngineFilePath(path).kind === "tracked" &&
-        (scope.kind === "workspace" || (selector !== null && visibleSharePath(selector, path) !== null));
-      if (!page || (page.subject && !visible(page.subject.path))) return null;
-      return ChatFileMentionsPage.parse({
-        ...page,
-        entries: page.entries.filter(row => visible(row.attachment.pathHint)),
-        unchecked: page.unchecked.filter(visible),
-        mountsCovered: !workspace.shareMounts?.length,
-      });
-    };
-    return scope.kind === "share" ? scope.withAuthority(read) : read();
+      const read = async (): Promise<ChatFileMentionsPage> => {
+        check();
+        const page = await scope.store.fileMentionsPage({
+          workspaceId, ...parsed, scope: key, sharedChannelRowsUncovered: uncovered,
+        });
+        check();
+        const selector = recordedShareSelector(workspace.shareView?.grantedSelector);
+        const visible = (path: string) => classifyEngineFilePath(path).kind === "tracked" &&
+          (scope.kind === "workspace" || (selector !== null && visibleSharePath(selector, path) !== null));
+        if (!page || (page.subject && !visible(page.subject.path))) return null;
+        return {
+          ...page,
+          entries: page.entries.filter(row => visible(row.attachment.pathHint)).map(row => {
+            if (scope.kind === "workspace") return row;
+            const { channelName: _name, channelSlug: _slug, channelWireId: _wire, ...shared } = row;
+            return shared;
+          }),
+          unchecked: page.unchecked.filter(visible),
+          mountsCovered: !workspace.shareMounts?.length,
+        };
+      };
+      return scope.kind === "share" ? scope.withAuthority(read) : read();
+    }
   };
 }

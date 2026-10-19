@@ -22,7 +22,7 @@ function harness(kind: "workspace" | "share" = "workspace") {
   const fileMentionsPage = vi.fn(async () => page());
   const withAuthority = vi.fn(async (work: () => Promise<unknown>) => work());
   const scope = { kind, workspace, store: { fileMentionsPage }, withAuthority, access: "view" } as unknown as ChatScope;
-  const requireChatScope = vi.fn(async () => scope);
+  const requireChatScope = vi.fn(async () => ({ ...scope, workspace }));
   const sync = vi.fn(async () => 0);
   const read = createChatFileMentionsReader({ requireChatScope, syncWorkspaceSharedChannels: sync,
     readWorkspace: () => workspace, principalGeneration: () => generation });
@@ -35,13 +35,15 @@ describe("chat mention page authority", () => {
   it("requires chat authority and reads one page, preserving continuation and uncovered coverage", async () => {
     const h = harness();
     h.sync.mockResolvedValue(7);
-    const result = await h.read("w", {cursor:"previous"});
+    const result = await h.read("w", {});
+    await h.read("w", {cursor:"previous"});
     expect(h.requireChatScope).toHaveBeenCalledWith("w");
     expect(h.sync).toHaveBeenCalledOnce();
-    expect(h.fileMentionsPage).toHaveBeenCalledOnce();
+    expect(h.fileMentionsPage).toHaveBeenCalledTimes(2);
     expect(h.fileMentionsPage).toHaveBeenCalledWith(expect.objectContaining({
-      workspaceId:"w",cursor:"previous",sharedChannelRowsUncovered:7,scope:expect.stringMatching(/^[a-f0-9]{64}$/),
+      workspaceId:"w",sharedChannelRowsUncovered:7,scope:expect.stringMatching(/^[a-f0-9]{64}$/),
     }));
+    expect(h.fileMentionsPage).toHaveBeenLastCalledWith(expect.objectContaining({cursor:"previous",sharedChannelRowsUncovered:0}));
     expect(result?.nextCursor).toBe("opaque");
   });
   it("never reads the store without the Chats capability", async () => {
@@ -53,23 +55,29 @@ describe("chat mention page authority", () => {
   });
   it("uses only the projected share store and hides out-of-selector and reserved identities", async () => {
     const h = harness("share");
-    h.fileMentionsPage.mockResolvedValue(page(["notes/a.md","private/b.md",".dohc/secret"]));
+    const projected = page(["notes/a.md","private/b.md",".dohc/secret"]);
+    projected.entries[0] = {...projected.entries[0]!,channelId:"local",channelKind:"channel",channelName:"Private name",channelSlug:"private",channelWireId:"secret-wire"};
+    h.fileMentionsPage.mockResolvedValue(projected);
     const result = await h.read("w",{});
     expect(h.sync).not.toHaveBeenCalled();
     expect(h.withAuthority).toHaveBeenCalledOnce();
     expect(result?.entries.map(row=>row.attachment.pathHint)).toEqual(["notes/a.md"]);
-    expect(result?.unchecked).toEqual(["notes/a.md"]);
+    expect(result?.entries[0]).toMatchObject({channelId:"local",channelKind:"channel"});
+    for (const field of ["channelName","channelSlug","channelWireId"]) expect(result?.entries[0]).not.toHaveProperty(field);
   });
-  it("refuses authority changed during channel sync before reading any rows", async () => {
+  it("reacquires authority once when synchronization ends a channel", async () => {
     const h = harness();
     const pending = deferred<number>();
     h.sync.mockReturnValue(pending.promise);
     const result = h.read("w",{});
     await vi.waitFor(()=>expect(h.sync).toHaveBeenCalled());
-    h.changePrincipal();
-    pending.resolve(0);
-    await expect(result).rejects.toThrow("Chat access changed");
-    expect(h.fileMentionsPage).not.toHaveBeenCalled();
+    h.change({sharedChannels:[{shareId:"ended",ended:true} as NonNullable<RegistryEntry["sharedChannels"]>[number]]});
+    pending.resolve(3);
+    await expect(result).resolves.toMatchObject({nextCursor:"opaque"});
+    expect(h.requireChatScope).toHaveBeenCalledTimes(2);
+    expect(h.sync).toHaveBeenCalledOnce();
+    expect(h.fileMentionsPage).toHaveBeenCalledOnce();
+    expect(h.fileMentionsPage).toHaveBeenCalledWith(expect.objectContaining({sharedChannelRowsUncovered:3}));
   });
   it.each(["root","principal","membership"] as const)("discards rows when %s changes during the page read", async change => {
     const h = harness();

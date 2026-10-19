@@ -1887,7 +1887,8 @@ export type ChatMessageRecord = z.infer<typeof ChatMessageRecord>;
 export const ChatFileMentionsPagePayload = ChatFileMentionsInput.extend({ workspaceId: WORKSPACE_ID });
 export const ChatFileMentionRecord = ChatFileMentionEntry;
 export type ChatFileMentionRecord = z.infer<typeof ChatFileMentionRecord>;
-export const ChatFileMentionsPageResult = ChatFileMentionsPage;
+// The engine adapter validates each page before the reader applies authority filtering.
+export const ChatFileMentionsPageResult = z.custom<z.infer<typeof ChatFileMentionsPage>>();
 
 const CHAT_BOOKMARK_RECORD_BASE = z.object({
   bookmarkId: OPAQUE_ID,

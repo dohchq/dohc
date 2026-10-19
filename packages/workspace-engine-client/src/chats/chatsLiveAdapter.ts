@@ -1,4 +1,4 @@
-import { ChatFileMentionsPage, type ChatFileMentionsEngineInput } from "@dohc/workspace-contracts/chat-file-mentions";
+import type { ChatFileMentionsPage, ChatFileMentionsEngineInput } from "@dohc/workspace-contracts/chat-file-mentions";
 import { randomUUID } from "node:crypto";
 import {
   WorkspaceDaemonRequester,
@@ -480,7 +480,7 @@ export class ChatsLiveAdapter {
   async fileMentionsPage(input: ChatFileMentionsEngineInput): Promise<ChatFileMentionsPage> {
     this.assertWorkspace(input.workspaceId);
     const { workspaceId: _workspaceId, ...params } = input;
-    return ChatFileMentionsPage.parse(await this.requester.request(CHATS_METHOD.attachmentsListFileMentions, params, { workspace: this.workspace }));
+    return this.request(CHATS_METHOD.attachmentsListFileMentions, params);
   }
 
   async markThreadReadByAgent(input: {

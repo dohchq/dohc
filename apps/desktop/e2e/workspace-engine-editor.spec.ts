@@ -348,7 +348,7 @@ test("@restart-durability-capture-before-reopen kept typing survives capture bef
       const api = (window as unknown as { dohcDesktop: {
         chatFileMentionsPage(input: { workspaceId: string; path: string }): Promise<unknown>;
       } }).dohcDesktop;
-      await api.chatFileMentionsPage({ workspaceId, path });
+      await api.chatFileMentionsPage({ workspaceId, subject: { path } });
     }, { workspaceId: workspace.workspaceId, path });
     await expect(desktop.page.getByTestId("markdown-editor")).toHaveCount(0);
     await openEngineDoc(desktop.page, path);

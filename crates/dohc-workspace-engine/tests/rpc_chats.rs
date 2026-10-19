@@ -997,6 +997,7 @@ async fn file_mentions_are_compact_bounded_sealed_and_continue_beyond_2000() {
     let mut all = Vec::new();
     let mut next = first["nextCursor"].as_str().map(str::to_owned);
     while let Some(cursor) = next {
+        params["sharedChannelRowsUncovered"] = json!(0);
         params["cursor"] = json!(cursor);
         let page = call(
             &transport,
@@ -1009,6 +1010,7 @@ async fn file_mentions_are_compact_bounded_sealed_and_continue_beyond_2000() {
         assert!(page.to_string().len() <= 64 * 1024);
         assert!(page["entries"].as_array().unwrap().len() <= 100);
         assert_eq!(page["complete"], json!(false));
+        assert_eq!(page["sharedChannelRowsUncovered"], json!(3));
         all.extend(page["entries"].as_array().unwrap().iter().cloned());
         next = page["nextCursor"].as_str().map(str::to_owned);
     }

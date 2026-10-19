@@ -1,3 +1,4 @@
+import * as graphData from "./graphData";
 // @vitest-environment jsdom
 import {
   act,
@@ -792,6 +793,7 @@ function stubFileGraph(mock: { linksEdges: (...args: never[]) => Promise<GraphFi
 }
 
 it("paints the first chat page, continues once, and deduplicates attachments across pages", async()=>{
+  const overlay = vi.spyOn(graphData, "withChatMentions");
   const later=deferred<unknown>();
   const row=(id:string,title:string)=>({attachment:{attachmentId:id,objectId:"a.md",pathHint:"a.md"},thread:{id,title}} as ChatFileMentionRecord);
   const first=row("one","First discussion"), second=row("two","Second discussion");
@@ -807,6 +809,8 @@ it("paints the first chat page, continues once, and deduplicates attachments acr
   await act(async()=>later.resolve({entries:[first,second],nextCursor:null}));
   await screen.findAllByText("Second discussion");
   expect(screen.getByTestId("graph-link-count").textContent).toBe("2 links");
+  expect(overlay.mock.lastCall?.[1]).toHaveLength(2);
+  overlay.mockRestore();
   expect(screen.queryByText("Gathering linked mentions")).toBeNull();
 });
 it("discards a continuation after the chat toggle is disabled",async()=>{
@@ -821,4 +825,27 @@ it("discards a continuation after the chat toggle is disabled",async()=>{
   await act(async()=>later.resolve({entries:[{attachment:{attachmentId:"late",objectId:"a.md",pathHint:"a.md"},thread:{id:"late",title:"Late discussion"}}],nextCursor:"third"}));
   expect(screen.queryByText("Late discussion")).toBeNull();
   expect(chatFileMentionsPage).toHaveBeenCalledTimes(2);
+});
+
+it("clears chat rows on access changes, restarts once, then reports a repeated change", async () => {
+  const changed = deferred<unknown>(), restarted = deferred<unknown>();
+  const row = { attachment: { attachmentId: "old", objectId: "a.md", pathHint: "a.md" }, thread: { id: "old", title: "Old access" } };
+  const chatFileMentionsPage = vi.fn().mockResolvedValueOnce({entries:[row],nextCursor:"old-cursor"})
+    .mockReturnValueOnce(changed.promise).mockReturnValueOnce(restarted.promise);
+  const onError = vi.fn();
+  vi.stubGlobal("dohcDesktop",{linksEdges:vi.fn(async()=>page("a.md")),chatFileMentionsPage});
+  render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" onOpenPath={vi.fn()} onError={onError} chatMentionsAvailable/>);
+  await screen.findAllByText("a.md");
+  fireEvent.click(screen.getByTestId("graph-chat-mentions-toggle"));
+  await screen.findAllByText("Old access");
+  await waitFor(()=>expect(chatFileMentionsPage).toHaveBeenCalledTimes(2));
+  await act(async()=>changed.reject(new Error("Chat access changed. Try again.")));
+  await waitFor(()=>expect(chatFileMentionsPage).toHaveBeenCalledTimes(3));
+  expect(chatFileMentionsPage.mock.calls[2]![0]).toEqual({workspaceId:"ws"});
+  expect(screen.queryByText("Old access")).toBeNull();
+  expect(onError).not.toHaveBeenCalled();
+  await act(async()=>restarted.reject(new Error("Chat access changed. Try again.")));
+  expect(onError).toHaveBeenCalledOnce();
+  expect(chatFileMentionsPage).toHaveBeenCalledTimes(3);
+  expect(screen.getAllByText("a.md").length).toBeGreaterThan(0);
 });

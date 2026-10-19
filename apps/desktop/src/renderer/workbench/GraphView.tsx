@@ -777,7 +777,7 @@ export function GraphView(props: {
   reportError.current = props.onError;
   const [walking, setWalking] = useState(true);
   const completedRequest = useRef<typeof requestIdentity | null>(null);
-  const [chatRows, setChatRows] = useState<{ workspaceId: string; rows: ChatFileMentionRecord[]; complete: boolean; indexBuilding: boolean; mountsCovered: boolean; unchecked: string[] } | null>(null);
+  const [chatRows, setChatRows] = useState<{ workspaceId: string; rows: ChatFileMentionRecord[]; complete: boolean; mountsCovered: boolean } | null>(null);
   const [chatWalking, setChatWalking] = useState(false);
   useEffect(() => {
     let active = true;
@@ -853,37 +853,39 @@ export function GraphView(props: {
     if (walking || completedRequest.current !== requestIdentity) return;
     const current = () => active && requestIdentityRef.current === requestIdentity;
     const retry = () => { if (requestIdentityRef.current === requestIdentity) load(); };
-    const retained = chatRows?.workspaceId === props.workspaceId && chatRows.rows.length > 0;
-    let retries = 0;
+    let retained = chatRows?.workspaceId === props.workspaceId && chatRows.rows.length > 0;
+    let restarted = false;
     setChatWalking(true);
     const walk = async () => {
       const rows = new Map<string, ChatFileMentionRecord>();
-      const unchecked = new Set<string>();
-      let complete = true, indexBuilding = false, mountsCovered = true;
+      let complete = true, mountsCovered = true;
       let cursor: string | undefined;
       try {
         do {
           const page = await bridge().chatFileMentionsPage({ workspaceId: props.workspaceId, ...(cursor ? { cursor } : {}) });
           if (!current()) return;
           for (const row of page?.entries ?? []) rows.set(row.attachment.attachmentId, row);
-          for (const path of page?.unchecked ?? []) unchecked.add(path);
           complete &&= page?.complete ?? true;
-          indexBuilding ||= page?.indexBuilding ?? false;
           mountsCovered &&= page?.mountsCovered ?? true;
           cursor = page?.nextCursor ?? undefined;
           if (!retained || !cursor) setChatRows({ workspaceId: props.workspaceId, rows: [...rows.values()],
-            complete, indexBuilding, mountsCovered, unchecked: [...unchecked] });
+            complete, mountsCovered });
           if (cursor) await new Promise<void>(resolve => {
             resumePaint = resolve;
             frame = requestAnimationFrame(() => { timer = setTimeout(resolve, 0); });
           });
           if (!current()) return;
         } while (cursor);
-        if (indexBuilding && retries < 5) {
-          timer = setTimeout(() => { retries++; void walk(); }, Math.min(250 * 2 ** retries, 8000));
-        } else { setChatWalking(false); }
+        setChatWalking(false);
       } catch (error) {
-        if (current()) { setChatWalking(false); reportError.current?.("dohc could not load chat mentions.", error, retry); }
+        if (!current()) return;
+        if (ipcErrorMessage(error, "").includes("Chat access changed")) {
+          setChatRows(null);
+          retained = false;
+          if (!restarted) { restarted = true; void walk(); return; }
+        }
+        setChatWalking(false);
+        reportError.current?.("dohc could not load chat mentions.", error, retry);
       }
     };
     void walk();
@@ -904,8 +906,7 @@ export function GraphView(props: {
   const baseGraph = scopedState.graph ?? EMPTY_GRAPH;
   const graph = useMemo(() => chatMentionsEnabled && chatRows?.workspaceId === props.workspaceId
     ? { ...withChatMentions(baseGraph, chatRows.rows), complete: baseGraph.complete && chatRows.complete,
-      indexBuilding: baseGraph.indexBuilding || chatRows.indexBuilding, mountsCovered: baseGraph.mountsCovered && chatRows.mountsCovered,
-      unchecked: [...new Set([...baseGraph.unchecked, ...chatRows.unchecked])] } : baseGraph, [baseGraph, chatRows, chatMentionsEnabled, props.workspaceId]);
+      mountsCovered: baseGraph.mountsCovered && chatRows.mountsCovered } : baseGraph, [baseGraph, chatRows, chatMentionsEnabled, props.workspaceId]);
   const rows = useMemo(
     () => visibleGraphNodes(graph, props.activePath, variant),
     [graph, props.activePath, variant],

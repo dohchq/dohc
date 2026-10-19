@@ -1547,11 +1547,8 @@ describe("shared view chats surface", () => {
     expect(screen.getByTestId("about-rail")).toBeTruthy();
   });
 
-  // The last ungated chat call. Linked mentions ride on every markdown open
-  // and every window refocus, and `chatFileMentionsPage` goes through
-  // requireEngineCapture like every other Chats call — so a shared view was
-  // still issuing one refused call per file open. Its own `.catch` swallowed
-  // the refusal, which is exactly why nothing caught it.
+  // This shell does not expose Chats for received views. The page reader can
+  // read projected share rows, but opening a file must not request them here.
   it("asks for no chat mentions when a shared view opens a file", async () => {
     const bridge = makeShareBridge(Promise.resolve(STORED_STATE));
     renderShell(bridge, SHARE_VIEW);
@@ -1615,9 +1612,8 @@ describe("chats surface after a failed capture build", () => {
     historyRecordingUnavailable: true,
   };
 
-  // Main's real answers once the capture build failed: every Chats call goes
-  // through requireEngineCapture, which has no capture to hand it. The stored
-  // layout shows the Chats view on the left and About on the right.
+  // Owned-workspace chat reads need a working capture. The stored layout
+  // shows the Chats view on the left and About on the right.
   function makeFailedCaptureBridge() {
     const bridge = makeBridge(Promise.resolve(STORED_CHATS_STATE));
     bridge.openWorkspace = vi.fn(async () => FAILED_STATUS);
@@ -1675,10 +1671,8 @@ describe("chats surface after a failed capture build", () => {
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
-  // The linked-mentions panel rides every markdown open, and
-  // chatFileMentionsPage goes through requireEngineCapture like every other
-  // Chats call. Its own `.catch` swallows the refusal, which is why nothing
-  // caught it (the last ungated call, from the other cause).
+  // An owned workspace with failed capture must not request chat pages when
+  // a file opens. File links remain available independently.
   it("asks for no chat mentions when a file opens", async () => {
     const bridge = makeFailedCaptureBridge();
     renderShell(bridge);

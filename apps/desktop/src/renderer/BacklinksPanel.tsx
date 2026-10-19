@@ -4,6 +4,7 @@ import type {
   ChatFileMentionRecord,
 } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
+import { ipcErrorMessage } from "./ipcError";
 import { Ref } from "./ui/Ref";
 
 import type { LinksInResult } from "@dohc/workspace-contracts/links";
@@ -186,47 +187,45 @@ export function BacklinksPanel(props: {
     return () => { active = false; clearTimeout(timer); };
   }, [chatMentionsAvailable, workspaceId, path, refreshKey, focusNonce]);
 
-  const [chatWalkInFlight, setChatWalkInFlight] = useState(false);
   useEffect(() => {
     let active = true;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let retries = 0;
-    if (!chatMentionsAvailable) { setChatWalkInFlight(false); return; }
+    if (!chatMentionsAvailable) return;
     const read = bridge().chatFileMentionsPage;
     if (typeof read !== "function") return;
-    setChatWalkInFlight(true);
-    const retained = loadedChats?.workspaceId === workspaceId && loadedChats.path === path && loadedChats.mentions.length > 0;
+    let retained = loadedChats?.workspaceId === workspaceId && loadedChats.path === path && loadedChats.mentions.length > 0;
+    let restarted = false;
     const retry = () => {
       if (currentDocument.current?.workspaceId === workspaceId && currentDocument.current.path === path)
         setFocusNonce(nonce => nonce + 1);
     };
     const walk = async () => {
       let cursor: string | undefined;
-      let indexBuilding = false;
       const mentions = new Map<string, ChatFileMentionRecord>();
       try {
         do {
           const page = await read({ workspaceId, subject: { path }, ...(cursor ? { cursor } : {}) });
           if (!active) return;
           for (const row of page?.entries ?? []) mentions.set(row.attachment.attachmentId, row);
-          indexBuilding ||= page?.indexBuilding ?? false;
           cursor = page?.nextCursor ?? undefined;
           if (!retained || !cursor) setLoadedChats({ workspaceId, path, mentions: [...mentions.values()] });
         } while (cursor);
-        if (indexBuilding && retries < 5) {
-          timer = setTimeout(() => { retries++; void walk(); }, Math.min(250 * 2 ** retries, 8000));
-        } else { setChatWalkInFlight(false); }
       } catch (error) {
-        if (active) { setChatWalkInFlight(false); reportError.current?.("dohc could not load chat mentions.", error, retry); }
+        if (!active) return;
+        if (ipcErrorMessage(error, "").includes("Chat access changed")) {
+          setLoadedChats(null);
+          retained = false;
+          if (!restarted) { restarted = true; void walk(); return; }
+        }
+        reportError.current?.("dohc could not load chat mentions.", error, retry);
       }
     };
     void walk();
-    return () => { active = false; clearTimeout(timer); };
+    return () => { active = false; };
   }, [chatMentionsAvailable, workspaceId, path, refreshKey, focusNonce]);
 
   const linkedTotal = sources.reduce((sum, source) => sum + source.snippets.length, 0);
   const total = linkedTotal + chatMentions.length;
-  const isGathering = (current?.indexBuilding === true && walkInFlight) || chatWalkInFlight;
+  const isGathering = current?.indexBuilding === true && walkInFlight;
   if (total === 0 && !isGathering) return null;
 
   return (

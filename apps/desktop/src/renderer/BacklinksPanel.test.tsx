@@ -590,3 +590,33 @@ it("streams chat pages for one subject and discards a previous document's contin
   expect(screen.queryByText("Late preview")).toBeNull();
   expect(chatFileMentionsPage).toHaveBeenCalledTimes(3);
 });
+
+it("does not show gathering while an empty file's chat page is pending", async () => {
+  const pending = deferred<unknown>();
+  const chatFileMentionsPage = vi.fn().mockReturnValue(pending.promise);
+  vi.stubGlobal("dohcDesktop",{linksIn:vi.fn(async()=>linkQueryPage({sources:[]})),chatFileMentionsPage});
+  render(<BacklinksPanel workspaceId="ws" path="empty.md" chatMentionsAvailable/>);
+  await waitFor(()=>expect(chatFileMentionsPage).toHaveBeenCalledOnce());
+  expect(screen.queryByTestId("backlinks")).toBeNull();
+  expect(screen.queryByText("Gathering linked mentions")).toBeNull();
+  await act(async()=>pending.resolve({entries:[],nextCursor:null}));
+  expect(screen.queryByTestId("backlinks")).toBeNull();
+});
+it("clears stale chat rows and restarts once when access changes", async () => {
+  const changed = deferred<unknown>(), restarted = deferred<unknown>();
+  const row={attachment:{attachmentId:"a",threadId:"t",messageId:"m",pathHint:"target.md"},message:{id:"m",authorDisplayName:"Ada",preview:"Old access",createdAtMs:1},thread:{id:"t",title:"Discussion"}};
+  const chatFileMentionsPage=vi.fn().mockResolvedValueOnce({entries:[row],nextCursor:"next"})
+    .mockReturnValueOnce(changed.promise).mockReturnValueOnce(restarted.promise);
+  const onError=vi.fn();
+  vi.stubGlobal("dohcDesktop",{linksIn:vi.fn(async()=>linkQueryPage({sources:[]})),chatFileMentionsPage});
+  render(<BacklinksPanel workspaceId="ws" path="target.md" onError={onError} chatMentionsAvailable/>);
+  await screen.findByText("Old access");
+  await waitFor(()=>expect(chatFileMentionsPage).toHaveBeenCalledTimes(2));
+  await act(async()=>changed.reject(new Error("Chat access changed. Try again.")));
+  expect(chatFileMentionsPage.mock.calls[2]![0]).toEqual({workspaceId:"ws",subject:{path:"target.md"}});
+  expect(screen.queryByText("Old access")).toBeNull();
+  expect(onError).not.toHaveBeenCalled();
+  await act(async()=>restarted.reject(new Error("Chat access changed. Try again.")));
+  expect(onError).toHaveBeenCalledOnce();
+  expect(chatFileMentionsPage).toHaveBeenCalledTimes(3);
+});

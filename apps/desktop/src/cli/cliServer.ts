@@ -3455,7 +3455,7 @@ async function dispatchWorkspace(
   }
 }
 
-async function dispatchLinks(
+async function dispatchMentionAndLinkReads(
   request: Extract<CliRequest, { verb: "chatFileMentions" | "linksIn" | "linksResolve" | "linksEdges" }>,
   options: CliServerOptions,
 ): Promise<unknown> {
@@ -3573,7 +3573,7 @@ export async function handleCliRequestLine(
     const unvalidated = request.verb === "accountDeletePreview" || request.verb === "accountDelete"
       ? await dispatchAccount(request, options)
       : request.verb === "chatFileMentions" || request.verb === "linksEdges" || request.verb === "linksIn" || request.verb === "linksResolve"
-        ? await dispatchLinks(request, options)
+        ? await dispatchMentionAndLinkReads(request, options)
         : await dispatch(request, await workspaceContextForRequest(request, options), options, completion);
     const result = parseCliResult(parsed.data.verb, unvalidated);
     const response = cliTransportResponseSchema.parse({
