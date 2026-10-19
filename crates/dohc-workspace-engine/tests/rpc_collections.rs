@@ -4857,3 +4857,97 @@ async fn capture_authored_record_edit_keeps_the_agent_in_field_history() {
 async fn person_record_write_keeps_person_in_field_history() {
     assert_capture_authored_record_edit(true).await;
 }
+
+/// A watched workspace with an ordinary pull left unfinished. Capture still
+/// records a new record's file, but its Collections update finds the pull and
+/// changes nothing. Abandoning the pull on the open binding wakes capture, and
+/// the record binds without a relay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn capture_leaves_collections_to_an_unfinished_pull_until_it_is_abandoned() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    seed_schema(&scratch, "name: Tasks\nfields:\n  Title:\n    type: text\n");
+    let db = engine_db_path(&scratch).unwrap();
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "INSERT INTO sync_identity \
+             (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms,ordinary_pull_token) \
+             VALUES (?1,'local-origin','epoch','stream',1,'unfinished')",
+            [WORKSPACE_ID],
+        )
+        .unwrap();
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let params =
+        json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": WORKSPACE_ID });
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(1, "workspace.open", None, params.clone()),
+        )
+        .await
+        .expect("open watched workspace");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).unwrap();
+    let count = |query: &str| -> i64 {
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .query_row(query, [], |row| row.get(0))
+            .unwrap()
+    };
+    let bound = || count("SELECT COUNT(*) FROM collection_records WHERE file_path='tasks/a.md'");
+
+    write_file(
+        scratch.path(),
+        "tasks/a.md",
+        format!("---\nid: {RECORD_ID}\nTitle: First\n---\n").as_bytes(),
+    );
+    reconcile_capture(&transport, &handle, 10).await;
+    let status = call(&transport, &handle, 40, "capture.flush", json!({})).await;
+    assert_eq!(status["degraded"], false, "{status}");
+    assert_eq!(
+        count("SELECT COUNT(*) FROM snapshots WHERE path='tasks/a.md'"),
+        1,
+        "capture saved the file"
+    );
+    assert_eq!(bound(), 0, "the Collections update waits for the pull");
+    assert_eq!(
+        call(
+            &transport,
+            &handle,
+            41,
+            "sync.collectionsWaiting",
+            json!({})
+        )
+        .await,
+        json!({ "waiting": true })
+    );
+
+    let mut abandoning = params;
+    abandoning["abandonOrdinaryPull"] = json!(true);
+    let reopened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(42, "workspace.open", None, abandoning),
+        )
+        .await
+        .expect("abandon on the open binding");
+    assert_eq!(reopened.result["workspace"], json!(handle));
+    assert_eq!(
+        call(
+            &transport,
+            &handle,
+            43,
+            "sync.collectionsWaiting",
+            json!({})
+        )
+        .await,
+        json!({ "waiting": false })
+    );
+    let mut id = 50;
+    while bound() == 0 {
+        assert!(id < 90, "capture never ran the woken update");
+        call(&transport, &handle, id, "capture.flush", json!({})).await;
+        id += 1;
+    }
+}

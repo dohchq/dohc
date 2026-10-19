@@ -148,7 +148,7 @@ it.skipIf(engine.missing)("undoes a person's file through IPC and an agent's ren
       dispatchStore: createLiveAgentDispatchStore(workspace, sessions).store,
       fileObjectIdForPath: path => capture.fileObjectIdForPath(path), filePathForObjectId: async () => null,
       listMoments: async () => [], readMoment: async () => null,
-      daemonReads: { queryChatMessagesGranular: async () => ({ results: [], saturated: false }), listUnreadFileThreads: async () => [] },
+      daemonReads: { queryChatMessagesGranular: async () => ({ results: [], saturated: false }), listUnreadFileThreads: async () => [], collectionsWaiting: async () => false },
       deletePath: async () => { throw new Error("No delete expected"); },
       historyOperation: input => readWorkspaceHistoryOperation(operation, input, history),
       historyUndo: (input, origin) => undoWorkspaceHistoryOperation(operation, input, agentWriteAuthor(origin), { history, agent: true }),

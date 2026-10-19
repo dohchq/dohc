@@ -90,7 +90,12 @@ import { workspaceVersionHandlers } from "./ipc/workspaceVersionsIpc";
 import { createShareProposalsIpc } from "./ipc/shareProposalsIpc";
 import { createShareDirectWriteDelivery } from "./ipc/shareDirectWriteDelivery";
 import { registerSharedViewsIpcHandlers } from "./ipc/sharedViewsIpc";
-import { createWorkspaceSyncStop } from "./workspaces/stopWorkspaceSync";
+import {
+  createWorkspaceSyncStop,
+  reopenWithoutSync,
+  withWorkspaceSyncTransition,
+  type SyncPauseReopen,
+} from "./workspaces/stopWorkspaceSync";
 import { registerCloudIpcHandlers } from "./ipc/cloudIpc";
 import { createSharedChannelsIpc } from "./ipc/sharedChannelsIpc";
 import { createShareHandoffIpcHandlers } from "./ipc/shareHandoffIpc";
@@ -2294,6 +2299,11 @@ function engineForWorkspace(
       },
       recoverOrigin: () => daemonRelay.recoverOrigin(),
     },
+    // Workspace activity keeps the Collections wait, so it outlasts this
+    // engine when the person signs out.
+    afterPass: ({ failed }) =>
+      withWorkspaceAttachment(workspace, lease => workspaceActivity.syncPassEnded(canonicalWorkspaceFor(lease),
+        lease.state.activity, failed, () => daemonRelay.collectionsWaiting())) ?? Promise.resolve(false),
     capture,
     onChange: createRelayOnChange(workspace),
     // MU-C4: joined shared channels refresh on the same cadence as the
@@ -2400,6 +2410,11 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
     };
   },
   engineFor: engineForWorkspace,
+  collectionsWaitingFor: async workspace => {
+    const waiting = await withEngineAdapter(workspace, adapter => adapter.collectionsWaiting());
+    if (waiting === null) throw new Error("The workspace engine is not running.");
+    return waiting;
+  },
   // The engine capture gate (engineCaptureGate.ts) owns the shared-view rule:
   // main only states whether the workspace is one, and the decision
   // carries the cause.
@@ -2519,6 +2534,14 @@ const activity = {
     workspaceAuthorities.withAuthority(workspace.workspaceId, lease =>
       workspaceActivity.prepareSyncPause(canonicalWorkspaceFor(lease), lease.state.activity),
     ),
+  recordSyncPauseReopenFailed: (workspaceId: string): void =>
+    withWorkspaceActivityState(workspaceId, (lease, workspace) =>
+      workspaceActivity.recordSyncPauseReopenFailed(workspace, lease.state.activity),
+    ),
+  readCollectionsWaiting: (workspace: RegistryEntry): Promise<boolean> =>
+    workspaceAuthorities.withAuthority(workspace.workspaceId, lease =>
+      workspaceActivity.readCollectionsWaiting(canonicalWorkspaceFor(lease), lease.state.activity),
+    ),
   reconcileCloud: (): void => {
     for (const workspaceId of workspaceAuthorities.workspaceIds()) {
       withWorkspaceActivityState(workspaceId, (lease) =>
@@ -2575,14 +2598,27 @@ const activity = {
     );
   },
   // Starts the pass under the lease and waits for it outside, so a pass that
-  // waits on an unreachable server holds no workspace authority.
+  // waits on an unreachable server holds no workspace authority. After a
+  // pause there is no sync to retry: Try again repeats the reopen that ends
+  // the Collections wait.
   retryCloudSync: (
     workspaceId: string,
     reason: "person" | "reconnect",
-  ): Promise<void> =>
-    withWorkspaceActivityState(workspaceId, (lease) =>
+  ): Promise<void> => {
+    const reopen = withWorkspaceActivityState(workspaceId, (lease, workspace) =>
+      workspaceActivity.getStatus(workspace, lease.state.activity).collectionsWaitingForSync === "reopen");
+    if (reopen) {
+      if (reason !== "person") return Promise.resolve();
+      const workspace = requireWorkspace(workspaceId);
+      return withWorkspaceSyncTransition(workspaceId, () => desktopEngine.withOwnerHostPaused(async () => {
+        const { failure } = await reopenWithoutSync(syncPauseReopen, workspace);
+        if (failure) throw failure.error;
+      }));
+    }
+    return withWorkspaceActivityState(workspaceId, (lease) =>
       workspaceActivity.retryCloudSync(lease.state.activity, reason),
-    ),
+    );
+  },
   retryFileObservation: (workspaceId: string): Promise<void> =>
     withWorkspaceActivityState(workspaceId, lease => workspaceActivity.retryFileObservation(lease.state.activity)),
   syncNow: (workspaceId: string): Promise<void> =>
@@ -5975,19 +6011,25 @@ function pauseStatus(pause: WorkspaceSyncPause) {
   return workspaceSyncPauseStatus(pause, localInstallationId());
 }
 
+const syncPauseReopen: SyncPauseReopen = {
+  closeActivity: workspaceId => activity.close(workspaceId, { notify: false, preserveAgentRun: true }),
+  closeRelay: workspace => closeRelayTransportWorkspace(workspace),
+  openActivity: workspace => activity.open(workspace),
+  collectionsWaiting: workspace => activity.readCollectionsWaiting(workspace),
+  notify: workspaceId => notifyRenderer({ workspaceId }),
+};
+
 const stopWorkspaceSync = createWorkspaceSyncStop({
+  ...syncPauseReopen,
   person: async () => ({ kind: "person", personId: localInstallationId() }),
   pauseStatus,
   withOwnerHostPaused: work => desktopEngine.withOwnerHostPaused(work),
   prepare: workspace => activity.prepareSyncPause(workspace),
   resume: workspace => activity.enableCloud(workspace),
   pauseRemote: pauseWorkspaceRemote,
-  closeActivity: workspaceId => activity.close(workspaceId, { notify: false, preserveAgentRun: true }),
-  closeRelay: workspace => closeRelayTransportWorkspace(workspace),
-  openActivity: workspace => activity.open(workspace),
   status: workspaceId => activity.getStatus(workspaceId),
-  notify: workspaceId => notifyRenderer({ workspaceId }),
   cleanupFailed: (workspaceId, error) => console.error("[desktop] sync pause cleanup:", workspaceId, error),
+  reopenFailed: workspace => activity.recordSyncPauseReopenFailed(workspace.workspaceId),
 });
 
 function registerIpcHandlers(): void {

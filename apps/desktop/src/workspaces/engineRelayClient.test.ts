@@ -136,6 +136,8 @@ class MockDaemon implements EngineDaemonClient {
           };
         case "sync.resetClaimRefusal":
           return { reset: true };
+        case "sync.collectionsWaiting":
+          return { waiting: true };
         case "sync.claim":
           return { claimed: true };
         case "sync.adoptJoinIdentity":
@@ -395,6 +397,7 @@ describe("EngineRelayClient", () => {
     });
     await expect(client.claim()).resolves.toBeUndefined();
     await expect(client.probe()).resolves.toEqual({ hasContent: true });
+    await expect(client.collectionsWaiting()).resolves.toBe(true);
 
     const open = daemon.requests.find(
       (request) => request.method === "workspace.open",
@@ -415,6 +418,7 @@ describe("EngineRelayClient", () => {
       "sync.recoverOrigin",
       "sync.claim",
       "sync.probe",
+      "sync.collectionsWaiting",
     ]);
     expectStatefulRequestsScoped(daemon.requests);
     expect(
@@ -437,6 +441,7 @@ describe("EngineRelayClient", () => {
       },
       { method: "sync.claim", params: { workspaceId: "workspace-a" } },
       { method: "sync.probe", params: { workspaceId: "workspace-a" } },
+      { method: "sync.collectionsWaiting", params: { workspaceId: "workspace-a" } },
     ]);
     await sessions.closeAll();
   });
@@ -2690,6 +2695,51 @@ describe("RelayConfiguredDaemonClientSource capability forwarding", () => {
     expect(wrapped.onEvent).toBeUndefined();
     expect(wrapped.onBlob).toBeUndefined();
     expect(wrapped.cancelRequest).toBeUndefined();
+  });
+});
+
+describe("RelayConfiguredDaemonClientSource unfinished ordinary pulls", () => {
+  async function openParams(
+    source: RelayConfiguredDaemonClientSource,
+    inner: MockDaemon,
+    params: Record<string, JsonValue> = {},
+  ): Promise<JsonValue | undefined> {
+    await source.currentClient().sendRequest({
+      id: 1,
+      method: "workspace.open",
+      params: { rootDir: "/root", workspaceId: "ws", ...params },
+    });
+    return inner.requests.at(-1)?.params;
+  }
+
+  it("lets a full owner open of a workspace with no ordinary sync abandon one", async () => {
+    const inner = new MockDaemon();
+    const source = new RelayConfiguredDaemonClientSource(
+      { currentClient: () => inner },
+      new RelayTransportRouteGuard(),
+      workspaceId => workspaceId === "ws",
+    );
+    expect(await openParams(source, inner)).toMatchObject({ abandonOrdinaryPull: true });
+    const temporaryOpens: Record<string, JsonValue>[] = [
+      { captureMode: "none" },
+      { skipStartupMaintenance: true },
+      { storeMode: "passive" },
+    ];
+    for (const temporary of temporaryOpens) {
+      expect(await openParams(source, inner, temporary)).not.toHaveProperty("abandonOrdinaryPull");
+    }
+  });
+
+  it("keeps one while ordinary sync is configured or the open carries a relay", async () => {
+    const inner = new MockDaemon();
+    const routes = new RelayTransportRouteGuard();
+    const synced = new RelayConfiguredDaemonClientSource({ currentClient: () => inner }, routes, () => false);
+    expect(await openParams(synced, inner)).not.toHaveProperty("abandonOrdinaryPull");
+    routes.bind({ workspaceId: "ws", rootPath: "/root", relay: { baseUrl: "https://relay.test", token: "token" } });
+    const routed = new RelayConfiguredDaemonClientSource({ currentClient: () => inner }, routes, () => true);
+    const params = await openParams(routed, inner);
+    expect(params).toHaveProperty("relay");
+    expect(params).not.toHaveProperty("abandonOrdinaryPull");
   });
 });
 

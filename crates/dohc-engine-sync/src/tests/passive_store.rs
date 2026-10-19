@@ -402,6 +402,7 @@ fn passive_store_cursor_never_backfills_local_heads() {
             stream_identity: "stream-1".into(),
             bootstrap_complete: true,
             settlement_report_id: None,
+            ordinary_pull: None,
         },
         &NoFaults,
         &NoLiveLeases,

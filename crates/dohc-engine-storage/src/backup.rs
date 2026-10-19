@@ -116,6 +116,7 @@ const COMPARED_TABLES: &[&str] = &[
     "owner_ydoc_outboxes",
     "owner_ydoc_outbox_entries",
     "owner_live_stops",
+    "sync_identity",
     "replication_log",
     "hosted_replicas",
     "hosted_documents",
@@ -699,6 +700,11 @@ mod tests {
                 "backup restore verification must compare {table}"
             );
         }
+    }
+
+    #[test]
+    fn backup_compares_the_replication_identity_and_its_pull_progress() {
+        assert!(COMPARED_TABLES.contains(&"sync_identity"));
     }
 
     #[test]
