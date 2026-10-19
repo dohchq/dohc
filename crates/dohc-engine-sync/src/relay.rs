@@ -2508,6 +2508,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 Holding::ByDocument { .. } => BTreeSet::new(),
             };
             let mut still_retryable = Vec::new();
+            let mut retryable_refusals = Vec::new();
             let mut made_progress = false;
             for op in round {
                 let key = holding.key(op);
@@ -2532,6 +2533,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 };
                 match routed {
                     Err(SyncError::RetryableState { reason }) => {
+                        retryable_refusals.push((op, reason));
                         holding.stop_at_withheld_parent(op, reason);
                         if let Some(key) = key {
                             if retained_while_held(op, reason) {
@@ -2589,7 +2591,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     .iter()
                     .any(|op| !holding.key(op).is_some_and(|key| durable.contains(&key)))
                 {
-                    return Err(RelayError::Local("retryable-state".to_owned()));
+                    return Err(retryable_refusal(retryable_refusals.into_iter().filter(
+                        |(op, _)| {
+                            holding.unready(op).is_none()
+                                && !holding.key(op).is_some_and(|key| durable.contains(&key))
+                        },
+                    )));
                 }
                 // A hosted document that would pass the retention limit is
                 // held at its first op still to apply, as one that is not
@@ -6574,7 +6581,33 @@ fn local(error: SyncError) -> RelayError {
     if matches!(error, SyncError::Storage(StorageError::FileLocked)) {
         return RelayError::StoreBusy;
     }
+    if matches!(error, SyncError::RetryableState { .. }) {
+        return RelayError::Local(format!("{}: {error}", error.code()));
+    }
     RelayError::Local(error.code().to_owned())
+}
+
+fn retryable_refusal<'a>(
+    refusals: impl IntoIterator<Item = (&'a ReplicationEnvelope, &'static str)>,
+) -> RelayError {
+    let mut refusals = refusals.into_iter();
+    let Some((op, reason)) = refusals.next() else {
+        return RelayError::Local("retryable-state".to_owned());
+    };
+    let object = crate::hosted::hosted_document(op)
+        .map(|id| format!("object {id}, "))
+        .unwrap_or_default();
+    let mut detail = format!(
+        "retryable-state: {} ({object}origin {} seq {})",
+        SyncError::RetryableState { reason },
+        op.origin_id,
+        op.origin_seq,
+    );
+    let remaining = refusals.count();
+    if remaining > 0 {
+        detail.push_str(&format!("; and {remaining} more"));
+    }
+    RelayError::Local(detail)
 }
 
 /// A hosted feed request on a transport built for an ordinary replica.
@@ -7114,5 +7147,59 @@ mod conflict_resolve_blob_ref_tests {
             (state_vector_sha, BTreeSet::from([BlobKind::Ydoc])),
         ]);
         assert_eq!(refs, expected);
+    }
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::*;
+
+    #[test]
+    fn local_retryable_refusal_keeps_its_reason() {
+        let error = local(SyncError::RetryableState {
+            reason: "ydoc-resulting-head-pending",
+        });
+        assert!(
+            matches!(&error, RelayError::Local(code) if code.split(':').next() == Some("retryable-state"))
+        );
+        assert!(error.to_string().contains("ydoc-resulting-head-pending"));
+    }
+
+    #[test]
+    fn local_retryable_refusal_keeps_its_reason_and_bounds_pull_detail() {
+        let op = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
+            workspace_id: "ws".into(),
+            origin_id: "peer".into(),
+            origin_seq: 7,
+            relay_seq: Some(7),
+            op_kind: "ydoc.update".into(),
+            payload: serde_json::json!({"objectId": "apollo"}),
+            recorded_at_ms: 0,
+        };
+        let first = (&op, "ydoc-resulting-head-pending");
+        assert_eq!(
+            retryable_refusal([first]).to_string(),
+            "local sync state failed: retryable-state: replication state is not ready: ydoc-resulting-head-pending (object apollo, origin peer seq 7)",
+        );
+        assert_eq!(
+            retryable_refusal(
+                std::iter::once(first).chain(std::iter::repeat_n((&op, "other reason"), 499))
+            )
+            .to_string(),
+            "local sync state failed: retryable-state: replication state is not ready: ydoc-resulting-head-pending (object apollo, origin peer seq 7); and 499 more",
+        );
+        let without_object = ReplicationEnvelope {
+            payload: serde_json::json!({}),
+            ..op
+        };
+        assert_eq!(
+            retryable_refusal([(&without_object, "ydoc-resulting-head-pending")]).to_string(),
+            "local sync state failed: retryable-state: replication state is not ready: ydoc-resulting-head-pending (origin peer seq 7)",
+        );
+        assert!(
+            matches!(retryable_refusal([]), RelayError::Local(detail) if detail == "retryable-state")
+        );
     }
 }

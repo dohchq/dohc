@@ -1,7 +1,7 @@
 import {normalizeShareLabel, shareAccessLabel} from "@dohc/security-contract/share-labels";
 import {useEffect, useRef, useState} from "react";
 import {accountUser, namedRequest} from "./namedRecipient";
-import {NamedSignIn, SIGN_IN_FAILED} from "./NamedSignIn";
+import {NamedSignIn, signInErrorMessage} from "./NamedSignIn";
 import {AppLaunchError, launchSharedApp} from "./OpenSharedApp";
 import type {NamedAppTarget} from "./namedAppRoute";
 import "./namedRecipient.css";
@@ -48,7 +48,7 @@ export default function NamedApp({target}: {target: NamedAppTarget | null}) {
     const controller = start("sign-in");
     void namedRequest("/api/account/sign-in", controller.signal, credentials).then(
       () => load(controller).then(() => finish(controller, null), () => finish(controller, CHECK_FAILED)),
-      () => finish(controller, SIGN_IN_FAILED));
+      (reason: unknown) => finish(controller, signInErrorMessage(reason)));
   };
   const signOut = () => {
     const controller = start("sign-out");

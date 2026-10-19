@@ -11,6 +11,7 @@ const record = (value: unknown): value is Record<string, unknown> => value !== n
 export interface NamedRecipientFiles {subjectName: string | null; sharerName: string | null; access: "edit";userId: string; workspaceId: string; shareId: string; grantId: string;
   files: {objectId: string; path: string}[]; limits: NamedLiveBrowserLimits}
 export class ShareAccessRemovedError extends Error { constructor() { super("The owner removed your access."); } }
+export class AccountSetupRequiredError extends Error { constructor() { super("Account setup required"); } }
 export async function namedRequest(path: string, signal: AbortSignal, body?: unknown): Promise<unknown> {
   signal = AbortSignal.any([signal, AbortSignal.timeout(RETRY_BUDGET_MS)]);
   const response = await fetchShareWeb(path, {method: body === undefined ? "GET" : "POST", credentials: "same-origin", cache: "no-store",
@@ -19,8 +20,9 @@ export async function namedRequest(path: string, signal: AbortSignal, body?: unk
   try {
     const removedResponse = response.status === 404;
     const linkRefused = path.startsWith("/api/live/link-") && [403, 429, 503].includes(response.status);
-    if ([401, 403].includes(response.status) && !linkRefused) throw new LiveAuthorityUnavailableError("Unavailable");
-    if ((!linkRefused && !removedResponse && response.status !== 200) || response.redirected || !response.body ||
+    const accountRefused = path === "/api/account/sign-in" && response.status === 403;
+    if ([401, 403].includes(response.status) && !linkRefused && !accountRefused) throw new LiveAuthorityUnavailableError("Unavailable");
+    if ((!linkRefused && !removedResponse && !accountRefused && response.status !== 200) || response.redirected || !response.body ||
       response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") throw Error("Unavailable");
     const reader = response.body.getReader(), decoder = new TextDecoder("utf-8", {fatal: true});
     let length = 0, text = "";
@@ -35,6 +37,12 @@ export async function namedRequest(path: string, signal: AbortSignal, body?: unk
         length += chunk.value.length; text += decoder.decode(chunk.value, {stream: true});
       }
       const value: unknown = JSON.parse(text + decoder.decode());
+      if (accountRefused) {
+        if (record(value) && Object.keys(value).sort().join() === "code,ok" && value.ok === false && value.code === "EMAIL_NOT_VERIFIED") {
+          throw new AccountSetupRequiredError();
+        }
+        throw new LiveAuthorityUnavailableError("Unavailable");
+      }
       if (removedResponse) {
         if (record(value) && value.code === "share_access_removed") throw new ShareAccessRemovedError();
         throw new LiveAuthorityUnavailableError("Unavailable");
