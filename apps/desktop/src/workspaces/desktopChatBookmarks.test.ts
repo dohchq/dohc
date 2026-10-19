@@ -249,10 +249,10 @@ describe("desktop chat bookmarks", () => {
     const projection = test.owner.projectPendingChatBookmarks("workspace");
     await entered.promise;
     const queued = test.owner.materializeChatBookmark(test.workspace, test.capture, test.bookmark);
-    const queuedResult = expect(queued).rejects.toThrow("retired workspace authority");
+    const queuedResult = expect(queued).rejects.toThrow("This workspace was closed. Open it again.");
     const retired = test.authorities.invalidate("workspace");
     expect(test.disposed).not.toHaveBeenCalled();
-    expect(() => test.authorities.acquire("workspace")).toThrow("retiring or blocked");
+    expect(() => test.authorities.acquire("workspace")).toThrow("This workspace was closed. Open it again.");
     write.reject(new Error("retired capture"));
     await Promise.all([projection, queuedResult, retired]);
     expect(test.disposed).toHaveBeenCalledOnce();

@@ -4,6 +4,7 @@ import {createLiveJournalHistoryAuthority} from "./liveJournalHistory";
 import type {StorageContext} from "./context";
 import {MAX_LOG_PAGE_SIZE, MAX_PAYLOAD_JSON_BYTES} from "../wireLimits";
 import {createOwnerRestoreRoutes} from "../ownerRestoreRoutes";
+import {createServiceHostEnrollmentRoutes} from "../serviceHostEnrollmentRoutes";
 import {createSyncRelayHandler} from "../server";
 import {advanceStopRestoreFence} from "./liveRestoreOperation";
 import {restoreDigest} from "./liveRestoreCheckpoint";
@@ -17,7 +18,8 @@ afterEach(async () => {vi.restoreAllMocks(); for (const close of cleanups.splice
 async function fixture() {
   const f = await ticketFixture(); cleanups.push(f.close);
   const context = f.storage as StorageContext;
-  const store = f.storage.createLiveCommittedDeliveryStore(createLiveJournalHistoryAuthority({namespace, reconciled: true}));
+  const history = createLiveJournalHistoryAuthority({namespace, reconciled: true});
+  const store = f.storage.createLiveCommittedDeliveryStore(history);
   const input = {workspaceId: scope.workspaceId, ownerUserId, path: binding.currentPath};
   const read = (beforeCursor?: number) => f.storage.readOwnerRestoreOptions({...input, ...(beforeCursor === undefined ? {} : {beforeCursor})});
   const point = (cursor: number, receivedAtMs = cursor, objectId = binding.objectId) => {
@@ -36,7 +38,7 @@ async function fixture() {
       restorePointReceiptDigest: binding.lineageClaimId, maxOutputBytes: MAX_PAYLOAD_JSON_BYTES});
     return f.storage.beginStopRestore(plan.intent, 100);
   };
-  return {...f, context, input, read, point, begin, store};
+  return {...f, context, input, read, point, begin, store, history};
 }
 
 function nativeFenced(f: Awaited<ReturnType<typeof fixture>>) {
@@ -55,6 +57,82 @@ function nativeFenced(f: Awaited<ReturnType<typeof fixture>>) {
   const fence = f.store.acknowledgeStopRestoreFence(input, {operation, localHeadSequence: 0, recordedAtMs: 120});
   return {lookup, fence};
 }
+
+function enrollService(f: Awaited<ReturnType<typeof fixture>>) {
+  f.storage.claimWorkspaceIdentity({workspaceId: scope.workspaceId, replicationEpoch: "epoch", streamIdentity: "stream"});
+  f.raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,relay_seq) VALUES (?,'owner',0,'moment.append','{}',1,1)").run(scope.workspaceId);
+  f.raw.prepare("INSERT INTO sync_relay_current_files VALUES (?,'main',?,?,'text',1)").run(scope.workspaceId,binding.currentPath,"b".repeat(64));
+  f.storage.enrollServiceHostDocument({workspaceId: scope.workspaceId, path: binding.currentPath, ownerUserId, shareId: scope.shareId, nowMs: 10, guard() {}});
+}
+
+it("returns the accepted head in retirement and repeated retirement", async () => {
+  const f=await fixture();enrollService(f);f.point(3);f.point(9);
+  const retire=() => f.storage.setServiceHostEnrollmentEnabled({...f.input,enabled:false,retire:true,restoreFenceGeneration:7,nowMs:20,guard() {}});
+  expect(retire()).toMatchObject({retired:true,acceptedCursor:9});
+  expect(retire()).toMatchObject({retired:true,acceptedCursor:9});
+});
+
+it("refuses a new restore after service enrollment retirement, including a previously read plan", async () => {
+  const f = await fixture(); enrollService(f);
+  const plan = f.storage.readStopRestorePlan({operationId: "restore", ownerUserId, document,
+    shareId: scope.shareId, grantId: scope.grantId, restorePointCursor: 0,
+    restorePointReceiptDigest: binding.lineageClaimId, maxOutputBytes: MAX_PAYLOAD_JSON_BYTES});
+  f.storage.setServiceHostEnrollmentEnabled({workspaceId: scope.workspaceId, path: binding.currentPath, ownerUserId, enabled: false, retire: true, restoreFenceGeneration: 7, nowMs: 11, guard() {}});
+  expect(() => f.begin()).toThrow();
+  expect(() => f.storage.beginStopRestore(plan.intent, 100)).toThrow();
+  expect(f.raw.prepare("SELECT COUNT(*) AS count FROM sync_relay_live_restore_operations").get()!.count).toBe(0);
+});
+
+it("compares retirement against the current lineage when an older lineage remains", async () => {
+  const f = await fixture(); enrollService(f);
+  const row = f.raw.prepare("SELECT * FROM sync_relay_live_documents WHERE lineage_state='current'").get()!;
+  const older = {...row, lineage_claim_id: "0".repeat(64), baseline_digest: "0".repeat(64),
+    lineage_state: "retired", admission_state: "closed", retired_at_ms: 1, restore_fence_generation: 0};
+  const columns = Object.keys(older);
+  f.raw.prepare(`INSERT INTO sync_relay_live_documents(${columns.join(",")}) VALUES(${columns.map(() => "?").join(",")})`).run(...Object.values(older));
+  expect(f.storage.setServiceHostEnrollmentEnabled({workspaceId: scope.workspaceId, path: binding.currentPath, ownerUserId,
+    enabled: false, retire: true, restoreFenceGeneration: 7, nowMs: 11, guard() {}})?.retired).toBe(true);
+});
+
+it("allows a restore after Start clears retirement", async () => {
+  const f = await fixture(); enrollService(f);
+  f.storage.setServiceHostEnrollmentEnabled({workspaceId: scope.workspaceId, path: binding.currentPath, ownerUserId, enabled: false, retire: true, restoreFenceGeneration: 7, nowMs: 11, guard() {}});
+  f.storage.enrollServiceHostDocument({workspaceId: scope.workspaceId, path: binding.currentPath, ownerUserId, shareId: scope.shareId, nowMs: 12, guard() {}});
+  expect(f.begin().phase).toBe("authority-invalidated");
+});
+
+it("allows retirement at the new generation after a restore resumes", async () => {
+  const f = await fixture(); enrollService(f);
+  retainedLifecycle(f, "resumed");
+  expect(f.storage.setServiceHostEnrollmentEnabled({workspaceId: scope.workspaceId, path: binding.currentPath, ownerUserId, enabled: false, retire: true, restoreFenceGeneration: 8, nowMs: 151, guard() {}})?.retired).toBe(true);
+});
+
+it("does not retire at the old generation while a restore has begun", async () => {
+  const f = await fixture();
+  f.storage.claimWorkspaceIdentity({workspaceId: scope.workspaceId, replicationEpoch: "epoch", streamIdentity: "stream"});
+  f.raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,relay_seq) VALUES (?,'owner',0,'moment.append','{}',1,1)").run(scope.workspaceId);
+  f.raw.prepare("INSERT INTO sync_relay_current_files VALUES (?,'main',?,?,'text',1)").run(scope.workspaceId,binding.currentPath,"b".repeat(64));
+  f.storage.enrollServiceHostDocument({workspaceId: scope.workspaceId, path: binding.currentPath, ownerUserId, shareId: scope.shareId, nowMs: 10, guard() {}});
+  expect(f.begin().phase).toBe("authority-invalidated");
+  expect(() => f.storage.setServiceHostEnrollmentEnabled({workspaceId: scope.workspaceId, path: binding.currentPath, ownerUserId, enabled: false, retire: true, restoreFenceGeneration: 7, nowMs: 101, guard() {}})).toThrowError(expect.objectContaining({code: "restore-in-progress", statusCode: 409}));
+  const advanced = advanceStopRestoreFence(f.context,{workspaceId: scope.workspaceId,ownerUserId,operationId:"restore"},102);
+  expect(advanced.newFence).toBe(8);
+  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)?.retired).toBe(false);
+});
+
+it.each([7, undefined])("answers DELETE with a retryable restore-in-progress conflict at generation %s", async restoreFenceGeneration => {
+  const f = await fixture(); enrollService(f); f.begin();
+  const handle = createServiceHostEnrollmentRoutes({storage: f.storage,
+    history: f.history,
+    resolveActor: async () => ({workspaceId: scope.workspaceId, userId: ownerUserId}),
+    host: {ready: () => false, reconcile() {}, unavailable: false, blocked: () => undefined, unblock: () => false, diverged: () => false}});
+  const response = await handle(new Request(`https://relay.test/sync/${scope.workspaceId}/live-host`, {
+    method: "DELETE", headers: {authorization: "Bearer owner", "content-type": "application/json"},
+    body: JSON.stringify({path: binding.currentPath, retire: true, restoreFenceGeneration}),
+  }));
+  expect(response.status).toBe(409);
+  expect(await response.json()).toMatchObject({ok: false, code: "restore-in-progress"});
+});
 
 function retainedLifecycle(f: Awaited<ReturnType<typeof fixture>>, phase: "relay-admitted" | "resumed") {
   const {lookup, fence} = nativeFenced(f), proposalDigest = "e".repeat(64), candidateDigest = "c".repeat(64);
@@ -94,7 +172,7 @@ describe("owner restore options", () => {
     const f = await fixture();
     expect(f.read()).toEqual({document, path: binding.currentPath, grants: [{shareId: scope.shareId,
       grantId: scope.grantId, generation: 4, principalKind: "user", userId: scope.userId, email: null}],
-      points: [{cursor: 0, receivedAtMs: null, kind: "baseline", receiptDigest: binding.lineageClaimId}],
+      points: [{cursor: 0, receivedAtMs: null, kind: "baseline", receiptDigest: binding.lineageClaimId, authority: null}], authors: [],
       nextBeforeCursor: null, nextGrantCursor: null, pendingOperation: null});
   });
 
@@ -237,6 +315,110 @@ describe("owner restore options", () => {
     expect(response.status).toBe(200); expect((await response.json()).document).toEqual(document);
     const direct = createOwnerRestoreRoutes({storage: f.storage, host: () => host, newId: () => "unused", nowMs: () => 1});
     await expect(direct(new Request("http://relay.test", {method: "POST", body: JSON.stringify({path: binding.currentPath, ownerUserId})}),
+      {route: "owner-restore", action: "options", workspaceId: scope.workspaceId}, ownerUserId)).rejects.toThrow();
+  });
+
+  it("names who each restore point came from by the relay's authority and the account's email", async () => {
+    const f = await fixture(); f.point(1); f.point(2);
+    f.raw.prepare("UPDATE sync_relay_live_update_journal SET principal_kind='owner',principal_id=?,grant_id=NULL,grant_generation=NULL WHERE journal_cursor=2")
+      .run(ownerUserId);
+    const route = (lookupUserEmail?: (userId: string) => string | null) => createOwnerRestoreRoutes({storage: f.storage,
+      host: () => ({restoreConfigured: true}) as never, newId: () => "unused", nowMs: () => 1, ...(lookupUserEmail ? {lookupUserEmail} : {})});
+    const read = async (respond: ReturnType<typeof route>) => (await (await respond(new Request("http://relay.test", {method: "POST",
+      body: JSON.stringify({path: binding.currentPath})}), {route: "owner-restore", action: "options", workspaceId: scope.workspaceId}, ownerUserId)).json());
+    const lookups: string[] = [];
+    f.point(3);
+    const named = await read(route(userId => {lookups.push(userId); return userId === "reader-1" ? "ana@example.com" : null;}));
+    expect(named.points.map((point: {authority: unknown}) => point.authority)).toEqual([
+      {principalKind: "named", principalId: "reader-1", grantId: "edit-1", grantGeneration: 4},
+      {principalKind: "owner", principalId: ownerUserId, grantId: null, grantGeneration: null},
+      {principalKind: "named", principalId: "reader-1", grantId: "edit-1", grantGeneration: 4},
+      null,
+    ]);
+    // One author per grant, however many points it made.
+    expect(named.authors).toEqual([{grantId: "edit-1", principalKind: "user", userId: "reader-1", email: "ana@example.com"}]);
+    expect(lookups.filter(userId => userId === "reader-1")).toHaveLength(1);
+    // A failed or missing lookup leaves the email unknown, never a stand-in.
+    expect((await read(route(() => {throw new Error("database down");}))).authors[0].email).toBeNull();
+    expect((await read(route())).authors[0].email).toBeNull();
+  });
+
+  it("keeps emails within the room the page held, as encoded, and the page within the metadata limit", async () => {
+    const f = await fixture(), pad = (prefix: string, cursor: number) => `${prefix}${cursor}-`.padEnd(512, "x");
+    f.raw.exec("BEGIN");
+    for (let cursor = 1; cursor <= 200; cursor++) f.point(cursor);
+    f.raw.exec("COMMIT");
+    for (let cursor = 1; cursor <= 200; cursor++) {
+      f.raw.prepare("UPDATE sync_relay_live_update_journal SET principal_id=?, grant_id=? WHERE journal_cursor=?")
+        .run(pad("p", cursor), pad("g", cursor), cursor);
+    }
+    // 318 characters encode to exactly the room; one escaped quote more does not fit.
+    const fits = `${"a".repeat(306)}@example.com`, escaped = `"${"a".repeat(305)}@example.com`;
+    expect(Buffer.byteLength(JSON.stringify(fits))).toBe(320);
+    const route = createOwnerRestoreRoutes({storage: f.storage, host: () => ({restoreConfigured: true}) as never,
+      newId: () => "unused", nowMs: () => 1, lookupUserEmail: userId => userId === pad("p", 199) ? escaped : fits});
+    const read = async (beforeCursor?: number) => {
+      const response = await route(new Request("http://relay.test", {method: "POST", body: JSON.stringify({path: binding.currentPath,
+        ...(beforeCursor === undefined ? {} : {beforeCursor})})}), {route: "owner-restore", action: "options", workspaceId: scope.workspaceId}, ownerUserId);
+      const text = await response.text();
+      expect(Buffer.byteLength(text)).toBeLessThanOrEqual(MAX_PAYLOAD_JSON_BYTES);
+      return JSON.parse(text);
+    };
+    const first = await read();
+    // Long authors end the page early, and the next page continues below it.
+    expect(first.points.length).toBeLessThan(200);
+    expect(first.nextBeforeCursor).toBe(first.points.at(-1).cursor);
+    expect(first.authors).toHaveLength(first.points.length);
+    expect(first.authors.find((author: {userId: string}) => author.userId === pad("p", 199)).email).toBeNull();
+    expect(first.authors.find((author: {userId: string}) => author.userId === pad("p", 200)).email).toBe(fits);
+    const next = await read(first.nextBeforeCursor);
+    expect(next.points[0].cursor).toBe(first.nextBeforeCursor - 1);
+  });
+
+  it("pages a long access list by bytes, with room held for every email, and reaches every grant once", async () => {
+    const f = await fixture();
+    const insert = f.raw.prepare(`INSERT INTO sync_relay_share_grants (grant_id,share_id,principal_kind,principal_user_id,access,generation,status,created_at_ms)
+      VALUES (?,?,'user',?,'edit',1,'active',1)`);
+    f.raw.exec("BEGIN");
+    for (let index = 0; index < 400; index++) {
+      insert.run(`grant-${String(index).padStart(3, "0")}-${"g".repeat(26)}`, scope.shareId, `user-${index}-`.padEnd(300, "u"));
+    }
+    f.raw.exec("COMMIT");
+    const email = `${"a".repeat(306)}@example.com`;
+    const route = createOwnerRestoreRoutes({storage: f.storage, host: () => ({restoreConfigured: true}) as never,
+      newId: () => "unused", nowMs: () => 1, lookupUserEmail: () => email});
+    const read = async (grantCursor?: unknown) => {
+      const response = await route(new Request("http://relay.test", {method: "POST", body: JSON.stringify({path: binding.currentPath,
+        ...(grantCursor === undefined ? {} : {grantCursor})})}), {route: "owner-restore", action: "options", workspaceId: scope.workspaceId}, ownerUserId);
+      const text = await response.text();
+      expect(Buffer.byteLength(text)).toBeLessThanOrEqual(MAX_PAYLOAD_JSON_BYTES);
+      return JSON.parse(text);
+    };
+    const seen: string[] = [];
+    let page = await read(), pages = 1;
+    // Bytes, not the row count, end the first page, and it still lists the baseline.
+    expect(page.grants.length).toBeLessThan(400);
+    expect(page.nextGrantCursor).not.toBeNull();
+    expect(page.points.map((point: {cursor: number}) => point.cursor)).toEqual([0]);
+    for (;;) {
+      seen.push(...page.grants.map((grant: {grantId: string; email: string | null}) => {
+        expect(grant.email).toBe(email);
+        return grant.grantId;
+      }));
+      if (page.nextGrantCursor === null) break;
+      page = await read(page.nextGrantCursor); pages++;
+    }
+    expect(pages).toBeGreaterThan(1);
+    expect(new Set(seen).size).toBe(seen.length);
+    expect(seen).toHaveLength(401);
+  });
+
+  it("refuses to answer options when the workspace changes owner during the email lookup", async () => {
+    const f = await fixture(); f.point(1);
+    const owned = vi.spyOn(f.storage, "workspaceIsOwnedBy");
+    const route = createOwnerRestoreRoutes({storage: f.storage, host: () => ({restoreConfigured: true}) as never,
+      newId: () => "unused", nowMs: () => 1, lookupUserEmail: async () => {owned.mockReturnValue(false); return "ana@example.com";}});
+    await expect(route(new Request("http://relay.test", {method: "POST", body: JSON.stringify({path: binding.currentPath})}),
       {route: "owner-restore", action: "options", workspaceId: scope.workspaceId}, ownerUserId)).rejects.toThrow();
   });
 

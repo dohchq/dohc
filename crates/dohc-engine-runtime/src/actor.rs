@@ -26,12 +26,22 @@
 
 mod automations;
 mod capture;
+mod recovery_import;
+use crate::supervisor::ActorOpenMode;
+pub use recovery_import::{
+    RecoveryImport, RecoveryImportOutcome, RecoveryImportResult, RecoveryUpdate,
+};
 mod chats;
+mod checked_deletes;
 mod collections;
+mod history_operations;
+pub use history_operations::{HistoryOperation, HistoryUndoResult};
 mod journal;
 mod live_application;
 mod materialization;
 mod relay;
+#[cfg(unix)]
+mod retained;
 mod search;
 mod secrets;
 mod versioned;
@@ -39,10 +49,10 @@ mod versions;
 mod ydoc;
 
 pub use capture::{
-    CAPTURE_NEW_FILE_LIVE, MAX_CAPTURE_INGEST_BATCH_BYTES, MAX_CAPTURE_INGEST_BATCH_OPS,
-    WorkspaceRootGuard,
+    CAPTURE_NEW_FILE_LIVE, CapturePassSettlement, CapturePlacementPath,
+    MAX_CAPTURE_INGEST_BATCH_BYTES, MAX_CAPTURE_INGEST_BATCH_OPS, WorkspaceRootGuard,
 };
-pub use collections::CollectionReconciliation;
+pub use collections::{CollectionCommitListener, CollectionReconciliation};
 pub use dohc_engine_sync::SharingDeclined;
 pub use live_application::{ActorLiveApplicationHandle, ActorLiveApplicationOwner};
 pub use materialization::{PostCommitMaterializeOutcome, SelfWriteRecorder};
@@ -61,6 +71,8 @@ pub use ydoc::{
 
 use crate::error::RuntimeError;
 use crate::identity::EngineDbIdentity;
+pub use crate::links::LinkDrainMetrics;
+use crate::links::{DrainWorker, SharedMetrics};
 use dohc_engine_collab::WriterDocCache;
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError};
 use std::path::PathBuf;
@@ -152,9 +164,14 @@ impl LifecycleState {
 }
 
 type ActorWork = Box<dyn FnOnce(&mut EngineStore, &mut WriterDocCache) + Send>;
+type RegistrationWork =
+    Box<dyn FnOnce(&mut EngineStore, &mut WriterDocCache, &mut live_application::Registry) + Send>;
 
 enum Command {
     Run(ActorWork),
+    WakeLinks,
+    /// Work that may release live application registrations in the same step.
+    RunWithRegistrations(RegistrationWork),
     LiveApplication(Box<live_application::Request>),
     /// Break the loop and release the connection. Carries no reply: the caller
     /// joins the worker, and the join is the completion signal (so `close`
@@ -168,6 +185,7 @@ enum Command {
 pub struct WorkspaceActor {
     identity: EngineDbIdentity,
     generation: u64,
+    mode: ActorOpenMode,
     /// Authoritative open disposition reported by [`EngineStore`]. This is
     /// true only when this actor created a brand-new schema; opening an
     /// existing, migrated, or recovered database always reports false.
@@ -180,7 +198,15 @@ pub struct WorkspaceActor {
     close_permit: Option<OwnedPermit<Command>>,
     state: Arc<AtomicU8>,
     worker: Option<JoinHandle<()>>,
+    #[cfg(unix)]
+    retention: Option<retained::Worker>,
+    #[cfg(unix)]
+    retention_root: retained::Root,
     claims: ClaimAnnouncer,
+    link_metrics: SharedMetrics,
+    link_drain_holds: Arc<AtomicU64>,
+    current_views: Arc<std::sync::Mutex<dohc_engine_sync::replica_cut::CurrentViewCache>>,
+    pub(crate) link_resolvers: Arc<std::sync::Mutex<crate::links::cache::Cache>>,
 }
 
 impl WorkspaceActor {
@@ -200,7 +226,15 @@ impl WorkspaceActor {
         now_ms: i64,
         work: Option<Arc<AtomicU64>>,
     ) -> Result<Self, RuntimeError> {
-        Self::spawn_with_mode(db_path, identity, generation, now_ms, false, None, work)
+        Self::spawn_with_mode(
+            db_path,
+            identity,
+            generation,
+            now_ms,
+            ActorOpenMode::ReadWrite,
+            None,
+            work,
+        )
     }
 
     pub(crate) fn spawn_root_bound(
@@ -216,7 +250,7 @@ impl WorkspaceActor {
             identity,
             generation,
             now_ms,
-            false,
+            ActorOpenMode::ReadWrite,
             Some(root_token),
             work,
         )
@@ -230,19 +264,46 @@ impl WorkspaceActor {
         generation: u64,
         work: Option<Arc<AtomicU64>>,
     ) -> Result<Self, RuntimeError> {
-        Self::spawn_with_mode(db_path, identity, generation, 0, true, None, work)
+        Self::spawn_with_mode(
+            db_path,
+            identity,
+            generation,
+            0,
+            ActorOpenMode::ReadOnly,
+            None,
+            work,
+        )
     }
 
-    fn spawn_with_mode(
+    pub(crate) fn spawn_passive(
         db_path: PathBuf,
         identity: EngineDbIdentity,
         generation: u64,
         now_ms: i64,
-        read_only: bool,
         root_token: Option<String>,
         work: Option<Arc<AtomicU64>>,
     ) -> Result<Self, RuntimeError> {
-        let writer_lock = if read_only {
+        Self::spawn_with_mode(
+            db_path,
+            identity,
+            generation,
+            now_ms,
+            ActorOpenMode::Passive,
+            root_token,
+            work,
+        )
+    }
+
+    pub(crate) fn spawn_with_mode(
+        db_path: PathBuf,
+        identity: EngineDbIdentity,
+        generation: u64,
+        now_ms: i64,
+        mode: ActorOpenMode,
+        root_token: Option<String>,
+        work: Option<Arc<AtomicU64>>,
+    ) -> Result<Self, RuntimeError> {
+        let writer_lock = if matches!(mode, ActorOpenMode::ReadOnly) {
             let file = std::fs::File::open(&db_path).map_err(|error| RuntimeError::Identity {
                 reason: "could not inspect workspace database links",
                 source: Some(error),
@@ -264,6 +325,10 @@ impl WorkspaceActor {
         // context, so the open result must not depend on a tokio runtime.
         let (startup_tx, startup_rx) = std_sync_channel::<Result<bool, StorageError>>(1);
 
+        let link_metrics = SharedMetrics::default();
+        let worker_metrics = Arc::clone(&link_metrics);
+        let link_drain_holds = Arc::new(AtomicU64::new(0));
+        let worker_link_drain_holds = Arc::clone(&link_drain_holds);
         let worker_state = Arc::clone(&state);
         let worker = std::thread::Builder::new()
             .name("dohc-engine-actor".to_owned())
@@ -271,10 +336,12 @@ impl WorkspaceActor {
                 worker_main(
                     db_path,
                     now_ms,
-                    read_only,
+                    mode,
                     root_token,
                     rx,
                     worker_state,
+                    worker_metrics,
+                    worker_link_drain_holds,
                     startup_tx,
                     writer_lock,
                     work,
@@ -283,16 +350,36 @@ impl WorkspaceActor {
             .map_err(RuntimeError::ThreadSpawn)?;
 
         match startup_rx.recv() {
-            Ok(Ok(store_freshly_created)) => Ok(WorkspaceActor {
-                identity,
-                generation,
-                store_freshly_created,
-                tx,
-                close_permit,
-                state,
-                worker: Some(worker),
-                claims: ClaimAnnouncer::default(),
-            }),
+            Ok(Ok(store_freshly_created)) => {
+                #[allow(unused_mut)]
+                let mut actor = WorkspaceActor {
+                    identity,
+                    generation,
+                    mode,
+                    store_freshly_created,
+                    tx,
+                    close_permit,
+                    state,
+                    worker: Some(worker),
+                    #[cfg(unix)]
+                    retention: None,
+                    #[cfg(unix)]
+                    retention_root: retained::Root::default(),
+                    claims: ClaimAnnouncer::default(),
+                    link_metrics,
+                    link_drain_holds,
+                    current_views: Arc::default(),
+                    link_resolvers: Arc::default(),
+                };
+                #[cfg(unix)]
+                if matches!(mode, ActorOpenMode::ReadWrite) {
+                    actor.retention = Some(retained::Worker::spawn(
+                        actor.handle(),
+                        actor.retention_root.clone(),
+                    )?);
+                }
+                Ok(actor)
+            }
             Ok(Err(storage_err)) => {
                 let _ = worker.join();
                 Err(RuntimeError::Storage(storage_err))
@@ -311,6 +398,12 @@ impl WorkspaceActor {
             tx: self.tx.clone(),
             state: Arc::clone(&self.state),
             claims: self.claims.clone(),
+            #[cfg(unix)]
+            retained_root: self.retention_root.clone(),
+            link_metrics: Arc::clone(&self.link_metrics),
+            link_drain_holds: Arc::clone(&self.link_drain_holds),
+            current_views: Arc::clone(&self.current_views),
+            link_resolvers: Arc::clone(&self.link_resolvers),
         }
     }
 
@@ -322,6 +415,10 @@ impl WorkspaceActor {
     /// The session generation (incremented on restart).
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    pub(crate) fn open_mode(&self) -> ActorOpenMode {
+        self.mode
     }
 
     /// Whether this actor's store open created a brand-new database schema.
@@ -353,6 +450,12 @@ impl WorkspaceActor {
         let Some(worker) = self.worker.take() else {
             return Ok(());
         };
+        #[cfg(unix)]
+        if let Some(retention) = &mut self.retention {
+            retention.stop();
+            // Finish an in-flight changed read while the writer can still commit it.
+            retention.join();
+        }
         match self.close_permit.take() {
             // Reserved slot: instant, fair, FIFO-respecting delivery.
             Some(permit) => {
@@ -365,6 +468,7 @@ impl WorkspaceActor {
                 let _ = self.tx.try_send(Command::Close);
             }
         }
+        self.link_resolvers.lock().unwrap().close();
         match worker.join() {
             Ok(()) => Ok(()),
             Err(_) => Err(RuntimeError::WorkerPanicked),
@@ -380,17 +484,61 @@ impl Drop for WorkspaceActor {
     }
 }
 
-/// A clonable, message-only handle to a [`WorkspaceActor`]. Holds no state of
-/// its own beyond the sender and the shared lifecycle flag.
+/// A clonable handle to a [`WorkspaceActor`]. The worker also owns its shared
+/// current view projection cache.
 #[derive(Clone)]
 pub struct ActorHandle {
+    #[cfg(unix)]
+    retained_root: retained::Root,
     identity: EngineDbIdentity,
     tx: mpsc::Sender<Command>,
     state: Arc<AtomicU8>,
     claims: ClaimAnnouncer,
+    link_metrics: SharedMetrics,
+    link_drain_holds: Arc<AtomicU64>,
+    current_views: Arc<std::sync::Mutex<dohc_engine_sync::replica_cut::CurrentViewCache>>,
+    pub(crate) link_resolvers: Arc<std::sync::Mutex<crate::links::cache::Cache>>,
+}
+
+/// Keeps derived link writes behind capture, including its queued commands.
+/// Dropping the last hold wakes an idle actor without polling.
+#[must_use]
+pub struct LinkDrainHold {
+    holds: Arc<AtomicU64>,
+    tx: mpsc::Sender<Command>,
+}
+impl Drop for LinkDrainHold {
+    fn drop(&mut self) {
+        if self.holds.fetch_sub(1, Ordering::AcqRel) == 1 {
+            // A full queue already has foreground work to wake the actor.
+            let _ = self.tx.try_send(Command::WakeLinks);
+        }
+    }
 }
 
 impl ActorHandle {
+    pub fn hold_link_drain(&self) -> LinkDrainHold {
+        self.link_drain_holds.fetch_add(1, Ordering::AcqRel);
+        LinkDrainHold {
+            holds: Arc::clone(&self.link_drain_holds),
+            tx: self.tx.clone(),
+        }
+    }
+
+    #[cfg(feature = "fault-injection")]
+    pub async fn commit_count_for_harness(&self) -> Result<u64, RuntimeError> {
+        self.run(|store, _| Ok(store.commit_count_for_harness()))
+            .await
+    }
+
+    /// Engine diagnostics for the derived index; no store read or drain.
+    pub fn link_drain_metrics(&self) -> LinkDrainMetrics {
+        self.link_metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     /// Hear every Group automation claim this workspace's chat writes and
     /// relay passes commit. The latest listener replaces an earlier one.
     pub fn listen_for_automation_claims(&self, listener: AutomationClaimListener) {
@@ -401,7 +549,65 @@ impl ActorHandle {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(listener);
     }
 
-    async fn run<R: Send + 'static>(
+    pub async fn replica_current_view(
+        &self,
+        workspace: String,
+        request: dohc_engine_sync::replica_cut::CurrentViewRequest,
+    ) -> Result<dohc_engine_sync::replica_cut::ReplicaCurrentView, RuntimeError> {
+        let cache = Arc::clone(&self.current_views);
+        self.run(move |store, _| {
+            Ok(dohc_engine_sync::replica_cut::collect_current_view_cached(
+                store,
+                &workspace,
+                &request,
+                &mut cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            )?)
+        })
+        .await
+    }
+
+    pub async fn replica_frontiers(
+        &self,
+        workspace: String,
+    ) -> Result<dohc_engine_storage::replica::ReplicaFrontiers, RuntimeError> {
+        self.run(move |store, _| {
+            store.read_with(|conn| {
+                Ok(dohc_engine_storage::replica::read_frontiers(
+                    conn, &workspace,
+                )?)
+            })
+        })
+        .await
+    }
+
+    pub async fn apply_replica_page(
+        &self,
+        workspace: String,
+        after: i64,
+        epoch_log_floor: i64,
+        rows: Vec<dohc_engine_collab::live_update_application::passive::ReplicaJournalRow>,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<dohc_engine_collab::live_update_application::passive::ReplicaPageResult, RuntimeError>
+    {
+        self.run(move |store, cache| {
+            let _reservation = reservation;
+            let result = dohc_engine_collab::live_update_application::passive::apply_page(
+                store,
+                &workspace,
+                after,
+                epoch_log_floor,
+                &rows,
+                &dohc_engine_storage::NoFaults,
+            );
+            cache.clear();
+            Ok(result?)
+        })
+        .await
+    }
+
+    pub(crate) async fn run<R: Send + 'static>(
         &self,
         work: impl FnOnce(&mut EngineStore, &mut WriterDocCache) -> Result<R, RuntimeError>
         + Send
@@ -411,8 +617,31 @@ impl ActorHandle {
         self.tx
             .send(Command::Run(Box::new(move |store, cache| {
                 let outcome = work(store, cache);
-                let _ = reply.send(outcome);
+                let _ = reply.send(drained(store, outcome));
             })))
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    async fn run_with_registrations<R: Send + 'static>(
+        &self,
+        work: impl FnOnce(
+            &mut EngineStore,
+            &mut WriterDocCache,
+            &mut live_application::Registry,
+        ) -> Result<R, RuntimeError>
+        + Send
+        + 'static,
+    ) -> Result<R, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::RunWithRegistrations(Box::new(
+                move |store, cache, registrations| {
+                    let outcome = work(store, cache, registrations);
+                    let _ = reply.send(drained(store, outcome));
+                },
+            )))
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)?;
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
@@ -429,7 +658,7 @@ impl ActorHandle {
         self.tx
             .blocking_send(Command::Run(Box::new(move |store, cache| {
                 let outcome = work(store, cache);
-                let _ = reply.send(outcome);
+                let _ = reply.send(drained(store, outcome));
             })))
             .map_err(|_| RuntimeError::ActorUnavailable)?;
         reply_rx
@@ -454,17 +683,17 @@ impl ActorHandle {
         root: std::path::PathBuf,
     ) -> Result<Vec<(String, String)>, RuntimeError> {
         self.run(move |store, _| {
-            Ok(store
-                .list_kept_displacements(&workspace_id)?
-                .into_iter()
-                .map(|row| {
-                    (
-                        row.target_path,
-                        format!(".dohc/engine/displaced/{}", row.displaced_name),
-                    )
-                })
-                .filter(|(_, path)| std::fs::symlink_metadata(root.join(path)).is_ok())
-                .collect())
+            let mut files = Vec::new();
+            for row in store.list_kept_displacements(&workspace_id)? {
+                let dir = store
+                    .staging_location(&row.job_id)?
+                    .unwrap_or_else(|| ".dohc/engine/displaced".into());
+                let path = format!("{dir}/{}", row.displaced_name);
+                if std::fs::symlink_metadata(root.join(&path)).is_ok() {
+                    files.push((row.target_path, path));
+                }
+            }
+            Ok(files)
         })
         .await
     }
@@ -482,6 +711,23 @@ impl ActorHandle {
         self.run(move |store, _| {
             store
                 .bind_root_token(&token, faults.as_ref())
+                .map_err(RuntimeError::Storage)
+        })
+        .await
+    }
+
+    /// Whether this store already records a workspace other than `workspace_id`.
+    pub async fn holds_other_workspace(&self, workspace_id: String) -> Result<bool, RuntimeError> {
+        self.run(move |store, _| {
+            store
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM versioned_workspaces WHERE workspace_id <> ?1)",
+                        rusqlite::params![workspace_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(dohc_engine_storage::StorageError::corrupt_public)
+                })
                 .map_err(RuntimeError::Storage)
         })
         .await
@@ -508,10 +754,12 @@ fn debug_assert_sync_context() {
 fn worker_main(
     db_path: PathBuf,
     now_ms: i64,
-    read_only: bool,
+    mode: ActorOpenMode,
     root_token: Option<String>,
     mut rx: mpsc::Receiver<Command>,
     state: Arc<AtomicU8>,
+    link_metrics: SharedMetrics,
+    link_drain_holds: Arc<AtomicU64>,
     startup_tx: std::sync::mpsc::SyncSender<Result<bool, StorageError>>,
     writer_lock: Option<WriterLock>,
     work_count: Option<Arc<AtomicU64>>,
@@ -531,12 +779,20 @@ fn worker_main(
     // Drop SQLite first, then its owner lock, then publish Closed, including unwind.
     let _writer_lock = writer_lock;
 
-    let mut store = match if read_only {
-        EngineStore::open_read_only_counting(&db_path, work_count.clone())
-    } else if let Some(token) = &root_token {
-        EngineStore::open_with_root_token(&db_path, now_ms, token, work_count.clone())
+    let mut store = match if matches!(mode, ActorOpenMode::Passive) {
+        EngineStore::open_passive(&db_path, now_ms, root_token.as_deref(), work_count.clone())
+    } else if matches!(mode, ActorOpenMode::ReadOnly) {
+        EngineStore::open_read_only_counting(&db_path, work_count.clone()).and_then(|store| {
+            if store.is_passive() {
+                Err(dohc_engine_storage::StorageError::InvalidInput {
+                    reason: "engine store role mismatch",
+                })
+            } else {
+                Ok(store)
+            }
+        })
     } else {
-        EngineStore::open_counting(&db_path, now_ms, work_count.clone())
+        EngineStore::open_for_actor(&db_path, now_ms, root_token.as_deref(), work_count.clone())
     } {
         Ok(store) => store,
         Err(err) => {
@@ -559,6 +815,12 @@ fn worker_main(
     // successful open also observes Ready. The same handshake carries the
     // store's authoritative freshness disposition; no caller infers it from
     // file existence or actor-registry ownership.
+    #[cfg(test)]
+    {
+        let mut metrics = link_metrics.lock().unwrap();
+        metrics.worker_starts_at_publication = Some(metrics.worker_starts);
+        metrics.actor_batches_at_publication = Some(metrics.actor_batches);
+    }
     state.store(LifecycleState::Ready.as_u8(), Ordering::Release);
     if startup_tx.send(Ok(store_freshly_created)).is_err() {
         // The spawner unwound before the actor was built; nothing to serve.
@@ -576,7 +838,92 @@ fn worker_main(
     // Blocking recv on the tokio channel keeps the SQLite work on this
     // dedicated thread, off the async runtime. `blocking_recv` returns `None`
     // once every sender is dropped.
-    while let Some(cmd) = rx.blocking_recv() {
+    // Publish before link startup, then let queued foreground commands win.
+    // An idle reopened store must also resume its durable drain without a
+    // foreground request; link-drain holds still postpone startup and slices.
+    let mut links_started = false;
+    let mut links = None;
+    let mut timer = None;
+    loop {
+        // Serve a queued foreground command before each background slice.
+        // The timer runtime ends before synchronous commands execute.
+        let cmd = match rx.try_recv() {
+            Ok(cmd) => Some(cmd),
+            Err(mpsc::error::TryRecvError::Disconnected) => break,
+            Err(mpsc::error::TryRecvError::Empty) => {
+                if !links_started
+                    && matches!(mode, ActorOpenMode::ReadWrite)
+                    && link_drain_holds.load(Ordering::Acquire) == 0
+                {
+                    links_started = true;
+                    match DrainWorker::new(Arc::clone(&link_metrics)) {
+                        Ok(worker) => {
+                            links = Some(worker);
+                            timer = tokio::runtime::Builder::new_current_thread()
+                                .enable_time()
+                                .build()
+                                .ok();
+                            #[cfg(test)]
+                            if timer.is_some() {
+                                link_metrics.lock().unwrap().timer_starts += 1;
+                            }
+                        }
+                        Err(_) => eprintln!("links parser could not start; pending work retained"),
+                    }
+                }
+                #[cfg(test)]
+                {
+                    // Count after startup so observing this slot also observes
+                    // whether the hold prevented worker and timer creation.
+                    link_metrics.lock().unwrap().idle_slots += 1;
+                }
+                match (&mut links, &timer) {
+                    (Some(worker), Some(timer))
+                        if link_drain_holds.load(Ordering::Acquire) == 0 =>
+                    {
+                        #[cfg(feature = "fault-injection")]
+                        let mut phase = dohc_engine_storage::capture_phase::Phase::new(
+                            "actor_background_slice",
+                            None,
+                            0,
+                            true,
+                        );
+                        #[cfg(feature = "fault-injection")]
+                        phase.field("link_drain_holds", link_drain_holds.load(Ordering::Acquire));
+                        let delay = worker.tick(&mut store);
+                        #[cfg(feature = "fault-injection")]
+                        {
+                            phase.finish("completed");
+                            drop(phase);
+                        }
+                        let parser_pending = worker.waiting_for_parser();
+                        if delay == std::time::Duration::MAX && !parser_pending {
+                            rx.blocking_recv()
+                        } else {
+                            if delay.is_zero() {
+                                continue;
+                            }
+                            timer.block_on(async {
+                                tokio::select! {
+                                    biased;
+                                    cmd = rx.recv() => cmd,
+                                    () = worker.parser_finished(), if parser_pending => None,
+                                    () = async { tokio::time::sleep(delay).await },
+                                        if delay != std::time::Duration::MAX => None,
+                                }
+                            })
+                        }
+                    }
+                    _ => rx.blocking_recv(),
+                }
+            }
+        };
+        let Some(cmd) = cmd else {
+            if rx.is_closed() {
+                break;
+            }
+            continue;
+        };
         // Counted as each command starts, so its caller sees the count by the
         // time its reply arrives.
         if let Some(work) = &work_count {
@@ -592,6 +939,10 @@ fn worker_main(
         }
         match cmd {
             Command::Run(work) => work(&mut store, &mut doc_cache),
+            Command::WakeLinks => {}
+            Command::RunWithRegistrations(work) => {
+                work(&mut store, &mut doc_cache, &mut live_applications);
+            }
             Command::LiveApplication(request) => {
                 request.execute(&mut live_applications, &mut store, &mut doc_cache);
             }
@@ -602,6 +953,7 @@ fn worker_main(
                 break;
             }
         }
+        store.request_checkpoint();
         if state.load(Ordering::Acquire) == LifecycleState::RecoveryRequired.as_u8() {
             break;
         }
@@ -610,7 +962,29 @@ fn worker_main(
     // Normal exit: drop the connection explicitly, then the `_closed_guard`
     // publishes Closed as it falls out of scope (same ordering the guard
     // guarantees on a panic unwind).
+    drop(links);
     drop(store);
+}
+
+/// Pay the drain that barrier flushes left owed before a result leaves the
+/// actor, so the files a command projected are as durable at its reply as a
+/// drain per file made them. The drain does not sync the WAL: the command's
+/// NORMAL commits are no more durable than before. A drain that fails stays
+/// owed, so the next reply drains again even when its command flushed
+/// nothing. The work's own error comes first; a failed drain turns a success
+/// into an I/O error.
+fn drained<R>(store: &EngineStore, outcome: Result<R, RuntimeError>) -> Result<R, RuntimeError> {
+    let drain = store.drain_flushes().map_err(|error| {
+        RuntimeError::Materialize(dohc_engine_files::MaterializeError::Io {
+            path: store.database_path().to_string_lossy().into_owned(),
+            kind: error.kind(),
+            raw_os_error: error.raw_os_error(),
+            // macOS checks privacy when a path opens, and the drain uses a
+            // folder the store opened earlier.
+            privacy_denied: false,
+        })
+    });
+    outcome.and_then(|value| drain.map(|()| value))
 }
 
 #[cfg(any(windows, target_vendor = "apple"))]
@@ -690,6 +1064,454 @@ mod saturation_tests {
     use std::task::Poll;
     use std::time::{Duration, Instant};
     use tokio::sync::Semaphore;
+
+    // Prepare the real command channel and holds before worker_main publishes.
+    // This removes the race between spawn returning and its first idle slot.
+    fn spawn_prequeued_actor(
+        db: &std::path::Path,
+        prepare: impl FnOnce(&ActorHandle),
+    ) -> WorkspaceActor {
+        let identity = EngineDbIdentity::resolve_or_create(db).unwrap();
+        let writer_lock = acquire_writer_lock(db).unwrap();
+        let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
+        let state = Arc::new(AtomicU8::new(LifecycleState::Opening.as_u8()));
+        let metrics = SharedMetrics::default();
+        let holds = Arc::new(AtomicU64::new(0));
+        let mut actor = WorkspaceActor {
+            identity,
+            generation: 1,
+            mode: ActorOpenMode::ReadWrite,
+            store_freshly_created: false,
+            close_permit: Some(tx.clone().try_reserve_owned().unwrap()),
+            tx,
+            state,
+            worker: None,
+            #[cfg(unix)]
+            retention: None,
+            #[cfg(unix)]
+            retention_root: retained::Root::default(),
+            claims: ClaimAnnouncer::default(),
+            link_metrics: metrics,
+            link_drain_holds: holds,
+            current_views: Arc::default(),
+            link_resolvers: Arc::default(),
+        };
+        prepare(&actor.handle());
+        let (startup_tx, startup_rx) = std_sync_channel(1);
+        let db = db.to_owned();
+        let state = Arc::clone(&actor.state);
+        let metrics = Arc::clone(&actor.link_metrics);
+        let holds = Arc::clone(&actor.link_drain_holds);
+        actor.worker = Some(std::thread::spawn(move || {
+            worker_main(
+                db,
+                2,
+                ActorOpenMode::ReadWrite,
+                None,
+                rx,
+                state,
+                metrics,
+                holds,
+                startup_tx,
+                Some(writer_lock),
+                None,
+            );
+        }));
+        actor.store_freshly_created = startup_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        assert!(!actor.store_freshly_created, "exercise a reopened store");
+        actor
+    }
+
+    #[test]
+    fn commands_queued_at_publication_finish_before_link_worker_and_timer_start() {
+        let scratch = ScratchDir::new().unwrap();
+        let db = engine_db_path(&scratch).unwrap();
+        drop(EngineStore::open(&db, 1).unwrap());
+        let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+        let mut actor = spawn_prequeued_actor(&db, |handle| {
+            for command in 0..3 {
+                let metrics = Arc::clone(&handle.link_metrics);
+                let state = Arc::clone(&handle.state);
+                let completed = completed_tx.clone();
+                handle
+                    .tx
+                    .try_send(Command::Run(Box::new(move |store, _| {
+                        assert_eq!(state.load(Ordering::Acquire), LifecycleState::Ready.as_u8());
+                        let migrations = store
+                            .read_with(|conn| {
+                                conn.query_row(
+                                    "SELECT COUNT(*) FROM engine_migrations",
+                                    [],
+                                    |row| row.get::<_, i64>(0),
+                                )
+                            })
+                            .unwrap();
+                        assert!(migrations > 0);
+                        let metrics = metrics.lock().unwrap();
+                        completed
+                            .send((command, metrics.worker_starts, metrics.timer_starts))
+                            .unwrap();
+                    })))
+                    .unwrap();
+            }
+        });
+        let completed: Vec<_> = (0..3)
+            .map(|_| completed_rx.recv_timeout(Duration::from_secs(5)).unwrap())
+            .collect();
+        actor.close().unwrap();
+        assert_eq!(completed, [(0, 0, 0), (1, 0, 0), (2, 0, 0)]);
+    }
+
+    #[tokio::test]
+    async fn link_drain_hold_before_first_idle_slot_postpones_startup_until_release() {
+        let scratch = ScratchDir::new().unwrap();
+        let db = engine_db_path(&scratch).unwrap();
+        drop(EngineStore::open(&db, 1).unwrap());
+        let mut hold = None;
+        let mut actor = spawn_prequeued_actor(&db, |handle| {
+            hold = Some(handle.hold_link_drain());
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if actor.handle().link_drain_metrics().idle_slots > 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("actor reaches an idle slot while the hold is active");
+        // Commands still run while held, after publication returns to the caller.
+        for _ in 0..2 {
+            actor
+                .handle()
+                .run(|_, _| Ok(()))
+                .await
+                .expect("foreground command while held");
+            let metrics = actor.handle().link_drain_metrics();
+            assert_eq!(
+                metrics.worker_starts, 0,
+                "hold must postpone parser startup"
+            );
+            assert_eq!(metrics.timer_starts, 0, "hold must postpone timer startup");
+        }
+        drop(hold.take());
+        // Drop wakes the empty queue. No foreground request drives startup.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let metrics = actor.handle().link_drain_metrics();
+                if metrics.worker_starts == 1 && metrics.timer_starts == 1 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the next idle slot starts links after the last hold drops");
+        actor.close().unwrap();
+    }
+
+    /// A reply waits for the drain its command's barriers left owed. A failed
+    /// drain fails that reply and stays owed, so the next reply drains even
+    /// when its command flushed nothing. A command that fails after a flush
+    /// still drains before its error goes back, and its error comes first.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[tokio::test]
+    async fn every_reply_pays_the_drain_its_command_left_owed() {
+        use dohc_engine_storage::FlushKind::{Barrier, Drain};
+        let scratch = ScratchDir::new().unwrap();
+        let db = engine_db_path(&scratch).unwrap();
+        drop(EngineStore::open(&db, 1).unwrap());
+        let note = scratch.join("note.md");
+        std::fs::write(&note, b"projected").unwrap();
+        let supervisor = crate::WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 2).unwrap().actor;
+        let flush = move |store: &EngineStore| {
+            store
+                .flush_before_commits(&std::fs::File::open(&note).unwrap())
+                .unwrap();
+        };
+        let trace = || {
+            actor.run(|store, _| {
+                Ok(store
+                    .take_flush_trace()
+                    .into_iter()
+                    .map(|event| event.kind)
+                    .collect::<Vec<_>>())
+            })
+        };
+
+        let once = flush.clone();
+        actor
+            .run(move |store, _| {
+                once(store);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(trace().await.unwrap(), [Barrier, Drain]);
+
+        let failing = flush.clone();
+        let refused = actor
+            .run(move |store, _| {
+                failing(store);
+                store.fail_next_drain();
+                Ok(())
+            })
+            .await;
+        assert!(
+            matches!(&refused, Err(RuntimeError::Materialize(error)) if error.code() == "materialize-io"),
+            "{refused:?}"
+        );
+        actor.run(|_, _| Ok(())).await.expect("the retry drains");
+        assert_eq!(
+            trace().await.unwrap(),
+            [Barrier, Drain],
+            "a retry that flushes nothing pays the failed drain"
+        );
+
+        let failed = flush.clone();
+        let error = actor
+            .run(move |store, _| {
+                failed(store);
+                Err::<(), _>(RuntimeError::Cancelled)
+            })
+            .await;
+        assert!(matches!(error, Err(RuntimeError::Cancelled)), "{error:?}");
+        assert_eq!(trace().await.unwrap(), [Barrier, Drain]);
+
+        let both = flush.clone();
+        let error = actor
+            .run(move |store, _| {
+                both(store);
+                store.fail_next_drain();
+                Err::<(), _>(RuntimeError::Cancelled)
+            })
+            .await;
+        assert!(
+            matches!(error, Err(RuntimeError::Cancelled)),
+            "the work's error wins: {error:?}"
+        );
+        assert_eq!(trace().await.unwrap(), [Barrier], "the drain stays owed");
+        // That reply flushed nothing and still paid the owed drain.
+        assert_eq!(trace().await.unwrap(), [Drain]);
+        supervisor.close(&db).unwrap();
+    }
+
+    /// The drain runs on the database's folder as the store opened it. A
+    /// workspace renamed, or renamed and replaced by a new folder, while a
+    /// drain is owed still drains the original folder, and later replies keep
+    /// working.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[tokio::test]
+    async fn a_moved_workspace_still_drains_the_folder_its_store_opened() {
+        use dohc_engine_storage::FlushKind::{Barrier, Drain};
+        use std::os::unix::fs::MetadataExt;
+        for replace in [false, true] {
+            let scratch = ScratchDir::new().unwrap();
+            let root = scratch.join("workspace");
+            let moved = scratch.join("moved");
+            std::fs::create_dir_all(root.join(".dohc/engine")).unwrap();
+            let db = root.join(".dohc/engine/engine.db");
+            drop(EngineStore::open(&db, 1).unwrap());
+            std::fs::write(root.join("note.md"), b"projected").unwrap();
+            let engine = std::fs::metadata(root.join(".dohc/engine")).unwrap();
+            let supervisor = crate::WorkspaceSupervisor::new();
+            let actor = supervisor.open(&db, 2).unwrap().actor;
+            let trace = || {
+                actor.run(|store, _| {
+                    Ok(store
+                        .take_flush_trace()
+                        .into_iter()
+                        .map(|event| (event.kind, event.device, event.inode))
+                        .collect::<Vec<_>>())
+                })
+            };
+            let original = (Drain, engine.dev(), engine.ino());
+
+            let (from, to) = (root.clone(), moved.clone());
+            actor
+                .run(move |store, _| {
+                    let note = std::fs::File::open(from.join("note.md")).unwrap();
+                    store.flush_before_commits(&note).unwrap();
+                    std::fs::rename(&from, &to).unwrap();
+                    if replace {
+                        std::fs::create_dir_all(from.join(".dohc/engine")).unwrap();
+                    }
+                    Ok(())
+                })
+                .await
+                .expect("the reply drains the folder the store opened");
+            let drained = trace().await.unwrap();
+            assert_eq!(drained.len(), 2, "{drained:?}");
+            assert_eq!(drained[0].0, Barrier);
+            assert_eq!(drained[1], original, "replace={replace}");
+
+            let note = moved.join("note.md");
+            actor
+                .run(move |store, _| {
+                    let note = std::fs::File::open(&note).unwrap();
+                    store.flush_before_commits(&note).unwrap();
+                    Ok(())
+                })
+                .await
+                .expect("later replies still drain");
+            assert_eq!(trace().await.unwrap()[1], original);
+            supervisor
+                .close(&moved.join(".dohc/engine/engine.db"))
+                .unwrap();
+        }
+    }
+
+    /// smbfs drains a regular file but refuses `F_FULLFSYNC` on a folder. A
+    /// store whose folder refuses the trial drain at open takes no barriers:
+    /// every file drains at once, no drain is owed, and replies keep
+    /// succeeding, reads included.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[tokio::test]
+    async fn a_folder_that_refuses_a_drain_turns_barriers_off() {
+        use dohc_engine_storage::FlushKind::Full;
+        let scratch = ScratchDir::new().unwrap();
+        let db = engine_db_path(&scratch).unwrap();
+        drop(EngineStore::open(&db, 1).unwrap());
+        dohc_engine_storage::refuse_folder_flushes(db.parent().unwrap()).unwrap();
+        let note = scratch.join("note.md");
+        std::fs::write(&note, b"projected").unwrap();
+        let supervisor = crate::WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 2).unwrap().actor;
+        for _ in 0..2 {
+            let file = note.clone();
+            let kinds = actor
+                .run(move |store, _| {
+                    store
+                        .flush_before_commits(&std::fs::File::open(&file).unwrap())
+                        .unwrap();
+                    Ok(store
+                        .take_flush_trace()
+                        .into_iter()
+                        .map(|event| event.kind)
+                        .collect::<Vec<_>>())
+                })
+                .await
+                .expect("a reply after a flush succeeds");
+            assert_eq!(kinds, [Full]);
+            actor
+                .run(|_, _| Ok(()))
+                .await
+                .expect("a reply that flushed nothing succeeds");
+        }
+        supervisor.close(&db).unwrap();
+    }
+
+    #[tokio::test]
+    async fn reopened_actor_publishes_before_link_work_and_resumes_while_idle() {
+        use dohc_engine_domain::VersionedTextStore;
+        let scratch = ScratchDir::new().unwrap();
+        let db = engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&db, 1).unwrap();
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1, &dohc_engine_storage::NoFaults)
+            .unwrap();
+        drop(store);
+        let supervisor = crate::WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 2).unwrap().actor;
+        assert_eq!(
+            actor.state.load(Ordering::Acquire),
+            LifecycleState::Ready.as_u8()
+        );
+        {
+            let metrics = actor.link_metrics.lock().unwrap();
+            assert_eq!(
+                metrics.worker_starts_at_publication,
+                Some(0),
+                "no link startup before publication"
+            );
+            assert_eq!(
+                metrics.actor_batches_at_publication,
+                Some(0),
+                "no link writes before publication"
+            );
+        }
+        // No actor command follows open: a reader observes autonomous resume.
+        let reader =
+            rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let ready: bool = reader.query_row(
+                    "SELECT seed_phase='ready' FROM link_index_state WHERE workspace_id='ws' AND version_id='main'",
+                    [], |r| r.get(0),
+                ).unwrap();
+                if ready { break; }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }).await.unwrap();
+        drop(reader);
+        supervisor.close(&db).unwrap();
+    }
+
+    #[test]
+    fn passive_store_restart_without_active_slot_fails_closed() {
+        let scratch = ScratchDir::new().unwrap();
+        let db = engine_db_path(&scratch).unwrap();
+        let supervisor = crate::WorkspaceSupervisor::new();
+        supervisor
+            .open_passive_root_bound(&db, 1, "passive-root", None)
+            .unwrap();
+        supervisor.close(&db).unwrap();
+        assert!(
+            supervisor.restart(&db, 2).is_err(),
+            "restart without a passive mode must fail closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn passive_store_supervisor_restart_still_refuses_origination() {
+        let scratch = ScratchDir::new().unwrap();
+        let db = engine_db_path(&scratch).unwrap();
+        let supervisor = crate::WorkspaceSupervisor::new();
+        supervisor
+            .open_passive_root_bound(&db, 1, "passive-root", None)
+            .unwrap();
+        let actor = supervisor.restart(&db, 2).unwrap();
+        let refused = actor
+            .run(|store, _cache| {
+                Ok(dohc_engine_sync::create_claim_identity(
+                    store,
+                    "ws",
+                    "local",
+                    "epoch",
+                    "stream",
+                    2,
+                    &dohc_engine_storage::NoFaults,
+                )
+                .is_err())
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while actor.link_drain_metrics().idle_slots == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("passive actor reaches an idle slot before close");
+        supervisor.close(&db).unwrap();
+        assert!(refused, "a restart must keep local origination disabled");
+        assert_eq!(
+            actor.link_drain_metrics().worker_starts,
+            0,
+            "passive actors must never create a DrainWorker, even without queued work"
+        );
+        assert_eq!(
+            actor.link_drain_metrics().actor_batches,
+            0,
+            "passive actors must never run the link drain"
+        );
+    }
 
     #[test]
     fn writer_lock_survives_sqlite_descriptor_close_and_hard_link_aliases() {

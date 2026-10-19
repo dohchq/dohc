@@ -33,6 +33,8 @@ import { createSessionActorResolver } from "@dohc/workspace-auth/session";
 import { initializeRelayDeployment, openRelayDeployment } from "../../sync-relay/src/relayDeployment.js";
 import { startServiceLiveHost } from "../../sync-relay/src/serviceLiveHost.js";
 import { createSyncRelayHandler } from "../../sync-relay/src/server.js";
+import { createServiceHostReplication } from "../../sync-relay/src/serviceHostReplication.js";
+import { authorizeServiceHostReplication, deriveServiceHostBearer } from "../../sync-relay/src/serviceHostCredential.js";
 import { createNamedLiveRoutes } from "../../sync-relay/src/namedLiveRoutes.js";
 import { createLiveTickets } from "../../sync-relay/src/liveTickets.js";
 import { createLiveHostReports } from "../../sync-relay/src/namedLiveHostReports.js";
@@ -154,7 +156,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     const { storage } = deployment;
     expect(storage.claimWorkspace({ workspaceId: "workspace", ownerUserId: ownerUser.id, createdAtMs: 1 })).toBe("created");
     expect(storage.provisionLiveHostControl({ mode: "service", hostId: "service", updatedAtMs: 1, guard: storage.captureStanding() }).ok).toBe(true);
-    active = await startServiceLiveHost({ configPath: serviceConfig, ...deployment, frameChanges });
+    active = await startServiceLiveHost({trustedAccount: (accountId: string) => ({accountId, name: accountId}), configPath: serviceConfig, ...deployment, frameChanges });
     const baseline = Y.encodeStateAsUpdate(ownerDoc), document = { workspaceId: "workspace", mainVersionId: mainVersionId!, objectId: "object", lineageClaimId: hash(baseline) };
     const registration = createLiveMarkdownRegistrationValidator(validationPolicy)({ document, currentPath: "docs/a.md", checkpoint: baseline });
     if (registration.kind !== "accepted") throw new Error(JSON.stringify(registration));
@@ -177,8 +179,13 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     const relayApp = createSyncRelayHandler({storage, publicEditRelease, linkKey, shareWebOrigin: audience, relayExchangeKey: exchangeKey,
       namedBrowserSessionLimits: capacity.namedSessions, resolveActor: createSessionActorResolver(relayAuth), ownerRestoreHost: () => active});
     let routes!: ReturnType<typeof createNamedLiveRoutes>, namedRoutes!: ReturnType<typeof createNamedLiveRoutes>, linkHttp!: ReturnType<typeof createLinkLiveHttp>;
+    // The service host replicates through its scoped feed, with the credential this relay derives for it.
+    const serviceKey = {key: Buffer.from(ticketKey), namespace: deployment.history.namespace};
+    const serviceReplication = createServiceHostReplication({storage, prefix: "dohc-service-v1.", hostedFeed: true,
+      authorize: input => authorizeServiceHostReplication(storage, {...serviceKey, ...input})});
     const relayHttp = serveFetchHandler({handler: async request => {
       const path = new URL(request.url).pathname;
+      if (request.headers.get("authorization")?.startsWith("Bearer dohc-service-v1.")) return serviceReplication(request);
       const response = await (path === "/sync/live/named-tickets" ? namedRoutes.handle(request) : path === "/sync/live/link-tickets" ? routes.handle(request)
         : ["/sync/live/link-session", "/sync/live/link-document"].includes(path) ? linkHttp(request) : relayApp(request));
       return response;
@@ -402,7 +409,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     await browserExpect.poll(() => frameChanges.captureCount()).toBe(capacity.admittedConcurrency);
     await active.close(); active = undefined;
     await oldEpoch.hostileSend(epochPartial); await oldEpoch.until(() => oldEpoch.closed !== undefined);
-    active = await startServiceLiveHost({configPath: serviceConfig, ...deployment, frameChanges});
+    active = await startServiceLiveHost({trustedAccount: (accountId: string) => ({accountId, name: accountId}), configPath: serviceConfig, ...deployment, frameChanges});
     const newEpoch = await wire.connect(freshFirst.context, await wire.ticket(freshFirst.context, freshFirst.discriminator, "object"), "fresh-epoch-control"); await newEpoch.sync();
     // A service reconnect keeps the provisioned epoch; the closed old socket
     // is the restart fence. Epoch changes belong to an explicit host transition.
@@ -507,7 +514,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     const transitionHarness: PublicTransitionHarness = {root, workspace, audience, concurrency: capacity.admittedConcurrency,
       timeoutMs: routeLimits.upgradeTimeoutMs, storage, evidence: results, ownerUserId: ownerUser.id, host: () => {
         if (!active) throw new Error("Transition host is offline."); return active;
-      }, restart: async () => {await active!.close(); active = undefined; active = await startServiceLiveHost({configPath: serviceConfig, ...deployment, frameChanges});},
+      }, restart: async () => {await active!.close(); active = undefined; active = await startServiceLiveHost({trustedAccount: (accountId: string) => ({accountId, name: accountId}), configPath: serviceConfig, ...deployment, frameChanges});},
       publishSettled: async (document, path) => {
         // These documents are registered directly, without an ordinary owner
         // history. Publish the actual native file through the fixture relay;
@@ -575,9 +582,10 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     expect(browser!.contexts()).toHaveLength(0);
     await browserExpect.poll(() => frameChanges.listenerCount()).toBe(0);
     results.automaticView = await runPublicAutomaticView({h: transitionHarness, selected: transitions.cases.view, admission: capacity.automaticView,
-      executable, relayUrl, ownerToken, native: capacity.native, validation: validationPolicy, maxRegistrations: capacity.maxRegistrations,
+      executable, relayUrl, ownerToken, serviceBearer: workspace => deriveServiceHostBearer(workspace, serviceKey),
+      native: capacity.native, validation: validationPolicy, maxRegistrations: capacity.maxRegistrations,
       replaceHost: async config => {await active!.close(); active = undefined; writeFileSync(serviceConfig, JSON.stringify(config));
-        active = await startServiceLiveHost({configPath: serviceConfig, ...deployment, frameChanges});},
+        active = await startServiceLiveHost({trustedAccount: (accountId: string) => ({accountId, name: accountId}), configPath: serviceConfig, ...deployment, frameChanges});},
       newView: async url => {
         const context = await browser!.newContext({ignoreHTTPSErrors: true}); contexts.push(context); const page = await context.newPage();
         page.on("pageerror", error => browserErrors.push(String(error)));

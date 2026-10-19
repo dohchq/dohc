@@ -16,13 +16,14 @@ export type CaptureFlushResult = {
   settled: boolean;
   running: boolean;
   degraded: boolean;
+  heldFiles: WatcherStatusResult["heldFiles"];
 };
 
 const READY_WATCHER_STATUS = {
   running: true,
   degraded: false,
   terminal: false,
-  noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [],
+  noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [],
   phase: "ready",
 } satisfies WatcherStatusResult;
 
@@ -39,6 +40,7 @@ export function daemonCaptureLifecycleAnswer(
     settled: true,
     running: true,
     degraded: false,
+    heldFiles: [],
   }),
 ): Response | null {
   switch (request.method) {
@@ -91,6 +93,7 @@ export function mockLiveSessions(
     settled: true,
     running: true,
     degraded: false,
+    heldFiles: [],
   }),
   beforeRequest?: (request: Request) => void | Promise<void>,
 ): EngineWorkspaceSessions {

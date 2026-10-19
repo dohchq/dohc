@@ -1,4 +1,6 @@
-import { expect, test, type Locator } from "@playwright/test";
+import { holdSystemClipboard } from "./helpers/systemClipboard";
+import { DOCUMENT_START, DOCUMENT_END } from "./helpers/keys";
+import { test, expect, type Locator } from "@playwright/test";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   cleanupDesktopWorkspace,
@@ -10,12 +12,12 @@ import {
 
 const TITLE = "A deliberately long page title that keeps going well past the width of a narrow pane";
 
-function caret(title: Locator) {
+function caret(title: Locator, timeout?: number) {
   return title.evaluate((element: HTMLTextAreaElement) => ({
     start: element.selectionStart,
     end: element.selectionEnd,
     focused: document.activeElement === element,
-  }));
+  }), undefined, { timeout });
 }
 
 // A long title wraps in a narrow pane, and stays one line of text: ArrowDown
@@ -50,31 +52,67 @@ test("a wrapped page title keeps ArrowDown, selection, and paste inside the titl
 
     // From the first line, ArrowDown moves down the title.
     await title.click();
-    await page.keyboard.press("Control+Home");
+    await page.keyboard.press(DOCUMENT_START);
     await page.keyboard.press("ArrowDown");
     const moved = await caret(title);
     expect(moved.focused).toBe(true);
     expect(moved.start).toBeGreaterThan(0);
 
     // Shift+ArrowDown selects instead of leaving.
-    await page.keyboard.press("Control+Home");
+    await page.keyboard.press(DOCUMENT_START);
     await page.keyboard.press("Shift+ArrowDown");
     const selected = await caret(title);
     expect(selected.focused).toBe(true);
     expect(selected.end).toBeGreaterThan(selected.start);
 
     // From the last line, ArrowDown moves to the body.
-    await page.keyboard.press("Control+End");
+    await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.press("ArrowDown");
     await expect(page.getByTestId("markdown-editor")).toBeFocused();
 
     // A pasted line break becomes a space, and the caret stays after the paste.
-    await desktop.app.evaluate(({ clipboard }) => clipboard.writeText("short\nand "));
+    await holdSystemClipboard(test.info(), async (remainingMs) => {
+      await desktop!.app.evaluate(({ clipboard }) => clipboard.writeText("short\nand "));
+      await title.click({ timeout: remainingMs() });
+      await title.evaluate((element: HTMLTextAreaElement) => element.setSelectionRange(2, 2), undefined, { timeout: remainingMs() });
+      await page.keyboard.press("ControlOrMeta+V");
+      await expect(title).toHaveValue(`A short and ${TITLE.slice(2)}`, { timeout: remainingMs() });
+      expect(await caret(title, remainingMs())).toMatchObject({ start: "A short and ".length, focused: true });
+    });
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+// A page whose body opens with an H1 folds its empty title beside "Add icon".
+// Focus and blur leave it folded, so the + below does not move between the
+// press that blurs the title and the release that clicks the +.
+test("a click on + while the empty folded title has focus adds a property", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+
+  try {
+    await writeWorkspaceFiles(temp, [{ path: "plan.md", contents: "# Plan\n\nBody text.\n" }]);
+    desktop = await launchDesktopApp({ workspace: temp });
+    const page = desktop.page;
+    await openWorkspaceFromFirstRun(page, temp);
+
+    await explorerRow(page, "plan.md").click();
+    const title = page.getByTestId("page-title");
+    await expect(title).toHaveAttribute("placeholder", "Add title", { timeout: 20_000 });
+    await expect(page.locator(".dohc-tiptap-editor")).toHaveAttribute("data-collab-state", "disabled");
+    const add = page.getByTestId("property-add");
+    const before = await add.boundingBox();
+
     await title.click();
-    await title.evaluate((element: HTMLTextAreaElement) => element.setSelectionRange(2, 2));
-    await page.keyboard.press("Control+V");
-    await expect(title).toHaveValue(`A short and ${TITLE.slice(2)}`);
-    expect(await caret(title)).toMatchObject({ start: "A short and ".length, focused: true });
+    await expect(title).toBeFocused();
+    await expect(title).toHaveAttribute("placeholder", "Add title");
+    expect(await add.boundingBox()).toEqual(before);
+
+    await add.click();
+    await expect(page.getByTestId("property-row")).toHaveCount(1);
+    await expect(page.getByTestId("property-key")).toBeFocused();
+    await expect(title).toHaveAttribute("placeholder", "Add title");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
@@ -104,7 +142,7 @@ test("ArrowDown leaves a mixed-direction title from its last line, and only ther
     await expect(title).toHaveValue(long, { timeout: 20_000 });
     await expect(page.locator(".dohc-tiptap-editor")).toHaveAttribute("data-collab-state", "disabled");
     await title.click();
-    await page.keyboard.press("Control+Home");
+    await page.keyboard.press(DOCUMENT_START);
     await page.keyboard.press("ArrowDown");
     expect(await caret(title)).toMatchObject({ focused: true });
 
@@ -113,7 +151,7 @@ test("ArrowDown leaves a mixed-direction title from its last line, and only ther
     await expect(title).toHaveValue(short, { timeout: 20_000 });
     await expect(page.locator(".dohc-tiptap-editor")).toHaveAttribute("data-collab-state", "disabled");
     await title.click();
-    await page.keyboard.press("Control+Home");
+    await page.keyboard.press(DOCUMENT_START);
     await page.keyboard.press("ArrowDown");
     await expect(page.getByTestId("markdown-editor")).toBeFocused();
   } finally {

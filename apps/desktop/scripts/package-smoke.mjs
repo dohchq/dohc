@@ -19,13 +19,13 @@ function check(ok, label) {
 for (const output of ["dist/main/main.js", "dist/main/app.js", "dist/preload/preload.cjs", "dist/renderer/index.html"]) {
   check(existsSync(join(desktopDir, output)), `build output exists: ${output}`);
 }
-for (const worker of ["workspace-database-worker", "document-projection-worker", "workspace-files-worker"]) {
+for (const worker of ["workspace-database-worker", "document-projection-worker", "workspace-files-worker", "collection-history-worker"]) {
   check(
     existsSync(join(desktopDir, `dist/main/${worker}.js`)),
     `build output exists: dist/main/${worker}.js`,
   );
 }
-for (const icon of ["build/icon.png", "build/icon-light.png", "build/icon-dark.png"]) {
+for (const icon of ["build/icon.png", "build/icon-light.png", "build/icon-dark.png", "build/icon.icns", "build/trayTemplate.png", "build/trayTemplate@2x.png"]) {
   check(existsSync(join(desktopDir, icon)), `system theme icon exists: ${icon}`);
 }
 check(
@@ -145,7 +145,7 @@ if (config) {
     ? config.publish[0]
     : config.publish;
   if (publishConfig?.provider === "github") {
-    check(publishConfig.owner === "dohc-ai", "publish GitHub owner is dohc-ai");
+    check(publishConfig.owner === "dohchq", "publish GitHub owner is dohchq");
     check(publishConfig.repo === "dohc", "publish GitHub repo is dohc");
     check(
       publishConfig.channel === "latest" || publishConfig.channel === "nightly",
@@ -163,8 +163,12 @@ if (config) {
   const fileExtensions = config.fileAssociations?.flatMap((entry) =>
     Array.isArray(entry.ext) ? entry.ext : [entry.ext],
   ) ?? [];
-  for (const ext of ["md", "markdown", "txt", "csv", "json"]) {
+  // Markdown may make dohc its default app; text, CSV and JSON never do.
+  const expectedRanks = { md: "Default", markdown: "Default", txt: "Alternate", csv: "Alternate", json: "Alternate" };
+  for (const [ext, rank] of Object.entries(expectedRanks)) {
     check(fileExtensions.includes(ext), `Open with dohc association includes .${ext}`);
+    const entry = config.fileAssociations?.find((candidate) => [candidate.ext].flat().includes(ext));
+    check(entry?.rank === rank, `.${ext} association ranks dohc ${rank} (${entry?.rank ?? "missing"})`);
   }
   check(
     Array.isArray(config.protocols) &&
@@ -183,6 +187,14 @@ if (config) {
 const hasSigningCredentials = Boolean(process.env.CSC_LINK || process.env.WIN_CSC_LINK);
 if (process.env.DOHC_REQUIRE_SIGNING === "1") {
   check(hasSigningCredentials, "DOHC_REQUIRE_SIGNING=1 demands CSC_LINK/WIN_CSC_LINK in the env");
+  // electron-builder skips notarization without these, and Gatekeeper blocks
+  // a signed Mac app that is not notarized.
+  if (process.platform === "darwin") {
+    check(
+      Boolean(process.env.APPLE_ID && process.env.APPLE_APP_SPECIFIC_PASSWORD && process.env.APPLE_TEAM_ID),
+      "DOHC_REQUIRE_SIGNING=1 on macOS demands APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD and APPLE_TEAM_ID for notarization",
+    );
+  }
 }
 console.log(hasSigningCredentials
   ? "SIGNING: credentials present (CSC env set)"

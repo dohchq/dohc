@@ -15,6 +15,7 @@ use crate::records::{
     CaptureRetireResult, DeleteResult, DeleteTextFile, FileObjectRecord, MomentOp, MomentRecord,
     SnapshotRecord, TextSnapshot, WriteResult, WriteText,
 };
+use dohc_engine_storage::text;
 use dohc_engine_storage::{
     EngineStore, FaultInjector, MaterializationJobSpec, Preimage, put_binary_blob,
 };
@@ -232,9 +233,18 @@ impl CaptureIngestBatchContext {
         Ok(())
     }
 
+    /// Accept a History recovery recorded after the item's own moment.
+    ///
+    /// A deduped item reserves no order and leaves a fresh cursor uninitialized.
+    /// The recovery's order then comes from the table's high-water mark in this
+    /// transaction, so it initializes the cursor. A reserved cursor must match.
     pub fn commit_recovery_order(&mut self, order: i64) -> Result<(), DomainError> {
-        if !matches!(self.moment_order_cursor, CaptureMomentOrderCursor::Ready(next) if next == order)
-        {
+        let accepted = match self.moment_order_cursor {
+            CaptureMomentOrderCursor::Ready(next) => next == order,
+            CaptureMomentOrderCursor::Uninitialized => true,
+            CaptureMomentOrderCursor::Exhausted => false,
+        };
+        if !accepted {
             return Err(DomainError::StateCorrupt {
                 reason: "capture recovery order diverged from batch cursor",
             });
@@ -375,9 +385,12 @@ pub fn capture_ingest_in_tx(
 /// Admission returns `E` directly; domain errors convert through `E: From<DomainError>`.
 ///
 /// A head with a different `metadata_origin` is refused unless
-/// `claim_foreign_head` is set. Equal text returns the existing head; a claimed
-/// equal-text head can still update its stored origin. The caller supplies the
-/// disk observation and owns lease policy and related transaction effects.
+/// `claim_foreign_head` is set or the head is a local Y.Doc recovery copy the
+/// materializer refused to place, see [`refused_local_recovery_occupies`]. The
+/// request payload hashes the caller's flag only. Equal text returns the
+/// existing head; a claimed equal-text head can still update its stored
+/// origin. The caller supplies the disk observation and owns lease policy and
+/// related transaction effects.
 /// Roll back the enclosing transaction or savepoint on error.
 pub fn capture_ingest_with_admission_in_tx<E>(
     tx: &Transaction<'_>,
@@ -477,13 +490,21 @@ where
     }
 
     let existing_alias = alias_object_id(tx, &input.workspace_id, &input.version_id, &input.path)?;
+    let claim_foreign_head = input.claim_foreign_head
+        || refused_local_recovery_occupies(
+            tx,
+            &input.workspace_id,
+            &input.version_id,
+            existing_alias.as_deref(),
+            &input.path,
+        )?;
     refuse_unclaimable_head(
         tx,
         &input.workspace_id,
         &input.version_id,
         existing_alias.as_deref(),
         &input.metadata_origin,
-        input.claim_foreign_head,
+        claim_foreign_head,
     )?;
     let target_object_id = existing_alias.clone().unwrap_or_else(|| {
         derive_capture_object_id(&input.workspace_id, &input.version_id, &input.path)
@@ -515,7 +536,7 @@ where
     // silently revert that write.
     if let Some(existing) = &before
         && existing.metadata_origin != input.metadata_origin
-        && !input.claim_foreign_head
+        && !claim_foreign_head
     {
         return Err(DomainError::CaptureNotOwned.into());
     }
@@ -655,6 +676,64 @@ where
 ///
 /// The deletion uses the existing domain delete path. The caller owns related
 /// effects and transaction completion. Roll back the transaction or savepoint on error.
+/// [`capture_retire_in_tx`] for a path whose file the disk shows stored under
+/// `to`, another spelling of it. A respell is not a deletion, so the head
+/// retires whoever owns it, but only when that cannot lose content: the head
+/// still holds the bytes found at `to` (`to_sha256`), nothing is waiting to
+/// materialize at either spelling, and no head lives at `to`. Otherwise the
+/// respell is unproven and the head stays: the retire fails with
+/// [`DomainError::WritePreconditionFailed`] and changes nothing.
+pub fn capture_retire_respelled_in_tx(
+    tx: &Transaction<'_>,
+    input: &CaptureRetire,
+    to: &str,
+    to_sha256: &str,
+) -> Result<CaptureRetireResult, DomainError> {
+    if alias_object_id(tx, &input.workspace_id, &input.version_id, &input.path)?.is_none() {
+        return capture_retire_in_tx(tx, input);
+    }
+    if !respell_keeps_content(tx, input, to, to_sha256)? {
+        return Err(DomainError::WritePreconditionFailed {
+            current_sha256: None,
+        });
+    }
+    let mut input = input.clone();
+    input.only_if_capture_origin = false;
+    capture_retire_in_tx(tx, &input)
+}
+
+fn respell_keeps_content(
+    tx: &Transaction<'_>,
+    input: &CaptureRetire,
+    to: &str,
+    to_sha256: &str,
+) -> Result<bool, DomainError> {
+    let (workspace, version) = (input.workspace_id.as_str(), input.version_id.as_str());
+    let Some(object_id) = alias_object_id(tx, workspace, version, &input.path)? else {
+        return Ok(false);
+    };
+    let Some(head) = get_snapshot_meta(tx, workspace, version, &object_id)? else {
+        return Ok(false);
+    };
+    let sha = if head.content_kind == "binary" {
+        head.binary_sha256
+    } else {
+        head.blob_sha256
+    };
+    if sha.as_deref() != Some(to_sha256) || alias_object_id(tx, workspace, version, to)?.is_some() {
+        return Ok(false);
+    }
+    let pending: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM materialization_jobs WHERE workspace_id IN (?1,'') \
+             AND status='pending' AND target_path IN (?2,?3))",
+            params![workspace, input.path, to],
+            |row| row.get(0),
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    Ok(!pending)
+}
+
 pub fn capture_retire_in_tx(
     tx: &Transaction<'_>,
     input: &CaptureRetire,
@@ -709,6 +788,8 @@ pub fn capture_retire_in_tx(
             )?)
         };
         return Ok(CaptureRetireResult {
+            pending_placement: false,
+            released_capture_hold: false,
             retired,
             deduped: true,
         });
@@ -724,6 +805,8 @@ pub fn capture_retire_in_tx(
             input.now_ms,
         )?;
         return Ok(CaptureRetireResult {
+            pending_placement: false,
+            released_capture_hold: false,
             retired: None,
             deduped: false,
         });
@@ -752,6 +835,8 @@ pub fn capture_retire_in_tx(
                 input.now_ms,
             )?;
             return Ok(CaptureRetireResult {
+                pending_placement: false,
+                released_capture_hold: false,
                 retired: None,
                 deduped: false,
             });
@@ -767,6 +852,8 @@ pub fn capture_retire_in_tx(
                 input.now_ms,
             )?;
             return Ok(CaptureRetireResult {
+                pending_placement: false,
+                released_capture_hold: false,
                 retired: None,
                 deduped: false,
             });
@@ -817,6 +904,8 @@ pub fn capture_retire_in_tx(
         input.now_ms,
     )?;
     Ok(CaptureRetireResult {
+        pending_placement: false,
+        released_capture_hold: false,
         retired: Some(result),
         deduped: false,
     })
@@ -881,7 +970,7 @@ pub fn capture_ingest_binary_with_admission_in_tx<E>(
 where
     E: From<DomainError>,
 {
-    use crate::conflicts::{PersistBinaryHead, persist_binary_head_in_tx};
+    use crate::conflicts::{PersistBinaryHead, binary_write_job_id, persist_binary_head_in_tx};
 
     validate_identifier(&input.workspace_id, "workspace_id")?;
     validate_identifier(&input.version_id, "version_id")?;
@@ -934,13 +1023,21 @@ where
     }
 
     let existing_alias = alias_object_id(tx, &input.workspace_id, &input.version_id, &path)?;
+    let claim_foreign_head = input.claim_foreign_head
+        || refused_local_recovery_occupies(
+            tx,
+            &input.workspace_id,
+            &input.version_id,
+            existing_alias.as_deref(),
+            &path,
+        )?;
     refuse_unclaimable_head(
         tx,
         &input.workspace_id,
         &input.version_id,
         existing_alias.as_deref(),
         &input.metadata_origin,
-        input.claim_foreign_head,
+        claim_foreign_head,
     )?;
     let target_object_id = existing_alias
         .clone()
@@ -963,7 +1060,7 @@ where
     let before = get_snapshot(tx, &input.workspace_id, &input.version_id, &object_id)?;
     if let Some(existing) = &before
         && existing.metadata_origin != input.metadata_origin
-        && !input.claim_foreign_head
+        && !claim_foreign_head
     {
         return Err(DomainError::CaptureNotOwned.into());
     }
@@ -1010,7 +1107,7 @@ where
             dohc_engine_storage::record_completed_job(
                 tx,
                 &MaterializationJobSpec {
-                    job_id: moment.moment_id.clone(),
+                    job_id: binary_write_job_id(&moment.moment_id),
                     workspace_id: input.workspace_id.clone(),
                     target_path: path.clone(),
                     content_sha256: result_sha.clone(),
@@ -1021,6 +1118,8 @@ where
             )
             .map_err(DomainError::from)?;
             let result = CaptureIngestBinaryResult {
+                pending_placement: false,
+                released_capture_hold: false,
                 object_id: object_id.clone(),
                 moment_id: moment.moment_id.clone(),
                 moment_order: moment.moment_order,
@@ -1119,7 +1218,7 @@ where
     dohc_engine_storage::record_completed_job(
         tx,
         &MaterializationJobSpec {
-            job_id: moment_id.clone(),
+            job_id: binary_write_job_id(&moment_id),
             workspace_id: input.workspace_id.clone(),
             target_path: path.clone(),
             content_sha256: binary_sha256.clone(),
@@ -1137,6 +1236,8 @@ where
         input.now_ms,
     )?;
     Ok(CaptureIngestBinaryResult {
+        pending_placement: false,
+        released_capture_hold: false,
         object_id,
         moment_id,
         moment_order,
@@ -1324,6 +1425,8 @@ fn reconstruct_capture_binary(
             reason: "deduped binary capture moment has no binary blob",
         })?;
     Ok(CaptureIngestBinaryResult {
+        pending_placement: false,
+        released_capture_hold: false,
         object_id: moment.object_id,
         moment_id: moment.moment_id,
         moment_order: moment.moment_order,
@@ -1537,7 +1640,8 @@ fn write_normalized_text_in_tx(
                     if object_exists(tx, ws, input.object_id)? {
                         let bare_preallocation = allow_preallocated_object
                             && !object_has_any_binding(tx, ws, input.object_id)?;
-                        let dormant_history_object = history_source.is_some()
+                        let dormant_history_object = (history_source.is_some() ||
+                            (input.metadata_origin == "sync" && crate::received_object_token(input.object_id)))
                             && !tx.query_row(
                                 "SELECT EXISTS (SELECT 1 FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3) OR EXISTS (SELECT 1 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
                                 params![ws, input.version_id, input.object_id], |row| row.get::<_, bool>(0),
@@ -1588,14 +1692,23 @@ fn write_normalized_text_in_tx(
         )
         .map_err(DomainError::sql_persist)?;
     }
-    let blob_inserted = tx
-        .execute(
-            "INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?1, ?2, ?3)",
-            params![blob, input.text.len() as i64, input.text.as_ref()],
-        )
-        .map_err(DomainError::sql_persist)?
+    #[cfg(feature = "fault-injection")]
+    let blob_phase = dohc_engine_storage::capture_phase::Measure::new("blob_SQL");
+    let blob_inserted = text::insert(
+        tx,
+        &(blob),
+        input.text.len() as i64,
+        input.text.as_ref(),
+        true,
+    )
+    .map_err(DomainError::sql_persist)?
         != 0;
+    #[cfg(feature = "fault-injection")]
+    drop(blob_phase);
     if bind_alias {
+        #[cfg(feature = "fault-injection")]
+        let _alias_phase =
+            dohc_engine_storage::capture_phase::Measure::new("alias_SQL_including_triggers");
         tx.execute(
             "INSERT OR IGNORE INTO path_aliases (workspace_id, version_id, path, object_id) \
              VALUES (?1, ?2, ?3, ?4)",
@@ -1608,6 +1721,8 @@ fn write_normalized_text_in_tx(
         )
         .map_err(DomainError::sql_persist)?;
     }
+    #[cfg(feature = "fault-injection")]
+    let moment_phase = dohc_engine_storage::capture_phase::Measure::new("moment_SQL");
     tx.execute(
         "INSERT INTO moments \
          (workspace_id, moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
@@ -1643,8 +1758,13 @@ fn write_normalized_text_in_tx(
         ],
     )
     .map_err(DomainError::sql_persist)?;
+    #[cfg(feature = "fault-injection")]
+    drop(moment_phase);
     crate::collections::index_historical_record_owner_moment_in_tx(tx, ws, moment_order)?;
-    tx.execute(
+    #[cfg(feature = "fault-injection")]
+    let snapshot_phase =
+        dohc_engine_storage::capture_phase::Measure::new("snapshot_SQL_including_triggers");
+    tx.prepare_cached(
         "INSERT INTO snapshots \
          (workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms, \
            latest_moment_id, metadata_origin, metadata_summary, \
@@ -1658,20 +1778,23 @@ fn write_normalized_text_in_tx(
            metadata_correlation_id = excluded.metadata_correlation_id, \
            content_kind = excluded.content_kind, \
            binary_sha256 = excluded.binary_sha256",
-        params![
-            input.workspace_id,
-            input.version_id,
-            object_id,
-            input.path.as_ref(),
-            blob,
-            input.now_ms,
-            input.moment_id,
-            input.metadata_origin,
-            input.metadata_summary,
-            input.metadata_correlation_id,
-        ],
     )
+    .map_err(DomainError::sql_persist)?
+    .execute(params![
+        input.workspace_id,
+        input.version_id,
+        object_id,
+        input.path.as_ref(),
+        blob,
+        input.now_ms,
+        input.moment_id,
+        input.metadata_origin,
+        input.metadata_summary,
+        input.metadata_correlation_id,
+    ])
     .map_err(DomainError::sql_persist)?;
+    #[cfg(feature = "fault-injection")]
+    drop(snapshot_phase);
     record_request(
         tx,
         input.request_id,
@@ -1736,6 +1859,8 @@ fn write_normalized_text_in_tx(
         (object, moment)
     };
     Ok(WriteResult {
+        pending_placement: false,
+        released_capture_hold: false,
         object,
         snapshot: TextSnapshot {
             workspace_id: input.workspace_id.to_owned(),
@@ -1800,6 +1925,66 @@ fn refuse_unclaimable_head(
     }
 }
 
+/// Whether the path's object is a locally recovered Y.Doc copy whose write
+/// the materializer refused: the head is still the recovery moment with its
+/// text, that moment carries the local-recovery correlation, and the `sync`
+/// write job for exactly that moment, path, generation and content expected
+/// the path absent and is `conflict`. Such a head was never on disk, so the
+/// file at its path is another program's. Capture records it on first sight,
+/// and `repair_conflicted_ydoc_recoveries` then moves the copy to the next
+/// free name. A placed, pending, replaced, renamed or deleted copy fails this
+/// test and keeps the ordinary first-sight refusal.
+fn refused_local_recovery_occupies(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+    existing_alias: Option<&str>,
+    path: &str,
+) -> Result<bool, DomainError> {
+    let Some(object_id) = existing_alias else {
+        return Ok(false);
+    };
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM snapshots AS snapshot \
+           JOIN moments AS moment \
+             ON moment.workspace_id = snapshot.workspace_id \
+            AND moment.moment_id = snapshot.latest_moment_id \
+           JOIN materialization_jobs AS job \
+             ON job.job_id = 'sync-mat_' || moment.moment_id \
+          WHERE snapshot.workspace_id = ?1 AND snapshot.version_id = ?2 \
+            AND snapshot.object_id = ?3 AND snapshot.path = ?4 \
+            AND snapshot.metadata_origin = 'ydoc' \
+            AND snapshot.content_kind = 'text' \
+            AND moment.version_id = snapshot.version_id \
+            AND moment.object_id = snapshot.object_id \
+            AND moment.path = snapshot.path \
+            AND moment.after_blob_sha256 = snapshot.blob_sha256 \
+            AND moment.metadata_correlation_id GLOB 'ydoc-local-recovery:*' \
+            AND job.workspace_id = ?1 AND job.target_path = snapshot.path \
+            AND job.operation = 'write' AND job.status = 'conflict' \
+            AND job.preimage_present = 0 \
+            AND job.content_sha256 = snapshot.blob_sha256 \
+            AND job.target_generation = moment.moment_order)",
+        params![workspace_id, version_id, object_id, path],
+        |row| row.get(0),
+    )
+    .map_err(DomainError::sql_corrupt)
+}
+
+/// Give a refused observation the same object identity as first-sight capture.
+/// This records only the alias and object, without a snapshot or moment.
+pub fn ensure_capture_object_in_tx(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+    path: &str,
+    now_ms: i64,
+) -> Result<String, DomainError> {
+    let alias = alias_object_id(tx, workspace_id, version_id, path)?;
+    resolve_capture_object(tx, workspace_id, version_id, path, now_ms, alias, None)
+        .map(|resolved| resolved.object_id)
+}
+
 fn resolve_capture_object(
     tx: &Transaction<'_>,
     workspace_id: &str,
@@ -1858,11 +2043,15 @@ fn resolve_capture_object(
                 reserved_moment_order = Some(next_order);
                 disambiguated_object_id
             };
-            tx.execute(
+            #[cfg(feature = "fault-injection")]
+            let _alias_phase =
+                dohc_engine_storage::capture_phase::Measure::new("alias_SQL_including_triggers");
+            tx.prepare_cached(
                 "INSERT INTO path_aliases (workspace_id, version_id, path, object_id) \
                  VALUES (?1, ?2, ?3, ?4)",
-                params![workspace_id, version_id, path, object_id],
             )
+            .map_err(DomainError::sql_persist)?
+            .execute(params![workspace_id, version_id, path, object_id])
             .map_err(DomainError::sql_persist)?;
             object_id
         }

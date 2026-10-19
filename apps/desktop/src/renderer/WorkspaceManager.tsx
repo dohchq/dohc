@@ -13,10 +13,12 @@ import { ShareHandoffSurface } from "./ShareHandoffSurface";
 import { ConnectionNotices, useConnectionNotices } from "./shell/connectionNotices";
 import { useCrashReport } from "./shell/useCrashReport";
 import { useWorkspacePathOpenFailures } from "./shell/workspacePathOpenFailures";
+import { useMenuCommandsWithoutWorkspace } from "./appMenuCommands";
 import { Titlebar, workspaceName } from "./Titlebar";
 import { IconButton, SecondaryButton } from "./ui/controls";
 import { Menu } from "./ui/Menu";
 import { useCommitOnRelease } from "./workbench/useCommitOnRelease";
+import { revealInFileManagerLabel } from "../workspaces/explorerMenu";
 
 // The workspace manager. It is the first-run screen and the "manage
 // workspaces" screen in one: with nothing registered it is only the routes
@@ -166,7 +168,7 @@ function WorkspaceRow(props: {
             </IconButton>
           )}
           items={[
-            { id: "reveal", label: "Reveal in folder", onSelect: props.onReveal },
+            { id: "reveal", label: revealInFileManagerLabel(window.dohcDesktop?.platform), onSelect: props.onReveal },
             { id: "forget", label: "Forget", danger: true, onSelect: props.onForget },
           ]}
         />
@@ -198,6 +200,9 @@ export function WorkspaceManager(props: {
   const crashReportNotice = useCrashReport(connectionNotices);
   // A folder the command line or the OS asked for that did not open.
   useWorkspacePathOpenFailures(null, connectionNotices.reportFailure);
+  // Without the workspace shell, the manager answers the menu commands that
+  // need no workspace.
+  useMenuCommandsWithoutWorkspace(connectionNotices.reportError);
   // The address a failed attempt used, put back when a notice's Try again
   // reopens the route it came from.
   const [retryServerUrl, setRetryServerUrl] = useState("");

@@ -21,6 +21,7 @@ vi.mock("./renderer/bridge", async () => {
     onUserSettingsChanged: () => () => {},
     getUserSettings: async () => ({ settings: DEFAULT_USER_SETTINGS, source: "default", warning: "fixture warning" }),
     readDiagnostics: async () => ({ text: "dohc diagnostics", available: { usage: false, errors: false } }),
+    readUsageRecord: async () => ({ status: "readable", enabled: true, file: "/state/dohc-usage.json", since: null, incompleteDays: 0, rows: [] }),
     getWorkspaceSettings: async () => ({ settings: DEFAULT_WORKSPACE_SETTINGS, source: "default" }),
     getUserSettingsFilePath: async () => "/fixture/settings.json",
     onUpdateState: () => () => {},
@@ -29,13 +30,11 @@ vi.mock("./renderer/bridge", async () => {
 });
 vi.mock("./renderer/settings/AgentsMcpSettings", () => ({ AgentsMcpSettings: () => null }));
 vi.mock("./renderer/settings/ScheduleHostRow", () => ({ ScheduleHostRow: () => null }));
-vi.mock("./renderer/settings/SharedByMeList", () => ({ SharedByMeList: () => null }));
-vi.mock("./renderer/settings/SharedWithMeList", () => ({ SharedWithMeList: () => null }));
 
 beforeEach(() => { Element.prototype.scrollIntoView = vi.fn(); });
 afterEach(cleanup);
 function renderSettings(initialSection?: SettingsSectionId) {
-  render(<SettingsDialog workspaceId="fixture" workspacePath="/fixture" onClose={() => {}} initialSection={initialSection} />);
+  render(<SettingsDialog workspaceIsReady workspaceId="fixture" workspacePath="/fixture" onClose={() => {}} initialSection={initialSection} />);
 }
 it.each(["settingsDialog", "settingsSearch", "settingsWarning", "settingsEmptySearch"] as const)(
   "couples the %s literal to its producer", async (key) => {

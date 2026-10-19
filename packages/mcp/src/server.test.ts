@@ -3,15 +3,17 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { DohcCliError } from "@dohc/cli/errors";
 import { createDohcMcpServer, parseArgs } from "./server";
-import type { ToolContext } from "./tools";
+import { getShareCopyDetails, type ToolContext } from "./tools";
 
 // The two write tiers a share level decides between. A document write
 // changes the granter's files; a chat write posts to a thread.
 const DOCUMENT_WRITE_TOOLS = [
+  "dohc_stop_workspace_sync",
   "dohc_dataset",
+  "dohc_save_kept_copy",
   "dohc_publish_app",
   "dohc_write_file",
   "dohc_create_directory",
@@ -80,6 +82,17 @@ async function connectedToolNames(
 describe("share-level tool profiles", () => {
   const base: ToolContext = { root: "/tmp/shared-view", home: "/tmp/home" };
 
+  it("stops the owner's workspace with the handshake name as provenance", async () => {
+    const requests: unknown[] = [];
+    const { client } = await connectedToolNames({ ...base, request: async request => {
+      requests.push(request);
+      return { ok: true, workspaceId: "workspace", workspaceSynced: false };
+    } });
+    const result = await client.callTool({ name: "dohc_stop_workspace_sync", arguments: {} });
+    expect(result.isError).not.toBe(true);
+    expect(requests).toMatchObject([{ verb: "stopSync", door: "mcp", args: { cwd: base.root, actor: "agent", agent: "test" } }]);
+  });
+
   it("parses the --share-access flag", () => {
     expect(parseArgs(["--workspace", "/w", "--home", "/h", "--share-access", "comment"])).toMatchObject({
       root: "/w",
@@ -111,11 +124,8 @@ describe("share-level tool profiles", () => {
     }
   });
 
-  // #646 PR2 registers NO write tool at any level, chat included. The two
-  // chat tools are GROUP tools, and a shared view refuses every group
-  // write before the level is read; `comment` grants per-FILE chat, which no
-  // MCP tool writes yet. A tool the workspace always refuses is worse than an
-  // absent one — the agent spends a turn discovering the refusal.
+  // Local file, document, and chat writes require an owning workspace.
+  // Shared views expose Button presses checked by the owner's host.
   it("registers no write tool at all for a comment profile, chat tools included", async () => {
     const { names } = await connectedToolNames({ ...base, shareAccess: "comment" });
     for (const tool of [...DOCUMENT_WRITE_TOOLS, ...CHAT_WRITE_TOOLS]) {
@@ -443,4 +453,44 @@ it("routes owner publication with a bearer warning and a stable link operation i
   expect(result.structuredContent).toEqual(facts);
   expect(result.content).toHaveLength(1);
   expect(JSON.parse((result.content as Array<{type:string;text:string}>)[0]!.text)).toEqual(facts);
+});
+
+
+describe("share copy profile admission", () => {
+  const input = { shareId: "share", grantId: "grant" };
+  const details = { status: "active", shareCode: "dohc-share:share:https://relay.test", browserInvitationUrl: "https://share.test/s/edit/grant" };
+  it("advertises and calls the copy tool only for the owner profile", async () => {
+    const request = vi.fn(async () => details);
+    const { names, client } = await connectedToolNames({ root: "/workspace", home: "/state", request });
+    expect(names).toContain("dohc_read_share_copy");
+    const result = await client.callTool({ name: "dohc_read_share_copy", arguments: input });
+    expect(result.structuredContent).toEqual(details);
+    expect(request).toHaveBeenCalledWith(expect.objectContaining({ verb: "shareCopy", door: "mcp", args: { ...input, cwd: "/workspace", actor: "agent" } }));
+  });
+  it.each(["view", "comment", "edit"] as const)("refuses tools/call for a %s profile", async shareAccess => {
+    const request = vi.fn(async () => details);
+    const { names, client } = await connectedToolNames({ root: "/workspace", home: "/state", shareAccess, request });
+    expect(names).not.toContain("dohc_read_share_copy");
+    expect(await client.callTool({ name: "dohc_read_share_copy", arguments: input })).toMatchObject({ isError: true });
+    expect(request).not.toHaveBeenCalled();
+  });
+  it.each(["view", "comment", "edit"] as const)("refuses direct copy reads for a %s profile", async shareAccess => {
+    const request = vi.fn(async () => details);
+    expect(await getShareCopyDetails({ root: "/workspace", home: "/state", shareAccess, request }, input))
+      .toMatchObject({ ok: false, reason: expect.stringContaining("owning workspace") });
+    expect(request).not.toHaveBeenCalled();
+  });
+  it.each(["workspaceId", "ownerUserId", "userId", "credentials", "relayUrl"])("refuses caller-supplied %s before transport", async key => {
+    const request = vi.fn(async () => details);
+    expect(await getShareCopyDetails({ root: "/workspace", home: "/state", request }, { ...input, [key]: "other" })).toMatchObject({ ok: false });
+    expect(request).not.toHaveBeenCalled();
+  });
+});
+
+it("keeps an absent incoming subject as JSON null", async () => {
+  const { client } = await connectedToolNames({ root: "/tmp/links", home: "/tmp/home", request: async () => null });
+  const result = await client.callTool({ name: "dohc_links_in", arguments: { subject: { path: "missing.md" } } });
+  expect(result.content).toEqual([{ type: "text", text: "null" }]);
+  expect(result.structuredContent).toBeUndefined();
+  expect(result.isError).not.toBe(true);
 });

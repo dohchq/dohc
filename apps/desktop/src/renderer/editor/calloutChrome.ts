@@ -1,4 +1,5 @@
 import { stopEditorMouseEvent } from "./pmHelpers";
+import { isComposingKey } from "../ui/keys";
 import type { Node } from "@tiptap/pm/model";
 import { NodeSelection, Plugin, PluginKey } from "@tiptap/pm/state";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
@@ -295,6 +296,7 @@ function buildCalloutHeader(
   input.addEventListener("mousedown", (event) => event.stopPropagation());
   input.addEventListener("keydown", (event) => {
     event.stopPropagation();
+    if (isComposingKey(event)) return;
     if (event.key === "Enter") {
       event.preventDefault();
       input.blur();

@@ -188,6 +188,7 @@ async function readToken(path: string): Promise<string> {
 }
 
 function readResponseLine(
+  verb: CliVerb,
   socketPath: string,
   requestLine: string,
   timeoutMs: number | undefined,
@@ -223,7 +224,9 @@ function readResponseLine(
       }
     });
     socket.once("timeout", () => {
-      rejectOnce(new DohcCliError("desktop app did not respond"));
+      rejectOnce(new DohcCliError(verb === "historyUndo"
+        ? "Undo may still be finishing. Run the same command again to get its result."
+        : "desktop app did not respond"));
     });
     socket.once("error", () => {
       rejectOnce(new DohcCliError("desktop app not running"));
@@ -255,7 +258,7 @@ export async function sendCliRequest<Verb extends CliVerb>(
     try {
       const token = await readToken(endpoint.tokenPath);
       const request: CliRequest = cliRequestSchema.parse({ ...requestWithoutToken, door: requestWithoutToken.door ?? "cli", token });
-      const rawResponse = await (options.transport ?? readResponseLine)(
+      const rawResponse = await (options.transport ?? readResponseLine.bind(null, request.verb))(
         endpoint.socketPath,
         JSON.stringify(request),
         options.timeoutMs,

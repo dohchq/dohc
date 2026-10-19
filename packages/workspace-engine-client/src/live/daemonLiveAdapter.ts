@@ -34,7 +34,8 @@ export type DaemonErrorCode =
   | "AMBIGUOUS_SELECTOR"
   | "INVALID_CHANNEL"
   | "RELAY_METHOD_NOT_ALLOWED"
-  | "RELAY_INVALID_RESPONSE";
+  | "RELAY_INVALID_RESPONSE"
+  | "RELAY_HTTPS_REQUIRED";
 
 export interface DaemonWireError extends Omit<WireError, "code"> {
   code: DaemonErrorCode;
@@ -198,6 +199,14 @@ export function isFileLockedRefusal(error: unknown): boolean {
   return refusalMessageOf(error, "OVERLOADED") === "file-locked";
 }
 
+// The volume gave a file the engine created sharing permissions it was
+// created without, so the engine refused to write a secret or a file's own
+// access there (`MaterializeError::VolumeSharesNewFiles`). Moving the
+// workspace fixes it; a retry alone does not.
+export function isVolumeSharesNewFilesRefusal(error: unknown): boolean {
+  return refusalMessageOf(error, "INTERNAL") === "volume-shares-new-files";
+}
+
 // The engine's own database was busy and its bounded retry budget ran out
 // (`StorageError::FileLocked`, which the store documents as intact and the
 // operation as retryable). Not the artifact lock above and not the user's
@@ -217,7 +226,7 @@ function isLiveSettlementCapacityRefusal(error: unknown): boolean {
 }
 
 // Refusals that clear on their own: a program holding the artifact, busy
-// SQLite writers, occupied live capacity, or pending author coverage. MEMBERSHIP of
+// SQLite writers, occupied live or egress capacity, or pending author coverage. MEMBERSHIP of
 // that class lives here, at the protocol boundary, because three layers ask
 // the question — the settle ladder that re-arms, the journal write that must
 // be resent, and the session that must not be quarantined for one.
@@ -229,8 +238,14 @@ function isYdocSettlementPendingRefusal(error: unknown): boolean {
   return refusalMessageOf(error, "OVERLOADED") === "settlement-materialization-pending";
 }
 
+// A Y.Doc open or resync stored its result, but other replies held the
+// daemon's outgoing byte budget until the deadline. The state stays stored.
+function isBlobEgressCapacityRefusal(error: unknown): boolean {
+  return refusalMessageOf(error, "OVERLOADED") === "blob-egress-capacity";
+}
+
 export function isTransientEngineRefusal(error: unknown): boolean {
-  return isFileLockedRefusal(error) || isEngineStoreBusyRefusal(error) || isLiveSettlementCapacityRefusal(error) || isYdocAuthorCapacityRefusal(error) || isYdocSettlementPendingRefusal(error);
+  return isFileLockedRefusal(error) || isEngineStoreBusyRefusal(error) || isLiveSettlementCapacityRefusal(error) || isYdocAuthorCapacityRefusal(error) || isYdocSettlementPendingRefusal(error) || isBlobEgressCapacityRefusal(error);
 }
 
 // Retryability does not prove non-admission: cancellation or an internal
@@ -379,7 +394,6 @@ export const DAEMON_ERROR_CODES: readonly DaemonErrorCode[] = [
   "DEADLINE_EXCEEDED",
   "CANCELLED",
   "OVERLOADED",
-  "COLLECTION_RECONCILIATION_LEASE_HELD",
   "SESSION_EXPIRED",
   "WORKSPACE_UNAVAILABLE",
   "CONFLICT",
@@ -407,6 +421,7 @@ export const DAEMON_ERROR_CODES: readonly DaemonErrorCode[] = [
   "INVALID_CHANNEL",
   "RELAY_METHOD_NOT_ALLOWED",
   "RELAY_INVALID_RESPONSE",
+  "RELAY_HTTPS_REQUIRED",
   "INTERNAL",
 ];
 

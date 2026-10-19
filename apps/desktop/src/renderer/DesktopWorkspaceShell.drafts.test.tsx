@@ -5,6 +5,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
+import { webcrypto } from "node:crypto";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
 import type { ListWorkspaceFilesPayload, ListWorkspaceFilesResult, ReadWorkspaceTextPayload, SwitchWorkspaceVersionResult, EngineYDocSaveStateEvent } from "../ipc/bridgeContract";
 import { rendererMarks } from "../performance/rendererMarks";
@@ -78,8 +79,8 @@ describe("workspace switch admission", () => {
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
     await screen.findByTestId("tab-b.md");
-    await screen.findByTestId("titlebar-chats-sidebar");
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalled());
+    await screen.findByTestId("titlebar-about-sidebar");
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalled());
     await act(async () => {});
 
     expect(rejectedReads).toEqual([`ui-state:${OTHER_WORKSPACE.workspaceId}`]);
@@ -512,20 +513,20 @@ describe("workspace switch-back file listing", () => {
         payload: ListWorkspaceFilesPayload,
       ): Promise<ListWorkspaceFilesResult> => {
         if (payload.workspaceId === OTHER_WORKSPACE.workspaceId) {
-          return {
+          return { visibility: { status: "ready" as const, rules: [] },
             files: [{ path: "other.md", kind: "file" }],
             folders: [],
           };
         }
         workspaceACalls += 1;
         if (workspaceACalls === 1) {
-          return {
+          return { visibility: { status: "ready" as const, rules: [] },
             files: [{ path: "cached.md", kind: "file" }],
             folders: [],
           };
         }
         if (workspaceACalls === 2) {
-          return {
+          return { visibility: { status: "ready" as const, rules: [] },
             files: [{ path: "cached.md", kind: "file" }],
             folders: [],
             cached: true,
@@ -556,7 +557,7 @@ describe("workspace switch-back file listing", () => {
     expect(screen.queryByText("fresh.md")).toBeNull();
 
     await act(async () => {
-      revalidation.resolve({
+      revalidation.resolve({ visibility: { status: "ready" as const, rules: [] },
         files: [{ path: "fresh.md", kind: "file" }],
         folders: [],
       });
@@ -584,7 +585,7 @@ describe("workspace switch-back file listing", () => {
     );
     bridge.listWorkspaceFiles = vi
       .fn()
-      .mockResolvedValueOnce({
+      .mockResolvedValueOnce({ visibility: { status: "ready" as const, rules: [] },
         files: [{ path: "survivor.md", kind: "file" as const }],
         folders: [],
         cached: true,
@@ -601,7 +602,7 @@ describe("workspace switch-back file listing", () => {
     expect(await screen.findByTestId("tab-gone.md")).toBeTruthy();
 
     await act(async () => {
-      revalidation.resolve({
+      revalidation.resolve({ visibility: { status: "ready" as const, rules: [] },
         files: [{ path: "survivor.md", kind: "file" }],
         folders: [],
       });
@@ -622,7 +623,7 @@ describe("workspace switch-back file listing", () => {
     await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledOnce());
     expect(screen.queryByText("cold.md")).toBeNull();
     await act(async () => {
-      walk.resolve({
+      walk.resolve({ visibility: { status: "ready" as const, rules: [] },
         files: [{ path: "cold.md", kind: "file" }],
         folders: [],
       });
@@ -649,7 +650,7 @@ describe("file-open-start marking", () => {
     const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["a.md", "fallback.md"], "a.md")),
     );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
       files: ["a.md", "fallback.md"].map((path) => ({
         path,
         kind: "file" as const,
@@ -703,7 +704,7 @@ describe("file-open-start marking", () => {
         activeEditorGroup: "left",
       }),
     );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
       files: ["a.md", "fallback.md", "b.md"].map((path) => ({
         path,
         kind: "file" as const,
@@ -784,7 +785,7 @@ describe("file-open-start marking", () => {
       }),
     );
     const paths = ["left-old.md", "right-old.md", "left-new.md", "right-new.md"];
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
       files: paths.map((path) => ({ path, kind: "file" as const })),
       folders: [],
     }));
@@ -887,7 +888,7 @@ describe("file-open-start marking", () => {
     const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["data.db"], "data.db")),
     );
-    bridge.listWorkspaceFiles.mockResolvedValue({
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
       files: [{ path: "data.db", kind: "file" }],
       folders: [],
     });
@@ -980,7 +981,7 @@ describe("file-open-start marking", () => {
         activeEditorGroup: "right",
       }),
     );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
       files: ["a.md", "b.md", "c.md"].map((path) => ({
         path,
         kind: "file" as const,
@@ -1185,7 +1186,7 @@ describe("dirty tab close boundaries", () => {
         activeEditorGroup: "left",
       }),
     );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
       files: ["a.md", "b.md", "c.md"].map((path) => ({
         path,
         kind: "file" as const,
@@ -1392,7 +1393,7 @@ describe("explorer destructive change flush boundaries", () => {
     const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
       moveWorkspacePath: vi.fn(async () => undefined),
     });
-    bridge.listWorkspaceFiles.mockResolvedValue({
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
       files: [
         { path: "a.md", kind: "file" as const },
         { path: "docs/b.md", kind: "file" as const },
@@ -1463,7 +1464,7 @@ describe("explorer destructive change flush boundaries", () => {
     const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
       deleteWorkspacePath: vi.fn(async () => undefined),
     });
-    bridge.listWorkspaceFiles.mockResolvedValue({
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
       files: [
         { path: "a.md", kind: "file" as const },
         { path: "docs/b.md", kind: "file" as const },
@@ -1958,6 +1959,53 @@ describe("explorer destructive change flush boundaries", () => {
 // distinction between recovery (dot, no save promise) and savable-dirty
 // (dot and the version-switch save-first prompt).
 describe("set-aside draft recovery", () => {
+  it.each(["EBUSY", "EACCES"])("reports a %s draft read failure in Notices and retries discovery", async code => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    const record = {recordId: "a".repeat(64), path: "deleted/gone.md", objectId: "object", text: "Unseen typing", updateBase64: "AAA="};
+    bridge.listLiveDraftRecovery.mockRejectedValueOnce(Object.assign(new Error("temporary read failure"), {code})).mockResolvedValue([record]);
+    renderShell(bridge);
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("dohc could not read set-aside edits.");
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    const notices = screen.getByTestId("notice-center");
+    expect(notices.textContent).toContain("dohc could not read set-aside edits.");
+    await user.click(within(notices).getByRole("button", {name: "Try again"}));
+    await waitFor(() => expect(bridge.listLiveDraftRecovery).toHaveBeenCalledTimes(2));
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    await screen.findByTestId("notice-set-aside-edits");
+    expect(bridge.listLiveDraftRecovery).toHaveBeenCalledTimes(2);
+    await user.click(screen.getByTestId("recovery-list-copy"));
+    await waitFor(async () => expect(await navigator.clipboard.readText()).toBe(record.text));
+  });
+
+  it("shows main drafts on open and exposes each survivor through Notices Copy and Dismiss", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal("crypto", webcrypto);
+    const bridge = makeBridge(Promise.resolve(null));
+    const first = {recordId: "a".repeat(64), path: "deleted/gone.md", objectId: "object", text: "First main copy", updateBase64: "AAA="};
+    const second = {...first, recordId: "b".repeat(64), text: "Unseen main copy", updateBase64: "AAE="};
+    bridge.listLiveDraftRecovery.mockResolvedValue([first]);
+    bridge.discardLiveDraftRecovery.mockResolvedValueOnce([second]).mockResolvedValueOnce([]);
+    renderShell(bridge);
+    await screen.findByTestId("file-tree");
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    await screen.findByTestId("notice-set-aside-edits");
+    await user.click(screen.getByTestId("recovery-list-copy"));
+    await waitFor(async () => expect(await navigator.clipboard.readText()).toBe(first.text));
+    await user.click(screen.getByTestId("recovery-dismiss"));
+    await user.click(screen.getByTestId("recovery-dismiss-confirm"));
+    await waitFor(() => expect(bridge.discardLiveDraftRecovery).toHaveBeenCalledOnce());
+    await waitFor(() => expect(screen.getAllByTestId("recovery-list-row")).toHaveLength(1));
+    await user.click(screen.getByTestId("recovery-list-copy"));
+    await waitFor(async () => expect(await navigator.clipboard.readText()).toBe(second.text));
+    await user.click(screen.getByTestId("recovery-dismiss"));
+    await user.click(screen.getByTestId("recovery-dismiss-confirm"));
+    await waitFor(() => expect(screen.queryByTestId("notice-set-aside-edits")).toBeNull());
+    expect(bridge.listLiveDraftRecovery).toHaveBeenCalledExactlyOnceWith({workspaceId: WORKSPACE.workspaceId});
+    expect(bridge.discardLiveDraftRecovery.mock.calls.map(([input]) => input.recordId)).toEqual([first.recordId, second.recordId]);
+  });
+
   // Most tests capture a draft before the shell mounts, and the draft store
   // reads the platform from the bridge. `renderShell` replaces this stub.
   beforeEach(() => {

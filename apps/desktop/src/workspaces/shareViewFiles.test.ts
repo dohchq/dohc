@@ -29,6 +29,7 @@ import {
   withShareViewRefreshLifecycleLock,
 } from "./sharedView";
 import { SharePinInvalidError } from "./shareViewRecords";
+import { resolveRegisteredShareViewFilesTarget } from "./shareViewFilesTarget";
 import {
   mountRootFor,
   shareViewFilesMountProjection,
@@ -137,6 +138,7 @@ function target(
     schedulingRootPath: rootPath,
     rootPath,
     shareId: "share-a",
+    recipientUserId: "recipient-a",
     granterEmail: "granter@example.com",
     grantedSelector: { paths: [], versionId: "main", access },
     ended: false,
@@ -339,7 +341,7 @@ describe("ShareViewFiles", () => {
     const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
     await withStaleSensitiveWorkspaceOperation(rootPath, async lease => {
       if (restriction === "end") await files.end(lease, requested, () => undefined);
-      else await files.narrow(lease, requested, () => undefined, (paths, snapshot) => {
+      else await files.narrow(lease, requested, () => undefined, async (paths, snapshot) => {
         registered.grantedSelector.access = "view"; registered.unsavedPaths = paths; registered.unconfirmedChanges = snapshot;
       });
     });
@@ -397,7 +399,7 @@ describe("ShareViewFiles", () => {
     await withStaleSensitiveWorkspaceOperation(rootPath, async lease => {
       const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
       if (restriction === "end") await files.end(lease, requested, () => undefined);
-      else await files.narrow(lease, requested, () => undefined, (paths, snapshot) => {
+      else await files.narrow(lease, requested, () => undefined, async (paths, snapshot) => {
         registered.unsavedPaths = paths; registered.unconfirmedChanges = snapshot;
       });
     });
@@ -430,7 +432,7 @@ describe("ShareViewFiles", () => {
     try {
       await withStaleSensitiveWorkspaceOperation(rootPath, async lease => {
         if (restriction === "end") await files.end(lease, requested, () => undefined);
-        else await files.narrow(lease, requested, () => undefined, unsavedPaths => {
+        else await files.narrow(lease, requested, () => undefined, async unsavedPaths => {
           registered.grantedSelector.access = "view"; registered.unsavedPaths = unsavedPaths;
         });
       });
@@ -458,7 +460,7 @@ describe("ShareViewFiles", () => {
     const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
     await withStaleSensitiveWorkspaceOperation(rootPath, async lease => {
       if (restriction === "end") await files.end(lease, requested, () => undefined);
-      else await files.narrow(lease, requested, () => undefined, () => { registered.grantedSelector.access = "view"; });
+      else await files.narrow(lease, requested, () => undefined, async () => { registered.grantedSelector.access = "view"; });
     });
     expect(store.writeTextFile).toHaveBeenCalledWith(expect.objectContaining({ path, text: "recipient agent edit\n", metadata: { origin: "local-file" } }));
     await withStaleSensitiveWorkspaceOperation(rootPath, lease => files.reconcile(lease, requested, "settle"));
@@ -496,7 +498,7 @@ describe("ShareViewFiles", () => {
     try {
       await withStaleSensitiveWorkspaceOperation(rootPath, async lease => {
         if (restriction === "end") await files.end(lease, requested, () => undefined);
-        else await files.narrow(lease, requested, () => undefined, unsavedPaths => {
+        else await files.narrow(lease, requested, () => undefined, async unsavedPaths => {
           registered.grantedSelector.access = "view"; registered.unsavedPaths = unsavedPaths;
         });
       });
@@ -599,6 +601,41 @@ describe("ShareViewFiles", () => {
     expect(registered.unsavedPaths).toEqual([]);
     expect(pull).toHaveBeenCalledOnce();
     expect(await readFile(join(rootPath, path), "utf8")).toBe("recipient edit\n");
+  });
+
+  it.each([false, true])("reports the cursor internally only after a successful commit (commit fails: %s)", async commitFails => {
+    const rootPath = await workspaceRoot();
+    const registered = target(rootPath, "view");
+    const committing = deferred();
+    const committed = deferred();
+    const onCursorCommitted = vi.fn();
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => registered,
+      openStore: () => mutableTextStore(),
+      resolveRelay: async () => ({ baseUrl: "https://relay.example", token: "token" }),
+      pull: async () => ({
+        fetched: 0, applied: 0, skipped: 0, refusals: [], refusalCount: 0,
+        changedPaths: [], nextCursor: 57,
+        commitCursor: async () => { committing.resolve(); await committed.promise; },
+      }),
+    });
+    const result = withStaleSensitiveWorkspaceOperation(rootPath, lease => files.reconcile(
+      lease, { kind: "standalone", workspaceId: registered.workspaceId }, "refresh", onCursorCommitted,
+    ));
+    await committing.promise;
+    expect(onCursorCommitted).not.toHaveBeenCalled();
+    if (commitFails) committed.reject(new Error("cursor commit failed"));
+    else committed.resolve();
+    const reconciled = await result;
+    expect(reconciled).toMatchObject({ kind: "refresh", outcome: { ok: !commitFails } });
+    if (reconciled.kind !== "refresh") throw new Error("Expected a refresh result");
+    expect(reconciled.outcome).not.toHaveProperty("nextCursor");
+    if (commitFails) expect(onCursorCommitted).not.toHaveBeenCalled();
+    else {
+      expect(onCursorCommitted).toHaveBeenCalledOnce();
+      expect(onCursorCommitted).toHaveBeenCalledWith(57);
+    }
   });
 
   it("refuses automation saves on mounted shares", async () => {
@@ -2201,6 +2238,52 @@ describe("ShareViewFiles", () => {
     ).rejects.toBeInstanceOf(SharePinInvalidError);
   });
 
+  // The renderer presents these markers as damaged; an Edit grant on one must
+  // not reach the local store either. The intact row proves the refusal comes
+  // from the damage, not from the setup.
+  it.each([
+    ["intact", {}, null],
+    ["no share id", { shareId: undefined }, SharePinInvalidError],
+    ["a share id past the wire bound", { shareId: "s".repeat(201) }, SharedFileReadOnlyError],
+    ["no recipient", { recipientUserId: undefined }, SharedFileReadOnlyError],
+    ["an empty recipient", { recipientUserId: "" }, SharedFileReadOnlyError],
+  ] as const)("admits an Edit write through a registry marker only when it is %s", async (_name, damage, refusal) => {
+    const rootPath = await workspaceRoot();
+    const store = mutableTextStore();
+    const workspace = {
+      workspaceId: "workspace-a",
+      rootPath,
+      shareView: {
+        shareId: "share-a",
+        recipientUserId: "recipient-a",
+        granterEmail: "granter@example.com",
+        grantedSelector: { paths: [], versionId: "main", access: "edit" },
+        ...damage,
+      },
+    };
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: (requested) =>
+        resolveRegisteredShareViewFilesTarget(workspace, requested),
+      openStore: () => store,
+    });
+
+    const created = withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+      files.change(
+        lease,
+        { kind: "standalone", workspaceId: "workspace-a" },
+        { kind: "create", path: "notes/new.md", initialText: "new\n" },
+      ),
+    );
+
+    if (refusal === null) {
+      await expect(created).resolves.toMatchObject({ status: "committed" });
+      return;
+    }
+    await expect(created).rejects.toBeInstanceOf(refusal);
+    expect(store.writeTextFile).not.toHaveBeenCalled();
+  });
+
   it("refuses a dynamically chosen import path outside the pinned grant", async () => {
     const rootPath = await workspaceRoot();
     const source = join(rootPath, "outside.txt");
@@ -2983,4 +3066,29 @@ describe("ShareViewFiles", () => {
     expect(store.renameTextFile).not.toHaveBeenCalled();
   });
 
+});
+
+it("keeps link reads inside the share target gate and tracked-path floor, including ended local shares", async () => {
+  const rootPath = await workspaceRoot();
+  const requested = { kind: "standalone" as const, workspaceId: "workspace-a" };
+  let current: ResolvedShareViewFilesTarget | null = { ...target(rootPath), ended: true };
+  const page = { versionId: "main", subject: { path: "notes/a.md", objectId: "a" }, entries: [
+    { source: "notes/b.md", title: "B", ordinal: 0, span: [0, 5] as [number, number], line: 1, snippet: "[[a]]", highlightStart: 0, highlightEnd: 5 },
+    { source: ".env", title: "secret", ordinal: 0, span: [0, 5] as [number, number], line: 1, snippet: "[[a]]", highlightStart: 0, highlightEnd: 5 },
+  ], unchecked: ["notes/c.md", ".env"], nextCursor: null, complete: false, indexBuilding: false, mountsCovered: true };
+  const store = Object.assign(readStore({ text: "" }), {
+    incomingLinks: vi.fn(async () => page),
+    resolveLinks: vi.fn(async () => ({ versionId: "main", results: [{ path: "notes/a.md", fragment: null }, { path: ".env", fragment: null }, { path: null, create: "notes/new.md", fragment: null }, { path: null, create: ".env.local", fragment: null }], mountsCovered: true })),
+  });
+  const openStore = vi.fn(() => store);
+  const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => current, openStore });
+  expect(await files.linksIn(requested, { subject: { path: "notes/a.md" } })).toMatchObject({ entries: [page.entries[0]], unchecked: ["notes/c.md"] });
+  expect(await files.linksResolve(requested, { source: "notes/b.md", literals: [{ kind: "wikilink", literal: "a" }, { kind: "wikilink", literal: ".env" }] })).toMatchObject({ results: [{ path: "notes/a.md", fragment: null }, null, { path: null, create: "notes/new.md", fragment: null }, null] });
+  await expect(files.linksResolve(requested, { source: ".env", literals: [] })).rejects.toBeInstanceOf(SharedFileReadOnlyError);
+  await withShareViewRefreshLifecycleLock(rootPath, async () => {
+    const pending = files.linksIn(requested, { subject: { path: "notes/a.md" } });
+    current = null;
+    return { pending };
+  }).then(async ({ pending }) => { await expect(pending).rejects.toThrow(); });
+  expect(openStore).toHaveBeenCalledTimes(3);
 });

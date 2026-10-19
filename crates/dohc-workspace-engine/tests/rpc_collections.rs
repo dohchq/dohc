@@ -36,6 +36,27 @@ use std::{fmt::Write as _, sync::Arc};
 const WORKSPACE_ID: &str = "ws-rpc-collections";
 const RECORD_ID: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
 
+async fn expect_projection_commit(
+    notices: &mut tokio::sync::mpsc::Receiver<EngineEventNotice>,
+    path: &str,
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(120), async {
+        loop {
+            let notice = notices.recv().await.unwrap();
+            assert_ne!(notice.name, AUTOMATION_CLAIMED_EVENT);
+            if notice.name == dohc_workspace_engine::COLLECTIONS_PROJECTED_EVENT
+                && notice.payload["paths"]
+                    .as_array()
+                    .is_some_and(|paths| paths.contains(&json!(path)))
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("projection commit event");
+}
+
 #[tokio::test]
 async fn fresh_received_projection_has_no_index_until_its_first_pull() {
     let scratch = ScratchDir::new().unwrap();
@@ -133,21 +154,7 @@ async fn received_collection_projection_follows_local_definition_writes_and_anno
             "versionId": "main", "path": path, "text": text, "origin": "local-file" }),
         )
         .await;
-        tokio::time::timeout(std::time::Duration::from_secs(120), async {
-            loop {
-                let notice = notices.recv().await.unwrap();
-                assert_ne!(notice.name, AUTOMATION_CLAIMED_EVENT);
-                if notice.name == dohc_workspace_engine::COLLECTIONS_PROJECTED_EVENT
-                    && notice.payload["paths"]
-                        .as_array()
-                        .is_some_and(|paths| paths.contains(&json!(path)))
-                {
-                    break;
-                }
-            }
-        })
-        .await
-        .expect("projection commit event");
+        expect_projection_commit(&mut notices, path).await;
     }
     let listed = call(&transport, &handle, 7, "collections.list", json!({})).await;
     assert_eq!(listed["collections"][0]["path"], json!("tasks"));
@@ -169,16 +176,9 @@ async fn received_collection_projection_follows_local_definition_writes_and_anno
     )
     .await;
     assert_eq!(queried["records"].as_array().unwrap().len(), 1);
-    // local-file writes report bytes already on disk. Give settlement the
-    // same real artifact, so its stale-target fence can check that head.
     let record_path = scratch.path().join("tasks/a.md");
     std::fs::create_dir_all(record_path.parent().unwrap()).unwrap();
-    std::fs::write(
-        &record_path,
-        format!("---\nid: {RECORD_ID}\nTitle: Second\n---\n"),
-    )
-    .unwrap();
-    let opened = call(
+    let refusal = call_error(
         &transport,
         &handle,
         10,
@@ -188,30 +188,12 @@ async fn received_collection_projection_follows_local_definition_writes_and_anno
         }),
     )
     .await;
-    let doc = Ydoc::wire();
-    doc.rewrite_content_to_markdown(
-        ContentKind::Richdoc,
-        &format!("---\nid: {RECORD_ID}\nTitle: Second\n---\n"),
-    )
-    .unwrap();
-    call(&transport, &handle, 11, "ydoc.recordUpdate", json!({
-        "sessionId": opened["sessionId"], "seed": true,
-        "updateBase64": base64::engine::general_purpose::STANDARD.encode(doc.encode_full_state()),
-    })).await;
-    call(&transport, &handle, 12, "ydoc.recordUpdate", json!({
-        "sessionId": opened["sessionId"],
-        "updateBase64": base64::engine::general_purpose::STANDARD.encode(doc.frontmatter_set("Title", "Third").unwrap()),
-    })).await;
-    call(
-        &transport,
-        &handle,
-        13,
-        "ydoc.evict",
-        json!({"sessionId": opened["sessionId"]}),
-    )
-    .await;
-    // A later file write still maintains the closed lineage in a received
-    // store. The old broad early return left this Y.Doc at Third.
+    assert_eq!(refusal.code, ErrorCode::Forbidden);
+    assert_eq!(
+        refusal.message,
+        "received shares do not open live document sessions"
+    );
+    // Received writes still update the table after the live-session refusal.
     std::fs::write(
         &record_path,
         format!("---\nid: {RECORD_ID}\nTitle: Fourth\n---\n"),
@@ -228,6 +210,22 @@ async fn received_collection_projection_follows_local_definition_writes_and_anno
         }),
     )
     .await;
+    expect_projection_commit(&mut notices, "tasks/a.md").await;
+    let queried = call(
+        &transport,
+        &handle,
+        15,
+        "collections.query",
+        json!({ "collectionPath": "tasks" }),
+    )
+    .await;
+    let title = queried["records"][0]["values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|value| value["field"] == "Title")
+        .unwrap();
+    assert_eq!(title["value"], json!("Fourth"));
     let connection = rusqlite::Connection::open(&db).unwrap();
     for table in ["automation_claims", "collection_field_history"] {
         assert_eq!(
@@ -236,17 +234,11 @@ async fn received_collection_projection_follows_local_definition_writes_and_anno
                     .get::<_, i64>(0))
                 .unwrap(),
             0,
-            "recipient Y.Doc append created {table}"
+            "recipient writes created {table}"
         );
     }
-    let object_id: String = connection.query_row(
-        "SELECT object_id FROM snapshots WHERE workspace_id=?1 AND version_id='main' AND path='tasks/a.md'",
-        [WORKSPACE_ID], |row| row.get(0)).unwrap();
-    let key = DocKey::new(WORKSPACE_ID, "main", object_id).unwrap();
-    let lineage = dohc_engine_collab::load_doc_in(&connection, &key).unwrap();
-    assert_eq!(lineage.frontmatter_json()["Title"], json!("Fourth"));
     drop(connection);
-    call(&transport, &handle, 15, "workspace.close", json!({})).await;
+    call(&transport, &handle, 16, "workspace.close", json!({})).await;
     let connection = rusqlite::Connection::open(&db).unwrap();
     for table in ["automation_claims", "collection_field_history"] {
         let count: i64 = connection
@@ -328,7 +320,7 @@ async fn call_ydoc_with_blob(
     method: &str,
     params: Value,
 ) -> (Value, Vec<u8>) {
-    let output = ProtocolEngineService::call(
+    let output = service_call_with_busy_retry(
         service,
         RequestContext::unbounded().with_capability("blobs"),
         request(id, method, Some(handle.clone()), params),
@@ -370,15 +362,14 @@ async fn empty_record_seed_completes_through_watched_capture_and_adopts_every_re
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_replicated_empty_seed_refuses_unrepresentable_api_and_capture_writes() {
-    assert_empty_seed_completion(
-        "---\nTitle: Completed\n---\n- parent\n  - child\n",
-        false,
-        true,
-    )
-    .await;
+    let full = format!(
+        "---\nTitle: Completed\n---\n{} Completed\n",
+        "> ".repeat(121)
+    );
+    assert_empty_seed_completion(&full, false, true).await;
 }
 
-async fn assert_empty_seed_completion(full: &'static str, retires: bool, replicated: bool) {
+async fn assert_empty_seed_completion(full: &str, retires: bool, replicated: bool) {
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_schema(&scratch, "name: Tasks\nfields:\n  Title:\n    type: text\n");
@@ -403,9 +394,10 @@ async fn assert_empty_seed_completion(full: &'static str, retires: bool, replica
     let (finish, completed) = tokio::sync::oneshot::channel::<()>();
     let record_path = scratch.path().join("tasks/empty.md");
     std::fs::write(&record_path, "").expect("create empty record");
+    let writer_text = full.to_owned();
     let writer = tokio::spawn(async move {
         completed.await.expect("writer barrier");
-        std::fs::write(record_path, full).expect("complete record");
+        std::fs::write(record_path, writer_text).expect("complete record");
     });
     reconcile_capture(&transport, &handle, 10).await;
     let pending = call(
@@ -434,6 +426,7 @@ async fn assert_empty_seed_completion(full: &'static str, retires: bool, replica
     doc.rewrite_content_to_markdown(ContentKind::Richdoc, "")
         .expect("empty importer seed");
     call(&transport, &handle, 42, "ydoc.recordUpdate", json!({
+        "expectedLineageClaimId": empty["lineageClaimId"],
         "sessionId": empty["sessionId"], "seed": true,
         "updateBase64": base64::engine::general_purpose::STANDARD.encode(doc.encode_full_state()),
     })).await;
@@ -543,8 +536,9 @@ async fn assert_empty_seed_completion(full: &'static str, retires: bool, replica
     if replicated {
         for id in 60..63 {
             let status = call(&transport, &handle, id, "capture.flush", json!({})).await;
-            assert_eq!(status["degraded"], true, "{status}");
-            assert_eq!(status["settled"], false, "{status}");
+            assert_eq!(status["degraded"], false, "{status}");
+            assert_eq!(status["settled"], true, "{status}");
+            assert_eq!(status["heldFiles"][0]["path"], "tasks/empty.md");
         }
         let conn = rusqlite::Connection::open(&db).unwrap();
         let captured: String = conn
@@ -601,14 +595,17 @@ async fn assert_empty_seed_completion(full: &'static str, retires: bool, replica
         );
         drop(conn);
         // Another unrepresentable edit remains visibly refused.
-        std::fs::write(
-            scratch.path().join("tasks/empty.md"),
-            full.replace("Completed", "Changed"),
-        )
-        .unwrap();
-        let status = call(&transport, &handle, 70, "capture.reconcile", json!({})).await;
-        assert_eq!(status["degraded"], true, "{status}");
-        assert_eq!(status["settled"], false, "{status}");
+        let changed = full.replace("Completed", "Changed");
+        std::fs::write(scratch.path().join("tasks/empty.md"), &changed).unwrap();
+        reconcile_until_settled(&transport, &handle, 70).await;
+        let status = call(&transport, &handle, 71, "capture.flush", json!({})).await;
+        assert_eq!(status["degraded"], false, "{status}");
+        assert_eq!(status["settled"], true, "{status}");
+        assert_eq!(status["heldFiles"][0]["path"], "tasks/empty.md");
+        assert_eq!(
+            status["heldFiles"][0]["observedSha256"],
+            hex_sha256(changed.as_bytes())
+        );
         // A representable disk change recovers capture and version creation.
         std::fs::write(scratch.path().join("tasks/empty.md"), "Completed").unwrap();
         let named = call(
@@ -690,6 +687,7 @@ async fn assert_empty_seed_completion(full: &'static str, retires: bool, replica
         )
         .expect("sibling importer seed");
         call(&transport, &handle, id + 1, "ydoc.recordUpdate", json!({
+            "expectedLineageClaimId": state["lineageClaimId"],
             "sessionId": state["sessionId"], "seed": true,
             "updateBase64": base64::engine::general_purpose::STANDARD.encode(doc.encode_full_state()),
         })).await;
@@ -1133,6 +1131,7 @@ async fn assert_capture_authored_record_edit(human: bool) {
         63,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": opened["lineageClaimId"],
             "sessionId": opened["sessionId"],
             "updateBase64": base64::engine::general_purpose::STANDARD
                 .encode(seed_doc.encode_full_state()),
@@ -1348,6 +1347,7 @@ async fn local_live_id_edit_reasserts_engine_identity_and_keeps_history() {
         11,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": first["lineageClaimId"],
             "sessionId": first["sessionId"],
             "updateBase64": base64::engine::general_purpose::STANDARD
                 .encode(seed_doc.encode_full_state()),
@@ -1384,6 +1384,7 @@ async fn local_live_id_edit_reasserts_engine_identity_and_keeps_history() {
         14,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": second["lineageClaimId"],
             "sessionId": second["sessionId"],
             "updateBase64": base64::engine::general_purpose::STANDARD
                 .encode(edited.frontmatter_set("id", EDITED_ID).unwrap()),
@@ -1398,6 +1399,7 @@ async fn local_live_id_edit_reasserts_engine_identity_and_keeps_history() {
         15,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": second["lineageClaimId"],
             "sessionId": second["sessionId"],
             "updateBase64": base64::engine::general_purpose::STANDARD
                 .encode(edited.frontmatter_set("status", "done").unwrap()),
@@ -1450,6 +1452,7 @@ async fn local_live_id_edit_reasserts_engine_identity_and_keeps_history() {
         31,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": reseed["lineageClaimId"],
             "sessionId": reseed["sessionId"],
             "updateBase64": base64::engine::general_purpose::STANDARD
                 .encode(reseed_doc.encode_full_state()),
@@ -1570,6 +1573,7 @@ async fn an_automation_write_names_its_run_in_record_history() {
         11,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": session["lineageClaimId"],
             "sessionId": session["sessionId"],
             "updateBase64": base64::engine::general_purpose::STANDARD
                 .encode(doc.encode_full_state()),
@@ -1593,6 +1597,7 @@ async fn an_automation_write_names_its_run_in_record_history() {
                 id,
                 "ydoc.recordUpdate",
                 json!({
+                    "expectedLineageClaimId": null,
                     "sessionId": session_id,
                     "updateBase64": base64::engine::general_purpose::STANDARD.encode(update),
                     "actorOriginId": automation_id,
@@ -1645,6 +1650,7 @@ async fn an_automation_write_names_its_run_in_record_history() {
             id,
             "ydoc.recordUpdate",
             json!({
+                "expectedLineageClaimId": session["lineageClaimId"],
                 "sessionId": session["sessionId"],
                 "updateBase64": base64::engine::general_purpose::STANDARD.encode(update),
                 "actorOriginId": automation_id,
@@ -1813,6 +1819,7 @@ async fn remote_id_edit_converges_on_both_devices_under_the_original_identity() 
             102,
             "ydoc.recordUpdate",
             json!({
+                "expectedLineageClaimId": seeded["lineageClaimId"],
                 "sessionId": seeded["sessionId"],
                 "updateBase64": base64::engine::general_purpose::STANDARD.encode(&seed_update),
                 "seed": true,
@@ -3399,6 +3406,7 @@ async fn park_remote_status_update() -> ParkedRecordUpdate {
         102,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": seeded["lineageClaimId"],
             "sessionId": seeded["sessionId"],
             "updateBase64":
                 base64::engine::general_purpose::STANDARD.encode(seed_doc.encode_full_state()),
@@ -4654,6 +4662,7 @@ async fn native_public_trip_poll_moment_materializes_adopts_and_dedupes() {
     doc.rewrite_content_to_markdown(ContentKind::Richdoc, &text)
         .expect("seed response document");
     call(&transport, &handle, 23, "ydoc.recordUpdate", json!({
+        "expectedLineageClaimId": seeded["lineageClaimId"],
         "sessionId": seeded["sessionId"],
         "updateBase64": base64::engine::general_purpose::STANDARD.encode(doc.encode_full_state()),
         "seed": true,
@@ -4756,8 +4765,9 @@ async fn native_public_trip_poll_moment_materializes_adopts_and_dedupes() {
         adoption["payloadAfterBlobSha256"],
         hex_sha256(settled.as_bytes())
     );
-    assert!(
-        adoption["authors"].is_null(),
+    assert_eq!(
+        adoption["authors"],
+        json!([{"kind":"unattributed"}]),
         "owner settlement must not impersonate the public voter"
     );
     let mut retry = EngineStore::open(&db, 3).expect("retry store");

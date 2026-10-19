@@ -119,17 +119,36 @@ describe("AppErrorBoundary", () => {
     fireEvent.click(screen.getByTestId("app-crash-reload"));
     expect(reloadRenderer).toHaveBeenCalledOnce();
   });
+
+  // The window has no OS title bar, so the crash screen draws its own drag
+  // strip over its top edge without moving the message.
+  it("keeps the window movable", () => {
+    vi.stubGlobal("dohcDesktop", { reloadRenderer: vi.fn(async () => undefined) });
+    render(
+      <AppErrorBoundary>
+        <Bomb />
+      </AppErrorBoundary>,
+    );
+    const page = screen.getByTestId("app-crash-screen");
+    const strip = page.querySelector<HTMLElement>(":scope > .titlebar-drag");
+    expect(page.className).toContain("relative");
+    expect(strip?.className).toContain("absolute");
+    expect(strip?.style.height).toBe("40px");
+  });
 });
 
 describe("installGlobalErrorReporters", () => {
   it("logs uncaught errors and unhandled rejections", () => {
-    installGlobalErrorReporters(window);
-    window.dispatchEvent(new ErrorEvent("error", { message: "loose error" }));
+    // Not window: a listener there outlives the test, and vitest reports an
+    // uncaught error only while no other listener handles it.
+    const target = new EventTarget();
+    installGlobalErrorReporters(target as unknown as Window);
+    target.dispatchEvent(new ErrorEvent("error", { message: "loose error" }));
     const rejection = new Event("unhandledrejection") as Event & {
       reason?: unknown;
     };
     rejection.reason = new Error("loose rejection");
-    window.dispatchEvent(rejection);
+    target.dispatchEvent(rejection);
     const logged = vi.mocked(console.error).mock.calls.map((call) => String(call[0]));
     expect(logged.some((entry) => entry.includes("uncaught renderer error"))).toBe(
       true,

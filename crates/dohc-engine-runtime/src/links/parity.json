@@ -1,0 +1,563 @@
+{
+  "extract": [
+    {
+      "name": "unclosed markdown label",
+      "text": "[0, 1) xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n[[wiki]] [good](good.md)",
+      "links": [
+        [
+          "wikilink",
+          "wiki"
+        ],
+        [
+          "markdown",
+          "good.md"
+        ]
+      ]
+    },
+    {
+      "name": "unclosed wiki prose",
+      "text": "Type [[ to link\n\n[[good]]",
+      "links": [
+        [
+          "wikilink",
+          "good"
+        ]
+      ]
+    },
+    {
+      "name": "wiki stays on one line",
+      "text": "[[across\nlines]] [[good]]",
+      "links": [
+        [
+          "wikilink",
+          "good"
+        ]
+      ]
+    },
+    {
+      "name": "wiki stops at first bracket",
+      "text": "[[bad] text [[good]]",
+      "links": [
+        [
+          "wikilink",
+          "good"
+        ]
+      ]
+    },
+    {
+      "name": "embeds excluded",
+      "text": "![[embed]] ![image](image.md) [[link]] [link](link.md)",
+      "links": [
+        [
+          "wikilink",
+          "link"
+        ],
+        [
+          "markdown",
+          "link.md"
+        ]
+      ]
+    },
+    {
+      "name": "wiki length boundary",
+      "text": "[[xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx]] [[yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy]] [[last]]",
+      "links": [
+        [
+          "wikilink",
+          "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        ],
+        [
+          "wikilink",
+          "last"
+        ]
+      ]
+    },
+    {
+      "name": "unicode wiki boundary",
+      "text": "[[😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀]] [[😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀]] [[last]]",
+      "links": [
+        [
+          "wikilink",
+          "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
+        ],
+        [
+          "wikilink",
+          "last"
+        ]
+      ]
+    },
+    {
+      "name": "malformed markdown moves to next bracket",
+      "text": "[bad [discard](ignored.md) [good](good.md)",
+      "links": [
+        [
+          "markdown",
+          "ignored.md"
+        ],
+        [
+          "markdown",
+          "good.md"
+        ]
+      ]
+    },
+    {
+      "name": "long destination",
+      "text": "[long](xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx) [[good]]",
+      "links": [
+        [
+          "wikilink",
+          "good"
+        ]
+      ]
+    },
+    {
+      "name": "wiki alias and code",
+      "text": "[[folder/a|title]] `[[hidden]]`\n```\n[[hidden]]\n```\n[go](<folder/a.md> \"title\")",
+      "links": [
+        [
+          "wikilink",
+          "folder/a"
+        ],
+        [
+          "markdown",
+          "folder/a.md"
+        ]
+      ]
+    },
+    {
+      "name": "wiki after short malformed label",
+      "text": "[unclosed\n[[good]] [good](good.md)",
+      "links": [
+        [
+          "wikilink",
+          "good"
+        ],
+        [
+          "markdown",
+          "good.md"
+        ]
+      ]
+    },
+    {
+      "name": "wiki stays on one line with carriage returns",
+      "text": "[[across\rlines]] [[good]]",
+      "links": [
+        [
+          "wikilink",
+          "good"
+        ]
+      ]
+    },
+    {
+      "name": "wiki regex resumes at overlapping bracket",
+      "text": "[[[xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx]] [[last]]",
+      "links": [
+        [
+          "wikilink",
+          "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        ],
+        [
+          "wikilink",
+          "last"
+        ]
+      ]
+    },
+    {
+      "name": "embedded opening excludes only its own wiki span",
+      "text": "![[[nested]] ![[embed]]",
+      "links": [
+        [
+          "wikilink",
+          "nested"
+        ]
+      ]
+    }
+  ],
+  "resolve": [
+    {
+      "source": "notes/source.md",
+      "literal": "2026.10.05 standup",
+      "kind": "wikilink",
+      "target": "notes/2026.10.05 standup.md"
+    },
+    {
+      "source": "source.md",
+      "literal": "report.v2",
+      "kind": "wikilink",
+      "target": "folder/report.v2.md"
+    },
+    {
+      "source": "notes/source.md",
+      "literal": "report.v2?query",
+      "kind": "wikilink",
+      "target": "notes/report.v2.md"
+    },
+    {
+      "source": "notes/source.md",
+      "literal": "report.v2.md?query#part",
+      "kind": "markdown",
+      "target": "notes/report.v2.md"
+    },
+    {
+      "source": "source.md",
+      "literal": "folder/report.v2",
+      "kind": "wikilink",
+      "target": "folder/report.v2.markdown"
+    },
+    {
+      "source": "notes/source.md",
+      "literal": "../REPORT.V2.MDX",
+      "kind": "markdown",
+      "target": "report.v2.mdx"
+    },
+    {
+      "source": "source.md",
+      "literal": "photo",
+      "kind": "wikilink",
+      "target": "folder/photo.png"
+    },
+    {
+      "source": "notes/source.md",
+      "literal": "/folder/a%20b?query",
+      "kind": "markdown",
+      "target": "folder/a b.md"
+    },
+    {
+      "source": "source.md",
+      "literal": "report%3Fv2",
+      "kind": "wikilink",
+      "target": "report?v2.md"
+    },
+    {
+      "source": "source.md",
+      "literal": "report%23v2",
+      "kind": "wikilink",
+      "target": "report#v2.md"
+    },
+    {
+      "name": "local stem wins ambiguity",
+      "source": "notes/source.md",
+      "literal": "report",
+      "kind": "wikilink",
+      "target": "notes/report.md",
+      "paths": [
+        "notes/source.md",
+        "notes/report.md",
+        "other/report.md"
+      ]
+    },
+    {
+      "name": "ambiguous global stem",
+      "source": "source.md",
+      "literal": "report",
+      "kind": "wikilink",
+      "target": null,
+      "paths": [
+        "source.md",
+        "notes/report.md",
+        "other/report.md"
+      ]
+    },
+    {
+      "name": "exact case wins folded ambiguity",
+      "source": "source.md",
+      "literal": "/Report.md",
+      "kind": "wikilink",
+      "target": "Report.md",
+      "paths": [
+        "source.md",
+        "report.md",
+        "Report.md"
+      ]
+    },
+    {
+      "name": "folded case ambiguity",
+      "source": "source.md",
+      "literal": "/REPORT.MD",
+      "kind": "wikilink",
+      "target": null,
+      "paths": [
+        "source.md",
+        "report.md",
+        "Report.md"
+      ]
+    },
+    {
+      "name": "workspace path before source relative",
+      "source": "notes/source.md",
+      "literal": "other/report",
+      "kind": "wikilink",
+      "target": "other/report.md",
+      "paths": [
+        "notes/source.md",
+        "other/report.md",
+        "notes/other/report.md"
+      ]
+    },
+    {
+      "name": "explicit relative path",
+      "source": "notes/source.md",
+      "literal": "../other/report#part",
+      "kind": "wikilink",
+      "target": "other/report.md",
+      "paths": [
+        "notes/source.md",
+        "other/report.md"
+      ]
+    },
+    {
+      "name": "malformed percent stays literal",
+      "source": "source.md",
+      "literal": "report%20%zz",
+      "kind": "wikilink",
+      "target": "report%20%zz.md"
+    },
+    {
+      "name": "non-markdown extensionless",
+      "source": "source.md",
+      "literal": "/assets/photo",
+      "kind": "wikilink",
+      "target": "assets/photo.png"
+    },
+    {
+      "name": "fragment only unresolved",
+      "source": "source.md",
+      "literal": "#part",
+      "kind": "wikilink",
+      "target": null,
+      "paths": [
+        "source.md"
+      ]
+    },
+    {
+      "source": "source.md",
+      "kind": "wikilink",
+      "name": "markdown extension precedence",
+      "literal": "/report",
+      "target": "report.md",
+      "paths": [
+        "source.md",
+        "report.mdx",
+        "report.markdown",
+        "report.md"
+      ]
+    },
+    {
+      "source": "source.md",
+      "kind": "wikilink",
+      "name": "query and fragment",
+      "literal": "report?mode=1#part",
+      "target": "report.md"
+    },
+    {
+      "source": "source.md",
+      "kind": "wikilink",
+      "name": "leading question mark is filename",
+      "literal": "?report",
+      "target": "?report.md"
+    },
+    {
+      "source": "source.md",
+      "kind": "wikilink",
+      "name": "trailing slash stays directory",
+      "literal": "/report/",
+      "target": null,
+      "paths": [
+        "source.md",
+        "report.md",
+        "report"
+      ]
+    },
+    {
+      "source": "source.md",
+      "kind": "wikilink",
+      "name": "relative path cannot escape workspace",
+      "literal": "../report",
+      "target": null,
+      "paths": [
+        "source.md",
+        "report.md"
+      ]
+    },
+    {
+      "source": "source.md",
+      "kind": "wikilink",
+      "name": "external scheme refused",
+      "literal": "https:report",
+      "target": null,
+      "paths": [
+        "source.md",
+        "https:report.md"
+      ]
+    },
+    {
+      "source": "source.md",
+      "kind": "wikilink",
+      "name": "network path refused",
+      "literal": "//report",
+      "target": null,
+      "paths": [
+        "source.md",
+        "report.md"
+      ]
+    },
+    {
+      "source": "source.md",
+      "kind": "wikilink",
+      "name": "invalid utf8 escapes stay literal",
+      "literal": "report%FF",
+      "target": "report%FF.md"
+    },
+    {
+      "source": "source.md",
+      "kind": "wikilink",
+      "name": "encoded slash",
+      "literal": "notes%2Freport",
+      "target": "notes/report.md"
+    },
+    {
+      "source": "source.md",
+      "kind": "wikilink",
+      "name": "hidden filename stem",
+      "literal": ".report",
+      "target": ".report"
+    },
+    {
+      "name": "local non-markdown extensionless wins stem ambiguity",
+      "source": "source.md",
+      "kind": "wikilink",
+      "literal": "photo",
+      "target": "photo.png",
+      "paths": [
+        "source.md",
+        "photo.png",
+        "other/photo.png"
+      ]
+    },
+    {
+      "name": "explicit relative trailing slash stays directory",
+      "source": "source.md",
+      "kind": "wikilink",
+      "literal": "./report/",
+      "target": null,
+      "paths": [
+        "source.md",
+        "report.md"
+      ]
+    },
+    {
+      "name": "signed percent hex is malformed",
+      "source": "source.md",
+      "kind": "wikilink",
+      "literal": "report%+2",
+      "target": "report%+2.md"
+    },
+    {
+      "name": "space before fragment",
+      "source": "source.md",
+      "literal": "report #part",
+      "kind": "wikilink",
+      "target": "report.md"
+    },
+    {
+      "name": "space before query",
+      "source": "source.md",
+      "literal": "report ?q",
+      "kind": "wikilink",
+      "target": "report.md"
+    },
+    {
+      "name": "malformed percent in fragment",
+      "source": "source.md",
+      "literal": "a%20b#%zz",
+      "kind": "wikilink",
+      "target": "a b.md"
+    },
+    {
+      "name": "hidden global stem",
+      "source": "source.md",
+      "literal": ".report",
+      "kind": "wikilink",
+      "target": "other/.report"
+    },
+    {
+      "name": "double markdown extension global stem",
+      "source": "source.md",
+      "literal": "report.md",
+      "kind": "wikilink",
+      "target": "x/report.md.md"
+    },
+    {
+      "name": "bare dot normalizes source folder",
+      "source": "notes/source.md",
+      "literal": ".",
+      "kind": "wikilink",
+      "target": "notes.md"
+    },
+    {
+      "name": "bare parent normalizes source folder",
+      "source": "notes/sub/source.md",
+      "literal": "..",
+      "kind": "wikilink",
+      "target": "notes.md"
+    },
+    {
+      "name": "leading dot is not an extension",
+      "source": "source.md",
+      "literal": "/x/.md",
+      "kind": "wikilink",
+      "paths": [
+        "source.md",
+        "x/.md.md",
+        "x/.md.txt"
+      ],
+      "target": "x/.md.md"
+    },
+    {
+      "name": "trailing slash uses last segment extension",
+      "source": "source.md",
+      "literal": "/x.md/",
+      "kind": "wikilink",
+      "target": null,
+      "paths": [
+        "source.md",
+        "x.md/.md"
+      ]
+    },
+    {
+      "name": "surrounding whitespace",
+      "source": "notes/source.md",
+      "literal": " \t report \t ",
+      "kind": "wikilink",
+      "target": "notes/report.md"
+    },
+    {
+      "name": "single folded wikilink match",
+      "source": "source.md",
+      "literal": "/REPORT.MD",
+      "kind": "wikilink",
+      "target": "report.md"
+    },
+    {
+      "name": "positive explicit current folder",
+      "source": "notes/source.md",
+      "literal": "./report",
+      "kind": "wikilink",
+      "target": "notes/report.md"
+    },
+    {
+      "name": "mdx fill in",
+      "source": "source.md",
+      "literal": "/report",
+      "kind": "wikilink",
+      "target": "report.mdx"
+    },
+    {
+      "name": "literal percent in fragment",
+      "source": "source.md",
+      "literal": "report#50%",
+      "kind": "wikilink",
+      "target": "report.md"
+    }
+  ]
+}

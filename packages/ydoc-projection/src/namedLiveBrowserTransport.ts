@@ -1,3 +1,4 @@
+import {LIVE_CONNECTION_LIMIT_CLOSE_CODE, liveConnectionLimitMessage} from "@dohc/live-session-contract/live-connection";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import { parseLiveTicketToken } from "@dohc/live-session-contract/live-ticket";
 import {createLiveFrameSession} from "@dohc/live-session-contract/live-frame";
@@ -7,6 +8,7 @@ import { createNamedLiveProvider, type NamedLiveProviderLimits, type NamedLivePr
 /** Account ID is a stale-selection guard, never an authentication credential. */
 export interface NamedLiveSelection {
   accountId: string;
+  /** Public named:<grantId> binding, never the source workspace ID. */
   workspaceId: string;
   grantId: string;
   objectId: string;
@@ -76,27 +78,41 @@ export function createNamedLiveBrowserTransport<Selection extends LiveSelection 
     type Attempt = { controller: AbortController; route?: Route; socket?: BrowserSocket; timer?: ReturnType<typeof setTimeout>;
       removeListeners?: () => void; writes: Set<Promise<void>> };
     let attempt: Attempt | undefined;
+    let automatic = false, reconnectDelayMs = 250;
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+    function scheduleReconnect() {
+      const value = state();
+      if (!automatic || closed || reconnectTimer !== undefined || value.status !== "disconnected" || value.reason === "authority-unavailable") return;
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = undefined;
+        reconnectDelayMs = Math.min(10_000, reconnectDelayMs * 2);
+        void reconnect();
+      }, reconnectDelayMs);
+    }
     const state = (): NamedLiveBrowserState => ({ ...provider.state(), ...override });
     const notify = () => { for (const listener of listeners) { try { listener(state()); } catch { /* Observer owns its failure. */ } } };
     const current = (held: Attempt) => attempt === held && !held.controller.signal.aborted && !closed;
     function stop() {
+      clearTimeout(reconnectTimer); reconnectTimer = undefined;
       const previous = attempt; attempt = undefined;
       if (!previous) return;
       clearTimeout(previous.timer);
       previous.controller.abort();
       previous.removeListeners?.();
       previous.route?.disconnect();
+      clearTimeout(reconnectTimer); reconnectTimer = undefined;
       try { previous.socket?.close(); } catch { /* The attempt is already retired. */ }
       const prior = retiring;
       retiring = Promise.allSettled([prior, previous.route?.settled(), ...previous.writes]).then(() => undefined);
     }
     function fail(held: Attempt, status: Override["status"], reason: string) {
       if (!current(held)) return;
-      override = { status, reason }; stop(); notify();
+      override = { status, reason }; stop(); notify(); scheduleReconnect();
     }
     const unsubscribe = provider.subscribe(value => {
-      if (value.status === "live") clearTimeout(attempt?.timer);
+      if (value.status === "live") { clearTimeout(attempt?.timer); reconnectDelayMs = 250; }
       notify();
+      scheduleReconnect();
     });
     async function json(held: Attempt, path: string, body?: unknown): Promise<unknown> {
       const signal = held.controller.signal;
@@ -139,6 +155,11 @@ export function createNamedLiveBrowserTransport<Selection extends LiveSelection 
         let opened = false;
         const abort = () => reject(new Error("Attempt retired."));
         const finish = () => { held.controller.signal.removeEventListener("abort", abort); };
+        const onClose = (event: CloseEvent) => {
+          if (event.code === LIVE_CONNECTION_LIMIT_CLOSE_CODE && liveConnectionLimitMessage(event.reason)) {
+            fail(held, "disconnected", event.reason); finish(); reject(new Error(event.reason));
+          } else disconnected();
+        };
         const disconnected = () => { fail(held, "disconnected", "transport-closed"); finish(); reject(new Error("Socket closed.")); };
         function send(bytes: Uint8Array): Promise<void> {
           const work = new Promise<void>((sent, failed) => {
@@ -178,13 +199,52 @@ export function createNamedLiveBrowserTransport<Selection extends LiveSelection 
         socket.addEventListener("open", onOpen);
         socket.addEventListener("message", onMessage);
         socket.addEventListener("error", disconnected);
-        socket.addEventListener("close", disconnected);
+        socket.addEventListener("close", onClose);
         held.controller.signal.addEventListener("abort", abort, { once: true });
         held.removeListeners = () => {
           socket.removeEventListener("open", onOpen); socket.removeEventListener("message", onMessage);
-          socket.removeEventListener("error", disconnected); socket.removeEventListener("close", disconnected); finish();
+          socket.removeEventListener("error", disconnected); socket.removeEventListener("close", onClose); finish();
         };
       });
+    }
+    async function reconnect(): Promise<void> {
+      if (closed || ["quarantined", "refused"].includes(state().status)) return;
+      automatic = true;
+      stop();
+      const held: Attempt = { controller: new AbortController(), writes: new Set() };
+      attempt = held; override = { status: "authorizing", reason: null }; notify();
+      held.timer = setTimeout(() => fail(held, "disconnected", "connect-timeout"), limits.connectTimeoutMs);
+      try {
+        await retiring;
+        if (!current(held)) return;
+        let admitted: {discriminator: string; ticketToken: string; websocketUrl: string};
+        if (options.authorize) admitted = await options.authorize(target, held.controller.signal);
+        else {
+        if (!("accountId" in target) || !("grantId" in target)) throw new Error("Named account selection required.");
+        const account = await json(held, "/api/account/session");
+        if (!exact(account, "user")) throw new Error("Invalid account response.");
+        if (account.user === null) throw new Refused();
+        if (!exact(account.user, "id,name") || typeof account.user.name !== "string") throw new Error("Invalid account response.");
+        if (account.user.id !== target.accountId) throw new Refused();
+        const bootstrap = await json(held, "/api/live/named-session", { grantId: target.grantId });
+        if (!exact(bootstrap, "discriminator,expiresAtMs") || typeof bootstrap.discriminator !== "string" || !/^[A-Za-z0-9_-]{12}$/.test(bootstrap.discriminator) ||
+            typeof bootstrap.expiresAtMs !== "number" || !Number.isSafeInteger(bootstrap.expiresAtMs) || bootstrap.expiresAtMs <= Date.now()) throw new Error("Invalid session.");
+        const ticket = await json(held, "/api/live/named-ticket", { discriminator: bootstrap.discriminator, objectId: target.objectId });
+        if (!exact(ticket, "expiresAtMs,token") || typeof ticket.expiresAtMs !== "number" || !Number.isSafeInteger(ticket.expiresAtMs) || ticket.expiresAtMs <= Date.now()) throw new Error("Invalid ticket.");
+        const namedUrl = new URL("/api/live", origin); namedUrl.protocol = "wss:"; namedUrl.searchParams.set("session", bootstrap.discriminator);
+        admitted = {discriminator: bootstrap.discriminator, ticketToken: ticket.token as string, websocketUrl: namedUrl.href};
+        }
+        if (!/^[A-Za-z0-9_-]{12}$/.test(admitted.discriminator)) throw new Error("Invalid admission.");
+        parseLiveTicketToken(admitted.ticketToken);
+        const token = admitted.ticketToken;
+        if (!current(held)) return;
+        const url = new URL(admitted.websocketUrl);
+        if (url.protocol !== "wss:" || url.host !== origin.host || url.username || url.password || url.hash || url.searchParams.get("session") !== admitted.discriminator) throw new Error("Invalid live route.");
+        await attach(held, openSocket(url.href, ["dohc-live-v1", `dohc-live-ticket.${token}`]));
+      } catch (error) {
+        fail(held, error instanceof Refused ? (provider.state().pendingUpdates ? "quarantined" : "refused") : "disconnected",
+          error instanceof Refused ? "account-changed" : error instanceof LiveAuthorityUnavailableError ? "authority-unavailable" : "connection-failed");
+      }
     }
     return {
       doc: provider.doc, body: provider.body, state,
@@ -194,47 +254,10 @@ export function createNamedLiveBrowserTransport<Selection extends LiveSelection 
         if (closed || state().status !== "live") return false;
         provider.doc.transact(change); return true;
       },
-      /** One explicit attempt. Opening the socket does not make the document editable. */
-      async reconnect(): Promise<void> {
-        if (closed || ["quarantined", "refused"].includes(state().status)) return;
-        stop();
-        const held: Attempt = { controller: new AbortController(), writes: new Set() };
-        attempt = held; override = { status: "authorizing", reason: null }; notify();
-        held.timer = setTimeout(() => fail(held, "disconnected", "connect-timeout"), limits.connectTimeoutMs);
-        try {
-          await retiring;
-          if (!current(held)) return;
-          let admitted: {discriminator: string; ticketToken: string; websocketUrl: string};
-          if (options.authorize) admitted = await options.authorize(target, held.controller.signal);
-          else {
-          if (!("accountId" in target) || !("grantId" in target)) throw new Error("Named account selection required.");
-          const account = await json(held, "/api/account/session");
-          if (!exact(account, "user")) throw new Error("Invalid account response.");
-          if (account.user === null) throw new Refused();
-          if (!exact(account.user, "id,name") || typeof account.user.name !== "string") throw new Error("Invalid account response.");
-          if (account.user.id !== target.accountId) throw new Refused();
-          const bootstrap = await json(held, "/api/live/named-session", { grantId: target.grantId });
-          if (!exact(bootstrap, "discriminator,expiresAtMs") || typeof bootstrap.discriminator !== "string" || !/^[A-Za-z0-9_-]{12}$/.test(bootstrap.discriminator) ||
-              typeof bootstrap.expiresAtMs !== "number" || !Number.isSafeInteger(bootstrap.expiresAtMs) || bootstrap.expiresAtMs <= Date.now()) throw new Error("Invalid session.");
-          const ticket = await json(held, "/api/live/named-ticket", { discriminator: bootstrap.discriminator, objectId: target.objectId });
-          if (!exact(ticket, "expiresAtMs,token") || typeof ticket.expiresAtMs !== "number" || !Number.isSafeInteger(ticket.expiresAtMs) || ticket.expiresAtMs <= Date.now()) throw new Error("Invalid ticket.");
-          const namedUrl = new URL("/api/live", origin); namedUrl.protocol = "wss:"; namedUrl.searchParams.set("session", bootstrap.discriminator);
-          admitted = {discriminator: bootstrap.discriminator, ticketToken: ticket.token as string, websocketUrl: namedUrl.href};
-          }
-          if (!/^[A-Za-z0-9_-]{12}$/.test(admitted.discriminator)) throw new Error("Invalid admission.");
-          parseLiveTicketToken(admitted.ticketToken);
-          const token = admitted.ticketToken;
-          if (!current(held)) return;
-          const url = new URL(admitted.websocketUrl);
-          if (url.protocol !== "wss:" || url.host !== origin.host || url.username || url.password || url.hash || url.searchParams.get("session") !== admitted.discriminator) throw new Error("Invalid live route.");
-          await attach(held, openSocket(url.href, ["dohc-live-v1", `dohc-live-ticket.${token}`]));
-        } catch (error) {
-          fail(held, error instanceof Refused ? (provider.state().pendingUpdates ? "quarantined" : "refused") : "disconnected",
-            error instanceof Refused ? "account-changed" : error instanceof LiveAuthorityUnavailableError ? "authority-unavailable" : "connection-failed");
-        }
-      },
+      reconnect,
       disconnect() {
         if (closed || ["quarantined", "refused"].includes(state().status)) return;
+        automatic = false;
         override = { status: "disconnected", reason: "paused" }; stop(); notify();
       },
       close() {

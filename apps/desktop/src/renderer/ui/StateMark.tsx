@@ -1,18 +1,21 @@
-import { Lock, TriangleAlert } from "lucide-react";
-import { useId, useLayoutEffect, useRef, useState } from "react";
+import { Clock, Lock, TriangleAlert } from "lucide-react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { SaveState } from "@dohc/workspace-contracts/save-state";
+import { SecondaryButton } from "./controls";
+import { useShownAfter } from "./useShownAfter";
 
 // Save facts and access/view facts share this presentation map.
 //
 // The shape says what kind of state it is before the word is read. Filled
-// means settled, a ring means dohc is still working, a lock means the file
-// is held and no edit is lost, a triangle means the person has to act.
-// Nothing animates, so reduced motion needs no special case.
+// means settled, a clock means settled but old, a ring means dohc is still
+// working, a lock means the file is held and no edit is lost, a triangle
+// means the person has to act. Nothing animates, so reduced motion needs no
+// special case.
 //
 // A `Record` over the union, so a new state is a compile error here until it
 // has a label, and every label is one it can defend from code (see
 // StateMark.test.tsx for what each may claim).
-export type StateMarkKind = "settled" | "working" | "held" | "attention";
+export type StateMarkKind = "settled" | "dated" | "working" | "held" | "attention";
 
 export type StatePresentation = {
   label: string;
@@ -108,6 +111,28 @@ export const SAVE_STATE: Record<SaveStateKey, StatePresentation> = {
   },
 };
 
+// How current a list of who has access is: the access answer's freshness.
+// A list main checked within its refresh window is settled. A stale list is
+// settled too, but old: no check is running for it. An empty list is never
+// "no access", so unknown says so.
+export type AccessStateKey = "access-fresh" | "access-stale" | "access-unknown";
+
+export const ACCESS_STATE: Record<AccessStateKey, StatePresentation> = {
+  "access-fresh": { label: "Checked", mark: "settled" },
+  "access-stale": {
+    label: "May be out of date",
+    mark: "dated",
+    title: "This is the last list of shares dohc received.",
+  },
+  "access-unknown": {
+    label: "Unknown",
+    mark: "attention",
+    title: "Access information is unavailable for this file. This does not mean that no one has access.",
+  },
+};
+
+const PRESENTATIONS: Record<SaveStateKey | AccessStateKey, StatePresentation> = { ...SAVE_STATE, ...ACCESS_STATE };
+
 export function saveStatePresentationKey(state: SaveState): SaveStateKey | null {
   switch (state.kind) {
     case "saved-here": return "saved";
@@ -116,8 +141,21 @@ export function saveStatePresentationKey(state: SaveState): SaveStateKey | null 
   }
 }
 
+// Save states that need nothing from the person and pass on their own: an
+// edit in flight, and an edit the file or its host has taken. Pending share
+// is not one: it can last while the host is away, and until it ends
+// collaborators do not have the edits.
+const CALM: ReadonlySet<SaveStateKey | AccessStateKey> = new Set(["saved", "saving", "saved-to-host"]);
+
+// A settle that beats the host's acknowledgement passes through pending share
+// on its way to saved to host, so its words wait until it has lasted. A host
+// that answers within this never makes the row flash; one that does not is
+// away, and the person is told.
+export const PENDING_SHARE_WORDS_DELAY_MS = 2_000;
+
 const MARK_TONE: Record<StateMarkKind, string> = {
   settled: "text-subtle",
+  dated: "text-subtle",
   working: "text-subtle",
   held: "text-muted",
   attention: "text-danger",
@@ -127,6 +165,8 @@ function Mark(props: { kind: StateMarkKind }) {
   switch (props.kind) {
     case "settled":
       return <span aria-hidden className="size-2 shrink-0 rounded-full bg-current" />;
+    case "dated":
+      return <Clock size={12} aria-hidden className="shrink-0" />;
     case "working":
       return <span aria-hidden className="size-2 shrink-0 rounded-full border-[1.5px] border-current" />;
     case "held":
@@ -145,17 +185,36 @@ function Mark(props: { kind: StateMarkKind }) {
  * runs out, such as a narrow file header. While the label is cut short, the
  * chip takes keyboard focus and shows the whole label and its explanation in
  * a tooltip, on focus or hover, in place of the title; with room to spare it
- * is not a tab stop and keeps its title. */
+ * is not a tab stop and keeps its title. `quietWhenCalm` keeps a saved,
+ * saving or saved-to-host chip for screen readers only: those pass on their
+ * own, so typing never changes what the row draws. Words appear when the
+ * file is held, a pending share has lasted (and then stay while the person
+ * keeps typing), or the state needs the person. `onRetry` puts Try again
+ * beside the chip, for a state the person can retry from the editor. */
 export function StateMark(props: {
   state: string | SaveState;
-  shown: SaveStateKey | SaveState;
+  shown: SaveStateKey | AccessStateKey | SaveState;
   title?: string;
   testId: string;
   className?: string;
   truncate?: boolean;
+  quietWhenCalm?: boolean;
+  onRetry?: () => void;
 }) {
-  const shownKey = typeof props.shown === "string" ? props.shown : saveStatePresentationKey(props.shown);
-  const presentation = shownKey === null ? null : SAVE_STATE[shownKey];
+  const storedKey = typeof props.shown === "string" ? props.shown : saveStatePresentationKey(props.shown);
+  const quiet = props.quietWhenCalm === true;
+  // Once a pending share has shown its words, they stay through the saves the
+  // person's typing starts, until the share takes the edits or the state
+  // otherwise resolves: each keystroke passes through saving, and dropping
+  // the words there would hide them for as long as the person types.
+  const [shareHeld, setShareHeld] = useState(false);
+  const shownKey = quiet && shareHeld && storedKey === "saving" ? "pending-share" : storedKey;
+  const pendingShareLasted = useShownAfter(quiet && shownKey === "pending-share", PENDING_SHARE_WORDS_DELAY_MS);
+  useEffect(() => {
+    if (pendingShareLasted) setShareHeld(true);
+    else if (storedKey !== "pending-share" && storedKey !== "saving") setShareHeld(false);
+  }, [pendingShareLasted, storedKey]);
+  const presentation = shownKey === null ? null : PRESENTATIONS[shownKey];
   const title = props.title ?? presentation?.title;
   const { label, cut } = useCutShort(presentation?.label ?? "", props.truncate === true);
   const [open, setOpen] = useState(false);
@@ -193,11 +252,15 @@ export function StateMark(props: {
     };
   }, [shown]);
   if (!presentation) return null;
+  const dataState = typeof props.state === "string" ? props.state : props.state.kind === "unknown" ? "unknown" : saveStatePresentationKey(props.state);
+  if (quiet && shownKey !== null && (CALM.has(shownKey) || (shownKey === "pending-share" && !pendingShareLasted))) {
+    return <span data-testid={props.testId} data-state={dataState ?? undefined} title={title} className="sr-only">{presentation.label}</span>;
+  }
   const chip = (
     <span
       ref={chipRef}
       data-testid={props.testId}
-      data-state={typeof props.state === "string" ? props.state : props.state.kind === "unknown" ? "unknown" : saveStatePresentationKey(props.state)}
+      data-state={dataState ?? undefined}
       // Cut short, the tooltip says what the title would, so the browser's
       // own tooltip does not repeat it a moment later.
       title={cut ? undefined : title}
@@ -232,12 +295,19 @@ export function StateMark(props: {
       )}
     </span>
   );
-  if (!props.truncate) return chip;
+  // One line at its natural width: the chip beside it gives way instead.
+  const retry = props.onRetry ? (
+    <SecondaryButton size="compact" data-testid={`${props.testId}-retry`} onClick={props.onRetry} className="shrink-0 whitespace-nowrap">
+      Try again
+    </SecondaryButton>
+  ) : null;
+  if (!props.truncate) return <>{chip}{retry}</>;
   // The tooltip sits beside the chip, not in it, so the chip's text stays its
-  // label while the tooltip is open.
-  return (
+  // label while the tooltip is open. Beside Try again, the chip keeps the
+  // header's 25px for its mark and an ellipsis.
+  const explained = (
     <span
-      className="inline-flex min-w-0 max-w-full"
+      className={`inline-flex max-w-full ${retry ? "min-w-[25px]" : "min-w-0"}`}
       onMouseEnter={() => setOpen(true)}
       onMouseLeave={(event) => {
         if (!event.currentTarget.contains(document.activeElement)) setOpen(false);
@@ -257,6 +327,7 @@ export function StateMark(props: {
       ) : null}
     </span>
   );
+  return <>{explained}{retry}</>;
 }
 
 // Between the chip and its tooltip, and between the tooltip and the window's edge.

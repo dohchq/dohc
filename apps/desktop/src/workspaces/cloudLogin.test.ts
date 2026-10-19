@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { CloudCredentials } from "./cloudCredentialStore";
+import type { CloudCredentials, DeletedAccount } from "./cloudCredentialStore";
 import {
   adoptCompletedCloudLoginSession,
   runCloudLogoutTransition,
@@ -12,10 +12,18 @@ import { deferred } from "../testing/deferred";
 function memoryStore(): CloudLoginStore & {
   saved: CloudCredentials | null;
   invalidMarker: InvalidSessionMarker | null;
+  deletedAccounts: DeletedAccount[];
 } {
   const box = {
     saved: null as CloudCredentials | null,
     invalidMarker: null as InvalidSessionMarker | null,
+    deletedAccounts: [] as DeletedAccount[],
+    async loadDeletedAccounts() {
+      return box.deletedAccounts;
+    },
+    async saveDeletedAccounts(accounts: DeletedAccount[]) {
+      box.deletedAccounts = accounts;
+    },
     async load() {
       return box.saved;
     },
@@ -71,14 +79,14 @@ describe("cloud device-flow login", () => {
     try {
       const { impl, calls } = fakeFetch({});
       const login = createCloudLogin({ store: memoryStore(), fetch: impl });
-      await expect(login.start("")).rejects.toThrow("Enter an HTTPS server address");
+      await expect(login.start("")).rejects.toThrow("Enter the server's https address");
       expect(calls).toEqual([]);
     } finally {
       vi.unstubAllEnvs();
     }
   });
 
-  it("keeps the discovered server name and network scope in status", async () => {
+  it("keeps the discovered network scope in status, and not the server's name", async () => {
     const { impl } = fakeFetch({
       "/api/auth/device/code": () => ({ body: DEVICE }),
       "/api/auth/device/token": () => ({ body: { access_token: "secret" } }),
@@ -92,7 +100,9 @@ describe("cloud device-flow login", () => {
     });
     await login.start("https://cloud.test");
     await login.poll();
-    await expect(login.status()).resolves.toMatchObject({ connected: true, serverName: "Research server", networkAccess: "private" });
+    const status = await login.status();
+    expect(status).toMatchObject({ connected: true, networkAccess: "private" });
+    expect(status).not.toHaveProperty("serverName");
   });
 
   it.each([
@@ -131,10 +141,35 @@ describe("cloud device-flow login", () => {
   it("rejects an empty or invalid server before making a request", async () => {
     const { impl, calls } = fakeFetch({});
     const login = createCloudLogin({ store: memoryStore(), fetch: impl });
-    for (const address of ["", "https://cloud.test/api", "http://cloud.test"]) {
-      await expect(login.start(address)).rejects.toThrow("Enter an HTTPS server address");
+    for (const address of ["", "https://cloud.test/api", "http://cloud.test", "http://localhost:1786"]) {
+      await expect(login.start(address)).rejects.toThrow("Enter the server's https address");
     }
     expect(calls).toEqual([]);
+  });
+
+  it("reads a session saved for a plain http server as signed out, except under the e2e switch", async () => {
+    const saved = { serverUrl: "http://localhost:1786", relayUrl: "http://localhost:1786", email: "user@example.test", userId: "user", token: "secret" };
+    for (const allowInsecureLoopbackForTests of [false, true]) {
+      const store = memoryStore();
+      store.saved = saved;
+      const login = createCloudLogin({ store, fetch: fakeFetch({}).impl, allowInsecureLoopbackForTests });
+      await expect(login.credentials()).resolves.toEqual(allowInsecureLoopbackForTests ? saved : null);
+      await expect(login.status()).resolves.toMatchObject({ connected: allowInsecureLoopbackForTests });
+    }
+    const store = memoryStore();
+    store.saved = { ...saved, serverUrl: "https://cloud.test", relayUrl: "http://localhost:1786" };
+    await expect(createCloudLogin({ store }).credentials()).resolves.toBeNull();
+  });
+
+  it("signs in to a plain http server on this machine only under the e2e switch", async () => {
+    const local = "http://127.0.0.1:1786";
+    const fetcher = (async (url: string | URL | Request) => String(url).endsWith("/.well-known/dohc-server")
+      ? Response.json({ version: 1, authUrl: local, relayUrl: local, shareUrl: local })
+      : Response.json({ ...DEVICE, verification_uri: `${local}/device`, verification_uri_complete: `${local}/device?user_code=ABCD1234` })) as typeof fetch;
+    await expect(createCloudLogin({ store: memoryStore(), fetch: fetcher }).start(local))
+      .rejects.toThrow("Enter the server's https address");
+    await expect(createCloudLogin({ store: memoryStore(), fetch: fetcher, allowInsecureLoopbackForTests: true }).start(local))
+      .resolves.toMatchObject({ userCode: DEVICE.user_code });
   });
 
   it("discovers the relay from the server before sign-in", async () => {
@@ -1029,5 +1064,199 @@ describe("invalidateSessionIf", () => {
     await expect(login.credentials()).resolves.toMatchObject({
       userId: "usr_b",
     });
+  });
+});
+
+// A deleted account: every session of it is dead, whatever its token.
+describe("invalidateAccount", () => {
+  const SESSION_A: CloudCredentials = {
+    serverUrl: "https://cloud.test",
+    email: "a@dohc.test",
+    userId: "usr_a",
+    token: "token-a",
+  };
+  const ACCOUNT_A = { serverUrl: SESSION_A.serverUrl, userId: SESSION_A.userId };
+
+  it("clears the account's session after another window signed it in again", async () => {
+    const store = memoryStore();
+    store.saved = { ...SESSION_A, token: "token-a2" };
+    const login = createCloudLogin({ store, fetch: fakeFetch({}).impl });
+    await login.invalidateAccount(ACCOUNT_A);
+    expect(store.saved).toBeNull();
+    await expect(login.status()).resolves.toEqual({ connected: false });
+  });
+
+  it.each([
+    ["another account on the same server", { ...SESSION_A, userId: "usr_b", email: "b@dohc.test", token: "token-b" }],
+    ["the same user id on another server", { ...SESSION_A, serverUrl: "https://other.test", token: "token-o" }],
+  ])("keeps %s", async (_name, other) => {
+    const store = memoryStore();
+    store.saved = other;
+    const login = createCloudLogin({ store, fetch: fakeFetch({}).impl });
+    await login.invalidateAccount(ACCOUNT_A);
+    expect(store.saved).toEqual(other);
+    await expect(login.status()).resolves.toMatchObject({ connected: true });
+  });
+
+  it("clears a same-account sign-in whose save is in flight when deletion finishes", async () => {
+    const saveStarted = deferred<void>();
+    const releaseSave = deferred<void>();
+    const store = memoryStore();
+    store.saved = SESSION_A;
+    store.save = async (credentials) => {
+      saveStarted.resolve(undefined);
+      await releaseSave.promise;
+      store.saved = credentials;
+    };
+    const { impl } = fakeFetch({
+      "/api/auth/device/code": () => ({ body: DEVICE }),
+      "/api/auth/device/token": () => ({ body: { access_token: "token-a2" } }),
+      "/api/auth/get-session": () => ({ body: { user: { email: SESSION_A.email, id: SESSION_A.userId } } }),
+    });
+    const login = createCloudLogin({ store, fetch: impl });
+
+    await login.start("https://cloud.test");
+    const polling = login.poll();
+    await saveStarted.promise;
+    const invalidating = login.invalidateAccount(ACCOUNT_A);
+    releaseSave.resolve(undefined);
+
+    await expect(polling).resolves.toMatchObject({ status: "complete" });
+    await invalidating;
+    expect(store.saved).toBeNull();
+    await expect(login.credentials()).resolves.toBeNull();
+  });
+
+  // A sign-in whose get-session answer the test holds, so the server reads the
+  // session before deletion and the poll saves after it.
+  function heldSessionFetch(user: { id: string; email: string }) {
+    const asked = deferred<void>();
+    const answer = deferred<void>();
+    const { impl } = fakeFetch({
+      "/api/auth/device/code": () => ({ body: DEVICE }),
+      "/api/auth/device/token": () => ({ body: { access_token: "token-late" } }),
+      "/api/auth/get-session": () => ({ body: { user } }),
+    });
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).endsWith("/api/auth/get-session")) {
+        asked.resolve(undefined);
+        await answer.promise;
+      }
+      return impl(input, init);
+    }) as typeof fetch;
+    return { fetchImpl, asked: asked.promise, answer: () => answer.resolve(undefined) };
+  }
+
+  it("refuses a sign-in that read the session before deletion, also after a restart", async () => {
+    const store = memoryStore();
+    const held = heldSessionFetch({ id: SESSION_A.userId, email: SESSION_A.email });
+    const login = createCloudLogin({ store, fetch: held.fetchImpl });
+    await login.start("https://cloud.test");
+    const polling = login.poll();
+    await held.asked;
+
+    await login.invalidateAccount(ACCOUNT_A);
+    held.answer();
+
+    await expect(polling).rejects.toThrow("You deleted this account on this server.");
+    expect(store.saved).toBeNull();
+    expect(store.deletedAccounts).toEqual([ACCOUNT_A]);
+    await expect(login.status()).resolves.toEqual({ connected: false });
+    await expect(login.poll()).rejects.toThrow("No cloud login in progress");
+
+    // Restart: only the persisted record remains, and it still refuses.
+    const restarted = createCloudLogin({
+      store,
+      fetch: fakeFetch({
+        "/api/auth/device/code": () => ({ body: DEVICE }),
+        "/api/auth/device/token": () => ({ body: { access_token: "token-again" } }),
+        "/api/auth/get-session": () => ({ body: { user: { id: SESSION_A.userId, email: SESSION_A.email } } }),
+      }).impl,
+    });
+    await restarted.start("https://cloud.test");
+    await expect(restarted.poll()).rejects.toThrow("You deleted this account on this server.");
+    expect(store.saved).toBeNull();
+    await expect(restarted.status()).resolves.toEqual({ connected: false });
+    await expect(restarted.credentials()).resolves.toBeNull();
+  });
+
+  it("reads a stored session of a deleted account as disconnected after a restart", async () => {
+    const store = memoryStore();
+    store.saved = SESSION_A;
+    store.deletedAccounts = [ACCOUNT_A];
+    const login = createCloudLogin({ store, fetch: fakeFetch({}).impl });
+    await expect(login.status()).resolves.toEqual({ connected: false });
+    await expect(login.credentials()).resolves.toBeNull();
+    expect(store.saved).toBeNull();
+  });
+
+  it.each([
+    ["another account on the same server", { id: "usr_b", email: "b@dohc.test" }, "https://cloud.test"],
+    ["the same user id on another server", { id: SESSION_A.userId, email: SESSION_A.email }, "https://other.test"],
+  ])("still signs in to %s after a deletion", async (_name, user, deletedServer) => {
+    const store = memoryStore();
+    const held = heldSessionFetch(user);
+    const login = createCloudLogin({ store, fetch: held.fetchImpl });
+    await login.start("https://cloud.test");
+    const polling = login.poll();
+    await held.asked;
+
+    await login.invalidateAccount({ serverUrl: deletedServer, userId: SESSION_A.userId });
+    held.answer();
+
+    await expect(polling).resolves.toMatchObject({ status: "complete" });
+    expect(store.saved).toMatchObject({ serverUrl: "https://cloud.test", userId: user.id, token: "token-late" });
+    await expect(login.status()).resolves.toMatchObject({ connected: true });
+  });
+
+  it("refuses the account in this process when its record cannot be written", async () => {
+    const store = memoryStore();
+    store.saved = SESSION_A;
+    store.saveDeletedAccounts = async () => {
+      throw new Error("disk full");
+    };
+    const held = heldSessionFetch({ id: SESSION_A.userId, email: SESSION_A.email });
+    const login = createCloudLogin({ store, fetch: held.fetchImpl });
+    await login.start("https://cloud.test");
+    const polling = login.poll();
+    await held.asked;
+
+    await expect(login.invalidateAccount(ACCOUNT_A)).rejects.toThrow("disk full");
+    expect(store.saved).toBeNull();
+    held.answer();
+    await expect(polling).rejects.toThrow("You deleted this account on this server.");
+    expect(store.saved).toBeNull();
+  });
+
+  it("writes the record again on the next deletion of the same account, so a restart refuses it", async () => {
+    const store = memoryStore();
+    const save = store.saveDeletedAccounts;
+    store.saveDeletedAccounts = async () => {
+      throw new Error("disk full");
+    };
+    const login = createCloudLogin({ store, fetch: fakeFetch({}).impl });
+    await expect(login.invalidateAccount(ACCOUNT_A)).rejects.toThrow("disk full");
+    expect(store.deletedAccounts).toEqual([]);
+
+    store.saveDeletedAccounts = save;
+    await login.invalidateAccount(ACCOUNT_A);
+    expect(store.deletedAccounts).toEqual([ACCOUNT_A]);
+
+    store.saved = SESSION_A;
+    const restarted = createCloudLogin({ store, fetch: fakeFetch({}).impl });
+    await expect(restarted.status()).resolves.toEqual({ connected: false });
+  });
+
+  it("tombstones the account's current token when the clear fails", async () => {
+    const store = memoryStore();
+    store.saved = { ...SESSION_A, token: "token-a2" };
+    store.clear = async () => {
+      throw new Error("store unavailable");
+    };
+    const login = createCloudLogin({ store, fetch: fakeFetch({}).impl });
+    await expect(login.invalidateAccount(ACCOUNT_A)).rejects.toThrow("store unavailable");
+    expect(store.invalidMarker).toMatchObject(ACCOUNT_A);
+    await expect(login.status()).resolves.toEqual({ connected: false });
+    await expect(login.credentials()).resolves.toBeNull();
   });
 });

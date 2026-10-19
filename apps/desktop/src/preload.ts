@@ -1,32 +1,37 @@
+import { linksOperations } from "./ipc/linksOperations";
+import { shareHandoffOperations, shareMountOperations, shareProposalOperations, sharedChannelOperations, relayShareOperations } from "./ipc/shareOperations";
+import { chatOperations } from "./ipc/chatOperations";
 import { contextBridge, ipcRenderer, webUtils } from "electron";
+import { shareCopyOperations } from "./ipc/shareCopyOperations";
+import { accessOperations } from "./ipc/accessOperations";
+import { settingsOperations } from "./ipc/settingsOperations";
+import { workspaceFileOperations } from "./ipc/workspaceFileOperations";
 import { devToolsGranted } from "./ipc/devToolsIpc";
-import {OwnerRestoreRequest, OwnerRestoreActionResponse, type OwnerRestoreAction, type OwnerRestoreResult} from "./ipc/ownerRestoreContract";
+import { insecureLoopbackServersForTests } from "./workspaces/cloudConfiguration";
 import {OwnerAppPublicationRequest, OwnerAppPublicationResult} from "./ipc/ownerAppPublicationContract";
-import { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
+import { datasetOperations } from "./ipc/datasetOperations";
 import {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "@dohc/cli/app-responses";
 import type {
   CreateLocalWorkspacePayload,
   DohcDesktopBridge,
   GetSitePreviewLogsPayload,
   ListSitesPayload,
-  SetUserSettingsPayload,
-  SetWorkspaceSettingsPayload,
   SitePackagePayload,
   StartSitePreviewPayload,
   StopSitePreviewPayload,
-  WorkspaceSettingsPayload,
   WorkspaceActivityEvent,
 } from "./ipc/bridgeContract";
 import {
+  workspaceSyncOperations,
+  CaptureHoldsEvent,
+  systemMotionOperations,
+  systemPrivacySettingsOperations,
+  serverAccountOperations,
   SitePreviewReplacedEvent,
-  ListOwnerLiveDocumentsPayload,
-  ListOwnerLiveRefusalsPayload,
-  OwnerLiveRefusalsResult,
-  RetryOwnerLiveSharePayload,
-  OwnerLiveDocumentsResult,
-  OwnerLiveDocumentActionPayload,
   DesktopUserSettingsResult,
+  AgentColorChangedEvent,
   ShareDirectWritesPushedEvent,
+  shareDirectWriteDeliveryOperations,
   EngineYDocLineageReplacementEvent,
   EngineYDocRemoteUpdateEvent,
   EngineYDocOwnerHandoff,
@@ -38,26 +43,36 @@ import {
   CrashReportChangedEvent,
   NoticesChangedEvent,
   SearchResultsEvent,
+  FolderAppAnswer,
   ShareHandoffStatus,
   UpdateActionResult,
   UpdateCheckResult,
   UpdateStateEvent,
   WorkbenchMenuCommand,
   WorkspaceIdPayload,
-  WorkspaceSummary,
+  WorkspaceActivated,
   WorkspacePathOpenFailedEvent,
+  WindowFullScreenEvent,
   crashReportOperations,
   captureRecoveryOperations,
+  fileObservationOperations,
   reportingOperations,
+  usageRecordOperations,
+  UsageRecordStoppedEvent,
   noticeOperations,
   liveDraftRecoveryOperations,
+  stopAndRestoreRecoveryOperations,
   scheduleHostOperations,
   chatDispatchNoticeOperations,
+  agentRunStateOperations,
   sharedViewAccessOperations,
   ScheduleHostChangedEvent,
   ChatDispatchNoticesEvent,
+  AgentRunStateEvent,
   workspaceSearchOperations,
+  folderAppOfferOperations,
   workspaceVersionOperations,
+  historyOperations,
   engineYDocAdmissionOperations,
   engineYDocSaveOperations,
   parseWorkspaceActivityEventForIpc,
@@ -94,6 +109,17 @@ async function invokeParsed<Schema extends z.ZodType>(
   return schema.parse(await ipcRenderer.invoke(channel, ...args));
 }
 
+// A menu command that arrives before anything listens, as when the command
+// opened this window, waits for the first listener.
+const menuCommandListeners = new Set<(command: MenuCommand) => void>();
+const heldMenuCommands: MenuCommand[] = [];
+ipcRenderer.on(CHANNELS.menuCommand, (_event, raw: unknown) => {
+  const parsed = MenuCommand.safeParse(raw);
+  if (!parsed.success) return;
+  if (menuCommandListeners.size === 0) heldMenuCommands.push(parsed.data);
+  for (const listener of [...menuCommandListeners]) listener(parsed.data);
+});
+
 // The entire bridge surface. Narrow on purpose: the renderer gets named,
 // typed operations — never raw ipcRenderer, never Node. Typed as
 // DohcDesktopBridge so it cannot drift from the contract (a missing or
@@ -102,10 +128,29 @@ async function invokeParsed<Schema extends z.ZodType>(
 // reject IPC that the outgoing document queued while renderer reload cleanup
 // was draining on the same WebContents object.
 const rendererDocumentId = crypto.randomUUID();
+const relay = operationBridge(relayShareOperations, invoke);
 
 const bridge: DohcDesktopBridge = {
+  ...operationBridge(workspaceFileOperations, invoke),
+  ...operationBridge(settingsOperations, invoke),
+  ...operationBridge(chatOperations, invoke),
+  ...operationBridge(shareHandoffOperations, invoke),
+  ...operationBridge(shareMountOperations, invoke),
+  ...operationBridge(shareProposalOperations, invoke),
+  ...operationBridge(sharedChannelOperations, invoke),
+  ...relay,
+  ownerRestore: relay.ownerRestore as DohcDesktopBridge["ownerRestore"],
+  ...operationBridge(systemMotionOperations, invoke),
+  ...operationBridge(systemPrivacySettingsOperations, invoke),
+  ...operationBridge(serverAccountOperations, invoke),
+  ...operationBridge(historyOperations, invoke),
+  ...operationBridge(shareDirectWriteDeliveryOperations, invoke),
+  ...operationBridge(shareCopyOperations, invoke),
+  ...operationBridge(linksOperations, invoke),
+  ...operationBridge(accessOperations, invoke),
   platform: process.platform,
   devTools: devToolsGranted(process.argv),
+  insecureLoopbackServersForTests: insecureLoopbackServersForTests(process.env),
   windowRole:
     new URLSearchParams(window.location.search).get("view") === "manager"
       ? "manager"
@@ -130,8 +175,6 @@ const bridge: DohcDesktopBridge = {
   closeThisWindow: () => ipcRenderer.invoke(CHANNELS.closeThisWindow),
   revealWorkspaceFolder: (payload) =>
     ipcRenderer.invoke(CHANNELS.revealWorkspaceFolder, payload),
-  listWorkspaceFiles: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listWorkspaceFiles, payload),
   listCollections: (payload) =>
     ipcRenderer.invoke(CHANNELS.listCollections, payload),
   getCollection: (payload) =>
@@ -142,18 +185,6 @@ const bridge: DohcDesktopBridge = {
   getCollectionRecordHistory: (payload) =>
     ipcRenderer.invoke(CHANNELS.getCollectionRecordHistory, payload),
   locateRecordHistoryRun: (payload) => ipcRenderer.invoke(CHANNELS.locateRecordHistoryRun, payload),
-  createWorkspaceFile: (payload) =>
-    ipcRenderer.invoke(CHANNELS.createWorkspaceFile, payload),
-  createWorkspaceFolder: (payload) =>
-    ipcRenderer.invoke(CHANNELS.createWorkspaceFolder, payload),
-  moveWorkspacePath: (payload) =>
-    ipcRenderer.invoke(CHANNELS.moveWorkspacePath, payload),
-  deleteWorkspacePath: (payload) =>
-    ipcRenderer.invoke(CHANNELS.deleteWorkspacePath, payload),
-  exportWorkspaceZip: (payload) =>
-    ipcRenderer.invoke(CHANNELS.exportWorkspaceZip, payload),
-  exportDocumentFile: (payload) =>
-    ipcRenderer.invoke(CHANNELS.exportDocumentFile, payload),
   // The invoke RESULT is validated like main→renderer events are: only a
   // member of the closed command set reaches renderer code — anything else
   // reads as null ("dismissed").
@@ -173,7 +204,7 @@ const bridge: DohcDesktopBridge = {
   // webUtils.getPathForFile in the preload is the sanctioned resolver.
   // TRUST DELTA flagged in the contract: these paths are renderer-supplied
   // once they cross the bridge — main re-validates each one through the
-  // picker-grade import path (files only, never a workspace's .dohc).
+  // picker-grade import path (files and folders, never a workspace's .dohc).
   getDroppedFilePaths: (files) => {
     const paths: string[] = [];
     for (const file of files) {
@@ -187,31 +218,10 @@ const bridge: DohcDesktopBridge = {
     }
     return paths;
   },
-  importWorkspaceFiles: (payload) =>
-    ipcRenderer.invoke(CHANNELS.importWorkspaceFiles, payload),
-  readWorkspaceText: (payload) =>
-    ipcRenderer.invoke(CHANNELS.readWorkspaceText, payload),
-  writeWorkspaceText: (payload) =>
-    ipcRenderer.invoke(CHANNELS.writeWorkspaceText, payload),
-  writeWorkspaceAsset: (payload) =>
-    ipcRenderer.invoke(CHANNELS.writeWorkspaceAsset, payload),
-  pickImageFiles: (payload) =>
-    ipcRenderer.invoke(CHANNELS.pickImageFiles, payload),
-  openFileExternally: (payload) =>
-    ipcRenderer.invoke(CHANNELS.openFileExternally, payload),
   readWorkspaceGraph: (payload) =>
     ipcRenderer.invoke(CHANNELS.readWorkspaceGraph, payload),
-  getBacklinks: (payload) => ipcRenderer.invoke(CHANNELS.getBacklinks, payload),
   listWorkspaceHeadings: (payload) =>
     ipcRenderer.invoke(CHANNELS.listWorkspaceHeadings, payload),
-  listChatFileMentions: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listChatFileMentions, payload),
-  listChatBookmarks: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listChatBookmarks, payload),
-  saveChatBookmark: (payload) =>
-    ipcRenderer.invoke(CHANNELS.saveChatBookmark, payload),
-  archiveChatBookmark: (payload) =>
-    ipcRenderer.invoke(CHANNELS.archiveChatBookmark, payload),
   readWorkspaceDatabase: (payload) =>
     ipcRenderer.invoke(CHANNELS.readWorkspaceDatabase, payload),
   readWorkspaceDatabasePage: (payload) =>
@@ -239,92 +249,18 @@ const bridge: DohcDesktopBridge = {
   cloudLoginPoll: () => ipcRenderer.invoke(CHANNELS.cloudLoginPoll),
   cloudStatus: (payload) => ipcRenderer.invoke(CHANNELS.cloudStatus, payload),
   cloudLogout: () => ipcRenderer.invoke(CHANNELS.cloudLogout),
-  getShareHandoffStatus: () =>
-    invokeParsed(CHANNELS.getShareHandoffStatus, ShareHandoffStatus),
-  acceptShareHandoff: (payload) =>
-    ipcRenderer.invoke(CHANNELS.acceptShareHandoff, payload),
-  retryShareHandoff: () => ipcRenderer.invoke(CHANNELS.retryShareHandoff),
-  dismissShareHandoff: (payload) =>
-    ipcRenderer.invoke(CHANNELS.dismissShareHandoff, payload),
   onShareHandoffStatus: (listener) =>
     onEvent(CHANNELS.shareHandoffStatus, ShareHandoffStatus, listener),
+  ...operationBridge(workspaceSyncOperations, invoke),
   cloudEnableSync: (payload) =>
     ipcRenderer.invoke(CHANNELS.cloudEnableSync, payload),
   cloudJoinWorkspace: (payload) =>
     ipcRenderer.invoke(CHANNELS.cloudJoinWorkspace, payload),
-  createRelayShare: (payload) => ipcRenderer.invoke(CHANNELS.createRelayShare, payload),
-  listOwnerLiveDocuments: async payload => OwnerLiveDocumentsResult.parse(await ipcRenderer.invoke(
-    CHANNELS.listOwnerLiveDocuments, ListOwnerLiveDocumentsPayload.parse(payload))),
-  listOwnerLiveRefusals: async payload => OwnerLiveRefusalsResult.parse(await ipcRenderer.invoke(
-    CHANNELS.listOwnerLiveRefusals, ListOwnerLiveRefusalsPayload.parse(payload))),
-  retryOwnerLiveShare: async payload => {
-    await ipcRenderer.invoke(CHANNELS.retryOwnerLiveShare, RetryOwnerLiveSharePayload.parse(payload));
-  },
-  stopOwnerLiveDocument: async payload => {
-    await ipcRenderer.invoke(CHANNELS.stopOwnerLiveDocument, OwnerLiveDocumentActionPayload.parse(payload));
-  },
-  resumeOwnerLiveDocument: async payload => {
-    await ipcRenderer.invoke(CHANNELS.resumeOwnerLiveDocument, OwnerLiveDocumentActionPayload.parse(payload));
-  },
-  listRelayShares: () => ipcRenderer.invoke(CHANNELS.listRelayShares),
-  getRelayReceivedShare: (payload) =>
-    ipcRenderer.invoke(CHANNELS.getRelayReceivedShare, payload),
-  revokeRelayShare: (payload) => ipcRenderer.invoke(CHANNELS.revokeRelayShare, payload),
-  undoRelayShare: (payload) => ipcRenderer.invoke(CHANNELS.undoRelayShare, payload),
-  createRelayShareLink: (payload) =>
-    ipcRenderer.invoke(CHANNELS.createRelayShareLink, payload),
-  addRelayShareLink: (payload) =>
-    ipcRenderer.invoke(CHANNELS.addRelayShareLink, payload),
-  listRelayShareLinks: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listRelayShareLinks, payload),
-  ownerRestore: async <Action extends OwnerRestoreAction>(payload: OwnerRestoreRequest & {action: Action}) => {
-    const request = OwnerRestoreRequest.parse(payload);
-    return OwnerRestoreActionResponse[request.action].parse(await ipcRenderer.invoke(CHANNELS.ownerRestore, request)) as OwnerRestoreResult<Action>;
-  },
-  retuneRelayShareLink: (payload) =>
-    ipcRenderer.invoke(CHANNELS.retuneRelayShareLink, payload),
   publishOwnerApp: async (payload: OwnerAppPublicationRequest) => OwnerAppPublicationResult.parse(
     await ipcRenderer.invoke(CHANNELS.publishOwnerApp, OwnerAppPublicationRequest.parse(payload))),
-  dataset: async (payload: DatasetRequest) => DatasetResult.parse(await ipcRenderer.invoke(CHANNELS.dataset, DatasetRequest.parse(payload))),
+  ...operationBridge(datasetOperations, invoke),
   ownerAppResponses:async(payload:OwnerAppResponsesRequest)=>OwnerAppResponsesResult.parse(await ipcRenderer.invoke(CHANNELS.ownerAppResponses,OwnerAppResponsesRequest.parse(payload))),
-  rotateRelayShareLink: (payload) =>
-    ipcRenderer.invoke(CHANNELS.rotateRelayShareLink, payload),
-  revokeRelayShareLink: (payload) =>
-    ipcRenderer.invoke(CHANNELS.revokeRelayShareLink, payload),
-  listRelayShareDiscussion: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listRelayShareDiscussion, payload),
-  pollRelayShareDiscussionActivity: (payload) =>
-    ipcRenderer.invoke(CHANNELS.pollRelayShareDiscussionActivity, payload),
-  cancelRelayShareDiscussionActivity: (payload) =>
-    ipcRenderer.invoke(CHANNELS.cancelRelayShareDiscussionActivity, payload),
-  appendRelayShareDiscussion: (payload) =>
-    ipcRenderer.invoke(CHANNELS.appendRelayShareDiscussion, payload),
-  deleteRelayShareDiscussionMessage: (payload) =>
-    ipcRenderer.invoke(CHANNELS.deleteRelayShareDiscussionMessage, payload),
-  blockRelayShareDiscussionPrincipal: (payload) =>
-    ipcRenderer.invoke(CHANNELS.blockRelayShareDiscussionPrincipal, payload),
-  unblockRelayShareDiscussionPrincipal: (payload) =>
-    ipcRenderer.invoke(CHANNELS.unblockRelayShareDiscussionPrincipal, payload),
-  pauseRelayShareDiscussion: (payload) =>
-    ipcRenderer.invoke(CHANNELS.pauseRelayShareDiscussion, payload),
-  resumeRelayShareDiscussion: (payload) =>
-    ipcRenderer.invoke(CHANNELS.resumeRelayShareDiscussion, payload),
-  promoteRelayShareGrant: (payload) =>
-    ipcRenderer.invoke(CHANNELS.promoteRelayShareGrant, payload),
-  revokeRelayShareGrant: (payload) =>
-    ipcRenderer.invoke(CHANNELS.revokeRelayShareGrant, payload),
-  shareChatChannel: (payload) => ipcRenderer.invoke(CHANNELS.shareChatChannel, payload),
-  listChatChannelShares: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listChatChannelShares, payload),
-  listJoinedSharedChannels: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listJoinedSharedChannels, payload),
-  joinSharedChannel: (payload) => ipcRenderer.invoke(CHANNELS.joinSharedChannel, payload),
-  leaveSharedChannel: (payload) =>
-    ipcRenderer.invoke(CHANNELS.leaveSharedChannel, payload),
-  openSharedView: (payload) => ipcRenderer.invoke(CHANNELS.openSharedView, payload),
-  refreshSharedView: (payload) => ipcRenderer.invoke(CHANNELS.refreshSharedView, payload),
   ...operationBridge(sharedViewAccessOperations, invoke),
-  dismissShareSkips: (payload) => ipcRenderer.invoke(CHANNELS.dismissShareSkips, payload),
   listCollectionAutomations: (payload) =>
     ipcRenderer.invoke(CHANNELS.listCollectionAutomations, payload),
   switchCollectionAutomation: (payload) => ipcRenderer.invoke(CHANNELS.switchCollectionAutomation, payload),
@@ -349,6 +285,7 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.checkCollectionAutomation, payload),
   stopAndRestore: (payload) =>
     ipcRenderer.invoke(CHANNELS.stopAndRestore, payload),
+  ...operationBridge(stopAndRestoreRecoveryOperations, invoke),
   ...operationBridge(liveDraftRecoveryOperations, invoke),
   undoStopAndRestore: (payload) =>
     ipcRenderer.invoke(CHANNELS.undoStopAndRestore, payload),
@@ -380,6 +317,7 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.findDatasetCollection, payload),
   findAutomationCollection: (payload) =>
     ipcRenderer.invoke(CHANNELS.findAutomationCollection, payload),
+  onHistoryNamesChanged: (listener) => onEvent(CHANNELS.historyNamesChanged, WorkspaceIdPayload, listener),
   onCollectionAutomationsChanged: (listener) =>
     onEvent(CHANNELS.collectionAutomationsChanged, WorkspaceIdPayload, listener),
   onAutomationRunsChanged: (
@@ -405,6 +343,9 @@ const bridge: DohcDesktopBridge = {
   },
   ...operationBridge(crashReportOperations, invoke),
   ...operationBridge(reportingOperations, invoke),
+  ...operationBridge(usageRecordOperations, invoke),
+  onUsageRecordStopped: (listener) =>
+    onEvent(CHANNELS.usageRecordStopped, UsageRecordStoppedEvent, () => listener()),
   onCrashReportChanged: (listener) =>
     onEvent(CHANNELS.crashReportChanged, CrashReportChangedEvent, () => listener()),
   onAutomationHoldsChanged: (
@@ -452,27 +393,23 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.on(CHANNELS.automationRunWaiting, handler);
     return () => ipcRenderer.removeListener(CHANNELS.automationRunWaiting, handler);
   },
-  listShareProposals: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listShareProposals, payload),
-  readShareProposalChanges: (payload) =>
-    ipcRenderer.invoke(CHANNELS.readShareProposalChanges, payload),
-  readShareProposalFileContent: (payload) =>
-    ipcRenderer.invoke(CHANNELS.readShareProposalFileContent, payload),
-  settleShareProposal: (payload) =>
-    ipcRenderer.invoke(CHANNELS.settleShareProposal, payload),
-  submitShareChanges: (payload) =>
-    ipcRenderer.invoke(CHANNELS.submitShareChanges, payload),
-  pushShareDirectWrites: (payload) =>
-    ipcRenderer.invoke(CHANNELS.pushShareDirectWrites, payload),
-  onShareDirectWritesPushed: (listener) =>
-    onEvent(CHANNELS.shareDirectWritesPushed, ShareDirectWritesPushedEvent, listener),
-  listMyShareChanges: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listMyShareChanges, payload),
-  withdrawShareChanges: (payload) =>
-    ipcRenderer.invoke(CHANNELS.withdrawShareChanges, payload),
-  mountShare: (payload) => ipcRenderer.invoke(CHANNELS.mountShare, payload),
-  refreshShareMounts: (payload) => ipcRenderer.invoke(CHANNELS.refreshShareMounts, payload),
-  unmountShare: (payload) => ipcRenderer.invoke(CHANNELS.unmountShare, payload),
+  onShareDirectWritesPushed: (listener, workspaceId) => {
+    const subscriptionId = crypto.randomUUID();
+    const identity = { workspaceId, rendererDocumentId, subscriptionId };
+    const unsubscribe = onEvent(CHANNELS.shareDirectWritesPushed, ShareDirectWritesPushedEvent, event => {
+      if (event.workspaceId !== workspaceId) return;
+      const update = (action: "claim" | "acknowledge" | "release") => bridge.updateShareDirectWriteDelivery({
+        ...identity, action, answerId: event.answerId,
+      });
+      listener(event, { claim: () => update("claim"), acknowledge: () => update("acknowledge"), release: () => update("release") });
+    });
+    const update = (listening: boolean) => {
+      void bridge.updateShareDirectWriteDelivery({ ...identity, action: "listen", listening })
+        .catch(error => console.error("[desktop] direct-write subscription failed:", error));
+    };
+    update(true);
+    return () => { unsubscribe(); update(false); };
+  },
   openWorkspace: (payload) =>
     ipcRenderer.invoke(CHANNELS.openWorkspace, {
       ...payload,
@@ -485,45 +422,8 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.readEngineMoment, payload),
   restoreEngineMomentFile: (payload) =>
     ipcRenderer.invoke(CHANNELS.restoreEngineMomentFile, payload),
-  listFileChats: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listFileChats, payload),
-  createFileChat: (payload) =>
-    ipcRenderer.invoke(CHANNELS.createFileChat, payload),
-  listChatMessages: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listChatMessages, payload),
-  getChatThreadRevision: (payload) =>
-    ipcRenderer.invoke(CHANNELS.getChatThreadRevision, payload),
-  sendChatMessage: (payload) =>
-    ipcRenderer.invoke(CHANNELS.sendChatMessage, payload),
-  listChatThreadDecisions: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listChatThreadDecisions, payload),
-  resolveChatDecision: (payload) =>
-    ipcRenderer.invoke(CHANNELS.resolveChatDecision, payload),
-  listChatThreadAttachments: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listChatThreadAttachments, payload),
   chatRunRecordsForThread: (payload) =>
     ipcRenderer.invoke(CHANNELS.chatRunRecordsForThread, payload),
-  listChatChannels: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listChatChannels, payload),
-  listChatFollows: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listChatFollows, payload),
-  setChatFollow: (payload) => ipcRenderer.invoke(CHANNELS.setChatFollow, payload),
-  listPersonalChatFeed: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listPersonalChatFeed, payload),
-  markPersonalChatFeedSeen: (payload) =>
-    ipcRenderer.invoke(CHANNELS.markPersonalChatFeedSeen, payload),
-  createChatChannel: (payload) =>
-    ipcRenderer.invoke(CHANNELS.createChatChannel, payload),
-  listChannelThreads: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listChannelThreads, payload),
-  startChannelThread: (payload) =>
-    ipcRenderer.invoke(CHANNELS.startChannelThread, payload),
-  markChatThreadRead: (payload) =>
-    ipcRenderer.invoke(CHANNELS.markChatThreadRead, payload),
-  listChatReactions: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listChatReactions, payload),
-  setChatReaction: (payload) =>
-    ipcRenderer.invoke(CHANNELS.setChatReaction, payload),
   syncDms: (payload) => ipcRenderer.invoke(CHANNELS.syncDms, payload),
   acceptDm: (payload) => ipcRenderer.invoke(CHANNELS.acceptDm, payload),
   declineDm: (payload) => ipcRenderer.invoke(CHANNELS.declineDm, payload),
@@ -539,6 +439,7 @@ const bridge: DohcDesktopBridge = {
   presenceCancel: (payload) => ipcRenderer.invoke(CHANNELS.presenceCancel, payload),
   getSyncStatus: (payload) => ipcRenderer.invoke(CHANNELS.getSyncStatus, payload),
   ...operationBridge(captureRecoveryOperations, invoke),
+  ...operationBridge(fileObservationOperations, invoke),
   retryOwnerLiveDelivery: (payload) => ipcRenderer.invoke(CHANNELS.retryOwnerLiveDelivery, payload),
   retryFileRecovery: (payload) => ipcRenderer.invoke(CHANNELS.retryFileRecovery, payload),
   retryCloudSync: (payload) => ipcRenderer.invoke(CHANNELS.retryCloudSync, payload),
@@ -558,32 +459,16 @@ const bridge: DohcDesktopBridge = {
   runnerSelfTest: (payload) =>
     ipcRenderer.invoke(CHANNELS.runnerSelfTest, payload),
   detectAgentTools: (payload) => ipcRenderer.invoke(CHANNELS.detectAgentTools, payload),
-  getUserSettings: () => ipcRenderer.invoke(CHANNELS.getUserSettings),
-  setUserSettings: (payload: SetUserSettingsPayload) =>
-    ipcRenderer.invoke(CHANNELS.setUserSettings, payload),
-  resetUserSettings: () => ipcRenderer.invoke(CHANNELS.resetUserSettings),
-  reloadUserSettings: () => ipcRenderer.invoke(CHANNELS.reloadUserSettings),
-  setAppPinned: (payload) => ipcRenderer.invoke(CHANNELS.setAppPinned, payload),
-  getUserSettingsFilePath: () => ipcRenderer.invoke(CHANNELS.getUserSettingsFilePath),
-  openUserSettingsFile: () => ipcRenderer.invoke(CHANNELS.openUserSettingsFile),
-  openWorkspaceSettingsFile: (payload: WorkspaceSettingsPayload) =>
-    ipcRenderer.invoke(CHANNELS.openWorkspaceSettingsFile, payload),
-  getWorkspaceSettings: (payload: WorkspaceSettingsPayload) =>
-    ipcRenderer.invoke(CHANNELS.getWorkspaceSettings, payload),
-  setWorkspaceSettings: (payload: SetWorkspaceSettingsPayload) =>
-    ipcRenderer.invoke(CHANNELS.setWorkspaceSettings, payload),
-  resetWorkspaceSettings: (payload: WorkspaceSettingsPayload) =>
-    ipcRenderer.invoke(CHANNELS.resetWorkspaceSettings, payload),
   setTitlebarTheme: (payload) =>
     ipcRenderer.invoke(CHANNELS.setTitlebarTheme, payload),
+  onWindowFullScreen: (listener) =>
+    onEvent(CHANNELS.windowFullScreen, WindowFullScreenEvent, listener),
+  onAgentColorChanged: listener => onEvent(CHANNELS.agentColorChanged, AgentColorChangedEvent, listener),
   onUserSettingsChanged: (listener) =>
     onEvent(CHANNELS.userSettingsChanged, DesktopUserSettingsResult, listener),
   stepWindowZoom: (payload) =>
     ipcRenderer.invoke(CHANNELS.stepWindowZoom, payload),
-  getWorkspaceUiState: (payload) =>
-    ipcRenderer.invoke(CHANNELS.getWorkspaceUiState, payload),
-  setWorkspaceUiState: (payload) =>
-    ipcRenderer.invoke(CHANNELS.setWorkspaceUiState, payload),
+  onCaptureHolds: listener => onEvent(CHANNELS.captureHolds, CaptureHoldsEvent, listener),
   onWorkspaceActivity: (listener: (event: WorkspaceActivityEvent) => void) => {
     // Degrades to the payload-free global ping on a malformed payload; an
     // activity notification is never dropped (see the parser's contract).
@@ -616,9 +501,13 @@ const bridge: DohcDesktopBridge = {
     return () =>
       ipcRenderer.removeListener(CHANNELS.cloudSessionChanged, handler);
   },
-  onMenuCommand: (listener) => onEvent(CHANNELS.menuCommand, MenuCommand, listener),
+  onMenuCommand: (listener) => {
+    menuCommandListeners.add(listener);
+    for (const command of heldMenuCommands.splice(0)) listener(command);
+    return () => { menuCommandListeners.delete(listener); };
+  },
   onWorkspaceActivated: (listener) =>
-    onEvent(CHANNELS.workspaceActivated, WorkspaceSummary, listener),
+    onEvent(CHANNELS.workspaceActivated, WorkspaceActivated, ({ file, ...workspace }) => listener(workspace, file)),
   onWorkspacePathOpenFailed: (listener) =>
     onEvent(CHANNELS.workspacePathOpenFailed, WorkspacePathOpenFailedEvent, () => listener()),
   onUpdateState: (listener) => onEvent(CHANNELS.updateState, UpdateStateEvent, listener),
@@ -638,6 +527,8 @@ const bridge: DohcDesktopBridge = {
   // Content search: results stream main→renderer as bounded
   // batches; the searchId round-trips so stale batches drop renderer-side.
   ...operationBridge(workspaceSearchOperations, invoke),
+  ...operationBridge(folderAppOfferOperations, invoke),
+  onFolderAppChanged: listener => onEvent(CHANNELS.folderAppChanged, FolderAppAnswer, listener),
   onSearchResults: (listener) =>
     onEvent(CHANNELS.searchResults, SearchResultsEvent, listener),
   ...operationBridge(noticeOperations, invoke),
@@ -649,6 +540,9 @@ const bridge: DohcDesktopBridge = {
     onEvent(CHANNELS.scheduleHostChanged, ScheduleHostChangedEvent, listener),
   onChatDispatchNotices: (listener) =>
     onEvent(CHANNELS.chatDispatchNotices, ChatDispatchNoticesEvent, listener),
+  ...operationBridge(agentRunStateOperations, invoke),
+  onAgentRunState: (listener) =>
+    onEvent(CHANNELS.agentRunState, AgentRunStateEvent, listener),
   // Engine Y.Doc editor binding.
   // Updates cross as raw Uint8Array (structured clone); the sessionId
   // round-trips so the renderer applies forwarded deltas only for the bound

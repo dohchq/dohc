@@ -8,9 +8,9 @@ use dohc_engine_domain::store::SourceCaptureBounds;
 use dohc_engine_domain::{
     CreateNamedVersion, DeleteTextFile, ListMomentsQuery, MergeTextFileFromVersion,
     MergeTextFileResult, MomentOp, NoFaults, RenameTextFile, RollbackTextFileMutation, VersionKind,
-    VersionedTextStore, WriteText,
+    VersionedTextStore, WriteText, enqueue_write, write_text_in_tx,
 };
-use dohc_engine_storage::{EngineStore, StorageError, hex_sha256};
+use dohc_engine_storage::{EngineStore, Preimage, StorageError, TxnOutcome, hex_sha256};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
 
 const NO_FAULTS: NoFaults = NoFaults;
@@ -1180,6 +1180,69 @@ fn rename_text_file_moves_alias_and_preserves_identity() {
     assert_eq!(after.text, "one");
 }
 
+// oracle: a rename moves the alias off `from`, so a pending write aimed there
+// would put the file back under its old name on replay. The rename cancels
+// it, as the delete does, and only for the active version: jobs mirror the
+// active working tree, so a named version renaming its own copy of the path
+// leaves main's intent alone.
+#[test]
+fn rename_text_file_cancels_only_the_active_versions_pending_write() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    let outcome = store
+        .write_with(&NO_FAULTS, |tx| {
+            let written = write_text_in_tx(tx, &write("main", "a.md", "v1", "m1", "o1", 10))?;
+            enqueue_write(tx, &written, Preimage::Absent, "sync")
+        })
+        .expect("write with a pending disk intent");
+    assert!(matches!(outcome, TxnOutcome::Committed(())));
+    let job_status = |store: &EngineStore| -> String {
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT status FROM materialization_jobs WHERE job_id='sync-mat_m1'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .expect("job status")
+    };
+    assert_eq!(job_status(&store), "pending");
+
+    let mut vt = VersionedTextStore::new(&mut store);
+    vt.create_named_version(
+        &CreateNamedVersion {
+            workspace_id: WS.to_owned(),
+            new_version_id: "feat".to_owned(),
+            name: "feature".to_owned(),
+            from_version_id: "main".to_owned(),
+            now_ms: 20,
+            request_id: None,
+        },
+        &NO_FAULTS,
+    )
+    .expect("fork");
+    vt.rename_text_file(&rename("feat", "a.md", "b.md", "m2", 30), &NO_FAULTS)
+        .expect("rename in the named version");
+    let _ = vt;
+    assert_eq!(
+        job_status(&store),
+        "pending",
+        "a named version's rename leaves main's intent alone"
+    );
+
+    VersionedTextStore::new(&mut store)
+        .rename_text_file(&rename("main", "a.md", "c.md", "m3", 40), &NO_FAULTS)
+        .expect("rename in main");
+    assert_eq!(
+        job_status(&store),
+        "cancelled",
+        "main's rename takes the write aimed at a.md with it"
+    );
+}
+
 // oracle: versions-rename-text-file rejects identical source/destination.
 #[test]
 fn rename_text_file_rejects_same_path() {
@@ -1882,4 +1945,190 @@ fn rollback_of_unrecorded_moment_is_rejected() {
             .code(),
         "invalid-input"
     );
+}
+
+#[test]
+fn file_resolution_tracks_rename_delete_reuse_versions_and_restart() {
+    use dohc_engine_domain::{FileResolution as R, FileResolveTarget as T};
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    {
+        let mut store = EngineStore::open(&db, 1).unwrap();
+        bootstrap(&mut store);
+        let mut domain = VersionedTextStore::new(&mut store);
+        domain
+            .write_text(&write("main", " a.md ", "body", "m1", "o1", 2), &NO_FAULTS)
+            .unwrap();
+        assert_eq!(
+            domain
+                .resolve_files(
+                    WS,
+                    None,
+                    &[
+                        T::Path(" a.md ".into()),
+                        T::Path("missing.md".into()),
+                        T::Path("../bad".into()),
+                        T::ObjectId("".into()),
+                        T::Invalid
+                    ]
+                )
+                .unwrap()
+                .1,
+            vec![
+                R::Found {
+                    object_id: "o1".into(),
+                    path: " a.md ".into()
+                },
+                R::Absent,
+                R::Invalid,
+                R::Invalid,
+                R::Invalid
+            ]
+        );
+        assert_eq!(
+            domain
+                .resolve_files(WS, Some("unknown"), &[T::Invalid])
+                .unwrap_err()
+                .code(),
+            "version-not-found"
+        );
+        assert!(domain.resolve_files("foreign", Some("main"), &[]).is_err());
+        domain
+            .write_binary(
+                &dohc_engine_domain::WriteBinary {
+                    workspace_id: WS.into(),
+                    version_id: "main".into(),
+                    object_id: "binary".into(),
+                    path: "photo.png".into(),
+                    bytes: vec![1, 2],
+                    moment_id: "binary-m".into(),
+                    metadata_origin: "api".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 3,
+                    request_id: None,
+                },
+                &NO_FAULTS,
+            )
+            .unwrap();
+        assert_eq!(
+            domain
+                .resolve_files(
+                    WS,
+                    None,
+                    &[T::Path("photo.png".into()), T::ObjectId("binary".into())]
+                )
+                .unwrap()
+                .1,
+            vec![
+                R::Found {
+                    object_id: "binary".into(),
+                    path: "photo.png".into()
+                };
+                2
+            ]
+        );
+        domain
+            .create_named_version(
+                &CreateNamedVersion {
+                    workspace_id: WS.into(),
+                    new_version_id: "draft".into(),
+                    name: "Draft".into(),
+                    from_version_id: "main".into(),
+                    now_ms: 3,
+                    request_id: None,
+                },
+                &NO_FAULTS,
+            )
+            .unwrap();
+        domain
+            .rename_text_file(
+                &RenameTextFile {
+                    workspace_id: WS.into(),
+                    version_id: "main".into(),
+                    from_path: " a.md ".into(),
+                    to_path: "moved.md".into(),
+                    moment_id: "m2".into(),
+                    request_id: None,
+                    metadata_origin: "api".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 4,
+                },
+                &NO_FAULTS,
+            )
+            .unwrap();
+        assert_eq!(
+            domain
+                .resolve_files(
+                    WS,
+                    Some("main"),
+                    &[T::Path(" a.md ".into()), T::ObjectId("o1".into())]
+                )
+                .unwrap()
+                .1,
+            vec![
+                R::Absent,
+                R::Found {
+                    object_id: "o1".into(),
+                    path: "moved.md".into()
+                }
+            ]
+        );
+        domain
+            .delete_text_file(
+                &DeleteTextFile {
+                    workspace_id: WS.into(),
+                    version_id: "main".into(),
+                    path: "moved.md".into(),
+                    moment_id: "m3".into(),
+                    request_id: None,
+                    metadata_origin: "api".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 5,
+                },
+                &NO_FAULTS,
+            )
+            .unwrap();
+        domain
+            .write_text(&write("main", "moved.md", "new", "m4", "o2", 6), &NO_FAULTS)
+            .unwrap();
+        domain.set_active_version(WS, "draft", &NO_FAULTS).unwrap();
+        assert_eq!(
+            domain
+                .resolve_files(WS, None, &[T::ObjectId("o1".into())])
+                .unwrap(),
+            (
+                "draft".into(),
+                vec![R::Found {
+                    object_id: "o1".into(),
+                    path: " a.md ".into()
+                }]
+            )
+        );
+    }
+    let mut store = EngineStore::open(&db, 7).unwrap();
+    let domain = VersionedTextStore::new(&mut store);
+    assert_eq!(
+        domain
+            .resolve_files(
+                WS,
+                Some("main"),
+                &[T::ObjectId("o1".into()), T::Path("moved.md".into())]
+            )
+            .unwrap()
+            .1,
+        vec![
+            R::Absent,
+            R::Found {
+                object_id: "o2".into(),
+                path: "moved.md".into()
+            }
+        ]
+    );
+    assert_eq!(domain.resolve_files(WS, None, &[]).unwrap().0, "draft");
 }

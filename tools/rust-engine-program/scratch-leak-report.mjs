@@ -1,5 +1,27 @@
+import { existsSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
 import { lstat, readdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+/**
+ * This user's scratch parent, made private when absent. Every account shares
+ * /tmp, so on macOS and Linux the parent carries the user's id, and a parent
+ * another account owns or can enter is refused before anything is written in
+ * it. Its name is short because a macOS socket path must stay under 104 bytes. The desktop's `testTemp.ts` and the `dohc-test-scratch` crate derive the
+ * same path.
+ */
+export function testScratchParent({ platform = process.platform, uid = process.getuid?.(), base } = {}) {
+  if (platform === "win32") return join(tmpdir(), "dohc-test-scratch");
+  if (uid === undefined) throw new Error("test scratch needs a user id on this platform");
+  const parent = join(base ?? realpathSync(existsSync("/tmp") ? "/tmp" : tmpdir()), `dohc-scratch-${uid}`);
+  try { mkdirSync(parent, { mode: 0o700 }); }
+  catch (error) { if (error?.code !== "EEXIST") throw error; }
+  const stats = lstatSync(parent);
+  if (stats.isSymbolicLink() || !stats.isDirectory()) throw new Error(`test scratch parent ${parent} is not a directory. Remove it, then run again.`);
+  if (stats.uid !== uid) throw new Error(`test scratch parent ${parent} belongs to user ${stats.uid}, not ${uid}. Remove it as its owner, then run again.`);
+  if ((stats.mode & 0o077) !== 0) throw new Error(`test scratch parent ${parent} has mode ${(stats.mode & 0o777).toString(8)}, which lets other accounts in. Run chmod 700 on it, then run again.`);
+  return parent;
+}
 
 // What a healthy `cargo test --workspace` leaves in its run root on Windows.
 //

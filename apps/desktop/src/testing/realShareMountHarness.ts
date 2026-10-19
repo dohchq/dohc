@@ -1,9 +1,10 @@
+import { relayShareOperations } from "../ipc/shareOperations";
+import { registerOperations } from "../ipc/operationTable";
 import { readdir } from "node:fs/promises";
 import type { SyncRelayConnection } from "@dohc/workspace-contracts/relay";
 import type { LiveDaemonWorkspace } from "../../e2e/helpers/daemonSeed";
 import { createPresencePollRegistry } from "../collab/presencePollRegistry";
-import { CHANNELS } from "../ipc/channels";
-import { registerRelaySharesIpcHandlers } from "../ipc/relaySharesIpc";
+import { createRelaySharesIpcHandlers } from "../ipc/relaySharesIpc";
 import { createReceivedShareEngineAccess } from "../workspaces/receivedShareEngineAccess";
 import type { ShareMountRecord } from "../workspaces/registryStore";
 import {
@@ -13,6 +14,7 @@ import {
 import {
   assertRealMountRoot,
   shareViewFilesMountProjection,
+  updateShareMountRecords,
 } from "../workspaces/shareMounts";
 import { createShareSkipRecorder } from "../workspaces/shareSkipRecorder";
 import {
@@ -50,7 +52,8 @@ export function createRealShareMountHarness(input: {
     input.daemon.relay.closeWorkspace(workspaceId);
   const commands: ShareMountCommands<typeof workspace> = createShareMountCommands({
     readMounts: () => workspace.shareMounts,
-    writeMounts: (_workspaceId, mounts) => { workspace.shareMounts = mounts; },
+    updateMounts: async (_workspaceId, update) => { workspace.shareMounts = [...update(workspace.shareMounts)]; },
+    currentCredentialGeneration: () => 0,
     loadCredentials: async () => ({
       relayUrl: input.relay.baseUrl, token: input.relay.token, email: input.recipientEmail,
     }),
@@ -76,12 +79,9 @@ export function createRealShareMountHarness(input: {
       engineWorkspaceId: target.storeWorkspaceId, rootPath: target.rootPath, relay,
     }).pullShareView({ shareId: target.shareId, ...pull }),
     recordRefusals: async (target, refusals) => {
-      await createShareSkipRecorder({
-        current: () => workspace.shareMounts.find((mount) => mount.shareId === target.shareId),
-        persist: (next) => {
-          workspace.shareMounts = workspace.shareMounts.map((mount) =>
-            mount.shareId === target.shareId ? next : mount,
-          );
+      await createShareSkipRecorder<ShareMountRecord>({
+        update: async (change) => {
+          workspace.shareMounts = [...updateShareMountRecords(workspace.shareMounts, target.shareId, change)];
         },
       })(refusals);
     },
@@ -100,12 +100,14 @@ export function createRealShareMountHarness(input: {
     removeMount: (owner, target) => commands.filesLifecycle.removeMount(owner, target),
   });
   const mutations = createWorkspaceFileMutationOwner({
+    historyFor: () => ({ readHistoryPage: async () => { throw new Error("Unexpected History read"); }, undoHistoryOperation: async () => { throw new Error("Unexpected Undo"); } }),
     assertTrustedSender: () => undefined,
     withRendererWorkspaceOperation: async (_event, workspaceId, work) => {
       if (workspaceId !== workspace.workspaceId) throw new Error("Wrong host workspace");
       return work({
         assertCurrent: () => undefined,
         authorityId: workspace.attachmentId, workspace, capture: null,
+        signal: new AbortController().signal,
         yDocSessions: { withDocumentUnowned: unexpected, markDeletedUnderPath: unexpected },
       });
     },
@@ -118,10 +120,7 @@ export function createRealShareMountHarness(input: {
   });
   type Event = { sender: { id: number } };
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
-  registerRelaySharesIpcHandlers({
-    registerHandler: (channel, handler) => { handlers.set(channel, handler); },
-    assertTrustedSender: () => undefined,
-    withRendererWorkspaceOperation: unexpected,
+  const ownerHandlers = createRelaySharesIpcHandlers({
     remoteForWorkspace: unexpected,
     currentCredentialGeneration: unexpected,
     currentCredentials: unexpected,
@@ -130,9 +129,19 @@ export function createRealShareMountHarness(input: {
     relayShareJsonWithCredentials: unexpected,
     relayShareErrorCopy: unexpected,
     relayShareDiscussionActivityPolls: createPresencePollRegistry(),
+    ownerLiveStop: unexpected,
+    listOwnerLiveStops: unexpected,
     sharesChanged: unexpected,
     reconcileReceivedShares: unexpected,
   });
+  registerOperations({
+    handle: (channel, handler) => { handlers.set(channel, handler); },
+    assertTrustedSender: () => undefined,
+    withActiveWorkspace: async (_event: Event, workspaceId, message, work) => {
+      if (workspaceId !== workspace.workspaceId) throw new Error(message);
+      return work({workspace, assertCurrent});
+    },
+  }, relayShareOperations, ownerHandlers);
   return {
     workspace,
     mount: (shareCode: string) => commands.mount({ workspace, shareCode, assertCurrent }),
@@ -143,7 +152,7 @@ export function createRealShareMountHarness(input: {
       expectedContentHash: "0".repeat(64),
     }),
     reshare: async (path: string) => {
-      const handler = handlers.get(CHANNELS.createRelayShare);
+      const handler = handlers.get(relayShareOperations.createRelayShare.channel);
       if (!handler) throw new Error("Missing create-share handler");
       return handler({ sender: { id: 1 } }, {
         workspaceId: workspace.workspaceId, recipientEmail: "third-party@dohc.test",

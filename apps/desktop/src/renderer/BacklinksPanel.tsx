@@ -2,18 +2,29 @@ import { ChevronRight, Link2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type {
   ChatFileMentionRecord,
-  GetBacklinksResult,
 } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
+import { Ref } from "./ui/Ref";
 import { useAsyncResponseEffect } from "./useAsyncResponseEffect";
 
-type BacklinkSource = GetBacklinksResult["sources"][number];
+import type { LinksInResult } from "@dohc/workspace-contracts/links";
+type BacklinksResult = { sources: BacklinkSource[]; indexBuilding: boolean };
+type BacklinkSource = { sourcePath: string; sourceTitle: string; snippets: { text: string; line: number; highlightStart: number; highlightEnd: number }[] };
+function sourcesFor(entries: NonNullable<LinksInResult>["entries"]): BacklinkSource[] {
+  const sources = new Map<string, BacklinkSource>();
+  for (const entry of entries) {
+    let source = sources.get(entry.source);
+    if (!source) { source = { sourcePath: entry.source, sourceTitle: entry.title, snippets: [] }; sources.set(entry.source, source); }
+    source.snippets.push({ text: entry.snippet, line: entry.line, highlightStart: entry.highlightStart, highlightEnd: entry.highlightEnd });
+  }
+  return [...sources.values()];
+}
 type BacklinkSnippet = BacklinkSource["snippets"][number];
 type LoadedBacklinks = {
   workspaceId: string;
   path: string;
   sources: BacklinkSource[];
-  chatMentions: ChatFileMentionRecord[];
+  indexBuilding: boolean;
 };
 type BacklinksLoadIdentity = {
   chatMentionsAvailable: boolean;
@@ -25,10 +36,9 @@ type BacklinksLoadIdentity = {
 type BacklinksLoadOutcome =
   | {
       ok: true;
-      result: GetBacklinksResult;
-      chatMentions: ChatFileMentionRecord[];
+      result: BacklinksResult;
     }
-  | { ok: false };
+  | { ok: false; error?: unknown };
 type BacklinksLoadRequest = {
   identity: BacklinksLoadIdentity;
   response: Promise<BacklinksLoadOutcome>;
@@ -64,11 +74,7 @@ function snippetParts(snippet: BacklinkSnippet): {
   };
 }
 
-// "Linked mentions" — the inbound links to the open document, mirroring
-// Obsidian/Notion. Computation lives in main (it must read every workspace
-// file); this surface renders the result quietly at the bottom of the document,
-// hides itself entirely when there are none, and reuses the open pathway so a
-// mention click navigates like a wikilink.
+// Linked mentions reads bounded engine pages and keeps chat mentions separate.
 export function BacklinksPanel(props: {
   workspaceId: string;
   path: string;
@@ -79,21 +85,31 @@ export function BacklinksPanel(props: {
   // visibly — can only refuse it. Opt-in, and named the way GraphView names
   // the same fact, so both chat affordances read one word.
   chatMentionsAvailable?: boolean;
+  onError?: (message: string, error: unknown, retry: (() => void) | null) => void;
   onOpenPath?: (path: string) => void;
   onOpenChatMention?: (mention: ChatFileMentionRecord) => void;
 }) {
   const [loaded, setLoaded] = useState<LoadedBacklinks | null>(null);
   const [open, setOpen] = useState(true);
+  const [loadedChats, setLoadedChats] = useState<{ workspaceId: string; path: string; mentions: ChatFileMentionRecord[] } | null>(null);
   const { workspaceId, path, refreshKey } = props;
+  const currentDocument = useRef<{ workspaceId: string; path: string } | null>(null);
+  useEffect(() => {
+    currentDocument.current = { workspaceId, path };
+    return () => { currentDocument.current = null; };
+  }, [workspaceId, path]);
   // Absent reads as unavailable: a caller that has not decided must not make
   // dohc ask for a capability it may not have.
   const chatMentionsAvailable = props.chatMentionsAvailable === true;
   const [focusNonce, setFocusNonce] = useState(0);
   const previousRequest = useRef<BacklinksLoadRequest | null>(null);
+  const reportError = useRef(props.onError);
+  reportError.current = props.onError;
+  const [walkInFlight, setWalkInFlight] = useState(false);
   const current =
     loaded?.workspaceId === workspaceId && loaded.path === path ? loaded : null;
   const sources = current?.sources ?? [];
-  const chatMentions = current?.chatMentions ?? [];
+  const chatMentions = chatMentionsAvailable && loadedChats?.workspaceId === workspaceId && loadedChats.path === path ? loadedChats.mentions : [];
 
   // Recompute when the window regains focus. This catches edits made in
   // another app without polling. The focus nonce joins the same request
@@ -104,81 +120,88 @@ export function BacklinksPanel(props: {
     return () => window.removeEventListener("focus", onFocus);
   }, []);
 
-  useAsyncResponseEffect<BacklinksLoadOutcome>(
-    () => {
-      const identity: BacklinksLoadIdentity = {
-        chatMentionsAvailable,
-        workspaceId,
-        path,
-        refreshKey,
-        focusNonce,
-      };
-      const prior = previousRequest.current;
-      const focusOnlyRefresh = Boolean(
-        prior &&
-          sameBacklinksLoadBase(prior.identity, identity) &&
-          prior.identity.focusNonce !== identity.focusNonce,
-      );
-
-      const getBacklinks = bridge().getBacklinks;
-      // Partial bridges (tests, older hosts) may not expose it — degrade to none.
-      if (typeof getBacklinks !== "function") {
-        previousRequest.current = null;
-        return null;
-      }
-      const getChatMentions = chatMentionsAvailable
-        ? bridge().listChatFileMentions
-        : undefined;
-      const response = Promise.all([
-        getBacklinks({ workspaceId, path }),
-        typeof getChatMentions === "function"
-          ? getChatMentions({ workspaceId, path }).catch(() => ({ mentions: [] }))
-          : Promise.resolve({ mentions: [] }),
-      ]).then<BacklinksLoadOutcome, BacklinksLoadOutcome>(
-        ([result, chats]) => ({
-          ok: true,
-          result,
-          chatMentions: chats.mentions,
-        }),
-        () => ({ ok: false }),
-      );
-      // Focus refreshes are opportunistic. If one fails, the preceding
-      // same-document request remains the last useful answer, even if pending.
-      const currentResponse =
-        focusOnlyRefresh && prior
-          ? response.then((outcome) =>
-              outcome.ok ? outcome : prior.response,
-            )
-          : response;
-      previousRequest.current = { identity, response: currentResponse };
-      return currentResponse;
-    },
-    {
-      onSuccess: (outcome) => {
-        if (!outcome.ok) {
-          setLoaded({ workspaceId, path, sources: [], chatMentions: [] });
+  useEffect(() => {
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let delay = 250;
+    let failures = 0;
+    let publishedAnswer = false;
+    const identity = { chatMentionsAvailable, workspaceId, path, refreshKey, focusNonce };
+    const prior = previousRequest.current;
+    const focusOnly = prior && sameBacklinksLoadBase(prior.identity, identity)
+      && prior.identity.focusNonce !== focusNonce;
+    const linksIn = bridge().linksIn;
+    if (typeof linksIn !== "function") return;
+    setWalkInFlight(true);
+    const walk = async (): Promise<BacklinksLoadOutcome> => {
+      try {
+        const entries: NonNullable<LinksInResult>["entries"] = [];
+        let cursor: string | undefined;
+        let indexBuilding = false;
+        do {
+          const page = await linksIn({ workspaceId, subject: { path }, ...(cursor ? { cursor } : {}) });
+          if (!active && page?.nextCursor) return { ok: false };
+          entries.push(...(page?.entries ?? []));
+          indexBuilding ||= page?.indexBuilding ?? false;
+          cursor = page?.nextCursor ?? undefined;
+          // Keep the previous list until the walk ends, but expose its current index state.
+          if (active) setLoaded(previous => ({ workspaceId, path, indexBuilding,
+            sources: previous?.workspaceId === workspaceId && previous.path === path ? previous.sources : [] }));
+        } while (cursor);
+        return { ok: true, result: { sources: sourcesFor(entries), indexBuilding } };
+      } catch (error) { return { ok: false, error }; }
+    };
+    const publish = (outcome: BacklinksLoadOutcome) => {
+      if (!active) return;
+      if (outcome.ok) {
+        publishedAnswer = true;
+        failures = 0;
+        setLoaded({ workspaceId, path, ...outcome.result });
+        if (!outcome.result.indexBuilding) {
+          setWalkInFlight(false);
           return;
         }
-        // Guard the async response against a workspace/path switch mid-flight
-        // (product invariant: a slow response must never repaint the wrong doc).
-        setLoaded({
-          workspaceId,
-          path,
-          sources: outcome.result.sources,
-          chatMentions: outcome.chatMentions,
-        });
-      },
-      onError: () => {
-        setLoaded({ workspaceId, path, sources: [], chatMentions: [] });
-      },
-    },
-    [chatMentionsAvailable, workspaceId, path, refreshKey, focusNonce],
-  );
+      } else if (++failures >= 3) {
+        setWalkInFlight(false);
+        reportError.current?.("dohc could not load linked mentions.", outcome.error,
+          () => {
+            if (currentDocument.current?.workspaceId === workspaceId && currentDocument.current.path === path) {
+              setFocusNonce(nonce => nonce + 1);
+            }
+          });
+        return;
+      }
+      timer = setTimeout(() => {
+        delay = Math.min(delay * 2, 8000);
+        const response = walk();
+        previousRequest.current = { identity, response };
+        void response.then(publish);
+      }, delay);
+    };
+    const response = walk();
+    // An opportunistic focus failure may still use the preceding pending answer.
+    const currentResponse = focusOnly && prior
+      ? response.then(outcome => outcome.ok ? outcome : prior.response) : response;
+    previousRequest.current = { identity, response: currentResponse };
+    if (focusOnly && prior) void currentResponse.then(outcome => {
+      if (active && outcome.ok && !publishedAnswer) setLoaded({ workspaceId, path, ...outcome.result });
+    });
+    void response.then(publish);
+    return () => { active = false; clearTimeout(timer); };
+  }, [chatMentionsAvailable, workspaceId, path, refreshKey, focusNonce]);
+
+  useAsyncResponseEffect(() => {
+    const read = chatMentionsAvailable ? bridge().listChatFileMentions : undefined;
+    return typeof read === "function" ? read({ workspaceId, path }) : Promise.resolve({ mentions: [] });
+  }, {
+    onSuccess: result => setLoadedChats({ workspaceId, path, mentions: result.mentions }),
+    onError: () => setLoadedChats({ workspaceId, path, mentions: [] }),
+  }, [chatMentionsAvailable, workspaceId, path, refreshKey, focusNonce]);
 
   const linkedTotal = sources.reduce((sum, source) => sum + source.snippets.length, 0);
   const total = linkedTotal + chatMentions.length;
-  // Hidden entirely when nothing links here.
-  if (total === 0) return null;
+  const isGathering = current?.indexBuilding === true && walkInFlight;
+  if (total === 0 && !isGathering) return null;
 
   return (
     <section className="dohc-backlinks" data-testid="backlinks">
@@ -204,6 +227,7 @@ export function BacklinksPanel(props: {
         </button>
         {open ? (
           <div>
+          {isGathering ? <p role="status" className="text-sm text-muted">Gathering linked mentions</p> : null}
           {chatMentions.length > 0 ? (
             <ul className="dohc-backlinks__list" data-testid="chat-file-mentions">
               {chatMentions.map((mention) => (
@@ -244,14 +268,10 @@ export function BacklinksPanel(props: {
                   className="dohc-backlinks__source-link"
                   data-testid="backlink-source"
                   data-path={source.sourcePath}
+                  aria-label={`${source.sourceTitle} ${source.sourcePath}`}
                   onClick={() => props.onOpenPath?.(source.sourcePath)}
                 >
-                  <span className="dohc-backlinks__source-title">
-                    {source.sourceTitle}
-                  </span>
-                  <span className="dohc-backlinks__source-path">
-                    {source.sourcePath}
-                  </span>
+                  <Ref path={source.sourcePath} title={source.sourceTitle} folder />
                 </button>
                 <ul className="dohc-backlinks__snippets">
                   {source.snippets.map((snippet, index) => {

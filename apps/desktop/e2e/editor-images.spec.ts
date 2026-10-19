@@ -1,4 +1,5 @@
 import { readdir, readFile, writeFile } from "node:fs/promises";
+import { DOCUMENT_END } from "./helpers/keys";
 import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import type { ElectronApplication } from "playwright";
@@ -146,34 +147,27 @@ test("in-editor image: a link escaping the workspace root does not render", asyn
     await waitForWorkspaceFile(page, workspace.workspaceId, "notes/plan.md");
     await openMarkdownDoc(page, "notes/plan.md");
 
-    const img = page.locator(".dohc-editor-image").first();
+    // The node view resolves the src, then sets alt, before ProseMirror attaches
+    // its <img>. An attached image carrying the link's alt has therefore
+    // finished resolving, and a src-less image never starts a load, so the
+    // state read next is final rather than early.
+    const img = page.locator('.dohc-editor-image[alt="escape"]');
     await expect(img).toBeAttached({ timeout: 15_000 });
-    // The containment guarantee, asserted positively: no src attribute at all.
-    // (Not `src=""` either — browsers re-request the page's own URL for that.)
-    await expect
-      .poll(async () => await img.evaluate((el) => el.getAttribute("src")), {
-        timeout: 10_000,
-      })
-      .toBe(null);
-    // ...and it was never rewritten to the privileged scheme on the way there.
+    // It was never rewritten to the privileged scheme.
     await expect(img).not.toHaveAttribute("src", /^dohc-file:\/\//);
-
-    // Now prove it never decodes. `naturalWidth` is 0 before a load is even
-    // attempted, so polling for the first 0 would pass trivially: give the
-    // browser a real window to attempt (and finish) a load, then assert the
-    // settled state once. An <img> with no src reports complete=true with
-    // naturalWidth 0 and an empty currentSrc — i.e. it never fetched anything.
-    await page.waitForTimeout(2_000);
+    // No src attribute at all (not `src=""` either, which re-requests the
+    // page's own URL), and nothing fetched or decoded.
     expect(
       await img.evaluate((el) => {
         const image = el as HTMLImageElement;
         return {
           hasSrc: image.hasAttribute("src"),
+          complete: image.complete,
           naturalWidth: image.naturalWidth,
           currentSrc: image.currentSrc,
         };
       }),
-    ).toEqual({ hasSrc: false, naturalWidth: 0, currentSrc: "" });
+    ).toEqual({ hasSrc: false, complete: true, naturalWidth: 0, currentSrc: "" });
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
@@ -280,8 +274,9 @@ test("dragging an image onto the page top-matter (outside ProseMirror) still emb
     await waitForWorkspaceFile(page, workspace.workspaceId, "note.md");
     await openMarkdownDoc(page, "note.md");
 
-    // Aim at the document TITLE — inside the pane, outside the editor content.
-    const title = page.locator(".dohc-page-identity__title").first();
+    // Aim at the page title, folded beside "Add icon" because the body opens
+    // with an H1: inside the pane, outside the editor content.
+    const title = page.getByTestId("page-title").first();
     await expect(title).toBeVisible();
     const box = await title.boundingBox();
     if (!box) throw new Error("no title box");
@@ -324,7 +319,7 @@ test("/image opens the native picker and embeds the chosen file", async () => {
 
     const editor = page.getByTestId("markdown-editor");
     await editor.click();
-    await page.keyboard.press("Control+End");
+    await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.press("Enter");
     await page.keyboard.type("/image", { delay: 30 });
     await expect(page.locator(".dohc-slash-menu__item").first()).toBeVisible();

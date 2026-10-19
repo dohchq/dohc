@@ -123,9 +123,24 @@ async fn observed_editor_reopens_pending_work_without_publishing_it() {
     drop(blob);
     let update = doc.richdoc_append_paragraph("durable pending edit");
     let sid = opened["sessionId"].as_str().unwrap();
+    let claim = opened["lineageClaimId"].as_str().unwrap();
     let encoded = base64::engine::general_purpose::STANDARD.encode(&update);
     let attribution = json!({"actorKind":"agent","onBehalfOf":"local-person","depth":0});
-    let record = json!({"sessionId":sid,"updateBase64":encoded,"actorOriginId":"trip-agent","attribution":attribution});
+    // A draft append made against another claim, or against none, is refused
+    // before the draft changes.
+    for stale in [json!(null), json!("replaced-claim")] {
+        let error = service
+            .ydoc_record_update(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                Some("stale-edit".into()),
+                json!({"sessionId":sid,"updateBase64":encoded,"expectedLineageClaimId":stale}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.message, "ydoc-lineage-stale");
+    }
+    let record = json!({"sessionId":sid,"updateBase64":encoded,"expectedLineageClaimId":claim,"actorOriginId":"trip-agent","attribution":attribution});
     let result = service
         .ydoc_record_update(
             &RequestContext::unbounded(),
@@ -137,6 +152,8 @@ async fn observed_editor_reopens_pending_work_without_publishing_it() {
         .unwrap();
     assert!(result.get("seq").is_none());
     assert_eq!(result["ownerDraft"]["sequence"], 1);
+    assert_eq!(result["lineageClaimId"], claim);
+    assert_eq!(result["lineageOriginatedHere"], false);
     assert_eq!(
         result,
         service
@@ -152,8 +169,8 @@ async fn observed_editor_reopens_pending_work_without_publishing_it() {
     // The append key names the agent the edit declared, so a retry that
     // names another agent, or none, is a different edit.
     for changed in [
-        json!({"sessionId":sid,"updateBase64":encoded,"actorOriginId":"other-agent","attribution":attribution}),
-        json!({"sessionId":sid,"updateBase64":encoded}),
+        json!({"sessionId":sid,"updateBase64":encoded,"expectedLineageClaimId":claim,"actorOriginId":"other-agent","attribution":attribution}),
+        json!({"sessionId":sid,"updateBase64":encoded,"expectedLineageClaimId":claim}),
     ] {
         let error = service
             .ydoc_record_update(
@@ -171,6 +188,7 @@ async fn observed_editor_reopens_pending_work_without_publishing_it() {
     let typed = json!({
         "sessionId":sid,
         "updateBase64":base64::engine::general_purpose::STANDARD.encode(&typed),
+        "expectedLineageClaimId":claim,
         "actorOriginId":"local-person",
         "attribution":{"actorKind":"human","onBehalfOf":"local-person"}
     });

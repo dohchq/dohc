@@ -1,5 +1,6 @@
 import { errorMessage } from "./workspaceError";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
+import { atomicReplaceFile } from "../atomicReplaceFile";
 import {
   lstat,
   mkdir,
@@ -18,6 +19,7 @@ import { existingAncestor } from "./workspaceFiles";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import {
   ShareUnavailableError,
+  RelayUnauthorizedError,
   type PullShareViewResult,
   type ShareViewChangedPath,
   type ShareViewRefusal,
@@ -74,7 +76,7 @@ export type StandaloneShareViewRefreshOutcome =
       ok: true;
       collisionRecordQuarantined: boolean;
     } & RefreshSharedViewOutcome)
-  | { ok: false; changedPaths: number; errorMessage: string };
+  | { ok: false; changedPaths: number; errorMessage: string; errorKind?: "unauthorized" };
 
 export interface CaptureSharedViewLocalDivergenceOutcome {
   capturedPaths: number;
@@ -147,6 +149,7 @@ function standaloneShareViewFailureOutcome(
     ok: false,
     changedPaths,
     errorMessage: errorMessage(error),
+    ...(error instanceof RelayUnauthorizedError ? { errorKind: "unauthorized" as const } : {}),
   };
 }
 
@@ -272,7 +275,15 @@ async function materializeSharedViewPaths(
     return target;
   }
   const main = await store.ensureMainVersion({ workspaceId });
-  for (const change of changedPaths) {
+  // Every delete before every write. On a disk that ignores case or Unicode
+  // normalization, writing `notes.md` opens the `Notes.md` that a delete then
+  // removes. A refresh merges its pull's pages, so the changes can arrive in
+  // either order.
+  const ordered = [
+    ...changedPaths.filter((change) => change.operation === "delete"),
+    ...changedPaths.filter((change) => change.operation !== "delete"),
+  ];
+  for (const change of ordered) {
     const target = containedTarget(rootDir, change.path);
     // A mount keeps its own engine store at <mount>/.dohc. Containment cannot
     // see that: an alias planted inside the projection (`docs -> .dohc`)
@@ -454,22 +465,21 @@ async function writeSidecarAtomically(
 ): Promise<void> {
   const metadataDir = await ensureRealMetadataDirectory(rootDir);
   const target = join(metadataDir, fileName);
-  const temp = join(
-    metadataDir,
-    `.${fileName}.${process.pid}.${randomUUID()}.tmp`,
-  );
+  let temp: string | undefined;
   try {
-    const handle = await open(temp, "w");
-    try {
-      await writeContent(handle);
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-    await rename(temp, target);
+    await atomicReplaceFile(target, async (temporary) => {
+      temp = temporary;
+      const handle = await open(temporary, "w");
+      try {
+        await writeContent(handle);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+    });
     await syncMetadataDirectory(metadataDir);
   } finally {
-    await rm(temp, { force: true });
+    if (temp) await rm(temp, { force: true });
   }
 }
 
@@ -1943,6 +1953,7 @@ async function refreshSharedViewOnce(input: {
   // past it is committed, and idempotent by origin coordinate, because a
   // re-fetched page repeats refusals the record already holds.
   recordRefusals: (refusals: ShareViewRefusal[]) => Promise<void>;
+  onCursorCommitted?: (cursor: number) => void;
   excludeFromMaterialization?: ReadonlySet<string>;
   unjournalablePaths?: readonly UnjournalablePath[];
   trackPendingMaterialization?: boolean;
@@ -2103,6 +2114,7 @@ async function refreshSharedViewOnce(input: {
     await clearPullInFlightMarker(input.rootDir);
   }
   await pull.commitCursor();
+  input.onCursorCommitted?.(pull.nextCursor);
   // Logged one line per refusal, because the count alone cannot be diagnosed.
   // The engine's message names the constraint, and for a version refusal its
   // limit, unit and observed usage.

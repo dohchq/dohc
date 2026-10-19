@@ -1,3 +1,6 @@
+import { createTestScratch } from "../workspaces/testTemp";
+import type { TimelineReads } from "../workspaces/historyTimeline";
+import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
@@ -10,7 +13,8 @@ import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createWorkspaceEngineIpc } from "./workspaceEngineIpc";
 import { CHANNELS } from "./channels";
 import type { EngineMomentRecord, RebuildEngineStoreResult, SyncStatusResult } from "./bridgeContract";
-import { GetCollectionRecordHistoryResult, captureRecoveryOperations, engineYDocAdmissionOperations, engineYDocSaveOperations } from "./bridgeContract";
+import type { EngineMomentAuthorNames } from "./engineHistoryIpc";
+import { GetCollectionRecordHistoryResult, historyOperations, captureRecoveryOperations, fileObservationOperations, engineYDocAdmissionOperations, engineYDocSaveOperations } from "./bridgeContract";
 import { operationBridge } from "./operationTable";
 import { engineMomentSourceLabel } from "../renderer/workbench/EngineHistory";
 import { createWorkspaceAuthorityOwner, type WorkspaceAuthorityLease } from "../workspaces/workspaceAuthorityOwner";
@@ -22,6 +26,10 @@ import { createEngineYDocSessionIpc, type EngineYDocIpcSender } from "../workspa
 import type { WorkspaceEngineCapture, WorkspaceEngineYDocProviderSession, probeEngineStoreRefusal } from "../workspaces/workspaceEngineCapture";
 import { EngineStoreRecoveryFailedError } from "../workspaces/engineStoreRebuild";
 import type { RegistryEntry } from "../workspaces/registryStore";
+import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
+import type { SyncHistory } from "../workspaces/syncHistory";
+import { ownActorPresentation } from "../workspaces/actorPresentation";
+import { ACTOR_HUES, actorHueSlot } from "@dohc/workspace-contracts/actor-presentation";
 import { deferred } from "../testing/deferred";
 import { createServerRuns, type ServerAnswer, type ServerRequest } from "../automations/serverRuns";
 
@@ -43,18 +51,41 @@ const refused: SyncStatusResult = { ...healthy, historyCaptureFailed: true, engi
 const openPayload = { workspaceId: "workspace", sessionId: "renderer-session", path: "notes/a.md" };
 const descriptor = { id: "image", mimeType: "image/png", created: 1, ref: "assets/image.png", sha256: "a".repeat(64) };
 
+describe("workspace engine sender binding", () => {
+  it.each([
+    CHANNELS.getSyncStatus, CHANNELS.rebuildEngineStore, CHANNELS.listEngineMoments,
+    CHANNELS.readEngineMoment, CHANNELS.restoreEngineMomentFile,
+  ])("binds %s before reading or changing another open workspace", async channel => {
+    const h = await harness();
+    const input = { workspaceId: "workspace",
+      ...(channel === CHANNELS.readEngineMoment || channel === CHANNELS.restoreEngineMomentFile ? { momentId: "moment" } : {}) };
+    await expect(h.invoke(channel, input)).resolves.toBeDefined();
+    const services = [h.requireEngineCapture, h.requireWorkspace, h.getStatus,
+      h.syncProjection, h.writable, h.canonicalWorkspaceFor, h.requireSessions,
+      h.closeActivity, h.probe, h.move, h.reopen, h.notify,
+      h.capture.listMoments, h.capture.readMoment, h.capture.restoreFileToBeforeMoment];
+    services.forEach(service => service.mockClear());
+    await expect(h.invoke(channel, { ...input, workspaceId: "other" })).rejects.toThrow("no longer active");
+    services.forEach(service => expect(service).not.toHaveBeenCalled());
+  });
+});
+
 type SharedHistoryStore = Pick<ReturnType<ReturnType<typeof createReceivedShareEngineAccess>["storeFor"]>, "listHistoryPage" | "getMoment">;
 
 /** `sharedStore` makes the renderer's workspace a received share view backed by that store. */
-async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string) {
+async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, retry?: {
+  afterOperation(): Promise<void>;
+  read(): Promise<void>;
+}) {
   const workspace: RegistryEntry = { workspaceId: "workspace", rootPath: policyRoot ?? "C:/alias", kind: "personal", mode: "local-first",
     ...(sharedStore ? { shareView: {} as NonNullable<RegistryEntry["shareView"]> } : {}) };
   // Open and writable, but not the workspace this renderer shows.
   const other: RegistryEntry = { workspaceId: "other", rootPath: "C:/other", kind: "personal", mode: "local-first" };
   const sender = new Sender(7);
   const events: string[] = [];
+  const registry: { entry: RegistryEntry | null } = { entry: workspace };
   const authority = createWorkspaceAuthorityOwner({
-    findWorkspace: (id) => id === workspace.workspaceId ? workspace : id === other.workspaceId ? other : null,
+    findWorkspace: (id) => id === workspace.workspaceId ? registry.entry : id === other.workspaceId ? other : null,
     canonicalizeRoot: (root) => root === other.rootPath ? "C:/other-canonical" : policyRoot ?? "C:/canonical",
     createState: (): State => ({ operationLanes: new Map(), lastEngineStoreRebuildResult: null }),
   });
@@ -80,6 +111,11 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string) {
     currentSession: (value: Sender) => renderers.current(value),
     withPhysicalOperation: authority.withOperation.bind(authority),
   });
+  const gatedWorkspaceOperation: typeof withRendererWorkspaceOperation = async (sender, workspaceId, message, work) => {
+    const result = await withRendererWorkspaceOperation(sender, workspaceId, message, work);
+    if (retry) await retry.afterOperation();
+    return result;
+  };
   const sessions = new EngineWorkspaceSessions({ currentClient: () => { throw new Error("daemon boundary"); } });
   const storeWorkspaces: unknown[] = [];
   const receivedShareEngine = createReceivedShareEngineAccess({
@@ -115,8 +151,9 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string) {
     onError: vi.fn(),
   });
   const adapter = {
-    reconcileCapture: vi.fn<VersionedLiveAdapter["reconcileCapture"]>(async () => ({ settled: true, running: true, degraded: false })),
-    watcherStatus: vi.fn<VersionedLiveAdapter["watcherStatus"]>(async () => ({ running: true, degraded: false, terminal: false, phase: "ready", noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [] })),
+    reconcileCapture: vi.fn<VersionedLiveAdapter["reconcileCapture"]>(async () => ({ settled: true, running: true, degraded: false, heldFiles: [] })),
+    retryHeldCapture: vi.fn<VersionedLiveAdapter["retryHeldCapture"]>(async () => ({ settled: true, running: true, degraded: false, retried: true, heldFiles: [] })),
+    watcherStatus: vi.fn<VersionedLiveAdapter["watcherStatus"]>(async () => ({ running: true, degraded: false, terminal: false, phase: "ready", noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [] })),
     clearCaptureRecovery: vi.fn<VersionedLiveAdapter["clearCaptureRecovery"]>(async () => undefined),
     listCollections: vi.fn<VersionedLiveAdapter["listCollections"]>(async () => ({ collections: [] })),
     getCollection: vi.fn<VersionedLiveAdapter["getCollection"]>(async () => { throw new Error("get boundary"); }),
@@ -126,8 +163,9 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string) {
     getCollectionRecord: vi.fn<VersionedLiveAdapter["getCollectionRecord"]>(async () => { throw new Error("record boundary"); }),
   };
   const capture = {
+    filePathForObjectId: vi.fn<WorkspaceEngineCapture["filePathForObjectId"]>(async () => null),
     listMoments: vi.fn<WorkspaceEngineCapture["listMoments"]>(async () => ({
-      moments: [], nextBeforeMomentOrder: null, latestMomentOrder: 0, activeVersionId: "main", protectedTruncated: false,
+      moments: [], nextCursor: null, latestMomentOrder: 0, activeVersionId: "main", ...historyPageFields,
     })),
     readMoment: vi.fn<WorkspaceEngineCapture["readMoment"]>(async () => null),
     restoreFileToBeforeMoment: vi.fn<WorkspaceEngineCapture["restoreFileToBeforeMoment"]>(async () => {
@@ -162,6 +200,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string) {
   const routed: unknown[] = [];
   const requireSessions = vi.fn(() => sessions);
   const retryOwnerLiveDelivery = vi.fn();
+  const retryFileObservation = vi.fn(async (_workspaceId: string) => undefined);
   const retryCloudSync = vi.fn(async (_workspaceId: string, _reason: "person" | "reconnect") => undefined);
   const automationRunOnThisComputer = vi.fn(async (_workspaceId: string, _automationId: string, claimId: string) => claimId === "claim-here");
   // The relay's owner-only routes. It answers 404 to anyone but the owner.
@@ -180,15 +219,28 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string) {
   });
   const readPolicy = vi.fn<(rootPath: string) => Promise<WorkspaceEnginePolicySnapshot>>(async () => ({ filesPolicy: null, visibilityPolicy: null, errors: [], unreadable: [] }));
   if (policyRoot) readPolicy.mockImplementation(readWorkspaceEnginePolicy);
+  const recordHistoryPersonName = vi.fn((_workspaceId: string, userId: string, _sender: Sender): string | null => userId === "person-local" ? null : userId);
+  const recordHeldFiles = vi.fn();
+  const prepareRecordHistoryPeople = vi.fn<(_workspaceId: string, userIds: readonly string[], _sender: Sender) => void>();
+  const prepareNamed = vi.fn<NonNullable<EngineMomentAuthorNames["prepare"]>>();
+  const identity: { credentials: CloudCredentials | null } = { credentials: null };
+  const warmCredentialCache = vi.fn(async () => undefined);
+  const readSyncHistory = vi.fn(async (_rootPath: string): Promise<SyncHistory> => "never-synced");
+  const historyCollections = vi.fn<() => Promise<Pick<TimelineReads, "scope" | "local" | "remote">>>(async () => ({ scope: "test", local: () => ({ pages: [], transferred: [], sourceIds: [], sourceCount: 0 }), remote: async () => { throw new Error("unexpected remote history"); } }));
+  const stateDirectory = await createTestScratch("engine-ipc-settings-");
   const registrations = createWorkspaceEngineIpc({
-    readWorkspaceEnginePolicy: readPolicy,
+    historyCollections,
+    readWorkspaceEnginePolicy: readPolicy, readSyncHistory,
     localPersonId: () => "person-local",
     localPersonName: () => "Ice",
+    localInstallationId: () => "install-local",
+    stateDir: () => stateDirectory,
+    warmCredentialCache, currentCredentials: () => identity.credentials,
     // Read from main's own account, as the sign-in stands when the request arrives.
     localPerson: async () => ({ kind: "human", humanId: session.account ?? "install-local" }),
     registerHandler: (channel, handler) => { handlers.set(channel, handler); },
     assertTrustedSender: (event: { sender: Sender }) => { if (event.sender.id === -1) throw new Error("untrusted"); },
-    withRendererWorkspaceOperation, receivedShareEngine,
+    withRendererWorkspaceOperation: gatedWorkspaceOperation, receivedShareEngine,
     withEngineAdapter: async (_workspace, work) => {
       routed.push(_workspace);
       return missingAdapter ? null : work(adapter);
@@ -197,10 +249,13 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string) {
     automationAuthor: (_workspaceId, automationId) => ({ name: automationId, collection: "Tasks" }),
     automationRunOnThisComputer, serverRuns, signedInAccount: () => session.account,
     notifyRenderer: notify,
-    namedAuthorLabels: () => () => "Someone you shared with",
-    automationPersonName: (_workspaceId, userId) => userId === "person-local" ? null : userId,
+    recordHeldFiles,
+    namedAuthorLabels: () => ({ prepare: prepareNamed, named: () => "Someone you shared with" }),
+    recordHistoryPersonName,
+    prepareRecordHistoryPeople,
     retryOwnerLiveDelivery, retryCloudSync,
-    requireWorkspace, assertWritableWorkspace: writable, syncStatusWithOwnedProjection: syncProjection,
+    retryFileObservation: retry ? id => { void retryFileObservation(id); return retry.read(); } : retryFileObservation,
+    assertWritableWorkspace: writable, syncStatusWithOwnedProjection: syncProjection,
     activity: { getStatus, hasAgentRun }, workspaceAuthorities: authority, canonicalWorkspaceFor,
     requireEngineSessions: requireSessions, closeDispatchRunActivity: closeActivity,
     probeEngineStoreRefusal: probe, moveEngineStoreAside: move,
@@ -216,12 +271,14 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string) {
     return handler({ sender: value }, payload);
   };
   return {
-    workspace, sender, physical, authority, renderers, sessions, ydoc, provider, openYDocSession,
+    workspace, sender, physical, authority, renderers, sessions, ydoc, provider, openYDocSession, prepareNamed,
     adapter, capture, requireEngineCapture, getStatus, hasAgentRun, closeActivity, probe, move, reopen,
     notify, writable, requireWorkspace, displayName, syncProjection, canonicalWorkspaceFor, requireSessions,
-    events, handlers, invoke, routed, retryOwnerLiveDelivery, retryCloudSync, automationRunOnThisComputer, relay, setMissingAdapter: () => { missingAdapter = true; },
-    storeWorkspaces, readPolicy,
-    sent,
+    events, handlers, invoke, routed, retryOwnerLiveDelivery, retryCloudSync, retryFileObservation, automationRunOnThisComputer, relay, setMissingAdapter: () => { missingAdapter = true; },
+    storeWorkspaces, readPolicy, identity, warmCredentialCache, readSyncHistory, historyCollections,
+    /** The registry writes a new entry for this workspace, as every registry change does; null forgets it. */
+    replaceEntry: (next: RegistryEntry | null) => { registry.entry = next; },
+    sent, recordHistoryPersonName, prepareRecordHistoryPeople, recordHeldFiles,
     signIn: (account: string | null) => { session.account = account; session.generation += 1; },
     /** A credential load begins: no account is known until it reads the store. Resolves the load with its account. */
     loading: () => {
@@ -236,9 +293,9 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string) {
 
 const channels = [
   CHANNELS.listCollections, CHANNELS.getCollection, CHANNELS.queryCollectionRecords, CHANNELS.getCollectionRecordHistory,
-  CHANNELS.locateRecordHistoryRun, CHANNELS.listEngineMoments, CHANNELS.readEngineMoment, CHANNELS.restoreEngineMomentFile,
-  CHANNELS.getSyncStatus, captureRecoveryOperations.getCaptureRecoveryStatus.channel, captureRecoveryOperations.clearCaptureRecovery.channel,
-  CHANNELS.retryFileRecovery, CHANNELS.retryOwnerLiveDelivery, CHANNELS.retryCloudSync,
+  CHANNELS.locateRecordHistoryRun, historyOperations.listHistory.channel, CHANNELS.listEngineMoments, CHANNELS.readEngineMoment, CHANNELS.restoreEngineMomentFile,
+  CHANNELS.getSyncStatus, captureRecoveryOperations.retryHeldCapture.channel, captureRecoveryOperations.getCaptureRecoveryStatus.channel, captureRecoveryOperations.clearCaptureRecovery.channel,
+  fileObservationOperations.retryFileObservation.channel, CHANNELS.retryFileRecovery, CHANNELS.retryOwnerLiveDelivery, CHANNELS.retryCloudSync,
   CHANNELS.rebuildEngineStore,
   engineYDocAdmissionOperations.waitForEngineYDocAdmission.channel, engineYDocSaveOperations.retryEngineYDocSave.channel, CHANNELS.engineYDocOpen, CHANNELS.engineYDocReadArtifactAsset, CHANNELS.engineYDocApplyUpdate,
   CHANNELS.engineYDocAcknowledgeLineageReplacement, CHANNELS.engineYDocClose,
@@ -246,11 +303,84 @@ const channels = [
 ];
 
 describe("workspace engine IPC registrations", () => {
+  it("handles a read rejection before workspace operation completion", async () => {
+    const completed = deferred<void>();
+    const read = deferred<void>();
+    const attached = vi.spyOn(read.promise, "then");
+    const h = await harness(undefined, undefined, { afterOperation: () => completed.promise, read: () => read.promise });
+    const result = expect(h.invoke("desktop:retry-file-observation")).rejects.toThrow("read failed");
+    try {
+      await vi.waitFor(() => expect(h.retryFileObservation).toHaveBeenCalledOnce());
+      expect(attached).toHaveBeenCalled();
+      expect(attached.mock.calls.some(([, rejected]) => typeof rejected === "function")).toBe(true);
+    } finally {
+      // Keep the failing baseline test from leaking an unhandled rejection.
+      void read.promise.catch(() => {});
+      read.reject(new Error("read failed"));
+      completed.resolve();
+      await result;
+    }
+  });
+  it("retries file observation only for this renderer's active workspace and propagates failure", async () => {
+    const h = await harness();
+    await h.invoke("desktop:retry-file-observation");
+    expect(h.retryFileObservation).toHaveBeenCalledExactlyOnceWith("workspace");
+    await expect(h.invoke("desktop:retry-file-observation", { workspaceId: "other" })).rejects.toThrow("no longer active");
+    await expect(h.invoke("desktop:retry-file-observation", null, new Sender(-1))).rejects.toThrow("untrusted");
+    expect(h.retryFileObservation).toHaveBeenCalledOnce();
+    h.retryFileObservation.mockRejectedValueOnce(new Error("read failed"));
+    await expect(h.invoke("desktop:retry-file-observation")).rejects.toThrow("read failed");
+  });
+  it("releases the record History lease before background account lookup finishes", async () => {
+    const { createHistoryLabels } = await import("../automations/shareRoster");
+    const h = await harness();
+    const held = deferred<null>();
+    const lookupAccounts = vi.fn(() => held.promise);
+    const labels = createHistoryLabels({ snapshot: () => ({ roster: { grants: [], links: [], endedGrants: [], formerGrants: [] }, owner: true, context: 1, inventory: 1 }), lookupAccounts });
+    h.recordHistoryPersonName.mockImplementation((workspaceId, userId) => {
+      return labels.person(workspaceId, userId);
+    });
+    h.prepareRecordHistoryPeople.mockImplementation((workspaceId, userIds) => labels.prepare(workspaceId, userIds.map(userId => ({ userId }))));
+    h.adapter.getCollectionRecord.mockResolvedValue({
+      collection: { path: "tasks", objectId: "tasks", status: "valid", reasons: [] },
+      record: { id: "a", path: "tasks/a.md", conflicted: false, values: [] }, nextBeforeHistoryId: null,
+      history: [{ historyId: 1, field: "Status", previous: { present: false, value: null }, next: { present: true, value: "Done" },
+        authorOriginId: "automation", actorKind: "automation", onBehalfOf: "ben", depth: 1, recordedAtMs: 1, automationRun: null, linkAuthor: null }],
+    });
+    await h.invoke(CHANNELS.getCollectionRecordHistory, { workspaceId: "workspace", collectionPath: "tasks", recordId: "a" });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(lookupAccounts).toHaveBeenCalledTimes(1);
+    const removed = vi.fn();
+    await h.authority.retireBinding(h.authority.currentBinding("workspace")!, { removeBinding: removed });
+    expect(removed).toHaveBeenCalledTimes(1);
+    held.resolve(null);
+  });
+  it.each(["human", "agent"] as const)("keeps a %s row's local person out of relay account lookup", async actorKind => {
+    const { createHistoryLabels } = await import("../automations/shareRoster");
+    const h = await harness();
+    const lookupAccounts = vi.fn(async () => null);
+    const labels = createHistoryLabels({ snapshot: () => ({ roster: { grants: [], links: [], endedGrants: [], formerGrants: [] }, owner: true, context: 1, inventory: 1 }), lookupAccounts });
+    h.recordHistoryPersonName.mockImplementation((workspaceId, userId) => labels.person(workspaceId, userId));
+    h.prepareRecordHistoryPeople.mockImplementation((workspaceId, userIds) => labels.prepare(workspaceId, userIds.map(userId => ({ userId }))));
+    h.adapter.getCollectionRecord.mockResolvedValue({
+      collection: { path: "tasks", objectId: "tasks", status: "valid", reasons: [] },
+      record: { id: "a", path: "tasks/a.md", conflicted: false, values: [] }, nextBeforeHistoryId: null,
+      history: [{ historyId: 1, field: "Status", previous: { present: false, value: null }, next: { present: true, value: "Done" },
+        authorOriginId: actorKind === "human" ? "local:installation-1" : "helper", actorKind, onBehalfOf: "local:installation-1", depth: 0, recordedAtMs: 1, automationRun: null, linkAuthor: null }],
+    });
+    const page = await h.invoke(CHANNELS.getCollectionRecordHistory, { workspaceId: "workspace", collectionPath: "tasks", recordId: "a" });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect.soft(page).toMatchObject({ entries: [{ author: actorKind === "human" ? null : { kind: "agent", name: "Agent" } }] });
+    if (actorKind === "agent") expect.soft(GetCollectionRecordHistoryResult.parse(page).entries[0]?.author).not.toHaveProperty("person");
+    expect.soft(h.prepareRecordHistoryPeople).toHaveBeenCalledExactlyOnceWith("workspace", [], expect.any(Sender));
+    expect.soft(h.recordHistoryPersonName).not.toHaveBeenCalled();
+    expect(lookupAccounts).not.toHaveBeenCalled();
+  });
   it("reads and persistently dismisses capture recovery only for this renderer's workspace", async () => {
     const h = await harness();
     const bridge = operationBridge(captureRecoveryOperations, async (channel, payload) => h.invoke(channel, payload));
-    const recovery = { momentId: "recovery", versionId: "main", objectId: "object", path: "notes/a.md", captureMomentId: "capture" };
-    h.adapter.watcherStatus.mockResolvedValue({ running: true, degraded: false, terminal: false, phase: "ready", noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [recovery] });
+    const recovery = { momentId: "recovery", versionId: "main", objectId: "object", path: "notes/a.md", captureMomentId: "capture", deleted: false };
+    h.adapter.watcherStatus.mockResolvedValue({ running: true, degraded: false, terminal: false, phase: "ready", noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [recovery], heldFiles: [] });
     expect(await bridge.getCaptureRecoveryStatus({workspaceId: "workspace"})).toEqual({ captureRecoveries: [recovery] });
     expect(await bridge.clearCaptureRecovery({workspaceId: "workspace", momentId: "recovery"})).toBeUndefined();
     expect(h.adapter.clearCaptureRecovery).toHaveBeenCalledWith("recovery");
@@ -258,6 +388,16 @@ describe("workspace engine IPC registrations", () => {
     expect(h.adapter.clearCaptureRecovery).toHaveBeenCalledTimes(1);
     h.setMissingAdapter();
     await expect(h.invoke(captureRecoveryOperations.getCaptureRecoveryStatus.channel)).rejects.toThrow("not running");
+  });
+  it("retries and records held files only in the sender's workspace", async () => {
+    const h = await harness();
+    const bridge = operationBridge(captureRecoveryOperations, async (channel, payload) => h.invoke(channel, payload));
+    await bridge.retryHeldCapture({ workspaceId: "workspace", path: "notes/a.md" });
+    expect(h.adapter.retryHeldCapture).toHaveBeenCalledExactlyOnceWith("notes/a.md");
+    expect(h.recordHeldFiles).toHaveBeenCalledExactlyOnceWith(h.physical, []);
+    await expect(bridge.retryHeldCapture({ workspaceId: "other", path: "notes/a.md" })).rejects.toThrow("This workspace is no longer active.");
+    expect(h.adapter.retryHeldCapture).toHaveBeenCalledOnce();
+    expect(h.recordHeldFiles).toHaveBeenCalledOnce();
   });
   it("retries recovery only for the writable workspace this renderer shows", async () => {
     const h = await harness();
@@ -271,7 +411,7 @@ describe("workspace engine IPC registrations", () => {
   });
   it("keeps recovery unavailable when reconciliation or the recovery scan still fails", async () => {
     const h = await harness();
-    h.adapter.watcherStatus.mockResolvedValue({ running: true, degraded: false, terminal: false, phase: "ready", noAtomicPlacement: false, recoveryUnavailable: true, keptFiles: [], captureRecoveries: [] });
+    h.adapter.watcherStatus.mockResolvedValue({ running: true, degraded: false, terminal: false, phase: "ready", noAtomicPlacement: false, recoveryUnavailable: true, keptFiles: [], captureRecoveries: [], heldFiles: [] });
     await expect(h.invoke(CHANNELS.retryFileRecovery)).rejects.toThrow("still cannot read");
     h.adapter.reconcileCapture.mockRejectedValue(new Error("denied"));
     await expect(h.invoke(CHANNELS.retryFileRecovery)).rejects.toThrow("denied");
@@ -430,7 +570,7 @@ describe("workspace engine IPC registrations", () => {
     const side = (value: string | null) => ({ present: value !== null, value });
     const entry = (historyId: number, overrides: Partial<CollectionGetRecordResult["history"][number]>) => ({
       historyId, field: "Status", previous: side("Open"), next: side("Done"), authorOriginId: null, actorKind: null,
-      onBehalfOf: null, depth: null, recordedAtMs: 1_000 - historyId, automationRun: null, ...overrides,
+      onBehalfOf: null, depth: null, recordedAtMs: 1_000 - historyId, automationRun: null, linkAuthor: null, ...overrides,
     });
     const automation = { authorOriginId: stamp, actorKind: "automation" as const, onBehalfOf: "person-local", depth: 1 };
     h.adapter.getCollectionRecord.mockResolvedValue({
@@ -443,7 +583,7 @@ describe("workspace engine IPC registrations", () => {
         entry(6, automation),
         entry(5, { authorOriginId: "codex", actorKind: "agent", onBehalfOf: "person-local", depth: 0 }),
         entry(4, { authorOriginId: "codex", actorKind: "agent", onBehalfOf: "user-ana", depth: 0 }),
-        entry(3, { actorKind: "human" }),
+        entry(3, { actorKind: "human", authorOriginId: "user-ana", onBehalfOf: "user-ana" }),
         entry(2, { ...automation, onBehalfOf: "user-ana" }),
       ],
       nextBeforeHistoryId: 3,
@@ -461,12 +601,13 @@ describe("workspace engine IPC registrations", () => {
         { historyId: 6, author: { kind: "automation", name: stamp, run: null } },
         { historyId: 5, author: { kind: "agent", name: "You" } },
         // Another person's agent, as the file timeline names it.
-        { historyId: 4, author: { kind: "agent", name: "Agent" } },
-        { historyId: 3, author: null },
+        { historyId: 4, author: { kind: "agent", name: "Agent", person: "user-ana" } },
+        { historyId: 3, author: { kind: "human", name: "user-ana" } },
         { historyId: 2, author: { kind: "automation", name: stamp, person: "user-ana", run: null } },
       ],
     });
     expect(GetCollectionRecordHistoryResult.parse(page).entries[0]?.author).not.toHaveProperty("person");
+    expect(h.prepareRecordHistoryPeople).toHaveBeenCalledExactlyOnceWith("workspace", ["person-local", "user-ana"], expect.any(Sender));
     expect(h.automationRunOnThisComputer.mock.calls).toEqual([
       ["workspace", stamp, "claim-here"],
       ["workspace", stamp, "claim-gone"],
@@ -481,7 +622,7 @@ describe("workspace engine IPC registrations", () => {
     const serverRun = {
       claimId: "claim-server", state: "done", error: null, createdAtMs: 1, updatedAtMs: 2,
       trigger: { sharedAuthor: null, kind: "changed", recordId: "rec_a", by: "human", depth: 0 },
-      writes: [], definitionChanged: false, chainStopped: false, neverStarted: false, undone: false,
+      writes: [], definitionChanged: false, chainStopped: false, neverStarted: false, undone: false, undoUnfinished: false,
     };
     h.relay.mockImplementation(async (_workspaceId, request) => {
       const claimId = request.method === "GET" ? request.query?.claimId : undefined;
@@ -509,7 +650,7 @@ describe("workspace engine IPC registrations", () => {
     const change = (historyId: number, claimId: string) => ({
       historyId, field: "Status", previous: { present: true, value: "Open" }, next: { present: true, value: "Done" },
       authorOriginId: stamp, actorKind: "automation" as const, onBehalfOf: "person-local", depth: 1,
-      recordedAtMs: 1_000 - historyId, automationRun: { claimId, automationName: "Stamp" },
+      recordedAtMs: 1_000 - historyId, automationRun: { claimId, automationName: "Stamp" }, linkAuthor: null,
     });
     h.adapter.getCollectionRecord.mockResolvedValue({
       collection: { path: "tasks", objectId: "tasks-id", status: "valid", reasons: [] },
@@ -538,7 +679,7 @@ describe("workspace engine IPC registrations", () => {
     const serverRun = {
       claimId: "claim-server", state: "done", error: null, createdAtMs: 1, updatedAtMs: 2,
       trigger: { sharedAuthor: null, kind: "changed", recordId: "rec_a", by: "human", depth: 0 },
-      writes: [], definitionChanged: false, chainStopped: false, neverStarted: false, undone: false,
+      writes: [], definitionChanged: false, chainStopped: false, neverStarted: false, undone: false, undoUnfinished: false,
     };
     const shown = { status: 200, body: { ok: true, run: serverRun } };
     const locate = () => h.invoke(CHANNELS.locateRecordHistoryRun, { workspaceId: "workspace", automationId: stamp, claimId: "claim-server" });
@@ -617,24 +758,38 @@ describe("workspace engine IPC registrations", () => {
     await expect(result).rejects.toThrow("window changed workspaces");
   });
 
-  it("keeps history admission independent of renderer admission and omits absent paging fields", async () => {
+  it("reads the sender's history and omits absent paging fields", async () => {
     const h = await harness();
-    await h.renderers.open(h.sender, { workspaceId: "other", attachmentId: Symbol("other") }, "document-1");
     await h.invoke(CHANNELS.listEngineMoments);
     expect(h.requireEngineCapture).toHaveBeenCalledWith("workspace", "Engine history");
     expect(h.capture.listMoments).toHaveBeenLastCalledWith({});
-    await h.invoke(CHANNELS.listEngineMoments, { workspaceId: "workspace", objectId: "object-1", limit: 7, beforeMomentOrder: 19 });
-    expect(h.capture.listMoments).toHaveBeenLastCalledWith({ objectId: "object-1", limit: 7, beforeMomentOrder: 19 });
+    await h.invoke(CHANNELS.listEngineMoments, { workspaceId: "workspace", objectId: "object-1", limit: 7, cursor: historyCursor(19) });
+    expect(h.capture.listMoments).toHaveBeenLastCalledWith({ objectId: "object-1", limit: 7, cursor: historyCursor(19) });
     await expect(h.invoke(CHANNELS.listEngineMoments, { workspaceId: "workspace", objectId: "" })).rejects.toThrow();
     await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "moment" })).resolves.toEqual({ moment: null });
+  });
+
+  it("prepares every author of a History detail several people wrote", async () => {
+    const h = await harness();
+    const authors = [
+      { kind: "named", userId: "u-ana", grantId: "g-1", grantGeneration: 1 },
+      { kind: "named", userId: "u-ben", grantId: "g-dep", grantGeneration: 1 },
+    ] as const;
+    h.capture.readMoment.mockResolvedValueOnce({ protected: false, moment: {
+      id: "m-both", workspaceId: "workspace", versionId: "main", objectId: "o-1", path: "notes/a.md", recordedAtMs: 1,
+      operation: "write", metadata: { origin: "sync" }, authors: [...authors],
+      payload: { before: null, after: { path: "notes/a.md", contentKind: "text", sha256: "a".repeat(64), byteLength: 3, text: "new" } },
+    } });
+    const result = await h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "m-both" });
+    expect(h.prepareNamed).toHaveBeenCalledWith([...authors]);
+    expect(result).toMatchObject({ moment: { authorLabels: ["Someone you shared with", "Someone you shared with"] } });
   });
 
   it("reads a shared view's imported history from its registered share mount without a capture", async () => {
     const summary = { id: "shared", versionId: "main", path: "notes/a.md", recordedAtMs: 1, operation: "write" as const,
       metadata: { origin: "local-file" }, momentOrder: 1, authors: [{ kind: "agent" as const, agentId: "trip-agent-hosted", onBehalfOf: "owner-person" }] };
-    const listHistoryPage = vi.fn(async () => ({ activeVersion: { id: "main" },
-      textMomentPage: { moments: [summary], nextBeforeMomentOrder: null, latestMomentOrder: 1 },
-      protectedMoments: [], protectedTruncated: false }));
+    const listHistoryPage = vi.fn(async () => ({ activeVersion: { id: "main" }, ...historyPageFields,
+       moments: [summary], nextCursor: null, latestMomentOrder: 1, protectedMoments: [],  }));
     const getMoment = vi.fn(async ({ momentId }: { workspaceId: string; momentId: string }) => momentId !== "shared" ? null : {
       ...summary, workspaceId: "workspace", objectId: "object",
       payload: { before: null, after: { path: "notes/a.md", contentKind: "text", sha256: "a".repeat(64), byteLength: 4, text: "body" } },
@@ -643,7 +798,7 @@ describe("workspace engine IPC registrations", () => {
     h.readPolicy.mockRejectedValue(new Error("Receiver policy must not gate imported history."));
     h.requireEngineCapture.mockRejectedValue(new Error("dohc could not start Engine history for this workspace."));
     await expect(h.invoke(CHANNELS.listEngineMoments, { workspaceId: "workspace", objectId: "object", limit: 5 })).resolves.toMatchObject({
-      moments: [{ id: "shared", agentAuthorName: "trip-agent-hosted" }], protectedTruncated: false,
+      moments: [{ id: "shared", agentAuthorName: "trip-agent-hosted" }],
     });
     expect(listHistoryPage).toHaveBeenCalledWith({ workspaceId: "workspace", objectId: "object", limit: 5 });
     // The store opens the renderer's own attachment as a share mount; the payload names only the workspace.
@@ -668,7 +823,7 @@ describe("workspace engine IPC registrations", () => {
     const h = await harness();
     h.requireEngineCapture.mockRejectedValue(new Error("capture unavailable"));
     for (const channel of [CHANNELS.listEngineMoments, CHANNELS.readEngineMoment, CHANNELS.restoreEngineMomentFile]) {
-      await expect(h.invoke(channel, { workspaceId: "workspace", momentId: "moment" })).rejects.toThrow("capture unavailable");
+      await expect(h.invoke(channel, { workspaceId: "workspace", ...(channel === CHANNELS.listEngineMoments ? {} : { momentId: "moment" }) })).rejects.toThrow("capture unavailable");
     }
     expect(h.capture.listMoments).not.toHaveBeenCalled();
     expect(h.capture.readMoment).not.toHaveBeenCalled();
@@ -684,7 +839,7 @@ describe("workspace engine IPC registrations", () => {
         operation: "write", metadata: { origin: "local-file" }, protected: false, momentOrder: index,
         authors: [{ kind: "agent", agentId: "agent", agentRunId: "run-1", onBehalfOf }],
       })),
-      nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
+      nextCursor: null, latestMomentOrder: 1, activeVersionId: "main", ...historyPageFields,
     });
     const names = async () => ((await h.invoke(CHANNELS.listEngineMoments)) as { moments: Array<{ agentAuthorName?: string }> })
       .moments.map((moment) => moment.agentAuthorName);
@@ -713,7 +868,7 @@ describe("workspace engine IPC registrations", () => {
         operation: "write", metadata: { origin: "local-file" }, protected: false, momentOrder: index,
         authors: [{ kind: "agent", onBehalfOf: "person-local", ...identity }],
       })),
-      nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
+      nextCursor: null, latestMomentOrder: 1, activeVersionId: "main", ...historyPageFields,
     });
     await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({
       moments: [{ agentAuthorName: "You" }, { agentAuthorName: "Pat" }, { agentAuthorName: "Agent" }],
@@ -749,11 +904,205 @@ describe("workspace engine IPC registrations", () => {
     });
     h.capture.listMoments.mockResolvedValue({
       moments: [restore("mine", "person-local"), restore("earlier-account", "person-before")],
-      nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
+      nextCursor: null, latestMomentOrder: 1, activeVersionId: "main", ...historyPageFields,
     });
     const listed = (await h.invoke(CHANNELS.listEngineMoments)) as { moments: EngineMomentRecord[] };
     expect(listed.moments.map((moment) => moment.personAuthorName)).toEqual(["Ice", undefined]);
     expect(listed.moments.map(engineMomentSourceLabel)).toEqual(["Ice", "Restore"]);
+  });
+
+  it("names a hosted agent's live edit by the account holder and agent its author snapshot admitted", async () => {
+    const h = await harness();
+    const settled = (id: string, authors: NonNullable<Awaited<ReturnType<WorkspaceEngineCapture["listMoments"]>>["moments"][number]["authors"]>) => ({
+      id, versionId: "main", path: "notes/a.md", recordedAtMs: 1, operation: "write" as const,
+      metadata: { origin: "local-file" as const }, protected: false as const, momentOrder: 0, authors,
+    });
+    const owner = { kind: "human" as const, humanId: "person-local", humanName: "Owner Account" };
+    h.capture.listMoments.mockResolvedValue({
+      moments: [
+        settled("hosted", [owner, { kind: "agent", agentId: "writer", onBehalfOf: "person-local" }]),
+        settled("named", [owner, { kind: "agent", agentId: "writer", agentName: "Trip helper", onBehalfOf: "person-local" }]),
+        settled("account", [owner]),
+        settled("link", [{ kind: "link", publicPrincipalId: "public_1", label: "Anonymous" }]),
+      ],
+      nextCursor: null, latestMomentOrder: 1, activeVersionId: "main", ...historyPageFields,
+    });
+    const listed = (await h.invoke(CHANNELS.listEngineMoments)) as { moments: EngineMomentRecord[] };
+    expect(listed.moments.map(engineMomentSourceLabel)).toEqual([
+      "Owner Account, writer", "Owner Account, Trip helper", "Owner Account", "Link holder Anonymous",
+    ]);
+    expect(listed.moments.map((moment) => moment.authors?.length)).toEqual([2, 2, 1, 1]);
+  });
+
+  describe("History author presentation", () => {
+    type Authors = NonNullable<Awaited<ReturnType<WorkspaceEngineCapture["listMoments"]>>["moments"][number]["authors"]>;
+    const account: CloudCredentials = { serverUrl: "https://account.test", email: "ice@example.test", userId: "person-local", token: "token", relayUrl: "https://relay.test" };
+    const sam = { kind: "named" as const, userId: "sam", grantId: "grant-sam", grantGeneration: 1 };
+    const page = (...authors: Authors[]) => ({
+      moments: authors.map((each, index) => ({ ...historyDetail().moment, id: `m-${index}`, protected: false as const, momentOrder: index, authors: each })),
+      nextCursor: null, latestMomentOrder: 1, activeVersionId: "main", ...historyPageFields,
+    });
+    const tokens = async (h: Awaited<ReturnType<typeof harness>>) =>
+      ((await h.invoke(CHANNELS.listEngineMoments)) as { moments: EngineMomentRecord[] }).moments.map(moment => moment.authorPresentations);
+
+    it("draws own-store authors as chats do, for list and detail", async () => {
+      const h = await harness();
+      h.workspace.remote = { serverUrl: "https://account.test/", ownerUserId: "person-local" };
+      h.identity.credentials = account;
+      h.capture.listMoments.mockResolvedValue(page(
+        [{ kind: "human", humanId: "person-local" }], [{ kind: "human", humanId: "install-local" }], [sam],
+        [sam, { kind: "agent", agentId: "writer", onBehalfOf: "person-local" }],
+      ));
+      const [mine, signedOut, named, both] = await tokens(h);
+      expect(h.warmCredentialCache).toHaveBeenCalledOnce();
+      expect(mine).toEqual([{ ...ownActorPresentation("install-local", account), group: expect.any(String) }]);
+      expect(signedOut).toEqual([{ ...ownActorPresentation("install-local", null), group: expect.any(String) }]);
+      expect(mine![0]!.group).not.toBe(signedOut![0]!.group);
+      expect(named).toEqual([{ group: expect.any(String), hue: ACTOR_HUES[actorHueSlot("sam")], self: false }]);
+      expect(both).toEqual([named![0], { group: expect.any(String), hue: null, self: true }]);
+      h.capture.readMoment.mockResolvedValue({ ...historyDetail(), moment: { ...historyDetail().moment, authors: [sam] } });
+      await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "moment" })).resolves.toMatchObject({
+        moment: { namedAuthor: { userId: "sam" }, authorPresentations: named },
+      });
+    });
+
+    it("loads with named authors neutral when the workspace server is invalid", async () => {
+      const h = await harness();
+      h.workspace.remote = { serverUrl: "not a server", ownerUserId: "person-local" };
+      h.identity.credentials = account;
+      h.capture.listMoments.mockResolvedValue(page([sam], [{ kind: "human", humanId: "person-local" }]));
+      const [named, mine] = await tokens(h);
+      expect(named).toEqual([{ group: expect.stringMatching(/^unknown:/), hue: null, self: false }]);
+      // A server History can't read can't confirm the account is yours.
+      expect(mine![0]!.self).toBe(false);
+    });
+
+    it("keeps an account on another server from being you in a store synced to this one", async () => {
+      const h = await harness();
+      h.workspace.remote = { serverUrl: "https://other.test", ownerUserId: "owner-other" };
+      h.identity.credentials = account;
+      h.capture.listMoments.mockResolvedValue(page([{ kind: "human", humanId: "person-local" }], [{ kind: "human", humanId: "install-local" }]));
+      const [sameId, installation] = await tokens(h);
+      expect(sameId).toEqual([{ group: expect.any(String), hue: ownActorPresentation("install-local", account).hue, self: false }]);
+      expect(installation![0]!.self).toBe(true);
+    });
+
+    it("keeps received authors issuerless and never self, whatever this computer is signed in as", async () => {
+      const listHistoryPage = vi.fn(async () => ({ activeVersion: { id: "main" }, protectedMoments: [],
+        ...page([sam], [{ kind: "human", humanId: "person-local" }], [{ kind: "human", humanId: "install-local" }]) }));
+      const h = await harness({ listHistoryPage, getMoment: vi.fn(async () => null) } as unknown as SharedHistoryStore);
+      h.workspace.remote = { serverUrl: "https://account.test", ownerUserId: "person-local" };
+      h.identity.credentials = account;
+      const [named, person, installation] = await tokens(h);
+      expect(named).toEqual([{ group: expect.stringMatching(/^unknown:/), hue: null, self: false }]);
+      expect(person![0]!.self).toBe(false);
+      expect(installation![0]!.self).toBe(false);
+    });
+
+    it("refuses to draw tokens for a workspace that closed during the read", async () => {
+      const h = await harness();
+      h.capture.listMoments.mockImplementation(async () => {
+        h.replaceEntry(null);
+        return page([sam]);
+      });
+      await expect(h.invoke(CHANNELS.listEngineMoments)).rejects.toThrow();
+    });
+
+    const toOtherServer = (h: Awaited<ReturnType<typeof harness>>) =>
+      h.replaceEntry({ ...h.workspace, remote: { serverUrl: "https://other.test", ownerUserId: "owner-other" } });
+
+    it("stops a read whose registry entry was replaced, after each wait", async () => {
+      const replace = toOtherServer;
+      const during = await harness();
+      during.capture.listMoments.mockImplementation(async () => { replace(during); return page([sam]); });
+      await expect(during.invoke(CHANNELS.listEngineMoments)).rejects.toThrow("the workspace changed");
+      const warming = await harness();
+      warming.warmCredentialCache.mockImplementation(async () => { replace(warming); });
+      await expect(warming.invoke(CHANNELS.listEngineMoments)).rejects.toThrow("the workspace changed");
+      expect(warming.capture.listMoments).not.toHaveBeenCalled();
+      const capturing = await harness();
+      capturing.requireEngineCapture.mockImplementation(async () => { replace(capturing); return { capture: capturing.capture }; });
+      await expect(capturing.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "moment" })).rejects.toThrow("the workspace changed");
+      expect(capturing.warmCredentialCache).not.toHaveBeenCalled();
+    });
+
+    // None of these reaches a token, so only the read's own checks can stop it.
+    it.each([
+      ["the policy read, before a policy error", CHANNELS.listEngineMoments, (h: Awaited<ReturnType<typeof harness>>, replace: () => void) =>
+        h.readPolicy.mockImplementation(async () => { replace(); return { filesPolicy: null, visibilityPolicy: null, errors: ["line 1"], unreadable: [".dohc/files.toml"] }; })],
+      ["a detail's policy read, before a policy error", CHANNELS.readEngineMoment, (h: Awaited<ReturnType<typeof harness>>, replace: () => void) =>
+        h.readPolicy.mockImplementation(async () => { replace(); return { filesPolicy: null, visibilityPolicy: null, errors: ["line 1"], unreadable: [".dohc/files.toml"] }; })],
+      ["an empty page", CHANNELS.listEngineMoments, (h: Awaited<ReturnType<typeof harness>>, replace: () => void) =>
+        h.capture.listMoments.mockImplementation(async () => { replace(); return page(); })],
+      ["an authorless detail", CHANNELS.readEngineMoment, (h: Awaited<ReturnType<typeof harness>>, replace: () => void) =>
+        h.capture.readMoment.mockImplementation(async () => { replace(); return historyDetail(); })],
+      ["the object's path lookup", CHANNELS.listEngineMoments, (h: Awaited<ReturnType<typeof harness>>, replace: () => void) => {
+        h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [], unreadable: [] });
+        h.capture.listMoments.mockResolvedValue(historyPage("private/a.md"));
+        h.capture.filePathForObjectId.mockImplementation(async () => { replace(); return "private/a.md"; });
+      }],
+    ] as const)("stops a read whose server changed during %s", async (_await, channel, arrange) => {
+      const h = await harness();
+      arrange(h, () => toOtherServer(h));
+      const payload = channel === CHANNELS.listEngineMoments ? { objectId: "object-1", limit: 5 } : { momentId: "moment" };
+      await expect(h.invoke(channel, { workspaceId: "workspace", ...payload })).rejects.toThrow("the workspace changed");
+    });
+
+    it.each([
+      // The workspace authority retires an operation whose folder changed.
+      ["its folder moves", { rootPath: "C:/moved" }, "This workspace changed while this ran. Try again."],
+      ["it becomes a shared view", { shareView: {} as NonNullable<RegistryEntry["shareView"]> }, "the workspace changed"],
+    ])("stops a read when %s", async (_change, fields, message) => {
+      const h = await harness();
+      h.capture.listMoments.mockImplementation(async () => {
+        h.replaceEntry({ ...h.workspace, ...fields });
+        return page([sam]);
+      });
+      await expect(h.invoke(CHANNELS.listEngineMoments)).rejects.toThrow(message);
+    });
+
+    it("keeps reading through a registry write that leaves its folder, server, and shared view alone", async () => {
+      const h = await harness();
+      h.capture.listMoments.mockImplementation(async () => {
+        h.replaceEntry({ ...h.workspace, lastOpenedAt: 99 });
+        return page([sam]);
+      });
+      await expect(tokens(h)).resolves.toEqual([[{ group: expect.any(String), hue: null, self: false }]]);
+    });
+
+    it("draws the timeline's file authors as the moment list does, and stops it on a server change", async () => {
+      const h = await harness();
+      h.workspace.remote = { serverUrl: "https://account.test/", ownerUserId: "person-local" };
+      h.identity.credentials = account;
+      h.capture.listMoments.mockResolvedValue(page([{ kind: "human", humanId: "person-local" }], [sam]));
+      const byId = (moments: EngineMomentRecord[]) => Object.fromEntries(moments.map(moment => [moment.id, moment.authorPresentations]));
+      const listed = byId(((await h.invoke(CHANNELS.listEngineMoments)) as { moments: EngineMomentRecord[] }).moments);
+      const timeline = await h.invoke(historyOperations.listHistory.channel, { workspaceId: "workspace", object: { kind: "file", objectId: "object" } }) as
+        { entries: Array<{ moment: EngineMomentRecord }> };
+      expect(byId(timeline.entries.map(entry => entry.moment))).toEqual(listed);
+      expect(listed["m-0"]![0]!.self).toBe(true);
+      h.capture.listMoments.mockImplementation(async () => { toOtherServer(h); return page([sam]); });
+      await expect(h.invoke(historyOperations.listHistory.channel, { workspaceId: "workspace", object: { kind: "file", objectId: "object" } }))
+        .rejects.toThrow("the workspace changed");
+    });
+
+    it("keeps an account from being you in a folder that synced and has no remote now", async () => {
+      const h = await harness();
+      h.identity.credentials = account;
+      h.capture.listMoments.mockResolvedValue(page([{ kind: "human", humanId: "person-local" }], [{ kind: "human", humanId: "install-local" }]));
+      const [unsynced] = await tokens(h);
+      expect(unsynced![0]!.self).toBe(true);
+      h.readSyncHistory.mockResolvedValue("synced");
+      const [synced, installation] = await tokens(h);
+      expect(synced).toEqual([{ group: expect.any(String), hue: ownActorPresentation("install-local", account).hue, self: false }]);
+      expect(installation![0]!.self).toBe(true);
+      // History reads the attached folder by its canonical path.
+      expect(h.readSyncHistory).toHaveBeenCalledWith("C:/canonical");
+      // A record dohc can't read may say the folder synced.
+      h.readSyncHistory.mockResolvedValue("unknown");
+      const [unreadable] = await tokens(h);
+      expect(unreadable![0]!.self).toBe(false);
+    });
   });
 
   it("notifies after a restore and before parsing its result", async () => {
@@ -770,7 +1119,7 @@ describe("workspace engine IPC registrations", () => {
     const h = await harness();
     h.syncProjection.mockResolvedValue(healthy);
     await expect(h.invoke(CHANNELS.getSyncStatus)).resolves.toEqual(healthy);
-    expect(h.syncProjection).toHaveBeenCalledWith(h.workspace, refused);
+    expect(h.syncProjection).toHaveBeenCalledWith(h.physical, refused);
     expect(h.canonicalWorkspaceFor).not.toHaveBeenCalled();
     h.syncProjection.mockResolvedValue({ ...healthy, pendingChangeCount: -1 });
     await expect(h.invoke(CHANNELS.getSyncStatus)).rejects.toThrow();
@@ -790,7 +1139,7 @@ describe("registered engine-store repair", () => {
     );
     await entered.promise;
     const repair = h.invoke(CHANNELS.rebuildEngineStore);
-    expect(h.writable).toHaveBeenCalledWith(h.workspace);
+    expect(h.writable).toHaveBeenCalledWith(h.physical);
     expect(h.canonicalWorkspaceFor).not.toHaveBeenCalled();
     expect(h.requireSessions).not.toHaveBeenCalled();
     release.resolve();
@@ -941,38 +1290,119 @@ function historyDetail(path = "notes/a.md", beforePath: string | null = null, af
 }
 function historyPage(path = "notes/a.md") {
   return { moments: [{ ...historyDetail(path).moment, protected: false, momentOrder: 10 }],
-    nextBeforeMomentOrder: 8, latestMomentOrder: 10, activeVersionId: "main", protectedTruncated: false };
+    nextCursor: historyCursor(8), latestMomentOrder: 10, activeVersionId: "main", ...historyPageFields,  };
 }
 
 describe("owner History path policy", () => {
+  it.each([false, true])("preserves the request start cursor after skipping with policy=%s", async policy => {
+    const h = await harness();
+    if (policy) h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [], unreadable: [] });
+    const start = historyCursor(100);
+    const marker = { id: "draft", workspaceId: "workspace", kind: "named" as const, name: "Draft", createdAtMs: 90 };
+    h.capture.listMoments
+      .mockResolvedValueOnce({ ...historyPage("private/a.md"), moments: policy ? historyPage("private/a.md").moments : [], startCursor: start, nextCursor: historyCursor(80), versionMarkers: [marker] })
+      .mockResolvedValueOnce({ ...historyPage(), startCursor: historyCursor(80), nextCursor: null });
+    await expect(h.invoke(CHANNELS.listEngineMoments, { workspaceId: "workspace", cursor: start })).resolves.toMatchObject({
+      startCursor: start, moments: [{ path: "notes/a.md" }], versionMarkers: [marker], nextCursor: null,
+    });
+    expect(h.capture.listMoments).toHaveBeenCalledTimes(2);
+  });
+
+  it("skips marker-only pages without policy filtering", async () => {
+    const h = await harness();
+    const marker = { id: "draft", workspaceId: "workspace", kind: "named" as const, name: "Draft", createdAtMs: 90 };
+    h.capture.listMoments
+      .mockResolvedValueOnce({ ...historyPage(), moments: [], versionMarkers: [marker], nextCursor: historyCursor(8) })
+      .mockResolvedValueOnce({ ...historyPage("notes/old.md"), startCursor: historyCursor(8), nextCursor: null });
+    await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({ moments: [{ path: "notes/old.md" }], startCursor: historyPageFields.startCursor, versionMarkers: [marker] });
+    expect(h.capture.listMoments).toHaveBeenCalledTimes(2);
+  });
+
+  it("reaches admitted moments after more than 500 excluded moments", async () => {
+    const h = await harness();
+    h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [], unreadable: [] });
+    for (let i = 0; i < 12; i += 1) h.capture.listMoments.mockResolvedValueOnce({ ...historyPage("private/a.md"), moments: Array(50).fill(historyPage("private/a.md").moments[0]), nextCursor: historyCursor(2_000 - (i + 1) * 50) });
+    h.capture.listMoments.mockResolvedValueOnce({ ...historyPage(), nextCursor: null });
+    await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({ moments: [{ path: "notes/a.md" }] });
+    expect(h.capture.listMoments).toHaveBeenCalledTimes(13);
+  });
+  it("keeps version markers when a page's file moments are excluded", async () => {
+    const h = await harness();
+    h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [], unreadable: [] });
+    const marker = { id: "draft", workspaceId: "workspace", kind: "named" as const, name: "Draft", createdAtMs: 10 };
+    h.capture.listMoments
+      .mockResolvedValueOnce({ ...historyPage("private/a.md"), versionMarkers: [marker] })
+      .mockResolvedValueOnce({ ...historyPage("notes/old.md"), nextCursor: null });
+    await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({
+      moments: [{ path: "notes/old.md" }], versionMarkers: [marker], nextCursor: null,
+    });
+    expect(h.capture.listMoments).toHaveBeenCalledTimes(2);
+  });
+
   it("skips excluded pages to reach older admitted History", async () => {
     const h = await harness();
     h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [], unreadable: [] });
     h.capture.listMoments
-      .mockResolvedValueOnce({ ...historyPage("private/a.md"), nextBeforeMomentOrder: 800, latestMomentOrder: 1000, protectedTruncated: true })
-      .mockResolvedValueOnce({ ...historyPage("private/b.md"), nextBeforeMomentOrder: 600, latestMomentOrder: 1000 })
-      .mockResolvedValueOnce({ ...historyPage("notes/old.md"), nextBeforeMomentOrder: 400, latestMomentOrder: 1000 });
-    await expect(h.invoke(CHANNELS.listEngineMoments, { workspaceId: "workspace", limit: 200 })).resolves.toMatchObject({
-      moments: [{ path: "notes/old.md" }], nextBeforeMomentOrder: 400, latestMomentOrder: 1000, protectedTruncated: true,
+      .mockResolvedValueOnce({ ...historyPage("private/a.md"), nextCursor: historyCursor(800), latestMomentOrder: 1000,  })
+      .mockResolvedValueOnce({ ...historyPage("private/b.md"), nextCursor: historyCursor(600), latestMomentOrder: 1000 })
+      .mockResolvedValueOnce({ ...historyPage("notes/old.md"), nextCursor: historyCursor(400), latestMomentOrder: 1000 });
+    await expect(h.invoke(CHANNELS.listEngineMoments, { workspaceId: "workspace", limit: 50 })).resolves.toMatchObject({
+      moments: [{ path: "notes/old.md" }], nextCursor: historyCursor(400), latestMomentOrder: 1000,
     });
-    expect(h.capture.listMoments.mock.calls).toEqual([[{ limit: 200 }], [{ limit: 200, beforeMomentOrder: 800 }], [{ limit: 200, beforeMomentOrder: 600 }]]);
+    expect(h.capture.listMoments.mock.calls).toEqual([[{ limit: 50 }], [{ limit: 50, cursor: historyCursor(800) }], [{ limit: 50, cursor: historyCursor(600) }]]);
   });
 
   it("bounds excluded-page reads and leaves a cursor to continue", async () => {
     const h = await harness();
     h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [], unreadable: [] });
-    h.capture.listMoments.mockImplementation(async ({ beforeMomentOrder } = {}) => ({
-      ...historyPage("private/a.md"), nextBeforeMomentOrder: (beforeMomentOrder ?? 2000) - 200,
+    h.capture.listMoments.mockImplementation(async ({ cursor } = {}) => ({
+      ...historyPage("private/a.md"), nextCursor: historyCursor((cursor?.text?.momentOrder ?? 2000) - 50),
     }));
-    await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({ moments: [], nextBeforeMomentOrder: 0 });
-    expect(h.capture.listMoments).toHaveBeenCalledTimes(10);
+    await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({ moments: [], nextCursor: historyCursor(0) });
+    expect(h.capture.listMoments).toHaveBeenCalledTimes(40);
+  });
+
+  it("caps five-row requests at 40 pages instead of making 400 capture reads", async () => {
+    const h = await harness();
+    h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [], unreadable: [] });
+    h.capture.listMoments.mockImplementation(async ({ cursor } = {}) => ({
+      ...historyPage("private/a.md"), nextCursor: historyCursor((cursor?.text?.momentOrder ?? 2000) - 5),
+    }));
+    await expect(h.invoke(CHANNELS.listEngineMoments, { workspaceId: "workspace", limit: 5 })).resolves.toMatchObject({
+      moments: [], nextCursor: historyCursor(1800),
+    });
+    expect(h.capture.listMoments).toHaveBeenCalledTimes(40);
+  });
+
+  it.each([undefined, { ...historyCursor(8), objectId: "object-1" }])("loads ordinary object History without a path lookup with cursor=%s", async cursor => {
+    const h = await harness();
+    h.capture.listMoments.mockResolvedValue(historyPage());
+    await expect(h.invoke(CHANNELS.listEngineMoments, {
+      workspaceId: "workspace", objectId: "object-1", limit: 5, ...(cursor ? { cursor } : {}),
+    })).resolves.toMatchObject({ moments: [{ path: "notes/a.md" }] });
+    expect(h.capture.filePathForObjectId).not.toHaveBeenCalled();
+    expect(h.capture.listMoments).toHaveBeenCalledExactlyOnceWith({
+      objectId: "object-1", limit: 5, ...(cursor ? { cursor } : {}),
+    });
+  });
+
+  it("does not skip through an object's old pages when its current path is excluded", async () => {
+    const h = await harness();
+    h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [], unreadable: [] });
+    h.capture.filePathForObjectId.mockResolvedValue("private/a.md");
+    h.capture.listMoments.mockResolvedValue(historyPage("private/a.md"));
+    await expect(h.invoke(CHANNELS.listEngineMoments, { workspaceId: "workspace", objectId: "object-1", limit: 5 })).resolves.toMatchObject({
+      moments: [], nextCursor: null,
+    });
+    expect(h.capture.filePathForObjectId).toHaveBeenCalledExactlyOnceWith("object-1");
+    expect(h.capture.listMoments).toHaveBeenCalledExactlyOnceWith({ objectId: "object-1", limit: 5 });
   });
 
   it("stops skipping at the end of History", async () => {
     const h = await harness();
     h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [], unreadable: [] });
-    h.capture.listMoments.mockResolvedValue({ ...historyPage("private/a.md"), nextBeforeMomentOrder: null });
-    await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({ moments: [], nextBeforeMomentOrder: null });
+    h.capture.listMoments.mockResolvedValue({ ...historyPage("private/a.md"), nextCursor: null });
+    await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({ moments: [], nextCursor: null });
     expect(h.capture.listMoments).toHaveBeenCalledTimes(1);
   });
   it("retires captured list and detail after exclusion, including a reopened window", async () => {
@@ -1013,7 +1443,7 @@ describe("owner History path policy", () => {
     const h = await harness();
     h.capture.listMoments.mockResolvedValue(historyPage(path));
     h.capture.readMoment.mockResolvedValue(historyDetail(path));
-    await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({ moments: [], nextBeforeMomentOrder: 8, latestMomentOrder: 10 });
+    await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({ moments: [], nextCursor: historyCursor(8), latestMomentOrder: 10 });
     await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "moment" })).resolves.toEqual({ status: "untracked", moment: null });
   });
 
@@ -1054,4 +1484,83 @@ describe("owner History path policy", () => {
     expect(h.readPolicy).not.toHaveBeenCalled();
     expect(h.notify).not.toHaveBeenCalled();
   });
+});
+
+describe("merged History IPC", () => {
+  it("rejects a reply after this renderer changes workspace", async () => {
+    const h = await harness(), reached = deferred<void>(), reply = deferred<Awaited<ReturnType<WorkspaceEngineCapture["listMoments"]>>>();
+    h.capture.listMoments.mockImplementation(async () => { reached.resolve(); return reply.promise; });
+    const result = Promise.resolve(h.invoke(historyOperations.listHistory.channel));
+    const rejected = expect(result).rejects.toThrow("window changed workspaces");
+    await reached.promise;
+    await h.renderers.open(h.sender, { workspaceId: "other", attachmentId: Symbol("other") }, "document-1");
+    reply.resolve({ ...historyPage(), nextCursor: null });
+    await rejected;
+  });
+
+  it("fails closed before reading either source when policy is unreadable", async () => {
+    const h = await harness();
+    h.readPolicy.mockResolvedValue({ filesPolicy: null, visibilityPolicy: null, errors: ["Invalid policy"], unreadable: [".dohc/files.toml"] });
+    await expect(h.invoke(historyOperations.listHistory.channel)).resolves.toMatchObject({ status: "policy-unreadable" });
+    expect(h.capture.listMoments).not.toHaveBeenCalled();
+    expect(h.historyCollections).not.toHaveBeenCalled();
+  });
+
+  it("discards policy-hidden positions and retains protected activity", async () => {
+    const h = await harness();
+    h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [], unreadable: [] });
+    const hidden = historyPage("private/a.md").moments[0]!;
+    h.capture.listMoments.mockResolvedValue({ ...historyPage(), moments: [hidden, { ...hidden, id: "protected", protected: true, momentOrder: 9 }], nextCursor: null });
+    await expect(h.invoke(historyOperations.listHistory.channel)).resolves.toMatchObject({ status: "ready", entries: [{ kind: "file", moment: { id: "protected" } }], nextCursor: null });
+  });
+
+  it("reads imported share scope without owner capture, policy, or Collection access", async () => {
+    const listHistoryPage = vi.fn(async () => ({ activeVersion: { id: "main" }, ...historyPageFields,
+      moments: historyPage().moments, nextCursor: null, latestMomentOrder: 10, protectedMoments: [] }));
+    const h = await harness({ listHistoryPage, getMoment: vi.fn(async () => null) } as unknown as SharedHistoryStore);
+    await expect(h.invoke(historyOperations.listHistory.channel, { workspaceId: "workspace", object: { kind: "file", objectId: "object" } })).resolves.toMatchObject({ status: "ready", entries: [{ kind: "file" }] });
+    expect(listHistoryPage).toHaveBeenCalledWith({ workspaceId: "workspace", objectId: "object", limit: 50 });
+    expect(h.requireEngineCapture).not.toHaveBeenCalled();
+    expect(h.readPolicy).not.toHaveBeenCalled();
+    expect(h.historyCollections).not.toHaveBeenCalled();
+  });
+
+  it("keeps Collections out of named versions and routes per-file object identity", async () => {
+    const h = await harness();
+    h.capture.listMoments.mockResolvedValue({ ...historyPage(), startCursor: { ...historyPageFields.startCursor, versionId: "branch" }, moments: [], nextCursor: null });
+    const local = vi.fn(() => ({ pages: [], transferred: [], sourceIds: [], sourceCount: 0 }));
+    h.historyCollections.mockResolvedValue({ scope: "test", local, remote: async () => { throw Error("unexpected remote"); } });
+    await expect(h.invoke(historyOperations.listHistory.channel, { workspaceId: "workspace", versionId: "branch" })).resolves.toMatchObject({ versionId: "branch", entries: [] });
+    expect(local).not.toHaveBeenCalled();
+    expect(h.historyCollections).not.toHaveBeenCalled();
+    await h.invoke(historyOperations.listHistory.channel, { workspaceId: "workspace", versionId: "branch", object: { kind: "file", objectId: "object" } });
+    expect(h.capture.listMoments).toHaveBeenLastCalledWith({ limit: 50, versionId: "branch", objectId: "object" });
+    expect(h.historyCollections).not.toHaveBeenCalled();
+  });
+});
+
+it("does not start the Collection host for main per-file History", async () => {
+  const h = await harness();
+  await h.invoke(historyOperations.listHistory.channel, { workspaceId: "workspace", object: { kind: "file", objectId: "object" } });
+  expect(h.historyCollections).not.toHaveBeenCalled();
+});
+
+it("keys timeline prefetches by the lazily resolved workspace attachment scope", async () => {
+  const h = await harness(), datasetId = "00000000-0000-4000-8000-000000000008";
+  let scope = "attachment-one", calls = 0;
+  const remote = vi.fn(async () => {
+    calls++;
+    return { datasetId, name: "Collection", lineage: "a".repeat(64), headRevision: 2,
+      entries: [{ revision: 2, recordedAtMs: 2000 }, { revision: 1, recordedAtMs: 1000 }].map(row => ({
+        ...row, operation: "Add record", callerReference: null, approvedRevisionHash: "b".repeat(64), changesetBytes: 0, attachmentCount: 0
+      })), nextBeforeRevision: null };
+  });
+  h.historyCollections.mockImplementation(async () => ({ scope, local: () => ({ pages: [], transferred: [datasetId], sourceIds: [datasetId], sourceCount: 1 }), remote }));
+  const input = { workspaceId: "workspace", object: { kind: "dataset", datasetId }, limit: 1 };
+  await h.invoke(historyOperations.listHistory.channel, input);
+  await vi.waitFor(() => expect(calls).toBe(2));
+  scope = "attachment-two";
+  // Refresh and consume the same revision. The old attachment's cache must not match.
+  await h.invoke(historyOperations.listHistory.channel, input);
+  await vi.waitFor(() => expect(calls).toBe(4));
 });

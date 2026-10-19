@@ -65,7 +65,7 @@ export const CHATS_METHOD = {
   dispatchFailPendingForThread: "chats.dispatch.failPendingForThread",
   dispatchRecordRunMessage: "chats.dispatch.recordRunMessage",
   dispatchSetThreadPaused: "chats.dispatch.setThreadPaused",
-  dispatchMarkFailureNotePosted: "chats.dispatch.markFailureNotePosted",
+  dispatchMarkFailureHandled: "chats.dispatch.markFailureHandled",
   dispatchRequeueFailedTrigger: "chats.dispatch.requeueFailedTrigger",
   dispatchListAppQuitRecoveries: "chats.dispatch.listAppQuitRecoveries",
   dispatchComplete: "chats.dispatch.complete",
@@ -146,6 +146,7 @@ type ChatThreadStartParams = ChatsJsonObject & {
   authorDisplayName: string;
   authorOwnerDisplayName?: string;
   authorUserId?: string;
+  authorActorKey?: string;
   origin?: "cli";
   body: string;
   needsDecision?: boolean;
@@ -183,6 +184,7 @@ type ChatMessageSendParams = ChatsJsonObject & {
   authorDisplayName: string;
   authorOwnerDisplayName?: string;
   authorUserId?: string;
+  authorActorKey?: string;
   parentMessageId?: string;
   origin?: "cli";
   body: string;
@@ -415,7 +417,7 @@ export type ChatsMethodParamsMap = {
   [CHATS_METHOD.dispatchFailPendingForThread]: ChatDispatchFailPendingParams;
   [CHATS_METHOD.dispatchRecordRunMessage]: ChatDispatchRecordRunMessageParams;
   [CHATS_METHOD.dispatchSetThreadPaused]: ChatDispatchSetPausedParams;
-  [CHATS_METHOD.dispatchMarkFailureNotePosted]: ChatDispatchRunParams;
+  [CHATS_METHOD.dispatchMarkFailureHandled]: ChatDispatchRunParams;
   [CHATS_METHOD.dispatchRequeueFailedTrigger]: ChatDispatchRequeueParams;
   [CHATS_METHOD.dispatchListAppQuitRecoveries]: ChatPageParams;
   [CHATS_METHOD.dispatchComplete]: ChatDispatchCompleteParams;
@@ -509,6 +511,7 @@ const ChatMessageSchema = mutableStruct({
   threadId: Schema.String,
   author: ChatActorSchema,
   authorOwnerDisplayName: Schema.optionalKey(Schema.String),
+  authorActorKey: Schema.optionalKey(Schema.String),
   authorUserId: Schema.optionalKey(Schema.String),
   parentMessageId: Schema.optionalKey(Schema.String),
   origin: Schema.optionalKey(Schema.Literal("cli")),
@@ -582,7 +585,7 @@ const ChatRunSchema = mutableStruct({
   exitCode: Schema.optionalKey(AnyInt),
   failureReason: Schema.optionalKey(Schema.String),
   logPath: Schema.optionalKey(Schema.String),
-  failureNotePosted: Schema.Boolean,
+  failureHandled: Schema.Boolean,
 });
 const ChatDispatchClaimSchema = mutableStruct({
   dispatch: ChatDispatchSchema,
@@ -681,6 +684,8 @@ const ChatMentionSchema = mutableStruct({
   createdAtMs: AnyInt,
 });
 const ChatChannelOpeningMessageSchema = mutableStruct({
+  authorActorKey: Schema.optionalKey(Schema.String),
+  origin: Schema.optionalKey(Schema.Literal("cli")),
   id: Schema.String,
   author: ChatActorSchema,
   authorOwnerDisplayName: Schema.optionalKey(Schema.String),
@@ -850,7 +855,7 @@ const ChatsResultSchemas = {
   [CHATS_METHOD.dispatchFailPendingForThread]: NonnegativeInt,
   [CHATS_METHOD.dispatchRecordRunMessage]: Schema.Boolean,
   [CHATS_METHOD.dispatchSetThreadPaused]: ChatThreadPauseSchema,
-  [CHATS_METHOD.dispatchMarkFailureNotePosted]: ChatRunSchema,
+  [CHATS_METHOD.dispatchMarkFailureHandled]: ChatRunSchema,
   [CHATS_METHOD.dispatchRequeueFailedTrigger]: Schema.Boolean,
   [CHATS_METHOD.dispatchListAppQuitRecoveries]: pageSchema({
     recoveries: Schema.mutable(

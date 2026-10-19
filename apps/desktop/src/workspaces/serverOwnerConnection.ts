@@ -1,3 +1,4 @@
+import {readBoundedJson} from "@dohc/service-http";
 import {mkdir, writeFile} from "node:fs/promises";
 import {join} from "node:path";
 import {selfHostedLiveProfile} from "@dohc/sync-relay/self-host-live-profile";
@@ -94,6 +95,20 @@ export function createServerOwnerConnection(options: {
           const published = next === undefined ? seen : seen || (state?.published ?? false);
           refusalScan.set(workspace.workspaceId, {credentials: session.value, rootPath, after: next, seen: next === undefined ? false : seen, published});
           if (state?.published !== published) options.onRefusalsChanged?.(workspace.workspaceId);
+        },
+        async retire(binding, attempt) {
+          assertCurrent();const requestSignal=AbortSignal.any([signal,attempt]);
+          const response=await options.fetch(`${relayUrl}/sync/${encodeURIComponent(workspace.workspaceId)}/live-host`,{
+            method:"DELETE",headers:{authorization:`Bearer ${session.value.token}`,"content-type":"application/json"},
+            body:JSON.stringify({path:binding.currentPath,objectId:binding.objectId,retire:true,restoreFenceGeneration:binding.restoreFenceGeneration}),signal:requestSignal,redirect:"error",
+          });
+          assertCurrent();requestSignal.throwIfAborted();
+          if (!response.ok && response.status!==409) {await response.body?.cancel();throw new Error("dohc could not stop live editing. Try again.");}
+          const value=await readBoundedJson(response,16*1024,requestSignal);
+          if (response.status===409 && value && typeof value==="object" && "code" in value && ["restore-fenced","restore-in-progress"].includes(String(value.code))) return null;
+          if (!response.ok) throw new Error("dohc could not stop live editing. Try again.");
+          const retired=z.object({ok:z.literal(true),path:z.string().min(1),objectId:z.literal(binding.objectId),status:z.literal("retired"),acceptedCursor:z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)}).parse(value);
+          discovery.delete(workspace.workspaceId);return retired.acceptedCursor;
         },
         async documents(attempt) {
           assertCurrent();

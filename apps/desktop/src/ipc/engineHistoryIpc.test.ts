@@ -1,3 +1,4 @@
+import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
 import { describe, expect, it, vi } from "vitest";
 import {
   engineMomentDetailForIpc,
@@ -6,10 +7,13 @@ import {
   type EngineMomentAuthorNames,
 } from "./engineHistoryIpc";
 import {
+  AUTOMATION_AUTHOR_TEXT_MAX,
   CompareWorkspaceVersionsResult,
   EngineMomentDetailRecord,
+  EngineMomentRecord,
   ENGINE_TEXT_MAX_CHARS,
   ListWorkspaceVersionConflictsResult,
+  ReadEngineMomentResult,
   WorkspaceVersionConflict,
 } from "./bridgeContract";
 import { compareVersionFilesPage } from "@dohc/workspace-core/versionCompare";
@@ -19,6 +23,8 @@ import type {
 } from "@dohc/workspace-contracts/engine";
 import type { WorkspaceEngineMomentDetail } from "../workspaces/workspaceEngineCapture";
 import { DaemonRefusalError } from "@dohc/workspace-engine-client";
+import { LIVE_UPDATE_IDENTIFIER_MAX_BYTES } from "@dohc/live-session-contract/live-update-admission";
+import { engineMomentSourceLabel } from "../renderer/workbench/EngineHistory";
 
 const names: EngineMomentAuthorNames = {
   agent: (author) => author.onBehalfOf === "local" ? "You" : author.onBehalfOf,
@@ -26,12 +32,30 @@ const names: EngineMomentAuthorNames = {
   automation: (automationId) =>
     automationId.startsWith("collection:") ? { name: `Named ${automationId}`, collection: "Tasks" } : null,
   named: (author) => `${author.userId}@example.com (Edit)`,
+  presentations: (authors) => authors.map((author, index) => ({ group: `${author.kind}-${index}`, hue: null, self: false })),
 };
 
 const TEXT_SHA = "a".repeat(64);
 const BINARY_SHA = "b".repeat(64);
 
 describe("listEngineMomentsForIpc", () => {
+  it.each(["list", "detail"])("preserves relay confirmation through History %s validation", async (surface) => {
+    const detail = detailWith({before: null, after: textSide("new")});
+    if (detail.protected) throw new Error("Expected a plaintext moment");
+    const authors = [{kind: "human" as const, humanId: "recipient", humanName: "Recipient", relayConfirmed: true as const}];
+    detail.moment.authors = authors;
+    if (surface === "detail") {
+      const result = ReadEngineMomentResult.parse({moment: engineMomentDetailForIpc(detail, names)});
+      expect(result.moment?.authors).toEqual(authors);
+      return;
+    }
+    const response = await listEngineMomentsForIpc(async () => ({
+      moments: [{...detail.moment, momentOrder: 1, protected: false}],
+      nextCursor: null, latestMomentOrder: 1, activeVersionId: "main", ...historyPageFields,
+    }), names);
+    if (!("moments" in response)) throw new Error("Expected ready history");
+    expect(response.moments[0]?.authors).toEqual(authors);
+  });
   it.each([
     "History is still updating. Try again.",
     "Workspace is still updating. Try again.",
@@ -55,25 +79,49 @@ describe("listEngineMomentsForIpc", () => {
     const detail = detailWith({before: null, after: textSide("new")});
     if (detail.protected) throw new Error("Expected a plaintext moment");
     const authors: NonNullable<VersionedTextMoment["authors"]> = [
-      {kind: "human", humanId: "ada", onBehalfOf: "ada"},
+      {kind: "human", humanId: "local", onBehalfOf: "local"},
       {kind: "agent", agentId: "agent"},
       {kind: "automation", automationId: "collection:Tasks#stamp", depth: 1},
       {kind: "named", userId: "ana", grantId: "grant", grantGeneration: 1},
       {kind: "link", grantId: "grant", grantGeneration: 1, principalId: "holder"},
-      {kind: "public", principalId: "public", grantId: "grant"},
+      {kind: "public", principalId: "public_3f9a2c1d-7b4e-4c55-9d0a-1e2f3a4b5c6d", grantId: "grant"},
       {kind: "unattributed"},
     ];
     const response = await listEngineMomentsForIpc(async () => ({
       moments: [{...detail.moment, authors, momentOrder: 1, protected: false}],
-      nextBeforeMomentOrder: null,
+      nextCursor: null,
       latestMomentOrder: 1,
-      activeVersionId: "main",
-      protectedTruncated: false,
+      activeVersionId: "main", ...historyPageFields,
+
     }), names);
     if (!("moments" in response)) throw new Error("Expected ready history");
     expect(response.moments[0]?.authors).toEqual(authors);
+    expect(response.moments[0]?.authorPresentations?.map(token => token.group)).toEqual(authors.map((author, index) => `${author.kind}-${index}`));
     expect(response.moments[0]).not.toHaveProperty("namedAuthor");
     expect(response.moments[0]).not.toHaveProperty("automationAuthor");
+    // Several authors read as each of them, in order; none stands in for the rest.
+    expect(response.moments[0]?.authorLabels).toEqual([
+      "Ice", "Agent", "Named collection:Tasks#stamp in Tasks", "ana@example.com (Edit)",
+      "Edit link · holder holder", "Link holder 3f9a2c1d", "An unrecorded author",
+    ]);
+  });
+
+  it("gives list and detail records one presentation per author, and requires it", async () => {
+    const detail = detailWith({before: null, after: textSide("new")});
+    if (detail.protected) throw new Error("Expected a plaintext moment");
+    detail.moment.authors = [{kind: "named", userId: "ana", grantId: "grant", grantGeneration: 1}, {kind: "agent", agentId: "agent"}];
+    const record = engineMomentDetailForIpc(detail, names);
+    expect(record.authorPresentations).toEqual([{group: "named-0", hue: null, self: false}, {group: "agent-1", hue: null, self: false}]);
+    expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
+    const {authorPresentations: _omitted, ...missing} = record;
+    for (const shape of [missing, {...record, authorPresentations: record.authorPresentations!.slice(1)}]) {
+      expect(EngineMomentDetailRecord.safeParse(shape).success).toBe(false);
+      expect(EngineMomentRecord.safeParse({...shape, momentOrder: 1}).success).toBe(false);
+    }
+    expect(EngineMomentRecord.safeParse({...record, momentOrder: 1, authors: undefined, authorPresentations: undefined}).success).toBe(true);
+    // The token names no author: it carries only its group, hue, and self.
+    expect(EngineMomentRecord.parse({...record, momentOrder: 1, authorPresentations: record.authorPresentations!.map(token => ({...token, userId: "ana"}))})
+      .authorPresentations).toEqual(record.authorPresentations);
   });
 
   it("does not reclassify an unknown daemon failure", async () => {
@@ -152,10 +200,49 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
     const agentNamer = vi.fn(names.agent);
     const record = engineMomentDetailForIpc(detail, { ...names, agent: agentNamer });
     expect(record).not.toHaveProperty("agentAuthorName");
-    expect(agentNamer).not.toHaveBeenCalled();
+    // Each author reads on its own; the agent does not stand in for the person.
+    expect(record.authorLabels).toEqual(["You", "Another person"]);
+    expect(agentNamer).toHaveBeenCalledTimes(1);
     expect(record.authors).toEqual(detail.moment.authors);
     expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
   });
+  // A live document's settlement can name one collaborator or one Edit link
+  // by any identifier the relay accepts: up to 512 UTF-8 bytes, here all
+  // quotes, at the largest generation. History keeps it whole.
+  it("keeps a sole shared author with the longest live identifiers", async () => {
+    const id = "\"".repeat(LIVE_UPDATE_IDENTIFIER_MAX_BYTES);
+    for (const [author, field] of [
+      [{kind: "named", userId: id, grantId: id, grantGeneration: Number.MAX_SAFE_INTEGER}, {namedAuthor: {userId: id, label: "ana@example.com (Edit)"}}],
+      [{kind: "link", grantId: id, grantGeneration: Number.MAX_SAFE_INTEGER, principalId: id},
+        {linkAuthor: {kind: "link", grantId: id, grantGeneration: Number.MAX_SAFE_INTEGER, principalId: id}}],
+    ] as const) {
+      const detail = detailWith({before: null, after: textSide("new")});
+      if (detail.protected) throw new Error("Expected a plaintext moment");
+      detail.moment.authors = [author];
+      const shortNames = {...names, named: () => "ana@example.com (Edit)"};
+      const record = engineMomentDetailForIpc(detail, shortNames);
+      expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
+      expect(record).toMatchObject(field);
+      const page = await listEngineMomentsForIpc(async () => ({
+        moments: [{...detail.moment, momentOrder: 1, protected: false}],
+        nextCursor: null, latestMomentOrder: 1, activeVersionId: "main", ...historyPageFields,
+      }), shortNames);
+      if (!("moments" in page)) throw new Error("Expected ready history");
+      expect(page.moments[0]).toMatchObject(field);
+    }
+    // One byte past the live bound is not an identifier the relay accepts.
+    const over = `${"é".repeat(LIVE_UPDATE_IDENTIFIER_MAX_BYTES / 2)}x`;
+    expect(new TextEncoder().encode(over).byteLength).toBe(LIVE_UPDATE_IDENTIFIER_MAX_BYTES + 1);
+    const record = engineMomentDetailForIpc(detailWith({before: null, after: textSide("new")}), names);
+    for (const oversized of [
+      {namedAuthor: {userId: over, label: "ana@example.com (Edit)"}},
+      {linkAuthor: {kind: "link", grantId: over, grantGeneration: 1, principalId: "holder"}},
+      {linkAuthor: {kind: "link", grantId: "grant", grantGeneration: 1, principalId: over}},
+    ]) {
+      expect(EngineMomentDetailRecord.safeParse({...record, ...oversized}).success).toBe(false);
+    }
+  });
+
   it("preserves the public author without invoking the agent name resolver", () => {
     const detail = detailWith({before: textSide("old"), after: textSide("new")});
     if (detail.protected) throw new Error("Expected a plaintext moment");
@@ -180,6 +267,30 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
     detail.moment.authors = [{kind: "automation", automationId: "other:tools/stamp", onBehalfOf: "local", depth: 1}];
     expect(engineMomentDetailForIpc(detail, names)).not.toHaveProperty("automationAuthor");
   });
+  // History shows an automation's name up to this bound, and its id past it.
+  // A Collection's name has the same bound. History names both, alone or
+  // beside an agent.
+  it("names an automation at its longest name and Collection, alone or with another author", async () => {
+    const automation = {name: "n".repeat(AUTOMATION_AUTHOR_TEXT_MAX), collection: "c".repeat(AUTOMATION_AUTHOR_TEXT_MAX)};
+    const label = `${automation.name} in ${automation.collection}`;
+    const automator = {kind: "automation", automationId: "collection:Tasks#stamp", depth: 1} as const;
+    const agent = {kind: "agent", agentId: "writer", agentName: "Writer"} as const;
+    for (const [authors, expected] of [
+      [[automator], {automationAuthor: automation}],
+      [[automator, agent], {authorLabels: [label, "Writer"]}],
+    ] as const) {
+      const detail = detailWith({before: null, after: textSide("new")});
+      if (detail.protected) throw new Error("Expected a plaintext moment");
+      detail.moment.authors = [...authors];
+      const page = await listEngineMomentsForIpc(async () => ({
+        moments: [{...detail.moment, momentOrder: 1, protected: false}],
+        nextCursor: null, latestMomentOrder: 1, activeVersionId: "main", ...historyPageFields,
+      }), {...names, automation: () => automation});
+      if (!("moments" in page)) throw new Error("Expected ready history");
+      expect(page.moments[0]).toMatchObject(expected);
+    }
+    expect(EngineMomentRecord.shape.authorLabels.safeParse([`${label}x`, "Writer"]).success).toBe(false);
+  });
   it("names a person the owner shared with as main reads them from the roster", () => {
     const detail = detailWith({before: textSide("old"), after: textSide("new")});
     if (detail.protected) throw new Error("Expected a plaintext moment");
@@ -194,10 +305,12 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
     const detail = detailWith({before: textSide("old"), after: textSide("new")});
     if (detail.protected) throw new Error("Expected a plaintext moment");
     const author = {kind: "link", publicPrincipalId: "public-holder", label: "Ana"} as const;
+    detail.moment.metadata.origin = "ydoc";
     detail.moment.authors = [author];
     const record = engineMomentDetailForIpc(detail, names);
     expect(record.authors).toEqual([author]);
     expect(record.linkAuthor).toBeUndefined();
+    expect(engineMomentSourceLabel(record)).toBe("Link holder Ana");
     expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
   });
 
@@ -213,6 +326,66 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
     expect(record.agentAuthorName).toBeUndefined();
     expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
     expect(() => EngineMomentDetailRecord.parse({...record, linkAuthor: {...author, userId: "ana"}})).toThrow();
+  });
+  // A hosted agent's live edit settles with the account holder the relay
+  // admitted beside the agent they declared.
+  it("names each author of a live author snapshot as the relay admitted them", async () => {
+    const owner = {kind: "human", humanId: "owner", humanName: "Owner"} as const;
+    for (const [agent, labels] of [
+      [{kind: "agent", agentId: "writer", onBehalfOf: "owner"}, ["Owner", "owner"]],
+      [{kind: "agent", agentId: "writer", agentName: "Writer", onBehalfOf: "owner", depth: 1}, ["Owner", "Writer"]],
+    ] as const) {
+      const detail = detailWith({before: null, after: textSide("new")});
+      if (detail.protected) throw new Error("Expected a plaintext moment");
+      detail.moment.authors = [owner, agent];
+      const person = vi.fn(names.person);
+      const record = engineMomentDetailForIpc(detail, {...names, person});
+      expect(record.authors).toEqual([owner, agent]);
+      expect(record.authorLabels).toEqual(labels);
+      expect(person).not.toHaveBeenCalled();
+      expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
+      const page = await listEngineMomentsForIpc(async () => ({
+        moments: [{...detail.moment, momentOrder: 1, protected: false}],
+        nextCursor: null, latestMomentOrder: 1, activeVersionId: "main", ...historyPageFields,
+      }), names);
+      if (!("moments" in page)) throw new Error("Expected ready history");
+      expect(page.moments[0]).toMatchObject({authors: [owner, agent], authorLabels: labels});
+    }
+  });
+  it("names a sole snapshot author without making a link holder a direct writer", () => {
+    const id = "\"".repeat(LIVE_UPDATE_IDENTIFIER_MAX_BYTES);
+    for (const [author, field] of [
+      [{kind: "human", humanId: "owner", humanName: "Owner"}, {liveAuthorName: "Owner"}],
+      [{kind: "link", publicPrincipalId: "public_1", label: "Anonymous"}, {liveAuthorName: "Link holder Anonymous"}],
+      [{kind: "human", humanId: id, humanName: id}, {liveAuthorName: id}],
+      [{kind: "link", publicPrincipalId: id, label: id}, {liveAuthorName: `Link holder ${id}`}],
+      [{kind: "agent", agentId: "writer", agentName: id}, {agentAuthorName: id}],
+    ] as const) {
+      const detail = detailWith({before: null, after: textSide("new")});
+      if (detail.protected) throw new Error("Expected a plaintext moment");
+      detail.moment.authors = [author];
+      const record = engineMomentDetailForIpc({...detail, moment: {...detail.moment, metadata: {origin: "sync"}}}, names);
+      expect(record).toMatchObject({...field, authors: [author]});
+      expect(record).not.toHaveProperty("linkAuthor");
+      expect(record).not.toHaveProperty("personAuthorName");
+      expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
+    }
+    // Snapshot fields keep the live bound and their exact shape.
+    const over = `${"é".repeat(LIVE_UPDATE_IDENTIFIER_MAX_BYTES / 2)}x`;
+    const record = engineMomentDetailForIpc(detailWith({before: null, after: textSide("new")}), names);
+    const authorPresentations = names.presentations([{kind: "unattributed"}]);
+    expect(EngineMomentDetailRecord.safeParse({...record, authors: [{kind: "human", humanId: "owner", humanName: "Owner"}], authorPresentations}).success).toBe(true);
+    for (const author of [
+      {kind: "human", humanId: "owner", humanName: over},
+      {kind: "human", humanId: over, humanName: "Owner"},
+      {kind: "human", humanId: "owner", humanName: ""},
+      {kind: "human", humanId: "owner", humanName: "Owner", onBehalfOf: "owner"},
+      {kind: "link", publicPrincipalId: "public_1", label: over},
+      {kind: "link", publicPrincipalId: "public_1", label: "Anonymous", grantId: "grant"},
+      {kind: "agent", agentId: "writer", agentName: over},
+    ]) {
+      expect(EngineMomentDetailRecord.safeParse({...record, authors: [author], authorPresentations}).success, JSON.stringify(author)).toBe(false);
+    }
   });
   it("keeps the plain text moment shape (no binary side fields)", () => {
     const record = engineMomentDetailForIpc(
@@ -520,7 +693,7 @@ it("omits only rename summaries from timeline rows and details", async () => {
     detail.moment.metadata.summary = operation === "rename" ? "Renamed private/a.md to notes/a.md" : "Saved latest edits";
     const listed = await listEngineMomentsForIpc(async () => ({
       moments: [{ ...detail.moment, momentOrder: 1, protected: false }],
-      nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
+      nextCursor: null, latestMomentOrder: 1, activeVersionId: "main", ...historyPageFields,
     }), names);
     if (!("moments" in listed)) throw new Error("Expected ready history");
     for (const row of [listed.moments[0], engineMomentDetailForIpc(detail, names)]) {

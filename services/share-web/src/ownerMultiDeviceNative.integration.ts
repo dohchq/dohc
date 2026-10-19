@@ -27,7 +27,7 @@ const validationPolicy = { maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000
 const frames = { receive: { maxFrameBytes: 65536, maxStateVectorBytes: 100000, maxUpdateBytes: 1000000, maxSyncBytes: 2000000 },
   maxQueuedBytes: 2000000, maxQueuedFrames: 64, maxControlBytes: 131072, maxControlFrames: 8, maxAssemblyBytes: 2000000 };
 const browserLimits = { maxPendingRequests: 4, maxRequestBytes: 4096, maxResponseBytes: 8192, timeoutMs: 30000 };
-const routeLimits = { maxConnections: 4, maxConnectionsPerSession: 3, maxConnectionsPerPrincipal: 3, maxConnectionsPerGrant: 4,
+const routeLimits = { maxConnections: 4, maxConnectionsPerWorkspace: 96, reservedOwnerConnections: 0, maxConnectionsPerSession: 3, maxConnectionsPerPrincipal: 3, maxConnectionsPerGrant: 4, maxBufferedBytes: 134217728,
   maxPendingRequests: 4, maxRequestBytes: 4096, maxResponseBytes: 8192, maxPendingBytes: 2000000, maxFragments: 8, maxBufferedChunks: 64,
   upgradeTimeoutMs: 30000, idleTimeoutMs: 60000, drainTimeoutMs: 1000 };
 const exchangeKey = "native-network-exchange-".repeat(2);
@@ -96,7 +96,7 @@ it("preserves and delivers owner drafts across two real native replicas and auth
     const { storage } = deployment;
     expect(storage.claimWorkspace({ workspaceId: "workspace", ownerUserId: ownerUser.id, createdAtMs: 1 })).toBe("created");
     expect(storage.provisionLiveHostControl({ mode: "service", hostId: "service", updatedAtMs: 1, guard: storage.captureStanding() }).ok).toBe(true);
-    active = await startServiceLiveHost({ configPath: serviceConfig, ...deployment, frameChanges });
+    active = await startServiceLiveHost({trustedAccount: (accountId: string) => ({accountId, name: accountId}), configPath: serviceConfig, ...deployment, frameChanges });
     const baseline = Y.encodeStateAsUpdate(ownerDoc), document = { workspaceId: "workspace", mainVersionId: mainVersionId!, objectId: "object", lineageClaimId: hash(baseline) };
     const registration = createLiveMarkdownRegistrationValidator(validationPolicy)({ document, currentPath: "docs/a.md", checkpoint: baseline });
     if (registration.kind !== "accepted") throw new Error(JSON.stringify(registration));
@@ -209,7 +209,7 @@ it("preserves and delivers owner drafts across two real native replicas and auth
         const delivery = startDesktopOwnerDelivery({config: deliveryConfig,
           async runPass(document, signal) {
             const result = await runNativeOwnerDeliveryPass({client, workspaceHandle, document, config: deliveryConfig,
-              signal: AbortSignal.any([lifetime, signal]), bearer, accountId: ownerUser.id, assertCurrent() {expect(storage.unavailable.aborted).toBe(false);}});
+              signal: AbortSignal.any([lifetime, signal]), bearer, accountId: signedIn.user.id, assertCurrent() {expect(storage.unavailable.aborted).toBe(false);}});
             if (result !== "retry") completed(result);
             return result;
           },
@@ -268,7 +268,7 @@ it("preserves and delivers owner drafts across two real native replicas and auth
       return Y.encodeStateAsUpdate(local, before);
     }
     const divergent = append("Owner B offline edit");
-    await second.rpc("ydoc.recordUpdate", {sessionId: editor.sessionId, updateBase64: Buffer.from(divergent).toString("base64")});
+    await second.rpc("ydoc.recordUpdate", {sessionId: editor.sessionId, updateBase64: Buffer.from(divergent).toString("base64"), expectedLineageClaimId: editor.lineageClaimId});
     const captured = await second.client.ownerYDocPrepareEnrollment(second.request(), target);
     if (captured.status !== "capture") throw new Error("Fresh replica was already enrolled.");
     // No delivery runs yet. A restart must preserve the exact unenrolled local state.

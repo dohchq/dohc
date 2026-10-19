@@ -65,9 +65,10 @@ describe('receipt split', () => {
 
 describe('download architecture', () => {
   it.each([
-    [undefined, 'mac', 'https://github.com/dohc-ai/dohc/releases', false],
+    [undefined, 'mac', 'https://github.com/dohchq/dohc/releases', false],
     ['arm', 'mac-arm64', 'https://example.com/arm64.dmg', true],
-    ['x86', 'mac-x64', 'https://example.com/x64.dmg', true],
+    // dohc ships no Intel build, so an Intel Mac gets no preferred download.
+    ['x86', 'mac', 'https://github.com/dohchq/dohc/releases', false],
   ])('uses only positively reported Mac architecture (%s)', async (architecture, key, href, preferred) => {
     vi.stubGlobal('navigator', {
       userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
@@ -77,7 +78,7 @@ describe('download architecture', () => {
     await mount('#downloads');
     const card = document.querySelector(`[data-download-card="${key}"]`);
     expect(fetch).not.toHaveBeenCalled();
-    expect(card.href).toBe('https://github.com/dohc-ai/dohc/releases');
+    expect(card.href).toBe('https://github.com/dohchq/dohc/releases');
     card.dispatchEvent(new Event('pointerenter'));
     if (preferred) await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
     else expect(fetch).not.toHaveBeenCalled();
@@ -113,7 +114,7 @@ it('keeps a usable releases link when fresh asset resolution fails', async () =>
   vi.mocked(fetch).mockRejectedValue(new Error('offline'));
   await mount('#downloads');
   document.querySelector('[data-download-card="windows-x64"]').click();
-  await vi.waitFor(() => expect(navigate).toHaveBeenCalledWith('https://github.com/dohc-ai/dohc/releases'));
+  await vi.waitFor(() => expect(navigate).toHaveBeenCalledWith('https://github.com/dohchq/dohc/releases'));
   expect(document.querySelector('[aria-busy="true"]')).toBeNull();
   expect(document.querySelector('.download-card-action').textContent.trim()).toBe('Download');
 });
@@ -155,7 +156,7 @@ it('opens unknown-architecture Mac releases immediately without an asset request
   await mount('#downloads');
   const card = document.querySelector('[data-download-card="mac"]');
   card.click();
-  expect(navigate).toHaveBeenCalledWith('https://github.com/dohc-ai/dohc/releases');
+  expect(navigate).toHaveBeenCalledWith('https://github.com/dohchq/dohc/releases');
   expect(fetch).not.toHaveBeenCalled();
   expect(card.hasAttribute('aria-busy')).toBe(false);
 });

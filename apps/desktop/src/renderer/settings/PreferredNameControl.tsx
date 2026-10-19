@@ -1,13 +1,18 @@
 import { useEffect, useState, type KeyboardEvent } from "react";
+import { isComposingKey } from "../ui/keys";
 import {
   MAX_PREFERRED_NAME_LENGTH,
   preferredNameFromInput,
 } from "@dohc/workspace-contracts/chat-identity-values";
+import type { ActorPresentation } from "../../ipc/bridgeContract";
+import { ChatAvatar } from "../workbench/ChatAvatar";
+import { ownPresentation } from "../workbench/actorPresentation";
 
 export function PreferredNameControl(props: {
   value?: string;
   onChange: (preferredName: string | undefined) => Promise<void>;
   testIdPrefix?: string;
+  presentation?: ActorPresentation;
 }) {
   const prefix = props.testIdPrefix ?? "preferred-name";
   const [draft, setDraft] = useState(props.value ?? "");
@@ -45,6 +50,7 @@ export function PreferredNameControl(props: {
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (isComposingKey(event)) return;
     if (event.key === "Enter") event.currentTarget.blur();
     if (event.key === "Escape") {
       event.preventDefault();
@@ -55,7 +61,7 @@ export function PreferredNameControl(props: {
   };
 
   return (
-    <div className="flex min-w-[230px] flex-col gap-1.5">
+    <div className="flex w-[260px] flex-col gap-2">
       <input
         type="text"
         aria-label="Your name"
@@ -68,10 +74,15 @@ export function PreferredNameControl(props: {
         onChange={(event) => setDraft(event.currentTarget.value)}
         onBlur={() => void commit()}
         onKeyDown={onKeyDown}
-        className="h-8 w-full rounded-md border border-line bg-bg px-2.5 text-[12px] text-ink placeholder:text-subtle focus:border-ink disabled:opacity-60"
+        className="h-8 w-full rounded-md border border-line bg-bg px-2.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink disabled:opacity-60"
       />
-      <span data-testid={`${prefix}-preview`} className="text-[10px] text-subtle">
-        Your messages appear as <span className="font-medium text-ink">{preview}</span>.
+      {/* Your next chat message, as chat will draw it. */}
+      <span data-testid={`${prefix}-preview`} className="flex min-w-0 items-center gap-2 px-0.5">
+        <ChatAvatar presentation={props.presentation ?? ownPresentation} name={preview} kind="human" size="strip" />
+        <span className="sr-only">Your messages appear as</span>
+        <span className="min-w-0 truncate text-[12px] font-medium text-ink">{preview}</span>
+        <span aria-hidden className="h-1.5 w-[84px] shrink-0 rounded-sm bg-line" />
+        <span aria-hidden className="h-1.5 w-10 shrink-0 rounded-sm bg-line" />
       </span>
       {error ? (
         <span data-testid={`${prefix}-error`} role="alert" className="text-[10px] text-danger">

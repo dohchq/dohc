@@ -1,4 +1,4 @@
-import { desktopPins, chatsPanelTabPin } from "../src/testPins";
+import { activityPin } from "../src/testPins";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { join } from "node:path";
 import { seedThroughDaemon } from "./helpers/daemonSeed";
@@ -10,7 +10,8 @@ import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
   explorerRow,
-  openFileChatsPanel,
+  openAboutPanel,
+  openChatsView,
   openWorkspaceFromFirstRun,
   seedCloudCredentials,
   seedWorkspaceManifest,
@@ -22,13 +23,6 @@ import {
 
 const messageCount = 300;
 const author = { kind: "human" as const, displayName: "Reader" };
-
-async function openChats(page: Page): Promise<Locator> {
-  const panel = page.getByTestId(desktopPins.chatsPanel);
-  if (!(await panel.isVisible())) await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
-  await panel.getByTestId(chatsPanelTabPin("all")).click();
-  return panel;
-}
 
 function timeline(root: Locator): Locator {
   return root.locator('[role="list"][data-chat-virtualized="true"]');
@@ -76,10 +70,11 @@ test("chat lane keeps history, follows within 40px, and retains focused rows", a
       await chats.createChannel({ workspaceId, name: "Empty chat", type: "chat" });
       const channel = await chats.createChannel({ workspaceId, name: "Long chat", type: "chat" });
       const { thread, message } = await chats.startChannelThread({
+        authorActorKey: null,
         workspaceId, channelId: channel.id, lane: "chat", author, body: "Lane message 0",
       });
       for (let index = 1; index < messageCount; index += 1) {
-        await chats.sendMessage({ workspaceId, threadId: thread.id, author, body: `Lane message ${index}` });
+        await chats.sendMessage({ authorActorKey: null, workspaceId, threadId: thread.id, author, body: `Lane message ${index}` });
       }
       return { threadId: thread.id, firstMessageId: message.id };
     });
@@ -87,7 +82,7 @@ test("chat lane keeps history, follows within 40px, and retains focused rows", a
     await openWorkspaceFromFirstRun(desktop.page, temp);
     const page = desktop.page;
     await waitForCliEndpoint(temp.homeDir);
-    const panel = await openChats(page);
+    const panel = await openChatsView(page);
 
     await panel.getByTestId("chats-channel").filter({ hasText: "Empty chat" }).click();
     const lane = page.getByTestId("chats-lane");
@@ -169,9 +164,9 @@ test("a file linked mention reveals an unmounted historical message", async () =
       await files.ensureMainVersion({ workspaceId });
       const file = await files.writeTextFile({ workspaceId, versionId: "main", path: "topic.md", text: "# Topic\n", metadata: { origin: "local-file" } });
       const thread = await chats.createThread({ workspaceId, title: "Long file conversation", linkedFile: { objectId: file.object.id, pathHint: "topic.md" } });
-      const first = await chats.sendMessage({ workspaceId, threadId: thread.id, author, body: "heliotrope historical target @[topic.md]", attachments: [{ objectId: file.object.id, pathHint: "topic.md" }] });
+      const first = await chats.sendMessage({ authorActorKey: null, workspaceId, threadId: thread.id, author, body: "heliotrope historical target @[topic.md]", attachments: [{ objectId: file.object.id, pathHint: "topic.md" }] });
       for (let index = 1; index < messageCount; index += 1) {
-        await chats.sendMessage({ workspaceId, threadId: thread.id, author, body: `File message ${index}` });
+        await chats.sendMessage({ authorActorKey: null, workspaceId, threadId: thread.id, author, body: `File message ${index}` });
       }
       return first.id;
     });
@@ -180,7 +175,7 @@ test("a file linked mention reveals an unmounted historical message", async () =
     const page = desktop.page;
     await waitForWorkspaceFile(page, workspaceId, "topic.md");
     await explorerRow(page, "topic.md").click();
-    await openFileChatsPanel(page);
+    await openAboutPanel(page);
     await page.getByTestId("linked-chat-open").click();
     const rail = page.getByTestId("linked-chat-thread");
     await expectWindowed(rail, "linked-chat", `File message ${messageCount - 1}`);
@@ -213,22 +208,23 @@ test("a file linked mention opens the exact unmounted DM message", async () => {
       await files.ensureMainVersion({ workspaceId });
       const file = await files.writeTextFile({ workspaceId, versionId: "main", path: "topic.md", text: "# Topic\n", metadata: { origin: "local-file" } });
       const channel = await chats.createChannel({ workspaceId, name: "reader@dohc.test", kind: "dm" });
-      const { thread, message } = await chats.startChannelThread({ workspaceId, channelId: channel.id, author, body: "azimuth historical target @[topic.md]", attachments: [{ objectId: file.object.id, pathHint: "topic.md" }] });
+      const { thread, message } = await chats.startChannelThread({ authorActorKey: null, workspaceId, channelId: channel.id, author, body: "azimuth historical target @[topic.md]", attachments: [{ objectId: file.object.id, pathHint: "topic.md" }] });
       for (let index = 1; index < messageCount; index += 1) {
-        await chats.sendMessage({ workspaceId, threadId: thread.id, author, body: `Direct message ${index}` });
+        await chats.sendMessage({ authorActorKey: null, workspaceId, threadId: thread.id, author, body: `Direct message ${index}` });
       }
       return message.id;
     });
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);
     const page = desktop.page;
-    const panel = await openChats(page);
+    const panel = await openChatsView(page);
     await panel.getByTestId("chats-dm-item").filter({ hasText: "reader@dohc.test" }).click();
     const dm = page.getByTestId("chats-dm-view");
     await expectWindowed(dm, "chats-dm", `Direct message ${messageCount - 1}`);
     await expect(dm.locator(`[data-message-id="${firstMessageId}"]`)).toHaveCount(0);
 
     await waitForWorkspaceFile(page, workspaceId, "topic.md");
+    await page.getByTestId(activityPin("explorer")).click();
     await explorerRow(page, "topic.md").click();
     await page.getByTestId("chat-file-mention").filter({ hasText: "reader@dohc.test" }).click();
     await expect(page.getByTestId("chats-dm-view").locator(`[data-message-id="${firstMessageId}"]`)).toBeInViewport();

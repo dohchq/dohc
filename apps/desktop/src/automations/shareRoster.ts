@@ -1,4 +1,4 @@
-import type { RegistryEntry } from "../workspaces/registryStore";
+import type { RegistryEntry, ShareViewIdentity } from "../workspaces/registryStore";
 import type { SyncHistory } from "../workspaces/syncHistory";
 import type { ReachRoster } from "@dohc/automation-executor/automation-reach";
 import {
@@ -8,6 +8,7 @@ import {
   type ListedGrant,
   type RosterAnswer,
   type RosterListing,
+  type HistoryAccount,
 } from "@dohc/automation-executor/roster-listing";
 
 // The share roster: the grants the owner gave on one workspace, as the relay
@@ -58,23 +59,24 @@ export function reachRosterFor(input: {
 }): ReachRoster {
   const { entry } = input;
   if (entry.shareView) return { kind: "shared-view" };
+  const remote = entry.remote ?? entry.pausedRemote;
   // A workspace that synced keeps its grants on the relay even after it is
   // forgotten and attached again, which drops its server connection from the
   // registry. With no connection dohc cannot list them, so who can edit it
   // is unknown until it syncs again. A record dohc cannot read may say it
   // synced, so it counts the same. Only a folder with no record, as one made
   // before dohc kept it, or one that says it never synced, is its owner's.
-  if (!entry.remote && (input.history === "synced" || input.history === "unknown")) {
+  if (!remote && (input.history === "synced" || input.history === "unknown")) {
     return { kind: "unknown", problem: { kind: "unchecked", next: SYNC_AGAIN } };
   }
   // Only this computer's person can edit a workspace that does not sync, even
   // with no account signed in.
-  if (!entry.remote) {
+  if (!remote) {
     const local = input.localPersonId === null ? {} : { localPersonId: input.localPersonId };
     return { kind: "owner", ownerUserId: input.localUserId, grants: [], ...local };
   }
   // The registry is a file on disk. A copy it cannot read is unchecked, not empty.
-  return ownerRoster(entry.remote.ownerUserId, input.latest ?? entry.shareRoster, input.next);
+  return ownerRoster(remote.ownerUserId, input.latest ?? entry.shareRoster, input.next);
 }
 
 interface RosterState {
@@ -202,7 +204,8 @@ export function createShareRosters(dependencies: {
 
   async function listOnce(workspaceId: string, state: RosterState): Promise<void> {
     const workspace = dependencies.findWorkspace(workspaceId);
-    if (!workspace?.remote || workspace.shareView) return;
+    const remote = workspace?.remote ?? workspace?.pausedRemote;
+    if (!workspace || !remote || workspace.shareView) return;
     state.lastAttemptMs = nowMs();
     const listedAtMs = wallNowMs();
     const capturedContext = context(workspaceId);
@@ -219,9 +222,10 @@ export function createShareRosters(dependencies: {
       answer = UNUSABLE_ROSTER;
     }
     const current = dependencies.findWorkspace(workspaceId);
+    const currentRemote = current?.remote ?? current?.pausedRemote;
     if (state.retired || context(workspaceId) !== capturedContext || !current ||
-        current.rootPath !== workspace.rootPath || current.remote?.ownerUserId !== workspace.remote.ownerUserId ||
-        current.remote?.serverUrl !== workspace.remote.serverUrl) return;
+        current.rootPath !== workspace.rootPath || currentRemote?.ownerUserId !== remote.ownerUserId ||
+        currentRemote?.serverUrl !== remote.serverUrl) return;
     if (answer.kind === "unanswered") {
       state.invalidated = true;
       state.noAnswer = { next: answer.next, partial: (state.noAnswer?.partial ?? false) || answer.partial };
@@ -294,19 +298,19 @@ export function createShareRosters(dependencies: {
     if (state.unsaved && state.unsaved.context !== context(workspaceId)) state.unsaved = null;
     if (!entry) return { kind: "unknown", problem: { kind: "unchecked", next: "Open this workspace, then try again." } };
     const noAnswer = state.noAnswer;
-    if (entry.remote && !entry.shareView && (overlapped || stale(workspaceId, state))) {
-      const next = state.markFailed
-        ? "Check that your disk has free space, then try again."
-        : noAnswer?.next ?? "Try again in a moment.";
-      return { kind: "unknown", problem: { kind: "unchecked", next } };
+    const remote = entry.remote ?? entry.pausedRemote;
+    const next = noAnswer?.next ?? (entry.pausedRemote ? "Turn sync on in Settings → Sync and sharing, then try again." : "Try again in a moment.");
+    if (remote && !entry.shareView && (overlapped || stale(workspaceId, state))) {
+      return { kind: "unknown", problem: { kind: "unchecked", next: state.markFailed
+        ? "Check that your disk has free space, then try again." : next } };
     }
     return reachRosterFor({
       entry,
-      localUserId: entry.remote ? null : await dependencies.localUserId(),
-      localPersonId: entry.remote ? null : await dependencies.localPersonId(entry),
-      history: entry.remote ? null : await dependencies.syncHistory(entry),
+      localUserId: remote ? null : await dependencies.localUserId(),
+      localPersonId: remote ? null : await dependencies.localPersonId(entry),
+      history: remote ? null : await dependencies.syncHistory(entry),
       latest: state.unsaved?.listing ?? null,
-      next: noAnswer?.next ?? "Try again in a moment.",
+      next,
     });
   }
 
@@ -445,8 +449,102 @@ export function rosterAuthorLabel(
 /** A Button presser's name, including people whose grants have ended. */
 export function rosterPersonLabel(listing: RosterListing | null, userId: string): string {
   if (listing === null || listing.grants === null) return "Someone you shared with";
-  const email = [...listing.grants, ...listing.formerGrants.map((former) => former.grant), ...listing.endedGrants].find(
+  const grant = [...listing.grants, ...listing.formerGrants.map((former) => former.grant), ...listing.endedGrants].find(
     (candidate) => candidate.recipientUserId === userId && candidate.recipientEmail !== null,
-  )?.recipientEmail;
-  return email ?? "Someone you shared with";
+  );
+  if (!grant?.recipientEmail) return "Someone you shared with";
+  return grant.recipientEmail;
+}
+
+/** History's window-lifetime cache. Reads never wait for account lookups. */
+export function createHistoryLabels(dependencies: {
+  snapshot(workspaceId: string): { roster: RosterListing | null; owner: boolean; context: unknown; inventory: unknown;
+    shareView?: Pick<ShareViewIdentity, "granterUserId" | "sharerName" | "granterEmail"> };
+  lookupAccounts(workspaceId: string, ids: { grantIds: string[]; userIds: string[] }): Promise<HistoryAccount[] | null>;
+  ready?(workspaceId: string): void;
+  nowMs?(): number;
+}) {
+  type Snapshot = ReturnType<typeof dependencies.snapshot>;
+  type Cache = { snapshot: Snapshot; grants: Map<string, HistoryAccount>; people: Map<string, HistoryAccount>;
+    asked: Set<string>; pending: Map<string, { userId: string; grantId?: string }>; running: boolean; retryAt: number };
+  const caches = new Map<string, Cache>();
+  const now = dependencies.nowMs ?? (() => performance.now());
+  const key = (person: { userId: string; grantId?: string }) => person.grantId === undefined ? `user:${person.userId}` : `grant:${person.grantId}`;
+  const same = (left: Snapshot, right: Snapshot) => left.context === right.context && left.inventory === right.inventory;
+  const current = (workspaceId: string, snapshot: Snapshot) => {
+    const cache = caches.get(workspaceId);
+    return cache && same(cache.snapshot, snapshot) ? cache : undefined;
+  };
+  const live = (workspaceId: string, cache: Cache) => caches.get(workspaceId) === cache && same(cache.snapshot, dependencies.snapshot(workspaceId)) && dependencies.snapshot(workspaceId).owner;
+  function cachedLabel(workspaceId: string, userId: string, grantId?: string): string {
+    const snapshot = dependencies.snapshot(workspaceId);
+    const cache = snapshot.owner ? current(workspaceId, snapshot) : undefined;
+    const account = grantId === undefined ? cache?.people.get(userId) : cache?.grants.get(grantId);
+    return account?.recipientUserId === userId && account.recipientEmail
+      ? `${account.recipientEmail} (via share link)` : "Someone you shared with";
+  }
+  function schedule(workspaceId: string, target: Cache): void {
+    if (target.running || target.pending.size === 0 || now() < target.retryAt) return;
+    target.running = true;
+    // Let the IPC read answer and release its workspace lease before starting I/O.
+    setImmediate(() => { void (async () => {
+      if (!live(workspaceId, target)) return;
+      const batch = [...target.pending.entries()].slice(0, 200);
+      for (const [id] of batch) { target.pending.delete(id); target.asked.add(id); }
+      let accounts: HistoryAccount[] | null;
+      try { accounts = await dependencies.lookupAccounts(workspaceId, {
+        grantIds: batch.flatMap(([, person]) => person.grantId === undefined ? [] : [person.grantId]),
+        userIds: batch.flatMap(([, person]) => person.grantId === undefined ? [person.userId] : []),
+      }); } catch { accounts = null; }
+      if (!live(workspaceId, target)) return;
+      if (accounts === null) { for (const [id] of batch) target.asked.delete(id); target.retryAt = now() + 60_000; target.pending.clear(); return; }
+      for (const [id] of batch) target.asked.add(id);
+      for (const account of accounts) {
+        target.grants.set(account.grantId, account);
+        if (!target.people.has(account.recipientUserId)) target.people.set(account.recipientUserId, account);
+      }
+      if (accounts.some(account => account.recipientEmail)) dependencies.ready?.(workspaceId);
+    })().finally(() => {
+      target.running = false;
+      if (live(workspaceId, target)) schedule(workspaceId, target);
+    }); });
+  }
+  return {
+    invalidate(workspaceId: string | null): void {
+      if (workspaceId === null) caches.clear(); else caches.delete(workspaceId);
+    },
+    prepare(workspaceId: string, principals: readonly { userId: string; grantId?: string }[]): void {
+      const snapshot = dependencies.snapshot(workspaceId);
+      if (!snapshot.owner) return;
+      let cache = current(workspaceId, snapshot);
+      if (cache && now() < cache.retryAt) return;
+      const missing = principals.filter(person => !cache?.asked.has(key(person)) && !(person.grantId === undefined ? cache?.people.has(person.userId) : cache?.grants.has(person.grantId)) && (person.grantId === undefined
+        ? rosterPersonLabel(snapshot.roster, person.userId) : rosterAuthorLabel(snapshot.roster, { userId: person.userId, grantId: person.grantId })) === "Someone you shared with");
+      if (missing.length === 0) return;
+      if (!cache) {
+        cache = { snapshot, grants: new Map(), people: new Map(), asked: new Set(), pending: new Map(), running: false, retryAt: 0 };
+        caches.set(workspaceId, cache);
+      }
+      if (now() < cache.retryAt) return;
+      for (const person of missing) {
+        const id = key(person);
+        if (!cache.asked.has(id) && (person.grantId === undefined ? !cache.people.has(person.userId) : !cache.grants.has(person.grantId))) cache.pending.set(id, person);
+      }
+      schedule(workspaceId, cache);
+    },
+    author(workspaceId: string, author: { userId: string; grantId: string }): string {
+      const known = rosterAuthorLabel(dependencies.snapshot(workspaceId).roster, author);
+      return known !== "Someone you shared with" ? known : cachedLabel(workspaceId, author.userId, author.grantId);
+    },
+    person(workspaceId: string, userId: string): string {
+      const snapshot = dependencies.snapshot(workspaceId);
+      const share = snapshot.shareView;
+      if (share?.granterUserId && share.granterUserId === userId) {
+        const label = share.sharerName || share.granterEmail;
+        if (label) return label;
+      }
+      const known = rosterPersonLabel(snapshot.roster, userId);
+      return known !== "Someone you shared with" ? known : cachedLabel(workspaceId, userId);
+    },
+  };
 }

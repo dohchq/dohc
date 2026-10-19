@@ -1,9 +1,10 @@
+import { isWorkspaceVisibilityPolicyPath } from "../ipc/bridgeContract";
 import {
   deriveSyncStatus,
   type WatcherEvent,
 } from "@dohc/workspace-core";
 import type { EngineStoreRefusal } from "@dohc/workspace-engine-client";
-import type { SyncStatusResult } from "../ipc/bridgeContract";
+import type { AgentRunStateEvent, SyncStatusResult } from "../ipc/bridgeContract";
 import type { CloudSyncEngine } from "./relaySyncEngine";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import type {
@@ -36,7 +37,7 @@ interface WatchedWorkspace {
   // True when building the recorder threw: the cause is a failure,
   // not a capability, and the notice states which.
   historyRecordingUnavailable: boolean;
-  fileObservationUnavailable: boolean;
+  fileObservationFailure: NonNullable<SyncStatusResult["fileObservationFailure"]> | null;
   // True when this workspace is a shared view: no recorder by design.
   // Same rule as above — the cause travels with the decision so no consumer
   // has to guess it.
@@ -52,9 +53,7 @@ interface WatchedWorkspace {
   atomicPlacementUnavailable: boolean;
   recoveryUnavailable: boolean;
   keptFiles: readonly (readonly [string, string])[];
-  // The agent run whose writes this workspace's settled batches attribute to
-  // right now; null when the local user is editing. AgentIntegration sets it.
-  agentRun: ActiveAgentRun | null;
+  heldFiles: NonNullable<SyncStatusResult["heldFiles"]>;
 }
 
 /**
@@ -67,16 +66,20 @@ interface WatchedWorkspace {
  */
 export class WorkspaceActivityState {
   entry: WatchedWorkspace | null = null;
+  // The run outlives capture when stopping sync restarts local activity.
+  agentRun: { workspace: ActivityWorkspace; run: ActiveAgentRun } | null = null;
   preservedStatus: SyncStatusResult | null = null;
   liveSessionsGeneration = 0;
 }
 
 export interface WorkspaceActivityOptions {
+  onHeldFiles?: (workspaceId: string, files: NonNullable<SyncStatusResult["heldFiles"]>) => void;
   observationFor: (workspace: ActivityWorkspace, callbacks: WorkspaceObservationCallbacks) => WorkspaceObservationHandle;
   onObservationResync?: (workspace: ActivityWorkspace) => Promise<void>;
   // Live facts main owns: whether this workspace has cloud sync enabled
   // (registry remote identity) and whether a cloud session exists right now.
   cloudStateFor?: (workspaceId: string) => { enabled: boolean; connected: boolean;
+    syncPause?: SyncStatusResult["syncPause"];
   };
   // Builds a sync engine for a workspace when it is enabled and connected;
   // null keeps the workspace local-only. Called on open and on enableCloud.
@@ -102,6 +105,13 @@ export interface WorkspaceActivityOptions {
     workspace: ActivityWorkspace,
     events: readonly WatcherEvent[],
   ) => void;
+  // Whether this computer's agent is running changed in one workspace.
+  onAgentRunState?: (event: AgentRunStateEvent) => void;
+}
+
+// A local agent run is any run holding the slot except the runner self-test.
+function isAgentAtWork(run: ActiveAgentRun | null): boolean {
+  return run !== null && run.dispatch !== "self-test";
 }
 
 // What the open-time gate decided: the recorder, and why there is none.
@@ -126,6 +136,7 @@ export interface WorkspaceCaptureHooks {
   onAtomicPlacementUnavailable: () => void;
   onRecoveryUnavailable: (unavailable: boolean) => void;
   onKeptFiles: (paths: readonly (readonly [string, string])[]) => void;
+  onHeldFiles: (files: NonNullable<SyncStatusResult["heldFiles"]>) => void;
 }
 
 export async function closeWorkspaceActivityAndRelay(options: {
@@ -161,19 +172,63 @@ export function createWorkspaceActivity(
   notify: (scope?: WorkspaceActivityScope) => void,
   options: WorkspaceActivityOptions,
 ) {
+  // Rises on every run state change, in any workspace.
+  let agentRunRevision = 0;
+
+  // The run state is read from the live slot only, never from stored runs.
+  function agentRunState(
+    workspace: Pick<ActivityWorkspace, "workspaceId">,
+    state: WorkspaceActivityState,
+  ): AgentRunStateEvent {
+    return {
+      workspaceId: workspace.workspaceId,
+      revision: agentRunRevision,
+      active: isAgentAtWork(state.agentRun?.run ?? null),
+    };
+  }
+
+  function publishAgentRunState(workspaceId: string, active: boolean): void {
+    agentRunRevision += 1;
+    options.onAgentRunState?.({ workspaceId, revision: agentRunRevision, active });
+  }
+
+  // Every slot write goes through here, so each change pushes once.
+  function assignAgentRun(
+    state: WorkspaceActivityState,
+    workspace: ActivityWorkspace,
+    run: ActiveAgentRun | null,
+  ): void {
+    const was = isAgentAtWork(state.agentRun?.run ?? null);
+    state.agentRun = run ? { workspace, run } : null;
+    const active = isAgentAtWork(run);
+    if (active !== was) {
+      publishAgentRunState(workspace.workspaceId, active);
+    }
+  }
+
+  // Empties the slot only while it still holds this run.
+  function releaseAgentRun(
+    state: WorkspaceActivityState,
+    workspace: ActivityWorkspace,
+    agentRunId: string,
+  ): void {
+    if (state.agentRun?.run.agentRunId === agentRunId) assignAgentRun(state, workspace, null);
+  }
+
   function statusFor(
     workspace: ActivityWorkspace,
     state: WorkspaceActivityState,
   ): SyncStatusResult {
     const { workspaceId } = workspace;
     const liveSessionsGeneration = state.liveSessionsGeneration;
-    const preserved = state.preservedStatus;
-    if (preserved) return { ...preserved, liveSessionsGeneration };
-    const w = state.entry;
     const cloud = options.cloudStateFor?.(workspaceId) ?? {
       enabled: false,
       connected: false,
     };
+    const syncPause = cloud.syncPause;
+    const preserved = state.preservedStatus;
+    if (preserved) return { ...preserved, syncPause, liveSessionsGeneration };
+    const w = state.entry;
     const snap = w?.engine?.snapshot();
     const conflictCount = snap?.conflictCount ?? 0;
     const status = deriveSyncStatus({
@@ -197,14 +252,17 @@ export function createWorkspaceActivity(
     const historyCaptureDetail = w?.historyCaptureDetail ?? null;
     const baseStatus = {
       ...status,
+      ...(syncPause ? { syncPause } : {}),
       conflictCount,
       ...(snap?.claimingIdentity ? { claimingIdentity: true } : {}),
       ...(snap?.updateRequired ? { updateRequired: snap.updateRequired } : {}),
-      historyRecordingUnavailable: (w?.historyRecordingUnavailable ?? false) || (w?.fileObservationUnavailable ?? false),
+      historyRecordingUnavailable: w?.historyRecordingUnavailable ?? false,
+      ...(w?.fileObservationFailure ? { fileObservationFailure: w.fileObservationFailure } : {}),
       historyShareView: w?.historyShareView ?? false,
       atomicPlacementUnavailable: w?.atomicPlacementUnavailable ?? false,
       recoveryUnavailable: w?.recoveryUnavailable ?? false,
       keptFiles: (w?.keptFiles ?? []).map(([original, copy]): [string, string] => [original, copy]),
+      heldFiles: w?.heldFiles ?? [],
       sharingDeclined: snap?.sharingDeclined ?? [],
       ownerAdmissionPending: snap?.ownerAdmissionPending ?? [],
       ...(snap?.syncFailure ? { syncFailure: snap.syncFailure } : {}),
@@ -276,7 +334,8 @@ export function createWorkspaceActivity(
     state: WorkspaceActivityState,
   ): Promise<SyncStatusResult> {
     const current = state.entry;
-    if (current && current.workspace.rootPath !== workspace.rootPath) {
+    const rootPath = current?.workspace.rootPath ?? state.agentRun?.workspace.rootPath;
+    if (rootPath !== undefined && rootPath !== workspace.rootPath) {
       throw new Error(
         "Workspace activity was replaced by another physical root.",
       );
@@ -286,18 +345,18 @@ export function createWorkspaceActivity(
         workspace,
         inFlight: false,
         lastSyncedAtMs: null,
-        handle: { stop: async () => {}, ready: Promise.resolve(), pulledPaths: async () => {}, pullStarting: () => {}, pullFinished: () => {} },
+        handle: { stop: async () => {}, ready: Promise.resolve(), pulledPaths: async () => {}, pullStarting: () => {}, pullFinished: () => {}, retry: async () => {} },
         engine: null,
         capture: null,
         historyRecordingUnavailable: false,
-        fileObservationUnavailable: false,
+        fileObservationFailure: null,
         historyShareView: false,
         historyCaptureFailure: null,
         historyCaptureDetail: null,
         atomicPlacementUnavailable: false,
         recoveryUnavailable: false,
         keptFiles: [],
-        agentRun: null,
+        heldFiles: [],
       };
       state.entry = entry;
       // Resolve the engine capture before the watcher starts, so the mode is
@@ -321,6 +380,10 @@ export function createWorkspaceActivity(
                 entry.keptFiles = [...paths];
                 notify({ workspaceId: workspace.workspaceId });
               },
+              onHeldFiles: (files) => {
+                if (state.entry !== entry) return;
+                recordHeldFiles(workspace, state, files);
+              },
             });
           // stopAll may have raced the capture build; stop the capture no
           // one will ever own instead of leaking its chain/store handle.
@@ -330,6 +393,9 @@ export function createWorkspaceActivity(
           }
           entry.capture = decision.capture;
           entry.historyShareView = decision.shareView;
+          if (state.agentRun) {
+            await entry.capture?.setActiveAgentRun(state.agentRun.run);
+          }
         } catch (error) {
           console.error(
             `[desktop] workspace engine capture unavailable for ${workspace.rootPath}:`,
@@ -338,6 +404,11 @@ export function createWorkspaceActivity(
           // The error itself stays in the log: it is developer-facing, and
           // the notice owes the user a state and a next step, not a stack.
           entry.historyRecordingUnavailable = true;
+          const capture = entry.capture;
+          entry.capture = null;
+          await capture?.stop().catch(error => {
+            console.error("[desktop] failed to stop unavailable workspace capture:", error);
+          });
         }
       }
       // stopAll may have raced the capture build; do not start a watcher no
@@ -348,12 +419,13 @@ export function createWorkspaceActivity(
       entry.handle = options.observationFor(workspace, {
         facts(facts) {
           if (state.entry !== entry && state.entry !== null) return;
-          const events: WatcherEvent[] = facts.map(fact => ({ path: fact.path,
+          // Policy metadata refreshes names, not capture, automations or app discovery.
+          const events: WatcherEvent[] = facts.filter(fact => !isWorkspaceVisibilityPolicyPath(fact.path, process.platform)).map(fact => ({ path: fact.path,
             operation: fact.kind === "disappeared" ? "delete" : "update" }));
           // Deletion suppression happens before any queued work or close.
-          entry.capture?.observeFileEvents(events);
+          if (events.length) entry.capture?.observeFileEvents(events);
           if (state.entry !== entry) return;
-          options.onWatcherBatch?.(workspace, events);
+          if (events.length) options.onWatcherBatch?.(workspace, events);
           notify({ workspaceId: workspace.workspaceId, paths: facts.map(fact => fact.path),
             pathSetChanged: facts.some(fact => fact.kind !== "changed") });
         },
@@ -370,15 +442,16 @@ export function createWorkspaceActivity(
           entry.inFlight = false;
           entry.lastSyncedAtMs = Date.now();
           entry.engine?.queueSync();
+          entry.engine?.queueWatchedUpload();
           notify({ workspaceId: workspace.workspaceId, paths, pathSetChanged: false });
         },
         pulled(paths) {
           if (state.entry !== entry) return;
           options.onWatcherBatch?.(workspace, paths.map(path => ({ path, operation: "update" })));
         },
-        degraded(unavailable) {
-          if (state.entry !== entry || entry.fileObservationUnavailable === unavailable) return;
-          entry.fileObservationUnavailable = unavailable;
+        degraded(reason) {
+          if (state.entry !== entry || entry.fileObservationFailure === reason) return;
+          entry.fileObservationFailure = reason;
           notify({ workspaceId: workspace.workspaceId });
         },
       });
@@ -396,8 +469,6 @@ export function createWorkspaceActivity(
           entry.handle.ready,
           new Promise<void>(resolve => {
             readyTimer = setTimeout(() => {
-              entry.fileObservationUnavailable = true;
-              notify({ workspaceId: workspace.workspaceId });
               resolve();
             }, 5_000);
           }),
@@ -448,19 +519,46 @@ export function createWorkspaceActivity(
     notify({ workspaceId: workspace.workspaceId });
   }
 
+  async function prepareSyncPause(
+    workspace: ActivityWorkspace,
+    state: WorkspaceActivityState,
+  ): Promise<() => void> {
+    const entry = state.entry;
+    if (!entry) throw new Error("This workspace is not open. Open it and try again.");
+    let resumeAdmission: (() => void) | undefined;
+    try {
+      resumeAdmission = await entry.capture?.settleAndCloseLiveSessionsForSyncPause();
+      await entry.engine?.stop();
+      entry.engine = null;
+      return resumeAdmission ?? (() => {});
+    } catch (error) {
+      resumeAdmission?.();
+      throw error;
+    } finally {
+      state.liveSessionsGeneration += 1;
+      notify({ workspaceId: workspace.workspaceId });
+    }
+  }
+
   // Failed-join rollback (0P-C gate fix): stop and forget one workspace —
   // watcher, engine, and capture — so the join handler can remove its
   // folder/registry state without tearing down every other workspace.
   async function close(
     workspace: ActivityWorkspace,
     state: WorkspaceActivityState,
-    closeOptions: { preserveStatus?: boolean; notify?: boolean;
+    closeOptions: { preserveStatus?: boolean; preserveAgentRun?: boolean; notify?: boolean;
       expectedRootPath?: string;
     } = {},
   ): Promise<boolean> {
     const { workspaceId } = workspace;
     const entry = state.entry;
-    if (!entry) return false;
+    if (!entry) {
+      if (!closeOptions.preserveAgentRun && state.agentRun &&
+        (closeOptions.expectedRootPath === undefined || state.agentRun.workspace.rootPath === closeOptions.expectedRootPath)) {
+        assignAgentRun(state, workspace, null);
+      }
+      return false;
+    }
     if (
       closeOptions.expectedRootPath !== undefined &&
       entry.workspace.rootPath !== closeOptions.expectedRootPath
@@ -473,6 +571,7 @@ export function createWorkspaceActivity(
       state.preservedStatus = null;
     }
     state.entry = null;
+    if (!closeOptions.preserveAgentRun) assignAgentRun(state, workspace, null);
     const stopped = await Promise.allSettled([
       Promise.resolve().then(() => entry.handle.stop()).catch(async error => {
         entry.capture?.observationDrainFailed();
@@ -546,6 +645,13 @@ export function createWorkspaceActivity(
     return statusFor(workspace, state);
   }
 
+  function recordHeldFiles(workspace: ActivityWorkspace, state: WorkspaceActivityState, files: NonNullable<SyncStatusResult["heldFiles"]>): void {
+    const entry = state.entry;
+    if (!entry || entry.workspace.attachmentId !== workspace.attachmentId || JSON.stringify(files) === JSON.stringify(entry.heldFiles)) return;
+    entry.heldFiles = files;
+    options.onHeldFiles?.(workspace.workspaceId, files);
+  }
+
   function isOpen(state: WorkspaceActivityState): boolean {
     return state.entry !== null;
   }
@@ -592,6 +698,10 @@ export function createWorkspaceActivity(
   }
 
   function pullStarting(state: WorkspaceActivityState): void { state.entry?.handle.pullStarting(); }
+  function retryFileObservation(state: WorkspaceActivityState): Promise<void> {
+    if (!state.entry) return Promise.reject(new Error("This workspace is not open."));
+    return state.entry.handle.retry();
+  }
   function pullFinished(state: WorkspaceActivityState): void { state.entry?.handle.pullFinished(); }
   function handlePulledPaths(state: WorkspaceActivityState, paths: readonly string[]): Promise<void> {
     return state.entry?.handle.pulledPaths(paths) ?? Promise.resolve();
@@ -620,7 +730,7 @@ export function createWorkspaceActivity(
     const { workspaceId } = workspace;
     if (!entry) throw new Error(`Workspace is not open: ${workspaceId}`);
     await entry.capture?.setActiveAgentRun(run);
-    entry.agentRun = run;
+    if (state.entry === entry) assignAgentRun(state, workspace, run);
   }
 
   async function claimAgentRun(
@@ -640,13 +750,13 @@ export function createWorkspaceActivity(
         "Workspace activity was replaced by another physical root.",
       );
     }
-    if (entry.agentRun !== null) return false;
-    entry.agentRun = run;
+    if (state.agentRun !== null) return false;
+    assignAgentRun(state, workspace, run);
     try {
       await entry.capture?.setActiveAgentRun(run);
       return true;
     } catch (error) {
-      if (entry.agentRun?.agentRunId === run.agentRunId) entry.agentRun = null;
+      releaseAgentRun(state, workspace, run.agentRunId);
       throw error;
     }
   }
@@ -656,27 +766,27 @@ export function createWorkspaceActivity(
     agentRunId: string,
     expectedRootPath?: string,
   ): Promise<void> {
-    const entry = state.entry;
-    if (!entry) return;
+    const slot = state.agentRun;
+    if (!slot) return;
     if (
       expectedRootPath !== undefined &&
-      entry.workspace.rootPath !== expectedRootPath
+      slot.workspace.rootPath !== expectedRootPath
     ) {
       return;
     }
-    if (entry.agentRun?.agentRunId !== agentRunId) return;
-    await entry.capture?.setActiveAgentRun(null);
-    if (entry.agentRun?.agentRunId === agentRunId) entry.agentRun = null;
+    if (slot.run.agentRunId !== agentRunId) return;
+    await state.entry?.capture?.setActiveAgentRun(null);
+    if (state.agentRun === slot) releaseAgentRun(state, slot.workspace, agentRunId);
   }
 
   function hasAgentRun(state: WorkspaceActivityState,
     expectedRootPath?: string,
   ): boolean {
-    const entry = state.entry;
+    const slot = state.agentRun;
     return (
-      entry !== null &&
+      slot !== null &&
       (expectedRootPath === undefined ||
-        entry.workspace.rootPath === expectedRootPath) && entry.agentRun !== null
+        slot.workspace.rootPath === expectedRootPath)
     );
   }
 
@@ -684,14 +794,20 @@ export function createWorkspaceActivity(
   // the run's depth, or 0 with no run. An agent writing through the CLI or
   // MCP during the run writes at the run's depth, whichever agent it is.
   function agentRunDepth(state: WorkspaceActivityState): number {
-    return state.entry?.agentRun?.depth ?? 0;
+    return state.agentRun?.run.depth ?? 0;
+  }
+
+  // Whether a run dohc dispatched holds the slot. Its agent gives no name, so
+  // the CLI drops any name a write claims and the run stays one actor.
+  function dispatchedAgentRun(state: WorkspaceActivityState): boolean {
+    return state.agentRun?.run.dispatch !== undefined;
   }
 
   // The agent run holding the slot, as a local app's invocation is
-  // attributed to it: its chain depth, or null with no run.
-  function agentRun(state: WorkspaceActivityState): { depth: number } | null {
-    const run = state.entry?.agentRun;
-    return run ? { depth: run.depth } : null;
+  // attributed to it, or null with no run.
+  function agentRun(state: WorkspaceActivityState): ActiveAgentRun | null {
+    const run = state.agentRun?.run;
+    return run ? { ...run } : null;
   }
 
   // Registers engine-originated disk writes (restore flows, future engine
@@ -737,15 +853,18 @@ export function createWorkspaceActivity(
   // the last engine record is durably written too.
   async function stop(state: WorkspaceActivityState): Promise<void> {
     if (state.entry) await close(state.entry.workspace, state, { notify: false });
+    else if (state.agentRun) assignAgentRun(state, state.agentRun.workspace, null);
   }
 
   return {
     open,
     close,
     enableCloud,
+    prepareSyncPause,
     reconcileCloud,
     stopEngine,
     getStatus,
+    recordHeldFiles,
     recordShareViewStoreRefusal,
     recordAtomicPlacementUnavailable,
     isOpen,
@@ -754,6 +873,7 @@ export function createWorkspaceActivity(
     syncNow,
     queueCloudPull,
     pullStarting,
+    retryFileObservation,
     pullFinished,
     handlePulledPaths,
     drainObservations,
@@ -762,7 +882,9 @@ export function createWorkspaceActivity(
     clearAgentRun,
     hasAgentRun,
     agentRunDepth,
+    dispatchedAgentRun,
     agentRun,
+    agentRunState,
     engineCaptureFor,
     workspaceRootPath,
     registerExpectedEngineEvents,

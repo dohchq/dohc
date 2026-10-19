@@ -58,6 +58,25 @@ export class ServiceActivationStore {
     });
   }
 
+  /**
+   * `resume` for a document whose owner lost live authority over it: it
+   * establishes this connection's standing for the retained activation
+   * without the owner's authority, so what the host applied can settle.
+   */
+  departing(input: {document: LiveDocumentKey; activationId: string; host: LiveHostConnectionCoordinate;
+    registeredAtMs: number; guard(): void}): void {
+    this.storage.tx(() => {
+      input.guard(); requireLiveJournalHistory(this.storage, this.history);
+      const row = readServiceActivation(this.storage, input.document);
+      if (!row || row.activation_id !== input.activationId || row.relay_database_namespace !== this.history.namespace) {
+        throw new Error("Retained service activation is unavailable.");
+      }
+      if (!registerLiveHostInTransaction(this.storage, {...input.host, updatedAtMs: input.registeredAtMs, guard: input.guard}).ok) {
+        throw new Error("Service activation host is unavailable.");
+      }
+    });
+  }
+
   complete(input: {document: LiveDocumentKey; host: LiveHostConnectionCoordinate; access: ServiceActivationAccess;
     nativeState: {adoptionId: string; pendingBytes: number}; guard(): void}) {
     return this.storage.tx(() => {

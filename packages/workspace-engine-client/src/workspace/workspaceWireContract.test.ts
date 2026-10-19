@@ -7,6 +7,7 @@ import pipelineFixture from "../../../../crates/dohc-engine-domain/tests/fixture
 import reasonCodes from "../../../../crates/dohc-engine-domain/tests/fixtures/collection-reason-codes.json";
 import {
   WORKSPACE_METHOD,
+  type WorkspaceMethod,
   decodeAutomationGroupHandover,
   decodeCollectionValue,
   decodeConflictRecord,
@@ -32,6 +33,23 @@ const snapshot = {
   metadataSummary: null,
   metadataCorrelationId: null,
 };
+
+it("preserves the owner-only link author through the collection history wire contract", () => {
+  const linkAuthor = { kind: "link", grantId: "ended-link", grantGeneration: 2, publicPrincipalId: "public-holder" };
+  const raw = {
+    collection: { path: "tasks", objectId: "schema", status: "valid", reasons: [] },
+    record: { id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa", path: "tasks/a.md", conflicted: false, values: [] },
+    history: [{ historyId: 1, field: "Status", previous: { present: false, value: null }, next: { present: true, value: "Done" },
+      authorOriginId: null, actorKind: null, onBehalfOf: null, depth: null, recordedAtMs: 1, automationRun: null, linkAuthor }],
+    nextBeforeHistoryId: null,
+  };
+  const fetched = decodeWorkspaceResult(WORKSPACE_METHOD.collectionsGetRecord, raw);
+  expect(fetched.history[0]?.linkAuthor).toEqual(linkAuthor);
+  expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.collectionsGetRecord, {
+    ...raw,
+    history: [{ ...raw.history[0], linkAuthor: { kind: "link", grantId: "ended-link", grantGeneration: 2, principalId: "private-holder" } }],
+  })).toThrow(ProtocolShapeError);
+});
 
 const state = {
   path: "note.md",
@@ -346,6 +364,7 @@ describe("workspace wire schemas", () => {
             depth: 0,
             recordedAtMs: 1,
             automationRun: { claimId: "atc_1", automationName: "Stamp the finish date" },
+            linkAuthor: null,
           },
         ],
         nextBeforeHistoryId: null,
@@ -935,4 +954,82 @@ describe("automations wire schemas", () => {
       ).toThrow(ProtocolShapeError);
     }
   });
+});
+
+it("recovery replies only authorize retirement after a committed decision", () => {
+  for (const outcome of ["replayed", "imported", "covered"] as const) {
+    expect(decodeWorkspaceResult(WORKSPACE_METHOD.captureImportRecovery,
+      {committed:true,outcome,momentId:outcome === "imported" ? "moment" : null})).toMatchObject({committed:true,outcome});
+  }
+  for (const reply of [{committed:false,outcome:"replayed",momentId:null},{committed:true,outcome:"unknown",momentId:null}]) {
+    expect(()=>decodeWorkspaceResult(WORKSPACE_METHOD.captureImportRecovery,reply)).toThrow(ProtocolShapeError);
+  }
+});
+
+it("decodes whether a recovery keeps typing for a deleted file",()=>{
+ const record={momentId:"recovery",versionId:"main",objectId:"object",path:"note.md",captureMomentId:"deleted",deleted:true};
+ expect(decodeWorkspaceResult(WORKSPACE_METHOD.watcherStatus,{running:true,degraded:false,terminal:false,phase:"ready",noAtomicPlacement:false,recoveryUnavailable:false,keptFiles:[],captureRecoveries:[record],heldFiles:[]})).toMatchObject({captureRecoveries:[record],heldFiles:[]});
+});
+
+const heldFile = {
+  workspaceId: "workspace",
+  sourceVersionId: "main",
+  objectId: "object",
+  path: "held.md",
+  observedSha256: "a".repeat(64),
+  observedSize: 244,
+  reason: "ydoc-resolution-not-representable",
+  observedAtMs: 10,
+  attemptCount: 1,
+  retryRequested: false,
+};
+const holdReplies: Array<[WorkspaceMethod, Record<string, JsonValue>]> = [
+  ["capture.retryHeld" as WorkspaceMethod, { settled: true, running: true, degraded: false, retried: true }],
+  [WORKSPACE_METHOD.captureFlush, { settled: true, running: true, degraded: false }],
+  [WORKSPACE_METHOD.captureReconcile, { settled: true, running: true, degraded: false }],
+  [WORKSPACE_METHOD.watcherStatus, {
+    running: true,
+    degraded: false,
+    terminal: false,
+    phase: "ready",
+    noAtomicPlacement: false,
+    recoveryUnavailable: false,
+    keptFiles: [],
+    captureRecoveries: [],
+  }],
+];
+
+for (const [method, base] of holdReplies) {
+  it.each([{ heldFiles: [] }, { heldFiles: [heldFile] }])(
+    `decodes ${method} held files (%j)`,
+    ({ heldFiles }) => {
+      expect(decodeWorkspaceResult(method, { ...base, heldFiles })).toEqual({
+        ...base,
+        heldFiles,
+      });
+    },
+  );
+  it(`rejects malformed ${method} held files`, () => {
+    expect(decodeWorkspaceResult(method, { ...base, heldFiles: [] })).toEqual({ ...base, heldFiles: [] });
+    for (const heldFiles of [
+      null,
+      [{}],
+      [{ ...heldFile, observedSize: "244" }],
+      [{ ...heldFile, retryRequested: 1 }],
+      [{ ...heldFile, attemptCount: 1.5 }],
+      [{ ...heldFile, unexpected: true }],
+    ]) {
+      expect(() => decodeWorkspaceResult(method, { ...base, heldFiles })).toThrow(
+        ProtocolShapeError,
+      );
+    }
+    expect(() => decodeWorkspaceResult(method, base)).toThrow(ProtocolShapeError);
+  });
+}
+
+it("decodes the passive current view manifest and rejects a frontier-only placeholder",()=>{
+  const file={versionId:"main",objectId:"a",path:"docs/a.md",contentKind:"text",sha256:"a".repeat(64),byteLength:4,lineageClaimId:null,restoreGeneration:null};
+  const view={workspaceId:"w",revision:1,logCursor:3,journalCursor:5,moved:false,nextCursor:null,refusedFiles:[],files:[file],texts:[{sha256:file.sha256,text:"text"}]};
+  expect(decodeWorkspaceResult(WORKSPACE_METHOD.replicaCut,view)).toEqual(view);
+  expect(()=>decodeWorkspaceResult(WORKSPACE_METHOD.replicaCut,{revision:1,logCursor:3,journalCursor:5})).toThrow(ProtocolShapeError);
 });

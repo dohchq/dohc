@@ -7,8 +7,9 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { normalizeAbsolutePath } from "@dohc/workspace-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   MAX_RETAINED_SKIPPED_OPS,
@@ -23,6 +24,7 @@ import {
 // store produces: one rule, and the surfaces that show the warning read it
 // from the same place.
 import { hasUnacknowledgedShareSkips } from "../renderer/shareSkipNotice";
+import { canonicalWorkspaceRoot } from "./createWorkspaceFolder";
 import { createTestScratch } from "./testTemp";
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -82,6 +84,24 @@ function withPlatform<T>(platform: NodeJS.Platform, run: () => T): T {
   }
 }
 
+describe("missing workspace messages", () => {
+  it("uses reopening guidance at each missing registry check", () => {
+    const writes = [
+      () => store.pauseRemote("missing"),
+      () => store.setRemote("missing", { serverUrl: "https://relay.test", ownerUserId: "owner" }),
+      () => store.setShareRoster("missing", { grants: [], links: [], formerGrants: [], endedGrants: [] }, false),
+      () => store.markShareRosterPulled("missing"),
+    ];
+    for (const write of writes) {
+      expect(write).toThrow("This workspace is not open. Open it again.");
+    }
+  });
+
+  it("preserves the shared-view caller's missing message", () => {
+    expect(() => store.markShareViewEnded("missing")).toThrow("Unknown shared view: missing");
+  });
+});
+
 // A relay listing applied to the received-share records: the reconcile runs
 // on the record as the file holds it, the result is persisted, and the caller
 // learns whether anything changed.
@@ -103,17 +123,37 @@ describe("received share reconciliation", () => {
     const reread = createRegistryStore(registryPath).find("ws-1");
     expect(reread?.sharedChannels?.[0]?.ended).toBeUndefined();
     expect(reread?.confirmedRemovedShares).toEqual([{ shareId: "other", removedAtMs: 5 }]);
-    expect(() => store.reconcileRecipientShares("missing", () => null)).toThrow("Unknown workspace");
+    expect(() => store.reconcileRecipientShares("missing", () => null)).toThrow("This workspace is not open. Open it again.");
   });
 });
 
 describe("share roster", () => {
   const grant = (grantId: string) => ({
+    shareId: "share", generation: 1, status: "active" as const, granterUserId: "owner", granterEmail: null, subjectName: null, sharerName: null,
     grantId,
     recipientUserId: "u-ana",
     recipientEmail: "ana@dohc.test",
     selector: { paths: ["Trip"], versionId: null },
     access: "edit" as const,
+  });
+
+  it("retains grants and their roster while paused and after resuming the same owner", () => {
+    const remote = { serverUrl: "https://server.test", ownerUserId: "owner" };
+    store.register({ ...personal, remote });
+    store.setShareRoster("ws-1", { grants: [grant("g-1")], links: [], formerGrants: [], endedGrants: [] }, true);
+    const syncPause = { atMs: 42, author: { kind: "agent" as const, agentId: "Claude", onBehalfOf: "person-local", depth: 0 } };
+    store.pauseRemote("ws-1", syncPause);
+    const paused = createRegistryStore(registryPath).find("ws-1")!;
+    expect(paused.remote).toBeUndefined();
+    expect(paused.pausedRemote).toEqual(remote);
+    expect(paused.syncPause).toEqual(syncPause);
+    expect(paused.shareRoster?.grants).toEqual([grant("g-1")]);
+    store.setRemote("ws-1", remote);
+    const resumed = createRegistryStore(registryPath).find("ws-1")!;
+    expect(resumed.remote).toEqual(remote);
+    expect(resumed.pausedRemote).toBeUndefined();
+    expect(resumed.syncPause).toBeUndefined();
+    expect(resumed.shareRoster?.grants).toEqual([grant("g-1")]);
   });
 
   it("raises the version only when the listing changes, and survives a reopen", () => {
@@ -630,6 +670,34 @@ describe("registry store", () => {
     ).toThrow(/identity .* already attached|already attached .* identity/i);
   });
 
+  it("reads an entry saved through a link under its folder's real path, and keeps a missing folder's path", async () => {
+    const real = await createTestScratch("dohc-registry-real-");
+    const link = join(dirname(registryPath), "linked");
+    await symlink(real, link, process.platform === "win32" ? "junction" : "dir");
+    const missing = normalizeAbsolutePath(join(dirname(registryPath), "gone"));
+    await writeFile(registryPath, JSON.stringify({ version: 1, workspaces: [
+      { ...personal, rootPath: normalizeAbsolutePath(link) },
+      { ...personal, workspaceId: "ws-gone", rootPath: missing },
+    ] }));
+
+    const reopened = createRegistryStore(registryPath);
+    expect(reopened.list().map((entry) => entry.rootPath)).toEqual([canonicalWorkspaceRoot(real), missing]);
+    expect(() => reopened.register({ ...personal, workspaceId: "ws-real", rootPath: canonicalWorkspaceRoot(real) }))
+      .toThrow(/already attached/i);
+    // The next write saves the real path.
+    reopened.markOpened("ws-1", 5);
+    const saved = JSON.parse(await readFile(registryPath, "utf8")) as { workspaces: Array<{ rootPath: string }> };
+    expect(saved.workspaces.map((entry) => entry.rootPath)).toEqual([canonicalWorkspaceRoot(real), missing]);
+  });
+
+  it.skipIf(process.platform === "win32")("reads a backslash in a folder's name as part of the name", async () => {
+    const folder = join(dirname(registryPath), "trip\\2026");
+    await mkdir(folder);
+    await writeFile(registryPath, JSON.stringify({ version: 1, workspaces: [{ ...personal, rootPath: canonicalWorkspaceRoot(folder) }] }));
+    expect(createRegistryStore(registryPath).find("ws-1")?.rootPath).toBe(canonicalWorkspaceRoot(folder));
+    expect(canonicalWorkspaceRoot(folder).endsWith("/trip\\2026")).toBe(true);
+  });
+
   it("persists across store instances", () => {
     store.register(personal);
     const reopened = createRegistryStore(store.registryFile);
@@ -708,7 +776,7 @@ describe("registry store", () => {
 
     reopened.completeJoinBootstrap("ws-1");
     expect(createRegistryStore(registryPath).find("ws-1")?.joinBootstrapPending).toBeUndefined();
-    expect(() => reopened.completeJoinBootstrap("missing")).toThrow(/Unknown workspace/);
+    expect(() => reopened.completeJoinBootstrap("missing")).toThrow("This workspace is not open. Open it again.");
   });
 
   // The cache may only show a warning hidden once the same change reached
@@ -948,7 +1016,7 @@ describe("registry store", () => {
         genericChatWritable: false,
         grantedSelector: { paths: ["docs"], versionId: null, access: "view" },
       }),
-    ).toThrow(/Unknown workspace/);
+    ).toThrow("This workspace is not open. Open it again.");
   });
 
   it("keeps the shared-view identity truthful when its atomic rename fails", () => {

@@ -1,3 +1,5 @@
+import { matchShellShortcut, shortcutText } from "../shortcuts/shortcutRegistry";
+import { isComposingKey } from "./ui/keys";
 import { Search } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { rendererMarks } from "../performance/rendererMarks";
@@ -17,6 +19,7 @@ export function CommandPalette(props: {
   testId?: string;
   placeholder?: string;
   ariaLabel?: string;
+  toggleShortcut?: "command-palette" | "quick-open";
   // Optional ranking seam: Quick Open passes its prepared path
   // ranker. Default palettes keep the simple substring filter.
   rank?: (query: string, commands: Command[]) => Command[];
@@ -73,7 +76,17 @@ export function CommandPalette(props: {
   }
 
   return (
-    <Overlay onClose={props.onClose}>
+    <Overlay
+      onClose={props.onClose}
+      panelProps={{
+        onKeyDown: (event) => {
+          if (matchShellShortcut(event.nativeEvent, window.dohcDesktop?.platform) === (props.toggleShortcut ?? "command-palette")) {
+            event.preventDefault();
+            props.onClose();
+          }
+        },
+      }}
+    >
       <div
         data-testid={props.testId ?? "command-palette"}
         className="dohc-popover w-135 max-w-[80vw] overflow-hidden rounded-xl border border-line bg-panel"
@@ -95,8 +108,8 @@ export function CommandPalette(props: {
               setSelectedIndex(0);
             }}
             onKeyDown={(event) => {
-              if (event.key === "Escape") props.onClose();
-              else if (event.key === "ArrowDown") {
+              if (isComposingKey(event)) return;
+              if (event.key === "ArrowDown") {
                 event.preventDefault();
                 moveSelection(1);
               } else if (event.key === "ArrowUp") {
@@ -139,15 +152,15 @@ export function CommandPalette(props: {
         </ul>
         <div className="flex items-center gap-3 border-t border-line px-3.5 py-2 text-[10px] text-subtle">
           <span className="flex items-center gap-1">
-            <kbd className="rounded border border-line bg-bg px-1 font-mono">↑↓</kbd>
+            <kbd className="rounded border border-line bg-bg px-1 font-mono">{shortcutText("palette-move", window.dohcDesktop?.platform)}</kbd>
             navigate
           </span>
           <span className="flex items-center gap-1">
-            <kbd className="rounded border border-line bg-bg px-1 font-mono">↵</kbd>
+            <kbd className="rounded border border-line bg-bg px-1 font-mono">{shortcutText("palette-accept", window.dohcDesktop?.platform)}</kbd>
             open
           </span>
           <span className="flex items-center gap-1">
-            <kbd className="rounded border border-line bg-bg px-1 font-mono">esc</kbd>
+            <kbd className="rounded border border-line bg-bg px-1 font-mono">{shortcutText("palette-dismiss", window.dohcDesktop?.platform)}</kbd>
             dismiss
           </span>
         </div>

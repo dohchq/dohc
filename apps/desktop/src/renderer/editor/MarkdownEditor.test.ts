@@ -13,7 +13,17 @@ import userEvent from "@testing-library/user-event";
 import * as Y from "yjs";
 import { Awareness, applyAwarenessUpdate, encodeAwarenessUpdate } from "y-protocols/awareness";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Editor, Extension, getSchema, type JSONContent } from "@tiptap/core";
+import {
+  commands,
+  Editor,
+  Extension,
+  getSchema,
+  getExtensionField,
+  getSchemaTypeByName,
+  type AnyConfig,
+  type JSONContent,
+  type TiptapEditorHTMLElement,
+} from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
 import { marked } from "marked";
@@ -22,17 +32,24 @@ import { marked } from "marked";
 // this file uses DohcTaskItem.
 import { TaskItem, TaskList } from "@tiptap/extension-list";
 import { TableKit } from "@tiptap/extension-table";
+import { NodeSelection } from "@tiptap/pm/state";
+import { closeHistory } from "@tiptap/pm/history";
 import {
   prosemirrorJSONToYXmlFragment,
   yXmlFragmentToProseMirrorRootNode,
 } from "y-prosemirror";
-import { DohcTaskItem, dohcMarkdownExtensions } from "./extensions";
+import { DohcTaskItem } from "@dohc/ydoc-projection/markdown-extensions";
+import { desktopMarkdownExtensions } from "./extensions";
 import {
   getDohcProseMirrorSchema,
   getDohcYDocBodyFragment,
   markdownToYDoc,
-} from "./import-export";
-import { MarkdownEditor, SelectionToolbar, type MarkdownEditorHandle } from "./MarkdownEditor";
+} from "@dohc/ydoc-projection";
+import { SHORTCUTS, shortcutAccelerators, type ShortcutId } from "../../shortcuts/shortcutRegistry";
+import { MarkdownEditor, type MarkdownEditorHandle } from "./MarkdownEditor";
+import { sendToFocusedEditor } from "./editorMenuCommands";
+import { findReplaceKey } from "./findReplace";
+import { measureParseWork } from "./markdownParseWork";
 import {
   findEmptyListItemParagraph,
   makeCodeBlockChromePlugin,
@@ -61,6 +78,13 @@ async function flushAnimationFrames(count = 2): Promise<void> {
       });
     }
   });
+}
+
+/** The Tiptap editor behind a mounted MarkdownEditor surface. */
+function editorBehind(surface: HTMLElement): Editor {
+  const { editor } = surface as TiptapEditorHTMLElement;
+  if (!editor) throw new Error("The editor surface has no Tiptap editor mounted.");
+  return editor;
 }
 
 function selectionTextOffset(element: HTMLElement): number | null {
@@ -453,7 +477,7 @@ describe("MarkdownEditor task-item schema fidelity", () => {
   function roundTrip(taskItemExtension: typeof TaskItem | typeof DohcTaskItem): JSONContent {
     const schema = getSchema([
       StarterKit.configure({ trailingNode: false }),
-      ...dohcMarkdownExtensions,
+      ...desktopMarkdownExtensions,
       TaskList,
       taskItemExtension,
     ]);
@@ -578,37 +602,42 @@ describe("MarkdownEditor slash commands", () => {
 });
 
 describe("MarkdownEditor selection toolbar", () => {
-  it("shows the block and marks of the current selection, not the first one", () => {
-    const editor = new Editor({
-      element: document.createElement("div"),
-      extensions: [
-        StarterKit.configure({ trailingNode: false }),
-        ...dohcMarkdownExtensions,
-        Markdown.configure({ indentation: { style: "space", size: 2 } }),
-      ],
-      content: "# Big heading\n\nA paragraph with **bold words** in it.",
-      contentType: "markdown",
-    });
-    try {
+  it("shows the block and marks of the current selection, not the first one", async () => {
+    render(
+      createElement(MarkdownEditor, {
+        value: "# Big heading\n\nA paragraph with **bold words** in it.",
+        onDirty: vi.fn(),
+        workspaceId: "workspace-1",
+        path: "notes/toolbar.md",
+        knownFiles: [],
+      }),
+    );
+    const editor = editorBehind(await screen.findByTestId("markdown-editor"));
+    await flushAnimationFrames();
+
+    act(() => {
       editor.commands.setTextSelection({ from: 2, to: 5 });
-      render(createElement(SelectionToolbar, { editor, onOpenLink: vi.fn() }));
-      const bold = screen.getByRole("button", { name: "Bold" });
-      expect(screen.getByTitle("Turn into").textContent).toContain("Heading 1");
-      expect(bold.className).not.toContain("is-active");
+    });
+    // The bubble menu attaches once its debounced update sees the selection.
+    const menu = await waitFor(() => {
+      const element = document.querySelector<HTMLElement>(".dohc-bubble-menu");
+      expect(element).not.toBeNull();
+      return element!;
+    });
+    const bold = within(menu).getByRole("button", { name: "Bold" });
+    expect(within(menu).getByTitle("Turn into").textContent).toContain("Heading 1");
+    expect(bold.className).not.toContain("is-active");
 
-      let boldFrom = -1;
-      editor.state.doc.descendants((node, pos) => {
-        if (boldFrom === -1 && node.isText && node.text === "bold words") boldFrom = pos;
-      });
-      act(() => {
-        editor.commands.setTextSelection({ from: boldFrom, to: boldFrom + 4 });
-      });
+    let boldFrom = -1;
+    editor.state.doc.descendants((node, pos) => {
+      if (boldFrom === -1 && node.isText && node.text === "bold words") boldFrom = pos;
+    });
+    act(() => {
+      editor.commands.setTextSelection({ from: boldFrom, to: boldFrom + 4 });
+    });
 
-      expect(screen.getByTitle("Turn into").textContent).toContain("Text");
-      expect(bold.className).toContain("is-active");
-    } finally {
-      editor.destroy();
-    }
+    expect(within(menu).getByTitle("Turn into").textContent).toContain("Text");
+    expect(bold.className).toContain("is-active");
   });
 });
 
@@ -618,7 +647,7 @@ describe("MarkdownEditor slash command: image", () => {
       element: document.createElement("div"),
       extensions: [
         StarterKit.configure({ trailingNode: false }),
-        ...dohcMarkdownExtensions,
+        ...desktopMarkdownExtensions,
         TaskList,
         DohcTaskItem,
         Markdown.configure({ indentation: { style: "space", size: 2 } }),
@@ -685,7 +714,7 @@ describe("MarkdownEditor slash command: math", () => {
       element: document.createElement("div"),
       extensions: [
         StarterKit.configure({ trailingNode: false }),
-        ...dohcMarkdownExtensions,
+        ...desktopMarkdownExtensions,
         TaskList,
         DohcTaskItem,
         Markdown.configure({ indentation: { style: "space", size: 2 } }),
@@ -738,7 +767,7 @@ describe("MarkdownEditor code block continuation", () => {
       element: document.createElement("div"),
       extensions: [
         StarterKit.configure({ trailingNode: false }),
-        ...dohcMarkdownExtensions,
+        ...desktopMarkdownExtensions,
         TaskList,
         DohcTaskItem,
         Markdown.configure({ indentation: { style: "space", size: 2 } }),
@@ -849,6 +878,208 @@ describe("MarkdownEditor empty list item focus", () => {
 // binding converts the Y.Doc through that schema. A `paragraph+` task item
 // makes the indented list schema-invalid, so binding drops the whole task list
 // and the document opens empty.
+describe.each(["local", "collaboration"])("MarkdownEditor nested list interactions (%s)", (mode) => {
+  let ydoc: Y.Doc | undefined;
+  afterEach(() => { cleanup(); ydoc?.destroy(); ydoc = undefined; });
+
+  async function mount(markdown: string) {
+    ydoc = mode === "collaboration" ? markdownToYDoc(markdown) : undefined;
+    render(createElement(MarkdownEditor, {
+      value: markdown, onDirty: vi.fn(), workspaceId: "workspace-1",
+      path: "nested.md", knownFiles: [],
+      collab: ydoc ? { ydoc, status: "connected", peerCount: 0, synced: true } : undefined,
+    }));
+    const surface = await screen.findByTestId("markdown-editor");
+    const editor = editorBehind(surface);
+    return { surface, editor };
+  }
+
+  function caret(editor: Editor, text: string, offset = 0) {
+    let position = -1;
+    editor.state.doc.descendants((node, pos) => {
+      if (node.isTextblock && node.textContent === text) position = pos + 1 + offset;
+    });
+    expect(position).toBeGreaterThan(0);
+    act(() => { editor.commands.setTextSelection(position); editor.view.focus(); });
+  }
+
+  function reversible(surface: HTMLElement, editor: Editor, action: () => void, check: () => void) {
+    // Isolate the action from fixture edits in either history implementation.
+    fireEvent.focus(surface);
+    editor.view.dispatch(closeHistory(editor.state.tr));
+    const before = editor.getJSON();
+    act(action);
+    check();
+    const after = editor.getJSON();
+    expect(after).not.toEqual(before);
+    fireEvent.keyDown(surface, { key: "z", ctrlKey: true });
+    expect(editor.getJSON()).toEqual(before);
+    fireEvent.keyDown(surface, { key: "y", ctrlKey: true });
+    expect(editor.getJSON()).toEqual(after);
+  }
+
+  it.each(["bullet", "ordered", "task"])("indents and outdents %s items with Tab and Shift-Tab", async (kind) => {
+    const marker = kind === "task" ? "- [ ]" : kind === "ordered" ? "1." : "-";
+    const { surface, editor } = await mount(`${marker} parent\n${marker} child`);
+    caret(editor, "child");
+    reversible(surface, editor, () => { fireEvent.keyDown(surface, { key: "Tab" }); }, () => {
+      expect(surface.querySelector("li li")?.textContent).toContain("child");
+    });
+    caret(editor, "child");
+    reversible(surface, editor, () => { fireEvent.keyDown(surface, { key: "Tab", shiftKey: true }); }, () => {
+      expect(surface.querySelector("li li")).toBeNull();
+    });
+  });
+
+  it.each(["Enter", "Backspace"])("lifts an empty child with %s", async (key) => {
+    const { surface, editor } = await mount("- parent\n  - child");
+    caret(editor, "child");
+    act(() => { editor.commands.deleteRange({ from: editor.state.selection.from, to: editor.state.selection.from + 5 }); });
+    reversible(surface, editor, () => { fireEvent.keyDown(surface, { key }); }, () => {
+      expect(surface.querySelector("li li")).toBeNull();
+      expect(surface.querySelectorAll("li")).toHaveLength(2);
+    });
+  });
+
+  it("joins a child at its start with Backspace", async () => {
+    const { surface, editor } = await mount("- parent\n  - child");
+    caret(editor, "child");
+    reversible(surface, editor, () => { fireEvent.keyDown(surface, { key: "Backspace" }); }, () => {
+      expect(surface.querySelector("li li")).toBeNull();
+      expect(surface.textContent).toContain("child");
+    });
+  });
+
+  it("toggles a child checkbox without changing its parent", async () => {
+    const { surface, editor } = await mount("- [ ] parent\n  - [ ] child");
+    reversible(surface, editor, () => { fireEvent.click(surface.querySelectorAll("input[type=checkbox]")[1]!); }, () => {
+      expect(surface.querySelector("li li")?.getAttribute("data-checked")).toBe("true");
+      expect(surface.querySelector("li")?.getAttribute("data-checked")).toBe("false");
+    });
+  });
+
+  it.each([
+    ["bullet", "numbered-list"], ["bullet", "task-list"],
+    ["ordered", "bulleted-list"], ["ordered", "task-list"],
+    ["task", "bulleted-list"], ["task", "numbered-list"],
+  ] as const)("turns a %s child into %s and keeps its descendants", async (from, kind) => {
+    const child = from === "task" ? "- [x] child" : from === "ordered" ? "1. child" : "- child";
+    const { surface, editor } = await mount(`- parent\n  ${child}\n${" ".repeat(from === "ordered" ? 5 : 4)}- grandchild`);
+    caret(editor, "child", 2);
+    reversible(surface, editor, () => {
+      runSlashCommand(editor, kind, {
+        open: true, query: "", selected: 0, x: 0, y: 0,
+        bottom: null, maxHeight: 300, placement: "below",
+        from: editor.state.selection.from, to: editor.state.selection.from,
+      }, vi.fn());
+    }, () => {
+      const node = surface.querySelector("li > " + (kind === "numbered-list" ? "ol" : kind === "task-list" ? 'ul[data-type="taskList"]' : 'ul'));
+      expect(node?.textContent).toContain("child");
+      expect(node?.querySelector("li li")?.textContent).toContain("grandchild");
+      expect(editor.state.selection.$from.parent.textContent).toBe("child");
+      expect(editor.state.selection.$from.parentOffset).toBe(2);
+      expect(editor.state.doc.firstChild?.type.name).toBe("bulletList");
+    });
+  });
+
+  it.each([
+    ["top-level cursor", "- a\n- child\n- c", "child", false],
+    ["top-level selection", "- a\n- child\n- c", "child", true],
+    ["nested quote", "- parent\n  - child\n\n    > quote", "quote", false],
+    ["nested callout", "- parent\n  - child\n\n    > [!NOTE]\n    > callout", "callout", false],
+  ] as const)("keeps Tiptap conversion scope for %s", async (_name, markdown, text, multi) => {
+    const { surface, editor } = await mount(markdown);
+    if (multi) caret(editor, "c", 1);
+    const end = editor.state.selection.to;
+    caret(editor, text, 2);
+    if (multi) act(() => { editor.commands.setTextSelection({ from: editor.state.selection.from, to: end }); });
+    const before = editor.getJSON();
+    const selection = { from: editor.state.selection.from, to: editor.state.selection.to };
+    editor.view.dispatch(closeHistory(editor.state.tr));
+    act(() => { editor.commands.command(commands.toggleList("taskList", "taskItem")); });
+    const expected = editor.getJSON();
+    const expectedSelection = editor.state.selection.toJSON();
+    fireEvent.keyDown(surface, { key: "z", ctrlKey: true });
+    expect(editor.getJSON()).toEqual(before);
+    act(() => { editor.commands.setTextSelection(selection); });
+    reversible(surface, editor, () => { editor.commands.toggleTaskList(); }, () => {
+      expect(editor.getJSON()).toEqual(expected);
+      expect(editor.state.selection.toJSON()).toEqual(expectedSelection);
+    });
+  });
+
+  it.each(["before", "after", "both"])("joins converted children with task neighbours %s", async (side) => {
+    const { surface, editor } = await mount(`- parent\n${side !== "after" ? "  - [ ] a\n" : ""}  - child${side !== "before" ? "\n  - [ ] c" : ""}`);
+    caret(editor, "child", 2);
+    reversible(surface, editor, () => { editor.commands.toggleTaskList(); }, () => {
+      const lists = surface.querySelectorAll('li > ul[data-type="taskList"]');
+      expect(lists).toHaveLength(1);
+      expect(lists[0]!.querySelectorAll(":scope > li")).toHaveLength(side === "both" ? 3 : 2);
+      expect(editor.state.selection.$from.parent.textContent).toBe("child");
+      expect(editor.state.selection.$from.parentOffset).toBe(2);
+    });
+  });
+
+  it.each([
+    ["See here", 4, "- 5 points"],
+    ["See here", 4, "- first\n  - second"],
+    ["", 0, "- 5 points"],
+    ["", 0, "- a\n\n# Heading\n\n| t |\n|---|"],
+  ] as const)("keeps literal paste in %s at %i: %s", async (text, offset, pasted) => {
+    const { surface, editor } = await mount(text);
+    caret(editor, text, offset);
+    reversible(surface, editor, () => {
+      fireEvent.paste(surface, { clipboardData: {
+        files: [], types: ["text/plain"], getData: (type: string) => type === "text/plain" ? pasted : "",
+      } });
+    }, () => {
+      expect(surface.querySelector("li, h1, table")).toBeNull();
+      expect(surface.textContent).toContain(pasted.split("\n")[0]);
+    });
+  });
+
+  it("keeps a list pasted at the start of a heading literal", async () => {
+    const { surface, editor } = await mount("# Title");
+    caret(editor, "Title", 0);
+    reversible(surface, editor, () => {
+      fireEvent.paste(surface, { clipboardData: {
+        files: [], types: ["text/plain"], getData: (type: string) => type === "text/plain" ? "- a\n- b" : "",
+      } });
+    }, () => {
+      expect(surface.querySelector("li")).toBeNull();
+      expect(surface.querySelector("h1")?.textContent).toContain("- a");
+    });
+  });
+
+  it.each(["plain", "code"])("keeps Markdown literal when pasting as %s text", async (context) => {
+    const { surface, editor } = await mount(context === "code" ? "```\nseed\n```" : "");
+    caret(editor, context === "code" ? "seed" : "");
+    if (context === "plain") fireEvent.keyDown(surface, { key: "Shift", shiftKey: true });
+    fireEvent.paste(surface, { clipboardData: {
+      files: [], types: ["text/plain"],
+      getData: (type: string) => type === "text/plain" ? "- parent\n  - child" : "",
+    } });
+    expect(surface.querySelector("li")).toBeNull();
+    expect(surface.textContent).toContain("- parent");
+  });
+
+  it.each(["markdown", "html"])("pastes a nested list from %s", async (format) => {
+    const { surface, editor } = await mount("");
+    act(() => { editor.view.focus(); });
+    reversible(surface, editor, () => {
+      const markdown = "- parent\n  - child\n    - grandchild";
+      fireEvent.paste(surface, { clipboardData: {
+        files: [], types: [format === "html" ? "text/html" : "text/plain"],
+        getData: (type: string) => type === "text/html" && format === "html"
+          ? "<ul><li><p>parent</p><ul><li><p>child</p><ul><li><p>grandchild</p></li></ul></li></ul></li></ul>"
+          : type === "text/plain" ? markdown : "",
+      } });
+    }, () => {
+      expect(surface.querySelector("li li li")?.textContent).toBe("grandchild");
+    });
+  });
+});
+
 describe("MarkdownEditor nested checklists", () => {
   it("binds an indented list under a checkbox from the Y.Doc", async () => {
     const markdown = ["- [ ] parent", "  - child one", "  - child two"].join("\n");
@@ -882,6 +1113,83 @@ describe("MarkdownEditor nested checklists", () => {
   });
 });
 
+// The block gutter selects a whole table, which Backspace and Delete then
+// remove. Without the editor's table node selection, Tiptap turns the gutter's
+// selection into a selection of the table's cells.
+describe("MarkdownEditor table gutter", () => {
+  it.each(["Backspace", "Delete"])("selects a whole table from its gutter and deletes it with %s", async (key) => {
+    render(
+      createElement(MarkdownEditor, {
+        value: "Before\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n\nAfter",
+        onDirty: vi.fn(),
+        workspaceId: "workspace-1",
+        path: "notes/table.md",
+        knownFiles: [],
+      }),
+    );
+    const surface = await screen.findByTestId("markdown-editor");
+    const editor = editorBehind(surface);
+    const handle = surface.querySelectorAll<HTMLElement>(".dohc-block-handle")[1];
+    expect(handle).toBeDefined();
+
+    fireEvent.click(handle!);
+    const { selection } = editor.state;
+    expect(selection).toBeInstanceOf(NodeSelection);
+    expect((selection as NodeSelection).node.type.name).toBe("table");
+
+    fireEvent.keyDown(surface, { key });
+    const blocks: string[] = [];
+    editor.state.doc.forEach((block) => blocks.push(block.type.name));
+    expect(blocks).toEqual(["paragraph", "paragraph"]);
+    expect(editor.state.doc.textContent).toBe("BeforeAfter");
+  });
+});
+
+// The editor reads Markdown through the projection's parser. A block
+// tokenizer that splits or searches the rest of the document only to reject an
+// ordinary paragraph makes opening a long note quadratic. Counting newline
+// splits alone missed the block-marker searches.
+describe("MarkdownEditor markdown import", () => {
+  it("reads a linear amount of text when it opens or replaces ordinary paragraphs", async () => {
+    const body = (paragraphs: number, text: string) => Array(paragraphs).fill(text).join("\n\n");
+    const measure = async (paragraphs: number) => {
+      const ref = createRef<MarkdownEditorHandle>();
+      let view: ReturnType<typeof render> | undefined;
+      const open = await measureParseWork(async () => {
+        view = render(
+          createElement(MarkdownEditor, {
+            ref,
+            value: body(paragraphs, "Ordinary paragraph."),
+            onDirty: vi.fn(),
+            workspaceId: "workspace-1",
+            path: "notes/long.md",
+            knownFiles: [],
+          }),
+        );
+        const editor = editorBehind(await screen.findByTestId("markdown-editor"));
+        expect(editor.state.doc.childCount).toBe(paragraphs);
+      });
+      const replace = await measureParseWork(() => {
+        act(() => ref.current?.replaceMarkdown(body(paragraphs, "Replaced paragraph.")));
+        const editor = editorBehind(screen.getByTestId("markdown-editor"));
+        expect(editor.state.doc.childCount).toBe(paragraphs);
+        expect(editor.state.doc.lastChild?.textContent).toBe("Replaced paragraph.");
+      });
+      view?.unmount();
+      return { open, replace };
+    };
+    const small = await measure(64);
+    const large = await measure(128);
+    for (const path of ["open", "replace"] as const) {
+      expect(small[path].search, path).toBeGreaterThan(0);
+      expect(large[path].split, `${path} newline split characters: ${small[path].split} -> ${large[path].split}`)
+        .toBeLessThan(small[path].split * 2.2);
+      expect(large[path].search, `${path} searched characters: ${small[path].search} -> ${large[path].search}`)
+        .toBeLessThan(small[path].search * 2.2);
+    }
+  });
+});
+
 describe("MarkdownEditor history", () => {
   it("keeps malformed rich markdown from crashing the editor transaction loop", async () => {
     const user = userEvent.setup();
@@ -900,7 +1208,7 @@ describe("MarkdownEditor history", () => {
       element: document.createElement("div"),
       extensions: [
         StarterKit.configure({ trailingNode: false }),
-        ...dohcMarkdownExtensions,
+        ...desktopMarkdownExtensions,
         TaskList,
         DohcTaskItem,
         TableKit,
@@ -1256,12 +1564,10 @@ describe("MarkdownEditor remote carets", () => {
 
 // The live editor's getMarkdown() is what FileInspector.tsx's WYSIWYG save
 // and engine-draft export, and blockControls.tsx's "copy block as markdown"
-// all read from (they all serialize through this same mounted editor's
-// markdown manager). Before MarkdownEditor.tsx registered
-// FenceWideningCodeBlock, StarterKit's default codeBlock hardcoded a
-// three-backtick fence regardless of content, so a code block whose own
-// content held a ``` line closed its fence early and truncated on
-// re-import.
+// all read from (they all serialize through the projection's
+// serializeRichdocBody). A three-backtick fence around content that holds a
+// ``` line would close early and truncate on re-import, so the serializer
+// widens the fence.
 describe("MarkdownEditor markdown export: code fence widening", () => {
   it("reports Replace all while the find input owns focus", async () => {
     Object.defineProperty(Element.prototype, "scrollIntoView", {
@@ -1897,4 +2203,91 @@ describe("MarkdownEditor focus", () => {
       view.unmount();
     }
   });
+});
+
+
+it.each([["Win32", "win32"], ["MacIntel", "darwin"]] as const)("keeps the display catalogue and allowed shell conflicts aligned with the mounted %s editor keymaps", async (navigatorPlatform, platform) => {
+  const platformSpy = vi.spyOn(navigator, "platform", "get").mockReturnValue(navigatorPlatform);
+  vi.stubGlobal("dohcDesktop", { platform });
+  try {
+    render(createElement(MarkdownEditor, { value: "Text", onDirty: vi.fn(), workspaceId: "ws", path: "note.md", knownFiles: [] }));
+    const surface = await screen.findByTestId("markdown-editor");
+    const editor = await waitFor(() => editorBehind(surface));
+    const keymaps = editor.extensionManager.extensions.flatMap((extension) => {
+      const shortcuts = getExtensionField<AnyConfig["addKeyboardShortcuts"]>(extension, "addKeyboardShortcuts", {
+        name: extension.name, options: extension.options, storage: extension.storage, editor, type: getSchemaTypeByName(extension.name, editor.schema),
+      });
+      return Object.keys(shortcuts?.() ?? {}).filter((key) => /Mod-|Ctrl-|Alt-|Meta-/.test(key))
+        .map((key) => ({ extension: extension.name, key }));
+    });
+    const canonical = (key: string) => {
+      const parts = key.toLowerCase().split("-");
+      return [parts.includes("mod") ? "commandorcontrol" : "", parts.includes("ctrl") ? "ctrl" : "", parts.includes("meta") ? "meta" : "", parts.includes("shift") ? "shift" : "", parts.includes("alt") ? "alt" : "", parts.at(-1)!].filter(Boolean).join("+");
+    };
+    const mounted = [...new Set(keymaps.map(({ key }) => canonical(key)))].sort();
+    const listed = (Object.keys(SHORTCUTS) as ShortcutId[]).filter((id) => {
+      const row = SHORTCUTS[id];
+      return row.owner === "editor" && (!("platform" in row) || row.platform === platform);
+    }).flatMap((id) => shortcutAccelerators(id, platform).map((key) => key.toLowerCase())).sort();
+    expect(listed).toEqual(mounted);
+    if (platform === "darwin") {
+      expect(mounted).toEqual(expect.arrayContaining(["ctrl+a", "ctrl+e", "ctrl+h", "ctrl+d", "ctrl+alt+backspace", "commandorcontrol+alt+f"]));
+      expect(mounted).not.toContain("commandorcontrol+d");
+      expect(mounted).not.toContain("commandorcontrol+h");
+    } else {
+      expect(mounted).toContain("commandorcontrol+h");
+    }
+    const conflicts = Object.entries(SHORTCUTS).filter(([, row]) => row.owner === "shell" || row.owner === "history-restore")
+      .flatMap(([id, row]) => row.accelerators.filter((key) => ["commandorcontrol", "ctrl", "meta"].some((modifier) => mounted.includes(key.toLowerCase().replace("commandorcontrol", modifier)))).map((accelerator) => [id, accelerator]));
+    // These existing overlaps belong to the editor when it claims the event.
+    // A new overlap must be reviewed rather than silently taking an editor key.
+    expect(conflicts).toEqual([
+      ["command-palette", "CommandOrControl+K"],
+      ["toggle-sidebar", "CommandOrControl+B"],
+      ["history-restore-undo", "CommandOrControl+Z"],
+    ]);
+  } finally {
+    platformSpy.mockRestore();
+  }
+});
+
+it("hands Edit > Find to the editor that has focus, including its find bar", async () => {
+  vi.stubGlobal("dohcDesktop", { platform: "darwin" });
+  // The find bar scrolls its active match into view.
+  Object.defineProperty(Element.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
+  const left = createRef<MarkdownEditorHandle>();
+  const right = createRef<MarkdownEditorHandle>();
+  const props = { value: "the cat, the mat, the hat", onDirty: vi.fn(), workspaceId: "ws", knownFiles: [] };
+  render(createElement("div", null,
+    createElement(MarkdownEditor, { ...props, key: "left", ref: left, path: "left.md" }),
+    createElement(MarkdownEditor, { ...props, key: "right", ref: right, path: "right.md" })));
+  const [leftSurface, rightSurface] = await waitFor(() => {
+    const surfaces = screen.getAllByTestId("markdown-editor");
+    expect(surfaces).toHaveLength(2);
+    return surfaces;
+  });
+  const find = (surface: HTMLElement) => findReplaceKey.getState(editorBehind(surface!).state);
+
+  // With focus outside every editor, the command does nothing.
+  act(() => sendToFocusedEditor("editor-find"));
+  expect(screen.queryByRole("search", { name: "find and replace" })).toBeNull();
+
+  act(() => right.current?.focus("start"));
+  await waitFor(() => expect(document.activeElement).toBe(rightSurface));
+  act(() => sendToFocusedEditor("editor-find"));
+  const input = await screen.findByPlaceholderText("Find");
+  await waitFor(() => expect(document.activeElement).toBe(input));
+  expect(find(rightSurface!)?.open).toBe(true);
+  expect(find(leftSurface!)?.open).toBe(false);
+
+  // From the find bar, as with ⌘G there.
+  fireEvent.change(input, { target: { value: "the" } });
+  act(() => sendToFocusedEditor("find-again-next"));
+  expect(find(rightSurface!)?.activeIndex).toBe(1);
+  act(() => sendToFocusedEditor("find-again-previous"));
+  act(() => sendToFocusedEditor("find-again-previous"));
+  expect(find(rightSurface!)?.activeIndex).toBe(2);
+  act(() => sendToFocusedEditor("editor-replace"));
+  expect(find(rightSurface!)?.replaceOpen).toBe(true);
+  expect(find(leftSurface!)?.open).toBe(false);
 });

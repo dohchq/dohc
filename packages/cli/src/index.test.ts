@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CLI_PROTOCOL_VERSION,
+  CLI_JSON_SCHEMA_VERSION,
   type CliRequestWithoutToken,
 } from "./protocol";
 import { executeCli } from "./index";
@@ -17,6 +18,17 @@ const WORKSPACE = resolve("/workspace");
 const PROJECT = resolve("/workspace/project");
 
 const TOKEN = "a".repeat(64);
+it("stops sync through main without a caller-supplied workspace or identity", async () => {
+  const request = vi.fn(async () => ({ ok: true, workspaceId: "workspace", workspaceSynced: false }));
+  const result = await executeCli({ argv: ["sync", "stop", "--json", "--as-agent", "--agent", "Claude"], cwd: "/workspace", env: {}, request });
+  expect(result.exitCode).toBe(0);
+  expect(request).toHaveBeenCalledWith(expect.objectContaining({
+    verb: "stopSync", args: { cwd: resolve("/workspace"), actor: "agent", agent: "Claude" },
+  }));
+  expect(JSON.parse(result.stdout)).toMatchObject({ workspaceSynced: false });
+  expect((await executeCli({ argv: ["sync", "stop", "other-workspace"], env: {}, request })).exitCode).toBe(1);
+});
+
 it("lists Button inspection states and confirmations through the desktop socket", async () => {
   const result = { ok: true, buttons: [{ field: "Send", state: { kind: "ready", automationId: "collection:Billing#send", irreversible: [{ name: "destination/send", label: "Send" }] } },
     { field: "Later", state: { kind: "unchecked", reason: "Host unavailable" } }] };
@@ -59,7 +71,7 @@ describe("executeCli", () => {
     expect(result).toEqual({
       exitCode: 0,
       stderr: "",
-      stdout: `${JSON.stringify({ schemaVersion: 2, groups: [group] }, null, 2)}\n`,
+      stdout: `${JSON.stringify({ schemaVersion: 3, groups: [group] }, null, 2)}\n`,
     });
   });
 
@@ -74,7 +86,7 @@ describe("executeCli", () => {
       exitCode: 0,
       stderr: "",
       stdout: `${JSON.stringify({
-        schemaVersion: 2,
+        schemaVersion: 3,
         threadIds: ["th_one", "th_two"],
       }, null, 2)}\n`,
     });
@@ -161,6 +173,20 @@ describe("executeCli", () => {
       expect.any(String),
       expectedTimeoutMs,
     );
+  });
+
+  it.each([undefined, 1234])("waits up to 90 seconds for Undo, preserving an explicit timeout (%s)", async timeoutMs => {
+    const stateDir = await tempStateDir();
+    const transport = vi.fn(async () => ({
+      protocolVersion: CLI_PROTOCOL_VERSION, ok: true,
+      result: { ok: true, tracked: { state: "restored", momentCount: 1 }, restored: [], remaining: [] },
+    }));
+    const result = await executeCli({
+      argv: ["history", "undo", "dohc-operation:11111111-1111-4111-8111-111111111111"],
+      env: {}, client: { stateDir, transport, platform: "linux", ...(timeoutMs === undefined ? {} : { timeoutMs }) },
+    });
+    expect(result.exitCode).toBe(0);
+    expect(transport).toHaveBeenCalledWith(join(stateDir, "dohc-cli.sock"), expect.any(String), timeoutMs ?? 90_000);
   });
 
   it("passes the ambient run id through every chat write request only", async () => {
@@ -400,7 +426,7 @@ describe("executeCli", () => {
       "",
     ].join("\n"));
     expect(JSON.parse((await executeCli({ argv: ["automation", "run", "tasks", "stamp", "atc_1", "--json"], env: {}, request: show })).stdout))
-      .toEqual({ schemaVersion: 2, ok: true, run: { ...run, steps, failedStep: 3, startsOver: false } });
+      .toEqual({ schemaVersion: 3, ok: true, run: { ...run, steps, failedStep: 3, startsOver: false } });
     // A changed automation's run does not resume; Try again starts over.
     const changed = async () => ({ ok: true, run: { ...run, definitionChanged: true, steps, failedStep: 3, startsOver: true } });
     const changedText = (await executeCli({ argv: ["automation", "run", "tasks", "stamp", "atc_1"], env: {}, request: changed })).stdout;
@@ -517,4 +543,56 @@ describe("executeCli", () => {
     });
     expect(result.stderr).toBe("dohc: desktop app returned an invalid response\n");
   });
+
+  it("refuses malformed desktop transport results without exposing validation details", async () => {
+    const stateDir = await tempStateDir();
+    const result = await executeCli({
+      argv: ["chat", "groups"],
+      env: {},
+      client: {
+        stateDir,
+        platform: "linux",
+        transport: async () => ({
+          protocolVersion: CLI_PROTOCOL_VERSION,
+          ok: true,
+          result: { groups: [{ id: 7 }] },
+        }),
+      },
+    });
+    expect(result).toEqual({
+      exitCode: 1,
+      stdout: "",
+      stderr: "dohc: desktop app returned an invalid response\n",
+    });
+  });
+});
+
+it.each([
+  ["accessObject", ["access", "object", JSON.stringify({ kind: "path", path: "Notes/a.md", versionId: null }), "--json"]],
+  ["accessSharing", ["access", "sharing", "received", "--json"]],
+] as const)("prints the unknown reason for %s", async (verb, argv) => {
+  const request = vi.fn(async () => ({ ref: null, rows: [], visibility: "unknown", freshness: "unknown", checkedAtMs: null,
+    unknownReason: "other-account", nextCursor: null, coverage: { kind: "unavailable", complete: false, observation: "interval" } }));
+  const result = await executeCli({ argv: [...argv], env: {}, request });
+  expect(result.exitCode).toBe(0);
+  expect(JSON.parse(result.stdout)).toHaveProperty("unknownReason", "other-account");
+  expect(request).toHaveBeenCalledWith(expect.objectContaining({ verb }));
+});
+
+it("prints an absent incoming subject as JSON null", async () => {
+  const result = await executeCli({ argv: ["links", "in", JSON.stringify({ path: "missing.md" }), "--json"], cwd: "/tmp/links", env: {}, request: async () => null });
+  expect(result).toEqual({ exitCode: 0, stdout: "null\n", stderr: "" });
+});
+
+
+it("adds schemaVersion to incoming JSON and keeps an absent subject null", async () => {
+  const page = { versionId: "main", subject: { path: "target.md", objectId: "target" },
+    entries: [], unchecked: ["large.md"], complete: false, indexBuilding: false,
+    mountsCovered: false, nextCursor: null };
+  const argv = ["links", "in", JSON.stringify({ path: "target.md" }), "--json"];
+  const result = await executeCli({ argv, env: {}, request: async () => page });
+  expect(result.exitCode).toBe(0);
+  expect(JSON.parse(result.stdout)).toEqual({ schemaVersion: CLI_JSON_SCHEMA_VERSION, ...page });
+  expect(await executeCli({ argv, env: {}, request: async () => null }))
+    .toEqual({ exitCode: 0, stdout: "null\n", stderr: "" });
 });

@@ -1,10 +1,11 @@
+import {liveConnectionLimitMessage} from "@dohc/live-session-contract/live-connection";
 import { SharedDocumentWaitingError } from "../ipc/sharedDocumentOpenState";
 import type { ShareRecordStatus } from "./shareRecordStatus";
 import * as Y from "yjs";
 import { WebSocket as NodeWebSocket } from "ws";
 import { readBoundedJson } from "@dohc/service-http";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
-import { createNamedLiveBrowserTransport, parseNamedLiveBrowserLimits, type NamedLiveSelection } from "@dohc/ydoc-projection/named-live-browser-transport";
+import { createNamedLiveBrowserTransport, LiveAuthorityUnavailableError, parseNamedLiveBrowserLimits, type NamedLiveSelection } from "@dohc/ydoc-projection/named-live-browser-transport";
 import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "../ipc/channels";
 import { RELAY_FETCH_TIMEOUT_MS, relayApiFetch } from "./sharedChannels";
 import type { LiveDraft } from "./liveDraftRecovery";
@@ -40,8 +41,10 @@ export function createNamedDesktopLiveCapture(options: {
         !row.ticket || typeof row.ticket !== "object" || Array.isArray(row.ticket)) throw new Error("Invalid live admission.");
       const ticket = row.ticket as Record<string, unknown>;
       if (typeof ticket.token !== "string" || typeof ticket.expiresAtMs !== "number" || ticket.expiresAtMs <= Date.now()) throw new Error("Invalid live ticket.");
-      return { selection: { accountId: credentials.userId, workspaceId: parseLiveUpdateIdentifier(row.workspaceId),
-        grantId: parseLiveUpdateIdentifier(row.grantId), objectId: parseLiveUpdateIdentifier(row.objectId) },
+      const grantId = parseLiveUpdateIdentifier(row.grantId), workspaceId = `named:${grantId}`;
+      if (row.workspaceId !== workspaceId) throw new Error("Invalid live admission.");
+      return { selection: { accountId: credentials.userId, workspaceId,
+        grantId, objectId: parseLiveUpdateIdentifier(row.objectId) },
         discriminator: row.discriminator, token: ticket.token, limits: parseNamedLiveBrowserLimits(row.editorLimits) };
     } finally { await response.body?.cancel().catch(() => {}); }
   }
@@ -76,6 +79,7 @@ export function createNamedDesktopLiveCapture(options: {
       const transport = createNamedLiveBrowserTransport<NamedLiveSelection>({ publicOrigin: origin.origin, limits: first.limits,
         recordingContext: () => ({ kind: "account", accountId: credentials.userId }),
         authorize: async (selection, signal) => {
+          if (options.accessEnded()) throw new LiveAuthorityUnavailableError("Live editing is unavailable.");
           const next = initial ?? await admit(input.path, AbortSignal.any([signal, credentials.signal]));
           initial = undefined;
           if (JSON.stringify(next.selection) !== JSON.stringify(selection)) throw new Error("The shared file changed.");
@@ -95,13 +99,15 @@ export function createNamedDesktopLiveCapture(options: {
         announce = () => {
           const state = session.state();
           if (state.status === "live") resolve();
-          else if (!["authorizing", "connecting", "syncing"].includes(state.status)) reject(new Error("Live editing is paused. Open the file again to retry."));
+          else if (!["authorizing", "connecting", "syncing"].includes(state.status)) reject(new SharedDocumentWaitingError({state: "failed", message: liveConnectionLimitMessage(state.reason) ?? "Live editing is paused. Open the file again to retry."}));
         };
       });
       void ready.catch(() => {});
       const unsubscribe = session.subscribe(state => {
         if (!active) { announce(); return; }
         if (closed) return;
+        const limitMessage = liveConnectionLimitMessage(state.reason);
+        if (limitMessage && state.reason) input.onEditRefused?.(state.reason, limitMessage);
         if (state.status !== "live") input.onSaveState?.("read-only", token, "status", undefined, options.accessEnded() ? "access-ended" : "reconnecting");
         else if (state.pendingUpdates === 0) for (const accepted of pendingTokens.splice(0)) input.onSaveState?.("saved-to-host", accepted, "outcome");
       });

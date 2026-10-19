@@ -2,11 +2,13 @@
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { StrictMode, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { CHECKPOINT_FAILURE_MESSAGE, IMPORT_FAILURE_MESSAGE } from "../../workspaces/typingRecoveryWords";
 import { ipcErrorMessage } from "../ipcError";
 import { useShellError } from "./useShellError";
 import { shareCaptureNoticeState } from "../../workspaces/shareCaptureNotice";
 import { CreationPartialError } from "@dohc/cli/creation";
 import { errorDetails } from "./copyDetails";
+import { flushDatasetSourceCapture } from "../../workspaces/datasetSourceCapture";
 
 afterEach(cleanup);
 
@@ -15,6 +17,36 @@ const strict = ({ children }: { children: ReactNode }) => (
 );
 
 describe("useShellError", () => {
+  it("keeps a held source error in Notices with the repair words and retry", async () => {
+    const capture = { running: true, settled: true, degraded: false, heldFiles: [{
+      workspaceId: "ws-a", sourceVersionId: "main", objectId: "object", path: "sources/note.md",
+      observedSha256: "digest", observedSize: 4, reason: "ydoc-resolution-not-representable" as const,
+      observedAtMs: 1, attemptCount: 1, retryRequested: false,
+    }] };
+    const adapter = { reconcileCapture: async () => capture, flushCapture: async () => capture };
+    const failure = await flushDatasetSourceCapture(adapter, new AbortController().signal, ["sources/note.md"]).catch(error => error as Error);
+    expect(failure).toBeInstanceOf(Error);
+    if (!(failure instanceof Error)) throw Error("Expected a held source refusal");
+    const retry = vi.fn();
+    const { result } = renderHook(() => useShellError("ws-a"));
+    act(() => result.current.reportShellError("dohc could not prepare this Collection change.",
+      new Error(`Error invoking remote method 'dataset': Error: ${failure.message}`), retry));
+    const notice = result.current.shellErrors[0]!;
+    expect(notice.message).toBe('dohc could not prepare this Collection change. dohc cannot use "sources/note.md" for this change. dohc cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.');
+    expect(notice.seen).toBe(false);
+    expect(notice.retry).toBe(retry);
+    act(() => result.current.hideShellError(notice.id));
+    expect(result.current.shellErrors[0]).toMatchObject({ id: notice.id, seen: true });
+    act(() => result.current.shellErrors[0]!.retry!());
+    expect(retry).toHaveBeenCalledOnce();
+  });
+  it("routes an additional Notice action independently of its primary action", () => {
+    const first=vi.fn();const discard=vi.fn();const {result}=renderHook(()=>useShellError("workspace"));
+    act(()=>result.current.reportShellFailure({message:"Kept typing",action:{label:"Copy your typing",run:first,additional:[{label:"Discard your typing",run:discard}]}}));
+    const id=result.current.shellErrors[0]!.id;
+    act(()=>result.current.runShellErrorAction(id,1));expect(discard).toHaveBeenCalledOnce();expect(first).not.toHaveBeenCalled();
+    act(()=>result.current.runShellErrorAction(id));expect(first).toHaveBeenCalledOnce();
+  });
   it("hides only the persisted dismissal's matching restriction key", () => {
     const snapshot = { paths: ["tasks/local.yaml"], unchecked: false, checked: 1 };
     const dismissed = { ...snapshot, dismissedKey: shareCaptureNoticeState([], snapshot, false).key };
@@ -157,6 +189,22 @@ describe("useShellError", () => {
     expect(result.current.shellErrors).toEqual([]);
   });
 
+  it("opens the current file for a terminal binding refusal instead of retrying sync", () => {
+    const retry = vi.fn();
+    const open = vi.fn();
+    const { result } = renderHook(() => useShellError("ws-a"));
+    const reason = "This file's name, location, or sharing changed before this save arrived. Open the file to continue.";
+    const notice = { noticeId: "renamed-save", kind: "sync-refusal", workspaceId: "ws-a", store: "local" as const,
+      recipientShareId: null, senderKind: null, senderLabel: null, title: "dohc skipped an earlier save",
+      body: reason, detail: reason, target: { path: "renamed.md" }, createdAtMs: 1, readAtMs: null, postedHere: true };
+    act(() => result.current.showSyncRefusals([notice], retry, open));
+    expect(result.current.shellErrors[0]).toMatchObject({ retry: null, action: { label: "Open" } });
+    act(() => result.current.runShellErrorAction(notice.noticeId));
+    expect(open).toHaveBeenCalledWith("renamed.md");
+    expect(retry).not.toHaveBeenCalled();
+    expect(result.current.shellErrors).toHaveLength(1);
+  });
+
   it("runs a retry exactly once, even under Strict Mode, and drops the row", () => {
     const retry = vi.fn();
     const { result } = renderHook(() => useShellError("ws-a"), { wrapper: strict });
@@ -167,6 +215,46 @@ describe("useShellError", () => {
     act(() => result.current.retryShellError(id));
     expect(retry).toHaveBeenCalledTimes(1);
     expect(result.current.shellErrors).toEqual([]);
+  });
+
+  // A retry answers false when it could not run, such as during an account
+  // deletion review.
+  it("keeps a newer report of the same failure when an older row's retry cannot run", () => {
+    const { result } = renderHook(() => useShellError("ws-a"));
+    act(() => result.current.reportShellFailure({ message: "dohc could not finish disconnecting.", retry: () => false }));
+    const older = result.current.shellErrors[0]!;
+    const newer = vi.fn();
+    act(() => {
+      result.current.reportShellFailure({ message: "dohc could not finish disconnecting.", retry: newer });
+      result.current.retryShellError(older.id);
+    });
+    expect(result.current.shellErrors).toHaveLength(1);
+    expect(result.current.shellErrors[0]!.retry).toBe(newer);
+  });
+
+  // The toast is the newest unseen row, by time, then by place in the list.
+  it("keeps every row in place when a retry cannot run, so a same-time newer toast stays shown", () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    try {
+      const { result } = renderHook(() => useShellError("ws-a"));
+      act(() => result.current.reportShellFailure({ message: "dohc could not finish disconnecting.", retry: () => false }));
+      act(() => result.current.reportShellFailure({ message: "dohc could not reach this server.", retry: vi.fn() }));
+      const before = result.current.shellErrors;
+      act(() => result.current.retryShellError(before[0]!.id));
+      expect(result.current.shellErrors).toEqual(before);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("keeps the row a retry files again before it returns", () => {
+    const { result } = renderHook(() => useShellError("ws-a"));
+    const report = (): void => result.current.reportShellFailure({
+      message: "Could not load History.", identity: "about-history:a.md", retry: report, repeat: true,
+    });
+    act(report);
+    act(() => result.current.retryShellError(result.current.shellErrors[0]!.id));
+    expect(result.current.shellErrors.map((error) => error.message)).toEqual(["Could not load History."]);
   });
 
   it("offers Send as proposal on a direct-write row and clears those rows when it runs", () => {
@@ -292,6 +380,83 @@ describe("useShellError", () => {
     expect(result.current.shellErrors).toEqual([]);
   });
 
+  it("files a quiet failure as a row without a toast, and keeps an open toast open", () => {
+    const { result } = renderHook(() => useShellError("ws-a"));
+    act(() => result.current.reportShellFailure({ message: "Could not read site.", identity: "folder-app:site", quiet: true }));
+    expect(result.current.shellErrors.map((error) => error.seen)).toEqual([true]);
+    act(() => result.current.dismissShellError(result.current.shellErrors[0]!.id));
+    act(() => result.current.reportShellFailure({ message: "Could not read site.", identity: "folder-app:site" }));
+    act(() => result.current.reportShellFailure({ message: "Could not read site.", identity: "folder-app:site", quiet: true }));
+    expect(result.current.shellErrors.map((error) => error.seen)).toEqual([false]);
+  });
+
+  // The toast is the newest unseen row, by time, then by place in the list.
+  it("updates a quiet repeat in place, so another failure's newer toast stays the one shown", () => {
+    const now = vi.spyOn(Date, "now");
+    try {
+      const { result } = renderHook(() => useShellError("ws-a"));
+      now.mockReturnValue(1_000);
+      act(() => result.current.reportShellFailure({ message: "Could not read site.", identity: "folder-app:site", retry: vi.fn() }));
+      now.mockReturnValue(2_000);
+      act(() => result.current.reportShellFailure({ message: "Could not read docs.", identity: "folder-app:docs" }));
+      const [siteBefore] = result.current.shellErrors;
+
+      now.mockReturnValue(3_000);
+      const retry = vi.fn();
+      act(() => result.current.reportShellFailure({ message: "Could not read site again.", identity: "folder-app:site", retry, quiet: true }));
+      const [site, docs] = result.current.shellErrors;
+      expect(result.current.shellErrors).toHaveLength(2);
+      expect(site).toMatchObject({ id: siteBefore!.id, atMs: 1_000, seen: false, message: "Could not read site again.", retry });
+      expect(docs).toMatchObject({ identity: "folder-app:docs", atMs: 2_000, seen: false });
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("replaces a repeated failure's row and keeps that row's toast, open or closed", () => {
+    const { result } = renderHook(() => useShellError("ws-a"));
+    act(() => result.current.reportShellFailure({ message: "Could not load History.", identity: "about-history:a.md" }));
+    expect(result.current.shellErrors.map((error) => error.seen)).toEqual([false]);
+    // Still open: the repeat keeps it open, as one row.
+    act(() => result.current.reportShellFailure({ message: "Could not load History.", identity: "about-history:a.md", repeat: true }));
+    expect(result.current.shellErrors.map((error) => error.seen)).toEqual([false]);
+    // Closed by the person: the repeat does not toast again.
+    act(() => result.current.hideShellError(result.current.shellErrors[0]!.id));
+    act(() => result.current.reportShellFailure({ message: "Could not load History.", identity: "about-history:a.md", repeat: true }));
+    expect(result.current.shellErrors.map((error) => error.seen)).toEqual([true]);
+    // Another file's first failure is a toast of its own, repeat or not.
+    act(() => result.current.reportShellFailure({ message: "Could not load History.", identity: "about-history:b.md", repeat: true }));
+    expect(result.current.shellErrors.map((error) => [error.identity, error.seen])).toEqual([
+      ["about-history:a.md", true], ["about-history:b.md", false],
+    ]);
+  });
+
+  it("toasts a repeat again once Try again or Dismiss has removed its row", () => {
+    const retry = vi.fn();
+    const { result } = renderHook(() => useShellError("ws-a"));
+    const report = () => result.current.reportShellFailure({
+      message: "Could not load History.", identity: "about-history:a.md", retry, repeat: true,
+    });
+    act(report);
+    act(() => result.current.hideShellError(result.current.shellErrors[0]!.id));
+    // Try again removes the row, then reads; the read fails again.
+    act(() => result.current.retryShellError(result.current.shellErrors[0]!.id));
+    expect(retry).toHaveBeenCalledTimes(1);
+    expect(result.current.shellErrors).toEqual([]);
+    act(report);
+    expect(result.current.shellErrors.map((error) => error.seen)).toEqual([false]);
+    // Dismissed, then failing again: a toast, not a quiet row.
+    act(() => result.current.dismissShellError(result.current.shellErrors[0]!.id));
+    act(report);
+    expect(result.current.shellErrors.map((error) => error.seen)).toEqual([false]);
+  });
+
+  it("still files a sync failure that asks for no toast quietly when it has no predecessor", () => {
+    const { result } = renderHook(() => useShellError("ws-a"));
+    act(() => result.current.reportSyncFailure({ message: "Sync stopped.", detail: "relay", toast: false }, vi.fn()));
+    expect(result.current.shellErrors.map((error) => error.seen)).toEqual([true]);
+  });
+
   it("shows words instead of Electron's prefix, a class name or a code, and keeps them for Copy", () => {
     const { result } = renderHook(() => useShellError("ws-a"));
     const refused = new Error(
@@ -376,4 +541,40 @@ it("retries unavailable recovery through the supplied action", () => {
   act(() => result.current.retryShellError(result.current.shellErrors[0].id));
   expect(retry).toHaveBeenCalledOnce();
   expect(result.current.shellErrors).toEqual([]);
+});
+
+it.each([["typing-checkpoint", CHECKPOINT_FAILURE_MESSAGE], ["typing-import", IMPORT_FAILURE_MESSAGE]] as const)("files one %s Notice with retry and copy details", (kind, message) => {
+ const retry = vi.fn(); const {result} = renderHook(() => useShellError("workspace"));
+ act(() => {result.current.reportShellFailure({kind, message, details: [["Reason", "disk or author refusal"]], retry}); result.current.reportShellFailure({kind, message, details: [["Reason", "retry refused"]], retry});});
+ expect(result.current.shellErrors).toHaveLength(1); const row = result.current.shellErrors[0]!;
+ expect(row).toMatchObject({kind, message, seen: false, retry}); expect(row.details).toEqual([["Reason", "retry refused"]]);
+ act(() => result.current.retryShellError(row.id)); expect(retry).toHaveBeenCalledOnce();
+});
+
+it("toasts a first repeated report and retains the toast identity and seen state on refresh",()=>{
+ const {result}=renderHook(()=>useShellError("typing-refresh"));
+ const report=()=>result.current.reportShellFailure({identity:"typing-import:one",kind:"typing-import",message:IMPORT_FAILURE_MESSAGE,repeat:true});
+ act(report);const first=result.current.shellErrors[0]!;expect(first.seen).toBe(false);
+ act(report);expect(result.current.shellErrors[0]).toMatchObject({id:first.id,atMs:first.atMs,seen:false});
+ act(()=>result.current.hideShellError(first.id));act(report);
+ expect(result.current.shellErrors).toHaveLength(1);expect(result.current.shellErrors[0]).toMatchObject({id:first.id,atMs:first.atMs,seen:true});
+});
+
+it("toasts a changed reason even when the prior repeated toast was closed", () => {
+ const {result}=renderHook(()=>useShellError("typing-new-reason"));
+ act(()=>result.current.reportShellFailure({identity:"typing-import:one",kind:"typing-import",message:IMPORT_FAILURE_MESSAGE,repeat:true}));
+ const first=result.current.shellErrors[0]!;
+ act(()=>result.current.hideShellError(first.id));
+ act(()=>result.current.reportShellFailure({identity:"typing-import:one",kind:"typing-import",message:"This file is no longer in History.",repeat:true}));
+ expect(result.current.shellErrors).toHaveLength(1);
+ expect(result.current.shellErrors[0]).toMatchObject({message:"This file is no longer in History.",seen:false});
+ expect(result.current.shellErrors[0]!.id).not.toBe(first.id);
+});
+
+it("gives a success Notice its Open History action without reporting a failure", () => {
+ const open=vi.fn();const {result}=renderHook(()=>useShellError("typing-recovered"));
+ act(()=>result.current.showSuccessNotice('dohc recovered your typing in "note.md".',undefined,undefined,{label:"Open History",run:open}));
+ const row=result.current.shellErrors[0]!;
+ expect(row).toMatchObject({tone:"success",retry:null,seen:false,action:{label:"Open History"}});
+ act(()=>result.current.runShellErrorAction(row.id));expect(open).toHaveBeenCalledOnce();
 });

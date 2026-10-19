@@ -7,10 +7,15 @@ import { parseDatasetAttemptRequest } from "@dohc/security-contract/dataset-atte
 import { APP_PUBLICATION_MAX_BUNDLE_BYTES, APP_PUBLICATION_MAX_DOCUMENT_BYTES } from "@dohc/security-contract/app-publication";
 import { APP_BACKEND_REQUEST_BYTES, APP_BACKEND_RESULT_BYTES, APP_BACKEND_UPLOAD_REQUEST_BYTES,
   parseAppBackendInvokeRequest, parseAppBackendUploadRequest, parseAppBackendRefusal } from "@dohc/security-contract/app-backend";
+import { APP_COLLECTION_REQUEST_BYTES, APP_COLLECTION_RESPONSE_BYTES, parseAppCollectionCreateRequest } from "@dohc/security-contract/app-publication";
+import { isAppCollectionPageRequest } from "@dohc/security-contract/app-collection-checks";
+export type LocalAppAction = "invoke" | "upload" | "attempt" | "list" | "create";
+/** The workspace engine cannot answer now. The app may retry; this is not a refusal. */
+export class LocalAppUnavailableError extends Error {}
 export interface LocalAppLaunchBackend {
   browserPublication(publicationId: string): { authorityRevision: number; files: Parameters<typeof createAppDocument>[0] };
   assertBrowserPublication(publicationId: string, authorityRevision: number): void;
-  request(publicationId: string, action: "invoke" | "upload" | "attempt", input: unknown, signal?: AbortSignal): Promise<unknown>;
+  request(publicationId: string, action: LocalAppAction, input: unknown, signal?: AbortSignal): Promise<unknown>;
   readBrowserFile(publicationId: string, input: { authorityRevision: number; fileId: string; operation: string; input: unknown }, signal?: AbortSignal): Promise<unknown>;
 }
 export interface LocalAppLaunchHost {
@@ -133,9 +138,16 @@ export async function createLocalAppLaunchHost(options: { backend: LocalAppLaunc
             if (!body || typeof body !== "object" || Array.isArray(body)) return reply(response, 400);
             const row = body as Record<string, unknown>;
             if (typeof row.id !== "string" || row.id.length > 64 || !/^[A-Za-z0-9_-]+$/.test(row.id)) return reply(response, 400);
-            if (row.op !== "backend.upload" && Buffer.byteLength(JSON.stringify(row)) > APP_BACKEND_REQUEST_BYTES) return reply(response, 413);
+            const collection = row.op === "collection.list" || row.op === "collection.create";
+            if (row.op !== "backend.upload" && Buffer.byteLength(JSON.stringify(row)) > (collection ? APP_COLLECTION_REQUEST_BYTES : APP_BACKEND_REQUEST_BYTES)) return reply(response, 413);
             let result: unknown;
-            if (row.op === "backend.attempt" && exact(row, ["id", "op", "operation", "request"])) {
+            if (row.op === "collection.list" && (exact(row, ["id", "op", "limit"]) || exact(row, ["id", "op", "limit", "afterPath"]))) {
+              if (!isAppCollectionPageRequest(row.limit, row.afterPath)) return reply(response, 400);
+              result = await options.backend.request(publicationId, "list", { authorityRevision, limit: row.limit, ...(row.afterPath === undefined ? {} : { afterPath: row.afterPath }) }, activeSignal);
+            } else if (row.op === "collection.create" && exact(row, ["id", "op", "idempotencyKey", "fields"])) {
+              const input = parseAppCollectionCreateRequest({ authorityRevision, idempotencyKey: row.idempotencyKey, fields: row.fields });
+              result = await options.backend.request(publicationId, "create", input, activeSignal);
+            } else if (row.op === "backend.attempt" && exact(row, ["id", "op", "operation", "request"])) {
               const operation = parseAppBackendInvokeRequest({ authorityRevision, operation: row.operation, idempotencyKey: "attempt", input: {} }).operation;
               result = await options.backend.request(publicationId, "attempt", { authorityRevision, operation, ...parseDatasetAttemptRequest(row.request) }, activeSignal);
             } else if (row.op === "backend.invoke" && exact(row, ["id", "op", "operation", "idempotencyKey", "input"])) {
@@ -150,14 +162,14 @@ export async function createLocalAppLaunchHost(options: { backend: LocalAppLaunc
               result = await options.backend.readBrowserFile(publicationId, { authorityRevision: input.authorityRevision, fileId: row.fileId, operation: input.operation, input: input.input }, activeSignal);
             } else return reply(response, 400);
             activeSignal.throwIfAborted(); current();
-            if (Buffer.byteLength(JSON.stringify(result)) > (row.op === "backend.file" ? APP_BACKEND_UPLOAD_REQUEST_BYTES : APP_BACKEND_RESULT_BYTES)) return reply(response, 503);
+            if (Buffer.byteLength(JSON.stringify(result)) > (row.op === "backend.file" ? APP_BACKEND_UPLOAD_REQUEST_BYTES : collection ? APP_COLLECTION_RESPONSE_BYTES : APP_BACKEND_RESULT_BYTES)) return reply(response, 503);
             return reply(response, 200, result);
           } catch (error) {
             if (!response.headersSent && !response.destroyed) {
               if (isAppBackendRuntimeError(error)) {
                 try { activeSignal.throwIfAborted(); current(); return reply(response, 409, parseAppBackendRefusal(error.refusal)); } catch {}
               }
-              reply(response, error instanceof RangeError ? 413 : 404);
+              reply(response, error instanceof RangeError ? 413 : error instanceof LocalAppUnavailableError ? 503 : 404);
             }
           }
           finally { request.removeListener("aborted", requestAborted); if (admitted) pending--; }

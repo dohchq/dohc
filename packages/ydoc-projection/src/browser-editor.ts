@@ -1,6 +1,5 @@
 import {EditorState} from "@tiptap/pm/state";
 import {EditorView} from "@tiptap/pm/view";
-import {Schema} from "@tiptap/pm/model";
 import {baseKeymap} from "@tiptap/pm/commands";
 import {keymap} from "@tiptap/pm/keymap";
 import {ySyncPlugin, ySyncPluginKey, yUndoPlugin, undo, redo} from "y-prosemirror";
@@ -10,9 +9,7 @@ import {getDohcProseMirrorSchema} from "./import-export.js";
 /** An editor on the existing body fragment. Admission remains the session owner's responsibility. */
 export function mountLiveBodyEditor(element: HTMLElement, input: {body: Y.XmlFragment; canEdit(): boolean;
   edit(change: () => void): boolean; label: string}) {
-  const projection = getDohcProseMirrorSchema();
-  // Empty editor content must default to a paragraph, not the projection's recursive callout.
-  const schema = new Schema({...projection.spec, nodes: projection.spec.nodes.addToStart("paragraph", projection.spec.nodes.get("paragraph")!)});
+  const schema = getDohcProseMirrorSchema();
   const view = new EditorView(element, {
     state: EditorState.create({schema, plugins: [ySyncPlugin(input.body), yUndoPlugin(),
       keymap({"Mod-z": state => input.canEdit() && undo(state), "Mod-Shift-z": state => input.canEdit() && redo(state),

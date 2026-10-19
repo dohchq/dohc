@@ -1,3 +1,4 @@
+import { actorHueSlot } from "@dohc/workspace-contracts/actor-presentation";
 import { createHmac, randomBytes } from "node:crypto";
 import { badRequest } from "./errors";
 import { accountDisplayName } from "./discussionRoutes";
@@ -137,11 +138,6 @@ export function sanitizePresenceState(
   return state;
 }
 
-function paletteSlot(value: string): number {
-  let hash = 2166136261;
-  for (const point of value) hash = Math.imul(hash ^ point.codePointAt(0)!, 16777619) >>> 0;
-  return hash % 7;
-}
 
 export interface PreparedPresencePeer {
   peer: PresenceEntry;
@@ -183,7 +179,7 @@ export function createPresenceProjection(
     labels.set(userId, { expiresAtMs: now + ACCOUNT_LABEL_TTL_MS, value });
     return value;
   };
-  return async (
+  const project = async (
     snapshot: PresenceSnapshot,
     input: {
       scopeKey: string;
@@ -228,11 +224,12 @@ export function createPresenceProjection(
           peer.userId === input.viewerUserId &&
           (input.viewerClientId === null || peer.clientId === input.viewerClientId),
         displayName,
-        paletteSlot: paletteSlot(displayName === null ? sessionToken : peer.userId),
+        paletteSlot: actorHueSlot(displayName === null ? sessionToken : peer.userId),
         state: item.state,
         updatedAtMs: peer.updatedAtMs,
       };
     });
     return { version: snapshot.version, peers };
   };
+  return Object.assign(project, {deleteAccount(userId: string) {labels.delete(userId);}});
 }

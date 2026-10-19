@@ -134,18 +134,15 @@ fn imported_activation_rejects_ordinary_projection_that_does_not_match_native_st
     assert!(capture_imported(&mut f, 1_000_000).is_err());
 }
 
-/// An imported document whose file keeps a body the engine's reader holds as
-/// text, such as a nested list, activates: activation compares the version's
-/// file with the projection the store settles, not the strict one.
 #[test]
 fn imported_activation_accepts_a_file_body_the_engine_reads_as_text() {
-    const NESTED: &str = "# Shared\n\n- parent\n  - nested\n";
+    const SOURCE: &str = "# Shared\n\nHello <b>hidden</b> world\n";
     let mut f = imported_fixture();
     f.doc
-        .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, NESTED)
+        .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, SOURCE)
         .unwrap();
     let projection = f.doc.project(ContentKind::Richdoc).unwrap().content;
-    assert_ne!(projection, NESTED);
+    assert_ne!(projection, SOURCE);
     assert_eq!(f.doc.preserved_markdown_source(&projection), None);
     let update = f.doc.encode_full_state();
     f.store
@@ -160,8 +157,8 @@ fn imported_activation_accepts_a_file_body_the_engine_reads_as_text() {
                 version_id: "main".into(),
                 object_id: "object".into(),
                 path: "owner.md".into(),
-                text: NESTED.into(),
-                moment_id: "imported-nested".into(),
+                text: SOURCE.into(),
+                moment_id: "imported-literal-html".into(),
                 metadata_origin: "sync".into(),
                 metadata_summary: None,
                 metadata_correlation_id: None,
@@ -173,7 +170,43 @@ fn imported_activation_accepts_a_file_body_the_engine_reads_as_text() {
         )
         .unwrap();
     let captured = capture_imported(&mut f, 1_000_000).unwrap();
-    assert_eq!(captured.source.source_digest, hex_sha256(NESTED.as_bytes()));
+    assert_eq!(captured.source.source_digest, hex_sha256(SOURCE.as_bytes()));
+}
+
+#[test]
+fn imported_activation_rejects_main_era_flattened_nested_list_witness() {
+    const SOURCE: &str = "- parent\n  - nested\n";
+    let mut f = imported_fixture();
+    f.doc = crate::ydoc::main_era_flattened_list_for_test(SOURCE);
+    let projection = f.doc.project(ContentKind::Richdoc).unwrap().content;
+    assert_ne!(projection, SOURCE);
+    assert_eq!(f.doc.preserved_markdown_source(&projection), None);
+    let update = f.doc.encode_full_state();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            durable::record_update_in_tx(tx, &f.key, &update, None, None, 4)
+        })
+        .unwrap();
+    VersionedTextStore::new(&mut f.store)
+        .write_text(
+            &WriteText {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                object_id: "object".into(),
+                path: "owner.md".into(),
+                text: SOURCE.into(),
+                moment_id: "imported-flattened-list".into(),
+                metadata_origin: "sync".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 5,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    assert!(capture_imported(&mut f, 1_000_000).is_err());
 }
 
 #[test]
@@ -277,6 +310,200 @@ fn retained_activation_reopens_after_adoption_and_a_later_native_head() {
     assert_eq!(resumed.source, captured.source);
     assert_eq!(resumed.full_state, captured.full_state);
     assert!(f.cut.expected_local_sequence > resumed.source.native_head_sequence);
+}
+
+#[test]
+fn hosted_activation_waits_for_its_document_backfill_not_the_ordinary_cursor() {
+    let mut f = imported_fixture();
+    let set = |f: &mut Fixture, sql: &str| {
+        f.store
+            .write_with(&NoFaults, |tx| tx.execute(sql, []).map_err(write_sql))
+            .unwrap();
+    };
+    set(&mut f, "DELETE FROM sync_relay_cursors");
+    set(
+        &mut f,
+        "INSERT OR IGNORE INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+         VALUES ('workspace','service-host:host','epoch','stream',1)",
+    );
+    // The base arrived in the document's backfill, past the frozen main cursor.
+    set(
+        &mut f,
+        "INSERT INTO hosted_replicas (workspace_id,scope_token,scope_generation,main_cursor,created_at_ms) \
+         VALUES ('workspace','scope',1,4,1)",
+    );
+    set(
+        &mut f,
+        "INSERT INTO hosted_documents (workspace_id,object_id,path,state,backfill_cursor,scope_generation) \
+         VALUES ('workspace','object','object.md','backfilling',9,1)",
+    );
+    assert!(matches!(
+        capture_imported(&mut f, 1_000_000),
+        Err(ApplicationError::HostedDocumentUnready)
+    ));
+    set(&mut f, "UPDATE hosted_documents SET state='ready'");
+    let captured = capture_imported(&mut f, 1_000_000).unwrap();
+    assert_eq!(captured.source.committed_cursor, 9);
+    assert_eq!(
+        resume_imported(&mut f, &captured.activation_id, 1_000_000)
+            .unwrap()
+            .source,
+        captured.source
+    );
+    // A document that left the scope stops activating, ready or not.
+    set(&mut f, "UPDATE hosted_replicas SET scope_generation=2");
+    assert!(matches!(
+        resume_imported(&mut f, &captured.activation_id, 1_000_000),
+        Err(ApplicationError::HostedDocumentUnready)
+    ));
+}
+
+/// The relay waits for a document that is not ready and stops resuming one
+/// that diverged, so a held document's resume says it is unready even when
+/// its state no longer matches the retained activation, and a ready
+/// document whose state diverged keeps the conflict.
+#[test]
+fn a_held_documents_resume_is_unready_and_a_ready_divergence_conflicts() {
+    let mut f = imported_fixture();
+    let set = |f: &mut Fixture, sql: &str| {
+        f.store
+            .write_with(&NoFaults, |tx| tx.execute(sql, []).map_err(write_sql))
+            .unwrap();
+    };
+    set(&mut f, "DELETE FROM sync_relay_cursors");
+    set(
+        &mut f,
+        "INSERT OR IGNORE INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+         VALUES ('workspace','service-host:host','epoch','stream',1)",
+    );
+    set(
+        &mut f,
+        "INSERT INTO hosted_replicas (workspace_id,scope_token,scope_generation,main_cursor,created_at_ms) \
+         VALUES ('workspace','scope',1,9,1)",
+    );
+    set(
+        &mut f,
+        "INSERT INTO hosted_documents (workspace_id,object_id,path,state,scope_generation) \
+         VALUES ('workspace','object','object.md','ready',1)",
+    );
+    let captured = capture_imported(&mut f, 1_000_000).unwrap();
+    // The document's base no longer matches the activation's.
+    set(&mut f, "UPDATE ydoc_docs SET base_relay_seq=8");
+    set(
+        &mut f,
+        "UPDATE hosted_documents SET state='held',held_reason='hosted-backfill-work-waiting'",
+    );
+    assert!(matches!(
+        resume_imported(&mut f, &captured.activation_id, 1_000_000),
+        Err(ApplicationError::HostedDocumentUnready)
+    ));
+    set(&mut f, "UPDATE hosted_documents SET state='ready',held_reason=NULL");
+    assert!(matches!(
+        resume_imported(&mut f, &captured.activation_id, 1_000_000),
+        Err(ApplicationError::Conflict)
+    ));
+}
+
+/// A file written only as text has no Y.Doc to activate, so its capture says
+/// so, unlike a conflict the relay retries. A hosted document that is not
+/// ready, or Y.Doc input waiting for its base, may still bring a lineage, and
+/// a document with one keeps its answers.
+#[test]
+fn a_document_without_lineage_refuses_capture_unlike_one_whose_lineage_may_arrive() {
+    let mut f = imported_fixture();
+    let set = |f: &mut Fixture, sql: &str| {
+        f.store
+            .write_with(&NoFaults, |tx| tx.execute(sql, []).map_err(write_sql))
+            .unwrap();
+    };
+    VersionedTextStore::new(&mut f.store)
+        .write_text(
+            &WriteText {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                object_id: "plain".into(),
+                path: "plain.md".into(),
+                text: "Written as text".into(),
+                moment_id: "plain-write".into(),
+                metadata_origin: "sync".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 4,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    let plain = DocKey::new("workspace", "main", "plain").unwrap();
+    let capture_plain = |f: &mut Fixture| {
+        capture_imported_owner_activation(&mut f.store, "namespace", &plain, "plain.md", 1_000_000, &NoFaults)
+    };
+    assert!(matches!(
+        capture_plain(&mut f),
+        Err(ApplicationError::LiveDocumentWithoutLineage)
+    ));
+    set(
+        &mut f,
+        "INSERT INTO ydoc_deferred_updates(workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms) \
+         VALUES ('workspace','main','plain','remote',8,4)",
+    );
+    assert!(matches!(capture_plain(&mut f), Err(ApplicationError::Conflict)));
+    set(&mut f, "DELETE FROM ydoc_deferred_updates");
+    set(&mut f, "DELETE FROM sync_relay_cursors");
+    set(
+        &mut f,
+        "INSERT OR IGNORE INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+         VALUES ('workspace','service-host:host','epoch','stream',1)",
+    );
+    set(
+        &mut f,
+        "INSERT INTO hosted_replicas (workspace_id,scope_token,scope_generation,main_cursor,created_at_ms) \
+         VALUES ('workspace','scope',1,9,1)",
+    );
+    set(
+        &mut f,
+        "INSERT INTO hosted_documents (workspace_id,object_id,path,state,backfill_cursor,scope_generation) \
+         VALUES ('workspace','plain','plain.md','backfilling',4,1), \
+                ('workspace','object','owner.md','ready',0,1)",
+    );
+    assert!(matches!(
+        capture_plain(&mut f),
+        Err(ApplicationError::HostedDocumentUnready)
+    ));
+    set(&mut f, "UPDATE hosted_documents SET state='ready' WHERE object_id='plain'");
+    assert!(matches!(
+        capture_plain(&mut f),
+        Err(ApplicationError::LiveDocumentWithoutLineage)
+    ));
+    // The document with a lineage still activates, and its base past the
+    // committed position is still a conflict.
+    capture_imported(&mut f, 1_000_000).unwrap();
+    set(&mut f, "UPDATE ydoc_docs SET base_relay_seq=10");
+    assert!(matches!(
+        capture_imported(&mut f, 1_000_000),
+        Err(ApplicationError::Conflict)
+    ));
+}
+
+/// A store that does not hold the retained activation, as one an identity
+/// change selected, refuses its resume as a conflict, so the relay stops
+/// resuming it instead of retrying an internal error.
+#[test]
+fn a_store_without_the_retained_activation_refuses_its_resume_as_a_conflict() {
+    let mut f = imported_fixture();
+    let captured = capture_imported(&mut f, 1_000_000).unwrap();
+    let other = format!("ordinary-activation-{}", "0".repeat(64));
+    assert!(matches!(
+        resume_imported(&mut f, &other, 1_000_000),
+        Err(ApplicationError::Conflict)
+    ));
+    assert_eq!(
+        resume_imported(&mut f, &captured.activation_id, 1_000_000)
+            .unwrap()
+            .activation_id,
+        captured.activation_id
+    );
 }
 
 #[test]

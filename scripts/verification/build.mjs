@@ -20,13 +20,32 @@ const configFiles = {
     ...[".env", ".env.local", ".env.production", ".env.production.local"].map((name) => `services/share-web/viewer/${name}`),
   ],
 };
+// Native tests include these shared fixtures. The daemon does not.
+const nativeTestInputs = [
+  "packages/excalidraw-scene/fixtures/canonical-json.json", "packages/live-session-contract/src/liveObjectBinding.vectors.json",
+  "packages/live-session-contract/vectors/live-update-admission-vectors.json", "packages/security-contract/vectors/share-grant-vectors.json",
+  "packages/workspace-contracts/src/relayValues.ts", "packages/workspace-fs/text-media-cases.json",
+  "services/sync-relay/relay-error-codes.json", "tools/rust-engine-program/capture-fixtures.json", "tools/rust-engine-program/capture-goldens.json",
+  "tools/rust-engine-program/ydoc-replay-fixtures.json", "tools/rust-engine-program/ydoc-replay-goldens.json",
+];
+// Receipts depend on the helpers that discover inputs and launch each build.
+// process.mjs runs Windows commands through windows-command.mjs and windows-job.ps1.
+const preparationInputs = [
+  "scripts/verification/build.mjs", "scripts/verification/process.mjs", "scripts/verification/cancellation.mjs",
+  "scripts/verification/windows-command.mjs", "scripts/verification/windows-job.ps1",
+  "tools/rust-engine-program/git-read.mjs", "tools/rust-engine-program/build-slot.mjs",
+  "apps/desktop/scripts/require-e2e-engine.mjs",
+];
+// Verification provenance: the production inputs plus tests, proofs, profiling
+// and dependency patches. artifactSourceFingerprint selects what a build consumes.
 const inputPaths = {
-  engine: ["crates", "vendor", ".cargo", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "packages/ydoc-projection", "pnpm-lock.yaml", "scripts/verification", ".gitignore"],
-  desktop: ["apps/desktop", "packages", "services", "scripts", "tools", "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "tsconfig.base.json", ".gitignore", ...configFiles.desktop],
+  engine: ["crates", "vendor", ".cargo", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "packages/ydoc-projection", "pnpm-lock.yaml", "scripts/verification", ".gitignore", ...preparationInputs, ...nativeTestInputs],
+  // macOS staging builds the app compiler owner crate.
+  desktop: ["apps/desktop", "packages", "services", "patches", "scripts", "tools", "crates/dohc-compiler-owner", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "tsconfig.base.json", ".gitignore", ...configFiles.desktop],
 };
 const environmentInputs = {
   engine: /^(CARGO_(BUILD_|PROFILE_|TARGET_|INCREMENTAL$|ENCODED_RUSTFLAGS$)|RUST(?:FLAGS|UP_TOOLCHAIN|C|C_WRAPPER|C_WORKSPACE_WRAPPER|DOC|DOCFLAGS)$|(?:CC|CXX|AR|CFLAGS|CXXFLAGS)(?:_|$))/,
-  desktop: /^(VITE_|NODE_ENV$|NODE_OPTIONS$|ESBUILD_BINARY_PATH$|DOHC_(?:POSTHOG_KEY|POSTHOG_HOST|SENTRY_DSN|SENTRY_DIST)$)/,
+  desktop: /^(VITE_|NODE_ENV$|NODE_OPTIONS$|ESBUILD_BINARY_PATH$|DOHC_(?:POSTHOG_KEY|POSTHOG_HOST|DESKTOP_DIST)$)/,
 };
 
 export function hashFile(path) {
@@ -55,9 +74,11 @@ export function repairOwnedEngineExecutable(path) {
   accessSync(path, constants.X_OK);
 }
 
-export function sourceFingerprint(kind, root = repoRoot, selectedPaths, contents = new Map()) {
-  const paths = selectedPaths ?? git(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ...inputPaths[kind]], root).split("\0").filter(Boolean);
-  paths.push(...configFiles[kind]);
+const listFiles = root => git(["ls-files", "-z", "--cached", "--others", "--exclude-standard"], root).split("\0").filter(Boolean);
+const kindInputs = (kind, files) => files.filter(path => inputPaths[kind].some(input => path === input || path.startsWith(input + "/")));
+
+export function sourceFingerprint(kind, root = repoRoot, selectedPaths = kindInputs(kind, listFiles(root)), contents = new Map()) {
+  const paths = [...selectedPaths, ...configFiles[kind]];
   const hash = createHash("sha256");
   hash.update(JSON.stringify({ platform: process.platform, arch: process.arch, node: process.version }));
   const environmentKeys = new Set();
@@ -77,7 +98,7 @@ export function sourceFingerprint(kind, root = repoRoot, selectedPaths, contents
     if (executable) { hash.update(name + "\0" + executable + "\0"); hash.update(readFileSync(executable)); }
   }
   if (kind === "engine") {
-    hash.update(execFileSync("rustc", ["-vV"], { cwd: root, env: { ...process.env, RUSTUP_AUTO_INSTALL: "0" } }));
+    hash.update(execFileSync("rustc", ["-vV"], { cwd: root, windowsHide: true, env: { ...process.env, RUSTUP_AUTO_INSTALL: "0" } }));
     // Cargo discovers configuration from its working directory through the filesystem root.
     for (let directory = resolve(root); dirname(directory) !== directory;) {
       directory = dirname(directory);
@@ -96,25 +117,20 @@ export function sourceFingerprint(kind, root = repoRoot, selectedPaths, contents
   }
   for (const path of [...new Set(paths)].sort()) {
     hash.update(path + "\0");
-    const absolute = join(root, path);
-    try { hash.update(contents.get(path) ?? readFileSync(absolute)); }
-    catch (error) { if (error.code !== "ENOENT") throw error; hash.update("<deleted>"); }
+    let bytes = contents.get(path);
+    if (bytes === undefined) {
+      try { bytes = readFileSync(join(root, path)); contents.set(path, bytes); }
+      catch (error) { if (error.code !== "ENOENT") throw error; bytes = "<deleted>"; }
+    }
+    hash.update(bytes);
     hash.update("\0");
   }
   return hash.digest("hex");
 }
 
 const testInput = path => /(?:^|\/)(?:tests|__tests__|testing|e2e)\/|\.(?:test|spec|testSupport|fixture|integration-helper)\.[^/]+$|[Tt]estFixture\.[^/]+$/u.test(path);
-const preparationInputs = [
-  "scripts/verification/build.mjs", "scripts/verification/process.mjs", "scripts/verification/cancellation.mjs",
-  "scripts/verification/windows-command.mjs", "scripts/verification/windows-job.ps1",
-  "tools/rust-engine-program/git-read.mjs", "tools/rust-engine-program/build-slot.mjs",
-  "apps/desktop/scripts/require-e2e-engine.mjs",
-];
 
-export function artifactSourceFingerprint(kind, root = repoRoot) {
-  const files = git(["ls-files", "-z", "--cached", "--others", "--exclude-standard"], root).split("\0").filter(Boolean);
-  const contents = new Map();
+export function artifactSourceFingerprint(kind, root = repoRoot, files = listFiles(root), contents = new Map()) {
   const read = path => {
     if (!contents.has(path)) contents.set(path, readFileSync(join(root, path)));
     return contents.get(path);
@@ -212,6 +228,15 @@ export function artifactSourceFingerprint(kind, root = repoRoot) {
   return sourceFingerprint(kind === "runtime" ? "desktop" : kind, root, [...selected], contents);
 }
 
+// One listing and one read of each file serve every fingerprint of a checkout state.
+function inputFingerprints(kinds, root = repoRoot) {
+  const files = listFiles(root), contents = new Map();
+  return Object.fromEntries(kinds.map(kind => [kind, {
+    source: sourceFingerprint(kind, root, kindInputs(kind, files), contents),
+    production: artifactSourceFingerprint(kind, root, files, contents),
+  }]));
+}
+
 export function directoryFingerprint(path) {
   if (!lstatSync(path).isDirectory()) throw new Error(`Unexpected build artifact directory: ${path}`);
   const hash = createHash("sha256");
@@ -227,20 +252,26 @@ export function directoryFingerprint(path) {
   return hash.digest("hex");
 }
 
-function artifactFingerprint(kind) {
+// The Windows x64 probe owner and relay run on the compiler's pinned Node, so both trees are desktop artifacts.
+// macOS and Linux stage only the Collection compiler's esbuild binary.
+const compilerTargets = ["win32-x64", "darwin-arm64", "linux-arm64", "linux-x64"];
+export function artifactFingerprint(kind, root = repoRoot, platform = process.platform, arch = process.arch) {
   if (kind === "engine") return hashFile(enginePath);
   return createHash("sha256").update(JSON.stringify([
     "apps/desktop/dist", "apps/desktop/resources/cli-bin", "apps/desktop/resources/app-backend-runtime", "services/share-web/viewer/dist",
-    ...(process.platform === "win32" && process.arch === "x64" ? ["apps/desktop/resources/app-compiler"] : []),
-  ].map((path) => [path, directoryFingerprint(join(repoRoot, path))]))).digest("hex");
+    ...(compilerTargets.includes(`${platform}-${arch}`) ? ["apps/desktop/resources/app-compiler"] : []),
+    ...(platform === "win32" && arch === "x64" ? ["apps/desktop/resources/agent-probe"] : []),
+  ].map((path) => [path, directoryFingerprint(join(root, path))]))).digest("hex");
 }
 
-export function preparedStatus(kind, receipt = readJson(receiptPath), engineBinary = enginePath, source = artifactSourceFingerprint(kind)) {
+// A receipt is reusable while the inputs its build consumed are unchanged.
+// Its `source` is the full provenance a proof records; `production` decides reuse.
+export function preparedStatus(kind, receipt = readJson(receiptPath), engineBinary = enginePath, production = artifactSourceFingerprint(kind)) {
   try {
     if (kind === "desktop" && process.platform !== "win32") {
       for (const name of ["dohc", "dohc-mcp"]) accessSync(join(repoRoot, "apps/desktop/resources/cli-bin", name), constants.X_OK);
     }
-    return receipt?.[kind]?.source === source
+    return receipt?.[kind]?.production === production
       && (kind === "engine" ? engineArtifactMatches(engineBinary, receipt[kind].artifact)
         : receipt[kind].artifact === artifactFingerprint(kind));
   } catch (error) {
@@ -282,7 +313,7 @@ export async function withBuildBudget(action) {
   const budget = resolveBuildBudget();
   if (budget) {
     const free = freeDiskGb(repoRoot);
-    if (free === null || free < budget.diskFloorGb) throw new Error(`Build needs ${budget.diskFloorGb} GB free; observed ${free ?? "unknown"}.`);
+    if (free === null || free < budget.diskFloorGb) throw Object.assign(new Error(`Build needs ${budget.diskFloorGb} GB free; observed ${free ?? "unknown"}.`), { environment: "disk space" });
   }
   const slot = budget ? await acquireBuildSlot({ ...budget, cooperativeCancellation: true }) : null;
   const env = buildEnvironment(budget?.jobs);
@@ -301,19 +332,24 @@ export async function prepare({ engineOnly = false, output = join(repoRoot, ".do
   catch (error) { if (error.code === "EEXIST") throw new Error(`Another preparation owns ${lock}. Inspect its PID before removing a stale lock.`); throw error; }
   try {
   await cancellation.checkpoint();
-  if (install) await run(...pnpm(["install", "--frozen-lockfile"]), { log: join(output, "prepare-install.log") });
+  if (install) await run(...pnpm(["install", "--frozen-lockfile", "--config.confirm-modules-purge=false"]), { log: join(output, "prepare-install.log") });
   await cancellation.checkpoint();
   const receipt = readJson(receiptPath) ?? { version: 1 };
-  const pending = [];
-  for (const kind of engineOnly ? ["engine"] : ["engine", "desktop"]) {
-    if (kind === "engine" && existsSync(enginePath)) repairOwnedEngineExecutable(enginePath);
-    const source = artifactSourceFingerprint(kind);
-    const prepared = preparedStatus(kind, receipt, enginePath, source);
+  const kinds = engineOnly ? ["engine"] : ["engine", "desktop"];
+  if (existsSync(enginePath)) repairOwnedEngineExecutable(enginePath);
+  const start = inputFingerprints(kinds), pending = [];
+  for (const kind of kinds) {
+    const prepared = preparedStatus(kind, receipt, enginePath, start[kind].production);
     await cancellation.checkpoint();
     if (prepared) { console.log(`[prepare] reuse ${kind} ${receipt[kind].artifact.slice(0, 12)}`); continue; }
-    pending.push({kind, source});
+    pending.push({kind, ...start[kind]});
   }
-  async function prepareKind({kind, source}, env) {
+  const commit = pending.length ? git(["rev-parse", "HEAD"]) : undefined;
+  // A build records its source and production inputs only if both held from
+  // start to finish.
+  const changed = (kind, now = inputFingerprints([kind])) => now[kind].source !== start[kind].source
+    || now[kind].production !== start[kind].production;
+  async function prepareKind({kind, source, production}, env) {
     await cancellation.checkpoint();
     if (kind === "engine") {
       const result = await run("cargo", ["build", "--locked", "--target-dir", join(repoRoot, "target"), "--message-format=json-render-diagnostics", "-p", "dohc-workspace-engine", "--bin", "dohc-workspace-engine"], { env, log: join(output, "engine-build.log"), quietStdout: true });
@@ -325,8 +361,8 @@ export async function prepare({ engineOnly = false, output = join(repoRoot, ".do
       await run(...pnpm(["--filter", "@dohc/desktop", "build"]), { log: join(output, "desktop-build.log") });
       await run(...pnpm(["--filter", "@dohc/share-web", "build"]), { log: join(output, "share-web-build.log") });
     }
-    if (artifactSourceFingerprint(kind) !== source) throw new Error(`${kind} inputs changed during the build. Run preparation again.`);
-    receipt[kind] = { source, artifact: artifactFingerprint(kind), commit: git(["rev-parse", "HEAD"]), builtAt: new Date().toISOString() };
+    if (changed(kind)) throw new Error(`${kind} inputs changed during the build. Run preparation again.`);
+    receipt[kind] = { source, production, artifact: artifactFingerprint(kind), commit, builtAt: new Date().toISOString() };
     await cancellation.checkpoint();
     mkdirSync(resolve(receiptPath, ".."), { recursive: true });
     writeFileSync(receiptPath + ".tmp", JSON.stringify(receipt, null, 2) + "\n");
@@ -339,9 +375,10 @@ export async function prepare({ engineOnly = false, output = join(repoRoot, ".do
   }
   if (pending.some(({kind}) => kind === "engine")) await withBuildBudget(buildPending);
   else await buildPending();
-  // A completed build can become stale while its sibling is still running.
-  for (const kind of engineOnly ? ["engine"] : ["engine", "desktop"]) {
-    if (artifactSourceFingerprint(kind) !== receipt[kind].source) throw new Error(`${kind} inputs changed during preparation. Run preparation again.`);
+  // A completed or reused build can become stale while its sibling is still running.
+  const end = inputFingerprints(kinds);
+  for (const kind of kinds) {
+    if (changed(kind, end)) throw new Error(`${kind} inputs changed during preparation. Run preparation again.`);
   }
   requireE2eEngine({ override: enginePath });
   await cancellation.checkpoint();

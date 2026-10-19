@@ -1,35 +1,96 @@
+import { shortcutKeys } from "../../shortcuts/shortcutRegistry";
+import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
 import { FILE_KIND_RECORDS, type FileDisplayKind } from "@dohc/workspace-contracts/kinds";
-import { AlertTriangle, Bot, CheckCircle2, Globe2, MoreHorizontal, SearchX } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { ReactNode } from "react";
-import type { HistoryPolicyUnreadableResult, SyncStatusResult } from "../../ipc/bridgeContract";
+import { SAVED_HERE, SAVING, saveProblem, type SaveState } from "@dohc/workspace-contracts/save-state";
+import { AlertTriangle, Bot, CheckCircle2, Globe2, MessageSquare, MoreHorizontal, SearchX } from "lucide-react";
+import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
+import type { ComponentProps, ReactNode } from "react";
+import type {
+  ActorPresentation,
+  ChannelThreadRecord,
+  ChatChannelRecord,
+  ChatMessageRecord,
+  ChatThreadRecord,
+  CloudStatusResult,
+  DatabaseSnapshotResult,
+  EngineMomentRecord,
+  HistoryPolicyUnreadableResult,
+  SitePackageInfo,
+  SyncStatusResult,
+  TimelineEntry,
+  UsageRecordResult,
+  UsageRecordRow,
+  WorkspaceFileEntry,
+} from "../../ipc/bridgeContract";
 import { readError, withErrorWords } from "../../ipc/errorWords";
+import { CsvPreviewBound, CsvTable, CsvViewActions, csvColumns } from "../CsvView";
+import { DatabaseGrid, DatabaseViewActions, editOf } from "../DatabaseStudioView";
 import { DocumentMenu } from "../DocumentMenu";
 import { FrontmatterAsWritten } from "../FrontmatterAsWritten";
-import { DocumentControls, OPENING_TITLE, ViewHeader } from "../fileInspectorUi";
+import { PageIdentity } from "../PageIdentity";
+import { PropertiesPanel } from "../PropertiesPanel";
+import { TextViewActions } from "../TextEditorView";
+import { DocumentControls, OPENING_TITLE, OpeningState, ViewActions } from "../fileInspectorUi";
 import { BlockMenu } from "../editor/blockControls";
+import { UrlPasteOfferRow } from "../editor/UrlPasteOffer";
 import { SlashCommandMenu, type SlashCommandState } from "../editor/slashCommands";
 import { buildTableMenu, type TableMenuRow } from "../editor/tableControls";
 import { OverlayFrame } from "../Overlay";
 import { CollectionUnavailable } from "../TransactionalCollectionPage";
-import { ColorControl, HueControl, SwitchControl, TextControl } from "../settings/SettingRow";
+import { CloudSyncSettings, ProtectedFilesRow, type CloudSettings } from "../settings/CloudSyncSettings";
+import { ColorControl, HueControl, SettingRow, StepperControl, SwitchControl, TextControl, ThemeControl } from "../settings/SettingRow";
+import { PreferredNameControl } from "../settings/PreferredNameControl";
+import { SettingsNav } from "../settings/SettingsNav";
+import { SETTINGS_SECTIONS } from "../settings/settingsRegistry";
+import { UsageRecordCard, UsageRecordClearConfirm, type UsageRecordView } from "../settings/UsageRecordSettings";
 import { ConfirmDialogCard } from "../ui/ConfirmDialog";
 import { CopyButton, CopyField } from "../ui/CopyButton";
-import { DangerButton, EmptyState, IconButton, Pill, PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
-import { MENU_SEPARATOR, Menu, type MenuEntry } from "../ui/Menu";
+import { DangerButton, EmptyState, IconButton, Pill, PrimaryButton, RetryRow, SecondaryButton, SectionLabel } from "../ui/controls";
+import { ObjectGlyph, type ObjectKind } from "../ui/KindGlyph";
+import { MENU_FRAME, MENU_SEPARATOR, Menu, type MenuEntry } from "../ui/Menu";
 import { MoreMenu } from "../ui/MoreMenu";
+import { Ref } from "../ui/Ref";
 import { SegmentedControl } from "../ui/SegmentedControl";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { SAVE_STATE, StateMark, type SaveStateKey } from "../ui/StateMark";
 import { FolderChip, Step } from "../ui/Step";
+import { Titlebar } from "../Titlebar";
+import { ActivityBar } from "../workbench/ActivityBar";
 import { AgentBadge } from "../workbench/AgentBadge";
+import { AgentColorContext, AgentColorSwatches } from "../workbench/AgentColorPicker";
+import { AppRows } from "../workbench/AppsView";
+import { chatTabPath, collectionTabPath, HISTORY_TAB_PATH, siteTabPath, VIEW_IDS } from "../workbench/workbenchState";
 import { AutomationBadge } from "../workbench/AutomationBadge";
 import { ChatAvatar } from "../workbench/ChatAvatar";
+import { neutralPresentation, relayPresentation } from "../workbench/actorPresentation";
+import { ThreadMessages } from "../workbench/ChatPosts";
+import { ChatComposer, ChatMessageList, type ChatReactionControls } from "../workbench/chatMessages";
+import { ComposerModeBar } from "../workbench/ChatsControls";
+import { ComposerCatalogOptions, MentionComposer } from "../workbench/MentionComposer";
+import type { AgentAddressedOffer, AgentOfferState } from "../offers/agentAddressed";
+import { PostCard, type PostData } from "../workbench/PostCard";
 import { EditorGroupLayout } from "../workbench/EditorGroupLayout";
 import { EditorTabs } from "../workbench/EditorTabs";
-import { HistoryHiddenState, HistoryUntrackedState } from "../workbench/HistoryPolicyStates";
+import { EditorGroupFrame } from "../workbench/tabRowActions";
+import { HistoryHiddenState, HistoryUntrackedState, historyHiddenWords } from "../workbench/HistoryPolicyStates";
 import { TreeRow, type VisibleRow } from "../workbench/Explorer";
 import { LocalNoticeRow, WorkspaceErrorToast } from "../workbench/NoticeCenter";
+import { EngineHistoryView, MomentRow } from "../workbench/EngineHistory";
+import { DiffCounts, UnifiedDiffLines, buildUnifiedDiffLines, computeTextDiff } from "../workbench/unifiedDiff";
+import {
+  AboutAccessView,
+  AboutChatRow,
+  AboutHeader,
+  AboutHistoryView,
+  AboutSection,
+  type AccessReason,
+  type AccessSetup,
+  type AccessView,
+} from "../workbench/About";
+import type { AboutConversation } from "../workbench/aboutConversation";
+import type { PresencePeer } from "../collab/presenceChannel";
+import { SharingPanel, type ShareMount, type SharingActions, type SkipView } from "../workbench/SharingView";
+import { CAPTURE_RECOVERY_TITLE, captureRecoveryMessage } from "../shell/useCaptureRecoveryNotices";
 import { WorkspaceSyncStatus } from "../workbench/WorkspaceSyncStatus";
 import { closeStatesPage } from "./statesRoute";
 
@@ -52,50 +113,37 @@ import { closeStatesPage } from "./statesRoute";
 // opens the menu or presses the button. On the page itself, hover and press
 // the parts.
 
+// Specimens ignore this installation and live account colour choices.
+const SAMPLE_ADA: ActorPresentation = { group: "states-ada", hue: "teal", self: false };
+const SAM_PALETTE_SLOT = 1;
+const SAMPLE_SAM: ActorPresentation = { ...relayPresentation(SAM_PALETTE_SLOT), group: "states-sam" };
+const SAMPLE_NOVA: ActorPresentation = { group: "states-nova", hue: null, self: false };
+const SAMPLE_ORBIT: ActorPresentation = { group: "states-orbit", hue: "plum", self: false };
+
 const KBD = "rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle";
 
-// A floating part draws a shadow up to 38px below and 28px beside itself,
-// and its whole shadow must stay in its own capture. The toasts get this
-// padding; the menus get the same room from their taller boxes.
+// A floating part draws a shadow up to 41px below and 31px beside itself in
+// the dark theme, and its whole shadow must stay in its own capture, which
+// takes 16px around its part. So a part needs at least 25px of its own room
+// below a floating box and 15px beside it. The toasts get this 40px padding;
+// the shell's menus get the room from their taller boxes, and the editor's
+// menus from EDITOR_MENU_BOX's margin and their boxes' heights.
 const SHADOW_ROOM = "p-10";
 
-// A part's pixels depend on where in a pixel it starts, and Chromium lays
-// out in 1/64 px, so a section whose content ends on a fraction would move
-// every section below it off the pixel grid and change their captures. Each
-// section takes the next whole pixel above its content's height; with whole
-// gaps and padding around them, every part then starts on one. The content
-// is measured, not the section: the section's own height is what is set,
-// so measuring it would never let it shrink and would resize inside its own
-// observer's callback.
-function useWholePixelHeight() {
-  const section = useRef<HTMLElement>(null);
-  const content = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const measured = content.current;
-    const sized = section.current;
-    if (!measured || !sized) return;
-    const observer = new ResizeObserver(([entry]) => {
-      const size = entry?.borderBoxSize[0];
-      if (size) sized.style.height = `${Math.ceil(size.blockSize)}px`;
-    });
-    observer.observe(measured, { box: "border-box" });
-    return () => observer.disconnect();
-  }, []);
-  return { section, content };
-}
+// The parts the page renders, when it renders only some.
+const ShownParts = createContext<ReadonlySet<string> | undefined>(undefined);
 
 // A part whose subject is not a menu but which holds one, such as a header
 // with its document menu, is captured with its menus closed (`menusAtRest`).
 function Section(props: { part: string; title: string; children: ReactNode; menusAtRest?: boolean }) {
-  const { section, content } = useWholePixelHeight();
+  const shown = useContext(ShownParts);
+  if (shown && !shown.has(props.part)) return null;
   return (
-    <section ref={section} data-part={props.part} data-menus={props.menusAtRest ? "rest" : undefined}>
-      <div ref={content} className="flex flex-col gap-3">
-        <SectionLabel as="h3" className="m-0">
-          {props.title}
-        </SectionLabel>
-        <div className="flex flex-wrap items-start gap-x-6 gap-y-4">{props.children}</div>
-      </div>
+    <section data-part={props.part} data-menus={props.menusAtRest ? "rest" : undefined} className="flex flex-col gap-3">
+      <SectionLabel as="h3" className="m-0">
+        {props.title}
+      </SectionLabel>
+      <div className="flex flex-wrap items-start gap-x-6 gap-y-4">{props.children}</div>
     </section>
   );
 }
@@ -152,6 +200,100 @@ function EditorGroupSpecimen(props: { groupId: string; groupNumber: number; tabs
   );
 }
 
+// A URL pasted on its own line, on a strip of paper, with the offer's row
+// where the editor floats it: under the line. A pasted URL is already a link,
+// so Link is pressed before a choice. Only Plain text changes it: the URL is
+// then plain text and the row offers Undo.
+function UrlOfferSpecimen(props: { force?: string; chosen?: boolean }) {
+  return (
+    <div className="w-[420px] rounded-lg border border-line bg-bg px-4 pb-10 pt-3 text-[15px] text-ink">
+      <p className={`m-0 ${props.chosen ? "" : "underline"}`}>https://example.com/trip/itinerary</p>
+      <div
+        className="mt-1"
+        data-force-state={props.force ? "focus-visible" : undefined}
+        data-force-target={props.force ? `[data-testid="${props.force}"]` : undefined}
+      >
+        <UrlPasteOfferRow form={props.chosen ? "plain" : "link"} chosen={props.chosen ?? false} />
+      </div>
+    </div>
+  );
+}
+
+// One group's tab row carrying an open document's actions, as the shell lays
+// it out, over a strip of paper.
+function TabRowActionsSpecimen(props: { width: string; testId?: string; path?: string; children: ReactNode }) {
+  const path = props.path ?? "trip/plan.md";
+  return (
+    <div data-testid={props.testId} className={`${props.width} rounded-lg border border-line`}>
+      <EditorGroupFrame
+        tabs={(actionsRef) => (
+          <EditorTabs
+            actionsRef={actionsRef}
+            groupId="states"
+            groupNumber={1}
+            tabs={[{ path }]}
+            activeTab={path}
+            activeTabDirty={false}
+            recoveryPaths={NO_RECOVERY}
+            onActivate={noop}
+            onClose={noop}
+            onContextMenu={noop}
+            onMove={noop}
+            onMoveToGroup={noop}
+            onCreateGroupRight={noop}
+          />
+        )}
+      >
+        {props.children}
+        <div className="h-4 rounded-b-lg bg-bg" />
+      </EditorGroupFrame>
+    </div>
+  );
+}
+
+// Two groups side by side, each with one file open and that file's actions
+// in its own tab row.
+function FileViewSplitSpecimen(props: { left: { path: string; actions: ReactNode }; right: { path: string; actions: ReactNode } }) {
+  const group = (id: string, groupNumber: number, file: { path: string; actions: ReactNode }) => ({
+    id,
+    size: 1,
+    content: (
+      <EditorGroupFrame
+        tabs={(actionsRef) => (
+          <EditorTabs
+            actionsRef={actionsRef}
+            groupId={id}
+            groupNumber={groupNumber}
+            tabs={[{ path: file.path }]}
+            activeTab={file.path}
+            activeTabDirty={false}
+            recoveryPaths={NO_RECOVERY}
+            onActivate={noop}
+            onClose={noop}
+            onContextMenu={noop}
+            onMove={noop}
+            onMoveToGroup={noop}
+            onCreateGroupRight={noop}
+          />
+        )}
+      >
+        {file.actions}
+        <div className="h-4 bg-bg" />
+      </EditorGroupFrame>
+    ),
+  });
+  return (
+    <div className="flex w-full overflow-hidden rounded-lg border border-line">
+      <EditorGroupLayout
+        groups={[group("left", 1, props.left), group("right", 2, props.right)]}
+        activeGroupId="left"
+        onFocusGroup={noop}
+        onResizeGroups={noop}
+      />
+    </div>
+  );
+}
+
 // A split of two groups where one has tabs and the other none. A strip with
 // tabs carries the tab-list menu, and a part opens one menu, so each part
 // holds one strip with tabs.
@@ -170,6 +312,35 @@ function EditorGroupsSpecimen(props: { activeHasTabs: boolean }) {
         onFocusGroup={noop}
         onResizeGroups={noop}
       />
+    </div>
+  );
+}
+
+// More tabs than a narrow strip holds.
+const OVERFLOW_TABS = ["itinerary.md", "budget.csv", "packing-list.md", "flights.md", "restaurants.md", "notes.md"].map(
+  (path) => ({ path }),
+);
+
+// One group's overflowing strip over a strip of paper. The strip scrolls
+// itself to reveal its active tab when it mounts.
+function OverflowStripSpecimen(props: { groupId: string; groupNumber: number; active: string; testId?: string }) {
+  return (
+    <div data-testid={props.testId}>
+      <EditorTabs
+        groupId={props.groupId}
+        groupNumber={props.groupNumber}
+        tabs={OVERFLOW_TABS}
+        activeTab={props.active}
+        activeTabDirty={false}
+        recoveryPaths={NO_RECOVERY}
+        onActivate={noop}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+        onMoveToGroup={noop}
+        onCreateGroupRight={noop}
+      />
+      <div className="h-6 bg-bg" />
     </div>
   );
 }
@@ -203,6 +374,7 @@ const treeRowCallbacks = {
 function Row(props: {
   name: string;
   folder?: boolean;
+  app?: boolean;
   selected?: boolean;
   active?: boolean;
   drop?: boolean;
@@ -211,8 +383,9 @@ function Row(props: {
   return (
     <div data-force-state={props.force} data-force-target="button">
       <TreeRow
-        row={treeRow(props.name, props.folder)}
+        row={treeRow(props.name, props.folder || props.app)}
         collection={false}
+        app={props.app ?? false}
         selected={props.selected ?? false}
         active={props.active ?? false}
         tabbable={false}
@@ -252,6 +425,7 @@ function KindRows(props: { label: string; selected: boolean }) {
             kind: kind.displayKind === "database" ? "database" : "file",
           }}
           collection={false}
+          app={false}
           selected={props.selected}
           active={false}
           tabbable={false}
@@ -263,7 +437,94 @@ function KindRows(props: { label: string; selected: boolean }) {
   );
 }
 
-const RELAY_ERROR = "dohc could not reach the sync relay. Check your connection.";
+// Every object that is not a file, by the name its tab shows, each glyph in
+// a row the way a list draws it. A `Record` over the kinds, so a new kind is
+// a compile error here until the page shows it.
+const OBJECT_SAMPLES: Record<ObjectKind, string> = {
+  app: "trip-planner",
+  collection: "Registrations",
+  group: "trip",
+  chat: "Home",
+  compare: "Compare with Main",
+  change: "Diff: plan.md",
+  graph: "Graph",
+  history: "History",
+};
+const OBJECTS = Object.keys(OBJECT_SAMPLES) as ObjectKind[];
+// The kind and object name columns share one width, wider than the longest
+// name, so the rows beside each start at the same place on both lines.
+const KIND_NAMES = "m-0 w-36 list-none border border-transparent py-1 font-mono text-[11px] text-subtle";
+
+function ObjectRows(props: { label: string; selected: boolean }) {
+  return (
+    <ul aria-label={props.label} className="m-0 w-52 list-none rounded-lg border border-line bg-panel py-1">
+      {OBJECTS.map((kind) => (
+        <li key={kind} className="px-1">
+          <span
+            className={`flex h-7 items-center gap-1.5 rounded-md pl-7 pr-2 text-[13px] ${
+              props.selected ? "bg-selected text-ink" : "text-muted"
+            }`}
+          >
+            <ObjectGlyph kind={kind} size={15} className={props.selected ? "text-ink" : "text-subtle"} />
+            <span className="min-w-0 flex-1 truncate">{OBJECT_SAMPLES[kind]}</span>
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+// Tabs of every kind, as the listing describes their files: a database by
+// its header, whatever its name, and a page with an emoji.
+const STRIP_GROUP = chatTabPath({ kind: "channel", id: "trip" });
+const STRIP_COLLECTION = collectionTabPath("registrations");
+const STRIP_LONG = "notes/offsite-retrospective-and-next-quarter-planning.md";
+const STRIP_FILES: ReadonlyMap<string, WorkspaceFileEntry> = new Map(
+  [
+    { path: "trip/plan.md", kind: "file" as const },
+    { path: "budget.csv", kind: "file" as const },
+    { path: "map.excalidraw", kind: "file" as const },
+    { path: "ledger.db", kind: "database" as const },
+    { path: "launch.md", kind: "file" as const, icon: "🚀" },
+    { path: STRIP_LONG, kind: "file" as const },
+  ].map((entry) => [entry.path, entry]),
+);
+const STRIP_LABELS: ReadonlyMap<string, string> = new Map([[STRIP_GROUP, "trip"]]);
+
+// One group's strip over a strip of paper, its tab list at rest.
+function GlyphStrip(props: { groupId: string; groupNumber: number; tabs: string[]; active: string; dirty?: boolean }) {
+  return (
+    <>
+      <EditorTabs
+        groupId={props.groupId}
+        groupNumber={props.groupNumber}
+        tabs={props.tabs.map((path) => ({ path }))}
+        activeTab={props.active}
+        activeTabDirty={props.dirty ?? false}
+        tabLabels={STRIP_LABELS}
+        files={STRIP_FILES}
+        recoveryPaths={NO_RECOVERY}
+        onActivate={noop}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+        onMoveToGroup={noop}
+        onCreateGroupRight={noop}
+      />
+      <div className="h-4 bg-bg" />
+    </>
+  );
+}
+
+function GlyphStripBox(props: { tabs: string[]; active: string; dirty?: boolean }) {
+  return (
+    <div className="w-full overflow-hidden rounded-lg border border-line">
+      <GlyphStrip groupId="states" groupNumber={1} {...props} />
+    </div>
+  );
+}
+
+const RELAY_ERROR ="dohc could not reach the sync relay. Check your connection.";
 const FOLDER = "C:\\Users\\ice\\Research";
 
 function toast(tone: "danger" | "success") {
@@ -296,6 +557,426 @@ const REFUSED_RESTORE_TOAST = {
   canRetry: true,
   seen: false,
 };
+
+// Typing capture kept when its file changed outside dohc: the toast and the
+// rows the shell builds for it, and its change in History. The time is
+// local, so the row reads the same in every time zone.
+const RECOVERY_PATH = "trip/plan.md";
+const RECOVERY_DETAILS = `Notice: ${captureRecoveryMessage(RECOVERY_PATH, false)}\nTitle: ${CAPTURE_RECOVERY_TITLE}\nFile: ${RECOVERY_PATH}`;
+const RECOVERY_TOAST = {
+  id: "capture-recovery",
+  tone: "warning" as const,
+  title: CAPTURE_RECOVERY_TITLE,
+  message: captureRecoveryMessage(RECOVERY_PATH, false),
+  details: RECOVERY_DETAILS,
+  atMs: 0,
+  canRetry: false,
+  actionLabel: "Open History",
+  seen: false,
+};
+function recoveryNotice(id: string, shared: boolean) {
+  return {
+    id,
+    tone: "warning" as const,
+    title: CAPTURE_RECOVERY_TITLE,
+    body: captureRecoveryMessage(RECOVERY_PATH, shared),
+    Icon: AlertTriangle,
+    actions: [{ label: "Open History", onClick: noop }],
+    copyText: RECOVERY_DETAILS,
+    copyLabel: "Copy notice details",
+    onDismiss: noop,
+  };
+}
+const RECOVERY_MOMENT: EngineMomentRecord = {
+  id: "moment-capture-recovery",
+  versionId: "main",
+  path: RECOVERY_PATH,
+  recordedAtMs: new Date(2026, 6, 8, 9, 41).getTime(),
+  operation: "write",
+  origin: "capture-recovery",
+  momentOrder: 7,
+};
+
+// One History timeline across two days: a file change, a version starting,
+// a labelled record change by an automation, a rules change an agent
+// approved that main could not date, the workspace starting, and an
+// unlabelled record change with no date or place. Only a rules change can
+// carry its approving agent. Local times, as above.
+const TIMELINE_BUDGET = "00000000-0000-4000-8000-0000000000b1";
+const TIMELINE_GUESTS = "00000000-0000-4000-8000-0000000000b2";
+const TIMELINE_FILE: TimelineEntry = { kind: "file", moment: {
+  id: "moment-timeline-plan", versionId: "main", path: "trip/plan.md", recordedAtMs: new Date(2026, 6, 8, 10, 12).getTime(),
+  operation: "write", origin: "local-file", momentOrder: 9, summary: "Added the ferry times",
+} };
+function timelineVersion(id: string, kind: "main" | "named", name: string, createdAtMs: number): TimelineEntry {
+  return { kind: "version", version: { id, workspaceId: "states", kind, name, createdAtMs } };
+}
+function timelineChange(datasetId: string, name: string, revision: number, recordedAtMs: number | null, sortAtMs: number | null,
+  by?: { automation?: string; rulesApprovedBy?: string }): TimelineEntry {
+  const rules = by?.rulesApprovedBy;
+  return { kind: "collection", datasetId, name, sortAtMs, change: {
+    revision, operation: rules ? "Fields and rules" : "addGuest", callerReference: null, recordedAtMs, approvedRevisionHash: "a".repeat(64),
+    changesetBytes: rules ? 0 : 120, attachmentCount: 0,
+    ...(by?.automation ? { automation: { automationId: `automations.yaml#${by.automation}`, depth: 1, name: by.automation } } : {}),
+    ...(rules ? {
+      approvalAgent: { kind: "agent" as const, label: rules, labelSource: "agent-declared" as const },
+      schema: { previousRevisionHash: "b".repeat(64), revisionHash: "a".repeat(64) },
+    } : {}),
+  } };
+}
+const TIMELINE_DATED = timelineChange(TIMELINE_BUDGET, "Budget", 12, new Date(2026, 6, 8, 9, 44).getTime(), new Date(2026, 6, 8, 9, 44).getTime(), { automation: "Stamp the date" });
+const TIMELINE_MIXED: TimelineEntry[] = [
+  TIMELINE_FILE,
+  timelineVersion("version-draft", "named", "Draft itinerary", new Date(2026, 6, 8, 9, 58).getTime()),
+  TIMELINE_DATED,
+  timelineChange(TIMELINE_GUESTS, "Guests", 3, null, new Date(2026, 6, 8, 9, 30).getTime(), { rulesApprovedBy: "trip-agent" }),
+  timelineVersion("main", "main", "Main", new Date(2026, 6, 7, 18, 0).getTime()),
+  timelineChange(TIMELINE_GUESTS, "Guests", 1, null, null),
+];
+// Budget's definition labels its operation; Guests' is not loaded here.
+const TIMELINE_COLLECTIONS = new Map([
+  [TIMELINE_BUDGET, { name: "Budget", operationLabels: new Map([["addGuest", "Add guest"]]), openHistory: noop }],
+  [TIMELINE_GUESTS, { name: "Guests" }],
+]);
+
+// The About tab on the drawing's document: who wrote what, who has it.
+const ABOUT_PATH = "notes/product-plan.md";
+const ABOUT_THREADS: ChatThreadRecord[] = [
+  { id: "thread-scope", title: "Launch scope", createdAtMs: new Date(2026, 6, 6, 14, 5).getTime(), updatedAtMs: new Date(2026, 6, 8, 9, 12).getTime() },
+  { id: "thread-pricing", title: "Pricing questions", createdAtMs: new Date(2026, 6, 2, 11, 0).getTime(), updatedAtMs: new Date(2026, 6, 7, 16, 40).getTime() },
+];
+const aboutMoment = (moment: Partial<EngineMomentRecord> & { id: string; recordedAtMs: number; momentOrder: number }): EngineMomentRecord => ({
+  versionId: "main",
+  path: ABOUT_PATH,
+  operation: "write",
+  origin: "ydoc",
+  ...moment,
+});
+const ABOUT_MOMENTS: EngineMomentRecord[] = [
+  aboutMoment({ id: "about-agent", recordedAtMs: new Date(2026, 6, 8, 9, 30).getTime(), momentOrder: 9, agentAuthorName: "Nova", summary: "Tightened the launch list",
+    authors: [{ kind: "agent", agentId: "nova", agentRunId: "run-nova", onBehalfOf: "ice" }],
+    authorPresentations: [{ group: "states-nova", hue: null, self: false }] }),
+  aboutMoment({ id: "about-person", recordedAtMs: new Date(2026, 6, 8, 8, 55).getTime(), momentOrder: 8, namedAuthor: { userId: "sam", label: "Sam Rivera" },
+    authors: [{ kind: "named", userId: "sam", grantId: "grant-sam", grantGeneration: 1 }], authorPresentations: [SAMPLE_SAM] }),
+  aboutMoment({ id: "about-local", recordedAtMs: new Date(2026, 6, 7, 17, 20).getTime(), momentOrder: 6, origin: "local-file" }),
+];
+const aboutGrant = (grant: Partial<AccessShareRow> & { grantId: string }): AccessShareRow => ({
+  kind: "share",
+  shareId: "share-plan",
+  via: "named",
+  granterUserId: "ice",
+  granterEmail: "ice@example.com",
+  recipientUserId: null,
+  recipientEmail: null,
+  subjectName: null,
+  sharerName: null,
+  selector: { paths: ["notes"], versionId: null },
+  access: "edit",
+  status: "active",
+  generation: 1,
+  ...grant,
+});
+const ABOUT_ACCESS: AccessAnswer = {
+  ref: { kind: "path", path: ABOUT_PATH, versionId: null },
+  rows: [
+    aboutGrant({ grantId: "grant-sam", recipientUserId: "sam", recipientEmail: "sam@example.com" }),
+    aboutGrant({ grantId: "grant-link", via: "link", access: "view" }),
+    aboutGrant({ grantId: "grant-kim", recipientUserId: "kim", recipientEmail: "kim@example.com", status: "revoked", access: null }),
+  ],
+  visibility: "visible",
+  unknownReason: null, coverage: { kind: "granted", complete: true, observation: "interval" },
+  checkedAtMs: new Date(2026, 6, 8, 9, 40).getTime(),
+  freshness: "fresh",
+  nextCursor: null,
+};
+const ABOUT_ACCESS_UNKNOWN: AccessAnswer = {
+  ...ABOUT_ACCESS,
+  rows: [],
+  unknownReason: "not-listed-yet", coverage: { kind: "unavailable", complete: false, observation: "interval" },
+  checkedAtMs: null,
+  freshness: "unknown",
+};
+
+// About for the drawing's #general: Sam and Nova here, and the Group's grants.
+const aboutPeer = (faceToken: string, displayName: string, paletteSlot: number): PresencePeer => ({
+  faceToken, sessionToken: `${faceToken}-session`, isSelf: false, displayName, paletteSlot, state: null, updatedAtMs: 0,
+});
+const ABOUT_PRESENT = [aboutPeer("face-sam", "Sam Rivera", SAM_PALETTE_SLOT), aboutPeer("face-nova", "Nova", 4)];
+const ABOUT_GROUP: AboutConversation = {
+  kind: "group", name: "general", channelWireId: "wire-general", received: false, present: ABOUT_PRESENT,
+};
+const ABOUT_CHAT_ACCESS: AccessAnswer = {
+  ...ABOUT_ACCESS,
+  ref: { kind: "chat", channelWireId: "wire-general" },
+  rows: [
+    aboutGrant({ shareId: "share-general", grantId: "grant-sam", recipientUserId: "sam", recipientEmail: "sam@example.com",
+      selector: { kind: "chat", channelWireId: "wire-general" }, access: "read-write" }),
+    aboutGrant({ shareId: "share-general", grantId: "grant-kim", recipientUserId: "kim", recipientEmail: "kim@example.com",
+      selector: { kind: "chat", channelWireId: "wire-general" }, access: "read-only" }),
+  ],
+};
+
+// A group's feed and a thread, from the drawing's #general.
+const CHAT_AT = new Date(2026, 6, 8, 14, 43).getTime();
+const CHAT_REACTIONS: ChatReactionControls = { reactions: [], viewerAuthorId: "you", onToggle: noop };
+const CHAT_CHANNEL: ChatChannelRecord = {
+  id: "general", name: "general", slug: "general", kind: "channel", type: "posts",
+  createdAtMs: CHAT_AT, updatedAtMs: CHAT_AT, threadCount: 3, unreadCount: 0,
+};
+const chatPost = (
+  id: string,
+  author: { authorKind: "human" | "agent"; authorDisplayName: string; presentation: ActorPresentation },
+  title: string,
+  bodySnippet: string,
+  counts: Partial<Pick<ChannelThreadRecord, "messageCount" | "unreadCount" | "openDecisionCount">> = {},
+): { thread: ChannelThreadRecord; data: PostData } => ({
+  thread: {
+    id, title, createdAtMs: CHAT_AT, updatedAtMs: CHAT_AT, channelId: CHAT_CHANNEL.id,
+    messageCount: 1, lastReadSequence: 0, unreadCount: 0, ...counts,
+  },
+  data: { openingMessage: { id: `${id}-opening`, createdAtMs: CHAT_AT, bodySnippet, ...author }, reactions: [], viewerAuthorId: "you" },
+});
+const SAM = { authorKind: "human", authorDisplayName: "Sam", presentation: SAMPLE_SAM } as const;
+const CHAT_POSTS = [
+  chatPost("post-plain", SAM, "Pricing page copy", "Pricing page copy\nDraft is in research/competitors.md for now. Comments welcome."),
+  chatPost("post-hover", { authorKind: "agent", authorDisplayName: "Agent", presentation: neutralPresentation }, "The funnel numbers changed since last week.",
+    "The funnel numbers changed since last week.", { unreadCount: 1 }),
+  chatPost("post-poll", SAM, "Can we get the launch checklist into shape before Friday?",
+    "Can we get the launch checklist into shape before Friday?", { messageCount: 5, unreadCount: 2, openDecisionCount: 1 }),
+  chatPost("post-unkeyed", { authorKind: "human", authorDisplayName: "Kim", presentation: neutralPresentation },
+    "Launch checklist notes", "Launch checklist notes\nI added the remaining review notes."),
+];
+// The feed's rows, then two kept rows with keyboard focus: on the row, and
+// on Comment inside its toolbar.
+const CHAT_FEED_SPECIMENS: { key: string; post: (typeof CHAT_POSTS)[number]; force?: { row?: string; button?: string }; last?: boolean }[] = [
+  { key: "titled", post: CHAT_POSTS[0]! },
+  { key: "unkeyed", post: CHAT_POSTS[3]! },
+  { key: "hovered", post: CHAT_POSTS[1]!, force: { row: "hover" } },
+  { key: "poll", post: CHAT_POSTS[2]! },
+  { key: "row-focus", post: CHAT_POSTS[0]!, force: { row: "focus focus-visible" } },
+  { key: "toolbar-focus", post: CHAT_POSTS[0]!, force: { row: "focus-within", button: "focus focus-visible" }, last: true },
+];
+const chatMessage = (id: string, body: string, minutes: number, parentMessageId?: string): ChatMessageRecord => ({
+  id, threadId: "post-plain", ...SAM, body, createdAtMs: CHAT_AT + minutes * 60_000,
+  ...(parentMessageId ? { parentMessageId } : {}),
+});
+const CHAT_THREAD_MESSAGES = [
+  chatMessage("opening", "Draft is in research/competitors.md for now. Comments welcome.", 0),
+  chatMessage("comment-1", "The second section reads well.", 1, "opening"),
+  chatMessage("comment-2", "Can we cut the last paragraph?", 2, "opening"),
+];
+const CHAT_THREAD_NAV = { level: "thread", channel: CHAT_CHANNEL, thread: CHAT_POSTS[0]!.thread } as const;
+const NO_BOOKMARKS = new Set<string>();
+
+// A thread at the drawing's column, its second comment hovered. Its
+// toolbar's shadow takes the room below.
+function ChatThreadSpecimen() {
+  return (
+    <div className="w-[560px] pb-6" data-force-state="hover" data-force-target='[data-message-id="comment-2"] > [data-testid="chats-comment-bubble"]'>
+      <ThreadMessages
+        nav={CHAT_THREAD_NAV}
+        messages={CHAT_THREAD_MESSAGES}
+        messagesLoading={false}
+        threadLocked={false}
+        flashMessageId={null}
+        runRecords={{}}
+        reactionsByMessage={new Map()}
+        decisionsByMessage={new Map()}
+        attachmentsByMessage={new Map()}
+        reactionControls={CHAT_REACTIONS}
+        mentionCandidates={[]}
+        bookmarkFor={() => undefined}
+        bookmarkBusy={NO_BOOKMARKS}
+        toggleBookmark={async () => undefined}
+        beginReply={noop}
+        beginResolve={noop}
+        scrollToMessage={noop}
+        setMessageNode={noop}
+      />
+    </div>
+  );
+}
+
+const COMPOSER_DRAFT = "Can we cut the last paragraph?";
+
+// The agent picked from the roster, in each state its offer says. The
+// specimen agent takes the default agent colour, not a chosen one.
+const AGENT_OFFER_STATES: readonly AgentOfferState[] = ["runs", "working", "paused", "runner-off", "no-command", "unknown"];
+const AGENT_DRAFT = "@agent can you check funnel.csv against last week?";
+function agentOffer(state: AgentOfferState): AgentAddressedOffer {
+  return {
+    kind: "agent-addressed",
+    agent: { id: "agent:default", kind: "agent", handle: "agent", label: "Nova" },
+    presentation: { group: "states-agent", hue: null, self: false },
+    state,
+    working: state === "working",
+    reach: "C:\\Users\\ada\\trip-planner",
+  };
+}
+
+function AgentOfferComposer(props: {
+  state: AgentOfferState;
+  surface: "post" | "stream";
+  id: string;
+  width?: string;
+  focus?: boolean;
+  replying?: boolean;
+}) {
+  const composer = (
+    <MentionComposer testIdPrefix={props.id} composerId={props.id} value={AGENT_DRAFT} sending={false}
+      surface={props.surface} authorName="Ada" authorPresentation={SAMPLE_ADA}
+      placeholder={props.surface === "post" ? "What's happening in #general?" : "Message #general"}
+      sendLabel={props.surface === "post" ? "Start post" : "Send message"} candidates={[]} onChange={noop} onSend={noop}
+      agentOffer={agentOffer(props.state)} onSetUpAgent={noop}
+      above={props.replying ? (
+        <ComposerModeBar testId={`${props.id}-replying-mode`} cancelTestId={`${props.id}-replying-cancel`}
+          cancelLabel="Cancel reply" onCancel={noop}>Replying to Sam ·</ComposerModeBar>
+      ) : undefined} />
+  );
+  const focused = props.focus ? (
+    <div data-force-state="focus-visible" data-force-target='[data-testid="composer-agent-offer-setup"]'>{composer}</div>
+  ) : composer;
+  // A stream composer floats its offer above its top edge, into the room the
+  // end of its conversation keeps, so it gets that room here.
+  return props.surface === "post"
+    ? <div id={`${props.id}-specimen`} className={props.width ?? "w-[560px]"}>{focused}</div>
+    : <div id={`${props.id}-specimen`} className={`${props.width ?? "w-[400px]"} rounded-lg border border-line bg-panel pt-9`}>{focused}</div>;
+}
+
+// The About rail at the drawing's 290px, on the chrome.
+function AboutPanelSpecimen(props: { children: ReactNode }) {
+  return <div className="flex w-[290px] flex-col rounded-lg border border-line bg-panel pb-2">{props.children}</div>;
+}
+
+// A run in a file's chats, the narrowest conversation. From an earlier year,
+// so its day divider reads the same whenever the page is drawn.
+const CHAT_RUN_AT = new Date(2025, 6, 8, 12, 43).getTime();
+const CHAT_RUN: ChatMessageRecord[] = [
+  { id: "run-1", threadId: "about-chat", ...SAM, body: "The second section reads well.", createdAtMs: CHAT_RUN_AT },
+  { id: "run-2", threadId: "about-chat", ...SAM, body: "Can we cut the last paragraph?", createdAtMs: CHAT_RUN_AT + 2 * 60_000 },
+];
+
+// A person, an agent in the default olive, and an agent with a chosen color.
+const AGENT_COLOR_CHAT: ChatMessageRecord[] = [
+  { id: "color-sam", threadId: "about-chat", ...SAM, body: "Can you two check the funnel numbers?", createdAtMs: CHAT_RUN_AT },
+  { id: "color-nova", threadId: "about-chat", authorKind: "agent", authorDisplayName: "Nova", presentation: SAMPLE_NOVA,
+    body: "The signups match last week.", createdAtMs: CHAT_RUN_AT + 60_000 },
+  { id: "color-orbit", threadId: "about-chat", authorKind: "agent", authorDisplayName: "Orbit", presentation: SAMPLE_ORBIT,
+    body: "Checkout dropped 4%.", createdAtMs: CHAT_RUN_AT + 2 * 60_000 },
+];
+
+// Its second message hovered, so "12:45" shows in the avatar's column.
+function ChatRunSpecimen() {
+  return (
+    <div data-force-state="hover" data-force-target='[data-message-id="run-2"] > .group'>
+      <AboutPanelSpecimen>
+        <div className="flex h-[180px] flex-col">
+          <ChatMessageList testIdPrefix="states-chat" messages={CHAT_RUN} loading={false} emptyLabel="No messages yet." />
+        </div>
+      </AboutPanelSpecimen>
+    </div>
+  );
+}
+
+const accessSetup = (reason: AccessReason): AccessSetup => ({ reason, openSyncSettings: noop, connect: noop });
+const ACCESS_UNEXPLAINED = accessSetup("unexplained");
+
+function AccessSpecimen(props: { view: AccessView; reason?: AccessReason }) {
+  return (
+    <AboutPanelSpecimen>
+      <AboutAccessView view={props.view} expanded onToggle={noop} onRetry={noop} onMore={noop}
+        setup={props.reason ? accessSetup(props.reason) : ACCESS_UNEXPLAINED} />
+    </AboutPanelSpecimen>
+  );
+}
+
+// The Sharing view's lists, as the drawing fills them.
+const SHARING_CHECKED_AT = new Date(2026, 6, 8, 9, 40).getTime();
+const SHARING_GRANTED: AccessAnswer = {
+  ...ABOUT_ACCESS,
+  ref: null,
+  rows: [
+    aboutGrant({ shareId: "share-plan", grantId: "grant-sam", recipientUserId: "sam", recipientEmail: "sam@hollis.studio",
+      selector: { paths: ["notes/product-plan.md"], versionId: null } }),
+    aboutGrant({ shareId: "share-research", grantId: "grant-link", via: "link", recipientUserId: null, recipientEmail: null,
+      selector: { paths: ["research/competitors.md"], versionId: null }, access: "view" }),
+    aboutGrant({ shareId: "share-old", grantId: "grant-kim", recipientUserId: "kim", recipientEmail: "kim@example.com",
+      subjectName: "budget.csv", selector: null, access: null, status: "revoked" }),
+  ],
+  checkedAtMs: SHARING_CHECKED_AT,
+};
+const SHARING_RECEIVED: AccessAnswer = {
+  ...SHARING_GRANTED,
+  unknownReason: null, coverage: { kind: "received-account", complete: true, observation: "interval" },
+  rows: [
+    aboutGrant({ shareId: "in-funnel", grantId: "in-1", via: "received", sharerName: "Sam", granterEmail: "sam@hollis.studio",
+      recipientUserId: "me", recipientEmail: null, subjectName: "funnel.csv", selector: { paths: ["data/funnel.csv"], versionId: null }, access: "view" }),
+    aboutGrant({ shareId: "in-research", grantId: "in-2", via: "received", sharerName: "Sam", granterEmail: "sam@hollis.studio",
+      recipientUserId: "me", recipientEmail: null, subjectName: "research", selector: { kind: "chat", channelWireId: "wire-research" }, access: "read-only" }),
+  ],
+};
+const SHARING_UNKNOWN: Partial<AccessAnswer> = {
+  rows: [],
+  visibility: "unknown",
+  unknownReason: "not-listed-yet", coverage: { kind: "unavailable", complete: false, observation: "interval" },
+  checkedAtMs: null,
+  freshness: "unknown",
+};
+const SHARING_MOUNTS: ShareMount[] = [{ shareId: "in-funnel", label: "funnel", granterEmail: "sam@hollis.studio", access: "view" }];
+// A mount the relay no longer lists, and one whose pulls skipped changes.
+const SHARING_SKIPPED = {
+  ops: [{ originId: "origin-sam", originSeq: 4, opKind: "write", code: "share-boundary-violation", detail: "notes/draft.md", atMs: SHARING_CHECKED_AT }],
+  more: 0, generation: 3,
+};
+const SHARING_REMOVED_MOUNTS: ShareMount[] = [
+  { ...SHARING_MOUNTS[0]!, skippedOps: SHARING_SKIPPED },
+  { shareId: "in-notes", label: "notes", granterEmail: "kim@example.com", access: "view" },
+];
+const SHARING_REMOVED: AccessAnswer = {
+  ...SHARING_RECEIVED,
+  rows: [
+    SHARING_RECEIVED.rows[0]!,
+    aboutGrant({ shareId: "in-budget", grantId: "in-3", via: "received", sharerName: null, granterEmail: null, recipientUserId: "me",
+      recipientEmail: null, selector: null, access: null, status: "removed", removalMessage: "Sam removed your access." }),
+  ],
+};
+const SHARING_WAITING = new Map([["share-plan", { count: 2, senders: ["sam@hollis.studio"], oldestProposalId: "proposal-1" }]]);
+const SHARING_ACTIONS: SharingActions = {
+  retry: noop, more: noop, reviewChanges: noop, startEnd: noop, cancelEnd: noop, end: noop, mount: noop, unmount: noop,
+  copy: async () => null, dismissSkips: noop, showSkips: noop, reviewConflicts: noop,
+};
+const ready = (answer: AccessAnswer): AccessView => ({ status: "ready", answer });
+
+// The Sharing view at the drawing's 280px, on the chrome.
+function SharingSpecimen(props: {
+  granted: AccessView;
+  received: AccessView;
+  grantedReason?: AccessReason;
+  receivedReason?: AccessReason;
+  conflictCount?: number;
+  confirmShareId?: string;
+  mounts?: ShareMount[];
+  skipView?: SkipView;
+}) {
+  return (
+    <div className="flex w-[280px] flex-col rounded-lg border border-line bg-panel">
+      <SharingPanel
+        granted={props.granted}
+        received={props.received}
+        grantedSetup={props.grantedReason ? accessSetup(props.grantedReason) : ACCESS_UNEXPLAINED}
+        receivedSetup={props.receivedReason ? accessSetup(props.receivedReason) : ACCESS_UNEXPLAINED}
+        conflictCount={props.conflictCount ?? null}
+        waiting={SHARING_WAITING}
+        mounts={props.mounts ?? SHARING_MOUNTS}
+        skipView={props.skipView ?? new Map()}
+        invitations
+        confirmShareId={props.confirmShareId ?? null}
+        busyShareId={null}
+        actions={SHARING_ACTIONS}
+      />
+    </div>
+  );
+}
 
 function notice(id: string, tone: "danger" | "success") {
   return {
@@ -355,7 +1036,7 @@ const menuItems = [
   { label: "Delete", onSelect: noop, disabled: true },
 ];
 
-const avatarSizes = ["post", "comment", "strip"] as const;
+const avatarSizes = ["post", "row", "comment", "strip"] as const;
 
 const SYNC_CODE = "dohc-sync:ws_7f3a:wss://relay.dohc.dev";
 
@@ -446,8 +1127,9 @@ const dangerMenuItems: MenuEntry[] = [
 
 // The editor's menus draw themselves at fixed places. Laid out inside a box
 // with `contain: layout`, which is the containing block for fixed children,
-// they land in their part. The box leaves room for the shadow.
-const EDITOR_MENU_BOX = "relative [contain:layout]";
+// they land in their part. The box's 24px margin leaves room for the shadow
+// beside; each box's height leaves room below.
+const EDITOR_MENU_BOX = "relative ml-6 [contain:layout]";
 
 const BLOCK_MENU_OPEN = {
   open: true,
@@ -509,6 +1191,36 @@ function AsWrittenSpecimen(props: { name: string }) {
   return (
     <div className="w-[420px] rounded-lg border border-line bg-bg">
       <FrontmatterAsWritten markdown={`---\n# Monthly\n${props.name}: 100 # euros\n---\n\nBody`} propertiesShown />
+    </div>
+  );
+}
+
+// A page's top matter on paper, at the editor's font size, as a document
+// pane holds it. The pane is the hover zone that shows a lone +.
+function TopmatterSpecimen(props: { children: ReactNode }) {
+  return (
+    <div className="group/topmatter w-[560px] rounded-lg border border-line bg-bg pb-5 text-[length:var(--dohc-editor-font-size)]">
+      {props.children}
+    </div>
+  );
+}
+
+const PILLS = "---\nowner: Sam\nrelease: September launch\nstatus: In progress\n---\n";
+const LONG_PILL = "---\nowner: Sam\nbrief: https://example.com/plans/2026/q3/product-plan-with-every-goal-and-owner\n---\n";
+
+// A reserved name shows only while a person types it, so the specimen types
+// it into the second pill's name once, as a keystroke would.
+function ReservedPillSpecimen() {
+  const pills = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const name = pills.current?.querySelectorAll<HTMLInputElement>('[data-testid="property-key"]')[1];
+    if (!name) return;
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(name, "title");
+    name.dispatchEvent(new Event("input", { bubbles: true }));
+  }, []);
+  return (
+    <div ref={pills}>
+      <PropertiesPanel body={PILLS} onChange={noop} />
     </div>
   );
 }
@@ -662,19 +1374,29 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="avatars" title="Avatars">
-        <Specimen label="human: post, comment, strip">
+        <Specimen label="human: post, row, comment, strip">
           {avatarSizes.map((size) => (
-            <ChatAvatar key={size} name="Ice de Vera" kind="human" size={size} />
+            <ChatAvatar presentation={neutralPresentation} key={size} name="Ice de Vera" kind="human" size={size} />
           ))}
         </Specimen>
-        <Specimen label="agent: post, comment, strip">
+        <Specimen label="coloured person: post, row, comment, strip">
           {avatarSizes.map((size) => (
-            <ChatAvatar key={size} name="Agent" kind="agent" size={size} />
+            <ChatAvatar presentation={SAMPLE_SAM} key={size} name="Sam Rivera" kind="human" size={size} />
           ))}
         </Specimen>
-        <Specimen label="automation: post, comment, strip">
+        <Specimen label="agent: post, row, comment, strip">
           {avatarSizes.map((size) => (
-            <ChatAvatar key={size} name="Nightly digest" kind="automation" size={size} />
+            <ChatAvatar presentation={neutralPresentation} key={size} name="Agent" kind="agent" size={size} />
+          ))}
+        </Specimen>
+        <Specimen label="coloured agent: post, row, comment, strip">
+          {avatarSizes.map((size) => (
+            <ChatAvatar presentation={SAMPLE_ORBIT} key={size} name="Orbit" kind="agent" size={size} />
+          ))}
+        </Specimen>
+        <Specimen label="automation: post, row, comment, strip">
+          {avatarSizes.map((size) => (
+            <ChatAvatar presentation={neutralPresentation} key={size} name="Nightly digest" kind="automation" size={size} />
           ))}
         </Specimen>
       </Section>
@@ -727,16 +1449,30 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="hue-control" title="Hue control">
-        <Specimen label="person, olive chosen">
-          <HueControl label="Your color" value="olive" shape="person" onChange={noop} />
+        <Specimen label="person, rose chosen">
+          <HueControl label="Your color" value="rose" shape="person" onChange={noop} />
         </Specimen>
-        <Specimen label="agent, none chosen">
+        <Specimen label="agent, Default chosen">
           <HueControl label="Your agent's color" value={null} shape="agent" onChange={noop} />
+        </Specimen>
+        <Specimen label="agent, teal chosen">
+          <HueControl label="Your agent's color" value="teal" shape="agent" onChange={noop} />
         </Specimen>
       </Section>
 
       <Section part="color-control" title="Color control">
         <ColorControl label="Accent" value="#6b7230" onChange={noop} />
+      </Section>
+
+      <Section part="native-controls" title="Native controls">
+        <Specimen label="checkboxes and radios in the theme's colors, checked ones in the accent (Explorer's archived toggle)">
+          <div className="flex flex-col">
+            <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted"><input type="checkbox" defaultChecked={false} />Archived collections</label>
+            <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted"><input type="checkbox" defaultChecked />Archived collections</label>
+            <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted"><input type="radio" name={`native-radio-${theme}`} defaultChecked={false} />Off</label>
+            <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted"><input type="radio" name={`native-radio-${theme}`} defaultChecked />On</label>
+          </div>
+        </Specimen>
       </Section>
 
       <Section part="list-rows" title="List rows">
@@ -865,8 +1601,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         <DialogSpecimen theme={theme} />
       </Section>
 
-      {/* The shell's menus, one part each, after the dialog so the parts
-          above keep their places. */}
+      {/* The shell's menus, one part each. */}
       <Section part="menu-radio" title="Menu with radio rows">
         <Specimen label="checked: keyboard-active; unchecked: hover; icon; disabled">
           <div
@@ -883,17 +1618,19 @@ function Pane(props: { theme: "light" | "dark" }) {
 
       <Section part="menu-field" title="Menu with a name field">
         <Specimen label="field: focus, hint">
-          <div className="flex h-48 w-72 items-start justify-end" data-force-state="focus" data-force-target="input">
+          <div className="flex h-52 w-72 items-start justify-end" data-force-state="focus" data-force-target="input">
             <MenuSpecimen label="Versions" items={fieldMenuItems} width={240} testId={`states-menu-field-${theme}`} />
           </div>
         </Specimen>
       </Section>
 
       <Section part="menu-overflow" title="Overflow menu">
-        <Specimen label="current; long name: keyboard-active; rest">
+        {/* Focus without focus-visible, as a pointer leaves it: the active
+            row still shows apart from the current one. */}
+        <Specimen label="current; long name: active from the pointer; rest">
           <div
             className="flex h-56 w-72 items-start justify-end"
-            data-force-state="focus focus-visible"
+            data-force-state="focus"
             data-force-target="[role=menuitem]:nth-child(2)"
           >
             <MenuSpecimen
@@ -918,8 +1655,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* After the menus, so the parts above keep their places. The capture
-          opens each part's tab list. */}
+      {/* The capture opens each part's tab list. */}
       <Section part="editor-groups" title="Editor groups">
         <Specimen label="split: the active group with tabs, then an empty one">
           <EditorGroupsSpecimen activeHasTabs />
@@ -932,10 +1668,9 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* After the editor groups, so the parts above keep their places. */}
       <Section part="kind-glyph" title="Kind glyph">
         <Specimen label="kind">
-          <ul className="m-0 list-none border border-transparent py-1 font-mono text-[11px] text-subtle">
+          <ul className={KIND_NAMES}>
             {KINDS.map((kind) => (
               <li key={kind.displayKind} className="flex h-7 items-center">
                 {kind.displayKind} · {kind.name}
@@ -949,11 +1684,25 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="selected">
           <KindRows label="Kinds, selected" selected />
         </Specimen>
+        <Specimen label="object">
+          <ul className={KIND_NAMES}>
+            {OBJECTS.map((kind) => (
+              <li key={kind} className="flex h-7 items-center">
+                {kind}
+              </li>
+            ))}
+          </ul>
+        </Specimen>
+        <Specimen label="object, rest">
+          <ObjectRows label="Objects" selected={false} />
+        </Specimen>
+        <Specimen label="object, selected">
+          <ObjectRows label="Objects, selected" selected />
+        </Specimen>
       </Section>
 
-      {/* The editor's menus, after the shell's so the parts above keep their
-          places. Their active row is the one Enter acts on, keyboard or
-          pointer, and always draws the outline. */}
+      {/* The editor's menus. Their active row is the one Enter acts on,
+          keyboard or pointer, and always draws the outline. */}
       <Section part="block-menu" title="Block menu">
         <Specimen label="sections; first row active; destructive with Del">
           <div className={`${EDITOR_MENU_BOX} h-[410px] w-[270px]`}>
@@ -968,7 +1717,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Near the end, so a change here moves only the file header below it. */}
       <Section part="history" title="History held back by its rules">
         <Specimen label="panel: rules can't be read">
           <div className="flex h-64 w-64 flex-col rounded-lg border border-line bg-panel">
@@ -987,16 +1735,50 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* After the history part, so the parts above keep their places. */}
-      <Section part="file-header" title="File header" menusAtRest>
-        {/* One document loading, ready, failed, and ready in a narrow pane:
-            Share, the toggle and the menu keep their places, and only the
-            save state gives way. No box clips them, so an overflow shows. */}
+      <Section part="history-timeline" title="History timeline">
+        <Specimen label="files, versions and Collections, with day headings">
+          <div className="flex h-[500px] w-[300px] flex-col overflow-hidden rounded-lg border border-line bg-panel">
+            <EngineHistoryView entries={TIMELINE_MIXED} hasMore={false} loadingMore={false} onLoadMore={noop} onOpenMoment={noop}
+              collections={TIMELINE_COLLECTIONS} onRetry={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="partial: a Collection did not load">
+          <div className="flex h-[260px] w-[300px] flex-col overflow-hidden rounded-lg border border-line bg-panel">
+            <EngineHistoryView entries={[TIMELINE_FILE, TIMELINE_DATED]} hasMore={false} loadingMore={false} onLoadMore={noop} onOpenMoment={noop}
+              unavailableSources={[{ datasetId: TIMELINE_GUESTS }]} collections={TIMELINE_COLLECTIONS} onRetry={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="Collections left out by the limit">
+          <div className="flex h-[240px] w-[300px] flex-col overflow-hidden rounded-lg border border-line bg-panel">
+            <EngineHistoryView entries={[TIMELINE_FILE]} hasMore={false} loadingMore={false} onLoadMore={noop} onOpenMoment={noop}
+              omittedSources={14} collections={TIMELINE_COLLECTIONS} onRetry={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="one Collection, unavailable">
+          <div className="flex h-48 w-[300px] flex-col rounded-lg border border-line bg-panel">
+            <EngineHistoryView entries={[]} hasMore={false} loadingMore={false} onLoadMore={noop} onOpenMoment={noop}
+              unavailableSources={[{ datasetId: TIMELINE_GUESTS }]} collections={TIMELINE_COLLECTIONS} onRetry={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="loading">
+          <div className="flex h-48 w-[300px] flex-col rounded-lg border border-line bg-panel">
+            <SkeletonRows layout="panel" label="Loading history..." />
+          </div>
+        </Specimen>
+      </Section>
+
+      <Section part="tab-row-actions" title="Document actions in the tab row" menusAtRest>
+        {/* One document loading, saved, saving, pending share, held,
+            failed, and changed on disk in a narrow pane: Share, the toggle
+            and the menu keep their places, and the save state gives way
+            before the tab name. Opening, saved and saving say so only to
+            screen readers, so loading and ready draw the same width. No box
+            clips them, so an overflow shows. */}
         <Specimen label="loading" className="w-full">
-          <div className="w-full rounded-lg border border-line bg-bg">
-            <ViewHeader
-              path="trip/plan.md"
+          <TabRowActionsSpecimen width="w-full">
+            <ViewActions
               onShare={noop}
+              status={<OpeningState />}
               actions={
                 <DocumentControls
                   toggle={{ label: "Edit", disabled: true, title: OPENING_TITLE }}
@@ -1004,14 +1786,13 @@ function Pane(props: { theme: "light" | "dark" }) {
                 />
               }
             />
-          </div>
+          </TabRowActionsSpecimen>
         </Specimen>
-        <Specimen label="ready" className="w-full">
-          <div className="w-full rounded-lg border border-line bg-bg">
-            <ViewHeader
-              path="trip/plan.md"
+        <Specimen label="saved" className="w-full">
+          <TabRowActionsSpecimen width="w-full">
+            <ViewActions
               onShare={noop}
-              status={<StateMark testId={`states-file-header-state-${theme}`} truncate state="saved" shown="saved" />}
+              status={<StateMark testId={`states-tab-row-actions-state-${theme}`} truncate quietWhenCalm state="saved" shown="saved" />}
               actions={
                 <DocumentControls
                   toggle={{ label: "Source", title: "Toggle markdown source (Ctrl+/)", onClick: noop }}
@@ -1019,12 +1800,53 @@ function Pane(props: { theme: "light" | "dark" }) {
                 />
               }
             />
-          </div>
+          </TabRowActionsSpecimen>
+        </Specimen>
+        <Specimen label="saving" className="w-full">
+          <TabRowActionsSpecimen width="w-full">
+            <ViewActions
+              onShare={noop}
+              status={<StateMark testId={`states-tab-row-actions-saving-${theme}`} truncate quietWhenCalm state="saving" shown="saving" />}
+              actions={
+                <DocumentControls
+                  toggle={{ label: "Source", title: "Toggle markdown source (Ctrl+/)", onClick: noop }}
+                  menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => "# Plan" }}
+                />
+              }
+            />
+          </TabRowActionsSpecimen>
+        </Specimen>
+        <Specimen label="pending share" className="w-full">
+          <TabRowActionsSpecimen width="w-full">
+            <ViewActions
+              onShare={noop}
+              status={<StateMark testId={`states-tab-row-actions-pending-${theme}`} truncate quietWhenCalm state="pending-share" shown="pending-share" />}
+              actions={
+                <DocumentControls
+                  toggle={{ label: "Source", title: "Toggle markdown source (Ctrl+/)", onClick: noop }}
+                  menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => "# Plan" }}
+                />
+              }
+            />
+          </TabRowActionsSpecimen>
+        </Specimen>
+        <Specimen label="held: file in use" className="w-full">
+          <TabRowActionsSpecimen width="w-full">
+            <ViewActions
+              onShare={noop}
+              status={<StateMark testId={`states-tab-row-actions-held-${theme}`} truncate quietWhenCalm state="file-locked" shown="file-locked" />}
+              actions={
+                <DocumentControls
+                  toggle={{ label: "Source", title: "Toggle markdown source (Ctrl+/)", onClick: noop }}
+                  menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => "# Plan" }}
+                />
+              }
+            />
+          </TabRowActionsSpecimen>
         </Specimen>
         <Specimen label="failed" className="w-full">
-          <div className="w-full rounded-lg border border-line bg-bg">
-            <ViewHeader
-              path="trip/plan.md"
+          <TabRowActionsSpecimen width="w-full">
+            <ViewActions
               onShare={noop}
               actions={
                 <DocumentControls
@@ -1033,15 +1855,14 @@ function Pane(props: { theme: "light" | "dark" }) {
                 />
               }
             />
-          </div>
+          </TabRowActionsSpecimen>
         </Specimen>
-        <Specimen label="narrow, pending share">
-          <div data-testid={`states-file-header-narrow-${theme}`} className="w-[400px] rounded-lg border border-line bg-bg">
-            <ViewHeader
-              path="trip/plan.md"
+        <Specimen label="narrow, changed on disk">
+          <TabRowActionsSpecimen width="w-[360px]" testId={`states-tab-row-actions-narrow-${theme}`}>
+            <ViewActions
               onShare={noop}
               status={
-                <StateMark testId={`states-file-header-pending-${theme}`} truncate state="pending-share" shown="pending-share" />
+                <StateMark testId={`states-tab-row-actions-cut-${theme}`} truncate quietWhenCalm state="changed-on-disk" shown="changed-on-disk" />
               }
               actions={
                 <DocumentControls
@@ -1050,26 +1871,24 @@ function Pane(props: { theme: "light" | "dark" }) {
                 />
               }
             />
-          </div>
+          </TabRowActionsSpecimen>
         </Specimen>
       </Section>
 
-      {/* The editor's listboxes share these rows, after History so no part
-          above them moves. The editor keeps focus, and the option Enter acts
-          on draws the outline. The page link and emoji pickers are not here:
-          an open picker takes Enter from the whole window, which would take
-          it from this page's other parts. */}
+      {/* The editor's listboxes share these rows. The editor keeps focus,
+          and the option Enter acts on draws the outline. The page link and
+          emoji pickers are not here: an open picker takes Enter from the
+          whole window, which would take it from this page's other parts. */}
       <Section part="slash-menu" title="Slash menu">
         <Specimen label="third option active; the list scrolls">
-          <div className={`${EDITOR_MENU_BOX} h-[272px] w-[330px]`}>
+          <div className={`${EDITOR_MENU_BOX} h-[290px] w-[330px]`}>
             <SlashCommandMenu state={SLASH_MENU_OPEN} onSelect={noop} onHover={noop} />
           </div>
         </Specimen>
       </Section>
 
-      {/* After the file header, so the parts above keep their places. The
-          group a keyboard close leaves empty takes focus, and its ring shows
-          on all four edges above its tab strip. */}
+      {/* The group a keyboard close leaves empty takes focus, and its ring
+          shows on all four edges above its tab strip. */}
       <Section part="editor-group-focus" title="Editor group, focused" menusAtRest>
         <Specimen label="split: the focused active group, empty, then one with tabs">
           <div data-force-state="focus focus-visible" data-force-target='[data-editor-group-id="first"]'>
@@ -1078,7 +1897,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Last, so the parts above keep their places. */}
       <Section part="frontmatter-as-written" title="Frontmatter as written">
         <Specimen label="rename saved">
           <AsWrittenSpecimen name="cost" />
@@ -1088,9 +1906,10 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* After the others, so they keep their places. On the title bar's
-          own fill. */}
+      {/* On the title bar's own fill. */}
       <Section part="title-bar-status" title="Title bar status">
+        {/* The saved dot alone while nothing needs the person, and its words
+            once something does. */}
         {TITLE_BAR_STATUSES.map(({ label, syncStatus, failedSaves }) => (
           <Specimen key={label} label={label}>
             <span className="flex h-8 items-center rounded-md border border-line bg-panel px-3">
@@ -1099,9 +1918,1145 @@ function Pane(props: { theme: "light" | "dark" }) {
           </Specimen>
         ))}
       </Section>
+
+      <Section part="capture-recovery" title="Typing kept in History">
+        <Specimen label="toast">
+          <div className={SHADOW_ROOM}>
+            <WorkspaceErrorToast error={RECOVERY_TOAST} onAction={noop} onHide={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="Notices: History Restore, then a shared live file">
+          <div className="w-[360px] rounded-lg border border-line bg-panel text-xs text-ink">
+            <ul className="m-0 list-none p-0">
+              <LocalNoticeRow notice={recoveryNotice("capture-recovery", false)} onKeyDown={noop} onAction={noop} onDismiss={noop} />
+              <LocalNoticeRow notice={recoveryNotice("capture-recovery-shared", true)} onKeyDown={noop} onAction={noop} onDismiss={noop} />
+            </ul>
+          </div>
+        </Specimen>
+        <Specimen label="History at its default width: the recovery change">
+          <ul className="m-0 w-[240px] list-none rounded-lg border border-line bg-panel p-0">
+            <li className="border-b border-line last:border-b-0">
+              <MomentRow moment={RECOVERY_MOMENT} onOpenMoment={noop} />
+            </li>
+          </ul>
+        </Specimen>
+      </Section>
+
+      <Section part="about" title="About">
+        <Specimen label="a document: chats, history, access checked">
+          <AboutPanelSpecimen>
+            <AboutHeader subject={{ path: ABOUT_PATH }} />
+            <AboutSection id="chats" icon={MessageSquare} label="Chats" count="2" expanded onToggle={noop}>
+              <ul className="m-0 list-none p-0">
+                {ABOUT_THREADS.map((thread) => (
+                  <li key={thread.id}>
+                    <AboutChatRow thread={thread} onOpen={noop} />
+                  </li>
+                ))}
+              </ul>
+            </AboutSection>
+            <AboutHistoryView
+              view={{ status: "ready", moments: ABOUT_MOMENTS, more: true }}
+              expanded
+              onToggle={noop}
+              onOpenMoment={noop}
+            />
+            <AboutAccessView view={{ status: "ready", answer: ABOUT_ACCESS }} expanded onToggle={noop} onRetry={noop}
+              onMore={noop} setup={ACCESS_UNEXPLAINED} />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="access may be out of date">
+          <AccessSpecimen view={{ status: "ready", answer: { ...ABOUT_ACCESS, freshness: "stale" } }} />
+        </Specimen>
+        <Specimen label="no share within its coverage">
+          <AccessSpecimen view={{ status: "ready", answer: { ...ABOUT_ACCESS, rows: [] } }} />
+        </Specimen>
+        <Specimen label="unknown: the workspace does not sync">
+          <AccessSpecimen view={{ status: "ready", answer: ABOUT_ACCESS_UNKNOWN }} reason="not-synced" />
+        </Specimen>
+        <Specimen label="unknown: signed out">
+          <AccessSpecimen view={{ status: "ready", answer: ABOUT_ACCESS_UNKNOWN }} reason="signed-out" />
+        </Specimen>
+        <Specimen label="unknown: no cause dohc can name">
+          <AccessSpecimen view={{ status: "ready", answer: ABOUT_ACCESS_UNKNOWN }} />
+        </Specimen>
+        <Specimen label="loading, then failed reads: words in Notices">
+          <AboutPanelSpecimen>
+            <AboutHistoryView view={{ status: "loading" }} expanded onToggle={noop} onOpenMoment={noop} />
+            <AboutHistoryView view={{ status: "failed", retry: noop }} expanded onToggle={noop} onOpenMoment={noop} />
+            <AboutAccessView view={{ status: "failed" }} expanded onToggle={noop} onRetry={noop} onMore={noop} setup={ACCESS_UNEXPLAINED} />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="History held back by its rules: drawn here, no row">
+          <AboutPanelSpecimen>
+            <AboutHistoryView
+              view={{ status: "held", words: historyHiddenWords([".dohc/files.toml"]), retry: noop }}
+              expanded
+              onToggle={noop}
+              onOpenMoment={noop}
+            />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="keyboard focus on a closed section">
+          <div data-force-state="focus focus-visible" data-force-target='[data-testid="about-access-toggle"]'>
+            <AboutPanelSpecimen>
+              <AboutHistoryView view={{ status: "untracked" }} expanded onToggle={noop} onOpenMoment={noop} />
+              <AboutAccessView view={{ status: "loading" }} expanded={false} onToggle={noop} onRetry={noop} onMore={noop}
+                setup={ACCESS_UNEXPLAINED} />
+            </AboutPanelSpecimen>
+          </div>
+        </Specimen>
+      </Section>
+
+      {/* Its rows' menus rest; the menu part draws an open one. */}
+      <Section part="sharing" title="Sharing" menusAtRest>
+        <Specimen label="both lists, a conflict, and changes waiting">
+          <SharingSpecimen granted={ready(SHARING_GRANTED)} received={ready(SHARING_RECEIVED)} conflictCount={2} />
+        </Specimen>
+        <Specimen label="may be out of date">
+          <SharingSpecimen granted={ready({ ...SHARING_GRANTED, freshness: "stale" })}
+            received={ready({ ...SHARING_RECEIVED, freshness: "stale" })} />
+        </Specimen>
+        <Specimen label="no share within each coverage">
+          <SharingSpecimen granted={ready({ ...SHARING_GRANTED, rows: [] })} received={ready({ ...SHARING_RECEIVED, rows: [] })} />
+        </Specimen>
+        <Specimen label="unknown: no cause dohc can name, and signed out">
+          <SharingSpecimen granted={ready({ ...SHARING_GRANTED, ...SHARING_UNKNOWN })}
+            received={ready({ ...SHARING_RECEIVED, ...SHARING_UNKNOWN })} receivedReason="signed-out" />
+        </Specimen>
+        <Specimen label="unknown: the workspace does not sync">
+          <SharingSpecimen granted={ready({ ...SHARING_GRANTED, ...SHARING_UNKNOWN })} grantedReason="not-synced"
+            received={ready(SHARING_RECEIVED)} />
+        </Specimen>
+        <Specimen label="loading, then failed reads: words in Notices">
+          <SharingSpecimen granted={{ status: "loading" }} received={{ status: "failed" }} />
+        </Specimen>
+        <Specimen label="ending a share asks first">
+          <SharingSpecimen granted={ready(SHARING_GRANTED)} received={ready({ ...SHARING_RECEIVED, rows: [] })}
+            confirmShareId="share-plan" />
+        </Specimen>
+        <Specimen label="keyboard focus on a row's actions">
+          <div data-force-state="focus-within" data-force-target='[data-testid="sharing-granted-actions"]'>
+            <div data-force-state="focus focus-visible" data-force-target='[data-testid="sharing-granted-menu"]'>
+              <SharingSpecimen granted={ready({ ...SHARING_GRANTED, rows: SHARING_GRANTED.rows.slice(0, 1) })}
+                received={ready({ ...SHARING_RECEIVED, rows: [] })} />
+            </div>
+          </div>
+        </Specimen>
+        <Specimen label="keyboard focus on a row's code copy">
+          <div data-force-state="focus-within" data-force-target='[data-testid="sharing-granted-actions"]'>
+            <div data-force-state="focus focus-visible" data-force-target='[data-testid="sharing-copy-code"]'>
+              <SharingSpecimen granted={ready({ ...SHARING_GRANTED, rows: SHARING_GRANTED.rows.slice(0, 1) })}
+                received={ready({ ...SHARING_RECEIVED, rows: [] })} />
+            </div>
+          </div>
+        </Specimen>
+        <Specimen label="removed shares still on this computer, and skipped changes">
+          <SharingSpecimen granted={ready({ ...SHARING_GRANTED, rows: [] })} received={ready(SHARING_REMOVED)}
+            mounts={SHARING_REMOVED_MOUNTS} />
+        </Specimen>
+      </Section>
+
+      <Section part="usage-record" title="Usage record">
+        <Specimen label="counts, with a row and a door this version does not count">
+          <UsageRecordSpecimen view={USAGE_RECORD} />
+        </Specimen>
+        <Specimen label="off, with saved counts">
+          <UsageRecordSpecimen view={{ ...USAGE_RECORD, enabled: false }} />
+        </Specimen>
+        <Specimen label="nothing counted yet">
+          <UsageRecordSpecimen view={{ ...USAGE_RECORD, since: USAGE_TODAY, rows: [] }} />
+        </Specimen>
+        <Specimen label="a record dohc cannot open, with Try again">
+          <UsageRecordSpecimen view={{ status: "unreadable", file: USAGE_RECORD.file, code: "EACCES", setAside: null }} />
+        </Specimen>
+        <Specimen label="a record dohc cannot decode, with Start a new record">
+          <UsageRecordSpecimen view={{ status: "unreadable", file: USAGE_RECORD.file, code: "INVALID_USAGE_RECORD", setAside: null }} />
+        </Specimen>
+        <Specimen label="a new record, Off, with the old one set aside">
+          <UsageRecordSpecimen view={{ ...USAGE_RECORD, enabled: false, since: USAGE_TODAY, rows: [], setAside: "dohc-usage.set-aside-1.json" }} />
+        </Specimen>
+        <Specimen label="loading, then a failed read: words in Notices">
+          <div className="flex flex-col gap-3">
+            <UsageRecordSpecimen view={{ status: "loading" }} />
+            <UsageRecordSpecimen view={{ status: "failed" }} />
+          </div>
+        </Specimen>
+        <Specimen label="Clear's confirm, with Copy first">
+          <div className={SHADOW_ROOM}>
+            <UsageRecordClearConfirm card record={USAGE_RECORD} onCancel={noop} onConfirm={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="keyboard focus on the switch">
+          <div data-force-state="focus focus-visible" data-force-target='[role="switch"]'>
+            <UsageRecordSpecimen view={{ ...USAGE_RECORD, rows: USAGE_RECORD.rows.slice(0, 2) }} />
+          </div>
+        </Specimen>
+      </Section>
+
+      <Section part="word-diff" title="Word diff">
+        {WORD_DIFFS.map((specimen) => (
+          <Specimen key={specimen.label} label={specimen.label}>
+            <div className="w-[520px] rounded-lg border border-line bg-bg">
+              <div className="flex h-9 items-center gap-2 border-b border-line px-4 text-[12px]">
+                <span className="min-w-0 flex-1 truncate font-mono text-ink">{specimen.path}</span>
+                {specimen.diff.counts ? <DiffCounts counts={specimen.diff.counts} /> : null}
+              </div>
+              <UnifiedDiffLines lines={buildUnifiedDiffLines(specimen.diff)} />
+            </div>
+          </Specimen>
+        ))}
+      </Section>
+
+      {/* Its empty and loading states are the shared ones above, in Empty
+          ("create") and Loading. */}
+      <Section part="apps-shelf" title="Apps shelf">
+        <Specimen label="pinned; selected, with a warning; shared, hovered; low confidence">
+          <div className="w-60 rounded-lg border border-line bg-panel" data-force-state="hover" data-force-target="li:nth-child(3)">
+            <AppRows apps={SHELF_APPS} pinnedApps={["trip-planner"]} activePath={siteTabPath("apps/funnel-dashboard")}
+              onOpenPath={noop} onSetPinned={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="keyboard focus: a row, then a pin">
+          <div className="w-60 rounded-lg border border-line bg-panel" data-force-state="focus focus-visible"
+            data-force-target='li:nth-child(1) [data-testid="sites-row"]'>
+            <div data-force-state="focus focus-visible" data-force-target='li:nth-child(3) [data-testid="sites-pin"]'>
+              <AppRows apps={SHELF_APPS} pinnedApps={[]} activePath={null} onOpenPath={noop} onSetPinned={noop} />
+            </div>
+          </div>
+        </Specimen>
+        <Specimen label="failed read: words in Notices">
+          <div className="w-60 rounded-lg border border-line bg-panel p-1">
+            <RetryRow testId={`states-apps-failed-${theme}`} onRetry={noop} />
+          </div>
+        </Specimen>
+      </Section>
+
+      <Section part="chat-rows" title="Chat rows">
+        <Specimen label="feed: identified and unknown authors; hovered, unread; untitled, unread, poll, comments; focus on a row; focus in its toolbar">
+          <div className="w-[560px]">
+            {CHAT_FEED_SPECIMENS.map(({ key, post, force, last }) => (
+              // Each row is painted in its own box, as the feed list's items are.
+              <div key={key} data-feed-last={last ? "" : undefined} className="[contain:paint_layout_style]">
+                <div data-force-state={force?.row} data-force-target='[data-testid="chats-post-card"]'>
+                  <div data-force-state={force?.button} data-force-target='[data-testid="chats-post-comment"]'>
+                    <PostCard thread={post.thread} data={post.data} reactionControls={CHAT_REACTIONS} onOpen={noop} onToggleBookmark={noop} />
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Specimen>
+        <Specimen label="thread: opening post, divider, a run of two comments, the second hovered">
+          <ChatThreadSpecimen />
+        </Specimen>
+      </Section>
+
+      <Section part="settings-frame" title="Settings frame">
+        <Specimen label="General chosen, Appearance hovered, keyboard focus on Files; a changed row">
+          <div
+            className="flex h-[420px] w-[688px] overflow-hidden rounded-xl border border-line bg-bg"
+            data-force-state="hover"
+            data-force-target='[data-testid="settings-nav-appearance"]'
+          >
+            <div className="flex" data-force-state="focus focus-visible" data-force-target='[data-testid="settings-nav-files"]'>
+              <SettingsNav workspacePath={SETTINGS_WORKSPACE} sections={SETTINGS_SECTIONS} activeSection="general"
+                onSelect={noop} query="" onQuery={noop} />
+            </div>
+            {/* No close button here, so no room is kept for one. */}
+            <div className="min-w-0 flex-1 px-8 py-7">
+              <div className="max-w-[640px]">
+                <SettingRow title="Your name">
+                  <PreferredNameControl presentation={SAMPLE_ADA} value="Ada" onChange={async () => undefined} testIdPrefix={`states-name-${theme}`} />
+                </SettingRow>
+                <SettingRow title="Editor font" modified onReset={noop}>
+                  <SegmentedControl label="Editor font" value="serif" options={EDITOR_FONT_OPTIONS} onChange={noop} />
+                </SettingRow>
+              </div>
+            </div>
+          </div>
+        </Specimen>
+      </Section>
+
+      <Section part="theme-picker" title="Theme picker">
+        <Specimen label="System chosen">
+          <ThemeControl value="system" onChange={noop} />
+        </Specimen>
+        <Specimen label="Dark chosen, Light hovered">
+          <div data-force-state="hover" data-force-target='[role="radio"]:nth-child(2)'>
+            <ThemeControl value="dark" onChange={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="keyboard focus on the chosen">
+          <div data-force-state="focus focus-visible" data-force-target='[aria-checked="true"]'>
+            <ThemeControl value="light" onChange={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="changed, in its row: the dot and the reset">
+          <div className="w-[560px]">
+            <SettingRow title="Theme" modified onReset={noop}>
+              <ThemeControl value="dark" onChange={noop} />
+            </SettingRow>
+          </div>
+        </Specimen>
+      </Section>
+
+      <Section part="zoom-stepper" title="Zoom stepper">
+        <Specimen label="100%">
+          <ZoomSpecimen percent={100} />
+        </Specimen>
+        <Specimen label="+ hovered">
+          <div data-force-state="hover" data-force-target='[aria-label="Zoom in"]'>
+            <ZoomSpecimen percent={100} />
+          </div>
+        </Specimen>
+        <Specimen label="keyboard focus on the value">
+          <div data-force-state="focus focus-visible" data-force-target='[aria-label^="Reset zoom"]'>
+            <ZoomSpecimen percent={110} />
+          </div>
+        </Specimen>
+        <Specimen label="at the largest: + disabled">
+          <ZoomSpecimen percent={300} atMost />
+        </Specimen>
+        <Specimen label="changed, in its row: the dot and the reset">
+          <div className="w-[560px]">
+            <SettingRow title="Zoom" modified onReset={noop}>
+              <ZoomSpecimen percent={110} />
+            </SettingRow>
+          </div>
+        </Specimen>
+      </Section>
+
+      <Section part="rails" title="Rails">
+        <Specimen label="activity bar: Chats beside Files, selected; Search hovered; Graph focused">
+          <div className="flex h-[400px] overflow-hidden rounded-lg border border-line">
+            <div className="flex" data-force-state="hover" data-force-target={`[data-testid="activity-search"]`}>
+              <div className="flex" data-force-state="focus-visible" data-force-target={`[data-testid="activity-graph"]`}>
+                <ActivityBar views={VIEW_IDS} activeView="chats" sidebarVisible hasConflict={false} onSelectView={noop} onOpenSettings={noop} />
+              </div>
+            </div>
+          </div>
+        </Specimen>
+        <Specimen label="layout toggles: side panel and About shown; About hidden">
+          <div className="flex w-[480px] flex-col gap-2">
+            <div className="overflow-hidden rounded-lg border border-line">
+              <Titlebar primarySidebar={{ visible: true, onToggle: noop }} aboutSidebar={{ visible: true, onToggle: noop }} />
+            </div>
+            <div className="overflow-hidden rounded-lg border border-line">
+              <Titlebar primarySidebar={{ visible: true, onToggle: noop }} aboutSidebar={{ visible: false, onToggle: noop }} />
+            </div>
+          </div>
+        </Specimen>
+      </Section>
+
+      {/* A send shows only once it has taken a second, so the capture waits
+          for the ring. */}
+      <Section part="composer-sending" title="Composer sending">
+        <Specimen label="at rest">
+          <div className="w-[400px] rounded-lg border border-line bg-panel">
+            <MentionComposer testIdPrefix={`states-composer-rest-${theme}`} composerId={`states-composer-rest-${theme}`}
+              value={COMPOSER_DRAFT} sending={false} placeholder="Message #general" sendLabel="Send message"
+              candidates={[]} onChange={noop} onSend={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="cannot send yet, or a send under a second">
+          <div className="w-[400px] rounded-lg border border-line bg-panel">
+            <MentionComposer testIdPrefix={`states-composer-disabled-${theme}`} composerId={`states-composer-disabled-${theme}`}
+              value={COMPOSER_DRAFT} sending={false} disabled placeholder="Message #general" sendLabel="Send message"
+              candidates={[]} onChange={noop} onSend={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="sending, after a second: a group, a message or a post's comments">
+          <div className="w-[400px] rounded-lg border border-line bg-panel">
+            <MentionComposer testIdPrefix={`states-composer-stream-${theme}`} composerId={`states-composer-stream-${theme}`}
+              value={COMPOSER_DRAFT} sending placeholder="Message #general" sendLabel="Send message"
+              candidates={[]} onChange={noop} onSend={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="sending, after a second: a new post">
+          <div className="w-[560px]">
+            <MentionComposer testIdPrefix={`states-composer-post-${theme}`} composerId={`states-composer-post-${theme}`}
+              value={COMPOSER_DRAFT} sending surface="post" authorName="Ada" authorPresentation={SAMPLE_ADA} placeholder="What's happening in #general?"
+              sendLabel="Start post" candidates={[]} onChange={noop} onSend={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="sending, after a second: a file's chats in About">
+          <AboutPanelSpecimen>
+            <ChatComposer testIdPrefix={`states-composer-about-${theme}`} composerId={`states-composer-about-${theme}`}
+              value={COMPOSER_DRAFT} sending placeholder="Write a message…" sendLabel="Send message"
+              onChange={noop} onSend={noop} />
+          </AboutPanelSpecimen>
+        </Specimen>
+      </Section>
+
+      <Section part="about-conversation" title="About a conversation">
+        <Specimen label="a Group: who is here, and its access checked">
+          <AboutPanelSpecimen>
+            <AboutHeader subject={ABOUT_GROUP} />
+            <AboutAccessView view={{ status: "ready", answer: ABOUT_CHAT_ACCESS }} expanded onToggle={noop} onRetry={noop}
+              onMore={noop} setup={ACCESS_UNEXPLAINED} noun="chat" />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="a person, with Access closed">
+          <AboutPanelSpecimen>
+            <AboutHeader subject={{ ...ABOUT_GROUP, kind: "person", name: "Sam Rivera", present: ABOUT_PRESENT.slice(0, 1) }} />
+            <AboutAccessView view={{ status: "loading" }} expanded={false} onToggle={noop} onRetry={noop} onMore={noop}
+              setup={ACCESS_UNEXPLAINED} noun="chat" />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="an agent, alone: no share includes it">
+          <AboutPanelSpecimen>
+            <AboutHeader subject={{ ...ABOUT_GROUP, kind: "agent", name: "Nova", present: [] }} />
+            <AboutAccessView view={{ status: "ready", answer: { ...ABOUT_CHAT_ACCESS, rows: [] } }} expanded onToggle={noop}
+              onRetry={noop} onMore={noop} setup={ACCESS_UNEXPLAINED} noun="chat" />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="unknown, then gone">
+          <AboutPanelSpecimen>
+            <AboutAccessView view={{ status: "ready", answer: ABOUT_ACCESS_UNKNOWN }} expanded onToggle={noop} onRetry={noop}
+              onMore={noop} setup={ACCESS_UNEXPLAINED} noun="chat" />
+            <AboutAccessView view={{ status: "ready", answer: { ...ABOUT_ACCESS_UNKNOWN, visibility: "missing", unknownReason: null } }} expanded
+              onToggle={noop} onRetry={noop} onMore={noop} setup={ACCESS_UNEXPLAINED} noun="chat" />
+          </AboutPanelSpecimen>
+        </Specimen>
+      </Section>
+
+      {/* A CSV and a text file draw their save state, Share and controls in
+          the tab row, as a document does: a calm save state says so only to
+          screen readers. */}
+      <Section part="file-view-actions" title="File view actions" menusAtRest>
+        {FILE_VIEW_CSV_STATES.map((specimen) => (
+          <Specimen key={specimen.label} label={`CSV ${specimen.label}`} className="w-full">
+            <TabRowActionsSpecimen width="w-full" path="data/funnel.csv">
+              <CsvViewActions onShare={noop} onModeChange={noop} onImport={noop} {...specimen.view} />
+            </TabRowActionsSpecimen>
+          </Specimen>
+        ))}
+        {FILE_VIEW_TEXT_STATES.map((specimen) => (
+          <Specimen key={specimen.label} label={`text ${specimen.label}`} className="w-full">
+            <TabRowActionsSpecimen width="w-full" path="src/useFunnel.ts">
+              <TextViewActions testId="view-text" onShare={noop} saveState={specimen.saveState} />
+            </TabRowActionsSpecimen>
+          </Specimen>
+        ))}
+        <Specimen label="split: text failed beside a CSV in Raw" className="w-full">
+          <FileViewSplitSpecimen
+            left={{ path: "src/useFunnel.ts", actions: <TextViewActions testId="view-text" onShare={noop} saveState={FILE_VIEW_FAILED} /> }}
+            right={{
+              path: "data/funnel.csv",
+              actions: <CsvViewActions onShare={noop} onModeChange={noop} onImport={noop} saveState={SAVED_HERE} mode="raw" />,
+            }}
+          />
+        </Specimen>
+      </Section>
+
+      {/* Offers sit in space already there: a folder row's glyph, the tab
+          row's end, a row floating under a pasted line, the space before a
+          post's Send, and above a message composer's Send. */}
+      <Section part="offers" title="Offers" menusAtRest>
+        <Specimen label="an app folder in Files: at rest, selected, focused">
+          <ul role="tree" aria-label="App folders" className="m-0 w-64 list-none rounded-lg border border-line bg-panel py-1">
+            <Row name="trip-planner" app />
+            <Row name="signup" app selected />
+            <Row name="dashboard" app force="focus-visible" />
+          </ul>
+        </Specimen>
+        <Specimen label="Run in the tab row of an app's entry file" className="w-full">
+          <TabRowActionsSpecimen width="w-full" path="trip-planner/index.html">
+            <ViewActions onShare={noop} onRun={noop} />
+          </TabRowActionsSpecimen>
+        </Specimen>
+        <Specimen label="a URL pasted on its own line, Link pressed: Link focused, Plain text focused, then Undo after Plain text">
+          <div className="flex flex-col gap-3">
+            {(["link", "plain"] as const).map((focused) => (
+              <UrlOfferSpecimen key={focused} force={focused === "link" ? "url-paste-link" : "url-paste-plain"} />
+            ))}
+            <UrlOfferSpecimen chosen />
+          </div>
+        </Specimen>
+        <Specimen label="the agent picked in a new post: runs, working, paused, dispatch off, no runner, unknown">
+          <div className="flex flex-col gap-3">
+            {AGENT_OFFER_STATES.map((state) => (
+              <AgentOfferComposer key={state} state={state} surface="post" id={`states-agent-post-${state}-${theme}`} />
+            ))}
+          </div>
+        </Specimen>
+        <Specimen label="the agent picked in a message or comment: the same states, above Send">
+          <div className="flex flex-col gap-3">
+            {AGENT_OFFER_STATES.map((state) => (
+              <AgentOfferComposer key={state} state={state} surface="stream" id={`states-agent-stream-${state}-${theme}`} />
+            ))}
+          </div>
+        </Specimen>
+        <Specimen label="Set up focused; above a reply bar; then a narrow pane">
+          <div className="flex flex-col gap-3">
+            <AgentOfferComposer state="no-command" surface="post" id={`states-agent-post-focus-${theme}`} focus />
+            <AgentOfferComposer state="runner-off" surface="stream" id={`states-agent-stream-focus-${theme}`} focus />
+            <AgentOfferComposer state="runs" surface="stream" id={`states-agent-stream-replying-${theme}`} replying />
+            <AgentOfferComposer state="runs" surface="post" id={`states-agent-post-narrow-${theme}`} width="w-[300px]" />
+            <AgentOfferComposer state="paused" surface="stream" id={`states-agent-stream-narrow-${theme}`} width="w-[300px]" />
+            <AgentOfferComposer state="no-command" surface="stream" id={`states-agent-stream-narrow-setup-${theme}`} width="w-[300px]" />
+          </div>
+        </Specimen>
+      </Section>
+
+      {/* The body's H1 is the editor's, so the folded specimens show the
+          row above it alone. */}
+      <Section part="page-identity" title="Page identity">
+        <Specimen label="an H1 opens the body: the title folds, at rest">
+          <TopmatterSpecimen>
+            <PageIdentity body={"# Q3 product plan\n"} onChange={noop} filenameStem="product-plan" />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="folded, hovered: Add icon and Add title">
+          <TopmatterSpecimen>
+            <div data-force-state="hover" data-force-target={`[data-testid="page-identity"]`}>
+              <PageIdentity body={"# Q3 product plan\n"} onChange={noop} filenameStem="product-plan" />
+            </div>
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="folded, focused: Add icon and Add title in place, so nothing below moves">
+          <TopmatterSpecimen>
+            <div data-force-state="focus-within" data-force-target={`[data-testid="page-identity"]`}>
+              <div data-force-state="focus" data-force-target={`[data-testid="page-title"]`}>
+                <PageIdentity body={"# Q3 product plan\n"} onChange={noop} filenameStem="product-plan" />
+              </div>
+            </div>
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="a title property">
+          <TopmatterSpecimen>
+            <PageIdentity body={"---\ntitle: Q3 product plan\n---\n\n# Goals\n"} onChange={noop} filenameStem="product-plan" />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="no H1: the file name in place of a title">
+          <TopmatterSpecimen>
+            <PageIdentity body={"Q3 notes\n"} onChange={noop} filenameStem="product-plan" />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="pills at rest">
+          <TopmatterSpecimen>
+            <PropertiesPanel body={PILLS} onChange={noop} />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="pill hovered: its ×">
+          <TopmatterSpecimen>
+            <div data-force-state="hover" data-force-target={`[data-testid="property-row"]`}>
+              <PropertiesPanel body={PILLS} onChange={noop} />
+            </div>
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="pill focused: its value, and its ×">
+          <TopmatterSpecimen>
+            <div data-force-state="focus-within" data-force-target={`[data-testid="property-row"]`}>
+              <div data-force-state="focus" data-force-target={`[data-testid="property-value"]`}>
+                <PropertiesPanel body={PILLS} onChange={noop} />
+              </div>
+            </div>
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="a long value: an ellipsis, all of it in the tooltip">
+          <TopmatterSpecimen>
+            <PropertiesPanel body={LONG_PILL} onChange={noop} />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="reserved name, typed">
+          <TopmatterSpecimen>
+            <ReservedPillSpecimen />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="duplicate name">
+          <TopmatterSpecimen>
+            <PropertiesPanel body={"---\nowner: Sam\nOwner: Ada\n---\n"} onChange={noop} />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="locked: the block must be edited as text">
+          <TopmatterSpecimen>
+            {/* Written on one line, the block cannot change one property
+                without rewriting the others. */}
+            <PropertiesPanel body={"---\n{owner: Sam, status: Draft}\n---\n"} onChange={noop} />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="set by an automation">
+          <TopmatterSpecimen>
+            <PropertiesPanel body={PILLS} onChange={noop} fieldMarks={new Map([["status", ["Stamp the status"]]])} />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="+ keyboard focus">
+          <TopmatterSpecimen>
+            <div data-force-state="focus-visible" data-force-target={`[data-testid="property-add"]`}>
+              <PropertiesPanel body={PILLS} onChange={noop} />
+            </div>
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="the + alone, the pointer over the page's top">
+          <div data-force-state="hover" data-force-target=".group\/topmatter">
+            <TopmatterSpecimen>
+              <PropertiesPanel body={"Q3 notes\n"} onChange={noop} />
+            </TopmatterSpecimen>
+          </div>
+        </Specimen>
+      </Section>
+
+      <Section part="settings-sync" title="Settings: Sync and sharing">
+        <Specimen label="signed in, syncing, on a private server; keyboard focus on Disconnect">
+          <div className="w-[640px]" data-force-state="focus focus-visible" data-force-target='[data-testid="cloud-disconnect"]'>
+            <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ ...CLOUD_SIGNED_IN, networkAccess: "private", workspaceSynced: true, workspaceSyncConnected: true })} />
+          </div>
+        </Specimen>
+        <Specimen label="signed in, not syncing">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud(CLOUD_SIGNED_IN)} />
+          </div>
+        </Specimen>
+        <Specimen label="sync off: paused by you">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ ...CLOUD_SIGNED_IN, syncPause: SYNC_PAUSED_BY_YOU })} />
+          </div>
+        </Specimen>
+        <Specimen label="sync off: paused by an agent">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ ...CLOUD_SIGNED_IN, syncPause: SYNC_PAUSED_BY_AGENT })} />
+          </div>
+        </Specimen>
+        <Specimen label="sync off: paused under this computer's earlier id">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ ...CLOUD_SIGNED_IN, syncPause: SYNC_PAUSED_BY_ANOTHER })} />
+          </div>
+        </Specimen>
+        <Specimen label="turning sync off: the switch holds until main answers">
+          <div className="w-[640px]">
+            <SettingRow title="Sync this workspace">
+              <SwitchControl label="Sync this workspace" checked={false} busy disabled onChange={noop} />
+            </SettingRow>
+          </div>
+        </Specimen>
+        <Specimen label="sync on, account unconfirmed: not syncing, with Try again">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ ...CLOUD_SIGNED_IN, workspaceSynced: true })} />
+          </div>
+        </Specimen>
+        <Specimen label="protected files: the passphrase field and its error">
+          <div className="w-[640px]">
+            <ProtectedFilesRow
+              secretState="protected-key-present"
+              purpose="protect"
+              passphrase="1234567"
+              error="Enter at least 8 characters to protect synced secrets."
+              busy={false}
+              onStart={noop}
+              onPassphrase={noop}
+              onSubmit={noop}
+            />
+          </div>
+        </Specimen>
+        <Specimen label="a shared view: the account, no switch">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" sharedView cloud={settingsCloud(CLOUD_SIGNED_IN)} />
+          </div>
+        </Specimen>
+        <Specimen label="signed out">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ connected: false })} />
+          </div>
+        </Specimen>
+        <Specimen label="signed out, paused by you: turning sync on needs the server">
+          <div className="w-[640px]">
+            <CloudSyncSettings
+              workspaceId="ws-trip"
+              cloud={settingsCloud({ connected: false, workspaceSyncOwned: true, workspaceSynced: false, syncPause: SYNC_PAUSED_BY_YOU })}
+            />
+          </div>
+        </Specimen>
+        <Specimen label="the status still loading">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud(null)} />
+          </div>
+        </Specimen>
+        <Specimen label="the status unreadable">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" cloud={{ ...settingsCloud(null), unreadable: true }} />
+          </div>
+        </Specimen>
+      </Section>
+
+      {/* A CSV's rows and columns: numbers at the right in mono, row
+          numbers in the gutter, and each row's and column's actions only on
+          hover or focus. A database table: each column's type as an icon,
+          the active cell, the editing cell, a sort, and the read-only mark. */}
+      <Section part="data-grid" title="Data grid" menusAtRest>
+        <Specimen label="CSV at rest: numbers, Add row and Add column">
+          <CsvGridSpecimen />
+        </Specimen>
+        <Specimen label="CSV a hovered row, pointer on Delete row">
+          <div data-force-state="hover" data-force-target="tbody tr:nth-child(2)">
+            <div data-force-state="hover" data-force-target="tbody tr:nth-child(2) [data-testid=csv-delete-row]">
+              <CsvGridSpecimen />
+            </div>
+          </div>
+        </Specimen>
+        <Specimen label="CSV a hovered header">
+          <div data-force-state="hover" data-force-target="thead th:nth-child(2)">
+            <CsvGridSpecimen />
+          </div>
+        </Specimen>
+        {/* The input holds focus, so its row and cell hold it within: the
+            same three states a person's click or Tab gives. */}
+        <Specimen label="CSV a focused cell">
+          <div data-force-state="focus-within" data-force-target="tbody tr:nth-child(1)">
+            <div data-force-state="focus-within" data-force-target="tbody tr:nth-child(1) td:nth-child(2)">
+              <div data-force-state="focus focus-visible" data-force-target="tbody tr:nth-child(1) td:nth-child(2) input">
+                <CsvGridSpecimen />
+              </div>
+            </div>
+          </div>
+        </Specimen>
+        <Specimen label="CSV read-only">
+          <CsvGridSpecimen locked />
+        </Specimen>
+        <Specimen label="CSV empty">
+          <div className="flex h-44 w-80 flex-col">
+            <CsvGridSpecimen rows={[]} />
+          </div>
+        </Specimen>
+        <Specimen label="CSV the preview's bound">
+          <CsvPreviewBound rowCount={1240} />
+        </Specimen>
+        <Specimen label="database at rest: text, numbers, bytes and an untyped column">
+          <DatabaseGridSpecimen />
+        </Specimen>
+        <Specimen label="database sorted by count, descending">
+          <DatabaseGridSpecimen sort={{ column: "count", direction: "desc" }} />
+        </Specimen>
+        {/* The cell holds focus itself, as an arrow key or a click leaves it. */}
+        <Specimen label="database the active cell">
+          <div data-force-state="focus focus-visible focus-within" data-force-target="tbody tr:nth-child(2) td:nth-child(2)">
+            <DatabaseGridSpecimen />
+          </div>
+        </Specimen>
+        <Specimen label="database the editing cell">
+          <div data-force-state="focus-within" data-force-target="tbody tr:nth-child(2) td:nth-child(2)">
+            <div data-force-state="focus focus-visible" data-force-target="tbody tr:nth-child(2) td:nth-child(2) input">
+              <DatabaseGridSpecimen editing />
+            </div>
+          </div>
+        </Specimen>
+        <Specimen label="database read-only, shared with you to read" className="w-full">
+          <TabRowActionsSpecimen width="w-full" path="data/funnel.sqlite">
+            <DatabaseViewActions onShare={noop} readOnlyReason="This database is shared with you to read." />
+            <div className="bg-bg px-4 pt-3">
+              <DatabaseGridSpecimen readOnly />
+            </div>
+          </TabRowActionsSpecimen>
+        </Specimen>
+      </Section>
+
+      {/* Last, so the parts above keep their places. A strip too narrow for
+          its tabs fades each edge it can still scroll past, and none it has
+          reached; its active tab sits clear of the fades. */}
+      <Section part="tab-strip-overflow" title="Tab strip, overflowing" menusAtRest>
+        {(
+          [
+            ["start", "at the start: the end fades", "itinerary.md"],
+            ["middle", "scrolled to the middle: both edges fade", "flights.md"],
+            ["end", "at the end: the start fades", "notes.md"],
+          ] as const
+        ).map(([at, label, active]) => (
+          <Specimen key={at} label={label} className="w-full">
+            <div className="w-[360px] overflow-hidden rounded-lg border border-line">
+              <OverflowStripSpecimen
+                groupId={`overflow-${at}`}
+                groupNumber={1}
+                active={active}
+                testId={`states-tab-strip-overflow-${at}-${theme}`}
+              />
+            </div>
+          </Specimen>
+        ))}
+        <Specimen label="split: the active group's line over its fades, then the other group">
+          <div className="flex w-[640px] overflow-hidden rounded-lg border border-line">
+            <EditorGroupLayout
+              groups={[
+                { id: "first", size: 1, content: <OverflowStripSpecimen groupId="first" groupNumber={1} active="packing-list.md" /> },
+                { id: "second", size: 1, content: <OverflowStripSpecimen groupId="second" groupNumber={2} active="flights.md" /> },
+              ]}
+              activeGroupId="first"
+              onFocusGroup={noop}
+              onResizeGroups={noop}
+            />
+          </div>
+        </Specimen>
+      </Section>
+
+      {/* Last, so the parts above keep their places. Each strip holds a tab
+          list, so the part holds them at rest. */}
+      <Section part="tab-glyphs" title="Tab glyphs" menusAtRest>
+        <Specimen label="files: a document, active and unsaved; a CSV; a drawing; a database" className="w-full">
+          <GlyphStripBox tabs={["trip/plan.md", "budget.csv", "map.excalidraw", "ledger.db"]} active="trip/plan.md" dirty />
+        </Specimen>
+        <Specimen label="objects: a group, active; an app; a Collection; History" className="w-full">
+          <GlyphStripBox tabs={[STRIP_GROUP, siteTabPath("trip-planner"), STRIP_COLLECTION, HISTORY_TAB_PATH]} active={STRIP_GROUP} />
+        </Specimen>
+        <Specimen label="a page with an emoji, active; a long name, cut off" className="w-full">
+          <GlyphStripBox tabs={["launch.md", STRIP_LONG]} active="launch.md" />
+        </Specimen>
+        <Specimen label="split: the active group, then one whose active tab recedes" className="w-full">
+          <div className="flex w-full overflow-hidden rounded-lg border border-line">
+            <EditorGroupLayout
+              groups={[
+                { id: "first", size: 1, content: <GlyphStrip groupId="first" groupNumber={1} tabs={["trip/plan.md", "ledger.db"]} active="trip/plan.md" /> },
+                { id: "second", size: 1, content: <GlyphStrip groupId="second" groupNumber={2} tabs={[STRIP_GROUP, siteTabPath("trip-planner")]} active={STRIP_GROUP} /> },
+              ]}
+              activeGroupId="first"
+              onFocusGroup={noop}
+              onResizeGroups={noop}
+            />
+          </div>
+        </Specimen>
+      </Section>
+
+      {/* The catalog is a listbox the textarea controls, not a menu, so it
+          is drawn open here under its composer instead of being opened. */}
+      <Section part="composer-poll" title="Composer catalog and poll">
+        <Specimen label="/ in a new post: Poll active">
+          <ComposerCatalogSpecimen theme={theme} surface="post" />
+        </Specimen>
+        <Specimen label="/ in a group's chat">
+          <ComposerCatalogSpecimen theme={theme} surface="stream" />
+        </Specimen>
+        <Specimen label="a new post with a poll; the second choice repeats the first">
+          <div className="w-[560px]">
+            <MentionComposer testIdPrefix={`states-poll-post-${theme}`} composerId={`states-poll-post-${theme}`}
+              value={POLL_QUESTION} sending={false} surface="post" authorName="Ada" authorPresentation={SAMPLE_ADA}
+              placeholder="What's happening in #general?" sendLabel="Start post" candidates={[]} fileCandidates={STATES_FILES}
+              onChange={noop} onSend={noop} poll={{ choices: ["Porto", "Porto ", "Lisbon"], open: true }} onPollChange={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="a narrow new post with a poll: Poll without its label">
+          <div className="w-[400px]">
+            <MentionComposer testIdPrefix={`states-poll-narrow-${theme}`} composerId={`states-poll-narrow-${theme}`}
+              value={POLL_QUESTION} sending={false} surface="post" authorName="Ada" authorPresentation={SAMPLE_ADA}
+              placeholder="What's happening in #general?" sendLabel="Start post" candidates={[]} fileCandidates={STATES_FILES}
+              onChange={noop} onSend={noop} poll={{ choices: ["Lisbon", "Porto"], open: true }} onPollChange={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="a comment asking the agent, with a poll, replying to a message: the offer floats over the stack">
+          {/* A stream composer floats its offer above its top edge, into the
+              room the end of its conversation keeps, so it gets that room. */}
+          <div className="w-[400px] rounded-lg border border-line bg-panel pt-9">
+            <MentionComposer testIdPrefix={`states-poll-stream-${theme}`} composerId={`states-poll-stream-${theme}`}
+              value={`@agent ${POLL_QUESTION.toLowerCase()}`} sending={false} placeholder="Write a comment…  @ to mention"
+              sendLabel="Send message" candidates={[]} fileCandidates={STATES_FILES} onChange={noop} onSend={noop}
+              agentOffer={agentOffer("runs")} onSetUpAgent={noop}
+              above={
+                <ComposerModeBar testId={`states-poll-stream-${theme}-replying-mode`} cancelTestId={`states-poll-stream-${theme}-replying-cancel`}
+                  cancelLabel="Cancel reply" onCancel={noop}>Replying to Sam ·</ComposerModeBar>
+              }
+              poll={{ choices: ["Lisbon", "Porto", "Madeira"], open: true }} onPollChange={noop} />
+          </div>
+        </Specimen>
+      </Section>
+
+      {/* Last, so the parts above keep their places. A new part goes after. */}
+      <Section part="chat-messages" title="Chat messages">
+        <Specimen label="a file's chats in About: a run, its second message hovered at 12:45 PM">
+          <ChatRunSpecimen />
+        </Specimen>
+      </Section>
+
+      <Section part="ref" title="Reference">
+        <Specimen label="rest, hover, keyboard focus, selected, missing">
+          <Ref path="data/funnel.csv" onOpen={noop} />
+          <span data-force-state="hover" data-force-target="button"><Ref path="data/funnel.csv" onOpen={noop} /></span>
+          <span data-force-state="focus-visible" data-force-target="button"><Ref path="data/funnel.csv" onOpen={noop} /></span>
+          <Ref path="data/funnel.csv" selected onOpen={noop} />
+          <Ref path="research/competitors.md" missing onOpen={noop} />
+        </Specimen>
+        <Specimen label="a title, with and without its folder; a heading">
+          <Ref path="research/competitors.md" title="Competitor landscape" />
+          <Ref path="research/competitors.md" title="Competitor landscape" folder />
+          <Ref path="research/competitors.md" heading="pricing" />
+        </Specimen>
+        <Specimen label="a long name in a narrow row" className="w-56">
+          <Ref path={STRIP_LONG} folder />
+        </Specimen>
+        <Specimen label="in a sentence">
+          <p className="m-0 w-[420px] text-[14px] leading-[22px] text-ink">
+            Numbers are in <Ref path="data/funnel.csv" onOpen={noop} /> and the flow is sketched in{" "}
+            <Ref path="sketches/flow.excalidraw" onOpen={noop} />.
+          </p>
+        </Specimen>
+        <Specimen label="kind">
+          <div className="flex w-[420px] flex-wrap gap-1.5">
+            {KINDS.map((kind) => (
+              <Ref key={kind.displayKind} path={KIND_SAMPLES[kind.displayKind]} kind={kind} />
+            ))}
+          </div>
+        </Specimen>
+      </Section>
+
+      <Section part="agent-color" title="Agent color">
+        <Specimen label="a person and two agents, Default and plum; keyboard focus on the plum agent's avatar">
+          <div data-force-state="focus-visible" data-force-target='[data-message-id="color-orbit"] [data-testid="agent-color-trigger"]'>
+            <AgentColorContext.Provider value={noop}>
+              <AboutPanelSpecimen>
+                <div className="flex h-[220px] flex-col">
+                  <ChatMessageList testIdPrefix={`states-agent-color-${theme}`} messages={AGENT_COLOR_CHAT} loading={false} emptyLabel="No messages yet." />
+                </div>
+              </AboutPanelSpecimen>
+            </AgentColorContext.Provider>
+          </div>
+        </Specimen>
+        <Specimen label="open, plum chosen, keyboard focus on Default">
+          <div className={`w-fit ${SHADOW_ROOM}`} data-force-state="focus-visible" data-force-target='[aria-label="Default"]'>
+            <AgentColorSwatches label="Color for Orbit" value="plum" onChange={noop} />
+          </div>
+        </Specimen>
+      </Section>
     </section>
   );
 }
+
+const POLL_QUESTION = "Where should we hold the offsite?";
+const STATES_FILES = [{ path: "Plans/offsite.md", label: "offsite" }];
+
+function ComposerCatalogSpecimen(props: { theme: "light" | "dark"; surface: "post" | "stream" }) {
+  const id = `states-catalog-${props.surface}-${props.theme}`;
+  const composer = (
+    <MentionComposer testIdPrefix={id} composerId={id} value={`${POLL_QUESTION} /`} sending={false}
+      surface={props.surface} authorName="Ada" authorPresentation={SAMPLE_ADA}
+      placeholder="Message #general" sendLabel="Send message" candidates={[]} fileCandidates={STATES_FILES}
+      onChange={noop} onSend={noop} poll={null} onPollChange={noop} />
+  );
+  return (
+    <div className={`flex flex-col gap-1.5 pb-10 ${props.surface === "post" ? "w-[560px]" : "w-[400px]"}`}>
+      {props.surface === "post" ? composer : <div className="flex flex-col rounded-lg border border-line bg-panel">{composer}</div>}
+      <ul role="listbox" aria-label="Add to message" className={`${MENU_FRAME} w-64`}>
+        <ComposerCatalogOptions listboxId={`${id}-mentions`} testIdPrefix={id} rows={["poll", "mention", "file"]}
+          highlight={0} onPick={noop} onHover={() => noop} />
+      </ul>
+    </div>
+  );
+}
+
+const GRID_FUNNEL = [
+  ["stage", "count", "conversion"],
+  ["Visited", "4820", "1.00"],
+  ["Signed up", "1290", "0.27"],
+  ["Created doc", "860", "0.18"],
+  ["Invited agent", "340", "0.07"],
+];
+
+function CsvGridSpecimen(props: { rows?: string[][]; locked?: boolean }) {
+  const rows = props.rows ?? GRID_FUNNEL;
+  return (
+    <CsvTable rows={rows} columns={csvColumns(rows)} locked={props.locked ?? false}
+      onUpdateCell={noop} onEndEdit={noop} onDeleteRow={noop} onDeleteColumn={noop} onAddRow={noop} onAddColumn={noop} />
+  );
+}
+
+const GRID_DATABASE: DatabaseSnapshotResult["tables"][number] = {
+  name: "funnel",
+  columns: [
+    { name: "stage", type: "TEXT" },
+    { name: "count", type: "INTEGER", nullable: false },
+    { name: "conversion", type: "REAL" },
+    { name: "export", type: "BLOB" },
+    { name: "note", type: "" },
+  ],
+  rows: [
+    { __dohc_rowid: 1, stage: "Visited", count: 4820, conversion: 1, export: "<blob 16 bytes>", note: null },
+    { __dohc_rowid: 2, stage: "Signed up", count: 1290, conversion: 0.27, export: "<blob 16 bytes>", note: "trial" },
+    { __dohc_rowid: 3, stage: "Created doc", count: 860, conversion: 0.18, export: null, note: null },
+    { __dohc_rowid: 4, stage: "Invited agent", count: 340, conversion: 0.07, export: null, note: "team" },
+  ],
+  nextOffset: null,
+};
+const GRID_DATABASE_ROWS = GRID_DATABASE.rows.map((row, sourceIndex) => ({ row, sourceIndex }));
+
+function DatabaseGridSpecimen(props: {
+  sort?: ComponentProps<typeof DatabaseGrid>["sort"];
+  editing?: boolean;
+  readOnly?: boolean;
+}) {
+  // The rows are already in descending count, as the sort specimen shows them.
+  return (
+    <DatabaseGrid
+      table={GRID_DATABASE}
+      rows={GRID_DATABASE_ROWS}
+      readOnly={props.readOnly ?? false}
+      editing={props.editing ? editOf(GRID_DATABASE, GRID_DATABASE.rows[1]!, "stage") : null}
+      draftRef={{ current: "Signed in" }}
+      sort={props.sort ?? null}
+      onSort={noop}
+      onBeginEdit={noop}
+      onCommit={noop}
+      onCancel={noop}
+    />
+  );
+}
+
+const FILE_VIEW_FAILED = saveProblem("error", "dohc couldn't write the file.");
+
+const FILE_VIEW_CSV_STATES: {
+  label: string;
+  view: Pick<ComponentProps<typeof CsvViewActions>, "saveState" | "mode" | "readOnly" | "truncated" | "importing">;
+}[] = [
+  { label: "saved, as a table", view: { saveState: SAVED_HERE, mode: "table" } },
+  { label: "saving", view: { saveState: SAVING, mode: "table" } },
+  { label: "failed", view: { saveState: FILE_VIEW_FAILED, mode: "table" } },
+  { label: "read-only", view: { saveState: SAVED_HERE, mode: "table", readOnly: true } },
+  { label: "too large", view: { saveState: SAVED_HERE, mode: "table", truncated: true } },
+  { label: "raw", view: { saveState: SAVED_HERE, mode: "raw" } },
+  { label: "importing", view: { saveState: SAVED_HERE, mode: "table", importing: true } },
+];
+
+const FILE_VIEW_TEXT_STATES: { label: string; saveState: SaveState }[] = [
+  { label: "saved", saveState: SAVED_HERE },
+  { label: "failed", saveState: FILE_VIEW_FAILED },
+];
+
+const CLOUD_SIGNED_IN: CloudStatusResult = {
+  connected: true,
+  email: "sam@hollis.studio",
+  // Fixed, so the account avatar doesn't take this run's installation colour.
+  ownPresentation: { group: "own", hue: "amber", self: true },
+  serverUrl: "https://dohc.hollis.studio",
+  relayUrl: "https://relay.hollis.studio",
+  workspaceSynced: false,
+  workspaceSyncConnected: false,
+};
+const SYNC_PAUSED_BY_YOU: CloudStatusResult["syncPause"] = {
+  atMs: new Date(2026, 6, 8, 8, 42).getTime(),
+  author: { kind: "person", personId: "local-sam", self: true },
+};
+// This computer's id file was unreadable, so it took a new id after the pause.
+const SYNC_PAUSED_BY_ANOTHER: CloudStatusResult["syncPause"] = {
+  atMs: new Date(2026, 6, 8, 8, 42).getTime(),
+  author: { kind: "person", personId: "local-old", self: false },
+};
+const SYNC_PAUSED_BY_AGENT: CloudStatusResult["syncPause"] = {
+  atMs: new Date(2026, 6, 8, 8, 42).getTime(),
+  author: { kind: "agent", agentId: "codex", onBehalfOf: "human-sam", depth: 1 },
+};
+const settingsCloud = (status: CloudStatusResult | null): CloudSettings => ({
+  status, unreadable: false, onChanged: noop, onConnect: noop, onError: noop, onAccountError: noop, onDeleteAccount: noop,
+});
+
+const SETTINGS_WORKSPACE = "C:\\Users\\ada\\Documents\\trip";
+const EDITOR_FONT_OPTIONS = [
+  { value: "sans", label: "Sans" },
+  { value: "serif", label: "Serif" },
+  { value: "mono", label: "Mono" },
+];
+
+// Appearance's zoom stepper keeps its existing Windows specimen text on every host.
+function ZoomSpecimen(props: { percent: number; atMost?: boolean }) {
+  return (
+    <StepperControl
+      setting="zoom"
+      value={`${props.percent}%`}
+      decrease={{ label: "Zoom out", keys: shortcutKeys("zoom-out", "win32"), onClick: noop }}
+      reset={{ label: "Reset to 100%", to: "100%", keys: shortcutKeys("zoom-reset", "win32"), onClick: noop }}
+      increase={{ label: "Zoom in", keys: shortcutKeys("zoom-in", "win32"), disabled: props.atMost, onClick: noop }}
+    />
+  );
+}
+
+// A fixed day, so "today" and "since" never move the capture.
+const USAGE_TODAY = "2026-10-07";
+const usageCell = (count: number, counted = true) => ({ count, counted });
+const usageRow = (capabilityId: string, label: string, doors: Partial<UsageRecordRow["doors"]>, lastUsed: string | null = null): UsageRecordRow => ({
+  capabilityId, label, lastUsed,
+  doors: { renderer: usageCell(0, false), cli: usageCell(0, false), mcp: usageCell(0, false), automation: usageCell(0, false), ...doors },
+});
+const USAGE_RECORD: Extract<UsageRecordResult, { status: "readable" }> = {
+  status: "readable", enabled: true, file: "C:\\Users\\ada\\AppData\\Roaming\\dohc\\dohc-usage.json",
+  since: "2026-09-12", incompleteDays: 1,
+  rows: [
+    usageRow("version.create", "Create a workspace version", { renderer: usageCell(41), cli: usageCell(2, false) }, "2026-10-07"),
+    usageRow("file.kept.save", "Save a kept copy beside its file", { renderer: usageCell(3), cli: usageCell(1), mcp: usageCell(0) }, "2026-10-06"),
+    usageRow("version.try", "Try changes in a workspace version", { renderer: usageCell(1) }, "2026-09-03"),
+    usageRow("chat.post", "Post a chat message", { cli: usageCell(0), mcp: usageCell(0) }),
+    usageRow("chat.export", "Export a chat", {}),
+  ],
+  setAside: null,
+};
+
+// Privacy's width for the card.
+function UsageRecordSpecimen(props: { view: UsageRecordView }) {
+  return (
+    <div className="w-[560px] [&>section]:mt-0">
+      <UsageRecordCard view={props.view} today={USAGE_TODAY} onSwitch={noop} onClear={noop} onRetry={noop}
+        onStart={noop} onRestore={noop} />
+    </div>
+  );
+}
+
+// The drawing's prose edit, a code edit, and a rewrite that keeps its lines
+// whole, through the same diff the History page runs.
+const WORD_DIFFS = [
+  {
+    label: "prose: a word replaced, words added",
+    path: "notes/product-plan.md",
+    before: "## Goals\n\n- Ship the chats feed to the first beta group\n- Get a new person to their first document in under 30 seconds\n- Make agent activity readable at a glance\n\n## Workstreams\n",
+    after: "## Goals\n\n- Ship the chats feed to the first beta group\n- Get a new person to their first document in under 20 seconds\n- Make agent activity readable at a glance, with who changed what\n\n## Workstreams\n",
+  },
+  {
+    label: "code: changed tokens",
+    path: "src/limits.ts",
+    before: "export function limitFor(kind: string) {\n  const limit = 800;\n  return kind === \"history\" ? limit : limit / 2;\n}\n",
+    after: "export function limitFor(kind: string, displayLimit?: number) {\n  const limit = displayLimit ?? 800;\n  return kind === \"history\" ? limit : Math.floor(limit / 2);\n}\n",
+  },
+  {
+    label: "a rewritten line stays whole; a new line has no pair",
+    path: "notes/trip.md",
+    before: "# Trip\n\nThe meeting moved to Tuesday.\n",
+    after: "# Trip\n\nBring snacks for everyone!\nTickets are in the shared folder.\n",
+  },
+].map((specimen) => ({ ...specimen, diff: computeTextDiff(specimen.before, specimen.after, 800) }));
+
+const SHELF_APP: SitePackageInfo = {
+  root: "trip-planner",
+  title: "Trip planner",
+  kind: "static",
+  confidence: "high",
+  entryPath: "trip-planner/index.html",
+  configPath: null,
+  packagePath: null,
+  packageManager: null,
+  scripts: {},
+  configuredScripts: {},
+  configuredPreviewMode: null,
+  configuredBuildOutput: null,
+  buildOutputs: [],
+  sourceFiles: ["trip-planner/index.html"],
+  shareManifest: { ok: false, reason: "no-runnable-artifact" },
+  diagnostics: [],
+  authority: { kind: "workspace" },
+};
+
+const SHELF_APPS: SitePackageInfo[] = [
+  SHELF_APP,
+  {
+    ...SHELF_APP,
+    root: "apps/funnel-dashboard",
+    title: "Funnel dashboard",
+    diagnostics: [{
+      path: "apps/funnel-dashboard/dohc.json",
+      severity: "warning",
+      code: "invalid-config",
+      message: "Configured preview commands run only in dev mode.",
+    }],
+  },
+  {
+    ...SHELF_APP,
+    root: "shared-with-me/sam/signup-form",
+    title: "Signup form",
+    authority: { kind: "share", mountRoot: "shared-with-me/sam" },
+  },
+  { ...SHELF_APP, root: "notes/reading-list", title: "Reading list", confidence: "low" },
+];
 
 const SYNCED_STATUS: SyncStatusResult = {
   state: "synced",
@@ -1114,11 +3069,14 @@ const SYNCED_STATUS: SyncStatusResult = {
 
 const TITLE_BAR_STATUSES: { label: string; syncStatus: SyncStatusResult; failedSaves: number }[] = [
   { label: "saved", syncStatus: SYNCED_STATUS, failedSaves: 0 },
+  { label: "syncing", syncStatus: { ...SYNCED_STATUS, state: "syncing" }, failedSaves: 0 },
   { label: "a file couldn't save", syncStatus: SYNCED_STATUS, failedSaves: 1 },
   { label: "files couldn't save, during a sync pass", syncStatus: { ...SYNCED_STATUS, state: "syncing" }, failedSaves: 2 },
+  { label: "server disconnected", syncStatus: { ...SYNCED_STATUS, state: "cloud-disconnected" }, failedSaves: 0 },
 ];
 
-export function StatesPage() {
+// `parts` renders only those parts, so a test renders only what it checks.
+export function StatesPage(props: { parts?: ReadonlySet<string> }) {
   // The light pane has no rule of its own: it reads the document's light
   // tokens. The document is held light while the page is open and given back
   // its theme on close.
@@ -1141,8 +3099,10 @@ export function StatesPage() {
         </SecondaryButton>
       </header>
       <div className="grid grid-cols-2">
-        <Pane theme="light" />
-        <Pane theme="dark" />
+        <ShownParts.Provider value={props.parts}>
+          <Pane theme="light" />
+          <Pane theme="dark" />
+        </ShownParts.Provider>
       </div>
     </div>
   );

@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAgentRunsIpc } from "./agentRunsIpc";
 import { CHANNELS } from "./channels";
@@ -14,9 +14,15 @@ import { createTestScratch } from "../workspaces/testTemp";
 import { deferred } from "../testing/deferred";
 
 class Sender {
+  #destroyed = false;
+  readonly #onDestroyed: Array<() => void> = [];
   constructor(readonly id: number) {}
-  isDestroyed() { return false; }
-  once(_event: "destroyed", _listener: () => void): this { return this; }
+  isDestroyed() { return this.#destroyed; }
+  once(_event: "destroyed", listener: () => void): this { this.#onDestroyed.push(listener); return this; }
+  destroy(): void {
+    this.#destroyed = true;
+    for (const listener of this.#onDestroyed.splice(0)) listener();
+  }
 }
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -27,7 +33,7 @@ const sharedView = {
   grantedSelector: { paths: [], versionId: null, access: "view" as const },
 };
 
-async function harness(shared = false) {
+async function harness(shared = false, hooks: { disposeState?: () => void } = {}) {
   const rootPath = await createTestScratch("agent-runs-ipc-");
   const registry = createRegistryStore(join(rootPath, "registry.json"));
   const workspace: RegistryEntry = {
@@ -35,12 +41,15 @@ async function harness(shared = false) {
     ...(shared ? { shareView: sharedView } : {}),
   };
   registry.register(workspace);
+  await mkdir(join(rootPath, "other"));
+  registry.register({ ...workspace, workspaceId: "other", rootPath: join(rootPath, "other") });
   const sender = new Sender(7);
   const events: string[] = [];
   const authority = createWorkspaceAuthorityOwner({
     findWorkspace: registry.find,
     canonicalizeRoot: (root: string) => root,
     createState: () => new AgentIntegrationState(),
+    ...(hooks.disposeState ? { disposeState: hooks.disposeState } : {}),
   });
   const held = authority.acquire(workspace.workspaceId);
   const physical = { ...workspace, attachmentId: held.binding.attachmentId };
@@ -61,6 +70,7 @@ async function harness(shared = false) {
   let nextRun = 0;
   const integration = createAgentIntegration({
     localPersonId: () => "person-local",
+    installId: () => "install-local",
     acquire: (id) => {
       const lease = authority.acquire(id);
       return {
@@ -97,7 +107,7 @@ async function harness(shared = false) {
   const shareAccess = vi.fn((_view: unknown) => "view" as const);
   const config = vi.fn((_root: string, _access: unknown) => ({ command: "dohc-mcp", args: ["--workspace", rootPath], workspacePath: rootPath, home: rootPath }));
   const handlers = new Map<string, (event: { sender: Sender }, payload: unknown) => unknown>();
-  const detection = vi.fn(async () => []);
+  const detection = vi.fn(async (_root: string, _signal?: AbortSignal) => []);
   const registrations = createAgentRunsIpc({
     detectAgentTools: detection,
     registerHandler: (channel, handler) => { if (handlers.has(channel)) throw new Error("duplicate registration"); handlers.set(channel, handler); },
@@ -105,7 +115,7 @@ async function harness(shared = false) {
     withRendererWorkspaceOperation,
     requireEngineCapture: requireCapture, linkedChatStoreFor: () => ({ ensureOpen }),
     agentDispatchStoreHandleFor: () => ({ store: { runRecordsForThread: records } }),
-    requireWorkspace, assertAgentRunnableWorkspace: runnable, assertChatRunnerIdle: idle,
+    assertAgentRunnableWorkspace: runnable, assertChatRunnerIdle: idle,
     startAgentRunWithWorkspaceActivity: start,
     agentIntegration: integration,
     mcpShareAccessOf: shareAccess, mcpConfigFor: config,
@@ -138,6 +148,8 @@ async function harness(shared = false) {
   };
 }
 
+type Harness = Awaited<ReturnType<typeof harness>>;
+
 const channels = [
   CHANNELS.chatRunRecordsForThread,
   CHANNELS.detectAgentTools, CHANNELS.startAgentRun, CHANNELS.endAgentRun, CHANNELS.getAgentRunStatus, CHANNELS.getMcpConfig,
@@ -145,7 +157,59 @@ const channels = [
 ];
 const threadPayload = { workspaceId: "workspace-a", threadId: "thread-1" };
 
+const detectionRetirements: ReadonlyArray<{ readonly path: string; readonly retire: (h: Harness) => unknown }> = [
+  { path: "switches workspaces", retire: (h) => h.switchWorkspace() },
+  { path: "reloads", retire: (h) => h.renderers.retireForReload(h.sender, "document-1") },
+  { path: "crashes", retire: (h) => h.renderers.retireAfterCrash(h.sender) },
+  { path: "is destroyed", retire: (h) => { h.sender.destroy(); } },
+  {
+    path: "loses its sender id to a new renderer",
+    retire: (h) => h.renderers.open(new Sender(7), { ...h.physical, workspaceId: "workspace-b", attachmentId: Symbol("workspace-b") }, "document-2"),
+  },
+];
+
 describe("agent run IPC registrations", () => {
+  it.each([
+    CHANNELS.startAgentRun, CHANNELS.endAgentRun, CHANNELS.getAgentRunStatus,
+    CHANNELS.getMcpConfig, CHANNELS.runnerSelfTest, CHANNELS.chatRunRecordsForThread,
+    CHANNELS.chatDispatchStateForThread, CHANNELS.resumeThreadDispatch,
+  ])("binds %s to the sender before calling services", async channel => {
+    const h = await harness();
+    const end = vi.spyOn(h.integration, "endAgentRun");
+    const status = vi.spyOn(h.integration, "getAgentRunStatus");
+    const input = { workspaceId: "workspace-a",
+      ...(channel === CHANNELS.endAgentRun ? { runId: "run-1" } : {}),
+      ...(channel === CHANNELS.chatRunRecordsForThread || channel === CHANNELS.chatDispatchStateForThread || channel === CHANNELS.resumeThreadDispatch
+        ? { threadId: "thread-1" } : {}) };
+    if (channel === CHANNELS.endAgentRun) await h.invoke(CHANNELS.startAgentRun);
+    await h.invoke(channel, input);
+    const services = [h.requireWorkspace, h.requireCapture, h.ensureOpen, h.records,
+      h.runnable, h.idle, h.start, end, status, h.shareAccess, h.config,
+      h.writable, h.activity, ...Object.values(h.dispatch)];
+    services.forEach(service => service.mockClear());
+    await expect(h.invoke(channel, { ...input, workspaceId: "other" })).rejects.toThrow("no longer active");
+    services.forEach(service => expect(service).not.toHaveBeenCalled());
+  });
+  it("releases admission before a held runner self-test so retirement can finish", async () => {
+    const disposed = vi.fn();
+    const h = await harness(false, { disposeState: disposed });
+    const entered = deferred<void>();
+    const drain = deferred<{ ok: boolean; detail: string }>();
+    h.dispatch.runnerSelfTest.mockImplementation(() => { entered.resolve(); return drain.promise; });
+    const result = h.invoke(CHANNELS.runnerSelfTest);
+    let retiring: Promise<void> | undefined;
+    try {
+      await entered.promise;
+      retiring = h.authority.invalidate(h.workspace.workspaceId);
+      await vi.waitFor(() => expect(disposed).toHaveBeenCalledOnce());
+      await retiring;
+    } finally {
+      drain.resolve({ ok: true, detail: "Ready" });
+      await Promise.allSettled([result, retiring]);
+    }
+    await expect(result).resolves.toEqual({ ok: true, detail: "Ready" });
+  });
+
   it("registers each original group and rejects untrusted callers before parsing", async () => {
     const h = await harness();
     expect(h.groupSizes).toEqual([1, 10]);
@@ -158,11 +222,83 @@ describe("agent run IPC registrations", () => {
     const h = await harness();
     await expect(h.invoke(CHANNELS.detectAgentTools)).resolves.toEqual({ workingDirectory: h.workspace.rootPath, tools: [] });
     expect(h.detection).toHaveBeenCalledOnce();
-    expect(h.detection).toHaveBeenCalledWith(h.workspace.rootPath);
+    expect(h.detection).toHaveBeenCalledWith(h.workspace.rootPath, expect.any(AbortSignal));
     expect(h.activity).not.toHaveBeenCalled();
     await h.switchWorkspace();
     await expect(h.invoke(CHANNELS.detectAgentTools)).rejects.toThrow();
     expect(h.detection).toHaveBeenCalledOnce();
+  });
+
+  it("cancels admitted detection when its authority retires and disposes only after detection drains", async () => {
+    const order: string[] = [];
+    const h = await harness(false, { disposeState: () => { order.push("disposed"); } });
+    const entered = deferred<void>();
+    const drain = deferred<void>();
+    const cancellation = new Error("Agent detection was cancelled.");
+    let removeAbortListener = (): void => undefined;
+    h.detection.mockImplementation((_root, signal) => {
+      if (signal) {
+        const onAbort = (): void => { order.push("cancelled"); };
+        if (signal.aborted) onAbort();
+        else {
+          signal.addEventListener("abort", onAbort, { once: true });
+          removeAbortListener = () => signal.removeEventListener("abort", onAbort);
+        }
+      }
+      entered.resolve();
+      return drain.promise.then(() => {
+        order.push("drained");
+        throw cancellation;
+      });
+    });
+    const outcome = h.invoke(CHANNELS.detectAgentTools).then(() => undefined, (reason: unknown) => reason);
+    let closing: Promise<void> | undefined;
+    try {
+      await entered.promise;
+      closing = h.authority.invalidate(h.workspace.workspaceId);
+      expect([...order]).toEqual(["cancelled"]);
+    } finally {
+      drain.resolve();
+      removeAbortListener();
+      await Promise.allSettled([outcome, ...(closing ? [closing] : [])]);
+    }
+    expect(await outcome).toBe(cancellation);
+    await closing;
+    expect(order).toEqual(["cancelled", "drained", "disposed"]);
+  });
+
+  it.each(detectionRetirements)("cancels admitted detection when its window $path while another window keeps the workspace", async ({ retire }) => {
+    const h = await harness();
+    const keeper = new Sender(8);
+    await h.renderers.open(keeper, h.physical, "document-keeper");
+    const calls: Array<{ readonly signal: AbortSignal; readonly finish: () => void }> = [];
+    h.detection.mockImplementation((_root, signal) => new Promise<never[]>((resolve, reject) => {
+      if (!signal) { reject(new Error("Detection needs a signal.")); return; }
+      signal.addEventListener("abort", () => { reject(signal.reason); }, { once: true });
+      calls.push({ signal, finish: () => { resolve([]); } });
+    }));
+    const retired = h.invoke(CHANNELS.detectAgentTools).then(() => undefined, (error: unknown) => error);
+    let kept: Promise<unknown> | undefined;
+    let retiring: unknown;
+    try {
+      await vi.waitFor(() => expect(calls).toHaveLength(1));
+      kept = h.invoke(CHANNELS.detectAgentTools, undefined, keeper);
+      await vi.waitFor(() => expect(calls).toHaveLength(2));
+      const [retiredCall, keptCall] = calls;
+
+      retiring = retire(h);
+      expect(retiredCall!.signal.aborted).toBe(true);
+      expect(keptCall!.signal.aborted).toBe(false);
+      expect(await retired).toMatchObject({ message: "Agent detection stopped because this window changed workspaces." });
+
+      keptCall!.finish();
+      await expect(kept).resolves.toEqual({ workingDirectory: h.workspace.rootPath, tools: [] });
+    } finally {
+      for (const call of calls) call.finish();
+      await Promise.allSettled([retired, kept, retiring]);
+    }
+    expect(h.renderers.current(keeper)?.attachmentId).toBe(h.physical.attachmentId);
+    expect(h.renderers.isAttachmentOpen(h.physical.attachmentId)).toBe(true);
   });
 
   it("rejects malformed payloads before workspace or session work", async () => {
@@ -178,10 +314,10 @@ describe("agent run IPC registrations", () => {
     h.ensureOpen.mockImplementation(async () => { reached.resolve(); await release.promise; });
     h.records.mockResolvedValue({ message: {
       workspaceId: "workspace-a", runId: "run-1", threadId: "thread-1", triggerMessageId: "message", command: "echo hi",
-      startedAtMs: 0, endedAtMs: 0, exitCode: 0, logPath: "", failureReason: "internal", failureNotePosted: true,
+      startedAtMs: 0, endedAtMs: 0, exitCode: 0, logPath: "", failureReason: "internal", failureHandled: true,
     }, pending: {
       workspaceId: "workspace-a", runId: "run-2", threadId: "thread-1", triggerMessageId: "pending", command: "echo later",
-      startedAtMs: 1, logPath: "logs/run-2.txt", failureNotePosted: false,
+      startedAtMs: 1, logPath: "logs/run-2.txt", failureHandled: false,
     } });
     const pending = h.invoke(CHANNELS.chatRunRecordsForThread, threadPayload);
     try {
@@ -228,7 +364,9 @@ describe("agent run IPC registrations", () => {
     await h.invoke(CHANNELS.endAgentRun, { workspaceId: "workspace-a", runId: "run-1", ...(status ? { status } : {}) });
     expect(h.ended).toHaveBeenCalledTimes(1);
     expect(await h.durableRuns()).toEqual([expect.objectContaining({ id: "run-1", status: status ?? "complete", endedAt: 10 })]);
-    await expect(h.invoke(CHANNELS.getAgentRunStatus)).resolves.toMatchObject({ activeRun: null, lastRun: { status: status ?? "complete" } });
+    await expect(h.invoke(CHANNELS.getAgentRunStatus)).resolves.toEqual({
+      activeRun: null, lastRun: expect.objectContaining({ id: "run-1", status: status ?? "complete" }),
+    });
   });
 
   it("forwards main-owned MCP configuration for a shared view", async () => {

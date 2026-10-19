@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { DOCUMENT_END } from "./helpers/keys";
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { launchDesktopApp } from "./helpers/desktopApp";
@@ -76,7 +77,7 @@ test("a document past the in-band cap reaches disk, and the editor never claims 
     const saveState = page.getByTestId("markdown-save-state");
     const editor = page.getByTestId("markdown-editor");
     await editor.click();
-    await page.keyboard.press("ControlOrMeta+End");
+    await page.keyboard.press(DOCUMENT_END);
 
     // Paste-sized input, the way the journeys produced it. insertText goes in
     // as one input event per chunk rather than 50,000 keystrokes.

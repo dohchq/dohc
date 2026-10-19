@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { createActorIssuer, deriveMomentActor, parseActorKey } from "@dohc/workspace-contracts/actor-identity";
 import type { ChatMessage, ChatReaction } from "@dohc/workspace-contracts/engine";
 import { createChatWrites, type ChatWriter, type PersonWriter, type ChatWriteStore } from "./chatWrites";
 import { AutomationChatSessionWait } from "@dohc/automation-executor/automation-chat";
@@ -31,18 +32,20 @@ function fixture() {
     hold.entered.resolve();
     await hold.held.promise;
   }
-  const row: Pick<RegistryEntry, "remote" | "shareView" | "sharedChannels"> = {
+  const row: Pick<RegistryEntry, "remote" | "pausedRemote" | "shareView" | "sharedChannels"> = {
     remote: { serverUrl: "https://cloud.test", ownerUserId: "user-1" },
   };
   const reactions: ChatReaction[] = [];
-  const message = ({ automation: _automation, ...input }: Parameters<ChatWriteStore["sendMessage"]>[0]): ChatMessage => ({
-    ...input, id: "message", createdAtMs: 2,
+  const message = ({ automation: _automation, authorActorKey, ...input }: Parameters<ChatWriteStore["sendMessage"]>[0]): ChatMessage => ({
+    ...input, ...(authorActorKey !== null ? { authorActorKey } : {}), id: "message", createdAtMs: 2,
     attachments: (input.attachments ?? []).map((attachment, index) => ({
       ...attachment, attachmentId: `attachment-${index}`, threadId: input.threadId,
       messageId: "message", targetKind: "file", createdAtMs: 2,
     })),
   });
   const store = {
+    getMessage: vi.fn<ChatWriteStore["getMessage"]>(async () => { throw Error("missing message"); }),
+    listChannelThreads: vi.fn<ChatWriteStore["listChannelThreads"]>(async () => []),
     findThreadChannelId: vi.fn(async () => {
       await reach("channel");
       return "channel";
@@ -86,6 +89,7 @@ function fixture() {
   let credentials: CloudCredentials | null = signedIn("user-1");
   // The credential cache bumps its generation whenever it replaces a session.
   let generation = 1;
+  let displayName = "Sam";
   const warmCredentials = vi.fn(async () => {
     await reach("warm");
   });
@@ -101,7 +105,7 @@ function fixture() {
     warmCredentials,
     currentCredentials: () => credentials,
     currentCredentialGeneration: () => generation,
-    localUserDisplayName: () => "Sam",
+    localUserDisplayName: () => displayName,
     agentDisplayName: async () => "Nova",
     localInstallationId: () => "local-id",
     ...effects,
@@ -113,6 +117,7 @@ function fixture() {
   });
   return {
     events, row, reactions, store, warmCredentials, effects, writes, place, attachments,
+    setDisplayName: (name: string) => { displayName = name; },
     setCredentials: (value: CloudCredentials | null) => {
       credentials = value;
       generation += 1;
@@ -141,6 +146,47 @@ function expectNothingWritten(test: ReturnType<typeof fixture>) {
 }
 
 describe("chat writes", () => {
+  const automationWriter: ChatWriter = { via: "automation", automationId: "collection:Tasks#post", name: "Post", depth: 1 };
+  const retained: ChatMessage = { id: "stable-message", workspaceId: "workspace", threadId: "thread", body: "Hello", createdAtMs: 1,
+    author: { kind: "automation", displayName: "Post" }, authorOwnerDisplayName: "Sam", authorUserId: "user-1",
+    automation: { automationId: "collection:Tasks#post" }, attachments: [] };
+
+  it.each(["name", "account", "signed-out"])("finds an automation's existing message after its owner's %s changes", async change => {
+    const test = fixture();
+    if (change === "name") test.setDisplayName("Renamed");
+    else test.setCredentials(change === "account" ? signedIn("user-2") : null);
+    test.store.sendMessage.mockRejectedValue(new Error("payload mismatch"));
+    test.store.getMessage.mockResolvedValue(retained);
+    await expect(test.writes.sendMessage(test.place, { writer: automationWriter, threadId: "thread", body: "Hello", messageId: retained.id,
+      idempotencyKey: "effect", resolveAttachments: async () => [] })).resolves.toEqual(retained);
+    if (change === "name") expect(test.store.sendMessage.mock.calls[0]?.[0].authorOwnerDisplayName).toBe("Renamed");
+    expect(test.store.sendMessage).toHaveBeenCalledTimes(change === "name" ? 1 : 0);
+  });
+
+  it("finds the existing automation post's thread after a name change", async () => {
+    const test = fixture();
+    test.setDisplayName("Renamed");
+    test.store.startChannelThread.mockRejectedValue(new Error("payload mismatch"));
+    test.store.getMessage.mockResolvedValue(retained);
+    const thread = { id: "thread", workspaceId: "workspace", title: "", createdAtMs: 1, updatedAtMs: 1 };
+    test.store.listChannelThreads.mockResolvedValue([{ thread } as Awaited<ReturnType<ChatWriteStore["listChannelThreads"]>>[number]]);
+    await expect(test.writes.startThread(test.place, { writer: automationWriter, channelId: "channel", body: "Hello", messageId: retained.id,
+      threadId: "thread", idempotencyKey: "effect", resolveAttachments: async () => [] })).resolves.toEqual({ thread, message: retained });
+  });
+
+  it.each(["missing", "author", "automation", "body", "target"])("refuses a failed automation send whose stored receipt has the wrong %s", async mismatch => {
+    const test = fixture();
+    test.store.sendMessage.mockRejectedValue(new Error("payload mismatch"));
+    const sent = structuredClone(retained);
+    if (mismatch === "author") sent.author.kind = "human";
+    if (mismatch === "automation") sent.automation!.automationId = "other";
+    if (mismatch === "body") sent.body = "other";
+    if (mismatch === "target") sent.threadId = "other";
+    if (mismatch !== "missing") test.store.getMessage.mockResolvedValue(sent);
+    await expect(test.writes.sendMessage(test.place, { writer: automationWriter, threadId: "thread", body: "Hello", messageId: retained.id,
+      idempotencyKey: "effect", resolveAttachments: async () => [] })).rejects.toThrow("payload mismatch");
+    expect(test.effects.notifyRenderer).not.toHaveBeenCalled();
+  });
   it.each([PERSON, AGENT])("refuses invalid message bodies before any write for %j", async writer => {
     for (const [body, reason] of [
       ["界".repeat(30_000), "The message is longer than 64 KiB. Shorten it."],
@@ -172,11 +218,11 @@ describe("chat writes", () => {
     const sent = await test.writes.sendMessage(test.place, {
       writer: PERSON, threadId: "thread", parentMessageId: "parent", body: "Hello", resolveAttachments: test.attachments,
     });
-    expect(test.store.sendMessage).toHaveBeenCalledWith({
+    expect(test.store.sendMessage).toHaveBeenCalledWith(expect.objectContaining({
       workspaceId: "workspace", threadId: "thread", parentMessageId: "parent", body: "Hello",
       author: { kind: "human", displayName: "Sam" }, authorUserId: "user-1",
       attachments: [{ objectId: "object", pathHint: "notes.md" }],
-    });
+    }));
     expect(sent.id).toBe("message");
     expect(test.effects.projectChatBookmarks).toHaveBeenCalledWith("workspace");
     expect(test.effects.scanChatDispatch).toHaveBeenCalledWith("workspace");
@@ -190,11 +236,11 @@ describe("chat writes", () => {
       writer: AGENT, channelId: "channel", lane: "chat", title: "Plan", body: "Pick one",
       needsDecision: true, options: ["A", "B"], resolveAttachments: async () => [],
     });
-    expect(test.store.startChannelThread).toHaveBeenCalledWith({
+    expect(test.store.startChannelThread).toHaveBeenCalledWith(expect.objectContaining({
       workspaceId: "workspace", channelId: "channel", lane: "chat", title: "Plan", body: "Pick one",
       author: { kind: "agent", displayName: "Nova" }, authorOwnerDisplayName: "Sam",
       authorUserId: "user-1", origin: "cli", needsDecision: true, options: ["A", "B"],
-    });
+    }));
     expect(test.effects.projectChatBookmarks).toHaveBeenCalledWith("workspace");
     expect(test.effects.scanChatDispatch).toHaveBeenCalledWith("workspace");
     expect(test.effects.syncSharedChannelsForChatTarget).toHaveBeenCalledWith("workspace", { channelId: "channel" });
@@ -207,12 +253,12 @@ describe("chat writes", () => {
       writer: automation, channelId: "channel", lane: "posts", threadId: "thread-auto-1", body: "Done",
       messageId: "message-auto-1", idempotencyKey: "atc_1/h/0/post", resolveAttachments: async () => [],
     });
-    expect(test.store.startChannelThread).toHaveBeenCalledWith({
+    expect(test.store.startChannelThread).toHaveBeenCalledWith(expect.objectContaining({
       workspaceId: "workspace", channelId: "channel", lane: "posts", threadId: "thread-auto-1", body: "Done",
       messageId: "message-auto-1", idempotencyKey: "atc_1/h/0/post",
       author: { kind: "automation", displayName: "Tell the trip" }, authorOwnerDisplayName: "Sam",
       automation: { automationId: "collection:Tasks#tell", chainDepth: 2 }, authorUserId: "user-1",
-    });
+    }));
     // Nothing on screen asked for it, so the windows hear of it.
     expect(test.effects.notifyRenderer).toHaveBeenCalledWith("workspace");
   });
@@ -558,4 +604,87 @@ describe("chat writes", () => {
     })).rejects.toThrow("Chats are read-only in this shared view.");
     expectNothingWritten(test);
   });
+});
+
+describe("ActorKey local admission", () => {
+  it.each([undefined, "other-owner"])("snapshots the account without a matching relay author (%s)", async (owner) => {
+    const test = fixture();
+    test.row.remote = owner ? { serverUrl: "https://other.test", ownerUserId: owner } : undefined;
+    const sent = await test.writeEach.send();
+    expect(sent.authorUserId).toBeUndefined();
+    expect(parseActorKey(sent.authorActorKey!)).toEqual({ kind: "account", issuer: "https://cloud.test", userId: "user-1" });
+  });
+
+  it("keeps signed-out rows separate after sign-in and account replacement", async () => {
+    const test = fixture();
+    test.setCredentials(null);
+    const offline = await test.writeEach.send();
+    test.setCredentials(signedIn("user-1"));
+    const online = await test.writeEach.send();
+    test.setCredentials(signedIn("user-2"));
+    const switched = await test.writeEach.send();
+    expect(parseActorKey(offline.authorActorKey!)).toEqual({ kind: "installation", installationId: "local-id" });
+    expect(parseActorKey(online.authorActorKey!)).toEqual({ kind: "account", issuer: "https://cloud.test", userId: "user-1" });
+    expect(parseActorKey(switched.authorActorKey!)).toEqual({ kind: "account", issuer: "https://cloud.test", userId: "user-2" });
+  });
+
+  it.each([undefined, " Opus "])("records the actual handshake claim (%s), matching History", async (agentName) => {
+    const test = fixture();
+    const sent = await test.writes.sendMessage(test.place, {
+      writer: { via: "cli", actor: "agent", agentName }, threadId: "thread", body: "Hi", resolveAttachments: async () => [],
+    });
+    const history = deriveMomentActor({ kind: "agent", agentId: agentName ?? "dohc-mcp", onBehalfOf: "user-1" }, {
+      source: "own-store", origin: "cli", workspaceId: "workspace",
+      identity: { installationId: "local-id", account: { issuer: createActorIssuer("https://cloud.test"), userId: "user-1" } },
+    }, "Agent");
+    expect(parseActorKey(sent.authorActorKey!)).toEqual(history.key);
+    expect(sent.author.displayName).toBe(agentName ?? "Nova");
+  });
+
+  it("stores CLI human origin and automation definition identity locally", async () => {
+    const test = fixture();
+    const human = await test.writes.sendMessage(test.place, {
+      writer: { via: "cli", actor: "human" }, threadId: "thread", body: "Hi", resolveAttachments: async () => [],
+    });
+    expect(human.origin).toBe("cli");
+    expect(parseActorKey(human.authorActorKey!)).toMatchObject({ kind: "account" });
+    await test.writes.startThread(test.place, {
+      writer: { via: "automation", automationId: "collection:Tasks#tell", name: "Tell", depth: 1 },
+      channelId: "channel", body: "Done", resolveAttachments: async () => [],
+    });
+    expect(parseActorKey(test.store.startChannelThread.mock.calls[0]![0].authorActorKey!)).toEqual({
+      kind: "automation", ownerKey: { kind: "account", issuer: "https://cloud.test", userId: "user-1" },
+      workspaceId: "workspace", automationId: "collection:Tasks#tell",
+    });
+  });
+
+  it("keeps a malformed signed-in issuer unknown without failing the write", async () => {
+    const test = fixture();
+    test.setCredentials({ ...signedIn("user-1"), serverUrl: "not a URL" });
+    const sent = await test.writeEach.send();
+    expect(sent.authorActorKey).toBeUndefined();
+    expect(test.store.sendMessage.mock.calls[0]![0].authorActorKey).toBeNull();
+    expect(sent.id).toBe("message");
+  });
+
+  it("refuses a session replaced while admission work awaits", async () => {
+    const test = fixture();
+    const hold = test.holdAt("attachments");
+    const pending = test.writeEach.send();
+    await hold.entered.promise;
+    test.setCredentials(signedIn("user-2"));
+    hold.held.resolve();
+    await expect(pending).rejects.toThrow("session changed");
+    expectNothingWritten(test);
+  });
+});
+
+it("records paused chat writes under the retained relay author", async () => {
+  const h = fixture(); h.row.pausedRemote = h.row.remote; delete h.row.remote;
+  await h.writeEach.send(); await h.writeEach.react(); await h.writeEach.decide();
+  expect(h.store.sendMessage.mock.calls[0]![0].authorUserId).toBe("user-1");
+  expect(h.store.setReaction.mock.calls[0]![0].replicationAuthorId).toBe("user-1");
+  h.setCredentials(null);
+  await expect(h.writes.sendMessage(h.place, { writer: { via: "automation", automationId: "collection:Tasks#tell", name: "Tell", depth: 1 },
+    threadId: "thread", body: "Wait", resolveAttachments: async () => [] })).rejects.toBeInstanceOf(AutomationChatSessionWait);
 });

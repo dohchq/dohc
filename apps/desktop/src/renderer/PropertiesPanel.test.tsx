@@ -2,12 +2,81 @@
 import { act, render, screen } from "@testing-library/react";
 import { cleanup } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useState } from "react";
+import { useLayoutEffect, useState } from "react";
 import * as Y from "yjs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
-import { patchFrontmatter, setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter";
+import {
+  frontmatterAsWritten,
+  frontmatterMapValues,
+  patchFrontmatter,
+  setFrontmatterValue,
+} from "@dohc/ydoc-projection/frontmatter-map";
 import { PropertiesPanel } from "./PropertiesPanel";
+import {
+  EDGE_DISPLAY,
+  EDGE_FRONTMATTER,
+  EDGE_MARKDOWN,
+  receivedYDoc,
+  recordedYDoc,
+} from "./markdown/frontmatter.edge-fixture";
+
+// A text input shows its value on one line.
+function propertyValue(key: string): string {
+  return (screen.getByLabelText(`Property ${key} value`) as HTMLInputElement).value;
+}
+
+function oneLine(text: string): string {
+  return text.replaceAll("\n", "");
+}
+
+// The properties each change touches. A change inside a shared value reports
+// the property that holds it.
+function trackChangedProperties(frontmatter: Y.Map<unknown>): Set<string> {
+  const changed = new Set<string>();
+  frontmatter.observeDeep((events) => {
+    for (const event of events) {
+      if (event.target !== frontmatter) changed.add(String(event.path[0]));
+      else if (event instanceof Y.YMapEvent) for (const key of event.keysChanged) changed.add(key);
+    }
+  });
+  return changed;
+}
+
+// A value the canonical writer keeps in shared Y types: keys Yjs Any loses,
+// exact integers, and a literal key spelled like the integer's marker. It is
+// the last entry, so its row keeps its place while a rename moves its key to
+// the end of the map.
+const ZONE_ENTRY = [
+  "zone:",
+  "  __proto__: nested-value",
+  "  constructor: own",
+  "  inner:",
+  "    __proto__: nested-proto",
+  "    exact: 9007199254740993",
+  "  list:",
+  "    - $dohcBigInt: 9007199254740993",
+  "    - 9007199254740993",
+  "",
+].join("\n");
+// A computed `__proto__` key is an own property, as the file holds it.
+const ZONE = {
+  ["__proto__"]: "nested-value",
+  constructor: "own",
+  inner: { ["__proto__"]: "nested-proto", exact: 9007199254740993n },
+  list: [{ $dohcBigInt: 9007199254740993n }, 9007199254740993n],
+};
+const OPTIONS_ENTRY = ZONE_ENTRY.replace("zone:", "options:");
+
+// The panel's rows read the document in an effect after its render decoded
+// the source snapshot. A layout effect lands between the two, where a device's
+// update arrives after a render and before the effects it schedules.
+function ForwardsOnCommit(props: { from: Y.Doc; to: Y.Doc }) {
+  useLayoutEffect(() => {
+    Y.applyUpdate(props.to, Y.encodeStateAsUpdate(props.from, Y.encodeStateVector(props.to)));
+  }, [props.from, props.to]);
+  return null;
+}
 
 function ControlledPropertiesPanel(props: { initialBody: string }) {
   const [body, setBody] = useState(props.initialBody);
@@ -187,6 +256,129 @@ describe("PropertiesPanel", () => {
     expect(words.hidden).toBe(true);
   });
 
+  describe("pills", () => {
+    it("keeps the keyboard order name, value, remove in each pill, then the +", async () => {
+      const user = userEvent.setup();
+      render(<PropertiesPanel body={"---\nowner: Sam\nstatus: Draft\n---\n"} onChange={vi.fn()} />);
+
+      await user.click(screen.getByLabelText("Property 1 name"));
+      const order = [document.activeElement];
+      for (let step = 0; step < 6; step += 1) {
+        await user.tab();
+        order.push(document.activeElement);
+      }
+      expect(order).toEqual([
+        screen.getByLabelText("Property 1 name"),
+        screen.getByLabelText("Property owner value"),
+        screen.getByLabelText("Remove property owner"),
+        screen.getByLabelText("Property 2 name"),
+        screen.getByLabelText("Property status value"),
+        screen.getByLabelText("Remove property status"),
+        screen.getByTestId("property-add"),
+      ]);
+    });
+
+    it("keeps Add a property as the +'s name and tooltip, and adds then removes a pill", async () => {
+      const user = userEvent.setup();
+      render(<ControlledPropertiesPanel initialBody={"---\nowner: Sam\n---\n\nBody"} />);
+      const add = screen.getByRole("button", { name: "Add a property" });
+      expect(add.getAttribute("title")).toBe("Add a property");
+      expect(add.textContent).toBe("");
+
+      await user.click(add);
+      expect(screen.getAllByTestId("property-row")).toHaveLength(2);
+      await user.type(screen.getByLabelText("Property 2 name"), "release");
+      await user.type(screen.getByLabelText("Property release value"), "September");
+      expect(screen.getByTestId("current-body").textContent).toBe("---\nowner: Sam\nrelease: September\n---\n\nBody");
+
+      await user.click(screen.getByLabelText("Remove property owner"));
+      expect(screen.getAllByTestId("property-row")).toHaveLength(1);
+      expect(screen.getByTestId("current-body").textContent).toBe("---\nrelease: September\n---\n\nBody");
+    });
+
+    it("moves focus to the new pill's name after an add", async () => {
+      const user = userEvent.setup();
+      render(<ControlledPropertiesPanel initialBody={"---\nowner: Sam\n---\n\nBody"} />);
+
+      await user.click(screen.getByTestId("property-add"));
+      expect(document.activeElement).toBe(screen.getByLabelText("Property 2 name"));
+      await user.keyboard("release");
+      expect((screen.getByLabelText("Property 2 name") as HTMLInputElement).value).toBe("release");
+    });
+
+    it("moves focus after a remove to the next pill, else the one before, else the +", async () => {
+      const user = userEvent.setup();
+      render(<ControlledPropertiesPanel initialBody={"---\nowner: Sam\nrelease: September\nstatus: Draft\n---\n\nBody"} />);
+
+      // The middle pill: the next one takes its place.
+      screen.getByLabelText("Remove property release").focus();
+      await user.keyboard("{Enter}");
+      expect(screen.getAllByTestId("property-row")).toHaveLength(2);
+      expect(document.activeElement).toBe(screen.getAllByTestId("property-key")[1]);
+      expect((document.activeElement as HTMLInputElement).value).toBe("status");
+
+      // The last pill: the one before it.
+      screen.getByLabelText("Remove property status").focus();
+      await user.keyboard("{Enter}");
+      expect(document.activeElement).toBe(screen.getAllByTestId("property-key")[0]);
+      expect((document.activeElement as HTMLInputElement).value).toBe("owner");
+
+      // The only pill: the +.
+      screen.getByLabelText("Remove property owner").focus();
+      await user.keyboard("{Enter}");
+      expect(screen.queryAllByTestId("property-row")).toHaveLength(0);
+      expect(document.activeElement).toBe(screen.getByTestId("property-add"));
+    });
+
+    it.each([false, true])("offers no + and no × on a block written on one line (shared: %s)", (shared) => {
+      const body = "---\n{status: draft, owner: Sam}\n---\n\nBody";
+      const doc = markdownToYDoc(body);
+      try {
+        render(shared ? <PropertiesPanel ydoc={doc} /> : <PropertiesPanel body={body} onChange={vi.fn()} />);
+        expect(screen.getByTestId("properties-locked").textContent).toBe("Edit in Source");
+        expect(screen.getAllByTestId("property-row")).toHaveLength(2);
+        expect(screen.queryByTestId("property-add")).toBeNull();
+        expect(screen.queryAllByTestId("property-remove")).toHaveLength(0);
+      } finally { doc.destroy(); }
+    });
+
+    it("keeps a long value whole in its tooltip", () => {
+      const value = "https://example.com/a/very/long/path/that/keeps/going/past/the/width/of/one/pill";
+      render(<PropertiesPanel body={`---\nlink: ${value}\n---\n`} onChange={vi.fn()} />);
+      const input = screen.getByLabelText("Property link value") as HTMLInputElement;
+      expect(input.value).toBe(value);
+      expect(input.title).toBe(value);
+      expect(input.className).toContain("text-ellipsis");
+    });
+
+    it("shows the + alone, hidden until hover or focus, on a page with no properties", () => {
+      render(<PropertiesPanel body={"Body"} onChange={vi.fn()} />);
+      expect(screen.queryAllByTestId("property-row")).toHaveLength(0);
+      const add = screen.getByTestId("property-add");
+      expect(add.className).toContain("opacity-0");
+      expect(add.className).toContain("group-hover/topmatter:opacity-100");
+      expect(add.className).toContain("focus-visible:opacity-100");
+    });
+
+    it("flags a reserved or duplicate name in its pill in place of the value", async () => {
+      const user = userEvent.setup();
+      render(<ControlledPropertiesPanel initialBody={"---\nowner: Sam\nstatus: Draft\n---\n"} />);
+
+      await user.clear(screen.getByLabelText("Property 2 name"));
+      await user.type(screen.getByLabelText("Property 2 name"), "owner");
+      const rows = screen.getAllByTestId("property-row");
+      expect(screen.getAllByTestId("property-duplicate").map((flag) => flag.closest('[data-testid="property-row"]'))).toEqual(rows);
+      expect(screen.queryAllByTestId("property-value")).toHaveLength(0);
+      expect(screen.getByTestId("current-body").textContent).toBe("---\nowner: Sam\nstatus: Draft\n---\n");
+
+      await user.clear(screen.getByLabelText("Property 2 name"));
+      await user.type(screen.getByLabelText("Property 2 name"), "icon");
+      const reserved = screen.getByTestId("property-reserved");
+      expect(reserved.closest('[data-testid="property-row"]')).toBe(screen.getAllByTestId("property-row")[1]);
+      expect(screen.getAllByTestId("property-value")).toHaveLength(1);
+    });
+  });
+
   it("hides the reserved icon key from the user property rows", () => {
     render(
       <PropertiesPanel
@@ -290,9 +482,11 @@ describe("PropertiesPanel", () => {
     const initialBody = `---\n# Keep\n${yaml}\n---\n\n# Plan\n`;
     render(<ControlledPropertiesPanel initialBody={initialBody} />);
 
-    expect(screen.getByTestId("properties-locked")).toBeTruthy();
+    expect(screen.getByTestId("properties-locked").textContent).toBe("Edit in Source");
     await user.type(screen.getByLabelText("Property status value"), "x");
-    await user.click(screen.getByLabelText("Remove property score"));
+    // A locked block offers no + and no ×, which could do nothing.
+    expect(screen.queryByTestId("property-add")).toBeNull();
+    expect(screen.queryAllByTestId("property-remove")).toHaveLength(0);
 
     expect(screen.getByTestId("current-body").textContent).toBe(initialBody);
   });
@@ -520,6 +714,182 @@ describe("PropertiesPanel", () => {
 
     expect(frontmatter.get("status")).toBe("ready");
     expect(frontmatter.get("settings")).toEqual({ pinned: true });
+  });
+
+  // `settings` is the last entry, so its row keeps its place while a rename
+  // moves its key to the end of the map.
+  it("renames a shared map property without losing it", async () => {
+    const user = userEvent.setup();
+    const doc = markdownToYDoc("---\nid: note-1\ntitle: Plan\ndue: friday\nsettings:\n  pinned: true\n---\n\nBody\n");
+    const frontmatter = doc.getMap<unknown>("frontmatter");
+    const changed = trackChangedProperties(frontmatter);
+    const replica = new Y.Doc();
+    try {
+      expect(doc.getMap("meta").get("dohcFrontmatterSource")).toBeUndefined();
+      render(<PropertiesPanel ydoc={doc} />);
+      await user.clear(screen.getByDisplayValue("settings"));
+      await user.type(screen.getByLabelText("Property 2 name"), "options");
+
+      expect(screen.queryByTestId("properties-locked")).toBeNull();
+      expect([...frontmatter.keys()]).toEqual(["due", "id", "title", "options"]);
+      expect([...changed].filter((key) => !"options".startsWith(key))).toEqual(["settings"]);
+      // An ordinary map stays a Yjs Any value.
+      expect(frontmatter.get("options")).not.toBeInstanceOf(Y.AbstractType);
+
+      Y.applyUpdate(replica, Y.encodeStateAsUpdate(doc));
+      expect(frontmatterMapValues(replica.getMap("frontmatter"))).toEqual({
+        due: "friday",
+        id: "note-1",
+        options: { pinned: true },
+        title: "Plan",
+      });
+      expect(yDocToMarkdown(replica)).toBe("---\nid: note-1\ntitle: Plan\ndue: friday\noptions:\n  pinned: true\n---\n\nBody");
+    } finally {
+      replica.destroy();
+      doc.destroy();
+    }
+  });
+
+  // A rename keeps the property in its place: canonical frontmatter keeps the
+  // text its first rename starts from, so the file no longer settles sorted.
+  it.each([
+    ["canonical", `---\nstatus: draft\n${ZONE_ENTRY}---\n\nBody\n`, `---\nstatus: draft\n${OPTIONS_ENTRY}---\n\n`],
+    [
+      "kept",
+      `---\n# Keep this note\nstatus: draft\n${ZONE_ENTRY}---\n\nBody\n`,
+      `---\n# Keep this note\nstatus: draft\n${OPTIONS_ENTRY}---\n\n`,
+    ],
+  ])("renames a shared-type property that another replica reads back (%s text)", async (_name, markdown, settled) => {
+    const user = userEvent.setup();
+    const doc = receivedYDoc(markdown);
+    const frontmatter = doc.getMap<unknown>("frontmatter");
+    const changed = trackChangedProperties(frontmatter);
+    const replica = new Y.Doc();
+    try {
+      expect(frontmatter.get("zone")).toBeInstanceOf(Y.Map);
+      expect(frontmatterMapValues(frontmatter).zone).toEqual(ZONE);
+      render(<PropertiesPanel ydoc={doc} />);
+      await user.clear(screen.getByDisplayValue("zone"));
+      await user.type(screen.getByLabelText("Property 2 name"), "options");
+
+      expect(screen.queryByTestId("properties-locked")).toBeNull();
+      expect(changed.has("status")).toBe(false);
+      expect(frontmatterAsWritten(doc, true)).toBe(settled);
+
+      Y.applyUpdate(replica, Y.encodeStateAsUpdate(doc));
+      const values = frontmatterMapValues(replica.getMap("frontmatter"));
+      expect(Object.keys(values)).toEqual(["options", "status"]);
+      expect(values.options).toEqual(ZONE);
+      expect(yDocToMarkdown(replica)).toBe(`${settled}Body`);
+    } finally {
+      replica.destroy();
+      doc.destroy();
+    }
+  });
+
+  it("shows shared-type frontmatter as YAML and edits only the changed property", async () => {
+    const user = userEvent.setup();
+    const doc = receivedYDoc(EDGE_MARKDOWN);
+    const frontmatter = doc.getMap("frontmatter");
+    const changed: string[] = [];
+    frontmatter.observeDeep((events) => {
+      for (const event of events) {
+        // A change inside a shared value reports the property that holds it.
+        if (event.target !== frontmatter) changed.push(String(event.path[0]));
+        else if (event instanceof Y.YMapEvent) changed.push(...event.keysChanged);
+      }
+    });
+    try {
+      render(<PropertiesPanel ydoc={doc} />);
+      for (const [key, text] of Object.entries(EDGE_DISPLAY)) {
+        expect(propertyValue(key), key).toBe(oneLine(text));
+      }
+
+      await user.clear(screen.getByLabelText("Property status value"));
+      await user.type(screen.getByLabelText("Property status value"), "ready");
+
+      expect(new Set(changed)).toEqual(new Set(["status"]));
+      expect(yDocToMarkdown(doc)).toBe(
+        `${EDGE_FRONTMATTER.replace("status: draft", "status: ready")}Body`,
+      );
+    } finally {
+      doc.destroy();
+    }
+  });
+
+  // The root map's observer does not report a change inside a shared value,
+  // so the rows can hold a device's newer value while the panel's source
+  // snapshot holds the older one. Editing status must not write settings.
+  it("keeps a shared value another device changes before the rows read it, while only status changes", async () => {
+    const user = userEvent.setup();
+    const doc = receivedYDoc("---\nsettings:\n  constructor: kept\n  pinned: false\nstatus: draft\n---\n\nBody\n");
+    const frontmatter = doc.getMap<unknown>("frontmatter");
+    const settings = frontmatter.get("settings") as Y.Map<unknown>;
+    const replica = new Y.Doc();
+    try {
+      expect(settings).toBeInstanceOf(Y.Map);
+      Y.applyUpdate(replica, Y.encodeStateAsUpdate(doc));
+      const replicaSettings = replica.getMap<unknown>("frontmatter").get("settings") as Y.Map<unknown>;
+      replicaSettings.set("pinned", true);
+      render(
+        <>
+          <PropertiesPanel ydoc={doc} />
+          <ForwardsOnCommit from={replica} to={doc} />
+        </>,
+      );
+      expect(propertyValue("settings")).toBe(oneLine("constructor: kept\npinned: true"));
+
+      replicaSettings.set("note", "later");
+      act(() => Y.applyUpdate(doc, Y.encodeStateAsUpdate(replica, Y.encodeStateVector(doc))));
+      const changed = trackChangedProperties(frontmatter);
+      await user.clear(screen.getByLabelText("Property status value"));
+      await user.type(screen.getByLabelText("Property status value"), "ready");
+
+      expect(frontmatter.get("status")).toBe("ready");
+      expect(frontmatter.get("settings")).toBe(settings);
+      expect(changed).toEqual(new Set(["status"]));
+      expect(frontmatterMapValues(frontmatter).settings).toEqual({ constructor: "kept", note: "later", pinned: true });
+    } finally {
+      replica.destroy();
+      doc.destroy();
+    }
+  });
+
+  it("shows a direct Any bigint and leaves it alone while a neighbour changes", async () => {
+    const user = userEvent.setup();
+    const { doc } = recordedYDoc("numbers");
+    const frontmatter = doc.getMap("frontmatter");
+    try {
+      render(<PropertiesPanel ydoc={doc} />);
+      expect(propertyValue("c")).toBe("9007199254740993");
+
+      await user.clear(screen.getByLabelText("Property d value"));
+      await user.type(screen.getByLabelText("Property d value"), "2");
+
+      expect(frontmatter.get("d")).toBe("2");
+      expect(frontmatter.get("c")).toBe(9007199254740993n);
+    } finally {
+      doc.destroy();
+    }
+  });
+
+  it("keeps hostile keys and exact integers beside an edited local property", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const body = EDGE_MARKDOWN.replace(
+      "---\n",
+      "---\n__proto__: top-proto\nconstructor: top-constructor\n",
+    );
+    render(<PropertiesPanel body={body} onChange={onChange} />);
+    expect(propertyValue("__proto__")).toBe("top-proto");
+    for (const [key, text] of Object.entries(EDGE_DISPLAY)) {
+      expect(propertyValue(key), key).toBe(oneLine(text));
+    }
+
+    await user.clear(screen.getByLabelText("Property status value"));
+    await user.type(screen.getByLabelText("Property status value"), "ready");
+
+    expect(onChange).toHaveBeenLastCalledWith(body.replace("status: draft", "status: ready"));
   });
 
   it("does not collapse duplicate shared frontmatter keys", async () => {

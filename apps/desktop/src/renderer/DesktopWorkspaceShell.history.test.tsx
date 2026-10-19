@@ -1,19 +1,47 @@
 // @vitest-environment jsdom
 import "./DesktopWorkspaceShell.testSupport";
-import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { SetWorkspaceUiStatePayload } from "../ipc/bridgeContract";
-import type { AgentRunStatusResult, EngineMomentRecord, ListEngineMomentsResponse, ListEngineMomentsResult, McpConfigResult, ReadEngineMomentResult, WorkspaceUiState } from "../ipc/bridgeContract";
+import type { EngineMomentRecord, ListHistoryResult, ReadEngineMomentResult, WorkspaceUiState } from "../ipc/bridgeContract";
 import { DEFAULT_WORKSPACE_SETTINGS, type WorkspaceSettingsResult } from "../workspaces/workspaceSettings";
 import { rendererMarks } from "../performance/rendererMarks";
 import { momentDiffTabPath, versionCompareTabPath } from "./workbench/workbenchState";
 import { deferred } from "../testing/deferred";
-import { WORKSPACE, SYNC_STATUS, STORED_STATE, storedStateWithTabs, storedTabs, makeBridge, renderShell, SHARE_STATUS, SHARE_VIEW, makeShareBridge, settleShareView } from "./DesktopWorkspaceShell.testHarness";
+import { historyPageFields, timelineCursor, timelinePage, type TimelinePage } from "../testing/historyPageFixture";
+import type { Workspace } from "./DesktopWorkspaceShell";
+import { textEditorContent } from "./FileInspector.editor-fixture";
+import { DesktopWorkspaceShell, WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, STORED_STATE, storedStateWithTabs, storedTabs, makeBridge, renderShell, shellBootstrapProps, SHARE_STATUS, SHARE_VIEW, makeShareBridge, settleShareView } from "./DesktopWorkspaceShell.testHarness";
 
 describe("history page", () => {
+  it("shows a failed file read in a toast and Notices while history stays available", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const failedStatus = { ...SYNC_STATUS, fileObservationFailure: "read-failed" as const };
+    bridge.openWorkspace = vi.fn(async () => failedStatus);
+    bridge.getSyncStatus = vi.fn(async () => failedStatus);
+    renderShell(bridge);
+    const message = "dohc could not read file changes for this workspace.";
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(message);
+    expect(within(toast).getByRole("button", { name: /Copy/ })).toBeTruthy();
+    expect(toast.textContent).not.toContain("Restart");
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByRole("dialog", { name: "Notices" }).textContent).toContain(message);
+    await userEvent.click(within(screen.getByRole("dialog", { name: "Notices" })).getByRole("button", { name: "Try again" }));
+    expect(bridge.retryFileObservation).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId });
+    expect(screen.queryByTestId("notice-history-recording-unavailable")).toBeNull();
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    await userEvent.click(screen.getByTestId("activity-history"));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalled());
+    expect(screen.queryByTestId("history-off-placeholder")).toBeNull();
+    bridge.getSyncStatus.mockResolvedValue(SYNC_STATUS);
+    act(() => bridge.emitWorkspaceActivity());
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    await waitFor(() => expect(screen.getByRole("dialog", { name: "Notices" }).textContent).not.toContain(message));
+  });
   // The recorder failed to build. Without the status override the shell
-  // mounts the engine timeline, whose every listEngineMoments call can only
+  // mounts the engine timeline, whose every listHistory call can only
   // error. Main's status gates the surface, and the engine fetch must never
   // fire.
   it("lets the status failure gate the history surface", async () => {
@@ -29,7 +57,7 @@ describe("history page", () => {
 
     // Wait for the shell's engine surfaces to mount before anything is
     // asserted, so the pins below cannot pass vacuously.
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
 
     await user.click(screen.getByTestId("activity-history"));
     const placeholder = await screen.findByTestId("history-off-placeholder");
@@ -38,7 +66,7 @@ describe("history page", () => {
     );
 
     // Activity pushes take the no-engine refresh path too — the pin that
-    // kills the recurring listEngineMoments error loop. The residual this
+    // kills the recurring listHistory error loop. The residual this
     // used to name — one engine fetch firing before the first status lands —
     // is closed by the test below.
     const statusCalls = bridge.getSyncStatus.mock.calls.length;
@@ -48,7 +76,7 @@ describe("history page", () => {
     await waitFor(() =>
       expect(bridge.getSyncStatus.mock.calls.length).toBeGreaterThan(statusCalls),
     );
-    expect(bridge.listEngineMoments).not.toHaveBeenCalled();
+    expect(bridge.listHistory).not.toHaveBeenCalled();
   });
 
   it("never asks a refused store for engine moments", async () => {
@@ -63,14 +91,14 @@ describe("history page", () => {
     const user = userEvent.setup();
     renderShell(bridge);
 
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
     await user.click(screen.getByTestId("activity-history"));
     act(() => {
       bridge.emitWorkspaceActivity();
     });
     await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalled());
 
-    expect(bridge.listEngineMoments).not.toHaveBeenCalled();
+    expect(bridge.listHistory).not.toHaveBeenCalled();
   });
 
   // The window before main's capture decision. The refresh runs
@@ -93,7 +121,7 @@ describe("history page", () => {
     bridge.getSyncStatus = vi.fn(async () =>
       decided ? FAILED_HISTORY_STATUS : SYNC_STATUS,
     );
-    bridge.listEngineMoments = vi.fn(async (): Promise<never> => {
+    bridge.listHistory = vi.fn(async (): Promise<never> => {
       throw new Error("Engine history is not enabled for this workspace.");
     });
     const user = userEvent.setup();
@@ -101,7 +129,7 @@ describe("history page", () => {
 
     // The premise: the renderer's own read said engine-ON, and the decision
     // has not landed.
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
     expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
     await user.click(screen.getByTestId("activity-history"));
 
@@ -109,7 +137,7 @@ describe("history page", () => {
       bridge.emitWorkspaceActivity();
       await Promise.resolve();
     });
-    expect(bridge.listEngineMoments).not.toHaveBeenCalled();
+    expect(bridge.listHistory).not.toHaveBeenCalled();
     // And the rail claims nothing while it knows nothing: a placeholder here
     // would name a cause main has not established.
     expect(screen.queryByTestId("history-off-placeholder")).toBeNull();
@@ -125,7 +153,7 @@ describe("history page", () => {
     expect(placeholder.textContent).toContain(
       "dohc could not start recording history for this workspace.",
     );
-    expect(bridge.listEngineMoments).not.toHaveBeenCalled();
+    expect(bridge.listHistory).not.toHaveBeenCalled();
   });
 
   // The other half of that branch: a healthy workspace's history must still
@@ -137,7 +165,7 @@ describe("history page", () => {
     renderShell(bridge);
 
     await user.click(screen.getByTestId("activity-history"));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalled());
     expect(screen.queryByTestId("history-off-placeholder")).toBeNull();
   });
 
@@ -172,7 +200,7 @@ describe("history page", () => {
       const shareStatus = { ...SYNC_STATUS, historyShareView: true };
       bridge.openWorkspace = vi.fn(async () => shareStatus);
       bridge.getSyncStatus = vi.fn(async () => shareStatus);
-      bridge.listEngineMoments = vi.fn(async () => historyPage([historyMoment("m-1", "Agent revised this line")]));
+      bridge.listHistory = vi.fn(async () => historyPage([historyMoment("m-1", "Agent revised this line")]));
       bridge.getTryInVersionState = vi.fn(async () => { throw new Error("A shared view has no versions."); });
       const user = userEvent.setup();
       renderShell(bridge, {
@@ -183,13 +211,13 @@ describe("history page", () => {
       await user.click(screen.getByTestId("activity-history"));
       expect(await screen.findByTestId("engine-moment-open")).toBeTruthy();
       expect(screen.queryByTestId("history-off-placeholder")).toBeNull();
-      expect(bridge.listEngineMoments).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: WORKSPACE.workspaceId }));
-      const reads = bridge.listEngineMoments.mock.calls.length;
+      expect(bridge.listHistory).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: WORKSPACE.workspaceId }));
+      const reads = bridge.listHistory.mock.calls.length;
       await act(async () => {
         bridge.emitWorkspaceActivity();
         await Promise.resolve();
       });
-      await waitFor(() => expect(bridge.listEngineMoments.mock.calls.length).toBeGreaterThan(reads));
+      await waitFor(() => expect(bridge.listHistory.mock.calls.length).toBeGreaterThan(reads));
       // It has no versions, so the refresh asks for no try run.
       expect(bridge.getTryInVersionState).not.toHaveBeenCalled();
       expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
@@ -216,7 +244,7 @@ describe("history page", () => {
       bridge.emitWorkspaceActivity();
       await Promise.resolve();
     });
-    expect(bridge.listEngineMoments).not.toHaveBeenCalled();
+    expect(bridge.listHistory).not.toHaveBeenCalled();
   });
 
 
@@ -235,26 +263,95 @@ describe("history page", () => {
 
   function historyPage(
     moments: EngineMomentRecord[],
-    activeVersionId = "main",
-  ): ListEngineMomentsResult {
-    return {
-      moments,
-      nextBeforeMomentOrder: null,
-      latestMomentOrder: 1,
-      activeVersionId,
-      protectedTruncated: false,
-    };
+    versionId = "main",
+    workspaceId = WORKSPACE.workspaceId,
+  ): TimelinePage {
+    return timelinePage(moments.map((moment) => ({ kind: "file", moment })), { workspaceId, versionId });
   }
+
+  // DesktopRoot keys the shell by workspace, so a switch remounts it. A history
+  // answer A asked for before the switch can land after B is on screen, and it
+  // must never paint there. The E2E switch spec covers this only as a smoke
+  // test against the real app; here A's answer is held until B has painted.
+  it("keeps a history answer workspace A asked for out of workspace B", async () => {
+    const A_CONTROL = "A_CONTROL wrote the A plan";
+    const A_STALE = "A_STALE answered after the switch";
+    const B_ONLY = "B_ONLY wrote the B note";
+    const heldA = deferred<TimelinePage>();
+    let selected = WORKSPACE.workspaceId;
+    let holdA = false;
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listHistory = vi.fn(async () => {
+      if (selected === OTHER_WORKSPACE.workspaceId) {
+        return historyPage([historyMoment("m-b", B_ONLY)], "main", OTHER_WORKSPACE.workspaceId);
+      }
+      return holdA ? heldA.promise : historyPage([historyMoment("m-a", A_CONTROL)]);
+    });
+    const shell = (workspace: Workspace) => (
+      <DesktopWorkspaceShell
+        key={workspace.workspaceId}
+        workspace={workspace}
+        workspaces={[WORKSPACE, OTHER_WORKSPACE]}
+        {...shellBootstrapProps(bridge)}
+        onSwitchWorkspace={() => {}}
+      />
+    );
+    vi.stubGlobal("dohcDesktop", bridge);
+    const user = userEvent.setup();
+    const view = render(shell(WORKSPACE));
+
+    // A's answers paint in A: the control that makes the absence below mean
+    // something.
+    await user.click(screen.getByTestId("activity-history"));
+    expect(await screen.findByText(A_CONTROL)).toBeTruthy();
+
+    // A asks again, and that answer is held.
+    holdA = true;
+    const readsBeforeHold = bridge.listHistory.mock.calls.length;
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() =>
+      expect(bridge.listHistory.mock.calls.length).toBeGreaterThan(readsBeforeHold),
+    );
+    const heldRead = bridge.listHistory.mock.calls.length;
+    expect(bridge.listHistory).toHaveBeenNthCalledWith(
+      heldRead,
+      expect.objectContaining({ workspaceId: WORKSPACE.workspaceId }),
+    );
+
+    // Switch to B the way DesktopRoot does, and wait for B's own history.
+    selected = OTHER_WORKSPACE.workspaceId;
+    view.rerender(shell(OTHER_WORKSPACE));
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+    await user.click(screen.getByTestId("activity-history"));
+    expect(await screen.findByText(B_ONLY)).toBeTruthy();
+    expect(screen.queryByText(A_CONTROL)).toBeNull();
+
+    // Only now does A's held answer land, and the renderer consumes it.
+    await act(async () => {
+      heldA.resolve(historyPage([historyMoment("m-a-stale", A_STALE)]));
+      await heldA.promise;
+    });
+    await act(async () => {});
+
+    expect(screen.queryByText(A_STALE)).toBeNull();
+    expect(screen.queryByText(A_CONTROL)).toBeNull();
+    expect(screen.getByText(B_ONLY)).toBeTruthy();
+    expect(screen.getAllByTestId("engine-moment-open")).toHaveLength(1);
+  });
 
   it("uses the admitted rename label in the row, search and diff header", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const renamed: EngineMomentRecord = { id: "rename", versionId: "main", path: "notes/b.md", recordedAtMs: 100,
       operation: "rename", origin: "local-file", momentOrder: 1 };
-    bridge.listEngineMoments = vi.fn(async () => historyPage([renamed]));
+    bridge.listHistory = vi.fn(async () => historyPage([renamed]));
     bridge.readEngineMoment = vi.fn(async () => ({ moment: { ...renamed, beforeText: "body", afterText: "body" } }));
     const user = userEvent.setup();
     renderShell(bridge);
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
     await user.click(screen.getByTestId("activity-history"));
     expect(await screen.findByText("Renamed to b.md")).toBeTruthy();
     await user.type(screen.getByTestId("engine-history-search"), "Renamed to");
@@ -262,33 +359,135 @@ describe("history page", () => {
     expect((await screen.findByTestId("engine-diff-summary")).textContent).toBe("Renamed to b.md");
   });
 
+  it("finds a moment by an author its shortened source label leaves out", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listHistory = vi.fn(async () => historyPage([
+      {...historyMoment("many", "Revised the plan"), authorLabels: ["You", "trip-agent", "ana@example.com", "ben@example.com"]},
+      historyMoment("other", "Wrote the outline"),
+    ]));
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await screen.findByTestId("titlebar-about-sidebar");
+    await user.click(screen.getByTestId("activity-history"));
+    expect(await screen.findByText("Wrote the outline")).toBeTruthy();
+    expect(screen.getByText("You, trip-agent, ana@example.com and 1 more")).toBeTruthy();
+    await user.type(screen.getByTestId("engine-history-search"), "ben@example.com");
+    await waitFor(() => expect(screen.queryByText("Wrote the outline")).toBeNull());
+    expect(screen.getByText("Revised the plan")).toBeTruthy();
+  });
+
   it("keeps earlier History reachable when the bounded policy scan returns no rows", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listEngineMoments = vi.fn()
-      .mockResolvedValueOnce({ ...historyPage([]), nextBeforeMomentOrder: 80 })
+    bridge.listHistory = vi.fn()
+      .mockResolvedValueOnce({ ...historyPage([]), nextCursor: timelineCursor(80) })
       .mockResolvedValue(historyPage([historyMoment("older", "Older admitted edit")]));
     const user = userEvent.setup();
     renderShell(bridge);
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
     await user.click(screen.getByTestId("activity-history"));
     await user.click(await screen.findByTestId("engine-history-load-more"));
     expect(await screen.findByText("Older admitted edit")).toBeTruthy();
     expect(screen.queryByText("No changes yet")).toBeNull();
-    expect(bridge.listEngineMoments).toHaveBeenLastCalledWith(expect.objectContaining({ beforeMomentOrder: 80 }));
+    expect(bridge.listHistory).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: timelineCursor(80) }));
+  });
+
+  // History's first page can be all Collection changes, or miss a moment that
+  // arrived with an old date. The open file still re-reads when the engine
+  // records a newer file moment.
+  it("re-reads the open file for a new file moment that History's first page does not show", async () => {
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs(["b.md"], "b.md")));
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
+      files: [{ path: "b.md", kind: "file" as const }], folders: [] }));
+    const collectionChange = { kind: "collection" as const, datasetId: "00000000-0000-4000-8000-000000000001", name: "Guests", sortAtMs: 200, change: {
+      revision: 1, operation: "records.create", callerReference: null, recordedAtMs: 200, approvedRevisionHash: "a".repeat(64), changesetBytes: 1, attachmentCount: 0,
+    } };
+    bridge.listHistory = vi.fn(async () => timelinePage([collectionChange], { workspaceId: WORKSPACE.workspaceId }));
+    let latestMomentOrder = 3;
+    bridge.listEngineMoments = vi.fn(async () => ({
+      moments: [], nextCursor: null, latestMomentOrder, activeVersionId: "main", ...historyPageFields,
+    }));
+    renderShell(bridge);
+    await settleShareView();
+    await waitFor(() => expect(bridge.readWorkspaceText).toHaveBeenCalledWith(expect.objectContaining({ relativePath: "b.md" })));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId, limit: 1 }));
+    await act(async () => {});
+    const reads = bridge.readWorkspaceText.mock.calls.length;
+
+    // Activity with no new file moment re-reads nothing.
+    const asked = bridge.listEngineMoments.mock.calls.length;
+    act(() => bridge.emitWorkspaceActivity());
+    await waitFor(() => expect(bridge.listEngineMoments.mock.calls.length).toBeGreaterThan(asked));
+    await act(async () => {});
+    expect(bridge.readWorkspaceText.mock.calls.length).toBe(reads);
+
+    latestMomentOrder = 4;
+    act(() => bridge.emitWorkspaceActivity());
+    await waitFor(() => expect(bridge.readWorkspaceText.mock.calls.length).toBeGreaterThan(reads));
+  });
+
+  // History can answer while the read of the newest file moment does not.
+  // That read retries `updating` by itself, and a failure says so in Notices
+  // with a Try again that reads again.
+  function freshnessShell() {
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs(["b.md"], "b.md")));
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
+      files: [{ path: "b.md", kind: "file" as const }], folders: [] }));
+    const state = { latestMomentOrder: 3, queued: [] as Array<"updating" | Error> };
+    bridge.listEngineMoments = vi.fn(async () => {
+      const next = state.queued.shift();
+      if (next instanceof Error) throw next;
+      return next === "updating" ? { status: "updating" as const }
+        : { moments: [], nextCursor: null, latestMomentOrder: state.latestMomentOrder, activeVersionId: "main", ...historyPageFields };
+    });
+    renderShell(bridge);
+    return { bridge, state };
+  }
+  async function settledReads(bridge: ReturnType<typeof makeBridge>) {
+    await settleShareView();
+    await waitFor(() => expect(bridge.readWorkspaceText).toHaveBeenCalledWith(expect.objectContaining({ relativePath: "b.md" })));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalled());
+    await act(async () => {});
+    return bridge.readWorkspaceText.mock.calls.length;
+  }
+
+  it("re-reads the open file once an updating newest-moment read answers, with no new activity", async () => {
+    const { bridge, state } = freshnessShell();
+    const reads = await settledReads(bridge);
+    state.latestMomentOrder = 4;
+    state.queued.push("updating");
+    const asked = bridge.listEngineMoments.mock.calls.length;
+    act(() => bridge.emitWorkspaceActivity());
+    await waitFor(() => expect(bridge.listEngineMoments.mock.calls.length).toBe(asked + 2));
+    await waitFor(() => expect(bridge.readWorkspaceText.mock.calls.length).toBeGreaterThan(reads));
+    expect(screen.queryByTestId("history-load-failed")).toBeNull();
+  });
+
+  it("says when the newest-moment read fails while History answers, and Try again re-reads the open file", async () => {
+    const { bridge, state } = freshnessShell();
+    const reads = await settledReads(bridge);
+    state.latestMomentOrder = 4;
+    state.queued.push(new Error("Error invoking remote method 'desktop:list-engine-moments': Error: engine busy"));
+    act(() => bridge.emitWorkspaceActivity());
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("dohc could not check whether open files changed.");
+    expect(bridge.readWorkspaceText.mock.calls.length).toBe(reads);
+
+    await userEvent.click(within(toast).getByTestId("workspace-shell-error-retry"));
+    await waitFor(() => expect(bridge.readWorkspaceText.mock.calls.length).toBeGreaterThan(reads));
   });
 
   it("says History is hidden while its rules can't be read, and shows it again once they can", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listEngineMoments = vi.fn()
+    bridge.listHistory = vi.fn()
       .mockResolvedValueOnce({
         status: "policy-unreadable",
         unreadable: [".dohc/visibility.toml"],
         policyErrors: ["visibility.toml: TOML parse error at line 3, column 9"],
-      } satisfies ListEngineMomentsResponse)
+      } satisfies ListHistoryResult)
       .mockResolvedValue(historyPage([historyMoment("m-1", "Wrote the plan")]));
     const user = userEvent.setup();
     renderShell(bridge);
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
     await user.click(screen.getByTestId("activity-history"));
 
     const hidden = await screen.findByTestId("history-policy-hidden");
@@ -307,7 +506,7 @@ describe("history page", () => {
   it("reports a refused restore in dohc's words, and Try again asks before it restores", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const moment = historyMoment("m-1", "Wrote the plan");
-    bridge.listEngineMoments = vi.fn(async () => historyPage([moment]));
+    bridge.listHistory = vi.fn(async () => historyPage([moment]));
     bridge.readEngineMoment = vi.fn(async () => ({ moment: { ...moment, beforeText: "one\n", afterText: "two\n" } }));
     const restoreEngineMomentFile = vi.fn()
       .mockRejectedValueOnce(new Error(
@@ -317,7 +516,7 @@ describe("history page", () => {
     Object.assign(bridge, { restoreEngineMomentFile });
     const user = userEvent.setup();
     renderShell(bridge);
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
     await user.click(screen.getByTestId("activity-history"));
     await user.click(await screen.findByTestId("engine-moment-open"));
     await user.click(await screen.findByTestId("engine-diff-restore-file"));
@@ -354,7 +553,7 @@ describe("history page", () => {
       policyErrors: ["visibility.toml: TOML parse error at line 3, column 9"],
     };
     let broken = false;
-    bridge.listEngineMoments = vi.fn(async (): Promise<ListEngineMomentsResponse> => broken ? blocked : historyPage([moment]));
+    bridge.listHistory = vi.fn(async (): Promise<ListHistoryResult> => broken ? blocked : historyPage([moment]));
     bridge.readEngineMoment = vi.fn(async (): Promise<ReadEngineMomentResult> => broken
       ? { ...blocked, moment: null }
       : { moment: { ...moment, beforeText: "one\n", afterText: "two\n" } });
@@ -366,7 +565,7 @@ describe("history page", () => {
     Object.assign(bridge, { restoreEngineMomentFile });
     const user = userEvent.setup();
     renderShell(bridge);
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
     await user.click(screen.getByTestId("activity-history"));
     await user.click(await screen.findByTestId("engine-moment-open"));
     await user.click(await screen.findByTestId("engine-diff-restore-file"));
@@ -404,13 +603,13 @@ describe("history page", () => {
       policyErrors: ["visibility.toml: TOML parse error at line 3, column 9"],
     };
     let broken = false;
-    bridge.listEngineMoments = vi.fn(async (): Promise<ListEngineMomentsResponse> => broken ? blocked : historyPage([moment]));
+    bridge.listHistory = vi.fn(async (): Promise<ListHistoryResult> => broken ? blocked : historyPage([moment]));
     bridge.readEngineMoment = vi.fn(async (): Promise<ReadEngineMomentResult> => broken
       ? { ...blocked, moment: null }
       : { moment: { ...moment, beforeText: "one\n", afterText: "two\n" } });
     const user = userEvent.setup();
     renderShell(bridge);
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
     await user.click(screen.getByTestId("activity-history"));
     await user.click(await screen.findByTestId("engine-moment-open"));
     await screen.findByTestId("engine-diff-lines");
@@ -433,7 +632,7 @@ describe("history page", () => {
   it("persists a moment diff opened for a valid multibyte file path", async () => {
     const filePath = `目录/${"界".repeat(500)}.md`;
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listEngineMoments = vi.fn(async () =>
+    bridge.listHistory = vi.fn(async () =>
       historyPage([{ ...historyMoment("m-1", "Wrote the file"), path: filePath }]),
     );
     const validStates: WorkspaceUiState[] = [];
@@ -467,8 +666,8 @@ describe("history page", () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       const bridge = makeBridge(Promise.resolve(null));
-      bridge.listEngineMoments = vi.fn(
-        async (): Promise<ListEngineMomentsResponse> => ({ status: "updating" }),
+      bridge.listHistory = vi.fn(
+        async (): Promise<ListHistoryResult> => ({ status: "updating" }),
       );
       const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
       renderShell(bridge);
@@ -478,7 +677,7 @@ describe("history page", () => {
         await vi.advanceTimersByTimeAsync(2_000);
       });
 
-      expect(bridge.listEngineMoments).toHaveBeenCalledTimes(5);
+      expect(bridge.listHistory).toHaveBeenCalledTimes(5);
       expect(await screen.findByTestId("history-updating")).toBeTruthy();
       expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
       expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
@@ -487,11 +686,11 @@ describe("history page", () => {
     }
   });
 
-  it("shows the protected truncation marker from the history page", async () => {
+  it("shows complete protected paging without a truncation banner", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listEngineMoments = vi.fn(async () => ({
+    bridge.listHistory = vi.fn(async () => ({
       ...historyPage([historyMoment("m-1", "Wrote the plan")]),
-      protectedTruncated: true,
+
     }));
     const user = userEvent.setup();
     renderShell(bridge);
@@ -499,9 +698,8 @@ describe("history page", () => {
 
     await user.click(screen.getByTestId("activity-history"));
 
-    expect(
-      await screen.findAllByText("Some protected activity in this range is not shown."),
-    ).toHaveLength(1);
+    expect(await screen.findByText("Wrote the plan")).toBeTruthy();
+    expect(screen.queryByText("Some protected activity in this range is not shown.")).toBeNull();
   });
 
   it("keeps a moment diff selected when an older duplicate-file open finishes flushing", async () => {
@@ -521,14 +719,14 @@ describe("history page", () => {
         activeEditorGroup: "right",
       }),
     );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
       files: ["race-a.txt", "b.md"].map((path) => ({
         path,
         kind: "file" as const,
       })),
       folders: [],
     }));
-    bridge.listEngineMoments = vi.fn(async () =>
+    bridge.listHistory = vi.fn(async () =>
       historyPage([historyMoment("m-1", "Wrote the plan")]),
     );
     bridge.writeWorkspaceText = vi.fn(() => save.promise);
@@ -538,8 +736,7 @@ describe("history page", () => {
 
     const left = await screen.findByRole("region", { name: "Editor group 1" });
     const right = screen.getByRole("region", { name: "Editor group 2" });
-    const content = (await within(right).findByTestId("view-text-editor"))
-      .querySelector(".cm-content") as HTMLElement;
+    const content = await textEditorContent(await within(right).findByTestId("view-text-editor"));
     await user.click(content);
     await user.keyboard("{End} changed");
     await waitFor(() => expect(within(right).getByTestId("tab-dirty")).toBeTruthy());
@@ -584,14 +781,14 @@ describe("history page", () => {
     const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["race-a.txt", "b.md"], "race-a.txt")),
     );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
       files: ["race-a.txt", "b.md"].map((path) => ({
         path,
         kind: "file" as const,
       })),
       folders: [],
     }));
-    bridge.listEngineMoments = vi.fn(async () =>
+    bridge.listHistory = vi.fn(async () =>
       historyPage([historyMoment("m-1", "Wrote the plan")]),
     );
     bridge.writeWorkspaceText = vi.fn(() => save.promise);
@@ -600,8 +797,7 @@ describe("history page", () => {
     await settleShareView();
 
     const group = await screen.findByRole("region", { name: "Editor group 1" });
-    const content = (await within(group).findByTestId("view-text-editor"))
-      .querySelector(".cm-content") as HTMLElement;
+    const content = await textEditorContent(await within(group).findByTestId("view-text-editor"));
     await user.click(content);
     await user.keyboard("{End} changed");
     await waitFor(() => expect(within(group).getByTestId("tab-dirty")).toBeTruthy());
@@ -645,14 +841,14 @@ describe("history page", () => {
         activeEditorGroup: "right",
       }),
     );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
       files: ["a.md", "dirty.txt"].map((path) => ({
         path,
         kind: "file" as const,
       })),
       folders: [],
     }));
-    bridge.listEngineMoments = vi.fn(async () =>
+    bridge.listHistory = vi.fn(async () =>
       historyPage([historyMoment("m-1", "Wrote the plan")]),
     );
     bridge.writeWorkspaceText = vi.fn(() => save.promise);
@@ -662,8 +858,7 @@ describe("history page", () => {
 
     const left = await screen.findByRole("region", { name: "Editor group 1" });
     const right = screen.getByRole("region", { name: "Editor group 2" });
-    const content = (await within(right).findByTestId("view-text-editor"))
-      .querySelector(".cm-content") as HTMLElement;
+    const content = await textEditorContent(await within(right).findByTestId("view-text-editor"));
     await user.click(content);
     await user.keyboard("{End} changed");
     await waitFor(() => expect(within(right).getByTestId("tab-dirty")).toBeTruthy());
@@ -695,21 +890,21 @@ describe("history page", () => {
   // that commits, and the Show earlier changes control to the hook's cursor.
   it("marks history ready when the page commits, and appends the earlier page", async () => {
     const previousOrdinal = rendererMarks.readSwitchTimeline().at(-1)?.ordinal ?? 0;
-    const first = deferred<ListEngineMomentsResult>();
-    const earlier = deferred<ListEngineMomentsResult>();
+    const first = deferred<TimelinePage>();
+    const earlier = deferred<TimelinePage>();
     const pages = [first, earlier];
     let issued = 0;
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listEngineMoments = vi.fn(() => pages[issued++]!.promise);
+    bridge.listHistory = vi.fn(() => pages[issued++]!.promise);
     const user = userEvent.setup();
     renderShell(bridge);
 
     await user.click(screen.getByTestId("activity-history"));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(1));
     await act(async () => {
       first.resolve({
         ...historyPage([historyMoment("m-first", "Added the launch checklist")]),
-        nextBeforeMomentOrder: 1,
+        nextCursor: timelineCursor(1),
       });
       await first.promise;
     });
@@ -722,18 +917,18 @@ describe("history page", () => {
     });
 
     await user.click(screen.getByTestId("engine-history-load-more"));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
-    expect(bridge.listEngineMoments).toHaveBeenLastCalledWith({
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(2));
+    expect(bridge.listHistory).toHaveBeenLastCalledWith({
       workspaceId: WORKSPACE.workspaceId,
-      limit: 200,
-      beforeMomentOrder: 1,
+      limit: 50,
+      cursor: timelineCursor(1),
     });
     // The earlier page still has a cursor, so the control stays and is
     // usable again once the page lands.
     await act(async () => {
       earlier.resolve({
         ...historyPage([historyMoment("m-earlier", "Started the plan")]),
-        nextBeforeMomentOrder: 0,
+        nextCursor: timelineCursor(0),
       });
       await earlier.promise;
     });
@@ -746,31 +941,31 @@ describe("history page", () => {
 
   // A pagination failure about the displayed timeline reaches the notices.
   it("reports a pagination that failed for the timeline on screen", async () => {
-    const first = deferred<ListEngineMomentsResult>();
+    const first = deferred<TimelinePage>();
     let failPage!: (error: Error) => void;
     const page = new Promise<never>((_resolve, reject) => {
       failPage = reject;
     });
-    const responses: Promise<ListEngineMomentsResult>[] = [first.promise, page];
+    const responses: Promise<TimelinePage>[] = [first.promise, page];
     let issued = 0;
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
+    bridge.listHistory = vi.fn(() => responses[issued++]!);
     const user = userEvent.setup();
     renderShell(bridge);
 
     await user.click(screen.getByTestId("activity-history"));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(1));
     await act(async () => {
       first.resolve({
         ...historyPage([historyMoment("m-first", "Added the launch checklist")]),
-        nextBeforeMomentOrder: 1,
+        nextCursor: timelineCursor(1),
       });
       await first.promise;
     });
     expect(await screen.findByText("Added the launch checklist")).toBeTruthy();
 
     await user.click(screen.getByTestId("engine-history-load-more"));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(2));
     await act(async () => {
       failPage(new Error("pagination failed"));
       await Promise.resolve();
@@ -800,31 +995,31 @@ describe("history page", () => {
   // republish snapshots the user has acted on since — here the review card the
   // main process already dismissed, which nothing else would clear.
   it("does not bring back a review the user dismissed while a page was loading", async () => {
-    const first = deferred<ListEngineMomentsResult>();
-    const refreshed = deferred<ListEngineMomentsResult>();
+    const first = deferred<TimelinePage>();
+    const refreshed = deferred<TimelinePage>();
     let failPage!: (error: Error) => void;
     const page = new Promise<never>((_resolve, reject) => {
       failPage = reject;
     });
-    const responses: Promise<ListEngineMomentsResult>[] = [
+    const responses: Promise<TimelinePage>[] = [
       first.promise,
       refreshed.promise,
       page,
     ];
     let issued = 0;
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
+    bridge.listHistory = vi.fn(() => responses[issued++]!);
     // The main process keeps reporting the review until it is dismissed.
     bridge.getTryInVersionState = vi.fn(async () => ({ state: REVIEW_STATE }));
     const user = userEvent.setup();
     renderShell(bridge);
 
     await user.click(screen.getByTestId("activity-history"));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(1));
     await act(async () => {
       first.resolve({
         ...historyPage([historyMoment("m-first", "Added the launch checklist")]),
-        nextBeforeMomentOrder: 1,
+        nextCursor: timelineCursor(1),
       });
       await first.promise;
     });
@@ -835,9 +1030,9 @@ describe("history page", () => {
     act(() => {
       bridge.emitWorkspaceActivity();
     });
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(2));
     await user.click(screen.getByTestId("engine-history-load-more"));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(3));
     await act(async () => {
       refreshed.resolve(historyPage([historyMoment("m-refreshed", "Rewrote the plan")]));
       await refreshed.promise;
@@ -864,31 +1059,31 @@ describe("history page", () => {
   // the user took after it was issued — and nothing would put the card away
   // again, because dismissing emits no replacement activity.
   it("does not bring back a review dismissed while the refresh was still in flight", async () => {
-    const first = deferred<ListEngineMomentsResult>();
-    const refreshed = deferred<ListEngineMomentsResult>();
+    const first = deferred<TimelinePage>();
+    const refreshed = deferred<TimelinePage>();
     let failPage!: (error: Error) => void;
     const page = new Promise<never>((_resolve, reject) => {
       failPage = reject;
     });
-    const responses: Promise<ListEngineMomentsResult>[] = [
+    const responses: Promise<TimelinePage>[] = [
       first.promise,
       refreshed.promise,
       page,
     ];
     let issued = 0;
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
+    bridge.listHistory = vi.fn(() => responses[issued++]!);
     // The main process keeps reporting the review until it is dismissed.
     bridge.getTryInVersionState = vi.fn(async () => ({ state: REVIEW_STATE }));
     const user = userEvent.setup();
     renderShell(bridge);
 
     await user.click(screen.getByTestId("activity-history"));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(1));
     await act(async () => {
       first.resolve({
         ...historyPage([historyMoment("m-first", "Added the launch checklist")]),
-        nextBeforeMomentOrder: 1,
+        nextCursor: timelineCursor(1),
       });
       await first.promise;
     });
@@ -899,10 +1094,10 @@ describe("history page", () => {
     act(() => {
       bridge.emitWorkspaceActivity();
     });
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(bridge.getTryInVersionState).toHaveBeenCalledTimes(2));
     await user.click(screen.getByTestId("engine-history-load-more"));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(3));
 
     // The user dismisses the card while both are still in flight.
     await user.click(screen.getByTestId("try-review-keep-working"));
@@ -929,14 +1124,14 @@ describe("history page", () => {
   // answer describing the version the user left must never paint the one they
   // are now on, however the newest-answer race would otherwise resolve.
   it("never paints the version the user left over the one they switched to", async () => {
-    const first = deferred<ListEngineMomentsResult>();
-    const staleRefresh = deferred<ListEngineMomentsResult>();
-    const stalePage = deferred<ListEngineMomentsResult>();
+    const first = deferred<TimelinePage>();
+    const staleRefresh = deferred<TimelinePage>();
+    const stalePage = deferred<TimelinePage>();
     let failSwitchRefresh!: (error: Error) => void;
     const switchRefresh = new Promise<never>((_resolve, reject) => {
       failSwitchRefresh = reject;
     });
-    const responses: Promise<ListEngineMomentsResult>[] = [
+    const responses: Promise<TimelinePage>[] = [
       first.promise,
       staleRefresh.promise,
       stalePage.promise,
@@ -944,7 +1139,7 @@ describe("history page", () => {
     ];
     let issued = 0;
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
+    bridge.listHistory = vi.fn(() => responses[issued++]!);
     bridge.getTryInVersionState = vi.fn(async () => ({ state: REVIEW_STATE }));
     // The workspace reports the try version until the switch runs, Main after.
     let switched = false;
@@ -958,24 +1153,24 @@ describe("history page", () => {
           canMergeIntoMain: false,
         },
       ],
-      activeVersionId: switched ? "main" : "try-1",
+      activeVersionId: switched ? "main" : "try-1", ...historyPageFields,
     }));
     bridge.switchWorkspaceVersion = vi.fn(async () => {
       switched = true;
-      return { activeVersionId: "main", changedFileCount: 0 };
+      return { activeVersionId: "main", ...historyPageFields, changedFileCount: 0 };
     });
     const user = userEvent.setup();
     renderShell(bridge);
 
     await user.click(screen.getByTestId("activity-history"));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(1));
     await act(async () => {
       first.resolve({
         ...historyPage(
           [historyMoment("m-first", "Wrote the note in the try version")],
           "try-1",
         ),
-        nextBeforeMomentOrder: 1,
+        nextCursor: timelineCursor(1),
       });
       await first.promise;
     });
@@ -985,15 +1180,15 @@ describe("history page", () => {
     act(() => {
       bridge.emitWorkspaceActivity();
     });
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(2));
     await user.click(screen.getByTestId("engine-history-load-more"));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(3));
 
     // Set aside: switch back to Main. Its own refresh fails, so nothing newer
     // ever answers — exactly when the stale answers would win.
     await user.click(screen.getByTestId("try-review-set-aside"));
     await waitFor(() => expect(bridge.switchWorkspaceVersion).toHaveBeenCalled());
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(4));
     await act(async () => {
       failSwitchRefresh(new Error("history failed"));
       await Promise.resolve();
@@ -1024,25 +1219,27 @@ describe("history page", () => {
   });
 
   // The other side of that boundary. Main notifies the renderer before the
-  // switch invoke resolves, so an activity refresh can be issued — and answer
-  // — for the new version before the shell hears about the switch at all.
-  // Rejecting by arrival order threw that valid answer away and left the panel
-  // on the version the user had just left.
-  it("keeps a new-version answer that raced the switch it belongs to", async () => {
-    const first = deferred<ListEngineMomentsResult>();
-    const earlyRefresh = deferred<ListEngineMomentsResult>();
+  // switch invoke resolves, so an activity refresh can be issued for the new
+  // version before the shell hears about the switch at all. The switch's own
+  // refresh supersedes it: only the newest refresh may answer, so when that
+  // one fails the panel says so and Try again reads Main.
+  it("lets the switch's own refresh supersede an earlier one, and recovers through Try again", async () => {
+    const first = deferred<TimelinePage>();
+    const earlyRefresh = deferred<TimelinePage>();
+    const retry = deferred<TimelinePage>();
     let failSwitchRefresh!: (error: Error) => void;
     const switchRefresh = new Promise<never>((_resolve, reject) => {
       failSwitchRefresh = reject;
     });
-    const responses: Promise<ListEngineMomentsResult>[] = [
+    const responses: Promise<TimelinePage>[] = [
       first.promise,
       earlyRefresh.promise,
       switchRefresh,
+      retry.promise,
     ];
     let issued = 0;
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
+    bridge.listHistory = vi.fn(() => responses[issued++]!);
     bridge.getTryInVersionState = vi.fn(async () => ({ state: REVIEW_STATE }));
     let switched = false;
     bridge.listWorkspaceVersions = vi.fn(async () => ({
@@ -1055,7 +1252,7 @@ describe("history page", () => {
           canMergeIntoMain: false,
         },
       ],
-      activeVersionId: switched ? "main" : "try-1",
+      activeVersionId: switched ? "main" : "try-1", ...historyPageFields,
     }));
     // The switch lands in the daemon and notifies the renderer before the
     // invoke resolves, which is the ordering this test exists for.
@@ -1064,13 +1261,13 @@ describe("history page", () => {
       switched = true;
       bridge.emitWorkspaceActivity();
       await switchInvoke.promise;
-      return { activeVersionId: "main", changedFileCount: 0 };
+      return { activeVersionId: "main", ...historyPageFields, changedFileCount: 0 };
     });
     const user = userEvent.setup();
     renderShell(bridge);
 
     await user.click(screen.getByTestId("activity-history"));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(1));
     await act(async () => {
       first.resolve(
         historyPage([historyMoment("m-first", "Wrote the note in the try version")], "try-1"),
@@ -1083,30 +1280,36 @@ describe("history page", () => {
     // MAIN is issued before the switch invoke resolves — and it is still in
     // flight when the shell finally hears about the switch.
     await user.click(screen.getByTestId("try-review-set-aside"));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(2));
 
     // The switch resolves, the shell runs its boundary, and its own refresh
-    // fails — so the early answer is the only one that will ever describe Main.
+    // fails.
     await act(async () => {
       switchInvoke.resolve();
       await switchInvoke.promise;
     });
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(3));
     await act(async () => {
       failSwitchRefresh(new Error("history failed"));
       await Promise.resolve();
     });
 
-    // It answers last, describing the version the user is now on.
+    // The superseded early refresh answers last. It paints nothing.
     await act(async () => {
       earlyRefresh.resolve(
         historyPage([historyMoment("m-early", "Back on main")], "main"),
       );
       await earlyRefresh.promise;
     });
-
-    expect(await screen.findByText("Back on main")).toBeTruthy();
+    expect(screen.queryByText("Back on main")).toBeNull();
     expect(screen.queryByText("Wrote the note in the try version")).toBeNull();
+    await user.click(within(screen.getByTestId("history-load-failed")).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(4));
+    await act(async () => {
+      retry.resolve(historyPage([historyMoment("m-main", "Back on main")], "main"));
+      await retry.promise;
+    });
+    expect(await screen.findByText("Back on main")).toBeTruthy();
   });
 
   // The boundary has to name the version the user left, and before the first
@@ -1115,18 +1318,18 @@ describe("history page", () => {
   // the version they had already left painted the panel — and stayed there
   // when the post-switch refresh failed.
   it("rejects the version the user left before the timeline committed one", async () => {
-    const stranded = deferred<ListEngineMomentsResult>();
+    const stranded = deferred<TimelinePage>();
     let failSwitchRefresh!: (error: Error) => void;
     const switchRefresh = new Promise<never>((_resolve, reject) => {
       failSwitchRefresh = reject;
     });
-    const responses: Promise<ListEngineMomentsResult>[] = [
+    const responses: Promise<TimelinePage>[] = [
       stranded.promise,
       switchRefresh,
     ];
     let issued = 0;
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
+    bridge.listHistory = vi.fn(() => responses[issued++]!);
     let switched = false;
     bridge.listWorkspaceVersions = vi.fn(async () => ({
       versions: [
@@ -1145,11 +1348,11 @@ describe("history page", () => {
           canMergeIntoMain: true,
         },
       ],
-      activeVersionId: switched ? "main" : "try-1",
+      activeVersionId: switched ? "main" : "try-1", ...historyPageFields,
     }));
     bridge.switchWorkspaceVersion = vi.fn(async () => {
       switched = true;
-      return { activeVersionId: "main", changedFileCount: 0 };
+      return { activeVersionId: "main", ...historyPageFields, changedFileCount: 0 };
     });
     const user = userEvent.setup();
     renderShell(bridge);
@@ -1157,7 +1360,7 @@ describe("history page", () => {
     // The first page is still in flight, so the panel knows no version of its
     // own when the user leaves this one.
     await user.click(screen.getByTestId("activity-history"));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(1));
 
     await user.click(await screen.findByTestId("version-menu-button"));
     const mainItem = (await screen.findAllByTestId("version-item")).find(
@@ -1168,7 +1371,7 @@ describe("history page", () => {
 
     // The switch's own refresh fails, so nothing newer ever answers — exactly
     // when the stranded answer would win.
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(2));
     await act(async () => {
       failSwitchRefresh(new Error("history failed"));
       await Promise.resolve();
@@ -1194,18 +1397,18 @@ describe("history page", () => {
   // sit in front of the announcement: the shell's own lookup, and the
   // selector's post-switch re-read. Neither answers here.
   it("rejects the old version's answer without waiting for a lookup", async () => {
-    const stranded = deferred<ListEngineMomentsResult>();
+    const stranded = deferred<TimelinePage>();
     let failSwitchRefresh!: (error: Error) => void;
     const switchRefresh = new Promise<never>((_resolve, reject) => {
       failSwitchRefresh = reject;
     });
-    const responses: Promise<ListEngineMomentsResult>[] = [
+    const responses: Promise<TimelinePage>[] = [
       stranded.promise,
       switchRefresh,
     ];
     let issued = 0;
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
+    bridge.listHistory = vi.fn(() => responses[issued++]!);
     let switched = false;
     // Only the selector's mount read answers. Every later read hangs forever:
     // the shell's own lookup if it still needed one, AND the selector's
@@ -1233,18 +1436,18 @@ describe("history page", () => {
             canMergeIntoMain: true,
           },
         ],
-        activeVersionId: switched ? "main" : "try-1",
+        activeVersionId: switched ? "main" : "try-1", ...historyPageFields,
       });
     });
     bridge.switchWorkspaceVersion = vi.fn(async () => {
       switched = true;
-      return { activeVersionId: "main", changedFileCount: 0 };
+      return { activeVersionId: "main", ...historyPageFields, changedFileCount: 0 };
     });
     const user = userEvent.setup();
     renderShell(bridge);
 
     await user.click(screen.getByTestId("activity-history"));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(1));
 
     await user.click(await screen.findByTestId("version-menu-button"));
     const mainItem = (await screen.findAllByTestId("version-item")).find(
@@ -1252,7 +1455,7 @@ describe("history page", () => {
     );
     await user.click(mainItem!);
     await waitFor(() => expect(bridge.switchWorkspaceVersion).toHaveBeenCalled());
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(2));
 
     await act(async () => {
       failSwitchRefresh(new Error("history failed"));
@@ -1272,27 +1475,23 @@ describe("history page", () => {
   });
 
   // The residual window: a switch that failed, whose recovery re-read
-  // also failed, leaves the shell asking which version is active. That lookup
-  // is a boundary arriving after the answers it must judge — an old-version
-  // answer landing first meets a guard that knows nothing and paints. The
-  // lookup cannot stop the paint, so it judges the committed page when it
-  // settles: naming a version the lookup contradicts, the page is dropped and
-  // the timeline asked again.
-  it("drops an old-version answer the failed-switch lookup contradicts", async () => {
-    const stranded = deferred<ListEngineMomentsResult>();
-    const repaint = deferred<ListEngineMomentsResult>();
+  // also failed, leaves the shell asking which version is active. The
+  // old-version answer lands before that lookup does, but the switch's own
+  // refresh superseded it, so it paints nothing even though that refresh
+  // failed. The lookup then finds no page to drop and asks nothing.
+  it("never paints an old-version answer the switch's failed refresh superseded", async () => {
+    const stranded = deferred<TimelinePage>();
     let failSwitchRefresh!: (error: Error) => void;
     const switchRefresh = new Promise<never>((_resolve, reject) => {
       failSwitchRefresh = reject;
     });
-    const responses: Promise<ListEngineMomentsResult>[] = [
+    const responses: Promise<TimelinePage>[] = [
       stranded.promise,
       switchRefresh,
-      repaint.promise,
     ];
     let issued = 0;
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
+    bridge.listHistory = vi.fn(() => responses[issued++]!);
     const versionList = [
       {
         id: "main",
@@ -1336,7 +1535,7 @@ describe("history page", () => {
     renderShell(bridge);
 
     await user.click(screen.getByTestId("activity-history"));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(1));
 
     await user.click(await screen.findByTestId("version-menu-button"));
     const mainItem = (await screen.findAllByTestId("version-item")).find(
@@ -1349,14 +1548,13 @@ describe("history page", () => {
     );
 
     // The switch-triggered refresh fails: nothing newer will answer on its own.
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(2));
     await act(async () => {
       failSwitchRefresh(new Error("history failed"));
       await Promise.resolve();
     });
 
-    // The old version's answer lands while the lookup is still in flight. The
-    // guard knows nothing yet, so it paints — this is the window itself.
+    // The old version's answer lands while the lookup is still in flight.
     await act(async () => {
       stranded.resolve(
         historyPage(
@@ -1366,23 +1564,15 @@ describe("history page", () => {
       );
       await stranded.promise;
     });
-    expect(await screen.findByText("Wrote the note in the try version")).toBeTruthy();
+    expect(screen.queryByText("Wrote the note in the try version")).toBeNull();
+    expect(screen.getByTestId("history-load-failed")).toBeTruthy();
 
-    // The lookup settles and contradicts the committed page: dropped, and the
-    // timeline is asked again.
     await act(async () => {
       lookup.resolve({ versions: versionList, activeVersionId: "main" });
       await lookup.promise;
     });
-    await waitFor(() =>
-      expect(screen.queryByText("Wrote the note in the try version")).toBeNull(),
-    );
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(3));
-    await act(async () => {
-      repaint.resolve(historyPage([historyMoment("m-main", "Back on main")], "main"));
-      await repaint.promise;
-    });
-    expect(await screen.findByText("Back on main")).toBeTruthy();
+    expect(screen.queryByText("Wrote the note in the try version")).toBeNull();
+    expect(bridge.listHistory).toHaveBeenCalledTimes(2);
   });
 
   // The other verdict the lookup can reach: it agrees with the committed page
@@ -1390,18 +1580,18 @@ describe("history page", () => {
   // that is right — and this is every merge and conflict resolution, whose
   // lookup only restates what is already true.
   it("keeps the committed page when the failed-switch lookup agrees with it", async () => {
-    const stranded = deferred<ListEngineMomentsResult>();
+    const stranded = deferred<TimelinePage>();
     let failSwitchRefresh!: (error: Error) => void;
     const switchRefresh = new Promise<never>((_resolve, reject) => {
       failSwitchRefresh = reject;
     });
-    const responses: Promise<ListEngineMomentsResult>[] = [
+    const responses: Promise<TimelinePage>[] = [
       stranded.promise,
       switchRefresh,
     ];
     let issued = 0;
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
+    bridge.listHistory = vi.fn(() => responses[issued++]!);
     const versionList = [
       {
         id: "main",
@@ -1439,22 +1629,7 @@ describe("history page", () => {
     renderShell(bridge);
 
     await user.click(screen.getByTestId("activity-history"));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
-
-    await user.click(await screen.findByTestId("version-menu-button"));
-    const mainItem = (await screen.findAllByTestId("version-item")).find(
-      (item) => item.dataset.versionId === "main",
-    );
-    await user.click(mainItem!);
-    await waitFor(() => expect(bridge.switchWorkspaceVersion).toHaveBeenCalled());
-    await waitFor(() =>
-      expect(bridge.listWorkspaceVersions.mock.calls.length).toBeGreaterThanOrEqual(3),
-    );
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
-    await act(async () => {
-      failSwitchRefresh(new Error("history failed"));
-      await Promise.resolve();
-    });
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(1));
     await act(async () => {
       stranded.resolve(
         historyPage(
@@ -1466,6 +1641,23 @@ describe("history page", () => {
     });
     expect(await screen.findByText("Wrote the note in the try version")).toBeTruthy();
 
+    await user.click(await screen.findByTestId("version-menu-button"));
+    const mainItem = (await screen.findAllByTestId("version-item")).find(
+      (item) => item.dataset.versionId === "main",
+    );
+    await user.click(mainItem!);
+    await waitFor(() => expect(bridge.switchWorkspaceVersion).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(bridge.listWorkspaceVersions.mock.calls.length).toBeGreaterThanOrEqual(3),
+    );
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(2));
+    // A failed refresh keeps the rows on screen.
+    await act(async () => {
+      failSwitchRefresh(new Error("history failed"));
+      await Promise.resolve();
+    });
+    expect(await screen.findByText("Wrote the note in the try version")).toBeTruthy();
+
     // The switch never applied: the lookup names the version the page already
     // describes. Nothing is dropped and nothing is re-fetched.
     await act(async () => {
@@ -1473,7 +1665,7 @@ describe("history page", () => {
       await lookup.promise;
     });
     expect(await screen.findByText("Wrote the note in the try version")).toBeTruthy();
-    expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2);
+    expect(bridge.listHistory).toHaveBeenCalledTimes(2);
   });
 
   // The judge must know when court is over: a lookup that settles after the
@@ -1482,18 +1674,18 @@ describe("history page", () => {
   // fire four IPC reads for a workspace the user already left — the renderer
   // async-state invariant.
   it("a lookup that settles after unmount drops nothing and asks nothing", async () => {
-    const stranded = deferred<ListEngineMomentsResult>();
+    const stranded = deferred<TimelinePage>();
     let failSwitchRefresh!: (error: Error) => void;
     const switchRefresh = new Promise<never>((_resolve, reject) => {
       failSwitchRefresh = reject;
     });
-    const responses: Promise<ListEngineMomentsResult>[] = [
+    const responses: Promise<TimelinePage>[] = [
       stranded.promise,
       switchRefresh,
     ];
     let issued = 0;
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
+    bridge.listHistory = vi.fn(() => responses[issued++]!);
     const versionList = [
       {
         id: "main",
@@ -1531,7 +1723,7 @@ describe("history page", () => {
     const view = renderShell(bridge);
 
     await user.click(screen.getByTestId("activity-history"));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(1));
 
     await user.click(await screen.findByTestId("version-menu-button"));
     const mainItem = (await screen.findAllByTestId("version-item")).find(
@@ -1542,7 +1734,7 @@ describe("history page", () => {
     await waitFor(() =>
       expect(bridge.listWorkspaceVersions.mock.calls.length).toBeGreaterThanOrEqual(3),
     );
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(2));
     await act(async () => {
       failSwitchRefresh(new Error("history failed"));
       await Promise.resolve();
@@ -1568,7 +1760,7 @@ describe("history page", () => {
       await lookup.promise;
       await Promise.resolve();
     });
-    expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2);
+    expect(bridge.listHistory).toHaveBeenCalledTimes(2);
   });
 
   // A null page is not "no changes". Before the first read answers, the
@@ -1576,14 +1768,14 @@ describe("history page", () => {
   // failure. The moment the read answers with an empty timeline, the empty
   // copy is earned.
   it("claims neither empty nor failed until the first read answers", async () => {
-    const first = deferred<ListEngineMomentsResult>();
+    const first = deferred<TimelinePage>();
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listEngineMoments = vi.fn(() => first.promise);
+    bridge.listHistory = vi.fn(() => first.promise);
     const user = userEvent.setup();
     renderShell(bridge);
 
     await user.click(screen.getByTestId("activity-history"));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalled());
     expect(screen.queryByText("No changes yet")).toBeNull();
     expect(screen.queryByTestId("history-load-failed")).toBeNull();
 
@@ -1601,7 +1793,7 @@ describe("history page", () => {
   // The failure is still reported; it is reported about the read that had it.
   it("keeps the history page a sibling read's failure never touched", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listEngineMoments = vi.fn(async () =>
+    bridge.listHistory = vi.fn(async () =>
       historyPage([historyMoment("m-1", "Wrote the plan")]),
     );
     bridge.getTryInVersionState = vi.fn(() =>
@@ -1634,7 +1826,7 @@ describe("history page", () => {
     let nextStatus: typeof SYNC_STATUS | typeof syncingStatus = SYNC_STATUS;
     let failNextRead = false;
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listEngineMoments = vi.fn(async () =>
+    bridge.listHistory = vi.fn(async () =>
       historyPage([historyMoment("m-1", "Wrote the plan")]),
     );
     bridge.getSyncStatus = vi.fn(() => {
@@ -1693,7 +1885,7 @@ describe("history page", () => {
   // least gave up as soon as history did.
   it("says the history read failed while a sibling read never settles", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listEngineMoments = vi.fn(() => Promise.reject(new Error("history failed")));
+    bridge.listHistory = vi.fn(() => Promise.reject(new Error("history failed")));
     bridge.getSyncStatus = vi.fn(() => new Promise<never>(() => {}));
     const user = userEvent.setup();
     renderShell(bridge);
@@ -1708,7 +1900,7 @@ describe("history page", () => {
   // The mirror: a page the engine already served is nobody's hostage either.
   it("shows the history page while a sibling read never settles", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listEngineMoments = vi.fn(async () =>
+    bridge.listHistory = vi.fn(async () =>
       historyPage([historyMoment("m-1", "Wrote the plan")]),
     );
     bridge.getTryInVersionState = vi.fn(() => new Promise<never>(() => {}));
@@ -1725,7 +1917,7 @@ describe("history page", () => {
   // card while the timeline says it could not load.
   it("shows the try review a failed history read did not answer for", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listEngineMoments = vi.fn(() => Promise.reject(new Error("history failed")));
+    bridge.listHistory = vi.fn(() => Promise.reject(new Error("history failed")));
     bridge.getTryInVersionState = vi.fn(async () => ({ state: REVIEW_STATE }));
     const user = userEvent.setup();
     renderShell(bridge);
@@ -1744,15 +1936,15 @@ describe("history page", () => {
     const first = new Promise<never>((_resolve, reject) => {
       failFirst = reject;
     });
-    const second = deferred<ListEngineMomentsResult>();
+    const second = deferred<TimelinePage>();
     let issued = 0;
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listEngineMoments = vi.fn(() => (++issued === 1 ? first : second.promise));
+    bridge.listHistory = vi.fn(() => (++issued === 1 ? first : second.promise));
     const user = userEvent.setup();
     renderShell(bridge);
 
     await user.click(screen.getByTestId("activity-history"));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(1));
     await act(async () => {
       failFirst(new Error("history failed"));
       await Promise.resolve();
@@ -1760,7 +1952,7 @@ describe("history page", () => {
     expect(await screen.findByTestId("history-load-failed")).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: "Try again" }));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(2));
     expect(screen.queryByTestId("history-load-failed")).toBeNull();
     expect(screen.getByText("Loading history...")).toBeTruthy();
 
@@ -1772,30 +1964,24 @@ describe("history page", () => {
   });
 
   // the vector, the double failure the review found: a switch fails, its
-  // recovery read fails, the lookup contradicts the stranded page, and the
-  // re-fetch that drop owes fails too. The surface then has no page and no
-  // way to get one — and it used to answer that by telling a workspace with
-  // real history that it had no changes.
+  // recovery read fails, and the switch's own refresh fails too. The surface
+  // then has no page and no way to get one on its own — and it used to answer
+  // that by telling a workspace with real history that it had no changes.
   it("never says 'No changes yet' for a read that failed", async () => {
-    const stranded = deferred<ListEngineMomentsResult>();
-    const retry = deferred<ListEngineMomentsResult>();
+    const stranded = deferred<TimelinePage>();
+    const retry = deferred<TimelinePage>();
     let failSwitchRefresh!: (error: Error) => void;
     const switchRefresh = new Promise<never>((_resolve, reject) => {
       failSwitchRefresh = reject;
     });
-    let failRefetch!: (error: Error) => void;
-    const refetch = new Promise<never>((_resolve, reject) => {
-      failRefetch = reject;
-    });
-    const responses: Promise<ListEngineMomentsResult>[] = [
+    const responses: Promise<TimelinePage>[] = [
       stranded.promise,
       switchRefresh,
-      refetch,
       retry.promise,
     ];
     let issued = 0;
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
+    bridge.listHistory = vi.fn(() => responses[issued++]!);
     const versionList = [
       {
         id: "main",
@@ -1833,7 +2019,7 @@ describe("history page", () => {
     renderShell(bridge);
 
     await user.click(screen.getByTestId("activity-history"));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(1));
 
     await user.click(await screen.findByTestId("version-menu-button"));
     const mainItem = (await screen.findAllByTestId("version-item")).find(
@@ -1844,7 +2030,7 @@ describe("history page", () => {
     await waitFor(() =>
       expect(bridge.listWorkspaceVersions.mock.calls.length).toBeGreaterThanOrEqual(3),
     );
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(2));
     await act(async () => {
       failSwitchRefresh(new Error("history failed"));
       await Promise.resolve();
@@ -1858,16 +2044,9 @@ describe("history page", () => {
       );
       await stranded.promise;
     });
-    expect(await screen.findByText("Wrote the note in the try version")).toBeTruthy();
-
     await act(async () => {
       lookup.resolve({ versions: versionList, activeVersionId: "main" });
       await lookup.promise;
-    });
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(3));
-    await act(async () => {
-      failRefetch(new Error("re-fetch failed"));
-      await Promise.resolve();
     });
 
     // No page, and no read on the way. The surface says what happened.
@@ -1879,8 +2058,9 @@ describe("history page", () => {
     );
 
     // The Next has to work on this surface (copy.md): the control reads again.
+    expect(bridge.listHistory).toHaveBeenCalledTimes(2);
     await user.click(screen.getByRole("button", { name: "Try again" }));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(3));
     await act(async () => {
       retry.resolve(historyPage([historyMoment("m-main", "Back on main")], "main"));
       await retry.promise;
@@ -1900,7 +2080,7 @@ describe("history page", () => {
     });
     let issued = 0;
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listEngineMoments = vi.fn(() => {
+    bridge.listHistory = vi.fn(() => {
       issued += 1;
       if (issued === 1) {
         return Promise.resolve(
@@ -1934,11 +2114,11 @@ describe("history page", () => {
       versionReads += 1;
       return {
         versions: versionList,
-        activeVersionId: versionReads === 1 ? "try-1" : "main",
+        activeVersionId: versionReads === 1 ? "try-1" : "main", ...historyPageFields,
       };
     });
     bridge.switchWorkspaceVersion = vi.fn(async () => ({
-      activeVersionId: "main",
+      activeVersionId: "main", ...historyPageFields,
       changedFileCount: 0,
     }));
     const user = userEvent.setup();
@@ -1953,7 +2133,7 @@ describe("history page", () => {
     );
     await user.click(mainItem!);
     await waitFor(() => expect(bridge.switchWorkspaceVersion).toHaveBeenCalled());
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(2));
     await act(async () => {
       failSwitchRefresh(new Error("history failed"));
       await Promise.resolve();
@@ -1974,7 +2154,7 @@ describe("history page", () => {
   it("shows the new version's timeline when the switch and its refresh succeed", async () => {
     let issued = 0;
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listEngineMoments = vi.fn(() => {
+    bridge.listHistory = vi.fn(() => {
       issued += 1;
       if (issued === 1) {
         return Promise.resolve(
@@ -2009,11 +2189,11 @@ describe("history page", () => {
       versionReads += 1;
       return {
         versions: versionList,
-        activeVersionId: versionReads === 1 ? "try-1" : "main",
+        activeVersionId: versionReads === 1 ? "try-1" : "main", ...historyPageFields,
       };
     });
     bridge.switchWorkspaceVersion = vi.fn(async () => ({
-      activeVersionId: "main",
+      activeVersionId: "main", ...historyPageFields,
       changedFileCount: 0,
     }));
     const user = userEvent.setup();
@@ -2064,7 +2244,7 @@ describe("history page", () => {
             canMergeIntoMain: true,
           },
         ],
-        activeVersionId: switched ? "main" : "try-1",
+        activeVersionId: switched ? "main" : "try-1", ...historyPageFields,
       });
       versionReads += 1;
       if (versionReads === 1) return Promise.resolve(answer());
@@ -2074,7 +2254,7 @@ describe("history page", () => {
     });
     bridge.switchWorkspaceVersion = vi.fn(async () => {
       switched = true;
-      return { activeVersionId: "main", changedFileCount: 0 };
+      return { activeVersionId: "main", ...historyPageFields, changedFileCount: 0 };
     });
     const user = userEvent.setup();
     renderShell(bridge);
@@ -2109,20 +2289,20 @@ describe("history page", () => {
   // boundary. The dismissal here never settles, which is what a slow one looks
   // like from the timeline's side.
   it("reports Main before the dismissal it does not wait for", async () => {
-    const first = deferred<ListEngineMomentsResult>();
-    const stranded = deferred<ListEngineMomentsResult>();
+    const first = deferred<TimelinePage>();
+    const stranded = deferred<TimelinePage>();
     let failSwitchRefresh!: (error: Error) => void;
     const switchRefresh = new Promise<never>((_resolve, reject) => {
       failSwitchRefresh = reject;
     });
-    const responses: Promise<ListEngineMomentsResult>[] = [
+    const responses: Promise<TimelinePage>[] = [
       first.promise,
       stranded.promise,
       switchRefresh,
     ];
     let issued = 0;
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
+    bridge.listHistory = vi.fn(() => responses[issued++]!);
     bridge.getTryInVersionState = vi.fn(async () => ({ state: REVIEW_STATE }));
     let switched = false;
     bridge.listWorkspaceVersions = vi.fn(async () => ({
@@ -2142,11 +2322,11 @@ describe("history page", () => {
           canMergeIntoMain: true,
         },
       ],
-      activeVersionId: switched ? "main" : "try-1",
+      activeVersionId: switched ? "main" : "try-1", ...historyPageFields,
     }));
     bridge.switchWorkspaceVersion = vi.fn(async () => {
       switched = true;
-      return { activeVersionId: "main", changedFileCount: 0 };
+      return { activeVersionId: "main", ...historyPageFields, changedFileCount: 0 };
     });
     // The switch lands; the dismissal that follows it never does.
     bridge.dismissTryInVersionReview = vi.fn(() => new Promise<never>(() => {}));
@@ -2154,7 +2334,7 @@ describe("history page", () => {
     renderShell(bridge);
 
     await user.click(screen.getByTestId("activity-history"));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(1));
     await act(async () => {
       first.resolve(
         historyPage(
@@ -2170,7 +2350,7 @@ describe("history page", () => {
     act(() => {
       bridge.emitWorkspaceActivity();
     });
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(2));
 
     // Set aside: switch back to Main, then hang on the dismissal.
     await user.click(screen.getByTestId("try-review-set-aside"));
@@ -2179,7 +2359,7 @@ describe("history page", () => {
 
     // The boundary's own refresh fails, so the try-version answer is the only
     // one left — and it describes somewhere the user is no longer.
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(3));
     await act(async () => {
       failSwitchRefresh(new Error("history failed"));
       await Promise.resolve();
@@ -2197,21 +2377,19 @@ describe("history page", () => {
     expect(screen.queryByText("Edited the note in the try version")).toBeNull();
   });
 
-  // Statements about the active version are ordered by the ISSUE counter, and
-  // main serves these calls concurrently — so a request issued earlier can
-  // answer later. A late answer restating a version the workspace has already
-  // moved past must not lower what the workspace said: doing so would leave a
-  // watermark below the answers still in flight, and the next one describing
-  // the version the user left would read as fresh and paint it.
-  it("keeps a late answer from lowering what the workspace already said", async () => {
-    const opening = deferred<ListEngineMomentsResult>();
-    const late = deferred<ListEngineMomentsResult>();
-    const stale = deferred<ListEngineMomentsResult>();
+  // Main serves these calls concurrently, so a request issued earlier can
+  // answer later. Two activity refreshes are both superseded by the switch's
+  // own refresh. When that one fails, neither answer paints, whichever
+  // version it describes; the rows the switch dropped stay gone.
+  it("paints no superseded answer after the switch's own refresh failed", async () => {
+    const opening = deferred<TimelinePage>();
+    const late = deferred<TimelinePage>();
+    const stale = deferred<TimelinePage>();
     let failSwitchRefresh!: (error: Error) => void;
     const switchRefresh = new Promise<never>((_resolve, reject) => {
       failSwitchRefresh = reject;
     });
-    const responses: Promise<ListEngineMomentsResult>[] = [
+    const responses: Promise<TimelinePage>[] = [
       opening.promise,
       late.promise,
       stale.promise,
@@ -2219,7 +2397,7 @@ describe("history page", () => {
     ];
     let issued = 0;
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
+    bridge.listHistory = vi.fn(() => responses[issued++]!);
     let switched = false;
     bridge.listWorkspaceVersions = vi.fn(async () => ({
       versions: [
@@ -2238,17 +2416,17 @@ describe("history page", () => {
           canMergeIntoMain: true,
         },
       ],
-      activeVersionId: switched ? "main" : "try-1",
+      activeVersionId: switched ? "main" : "try-1", ...historyPageFields,
     }));
     bridge.switchWorkspaceVersion = vi.fn(async () => {
       switched = true;
-      return { activeVersionId: "main", changedFileCount: 0 };
+      return { activeVersionId: "main", ...historyPageFields, changedFileCount: 0 };
     });
     const user = userEvent.setup();
     renderShell(bridge);
 
     await user.click(screen.getByTestId("activity-history"));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(1));
     await act(async () => {
       opening.resolve(
         historyPage(
@@ -2264,11 +2442,11 @@ describe("history page", () => {
     act(() => {
       bridge.emitWorkspaceActivity();
     });
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(2));
     act(() => {
       bridge.emitWorkspaceActivity();
     });
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(3));
 
     // The switch: the workspace says Main, which is the newest statement of all
     // — issued after both refreshes. The switch's own refresh fails, so nothing
@@ -2279,23 +2457,20 @@ describe("history page", () => {
     );
     await user.click(mainItem!);
     await waitFor(() => expect(bridge.switchWorkspaceVersion).toHaveBeenCalled());
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(4));
     await act(async () => {
       failSwitchRefresh(new Error("history failed"));
       await Promise.resolve();
     });
 
-    // The earlier of the two refreshes answers first, and it is right about
-    // Main — it just says nothing the workspace has not already said.
+    // The earlier of the two refreshes answers first, about Main.
     await act(async () => {
       late.resolve(historyPage([historyMoment("m-late", "Back on main")], "main"));
       await late.promise;
     });
-    expect(await screen.findByText("Back on main")).toBeTruthy();
+    expect(screen.queryByText("Back on main")).toBeNull();
 
-    // The later one describes the version the user left. It is newer than that
-    // Main answer and older than the workspace's statement, and it loses to the
-    // statement.
+    // The later one describes the version the user left.
     await act(async () => {
       stale.resolve(
         historyPage(
@@ -2307,17 +2482,19 @@ describe("history page", () => {
     });
 
     expect(screen.queryByText("Edited the note in the try version")).toBeNull();
-    expect(screen.getByText("Back on main")).toBeTruthy();
+    expect(screen.queryByText("Wrote the note in the try version")).toBeNull();
+    expect(screen.getByTestId("history-load-failed")).toBeTruthy();
   });
 
   // The same callback runs for merges, conflict resolutions, and a "Set aside"
-  // that was already on Main — none of which change the active version. Clearing
-  // the held refresh on every one of them threw away a good answer, and when the
-  // pagination holding it and the replacement refresh both failed, the timeline
-  // never got it.
-  it("keeps a held refresh when the version state changed without a switch", async () => {
-    const first = deferred<ListEngineMomentsResult>();
-    const refreshed = deferred<ListEngineMomentsResult>();
+  // that was already on Main — none of which change the active version. Its
+  // refresh supersedes the one a pagination was holding. When that refresh and
+  // the pagination both fail, the rows on screen stay; the held answer, asked
+  // again since, does not paint. (useHistoryPage.test.tsx pins that a version
+  // statement alone keeps a held refresh.)
+  it("keeps the rows on screen when the refresh that superseded a held one fails", async () => {
+    const first = deferred<TimelinePage>();
+    const refreshed = deferred<TimelinePage>();
     let failPage!: (error: Error) => void;
     const page = new Promise<never>((_resolve, reject) => {
       failPage = reject;
@@ -2326,7 +2503,7 @@ describe("history page", () => {
     const dismissRefresh = new Promise<never>((_resolve, reject) => {
       failDismissRefresh = reject;
     });
-    const responses: Promise<ListEngineMomentsResult>[] = [
+    const responses: Promise<TimelinePage>[] = [
       first.promise,
       refreshed.promise,
       page,
@@ -2334,17 +2511,17 @@ describe("history page", () => {
     ];
     let issued = 0;
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
+    bridge.listHistory = vi.fn(() => responses[issued++]!);
     bridge.getTryInVersionState = vi.fn(async () => ({ state: REVIEW_STATE }));
     const user = userEvent.setup();
     renderShell(bridge);
 
     await user.click(screen.getByTestId("activity-history"));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(1));
     await act(async () => {
       first.resolve({
         ...historyPage([historyMoment("m-first", "Added the launch checklist")]),
-        nextBeforeMomentOrder: 1,
+        nextCursor: timelineCursor(1),
       });
       await first.promise;
     });
@@ -2353,19 +2530,18 @@ describe("history page", () => {
     act(() => {
       bridge.emitWorkspaceActivity();
     });
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(2));
     await user.click(screen.getByTestId("engine-history-load-more"));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(3));
     await act(async () => {
       refreshed.resolve(historyPage([historyMoment("m-refreshed", "Rewrote the plan")]));
       await refreshed.promise;
     });
 
     // Set aside while already on Main: no switch runs, but the shell hears the
-    // version state changed. Its refresh fails, so the held answer is still the
-    // only one anyone has.
+    // version state changed and refreshes. That refresh fails.
     await user.click(screen.getByTestId("try-review-set-aside"));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(4));
     expect(bridge.switchWorkspaceVersion).not.toHaveBeenCalled();
     await act(async () => {
       failDismissRefresh(new Error("history failed"));
@@ -2377,7 +2553,8 @@ describe("history page", () => {
       await Promise.resolve();
     });
 
-    expect(await screen.findByText("Rewrote the plan")).toBeTruthy();
+    expect(await screen.findByText("Added the launch checklist")).toBeTruthy();
+    expect(screen.queryByText("Rewrote the plan")).toBeNull();
   });
 
   // A failure is an answer for the version rule: it answers about somewhere
@@ -2386,7 +2563,7 @@ describe("history page", () => {
   // "about the open timeline" and posted a banner for a version nobody is
   // looking at.
   it("says nothing about a pagination that failed for the version the user left", async () => {
-    const first = deferred<ListEngineMomentsResult>();
+    const first = deferred<TimelinePage>();
     let failPage!: (error: Error) => void;
     const page = new Promise<never>((_resolve, reject) => {
       failPage = reject;
@@ -2395,14 +2572,14 @@ describe("history page", () => {
     const switchRefresh = new Promise<never>((_resolve, reject) => {
       failSwitchRefresh = reject;
     });
-    const responses: Promise<ListEngineMomentsResult>[] = [
+    const responses: Promise<TimelinePage>[] = [
       first.promise,
       page,
       switchRefresh,
     ];
     let issued = 0;
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
+    bridge.listHistory = vi.fn(() => responses[issued++]!);
     let switched = false;
     bridge.listWorkspaceVersions = vi.fn(async () => ({
       versions: [
@@ -2421,24 +2598,24 @@ describe("history page", () => {
           canMergeIntoMain: true,
         },
       ],
-      activeVersionId: switched ? "main" : "try-1",
+      activeVersionId: switched ? "main" : "try-1", ...historyPageFields,
     }));
     bridge.switchWorkspaceVersion = vi.fn(async () => {
       switched = true;
-      return { activeVersionId: "main", changedFileCount: 0 };
+      return { activeVersionId: "main", ...historyPageFields, changedFileCount: 0 };
     });
     const user = userEvent.setup();
     renderShell(bridge);
 
     await user.click(screen.getByTestId("activity-history"));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(1));
     await act(async () => {
       first.resolve({
         ...historyPage(
           [historyMoment("m-first", "Wrote the note in the try version")],
           "try-1",
         ),
-        nextBeforeMomentOrder: 1,
+        nextCursor: timelineCursor(1),
       });
       await first.promise;
     });
@@ -2446,7 +2623,7 @@ describe("history page", () => {
 
     // Earlier moments are on their way when the user leaves this version.
     await user.click(screen.getByTestId("engine-history-load-more"));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(2));
 
     await user.click(await screen.findByTestId("version-menu-button"));
     const mainItem = (await screen.findAllByTestId("version-item")).find(
@@ -2457,7 +2634,7 @@ describe("history page", () => {
     // Nothing commits for the new version either, so the committed watermark
     // never moves — the only thing that can tell the failure apart is which
     // version it belongs to.
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(3));
     await act(async () => {
       failSwitchRefresh(new Error("history failed"));
       await Promise.resolve();
@@ -2475,108 +2652,41 @@ describe("history page", () => {
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
-  // Starting or ending a run is the user acting. Merely observing that the run
-  // changed under the rendered label is not: that reading came from its own
-  // request, which can be older than a refresh the shell is still waiting on.
-  // Superseding on it threw the newer answer away, and a run seen alive just
-  // before it ended left the indicator running with nothing to correct it.
-  it("keeps an observed agent state from rejecting a newer refresh", async () => {
-    const first = deferred<ListEngineMomentsResult>();
-    const afterTheRun = deferred<ListEngineMomentsResult>();
-    const responses: Promise<ListEngineMomentsResult>[] = [
-      first.promise,
-      afterTheRun.promise,
-    ];
-    let issued = 0;
+  // Main pushes each change of the run slot, so the dot needs no read on
+  // refresh: a run seen by Settings or by chat dispatch shows the same way.
+  it("follows main's run state pushes and never reads agent runs on refresh", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
-    let activeRunId: string | null = null;
-    bridge.getAgentRunStatus = vi.fn(async () => ({
-      mcpEnabled: true,
-      activeRun: activeRunId
-        ? {
-            id: activeRunId,
-            startedAt: 1,
-            agentId: "agent-1",
-            onBehalfOf: "ice",
-            status: "running" as const,
-          }
-        : null,
-      lastRun: null,
-    }));
-    // The panel's reread is held open through getMcpConfig, which only the
-    // settings panel calls — so the shell's own requests run unimpeded.
-    const heldPanelReads: Array<() => void> = [];
-    let panelReads = 0;
-    const mcpConfig: McpConfigResult = {
-      command: "dohc-mcp",
-      args: [],
-      workspacePath: WORKSPACE.rootPath,
-      home: "/tmp/dohc-home",
-    };
-    bridge.getMcpConfig = vi.fn(() => {
-      panelReads += 1;
-      if (panelReads === 1) return Promise.resolve(mcpConfig);
-      return new Promise<McpConfigResult>((resolveRead) => {
-        heldPanelReads.push(() => resolveRead(mcpConfig));
-      });
-    });
-    const user = userEvent.setup();
     renderShell(bridge);
+    await waitFor(() => expect(bridge.readAgentRunState).toHaveBeenCalledOnce());
+    await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalled());
+    const setupReads = bridge.getAgentRunStatus.mock.calls.length;
+    const statusReads = bridge.getSyncStatus.mock.calls.length;
 
-    await user.click(screen.getByTestId("activity-history"));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
-    await act(async () => {
-      first.resolve(historyPage([historyMoment("m-first", "Added the launch checklist")]));
-      await first.promise;
-    });
-    expect(screen.queryByTestId("agent-run-indicator")).toBeNull();
-
-    // Settings opens while no run is going, so the panel renders "no run".
-    await user.keyboard("{Control>}k{/Control}");
-    await user.click(
-      await within(await screen.findByTestId("command-palette")).findByText(
-        "Settings: Open Agents & MCP",
-      ),
-    );
-    await screen.findByTestId("mcp-enable-toggle");
-
-    // Wait for the panel's initial read before starting the run.
-    await waitFor(() =>
-      expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"),
-    );
-
-    // A run starts, and the toggle's reread catches it alive — but the reread
-    // is still in flight.
-    activeRunId = "run-1";
-    await user.click(screen.getByTestId("mcp-enable-toggle"));
-    await waitFor(() => expect(heldPanelReads.length).toBe(1));
-
-    // The run ends, and the refresh that captured the END is waiting on its
-    // history page.
-    activeRunId = null;
     act(() => {
       bridge.emitWorkspaceActivity();
     });
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
-
-    // The reread answers first, reporting the run it saw alive.
-    await act(async () => {
-      for (const answerRead of heldPanelReads) answerRead();
-      await Promise.resolve();
-    });
-    expect(bridge.startAgentRun).not.toHaveBeenCalled();
-    expect(bridge.endAgentRun).not.toHaveBeenCalled();
-
-    // Then the refresh lands, and it knows the run is over.
-    await act(async () => {
-      afterTheRun.resolve(historyPage([historyMoment("m-after", "Rewrote the plan")]));
-      await afterTheRun.promise;
-    });
-
     await waitFor(() =>
-      expect(screen.queryByTestId("agent-run-indicator")).toBeNull(),
+      expect(bridge.getSyncStatus.mock.calls.length).toBeGreaterThan(statusReads),
     );
+    expect(bridge.getAgentRunStatus).toHaveBeenCalledTimes(setupReads);
+    expect(screen.queryByTestId("agent-run-indicator")).toBeNull();
+
+    act(() => {
+      bridge.emitAgentRunState({ workspaceId: WORKSPACE.workspaceId, revision: 1, active: true });
+    });
+    expect(screen.getByTestId("agent-run-indicator")).toBeTruthy();
+    // Another workspace's run, and an answer older than the one shown, change nothing.
+    act(() => {
+      bridge.emitAgentRunState({ workspaceId: "ws-other", revision: 2, active: false });
+      bridge.emitAgentRunState({ workspaceId: WORKSPACE.workspaceId, revision: 1, active: false });
+    });
+    expect(screen.getByTestId("agent-run-indicator")).toBeTruthy();
+    act(() => {
+      bridge.emitAgentRunState({ workspaceId: WORKSPACE.workspaceId, revision: 3, active: false });
+    });
+    expect(screen.queryByTestId("agent-run-indicator")).toBeNull();
+    expect(bridge.readAgentRunState).toHaveBeenCalledOnce();
+    expect(bridge.getAgentRunStatus).toHaveBeenCalledTimes(setupReads);
   });
 
   // A failure reports, and it takes nothing. The lane's watermark is what an
@@ -2607,7 +2717,7 @@ describe("history page", () => {
     renderShell(bridge);
 
     await user.click(screen.getByTestId("activity-history"));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalled());
     expect(screen.getByTestId("sync-status").dataset.state).toBe("synced");
 
     // One refresh's status read is still in flight.
@@ -2655,7 +2765,7 @@ describe("history page", () => {
     renderShell(bridge);
 
     await user.click(screen.getByTestId("activity-history"));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalled());
 
     // The older refresh's read is still in flight when a newer one answers.
     nextRead = "older";
@@ -2692,15 +2802,15 @@ describe("history page", () => {
   // is still the one now failing. A banner about a card the user dismissed
   // describes nothing on screen.
   it("keeps a failed read from reporting after the user superseded its lane", async () => {
-    const first = deferred<ListEngineMomentsResult>();
-    const refreshed = deferred<ListEngineMomentsResult>();
-    const responses: Promise<ListEngineMomentsResult>[] = [
+    const first = deferred<TimelinePage>();
+    const refreshed = deferred<TimelinePage>();
+    const responses: Promise<TimelinePage>[] = [
       first.promise,
       refreshed.promise,
     ];
     let issued = 0;
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
+    bridge.listHistory = vi.fn(() => responses[issued++]!);
     let failSecondTryRead!: (error: Error) => void;
     const secondTryRead = new Promise<never>((_resolve, reject) => {
       failSecondTryRead = reject;
@@ -2774,7 +2884,7 @@ describe("history page", () => {
     renderShell(bridge);
 
     await user.click(screen.getByTestId("activity-history"));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalled());
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
 
     // Two refreshes overlap on this lane. Neither has answered.
@@ -2808,170 +2918,44 @@ describe("history page", () => {
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
-  // The twin of the test above, on the other way a read settles. The lane's
-  // own reader answers the observation, and that read can fail — after a newer
-  // refresh already committed the lane. A failure judged without the token
-  // then raises a banner about a reading nothing is showing: the newer answer
-  // is on screen, correct, and the user is told it could not be read.
-  it("keeps a failed agent-lane read from reporting over a newer refresh", async () => {
-    const first = deferred<ListEngineMomentsResult>();
-    const afterTheRun = deferred<ListEngineMomentsResult>();
-    const responses: Promise<ListEngineMomentsResult>[] = [
-      first.promise,
-      afterTheRun.promise,
-    ];
-    let issued = 0;
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
-    // The observation's own read is the one that fails, and it is the first
-    // agent read issued after the held panel read is released — nothing else
-    // asks in between, because every shell refresh here is driven by the test.
-    let failNextAgentRead = false;
-    let failObservationRead!: (error: Error) => void;
-    let runIsAlive = false;
-    bridge.getAgentRunStatus = vi.fn(() => {
-      if (failNextAgentRead) {
-        failNextAgentRead = false;
-        return new Promise<never>((_resolve, reject) => {
-          failObservationRead = reject;
-        });
-      }
-      return Promise.resolve({
-        mcpEnabled: true,
-        activeRun: runIsAlive
-          ? {
-              id: "run-1",
-              startedAt: 1,
-              agentId: "agent-1",
-              onBehalfOf: "ice",
-              status: "running" as const,
-            }
-          : null,
-        lastRun: null,
-      });
-    });
-    const heldPanelReads: Array<() => void> = [];
-    let panelReads = 0;
-    const mcpConfig: McpConfigResult = {
-      command: "dohc-mcp",
-      args: [],
-      workspacePath: WORKSPACE.rootPath,
-      home: "/tmp/dohc-home",
-    };
-    bridge.getMcpConfig = vi.fn(() => {
-      panelReads += 1;
-      if (panelReads === 1) return Promise.resolve(mcpConfig);
-      return new Promise<McpConfigResult>((resolveRead) => {
-        heldPanelReads.push(() => resolveRead(mcpConfig));
-      });
-    });
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await user.click(screen.getByTestId("activity-history"));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
-    await act(async () => {
-      first.resolve(historyPage([historyMoment("m-first", "Added the launch checklist")]));
-      await first.promise;
-    });
-
-    await user.keyboard("{Control>}k{/Control}");
-    await user.click(
-      await within(await screen.findByTestId("command-palette")).findByText(
-        "Settings: Open Agents & MCP",
-      ),
-    );
-    await screen.findByTestId("mcp-enable-toggle");
-
-    // A run starts under the rendered label, so the toggle's reread reports it
-    // rather than starting or ending anything.
-    runIsAlive = true;
-    await user.click(screen.getByTestId("mcp-enable-toggle"));
-    await waitFor(() => expect(heldPanelReads.length).toBe(1));
-
-    // Release the reread. The observation lands and asks the lane's own
-    // reader, whose read is the one that will fail.
-    failNextAgentRead = true;
-    await act(async () => {
-      for (const answerRead of heldPanelReads) answerRead();
-      await Promise.resolve();
-    });
-    await waitFor(() => expect(failObservationRead).toBeTruthy());
-
-    // A newer refresh answers the same lane first, and it says the run is
-    // alive. That is what the user is looking at.
-    act(() => {
-      bridge.emitWorkspaceActivity();
-    });
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
-    await act(async () => {
-      afterTheRun.resolve(historyPage([historyMoment("m-after", "Rewrote the plan")]));
-      await afterTheRun.promise;
-    });
-    expect(await screen.findByTestId("agent-run-indicator")).toBeTruthy();
-
-    // Only now does the older read fail. It has nothing to report: the lane
-    // already holds a newer answer, and it is on screen.
-    await act(async () => {
-      failObservationRead(new Error("agent status failed"));
-      await Promise.resolve();
-    });
-    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
-    expect(screen.getByTestId("agent-run-indicator")).toBeTruthy();
-  });
-
   // Supersession is per LANE. The user dismissed a review; that says nothing
-  // about sync or agent state, and the dismiss emits no activity event, so
-  // rejecting those lanes too would strand the workspace status with no other source.
+  // about sync state, and the dismiss emits no activity event, so rejecting
+  // that lane too would strand the workspace status with no other source.
   it("suppresses only the lane the user wrote when a refresh answers late", async () => {
-    const first = deferred<ListEngineMomentsResult>();
-    const refreshed = deferred<ListEngineMomentsResult>();
-    const responses: Promise<ListEngineMomentsResult>[] = [
+    const first = deferred<TimelinePage>();
+    const refreshed = deferred<TimelinePage>();
+    const responses: Promise<TimelinePage>[] = [
       first.promise,
       refreshed.promise,
     ];
     let issued = 0;
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
+    bridge.listHistory = vi.fn(() => responses[issued++]!);
     bridge.getTryInVersionState = vi.fn(async () => ({ state: REVIEW_STATE }));
     // The workspace moves on before the second refresh is issued, so that
-    // refresh carries fresh news on the two lanes the user did not write.
+    // refresh carries fresh news on the lane the user did not write.
     let movedOn = false;
     bridge.getSyncStatus = vi.fn(async () =>
       movedOn ? { ...SYNC_STATUS, state: "syncing" as const } : SYNC_STATUS,
     );
-    bridge.getAgentRunStatus = vi.fn(async () => ({
-      mcpEnabled: false,
-      activeRun: movedOn
-        ? {
-            id: "run-1",
-            startedAt: 1,
-            agentId: "agent-1",
-            onBehalfOf: "ice",
-            status: "running" as const,
-          }
-        : null,
-      lastRun: null,
-    }));
     const user = userEvent.setup();
     renderShell(bridge);
 
     await user.click(screen.getByTestId("activity-history"));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(1));
     await act(async () => {
       first.resolve(historyPage([historyMoment("m-first", "Added the launch checklist")]));
       await first.promise;
     });
     expect(await screen.findByTestId("try-review-card")).toBeTruthy();
     expect(screen.getByTestId("sync-status").dataset.state).toBe("synced");
-    expect(screen.queryByTestId("agent-run-indicator")).toBeNull();
 
     // A refresh is in flight when the user dismisses the review.
     movedOn = true;
     act(() => {
       bridge.emitWorkspaceActivity();
     });
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(2));
     await user.click(screen.getByTestId("try-review-keep-working"));
     await waitFor(() => expect(screen.queryByTestId("try-review-card")).toBeNull());
 
@@ -2980,127 +2964,19 @@ describe("history page", () => {
       await refreshed.promise;
     });
 
-    // The lane the user wrote stays written; the lanes they did not, update.
+    // The lane the user wrote stays written; the lane they did not, updates.
     expect(screen.queryByTestId("try-review-card")).toBeNull();
     await waitFor(() =>
       expect(screen.getByTestId("sync-status").dataset.state).toBe("syncing"),
     );
-    expect(screen.getByTestId("agent-run-indicator")).toBeTruthy();
   });
 
-  // The no-history refresh wrote both of its lanes with no request token
-  // at all. Nothing else in the shell writes a lane untimed, so the rule read
-  // as held everywhere — but these two lanes are shared, and an untimed write
-  // is ranked by ARRIVAL. A refresh issued before the run started could land
-  // after the refresh that saw it and turn the indicator back off, with
-  // nothing to correct it: the write moved no watermark, so the lane still
-  // believed nothing had answered.
-  it("keeps an older no-history refresh from undoing a newer agent answer", async () => {
-    const idle: AgentRunStatusResult = {
-      mcpEnabled: false,
-      activeRun: null,
-      lastRun: null,
-    };
-    const running: AgentRunStatusResult = {
-      mcpEnabled: false,
-      activeRun: {
-        id: "run-1",
-        startedAt: 1,
-        agentId: "agent-1",
-        onBehalfOf: "ice",
-        status: "running",
-      },
-      lastRun: null,
-    };
-    const heldRead = deferred<AgentRunStatusResult>();
-    // Which read gets what is set by this test, not by a call count: activity
-    // refreshes keep reading after bootstrap has shared its first answer.
-    let holdNextRead = false;
-    let runIsActive = false;
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.getAgentRunStatus = vi.fn(() => {
-      if (holdNextRead) {
-        holdNextRead = false;
-        return heldRead.promise;
-      }
-      return Promise.resolve(runIsActive ? running : idle);
-    });
-    renderShell(bridge);
-
-    await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalled());
-    expect(screen.queryByTestId("agent-run-indicator")).toBeNull();
-
-    // One agent read from a refresh is still in flight.
-    holdNextRead = true;
-    act(() => {
-      bridge.emitWorkspaceActivity();
-    });
-    await waitFor(() => expect(holdNextRead).toBe(false));
-
-    // The run starts, and a newer refresh answers it.
-    runIsActive = true;
-    act(() => {
-      bridge.emitWorkspaceActivity();
-    });
-    await waitFor(() => expect(screen.getByTestId("agent-run-indicator")).toBeTruthy());
-
-    // The older read answers last, from before the run existed.
-    await act(async () => {
-      heldRead.resolve(idle);
-      await heldRead.promise;
-    });
-    expect(screen.getByTestId("agent-run-indicator")).toBeTruthy();
-  });
-
-  it("commits sync status when the sibling agent read fails", async () => {
-    const syncingStatus = { ...SYNC_STATUS, state: "syncing" as const };
-    let failNextAgentRead = false;
-    let statusChanged = false;
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.getSyncStatus = vi.fn(async () =>
-      statusChanged ? syncingStatus : SYNC_STATUS,
-    );
-    bridge.getAgentRunStatus = vi.fn(async () => {
-      if (failNextAgentRead) {
-        failNextAgentRead = false;
-        throw new Error("agent status failed");
-      }
-      return {
-        mcpEnabled: false,
-        activeRun: null,
-        lastRun: null,
-      };
-    });
-    renderShell(bridge);
-
-    await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalledTimes(1));
-    expect(screen.getByTestId("sync-status").dataset.state).toBe("synced");
-
-    statusChanged = true;
-    failNextAgentRead = true;
-    act(() => {
-      bridge.emitWorkspaceActivity();
-    });
-
-    await waitFor(() =>
-      expect(screen.getByTestId("sync-status").dataset.state).toBe("syncing"),
-    );
-    const error = await screen.findByTestId("workspace-shell-error");
-    expect(error.textContent).toContain("dohc could not refresh agent runs.");
-    expect(error.textContent).not.toContain("Could not refresh history.");
-  });
-
-  it("marks history ready when one status lane succeeds", async () => {
+  it("marks history ready when the status read succeeds", async () => {
     const previousOrdinal = rendererMarks.readSwitchTimeline().at(-1)?.ordinal ?? 0;
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.getAgentRunStatus = vi.fn(async () => {
-      throw new Error("agent status failed");
-    });
     renderShell(bridge);
 
     await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect(bridge.getAgentRunStatus).toHaveBeenCalledTimes(1));
-    await screen.findByTestId("workspace-shell-error");
     await waitFor(() => {
       const timeline = rendererMarks
         .readSwitchTimeline()
@@ -3333,7 +3209,7 @@ describe("versions surface after a failed capture build", () => {
     // own read said engine-ON (this control renders on that read alone), and
     // main's status has landed carrying the failure. Without them the no-call
     // below passes vacuously in the pre-read window.
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
     await waitFor(() =>
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
@@ -3380,7 +3256,7 @@ describe("versions surface after a failed capture build", () => {
     // Both halves of the premise. The titlebar Chats button renders on the
     // renderer's own read alone, so it proves that read answered engine-ON;
     // `data-ready` proves the open has not resolved.
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
     expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
 
     expect(screen.queryByTestId("version-menu-button")).toBeNull();
@@ -3444,7 +3320,7 @@ describe("versions surface after a failed capture build", () => {
       await Promise.resolve();
     });
     expect(bridge.getSyncStatus).not.toHaveBeenCalled();
-    expect(bridge.listEngineMoments).not.toHaveBeenCalled();
+    expect(bridge.listHistory).not.toHaveBeenCalled();
     expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
 
     // Now the renderer's read answers engine-ON. Every input the old gate had
@@ -3458,7 +3334,7 @@ describe("versions surface after a failed capture build", () => {
       });
       await settings.promise;
     });
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
 
     expect(screen.queryByTestId("version-menu-button")).toBeNull();
     expect(bridge.listWorkspaceVersions).not.toHaveBeenCalled();
@@ -3492,7 +3368,7 @@ describe("versions surface after a failed capture build", () => {
 
     // Before the decision lands, the tab mounts no page and claims nothing:
     // the renderer's own read proves nothing about what main recorded.
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
     expect(screen.queryByTestId("version-compare-page")).toBeNull();
     expect(screen.queryByTestId("version-compare-off")).toBeNull();
     expect(bridge.listWorkspaceVersions).not.toHaveBeenCalled();
@@ -3620,7 +3496,7 @@ describe("moment-diff tab after a failed capture build", () => {
 
     // Before the decision lands the tab mounts no page and claims nothing:
     // the renderer's own read proves nothing about what main recorded.
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
     expect(screen.queryByTestId("engine-moment-diff-page")).toBeNull();
     expect(screen.queryByTestId("moment-diff-off")).toBeNull();
     expect(bridge.readEngineMoment).not.toHaveBeenCalled();

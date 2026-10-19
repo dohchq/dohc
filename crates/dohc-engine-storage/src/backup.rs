@@ -57,6 +57,7 @@ const COMPARED_TABLES: &[&str] = &[
     "live_audit_record_chunks",
     "live_audit_events",
     "live_audit_projection_authors",
+    "live_audit_projection_contributions",
     "live_audit_event_publications",
     "live_audit_event_conflicts",
     "live_accepted_updates",
@@ -86,6 +87,7 @@ const COMPARED_TABLES: &[&str] = &[
     "versions",
     "active_versions",
     "file_objects",
+    "capture_file_holds",
     "blobs",
     "binary_blobs",
     "path_aliases",
@@ -101,6 +103,9 @@ const COMPARED_TABLES: &[&str] = &[
     "collection_relation_edges",
     "materialization_jobs",
     "materialization_displacements",
+    "materialization_retained",
+    "materialization_displacement_reads",
+    "materialization_staging_locations",
     "ydoc_docs",
     "ydoc_updates",
     "ydoc_snapshots",
@@ -110,7 +115,15 @@ const COMPARED_TABLES: &[&str] = &[
     "ydoc_recovery_decisions",
     "owner_ydoc_outboxes",
     "owner_ydoc_outbox_entries",
+    "owner_live_stops",
     "replication_log",
+    "hosted_replicas",
+    "hosted_documents",
+    "hosted_withheld_befores",
+    "hosted_deferred_ops",
+    "hosted_retired_files",
+    "hosted_parked_snapshots",
+    "hosted_parked_path_aliases",
     "replication_refused_moment_blobs",
     "replication_refused_ydoc_blobs",
     "replication_pending_conflict_bundles",
@@ -504,6 +517,49 @@ mod tests {
     use super::COMPARED_TABLES;
 
     #[test]
+    fn vacuum_backup_includes_commits_retained_in_wal_after_actor_close() {
+        use crate::{EngineStore, NoFaults, StorageError};
+        use dohc_test_scratch::ScratchDir;
+        let dir = ScratchDir::new().unwrap();
+        let path = dir.join("engine.db");
+        let mut store = EngineStore::open_for_actor(&path, 0, None, None).unwrap();
+        store
+            .read_with(|c| c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)"))
+            .unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute_batch(
+                    "CREATE TABLE backup_wal_proof(id INTEGER PRIMARY KEY, body TEXT);
+                INSERT INTO backup_wal_proof VALUES(1,'committed')",
+                )
+                .map_err(StorageError::corrupt_public)?;
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+        let (log, backfilled): (i64, i64) = store
+            .read_with(|c| {
+                c.query_row("PRAGMA wal_checkpoint(NOOP)", [], |r| {
+                    Ok((r.get(1)?, r.get(2)?))
+                })
+            })
+            .unwrap();
+        assert!(log > backfilled, "fixture must contain WAL-only commits");
+        drop(store);
+        assert!(std::fs::metadata(dir.join("engine.db-wal")).unwrap().len() > 0);
+        let store = EngineStore::open_read_only(&path).unwrap();
+        let snapshot = dir.join("snapshot.db");
+        store.vacuum_into(&snapshot).unwrap();
+        let restored = rusqlite::Connection::open(&snapshot).unwrap();
+        let value: String = restored
+            .query_row("SELECT body FROM backup_wal_proof WHERE id=1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(value, "committed");
+        assert!(!dir.join("snapshot.db-wal").exists());
+    }
+
+    #[test]
     fn restore_comparison_rejects_missing_or_lost_live_and_recovery_tables() {
         use crate::{EngineStore, NoFaults, StorageError};
         use dohc_test_scratch::ScratchDir;
@@ -523,6 +579,8 @@ mod tests {
             let source=crate::hex_sha256(b"");
             tx.execute("INSERT INTO blobs(sha256,text,byte_length) VALUES (?1,'',0)",[&source]).unwrap();
             tx.execute("INSERT INTO file_objects(workspace_id,object_id,created_at_ms) VALUES ('workspace','owner',0)",[]).unwrap();
+            tx.execute("INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES ('workspace','main','main','Main',0)",[]).unwrap();
+            tx.execute("INSERT INTO capture_file_holds VALUES ('workspace','main','owner','held.md',?1,1,'ydoc-resolution-not-representable',0,1,0)",[&sha]).unwrap();
             tx.execute("INSERT INTO ydoc_docs(workspace_id,version_id,object_id,updated_at_ms) VALUES ('workspace','main','owner',0)",[]).unwrap();
             tx.execute("INSERT INTO ydoc_owner_base_sources VALUES ('workspace','main','owner',?1,'owner.md','source',?2,0)",rusqlite::params![sha,source]).unwrap();
             tx.execute("INSERT INTO ydoc_owner_activation_sources VALUES ('activation','relay','workspace','main','owner',?1,'source',?2,?1,'{}')",rusqlite::params![sha,source]).unwrap();
@@ -540,7 +598,8 @@ mod tests {
             tx.execute("INSERT INTO live_audit_settlement_conflicts VALUES ('workspace','peer',0,?1,'{}',?2)",rusqlite::params![sha,source]).unwrap();
             tx.execute("INSERT INTO live_audit_record_chunks VALUES (?1,0,?1)",[&sha]).unwrap();
             tx.execute("INSERT INTO live_audit_events VALUES ('relay','workspace','main','object',?1,1,?1,?1,1,'delivery',1,NULL,NULL,1)",[&sha]).unwrap();
-            tx.execute(r#"INSERT INTO live_audit_projection_authors VALUES ('workspace','peer',0,'main','object','note.md','lineage','[{"kind":"human","humanId":"recipient","humanName":"Recipient"}]')"#,[]).unwrap();
+            tx.execute(r#"INSERT INTO live_audit_projection_authors VALUES ('workspace','peer',0,'main','object','note.md','lineage','[{"kind":"human","humanId":"recipient","humanName":"Recipient"}]',NULL)"#,[]).unwrap();
+            tx.execute(r#"INSERT INTO live_audit_projection_contributions VALUES ('workspace','peer',0,?1,'[{"kind":"human","humanId":"recipient","humanName":"Recipient"}]')"#,[&sha]).unwrap();
             tx.execute("INSERT INTO live_audit_event_publications VALUES ('relay','workspace','main','object',?1,1,'peer',0)",[&sha]).unwrap();
             tx.execute("INSERT INTO live_audit_event_conflicts VALUES ('workspace','peer',0,?1)",[&sha]).unwrap();
             Ok::<_, StorageError>(())
@@ -554,6 +613,7 @@ mod tests {
             "live_audit_record_chunks",
             "live_audit_events",
             "live_audit_projection_authors",
+            "live_audit_projection_contributions",
             "live_audit_event_publications",
             "live_audit_event_conflicts",
             "live_audit_base_publications",
@@ -573,6 +633,7 @@ mod tests {
             "replication_log",
             "replication_refused_moment_blobs",
             "replication_refused_ydoc_blobs",
+            "capture_file_holds",
         ]
         .into_iter()
         .enumerate()

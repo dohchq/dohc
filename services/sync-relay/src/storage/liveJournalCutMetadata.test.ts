@@ -1,3 +1,4 @@
+import {createLiveBufferBudget, LiveConnectionLimitError} from "@dohc/live-session-contract/live-connection";
 import {afterEach, expect, it} from "vitest";
 import {cleanupLiveDeliveryFixtures, registered} from "../../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport.js";
 
@@ -65,7 +66,8 @@ it("refuses non-canonical coverage on a stored checkpoint", () => {
     const original = f.storage.readLiveUpdateJournalCut({document});
     if (original.kind !== "cut") throw new Error("Expected checkpoint cut");
     expect(original.cut.checkpoint.cursor).not.toBeNull();
-    expect(original.cut.checkpoint.metadata?.checkpointCoverage).toEqual([]);
+    expect(original.cut.checkpoint.metadata?.checkpointCoverage).toEqual([{author: {kind: "unattributed"},
+      structRanges: [{clientId: expect.any(Number), startClock: 0, endClock: 1}], deletionRanges: []}]);
     expect(original.cut.suffix).toEqual([]);
     const coverage = JSON.stringify([{author: {kind: "human", humanId: "owner", humanName: "Owner"},
       structRanges: [{clientId: 999, startClock: 5, endClock: 6}, {clientId: 999, startClock: 0, endClock: 1}], deletionRanges: []}]);
@@ -97,3 +99,17 @@ it.each([{coverage: []}, {coverage: [{author: {kind: "human", humanId: "owner", 
       expect(f.storage.readLiveUpdateJournalCut({document})).toEqual(original);
     } finally {f.close();}
   });
+
+it("charges journal bytes before materializing the cut", () => {
+  const f = registered({deployment: true});
+  try {
+    const document = f.input.evidence.document;
+    const budget = createLiveBufferBudget(1);
+    expect(() => f.storage.readLiveUpdateJournalCut({document}, budget.reserve)).toThrowError(LiveConnectionLimitError);
+    expect(budget.usage()).toBe(0);
+    let charge = 0;
+    const read = f.storage.readLiveUpdateJournalCut({document}, size => {charge = size;});
+    expect(read.kind).toBe("cut");
+    expect(charge).toBeGreaterThan(1);
+  } finally {f.close();}
+});

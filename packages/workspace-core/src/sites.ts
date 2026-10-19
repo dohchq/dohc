@@ -156,7 +156,7 @@ const PACKAGE_SCRIPT_KEYS = [
   "poststart",
   "build",
 ] as const;
-const BUILD_OUTPUT_DIRS = ["dist", "build", "out"];
+export const BUILD_OUTPUT_DIRS = ["dist", "build", "out"];
 // Matches the bridge contract's SitePackageInfo.title bound (z.string().max(200))
 // — a title over this length must never reach discoverSites' output, or the
 // whole listSites response fails to parse over one site's config value.
@@ -212,14 +212,16 @@ const WEB_SCRIPT_TOKENS = [
   "webpack",
 ];
 
-const CONFIG_PATTERNS = [
-  /^app\.config\.(cjs|cts|js|mjs|mts|ts)$/,
-  /^astro\.config\.(cjs|cts|js|json|mjs|mts|ts)$/,
-  /^next\.config\.(cjs|cts|js|mjs|mts|ts)$/,
-  /^svelte\.config\.(cjs|cts|js|mjs|mts|ts)$/,
-  /^tanstack\.config\.(cjs|cts|js|mjs|mts|ts)$/,
-  /^vite\.config\.(cjs|cts|js|mjs|mts|ts)$/,
-  /^vinxi\.config\.(cjs|cts|js|mjs|mts|ts)$/,
+const FRAMEWORK_CONFIG_NAMES = new Set(
+  ["app", "astro", "next", "svelte", "tanstack", "vite", "vinxi"].flatMap(name =>
+    ["cjs", "cts", "js", "mjs", "mts", "ts", ...(name === "astro" ? ["json"] : [])]
+      .map(extension => `${name}.config.${extension}`)),
+);
+
+export const SITE_DISCOVERY_FILE_NAMES: readonly string[] = [
+  "index.html", "dohc.json", "package.json", "app.publish.json",
+  "pnpm-lock.yaml", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "bun.lock", "bun.lockb",
+  ...FRAMEWORK_CONFIG_NAMES,
 ];
 
 const IGNORED_SITE_SEGMENTS = new Set([
@@ -681,7 +683,7 @@ export function detectSitePackageManager(
 }
 
 function isFrameworkConfig(name: string): boolean {
-  return CONFIG_PATTERNS.some((pattern) => pattern.test(name));
+  return FRAMEWORK_CONFIG_NAMES.has(name);
 }
 
 export function frameworkConfigName(names: ReadonlySet<string>): string | undefined {

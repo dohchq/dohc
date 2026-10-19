@@ -1,9 +1,10 @@
+import {LIVE_CONNECTION_LIMIT_MESSAGES} from "@dohc/live-session-contract/live-connection";
 // @vitest-environment jsdom
 import {act} from "react";
 import {createRoot, type Root} from "react-dom/client";
 import {afterEach, beforeEach, expect, it, vi} from "vitest";
 import {markdownToYDoc, getDohcYDocBodyFragment} from "@dohc/ydoc-projection";
-import {setFrontmatterValue} from "@dohc/ydoc-projection/frontmatter";
+import {setFrontmatterValue} from "@dohc/ydoc-projection/frontmatter-map";
 import type {NamedLiveBrowserState} from "@dohc/ydoc-projection/named-live-browser-transport";
 import {NamedDocumentEditor} from "./NamedDocumentEditor";
 
@@ -65,4 +66,13 @@ it("asks the reader to check the connection when the connection failed", async (
   await act(async () => root.render(<NamedDocumentEditor session={{...live, state: () => closed}} path="docs/a.md" onState={() => {}}/>));
   expect(container.querySelector('[role="status"]')?.textContent).toBe("Editing paused. Check your connection, then retry.");
   expect(container.querySelector("button")?.textContent).toBe("Retry connection");
+});
+
+it.each(Object.entries(LIVE_CONNECTION_LIMIT_MESSAGES))("shows the %s refusal in named and link editors", async (code, message) => {
+  const live = session("Body"), unavailable = {...live.state(), status: "disconnected" as const, reason: code};
+  for (const link of [false, true]) {
+    await act(async () => root.render(<NamedDocumentEditor session={{...live, state: () => unavailable}} path="docs/a.md" link={link} onState={() => {}}/>));
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(message);
+    expect(container.querySelector("button")?.textContent).toBe("Try again");
+  }
 });

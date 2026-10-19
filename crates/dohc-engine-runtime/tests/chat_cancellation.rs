@@ -46,12 +46,12 @@ async fn cancelled_core_chat_mutations_leave_channels_threads_messages_and_revis
         request_id: Some("existing-thread-request".to_owned()),
     };
     actor
-        .chat_thread_start(start.clone(), CancellationToken::new())
+        .chat_thread_start(start.clone(), None, CancellationToken::new())
         .await
         .expect("create prerequisite thread and opening message");
 
     let channels_before = actor
-        .chat_channels_list(workspace_id.clone())
+        .chat_channels_list(workspace_id.clone(), None, 500)
         .await
         .expect("channels before cancellation");
     let threads_before = actor
@@ -147,7 +147,7 @@ async fn cancelled_core_chat_mutations_leave_channels_threads_messages_and_revis
     ));
     assert!(matches!(
         actor
-            .chat_thread_start(cancelled_start.clone(), token.clone())
+            .chat_thread_start(cancelled_start.clone(), None, token.clone())
             .await,
         Err(RuntimeError::Cancelled)
     ));
@@ -158,13 +158,13 @@ async fn cancelled_core_chat_mutations_leave_channels_threads_messages_and_revis
         Err(RuntimeError::Cancelled)
     ));
     assert!(matches!(
-        actor.chat_message_send(message.clone(), token).await,
+        actor.chat_message_send(message.clone(), None, token).await,
         Err(RuntimeError::Cancelled)
     ));
 
     assert_eq!(
         actor
-            .chat_channels_list(workspace_id.clone())
+            .chat_channels_list(workspace_id.clone(), None, 500)
             .await
             .expect("channels after cancellation"),
         channels_before
@@ -232,7 +232,7 @@ async fn cancelled_core_chat_mutations_leave_channels_threads_messages_and_revis
         .await
         .expect("agent channel input is valid");
     actor
-        .chat_thread_start(cancelled_start, CancellationToken::new())
+        .chat_thread_start(cancelled_start, None, CancellationToken::new())
         .await
         .expect("channel thread input is valid");
     actor
@@ -240,7 +240,7 @@ async fn cancelled_core_chat_mutations_leave_channels_threads_messages_and_revis
         .await
         .expect("file thread input is valid");
     actor
-        .chat_message_send(message, CancellationToken::new())
+        .chat_message_send(message, None, CancellationToken::new())
         .await
         .expect("message input is valid");
     supervisor.close(&db).expect("close actor");

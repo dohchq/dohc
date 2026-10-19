@@ -1,3 +1,4 @@
+import { renderCliResult } from "./render";
 import { describe, expect, it } from "vitest";
 import {
   CLI_PROTOCOL_VERSION,
@@ -8,6 +9,20 @@ import {
 
 const token = "a".repeat(64);
 const argsBase = { cwd: "C:/ws", actor: "agent" as const };
+
+it("parses Access answers through the field allowlist and refuses caller workspace selectors", () => {
+  const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "accessSharing", args: { ...argsBase, lane: "received" } };
+  expect(cliRequestSchema.safeParse(request).success).toBe(true);
+  expect(cliRequestSchema.safeParse({ ...request, args: { ...request.args, workspaceId: "other" } }).success).toBe(false);
+  expect(cliRequestSchema.safeParse({ ...request, args: { ...request.args, accountId: "other" } }).success).toBe(false);
+  const answer = parseCliResult("accessSharing", { ref: null, rows: [{ kind: "share", shareId: "share", grantId: "grant", via: "received", status: "removed",
+      granterUserId: null, granterEmail: null, recipientUserId: "recipient", recipientEmail: null, subjectName: null, sharerName: null,
+      selector: null, access: null, generation: null, removalMessage: "The owner removed your access." }],
+    visibility: "visible", freshness: "stale", checkedAtMs: 7, unknownReason: null,
+    nextCursor: null, coverage: { kind: "received-account", complete: true, observation: "interval" }, bearerUrl: "secret" });
+  expect(answer).not.toHaveProperty("bearerUrl");
+  expect(JSON.parse(renderCliResult("accessSharing", answer)).rows[0].removalMessage).toBe("The owner removed your access.");
+});
 
 it("accepts only CLI and MCP counting labels, with an optional label on the strict envelope", () => {
   const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "groups", args: argsBase };
@@ -43,6 +58,10 @@ it.each(["collectionSetFields", "collectionCreateRecord"])("validates the agent 
 });
 
 describe("moment author results", () => {
+  it("preserves a relay-confirmed person's public name", () => {
+    const result = momentsResult([{kind: "human", humanId: "recipient", humanName: "Recipient", relayConfirmed: true}]);
+    expect(parseCliResult("moments", result)).toEqual(result);
+  });
   it.each([
     { kind: "agent", agentId: "agent" },
     { kind: "automation", automationId: "collection:tasks#stamp", depth: 4 },
@@ -58,6 +77,23 @@ describe("moment author results", () => {
     const result = momentsResult([{ kind: "human", humanId: "ada" }, { kind: "agent", agentId: "agent" }]);
     expect(parseCliResult("moments", result)).toEqual(result);
     expect(() => parseCliResult("moments", momentsResult([]))).toThrow();
+  });
+
+  it("keeps a live author snapshot's account holder, declared agent, and link holder", () => {
+    const result = momentsResult([
+      { kind: "human", humanId: "owner", humanName: "Owner" },
+      { kind: "agent", agentId: "writer", agentName: "Writer", onBehalfOf: "owner" },
+      { kind: "link", publicPrincipalId: "public_1", label: "Anonymous" },
+    ]);
+    expect(parseCliResult("moments", result)).toEqual(result);
+    const fullHuman = momentsResult([
+      { kind: "human", humanId: "owner", humanName: "Owner", relayConfirmed: true, onBehalfOf: "owner" },
+    ]);
+    expect(parseCliResult("moments", fullHuman)).toEqual(fullHuman);
+    for (const author of [
+      { kind: "human", humanId: "owner", humanName: "Owner", agentName: "Writer" },
+      { kind: "link", publicPrincipalId: "public_1", label: "Anonymous", grantId: "grant" },
+    ]) expect(() => parseCliResult("moments", momentsResult([author]))).toThrow();
   });
 
   it("refuses a link author that claims a person", () => {
@@ -263,16 +299,17 @@ describe("collection result schemas", () => {
             next: { present: true, value: "open" },
             authorOriginId: "origin_agent",
             actorKind: "agent",
-            onBehalfOf: "user:ice",
+            onBehalfOf: "public-holder",
             depth: 0,
             recordedAtMs: 12,
             automationRun: null,
+            linkAuthor: { kind: "link", grantId: "link", grantGeneration: 2, publicPrincipalId: "public-holder" },
           },
         ],
       }),
     ).toMatchObject({
       ok: true,
-      history: [{ historyId: 3, actorKind: "agent", onBehalfOf: "user:ice" }],
+      history: [{ historyId: 3, actorKind: "agent", onBehalfOf: "public-holder", linkAuthor: { publicPrincipalId: "public-holder" } }],
     });
   });
 
@@ -396,4 +433,17 @@ it("validates file write authors and preserves partial batch results", () => {
   expect(cliRequestSchema.safeParse({ ...input, args: { ...input.args, files: [] } }).success).toBe(false);
   const failed = { ok: false, written: ["1.txt", "2.txt"], path: "3.txt", reason: "Changed. Read again.", currentSha256: "a".repeat(64) };
   expect(parseCliResult("fileWrite", failed)).toEqual(failed);
+});
+
+it.each(["accessObject", "accessSharing"] as const)("preserves the unknown reason in %s results", verb => {
+  const answer = parseCliResult(verb, { ref: null, rows: [], visibility: "unknown", freshness: "unknown", checkedAtMs: null,
+    unknownReason: "other-account", nextCursor: null, coverage: { kind: "unavailable", complete: false, observation: "interval" } });
+  expect(JSON.parse(renderCliResult(verb, answer))).toHaveProperty("unknownReason", "other-account");
+});
+
+it.each(["accessObject", "accessSharing"] as const)("preserves withheld answers in %s results", verb => {
+  const answer = { ref: null, rows: [], visibility: "hidden", freshness: "unknown", checkedAtMs: null,
+    unknownReason: null, nextCursor: null, coverage: { kind: "unavailable", complete: false, observation: "interval" } };
+  expect(JSON.parse(renderCliResult(verb, parseCliResult(verb, answer)))).toMatchObject({ visibility: "hidden", unknownReason: null });
+  expect(() => parseCliResult(verb, { ...answer, unknownReason: "unreadable" })).toThrow();
 });

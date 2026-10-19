@@ -8,29 +8,29 @@ export function runOwnerCancellationFixture(root, sourceRoot, kind, signal, clea
   const put = (path, text) => { mkdirSync(dirname(join(root, path)), { recursive: true }); writeFileSync(join(root, path), text); };
   const copy = (path) => put(path, readFileSync(join(sourceRoot, path)));
   put("package.json", '{"type":"module"}');
-  for (const file of ["build.mjs", "verify.mjs", "js-tests.mjs", "selection.mjs", "renderer-selection.mjs", "cancellation.mjs", "timing.mjs"]) {
+  for (const file of ["build.mjs", "verify.mjs", "ticket-evidence.mjs", "queue.mjs", "js-tests.mjs", "selection.mjs", "cancellation.mjs", "timing.mjs", "flaky.mjs"]) {
     const path = `scripts/verification/${file}`;
     if (existsSync(join(sourceRoot, path))) copy(path);
   }
   put("apps/desktop/package.json", "{}");
   put("scripts/verification/rust-reuse.mjs", "export const rustIdentity=()=>({});export const finishRustEvidence=()=>({kind:'fixture'});export const refreshRustReuse=()=>{throw Error('unexpected reuse');};");
-  put("pnpm-workspace.yaml", "fixture workspace");
-  put("packages/workspace-auth/package.json", '{"name":"@dohc/workspace-auth","scripts":{"test":"vitest run"}}');
+  put("scripts/verification/linux.mjs", "export const linuxDistro=()=>null;export const linuxRustJob=()=>{throw Error('unexpected Linux job');};");
   put(".github/workflows/pr-checks.yml", "fixture workflow");
-  put("node_modules/js-yaml/index.js", "exports.load=s=>s==='fixture workspace'?{packages:['packages/*']}:s==='fixture workflow'?{jobs:{changes:{steps:[{with:{filters:'fixture filters'}}]}}}:{rust:[],js:['**']};");
+  put("node_modules/js-yaml/index.js", "exports.load=s=>s==='fixture workflow'?{jobs:{changes:{steps:[{with:{filters:'fixture filters'}}]}}}:{rust:[],js:['**'],repository:[]};");
   put("tools/rust-engine-program/build-slot-real.mjs", readFileSync(join(sourceRoot, "tools/rust-engine-program/build-slot.mjs")));
-  put("tools/rust-engine-program/build-slot.mjs", "export {acquireExclusiveSlot} from './build-slot-real.mjs';export const capBuildParallelism=source=>({...source});export const resolveBuildBudget=()=>null;export const freeDiskGb=()=>100;export const acquireBuildSlot=()=>{throw Error('unexpected slot acquisition')};export const acquireVerificationSlot=()=>null;");
+  put("tools/rust-engine-program/build-slot.mjs", "export {acquireExclusiveSlot, buildQueueStatus, heldVerificationSlots, maxVerificationLanes, readVerificationLanes} from './build-slot-real.mjs';export const capBuildParallelism=source=>({...source});export const resolveBuildBudget=()=>null;export const freeDiskGb=()=>100;export const acquireBuildSlot=()=>{throw Error('unexpected slot acquisition')};export const acquireVerificationSlot=()=>null;");
   put("apps/desktop/scripts/require-e2e-engine.mjs", "export const requireE2eEngine=()=>{};");
   put("scripts/verification/doctor.mjs", "export const doctor=()=>({checks:[]});");
-  put("scripts/verification/admission.mjs", "export const admissionPreflight=()=>{};export const installedDependenciesMatch=()=>false;export const verificationAdmission=()=>({lightweight:false,reason:'fixture full lane'});");
+  put("scripts/verification/admission.mjs", "export const admissionPreflight=()=>{};export const installedDependenciesMatch=()=>false;");
   put("tools/rust-engine-program/tree-provenance.mjs", "export const readTreeState=()=>({head:'fixture'});export const classifyTreeProvenance=()=>({status:'PASS'});");
-  put("tools/rust-engine-program/git-read.mjs", readFileSync(join(sourceRoot, "tools/rust-engine-program/git-read.mjs")));
+  for (const file of ["git-read.mjs", "gate-commands.mjs"]) copy(`tools/rust-engine-program/${file}`);
   if (kind === "verify") put("scripts/verification/build.mjs", `
     import {existsSync} from 'node:fs';
     import {interruptDuringSync} from './process.mjs';
     export const prepare=async()=>{};
     export const assertPrepared=()=>({});
     export const buildEnvironment=()=>process.env;
+    export const withBuildBudget=action=>action(process.env);
     export const enginePath='fixture-engine';
     export const stagedEnginePath='fixture-staged-engine';
     export const assertIndependentStagedEngine=()=>{};
@@ -61,7 +61,7 @@ export function runOwnerCancellationFixture(root, sourceRoot, kind, signal, clea
         if(args[0]==='inspect')return {stdout:'healthy'};
         if(args[0]==='port')return {stdout:'127.0.0.1:1234'};
         if(args[0]==='rm'){
-          if(args[2]!==readFileSync('container','utf8'))throw Error('wrong container');
+          if(args.at(-1)!==readFileSync('container','utf8'))throw Error('wrong container');
           if(${cleanupFails})throw Error('fixture cleanup rejected');
           rmSync('container');return {stdout:'removed'};
         }
@@ -109,9 +109,11 @@ export function runOwnerCancellationFixture(root, sourceRoot, kind, signal, clea
   `], { cwd: root, encoding: "utf8", timeout: 20_000 });
   const json = (path) => existsSync(join(root, path)) ? JSON.parse(readFileSync(join(root, path), "utf8")) : null;
   const reports = join(root, ".agent-artifacts/verification");
+  // The blocked second run writes its own report, and a clock step can sort it first.
+  const ownerReport = () => readdirSync(reports).map(name => json(`.agent-artifacts/verification/${name}/result.json`)).find(report => report?.scope === "js") ?? null;
   return { pid: result.pid, status: result.status, signal: result.signal, error: result.error?.message, stdout: result.stdout, stderr: result.stderr,
     entered: existsSync(join(root, "sync-entered")), syncReturned: existsSync(join(root, "sync-returned")),
     lockExists: existsSync(join(root, ".dohc-dev/verification/build.json.lock")), containerExists: existsSync(join(root, "container")),
     outcome: json("outcome.json"), commands: readFileSync(join(root, "commands.jsonl"), "utf8").trim().split(/\r?\n/).map(JSON.parse),
-    report: existsSync(reports) ? json(`.agent-artifacts/verification/${readdirSync(reports)[0]}/result.json`) : null };
+    report: existsSync(reports) ? ownerReport() : null };
 }

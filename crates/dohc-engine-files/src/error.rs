@@ -41,6 +41,11 @@ pub enum FilesError {
     ScanIo {
         path: String,
         kind: std::io::ErrorKind,
+        /// The OS error number, which tells EPERM from EACCES where `kind`
+        /// cannot.
+        raw_os_error: Option<i32>,
+        /// See [`privacy_denied`].
+        privacy_denied: bool,
     },
 
     /// The workspace root does not resolve to a readable directory.
@@ -84,12 +89,51 @@ pub enum FilesError {
     InvalidCaptureReceipt { path: String },
 }
 
+/// The code of an io failure that is macOS refusing dohc a folder.
+pub const PRIVACY_DENIED: &str = "privacy-denied";
+
+/// Whether an io failure at `path` is macOS refusing dohc a folder: one the
+/// person chose "Don't Allow" for, such as Documents, or a removable or
+/// network volume. The refusal is EPERM. Ordinary file permissions fail with
+/// EACCES, and std maps both to `PermissionDenied`. A file or folder locked
+/// in Finder also fails writes with EPERM, so a failure at a locked `path`,
+/// or in a locked parent, is not a privacy refusal.
+pub fn privacy_denied(err: &std::io::Error, path: &std::path::Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        // EPERM is 1 on every Unix.
+        err.raw_os_error() == Some(1) && !locked(path) && !path.parent().is_some_and(locked)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (err, path);
+        false
+    }
+}
+
+/// Whether the user immutable flag (Finder's Locked) or the system one is set.
+#[cfg(target_os = "macos")]
+fn locked(path: &std::path::Path) -> bool {
+    use std::os::macos::fs::MetadataExt;
+    const UF_IMMUTABLE: u32 = 0x0000_0002;
+    const SF_IMMUTABLE: u32 = 0x0002_0000;
+    std::fs::symlink_metadata(path)
+        .is_ok_and(|metadata| metadata.st_flags() & (UF_IMMUTABLE | SF_IMMUTABLE) != 0)
+}
+
 impl FilesError {
-    /// Construct a [`FilesError::ScanIo`] from a path and io error.
-    pub(crate) fn scan_io(path: impl Into<String>, err: &std::io::Error) -> Self {
+    /// Construct a [`FilesError::ScanIo`] from the failed directory, the path
+    /// its message names, and the io error.
+    pub(crate) fn scan_io(
+        dir: &std::path::Path,
+        path: impl Into<String>,
+        err: &std::io::Error,
+    ) -> Self {
         FilesError::ScanIo {
             path: path.into(),
             kind: err.kind(),
+            raw_os_error: err.raw_os_error(),
+            privacy_denied: privacy_denied(err, dir),
         }
     }
 
@@ -100,6 +144,10 @@ impl FilesError {
             FilesError::TooManyEntries { .. } => "too-many-entries",
             FilesError::FileTooLarge { .. } => "file-too-large",
             FilesError::DiffTooLarge { .. } => "diff-too-large",
+            FilesError::ScanIo {
+                privacy_denied: true,
+                ..
+            } => PRIVACY_DENIED,
             FilesError::ScanIo { .. } => "scan-io",
             FilesError::InvalidRoot { .. } => "invalid-root",
             FilesError::PoolUnavailable { .. } => "pool-unavailable",

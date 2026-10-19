@@ -16,6 +16,19 @@ mod binary_write;
 mod capture_recovery;
 mod capture_write;
 mod delete_rename;
+mod file_resolution;
+pub use file_resolution::{FileResolution, FileResolveTarget};
+mod operations;
+pub use operations::{
+    OPERATION_ID_PREFIX, OperationMoment, ensure_operation_published_in, operation_moments_in,
+    preflight_undo_operation_in, replayed_undo_operation_in, undo_correlation_id,
+    undo_operation_in_tx, undo_request_is_replay_in, validate_operation_id,
+};
+mod history;
+pub use history::{
+    HistoryCursor, HistoryMarkerPosition, HistoryMomentMetadata, HistoryMomentPosition,
+    HistoryPageRead,
+};
 mod request_ledger;
 mod rollback;
 mod source_capture;
@@ -29,7 +42,8 @@ pub use binary_write::{write_binary_in_tx, write_published_binary_in_tx};
 pub use capture_recovery::{
     CAPTURE_RECOVERY_ORIGIN, CLEARED_CAPTURE_RECOVERY_ORIGIN, CaptureRecovery,
     capture_recoveries_in, clear_capture_recovery_in, is_capture_recovery_origin,
-    record_capture_recovery_in_tx,
+    record_capture_recovery_in_tx, record_deleted_capture_recovery_in_tx,
+    record_keyed_capture_recovery_in_tx,
 };
 pub use capture_write::{
     CAPTURE_ORIGIN, CaptureIngestBatchContext, CaptureManifestSeedEntry,
@@ -37,14 +51,16 @@ pub use capture_write::{
     capture_ingest_binary_in_tx, capture_ingest_binary_with_admission_in_tx,
     capture_ingest_in_batch_with_admission_in_tx, capture_ingest_in_tx,
     capture_ingest_with_admission_in_tx, capture_manifest_seed, capture_retire_in_tx,
-    derive_capture_moment_id, derive_capture_object_id, derive_capture_retire_moment_id,
-    validate_write_input, write_history_text_in_tx, write_projected_text_in_tx,
-    write_published_history_text_in_tx, write_published_text_in_tx, write_text_in_tx,
+    capture_retire_respelled_in_tx, derive_capture_moment_id, derive_capture_object_id,
+    derive_capture_retire_moment_id, ensure_capture_object_in_tx, validate_write_input,
+    write_history_text_in_tx, write_projected_text_in_tx, write_published_history_text_in_tx,
+    write_published_text_in_tx, write_text_in_tx,
 };
 
 pub use delete_rename::{
     delete_text_in_tx, delete_text_in_tx_checked, finish_checked_delete_in_tx,
-    prepare_checked_delete_in_tx, validate_delete_input,
+    moment_has_replication_dependents_in, prepare_checked_delete_in_tx, rename_text_in_tx,
+    validate_delete_input,
 };
 
 pub use rollback::{
@@ -66,6 +82,7 @@ use crate::records::{
     SnapshotRecord, SnapshotView, TextBlobRead, TextSnapshot, VersionKind, VersionRecord,
     WriteResult,
 };
+use dohc_engine_storage::text;
 use dohc_engine_storage::{
     EngineStore, FaultInjector, MAX_IDENTIFIER_BYTES, StorageError, TxnOutcome, hex,
 };
@@ -79,11 +96,21 @@ pub const MAX_TEXT_BYTES: usize = 10 * 1024 * 1024;
 pub const MAX_METADATA_FIELD_BYTES: usize = 16 * 1024;
 pub const MAX_AUTHOR_FIELD_BYTES: usize = MAX_IDENTIFIER_BYTES;
 // Without control characters, quotes and backslashes take at most 2 bytes.
-// The largest live entry is a 66-byte automation skeleton + 2 * 2 * 512
-// bytes of identity fields = 2,114 bytes.
-pub const MAX_AUTHOR_ENTRY_BYTES: usize =
-    r#"{"automationId":"","depth":64,"kind":"automation","onBehalfOf":""}"#.len()
-        + 2 * 2 * MAX_AUTHOR_FIELD_BYTES;
+// The largest live entry is a declared agent: a 71-byte skeleton + 3 * 2 * 512
+// bytes for its id, name and principal = 3,143 bytes. The largest two-field
+// entries, an 80-byte Edit link at the largest grant generation and a 66-byte
+// automation, take 2,128 and 2,114 bytes.
+pub const MAX_AUTHOR_ENTRY_BYTES: usize = larger(
+    r#"{"agentId":"","agentName":"","depth":64,"kind":"agent","onBehalfOf":""}"#.len()
+        + 3 * 2 * MAX_AUTHOR_FIELD_BYTES,
+    larger(
+        r#"{"automationId":"","depth":64,"kind":"automation","onBehalfOf":""}"#.len(),
+        r#"{"grantGeneration":9007199254740991,"grantId":"","kind":"link","principalId":""}"#.len(),
+    ) + 2 * 2 * MAX_AUTHOR_FIELD_BYTES,
+);
+const fn larger(left: usize, right: usize) -> usize {
+    if left > right { left } else { right }
+}
 const _: () = assert!(crate::MAX_CHANGE_ATTRIBUTION_DEPTH < 100);
 pub const MAX_MOMENT_AUTHORS: usize = 1_024;
 // The journal embeds authors as a JSON value, with no second string encoding.
@@ -419,13 +446,7 @@ impl<'a> VersionedTextStore<'a> {
             if !referenced {
                 return Ok(None);
             }
-            let lengths: Option<(i64, i64)> = conn
-                .query_row(
-                    "SELECT byte_length, LENGTH(CAST(text AS BLOB)) \
-                     FROM blobs WHERE sha256 = ?1",
-                    params![sha256],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
+            let lengths: Option<(i64, i64)> = text::lengths(conn, sha256)
                 .optional()
                 .map_err(DomainError::sql_corrupt)?;
             let Some((byte_length, actual_length)) = lengths else {
@@ -533,14 +554,7 @@ impl<'a> VersionedTextStore<'a> {
             let sha = snapshot.blob_sha256.ok_or(DomainError::StateCorrupt {
                 reason: "text head without a text blob",
             })?;
-            let row: Option<(i64, i64, Option<String>)> = conn
-                .query_row(
-                    "SELECT byte_length, LENGTH(CAST(text AS BLOB)), \
-                     CASE WHEN byte_length <= ?2 AND LENGTH(CAST(text AS BLOB)) <= ?2 THEN text END \
-                     FROM blobs WHERE sha256 = ?1",
-                    rusqlite::params![sha, cap as i64],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
+            let row: Option<(i64, i64, Option<String>)> = text::capped(conn, &sha, cap as i64)
                 .optional()
                 .map_err(DomainError::sql_corrupt)?;
             let Some((byte_length, actual_length, text)) = row else {
@@ -677,6 +691,8 @@ impl<'a> VersionedTextStore<'a> {
             });
         }
         self.store.read_with(|conn| {
+            let snapshot = text::ReadSnapshot::new(conn).map_err(DomainError::sql_corrupt)?;
+
             if let Some(version_id) = &query.version_id
                 && !version_exists(conn, &query.workspace_id, version_id)?
             {
@@ -688,22 +704,20 @@ impl<'a> VersionedTextStore<'a> {
 
             // Probe limit+1 to detect a following page.
             let probe = query.limit.saturating_add(1);
-            let mut sql = String::from(
-                "SELECT moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
+            let mut sql = String::from("SELECT moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
                  operation, after_blob_sha256, before_present, before_blob_sha256, \
                  before_latest_moment_id, metadata_origin, metadata_summary, \
                  metadata_correlation_id, author_json, sync_record_only, \
                  COALESCE(after_content_kind, 'text'), after_binary.sha256, \
-                 COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             CASE WHEN after_text_blob.byte_length <= 131072 AND LENGTH(CAST(after_text_blob.text AS BLOB)) <= 131072 THEN after_text_blob.text END, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             CASE WHEN before_text_blob.byte_length <= 131072 AND LENGTH(CAST(before_text_blob.text AS BLOB)) <= 131072 THEN before_text_blob.text END, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length), \
-             COALESCE(LENGTH(CAST(after_text_blob.text AS BLOB)), LENGTH(after_binary.bytes)), \
-             COALESCE(LENGTH(CAST(before_text_blob.text AS BLOB)), LENGTH(before_binary.bytes)), \
+                 COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             after_text_blob.sha256, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             before_text_blob.sha256, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length), \
+             COALESCE(after_text_blob.byte_length, LENGTH(after_binary.bytes)), \
+             COALESCE(before_text_blob.byte_length, LENGTH(before_binary.bytes)), \
              m.payload_before_path \
                  FROM moments m \
                  LEFT JOIN binary_blobs after_binary ON after_binary.sha256 = m.after_binary_sha256 \
                  LEFT JOIN binary_blobs before_binary ON before_binary.sha256 = m.before_binary_sha256 \n             LEFT JOIN blobs after_text_blob ON after_text_blob.sha256 = m.after_blob_sha256 \n             LEFT JOIN blobs before_text_blob ON before_text_blob.sha256 = m.before_blob_sha256 \
                  WHERE workspace_id = ?1 AND NOT EXISTS (SELECT 1 FROM materialization_jobs j \
-                 WHERE j.workspace_id=m.workspace_id AND j.job_id='restore-delete-mat_'||m.moment_id)",
-            );
+                 WHERE j.workspace_id=m.workspace_id AND j.job_id='restore-delete-mat_'||m.moment_id)");
             let mut binds: Vec<Box<dyn rusqlite::ToSql>> =
                 vec![Box::new(query.workspace_id.clone())];
             if let Some(version_id) = &query.version_id {
@@ -735,17 +749,21 @@ impl<'a> VersionedTextStore<'a> {
                 moments.push(row.map_err(DomainError::sql_corrupt)??);
             }
 
+            let mut moments = hydrate_moments(conn, moments)?;
             let next_before_moment_order = if moments.len() as i64 > query.limit {
                 moments.truncate(query.limit as usize);
                 moments.last().map(|m| m.moment_order)
             } else {
                 None
             };
-            Ok(MomentPage {
-                moments,
-                next_before_moment_order,
-                latest_moment_order: latest,
-            })
+            snapshot.finish(
+                Ok(MomentPage {
+                    moments,
+                    next_before_moment_order,
+                    latest_moment_order: latest,
+                }),
+                DomainError::sql_corrupt,
+            )
         })
     }
 
@@ -761,9 +779,8 @@ impl<'a> VersionedTextStore<'a> {
             .collect()
     }
 
-    /// One PAGE of snapshot metadata in `version`, ordered by path, with NO
-    /// body hydration — `LENGTH(CAST(text AS BLOB))` sizes a text head in
-    /// bytes without copying it out of the row. Keyset: strictly after
+    /// One page of snapshot metadata, ordered by path, using recorded byte lengths
+    /// without reading bodies. Keyset: strictly after
     /// `after_path` (None = from the start).
     pub fn list_snapshot_metadata(
         &self,
@@ -780,7 +797,7 @@ impl<'a> VersionedTextStore<'a> {
                        WHEN 'binary' THEN bb.sha256 ELSE s.blob_sha256 END, \
                      CASE COALESCE(s.content_kind, 'text') \
                        WHEN 'binary' THEN bb.byte_length \
-                       ELSE LENGTH(CAST(b.text AS BLOB)) END, \
+                       ELSE b.byte_length END, \
                      s.updated_at_ms, s.latest_moment_id, s.metadata_origin, \
                      s.metadata_summary, s.metadata_correlation_id, \
                      COALESCE(s.content_kind, 'text'), bb.sha256, \
@@ -848,9 +865,11 @@ impl<'a> VersionedTextStore<'a> {
         version_id: &str,
     ) -> Result<Vec<SnapshotRecord>, DomainError> {
         self.store.read_with(|conn| {
+            let snapshot = text::ReadSnapshot::new(conn).map_err(DomainError::sql_corrupt)?;
+
             let mut stmt = conn
                 .prepare_cached(
-                    "SELECT s.object_id, s.path, b.text, s.blob_sha256, s.updated_at_ms, \
+                    "SELECT s.object_id, s.path, b.sha256, s.blob_sha256, s.updated_at_ms, \
                      s.latest_moment_id, s.metadata_origin, s.metadata_summary, \
                      s.metadata_correlation_id, COALESCE(s.content_kind, 'text'), \
                      bb.sha256 FROM snapshots s \
@@ -870,7 +889,7 @@ impl<'a> VersionedTextStore<'a> {
             for row in rows {
                 out.push(row.map_err(DomainError::sql_corrupt)??);
             }
-            Ok(out)
+            snapshot.finish(hydrate_snapshots(conn, out), DomainError::sql_corrupt)
         })
     }
 
@@ -882,9 +901,11 @@ impl<'a> VersionedTextStore<'a> {
         version_id: &str,
     ) -> Result<Vec<SnapshotRecord>, DomainError> {
         self.store.read_with(|conn| {
+            let snapshot = text::ReadSnapshot::new(conn).map_err(DomainError::sql_corrupt)?;
+
             let mut stmt = conn
                 .prepare_cached(
-                    "SELECT f.object_id, f.path, b.text, f.blob_sha256, f.updated_at_ms, \
+                    "SELECT f.object_id, f.path, b.sha256, f.blob_sha256, f.updated_at_ms, \
                      f.latest_moment_id, f.metadata_origin, f.metadata_summary, \
                      f.metadata_correlation_id, COALESCE(f.content_kind, 'text'), \
                      bb.sha256 FROM fork_base_snapshots f \
@@ -904,7 +925,7 @@ impl<'a> VersionedTextStore<'a> {
             for row in rows {
                 out.push(row.map_err(DomainError::sql_corrupt)??);
             }
-            Ok(out)
+            snapshot.finish(hydrate_snapshots(conn, out), DomainError::sql_corrupt)
         })
     }
 
@@ -1130,6 +1151,9 @@ impl<'a> VersionedTextStore<'a> {
                 params![ws, input.new_version_id, input.from_version_id],
             )
             .map_err(DomainError::sql_persist)?;
+            dohc_engine_storage::links::copy_version_in_tx(
+                tx, ws, &input.from_version_id, &input.new_version_id,
+            ).map_err(DomainError::sql_persist)?;
             crate::secrets::fork_version_in_tx(
                 tx,
                 ws,
@@ -1311,6 +1335,8 @@ pub(crate) fn write_result_from_moment(
         },
     )?;
     Ok(WriteResult {
+        pending_placement: false,
+        released_capture_hold: false,
         object,
         snapshot: TextSnapshot {
             workspace_id: workspace_id.to_owned(),
@@ -1641,14 +1667,13 @@ pub(crate) fn get_file_object(
 }
 
 fn blob_text(conn: &Connection, sha256: &str) -> Result<Option<String>, DomainError> {
-    conn.query_row(
-        "SELECT text FROM blobs WHERE sha256 = ?1",
-        params![sha256],
-        |row| row.get(0),
-    )
-    .optional()
-    .map_err(DomainError::sql_corrupt)
+    text::read(conn, sha256)
+        .optional()
+        .map_err(DomainError::sql_corrupt)
 }
+
+const ALIAS_OBJECT_ID_SQL: &str =
+    "SELECT object_id FROM path_aliases WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3";
 
 fn alias_object_id(
     conn: &Connection,
@@ -1657,7 +1682,7 @@ fn alias_object_id(
     path: &str,
 ) -> Result<Option<String>, DomainError> {
     conn.query_row(
-        "SELECT object_id FROM path_aliases WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
+        ALIAS_OBJECT_ID_SQL,
         params![workspace_id, version_id, path],
         |row| row.get(0),
     )
@@ -1787,15 +1812,36 @@ fn get_snapshot_meta(
     .map_err(DomainError::sql_corrupt)
 }
 
+/// Resolve a recovery target by object, including its current rename.
+pub fn recovery_snapshot_in(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+) -> Result<Option<TextSnapshot>, DomainError> {
+    validate_identifier(workspace_id, "workspace_id")?;
+    validate_identifier(version_id, "version_id")?;
+    validate_identifier(object_id, "object_id")?;
+    let Some(snapshot) = get_snapshot(conn, workspace_id, version_id, object_id)? else {
+        return Ok(None);
+    };
+    if snapshot.content_kind == "binary" {
+        return Err(DomainError::BinaryHeadNotText);
+    }
+    Ok(Some(snapshot_text_view(&snapshot)))
+}
+
 fn get_snapshot(
     conn: &Connection,
     workspace_id: &str,
     version_id: &str,
     object_id: &str,
 ) -> Result<Option<SnapshotRecord>, DomainError> {
+    let snapshot = text::ReadSnapshot::new(conn).map_err(DomainError::sql_corrupt)?;
+
     let row = conn
         .query_row(
-            "SELECT s.object_id, s.path, b.text, s.blob_sha256, s.updated_at_ms, \
+            "SELECT s.object_id, s.path, b.sha256, s.blob_sha256, s.updated_at_ms, \
          s.latest_moment_id, s.metadata_origin, s.metadata_summary, \
          s.metadata_correlation_id, COALESCE(s.content_kind, 'text'), \
          bb.sha256 FROM snapshots s \
@@ -1807,7 +1853,11 @@ fn get_snapshot(
         )
         .optional()
         .map_err(DomainError::sql_corrupt)?;
-    row.transpose()
+    snapshot.finish(
+        hydrate_snapshots(conn, row.transpose()?.into_iter().collect())
+            .map(|rows| rows.into_iter().next()),
+        DomainError::sql_corrupt,
+    )
 }
 
 fn upsert_snapshot(conn: &Connection, snapshot: &SnapshotRecord) -> Result<(), DomainError> {
@@ -1926,6 +1976,8 @@ pub(crate) fn get_moment(
     workspace_id: &str,
     moment_id: &str,
 ) -> Result<Option<MomentRecord>, DomainError> {
+    let snapshot = text::ReadSnapshot::new(conn).map_err(DomainError::sql_corrupt)?;
+
     let row = conn
         .query_row(
             "SELECT moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
@@ -1933,9 +1985,9 @@ pub(crate) fn get_moment(
              before_latest_moment_id, metadata_origin, metadata_summary, \
              metadata_correlation_id, author_json, sync_record_only, \
              COALESCE(after_content_kind, 'text'), after_binary.sha256, \
-             COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             CASE WHEN after_text_blob.byte_length <= 131072 AND LENGTH(CAST(after_text_blob.text AS BLOB)) <= 131072 THEN after_text_blob.text END, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             CASE WHEN before_text_blob.byte_length <= 131072 AND LENGTH(CAST(before_text_blob.text AS BLOB)) <= 131072 THEN before_text_blob.text END, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length), \
-             COALESCE(LENGTH(CAST(after_text_blob.text AS BLOB)), LENGTH(after_binary.bytes)), \
-             COALESCE(LENGTH(CAST(before_text_blob.text AS BLOB)), LENGTH(before_binary.bytes)), \
+             COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             after_text_blob.sha256, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             before_text_blob.sha256, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length), \
+             COALESCE(after_text_blob.byte_length, LENGTH(after_binary.bytes)), \
+             COALESCE(before_text_blob.byte_length, LENGTH(before_binary.bytes)), \
              m.payload_before_path \
              FROM moments m \
              LEFT JOIN binary_blobs after_binary ON after_binary.sha256 = m.after_binary_sha256 \
@@ -1946,7 +1998,11 @@ pub(crate) fn get_moment(
         )
         .optional()
         .map_err(DomainError::sql_corrupt)?;
-    row.transpose()
+    snapshot.finish(
+        hydrate_moments(conn, row.transpose()?.into_iter().collect())
+            .map(|rows| rows.into_iter().next()),
+        DomainError::sql_corrupt,
+    )
 }
 
 fn moment_by_order(
@@ -1992,6 +2048,64 @@ fn map_version_row(
     }))
 }
 
+type MomentRow = (MomentRecord, Option<String>, Option<String>);
+
+fn hydrate_moments(
+    conn: &Connection,
+    rows: Vec<MomentRow>,
+) -> Result<Vec<MomentRecord>, DomainError> {
+    let mut bodies = text::read_batch(
+        conn,
+        rows.iter().flat_map(|(_, after, before)| {
+            [after.as_deref(), before.as_deref()].into_iter().flatten()
+        }),
+        Some(131072),
+    )
+    .map_err(DomainError::sql_corrupt)?;
+    rows.into_iter()
+        .map(|(mut moment, after, before)| {
+            for (key, target) in [
+                (after, &mut moment.after_text),
+                (before, &mut moment.before_text),
+            ] {
+                if let Some(key) = key {
+                    let body = bodies.get_mut(&key).expect("requested body");
+                    if body.recorded != body.actual {
+                        return Err(DomainError::StateCorrupt {
+                            reason: "moment blob length does not match its content",
+                        });
+                    }
+                    *target = body.take_text();
+                }
+            }
+            Ok(moment)
+        })
+        .collect()
+}
+
+fn hydrate_snapshots(
+    conn: &Connection,
+    mut rows: Vec<SnapshotRecord>,
+) -> Result<Vec<SnapshotRecord>, DomainError> {
+    let mut bodies = text::read_batch(
+        conn,
+        rows.iter()
+            .filter(|row| row.content_kind == "text")
+            .filter_map(|row| row.blob_sha256.as_deref()),
+        None,
+    )
+    .map_err(DomainError::sql_corrupt)?;
+    for row in &mut rows {
+        if row.content_kind == "text" {
+            row.text = text::take(
+                &mut bodies,
+                row.blob_sha256.as_deref().expect("validated text key"),
+            );
+        }
+    }
+    Ok(rows)
+}
+
 fn map_snapshot_row(
     row: &rusqlite::Row<'_>,
     workspace_id: &str,
@@ -1999,7 +2113,7 @@ fn map_snapshot_row(
 ) -> rusqlite::Result<Result<SnapshotRecord, DomainError>> {
     let object_id: String = row.get(0)?;
     let path: String = row.get(1)?;
-    let text: Option<String> = row.get(2)?;
+    let text_key: Option<String> = row.get(2)?;
     let blob_sha256: Option<String> = row.get(3)?;
     let updated_at_ms: i64 = row.get(4)?;
     let latest_moment_id: String = row.get(5)?;
@@ -2008,8 +2122,8 @@ fn map_snapshot_row(
     let metadata_correlation_id: Option<String> = row.get(8)?;
     let content_kind: String = row.get(9)?;
     let binary_sha256: Option<String> = row.get(10)?;
-    let text = match content_kind.as_str() {
-        "text" => text.ok_or(DomainError::StateCorrupt {
+    let text_key = match content_kind.as_str() {
+        "text" => text_key.ok_or(DomainError::StateCorrupt {
             reason: "text snapshot is missing its blob",
         }),
         "binary" if binary_sha256.is_some() => Ok(String::new()),
@@ -2020,12 +2134,12 @@ fn map_snapshot_row(
             reason: "snapshot has an unknown content kind",
         }),
     };
-    Ok(text.map(|text| SnapshotRecord {
+    Ok(text_key.map(|_| SnapshotRecord {
         workspace_id: workspace_id.to_owned(),
         version_id: version_id.to_owned(),
         object_id,
         path,
-        text,
+        text: String::new(),
         blob_sha256,
         content_kind,
         binary_sha256,
@@ -2037,7 +2151,7 @@ fn map_snapshot_row(
     }))
 }
 
-fn map_moment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<MomentRecord, DomainError>> {
+fn map_moment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<MomentRow, DomainError>> {
     let moment_order: i64 = row.get(0)?;
     let moment_id: String = row.get(1)?;
     let version_id: String = row.get(2)?;
@@ -2058,16 +2172,15 @@ fn map_moment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<MomentReco
     let after_binary_sha256: Option<String> = row.get(17)?;
     let before_content_kind: String = row.get(18)?;
     let before_binary_sha256: Option<String> = row.get(19)?;
-    let after_text: Option<String> = row.get(20)?;
+    let after_text_key: Option<String> = row.get(20)?;
     let after_byte_length: Option<i64> = row.get(21)?;
-    let before_text: Option<String> = row.get(22)?;
+    let before_text_key: Option<String> = row.get(22)?;
     let before_byte_length: Option<i64> = row.get(23)?;
     let after_actual_length: Option<i64> = row.get(24)?;
     let before_actual_length: Option<i64> = row.get(25)?;
     let before_path: Option<String> = row.get(26)?;
-    // Recorded and actual lengths must agree per side — a corrupted
-    // recorded length (lying small or large) fails closed for text and
-    // binary alike, matching the in-band reads.
+    // Check binary actual lengths here. Text lengths are recorded in both
+    // columns; hydrate_moments checks them against the body before returning.
     if after_byte_length != after_actual_length || before_byte_length != before_actual_length {
         return Ok(Err(DomainError::StateCorrupt {
             reason: "moment blob length does not match its content",
@@ -2131,35 +2244,39 @@ fn map_moment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<MomentReco
                 }
             }
         }
-        Ok(MomentRecord {
-            moment_order,
-            moment_id,
-            version_id,
-            object_id,
-            path,
-            recorded_at_ms,
-            operation,
-            after_content_kind,
-            after_blob_sha256,
-            after_binary_sha256,
-            before_present: before_state == MomentBeforeState::Present,
-            before_blob_sha256,
-            before_content_kind,
-            before_binary_sha256,
-            before_latest_moment_id,
-            metadata_origin,
-            metadata_summary,
-            metadata_correlation_id,
-            author_json,
-            // A record-only marker is a non-NULL, NON-ZERO value; NULL or 0 both
-            // mean 'materialized' (matching the aligned fork SQL).
-            sync_record_only: matches!(sync_record_only, Some(v) if v != 0),
-            after_text,
-            after_byte_length,
-            before_text,
-            before_byte_length,
-            before_path,
-        })
+        Ok((
+            MomentRecord {
+                moment_order,
+                moment_id,
+                version_id,
+                object_id,
+                path,
+                recorded_at_ms,
+                operation,
+                after_content_kind,
+                after_blob_sha256,
+                after_binary_sha256,
+                before_present: before_state == MomentBeforeState::Present,
+                before_blob_sha256,
+                before_content_kind,
+                before_binary_sha256,
+                before_latest_moment_id,
+                metadata_origin,
+                metadata_summary,
+                metadata_correlation_id,
+                author_json,
+                // A record-only marker is a non-NULL, NON-ZERO value; NULL or 0 both
+                // mean 'materialized' (matching the aligned fork SQL).
+                sync_record_only: matches!(sync_record_only, Some(v) if v != 0),
+                after_text: None,
+                after_byte_length,
+                before_text: None,
+                before_byte_length,
+                before_path,
+            },
+            after_text_key,
+            before_text_key,
+        ))
     }))
 }
 

@@ -1,15 +1,19 @@
-// The dohc MCP server. The DESKTOP runs this; the user's AI tool (Claude Code,
-// Codex) is the client, launching it as a stdio child via its own config:
+// The dohc MCP server. The user's AI tool (Claude Code, Codex) is the client,
+// launching it as a stdio child via its own config:
 //   { mcpServers: { dohc: { command, args: ["--workspace", root, "--home", home] } } }
 // Stdio is scoped by construction — only the configured tool talks to it — so
 // there is no shared-secret auth to manage (a persistent HTTP server would
 // need one). Every tool routes through src/tools.ts, which contains all path
 // validation; this file is only registration + transport.
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { LinksInInput, LinksResolveInput } from "@dohc/workspace-contracts/links";
+import { McpServer, type ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
+import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
+import { ShareCopyInput } from "@dohc/workspace-contracts/share-copy";
+import { MCP_TOOL_LEVELS } from "./mcpAdvertisement";
 import { OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
 import { DatasetRequest } from "@dohc/cli/dataset";
 import { documentAgentNameSchema, documentEditTextSchema, requestIdSchema } from "@dohc/cli/protocol";
@@ -19,6 +23,9 @@ import {
   type ShareAccess,
 } from "@dohc/security-contract/share-selector";
 import {
+  MCP_TOOL_CAPABILITIES,
+  linksIn, linksResolve, readOperation, undoOperation,
+  getShareCopyDetails,
   createDocument,
   createRecord,
   dataset, publishApp,
@@ -57,6 +64,7 @@ import {
   testApp,
   writeWorkspaceFile,
   workspaceStatus,
+  stopWorkspaceSync,
   type ToolContext,
 } from "./tools";
 
@@ -92,66 +100,85 @@ function shareAccessArg(value: string | undefined): ShareAccess {
   );
 }
 
-function text(structuredContent: Record<string, unknown>) {
+function text(structuredContent: Record<string, unknown> | null) {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(structuredContent, null, 2) }],
-    structuredContent,
-    ...(structuredContent.ok === false || structuredContent.kind === "partial" ? { isError: true } : {}),
+    ...(structuredContent === null ? {} : { structuredContent }),
+    ...(structuredContent?.ok === false || structuredContent?.kind === "partial" ? { isError: true } : {}),
   };
 }
 
 export function createDohcMcpServer(ctx: ToolContext): McpServer {
   const server = new McpServer({ name: "dohc", version: "0.3.0" });
 
-  // Shared views expose reads and host-checked Button presses.
-  // Local document and chat writes register only in an owning workspace.
-  const register = server.registerTool.bind(server);
-  const skip = (() => undefined) as unknown as McpServer["registerTool"];
-  // Every write tool, document and chat alike.
-  const registerWrite: McpServer["registerTool"] =
-    ctx.shareAccess === undefined ? register : skip;
-  // Shared views inspect and press Buttons through the owner's host.
-  // Run history and retries belong to the host that holds the runs.
-  // File-backed controls use the share's access.
-  const registerAutomation = registerWrite;
+  const level = ctx.shareAccess ?? "owner";
+  function register<InputArgs extends z.ZodRawShape>(
+    name: keyof typeof MCP_TOOL_CAPABILITIES,
+    config: { description: string; inputSchema: InputArgs },
+    handler: ToolCallback<InputArgs>,
+  ) {
+    if (MCP_TOOL_LEVELS[name].includes(level)) server.registerTool(name, config, handler);
+  }
+
+  register("dohc_read_share_copy", {
+    description: "Read one owned grant's share code and named-account invite link. Requires the original workspace and its signed-in owner account. Ended grants return only status; unknown and link grants are refused.",
+    inputSchema: ShareCopyInput.shape,
+  }, async args => text(await getShareCopyDetails(ctx, args)));
 
   register("dohc_list_automations", {
     description: "Read automation definitions and on/off file state in a Collection, including shares. Shared run history and host runtime are unavailable.",
     inputSchema: { collectionPath: z.string().min(1).max(4096) },
   }, async args => text(await listAutomations(ctx, args)));
-  if (ctx.shareAccess === "edit") register("dohc_switch_automation", {
+  register("dohc_switch_automation", {
     description: "Change only one automation's enabled value. Read definitions first and provide their contentHash. Reformat confirms losing comments and hand formatting. After an unknown desktop save, read definitions and sync state before retrying; a stale base remains a conflict. A pending save is waiting to sync; acceptance records history, not host execution.",
     inputSchema: { collectionPath: z.string().min(1).max(4096), automation: z.string().min(1).max(64), enabled: z.boolean(),
       expectedContentHash: z.string().regex(/^[a-f0-9]{64}$/u), reformat: z.boolean().optional(), submitId: requestIdSchema },
   }, async args => text(await switchAutomation(ctx, args)));
 
-  registerWrite("dohc_publish_app", {
-    description: "Create a share link, prepare an immutable app revision, and approve publication with local owner authority. createLink requires a stable operationId; retries return the existing grant, never another link. Paths default to the app root at View access. A URL is a bearer credential at its stated access level, usable by anyone holding it. Keep its secret yourself. Append the returned appQuery before the fragment of any link URL, including one returned by createLink. Never send its secret to dohc. Rotation remains in the desktop. Agent labels are agent-declared provenance.",
+  register("dohc_publish_app", {
+    description: "Create a share link, prepare an immutable app revision, and approve publication as its owner on this computer. createLink requires a stable operationId; retries return the existing grant, never another link. Paths default to the app root at View access. A URL is a bearer credential at its stated access level, usable by anyone holding it. Keep its secret yourself. Append the returned appQuery before the fragment of any link URL, including one returned by createLink. Never send its secret to dohc. Rotation remains in the desktop. Agent labels are agent-declared provenance.",
     inputSchema: {request: OwnerAppPublicationRequest},
   }, async ({request}) => text(await publishApp(ctx,request)));
 
-  registerWrite("dohc_dataset", {
+  register("dohc_dataset", {
     description: "Create, prepare, approve, inspect, and use transactional Collections in the owning workspace. Address a dataset with datasetPath, its dataset.json path relative to the MCP server folder. List and describe return this path; datasetId is internal identity. After a move, update path references. Apps bind to these same datasets; they have no separate private app store. Invoke approved operations with their described revision and a stable retry key. History shows record edits and schema/rule revisions. historyRevision reads immutable saved source. prepareHistoryRestore prepares a reviewed forward change against current records, preserving current access; approveMigration applies it. Source-file restoration alone never activates rules. Permissions manages explicit data grants. Export streams a private recovery archive to an explicit savePath ending in .dohc-recovery; it includes private records, files, history, and retry credentials. savePath must be absolute and outside the workspace. A relative sourcePath is read only and resolves from the MCP server folder; an absolute sourcePath is also supported. Recovery uses prepareRecovery with explicit sourcePath, then claimRecovery after stopping the old host, or discardRecovery to cancel. The same rules apply in dohc and apps.",
     inputSchema: {request: DatasetRequest},
   }, async ({request}) => text(await dataset(ctx, request)));
 
-  server.registerTool(
+  register(
     "dohc_list_workspaces",
     { description: "List the local dohc workspaces in the desktop registry.", inputSchema: {} },
     async () => text(await listWorkspaces(ctx)),
   );
 
-  server.registerTool(
+  register(
     "dohc_workspace_status",
     { description: "Report whether this workspace is local-only or cloud-synced.", inputSchema: {} },
     async () => text(await workspaceStatus(ctx)),
   );
 
+  register(
+    "dohc_stop_workspace_sync",
+    { description: "Stop this computer's sync for the owning workspace after saving live document edits. Keep local work, shares, history, and protected-file keys. Groups you joined and received-share mounts keep syncing. Record who paused and when. Resume in Settings.", inputSchema: {} },
+    async () => text(await stopWorkspaceSync(ctx, agentName())),
+  );
+
+  register("dohc_links_in", { description: "Read a bounded page of documents linking to a file. indexBuilding reports active indexing; unchecked names omitted sources. complete excludes mount coverage, reported by mountsCovered. Cursors carry index state across pages.", inputSchema: LinksInInput.shape }, async args => text(await linksIn(ctx, args)));
+  register("dohc_links_resolve", { description: "Resolve wikilink or Markdown literals from one source document using the engine's link rules.", inputSchema: LinksResolveInput.shape }, async args => text(await linksResolve(ctx, args)));
+  register("dohc_read_operation", {
+    description: "List the paths changed by one operation, up to 50 per page. Returns change references and paths without retained contents. Owner workspace only.",
+    inputSchema: { operationId: HistoryOperationId, cursor: z.string().optional() },
+  }, async args => text(await readOperation(ctx, args)));
+  register("dohc_undo_operation", {
+    description: "Undo a delete, move, or rename by its operation id. Requires dohc open and the owning workspace. Returns History restoration state, restored paths, and remaining paths with reasons and retry flags. Undo again to retry each remaining path marked retry.",
+    inputSchema: { operationId: HistoryOperationId },
+  }, async args => text(await undoOperation(ctx, args, agentName())));
+
   // Legacy cloud sync (dohc_sync_now / dohc_sync_cloud) was removed with the
   // retired workspace-api file/sync routes. Cloud sync is now automatic per
   // workspace via the sync relay; use dohc_list_changes for workspace history
   // and dohc_workspace_status to see whether a workspace is cloud-synced.
-  server.registerTool(
+  register(
     "dohc_list_changes",
     {
       description:
@@ -166,7 +193,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await listChanges(ctx, args)),
   );
 
-  server.registerTool(
+  register(
     "dohc_list_kept_copies",
     {
       description:
@@ -176,7 +203,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async () => text(await listKeptCopies(ctx)),
   );
 
-  registerWrite(
+  register(
     "dohc_save_kept_copy",
     {
       description:
@@ -186,7 +213,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await saveKeptCopy(ctx, args)),
   );
 
-  server.registerTool(
+  register(
     "dohc_read_change",
     {
       description:
@@ -198,7 +225,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await readChange(ctx, args)),
   );
 
-  server.registerTool(
+  register(
     "dohc_list_files",
     {
       description: "List visible files and folders in the workspace. Hidden dohc internals are omitted.",
@@ -210,7 +237,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await listWorkspaceFiles(ctx, args)),
   );
 
-  server.registerTool(
+  register(
     "dohc_read_file",
     {
       description: "Read any visible workspace file as UTF-8 text or base64, returning size and sha256 for safe follow-up writes.",
@@ -224,7 +251,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await readWorkspaceFile(ctx, args)),
   );
 
-  server.registerTool(
+  register(
     "dohc_search_files",
     {
       description:
@@ -242,7 +269,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await searchWorkspaceFiles(ctx, args)),
   );
 
-  server.registerTool(
+  register(
     "dohc_read_document",
     {
       description:
@@ -261,7 +288,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     return named.success ? named.data : undefined;
   };
 
-  registerWrite(
+  register(
     "dohc_edit_document",
     {
       description:
@@ -276,7 +303,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await editDocument(ctx, args, agentName())),
   );
 
-  registerWrite(
+  register(
     "dohc_create_document",
     {
       description:
@@ -289,7 +316,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await createDocument(ctx, args, agentName())),
   );
 
-  registerWrite(
+  register(
     "dohc_write_file",
     {
       description:
@@ -305,7 +332,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await writeWorkspaceFile(ctx, args, agentName())),
   );
 
-  registerWrite(
+  register(
     "dohc_create_directory",
     {
       description:
@@ -318,11 +345,11 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await createWorkspaceDirectory(ctx, args)),
   );
 
-  registerWrite(
+  register(
     "dohc_move_path",
     {
       description:
-        "Move or rename a visible workspace file or folder. Requires dohc open. History records the move under your agent name. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. Files over 5 MiB binary or 10 MiB text move without a History row. Text with invalid UTF-8 also moves without a row when History cannot keep it as binary. `withoutHistory` lists their destination paths. With overwrite, `replaced` separately reports the old destination's trash location and files without History copies. A failed move puts everything back it can. `deleted` lists files History records as deleted after rollback. They stay in the workspace's .dohc/trash, and Restore in History brings them back.",
+        "Move or rename a visible workspace file or folder. Returns operationId and undo availability. Use dohc_undo_operation when available. Requires dohc open. History records the move under your agent name. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. Files over 5 MiB binary or 10 MiB text move without a History row. Text with invalid UTF-8 also moves without a row when History cannot keep it as binary. `withoutHistory` lists their destination paths. With overwrite, `replaced` separately reports the old destination's trash location and files without History copies. A failed move puts everything back it can. `deleted` lists files History records as deleted after rollback. They stay in the workspace's .dohc/trash, and Restore in History brings them back.",
       inputSchema: {
         fromPath: z.string().min(1).max(4096),
         toPath: z.string().min(1).max(4096),
@@ -333,11 +360,11 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await moveWorkspacePath(ctx, args, agentName())),
   );
 
-  registerWrite(
+  register(
     "dohc_delete_path",
     {
       description:
-        "Delete a visible workspace file or folder. Requires dohc open. History records the delete under your agent name, and Restore there brings the file back. Files over 5 MiB binary or 10 MiB text delete without a History row. Text with invalid UTF-8 also deletes without a row when History cannot keep it as binary. `withoutHistory` lists their paths. Restore these files from the trash. The file or folder goes through the workspace's .dohc/trash to the system trash, or stays in .dohc/trash when the system refuses; `trashed` says which. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. If History refuses a file in a folder, `deleted` lists the files already deleted, and the rest go back to their place.",
+        "Delete a visible workspace file or folder. Returns operationId and undo availability. Use dohc_undo_operation when available. Requires dohc open. History records the delete under your agent name, and Restore there brings the file back. Files over 5 MiB binary or 10 MiB text delete without a History row. Text with invalid UTF-8 also deletes without a row when History cannot keep it as binary. `withoutHistory` lists their paths. Restore these files from the trash. The file or folder goes through the workspace's .dohc/trash to the system trash, or stays in .dohc/trash when the system refuses; `trashed` says which. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. If History refuses a file in a folder, `deleted` lists the files already deleted, and the rest go back to their place.",
       inputSchema: {
         path: z.string().min(1).max(4096),
         summary: z.string().max(500).optional(),
@@ -346,7 +373,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await deleteWorkspacePath(ctx, args, agentName())),
   );
 
-  server.registerTool(
+  register(
     "dohc_detect_apps",
     {
       description:
@@ -359,7 +386,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await detectApps(ctx, args)),
   );
 
-  registerWrite(
+  register(
     "dohc_create_app",
     {
       description:
@@ -373,7 +400,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await createApp(ctx, args, agentName())),
   );
 
-  server.registerTool(
+  register(
     "dohc_test_app",
     {
       description:
@@ -385,7 +412,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await testApp(ctx, args)),
   );
 
-  registerWrite(
+  register(
     "dohc_import_data",
     {
       description: "Import a CSV/JSON/JSONL/Markdown source into a new visible .sqlite database. Requires dohc open and records the write under your agent name.",
@@ -398,7 +425,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await importData(ctx, args, agentName())),
   );
 
-  server.registerTool(
+  register(
     "dohc_query_database",
     {
       description: "Run a single read-only SELECT against a visible workspace database (bounded rows).",
@@ -410,7 +437,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await queryDatabase(ctx, args)),
   );
 
-  server.registerTool(
+  register(
     "dohc_list_file_chats",
     {
       description:
@@ -422,7 +449,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await listFileChats(ctx, args)),
   );
 
-  server.registerTool(
+  register(
     "dohc_read_chat",
     {
       description:
@@ -434,7 +461,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await readChat(ctx, args)),
   );
 
-  server.registerTool(
+  register(
     "dohc_list_groups",
     {
       description:
@@ -453,7 +480,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     runId: z.string().min(1).max(200).optional(),
   };
 
-  registerWrite(
+  register(
     "dohc_start_group_chat",
     {
       description:
@@ -467,7 +494,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await startGroupChat(ctx, args)),
   );
 
-  registerWrite(
+  register(
     "dohc_start_file_chat",
     {
       description:
@@ -483,7 +510,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await startFileChat(ctx, args, agentName())),
   );
 
-  registerWrite(
+  register(
     "dohc_reply_to_chat",
     {
       description:
@@ -499,7 +526,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await replyToChat(ctx, args)),
   );
 
-  server.registerTool(
+  register(
     "dohc_query_collection",
     {
       description:
@@ -531,7 +558,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await queryCollection(ctx, args)),
   );
 
-  server.registerTool(
+  register(
     "dohc_read_record",
     {
       description:
@@ -546,7 +573,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await readRecord(ctx, args)),
   );
 
-  registerWrite(
+  register(
     "dohc_set_record_fields",
     {
       description:
@@ -559,7 +586,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await setRecordFields(ctx, args, agentName())),
   );
 
-  registerWrite(
+  register(
     "dohc_create_record",
     {
       description:
@@ -579,7 +606,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     automation: z.string().min(1).max(200),
   };
 
-  registerAutomation(
+  register(
     "dohc_list_automation_runs",
     {
       description:
@@ -589,7 +616,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await listAutomationRuns(ctx, args)),
   );
 
-  registerAutomation(
+  register(
     "dohc_read_automation_run",
     {
       description:
@@ -599,7 +626,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await readAutomationRun(ctx, args)),
   );
 
-  registerAutomation(
+  register(
     "dohc_retry_automation_run",
     {
       description:

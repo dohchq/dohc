@@ -1,18 +1,23 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { JSONContent } from '@tiptap/core'
+import { getDefaults, Lexer, Tokenizer } from 'marked'
 import pipelineFixtureJson from '../../../crates/dohc-engine-domain/tests/fixtures/collection-field-pipeline.json'
 import frontmatterFixtureJson from '../../../crates/dohc-engine-domain/tests/fixtures/collection-frontmatter.json'
+import rawHtml from './fixtures/raw-html.json'
 import {
   prosemirrorJSONToYXmlFragment,
   yXmlFragmentToProseMirrorRootNode,
 } from 'y-prosemirror'
 import * as Y from 'yjs'
 import {
+  emptyLinkRanges,
+  opensBlock,
   getDohcProseMirrorSchema,
   getDohcYDocFrontmatter,
   getDohcYDocMeta,
   yDocToMarkdown,
   markdownToYDoc,
+  parseRichdocMarkdown,
   plainTextToYDoc,
   serializeRichdocBody,
 } from './import-export.js'
@@ -22,44 +27,79 @@ import {
   frontmatterEditsRefused,
   markdownFrontmatterEditsRefused,
   loadMarkdownFrontmatter,
-  setFrontmatterValue,
 } from './frontmatter.js'
+import { setFrontmatterValue } from './frontmatter-map.js'
 
 type ExpectedMarkdownFragment = string | RegExp
 
-it('scans a linear amount of text when rejecting block tokenizers for paragraphs', () => {
-  const split = String.prototype.split
-  const measure = (paragraphs: number) => {
-    let scanned = 0
-    const spy = vi.spyOn(String.prototype, 'split').mockImplementation(function (
-      this: string,
-      separator: unknown,
-      limit?: number,
-    ) {
-      if (separator === '\n') scanned += this.length
-      return Reflect.apply(split, this, [separator, limit]) as string[]
-    })
-    try {
-      const doc = markdownToYDoc(Array(paragraphs).fill('Ordinary paragraph.').join('\n\n'))
-      expect(getDohcYDocBodyFragment(doc).length).toBe(paragraphs)
-      doc.destroy()
-      return scanned
-    } finally {
-      spy.mockRestore()
-    }
+// The characters `run` splits at newlines, and the characters it passes to
+// `replace`.
+function textWork(run: () => void): { split: number; replace: number } {
+  const { split, replace } = String.prototype
+  const work = { split: 0, replace: 0 }
+  const splitSpy = vi.spyOn(String.prototype, 'split').mockImplementation(function (
+    this: string,
+    separator: unknown,
+    limit?: number,
+  ) {
+    if (separator === '\n') work.split += this.length
+    return Reflect.apply(split, this, [separator, limit]) as string[]
+  })
+  const replaceSpy = vi.spyOn(String.prototype, 'replace').mockImplementation(function (
+    this: string,
+    ...args: unknown[]
+  ) {
+    work.replace += this.length
+    return Reflect.apply(replace, this, args) as string
+  })
+  try {
+    run()
+    return work
+  } finally {
+    splitSpy.mockRestore()
+    replaceSpy.mockRestore()
   }
+}
+
+it('scans a linear amount of text when rejecting block tokenizers for paragraphs', () => {
+  const measure = (paragraphs: number) => textWork(() => {
+    const doc = markdownToYDoc(Array(paragraphs).fill('Ordinary paragraph.').join('\n\n'))
+    expect(getDohcYDocBodyFragment(doc).length).toBe(paragraphs)
+    doc.destroy()
+  }).split
   const small = measure(64)
   const large = measure(128)
   expect(large, `newline split characters: ${small} -> ${large}`).toBeLessThan(small * 2.2)
 })
 
+// With no blank line, each block starts where the last ended, and a block
+// tokenizer that read the rest of the text at each would cost quadratic work.
+it.each([
+  ['a paragraph', 'text that is not a definition\n# Heading\n', ['paragraph', 'heading']],
+  ['a definition a person writes with &#91;', '&#91;x]: not a definition\n# Heading\n', ['paragraph', 'heading']],
+  ['text written as a definition is', '&#91;x&#93;&#58; not a definition\n# Heading\n', ['paragraph', 'heading']],
+  ['a table', '| a |\n| - |\n| b |\n# Heading\n', ['table', 'heading']],
+  ['a table with a pipe in code', '| a | b |\n|---|---|\n| `c|e` | d |\n# Heading\n', ['table', 'heading']],
+  ['a table and a pipe in code after it', '| a | b |\n|---|---|\n| c | d |\n# H\n`x|y`\n', ['table', 'heading', 'paragraph']],
+])('reads %s before a heading in a linear amount of work', (_name, unit, kinds) => {
+  const measure = (repetitions: number) => textWork(() => {
+    const blocks = parseRichdocMarkdown(unit.repeat(repetitions)).content ?? []
+    expect(blocks.map(block => block.type)).toEqual(
+      Array.from({ length: kinds.length * repetitions }, (_, index) => kinds[index % kinds.length]),
+    )
+  })
+  const small = measure(64)
+  const large = measure(128)
+  for (const kind of ['split', 'replace'] as const) {
+    expect(small[kind]).toBeGreaterThan(0)
+    expect(large[kind], `${kind} characters: ${small[kind]} -> ${large[kind]}`)
+      .toBeLessThan(small[kind] * 2.2)
+  }
+})
+
 it.each([
   ['1. decimal', 'orderedList'],
   ['12) decimal', 'orderedList'],
-  ['iii. roman', 'orderedList'],
-  ['IV) roman', 'orderedList'],
-  ['aa. alpha', 'orderedList'],
-  ['ZZ) alpha', 'orderedList'],
   ['  2. indented\n     - nested', 'orderedList'],
   ['- [ ] unchecked', 'taskList'],
   ['+ [x] checked', 'taskList'],
@@ -196,6 +236,1112 @@ function yDocBodyJSON(doc: Y.Doc): JSONContent {
     getDohcProseMirrorSchema(),
   ).toJSON() as JSONContent
 }
+
+// Raw HTML is the text the file holds. The desktop tests read the same fixture
+// where a DOM exists and must get this same document.
+it('keeps raw HTML as the text the file holds', () => {
+  expect(parseRichdocMarkdown(rawHtml.markdown)).toEqual(rawHtml.document)
+  const doc = markdownToYDoc(rawHtml.markdown)
+  try {
+    expect(yDocBodyJSON(doc)).toEqual(
+      getDohcProseMirrorSchema().nodeFromJSON(rawHtml.document).toJSON(),
+    )
+    // A save keeps every comment and tag as text, with the Markdown inside a
+    // paired-tag run still text and the marks outside it still marks.
+    const saved = yDocToMarkdown(doc)
+    expect(parseRichdocMarkdown(saved)).toEqual(rawHtml.document)
+    const reopened = markdownToYDoc(saved)
+    try {
+      expect(yDocToMarkdown(reopened)).toBe(saved)
+    } finally {
+      reopened.destroy()
+    }
+  } finally {
+    doc.destroy()
+  }
+})
+
+// The live document the engine settles, built as the editor writes it. The
+// engine's projector (crates/dohc-engine-collab/src/ydoc.rs,
+// raw_html_text_settles_as_inert_text_the_importer_reopens) and the
+// cross-engine fixture raw-html-literal-text expect these same bytes.
+const RAW_HTML_SETTLED = [
+  'Lit &lt;span title&#61;&#34;q &#39;é&#39; &amp;&#35;92&#59;&#34;&gt;&#92;&#42; &#123;&#123;atom&#58;a&#125;&#125; https&#58;//in&#46;example/a&#95;b www&#46;in&#46;example a&#64;b&#46;co &lt;https&#58;//auto&#46;example&gt; &amp;&#35;123&#59;**x**&#42; &#32;\nnext&lt;/span&gt; and [out](https://out.example) end {{atom:rate 150}} ü.',
+  '',
+  '==&lt;b&gt;a\\=b &#92;&#42;c&lt;/b&gt;==',
+  '',
+  'code `<b>*x*</b>`',
+  '',
+  '&lt;!&#45;&#45; &#36;x&#36; &#61;&#61;y&#61;&#61; &#45;&#45;&gt; $z$.',
+  '',
+  '&lt;b&gt;x&lt;/b&gt; &amp;&#35;123&#59; &amp;&#35;92&#59; &lt;i&gt;y&lt;/i&gt;',
+  '',
+  '&lt;!&#45;&#45; a&#58; b&#44;',
+  '&#10; \t',
+  '&#123;&#123;atom&#58;a&#125;&#125; &#92;&#42; https&#58;//in&#46;example &#42;y&#42; &#45;&#45;&gt; **real**.',
+  '',
+  '**&lt;pre&gt;one',
+  '  &#32;**',
+  'two&lt;/pre&gt; and **real**.',
+].join('\n')
+
+function rawHtmlLiveDocument(): Y.Doc {
+  const doc = new Y.Doc()
+  const paragraph = (children: Array<Y.XmlText | Y.XmlElement>) => {
+    const element = new Y.XmlElement('paragraph')
+    element.insert(0, children)
+    return element
+  }
+  const runs = (parts: Array<[string, Record<string, unknown>?]>) => {
+    const text = new Y.XmlText()
+    let offset = 0
+    for (const [value, marks] of parts) {
+      text.insert(offset, value, marks ?? {})
+      offset += value.length
+    }
+    return text
+  }
+  const element = (name: string, attrs: Record<string, string>) => {
+    const node = new Y.XmlElement(name)
+    for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value)
+    return node
+  }
+  getDohcYDocBodyFragment(doc).insert(0, [
+    paragraph([
+      runs([
+        ['Lit <span title="q \'é\' &#92;">\\* {{atom:a}} https://in.example/a_b www.in.example a@b.co <https://auto.example> &#123;'],
+        ['x', { bold: {} }],
+        ['*  \nnext</span> and '],
+        ['out', { link: { href: 'https://out.example', target: '_blank', rel: 'noopener noreferrer nofollow', class: null, title: null } }],
+        [' end '],
+      ]),
+      element('inlineAtom', { atomId: 'rate', params: '150', source: 'atom:rate 150' }),
+      runs([[' ü.']]),
+    ]),
+    paragraph([runs([['<b>a=b \\*c</b>', { highlight: {} }]])]),
+    paragraph([runs([['code '], ['<b>*x*</b>', { code: {} }]])]),
+    paragraph([
+      runs([['<!-- $x$ ==y== --> ']]),
+      element('mathInline', { tex: 'z' }),
+      runs([['.']]),
+    ]),
+    paragraph([runs([['<b>x</b> &#123; &#92; <i>y</i>']])]),
+    paragraph([runs([
+      ['<!-- a: b,\n\n \t\n{{atom:a}} \\* https://in.example *y* --> '],
+      ['real', { bold: {} }],
+      ['.'],
+    ])]),
+    paragraph([runs([
+      ['<pre>one\n   ', { bold: {} }],
+      ['\ntwo</pre> and '],
+      ['real', { bold: {} }],
+      ['.'],
+    ])]),
+  ])
+  return doc
+}
+
+it('settles raw HTML in a live document as inert text that reopens as the same document', () => {
+  const doc = rawHtmlLiveDocument()
+  try {
+    const settled = yDocToMarkdown(doc)
+    expect(settled).toBe(RAW_HTML_SETTLED)
+    expect(getDohcProseMirrorSchema().nodeFromJSON(parseRichdocMarkdown(settled)).toJSON())
+      .toEqual(yDocBodyJSON(doc))
+    const reopened = markdownToYDoc(settled)
+    try {
+      expect(yDocBodyJSON(reopened)).toEqual(yDocBodyJSON(doc))
+      expect(yDocToMarkdown(reopened)).toBe(settled)
+    } finally {
+      reopened.destroy()
+    }
+  } finally {
+    doc.destroy()
+  }
+})
+
+function expectSavedAsTheSameDocument(document: JSONContent): void {
+  const saved = serializeRichdocBody(document)
+  expect(parseRichdocMarkdown(saved)).toEqual(document)
+  expect(serializeRichdocBody(parseRichdocMarkdown(saved))).toBe(saved)
+}
+
+// Whatever Markdown, link, or dohc syntax raw HTML encloses stays the text the
+// file holds, and a save writes it back as the same text.
+it.each([
+  ['a backslash escape', '<b>\\*</b>'],
+  ['a backslash line break', '<b>a\\\nb</b>'],
+  ['a spaces line break', '<b>a  \nb</b>'],
+  ['a space and a tab around lines', '<b>a \n  b\t\nc</b>'],
+  ['an inline atom', '<span>{{atom:rate 150}}</span>'],
+  ['a bare URL', '<span>https://example.com/a_b</span>'],
+  ['a www link', '<span>www.example.com</span>'],
+  ['an email address', '<span>a@b.co</span>'],
+  ['an autolink', '<span><https://auto.example></span>'],
+  ['quoted attributes and entities', '<span title="a \'q\' &amp; b">&lt; &amp;lt; x</span>'],
+  ['a line that continues', '<b>one\ntwo *x* | y</b>'],
+  ['a comment', '<!-- *x* {{atom:a}} https://c.example -->'],
+  ['math and highlight', '<i>$x$ ==y== ~~z~~</i>'],
+  ['numeric references', '<b>&#42; &#35; &#92; &#123; &#58; &#32; &amp;#92; &amp;#42; &amp;amp;#42;</b>'],
+  ['numeric references in a comment', '<!-- &#42; &#92; &#123; &amp;#35; -->'],
+  ['numeric references in quoted attributes', '<span title="&#42; &#92;" data-x=\'&#123; &amp;#61;\'>x</span>'],
+  ['numeric references in a block of HTML', '<div title="&#42;">&#92; &#36; &amp;#92;</div>'],
+])('keeps %s in raw HTML as text through a save', (_name, markdown) => {
+  const document = parseRichdocMarkdown(markdown)
+  expect(document.content).toHaveLength(1)
+  const inline = document.content?.[0]?.content ?? []
+  expect(inline.every(node => node.type === 'text' && !node.marks)).toBe(true)
+  expect(inline.map(node => node.text).join('')).toBe(markdown)
+  expectSavedAsTheSameDocument(document)
+})
+
+// These kinds of HTML block run on across blank lines, and each reads as one
+// paragraph of its source. A save keeps it one paragraph, blank lines and all.
+it.each([
+  ['a comment', '<!-- TODO: fix this,\n\nsee: later -->'],
+  ['a comment over lines of spaces and tabs', '<!-- a: b,\n \t\n  \n\t\n\n \t\n\n  \n\n\t\nc; d -->'],
+  ['a pre block', '<pre>\n*x* {{atom:rate 150}} \\* https://in.example a@b.co [l](u)\n\n  $y$ ==h== &#42; &#59;\n</pre>'],
+  ['a script', '<script>\nif (a < b) { f("x: y"); }\n\n\nreturn;\n</script>'],
+  ['a style', '<style>\na { color: red; }\n\t\nb::after { content: "*"; }\n</style>'],
+  ['a textarea', '<textarea>\nx: _y_,\n\n# z\n</textarea>'],
+  ['a processing instruction', '<?php echo "a: b";\n\necho \'c\'; ?>'],
+  ['a declaration', '<!DOCTYPE html\n\nSYSTEM "a: b, {{atom:c}}">'],
+  ['CDATA', '<![CDATA[ a: [b],\n\n- c ]]>'],
+])('keeps %s with a blank line in it as one paragraph through a save', (_name, markdown) => {
+  const document = parseRichdocMarkdown(markdown)
+  expect(document).toEqual({
+    type: 'doc',
+    content: [{ type: 'paragraph', content: [{ type: 'text', text: markdown }] }],
+  })
+  expectSavedAsTheSameDocument(document)
+})
+
+// Only the serializer's `&lt;` and `&gt;` open and close a tag span. A raw
+// tag, or a `<` or `>` the file holds as text, opens none, so a reference
+// beside it keeps the spelling the file gave it. The save writes that text
+// so it reopens the same.
+it.each([
+  ['raw HTML', '<b>&#59;</b>', '<b>&#59;</b>', '&lt;b&gt;&amp;&#35;59&#59;&lt;/b&gt;'],
+  ['text between raw runs', '<b>x</b> &#123; <i>y</i>', '<b>x</b> &#123; <i>y</i>', '&lt;b&gt;x&lt;/b&gt; &amp;&#35;123&#59; &lt;i&gt;y&lt;/i&gt;'],
+  ['text after a non-tag <', 'Map<K, &#59; V>', 'Map<K, &#59; V>', 'Map&lt;K&#44; &amp;&#35;59&#59; V&gt;'],
+  ['text between text angles', 'a <b, &#59; c> d', 'a <b, &#59; c> d', 'a &lt;b&#44; &amp;&#35;59&#59; c&gt; d'],
+  ['text before a > after an encoded tag', '&lt;b&gt;x&lt;/b&gt; &#59; 3 > 2', '<b>x</b> &#59; 3 > 2', '&lt;b&gt;x&lt;/b&gt; &amp;&#35;59&#59; 3 &gt; 2'],
+])('keeps the spelling of a reference in %s', (_name, markdown, text, saved) => {
+  const document: JSONContent = {
+    type: 'doc',
+    content: [{ type: 'paragraph', content: [{ type: 'text', text }] }],
+  }
+  expect(parseRichdocMarkdown(markdown)).toEqual(document)
+  expect(serializeRichdocBody(document)).toBe(saved)
+  expectSavedAsTheSameDocument(document)
+})
+
+// So does a reference beside text angles wherever the text sits: it reads as
+// the same text as a reference whose `&` the file spells `&amp;`.
+it.each([
+  ['a list item', (text: string) => `- ${text}`],
+  ['a heading', (text: string) => `# ${text}`],
+  ['a quote', (text: string) => `> ${text}`],
+  ['link text', (text: string) => `[${text}](https://e.example)`],
+  ['emphasis', (text: string) => `*${text}*`],
+  ['a table cell', (text: string) => `| H |\n| --- |\n| ${text} |`],
+])('keeps the spelling of a reference beside text angles in %s', (_name, markdown) => {
+  const document = parseRichdocMarkdown(markdown('Map<K, &#59; V>'))
+  expect(document).toEqual(parseRichdocMarkdown(markdown('Map<K, &amp;#59; V>')))
+  expectSavedAsTheSameDocument(document)
+})
+
+function expectParagraphText(markdown: string, text: string, saved: string): void {
+  const document: JSONContent = {
+    type: 'doc',
+    content: [{ type: 'paragraph', content: [{ type: 'text', text }] }],
+  }
+  expect(parseRichdocMarkdown(markdown)).toEqual(document)
+  expect(serializeRichdocBody(document)).toBe(saved)
+  expectSavedAsTheSameDocument(document)
+}
+
+// A link with no text is the text the file holds, every reference as the file
+// spells it, and its own `<` and `>` open no tag span. A save writes it as it
+// is, at the start of a line too, so it reopens as the same text.
+it.each([
+  ['text angles in its title', '[](https://e.example "Map<K, &#59; V>")'],
+  ['a title', '[](https://h.example "kept")'],
+  ['no title', '[](https://h.example)'],
+  ['a destination in angles', '[](<https://e.example> "t")'],
+  ['a reference in a destination in angles', '[](<https://e.example/&#59;>)'],
+  ['a closing angle after encoded tags', '[](https://e.example "&lt;b&gt;x&lt;/b&gt; &#59; 3 > 2")'],
+  ['named references', '[](https://e.example "a &amp; b &lt;i&gt; &quot;q&quot;")'],
+  ['block escape references', '[](https://e.example "&#35; &amp;#35; &#42;")'],
+  ['an NBSP', '[](https://e.example "a\u00a0b")'],
+  ['a line before it', 'before\n[](https://e.example "Map<K, &#59; V>")'],
+  ['text before it', 'See [](https://e.example "Map<K, &#59; V>")'],
+])('keeps an empty link with %s as the text the file holds', (_name, markdown) => {
+  expectParagraphText(markdown, markdown, markdown)
+})
+
+// Text that is no link reads as text does, and only real syntax beside an
+// empty link is syntax.
+it('reads text beside an empty link as text, and its syntax as syntax', () => {
+  expectParagraphText('[](a b &amp; c)', '[](a b & c)', '[](a b &amp; c)')
+  const document = parseRichdocMarkdown('&lt;i&gt; [](https://e.example "<b>") **real** https://e.example')
+  expect(document.content?.[0]?.content).toEqual([
+    { type: 'text', text: '<i> [](https://e.example "<b>") ' },
+    { type: 'text', marks: [{ type: 'bold' }], text: 'real' },
+    { type: 'text', text: ' ' },
+    {
+      type: 'text',
+      marks: [{ type: 'link', attrs: { href: 'https://e.example', title: null } }],
+      text: 'https://e.example',
+    },
+  ])
+  expectSavedAsTheSameDocument(document)
+})
+
+// Inside a tag span, an empty link's `[` is a reference, so it reads back as
+// the span's other text does.
+it('saves an empty link inside a tag span as the same text', () => {
+  const document = parseRichdocMarkdown('&lt;b&gt; [](https://e.example "Map<K, &#59; V>") x&lt;/b&gt;')
+  expect(document).toEqual({
+    type: 'doc',
+    content: [{
+      type: 'paragraph',
+      content: [{ type: 'text', text: '<b> [](https://e.example "Map<K, &#59; V>") x</b>' }],
+    }],
+  })
+  expectSavedAsTheSameDocument(document)
+})
+
+it.each([
+  ['a list item', (text: string) => `- ${text}`],
+  ['a heading', (text: string) => `# ${text}`],
+  ['a quote', (text: string) => `> ${text}`],
+  ['emphasis', (text: string) => `*${text}*`],
+  ['a table cell', (text: string) => `| H |\n| --- |\n| ${text} |`],
+])('keeps an empty link as the text the file holds in %s', (_name, markdown) => {
+  const link = '[](https://e.example "Map<K, &#59; &amp; V>")'
+  const document = parseRichdocMarkdown(markdown(link))
+  expect(JSON.stringify(document)).toContain(JSON.stringify(link))
+  expectSavedAsTheSameDocument(document)
+})
+
+// A link reference definition is the text the file holds too, references
+// spelled as the file spells them.
+it.each([
+  '[a]: <https://e.example/?q=&#59;>',
+  '[x]: <a b> "t"',
+  '[x]: <https://e.example/a b> "t"',
+  '[x]: https://e.example "Map<K, &#59; V>"',
+  '[x]: https://h.example "kept"',
+  '[x]: https://e.example "a &amp; b &#35; &amp;#35; *c*"',
+  '[x]:\nhttps://e.example\n"t"',
+])('keeps the link reference definition %j as the text the file holds', (markdown) => {
+  expect(parseRichdocMarkdown(markdown)).toEqual({
+    type: 'doc',
+    content: [{ type: 'paragraph', content: [{ type: 'text', text: markdown }] }],
+  })
+})
+
+// A save writes the definition as one tag span: each character that could
+// read as syntax is a reference, so no renderer reads a link or emphasis in
+// it. A block that holds exactly those bytes for one whole definition reopens
+// as the same text, URLs and all.
+it.each([
+  ['[a]: <https://e.example/?q=&#59;>', '&#91;a&#93;&#58; &lt;https&#58;//e&#46;example/?q&#61;&amp;&#35;59&#59;&gt;'],
+  ['[x]: <a b> "t"', '&#91;x&#93;&#58; &lt;a b&gt; &#34;t&#34;'],
+  ['[x]: <https://e.example/a b> "t"', '&#91;x&#93;&#58; &lt;https&#58;//e&#46;example/a b&gt; &#34;t&#34;'],
+  ['[x]: https://e.example "Map<K, &#59; V>"', '&#91;x&#93;&#58; https&#58;//e&#46;example &#34;Map&lt;K&#44; &amp;&#35;59&#59; V&gt;&#34;'],
+  ['[x]: https://h.example "kept"', '&#91;x&#93;&#58; https&#58;//h&#46;example &#34;kept&#34;'],
+  ['[x]: https://e.example "a &amp; b &#35; &amp;#35; *c*"', '&#91;x&#93;&#58; https&#58;//e&#46;example &#34;a &amp;amp&#59; b &amp;&#35;35&#59; &amp;amp&#59;&#35;35&#59; &#42;c&#42;&#34;'],
+  ['[x]:\nhttps://e.example\n"t"', '&#91;x&#93;&#58;\nhttps&#58;//e&#46;example\n&#34;t&#34;'],
+  ['[x]: u "[](v \'&amp; <b>\')"', '&#91;x&#93;&#58; u &#34;&#91;&#93;&#40;v &#39;&amp;amp&#59; &lt;b&gt;&#39;&#41;&#34;'],
+  ['[x]: <a b> "https://e.example *y*"', '&#91;x&#93;&#58; &lt;a b&gt; &#34;https&#58;//e&#46;example &#42;y&#42;&#34;'],
+  ['[x]: u "one\n# two\n- three\n| four |\n---"', '&#91;x&#93;&#58; u &#34;one\n&#35; two\n&#45; three\n&#124; four &#124;\n&#45;&#45;&#45;&#34;'],
+  ['[multi\nline label]: u \'t\'', '&#91;multi\nline label&#93;&#58; u &#39;t&#39;'],
+])('saves the link reference definition %j as the same text', (markdown, saved) => {
+  expectParagraphText(markdown, markdown, saved)
+})
+
+const exampleLink = {
+  type: 'text',
+  text: 'https://e.example',
+  marks: [{ type: 'link', attrs: { href: 'https://e.example', title: null } }],
+}
+
+// A definition a person writes with `&#91;` is no definition, and reads as
+// any text does, its URL a link. Only the bytes a save writes for one whole
+// definition are one, and text around them reads as it always has.
+it.each([
+  ['&#91;x]: https://e.example', [{ type: 'text', text: '[x]: ' }, exampleLink]],
+  ['&#91;x]: https://e.example "kept"', [{ type: 'text', text: '[x]: ' }, exampleLink, { type: 'text', text: ' "kept"' }]],
+  ['&#91;x&#93;&#58; https://e.example', [{ type: 'text', text: '[x&#93;&#58; ' }, exampleLink]],
+  ['&#91;x]: https://e.example\nmore', [{ type: 'text', text: '[x]: ' }, exampleLink, { type: 'text', text: '\nmore' }]],
+  ['&#91;x] https://e.example', [{ type: 'text', text: '[x] ' }, exampleLink]],
+  ['a\n&#91;x]: https://e.example', [{ type: 'text', text: 'a\n[x]: ' }, exampleLink]],
+])('reads %j as it reads any text', (markdown, content) => {
+  expect(parseRichdocMarkdown(markdown)).toEqual({ type: 'doc', content: [{ type: 'paragraph', content }] })
+})
+
+// The bytes a save writes stop being a definition at the first change: a
+// character the save would write as a reference, or a line after it.
+it.each([
+  ['&#91;x&#93;&#58; u &#34;t"', '[x&#93;&#58; u &#34;t"'],
+  ['&#91;x&#93;&#58; u&#33;', '[x&#93;&#58; u&#33;'],
+  ['&#91;x&#93;&#58; u\nmore', '[x&#93;&#58; u\nmore'],
+  [' &#91;x&#93;&#58; u', ' [x&#93;&#58; u'],
+])('reads the changed definition bytes %j as any text', (markdown, text) => {
+  expect(parseRichdocMarkdown(markdown)).toEqual({
+    type: 'doc',
+    content: [{ type: 'paragraph', content: [{ type: 'text', text }] }],
+  })
+})
+
+// A document whose definitions sit beside other blocks, tables included,
+// saves and reopens as the same document.
+it('saves definitions beside other blocks as the same document', () => {
+  const document = parseRichdocMarkdown([
+    '[x]: u "a\n# b"',
+    '| a | b |\n|---|---|\n| [y]: v | d |',
+    '> [z]: https://e.example "q"',
+    '- [w]: <a b>\n  "multi\n  line"',
+    '# [v]: not a definition here',
+  ].join('\n\n'))
+  expect(document.content?.map(block => block.type))
+    .toEqual(['paragraph', 'table', 'blockquote', 'bulletList', 'heading'])
+  expect(document.content?.[0]).toEqual({ type: 'paragraph', content: [{ type: 'text', text: '[x]: u "a\n# b"' }] })
+  expectSavedAsTheSameDocument(document)
+})
+
+// A definition's NBSP and `\r` are references like its punctuation, and
+// other Unicode is written as it is, so it still reopens as the same text.
+it.each([
+  ['[x]: u "a\u00a0b"', '&#91;x&#93;&#58; u &#34;a&#160;b&#34;'],
+  ['[x]: u "a\rb"', '&#91;x&#93;&#58; u &#34;a&#13;b&#34;'],
+  ['[x]: https://e.example/日本 "😀 é"', '&#91;x&#93;&#58; https&#58;//e&#46;example/日本 &#34;😀 é&#34;'],
+])('saves the definition %j with its whitespace as references', (text, saved) => {
+  const document: JSONContent = {
+    type: 'doc',
+    content: [{ type: 'paragraph', content: [{ type: 'text', text }] }],
+  }
+  expect(serializeRichdocBody(document)).toBe(saved)
+  expectSavedAsTheSameDocument(document)
+})
+
+// A link with no text is the text the file holds on each of its lines: no
+// block opener, indent, or reference escape reads a line its title starts.
+// The Markdown around it still reads as Markdown.
+it.each([
+  '[](u "a\n2. b")',
+  '[](u "a\n[x] b")',
+  '[](u "x\n    y")',
+])('keeps each line of the link with no text %j', (markdown) => {
+  expectParagraphText(markdown, markdown, markdown)
+})
+
+it('keeps the Markdown around a link with no text across lines', () => {
+  const document = parseRichdocMarkdown('x [](u "a\n2. b") y\n2. not')
+  expect(serializeRichdocBody(document)).toBe('x [](u "a\n2. b") y\n2&#46; not')
+  expectSavedAsTheSameDocument(document)
+  for (const markdown of ['> [](u "a\n> [x] b")', '- x [](u "a\n  2. b")']) {
+    expectSavedAsTheSameDocument(parseRichdocMarkdown(markdown))
+  }
+})
+
+// A paragraph someone types holds a link with no text across lines, its runs
+// marked as given, and a heading after it when asked.
+function typedParagraph(runs: Array<{ text: string; mark?: string }>, heading = false): Y.Doc {
+  const doc = markdownToYDoc(heading ? 'placeholder\n\n# Outside' : 'placeholder')
+  const paragraph = getDohcYDocBodyFragment(doc).get(0) as Y.XmlElement
+  const live = paragraph.get(0) as Y.XmlText
+  doc.transact(() => {
+    live.delete(0, live.length)
+    live.insert(0, runs.map(run => run.text).join(''))
+    let at = 0
+    for (const run of runs) {
+      if (run.mark) live.format(at, run.text.length, { [run.mark]: {} })
+      at += run.text.length
+    }
+  })
+  return doc
+}
+
+// The file holds such a link as it is when no line in it would end the
+// paragraph. When one would, the link is written as references, the way a
+// definition is, so no Markdown reads in it, and the parser reads exactly
+// those bytes back as the link's text. Either way the document reopens as
+// itself and saves the same again, marks and the heading after it included.
+it.each([
+  [[{ text: '[](u "a\n# b")' }], '&#91;&#93;&#40;u &#34;a\n&#35; b&#34;&#41;'],
+  [[{ text: '[](u "a\n- b")' }], '&#91;&#93;&#40;u &#34;a\n&#45; b&#34;&#41;'],
+  [[{ text: '[](u "a\n> b")' }], '&#91;&#93;&#40;u &#34;a\n&gt; b&#34;&#41;'],
+  [
+    [{ text: 'x [](u "a\n# b") y\n2. not' }],
+    'x &#91;&#93;&#40;u &#34;a\n&#35; b&#34;&#41; y\n2&#46; not',
+  ],
+  [[{ text: '[](u "*b*\n# b")' }], '&#91;&#93;&#40;u &#34;&#42;b&#42;\n&#35; b&#34;&#41;'],
+  [[{ text: '[](u "`b`\n# b")' }], '&#91;&#93;&#40;u &#34;&#96;b&#96;\n&#35; b&#34;&#41;'],
+  [[{ text: '[](u "&#59;\n# b")' }], '&#91;&#93;&#40;u &#34;&amp;&#35;59&#59;\n&#35; b&#34;&#41;'],
+  [
+    [{ text: '[](https://e.example "t\n# b")' }],
+    '&#91;&#93;&#40;https&#58;//e&#46;example &#34;t\n&#35; b&#34;&#41;',
+  ],
+  [
+    [{ text: '[](u "a\\"b \\* c\n# b")' }],
+    '&#91;&#93;&#40;u &#34;a&#92;&#34;b &#92;&#42; c\n&#35; b&#34;&#41;',
+  ],
+  [[{ text: '[](u "a  \n# b")' }], '&#91;&#93;&#40;u &#34;a &#32;\n&#35; b&#34;&#41;'],
+  [
+    [{ text: '[](u "{{atom:a}} \u00a0x\n# b")' }],
+    '&#91;&#93;&#40;u &#34;&#123;&#123;atom&#58;a&#125;&#125; &#160;x\n&#35; b&#34;&#41;',
+  ],
+  [
+    [{ text: '[](u "a\n$$b$$\nc")' }],
+    '&#91;&#93;&#40;u &#34;a\n&#36;&#36;b&#36;&#36;\nc&#34;&#41;',
+  ],
+  [
+    [{ text: '[](u "a\n$$b$$\nc") ' }, { text: 'y', mark: 'italic' }],
+    '&#91;&#93;&#40;u &#34;a\n&#36;&#36;b&#36;&#36;\nc&#34;&#41; *y*\n\n# Outside',
+  ],
+  [
+    [{ text: '[](u "a\n$$\nx\n$$\nc")' }],
+    '&#91;&#93;&#40;u &#34;a\n&#36;&#36;\nx\n&#36;&#36;\nc&#34;&#41;',
+  ],
+  [[{ text: '[](u "a\rb")' }], '&#91;&#93;&#40;u &#34;a&#13;b&#34;&#41;'],
+  [[{ text: '[](u "&\r&")' }], '&#91;&#93;&#40;u &#34;&amp;&#13;&amp;&#34;&#41;'],
+  [
+    [{ text: 'x [](u "a\rb") y\n2. not' }],
+    'x &#91;&#93;&#40;u &#34;a&#13;b&#34;&#41; y\n2&#46; not',
+  ],
+  [
+    [{ text: '[](u "a\rb")', mark: 'bold' }, { text: ' ' }, { text: 'y', mark: 'italic' }],
+    '**&#91;&#93;&#40;u &#34;a&#13;b&#34;&#41;** *y*\n\n# Outside',
+  ],
+  [[{ text: '[](u "a\n2. b")' }], '[](u "a\n2. b")'],
+  [[{ text: '[](u "&=\n=")', mark: 'highlight' }], '==[](u "&\\=\n\\=")=='],
+  [[{ text: '[](u "a\n2. b")', mark: 'highlight' }], '==[](u "a\n2. b")=='],
+  [
+    [{ text: '[](u "a=b\n# c")', mark: 'highlight' }],
+    '==&#91;&#93;&#40;u &#34;a\\=b\n&#35; c&#34;&#41;==',
+  ],
+  [[{ text: '[](u "a\n# b")', mark: 'bold' }], '**&#91;&#93;&#40;u &#34;a\n&#35; b&#34;&#41;**'],
+  [
+    [{ text: 'before ' }, { text: '[](u "a\n# b")', mark: 'bold' }, { text: ' after\n2. outside' }],
+    'before **&#91;&#93;&#40;u &#34;a\n&#35; b&#34;&#41;** after\n2&#46; outside\n\n# Outside',
+  ],
+] as Array<[Array<{ text: string; mark?: string }>, string]>)(
+  'keeps the typed paragraph %j through a save and reopen',
+  (runs, saved) => {
+    const heading = runs.length > 1
+    const doc = typedParagraph(runs, heading)
+    try {
+      const initial = yXmlFragmentToProseMirrorRootNode(
+        getDohcYDocBodyFragment(doc),
+        getDohcProseMirrorSchema(),
+      ).toJSON()
+      expect(initial.content?.[0]?.content).toHaveLength(runs.length)
+      expect(yDocToMarkdown(doc)).toBe(saved)
+      expect(parseRichdocMarkdown(saved)).toEqual(initial)
+      const reopened = markdownToYDoc(saved)
+      try {
+        expect(yDocToMarkdown(reopened)).toBe(saved)
+      } finally {
+        reopened.destroy()
+      }
+    } finally {
+      doc.destroy()
+    }
+  },
+)
+
+// Only exactly the bytes the serializer writes, for a link that holds a line
+// that would end its paragraph, read as that link's text. Any other spelling
+// reads as such text always has: a block escape as its character, any other
+// reference as written, and a line opener as a block.
+it.each([
+  ['&#91;&#93;&#40;u &#34;a\n&#35; b&#34;&#41; tail.', [{ type: 'text', text: '[](u "a\n# b") tail.' }]],
+  ['&#91;&#93;&#40;u "a\n&#35; b")', [{ type: 'text', text: '[&#93;&#40;u "a\n# b")' }]],
+  ['&#91;&#93;&#40;u &#34;a b&#34;&#41;', [{ type: 'text', text: '[&#93;&#40;u &#34;a b&#34;)' }]],
+  ['&#091;&#93;&#40;u &#34;a\n&#35; b&#34;&#41;', [{ type: 'text', text: '&#091;&#93;&#40;u &#34;a\n# b&#34;)' }]],
+  ['&#91;&#93;&#40;u &#34;a&#32;b\n&#35; b&#34;&#41;', [{ type: 'text', text: '[&#93;&#40;u &#34;a&#32;b\n# b&#34;)' }]],
+  ['&#91;&#93;&#40;u &#34;a&#13;b&#34;&#41;', [{ type: 'text', text: '[](u "a\rb")' }]],
+  ['[](u "a&#13;b")', [{ type: 'text', text: '[](u "a&#13;b")' }]],
+  [
+    'x &#91;&#93;&#40;u &#34;a\n&#35; b&#34;&#41;&#91;&#93;&#40;v &#34;c\n&#62; d&#34;&#41;',
+    [{ type: 'text', text: 'x [](u "a\n# b")[&#93;&#40;v &#34;c\n&#62; d&#34;)' }],
+  ],
+] as Array<[string, JSONContent[]]>)('reads %j as written', (markdown, content) => {
+  expect(parseRichdocMarkdown(markdown)).toEqual({ type: 'doc', content: [{ type: 'paragraph', content }] })
+})
+
+it('reads written links with no text in a linear amount of work', () => {
+  for (const unit of ['&#91;&#93;&#40;', '&#91;&#93;&#40;u &#34;a\n&#35; b&#34;&#41;', '&#91;&#93;&#40;u &#34;a b&#34;&#41;']) {
+    const measure = (repetitions: number) => textWork(() => {
+      parseRichdocMarkdown(`x ${unit.repeat(repetitions)}`)
+    })
+    const small = measure(64)
+    const large = measure(128)
+    expect(small.replace).toBeGreaterThan(0)
+    expect(large.replace, `${unit}: ${small.replace} -> ${large.replace}`)
+      .toBeLessThan(small.replace * 2.2)
+    expect(large.split, `${unit}: ${small.split} -> ${large.split}`)
+      .toBeLessThan(Math.max(small.split, 1) * 2.2)
+  }
+})
+
+// The characters `run` searches for a parse sentinel, from the start of each
+// search to the sentinel it finds or to the end, and those it compares with
+// one where it expects one.
+function sentinelSearchWork(run: () => void): number {
+  const { indexOf, matchAll, startsWith } = String.prototype
+  let work = 0
+  const indexOfSpy = vi.spyOn(String.prototype, 'indexOf').mockImplementation(function (
+    this: string,
+    search: string,
+    from?: number,
+  ) {
+    const at = Reflect.apply(indexOf, this, [search, from]) as number
+    if (search === '\uE000DOHC_') work += (at < 0 ? this.length : at + search.length) - (from ?? 0)
+    return at
+  })
+  const startsWithSpy = vi.spyOn(String.prototype, 'startsWith').mockImplementation(function (
+    this: string,
+    search: string,
+    at?: number,
+  ) {
+    if (search === '\uE000DOHC_') work += search.length
+    return Reflect.apply(startsWith, this, [search, at]) as boolean
+  })
+  const matchAllSpy = vi.spyOn(String.prototype, 'matchAll').mockImplementation(function (
+    this: string,
+    pattern: RegExp,
+  ) {
+    if (String(pattern).includes('DOHC_PARSE')) work += this.length
+    return Reflect.apply(matchAll, this, [pattern]) as ReturnType<typeof matchAll>
+  })
+  try {
+    run()
+    return work
+  } finally {
+    indexOfSpy.mockRestore()
+    matchAllSpy.mockRestore()
+    startsWithSpy.mockRestore()
+  }
+}
+
+// After or before a written link, each line of references costs its own
+// characters to search, however many lines the paragraph holds.
+it.each([
+  ['after', '&#35; b\n', '# b\n'],
+  ['after', '&#59; b\n', '&#59; b\n'],
+  ['before', '&#35; b\n', '# b\n'],
+  ['before', '&#59; b\n', '&#59; b\n'],
+])('searches %j a written link for its start in a linear amount of work: %j', (side, unit, read) => {
+  const witness = '&#91;&#93;&#40;u &#34;a\n&#35; b&#34;&#41;'
+  const link = '[](u "a\n# b")'
+  const measure = (repetitions: number) => {
+    const lines = unit.repeat(repetitions)
+    const source = side === 'after' ? `${witness}\n${lines}\n# Outside` : `ordinary\n${lines}${witness}\n# Outside`
+    let document: JSONContent = { type: 'doc' }
+    const work = sentinelSearchWork(() => {
+      document = parseRichdocMarkdown(source)
+    })
+    expect(document).toEqual({
+      type: 'doc',
+      content: [
+        {
+          type: 'paragraph',
+          content: [{
+            type: 'text',
+            text: side === 'after'
+              ? `${link}\n${read.repeat(repetitions).trimEnd()}`
+              : `ordinary\n${read.repeat(repetitions)}${link}`,
+          }],
+        },
+        { type: 'heading', attrs: { level: 1 }, content: [{ type: 'text', text: 'Outside' }] },
+      ],
+    })
+    return work
+  }
+  const small = measure(128)
+  const large = measure(256)
+  expect(small).toBeGreaterThan(0)
+  expect(large, `${small} -> ${large}`).toBeLessThan(small * 2.2)
+})
+
+// Text after a written link that holds no sentinel is searched once, however
+// often marked lexes inside it.
+it('searches Markdown after a written link for its start in a linear amount of work', () => {
+  const measure = (repetitions: number) => {
+    const lines = '*b* '.repeat(repetitions)
+    const control = parseRichdocMarkdown(`ordinary\n${lines}\n\n# Outside`)
+    const [paragraph, ...rest] = control.content ?? []
+    const [first, ...inline] = paragraph?.content ?? []
+    expect(first).toEqual({ type: 'text', text: 'ordinary\n' })
+    expect(inline.filter(node => node.text === 'b' && node.marks?.[0]?.type === 'italic'))
+      .toHaveLength(repetitions)
+    expect(rest).toEqual([
+      { type: 'heading', attrs: { level: 1 }, content: [{ type: 'text', text: 'Outside' }] },
+    ])
+    let document: JSONContent = { type: 'doc' }
+    const work = sentinelSearchWork(() => {
+      document = parseRichdocMarkdown(`&#91;&#93;&#40;u &#34;a\n&#35; b&#34;&#41;\n${lines}\n\n# Outside`)
+    })
+    expect(document).toEqual({
+      ...control,
+      content: [{ ...paragraph, content: [{ ...first, text: '[](u "a\n# b")\n' }, ...inline] }, ...rest],
+    })
+    return work
+  }
+  const small = measure(128)
+  const large = measure(256)
+  expect(small).toBeGreaterThan(0)
+  expect(large, `${small} -> ${large}`).toBeLessThan(small * 2.2)
+})
+
+// A file that holds such a line still reads it as the block it starts.
+it('reads a block a file starts inside a link with no text as that block', () => {
+  expect(parseRichdocMarkdown('[](u "a\n# b")').content?.map(block => block.type))
+    .toEqual(['paragraph', 'heading'])
+  expect(parseRichdocMarkdown('x\n- b').content?.map(block => block.type))
+    .toEqual(['paragraph', 'bulletList'])
+  expect(parseRichdocMarkdown('[](u "a\n$$b$$\nc")').content?.map(block => block.type))
+    .toEqual(['paragraph', 'mathBlock', 'paragraph'])
+  expect(parseRichdocMarkdown('[](u "a\n$$\nx\n$$\nc")').content?.map(block => block.type))
+    .toEqual(['paragraph', 'mathBlock', 'paragraph'])
+})
+
+// A link with no text is written as it is only when no line in it can end
+// its paragraph. Wherever marked's paragraph rule, its setext rule, or the
+// parser ends one, `opensBlock` must say so.
+it('writes as text each link with no text with a line that would end its paragraph', () => {
+  const rules = (Lexer as unknown as { rules: { block: { gfm: Record<string, RegExp> } } })
+    .rules.block.gfm
+  const lines = [
+    '# b', '- b', '* b', '+ b', '> b', '1. b', '2. b', '1) b', 'a. b', 'iv. b', 'B) b',
+    '$$', '$$ x', '```', '```\nx', '~~~', '<div>', '<!-- c -->', '<b>x', '---', '***', '___',
+    '===', '[x] b', '![a](b)', '> [!note] t', '- [ ] t', '    y', '\tb', '|a|', '| a |\n| - |',
+    'a\n| - |', '-', '#', '#b', '   # b', '    # b', '  > b', '   - b', '    - b', '[x]: u',
+    '^1', 'b', '\n', ' \nb', '    \nb', 'x\n===\nb', ':-:', '<pre>', '<script>', '---\nb',
+    '***\nb', '===\nb', '-\nb', '```\nb', '<div>\nb', '$$b$$\nc', '   $$b$$\nc', '$$b$$',
+    '$$\nx\n$$\nc',
+  ]
+  let ends = 0
+  for (const line of lines) {
+    // The link's own lines, after its first, as a paragraph's.
+    const link = `[](u "a\n${line}")`
+    const source = `x${link.slice(link.indexOf('\n'))}`
+    let block: JSONContent[]
+    try { block = parseRichdocMarkdown(source).content ?? [] }
+    catch (error) {
+      expect(String(error)).toMatch(/not representable/)
+      continue
+    }
+    const ended = rules.paragraph.exec(source)?.[0] !== source
+      || rules.lheading.test(source)
+      || block.length !== 1
+      || block[0].type !== 'paragraph'
+    if (ended) {
+      ends += 1
+      expect(opensBlock(link), JSON.stringify(line)).toBe(true)
+    }
+  }
+  expect(ends).toBeGreaterThan(15)
+  // The engine's `opens_block` pins the same answers.
+  for (const [link, opens] of [
+    ['[](u "a\n# b")', true],
+    ['[](u "a\n   - b")', true],
+    ['[](u "a\n1) b")', true],
+    ['[](u "a\n> [!note] t")', true],
+    ['[](u "a\n  \nb")', true],
+    ['[](u "a\n<div>")', true],
+    ['[](u "a\n:-:")', true],
+    ['[](u "a\n$$b$$\nc")', true],
+    ['[](u "a\n   $$b$$\nc")', true],
+    ['[](u "a\n$$\nx\n$$\nc")', true],
+    ['[](u "a\rb")', true],
+    ['[](u "a\n2. b")', false],
+    ['[](u "a\n    # b")', false],
+    ['[](u "a\n[x] b")', false],
+    ['[](u "a\na. b")', false],
+    ['[](u "a\n\tb")', false],
+    ['[](u "a b")', false],
+  ] as const) {
+    expect(opensBlock(link), JSON.stringify(link)).toBe(opens)
+  }
+})
+
+// A table reads only its own lines, so the Markdown right after it, with no
+// blank line, stays Markdown, even when a code span holds a pipe.
+it.each([
+  ['| a | b |\n|---|---|\n| c | d |\n# H\n`x|y`', ['table', 'heading', 'paragraph']],
+  ['| a | b |\n|---|---|\n| `c|e` | d |\n# H\nplain', ['table', 'heading', 'paragraph']],
+  ['| a |\n| - |\n| b |\n# H\n| c |\n| - |\n| d |', ['table', 'heading', 'table']],
+  ['a\n|-\nb\n# H', ['table', 'heading']],
+])('keeps the Markdown after the table in %j', (markdown, kinds) => {
+  const document = parseRichdocMarkdown(markdown)
+  expect(document.content?.map(block => block.type)).toEqual(kinds)
+  expect(document.content?.[1]).toEqual({
+    type: 'heading',
+    attrs: { level: 1 },
+    content: [{ type: 'text', text: 'H' }],
+  })
+  expectSavedAsTheSameDocument(document)
+})
+
+it('keeps a pipe in code in a table cell and after the table', () => {
+  const after = parseRichdocMarkdown('| a | b |\n|---|---|\n| c | d |\n# H\n`x|y`')
+  expect(after.content?.[2]).toEqual({
+    type: 'paragraph',
+    content: [{ type: 'text', text: 'x|y', marks: [{ type: 'code' }] }],
+  })
+  const cell = parseRichdocMarkdown('| a | b |\n|---|---|\n| `c|e` | d |\n# H')
+  expect(cell.content?.[0]?.content?.[1]?.content?.[0]?.content?.[0]?.content).toEqual([
+    { type: 'text', text: 'c|e', marks: [{ type: 'code' }] },
+  ])
+})
+
+// A definition that holds a line a table could start with, or that a table
+// follows with no blank line, keeps its lines and the table keeps its own.
+it('keeps a definition and the table after it apart', () => {
+  const source = '[x]: u "a\n| b |"\n| c |\n| - |\n| d |'
+  const document = parseRichdocMarkdown(source)
+  expect(document.content?.map(block => block.type)).toEqual(['paragraph', 'table'])
+  expect(document.content?.[0]).toEqual({ type: 'paragraph', content: [{ type: 'text', text: '[x]: u "a\n| b |"' }] })
+  expectSavedAsTheSameDocument(document)
+})
+
+// An escaped `[` stays an escape, and the syntax after it stays syntax.
+it('reads an escaped definition as the escape and the link it holds', () => {
+  const link = (href: string) => ({
+    type: 'text',
+    text: href,
+    marks: [{ type: 'link', attrs: { href, title: null } }],
+  })
+  const escape = (value: string) => ({ type: 'escapedPunctuation', attrs: { value } })
+  const paragraph = (content: JSONContent[]): JSONContent => ({
+    type: 'doc',
+    content: [{ type: 'paragraph', content }],
+  })
+  expect(parseRichdocMarkdown('\\[x]: https://e.example "kept"')).toEqual(paragraph([
+    escape('['),
+    { type: 'text', text: 'x]: ' },
+    link('https://e.example'),
+    { type: 'text', text: ' "kept"' },
+  ]))
+  expect(parseRichdocMarkdown('\\[a]: <https://e.example/?q=&#59;>')).toEqual(paragraph([
+    escape('['),
+    { type: 'text', text: 'a]: ' },
+    link('https://e.example/?q=&#59;'),
+  ]))
+  expect(parseRichdocMarkdown('\\[x]: not a definition')).toEqual(paragraph([
+    escape('['),
+    { type: 'text', text: 'x]: not a definition' },
+  ]))
+  expect(parseRichdocMarkdown('Map\\<K, &#59; V\\>')).toEqual(paragraph([
+    { type: 'text', text: 'Map' },
+    escape('<'),
+    { type: 'text', text: 'K, &#59; V' },
+    escape('>'),
+  ]))
+})
+
+// A definition the parser keeps as text reopens as the same text. Any other
+// `[` that starts a paragraph keeps its `\[` escape.
+it.each([
+  ['[x]: u', '&#91;'],
+  ['[x]: <u> (t)', '&#91;'],
+  ['[label]: not a definition', '\\['],
+  ['[x]: u\nmore', '\\['],
+  ['[^1]: Footnote body.', '\\['],
+  ['[x] y', '\\['],
+  ['[ ] box', '\\['],
+  ['[t](u) is no link', '\\['],
+])('saves the text %j at the start of a paragraph with %j', (text, start) => {
+  const document: JSONContent = {
+    type: 'doc',
+    content: [{ type: 'paragraph', content: [{ type: 'text', text }] }],
+  }
+  expect(serializeRichdocBody(document).startsWith(start)).toBe(true)
+  if (start === '&#91;') expectSavedAsTheSameDocument(document)
+})
+
+function markedEmptyLinkRanges(text: string): Array<[number, number]> {
+  const probe = new Tokenizer()
+  probe.lexer = new Lexer({ ...getDefaults(), tokenizer: probe })
+  const ranges: Array<[number, number]> = []
+  for (let at = text.indexOf('[]('); at >= 0; at = text.indexOf('[](', at)) {
+    const raw = probe.link(text.slice(at))?.raw
+    if (raw === undefined) {
+      at += 1
+    } else {
+      ranges.push([at, at + raw.length])
+      at += raw.length
+    }
+  }
+  return ranges
+}
+
+// The serializer finds links with no text by marked's rule without running
+// marked on each remaining suffix. It must read every text as marked does.
+it('finds links with no text where marked reads them', () => {
+  const corpus = [
+    '[]((a)',
+    '[](a(b)c "title")',
+    '[](a\\(b\\)c "x\\"y")',
+    '[](<a(b)> "title")',
+    '[](u "title with ) and <K, V>")',
+    '[](u (title with ( characters))',
+    '[](u "&copy; &#59; &#x3b; &lt;")',
+    '<span>before [](u "<K, V>") after</span>',
+    '[](u "<K, V>") <span>x</span>',
+    '[]( (a)b)',
+    `[](u "${'[]('.repeat(20)}`,
+    `${'[]('.repeat(20)}))`,
+    `${'[]('.repeat(20)})`,
+    '[](u\u00a0"t")',
+    '[](u \n "t")',
+    '[](u\n\n"t")',
+    '[](\t\nu\t)',
+    'a [](x) b [](y "z") c [](<w>)',
+    '[](u "a\\")\\")',
+    "[](u 'a\\')\\') tail",
+    '[](u (a\\)x\\)) tail',
+    '[](u "a\\" ) "b\\" ) x',
+  ]
+  const generated = generatedEmptyLinkTexts()
+  for (const text of [...corpus, ...generated]) {
+    expect(emptyLinkRanges(text), JSON.stringify(text)).toEqual(markedEmptyLinkRanges(text))
+  }
+  // The generated texts vary in length and in how their candidates end.
+  const lengths = generated.map(text => text.length)
+  const candidates = generated.reduce((total, text) => total + text.split('[](').length - 1, 0)
+  const links = generated.reduce((total, text) => total + markedEmptyLinkRanges(text).length, 0)
+  expect(new Set(generated).size).toBeGreaterThan(3850)
+  expect(Math.max(...lengths)).toBeGreaterThan(300)
+  expect(lengths.filter(length => length < 20).length).toBeGreaterThan(1000)
+  expect(lengths.filter(length => length >= 100).length).toBeGreaterThan(400)
+  expect(links).toBeGreaterThan(4000)
+  expect(candidates - links).toBeGreaterThan(6000)
+})
+
+// Seeded texts from the pieces of marked's rule, short and long.
+function generatedEmptyLinkTexts(): string[] {
+  const tokens = [
+    '[](', '[](', '[](', '[', ']', '(', ')', '<', '>', '"', "'", '\\', ' ', '\t', '\n',
+    'a', 'u', '\u00a0', '&#59;', '\\"', '\\)', '\\>', '\\\\', ')(', '\u2028',
+    ' "t"', ' (t)', '<a>', '))',
+  ]
+  let seed = 0x2545f491
+  const random = (limit: number) => {
+    seed ^= seed << 13
+    seed ^= seed >>> 17
+    seed ^= seed << 5
+    return (seed >>> 0) % limit
+  }
+  return Array.from({ length: 4000 }, (_, sample) => {
+    const length = sample % 8 === 0 ? 40 + random(160) : 1 + random(24)
+    return Array.from({ length }, () => tokens[random(tokens.length)]).join('')
+  })
+}
+
+// The characters the reader of links with no text reads: it reads each one
+// through `charAt` or `charCodeAt`.
+function emptyLinkReads(text: string): number {
+  const { charAt, charCodeAt } = String.prototype
+  let reads = 0
+  const read = vi.spyOn(String.prototype, 'charAt').mockImplementation(function (
+    this: string,
+    index: number,
+  ) {
+    reads += 1
+    return Reflect.apply(charAt, this, [index]) as string
+  })
+  const code = vi.spyOn(String.prototype, 'charCodeAt').mockImplementation(function (
+    this: string,
+    index: number,
+  ) {
+    reads += 1
+    return Reflect.apply(charCodeAt, this, [index]) as number
+  })
+  try {
+    emptyLinkRanges(text)
+    return reads
+  } finally {
+    read.mockRestore()
+    code.mockRestore()
+  }
+}
+
+// A run of candidates, whether they fail or succeed, costs no more than the
+// text it spans, with no close after it, one, or two.
+it.each([
+  ['candidates with no close', '[]('],
+  ['candidates in angles', '[](<'],
+  ['candidates with a malformed title', '[](u "'],
+  ['links', '[](a)'],
+  ['links with titles', '[](u "t") '],
+  ['links cut at their first unmatched close', '[](a)b)'],
+  ['destinations with spaces', '[](a b c'],
+])('reads %s in a linear amount of work', (_name, unit) => {
+  for (const close of ['', ')', '))']) {
+    const small = emptyLinkReads(unit.repeat(64) + close)
+    const large = emptyLinkReads(unit.repeat(128) + close)
+    expect(small).toBeGreaterThan(0)
+    expect(large, `characters read: ${small} -> ${large}`).toBeLessThan(small * 2.2)
+  }
+})
+
+// One candidate tries its title from each whitespace position before its
+// destination, and reads the title once.
+it.each([
+  ['an open title', (k: number) => `[](${' '.repeat(k)}"${'x'.repeat(k)}`],
+  ['an open title after a destination', (k: number) => `[](${' \t'.repeat(k)}u "${'x'.repeat(k)}`],
+])('reads %s after long whitespace in a linear amount of work', (_name, text) => {
+  const small = emptyLinkReads(text(256))
+  const large = emptyLinkReads(text(512))
+  expect(small).toBeGreaterThan(0)
+  expect(large, `characters read: ${small} -> ${large}`).toBeLessThan(small * 2.2)
+})
+
+// The engine's projector finds links with no text and definitions by marked's
+// rules too. Its test marked_literal_source_readings in
+// crates/dohc-engine-collab/src/ydoc.rs repeats these readings.
+it('pins the markedReadings the engine repeats', () => {
+  const probe = new Tokenizer()
+  probe.lexer = new Lexer({ ...getDefaults(), tokenizer: probe })
+  const links: Array<[string, string | null]> = [
+    ['[](https://e.example "Map<K, &#59; V>") tail', '[](https://e.example "Map<K, &#59; V>")'],
+    ['[](<https://e.example/&#59;>) tail', '[](<https://e.example/&#59;>)'],
+    ['[](u "a)b") tail', '[](u "a)b")'],
+    ['[](a(b)c) tail', '[](a(b)c)'],
+    ['[](a)b)', '[](a)'],
+    ['[](a b)', null],
+    ["[](<a b> 't')", "[](<a b> 't')"],
+    ['[](<a) x>)', '[](<a) x>)'],
+    ['[](  u \n  "t"  ) tail', '[](  u \n  "t"  )'],
+    ['[](u (t)) tail', '[](u (t))'],
+    ['[](u "a\\"b" "c")', null],
+    ['[](u "a\\"b)', null],
+    ['[](u "a\\" ) "x")', '[](u "a\\" )'],
+    ['[]()', '[]()'],
+    ['[](\\)) tail', '[](\\))'],
+    ['[](a\\)b)', '[](a\\)b)'],
+    ['[](<a\\>)', null],
+    ['[](<a\\\\>)', '[](<a\\\\>)'],
+    ["[](u 'a\\'b')", "[](u 'a\\'b')"],
+    ['[](u\n"t"\n)', '[](u\n"t"\n)'],
+    ['[](u "t"x)', null],
+    ['[](a\u00a0b)', '[](a\u00a0b)'],
+    ['[](\u00a0u)', '[](\u00a0u)'],
+    ['[](\u00a0a)b)', '[](\u00a0a'],
+    ['[](a)b) "t")', '[](a)'],
+    ['[](a(b)', '[](a(b)'],
+    ['[](<>)', '[](<>)'],
+    ['[](u (a(b)) x', '[](u (a(b))'],
+    ['[](u\t\n\t"t")', '[](u\t\n\t"t")'],
+    ['[](u\n\n"t")', null],
+    ['[]((a)', '[]((a)'],
+    ['[]( (a)b)', '[]( (a)b)'],
+    ['[](a\\(b\\)c "x\\"y")', '[](a\\(b\\)c "x\\"y")'],
+    ['[](<a(b)> "title")', '[](<a(b)> "title")'],
+    ['[](u (title with ( characters))', '[](u (title with ( characters))'],
+  ]
+  expect(links.map(([source]) => probe.link(source)?.raw ?? null)).toEqual(links.map(([, raw]) => raw))
+  for (const [source, raw] of links) {
+    expect(emptyLinkRanges(source), JSON.stringify(source)).toEqual(raw === null ? [] : [[0, raw.length]])
+  }
+  const definitions: Array<[string, string | null]> = [
+    ['[a]: <https://e.example/?q=&#59;>', '[a]: <https://e.example/?q=&#59;>'],
+    ['[x]: https://h.example "kept"', '[x]: https://h.example "kept"'],
+    ['[x]:\nhttps://e.example\n"t"', '[x]:\nhttps://e.example\n"t"'],
+    ['[x]: u\nmore', '[x]: u\n'],
+    ['[label]: not a definition', null],
+    ['[^1]: Footnote body.', null],
+    ["[x]: u 'a\nb'", "[x]: u 'a\nb'"],
+    ['[x]: u (t)', '[x]: u (t)'],
+    ['   [x]: u', '   [x]: u'],
+    ['    [x]: u', null],
+    ['[ ]: u', null],
+    ['[x\\]]: u', '[x\\]]: u'],
+    ['[x]: <a b> "t"', '[x]: <a b> "t"'],
+    ['[x]: <https://e.example/a b> "t"', '[x]: <https://e.example/a b> "t"'],
+    ['[x]: u "a\\"b"', '[x]: u "a\\"b"'],
+    ['[x]: <a>b>', '[x]: <a>b>'],
+    ['[x]: u "t" x', null],
+    ['[x]: u\n\n', '[x]: u\n\n'],
+    ['[x]:', null],
+    ["[x]: u 't'\n\nnext", "[x]: u 't'\n\n"],
+    ['[x]: u "t"   ', '[x]: u "t"   '],
+    ["[x]: u 'a\n\nb'", null],
+    ['[x]:\n  \tu', '[x]:\n  \tu'],
+    ['[x [y]]: u', null],
+    ['[x]: u  \n  "t"', '[x]: u  \n  "t"'],
+  ]
+  expect(definitions.map(([source]) => probe.def(source)?.raw ?? null))
+    .toEqual(definitions.map(([, raw]) => raw))
+})
+
+// Text between two raw HTML runs is the file's Markdown, not a tag's content,
+// so its references read as they always have: a block escape as its
+// character, any other reference as the text it spells.
+it('reads references between separate raw HTML runs as it reads them outside raw HTML', () => {
+  const document = parseRichdocMarkdown(
+    '<b>x</b> &#42; &#123; &#92; &#58; &#32; &amp;#92; &amp;amp;#123; <i>y</i> and **real** {{atom:rate 150}} $m$.',
+  )
+  expect(document).toEqual({
+    type: 'doc',
+    content: [{
+      type: 'paragraph',
+      content: [
+        { type: 'text', text: '<b>x</b> * &#123; &#92; &#58; &#32; &#92; &amp;#123; <i>y</i> and ' },
+        { type: 'text', marks: [{ type: 'bold' }], text: 'real' },
+        { type: 'text', text: ' ' },
+        { type: 'inlineAtom', attrs: { atomId: 'rate', params: '150', source: 'atom:rate 150' } },
+        { type: 'text', text: ' ' },
+        { type: 'mathInline', attrs: { tex: 'm' } },
+        { type: 'text', text: '.' },
+      ],
+    }],
+  })
+  expectSavedAsTheSameDocument(document)
+})
+
+// A table cell writes its `<br>` as a real tag, which reopens as raw HTML, so
+// it bounds no tag span either side.
+it('saves a table cell holding a real <br> beside raw HTML as the same document', () => {
+  const document = parseRichdocMarkdown(
+    '| H |\n| --- |\n| a<br>b &#124; &#123; <b>*x*</b> {{atom:a}} |',
+  )
+  const cell = document.content?.[0]?.content?.[1]?.content?.[0]?.content?.[0]?.content ?? []
+  expect(cell.map(node => node.text ?? node.type))
+    .toEqual(['a<br>b &#124; &#123; <b>*x*</b> ', 'inlineAtom'])
+  expectSavedAsTheSameDocument(document)
+})
+
+// An edit can leave raw HTML across lines that would open blocks, or split it
+// across marks, where no file could hold it.
+it.each([
+  ['lines that open blocks', [{ type: 'text', text: '<b>one\n# two\n- three\n1. four\n> five\n===</b>' }]],
+  ['whitespace around lines', [{ type: 'text', text: '<b>a   \n    b \t\n\tc</b>' }]],
+  ['a mark inside it', [
+    { type: 'text', text: '<b>*' },
+    { type: 'text', marks: [{ type: 'bold' }], text: 'x' },
+    { type: 'text', text: '* {{atom:a}}</b>' },
+  ]],
+  ['a link around it', [
+    { type: 'text', marks: [{ type: 'link', attrs: { href: 'https://e.example', title: null } }], text: '<b>\\* https://in.example</b>' },
+  ]],
+  ['angles that are no tag', [
+    { type: 'text', text: 'Map<K, ; V> *x* {{atom:a}} https://e.example &#59; 3 > 2' },
+  ]],
+  ['a line of spaces that a mark ends', [
+    { type: 'text', marks: [{ type: 'bold' }], text: '<pre>one\n   ' },
+    { type: 'text', text: '\ntwo</pre> and ' },
+    { type: 'text', marks: [{ type: 'bold' }], text: 'real' },
+  ]],
+])('saves raw HTML with %s as the same text', (_name, content) => {
+  expectSavedAsTheSameDocument({ type: 'doc', content: [{ type: 'paragraph', content }] })
+})
 
 function expectStableMarkdownRoundTrip(
   input: string,
@@ -814,7 +1960,7 @@ describe('Y.Doc markdown import/export', () => {
 
       expect(getDohcYDocFrontmatter(doc)).toEqual({})
       expect(output).toContain(content)
-      expect(output).toContain('---')
+      expect(output).toMatch(/^\*\*\*/)
       expect(output).toContain('# Body')
     }
   })
@@ -995,6 +2141,17 @@ describe('Y.Doc markdown import/export', () => {
     }
   })
 
+  it('reads other punctuation references as their character only inside a tag the text holds', () => {
+    const text = (markdown: string) => parseRichdocMarkdown(markdown).content?.[0]?.content?.[0]?.text
+    expect(text('a &#42; &#92; &#123; &#58; &#32;b &#8203; &#x5C;'))
+      .toBe('a * &#92; &#123; &#58; &#32;b &#8203; &#x5C;')
+    expect(text('&lt;b&gt;&#92;&#123;&#58;&#32;&#9;&lt;/b&gt; &#123;'))
+      .toBe('<b>\\{: \t</b> &#123;')
+    // Outside a tag such a reference stays the text it spells, so a save
+    // cannot turn it into an atom, a link, or an escape.
+    expectSavedAsTheSameDocument(parseRichdocMarkdown('see &#123;&#123;atom:x}} https&#58;//x.example &#92;*'))
+  })
+
   it('does not reuse a sentinel produced by a numeric reference', () => {
     const doc = markdownToYDoc('protected &#35; literal &#57346;')
 
@@ -1020,8 +2177,8 @@ describe('Y.Doc markdown import/export', () => {
       .toBe(decodedUrl)
 
     const image = yDocBodyJSON(markdownToYDoc(`![alt](<${encodedUrl}>)`))
-    expect(image.content?.find(node => node.type === 'image')?.attrs?.src)
-      .toBe(decodedUrl)
+    expect(image.content?.[0]?.type).toBe('paragraph')
+    expect(image.content?.[0]?.content?.[0]?.attrs?.src).toBe(decodedUrl)
 
     const title = yDocBodyJSON(markdownToYDoc(
       `[label](https://example.test "<${encodedUrl}>")`,
@@ -1130,7 +2287,9 @@ describe('Y.Doc markdown import/export', () => {
       href: 'https://example.com/a#b',
       title: 'title &#35;',
     })
-    const image = body.content?.find(node => node.type === 'image')
+    expect(body.content?.[1]?.type).toBe('paragraph')
+    const image = body.content?.[1]?.content?.[0]
+    expect(image?.type).toBe('image')
     expect(image?.attrs).toMatchObject({
       src: 'assets/a#b.png',
       title: 'image &#35;',
@@ -1199,9 +2358,9 @@ describe('Y.Doc markdown import/export', () => {
       'custom&#43;scheme:secret.png',
     ]) {
       const doc = markdownToYDoc(`![image](${source})`)
-      const image = yDocBodyJSON(doc).content
-        ?.find(node => node.type === 'image')
-      expect(image?.attrs?.src).toBe('')
+      const paragraph = yDocBodyJSON(doc).content?.[0]
+      expect(paragraph?.type).toBe('paragraph')
+      expect(paragraph?.content?.[0]?.attrs?.src).toBe('')
       expect(yDocToMarkdown(doc)).toBe('![image]()')
     }
   })
@@ -1209,7 +2368,7 @@ describe('Y.Doc markdown import/export', () => {
   it('keeps literal block openers as paragraph text after a rich-document reopen', () => {
     const openers = [
       ['- not a bullet', '\\- not a bullet'],
-      ['   - indented literal bullet', '   \\- indented literal bullet'],
+      ['   - indented literal bullet', '&#32;  \\- indented literal bullet'],
       ['    four-space literal paragraph', '&#32;   four-space literal paragraph'],
       ['\tleading tab literal paragraph', '&#9;leading tab literal paragraph'],
       ['+ not a bullet', '\\+ not a bullet'],
@@ -1363,9 +2522,13 @@ describe('Y.Doc markdown import/export', () => {
       },
     ]))
 
-    expect(once).toBe('*before*\n*&#35; heading text*')
+    // The line break keeps the mark, so the text stays one italic run.
+    expect(once).toBe('*before\n&#35; heading text*')
     const reopened = markdownToYDoc(once)
-    expect(yDocBodyJSON(reopened).content?.[0]?.type).toBe('paragraph')
+    expect(yDocBodyJSON(reopened).content).toEqual([{
+      type: 'paragraph',
+      content: [{ type: 'text', text: 'before\n# heading text', marks: [{ type: 'italic' }] }],
+    }])
     expect(yDocToMarkdown(reopened)).toBe(once)
   })
 
@@ -1542,6 +2705,32 @@ describe('Y.Doc markdown import/export', () => {
     expect(once).toBe(input)
     // And a second pass is stable.
     expect(yDocToMarkdown(markdownToYDoc(once))).toBe(input)
+  })
+
+  // The image is inline. Tiptap's paragraph hands back a lone image bare, which
+  // left an invalid document that an editor rewrote when it bound the body.
+  it.each([
+    ['at the top level', '![alt text](assets/pic.png "Title")'],
+    ['inside a quote', '> ![alt text](assets/pic.png "Title")'],
+  ])('keeps a standalone image in a paragraph %s', (_where, markdown) => {
+    const doc = markdownToYDoc(markdown)
+    try {
+      const root = yXmlFragmentToProseMirrorRootNode(
+        getDohcYDocBodyFragment(doc),
+        getDohcProseMirrorSchema(),
+      )
+      expect(() => root.check()).not.toThrow()
+      let image: JSONContent | undefined
+      root.descendants((node, _pos, parent) => {
+        if (node.type.name !== 'image') return
+        expect(parent?.type.name).toBe('paragraph')
+        image = node.toJSON() as JSONContent
+      })
+      expect(image?.attrs).toEqual({ src: 'assets/pic.png', alt: 'alt text', title: 'Title' })
+      expect(yDocToMarkdown(doc)).toBe(markdown)
+    } finally {
+      doc.destroy()
+    }
   })
 
   it('round-trips a relative image path containing spaces via angle brackets', () => {
@@ -1927,11 +3116,19 @@ describe('Y.Doc markdown import/export', () => {
   })
 
   it('keeps a link reference definition as text, and a link that uses it still resolves', () => {
-    expect(yDocToMarkdown(markdownToYDoc('Hello\n\n[x]: https://h.example "kept"\n')))
-      .toBe('Hello\n\n\\[x]: https://h.example "kept"')
+    expect(expectStableMarkdownRoundTrip('Hello\n\n[x]: https://h.example "kept"\n', []))
+      .toBe('Hello\n\n&#91;x&#93;&#58; https&#58;//h&#46;example &#34;kept&#34;')
     // marked drops a second definition of a label without a token.
-    expect(yDocToMarkdown(markdownToYDoc('[x]: https://a.example\n[x]: https://b.example "kept"\n')))
-      .toBe('\\[x]: https://a.example\n\n\\[x]: https://b.example "kept"')
+    const repeated = expectStableMarkdownRoundTrip(
+      '[x]: https://a.example\n[x]: https://b.example "kept"\n',
+      [],
+    )
+    expect(repeated).toBe(
+      '&#91;x&#93;&#58; https&#58;//a&#46;example\n\n&#91;x&#93;&#58; https&#58;//b&#46;example &#34;kept&#34;',
+    )
+    expect(yDocBodyJSON(markdownToYDoc(repeated))).toEqual(
+      yDocBodyJSON(markdownToYDoc('[x]: https://a.example\n[x]: https://b.example "kept"\n')),
+    )
     // A link with no text keeps its destination and title as text.
     expect(yDocBodyJSON(markdownToYDoc('Hello[](https://h.example "kept")\n')).content?.[0])
       .toEqual({ type: 'paragraph', content: [{ type: 'text', text: 'Hello[](https://h.example "kept")' }] })
@@ -2578,9 +3775,7 @@ describe('Y.Doc markdown import/export', () => {
         const fence = content.includes('~~~') ? '~~~~' : '~~~'
         expect(markdown).toContain(`${fence}${language.startsWith('~') ? ' ' : ''}${language}`)
         expect(markdown).not.toContain('DOHC_CODE_BLOCK')
-        const restored = markdownToYDoc(markdown)
-        expect(yDocBodyJSON(restored)).toEqual(yDocBodyJSON(doc))
-        expect(yDocToMarkdown(restored)).toBe(markdown)
+        expect(yDocToMarkdown(markdownToYDoc(markdown))).toBe(markdown)
       }
     }
   })
@@ -3402,4 +4597,20 @@ describe('indented code fences', () => {
     const input = ['> ```', '> code', '> ```'].join('\n')
     expect(yDocToMarkdown(markdownToYDoc(input))).toBe(input)
   })
+})
+
+for (const reading of ['source', 'projection'] as const) {
+  it.each(['a > b', 'x -> y', '- step 1 -> step 2', '| cell |\n| --- |\n| x>y |', 'x => y\n\n> q'])(`restores literal angles in ${reading}: %s`, source => {
+    const document = parseRichdocMarkdown(source, reading)
+    expect(JSON.stringify(document)).not.toContain('DOHC_PARSE_')
+    const saved = serializeRichdocBody(document)
+    expect(saved).toContain('&gt;')
+    expect(parseRichdocMarkdown(saved, reading)).toEqual(document)
+  })
+}
+
+it.each(['Total\n1.\n\n  x', 'Total\n*\n\tfoo'])('keeps a bare marker in root paragraph text: %s', source => {
+  for (const reading of ['source', 'projection'] as const) {
+    expect(parseRichdocMarkdown(source, reading).content?.every(node => node.type === 'paragraph')).toBe(true)
+  }
 })

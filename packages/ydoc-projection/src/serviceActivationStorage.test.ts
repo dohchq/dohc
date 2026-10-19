@@ -27,6 +27,7 @@ const validateBaseline=createLiveMarkdownRegistrationValidator(policy),validateJ
 const host={mode:'service' as const,hostId:'service',hostEpoch:parseHostEpoch(1),instanceId:'instance',connectionId:'connection'}
 const actor={kind:'owner' as const,userId:'owner',shareId:'share'}
 const bounds={maxCaptureBytes:1_000_000,maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000}
+const stop={operationId:'restore',workspaceId:'workspace',ownerUserId:'owner'}
 function fixture(){
   const root=mkdtempSync(join(tmpdir(),'dohc-service-activation-')),path=join(root,'relay.sqlite')
   const storage=openSyncRelayStorage(path),raw=new DatabaseSync(path)
@@ -170,6 +171,29 @@ it('ignores refused moments while verifying an ordinary activation cut',()=>{
     f.capture.source.committedCursor=4
     expect(f.prepare()).toEqual({document:f.document,replayed:false,completed:false})
     expect(f.store.read('workspace','docs/a.md',1_000_000)!.source).toEqual(f.capture.source)
+  }finally{f.close()}
+})
+// A hosted replica's cursor passes every row of the workspace, including rows of
+// documents it may not read, so it matches the relay's newest sequence.
+it('activates at a hosted cursor that passed rows of documents outside the hosted scope',()=>{
+  const f=fixture();try{
+    f.raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','origin',3,'ydoc.update',?,3)")
+      .run(JSON.stringify({versionId:'main',objectId:'private-object',path:'private/b.md',contentKind:'richdoc',isBaseState:true,lineageClaimId:'c'.repeat(64),updateBlobSha256:'c'.repeat(64)}))
+    expect(f.prepare).toThrow(ServiceActivationStaleCut)
+    f.capture.source.committedCursor=4
+    expect(f.prepare()).toEqual({document:f.document,replayed:false,completed:false})
+  }finally{f.close()}
+})
+// A host publication the relay kept after the document left its enrolled path
+// writes the old path. It projects nowhere, but activation still refuses it.
+it('refuses activation over a departed host publication',()=>{
+  const f=fixture();try{
+    f.raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,relay_admission) VALUES ('workspace','service-host:native',0,'moment.append',?,3,'departed')")
+      .run(JSON.stringify({versionId:'main',objectId:'object',momentId:'departed',path:'docs/old.md',operation:'write',payloadAfterPath:'docs/old.md',
+        payloadAfterContentKind:'text',payloadAfterBlobSha256:f.capture.source.sourceDigest,payloadAfterByteLength:f.capture.source.sourceByteLength}))
+    f.capture.source.committedCursor=4
+    expect(f.prepare).toThrow('Ordinary activation history replaced the live document.')
+    expect(f.raw.prepare('SELECT * FROM sync_relay_live_documents').all()).toEqual([])
   }finally{f.close()}
 })
 it('refuses an ordinary baseline as stale after a real workspace identity rotation',()=>{
@@ -409,12 +433,15 @@ it('requires exact seed application ACK and supports lost completion responses',
     try{
       const active=activationDriver(f,vi.fn(async()=>f.capture))
       expect(await active.driver.activate(active.target,new AbortController().signal)).toMatchObject({kind:'done'})
-      expect(active.driver.restoreConsumer(f.document)).toBe(active.driver.consumer(f.document).consumer)
+      expect(active.driver.restoreConsumer(f.document,stop)).toBe(active.driver.consumer(f.document).consumer)
     }finally{drain.mockRestore()}
     f.raw.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=2")
     expect(()=>f.store.resume({document:f.document,activationId:f.capture.activationId,host,registeredAtMs:5,guard(){}})).toThrow()
     f.raw.exec("UPDATE sync_relay_live_documents SET admission_state='closed'")
-    expect(activationDriver(f,vi.fn()).driver.restoreConsumer(f.document)).toBeInstanceOf(OwnerCommittedDelivery)
+    // Without that session, a restore needs its operation to name the retained adoption, and refuses without one.
+    const capture=vi.fn()
+    expect(()=>activationDriver(f,capture).driver.restoreConsumer(f.document,stop)).toThrow('Service restore owner adoption is unavailable.')
+    expect(capture).not.toHaveBeenCalled()
   }finally{f.close()}
 })
 
@@ -449,11 +476,11 @@ type RunDocument=ConstructorParameters<typeof ServiceActivationDriver>[0]['runDo
 function activationDriver(f:ReturnType<typeof fixture>,captureOwnerActivation:ReturnType<typeof vi.fn>,sendRequest:ReturnType<typeof vi.fn>=vi.fn(async()=>({result:{released:true}})),
   runDocument:RunDocument=(_document,_signal,operation)=>operation(),native:object={}){
   const pull=vi.fn(async()=>({hasMore:false})),target={workspaceId:'workspace',path:'docs/a.md',shareId:'share'}
-  const driver=new ServiceActivationDriver({storage:f.storage,history:f.history,host,
+  const driver=new ServiceActivationDriver({trustedAccount:accountId=>({accountId,name:'Owner'}),storage:f.storage,history:f.history,host,
     client:{...native,captureOwnerActivation,sendRequest} as never,
-    workspaces:new Map([['workspace',{handle:'native-workspace',ordinary:{pull} as never}]]),
+    workspace:id=>id==='workspace'?{handle:'native-workspace',replica:{pull,publish:vi.fn()}}:undefined,
     config:{targets:[target],validateBaseline,validateJournal,validateAdmission:validateJournal,maxCaptureBytes:1_000_000,maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000,
-      maxDocumentsPerPass:1,pollIntervalMs:1000,passDeadlineMs:10_000},
+      maxDocumentsPerPass:1,pollIntervalMs:1000,passDeadlineMs:10_000,idleUnloadMs:600_000,idleRetryMs:30_000},
     adoption:{maxBytes:1_000_000,maxEvents:10},nextRequestId:()=>1,deadlineMs:1000,assertCurrent(){},registered(){},
     runDocument,
   })
@@ -586,6 +613,8 @@ it('reports a restore fence that lands while a completed activation waits for do
     let drain=vi.spyOn(OwnerCommittedDelivery.prototype,'drain').mockResolvedValue({kind:'done'} as never)
     expect(await d.driver.activate(d.target,signal,settle)).toMatchObject({kind:'done'})
     expect(settle).toHaveBeenCalledTimes(1)
+    // Only this first pass, which has no owner yet, catches up first.
+    expect(d.pull).toHaveBeenCalledTimes(1)
     drain.mockRestore()
 
     const queued=queueBehind(()=>{
@@ -607,7 +636,7 @@ it('reports a restore fence that lands while a completed activation waits for do
     expect(settle).toHaveBeenCalledTimes(2)
     expect(d.driver.workspaceReady('workspace')).toBe(true)
     expect(capture).toHaveBeenCalledTimes(1)
-    expect(d.pull).not.toHaveBeenCalled()
+    expect(d.pull).toHaveBeenCalledTimes(1)
     expect(f.raw.prepare('SELECT count(*) AS n FROM sync_relay_service_activations').get()).toEqual({n:1})
     expect(f.raw.prepare('SELECT count(*) AS n FROM sync_relay_live_delivery_owners').get()).toEqual({n:1})
     expect(f.store.read('workspace','docs/a.md',1_000_000)!.source).toEqual(f.capture.source)
@@ -658,7 +687,7 @@ it('clears readiness when a restore fence is visible before the next activation'
     expect(native.client.sendRequest).toHaveBeenCalledTimes(calls)
     expect(()=>d.driver.consumer(f.document)).toThrow('incomplete')
     expect(d.driver.workspaceReady('workspace')).toBe(false)
-    expect(d.driver.restoreConsumer(f.document)).toBe(active)
+    expect(d.driver.restoreConsumer(f.document,stop)).toBe(active)
     reopen(f,fence)
     expect(await d.driver.activate(d.target,signal)).toMatchObject({kind:'done'})
     expect(d.driver.consumer(f.document).consumer).toBe(active)
@@ -786,18 +815,29 @@ it('releases a real captured session after a stale cut without retaining another
     expect(f.storage.getLiveHostControl()!.registeredConnectionId).toBeNull()
   }finally{f.close()}
 })
-it('restarts a pending activation with its retained ID instead of pulling and selecting a new cut',async()=>{
+// Proves: a restarted driver catches its replica up before resuming, and the
+// resume keeps the retained activation ID and cut even when the relay advanced
+// past that cut, where a fresh capture would be stale.
+it('restarts a pending activation with its retained ID and cut after catching up, without selecting a new cut',async()=>{
   const f=fixture(),drain=vi.spyOn(OwnerCommittedDelivery.prototype,'drain').mockResolvedValue({kind:'pending',reason:'transport interrupted',continueDrain:false})
   try{
     const initial=activationDriver(f,vi.fn(async()=>f.capture))
     await initial.driver.activate(initial.target,new AbortController().signal)
     expect(()=>initial.driver.consumer(f.document)).toThrow('incomplete')
-    const capture=vi.fn(async()=>({...f.capture,sessionId:'reopened-native-session'}))
-    const resumed=activationDriver(f,capture)
-    await resumed.driver.activate(resumed.target,new AbortController().signal)
-    expect(resumed.pull).not.toHaveBeenCalled()
+    const order:string[]=[],send=vi.fn(async()=>({result:{released:true}}))
+    const capture=vi.fn(async()=>{order.push('capture');return {...f.capture,sessionId:'reopened-native-session'}})
+    const resumed=activationDriver(f,capture,send)
+    resumed.pull.mockImplementation(async()=>{
+      order.push('pull')
+      f.raw.exec("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','other',1,'object.snapshot','{}',3)")
+      return {hasMore:false}
+    })
+    await expect(resumed.driver.activate(resumed.target,new AbortController().signal)).resolves.toMatchObject({kind:'pending',reason:'transport interrupted'})
+    expect(order).toEqual(['pull','capture'])
     expect(capture).toHaveBeenCalledWith(expect.objectContaining({workspace:'native-workspace'}),'docs/a.md',1_000_000,expect.any(AbortSignal),f.capture.activationId)
-    expect(f.store.read('workspace','docs/a.md',1_000_000)!.source).toEqual(f.capture.source)
+    expect(send).not.toHaveBeenCalled()
+    expect(f.raw.prepare('SELECT count(*) AS n FROM sync_relay_service_activations').get()).toEqual({n:1})
+    expect(f.store.read('workspace','docs/a.md',1_000_000)).toMatchObject({activationId:f.capture.activationId,source:f.capture.source})
     expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor}).kind).toBe('refused')
   }finally{drain.mockRestore();f.close()}
 })

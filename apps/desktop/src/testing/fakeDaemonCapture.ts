@@ -313,7 +313,7 @@ export function createFakeDaemonCapture(input: {
         case "capture.flush":
         case "capture.reconcile": {
           await ingest(await activeVersionId());
-          return { id: request.id, result: { settled: true, running: true, degraded: false } };
+          return { id: request.id, result: { settled: true, running: true, degraded: false, heldFiles: [] } };
         }
         case VERSIONED_METHOD.textWrite:
         case VERSIONED_METHOD.textWriteBlob:
@@ -321,7 +321,7 @@ export function createFakeDaemonCapture(input: {
         case VERSIONED_METHOD.binaryWriteBlob: {
           const response = await loopback.sendRequest(request);
           const result = response.result as { materializeOutcome?: string };
-          const key = typeof params.requestId === "string" ? params.requestId : null;
+          const key = request.idempotencyKey ?? null;
           if (result.materializeOutcome === "applied" &&
               (!key || !publishedRequests.has(key)) &&
               String(params.versionId) === await activeVersionId()) {

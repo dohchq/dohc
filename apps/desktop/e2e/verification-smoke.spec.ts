@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { DOCUMENT_END } from "./helpers/keys";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { launchDesktopApp } from "./helpers/desktopApp";
@@ -17,7 +18,7 @@ test("@verification-smoke an editor change reaches disk and survives restart", a
     const editor = desktop.page.getByTestId("markdown-editor");
     await expect(editor).toContainText("Original paragraph.");
     await editor.click();
-    await desktop.page.keyboard.press("ControlOrMeta+End");
+    await desktop.page.keyboard.press(DOCUMENT_END);
     await desktop.page.keyboard.type(" Durable verification edit.");
     await expect(desktop.page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved");
     await expect.poll(() => readFile(join(workspace.rootPath, "proof.md"), "utf8")).toContain("Durable verification edit.");

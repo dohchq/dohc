@@ -2,7 +2,7 @@ import {
   isChatShareAccessValue,
   isShareAccessValue,
 } from "@dohc/security-contract";
-import { groupChannelIsOrdinary, isGroupSelector, effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson, type StoredAnyShareSelector } from "./shareFilter";
+import { chatSideOf, groupChannelIsOrdinary, isGroupSelector, effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson, type StoredAnyShareSelector } from "./shareFilter";
 import type {
   SyncRelayStorage,
   SyncRelayGrantedShareRow,
@@ -35,11 +35,14 @@ export function createShareSummaries(
   lookupUserEmail?: (userId: string) => Promise<string | null> | string | null,
   namedBrowserOrigin?: string,
 ) {
-  const namedBrowserInvitation = (grantId: string, selector: StoredAnyShareSelector, access: string) => {
+  const namedBrowserInvitation = (workspaceId: string, grantId: string, selector: StoredAnyShareSelector, access: string) => {
     const effective = effectiveShareSelector(selector, access);
-    return namedBrowserOrigin && effective && isLiveEditShareSelector(effective)
-      ? { browserInvitationUrl: `${namedBrowserOrigin}/s/edit/${encodeURIComponent(grantId)}` }
-      : {};
+    if (!namedBrowserOrigin || !effective) return {};
+    if (isGroupSelector(effective) && !groupChannelIsOrdinary(effective, {
+      channelKind: wireId => storage.findChannelCreateKind(workspaceId, wireId),
+    })) return {};
+    const view = chatSideOf(effective) ? "chat" : isLiveEditShareSelector(effective) ? "edit" : null;
+    return view ? {browserInvitationUrl: `${namedBrowserOrigin}/s/${view}/${encodeURIComponent(grantId)}`} : {};
   };
   const groupFileScope = (workspaceId: string, selector: StoredAnyShareSelector | null, access: string) => {
     const effective = selector && effectiveShareSelector(selector, access);
@@ -93,6 +96,7 @@ export function createShareSummaries(
 
   const grantedShareSummary = async (
     row: SyncRelayGrantedShareRow,
+    roster?: { granterEmail: string | null },
   ): Promise<Record<string, unknown>> => {
     const { share, grant } = row;
     // A pending invite has no recipient user id yet; surface the addressed
@@ -106,6 +110,7 @@ export function createShareSummaries(
     const selector = parseStoredAnyShareSelectorJson(share.selectorJson);
     return {
       ...shareSummaryBase(row, selector),
+      ...(roster ? { granterUserId: share.granterUserId, granterEmail: roster.granterEmail, status: grant.status } : {}),
       workspaceId: share.workspaceId,
       recipientUserId: grant.principalUserId,
       recipientEmail,
@@ -113,7 +118,7 @@ export function createShareSummaries(
       automationsGeneration: row.automationsGeneration,
       ...(selector && grant.status === "active" && grant.revokedAtMs === null && grant.parentGrantId === null &&
         (grant.principalKind === "user" || grant.principalKind === "email")
-        ? namedBrowserInvitation(grant.grantId, selector, grant.access) : {}),
+        ? namedBrowserInvitation(share.workspaceId, grant.grantId, selector, grant.access) : {}),
     };
   };
 
@@ -125,7 +130,7 @@ export function createShareSummaries(
   ): Record<string, unknown> => {
     // Received summaries deliberately omit the workspace id: the recipient's
     // access is share-scoped, and the granter's workspace identity is not
-    // theirs to see.
+    // theirs to see. Only the detail route adds a recipient source handle.
     return {
       ...shareSummaryBase(row),
       granterUserId: row.share.granterUserId,

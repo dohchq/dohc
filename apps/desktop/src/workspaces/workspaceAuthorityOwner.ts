@@ -123,7 +123,7 @@ export function createWorkspaceAuthorityOwner<
 
   function assertOpen(): void {
     if (closing) {
-      throw new Error("Workspace authority owner is closing.");
+      throw new Error("dohc is closing. Open dohc again to continue.");
     }
   }
 
@@ -226,23 +226,23 @@ export function createWorkspaceAuthorityOwner<
   function currentRecord(workspaceId: string): AuthorityRecord<Workspace, State> {
     assertOpen();
     const workspace = options.findWorkspace(workspaceId);
-    if (!workspace) throw new Error(`Unknown workspace: ${workspaceId}`);
+    if (!workspace) throw new Error("This workspace is not open. Open it again.");
     const slot = slotFor(workspaceId);
     if (slot.registrationBlocked) {
       throw new Error(
-        "This workspace attachment is retiring or blocked by failed cleanup.",
+        "This workspace was closed. Open it again.",
       );
     }
     const current = slot.current;
     if (current?.retired) {
-      throw new Error("This workspace attachment is retiring or blocked by failed cleanup.");
+      throw new Error("This workspace was closed. Open it again.");
     }
     if (current && !current.retired && bindingMatchesWorkspace(current.binding, workspace)) {
       return current;
     }
     if (current) {
       retire(current);
-      throw new Error("This workspace attachment changed before its old authority was cleaned up.");
+      throw new Error("This workspace changed while this ran. Try again.");
     }
     const created = createRecord(workspace);
     slot.current = created;
@@ -252,13 +252,17 @@ export function createWorkspaceAuthorityOwner<
   function assertRecordCurrent(record: AuthorityRecord<Workspace, State>): void {
     const slot = slots.get(record.binding.workspaceId);
     const workspace = options.findWorkspace(record.binding.workspaceId);
+    if (workspace && !bindingMatchesWorkspace(record.binding, workspace)) {
+      throw new Error("This workspace changed while this ran. Try again.");
+    }
     if (
       record.retired ||
       slot?.current !== record ||
-      !workspace ||
-      !bindingMatchesWorkspace(record.binding, workspace)
+      !workspace
     ) {
-      throw new Error("This work belongs to a retired workspace authority.");
+      throw new Error(closing
+        ? "dohc is closing. Open dohc again to continue."
+        : "This workspace was closed. Open it again.");
     }
   }
 
@@ -273,7 +277,7 @@ export function createWorkspaceAuthorityOwner<
       state: record.state,
       assertCurrent(): void {
         if (released) {
-          throw new Error("This workspace authority lease was released.");
+          throw new Error("This operation ended. Try again.");
         }
         assertRecordCurrent(record);
       },
@@ -290,8 +294,13 @@ export function createWorkspaceAuthorityOwner<
     binding: WorkspaceAuthorityBinding<Workspace>,
   ): AuthorityRecord<Workspace, State> {
     const record = slots.get(binding.workspaceId)?.current;
-    if (!record || record.binding !== binding) {
-      throw new Error("This work belongs to a retired workspace authority.");
+    if (record && record.binding !== binding) {
+      throw new Error("This workspace changed while this ran. Try again.");
+    }
+    if (!record) {
+      throw new Error(closing
+        ? "dohc is closing. Open dohc again to continue."
+        : "This workspace was closed. Open it again.");
     }
     return record;
   }
@@ -306,7 +315,7 @@ export function createWorkspaceAuthorityOwner<
         lease.assertCurrent();
         const workspace = options.findWorkspace(lease.binding.workspaceId);
         if (!workspace || !bindingMatchesWorkspace(lease.binding, workspace)) {
-          throw new Error("This work belongs to a retired workspace authority.");
+          throw new Error("This workspace was closed. Open it again.");
         }
         return Object.freeze({
           ...workspace,
@@ -326,7 +335,7 @@ export function createWorkspaceAuthorityOwner<
     const slot = slotFor(workspace.workspaceId);
     if (slot.registrationBlocked || slot.current?.retired) {
       throw new Error(
-        "This workspace attachment is retiring or blocked by failed cleanup.",
+        "This workspace was closed. Open it again.",
       );
     }
     if (slot.current || options.findWorkspace(workspace.workspaceId)) {
@@ -557,6 +566,14 @@ export function createWorkspaceAuthorityOwner<
       return currentRecord(workspaceId).binding;
     },
 
+    attachmentRetirementSignal(workspaceId: string, attachmentId: symbol): AbortSignal {
+      const record = slots.get(workspaceId)?.current;
+      if (!record || record.retired || record.binding.attachmentId !== attachmentId) {
+        throw new Error("This workspace was closed. Open it again.");
+      }
+      return record.retirement.signal;
+    },
+
     // Whether work that outlives its lease still belongs to the attachment it
     // started on. A lookup only: it never creates or retires an attachment.
     isCurrentAttachment(workspaceId: string, attachmentId: symbol): boolean {
@@ -611,12 +628,7 @@ export function createWorkspaceAuthorityOwner<
       const lease = this.acquire(workspaceId);
       try {
         const operation = operationForLease(lease);
-        return Promise.resolve(work(operation))
-          .then((result) => {
-            operation.assertCurrent();
-            return result;
-          })
-          .finally(() => lease.release());
+        return Promise.resolve(work(operation)).finally(() => lease.release());
       } catch (error) {
         lease.release();
         return Promise.reject(error);

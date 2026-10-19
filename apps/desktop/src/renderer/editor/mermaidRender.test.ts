@@ -5,7 +5,8 @@ import { StarterKit } from '@tiptap/starter-kit'
 import { Markdown } from '@tiptap/markdown'
 import { TaskList } from '@tiptap/extension-list'
 import { TextSelection } from '@tiptap/pm/state'
-import { DohcTaskItem, dohcMarkdownExtensions } from './extensions'
+import { DohcTaskItem } from '@dohc/ydoc-projection/markdown-extensions'
+import { desktopMarkdownExtensions } from './extensions'
 import { codeBlock, doc, paragraph } from './testDocs'
 import {
   computeMermaidBlocks,
@@ -326,7 +327,7 @@ describe('makeMermaidPreviewPlugin — DOM wiring', () => {
       element,
       extensions: [
         StarterKit.configure({ trailingNode: false }),
-        ...dohcMarkdownExtensions,
+        ...desktopMarkdownExtensions,
         TaskList,
         DohcTaskItem,
         Markdown.configure({ indentation: { style: 'space', size: 2 } }),

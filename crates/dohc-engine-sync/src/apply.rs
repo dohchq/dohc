@@ -226,6 +226,46 @@ pub(crate) enum MutationOutcome<T> {
     RefusedRetainingMutation { reason: String },
 }
 
+/// Return whether the imported coordinate is already acknowledged with the
+/// same durable envelope. The caller still runs `apply_envelope_with_*` for a
+/// transactional skip, which refreshes refusal and audit state and detects a
+/// coordinate divergence without invoking the mutation path.
+pub(crate) fn is_acknowledged_envelope(
+    store: &EngineStore,
+    envelope: &ReplicationEnvelope,
+) -> Result<bool, SyncError> {
+    store.read_with(|conn| {
+        let acked: i64 = conn
+            .query_row(
+                "SELECT COALESCE((SELECT acked_seq FROM replication_peers \
+                 WHERE workspace_id=?1 AND origin_id=?2), -1)",
+                params![envelope.workspace_id, envelope.origin_id],
+                |row| row.get(0),
+            )
+            .map_err(SyncError::corrupt)?;
+        if envelope.origin_seq > acked.saturating_add(1) {
+            return Ok(false);
+        }
+        let existing: Option<(String, String, i64)> = conn
+            .query_row(
+                "SELECT op_kind, payload_json, recorded_at_ms FROM replication_log \
+                 WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+                params![
+                    envelope.workspace_id,
+                    envelope.origin_id,
+                    envelope.origin_seq
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(SyncError::corrupt)?;
+        match existing {
+            Some(row) => coordinate_matches(&row, envelope),
+            None => Ok(false),
+        }
+    })
+}
+
 /// Validate and atomically handle one imported coordinate. Ordinary
 /// mutation-level invalid input is rolled back to a savepoint, then journaled
 /// and acked as a refusal. `RefusedRetainingMutation` is the deliberate
@@ -255,50 +295,37 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
     envelope.validate()?;
     crate::settlement_publication::validate(envelope)?;
     let payload_json = envelope.payload_json()?;
+    let passive = store.is_passive();
     let result = store.write_with(faults, |tx| {
-        let acked = read_ack_tx(tx, &envelope.workspace_id, &envelope.origin_id)?;
-        if envelope.origin_seq <= acked {
-            // A redelivered coordinate at or below the ack must match the row
-            // already journaled after relay-compatible JSON canonicalization.
-            let existing: Option<(String, String, i64)> = tx
-                .query_row(
-                    "SELECT op_kind, payload_json, recorded_at_ms FROM replication_log \
-                     WHERE workspace_id = ?1 AND origin_id = ?2 AND origin_seq = ?3",
-                    params![envelope.workspace_id, envelope.origin_id, envelope.origin_seq],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-                .optional()
-                .map_err(SyncError::corrupt)?;
-            if let Some(row) = existing {
-                let canonical_payload = crate::relay::canonical_json_bytes(&envelope.payload)?;
-                if !coordinate_matches(&row, envelope, &canonical_payload)? {
+        if passive && let Some(cursor) = envelope.relay_seq {
+            dohc_engine_storage::replica::advance_frontiers(tx, &envelope.workspace_id, cursor, 0)?;
+        }
+        // A hosted replica receives each origin sparsely, so the journal alone
+        // says whether a coordinate applied, and its ack never moves.
+        let hosted = crate::hosted::is_hosted(tx, &envelope.workspace_id)?;
+        if hosted {
+            if let Some(row) = journaled_coordinate(tx, envelope)? {
+                return redelivered(tx, envelope, Some(row));
+            }
+        } else {
+            let acked = read_ack_tx(tx, &envelope.workspace_id, &envelope.origin_id)?;
+            if envelope.origin_seq <= acked {
+                // A redelivered coordinate at or below the ack must match the
+                // row already journaled after relay-compatible JSON
+                // canonicalization.
+                return redelivered(tx, envelope, journaled_coordinate(tx, envelope)?);
+            }
+            let expected = acked.checked_add(1).ok_or(SyncError::CoordinateDiverged)?;
+            if envelope.origin_seq != expected {
+                return Err(SyncError::SequenceGap);
+            }
+            if let Some(row) = journaled_coordinate(tx, envelope)? {
+                if !coordinate_matches(&row, envelope)? {
                     return Err(SyncError::CoordinateDiverged);
                 }
+                ack_tx(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
+                return redelivered(tx, envelope, None);
             }
-            if let Some(refusal) = crate::settlement_publication::refresh_in_tx(tx,envelope)? { return Ok(Admission::Refused(refusal)); }
-            return Ok(Admission::Skipped);
-        }
-        let expected = acked.checked_add(1).ok_or(SyncError::CoordinateDiverged)?;
-        if envelope.origin_seq != expected {
-            return Err(SyncError::SequenceGap);
-        }
-        let existing: Option<(String, String, i64)> = tx
-            .query_row(
-                "SELECT op_kind, payload_json, recorded_at_ms FROM replication_log \
-                 WHERE workspace_id = ?1 AND origin_id = ?2 AND origin_seq = ?3",
-                params![envelope.workspace_id, envelope.origin_id, envelope.origin_seq],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()
-            .map_err(SyncError::corrupt)?;
-        if let Some(row) = existing {
-            let canonical_payload = crate::relay::canonical_json_bytes(&envelope.payload)?;
-            if !coordinate_matches(&row, envelope, &canonical_payload)? {
-                return Err(SyncError::CoordinateDiverged);
-            }
-            ack_tx(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
-            if let Some(refusal) = crate::settlement_publication::refresh_in_tx(tx,envelope)? { return Ok(Admission::Refused(refusal)); }
-            return Ok(Admission::Skipped);
         }
         tx.execute_batch("SAVEPOINT dohc_replication_mutation")
             .map_err(SyncError::persist)?;
@@ -394,9 +421,14 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
             && refusal.reason.message() == crate::ydoc_apply::LIVE_UNADMITTED_UPDATE
         {
             crate::ydoc_apply::retain_refused_ydoc_blob(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
+            crate::hosted::hold_unadmitted_in_tx(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
         }
         crate::settlement_publication::refresh_in_tx(tx,envelope)?;
-        ack_tx(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
+        if hosted {
+            crate::hosted::record_unmaterialized_in_tx(tx, envelope)?;
+        } else {
+            ack_tx(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
+        }
         if crashes(faults, FaultPoint::SyncBeforeApplyCommit) {
             return Err(SyncError::FaultCrash);
         }
@@ -467,6 +499,12 @@ pub(crate) fn persist_refusal(
         ],
     )
     .map_err(SyncError::persist)?;
+    if refusal.op_kind == "ydoc.update" {
+        tx.execute(
+            "UPDATE replication_log SET apply_disposition='refused' WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+            params![refusal.workspace_id,refusal.origin_id,refusal.origin_seq],
+        ).map_err(SyncError::persist)?;
+    }
     Ok(())
 }
 
@@ -478,7 +516,7 @@ pub fn read_replayed_refusal(
         conn.query_row(
             "SELECT op_kind, reason_code, reason_message \
              FROM replication_pending_refusals \
-             WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+             WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3 AND reason_code='invalid-input'",
             params![
                 envelope.workspace_id,
                 envelope.origin_id,
@@ -537,7 +575,7 @@ pub(crate) fn read_pending_refusals(
     store.read_with(|conn| {
         let mut stmt = conn.prepare(
             "SELECT origin_id, origin_seq, op_kind, reason_message FROM replication_pending_refusals \
-             WHERE workspace_id=?1 AND COALESCE(report_id,'') != ?2 ORDER BY origin_id, origin_seq",
+             WHERE workspace_id=?1 AND reason_code='invalid-input' AND COALESCE(report_id,'') != ?2 ORDER BY origin_id, origin_seq",
         ).map_err(SyncError::corrupt)?;
         stmt.query_map(params![workspace_id, DIRECT_RPC_REFUSAL_REPORT_ID], |row| {
             Ok(ReplicationRefusal {
@@ -548,17 +586,57 @@ pub(crate) fn read_pending_refusals(
     })
 }
 
+fn journaled_coordinate(
+    tx: &Transaction<'_>,
+    envelope: &ReplicationEnvelope,
+) -> Result<Option<(String, String, i64)>, SyncError> {
+    tx.query_row(
+        "SELECT op_kind, payload_json, recorded_at_ms FROM replication_log \
+         WHERE workspace_id = ?1 AND origin_id = ?2 AND origin_seq = ?3",
+        params![
+            envelope.workspace_id,
+            envelope.origin_id,
+            envelope.origin_seq
+        ],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )
+    .optional()
+    .map_err(SyncError::corrupt)
+}
+
+/// Admit a coordinate that already applied: it must match its journal row,
+/// and only its admission facts refresh.
+fn redelivered<T>(
+    tx: &Transaction<'_>,
+    envelope: &ReplicationEnvelope,
+    journaled: Option<(String, String, i64)>,
+) -> Result<Admission<T>, SyncError> {
+    if let Some(row) = journaled {
+        if !coordinate_matches(&row, envelope)? {
+            return Err(SyncError::CoordinateDiverged);
+        }
+    }
+    if let Some(refusal) = crate::settlement_publication::refresh_in_tx(tx, envelope)? {
+        return Ok(Admission::Refused(refusal));
+    }
+    crate::live_audit::refresh_confirmed_application_in_tx(tx, envelope)?;
+    Ok(Admission::Skipped)
+}
+
 fn coordinate_matches(
     existing: &(String, String, i64),
     envelope: &ReplicationEnvelope,
-    canonical_payload: &[u8],
 ) -> Result<bool, SyncError> {
     if existing.0 != envelope.op_kind || existing.2 != envelope.recorded_at_ms {
         return Ok(false);
     }
     let existing_payload: serde_json::Value =
         serde_json::from_str(&existing.1).map_err(|_| SyncError::CoordinateDiverged)?;
-    Ok(crate::relay::canonical_json_bytes(&existing_payload)? == canonical_payload)
+    crate::relay::replication_payloads_match(
+        &envelope.op_kind,
+        &existing_payload,
+        &envelope.payload,
+    )
 }
 
 /// R10's built-in `chat.*` receiver apply dispatch. Structural rows use

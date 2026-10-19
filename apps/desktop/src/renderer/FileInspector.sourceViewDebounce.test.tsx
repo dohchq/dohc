@@ -6,12 +6,10 @@ import type { DohcDesktopBridge } from "../ipc/bridgeContract";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 import "./SourceCodeEditor";
-import {
-  markdownToYDoc,
-  replaceYDocWithMarkdown,
-  yDocToMarkdown,
-} from "./editor/import-export";
+import { markdownToYDoc } from "@dohc/ydoc-projection";
+import { yDocToMarkdown } from "./editor/import-export";
 import { FileInspector } from "./FileInspector";
+import { replaceYDocWithMarkdown } from "./FileInspector.remote-fixture";
 import { resetSharedLocalDocumentsForTests } from "./sharedLocalDocument";
 
 vi.mock("./editor/import-export", async (importOriginal) => {
@@ -22,6 +20,11 @@ vi.mock("./editor/import-export", async (importOriginal) => {
   };
 });
 
+const delayedProof=vi.hoisted(()=>({delay:0,active:0,maximum:0}));
+vi.mock('./editor/artifactSource',()=>({prepareArtifactSource:()=>undefined,projectArtifactSource:async(doc:Y.Doc)=>{
+ const text=(await import('@dohc/ydoc-projection')).yDocToArtifactMarkdown(doc);delayedProof.maximum=Math.max(delayedProof.maximum,++delayedProof.active);
+ await new Promise(resolve=>setTimeout(resolve,delayedProof.delay));delayedProof.active--;return text;
+}}));
 let engineDocState: UseEngineDoc;
 vi.mock("./collab/useEngineDoc", () => ({
   useEngineDoc: () => engineDocState,
@@ -52,7 +55,10 @@ function engineState(doc: Y.Doc): UseEngineDoc {
     recoveryAssets: null,
     permanentFailureWhileEditing: false,
     readOnlyWhileEditing: false,
-  readOnlyCause: null,
+    readOnlyDraftId: null,
+    readOnlyCause: null,
+    retryReplacement: null,
+    replacedDraftIds: [],
     removalInProgress: null,
     artifactAssets: [],
     readArtifactAsset: async () => {
@@ -138,6 +144,7 @@ async function openSourceView(doc: Y.Doc) {
 
 describe("FileInspector engine source update scheduling", () => {
   beforeEach(() => {
+    delayedProof.delay=0;delayedProof.active=0;delayedProof.maximum=0;
     stubEditorGlobals();
     vi.stubGlobal(
       "dohcDesktop",
@@ -251,5 +258,15 @@ describe("FileInspector engine source update scheduling", () => {
       "Stale first document.",
     );
     expect(serialize).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps painting delayed replies during continuing edits with one proof in flight',async()=>{
+    const doc=markdownToYDoc(INITIAL_MARKDOWN);doc.getMap('meta').set('dohcMarkdownSource','stale');
+    await openSourceView(doc);vi.useFakeTimers();delayedProof.delay=750;delayedProof.maximum=0;
+    for(let t=0;t<2000;t+=100){act(()=>{replaceYDocWithMarkdown(doc,`# Plan\n\nUpdate at ${t} ms.\n`);doc.getMap('meta').set('dohcMarkdownSource','stale');});await act(async()=>{await vi.advanceTimersByTimeAsync(100)});}
+    expect(screen.getByTestId('markdown-source-view').textContent).toContain('Update at');
+    expect(delayedProof.maximum).toBe(1);
+    await act(async()=>{await vi.advanceTimersByTimeAsync(2500)});
+    expect(screen.getByTestId('markdown-source-view').textContent).toContain('Update at 1900');doc.destroy();
   });
 });

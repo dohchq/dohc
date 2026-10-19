@@ -20,6 +20,10 @@ use crate::hash::{
     HashInput, HashOutcome, HashPool, HashRun, PostHashExpectation, PostHashProbe, mtime_ms,
 };
 use crate::media::media_type_for_path;
+use crate::search_policy::{
+    PathFloor, SearchPolicySnapshot, classify_engine_file_path, read_engine_search_policy,
+    resolve_effective_policy,
+};
 use std::borrow::Cow;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -53,6 +57,9 @@ pub struct FileEntry {
 pub enum SkipReason {
     /// The file exceeded `max_file_bytes` under [`OverCapPolicy::Skip`].
     OverCap,
+    /// A cloud provider such as iCloud Drive evicted the content of a file
+    /// the prior manifest tracks. Reading it would download it again.
+    Evicted,
 }
 
 /// A file that was seen but not tracked.
@@ -83,7 +90,13 @@ pub enum ScanIoOperation {
 
 /// Supplies a synthetic io error for a specific bounded scan unit.
 pub trait ScanIoFaultInjector: Send + Sync {
-    fn error_kind(&self, path: &str, operation: ScanIoOperation) -> Option<ErrorKind>;
+    fn error(&self, path: &str, operation: ScanIoOperation) -> Option<std::io::Error>;
+
+    /// Whether to treat `path` as evicted. Only a file provider can make a
+    /// real one.
+    fn evicted(&self, _path: &str) -> bool {
+        false
+    }
 }
 
 /// A completed scan: the tracked files (sorted by path) plus the seen-but-
@@ -120,6 +133,7 @@ pub struct Scanner {
     bounds: ScanBounds,
     pool: HashPool,
     io_faults: Option<Arc<dyn ScanIoFaultInjector>>,
+    paths: Option<Vec<String>>,
 }
 
 impl Scanner {
@@ -134,6 +148,7 @@ impl Scanner {
             bounds,
             pool,
             io_faults: None,
+            paths: None,
         })
     }
 
@@ -147,6 +162,12 @@ impl Scanner {
         let mut scanner = Self::new(bounds)?;
         scanner.io_faults = Some(io_faults);
         Ok(scanner)
+    }
+
+    /// Restrict enumeration to exact paths for an operation's reconciliation.
+    pub fn with_paths(mut self, paths: Option<Vec<String>>) -> Self {
+        self.paths = paths;
+        self
     }
 
     /// The bounds this scanner enforces.
@@ -171,6 +192,13 @@ impl Scanner {
     /// [`FileEntry`]). A reused file cannot surface a read failure, so a file
     /// that became unreadable without changing size or mtime stays tracked at
     /// its last-known-good content instead of degrading the scan.
+    ///
+    /// A tracked file whose content a cloud provider evicted is not read
+    /// either, since reading it downloads it: it is skipped as
+    /// [`SkipReason::Evicted`], so the reconcile retains its last-known
+    /// content and a policy narrowing still retires it. An untracked evicted
+    /// file is hashed, which downloads it, so a rename or a rebuilt store
+    /// still sees its content, unless `.dohc/files.toml` narrows it.
     pub fn scan_with_prior(
         &self,
         root: &Path,
@@ -188,7 +216,21 @@ impl Scanner {
                 // Deterministic order: sort by path before hashing so result
                 // indices are stable regardless of readdir order.
                 files.sort_by(|a, b| a.rel.cmp(&b.rel));
+                let mut policy = None;
+                let (evicted, files): (Vec<_>, Vec<_>) = files.into_iter().partition(|file| {
+                    file.evicted
+                        && (prior.get(&file.rel).is_some() || {
+                            let policy =
+                                policy.get_or_insert_with(|| read_engine_search_policy(&root));
+                            policy_narrows(policy, &file.rel)
+                        })
+                });
                 let mut skipped = skipped;
+                skipped.extend(evicted.into_iter().map(|file| SkippedPath {
+                    path: file.rel,
+                    size: file.size,
+                    reason: SkipReason::Evicted,
+                }));
                 skipped.sort_by(|a, b| a.path.cmp(&b.path));
                 let mut failed = failed;
                 failed.sort_by(|a, b| a.path.cmp(&b.path));
@@ -231,8 +273,11 @@ impl Scanner {
 
         let post_hash_probe = self.io_faults.as_ref().map(|faults| {
             let faults = Arc::clone(faults);
-            Arc::new(move |path: &str| faults.error_kind(path, ScanIoOperation::Hash))
-                as PostHashProbe
+            Arc::new(move |path: &str| {
+                faults
+                    .error(path, ScanIoOperation::Hash)
+                    .map(|err| err.kind())
+            }) as PostHashProbe
         });
         let outcomes = match self.pool.hash_batched_with_post_stat(
             &inputs,
@@ -352,6 +397,9 @@ impl Scanner {
 
     /// Enumerate every tracked candidate under `root`, bounded and cancellable.
     fn enumerate(&self, root: &Path, token: &CancellationToken) -> Result<EnumOutcome, FilesError> {
+        if let Some(paths) = &self.paths {
+            return self.enumerate_paths(root, paths, token);
+        }
         let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
         let mut files: Vec<Candidate> = Vec::new();
         let mut skipped: Vec<SkippedPath> = Vec::new();
@@ -372,16 +420,13 @@ impl Scanner {
                     .into_owned();
             let injected_read_dir = self.injected(&dir_rel, ScanIoOperation::ReadDir);
             let read_dir = match injected_read_dir {
-                Some(kind) if dir == root => {
-                    return Err(FilesError::ScanIo {
-                        path: display(&dir),
-                        kind,
-                    });
+                Some(err) if dir == root => {
+                    return Err(FilesError::scan_io(&dir, display(&dir), &err));
                 }
-                Some(kind) => {
+                Some(err) => {
                     failed.push(FailedPath {
                         path: dir_rel,
-                        kind,
+                        kind: err.kind(),
                     });
                     self.check_file_bound(files.len(), skipped.len(), failed.len())?;
                     continue;
@@ -390,7 +435,7 @@ impl Scanner {
                     Ok(rd) => rd,
                     Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
                     Err(err) if dir == root => {
-                        return Err(FilesError::scan_io(display(&dir), &err));
+                        return Err(FilesError::scan_io(&dir, display(&dir), &err));
                     }
                     Err(err) => {
                         failed.push(FailedPath {
@@ -438,8 +483,11 @@ impl Scanner {
                 }
                 rel.push_str(&normalized_name);
                 let file_type = match self.injected(&rel, ScanIoOperation::FileType) {
-                    Some(kind) => {
-                        failed.push(FailedPath { path: rel, kind });
+                    Some(err) => {
+                        failed.push(FailedPath {
+                            path: rel,
+                            kind: err.kind(),
+                        });
                         self.check_file_bound(files.len(), skipped.len(), failed.len())?;
                         continue;
                     }
@@ -476,8 +524,11 @@ impl Scanner {
                     continue;
                 }
                 let metadata = match self.injected(&rel, ScanIoOperation::Metadata) {
-                    Some(kind) => {
-                        failed.push(FailedPath { path: rel, kind });
+                    Some(err) => {
+                        failed.push(FailedPath {
+                            path: rel,
+                            kind: err.kind(),
+                        });
                         self.check_file_bound(files.len(), skipped.len(), failed.len())?;
                         continue;
                     }
@@ -523,6 +574,7 @@ impl Scanner {
                     }
                 }
                 files.push(Candidate {
+                    evicted: self.evicted(&rel, &metadata),
                     rel,
                     abs: path,
                     size,
@@ -540,10 +592,118 @@ impl Scanner {
         })
     }
 
-    fn injected(&self, path: &str, operation: ScanIoOperation) -> Option<ErrorKind> {
+    fn enumerate_paths(
+        &self,
+        root: &Path,
+        paths: &[String],
+        token: &CancellationToken,
+    ) -> Result<EnumOutcome, FilesError> {
+        let mut files = Vec::new();
+        let mut skipped = Vec::new();
+        let mut failed = Vec::new();
+        for rel in paths {
+            if token.is_cancelled() {
+                return Ok(EnumOutcome::Cancelled);
+            }
+            if floor::is_excluded_file(rel) {
+                continue;
+            }
+            let relative = Path::new(rel);
+            if !relative
+                .components()
+                .all(|c| matches!(c, std::path::Component::Normal(_)))
+            {
+                return Err(FilesError::InvalidRoot {
+                    reason: "invalid scoped path",
+                });
+            }
+            let mut abs = root.to_path_buf();
+            let mut metadata = None;
+            for component in relative.components() {
+                abs.push(component);
+                match std::fs::symlink_metadata(&abs) {
+                    Ok(m) if m.file_type().is_symlink() => {
+                        metadata = None;
+                        break;
+                    }
+                    Ok(m) => metadata = Some(m),
+                    Err(e)
+                        if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) =>
+                    {
+                        metadata = None;
+                        break;
+                    }
+                    Err(e) => {
+                        failed.push(FailedPath {
+                            path: rel.clone(),
+                            kind: e.kind(),
+                        });
+                        metadata = None;
+                        break;
+                    }
+                }
+            }
+            if let Some(m) = metadata.filter(|m| m.is_file()) {
+                let size = m.len();
+                if size > self.bounds.max_file_bytes {
+                    match self.bounds.over_cap {
+                        OverCapPolicy::Skip => skipped.push(SkippedPath {
+                            path: rel.clone(),
+                            size,
+                            reason: SkipReason::OverCap,
+                        }),
+                        OverCapPolicy::Error => {
+                            return Err(FilesError::FileTooLarge {
+                                path: rel.clone(),
+                                size,
+                                cap: self.bounds.max_file_bytes,
+                            });
+                        }
+                    }
+                } else {
+                    files.push(Candidate {
+                        rel: rel.clone(),
+                        abs,
+                        size,
+                        mtime_ms: mtime_ms(&m),
+                        evicted: self.evicted(rel, &m),
+                    });
+                }
+            }
+            self.check_file_bound(files.len(), skipped.len(), failed.len())?;
+        }
+        Ok(EnumOutcome::Completed {
+            files,
+            skipped,
+            failed,
+        })
+    }
+
+    /// Whether macOS marks the file dataless: its content lives only with a
+    /// cloud provider. Reading `st_flags` does not download it.
+    fn evicted(&self, path: &str, metadata: &std::fs::Metadata) -> bool {
+        #[cfg(target_os = "macos")]
+        let dataless = {
+            use std::os::macos::fs::MetadataExt;
+            const SF_DATALESS: u32 = 0x4000_0000;
+            metadata.st_flags() & SF_DATALESS != 0
+        };
+        #[cfg(not(target_os = "macos"))]
+        let dataless = {
+            let _ = metadata;
+            false
+        };
+        dataless
+            || self
+                .io_faults
+                .as_ref()
+                .is_some_and(|faults| faults.evicted(path))
+    }
+
+    fn injected(&self, path: &str, operation: ScanIoOperation) -> Option<std::io::Error> {
         self.io_faults
             .as_ref()
-            .and_then(|faults| faults.error_kind(path, operation))
+            .and_then(|faults| faults.error(path, operation))
     }
 
     fn check_file_bound(
@@ -561,11 +721,27 @@ impl Scanner {
     }
 }
 
+/// Whether `.dohc/files.toml` stops the engine tracking `path`. A policy
+/// capture cannot read counts as narrowing, since capture holds until it can.
+/// The secret floor is never narrowed.
+fn policy_narrows(policy: &SearchPolicySnapshot, path: &str) -> bool {
+    if policy.holds_file_capture() {
+        return true;
+    }
+    let Some(rules) = &policy.files_policy else {
+        return false;
+    };
+    classify_engine_file_path(path) == PathFloor::Tracked
+        && !resolve_effective_policy(path, Some(rules), None).tracked
+}
+
 struct Candidate {
     rel: String,
     abs: PathBuf,
     size: u64,
     mtime_ms: i64,
+    /// A cloud provider such as iCloud Drive evicted the content.
+    evicted: bool,
 }
 
 struct Enumerated {

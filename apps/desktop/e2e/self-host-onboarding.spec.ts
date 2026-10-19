@@ -1,8 +1,10 @@
-import { activityPin } from "../src/testPins";
+import { holdSystemClipboard } from "./helpers/systemClipboard";
+import { DOCUMENT_END } from "./helpers/keys";
+import { activityPin, settingsNavPin } from "../src/testPins";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { expect, test, type BrowserContext } from "@playwright/test";
+import { test, expect, type BrowserContext } from "@playwright/test";
 import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
 import { launchDesktopApp, type LaunchedDesktopApp } from "./helpers/desktopApp";
 import { approveDesktop, createVerifiedAccount, openDesktopApproval, startSelfHostOnboardingStack } from "./helpers/selfHostOnboarding";
@@ -19,8 +21,9 @@ async function readFileIfPresent(path: string): Promise<string> {
   }
 }
 
-test("@self-host-onboarding a real account connects two fresh desktops and keeps synced work after restart", async ({ browser, request }) => {
+test("@self-host-onboarding a real account connects two fresh desktops and keeps synced work after restart", async ({ browser, request }, testInfo) => {
   test.setTimeout(240_000);
+  const signal = AbortSignal.timeout(testInfo.timeout - 10_000);
   const first = await createTempWorkspace();
   const second = await createTempWorkspace();
   let stack: Awaited<ReturnType<typeof startSelfHostOnboardingStack>> | undefined;
@@ -31,7 +34,7 @@ test("@self-host-onboarding a real account connects two fresh desktops and keeps
   let bodyFailure: { error: unknown } | undefined;
   const account = { email: `desktop-${randomUUID()}@example.test`, password: `Desktop-proof-${randomUUID()}` };
   try {
-    stack = await startSelfHostOnboardingStack(first.baseDir);
+    stack = await startSelfHostOnboardingStack(first.baseDir, { signal });
     expect((await request.get(`${stack.account.origin}/ready`)).status()).toBe(200);
     expect(await (await request.get(`${stack.account.origin}/.well-known/dohc-server`)).json()).toMatchObject({
       version: 1, authUrl: stack.account.origin, relayUrl: stack.relayUrl,
@@ -48,21 +51,28 @@ test("@self-host-onboarding a real account connects two fresh desktops and keeps
     await writeWorkspaceFiles(first, [{ path: "welcome.md", contents: "# Self-hosted workspace\n\nCreated before connecting.\n" }]);
     left = await launchDesktopApp({ workspace: first });
     const workspace = await openWorkspaceFromFirstRun(left.page, first);
-    // Sync and sharing lives on the activity bar; the connect form is inside it.
-    await left.page.getByTestId(activityPin("cloud")).click();
+    // Sync and sharing lives in Settings. Signed out, it opens the connect
+    // flow; once signed in, the flow hands back to the page and its switch.
+    await left.page.getByTestId(activityPin("settings")).click();
+    await left.page.getByTestId(settingsNavPin("cloud")).click();
+    await left.page.getByTestId("settings-cloud-connect").click();
     await expect(left.page.getByTestId("cloud-sync-panel")).toBeVisible();
     ownerBrowser = await browser.newContext();
     const ownerPage = await ownerBrowser.newPage();
     const approval = await openDesktopApproval(left, ownerPage, stack.account.origin);
     await createVerifiedAccount(ownerPage, stack.account, account, approval);
     await approveDesktop(ownerPage, account);
-    await expect(left.page.getByTestId("cloud-connected-email")).toHaveText(account.email);
-    await left.page.getByTestId("cloud-enable-sync").click();
-    await expect(left.page.getByTestId("cloud-workspace-synced")).toBeVisible();
+    await expect(left.page.getByTestId("settings-row-account")).toContainText(account.email);
+    const syncSwitch = left.page.getByRole("switch", { name: "Sync this workspace" });
+    await syncSwitch.click();
+    await expect(syncSwitch).toHaveAttribute("aria-checked", "true");
     await expect(left.page.getByTestId("cloud-sync-code")).toBeVisible();
-    await left.page.getByTestId("cloud-copy-sync-code").click();
-    await expect.poll(() => left!.app.evaluate(({ clipboard }) => clipboard.readText())).toBe(await left.page.getByTestId("cloud-sync-code").textContent());
-    const syncCode = await left.app.evaluate(({ clipboard }) => clipboard.readText());
+    const syncCode = await holdSystemClipboard(test.info(), async (remainingMs) => {
+      await left!.page.getByTestId("cloud-copy-sync-code").click({ timeout: remainingMs() });
+      const syncCode = await left!.page.getByTestId("cloud-sync-code").textContent({ timeout: remainingMs() });
+      await expect.poll(() => left!.app.evaluate(({ clipboard }) => clipboard.readText()), { timeout: remainingMs() }).toBe(syncCode);
+      return await left!.app.evaluate(({ clipboard }) => clipboard.readText());
+    });
     expect(syncCode).toBe(await left.page.getByTestId("cloud-sync-code").textContent());
     expect(syncCode).toContain(stack.relayUrl);
     await left.page.keyboard.press("Escape");
@@ -84,7 +94,7 @@ test("@self-host-onboarding a real account connects two fresh desktops and keeps
     await explorerRow(left.page, "welcome.md").click();
     await expect(left.page.getByTestId("markdown-editor")).toContainText("Created before connecting.");
     await left.page.getByTestId("markdown-editor").click();
-    await left.page.keyboard.press("ControlOrMeta+End");
+    await left.page.keyboard.press(DOCUMENT_END);
     await left.page.keyboard.type(" Edited through the connected desktop.");
     await expect(left.page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved");
     await expect.poll(() => readFileIfPresent(join(first.rootPath, "welcome.md"))).toContain("Edited through the connected desktop.");

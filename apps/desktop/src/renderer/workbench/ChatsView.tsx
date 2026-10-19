@@ -1,15 +1,25 @@
 import {shareSenderLabel, shareAccessLabel} from "@dohc/security-contract/share-labels";
 import {ShareSender} from "../ShareSender";
 import { MessageReactions } from "./chatMessages";
-import { chatEditorPath } from "../shell/chatsNav";
-import { parseChatTabPath } from "./workbenchState";
+import { chatEditorPath, chatEditorTitle } from "../shell/chatsNav";
+import { parseTab } from "./workbenchState";
 import { configuredRunnerCommand } from "../../agents/agentToolCatalog";
 import { agentIsSetUp } from "../askAgent";
 import { PostFeedList } from "./PostFeedList";
 import { BookmarkAction, ThreadMessages } from "./ChatPosts";
-import { ActionButton, PostCard, SaveAsFileActions, type PostData } from "./PostCard";
+import {
+  ActionButton,
+  FEED_META,
+  FEED_ROW,
+  FeedReactionPill,
+  HOME_TOOLBAR,
+  PostCard,
+  SaveAsFileActions,
+  type PostData,
+} from "./PostCard";
 import { useIsOwnAuthor } from "./AgentBadge";
-import { ChatAvatar } from "./ChatAvatar";
+import { AgentName, ChatAvatar } from "./ChatAvatar";
+import { neutralPresentation, ownAgentPresentation } from "./actorPresentation";
 import { ChatLane } from "./ChatLane";
 import { usePersonalChatFeed } from "./usePersonalChatFeed";
 import { useReactions, type ReactionView } from "./reactionStore";
@@ -19,6 +29,7 @@ import {
   ShareReadFailureNotice,
   ChatHeader,
   joinedChannelLabel,
+  ComposerModeBar,
   ComposerNotice,
   type ShareReadFailure,
 } from "./ChatsControls";
@@ -41,7 +52,7 @@ import {
 } from "./chatShareLanes";
 import { SectionLabel } from "../ui/controls";
 import { SkeletonRows } from "../ui/SkeletonRows";
-import { formatChatTime } from "../time";
+import { formatChatTime, formatShortTime } from "../time";
 import { basenameOf } from "../path";
 import { ipcErrorMessage } from "../ipcError";
 import type { ShareRemovalNotices } from "../shell/useShareRemovalNotices";
@@ -60,6 +71,7 @@ import {
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -82,6 +94,7 @@ import type {
   JoinedChannelAnswer,
   JoinedSharedChannelRow,
   ListChatChannelSharesResult,
+  SendChatMessageResult,
   WorkspaceFileEntry,
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
@@ -93,12 +106,15 @@ import {
   type ChatReactionControls,
 } from "./chatMessages";
 import { MentionComposer } from "./MentionComposer";
+import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
+import { AGENT_OFFER_SPACE, NEW_CONVERSATION, reachName, useAgentOffer } from "./AgentOffer";
 import { AddAgentForm } from "./AddAgentForm";
 import type { DesktopUserSettings } from "../../settings/userSettings";
 import { extractChatFileReferences } from "./chatFileMentions";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { PresenceFaces, TypingIndicator } from "../collab/PresenceIndicators";
 import { usePresence } from "../collab/usePresence";
+import { publishAboutConversation, type AboutConversationEntry } from "./aboutConversation";
 import type {
   PresenceTransport,
 } from "../collab/presenceChannel";
@@ -125,11 +141,13 @@ export interface ChatPresenceCollaboration {
 }
 
 export interface AgentSetupSummary {
+  // The workspace whose agent run was read with these settings.
+  workspaceId: string;
   agentName?: string;
   preferredName?: string;
   runnerConfigured: boolean;
   runnerEnabled: boolean;
-  mcpEnabled: boolean;
+  agentRunActive: boolean;
 }
 
 // The Chats view (PR 13, WS-E): workspace Chats organized in channels, plus
@@ -198,6 +216,20 @@ export interface ChatsDrafts {
   resolveTargetMessageId: string | null;
   // The poll choice taken with the answer, when the poll had choices.
   resolveChosenOption?: string | null;
+  // The polls drafted in the comment and new-post composers, each with the
+  // conversation it belongs to.
+  poll: ThreadPollDraft | null;
+  newThreadPoll: PostPollDraft | null;
+}
+
+// A drafted poll, open or removed, with the conversation it was drafted in:
+// the thread for a comment's poll and the group for a new post's. Opening
+// another drops it, and sending the message drops it.
+export interface ThreadPollDraft extends ComposerPollDraft {
+  threadId: string;
+}
+export interface PostPollDraft extends ComposerPollDraft {
+  channelId: string;
 }
 
 interface ThreadSnapshot {
@@ -264,12 +296,6 @@ interface ChannelSnapshot {
   threads: ChannelThreadRecord[];
   feedPosts: Record<string, PostData>;
 }
-
-const IDLE_DISPATCH_STATE: ChatDispatchStateForThreadResult = {
-  liveRunId: null,
-  pendingCount: 0,
-  paused: false,
-};
 
 const EMPTY_MENTION_CANDIDATES: readonly MentionCandidate[] = [];
 
@@ -581,17 +607,24 @@ export function ChatsView(props: {
   const [decisions, setDecisions] = useState<ChatDecisionRecord[]>([]);
   const [attachments, setAttachments] = useState<ChatAttachmentRecord[]>([]);
   const [runRecords, setRunRecords] = useState<Record<string, ChatRunRecord>>({});
-  const [dispatchState, setDispatchState] = useState<ChatDispatchStateForThreadResult>(
-    IDLE_DISPATCH_STATE,
-  );
+  // The open thread's dispatch, null until read.
+  const [dispatchState, setDispatchState] = useState<ChatDispatchStateForThreadResult | null>(null);
   const [dispatchActionBusy, setDispatchActionBusy] = useState(false);
   const [composer, setComposer] = useState("");
+  const [poll, setPoll] = useState<ThreadPollDraft | null>(null);
   const [replyTarget, setReplyTarget] = useState<ComposerReplyTarget | null>(null);
   const [resolveTargetMessageId, setResolveTargetMessageId] = useState<string | null>(null);
   const [resolveChosenOption, setResolveChosenOption] = useState<string | null>(null);
   const [flashMessageId, setFlashMessageId] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [newThreadBody, setNewThreadBody] = useState("");
+  const [newThreadPoll, setNewThreadPoll] = useState<PostPollDraft | null>(null);
+  // Opening another thread or group drops a poll drafted in a different one,
+  // before the next paint.
+  useLayoutEffect(() => {
+    if (nav.level === "thread" && poll && poll.threadId !== nav.thread.id) setPoll(null);
+    if (nav.level === "channel" && newThreadPoll && newThreadPoll.channelId !== nav.channel.id) setNewThreadPoll(null);
+  }, [nav, poll, newThreadPoll]);
   const [startingThread, setStartingThread] = useState(false);
   const [creatingChannel, setCreatingChannel] = useState<string | null>(null);
   const [newGroupType, setNewGroupType] = useState<"posts" | "chat" | "both">("posts");
@@ -704,6 +737,18 @@ export function ChatsView(props: {
   );
   const focusedMessageJump = useRef<string | null>(null);
 
+  // One composer shows at a time. A new post or message starts a new
+  // conversation; this view reads dispatch only for an open thread.
+  const agentOffer = useAgentOffer({
+    workspaceId,
+    scope: `${workspaceId}:${nav.level === "thread" ? `thread:${nav.thread.id}`
+      : nav.level === "channel" ? `channel:${nav.channel.id}`
+        : nav.level === "dm" ? `dm:${nav.dm.channelId}` : nav.level}`,
+    setup: props.agentSetup,
+    dispatch: nav.level === "thread" ? dispatchState : nav.level === "dm" ? null : NEW_CONVERSATION,
+    reach: props.workspacePath,
+  });
+
   const sendContextKey =
     nav.level === "thread"
       ? `${workspaceId}:thread:${nav.thread.id}`
@@ -714,11 +759,13 @@ export function ChatsView(props: {
   activeSendContext.current = sendContextKey;
   const latestComposerState = useRef({
     composer,
+    poll,
     replyMessageId: replyTarget?.messageId,
     resolveTargetMessageId,
   });
   latestComposerState.current = {
     composer,
+    poll,
     replyMessageId: replyTarget?.messageId,
     resolveTargetMessageId,
   };
@@ -1309,14 +1356,16 @@ export function ChatsView(props: {
     setDecisions([]);
     setAttachments([]);
     setRunRecords({});
-    setDispatchState(IDLE_DISPATCH_STATE);
+    setDispatchState(null);
     setDispatchActionBusy(false);
     setComposer("");
+    setPoll(null);
     setReplyTarget(null);
     setResolveTargetMessageId(null);
     setFlashMessageId(null);
     messageNodes.current.clear();
     setNewThreadBody("");
+    setNewThreadPoll(null);
     resetGroupForm();
     setChannelShares(null);
     setShareReadFailure(null);
@@ -1517,6 +1566,7 @@ export function ChatsView(props: {
               {
                 openingMessage: preview
                   ? {
+                      presentation: preview.presentation,
                       id: preview.id,
                       authorKind: preview.authorKind,
                       authorDisplayName: preview.authorDisplayName,
@@ -1551,7 +1601,7 @@ export function ChatsView(props: {
       setSharePanelOpen(false);
       setChannelThreads([]);
       setFeedPosts({});
-      setDispatchState(IDLE_DISPATCH_STATE);
+      setDispatchState(null);
       setThreadsLoading(true);
       try {
         const snapshot = await loadChannelSnapshot(channel.id);
@@ -1859,7 +1909,7 @@ export function ChatsView(props: {
       setDecisions([]);
       setAttachments([]);
       setRunRecords({});
-      setDispatchState(IDLE_DISPATCH_STATE);
+      setDispatchState(null);
       setDispatchActionBusy(false);
       setReplyTarget(null);
       setResolveTargetMessageId(null);
@@ -2028,6 +2078,9 @@ export function ChatsView(props: {
     if (nav.level !== "channel") return;
     const body = newThreadBody.trim();
     if (body.length === 0 || startingThread || startingThreadRef.current) return;
+    const asked = openPollChoices(newThreadPoll);
+    const options = asked ? pollChoicesToSend(asked) : null;
+    if (asked && !options) return;
     const channel = nav.channel;
     const token = liveToken.current;
     startingThreadRef.current = true;
@@ -2038,6 +2091,7 @@ export function ChatsView(props: {
         workspaceId,
         channelId: channel.id,
         body,
+        ...(options ? { needsDecision: true, options } : {}),
         ...(extractChatFileReferences(body).length > 0
           ? { fileReferences: extractChatFileReferences(body) }
           : {}),
@@ -2053,15 +2107,17 @@ export function ChatsView(props: {
       if (token !== liveToken.current) return;
       props.onThreadStarted?.();
       setNewThreadBody("");
+      setNewThreadPoll(null);
       // The completion is the user's command landing: report it through the
       // seam in the same tick as the nav write (see openConversation).
       props.onNavCommand?.({ level: "thread", channel, thread: result.thread });
       setNav({ level: "thread", channel, thread: result.thread });
       setMessages([result.message]);
-      setDecisions([]);
+      // A poll comes with its message, so it shows wherever the message does.
+      setDecisions(result.decision ? [result.decision] : []);
       setAttachments(result.message.attachments ?? []);
       setRunRecords({});
-      setDispatchState(IDLE_DISPATCH_STATE);
+      setDispatchState(NEW_CONVERSATION);
       setDispatchActionBusy(false);
       setReplyTarget(null);
       setResolveTargetMessageId(null);
@@ -2074,7 +2130,7 @@ export function ChatsView(props: {
       startingThreadRef.current = false;
       setStartingThread(false);
     }
-  }, [nav, newThreadBody, props.onError, props.onNavCommand, props.onThreadStarted, reactions, startingThread, workspaceId]);
+  }, [nav, newThreadBody, newThreadPoll, props.onError, props.onNavCommand, props.onThreadStarted, reactions, startingThread, workspaceId]);
 
   const sendMessage = useCallback(async () => {
     if (nav.level !== "thread") return;
@@ -2096,6 +2152,10 @@ export function ChatsView(props: {
     ) {
       return;
     }
+    // A poll's question is the message's own words, never a fallback.
+    const asked = openPollChoices(poll);
+    const options = asked ? pollChoicesToSend(asked) : null;
+    if (asked && (!options || trimmedBody.length === 0)) return;
     const parentMessageId = replyTarget?.messageId;
     const request = ++sendRequestGeneration.current;
     inFlightSendByContext.current.set(sendContextKey, request);
@@ -2109,6 +2169,10 @@ export function ChatsView(props: {
         next.composer = "";
         setComposer("");
       }
+      if (latest.poll === poll) {
+        next.poll = null;
+        setPoll(null);
+      }
       if (latest.replyMessageId === replyTarget?.messageId) {
         next.replyMessageId = undefined;
         setReplyTarget(null);
@@ -2120,15 +2184,30 @@ export function ChatsView(props: {
       }
       latestComposerState.current = next;
     };
+    // The message's poll lands with it, so it shows wherever the message does.
+    const showSent = (sent: SendChatMessageResult) => {
+      setMessages((current) =>
+        current.some((message) => message.id === sent.message.id)
+          ? current
+          : [...current, sent.message],
+      );
+      const asked = sent.decision;
+      if (asked) {
+        setDecisions((current) =>
+          current.some((decision) => decision.messageId === asked.messageId) ? current : [...current, asked],
+        );
+      }
+    };
     sendingRef.current = true;
     setSending(true);
-    let sentMessage: ChatMessageRecord | null = null;
+    let sentMessage: SendChatMessageResult | null = null;
     try {
       const result = await bridge().sendChatMessage({
         workspaceId,
         threadId: nav.thread.id,
         ...(parentMessageId ? { parentMessageId } : {}),
         body,
+        ...(options ? { needsDecision: true, options } : {}),
         ...(extractChatFileReferences(body).length > 0
           ? { fileReferences: extractChatFileReferences(body) }
           : {}),
@@ -2137,7 +2216,7 @@ export function ChatsView(props: {
       // exception is returning to the exact workspace conversation while this
       // request still owns its send slot.
       if (!requestOwnsActiveContext()) return;
-      sentMessage = result.message;
+      sentMessage = result;
       let resolvedDecision: ChatDecisionRecord | null = null;
       if (resolvingMessageId) {
         const resolution = await bridge().resolveChatDecision({
@@ -2150,11 +2229,7 @@ export function ChatsView(props: {
         if (!requestOwnsActiveContext()) return;
         resolvedDecision = resolution.decision;
       }
-      setMessages((current) =>
-        current.some((message) => message.id === result.message.id)
-          ? current
-          : [...current, result.message],
-      );
+      showSent(result);
       if (resolvedDecision) {
         const decisionWasOpen = reconcileResolvedChatDecision(
           latestDecisions.current,
@@ -2188,12 +2263,7 @@ export function ChatsView(props: {
         // The two durable writes are intentionally separate. If the reply
         // landed but resolution failed, show the real posted message and exit
         // the mode so retrying cannot silently duplicate the reply.
-        const posted = sentMessage;
-        setMessages((current) =>
-          current.some((message) => message.id === posted.id)
-            ? current
-            : [...current, posted],
-        );
+        showSent(sentMessage);
         clearMatchingComposer();
         props.onError(
           ipcErrorMessage(error, "Your reply was sent, but the decision is still open."),
@@ -2216,6 +2286,7 @@ export function ChatsView(props: {
   }, [
     composer,
     nav,
+    poll,
     props.onError,
     replyTarget,
     resolveChosenOption,
@@ -2414,13 +2485,17 @@ export function ChatsView(props: {
       replyTarget,
       resolveTargetMessageId,
       resolveChosenOption,
+      poll,
+      newThreadPoll,
     });
   }, [
     composer,
     dmDraft,
     dmRecipients,
     newThreadBody,
+    newThreadPoll,
     onDraftsChange,
+    poll,
     replyTarget,
     resolveChosenOption,
     resolveTargetMessageId,
@@ -2437,7 +2512,8 @@ export function ChatsView(props: {
   useEffect(() => {
     if (seededRef.current || overview.status !== "ready") return;
     let seed = props.initialNav;
-    const target = parseChatTabPath(props.editorTabPath ?? null);
+    const tab = parseTab(props.editorTabPath ?? null);
+    const target = tab?.kind === "chat" ? tab.target : null;
     if (!seed && target?.kind === "channel") {
       const channel = overview.channels.find((entry) => entry.id === target.id);
       seed = channel ? { level: "channel", channel } : { level: "channels" };
@@ -2472,6 +2548,8 @@ export function ChatsView(props: {
       setReplyTarget(drafts.replyTarget);
       setResolveTargetMessageId(drafts.resolveTargetMessageId);
       setResolveChosenOption(drafts.resolveChosenOption ?? null);
+      setPoll(drafts.poll);
+      setNewThreadPoll(drafts.newThreadPoll);
     }
   }, [
     openChannel,
@@ -2610,7 +2688,7 @@ export function ChatsView(props: {
       ]);
       // The completion is the user's command landing (see openConversation).
       if (props.editorTabPath && props.onOpenInTab) {
-        onDraftsChange?.({ composer: "", newThreadBody: "", dmRecipients: "", dmDraft: "", replyTarget: null, resolveTargetMessageId: null });
+        onDraftsChange?.({ composer: "", newThreadBody: "", dmRecipients: "", dmDraft: "", replyTarget: null, resolveTargetMessageId: null, poll: null, newThreadPoll: null });
         props.onOpenInTab({ level: "dm", dm: result.dm });
       } else {
         props.onNavCommand?.({ level: "dm", dm: result.dm });
@@ -2953,6 +3031,61 @@ export function ChatsView(props: {
     [presence.others],
   );
 
+  // About for this tab: the conversation it shows, who is here, and whether
+  // it came through someone else's share. Only a tab's own page publishes.
+  const agentName = props.agentSetup?.agentName;
+  const aboutConversation = useMemo<AboutConversationEntry | null>(() => {
+    if (!props.editorTabPath) return null;
+    if (activeDm) {
+      return {
+        kind: "person",
+        name: activeDm.peerLabel,
+        channelWireId: activeDm.channelWireId,
+        received: activeDm.role === "participant",
+        present: presence.others,
+      };
+    }
+    // A channel always has a wire id here, the same one presence keys on.
+    if (!activeChannel || activeWireId === null) {
+      // The tab's conversation is gone, or Chats could not list it: About
+      // has nothing to show. Until then it is still loading.
+      const tab = parseTab(props.editorTabPath);
+      const target = tab.kind === "chat" ? tab.target : null;
+      if (overview.status === "unavailable") return "none";
+      if (overview.status !== "ready") return null;
+      if (target?.kind === "channel") {
+        return overview.channels.some((channel) => channel.id === target.id) ? null : "none";
+      }
+      if (target?.kind === "dm") {
+        return dmRestoreReady && !dms.some((dm) => dm.channelId === target.id) ? "none" : null;
+      }
+      return "none";
+    }
+    if (activeChannel.kind === "agent") {
+      return {
+        kind: "agent",
+        name: chatEditorTitle(nav, agentName),
+        channelWireId: activeWireId,
+        received: false,
+        // The agent is the conversation, so its own presence is not a face,
+        // the same as the page's header.
+        present: peoplePresence,
+      };
+    }
+    const joined = activeChannel.wireId ? joinedByWire.get(activeChannel.wireId) : null;
+    return {
+      kind: "group",
+      name: activeChannel.name,
+      channelWireId: activeWireId,
+      received: joined === undefined ? null : joined !== null,
+      present: presence.others,
+    };
+  }, [activeChannel, activeDm, activeWireId, agentName, dmRestoreReady, dms, joinedByWire, nav, overview, peoplePresence, presence.others, props.editorTabPath]);
+  useEffect(() => {
+    if (!props.editorTabPath || aboutConversation === null) return;
+    return publishAboutConversation(workspaceId, props.editorTabPath, aboutConversation);
+  }, [aboutConversation, props.editorTabPath, workspaceId]);
+
   const refreshShares = useCallback(async () => {
     // This reader has no channel list of its own, and the joined lane answers
     // what a caller NAMES. While the overview is unresolved there is nothing
@@ -3031,6 +3164,7 @@ export function ChatsView(props: {
         setMessages([]);
         setMessagesLoading(false);
         setComposer("");
+        setPoll(null);
         void refreshDms("person");
         void refreshShares();
         return;
@@ -3276,6 +3410,7 @@ export function ChatsView(props: {
       setNav({ level: "channels" });
       setMessages([]);
       setComposer("");
+      setPoll(null);
       // Drop the compose draft/recipients so reopening "New message" never
       // shows a stale, unrelated "To:" that could misdirect the next send.
       setDmRecipients("");
@@ -3447,10 +3582,11 @@ export function ChatsView(props: {
     });
   }, []);
 
+  const liveRunId = dispatchState?.liveRunId ?? null;
   const stopThreadRun = useCallback(async () => {
     if (
       nav.level !== "thread" ||
-      dispatchState.liveRunId === null ||
+      liveRunId === null ||
       dispatchActionBusy
     ) {
       return;
@@ -3462,7 +3598,7 @@ export function ChatsView(props: {
     try {
       await bridge().stopAgentRun({
         workspaceId,
-        runId: dispatchState.liveRunId,
+        runId: liveRunId,
       });
       const next = await bridge().chatDispatchStateForThread({
         workspaceId,
@@ -3486,10 +3622,11 @@ export function ChatsView(props: {
     } finally {
       if (token === liveToken.current) setDispatchActionBusy(false);
     }
-  }, [dispatchActionBusy, dispatchState.liveRunId, nav, props.onError, workspaceId]);
+  }, [dispatchActionBusy, liveRunId, nav, props.onError, workspaceId]);
 
+  const dispatchPaused = dispatchState?.paused === true;
   const resumeThreadDispatch = useCallback(async () => {
-    if (nav.level !== "thread" || !dispatchState.paused || dispatchActionBusy) {
+    if (nav.level !== "thread" || !dispatchPaused || dispatchActionBusy) {
       return;
     }
     const token = liveToken.current;
@@ -3520,7 +3657,7 @@ export function ChatsView(props: {
     } finally {
       if (token === liveToken.current) setDispatchActionBusy(false);
     }
-  }, [dispatchActionBusy, dispatchState.paused, nav, props.onError, workspaceId]);
+  }, [dispatchActionBusy, dispatchPaused, nav, props.onError, workspaceId]);
 
   // Escape walks back up one level — but never steals Escape from a composer
   // holding a draft (that Escape reads as "leave my text alone").
@@ -3549,8 +3686,9 @@ export function ChatsView(props: {
     [goBack, nav.level, replyTarget, resolveTargetMessageId, variant],
   );
 
+  const editorTab = parseTab(props.editorTabPath ?? null);
   if (overview.status === "loading" || (overview.status === "ready" && variant === "page" && !props.initialNav &&
-    parseChatTabPath(props.editorTabPath ?? null)?.kind === "dm" && !dmRestoreReady)) {
+    editorTab?.kind === "chat" && editorTab.target.kind === "dm" && !dmRestoreReady)) {
     return <SkeletonRows inSlot layout="panel" label="Loading Chats..." />;
   }
 
@@ -3709,7 +3847,7 @@ export function ChatsView(props: {
                   });
                 };
                 const body = (
-                  <span className="mt-2 block whitespace-pre-wrap break-words text-[14px] leading-relaxed text-ink">
+                  <span className="mt-0.5 block whitespace-pre-wrap break-words text-[14px] leading-[21px] text-ink">
                     <MentionText
                       body={item.message.body}
                       candidates={mentionCandidates}
@@ -3723,111 +3861,109 @@ export function ChatsView(props: {
                     key={item.message.id}
                     data-testid="chats-feed-item"
                     data-author-kind={item.message.authorKind}
-                    className="group @container rounded-xl border border-line bg-panel px-4 pb-1 pt-3.5"
+                    className={FEED_ROW}
                   >
                     <button
                       type="button"
                       onClick={open}
-                      className="block w-full cursor-pointer text-left dohc-focus-visible"
+                      className="flex w-full cursor-pointer gap-3 text-left dohc-focus-visible"
                     >
-                      <span className="flex items-center gap-2.5">
-                        <ChatAvatar
-                          name={item.message.authorDisplayName}
-                          kind={isAgent ? "agent" : "human"}
-                          own={isOwn(isAgent ? "agent" : "human", item.message, itemViewer)}
-                        />
-                        <span className="flex min-w-0 flex-1 flex-col leading-tight">
-                          <span
-                            className={`truncate text-[14px] font-semibold ${
-                              isAgent ? "text-agent" : "text-ink"
-                            }`}
+                      <ChatAvatar presentation={item.message.presentation}
+                        name={item.message.authorDisplayName}
+                        kind={isAgent ? "agent" : "human"}
+                        size="row"
+                      />
+                      <span className="min-w-0 flex-1">
+                        <span className="flex items-baseline gap-1.5 leading-[18px]">
+                          <span className="truncate text-[13px] font-semibold text-ink">
+                            <AgentName kind={isAgent ? "agent" : "human"} presentation={item.message.presentation}>
+                              {chatAuthorLabel(item.message)}
+                            </AgentName>
+                          </span>
+                          <span className="truncate font-mono text-[11px] text-subtle">{where}</span>
+                          <time
+                            dateTime={time.iso}
+                            title={time.label}
+                            className="shrink-0 font-mono text-[11px] text-subtle"
                           >
-                            {chatAuthorLabel(item.message)}
-                          </span>
-                          <span className="flex items-center gap-1.5 text-[12px] text-subtle">
-                            <span className="truncate font-mono text-[11px]">{where}</span>
-                            <span aria-hidden>·</span>
-                            <time dateTime={time.iso} title={time.iso} className="shrink-0">
-                              {time.label}
-                            </time>
-                          </span>
+                            {formatShortTime(item.message.createdAtMs)}
+                          </time>
                         </span>
+                        {isComment ? (
+                          <span className="mt-0.5 flex items-center gap-1.5 text-[12px] text-muted">
+                            <MessageSquare size={12} aria-hidden className="shrink-0" />
+                            <span className="truncate">{item.thread.title}</span>
+                          </span>
+                        ) : null}
+                        {hasFileMentions ? null : body}
                       </span>
-                      {isComment ? (
-                        <span className="mt-2.5 flex items-center gap-1.5 text-[12px] text-muted">
-                          <MessageSquare size={12} aria-hidden className="shrink-0" />
-                          <span className="truncate">{item.thread.title}</span>
-                        </span>
-                      ) : null}
-                      {hasFileMentions ? null : body}
                     </button>
-                    {hasFileMentions ? body : null}
-                    {byEmoji.size > 0 ? (
-                      <div
-                        data-testid="chats-feed-item-footer"
-                        className="mt-2.5 flex items-center gap-1.5 py-1.5 text-[12px] text-subtle"
-                      >
-                        {[...byEmoji.entries()].map(([emoji, count]) => (
-                          <button
-                            type="button"
-                            disabled={locked}
-                            aria-disabled={reactionPending || undefined}
-                            aria-label={`${emoji} ${count}`}
-                            aria-pressed={itemReactions.some((reaction) => reaction.emoji === emoji && reaction.authorId === itemViewer)}
-                            onClick={(event) => {
-                              if (reactionPending) return;
+                    {hasFileMentions || byEmoji.size > 0 ? (
+                      <div className="pl-11">
+                        {hasFileMentions ? body : null}
+                        {byEmoji.size > 0 ? (
+                          <div data-testid="chats-feed-item-footer" className={FEED_META}>
+                            {[...byEmoji.entries()].map(([emoji, count]) => {
                               const mine = itemReactions.some((reaction) => reaction.emoji === emoji && reaction.authorId === itemViewer);
-                              // Removing the only row unmounts this pill. Focus
-                              // that came with the activation stays in the post.
-                              if (mine && count === 1 && document.activeElement === event.currentTarget) {
-                                homeLikeTriggers.current.get(item.message.id)?.focus();
-                              }
-                              toggleHomeReaction(item, itemViewer, emoji, mine ? "removed" : "added");
-                            }}
-                            key={emoji}
-                            data-testid="chats-feed-reaction-pill"
-                            data-emoji={emoji}
-                            className="inline-flex items-center gap-1 rounded-full border border-line bg-bg px-1.5 text-[11px] leading-5 text-muted hover:border-accent/60 dohc-focus-visible aria-disabled:opacity-50 aria-disabled:cursor-default"
-                          >
-                            <span aria-hidden>{emoji}</span>
-                            <span className="tabular-nums">{count}</span>
-                          </button>
-                        ))}
+                              return (
+                                <FeedReactionPill
+                                  key={emoji}
+                                  testId="chats-feed-reaction-pill"
+                                  emoji={emoji}
+                                  count={count}
+                                  mine={mine}
+                                  disabled={locked}
+                                  pending={reactionPending}
+                                  onClick={(event) => {
+                                    if (reactionPending) return;
+                                    // Removing the only row unmounts this pill. Focus
+                                    // that came with the activation stays in the post.
+                                    if (mine && count === 1 && document.activeElement === event.currentTarget) {
+                                      homeLikeTriggers.current.get(item.message.id)?.focus();
+                                    }
+                                    toggleHomeReaction(item, itemViewer, emoji, mine ? "removed" : "added");
+                                  }}
+                                />
+                              );
+                            })}
+                          </div>
+                        ) : null}
                       </div>
-                    ) : (
-                      <span className="block h-2.5" />
-                    )}
-                    <div className="flex items-center gap-2 border-t border-line py-1.5">
-                      <MessageReactions testIdPrefix="chats-feed" actionTestId="chats-feed-like" pickerOnly flush
-                        messageId={item.message.id} records={itemReactions}
-                        triggerRef={(node) => {
-                          if (node) homeLikeTriggers.current.set(item.message.id, node);
-                          else homeLikeTriggers.current.delete(item.message.id);
-                        }}
-                        controls={{ reactions: itemReactions, viewerAuthorId: itemViewer, readOnly: locked, pending: reactionPending,
-                          onToggle: ({ emoji, nextState }) => toggleHomeReaction(item, itemViewer, emoji, nextState) }} />
-                      <ActionButton
-                        label={isComment ? "Reply" : "Comment"}
-                        icon={<MessageSquare size={15} strokeWidth={1.9} aria-hidden />}
-                        onClick={open}
-                      />
-                      <SaveAsFileActions
-                        testIdPrefix="chats-feed-bookmark"
-                        bookmark={bookmark}
-                        busy={bookmarkBusy.has(bookmarkKey)}
-                        onToggle={(mode) =>
-                          void toggleBookmark({
-                            target: bookmarkTarget,
-                            mode,
-                          })
-                        }
-                        onOpen={
-                          bookmark && props.onOpenPath
-                            ? () => props.onOpenPath?.(bookmark.destinationPath)
-                            : undefined
-                        }
-                      />
-                    </div>
+                    ) : null}
+                    <MessageReactions testIdPrefix="chats-feed" actionTestId="chats-feed-like" pickerOnly hoverToolbar
+                      toolbarClassName={HOME_TOOLBAR}
+                      messageId={item.message.id} records={itemReactions}
+                      triggerRef={(node) => {
+                        if (node) homeLikeTriggers.current.set(item.message.id, node);
+                        else homeLikeTriggers.current.delete(item.message.id);
+                      }}
+                      controls={{ reactions: itemReactions, viewerAuthorId: itemViewer, readOnly: locked, pending: reactionPending,
+                        onToggle: ({ emoji, nextState }) => toggleHomeReaction(item, itemViewer, emoji, nextState) }}
+                      toolbarActions={
+                        <>
+                          <ActionButton
+                            label={isComment ? "Reply" : "Comment"}
+                            icon={<MessageSquare size={14} strokeWidth={1.9} aria-hidden />}
+                            onClick={open}
+                          />
+                          <SaveAsFileActions
+                            testIdPrefix="chats-feed-bookmark"
+                            bookmark={bookmark}
+                            busy={bookmarkBusy.has(bookmarkKey)}
+                            onToggle={(mode) =>
+                              void toggleBookmark({
+                                target: bookmarkTarget,
+                                mode,
+                              })
+                            }
+                            onOpen={
+                              bookmark && props.onOpenPath
+                                ? () => props.onOpenPath?.(bookmark.destinationPath)
+                                : undefined
+                            }
+                          />
+                        </>
+                      } />
                   </div>
                 );
 
@@ -3883,6 +4019,10 @@ export function ChatsView(props: {
             loadFileHeadings={loadFileHeadings}
             onChange={setDmDraft}
             onSend={() => void startDm()}
+            onRosterPick={agentOffer.onRosterPick}
+            rosterScope={agentOffer.scope}
+            agentOffer={agentOffer.offer}
+            onSetUpAgent={props.onSetupAgent}
           />
         </div>
       </div>
@@ -3940,6 +4080,7 @@ export function ChatsView(props: {
               onOpenPath={props.onOpenPath}
               flashMessageId={flashMessageId}
               reactionControls={reactionControls}
+              bottomSpace={AGENT_OFFER_SPACE}
             />
           ) : (
             <div
@@ -3955,7 +4096,8 @@ export function ChatsView(props: {
               testIdPrefix="chats-dm"
               composerId="chats-dm-composer"
               value={composer}
-              sending={sending || !dm.threadId}
+              sending={sending}
+              disabled={!dm.threadId}
               placeholder={`Message ${dm.peerLabel}…`}
               sendLabel="Send message"
               candidates={mentionCandidates}
@@ -3969,6 +4111,10 @@ export function ChatsView(props: {
                 presence.setTyping(false);
                 void sendDmMessage();
               }}
+              onRosterPick={agentOffer.onRosterPick}
+              rosterScope={agentOffer.scope}
+              agentOffer={agentOffer.offer}
+              onSetUpAgent={props.onSetupAgent}
             />
           ) : (
             <ComposerNotice testId="chats-dm-ended">
@@ -4037,7 +4183,7 @@ export function ChatsView(props: {
                 }
                 testId="chats-thread-bookmark"
               />
-              {!threadLocked && dispatchState.liveRunId !== null ? (
+              {!threadLocked && liveRunId !== null ? (
                 <button
                   type="button"
                   data-testid="chats-stop-agent-run"
@@ -4067,7 +4213,7 @@ export function ChatsView(props: {
             </>
           }
         />
-        {dispatchState.paused ? (
+        {dispatchState?.paused ? (
           <div
             data-testid="chats-dispatch-status"
             title={dispatchState.pausedReason}
@@ -4088,13 +4234,13 @@ export function ChatsView(props: {
               <span>read-only</span>
             )}
           </div>
-        ) : dispatchState.liveRunId !== null ||
-          dispatchState.pendingCount > 0 ? (
+        ) : dispatchState && (liveRunId !== null ||
+          dispatchState.pendingCount > 0) ? (
           <div
             data-testid="chats-dispatch-status"
             className="flex h-7 shrink-0 items-center justify-center border-b border-line bg-panel-2/35 px-3 font-mono text-[10px] text-subtle"
           >
-            {dispatchState.liveRunId !== null
+            {liveRunId !== null
               ? `agent working${
                   dispatchState.pendingCount > 0
                     ? ` · ${dispatchState.pendingCount} queued`
@@ -4142,59 +4288,44 @@ export function ChatsView(props: {
                 : "This group is read-only for you."}
             </ComposerNotice>
           ) : (
-            <div ref={threadComposerRef} className="mx-auto w-full max-w-[640px] px-3 pb-4 sm:px-4">
-              {resolveTargetMessageId ? (
-                <div
-                  data-testid="chats-resolving-mode"
-                  className="flex items-center gap-1 border-x border-t border-line bg-panel-2 px-2.5 py-1.5 font-mono text-[10px] text-muted"
-                >
-                  <span className="min-w-0 flex-1 truncate">
-                    {resolveChosenOption
-                      ? `Answering the poll · ${resolveChosenOption}`
-                      : "Answering the poll"}
-                  </span>
-                  <button
-                    type="button"
-                    data-testid="chats-resolving-cancel"
-                    aria-label="Cancel resolving decision"
-                    onClick={() => {
-                      if (replyTarget?.messageId === resolveTargetMessageId) {
-                        setReplyTarget(null);
-                      }
-                      setResolveTargetMessageId(null);
-                      setResolveChosenOption(null);
-                    }}
-                    className="rounded px-1 text-subtle hover:text-ink dohc-focus-visible"
-                  >
-                    ×
-                  </button>
-                </div>
-              ) : null}
-              {replyTarget ? (
-                <div
-                  data-testid="chats-replying-mode"
-                  className="flex items-center gap-1 border-x border-t border-line bg-panel-2 px-2.5 py-1.5 font-mono text-[10px] text-muted"
-                >
-                  <span className="min-w-0 flex-1">
-                    Replying to {replyTarget.authorLabel} ·
-                  </span>
-                  <button
-                    type="button"
-                    data-testid="chats-replying-cancel"
-                    aria-label="Cancel reply"
-                    onClick={() => {
-                      if (resolveTargetMessageId === replyTarget.messageId) {
-                        setResolveTargetMessageId(null);
-                      }
-                      setReplyTarget(null);
-                    }}
-                    className="rounded px-1 text-subtle hover:text-ink dohc-focus-visible"
-                  >
-                    ×
-                  </button>
-                </div>
-              ) : null}
+            // The top space holds a picked agent's offer, so it covers no comment.
+            <div ref={threadComposerRef} className="mx-auto w-full max-w-[640px] px-3 pb-4 pt-6 sm:px-4">
               <MentionComposer
+                above={<>
+                  {resolveTargetMessageId ? (
+                    <ComposerModeBar
+                      testId="chats-resolving-mode"
+                      cancelTestId="chats-resolving-cancel"
+                      cancelLabel="Cancel resolving decision"
+                      onCancel={() => {
+                        if (replyTarget?.messageId === resolveTargetMessageId) {
+                          setReplyTarget(null);
+                        }
+                        setResolveTargetMessageId(null);
+                        setResolveChosenOption(null);
+                      }}
+                    >
+                      {resolveChosenOption
+                        ? `Answering the poll · ${resolveChosenOption}`
+                        : "Answering the poll"}
+                    </ComposerModeBar>
+                  ) : null}
+                  {replyTarget ? (
+                    <ComposerModeBar
+                      testId="chats-replying-mode"
+                      cancelTestId="chats-replying-cancel"
+                      cancelLabel="Cancel reply"
+                      onCancel={() => {
+                        if (resolveTargetMessageId === replyTarget.messageId) {
+                          setResolveTargetMessageId(null);
+                        }
+                        setReplyTarget(null);
+                      }}
+                    >
+                      Replying to {replyTarget.authorLabel} ·
+                    </ComposerModeBar>
+                  ) : null}
+                </>}
                 testIdPrefix="chats"
                 composerId="chats-composer"
                 value={composer}
@@ -4209,6 +4340,8 @@ export function ChatsView(props: {
                   setComposer(value);
                   presence.setTyping(value.trim().length > 0);
                 }}
+                poll={poll}
+                onPollChange={(next) => setPoll(next && { ...next, threadId: nav.thread.id })}
                 onEscape={() => {
                   setReplyTarget(null);
                   setResolveTargetMessageId(null);
@@ -4217,6 +4350,10 @@ export function ChatsView(props: {
                   presence.setTyping(false);
                   void sendMessage();
                 }}
+                onRosterPick={agentOffer.onRosterPick}
+                rosterScope={agentOffer.scope}
+                agentOffer={agentOffer.offer}
+                onSetUpAgent={props.onSetupAgent}
               />
             </div>
           )}
@@ -4340,7 +4477,7 @@ export function ChatsView(props: {
                   {channelGrants.length > 0 ? (
                     <span className="flex items-center -space-x-1.5">
                       {channelGrants.slice(0, 3).map((grant) => (
-                        <ChatAvatar
+                        <ChatAvatar presentation={neutralPresentation}
                           key={grant.shareId}
                           name={grant.recipientEmail ?? "?"}
                           kind="human"
@@ -4377,8 +4514,8 @@ export function ChatsView(props: {
                   : "Runner on"
                 : props.agentSetup.runnerConfigured
                   ? "Runner configured · dispatch is off"
-                  : props.agentSetup.mcpEnabled
-                    ? "Workspace MCP on · connect an agent to reply here"
+                  : props.agentSetup.agentRunActive
+                    ? "Agent run active · connect an agent to reply here"
                     : "No runner yet · add an agent under Agents"}
             </span>
             {props.workspacePath ? (
@@ -4387,7 +4524,7 @@ export function ChatsView(props: {
                 title={props.workspacePath}
                 className="hidden shrink-0 truncate font-mono text-[10px] text-subtle sm:inline"
               >
-                reaches {props.workspacePath.split(/[\\/]/u).filter(Boolean).at(-1) ?? props.workspacePath}
+                reaches {reachName(props.workspacePath)}
               </span>
             ) : null}
             {props.onSetupAgent ? (
@@ -4407,7 +4544,7 @@ export function ChatsView(props: {
             data-testid="chats-joined-banner"
             className="flex shrink-0 items-center gap-1.5 border-b border-line bg-panel-2/40 px-3 py-1.5"
           >
-            <ChatAvatar name={channelJoined.granterEmail ?? "?"} kind="human" size="strip" />
+            <ChatAvatar presentation={neutralPresentation} name={channelJoined.granterEmail ?? "?"} kind="human" size="strip" />
             <span className="min-w-0 flex-1 truncate text-[11px] text-muted">
               {joinedChannelLabel(channelJoined, ownerRemoved(channelJoined.shareId))}
             </span>
@@ -4445,7 +4582,7 @@ export function ChatsView(props: {
                     data-testid="chats-share-member"
                     className="flex h-7 items-center gap-2"
                   >
-                    <ChatAvatar name={grant.recipientEmail ?? "?"} kind="human" size="strip" />
+                    <ChatAvatar presentation={neutralPresentation} name={grant.recipientEmail ?? "?"} kind="human" size="strip" />
                     <span className="min-w-0 flex-1 truncate text-[12px] text-ink">
                       {grant.recipientEmail ?? "Invited"}
                     </span>
@@ -4525,6 +4662,9 @@ export function ChatsView(props: {
             onError={props.onError}
             onThreadRead={props.onThreadRead}
             revision={props.threadRevision ?? 0}
+            agentSetup={props.agentSetup}
+            onSetupAgent={props.onSetupAgent}
+            workspacePath={props.workspacePath}
           />
         ) : (
         <PostFeedList
@@ -4556,7 +4696,13 @@ export function ChatsView(props: {
                   fileCandidates={fileMentionCandidates}
                   loadFileHeadings={loadFileHeadings}
                   onChange={setNewThreadBody}
+                  poll={newThreadPoll}
+                  onPollChange={(next) => setNewThreadPoll(next && { ...next, channelId: nav.channel.id })}
                   onSend={() => void startThread()}
+                  onRosterPick={agentOffer.onRosterPick}
+                  rosterScope={agentOffer.scope}
+                  agentOffer={agentOffer.offer}
+                  onSetUpAgent={props.onSetupAgent}
                 />
               </div>
             ) : null}
@@ -4803,7 +4949,7 @@ export function ChatsView(props: {
                       data={{ "data-channel-id": dm.channelId }}
                       active={selectedDmId === dm.channelId}
                       onClick={() => openConversation({ level: "dm", dm })}
-                      icon={<ChatAvatar name={dm.peerLabel} kind="human" size="strip" />}
+                      icon={<ChatAvatar presentation={neutralPresentation} name={dm.peerLabel} kind="human" size="strip" />}
                       label={dm.peerLabel}
                       labelTestId="chats-dm-name"
                       muted={!dm.connected}
@@ -4901,7 +5047,7 @@ export function ChatsView(props: {
                   data={{ "data-channel-id": agentChannel.id }}
                   active={selectedChannelId === agentChannel.id}
                   onClick={() => openConversation({ level: "channel", channel: agentChannel })}
-                  icon={<ChatAvatar name={agentLabel} kind="agent" own size="strip" />}
+                  icon={<ChatAvatar presentation={ownAgentPresentation} name={agentLabel} kind="agent" size="strip" />}
                   label={agentLabel}
                   labelTestId="chats-my-agent-name"
                   trailing={
@@ -4937,7 +5083,7 @@ export function ChatsView(props: {
                         data={{ "data-owner": agent.owner }}
                         active={false}
                         onClick={agent.open}
-                        icon={<ChatAvatar name={agent.label} kind="agent" size="strip" />}
+                        icon={<ChatAvatar presentation={neutralPresentation} name={agent.label} kind="agent" size="strip" />}
                         label={agent.label}
                         labelTestId="chats-other-agent-name"
                         muted

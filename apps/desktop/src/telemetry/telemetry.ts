@@ -1,12 +1,16 @@
+import { relayShareOperations } from "../ipc/shareOperations";
+import { chatOperations } from "../ipc/chatOperations";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { z } from "zod";
+import { atomicReplaceFileSync } from "../atomicReplaceFile";
 import type { CodeLocation } from "../crashReports/crashReport";
 import type { ReportKinds } from "../ipc/bridgeContract";
 import { CHANNELS } from "../ipc/channels";
 import type { PrivacySettings } from "../settings/userSettings";
-import { sentryEnvelope, sentryEvent, type ErrorFacts, type ReportedError, type SentryEvent } from "./errorReport";
+import { errorReport, type ErrorFacts, type ErrorReport, type ReportedError } from "./errorReport";
+import type { ErrorSender } from "./posthogErrors";
 import type { Reporting } from "./reportingConfig";
 
 // Every usage event dohc counts. Each counts one finished action and
@@ -24,14 +28,14 @@ export type UsageEvent =
 const USAGE_EVENTS: Readonly<Record<string, (result: unknown) => UsageEvent | null>> = {
   [CHANNELS.createLocalWorkspace]: () => ({ name: "workspace_created" }),
   [CHANNELS.openWorkspace]: () => ({ name: "workspace_opened" }),
-  [CHANNELS.createRelayShare]: () => ({ name: "share_created", method: "people" }),
-  [CHANNELS.createRelayShareLink]: () => ({ name: "share_created", method: "link" }),
+  [relayShareOperations.createRelayShare.channel]: () => ({ name: "share_created", method: "people" }),
+  [relayShareOperations.createRelayShareLink.channel]: () => ({ name: "share_created", method: "link" }),
   // Publishing asks first: only an approved publication counts.
   [CHANNELS.publishOwnerApp]: (result) => {
     const outcome = result as { kind?: unknown; local?: unknown } | null;
     return outcome?.kind === "published" ? { name: "app_published", local: outcome.local === true } : null;
   },
-  [CHANNELS.sendChatMessage]: () => ({ name: "chat_message_sent" }),
+  [chatOperations.sendChatMessage.channel]: () => ({ name: "chat_message_sent" }),
 };
 
 /** The usage event a request that answered `result` counts, if any. */
@@ -113,8 +117,10 @@ export function createTelemetry(deps: {
   reporting: Reporting | null;
   // Holds the kinds a notice on screen has named, and the install ID.
   statePath: string;
-  facts(): ErrorFacts & { channel: string };
+  facts(): ErrorFacts;
   locate(frame: string): CodeLocation | null;
+  // A file under dohc's folder, by the path `locate` gives it.
+  readCode(path: string): Promise<string>;
   fetch?: typeof fetch;
   now?: () => number;
 }): Telemetry {
@@ -131,7 +137,9 @@ export function createTelemetry(deps: {
   let errorsPrepared = 0;
   const errorKeys = new Set<string>();
   const usage: Lane<{ event: string; properties: Record<string, unknown>; timestamp: string }> = lane();
-  const errors: Lane<SentryEvent> = lane();
+  const errors: Lane<ErrorReport> = lane();
+  // PostHog's SDK, loaded when the first error report leaves.
+  let errorSender: Promise<ErrorSender> | null = null;
 
   const usageOn = () => !ended && Boolean(reporting?.usage && named.usage && privacy?.usageReports);
   const errorsOn = () => !ended && Boolean(reporting?.errors && named.errors && privacy?.errorReports);
@@ -178,12 +186,12 @@ export function createTelemetry(deps: {
     return target.draining ?? Promise.resolve();
   }
 
-  async function post(target: Lane<unknown>, request: (signal: AbortSignal) => Promise<Response>): Promise<void> {
+  async function post(target: Lane<unknown>, request: (signal: AbortSignal) => Promise<Response | undefined>): Promise<void> {
     const controller = new AbortController();
     target.sending = controller;
     try {
       const response = await request(AbortSignal.any([controller.signal, AbortSignal.timeout(REPORT_LIMITS.requestTimeoutMs)]));
-      const pauseMs = rateLimitMs(response);
+      const pauseMs = response ? rateLimitMs(response) : 0;
       if (pauseMs > 0) target.pausedUntilMs = now() + pauseMs;
     } catch {
       // Dropped: a send that failed once is likely to fail again.
@@ -211,18 +219,13 @@ export function createTelemetry(deps: {
 
   const sendErrors = () => drain(errors, errorsOn, async () => {
     const service = reporting?.errors;
-    const event = errors.queue.shift();
-    if (!service || !event) return;
-    await post(errors, (signal) => send(service.url, {
-      method: "POST",
-      headers: {
-        "content-type": "application/x-sentry-envelope",
-        "x-sentry-auth": `Sentry sentry_version=7, sentry_key=${service.publicKey}, sentry_client=dohc-desktop/1`,
-      },
-      body: sentryEnvelope(event, now()),
-      redirect: "error",
-      signal,
-    }));
+    const report = errors.queue.shift();
+    if (!service || !report) return;
+    await post(errors, async (signal) => {
+      errorSender ??= import("./posthogErrors").then(({ createErrorSender }) =>
+        createErrorSender({ service, fetch: send, readCode: deps.readCode }));
+      return await (await errorSender)(report, signal);
+    });
   });
 
   return {
@@ -258,11 +261,11 @@ export function createTelemetry(deps: {
         if (!reporting || !errorsMayQueue() || errorCount >= REPORT_LIMITS.errorsPerLaunch) return;
         if (errors.queue.length >= REPORT_LIMITS.errorQueue || errorsPrepared >= REPORT_LIMITS.errorsPrepared) return;
         errorsPrepared += 1;
-        const { event, key } = sentryEvent(reported, deps.facts(), reporting, deps.locate);
+        const { report, key } = errorReport(reported, deps.facts(), reporting.dist, deps.locate);
         if (errorKeys.has(key)) return;
         if (errorKeys.size < REPORT_LIMITS.errorKeys) errorKeys.add(key);
         errorCount += 1;
-        errors.queue.push(event);
+        errors.queue.push(report);
         schedule(errors, errorsOn, REPORT_LIMITS.errorFlushMs, sendErrors);
       } catch (error) {
         console.error("[reports] could not prepare an error report", error);
@@ -344,27 +347,17 @@ function readState(path: string): ReportingState {
 
 function writeState(path: string, state: ReportingState): void {
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(`${path}.tmp`, JSON.stringify(state), { mode: 0o600 });
-  renameSync(`${path}.tmp`, path);
+  atomicReplaceFileSync(path, (temporary) => writeFileSync(temporary, JSON.stringify(state), { mode: 0o600 }));
 }
 
 /**
- * How long a service asked dohc to wait. Sentry names limits per category
- * in X-Sentry-Rate-Limits; an error report honors one with no categories or
- * with "error". A 429 without either header waits a minute.
+ * How long PostHog asked dohc to wait: a 429's Retry-After in seconds, or a
+ * minute without one.
  */
 export function rateLimitMs(response: Pick<Response, "status" | "headers">): number {
-  let seconds = 0;
-  const limits = response.headers.get("x-sentry-rate-limits");
-  for (const entry of limits?.split(",") ?? []) {
-    const [retryAfter, categories = ""] = entry.trim().split(":");
-    const names = categories.split(";").filter(Boolean);
-    if (names.length === 0 || names.includes("error")) seconds = Math.max(seconds, Number(retryAfter) || 0);
-  }
-  if (response.status === 429 && seconds === 0) {
-    const retryAfter = Number(response.headers.get("retry-after"));
-    seconds = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : REPORT_LIMITS.defaultPauseMs / 1000;
-  }
+  if (response.status !== 429) return 0;
+  const retryAfter = Number(response.headers.get("retry-after"));
+  const seconds = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : REPORT_LIMITS.defaultPauseMs / 1000;
   return Math.min(seconds * 1000, REPORT_LIMITS.maxPauseMs);
 }
 

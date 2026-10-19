@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
-import { assertReleaseFuses } from "./fuse-smoke.mjs";
+import { assertReleaseFuses, compilePackagedApp } from "./fuse-smoke.mjs";
+import { stageAppCompiler } from "./stage-app-compiler.mjs";
 
 const require = createRequire(import.meta.url);
 const { FuseState, FuseVersion, FuseV1Options } = require("@electron/fuses");
@@ -36,4 +40,14 @@ test("packaged fuse verification fails closed on unsupported wire versions and c
   assert.throws(() => assertReleaseFuses({ ...actual, version: "2" }, configured), /wire version/);
   assert.throws(() => assertReleaseFuses(actual, { ...configured, unknownFuse: true }), /Unsupported release fuse setting/);
   assert.throws(() => assertReleaseFuses(actual, { ...configured, runAsNode: "false" }), /Unsupported release fuse setting/);
+});
+
+test("packaged compile smoke builds through the arm64 owner and fails on a broken compiler",
+  { skip: process.platform !== "darwin" || process.arch !== "arm64", timeout: 60000 }, async t => {
+  const resources = await mkdtemp(join(tmpdir(), "dohc-fuse-smoke-compile-"));
+  t.after(() => rm(resources, { recursive: true, force: true }));
+  await stageAppCompiler({ destination: join(resources, "app-compiler") });
+  await compilePackagedApp(resources);
+  await writeFile(join(resources, "app-compiler/worker.mjs"), "process.exit(3);");
+  await assert.rejects(compilePackagedApp(resources), /The packaged app compiler failed/);
 });

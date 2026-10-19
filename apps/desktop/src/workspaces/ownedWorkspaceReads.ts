@@ -1,4 +1,4 @@
-import type { ListWorkspaceFilesResult } from "../ipc/bridgeContract";
+import type { WorkspacePathListing } from "../ipc/bridgeContract";
 import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
 import {
   createOwnedWorkspaceReadPort,
@@ -18,7 +18,8 @@ import type { WorkspaceFileListingScope } from "./workspaceFileListingScope";
 /** Compose the production read port from the workspace's owner records. */
 export function createOwnedWorkspaceReads(input: {
   workspace: ShareViewFilesWorkspaceRecord;
-  listFiles(scope?: WorkspaceFileListingScope): Promise<ListWorkspaceFilesResult>;
+  listFiles(scope?: WorkspaceFileListingScope): Promise<WorkspacePathListing>;
+  lookupFiles(paths: readonly string[]): Promise<WorkspacePathListing>;
   repairProjection(target: ShareViewFilesTarget): Promise<void>;
   onSearchSourceFailure?: (
     source: OwnedWorkspaceSearchSource,
@@ -50,6 +51,7 @@ export function createOwnedWorkspaceReads(input: {
 
   return createOwnedWorkspaceReadPort({
     listFiles: input.listFiles,
+    lookupFiles: input.lookupFiles,
     hasShareState: workspaceHasReceivedShareState(input.workspace),
     searchSources,
     repairProjection: input.repairProjection,

@@ -84,8 +84,8 @@ test("aggressive click-around keeps the shell mounted with no renderer errors", 
       }
 
       // Panel toggles: sidebar off/on, activity views, history rail off/on.
-      await page.keyboard.press("Control+b");
-      await page.keyboard.press("Control+b");
+      await page.keyboard.press("ControlOrMeta+b");
+      await page.keyboard.press("ControlOrMeta+b");
       for (const view of ["search", "graph", "history", "explorer"]) {
         await page.getByTestId(activityPin(view)).click();
       }
@@ -96,7 +96,7 @@ test("aggressive click-around keeps the shell mounted with no renderer errors", 
       }
 
       // Quick-open in and out.
-      await page.keyboard.press("Control+p");
+      await page.keyboard.press("ControlOrMeta+p");
       await expect(page.getByTestId("quick-open")).toBeVisible();
       await page.keyboard.press("Escape");
 

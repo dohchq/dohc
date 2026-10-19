@@ -5,7 +5,6 @@ import {
   headingAnchorBase,
   resolveWorkspaceHeadingAnchorTarget,
   workspaceHeadingRecords,
-  workspaceHeadingSection,
 } from "./workspaceHeadings";
 
 describe("workspace headings", () => {
@@ -28,7 +27,8 @@ describe("workspace headings", () => {
       { text: "Pricing & Regions", level: 2, anchor: "pricing-regions-1", occurrence: 1 },
       { text: "Appendix", level: 1, anchor: "appendix", occurrence: 0 },
     ]);
-    expect(workspaceHeadingSection(markdown, headings[1]!)).toBe(
+    const { startOffset, endOffset } = headings[1]!;
+    expect(markdown.slice(startOffset, endOffset).trimEnd()).toBe(
       "## Pricing & Regions\nfirst",
     );
   });

@@ -1,3 +1,4 @@
+import { hasPrimaryModifier, shortcutText, shortcutTitle } from "../shortcuts/shortcutRegistry";
 import { Bug, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
@@ -9,15 +10,14 @@ import { openStatesPage } from "./dev/statesRoute";
 
 // Debug panel for working on the UI. Present only when main launched with
 // DOHC_DEV_TOOLS=1 in an unpackaged build: the preload reports the flag and
-// every action's channel is gated again in main. Toggle with Ctrl+Shift+D or
+// every action's channel is gated again in main. Toggle with Ctrl+Shift+D (⇧⌘D on macOS) or
 // the bug button in the corner. Nothing here is product; it is a bench.
 
 function useDevPanelOpen(): [boolean, (next: boolean | ((open: boolean) => boolean)) => void] {
   const [open, setOpen] = useState(false);
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
-      const meta = event.ctrlKey || event.metaKey;
-      if (meta && event.shiftKey && event.key.toLowerCase() === "d") {
+      if (hasPrimaryModifier(event, window.dohcDesktop?.platform) && event.shiftKey && event.key.toLowerCase() === "d") {
         event.preventDefault();
         setOpen((current) => !current);
       }
@@ -101,7 +101,7 @@ export function DevPanel(props: { workspaceId?: string }) {
               <Bug size={13} strokeWidth={1.9} aria-hidden className="text-subtle" />
               Dev tools
               <kbd className="rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle">
-                Ctrl Shift D
+                {shortcutText("dev-panel", window.dohcDesktop?.platform)}
               </kbd>
             </span>
             <IconButton aria-label="Close dev tools" onClick={() => setOpen(false)}>
@@ -169,7 +169,7 @@ export function DevPanel(props: { workspaceId?: string }) {
       <button
         type="button"
         aria-label="Dev tools"
-        title="Dev tools (Ctrl+Shift+D)"
+        title={`Dev tools (${shortcutTitle("dev-panel", window.dohcDesktop?.platform)})`}
         onClick={() => setOpen((current) => !current)}
         className={`fixed bottom-9 right-3 z-50 grid size-7 place-items-center rounded-full border border-line transition-colors ${
           open ? "bg-ink text-bg" : "bg-panel text-subtle hover:text-ink"

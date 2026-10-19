@@ -213,6 +213,7 @@ export class ChatsLiveAdapter {
     author: ChatActor;
     authorOwnerDisplayName?: string;
     authorUserId?: string;
+    authorActorKey: string | null;
     origin?: "cli";
     body: string;
     needsDecision?: boolean;
@@ -238,6 +239,7 @@ export class ChatsLiveAdapter {
         ...(input.authorUserId !== undefined
           ? { authorUserId: input.authorUserId }
           : {}),
+        ...(input.authorActorKey !== null ? { authorActorKey: input.authorActorKey } : {}),
         ...(input.origin !== undefined ? { origin: input.origin } : {}),
         body: input.body,
         ...(input.needsDecision !== undefined
@@ -343,6 +345,7 @@ export class ChatsLiveAdapter {
     author: ChatActor;
     authorOwnerDisplayName?: string;
     authorUserId?: string;
+    authorActorKey: string | null;
     parentMessageId?: string;
     origin?: "cli";
     body: string;
@@ -368,6 +371,7 @@ export class ChatsLiveAdapter {
         ...(input.parentMessageId !== undefined
           ? { parentMessageId: input.parentMessageId }
           : {}),
+        ...(input.authorActorKey !== null ? { authorActorKey: input.authorActorKey } : {}),
         ...(input.origin !== undefined ? { origin: input.origin } : {}),
         body: input.body,
         ...(input.needsDecision !== undefined
@@ -955,8 +959,8 @@ export class ChatsLiveAdapter {
     );
   }
 
-  async markFailureNotePosted(runId: string): Promise<ChatRun> {
-    return this.request(CHATS_METHOD.dispatchMarkFailureNotePosted, { runId });
+  async markFailureHandled(runId: string): Promise<ChatRun> {
+    return this.request(CHATS_METHOD.dispatchMarkFailureHandled, { runId });
   }
 
   async recentDispatchCount(input: {

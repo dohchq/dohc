@@ -20,6 +20,7 @@ pub mod draft;
 pub mod enrollment;
 mod native_source;
 pub mod publication;
+pub mod release;
 pub(crate) use native_source::retain_native_source;
 pub use native_source::{
     OwnerOutboxDraftOrigin, OwnerOutboxDraftSource, OwnerOutboxNativeOrigin,
@@ -33,6 +34,67 @@ pub fn has_adopted_owner_in(
     conn.query_row("SELECT EXISTS(SELECT 1 FROM live_owner_adoptions WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)",
         params![key.workspace_id,key.version_id,key.object_id], |r| r.get(0))
         .map_err(|error| crate::CollabError::Storage(StorageError::corrupt_public(error)))
+}
+
+const OWNER_DRAFT_REFUSAL_ACTOR: &str = "owner-draft-refusal";
+const OWNER_DRAFT_QUARANTINE_ACTOR: &str = "owner-draft-quarantine";
+
+/// Diff the visible owner fields against their current Collection index.
+pub(super) fn index_frontmatter_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    binding: &LiveObjectBinding,
+    visible: &crate::Ydoc,
+    actor: Option<&str>,
+    attribution: Option<&dohc_engine_domain::ChangeAttribution>,
+    now_ms: i64,
+) -> Result<(), OwnerOutboxError> {
+    let before = dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(
+        tx,
+        &binding.workspace_id,
+        &binding.main_version_id,
+        &binding.object_id,
+    )
+    .map_err(index_error)?;
+    if let Some(before) = before {
+        index_frontmatter_from_in_tx(tx, binding, &before, visible, actor, attribution, now_ms)?;
+    }
+    Ok(())
+}
+
+pub(super) fn index_frontmatter_from_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    binding: &LiveObjectBinding,
+    before: &serde_json::Value,
+    visible: &crate::Ydoc,
+    actor: Option<&str>,
+    attribution: Option<&dohc_engine_domain::ChangeAttribution>,
+    now_ms: i64,
+) -> Result<(), OwnerOutboxError> {
+    let after = visible.frontmatter_json();
+    dohc_engine_domain::index_collection_frontmatter_apply_in_tx(
+        tx,
+        &binding.workspace_id,
+        &binding.main_version_id,
+        &binding.object_id,
+        before,
+        &after,
+        before,
+        &after,
+        None,
+        actor,
+        attribution,
+        None,
+        now_ms,
+    )
+    .map_err(index_error)?;
+    Ok(())
+}
+
+fn index_error(error: dohc_engine_domain::DomainError) -> OwnerOutboxError {
+    match error {
+        dohc_engine_domain::DomainError::Storage(error) => OwnerOutboxError::Storage(error),
+        _ => OwnerOutboxError::Corrupt,
+    }
 }
 
 /// Where a live frame was accepted, as far as its receiver can tell.
@@ -96,6 +158,12 @@ pub fn require_ordinary_settlement(
 
 #[derive(Debug, thiserror::Error)]
 pub enum OwnerOutboxError {
+    #[error("this computer hosts the document")]
+    DesktopHost,
+    #[error("the document restore is not complete")]
+    RestorePending,
+    #[error("the Stop request changed")]
+    StopConflict,
     #[error("owner Y.Doc outbox input is invalid: {0}")]
     InvalidInput(&'static str),
     #[error("owner Y.Doc outbox workspace does not match the engine handle")]
@@ -192,6 +260,7 @@ pub struct OwnerOutboxEntry {
     pub update: Vec<u8>,
     pub byte_length: i64,
     pub created_at_ms: i64,
+    pub person_edit: bool,
     pub agent_declaration: Option<AgentDeclaration>,
     pub automation_declaration: Option<AutomationDeclaration>,
 }
@@ -281,12 +350,16 @@ pub fn refuse_entry_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace: &str,
     input: &OwnerOutboxRefuseInput,
+    now_ms: i64,
 ) -> Result<LiveObjectBinding, OwnerOutboxError> {
     validate_identifier(&input.outbox_id, "invalid outbox id")?;
     validate_identifier(&input.delivery_id, "invalid delivery id")?;
     validate_identifier(&input.reason, "invalid refusal reason")?;
     if input.reason.len() > 256 {
         return Err(OwnerOutboxError::InvalidInput("invalid refusal reason"));
+    }
+    if !(0..=9_007_199_254_740_991).contains(&now_ms) {
+        return Err(OwnerOutboxError::InvalidInput("invalid refusal time"));
     }
     validate_digest(&input.update_digest)?;
     let parent = read_parent(tx, &input.outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
@@ -307,13 +380,23 @@ pub fn refuse_entry_in_tx(
             Err(OwnerOutboxError::ReceiptMismatch)
         };
     }
-    let checkpoint_digest = match observed {
-        Some(observed) => observed.checkpoint_digest,
+    let checkpoint_digest = match &observed {
+        Some(observed) => observed.checkpoint_digest.clone(),
         None => native_refusal_checkpoint_in_tx(tx, &parent.binding, input)?,
     };
     tx.execute("UPDATE owner_ydoc_outbox_entries SET pending=0,terminal_blob_digest=update_blob_digest,update_blob_digest=NULL,terminal_reason=?3 WHERE outbox_id=?1 AND delivery_id=?2 AND pending=1", params![input.outbox_id,input.delivery_id,input.reason]).map_err(write_sql)?;
-    draft::refuse_dependent_entries_in_tx(tx, &input.outbox_id, &checkpoint_digest)?;
+    let visible = draft::refuse_dependent_entries_in_tx(tx, &input.outbox_id, &checkpoint_digest)?;
     refresh_pending_in_tx(tx, &input.outbox_id)?;
+    if observed.is_some() && parent.state != OwnerOutboxState::Quarantined {
+        index_frontmatter_in_tx(
+            tx,
+            &parent.binding,
+            &visible,
+            Some(OWNER_DRAFT_REFUSAL_ACTOR),
+            None,
+            now_ms,
+        )?;
+    }
     Ok(parent.binding)
 }
 
@@ -414,7 +497,7 @@ pub fn append_in_tx(
     {
         return Err(OwnerOutboxError::Frozen);
     };
-    append_with_retained_base(tx, workspace_id, input, None, None, None, None)
+    append_with_retained_base(tx, workspace_id, input, None, None, None, None, false)
 }
 
 /// An append key names one exact entry: its binding, base, bytes, whether it
@@ -424,6 +507,7 @@ pub fn append_in_tx(
 /// `draft_revision`, the observed binding revision it was queued under. Its
 /// editor's declaration, or an adopted native update's recorded agent, rides
 /// in `agent_declaration`.
+#[allow(clippy::too_many_arguments)]
 fn append_with_retained_base(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
@@ -432,6 +516,7 @@ fn append_with_retained_base(
     draft_revision: Option<i64>,
     agent_declaration: Option<&AgentDeclaration>,
     automation_declaration: Option<&AutomationDeclaration>,
+    person_edit: bool,
 ) -> Result<OwnerOutboxAppendResult, OwnerOutboxError> {
     let binding = input
         .binding
@@ -542,11 +627,12 @@ fn append_with_retained_base(
         existing_draft_revision,
         existing_automation_json,
         terminal_reason,
+        existing_person_edit,
     )) = tx
         .query_row(
             "SELECT outbox_id,sequence,delivery_id,update_digest,result_pending_bytes,\
                  result_oldest_entry_at_ms,result_state,agent_declaration_json,\
-                 draft_binding_revision,automation_declaration_json,terminal_reason \
+                 draft_binding_revision,automation_declaration_json,terminal_reason,person_edit \
                  FROM owner_ydoc_outbox_entries WHERE append_key=?1",
             [&input.append_key],
             |row| {
@@ -562,6 +648,7 @@ fn append_with_retained_base(
                     row.get::<_, Option<i64>>(8)?,
                     row.get::<_, Option<String>>(9)?,
                     row.get::<_, Option<String>>(10)?,
+                    row.get::<_, Option<bool>>(11)?,
                 ))
             },
         )
@@ -575,6 +662,7 @@ fn append_with_retained_base(
             || parent.base_update_digest != base_update_digest
             || existing_update_digest != update_digest
             || existing_declaration_json != declaration_json
+            || existing_person_edit != person_edit.then_some(true)
             || existing_automation_json != automation_json
             || existing_draft_revision.is_some() != draft_revision.is_some()
         {
@@ -668,8 +756,8 @@ fn append_with_retained_base(
              (outbox_id,sequence,append_key,delivery_id,update_digest,update_blob_digest,\
               byte_length,created_at_ms,pending,result_pending_bytes,\
               result_oldest_entry_at_ms,result_state,agent_declaration_json,\
-              draft_binding_revision,automation_declaration_json) \
-             VALUES (?1,?2,?3,?4,?5,?5,?6,?7,1,?8,?9,?10,?11,?12,?13)",
+              draft_binding_revision,automation_declaration_json,person_edit) \
+             VALUES (?1,?2,?3,?4,?5,?5,?6,?7,1,?8,?9,?10,?11,?12,?13,?14)",
         params![
             parent.outbox_id,
             parent.next_sequence,
@@ -684,6 +772,7 @@ fn append_with_retained_base(
             declaration_json,
             draft_revision,
             automation_json,
+            person_edit.then_some(true),
         ],
     )
     .map_err(write_sql)?;
@@ -807,6 +896,7 @@ pub fn append_adopted_local_update_in_tx(
         None,
         agent_declaration.as_ref(),
         None,
+        source.person_edit().map_err(map)?,
     )
     .map_err(map)?;
     retain_native_source(tx, &result, &source).map_err(map)?;
@@ -830,7 +920,7 @@ pub fn read_pending(
         let mut statement = conn
             .prepare(
                 "SELECT sequence,append_key,delivery_id,update_digest,update_blob_digest,\
-                 byte_length,created_at_ms,agent_declaration_json,automation_declaration_json FROM owner_ydoc_outbox_entries \
+                 byte_length,created_at_ms,agent_declaration_json,automation_declaration_json,person_edit FROM owner_ydoc_outbox_entries \
                  WHERE outbox_id=?1 AND pending=1 ORDER BY sequence",
             )
             .map_err(read_sql)?;
@@ -846,6 +936,7 @@ pub fn read_pending(
                     row.get::<_, i64>(6)?,
                     row.get::<_, Option<String>>(7)?,
                     row.get::<_, Option<String>>(8)?,
+                    row.get::<_, Option<bool>>(9)?,
                 ))
             })
             .map_err(read_sql)?;
@@ -861,6 +952,7 @@ pub fn read_pending(
                 created_at_ms,
                 declaration_json,
                 automation_json,
+                person_edit,
             ) = row.map_err(read_sql)?;
             let update = get_binary_blob(conn, &blob_digest)?.ok_or(OwnerOutboxError::Corrupt)?;
             if update_digest != blob_digest
@@ -877,6 +969,7 @@ pub fn read_pending(
                 update,
                 byte_length,
                 created_at_ms,
+                person_edit: person_edit.unwrap_or(false),
                 agent_declaration: stored_declaration(declaration_json)?,
                 automation_declaration: stored_automation_declaration(automation_json)?,
             });
@@ -995,16 +1088,17 @@ pub fn read_pending_page(
             }
             EntryHeader | Update => {
                 let entry = tx.query_row(
-                    "SELECT append_key,delivery_id,update_digest,update_blob_digest,byte_length,created_at_ms,agent_declaration_json,automation_declaration_json \
+                    "SELECT append_key,delivery_id,update_digest,update_blob_digest,byte_length,created_at_ms,agent_declaration_json,automation_declaration_json,person_edit \
                      FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND sequence=?2 AND pending=1",
                     params![outbox_id, cursor.sequence], |row| Ok((
                         row.get::<_, String>(0)?, row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?, row.get::<_, String>(3)?,
                         row.get::<_, i64>(4)?, row.get::<_, i64>(5)?,
                         row.get::<_, Option<String>>(6)?, row.get::<_, Option<String>>(7)?,
+                        row.get::<_, Option<bool>>(8)?,
                     )),
                 ).optional().map_err(read_sql)?.ok_or(OwnerOutboxError::InvalidInput("invalid read entry"))?;
-                let (append_key, delivery_id, digest, blob_digest, byte_length, created_at_ms, declaration_json, automation_json) = entry;
+                let (append_key, delivery_id, digest, blob_digest, byte_length, created_at_ms, declaration_json, automation_json, person_edit) = entry;
                 if digest != blob_digest || byte_length <= 0 {
                     return Err(OwnerOutboxError::Corrupt);
                 }
@@ -1014,6 +1108,7 @@ pub fn read_pending_page(
                         "deliveryId": delivery_id, "updateDigest": digest,
                         "byteLength": byte_length, "createdAtMs": created_at_ms,
                     });
+                    if person_edit == Some(true) { header["personEdit"] = serde_json::json!(true); }
                     // An entry that declared no agent has no field at all.
                     if let Some(declaration) = stored_declaration(declaration_json)? {
                         header["agentDeclaration"] = serde_json::to_value(declaration)
@@ -1229,7 +1324,24 @@ pub fn quarantine(
     store: &mut EngineStore,
     workspace_id: &str,
     input: OwnerOutboxQuarantineInput,
+    now_ms: i64,
 ) -> Result<(), OwnerOutboxError> {
+    let outcome = store.write_with(&NoFaults, |tx| {
+        quarantine_in_tx(tx, workspace_id, &input, now_ms)
+    })?;
+    committed(outcome)
+}
+
+/// Quarantine and its visible-field rollback share the caller's transaction.
+pub(crate) fn quarantine_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    input: &OwnerOutboxQuarantineInput,
+    now_ms: i64,
+) -> Result<(), OwnerOutboxError> {
+    if !(0..=9_007_199_254_740_991).contains(&now_ms) {
+        return Err(OwnerOutboxError::InvalidInput("invalid quarantine time"));
+    }
     validate_identifier(&input.outbox_id, "outbox id must be non-empty and bounded")?;
     validate_identifier(
         &input.reason,
@@ -1237,21 +1349,42 @@ pub fn quarantine(
     )?;
     let observed_binding = input
         .observed_binding
+        .clone()
         .map(|binding| binding.normalized().map_err(OwnerOutboxError::InvalidInput))
         .transpose()?;
     let observed_binding_json = observed_binding.as_ref().map(binding_json).transpose()?;
-    let outcome = store.write_with(&NoFaults, |tx| {
-        let parent = read_parent(tx, &input.outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
-        require_workspace(workspace_id, &parent.binding.workspace_id)?;
-        tx.execute(
-            "UPDATE owner_ydoc_outboxes SET state='quarantined',quarantine_reason=?2,\
-             observed_binding_json=?3 WHERE outbox_id=?1",
-            params![input.outbox_id, input.reason, observed_binding_json],
-        )
-        .map_err(write_sql)?;
-        Ok::<(), OwnerOutboxError>(())
-    })?;
-    committed(outcome)
+    let parent = read_parent(tx, &input.outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
+    require_workspace(workspace_id, &parent.binding.workspace_id)?;
+    if parent.state != OwnerOutboxState::Quarantined {
+        // Only the current observed generation owns the draft field index.
+        let current_observation: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND binding_json=?5)",
+                params![parent.binding.workspace_id, parent.binding.main_version_id, parent.binding.object_id, parent.binding.lineage_claim_id, binding_json(&parent.binding)?],
+                |row| row.get(0),
+            )
+            .map_err(read_sql)?;
+        if current_observation {
+            // A host can advance native state without updating its retained observation.
+            let native =
+                crate::load_doc_in(tx, &draft::key(&parent.binding)?).map_err(draft::collab)?;
+            index_frontmatter_in_tx(
+                tx,
+                &parent.binding,
+                &native,
+                Some(OWNER_DRAFT_QUARANTINE_ACTOR),
+                None,
+                now_ms,
+            )?;
+        }
+    }
+    tx.execute(
+        "UPDATE owner_ydoc_outboxes SET state='quarantined',quarantine_reason=?2,\
+         observed_binding_json=?3 WHERE outbox_id=?1",
+        params![input.outbox_id, input.reason, observed_binding_json],
+    )
+    .map_err(write_sql)?;
+    Ok(())
 }
 
 fn read_parent(conn: &Connection, outbox_id: &str) -> Result<Option<ParentRow>, OwnerOutboxError> {
@@ -1693,6 +1826,7 @@ mod tests {
                             reason: "binding changed".to_owned(),
                             observed_binding: None,
                         },
+                        20,
                     )
                     .expect("quarantine during read");
                 }
@@ -2089,6 +2223,7 @@ mod tests {
                 reason: "restore-fence-mismatch".to_owned(),
                 observed_binding: Some(binding()),
             },
+            20,
         )
         .expect("quarantine");
         let pending = read_pending(&store, "workspace-1", &outbox).expect("pending");

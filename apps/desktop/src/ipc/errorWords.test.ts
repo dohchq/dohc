@@ -7,19 +7,28 @@ import { DaemonRefusalError, type DaemonErrorCode } from "@dohc/workspace-engine
 import { describe, expect, it } from "vitest";
 import { CompilerProcessError } from "../workspaces/compilerProcessSupervisor";
 import { WorkspaceManifestError } from "../workspaces/createWorkspaceFolder";
-import { RestorePolicyRefusalError } from "../workspaces/workspaceEngineCapture";
+import { LiveDocumentMutationError, RestorePolicyRefusalError } from "../workspaces/workspaceEngineCapture";
 import type { WorkspacePolicyPath } from "./bridgeContract";
 import {
   ERROR_WORDS,
   ipcWireError,
+  isPrivacyDenied,
   isShareReadOnlyRefusal,
+  isSharedLiveFileRefusal,
   isWorkspaceUpdatingError,
   needsNewerDohc,
+  PRIVACY_DENIED_WORDS,
   readCollectionReopenWait,
   readError,
   shouldRecheckShareAccess,
+  VOLUME_SHARES_NEW_FILES_WORDS,
   withErrorWords,
 } from "./errorWords";
+
+it("explains the held-file live-open refusal after Electron serializes it", () => {
+  const error = new Error("Error invoking remote method 'desktop:engine-ydoc-open': DaemonRefusalError [CONFLICT]: capture-file-held: notes/held.md");
+  expect(readError(error).words).toBe('dohc cannot open "notes/held.md" for live editing. dohc cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.');
+});
 
 // What the renderer receives when a main-process handler rejects: Electron
 // sends `error.toString()` and prefixes the channel.
@@ -38,6 +47,30 @@ const engineCodes = [
 ].map((match) => match[1]!);
 
 describe("error words", () => {
+  it.each([
+    "Each choice is one line of at most 200 characters.",
+    "Each choice appears once.",
+  ])("keeps the engine poll sentence across IPC: %s", sentence => {
+    const received = acrossIpc(refusal("INVALID_PARAMS", sentence));
+    expect(readError(received)).toEqual({
+      words: sentence,
+      mapped: false,
+      cause: `DaemonRefusalError [INVALID_PARAMS]: ${sentence}`,
+    });
+  });
+
+  it.each(["A new poll rule.", "A poll has at most twelve choices."])(
+    "uses the caller's words for an unknown poll sentence: %s", sentence => {
+      const received = acrossIpc(refusal("INVALID_PARAMS", sentence));
+      expect(readError(received)).toEqual({
+        words: null,
+        mapped: false,
+        cause: `DaemonRefusalError [INVALID_PARAMS]: ${sentence}`,
+      });
+      expect(withErrorWords("Could not send that message.", received)).toBe("Could not send that message.");
+    },
+  );
+
   it.each([
     new RelayUnauthorizedError(),
     new SharedFileReadOnlyError(),
@@ -58,6 +91,14 @@ describe("error words", () => {
       expect(shouldRecheckShareAccess(acrossIpc(refusal(code, "The request was rejected.")))).toBe(true);
     },
   );
+
+  it.each([
+    "The shared file session changed.",
+    "The shared file session changed. Open the Collection again.",
+    "The shared file session changed. Read the automations again.",
+  ])("rechecks share access for %s across IPC", message => {
+    expect(shouldRecheckShareAccess(acrossIpc(new Error(message)))).toBe(true);
+  });
 
   it.each([
     new Error("tasks/Untitled.md already exists. Choose another record name."),
@@ -107,6 +148,39 @@ describe("error words", () => {
     expect(needsNewerDohc(new ReservedWorkspaceIdError("link"))).toBe(false);
   });
 
+  it("names a macOS privacy refusal the engine sends, after the caller's sentence", () => {
+    const engine = acrossIpc(refusal("INTERNAL", "privacy-denied"), "desktop:list-workspace-files");
+    expect(readError(engine)).toEqual({
+      words: PRIVACY_DENIED_WORDS,
+      mapped: true,
+      cause: "DaemonRefusalError [INTERNAL]: privacy-denied",
+    });
+    expect(isPrivacyDenied(engine)).toBe(true);
+    expect(withErrorWords("Could not refresh workspace files.", engine))
+      .toBe(`Could not refresh workspace files. ${PRIVACY_DENIED_WORDS}`);
+    expect(PRIVACY_DENIED_WORDS).toBe(
+      "macOS blocked dohc from this folder. Allow dohc in System Settings › Privacy & Security › Files & Folders.",
+    );
+  });
+
+  it("says why dohc can't keep a file private on a volume that shares new files, after the caller's sentence", () => {
+    const engine = acrossIpc(refusal("INTERNAL", "volume-shares-new-files"), "desktop:write-workspace-file");
+    expect(readError(engine)).toEqual({
+      words: VOLUME_SHARES_NEW_FILES_WORDS,
+      mapped: true,
+      cause: "DaemonRefusalError [INTERNAL]: volume-shares-new-files",
+    });
+    expect(withErrorWords("Couldn't save .env.", engine)).toBe(
+      "Couldn't save .env. The disk this workspace is on adds sharing permissions to new files, so dohc can't keep this file private. Move the workspace to a disk on this Mac.",
+    );
+  });
+
+  it("keeps an EPERM main did not name a privacy refusal as a permission problem", () => {
+    const eperm = acrossIpc(Object.assign(new Error("EPERM: operation not permitted, rename 'a' -> 'b'"), { code: "EPERM" }));
+    expect(isPrivacyDenied(eperm)).toBe(false);
+    expect(readError(eperm).words).toBe("dohc does not have permission to use this file or folder.");
+  });
+
   it("has words, or the caller's words by decision, for every code the engine refuses with", () => {
     expect(engineCodes.length).toBeGreaterThan(30);
     const refusals = ERROR_WORDS.DaemonRefusalError!;
@@ -141,6 +215,17 @@ describe("error words", () => {
     expect(isWorkspaceUpdatingError(acrossIpc(new Error("Workspace is still updating. Try again.")))).toBe(false);
   });
 
+  it("knows a shared live file's restore refusal across IPC, and keeps its words", () => {
+    const refused = new LiveDocumentMutationError(
+      "dohc could not restore notes/plan.md. This action is unavailable for shared live files. Continue editing at the current location.",
+    );
+    const received = acrossIpc(refused, "desktop:restore-engine-moment-file");
+    expect(isSharedLiveFileRefusal(received)).toBe(true);
+    expect(readError(received).words).toBe(refused.message);
+    expect(isSharedLiveFileRefusal(acrossIpc(new Error(refused.message), "desktop:restore-engine-moment-file"))).toBe(false);
+    expect(isSharedLiveFileRefusal(acrossIpc(refusal("INVALID_PARAMS", "live-document-binding-active")))).toBe(false);
+  });
+
   it("leaves the caller's words for a refusal that names nothing a person can act on", () => {
     expect(readError(acrossIpc(refusal("INVALID_PARAMS", "invalid-input")))).toEqual({
       words: null,
@@ -149,6 +234,11 @@ describe("error words", () => {
     });
     expect(readError(acrossIpc(refusal("SHARE_READ_ONLY", "workspace operation failed"))).words)
       .toBe("This share is read-only.");
+  });
+
+  it("names https when the engine refuses a server address", () => {
+    expect(readError(acrossIpc(refusal("RELAY_HTTPS_REQUIRED", "workspace operation failed"))).words)
+      .toBe("Your server's address does not use https. Disconnect, then connect your server again with its https address.");
   });
 
   it("reads the app compiler and the Collection worker by their codes", () => {

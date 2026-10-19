@@ -5,9 +5,11 @@ import {
   engineMomentSummary,
   engineOriginLabel,
   groupAgentAuthorName,
-  groupEngineMoments,
+  groupTimeline,
+  collectionListPhrase,
+  missingSourcesWords,
 } from "./EngineHistory";
-import { chatAuthorLabel } from "./LinkedChats";
+import { chatAuthorLabel } from "./chatMessages";
 
 function moment(overrides: Partial<EngineMomentRecord> & { id: string }): EngineMomentRecord {
   return {
@@ -55,6 +57,11 @@ describe("engineOriginLabel", () => {
     expect(engineOriginLabel("ydoc")).toBe("Live edit");
     expect(engineOriginLabel("unknown")).toBe("Unknown source");
   });
+
+  it("names kept typing whether or not its notice is still open", () => {
+    expect(engineOriginLabel("capture-recovery")).toBe("Typing kept");
+    expect(engineOriginLabel("capture-recovery-cleared")).toBe("Typing kept");
+  });
 });
 
 // Agent-authored moments display as "the agent name" — the
@@ -75,10 +82,23 @@ describe("engineMomentSourceLabel", () => {
     const submission = engineMomentSourceLabel(moment({
       id: "public", origin: "sync", publicAuthor: {kind: "public", principalId, grantId: "grant-1"},
     }));
-    expect(submission).not.toBe(link);
+    expect(submission).toBe("Link holder 3f9a2c1d");
+  });
+  it("names every author of a moment several wrote, and none in place of the rest", () => {
+    expect(engineMomentSourceLabel(moment({ id: "mixed", origin: "local-file",
+      authorLabels: ["trip-agent", "ana@example.com (Edit)"] }))).toBe("trip-agent, ana@example.com (Edit)");
+    expect(engineMomentSourceLabel(moment({ id: "many", origin: "local-file",
+      authorLabels: ["You", "trip-agent", "ana@example.com (Edit)", "ben@example.com (Edit)", "Edit link · holder 3f9a2c1d"] })))
+      .toBe("You, trip-agent, ana@example.com (Edit) and 2 more");
+  });
+  it("names the account or link holder a live edit's author snapshot admitted", () => {
+    expect(engineMomentSourceLabel(moment({ id: "account", origin: "local-file", liveAuthorName: "Owner" }))).toBe("Owner");
+    expect(engineMomentSourceLabel(moment({ id: "link", origin: "local-file", liveAuthorName: "Link holder Anonymous" })))
+      .toBe("Link holder Anonymous");
   });
   it("labels a public principal without inventing an agent identity", () => {
-    expect(engineMomentSourceLabel(moment({id: "public", publicAuthor: {kind: "public", principalId: "holder-2", grantId: "grant-1"}}))).toBe("Link holder holder-2");
+    expect(engineMomentSourceLabel(moment({id: "public", publicAuthor: {kind: "public", principalId: "public_3f9a2c1d-7b4e-4c55-9d0a-1e2f3a4b5c6d", grantId: "grant-1"}})))
+      .toBe("Link holder 3f9a2c1d");
   });
   it("shows an agent-authored moment as \"the agent name\"", () => {
     expect(
@@ -156,7 +176,31 @@ describe("groupAgentAuthorName", () => {
   });
 });
 
-describe("groupEngineMoments", () => {
+// The file groups `groupTimeline` builds, for entries that are all files.
+function groupEngineMoments(moments: EngineMomentRecord[]) {
+  return groupTimeline(moments.map((entry) => ({ kind: "file" as const, moment: entry })))
+    .flatMap((item) => (item.kind === "files" ? [item.group] : []));
+}
+
+describe("groupTimeline", () => {
+  it("keeps every entry kind in the order main merged them", () => {
+    const items = groupTimeline([
+      { kind: "file", moment: moment({ id: "m2", momentOrder: 2, correlationId: "pass" }) },
+      { kind: "version", version: { id: "draft", workspaceId: "workspace", kind: "named", name: "Draft", createdAtMs: 90 } },
+      { kind: "file", moment: moment({ id: "m1", momentOrder: 1, correlationId: "pass" }) },
+      { kind: "collection", datasetId: "00000000-0000-4000-8000-000000000001", name: "Budget", sortAtMs: null, change: {
+        revision: 4, operation: "addRow", callerReference: null, recordedAtMs: null, approvedRevisionHash: "a".repeat(64), changesetBytes: 10, attachmentCount: 0,
+      } },
+    ]);
+    expect(items.map((item) => [item.kind, item.key])).toEqual([
+      ["files", "m2"],
+      ["version", "version:draft"],
+      // A row between two moments of one pass ends their group.
+      ["files", "m1"],
+      ["collection", "collection:00000000-0000-4000-8000-000000000001:4"],
+    ]);
+  });
+
   it("groups consecutive moments sharing a correlationId into one entry", () => {
     const groups = groupEngineMoments([
       moment({
@@ -213,6 +257,30 @@ describe("groupEngineMoments", () => {
     expect(
       groupEngineMoments([...tied].reverse()).map((group) => group.moments[0].id),
     ).toEqual(["earlier", "later"]);
+  });
+});
+
+describe("missing sources", () => {
+  it("names up to three Collections and counts the rest", () => {
+    expect(collectionListPhrase(["Budget"], 1)).toBe("Budget");
+    expect(collectionListPhrase(["Budget", "Guests"], 2)).toBe("Budget and Guests");
+    expect(collectionListPhrase(["Budget", "Guests", "Tasks"], 3)).toBe("Budget, Guests and Tasks");
+    expect(collectionListPhrase(["Budget", "Guests", "Tasks", "Venues"], 5)).toBe("Budget, Guests, Tasks and 2 more");
+    expect(collectionListPhrase(["Budget"], 2)).toBe("Budget and 1 more");
+    expect(collectionListPhrase([], 2)).toBe("2 Collections");
+  });
+
+  it("says which Collections did not load and how many the limit left out", () => {
+    const names = new Map([["a", "Budget"]]);
+    expect(missingSourcesWords([{ datasetId: "a" }, { datasetId: "b" }], 3, (id) => names.get(id))).toEqual({
+      unavailable: "dohc could not load changes from Budget and 1 more.",
+      omitted: "History includes up to 128 Collections. 3 more are left out. To see a Collection's changes, open it and choose History.",
+    });
+    expect(missingSourcesWords([], 1, () => undefined)).toEqual({
+      unavailable: null,
+      omitted: "History includes up to 128 Collections. 1 more is left out. To see a Collection's changes, open it and choose History.",
+    });
+    expect(missingSourcesWords([], 0, () => undefined)).toEqual({ unavailable: null, omitted: null });
   });
 });
 

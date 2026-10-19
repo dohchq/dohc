@@ -8,7 +8,7 @@ use dohc_engine_collab::{
     },
 };
 
-pub(super) fn fixture() -> (ScratchDir, EngineStore, ObservedOwnerBinding, Vec<u8>) {
+pub(crate) fn fixture() -> (ScratchDir, EngineStore, ObservedOwnerBinding, Vec<u8>) {
     let (dir, _, mut store) = open_store();
     seed_identity(&mut store);
     VersionedTextStore::new(&mut store)
@@ -94,6 +94,52 @@ fn candidate(
     )
 }
 #[test]
+fn released_owner_accepts_an_ordinary_peer_update_through_replication() {
+    use dohc_engine_collab::owner_outbox::release;
+    let (_dir, mut store, observed, checkpoint) = fixture();
+    let key = DocKey::new("ws", "main", "owner").unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            release::request_in_tx(tx, &key, 20)?;
+            release::release_in_tx(
+                tx,
+                &observed.binding,
+                observed.accepted_cursor,
+                21,
+                |_, _, _, _, _| Ok(()),
+            )
+        })
+        .unwrap();
+    let peer = Ydoc::wire();
+    peer.apply(&checkpoint).unwrap();
+    let update = peer.richdoc_append_paragraph("ordinary peer after Stop");
+    let mut op = candidate(&mut store, &observed, &update, 0);
+    op.origin_id = "peer".into();
+    op.relay_seq = Some(2);
+    let result = apply_ydoc_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap();
+    assert!(matches!(result.primary, ApplyDisposition::Applied(_)));
+    assert!(result.refusals.is_empty());
+    store
+        .read_with(|conn| {
+            let doc = dohc_engine_collab::load_doc_in(conn, &key).unwrap();
+            assert!(
+                doc.project(ContentKind::Richdoc)
+                    .unwrap()
+                    .content
+                    .contains("ordinary peer after Stop")
+            );
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+}
+#[test]
 fn pending_server_draft_does_not_enter_or_block_the_ordinary_publication_prefix() {
     let (_dir, mut store, observed, checkpoint) = fixture();
     let ordinary_before = store.table_row_count("replication_log").unwrap();
@@ -104,6 +150,7 @@ fn pending_server_draft_does_not_enter_or_block_the_ordinary_publication_prefix(
         &mut dohc_engine_collab::WriterDocCache::new(),
         "ws",
         dohc_engine_collab::owner_outbox::draft::OwnerDraftAppendInput {
+            person_edit: false,
             binding: observed.binding.clone(),
             expected_revision: 1,
             append_key: "offline-button".into(),
@@ -564,6 +611,7 @@ fn kept_current_resolution_checks_each_heads_own_content() {
         },
         effects: vec![],
         lineage_transition: None,
+        exported_before: None,
     };
     let built = build_conflict_resolve_v1(payload.clone()).unwrap();
     let mut op = envelope("local", 1, "conflict.resolve", built.value);

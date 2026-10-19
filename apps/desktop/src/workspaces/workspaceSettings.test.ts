@@ -6,8 +6,6 @@ import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import {
   DEFAULT_WORKSPACE_SETTINGS,
   mergeWorkspaceSettings,
-  parseWorkspaceSettings,
-  workspaceSettingsModified,
   WorkspaceSettingsResult,
 } from "./workspaceSettings";
 import {
@@ -59,37 +57,7 @@ vi.mock("./workspaceMetadata", async (importOriginal) => {
 
 
 describe("workspace settings model", () => {
-  it("falls back to defaults for missing, foreign, or future shapes", () => {
-    expect(parseWorkspaceSettings(null)).toEqual(DEFAULT_WORKSPACE_SETTINGS);
-    expect(parseWorkspaceSettings({ version: 2 })).toEqual(DEFAULT_WORKSPACE_SETTINGS);
-    expect(parseWorkspaceSettings({ version: 1, token: "secret" })).toEqual(
-      DEFAULT_WORKSPACE_SETTINGS,
-    );
-    expect(workspaceSettingsModified(DEFAULT_WORKSPACE_SETTINGS)).toBe(false);
-    expect(
-      workspaceSettingsModified({
-        ...DEFAULT_WORKSPACE_SETTINGS,
-        privacy: { confirmExternalLinks: false },
-      }),
-    ).toBe(true);
-  });
-
-  it("parses a settings shape without the files group without resetting it", () => {
-    // Files written before the files group existed: the strict schema must
-    // default the new group instead of silently resetting everything.
-    const oldShape = {
-      version: 1,
-      agents: { mcpAutoStart: true },
-      sites: { defaultPreviewMode: "static" },
-      privacy: { confirmExternalLinks: false },
-    };
-    expect(parseWorkspaceSettings(oldShape)).toEqual({
-      ...oldShape,
-      files: { attachmentLocation: "per-document", attachmentFolderName: "assets" },
-    });
-  });
-
-  it("defaults, merges, and round-trips the attachment-location (files) group", () => {
+  it("defaults and merges the attachment-location (files) group", () => {
     // Absent files group (old settings files) defaults to per-document/assets.
     expect(DEFAULT_WORKSPACE_SETTINGS.files).toEqual({
       attachmentLocation: "per-document",
@@ -102,17 +70,14 @@ describe("workspace settings model", () => {
       attachmentLocation: "global-folder",
       attachmentFolderName: "attachments",
     });
-    // Other groups are untouched, and the shape round-trips through a parse.
+    // Other groups are untouched.
     expect(globalFolder.privacy).toEqual(DEFAULT_WORKSPACE_SETTINGS.privacy);
-    expect(workspaceSettingsModified(globalFolder)).toBe(true);
-    expect(parseWorkspaceSettings(globalFolder)).toEqual(globalFolder);
     // An empty folder name is accepted by the schema (sanitized to a safe
     // segment at use time) rather than resetting the whole file.
     const emptyName = mergeWorkspaceSettings(DEFAULT_WORKSPACE_SETTINGS, {
       files: { attachmentFolderName: "" },
     });
     expect(emptyName.files.attachmentFolderName).toBe("");
-    expect(parseWorkspaceSettings(emptyName)).toEqual(emptyName);
   });
 
 });
@@ -122,7 +87,7 @@ describe("workspace settings file store", () => {
     const root = await createTestScratch("dohc-workspace-settings-");
     const settings = {
       ...DEFAULT_WORKSPACE_SETTINGS,
-      agents: { ...DEFAULT_WORKSPACE_SETTINGS.agents, mcpAutoStart: true },
+      sites: { defaultPreviewMode: "static" as const },
     };
     await writeWorkspaceSettingsFile(root, settings);
     expect(await readWorkspaceSettingsFile(root)).toEqual({
@@ -141,6 +106,8 @@ describe("workspace settings file store", () => {
   });
 
   it("an on-disk file from before the files group still parses as stored", async () => {
+    // Files from that time also carry the retired agents group: it is named
+    // as unknown, and the settings beside it still apply.
     const root = await createTestScratch("dohc-workspace-settings-");
     await writeWorkspaceSettingsFile(root, DEFAULT_WORKSPACE_SETTINGS);
     await writeFile(
@@ -148,17 +115,19 @@ describe("workspace settings file store", () => {
       JSON.stringify({
         version: 1,
         agents: { mcpAutoStart: true },
-        sites: { defaultPreviewMode: "auto" },
-        privacy: { confirmExternalLinks: true },
+        sites: { defaultPreviewMode: "static" },
+        privacy: { confirmExternalLinks: false },
       }),
     );
     const result = await readWorkspaceSettingsFile(root);
     expect(result).toEqual({
       settings: {
         ...DEFAULT_WORKSPACE_SETTINGS,
-        agents: { ...DEFAULT_WORKSPACE_SETTINGS.agents, mcpAutoStart: true },
+        sites: { defaultPreviewMode: "static" },
+        privacy: { confirmExternalLinks: false },
       },
       source: "stored",
+      ignored: [{ key: "agents", reason: "unknown" }],
     });
   });
 
@@ -505,7 +474,7 @@ describe("workspace settings file store", () => {
       outsideSettings,
       JSON.stringify({
         ...DEFAULT_WORKSPACE_SETTINGS,
-        agents: { ...DEFAULT_WORKSPACE_SETTINGS.agents, mcpAutoStart: true },
+        privacy: { confirmExternalLinks: false },
       }),
     );
     await unlink(join(root, ".dohc", WORKSPACE_SETTINGS_FILE));
@@ -513,7 +482,7 @@ describe("workspace settings file store", () => {
 
     const result = await readWorkspaceSettingsFile(root);
     expect(result.source).toBe("recovered");
-    expect(result.settings.agents.mcpAutoStart).toBe(false);
+    expect(result.settings.privacy.confirmExternalLinks).toBe(true);
     expect(result.warning).toContain("not a file dohc can read");
   });
 });

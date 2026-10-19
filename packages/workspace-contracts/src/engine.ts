@@ -103,6 +103,19 @@ export interface ActorNeutralWriteMetadata {
   correlationId?: string;
 }
 
+export const OPERATION_ID_PREFIX = "dohc-operation:";
+
+export function refuseCallerOperationId(id: string | undefined): void {
+  if (id?.startsWith(OPERATION_ID_PREFIX)) throw new VersionedTextStoreError("invalid-input", "Reserved operation id.");
+}
+
+export interface HistoryOperation { operationId: string; versionId: string; momentCount: number }
+export interface HistoryUndoResult extends HistoryOperation { compensationOperationId: string; deduped: boolean; materialized: boolean }
+export interface HistoryOperationsStore {
+  readHistoryOperation(input: {workspaceId: string; operationId: string}): Promise<HistoryOperation>;
+  undoHistoryOperation(input: {workspaceId: string; operationId: string; requestId: string; author?: MomentWriteAuthor}): Promise<HistoryUndoResult>;
+}
+
 // A recorded moment can also say that a live document session settled it.
 // The settle names no author, and it can carry a collaborator's synced
 // updates, so "ydoc" says how the change arrived, not who made it. Writes
@@ -128,6 +141,8 @@ export interface MomentMetadata extends Omit<ActorNeutralWriteMetadata, "origin"
 interface AgentMomentAuthor {
   kind: "agent";
   agentId: string;
+  // The name a live author snapshot declared for its agent.
+  agentName?: string;
   onBehalfOf?: string;
   agentRunId?: string;
   // An agent run an automation started writes at its chain depth, so the
@@ -140,6 +155,8 @@ interface HumanMomentAuthor {
   kind: "human";
   humanId: string;
   humanName?: string;
+  // Set only when the engine installs the relay's admitted settlement snapshot.
+  relayConfirmed?: true;
   onBehalfOf?: string;
 }
 
@@ -163,6 +180,9 @@ interface LinkMomentAuthor {
   principalId: string;
 }
 
+// A live edit's relay-admitted author snapshot names the signed-in account
+// holder as a human with the name the relay stored for them, or the Edit
+// link's public principal with its label.
 interface LiveLinkMomentAuthor {
   kind: "link";
   publicPrincipalId: string;
@@ -195,8 +215,8 @@ export type MomentAuthor =
 // write names the person the agent works for. An automation names its run's
 // person, and none when its run has none.
 export type MomentWriteAuthor =
-  | (AgentMomentAuthor & { onBehalfOf: string })
-  | Omit<HumanMomentAuthor, "onBehalfOf" | "humanName">
+  | (Omit<AgentMomentAuthor, "agentName"> & { onBehalfOf: string })
+  | Omit<HumanMomentAuthor, "onBehalfOf" | "humanName" | "relayConfirmed">
   | AutomationMomentAuthor;
 
 type VersionedFileContentKind = "text" | "binary";
@@ -458,8 +478,9 @@ interface VersionedTextMomentPayload {
 }
 
 interface VersionedTextWriteResult {
+  deduped?: boolean;
   materialized?: boolean;
-  materializeOutcome?: "applied" | "skipped" | "conflict" | "superseded" | "error";
+  materializeOutcome?: "applied" | "skipped" | "parked" | "conflict" | "superseded" | "error";
   object: FileObjectRecord;
   snapshot: TextFileSnapshot;
   moment: VersionedTextMoment;
@@ -626,10 +647,6 @@ export interface VersionedTextStore {
     origin: ActorNeutralWriteMetadata["origin"];
     author?: MomentWriteAuthor;
   }): Promise<void>;
-  getObject(input: {
-    workspaceId: WorkspaceId;
-    objectId: WorkspaceObjectId;
-  }): Promise<FileObjectRecord | null>;
   // Timeline reads (PR 0M-5 history flip). listMoments serves the history
   // list without payload bodies; getMoment serves the diff page with the full
   // before/after payload. Both are workspace-scoped: a moment id from another
@@ -645,6 +662,14 @@ export interface VersionedTextStore {
     workspaceId: WorkspaceId;
     momentId: VersionedTextMomentId;
   }): Promise<VersionedTextMoment | null>;
+  // Whether keyed write `requestId`, whose recorded result is `momentId`,
+  // reached disk. A committed moment alone never says so: its publication
+  // can fail, conflict, or be superseded.
+  publicationApplied(input: {
+    workspaceId: WorkspaceId;
+    requestId: string;
+    momentId: VersionedTextMomentId;
+  }): Promise<boolean>;
   // Releases the underlying database handle after in-flight writes drain.
   // Callers that own a store (workspace teardown, app quit) must close it so
   // SQLite handles/WAL locks never outlive the workspace session.
@@ -761,6 +786,8 @@ export interface ChannelThreadSummary {
   // without making callers load every message in every listed thread. Older
   // consumers can omit it; an empty thread has no preview.
   openingMessage?: {
+    authorActorKey?: string;
+    origin?: "cli";
     id: ChatMessageId;
     author: ChatActor;
     authorOwnerDisplayName?: string;
@@ -821,6 +848,8 @@ export interface ChatMessage {
   // display name.
   authorOwnerDisplayName?: string;
   authorUserId?: string;
+  // Serialized by this device at trusted admission. Never replicated or projected into a share.
+  authorActorKey?: string;
   parentMessageId?: ChatMessageId;
   origin?: "cli";
   body: string;
@@ -963,6 +992,7 @@ interface LinkedChatProjection {
 }
 
 export interface LinkedChatStore {
+  getMessage(input: { workspaceId: WorkspaceId; messageId: ChatMessageId }): Promise<ChatMessage>;
   // Creates a FILE-LINKED thread. linkedFile is required (exactly-one-owner
   // at creation): an ownerless thread would be readable and indexed but
   // unreachable by navigation. Channel threads go through startChannelThread.
@@ -1026,6 +1056,8 @@ export interface LinkedChatStore {
     // it for relay verification. Omit for solo (byte-identical to today).
     authorOwnerDisplayName?: string;
     authorUserId?: string;
+    // Local admission metadata, separate from the immutable replicated payload.
+    authorActorKey: string | null;
     origin?: "cli";
     body: string;
     needsDecision?: boolean;
@@ -1077,6 +1109,8 @@ export interface LinkedChatStore {
     // it for relay verification. Omit for solo (byte-identical to today).
     authorOwnerDisplayName?: string;
     authorUserId?: string;
+    // Local admission metadata, separate from the immutable replicated payload.
+    authorActorKey: string | null;
     parentMessageId?: ChatMessageId;
     origin?: "cli";
     body: string;
@@ -1290,7 +1324,7 @@ export interface AgentRunRecord {
   exitCode?: number;
   failureReason?: string;
   logPath?: string;
-  failureNotePosted: boolean;
+  failureHandled: boolean;
 }
 
 export interface AgentDispatchClaim {
@@ -1333,7 +1367,7 @@ export interface AgentDispatchStore {
   failRun(input: { runId: string; exitCode?: number; reason: string }): AgentRunRecord;
   listPending(workspaceId: WorkspaceId): AgentDispatchRecord[];
   openRuns(workspaceId: WorkspaceId): AgentDispatchClaim[];
-  markFailureNotePosted(runId: string): AgentRunRecord;
+  markFailureHandled(runId: string): AgentRunRecord;
   recentDispatchCount(input: {
     workspaceId: WorkspaceId;
     threadId: ChatThreadId;

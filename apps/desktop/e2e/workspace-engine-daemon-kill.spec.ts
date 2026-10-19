@@ -1,7 +1,9 @@
 import { expect, test, type Page } from "@playwright/test";
+import { DOCUMENT_END } from "./helpers/keys";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { launchDesktopApp } from "./helpers/desktopApp";
+import { mainProcessCrashText } from "./helpers/mainProcessCrashText";
 import {
   engineDaemonPids,
   hardKillAppTree,
@@ -47,20 +49,6 @@ async function openEngineDoc(page: Page, path: string): Promise<void> {
   await expect(page.getByTestId("markdown-editor")).toBeVisible();
 }
 
-function mainProcessCrashText(
-  logs: ReadonlyArray<{ source: string; level: string; text: string }>,
-): string[] {
-  return logs
-    .filter((entry) => entry.source === "main")
-    .map((entry) => entry.text)
-    .filter(
-      (text) =>
-        /Uncaught Exception/i.test(text) ||
-        /A JavaScript error occurred in the main process/i.test(text) ||
-        /EPIPE/.test(text),
-    );
-}
-
 interface KilledSession {
   desktop: Awaited<ReturnType<typeof launchDesktopApp>>;
   editor: ReturnType<Page["getByTestId"]>;
@@ -100,7 +88,7 @@ async function killDaemonMidTyping(
 
   const editor = page.getByTestId("markdown-editor");
   await editor.click();
-  await page.keyboard.press("ControlOrMeta+End");
+  await page.keyboard.press(DOCUMENT_END);
 
   // A first settled edit proves the session is genuinely live before the kill,
   // so a later missing sentinel cannot be blamed on a doc that never worked.
@@ -327,7 +315,7 @@ test("a document reopened after an app crash reads Saved only once its file has 
     await waitForWorkspaceFile(desktop.page, workspace.workspaceId, docPath);
     await openEngineDoc(desktop.page, docPath);
     await desktop.page.getByTestId("markdown-editor").click();
-    await desktop.page.keyboard.press("ControlOrMeta+End");
+    await desktop.page.keyboard.press(DOCUMENT_END);
 
     // Crash once the engine has journaled the edit.
     const journaled = ydocUpdateCount(temp.rootPath);

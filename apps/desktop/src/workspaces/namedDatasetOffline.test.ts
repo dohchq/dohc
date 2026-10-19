@@ -48,7 +48,7 @@ async function fixture(maxBytes?: number) {
     } };
   };
   const data = (binding?: unknown) => createNamedDatasetData({ workspaceId: "local-share", credentials: { userId: "helper", token: "private-token", email: "helper@example", serverUrl: "https://account", relayUrl: "https://relay" },
-    shareView: { shareId: "share", relayUrl: "https://relay", grantedSelector: { paths: ["app"], versionId: null, access: "view" } },
+    shareView: { shareId: "share", recipientUserId: "helper", relayUrl: "https://relay", grantedSelector: { paths: ["app"], versionId: null, access: "view" } },
     credentialGeneration: generation, currentCredentialGeneration: () => generation, assertCurrent() {}, signal: new AbortController().signal,
     relayJson: async () => { throw Error("unexpected transport"); }, offline: { cache: cache(binding), relayResponse } });
   return { directory, data, cache, relayResponse, registry: () => registry,

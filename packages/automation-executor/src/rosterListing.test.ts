@@ -1,12 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 import {checkAutomationReach, type ReachStep} from "./automationReach";
-import { listRosterGrants, ownerRoster, readStoredRoster } from "./rosterListing";
+import { listRosterGrants, lookupHistoryAccounts, ownerRoster, readStoredRoster } from "./rosterListing";
 
 const WORKSPACE = "ws-trip";
 
+const facts = { shareId: "s-1", generation: 1, status: "active" as const, granterUserId: "u-owner",
+  granterEmail: null, subjectName: null, sharerName: null };
+const { granterUserId, granterEmail, ...linkFacts } = facts;
+
 function row(overrides: Record<string, unknown> = {}) {
   return {
-    shareId: "s-1", workspaceId: WORKSPACE, grantId: "g-1", principalKind: "user", generation: 1,
+    ...facts, status: overrides.revokedAtMs ? "revoked" : "active", shareId: "s-1", workspaceId: WORKSPACE, grantId: "g-1", principalKind: "user", generation: 1,
     recipientUserId: "u-ana", recipientEmail: "ana@dohc.test", createdAtMs: 1, revokedAtMs: null,
     selector: { paths: ["Trip"], versionId: null }, access: "edit", automationsGeneration: null, ...overrides,
   };
@@ -14,7 +18,7 @@ function row(overrides: Record<string, unknown> = {}) {
 
 function link(overrides: Record<string, unknown> = {}) {
   return {
-    grantId: "g-link", access: "edit", automationsGeneration: null, status: "active", selector: { paths: ["Trip"], versionId: null },
+    ...linkFacts, grantId: "g-link", access: "edit", automationsGeneration: null, status: "active", selector: { paths: ["Trip"], versionId: null },
     dependents: [{ grantId: "g-dep", recipientUserId: "u-ben", recipientEmail: "ben@dohc.test", access: "edit", generation: 1, createdAtMs: 1 }],
     ...overrides,
   };
@@ -27,7 +31,8 @@ function relay(pages: Record<string, Page>) {
     const page = pages[path];
     if (page === undefined) throw new Error(`unexpected ${path}`);
     if (page instanceof Error) throw page;
-    return page;
+    return page.body !== null && typeof page.body === "object" && "granted" in page.body
+      ? { ...page, body: { granterUserId, granterEmail, ...page.body } } : page;
   });
 }
 
@@ -35,6 +40,35 @@ const unusable = { kind: "answered", listing: { grants: null, problem: { kind: "
 const serverDown = { status: 503, body: null };
 
 describe("listing from the relay", () => {
+  it("keeps reach requests and saved data identical to base despite ended-holder cursors", async () => {
+    const get = relay({
+      "/sync/shares?workspaceId=ws-trip": { status: 200, body: { granted: [row()] } },
+      "/sync/ws-trip/shares/links": { status: 200, body: { links: [link()], endedLinks: [], nextEndedHolderCursor: "history-only" } },
+      "/sync/ws-trip/shares/links?endedHolderCursor=history-only": { status: 200, body: { links: [], endedLinks: [] } },
+    });
+    const answer = await listRosterGrants(WORKSPACE, get);
+    expect(get.mock.calls.map(([path]) => path)).toEqual(["/sync/shares?workspaceId=ws-trip", "/sync/ws-trip/shares/links"]);
+    expect(answer).toEqual({ kind: "answered", listing: {
+      grants: [{ ...facts, grantId: "g-1", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test", selector: { paths: ["Trip"], versionId: null }, access: "edit" },
+        { ...facts, grantId: "g-dep", recipientUserId: "u-ben", recipientEmail: "ben@dohc.test", selector: { paths: ["Trip"], versionId: null }, access: "edit" }],
+      links: [{ grant: { ...facts, grantId: "g-link", recipientUserId: null, recipientEmail: null, selector: { paths: ["Trip"], versionId: null }, access: "edit" }, ended: false, automationsGeneration: null }],
+      formerGrants: [], endedGrants: [],
+    } });
+  });
+  it("looks up only requested accounts and grants in one bounded request", async () => {
+    const get = relay({ "/sync/ws-trip/shares/links?historyGrantId=g-dep&historyUserId=u-ben": { status: 200, body: { holders: [{ grantId: "g-dep", recipientUserId: "u-ben", recipientEmail: "ben@test.example", parentGrantId: "g-link" }] } } });
+    expect(await lookupHistoryAccounts(WORKSPACE, get, { grantIds: ["g-dep"], userIds: ["u-ben"] })).toHaveLength(1);
+    expect(get).toHaveBeenCalledTimes(1);
+  });
+  it("rejects oversized lookups and unsolicited identities", async () => {
+    const get = vi.fn(async () => ({ status: 200, body: { holders: [{ grantId: "other", recipientUserId: "other", recipientEmail: "other@test.example", parentGrantId: "g-link" }] } }));
+    expect(await lookupHistoryAccounts(WORKSPACE, get, { grantIds: Array(201).fill("g"), userIds: [] })).toBeNull();
+    expect(get).not.toHaveBeenCalled();
+    expect(await lookupHistoryAccounts(WORKSPACE, get, { grantIds: ["g-dep"], userIds: [] })).toBeNull();
+  });
+  it("keeps unavailable lookups out of the roster", async () => {
+    expect(await lookupHistoryAccounts(WORKSPACE, async () => serverDown, { grantIds: ["g-dep"], userIds: [] })).toBeNull();
+  });
   const noLinks = { "/sync/ws-trip/shares/links": { status: 200, body: { links: [], formerGrants: [] } } };
 
   it("pages through share links", async () => {
@@ -74,7 +108,7 @@ describe("listing from the relay", () => {
       "/sync/shares?workspaceId=ws-trip": {status: 200, body: {granted: [], nextCursor: null}},
     }))).toEqual(unusable);
     let page = 0;
-    const get = vi.fn(async () => ({status: 200, body: {granted: [], nextCursor: `c-${++page}`}}));
+    const get = vi.fn(async () => ({status: 200, body: {granterUserId, granterEmail, granted: [], nextCursor: `c-${++page}`}}));
     expect(await listRosterGrants(WORKSPACE, get)).toEqual(unusable);
     expect(get).toHaveBeenCalledTimes(50);
   });
@@ -138,11 +172,11 @@ describe("listing from the relay", () => {
     expect(await listRosterGrants(WORKSPACE, relay({ ...shares, "/sync/ws-trip/shares/links": { status: 200, body: { links: "all" } } })))
       .toEqual(unusable);
     const looping = vi.fn(async (path: string) =>
-      ({ status: 200, body: path === "/sync/shares?workspaceId=ws-trip" ? { granted: [] } : { links: [], nextCursor: "same" } }));
+      ({ status: 200, body: path === "/sync/shares?workspaceId=ws-trip" ? { granterUserId, granterEmail, granted: [] } : { links: [], nextCursor: "same" } }));
     expect(await listRosterGrants(WORKSPACE, looping)).toEqual(unusable);
     let page = 0;
     const endless = vi.fn(async (path: string) =>
-      ({ status: 200, body: path === "/sync/shares?workspaceId=ws-trip" ? { granted: [] } : { links: [], nextCursor: `c-${(page += 1)}` } }));
+      ({ status: 200, body: path === "/sync/shares?workspaceId=ws-trip" ? { granterUserId, granterEmail, granted: [] } : { links: [], nextCursor: `c-${(page += 1)}` } }));
     expect(await listRosterGrants(WORKSPACE, endless)).toEqual(unusable);
     expect(endless).toHaveBeenCalledTimes(51);
   });
@@ -216,7 +250,7 @@ it("keeps reach verdicts unchanged with View and Comment links in the stored ros
   ];
   const automation = {id: "a", collection: trip, codeFiles: [], steps};
   const additions = ["view", "comment"].map(access => ({
-    grant: {grantId: `g-${access}`, recipientUserId: null, recipientEmail: null,
+    grant: {...facts, grantId: `g-${access}`, recipientUserId: null, recipientEmail: null,
       selector: {paths: ["Trip"], versionId: null}, access},
     ended: false, automationsGeneration: null,
   }));

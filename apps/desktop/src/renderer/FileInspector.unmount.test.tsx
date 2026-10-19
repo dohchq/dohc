@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { setupFileInspectorTests } from "./FileInspector.environment-fixture";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -38,6 +38,10 @@ import {
   TEST_CONTENT_HASH,
 } from "./FileInspector.draft-fixture";
 import { type DraftFlush } from "./useAutosavedTextDraft";
+
+// A CSV's Table or Raw choice in its actions.
+const csvMode = (name: "Table" | "Raw") =>
+  within(screen.getByTestId("csv-raw-toggle")).getByRole("radio", { name });
 import { deferred } from "../testing/deferred";
 import { EDITOR_WRITE_STALL_MS, hasPendingEditorDrafts, settlePendingEditorDrafts } from "./pendingEditorDrafts";
 import { loadStoredDrafts } from "./orphanedDraftStorage";
@@ -1495,6 +1499,9 @@ describe("markdown editor unmount flush", () => {
       truncated: false,
       contentHash: TEST_CONTENT_HASH,
     });
+    vi.stubGlobal("dohcDesktop", { ...bridgeMock, linksResolve: vi.fn()
+      .mockResolvedValueOnce({ results: [{ path: "notes/faq?.md", fragment: "answers" }] })
+      .mockResolvedValueOnce({ results: [{ path: "notes/#notes.md", fragment: "risks" }] }) });
     const onOpenPath = vi.fn();
     render(
       <FileInspector
@@ -1524,10 +1531,7 @@ describe("markdown editor unmount flush", () => {
     });
     expect(link.dispatchEvent(click)).toBe(false);
     expect(click.defaultPrevented).toBe(true);
-    expect(onOpenPath).toHaveBeenCalledWith("notes/faq?.md", {
-      anchor: "answers",
-      nonce: 1,
-    });
+    await waitFor(() => expect(onOpenPath).toHaveBeenCalledWith("notes/faq?.md", { anchor: "answers", nonce: 1 }));
     expect(onOpenPath).toHaveBeenCalledOnce();
 
     const hashClick = new MouseEvent("click", {
@@ -1538,10 +1542,7 @@ describe("markdown editor unmount flush", () => {
     expect(
       screen.getByRole("link", { name: "Hash notes" }).dispatchEvent(hashClick),
     ).toBe(false);
-    expect(onOpenPath).toHaveBeenLastCalledWith("notes/#notes.md", {
-      anchor: "risks",
-      nonce: 2,
-    });
+    await waitFor(() => expect(onOpenPath).toHaveBeenLastCalledWith("notes/#notes.md", { anchor: "risks", nonce: 2 }));
 
     const fragmentClick = new MouseEvent("click", {
       bubbles: true,
@@ -1551,10 +1552,7 @@ describe("markdown editor unmount flush", () => {
     expect(
       screen.getByRole("link", { name: "Section" }).dispatchEvent(fragmentClick),
     ).toBe(false);
-    expect(onOpenPath).toHaveBeenLastCalledWith("notes/status.md", {
-      anchor: "next%20steps",
-      nonce: 3,
-    });
+    await waitFor(() => expect(onOpenPath).toHaveBeenLastCalledWith("notes/status.md", { anchor: "next%20steps", nonce: 3 }));
     expect(onOpenPath).toHaveBeenCalledTimes(3);
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
   });
@@ -1583,58 +1581,18 @@ describe("markdown editor unmount flush", () => {
     await waitFor(() => expect(scrollTo).toHaveBeenCalledWith({ top: 0 }));
   });
 
-  it("keeps encoded filename hashes distinct from real fragments without known files", async () => {
-    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
-      text: [
-        "[Unknown](new%23plan.md)",
-        "[Multiple](new%23release%231.md)",
-        "[Fragment](new%23plan.md?mode=preview#risks)",
-        "[Raw root](/plan.md#raw-root)",
-        "[Encoded root](%2Fplan.md#root)",
-        "[Encoded fragment](#a%2520b)",
-        "[Empty fragment](#)",
-        "[Malformed](bad%E0%A4%A.md#part%E0%A4%A)",
-      ].join("\n"),
-      truncated: false,
-      contentHash: TEST_CONTENT_HASH,
-    });
+  it("keeps encoded filename delimiters in the literal sent to the engine", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({ text: "[Hash](new%23plan.md) [FAQ](faq%3F.md#answers)", truncated: false, contentHash: TEST_CONTENT_HASH });
+    const linksResolve = vi.fn().mockResolvedValueOnce({ results: [{ path: null, create: "notes/new#plan.md", fragment: null }] }).mockResolvedValueOnce({ results: [{ path: null, create: "notes/faq?.md", fragment: "answers" }] });
+    vi.stubGlobal("dohcDesktop", { ...bridgeMock, linksResolve });
     const onOpenPath = vi.fn();
-    render(
-      <FileInspector
-        workspaceId="ws-1"
-        path="notes/status.md"
-        readOnly
-        knownMarkdownFiles={[]}
-        onOpenPath={onOpenPath}
-      />,
-    );
-    await screen.findByRole("link", { name: "Unknown" });
-
-    for (const [name, expectedPath, rawFragment] of [
-      ["Unknown", "notes/new#plan.md", undefined],
-      ["Multiple", "notes/new#release#1.md", undefined],
-      ["Fragment", "notes/new#plan.md", "risks"],
-      ["Raw root", "plan.md", "raw-root"],
-      ["Encoded root", "plan.md", "root"],
-      ["Encoded fragment", "notes/status.md", "a%2520b"],
-      ["Empty fragment", "notes/status.md", ""],
-      ["Malformed", "notes/bad%E0%A4%A.md", "part%E0%A4%25A"],
-    ] as const) {
-      const click = new MouseEvent("click", {
-        bubbles: true,
-        cancelable: true,
-        detail: 1,
-      });
-      expect(screen.getByRole("link", { name }).dispatchEvent(click)).toBe(false);
-      expect(onOpenPath).toHaveBeenLastCalledWith(
-        expectedPath,
-        rawFragment !== undefined
-          ? { anchor: rawFragment, nonce: onOpenPath.mock.calls.length }
-          : undefined,
-      );
-    }
-    expect(onOpenPath).toHaveBeenCalledTimes(8);
-    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+    render(<FileInspector workspaceId="ws-1" path="notes/status.md" readOnly onOpenPath={onOpenPath} />);
+    fireEvent.click(await screen.findByRole("link", { name: "Hash" }));
+    await waitFor(() => expect(linksResolve).toHaveBeenCalledWith({ workspaceId: "ws-1", source: "notes/status.md", literals: [{ kind: "markdown", literal: "./new%23plan.md" }] }));
+    fireEvent.click(screen.getByRole("link", { name: "FAQ" }));
+    await waitFor(() => expect(linksResolve).toHaveBeenLastCalledWith({ workspaceId: "ws-1", source: "notes/status.md", literals: [{ kind: "markdown", literal: "./faq%3F.md#answers" }] }));
+    expect(onOpenPath).toHaveBeenNthCalledWith(1, "notes/new#plan.md", undefined);
+    expect(onOpenPath).toHaveBeenNthCalledWith(2, "notes/faq?.md", { anchor: "answers", nonce: expect.any(Number) });
   });
 
   it("keeps local source mode and selects the target heading line", async () => {
@@ -4595,7 +4553,7 @@ describe("markdown editor unmount flush", () => {
     render(<FileInspector workspaceId="ws-1" path="data/table.csv" />);
 
     await screen.findByTestId("view-csv");
-    await user.click(screen.getByTestId("csv-raw-toggle"));
+    await user.click(csvMode("Raw"));
     const parse = vi.spyOn(delimitedTextCodec, "parse");
     try {
       fireEvent.change(screen.getByTestId("csv-raw-editor"), {
@@ -4813,7 +4771,10 @@ describe("markdown editor unmount flush", () => {
     const serialize = vi.spyOn(delimitedTextCodec, "serialize");
     try {
       for (const [rowIndex, value] of [[1, "first"], [0, '😀,"header"'], [500, 'last,"visible"'], [1, ""]] as const) {
-        const cell = screen.getByLabelText(rowIndex === 0 ? "Header column 1" : `Row ${rowIndex} column 1`);
+        // getByLabelText checks the labels of every element, which takes seconds over 500 rows.
+        const label = rowIndex === 0 ? "Header column 1" : `Row ${rowIndex} column 1`;
+        const cell = view.container.querySelector(`[aria-label="${label}"]`);
+        if (!cell) throw new Error(`No cell labeled ${label}`);
         fireEvent.change(cell, { target: { value } });
         expectedRows[rowIndex]![0] = value;
       }
@@ -4850,10 +4811,10 @@ describe("markdown editor unmount flush", () => {
     change("Row 1 column 1", "remaining");
     fireEvent.click(screen.getByTestId("csv-add-row"));
     change("Row 2 column 1", "new row");
-    fireEvent.click(screen.getByTestId("csv-raw-toggle"));
+    fireEvent.click(csvMode("Raw"));
     expect((screen.getByTestId("csv-raw-editor") as HTMLTextAreaElement).value).toBe("note,column_3\nremaining,added\nnew row,");
     fireEvent.change(screen.getByTestId("csv-raw-editor"), { target: { value: '"name",note\r\n"raw",before\r\n' } });
-    fireEvent.click(screen.getByTestId("csv-raw-toggle"));
+    fireEvent.click(csvMode("Table"));
     change("Row 1 column 1", "😀");
     change("Row 1 column 2", 'after "raw"');
     view.unmount();
@@ -4928,16 +4889,16 @@ describe("markdown editor unmount flush", () => {
     render(<FileInspector workspaceId="ws-1" path="data/table.csv" />);
 
     await screen.findByTestId("view-csv");
-    await user.click(screen.getByTestId("csv-raw-toggle"));
+    await user.click(csvMode("Raw"));
     const rawEditor = screen.getByTestId("csv-raw-editor") as HTMLTextAreaElement;
     expect(rawEditor.value).toBe(initial);
     fireEvent.change(rawEditor, { target: { value: edited } });
 
-    await user.click(screen.getByTestId("csv-raw-toggle"));
+    await user.click(csvMode("Table"));
     expect(
       (screen.getByLabelText("Row 1 column 1") as HTMLInputElement).value,
     ).toBe("Grace");
-    await user.click(screen.getByTestId("csv-raw-toggle"));
+    await user.click(csvMode("Raw"));
     expect((screen.getByTestId("csv-raw-editor") as HTMLTextAreaElement).value).toBe(
       edited,
     );

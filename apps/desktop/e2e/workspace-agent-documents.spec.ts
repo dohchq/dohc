@@ -15,7 +15,7 @@ import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
   explorerRow,
-  openFileChatsPanel,
+  openAboutPanel,
   openWorkspaceFromFirstRun,
   waitForWorkspaceFile,
   writeWorkspaceFiles,
@@ -95,7 +95,7 @@ async function fileText(temp: TempWorkspace, path: string): Promise<string> {
   return await readFile(join(temp.rootPath, path), "utf8").catch(() => "");
 }
 
-test("a document remains editable by its person and agent after restart", async ({}, testInfo) => {
+test("@restart-durability-person-agent a document remains editable by its person and agent after restart", async ({}, testInfo) => {
   test.setTimeout(240_000);
   const temp = await createTempWorkspace();
   const path = "notes/lifecycle.md";
@@ -364,7 +364,7 @@ test("an agent creates a document and comments on it where the person reads comm
     await expect(agentCli(temp, "fileChats", { path: "notes/itinerary.md" }))
       .resolves.toMatchObject({ ok: true, threads: [{ id: threadId, title: "Friday plan" }] });
 
-    await openFileChatsPanel(page);
+    await openAboutPanel(page);
     await page.getByTestId("linked-chat-open").click();
     await expect(page.getByTestId("linked-chat-title")).toContainText("Friday plan");
     await expect(page.getByTestId("linked-chat-message-body"))

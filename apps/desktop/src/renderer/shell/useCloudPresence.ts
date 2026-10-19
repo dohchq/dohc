@@ -6,6 +6,7 @@ import { buildChatCollaboration } from "../collab/chatCollaboration";
 export function useCloudPresence(
   workspaceId: string,
   onStatusUnavailable: (retry: () => void) => void,
+  workspaceIsReady: boolean,
 ) {
   // MU-C5 presence: the signed-in relay session, if any. Drives whether Chats
   // gets a live presence transport (connected + relayUrl) or stays dormant.
@@ -14,7 +15,11 @@ export function useCloudPresence(
     { workspaceId: string; status: CloudStatusResult } | null
   >(null);
   const cloudStatus =
-    scopedStatus?.workspaceId === workspaceId ? scopedStatus.status : null;
+    workspaceIsReady && scopedStatus?.workspaceId === workspaceId ? scopedStatus.status : null;
+  // The workspace whose last status read failed, so "not read yet" and
+  // "could not be read" stay apart. A read that answers clears it.
+  const [unreadableFor, setUnreadableFor] = useState<string | null>(null);
+  const cloudStatusUnreadable = cloudStatus === null && unreadableFor === workspaceId;
   // Stable per-session client id so this device's own presence entry is
   // identifiable and filtered out of "others". Lazily minted once — a fresh id
   // per render would churn the presence channel.
@@ -28,21 +33,24 @@ export function useCloudPresence(
   const cloudStatusToken = useRef(0);
   const refreshCloudStatus = useCallback(() => {
     const token = ++cloudStatusToken.current;
+    if (!workspaceIsReady) return;
     bridge()
       .cloudStatus({ workspaceId })
       .then((status) => {
         if (token === cloudStatusToken.current) {
           setScopedStatus({ workspaceId, status });
+          setUnreadableFor(null);
         }
       })
       .catch(() => {
         if (token !== cloudStatusToken.current) return;
         setScopedStatus(null);
+        setUnreadableFor(workspaceId);
         onStatusUnavailable(() => {
           if (token === cloudStatusToken.current) refreshCloudStatus();
         });
       });
-  }, [workspaceId, onStatusUnavailable]);
+  }, [workspaceId, onStatusUnavailable, workspaceIsReady]);
   useEffect(() => {
     setScopedStatus(null);
     refreshCloudStatus();
@@ -88,5 +96,5 @@ export function useCloudPresence(
 
   const workspaceSynced = cloudStatus?.workspaceSynced === true;
 
-  return { chatCollaboration, refreshCloudStatus, workspaceSynced };
+  return { chatCollaboration, refreshCloudStatus, workspaceSynced, cloudStatus, cloudStatusUnreadable };
 }

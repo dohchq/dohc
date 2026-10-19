@@ -43,15 +43,16 @@ function harness() {
       workspaceId: "w", shareId: body.shareId, grantId: body.grantId, generation: body.expectedGrantGeneration, ownerUserId: "owner" } };
   });
   const compile = vi.fn(compileClosedApp), upload = vi.fn(async () => {}), flush = vi.fn(async () => {});
+  const remote = vi.fn(async (_workspace: typeof workspace, _options?: { allowPaused: boolean }) => ({ credentials, credentialGeneration }));
   let handler!: (event: { sender: { id: number } }, payload: unknown) => unknown;
   registerOwnerAppPublicationIpc({ registerHandler(_channel, fn) { handler = fn; }, assertTrustedSender(event: { sender: { id: number } }) { if (event.sender.id < 0) throw new Error("untrusted"); },
     async withRendererWorkspaceOperation(_sender, _workspaceId, _message, work) { return work({ workspace, signal: controller.signal, session: { generation: rendererGeneration }, assertCurrent() { if (!current) throw new Error("retired"); } }); },
-    remoteForWorkspace: async () => ({ credentials, credentialGeneration }), currentCredentialGeneration: () => credentialGeneration,
+    remoteForWorkspace: remote, currentCredentialGeneration: () => credentialGeneration,
     flushCapture: flush, withAdapter: async (_workspace, work) => work(adapter), compile, relayJson: relay, upload });
   const invoke = async (input: unknown, senderId = 1) => OwnerAppPublicationResult.parse(await handler({ sender: { id: senderId } }, input));
   const prepare = async () => { const result = await invoke(prepareInput); if (result.kind !== "prepared") throw new Error("not prepared"); return result; };
   const approve = (value: Awaited<ReturnType<typeof prepare>>, digest = value.candidateDigest) => invoke({ action: "approve", workspaceId: "w", approvalId: value.approvalId, candidateDigest: digest });
-  return { source, grant, controller, workspace, requests, compile, upload, relay, flush, invoke, prepare, approve,
+  return { remote, source, grant, controller, workspace, requests, compile, upload, relay, flush, invoke, prepare, approve,
     setBeforeCapture(fn: typeof beforeCapture) { beforeCapture = fn; }, retire() { current = false; },
     switchRenderer() { rendererGeneration++; }, switchCredential() { credentialGeneration++; } };
 }
@@ -437,4 +438,41 @@ it("never returns a newly created credential after its grant rotates",async()=>{
   const result=await h.approve(await h.prepare());
   expect(result).toMatchObject({kind:"published"});
   expect(result).not.toHaveProperty("url");
+});
+
+it("refuses owner reactivation review before loading an operator-disabled manifest", async () => {
+  const h = harness();
+  h.relay.mockResolvedValueOnce({publicationId: "a".repeat(64), active: false, authorityRevision: 2,
+    owner: {workspaceId: "w", ownerUserId: "owner", generation: 7},
+    operatorTakedown: {actor: "operator", disabledAtMs: 30, reason: "Confirmed phishing"}});
+  await expect(h.invoke({action: "reviewReactivation", workspaceId: "w", publicationId: "a".repeat(64)})).rejects.toThrow("The server operator disabled this publication. Contact the server operator.");
+  expect(h.compile).not.toHaveBeenCalled();
+  expect(h.relay).toHaveBeenCalledTimes(1);
+});
+
+it("shows the operator message when a publish retry returns a taken-down publication", async () => {
+  const h = harness(), prepared = await h.prepare(), original = h.relay.getMockImplementation()!;
+  h.relay.mockImplementation(async (...args) => {
+    const result = await original(...args);
+    if (!args[1].endsWith("/app-publications")) return result;
+    return {...result as Record<string, unknown>, active: false, operatorTakedown: {actor: "operator", disabledAtMs: 30, reason: "Confirmed phishing"}};
+  });
+  await expect(h.approve(prepared)).rejects.toThrow("The server operator disabled this publication. Contact the server operator.");
+  expect(h.relay.mock.calls.some(call => call[1].endsWith("/reactivate"))).toBe(false);
+});
+
+it("allows withdrawal while paused without publishing paused sources", async () => {
+  const h = harness();
+  h.remote.mockImplementation(async (_workspace, options) => {
+    if (!options?.allowPaused) throw new Error("Sync this workspace before sharing.");
+    return { credentials: { serverUrl: "https://account.example", relayUrl: "https://relay.example", userId: "owner", token: "test-only", email: "owner@example.test" }, credentialGeneration: 1 };
+  });
+  const input = { action: "withdraw", workspaceId: "w", publicationId: "a".repeat(64), expectedAuthorityRevision: 1 };
+  expect(await h.invoke(input)).toMatchObject({ kind: "withdrawn" });
+  expect(h.remote).toHaveBeenCalledWith(h.workspace, { allowPaused: true });
+  expect(h.upload).not.toHaveBeenCalled();
+  expect(h.flush).not.toHaveBeenCalled();
+  await expect(h.prepare()).rejects.toThrow("Sync this workspace");
+  h.remote.mockRejectedValueOnce(new Error("wrong account"));
+  await expect(h.invoke(input)).rejects.toThrow("wrong account");
 });

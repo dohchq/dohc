@@ -6,6 +6,7 @@ import type { LiveCommittedDeliveryStore } from "./liveCommittedDelivery";
 import type {OwnerRestoreOptions, OwnerRestoreOptionsInput, OwnerRestoreStatus} from "./ownerRestoreOptions";
 import type { StopRestoreIntent, StopRestoreLookup, StopRestoreOperation, StopRestorePlan, StopRestorePlanInput } from "./liveRestoreOperation";
 import type { LiveJournalHistoryAuthority } from "./liveJournalHistory";
+import type {ReplicaLiveJournalRead, ReplicaLiveJournalPage} from "./liveUpdateJournal";
 import type { AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, LiveUpdateSubmissionMetadata, LiveUpdateAcceptResult } from "@dohc/live-session-contract/live-update-admission";
 import type {
   HostControlSnapshot,
@@ -118,6 +119,7 @@ export interface SyncRelayLogInput {
   recordedAtMs: number;
   admittedAuthorSnapshot?: LiveAuthorSnapshot;
   settlementAdmission?: import("./hostedSettlement").SettlementAdmission;
+  relayAdmission?: import("./relayAdmission").RelayAdmission;
 }
 
 export interface SyncRelayLogRow extends SyncRelayLogInput {
@@ -382,6 +384,12 @@ export interface SyncRelayGrantedInventoryPage {
   nextCursor: SyncRelayGrantedInventoryCursor | null;
 }
 
+export interface SyncRelayReceivedInventoryCursor { shareId: string }
+export interface SyncRelayReceivedInventoryPage {
+  shareIds: string[];
+  nextCursor: SyncRelayReceivedInventoryCursor | null;
+}
+
 export interface SyncRelayLinkInventoryRow extends SyncRelayShareWithGrantRow {
   dependents: SyncRelayShareGrantRow[];
   lastUsedAtMs: number | null;
@@ -403,6 +411,12 @@ export interface SyncRelayLinkInventoryCursor {
 export interface SyncRelayLinkInventoryPage {
   links: SyncRelayLinkInventoryRow[];
   nextCursor: SyncRelayLinkInventoryCursor | null;
+}
+
+export interface SyncRelayHistoryAccount {
+  grantId: string;
+  recipientUserId: string;
+  parentGrantId: string;
 }
 
 export interface SyncRelayIndependentGrantInventoryCursor {
@@ -598,13 +612,26 @@ export interface SyncRelayStorage {
   enrollServiceHostDocuments(inputs: readonly import("./serviceHostEnrollment").EnrollServiceHostDocumentInput[]): readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];
   enrollServiceHostDocument(input: import("./serviceHostEnrollment").EnrollServiceHostDocumentInput): import("./serviceHostEnrollment").ServiceHostEnrollment;
   listServiceHostEnrollments(workspaceId?: string): readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];
-  hasServiceHostEnrollment(workspaceId: string, path: string): boolean;
+  listUndrainedServiceHostEnrollments(after?: import("./serviceHostEnrollment").ServiceHostEnrollmentCursor): {
+    documents: readonly import("./serviceHostEnrollment").ServiceHostEnrollment[]; nextCursor: import("./serviceHostEnrollment").ServiceHostEnrollmentCursor | null;
+  };
+  hasKeptServiceHostEnrollment(workspaceId: string, path: string): boolean;
   readServiceHostEnrollment(workspaceId: string, path: string): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
   listRetiredServiceHostEnrollments(workspaceId: string, after?: string): {documents: readonly import("./serviceHostEnrollment").ServiceHostEnrollment[]; nextCursor: string | null};
-  listCurrentServiceHostEnrollments(workspaceId: string): readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];
+  currentServiceHostWorkspace(workspaceId: string, includeUndrained?: boolean): import("./serviceHostEnrollment").ServiceHostWorkspace | null;
+  readServiceHostFeedScope(workspaceId: string): import("./serviceHostFeed").ServiceHostFeedScope | null;
+  listServiceHostDocumentRows(input: {workspaceId: string; objectId: string; afterRelaySeq: number; limit: number}): SyncRelayLogRow[];
+  /** The relay sequence of the document's latest Y.Doc update, or 0 while it has none. */
+  latestServiceHostDocumentUpdate(input: {workspaceId: string; objectId: string}): number;
+  /** Stores blob bytes the service host uploaded, with its proof of holding them. */
+  putServiceHostBlob(input: {workspaceId: string; sha256: string; content: Uint8Array; createdAtMs: number}): PutBlobResult;
+  serviceHostUploaded(workspaceId: string, sha256: string): boolean;
   scanServiceHostCandidateShares(after?: import("./serviceHostEnrollment").ServiceHostCandidateCursor, workspaceId?: string): import("./serviceHostEnrollment").ServiceHostCandidatePage;
   checkServiceHostDocuments(input: {workspaceId: string; ownerUserId: string; shareId: string; paths: readonly string[]}): void;
   setServiceHostEnrollmentEnabled(input: import("./serviceHostEnrollment").SetServiceHostEnrollmentEnabledInput): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
+  serviceHostEnrollmentHasEditGrant(enrollment: Pick<import("./serviceHostEnrollment").ServiceHostEnrollment, "workspaceId" | "ownerUserId" | "path">): boolean;
+  serviceHostDocumentEnabled(document: {workspaceId: string; objectId: string}): boolean;
+  releaseServiceHostEnrollment(input: {workspaceId: string; objectId: string; nowMs: number}): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
   postNotice(input: import("./notices").PostNoticeInput): void;
   postAutomationWake(input: import("./notices").PostAutomationWakeInput): import("./notices").PostedAutomationWake;
   readNoticeChanges(input: import("./notices").ReadNoticeChangesInput): import("@dohc/workspace-contracts/relay").RelayNoticePage;
@@ -625,6 +652,7 @@ export interface SyncRelayStorage {
   recordAutomationServerTaken(input: { workspaceId: string; generation: number }): void;
   recordAutomationServerProgress(input: { workspaceId: string; throughMs: number }): void;
   joinAutomationWorkspace(input: { workspaceId: string; nowMs: number }): import("./automationWorkspaces").AutomationWorkspace | null;
+  replaceLostAutomationReplica(input: { workspaceId: string; incarnation: number; nowMs: number }): import("./automationWorkspaces").AutomationWorkspace | null;
   unwantAutomationWorkspace(input: { workspaceId: string; nowMs: number }): import("./automationWorkspaces").AutomationWorkspace | null;
   listAutomationWorkspaces(): import("./automationWorkspaces").AutomationWorkspace[];
   forgetAutomationWorkspace(input: { workspaceId: string; incarnation: number }): void;
@@ -661,6 +689,7 @@ export interface SyncRelayStorage {
   listAppPublications(input: import("./publications").ListAppPublicationsInput): ReturnType<typeof import("./publications").listAppPublications>;
   listLinkAppPublications(input: import("./publications").ListLinkAppPublicationsInput): ReturnType<typeof import("./publications").listLinkAppPublications>;
   withdrawAppPublication(input: import("./publications").WithdrawAppPublicationInput): import("./publications").AppPublicationState;
+  disableAppPublication(input: import("./publications").DisableAppPublicationInput): import("./publications").AppPublicationState;
   reactivateAppPublication(input: import("./publications").ReactivateAppPublicationInput): import("./publications").AppPublicationState;
   authorizeLinkAppPublication(input: import("./publications").LinkAppPublicationInput): import("./publications").LinkAppPublicationAuthority;
   createLinkAppPublicationGuard(input: import("./publications").LinkAppPublicationInput): (nowMs: number) => void;
@@ -675,11 +704,13 @@ export interface SyncRelayStorage {
   captureStanding(): () => void;
   createLiveCommittedDeliveryStore(history: LiveJournalHistoryAuthority, activation?: ServiceActivationAccess): LiveCommittedDeliveryStore;
   createServiceActivationStore(history: LiveJournalHistoryAuthority): ServiceActivationStore;
-  readLiveUpdateJournalCut(input: { document: LiveDocumentKey }): LiveUpdateJournalCutResult;
+  readLiveUpdateJournalCut(input: { document: LiveDocumentKey }, reserveBytes?: (size: number) => void): LiveUpdateJournalCutResult;
   commitLiveUpdateJournal(input: LiveUpdateJournalCommitInput, activation?: ServiceActivationAccess): RelayLiveUpdateJournalResult;
   readCommittedLiveUpdate(input: { host: LiveHostConnectionCoordinate; document: LiveDocumentKey; journalCursor: number }): CommittedLiveUpdateResult;
+  readReplicaLiveJournal(input: ReplicaLiveJournalRead): Promise<ReplicaLiveJournalPage>;
 
   close(): void;
+  invalidate(): void;
   resolveCurrentLiveDocumentBinding(input: CurrentLiveBindingRequest, activation?: ServiceActivationAccess): CurrentLiveBindingResult;
   automationRecordWriteAllowed(input: {workspaceId: string; ownerUserId: string; currentPath: string;
     declaration: import("@dohc/live-session-contract/live-authorship").AutomationDeclaration;
@@ -752,6 +783,24 @@ export interface SyncRelayStorage {
     rotatedAtMs: number;
   }): RotateWorkspaceIdentityResult;
   workspaceIsOwnedBy(workspaceId: string, ownerUserId: string): boolean;
+  discardReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease): void;
+  releaseReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease): void;
+  bindReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease): void;
+  replicaCurrentViewSelectors(workspaceId: string): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentViewSelector[];
+  stageReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease, view: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView, observations?: import("./replicaHistoryPins").ReplicaHistoryObservation[]): import("./replicaCurrentViews").StagedCurrentView;
+  flipReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease, staged: import("./replicaCurrentViews").StagedCurrentView): void;
+  advanceReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease, view: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView, previous: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView;
+  storeReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease, view: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView, observations?: import("./replicaHistoryPins").ReplicaHistoryObservation[]): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView;
+  nextReplicaHistoryPinAt(workspaceId: string): number | null;
+  sampleReplicaHistory(lease: import("../replicaReadPrincipal").ReplicaReadLease): void;
+  listReplicaHistoryPins(input: import("../replicaCurrentViewReads").ReplicaCurrentViewReadInput, source?: import("../replicaCurrentViewReads").ReplicaCurrentViewSource): import("../replicaHistoryReads").ReplicaHistoryList;
+  readReplicaHistoryPin(input: import("../replicaCurrentViewReads").ReplicaCurrentViewReadInput & {pinId: string}, source?: import("../replicaCurrentViewReads").ReplicaCurrentViewSource): import("../replicaHistoryReads").ReplicaHistoryRead;
+  readReplicaCurrentView(workspaceId: string): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView | null;
+  currentViewFilesAtFences(workspaceId: string, files: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView["files"], previous: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView["files"], omitted: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView["omitted"]): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView["files"];
+  readReplicaCurrentViewText(workspaceId: string,sha: string): string | null;
+  readReplicaStanding(workspaceId: string, shareGrantBindings?: string): ReturnType<typeof import("./replicaReads").readReplicaStanding>;
+  listReplicaCurrentViewFiles(input: import("../replicaCurrentViewReads").ReplicaCurrentViewReadInput, source?: import("../replicaCurrentViewReads").ReplicaCurrentViewSource): import("../replicaCurrentViewReads").ReplicaCurrentViewList;
+  readReplicaCurrentViewFile(input: import("../replicaCurrentViewReads").ReplicaCurrentViewReadInput & {path: string}, source?: import("../replicaCurrentViewReads").ReplicaCurrentViewSource): import("../replicaCurrentViewReads").ReplicaCurrentViewRead;
   putBlob(input: {
     workspaceId: string;
     sha256: string;
@@ -780,7 +829,7 @@ export interface SyncRelayStorage {
     expectedSha256: string | null;
   }): { sha256: string };
   getKeyEnvelope(workspaceId: string): KeyEnvelopeRow | null;
-  prepareHostedSettlements(input:{workspaceId:string;originId:string;ops:SyncRelayLogInput[]},signal?:AbortSignal):Promise<void>;
+  prepareLogAppend(input:{workspaceId:string;originId:string;ops:SyncRelayLogInput[]},signal?:AbortSignal):Promise<void>;
   appendLogBatch(input: {
     workspaceId: string;
     originId: string;
@@ -794,6 +843,9 @@ export interface SyncRelayStorage {
     // a gap where a concurrent revoke commits after the check but before the
     // transaction opens.
     guard?: (context: AppendLogBatchGuardContext) => void;
+    // Runs after the guard, under the same lock, with the ops at coordinates
+    // the log does not hold yet. It may refuse an op or mark it departed.
+    admit?: (ops: SyncRelayLogInput[]) => void;
   }): AppendLogBatchResult;
   fetchLogPage(input: {
     workspaceId: string;
@@ -805,6 +857,16 @@ export interface SyncRelayStorage {
     beforeRelaySeq: number | null;
     limit: number;
   }): SyncRelayLogRow[];
+  fetchChatMessages(input: {
+    workspaceId: string; channelWireId: string; cursor: number | null; direction: "older" | "newer"; limit: number;
+  }): FetchLogPageResult & {latestCursor: number};
+  fetchChatMessage(input: {
+    workspaceId: string; originId: string; messageId: string;
+  }): SyncRelayLogRow | null;
+  appendBrowserChatBatch(input: {
+    workspaceId: string; originId: string; messageId: string; ops: SyncRelayLogInput[];
+    guard?: (context: AppendLogBatchGuardContext) => void;
+  }): AppendLogBatchResult;
   fetchLogCoordinate(input: {
     workspaceId: string;
     originId: string;
@@ -989,6 +1051,9 @@ export interface SyncRelayStorage {
   // match is exact on the normalized (lowercased) address. Returns the number
   // of grants claimed.
   claimPendingSharesForEmail(email: string, userId: string): number;
+  // Whether a current pending invite is addressed to `email`, matched on the
+  // same normalized address a claim uses.
+  hasPendingInvite(email: string): boolean;
   shareHasActiveGrants(shareId: string): boolean;
   getShareLabels(shareId: string): ShareLabels;
   setShareLabels(shareId: string, labels: ShareLabels, updatedAtMs: number): void;
@@ -1003,6 +1068,7 @@ export interface SyncRelayStorage {
     workspaceId: string,
     cursor?: SyncRelayLinkInventoryCursor,
   ): SyncRelayLinkInventoryPage;
+  lookupHistoryAccounts(workspaceId: string, grantIds: readonly string[], userIds: readonly string[]): SyncRelayHistoryAccount[];
   listActiveIndependentShareGrants(input: {
     workspaceId: string;
     shareIds: readonly string[];
@@ -1011,6 +1077,7 @@ export interface SyncRelayStorage {
   // Active listings never disclose revoked selectors. Removed named recipients
   // receive only their grant ID, share ID, removal time, and an explanation.
   listSharesReceivedBy(recipientUserId: string): SyncRelayShareWithGrantRow[];
+  listReceivedShareIdsPage(recipientUserId: string, cursor?: SyncRelayReceivedInventoryCursor): SyncRelayReceivedInventoryPage;
   removeShareAccess(input: import("./shareRemoval").ShareRemovalInput): ReturnType<typeof import("./shareRemoval").removeShareAccess>;
   undoShareRemoval(input: Parameters<typeof import("./shareRemoval").undoShareRemoval>[1]): void;
   purgeExpiredShareRemovals(nowMs: number): void;

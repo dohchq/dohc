@@ -1,3 +1,4 @@
+import {registerTypingCheckpoint} from "./outageTypingRecovery";
 import { SharedDocumentWaitingError } from "../ipc/sharedDocumentOpenState";
 import { engineSaveState } from "./engineYDocSaveState";
 import {
@@ -6,6 +7,7 @@ import {
 } from "@dohc/workspace-engine-client";
 import * as Y from "yjs";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -26,9 +28,23 @@ import {
   type EngineYDocSessionCapture,
 } from "./engineYDocSessionIpc";
 import { CHANNELS, ENGINE_YDOC_UPDATE_MAX_BYTES } from "../ipc/channels";
+import { isPrivacyDenial } from "./privacyDenial";
+
+// A real macOS privacy refusal needs System Settings; a test answers for it.
+vi.mock("./privacyDenial", async (actual) => {
+  const real = await actual<typeof import("./privacyDenial")>();
+  return { ...real, isPrivacyDenial: vi.fn(real.isPrivacyDenial) };
+});
 import { deferred } from "../testing/deferred";
 
 const AUTHORITY_ID = Symbol("attachment-a");
+
+it("returns the held-file reason through the live-open bridge", async () => {
+  const h = harness();
+  vi.spyOn(h.capture, "openYDocSession").mockRejectedValue(new DaemonRefusalError({ code: "CONFLICT", message: "capture-file-held: notes/a.md", retry: "no" }, undefined));
+  expect(await h.ipc.open(new FakeSender(7), openPayload)).toEqual({ available: false, captureHeld: true });
+  await h.ipc.shutdown();
+});
 
 class FakeSender implements EngineYDocIpcSender {
   readonly sent: Array<{ channel: string; payload: unknown }> = [];
@@ -200,6 +216,25 @@ const openPayload = {
 const DOCUMENT = { workspaceId: openPayload.workspaceId, path: openPayload.path };
 
 describe("engine Y.Doc IPC adapter", () => {
+  it("reports main's unresolved flag on status events and clears it after admission", async () => {
+    const sender = new FakeSender(7);
+    const h = harness();
+    let unresolved = true;
+    const unregister = registerTypingCheckpoint(DOCUMENT.workspaceId, async () => {}, () => false,
+      {checkpointId: "active-session", path: DOCUMENT.path}, undefined, () => unresolved);
+    try {
+      await h.ipc.open(sender, openPayload);
+      h.capturedOpen()?.onSaveState?.("settling", 0, "status");
+      expect(sender.sent.at(-1)?.payload).toMatchObject({typingUnresolved: true, seq: 0});
+      unresolved = false;
+      h.capturedOpen()?.onSaveState?.("saved", 0, "status");
+      expect(sender.sent.at(-1)?.payload).toMatchObject({typingUnresolved: false, seq: 0});
+    } finally {
+      unregister();
+      await h.ipc.shutdown();
+    }
+  });
+
   it("sends a definitive edit refusal through the scoped save event", async () => {
     const h = harness(providerSession());
     const sender = new FakeSender(7);
@@ -208,7 +243,7 @@ describe("engine Y.Doc IPC adapter", () => {
     h.capturedOpen()?.onEditRefused?.("request-1", message);
     expect(sender.sent).toContainEqual({
       channel: CHANNELS.engineYDocSaveState,
-      payload: { sessionId: openPayload.sessionId, ...DOCUMENT, ...engineSaveState("error", { requestId: "request-1", message }), seq: 0,
+      payload: { sessionId: openPayload.sessionId, ...DOCUMENT, typingUnresolved: false, ...engineSaveState("error", { requestId: "request-1", message }), seq: 0,
         editRefusal: { workspaceId: "workspace-1", path: "notes/a.md", requestId: "request-1", message } },
     });
     await h.ipc.shutdown();
@@ -358,7 +393,7 @@ describe("engine Y.Doc IPC adapter", () => {
     h.capturedOpen()?.onSaveState?.("error", 1, "outcome", true);
     expect(sender.sent).toContainEqual({
       channel: CHANNELS.engineYDocSaveState,
-      payload: {sessionId: openPayload.sessionId, ...DOCUMENT, ...engineSaveState("error"), seq: 0, authorCapacity: true},
+      payload: {sessionId: openPayload.sessionId, ...DOCUMENT, typingUnresolved: false, ...engineSaveState("error"), seq: 0, authorCapacity: true},
     });
     await h.ipc.shutdown();
   });
@@ -640,8 +675,8 @@ describe("engine Y.Doc IPC adapter", () => {
     h.capturedOpen()?.onSaveState?.("settling", 9, "start");
     h.capturedOpen()?.onSaveState?.("saved", 9, "outcome");
     expect(sender.sent.slice(-2).map(({ payload }) => payload)).toEqual([
-      { sessionId: openPayload.sessionId, ...DOCUMENT, ...engineSaveState("settling"), seq: 4 },
-      { sessionId: openPayload.sessionId, ...DOCUMENT, ...engineSaveState("saved"), seq: 4 },
+      { sessionId: openPayload.sessionId, ...DOCUMENT, typingUnresolved: false, ...engineSaveState("settling"), seq: 4 },
+      { sessionId: openPayload.sessionId, ...DOCUMENT, typingUnresolved: false, ...engineSaveState("saved"), seq: 4 },
     ]);
   });
 
@@ -722,11 +757,11 @@ describe("engine Y.Doc IPC adapter", () => {
       const failures = () => sender.sent.map(({ payload }) => (payload as { saveFailure?: unknown }).saveFailure);
 
       h.capturedOpen()?.onSaveState?.("error", 1, "outcome");
-      expect(failures().at(-1)).toEqual({ readOnly: false });
+      expect(failures().at(-1)).toEqual({ reason: null });
       chmodSync(file, 0o444);
       h.capturedOpen()?.onSaveState?.("settling", 2, "start");
       h.capturedOpen()?.onSaveState?.("error", 2, "outcome");
-      expect(failures().at(-1)).toEqual({ readOnly: true });
+      expect(failures().at(-1)).toEqual({ reason: "read-only" });
       // An author-capacity refusal and an error no settle reported are not save failures.
       h.capturedOpen()?.onSaveState?.("settling", 3, "start");
       h.capturedOpen()?.onSaveState?.("error", 3, "outcome", true);
@@ -737,6 +772,67 @@ describe("engine Y.Doc IPC adapter", () => {
       await h.ipc.shutdown();
     } finally {
       chmodSync(file, 0o644);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("names a save macOS refused as a privacy refusal, not a read-only file", async () => {
+    const root = mkdtempSync(join(tmpdir(), "dohc-save-privacy-"));
+    mkdirSync(join(root, "notes"));
+    const file = join(root, "notes", "a.md");
+    writeFileSync(file, "# A\n");
+    chmodSync(file, 0o444);
+    vi.mocked(isPrivacyDenial).mockReturnValueOnce(true);
+    try {
+      const h = harness(providerSession(), { rootPath: root });
+      const sender = new FakeSender(7);
+      await h.ipc.open(sender, openPayload);
+      h.capturedOpen()?.onSaveState?.("error", 1, "outcome");
+      expect(sender.sent.map(({ payload }) => (payload as { saveFailure?: unknown }).saveFailure).at(-1))
+        .toEqual({ reason: "privacy-denied" });
+      await h.ipc.shutdown();
+    } finally {
+      chmodSync(file, 0o644);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("names a save the engine refused because the volume shares new files", async () => {
+    const root = mkdtempSync(join(tmpdir(), "dohc-save-volume-"));
+    mkdirSync(join(root, "notes"));
+    writeFileSync(join(root, "notes", "a.md"), "# A\n");
+    try {
+      const h = harness(providerSession(), { rootPath: root });
+      const sender = new FakeSender(7);
+      await h.ipc.open(sender, openPayload);
+      const refusal = new DaemonRefusalError({ code: "INTERNAL", message: "volume-shares-new-files", retry: "no" }, undefined);
+      h.capturedOpen()?.onSaveState?.("error", 1, "outcome", false, undefined, new Error("settle failed", { cause: refusal }));
+      expect(sender.sent.map(({ payload }) => (payload as { saveFailure?: unknown }).saveFailure).at(-1))
+        .toEqual({ reason: "volume-shares-new-files" });
+      await h.ipc.shutdown();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // A Finder lock refuses writes with EPERM, as a macOS privacy refusal does,
+  // but the file still reads, so it is read-only, not a privacy refusal.
+  it.runIf(process.platform === "darwin")("names a file locked in Finder read-only", async () => {
+    const root = mkdtempSync(join(tmpdir(), "dohc-save-locked-"));
+    mkdirSync(join(root, "notes"));
+    const file = join(root, "notes", "a.md");
+    writeFileSync(file, "# A\n");
+    execFileSync("chflags", ["uchg", file]);
+    try {
+      const h = harness(providerSession(), { rootPath: root });
+      const sender = new FakeSender(7);
+      await h.ipc.open(sender, openPayload);
+      h.capturedOpen()?.onSaveState?.("error", 1, "outcome");
+      expect(sender.sent.map(({ payload }) => (payload as { saveFailure?: unknown }).saveFailure).at(-1))
+        .toEqual({ reason: "read-only" });
+      await h.ipc.shutdown();
+    } finally {
+      execFileSync("chflags", ["nouchg", file]);
       rmSync(root, { recursive: true, force: true });
     }
   });
@@ -760,10 +856,10 @@ describe("engine Y.Doc IPC adapter", () => {
     h.capturedOpen()?.onSaveState?.("settling", 10, "start");
     h.capturedOpen()?.onSaveState?.("saved", 10, "outcome");
     expect(sender.sent.slice(-4).map(({ payload }) => payload)).toEqual([
-      { sessionId: openPayload.sessionId, ...DOCUMENT, ...engineSaveState("settling"), seq: 4 },
-      { sessionId: openPayload.sessionId, ...DOCUMENT, ...engineSaveState("saved"), seq: 0 },
-      { sessionId: openPayload.sessionId, ...DOCUMENT, ...engineSaveState("settling"), seq: 5 },
-      { sessionId: openPayload.sessionId, ...DOCUMENT, ...engineSaveState("saved"), seq: 5 },
+      { sessionId: openPayload.sessionId, ...DOCUMENT, typingUnresolved: false, ...engineSaveState("settling"), seq: 4 },
+      { sessionId: openPayload.sessionId, ...DOCUMENT, typingUnresolved: false, ...engineSaveState("saved"), seq: 0 },
+      { sessionId: openPayload.sessionId, ...DOCUMENT, typingUnresolved: false, ...engineSaveState("settling"), seq: 5 },
+      { sessionId: openPayload.sessionId, ...DOCUMENT, typingUnresolved: false, ...engineSaveState("saved"), seq: 5 },
     ]);
     await h.ipc.shutdown();
   });
@@ -785,11 +881,11 @@ describe("engine Y.Doc IPC adapter", () => {
     h.capturedOpen()?.onSaveState?.("settling", 0, "status");
     h.capturedOpen()?.onSaveState?.("error", 0, "status");
     expect(sender.sent.slice(-5).map(({ payload }) => payload)).toEqual([
-      { sessionId: openPayload.sessionId, ...DOCUMENT, ...engineSaveState("settling"), seq: 0 },
-      { sessionId: openPayload.sessionId, ...DOCUMENT, ...engineSaveState("error"), seq: 4, saveFailure: { readOnly: false } },
-      { sessionId: openPayload.sessionId, ...DOCUMENT, ...engineSaveState("changed-on-disk"), seq: 0 },
-      { sessionId: openPayload.sessionId, ...DOCUMENT, ...engineSaveState("settling"), seq: 0 },
-      { sessionId: openPayload.sessionId, ...DOCUMENT, ...engineSaveState("error"), seq: 0 },
+      { sessionId: openPayload.sessionId, ...DOCUMENT, typingUnresolved: false, ...engineSaveState("settling"), seq: 0 },
+      { sessionId: openPayload.sessionId, ...DOCUMENT, typingUnresolved: false, ...engineSaveState("error"), seq: 4, saveFailure: { reason: null } },
+      { sessionId: openPayload.sessionId, ...DOCUMENT, typingUnresolved: false, ...engineSaveState("changed-on-disk"), seq: 0 },
+      { sessionId: openPayload.sessionId, ...DOCUMENT, typingUnresolved: false, ...engineSaveState("settling"), seq: 0 },
+      { sessionId: openPayload.sessionId, ...DOCUMENT, typingUnresolved: false, ...engineSaveState("error"), seq: 0 },
     ]);
     await h.ipc.shutdown();
   });
@@ -962,7 +1058,7 @@ describe("engine Y.Doc IPC adapter", () => {
     h.ipc
       .fileMutationPort()
       .markDeletedUnderPath(AUTHORITY_ID, "Notes/Folder");
-    expect(sender.sent.at(-1)?.payload).toMatchObject({ ...engineSaveState("deleted") });
+    expect(sender.sent.at(-1)?.payload).toMatchObject({ typingUnresolved: false, ...engineSaveState("deleted") });
   });
 
   it("opens the workspace activity when the renderer outruns daemon startup", async () => {
@@ -1345,7 +1441,7 @@ describe("engine Y.Doc IPC adapter", () => {
     expect(sender.sent.at(-1)?.payload).toEqual({
       sessionId: openPayload.sessionId,
       ...DOCUMENT,
-      ...engineSaveState("read-only"),
+      typingUnresolved: false, ...engineSaveState("read-only"),
       seq: 5,
       readOnlyCause: "reconnecting",
     });
@@ -1357,7 +1453,7 @@ describe("engine Y.Doc IPC adapter", () => {
     expect(sender.sent.at(-1)?.payload).toEqual({
       sessionId: openPayload.sessionId,
       ...DOCUMENT,
-      ...engineSaveState("deleted"),
+      typingUnresolved: false, ...engineSaveState("deleted"),
       seq: 0,
     });
     expect(
@@ -1380,7 +1476,7 @@ describe("engine Y.Doc IPC adapter", () => {
     expect(sender.sent.at(-1)?.payload).toEqual({
       sessionId: openPayload.sessionId,
       ...DOCUMENT,
-      ...engineSaveState("object-changed"),
+      typingUnresolved: false, ...engineSaveState("object-changed"),
       seq: 0,
     });
     expect(

@@ -176,8 +176,8 @@ function layoutOf(doc: Y.Doc): Layout {
   }
   const chunks: Layout['chunks'] = []
   let start = 0
-  for (const block of blocks) {
-    const markdown = blockMarkdown(block)
+  for (const [index, block] of blocks.entries()) {
+    const markdown = blockMarkdown(block, index === 0)
     chunks.push({ markdown, start, end: start + markdown.length })
     start += markdown.length + BLOCK_SEPARATOR.length
   }
@@ -189,7 +189,8 @@ function markdownOfLayout(layout: Layout): string {
   return layout.frontmatter + layout.body
 }
 
-function blockMarkdown(block: ProseMirrorNode): string {
+function blockMarkdown(block: ProseMirrorNode, first: boolean): string {
+  if (block.type.name === 'horizontalRule') return first ? '***' : '---'
   const root = escapeHighlightMarkdown({ type: 'doc', content: [block.toJSON()] })
   return serializeRichdocBody(root).replace(/\n+$/u, '')
 }

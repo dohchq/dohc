@@ -23,21 +23,21 @@ async fn open_workspace(
     workspace_id: &str,
 ) -> WorkspaceHandle {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                id,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace_id,
-                }),
-            ),
-        )
-        .await
-        .expect("open workspace");
+    let opened = call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(
+            id,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace_id,
+            }),
+        ),
+    )
+    .await
+    .expect("open workspace");
     serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle")
 }
 
@@ -49,14 +49,15 @@ async fn call(
     params: Value,
 ) -> Value {
     *id += 1;
-    transport
-        .call(
-            RequestContext::unbounded(),
-            request(*id, method, Some(handle.clone()), params),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{method} failed: {error:?}"))
-        .result
+    // Boxed so the scenario retains a pointer while the bounded busy retry runs.
+    Box::pin(call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(*id, method, Some(handle.clone()), params),
+    ))
+    .await
+    .unwrap_or_else(|error| panic!("{method} failed: {error:?}"))
+    .result
 }
 
 async fn call_error(
@@ -67,13 +68,13 @@ async fn call_error(
     params: Value,
 ) -> dohc_engine_protocol::error::WireError {
     *id += 1;
-    transport
-        .call(
-            RequestContext::unbounded(),
-            request(*id, method, Some(handle.clone()), params),
-        )
-        .await
-        .unwrap_err()
+    Box::pin(call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(*id, method, Some(handle.clone()), params),
+    ))
+    .await
+    .unwrap_err()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -164,8 +165,7 @@ async fn call_with_idempotency(
     *id += 1;
     let mut request = request(*id, method, Some(handle.clone()), params);
     request.idempotency_key = Some(idempotency_key.to_owned());
-    transport
-        .call(RequestContext::unbounded(), request)
+    call_with_busy_retry(transport, RequestContext::unbounded(), request)
         .await
         .unwrap_or_else(|error| panic!("{method} failed: {error:?}"))
         .result
@@ -182,8 +182,7 @@ async fn call_error_with_idempotency(
     *id += 1;
     let mut request = request(*id, method, Some(handle.clone()), params);
     request.idempotency_key = Some(idempotency_key.to_owned());
-    transport
-        .call(RequestContext::unbounded(), request)
+    call_with_busy_retry(transport, RequestContext::unbounded(), request)
         .await
         .unwrap_err()
 }
@@ -878,6 +877,7 @@ async fn file_mentions_cap_at_2000_newest_and_hydrate_all_message_attachments() 
     let mut id = 10;
     let mut cursor: Option<String> = None;
     let mut mentions = Vec::new();
+    let mut checked_first_continuation = false;
     loop {
         let mut params = json!({ "objectId": "wanted", "pageLimit": 500 });
         if let Some(value) = &cursor {
@@ -899,6 +899,38 @@ async fn file_mentions_cap_at_2000_newest_and_hydrate_all_message_attachments() 
                 .cloned(),
         );
         cursor = page["nextCursor"].as_str().map(str::to_owned);
+        if !checked_first_continuation {
+            checked_first_continuation = true;
+            use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+            let encoded = cursor.as_ref().expect("first continuation");
+            let mut decoded: Value =
+                serde_json::from_slice(&URL_SAFE_NO_PAD.decode(encoded).unwrap()).unwrap();
+            assert_eq!(decoded["consumed"], json!(mentions.len()));
+            decoded["consumed"] = json!(i64::MAX);
+            let exhausted = call(
+                &transport,
+                &handle,
+                &mut id,
+                "chats.attachments.listFileMentions",
+                json!({ "objectId": "wanted", "pageLimit": 500,
+                    "cursor": URL_SAFE_NO_PAD.encode(serde_json::to_vec(&decoded).unwrap()) }),
+            )
+            .await;
+            assert_eq!(exhausted, json!({ "mentions": [], "nextCursor": null }));
+            decoded["consumed"] = json!(-1);
+            let error = call_error(
+                &transport,
+                &handle,
+                &mut id,
+                "chats.attachments.listFileMentions",
+                json!({ "objectId": "wanted", "pageLimit": 500,
+                    "cursor": URL_SAFE_NO_PAD.encode(serde_json::to_vec(&decoded).unwrap()) }),
+            )
+            .await;
+            assert_eq!(error.code, ErrorCode::InvalidParams);
+            assert_eq!(error.message, "invalid-cursor");
+        }
+
         if cursor.is_none() {
             break;
         }
@@ -2761,7 +2793,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
     assert_eq!(claimed["run"]["exitCode"], Value::Null);
     assert_eq!(claimed["run"]["failureReason"], Value::Null);
     assert_eq!(claimed["run"]["logPath"], json!("  logs/run-1.log  "));
-    assert_eq!(claimed["run"]["failureNotePosted"], json!(false));
+    assert_eq!(claimed["run"]["failureHandled"], json!(false));
     let retried_claim = call(
         &transport,
         &first_handle,
@@ -4035,15 +4067,15 @@ async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
     )
     .await;
     assert_eq!(recoveries["recoveries"][0]["attemptCount"], json!(1));
-    let noted = call(
+    let handled = call(
         &transport,
         &handle,
         &mut id,
-        "chats.dispatch.markFailureNotePosted",
+        "chats.dispatch.markFailureHandled",
         json!({ "runId": "run" }),
     )
     .await;
-    assert_eq!(noted["failureNotePosted"], json!(true));
+    assert_eq!(handled["failureHandled"], json!(true));
     let requeued = call(
         &transport,
         &handle,
@@ -4692,6 +4724,26 @@ async fn polls_and_lanes_cross_the_rpc_boundary() {
     .await;
     assert_eq!(wrong.message, "invalid-poll-choice");
 
+    let repeated_choice = call_error_with_idempotency(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.messages.send",
+        "send-repeated-choice",
+        json!({
+            "threadId": "poll-thread",
+            "messageId": "repeated-choice",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "Which day?",
+            "options": ["Friday", " Friday "],
+            "nowMs": 30,
+        }),
+    )
+    .await;
+    assert_eq!(repeated_choice.code, ErrorCode::InvalidParams);
+    assert_eq!(repeated_choice.message, "Each choice appears once.");
+
     call_with_idempotency(
         &transport,
         &handle,
@@ -4963,4 +5015,533 @@ async fn an_automation_message_names_its_automation_over_rpc() {
     )
     .await;
     assert_eq!(reaction.code, ErrorCode::InvalidParams, "{reaction:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn channel_and_follow_pages_continue_past_ten_thousand_with_tied_coordinates() {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "chat-list-pages").await;
+    let mut id = 1;
+    let mut conn = rusqlite::Connection::open(engine_db_path(&scratch).expect("database path"))
+        .expect("open database");
+    let tx = conn.transaction().expect("fixture transaction");
+    let mut expected_channels = Vec::new();
+    let mut expected_follows = Vec::new();
+    for index in 0..10_005 {
+        let channel_id = format!("channel-{index:05}");
+        tx.execute(
+            "INSERT INTO chat_channels \
+             (workspace_id,channel_id,name,slug,kind,created_at_ms,updated_at_ms) \
+             VALUES ('chat-list-pages',?1,?1,?1,'channel',?2,0)",
+            rusqlite::params![channel_id, index / 5],
+        )
+        .expect("channel fixture");
+        expected_channels.push(channel_id.clone());
+        let kind = ["person", "agent", "channel", "thread"][index as usize % 4];
+        tx.execute(
+            "INSERT INTO chat_follows \
+             (workspace_id,owner_user_id,target_kind,target_id,state,updated_at_ms,origin_id,origin_seq) \
+             VALUES ('chat-list-pages','owner',?1,?2,'following',0,'fixture',0)",
+            rusqlite::params![kind, channel_id],
+        ).expect("follow fixture");
+        expected_follows.push((kind.to_owned(), channel_id));
+    }
+    tx.execute(
+        "INSERT INTO chat_follows \
+         (workspace_id,owner_user_id,target_kind,target_id,state,updated_at_ms,origin_id,origin_seq) \
+         VALUES ('chat-list-pages','owner','thread','z-tombstone','unfollowed',0,'fixture',0)",
+        [],
+    ).expect("tombstone fixture");
+    tx.commit().expect("fixture commit");
+    drop(conn);
+    expected_follows.sort();
+
+    let mut channels = Vec::new();
+    let mut cursor = None;
+    for page in 0..25 {
+        let mut params = json!({ "pageLimit": 499 });
+        if let Some(value) = cursor.take() {
+            params["cursor"] = json!(value);
+        }
+        let result = call(&transport, &handle, &mut id, "chats.channels.list", params).await;
+        let rows = result["channels"].as_array().expect("channels");
+        assert!(!rows.is_empty());
+        assert!(rows.len() <= 499);
+        channels.extend(
+            rows.iter()
+                .map(|row| row["channelId"].as_str().unwrap().to_owned()),
+        );
+        cursor = result["nextCursor"].as_str().map(str::to_owned);
+        if let Some(value) = cursor.as_mut() {
+            let mut decoded: Value =
+                serde_json::from_slice(&URL_SAFE_NO_PAD.decode(&*value).unwrap()).unwrap();
+            assert!(decoded.get("consumed").is_none());
+            if page == 0 {
+                // An editable counter must not affect an uncapped continuation or overflow.
+                decoded["consumed"] = json!(i64::MAX);
+                *value = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&decoded).unwrap());
+            }
+        } else {
+            break;
+        }
+    }
+    assert!(cursor.is_none(), "channel paging terminates");
+    assert_eq!(channels, expected_channels);
+
+    for state in [None, Some("following")] {
+        let mut follows = Vec::new();
+        let mut cursor = None;
+        for _ in 0..25 {
+            let mut params = json!({ "ownerUserId": "owner", "pageLimit": 499 });
+            if let Some(value) = state {
+                params["state"] = json!(value);
+            }
+            if let Some(value) = cursor.take() {
+                params["cursor"] = json!(value);
+            }
+            let result = call(&transport, &handle, &mut id, "chats.follows.list", params).await;
+            let rows = result["follows"].as_array().expect("follows");
+            assert!(!rows.is_empty());
+            assert!(rows.len() <= 499);
+            follows.extend(rows.iter().map(|row| {
+                (
+                    row["targetKind"].as_str().unwrap().to_owned(),
+                    row["targetId"].as_str().unwrap().to_owned(),
+                )
+            }));
+            cursor = result["nextCursor"].as_str().map(str::to_owned);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert!(cursor.is_none(), "follow paging terminates");
+        let mut expected = expected_follows.clone();
+        if state.is_none() {
+            expected.push(("thread".to_owned(), "z-tombstone".to_owned()));
+        }
+        assert_eq!(follows, expected);
+    }
+    call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pending_bookmark_pages_keep_the_advisory_total_and_refuse_oversized_counters() {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "chat-bookmark-total").await;
+    let mut id = 1;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.create",
+        json!({
+            "channelId": "channel", "name": "Channel", "kind": "channel", "nowMs": 1,
+        }),
+    )
+    .await;
+    for index in 0..3 {
+        let thread_id = format!("thread-{index}");
+        call(&transport, &handle, &mut id, "chats.threads.start", json!({
+            "channelId": "channel", "threadId": thread_id, "messageId": format!("message-{index}"),
+            "authorKind": "human", "authorDisplayName": "Ada", "body": "Body", "nowMs": index + 2,
+        })).await;
+        call(&transport, &handle, &mut id, "chats.bookmarks.save", json!({
+            "ownerUserId": "owner", "targetKind": "thread", "targetId": thread_id,
+            "mode": "live", "destinationPath": format!("bookmarks/{index}.md"), "nowMs": index + 5,
+        })).await;
+    }
+    let first = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.bookmarks.listPending",
+        json!({
+            "ownerUserId": "owner", "limit": 2, "pageLimit": 1,
+        }),
+    )
+    .await;
+    assert_eq!(first["bookmarks"].as_array().unwrap().len(), 1);
+    let encoded = first["nextCursor"].as_str().expect("first continuation");
+    let mut decoded: Value =
+        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(encoded).unwrap()).unwrap();
+    assert_eq!(decoded["consumed"], json!(1));
+    decoded["consumed"] = json!(i64::MAX);
+    let error = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.bookmarks.listPending",
+        json!({
+            "ownerUserId": "owner", "limit": 2, "pageLimit": 1,
+            "cursor": URL_SAFE_NO_PAD.encode(serde_json::to_vec(&decoded).unwrap()),
+        }),
+    )
+    .await;
+    assert_eq!(error.code, ErrorCode::InvalidParams);
+    assert_eq!(error.message, "invalid-cursor");
+    let second = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.bookmarks.listPending",
+        json!({
+            "ownerUserId": "owner", "limit": 2, "pageLimit": 1, "cursor": encoded,
+        }),
+    )
+    .await;
+    assert_eq!(second["bookmarks"].as_array().unwrap().len(), 1);
+    assert_ne!(
+        first["bookmarks"][0]["bookmarkId"],
+        second["bookmarks"][0]["bookmarkId"]
+    );
+    assert_eq!(second["nextCursor"], Value::Null);
+    call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn local_chat_actor_key_survives_restart_and_never_enters_replication() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "actor-key").await;
+    let mut id = 1;
+    let installation_key = r#"{"kind":"installation","installationId":"device-a"}"#;
+    let account_key = r#"{"kind":"account","issuer":"https://accounts.test","userId":"alice"}"#;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.create",
+        json!({
+            "channelId": "channel", "name": "General", "kind": "channel", "nowMs": 10,
+        }),
+    )
+    .await;
+    let opening = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "channel", "threadId": "thread", "messageId": "opening",
+            "authorKind": "human", "authorDisplayName": "Alice", "authorActorKey": installation_key,
+            "body": "Offline", "nowMs": 20,
+        }),
+    )
+    .await;
+    assert_eq!(opening["message"]["authorActorKey"], installation_key);
+    let signed_in = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.messages.send",
+        json!({
+            "threadId": "thread", "messageId": "signed-in", "authorKind": "human",
+            "authorDisplayName": "Alice", "authorUserId": "alice", "authorActorKey": account_key,
+            "body": "Online", "nowMs": 21,
+        }),
+    )
+    .await;
+    assert_eq!(signed_in["authorActorKey"], account_key);
+    call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
+
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = EngineStore::open(&db, 30).expect("reopen own store");
+    let payloads: Vec<String> = store
+        .read_with(|conn| {
+            let mut query = conn.prepare(
+                "SELECT payload_json FROM replication_log WHERE workspace_id='actor-key'",
+            )?;
+            query.query_map([], |row| row.get(0))?.collect()
+        })
+        .expect("payloads");
+    assert!(!payloads.is_empty());
+    for payload in payloads {
+        let value: Value = serde_json::from_str(&payload).expect("JSON payload");
+        assert!(value.get("authorActorKey").is_none());
+        assert!(value.get("author_actor_key").is_none());
+        assert!(!payload.contains("device-a"));
+        assert!(!payload.contains("https://accounts.test"));
+    }
+    for (seq, message_id, forged) in [(0, "received-keyless", false), (1, "received-forged", true)]
+    {
+        let mut payload = json!({
+            "threadId": "thread", "messageId": message_id, "authorKind": "agent",
+            "authorDisplayName": "Peer claim", "authorUserId": "peer", "body": "Received", "createdAtMs": 40 + seq,
+        });
+        if forged {
+            payload["authorActorKey"] = json!(installation_key);
+        }
+        apply_chat_envelope(
+            &mut store,
+            &ReplicationEnvelope {
+                workspace_id: "actor-key".to_owned(),
+                origin_id: "peer-device".to_owned(),
+                origin_seq: seq,
+                relay_seq: Some(seq),
+                admitted_author_snapshot: None,
+                settlement_admission: None,
+                op_kind: "chat.message.append".to_owned(),
+                payload,
+                recorded_at_ms: 40 + seq,
+            },
+            &NoFaults,
+        )
+        .expect("ingest");
+    }
+    assert!(
+        store
+            .read_with(|conn| {
+                conn.execute(
+                    "UPDATE chat_messages SET author_actor_key='broken' WHERE message_id='opening'",
+                    [],
+                )
+            })
+            .is_err(),
+        "local chat actor keys must contain valid JSON"
+    );
+    let received_keys: Vec<Option<String>> = store
+        .read_with(|conn| {
+            let mut query = conn.prepare(
+                "SELECT author_actor_key FROM chat_messages WHERE message_id LIKE 'received-%'",
+            )?;
+            query.query_map([], |row| row.get(0))?.collect()
+        })
+        .expect("received keys");
+    assert_eq!(received_keys, vec![None, None]);
+    drop(store);
+
+    let reopened = open_workspace(&transport, &scratch, 100, "actor-key").await;
+    let listed = call(
+        &transport,
+        &reopened,
+        &mut id,
+        "chats.messages.list",
+        json!({ "threadId": "thread" }),
+    )
+    .await;
+    let rows = listed["messages"].as_array().expect("messages");
+    assert_eq!(
+        rows.iter().find(|row| row["id"] == "opening").unwrap()["authorActorKey"],
+        installation_key
+    );
+    assert_eq!(
+        rows.iter().find(|row| row["id"] == "signed-in").unwrap()["authorActorKey"],
+        account_key
+    );
+    for row in rows
+        .iter()
+        .filter(|row| row["id"].as_str().unwrap().starts_with("received-"))
+    {
+        assert!(row.get("authorActorKey").is_none());
+    }
+    call(&transport, &reopened, &mut id, "workspace.close", json!({})).await;
+}
+
+async fn oversized_local_chat_actor_key_is_rejected(method: &str) {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "actor-key-bound").await;
+    let mut id = 1;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.create",
+        json!({
+            "channelId": "channel", "name": "General", "kind": "channel", "nowMs": 10,
+        }),
+    )
+    .await;
+    let prefix = r#"{"kind":"installation","installationId":""#;
+    let suffix = r#""}"#;
+    let bounded_key = format!(
+        "{prefix}{}{suffix}",
+        "x".repeat(16 * 1024 - prefix.len() - suffix.len())
+    );
+    let opening = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "channel", "threadId": "thread", "messageId": "opening",
+            "authorKind": "human", "authorDisplayName": "Alice", "body": "Hello",
+            "authorActorKey": bounded_key, "nowMs": 20,
+        }),
+    )
+    .await;
+    assert_eq!(opening["message"]["authorActorKey"], bounded_key);
+    for padding in ["x".repeat(16 * 1024), "é".repeat(8 * 1024)] {
+        let mut params = json!({
+            "threadId": "thread", "messageId": "oversized",
+            "authorKind": "human", "authorDisplayName": "Alice", "body": "Hello",
+            "authorActorKey": format!("{prefix}{padding}{suffix}"), "nowMs": 30,
+        });
+        if method == "chats.threads.start" {
+            params["channelId"] = json!("channel");
+            params["threadId"] = json!("oversized-thread");
+        }
+        let error = call_error(&transport, &handle, &mut id, method, params).await;
+        assert_eq!(error.code, ErrorCode::InvalidParams, "{error:?}");
+        assert_eq!(error.message, "chat actor key exceeds 16384 bytes");
+    }
+    let listed = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.messages.list",
+        json!({ "threadId": "thread" }),
+    )
+    .await;
+    assert_eq!(listed["messages"].as_array().unwrap().len(), 1);
+    let threads = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.listForChannel",
+        json!({ "channelId": "channel" }),
+    )
+    .await;
+    assert_eq!(threads["threads"].as_array().unwrap().len(), 1);
+    call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn local_chat_actor_key_thread_start_has_a_byte_bound() {
+    oversized_local_chat_actor_key_is_rejected("chats.threads.start").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn local_chat_actor_key_message_send_has_a_byte_bound() {
+    oversized_local_chat_actor_key_is_rejected("chats.messages.send").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn passive_store_pulls_chat_rows_but_refuses_local_actor_key_admission() {
+    use dohc_engine_domain::{
+        ChatActorKind, ChatThreadLane, LinkedChatStore, SendMessage, StartChannelThread,
+    };
+    let source = ScratchDir::new().expect("source");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &source, 1, "actor-key-passive").await;
+    let mut id = 1;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.create",
+        json!({
+            "channelId":"channel", "name":"General", "kind":"channel", "nowMs":10
+        }),
+    )
+    .await;
+    let key = r#"{"kind":"installation","installationId":"owner-device"}"#;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId":"channel", "threadId":"pulled-thread", "messageId":"pulled-message",
+            "authorKind":"human", "authorDisplayName":"Alice", "authorUserId":"alice", "authorActorKey":key,
+            "body":"Pulled", "nowMs":20
+        }),
+    )
+    .await;
+    call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
+    let owner = EngineStore::open(&engine_db_path(&source).unwrap(), 30).unwrap();
+    let envelopes: Vec<ReplicationEnvelope> = owner.read_with(|conn| {
+        let mut query = conn.prepare("SELECT origin_id, origin_seq, op_kind, payload_json, recorded_at_ms FROM replication_log WHERE op_kind LIKE 'chat.%' ORDER BY origin_seq")?;
+        query.query_map([], |row| {
+            let payload: String = row.get(3)?;
+            Ok(ReplicationEnvelope {
+                workspace_id:"actor-key-passive".into(), origin_id:row.get(0)?, origin_seq:row.get(1)?,
+                relay_seq:None, admitted_author_snapshot:None, settlement_admission:None, op_kind:row.get(2)?, payload:serde_json::from_str(&payload).unwrap(), recorded_at_ms:row.get(4)?
+            })
+        })?.collect()
+    }).unwrap();
+    assert!(!envelopes.is_empty());
+    let replica = ScratchDir::new().expect("replica");
+    let replica_db = engine_db_path(&replica).unwrap();
+    let mut passive = EngineStore::open_passive(&replica_db, 1, None, None).unwrap();
+    for mut envelope in envelopes {
+        envelope.payload["authorActorKey"] = json!(key);
+        apply_chat_envelope(&mut passive, &envelope, &NoFaults).expect("pulled row");
+    }
+    let mut start = StartChannelThread {
+        workspace_id: "actor-key-passive".into(),
+        channel_id: "channel".into(),
+        thread_id: "local-thread".into(),
+        message_id: "local-opening".into(),
+        title: None,
+        lane: ChatThreadLane::Posts,
+        author_kind: ChatActorKind::Human,
+        author_display_name: "Alice".into(),
+        author_owner_display_name: None,
+        author_user_id: None,
+        origin: None,
+        body: "Local".into(),
+        needs_decision: false,
+        options: vec![],
+        attachments: vec![],
+        automation: None,
+        now_ms: 40,
+        request_id: Some("passive-start".into()),
+    };
+    let mut reply = SendMessage {
+        workspace_id: "actor-key-passive".into(),
+        thread_id: "pulled-thread".into(),
+        message_id: "local-reply".into(),
+        author_kind: ChatActorKind::Human,
+        author_display_name: "Alice".into(),
+        author_owner_display_name: None,
+        author_user_id: None,
+        parent_message_id: None,
+        origin: None,
+        body: "Local reply".into(),
+        needs_decision: false,
+        options: vec![],
+        attachments: vec![],
+        automation: None,
+        now_ms: 41,
+        request_id: Some("passive-send".into()),
+    };
+    let mut chats = LinkedChatStore::new(&mut passive);
+    for author_user_id in [None, Some("alice".to_owned())] {
+        start.author_user_id = author_user_id.clone();
+        reply.author_user_id = author_user_id;
+        for author_actor_key in [None, Some(key)] {
+            let start_error = chats
+                .start_admitted_channel_thread(&start, author_actor_key, &NoFaults)
+                .unwrap_err();
+            assert!(
+                start_error
+                    .to_string()
+                    .contains("passive store cannot originate"),
+                "{start_error:?}"
+            );
+            let send_error = chats
+                .send_admitted_message(&reply, author_actor_key, &NoFaults)
+                .unwrap_err();
+            assert!(
+                send_error
+                    .to_string()
+                    .contains("passive store cannot originate"),
+                "{send_error:?}"
+            );
+        }
+    }
+    drop(passive);
+    let passive = EngineStore::open_passive(&replica_db, 50, None, None).unwrap();
+    passive.read_with(|conn| {
+        let counts: (i64,i64,i64,i64,i64) = conn.query_row("SELECT (SELECT count(*) FROM chat_messages), (SELECT count(*) FROM chat_threads), (SELECT count(*) FROM chat_messages WHERE author_actor_key IS NOT NULL), (SELECT count(*) FROM replication_log WHERE imported=0), (SELECT count(*) FROM engine_requests WHERE request_id IN ('passive-start','passive-send'))", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)))?;
+        assert_eq!(counts, (1,1,0,0,0));
+        Ok::<_,rusqlite::Error>(())
+    }).unwrap();
 }

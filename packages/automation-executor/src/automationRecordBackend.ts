@@ -1,4 +1,5 @@
 import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
+import { changedSincePressed } from "./automationButtons";
 import type { StoredRun } from "./automationRunStore";
 import { datasetUndoDeletes, datasetCodeTable, datasetCodeOperation, datasetTableNamed, datasetStepsOf } from "./datasetAutomationPlan";
 import { isDeepStrictEqual } from "node:util";
@@ -27,6 +28,7 @@ import { automationTargetPathProblem, checkAutomationReach, datasetFieldKey, per
 import {
   applyDocumentEffect,
   applyChatEffect,
+  checkPlannedMessages,
   rebaseRun,
   groupChangedOutcome,
   groupMessage,
@@ -40,6 +42,7 @@ import {
   type CollectionAutomationRunInput,
   type CollectionAutomationRunOutcome,
   type CollectionAutomationReads,
+  type CollectionRecordWrites,
 } from "./collectionAutomationRun";
 import {
   applyDatasetEffect,
@@ -68,9 +71,9 @@ import { resolveAutomationInventory, type AutomationInventory } from "./automati
 import type { AutomationTarget } from "./automationTargets";
 
 export type RecordRunDependencies = Pick<CollectionAutomationRunDependencies,
-  "targets" | "evaluator" | "store" | "nowMs" | "personName" | "chat" | "postNotice" | "recipientVerdicts" | "readMessageBody" | "readCode"
+  "makeDurable" | "targets" | "evaluator" | "store" | "nowMs" | "personName" | "chat" | "postNotice" | "recipientVerdicts" | "readMessageBody" | "readCode" | "onUsageSuccess"
 > & Partial<Pick<CollectionAutomationRunDependencies,
-  "withReads" | "withRecordWrites" | "collectionIdOf" | "collectionPathOf" | "checkReach" | "localPersonId" | "checkPresser" | "authorizeDataset"
+  "withReads" | "withRecordWrites" | "collectionIdOf" | "collectionPathOf" | "isIndexReading" | "checkReach" | "localPersonId" | "checkPresser" | "authorizeDataset" | "isButtonField"
 >> & Partial<Pick<DatasetAutomationRunDependencies, "withHost" | "cachedRoster">>;
 export type RecordRunInput = Omit<CollectionAutomationRunInput, "claim"> & {
   claim: Pick<AutomationClaim, "automationId" | "claimId" | "run" | "depth" | "createdAtMs">;
@@ -96,6 +99,14 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
   { backend: StepBackend; ctx: RunContext; state: StoredRun; resuming: boolean }
 > {
   const { automation, collection, claim, signal, roster } = input;
+  const sourcePath = () => {
+    const id = parseCollectionAutomationId(claim.automationId)?.collectionId ?? null;
+    return id === null ? null : deps.collectionPathOf?.(id) ?? (id === source.datasetId ? collection.path : null);
+  };
+  const checkSourceMoved = () => {
+    const path = sourcePath();
+    if (path !== null && path !== collection.path) throw new AutomationRunWait("The automation's Collection moved.", "moved");
+  };
   try { await deps.checkPresser?.(); }
   catch (error) {
     if (error instanceof AutomationRunWait) throw error;
@@ -104,6 +115,10 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
   const saved = await savedRunOf(deps.store, claim, automation);
   if ("outcome" in saved) return { outcome: saved.outcome };
   const current = saved.current;
+  if (source.kind === "document" && automation.when.kind === "button" && current === null
+    && !await deps.isButtonField!(collection.path, automation.when.field)) {
+    return { outcome: failed(changedSincePressed(automation.when.field)) };
+  }
   const chat = readsChats(automation) ? await deps.chat.directory(roster, chatNeedsOf([automation])) : null;
   if (readsChats(automation) && chat === null) return { outcome: { kind: "wait", reason: "engine" } };
   if (source.engineClaim !== null) {
@@ -149,6 +164,10 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
     if (!await resolves(...savedRules)) return { outcome: failed(RULES_CHANGED_ERROR) };
   }
   const readable = new Set<string>();
+  // Existing messages need no new permission. Unsent saved messages check
+  // their own reach against the current roster immediately before sending.
+  if (current !== null) inventory.reach = inventory.reach.filter(step =>
+    step.kind !== "post" && step.kind !== "notify" && step.kind !== "personal");
   const verdicts = checkAutomationReach(roster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, collection.path), steps: inventory.reach });
   if (await deps.checkReach?.(inventory.reach, roster)) return { outcome: { kind: "wait", reason: "held" } };
   for (const [index, verdict] of verdicts.entries()) {
@@ -362,53 +381,81 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
   }
   if (moved) await deps.store.save(state);
   const checkLocations = () => {
-    const sourceId = parseCollectionAutomationId(claim.automationId)?.collectionId ?? null;
-    const sourcePath = sourceId === null ? null : deps.collectionPathOf?.(sourceId) ?? (sourceId === source.datasetId ? collection.path : null);
-    if (source.kind === "document" && sourcePath === null) throw new Error("This automation's Collection is gone.");
-    if (sourcePath !== collection.path) throw new AutomationRunWait("The automation's Collection moved.", "moved");
+    const path = sourcePath();
+    if (path === null && deps.isIndexReading?.()) throw new AutomationRunWait("The automation's Collection moved.", "moved");
+    if (source.kind === "document" && path === null) throw new Error("This automation's Collection is gone.");
+    if (path !== collection.path) throw new AutomationRunWait("The automation's Collection moved.", "moved");
     for (const target of state.collections) if ((deps.collectionPathOf?.(target.collectionId) ?? (target.collectionId === source.datasetId ? collection.path : null)) !== target.path) throw new AutomationRunWait("A Collection moved while this run was active.", "moved");
   };
   // Refresh grants and descriptor associations before reads and effects. Metadata stays local to this attempt.
   const checkNow = async (recordVerdicts = false) => {
-    await deps.checkPresser?.();
-    checkLocations();
-    const currentRoster = (await deps.cachedRoster?.()) ?? roster;
-    if (currentRoster.kind === "unknown") throw new AutomationRunWait("The workspace roster is unavailable.", "roster");
-    const allReach = [...inventory.reach, ...[...codeReach.values()].map(({ reach }) => reach)];
-    const steps = inventory.datasets.size === 0 ? allReach : await deps.withHost?.((host) => {
-      const grants = new Map<string, ReturnType<typeof host.dataGrants>>();
-      for (const [path, target] of inventory.targets) {
-        if (target.kind !== "dataset") continue;
-        if (!host.resolves(association(path).rules!)) throw new Error(RULES_CHANGED_ERROR);
-        grants.set(target.approved.datasetId, host.dataGrants(target.approved.datasetId));
+    try {
+      await deps.checkPresser?.();
+      checkLocations();
+      const currentRoster = (await deps.cachedRoster?.()) ?? roster;
+      if (currentRoster.kind === "unknown") throw new AutomationRunWait("The workspace roster is unavailable.", "roster");
+      const allReach = [...inventory.reach, ...[...codeReach.values()].map(({ reach }) => reach)];
+      const steps = inventory.datasets.size === 0 ? allReach : await deps.withHost?.((host) => {
+        const grants = new Map<string, ReturnType<typeof host.dataGrants>>();
+        for (const [path, target] of inventory.targets) {
+          if (target.kind !== "dataset") continue;
+          if (!host.resolves(association(path).rules!)) throw new Error(RULES_CHANGED_ERROR);
+          grants.set(target.approved.datasetId, host.dataGrants(target.approved.datasetId));
+        }
+        return allReach.map((step): ReachStep => step.kind === "dataset-operation" || step.kind === "dataset-field"
+          ? { ...step, grants: grants.get(step.datasetId)! } : step);
+      });
+      if (steps == null && inventory.datasets.size > 0) throw new AutomationRunWait("The dataset host is unavailable.");
+      const fresh = { reach: steps ?? allReach };
+      const checks = checkAutomationReach(currentRoster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, collection.path), steps: fresh.reach });
+      if (recordVerdicts && await deps.checkReach?.(fresh.reach.slice(0, inventory.reach.length), currentRoster)) throw new AutomationRunWait("The automation is waiting for an editor.", "held");
+      for (const [index, verdict] of checks.entries()) {
+        const step = fresh.reach[index]!;
+        if (!verdict.allowed && (step.kind !== "dataset-field" || visible.has(datasetFieldKey(step.datasetId, step.tableId, step.field.fieldId)))) {
+          throw new Error(index >= inventory.reach.length ? "This automation cannot use the requested Collection or fields." : verdict.reason);
+        }
       }
-      return allReach.map((step): ReachStep => step.kind === "dataset-operation" || step.kind === "dataset-field"
-        ? { ...step, grants: grants.get(step.datasetId)! } : step);
-    });
-    if (steps == null && inventory.datasets.size > 0) throw new AutomationRunWait("The dataset host is unavailable.");
-    const fresh = { reach: steps ?? allReach };
-    const checks = checkAutomationReach(currentRoster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, collection.path), steps: fresh.reach });
-    if (recordVerdicts && await deps.checkReach?.(fresh.reach.slice(0, inventory.reach.length), currentRoster)) throw new AutomationRunWait("The automation is waiting for an editor.", "held");
-    for (const [index, verdict] of checks.entries()) {
-      const step = fresh.reach[index]!;
-      if (!verdict.allowed && (step.kind !== "dataset-field" || visible.has(datasetFieldKey(step.datasetId, step.tableId, step.field.fieldId)))) {
-        throw new Error(index >= inventory.reach.length ? "This automation cannot use the requested Collection or fields." : verdict.reason);
-      }
-    }
-    return currentRoster;
+      checkLocations();
+      return currentRoster;
+    } catch (error) { checkLocations(); throw error; }
   };
   const verifyTarget = async (path: string) => {
     const before = inventory.targets.get(path);
     if (before === undefined) throw new Error(RULES_CHANGED_ERROR);
-    const fresh = await (deps.targets.validate ? deps.targets.validate(before) : deps.targets.resolve(path));
-    if (fresh.kind === "problem") {
-      if (fresh.code === "host-unavailable") throw new AutomationRunWait(fresh.problem);
-      throw new Error(fresh.problem);
+    try {
+      const fresh = await (deps.targets.validate ? deps.targets.validate(before) : deps.targets.resolve(path));
+      if (fresh.kind === "problem") {
+        if (fresh.code === "host-unavailable") throw new AutomationRunWait(fresh.problem);
+        throw new Error(fresh.problem);
+      }
+      if (fresh.kind !== before.kind || (fresh.kind === "dataset" && before.kind === "dataset" &&
+        (fresh.approved.datasetId !== before.approved.datasetId || !await resolves(before.approved)))) throw new Error(RULES_CHANGED_ERROR);
+    } catch (error) {
+      if (path === collection.path) checkSourceMoved();
+      throw error;
     }
-    if (fresh.kind !== before.kind || (fresh.kind === "dataset" && before.kind === "dataset" &&
-      (fresh.approved.datasetId !== before.approved.datasetId || !await resolves(before.approved)))) throw new Error(RULES_CHANGED_ERROR);
+  };
+  let engineWriteAttempted = false;
+  const documentDeps = {
+    ...deps,
+    withRecordWrites: deps.withRecordWrites === undefined ? undefined : <T>(writeSignal: AbortSignal, work: (writes: CollectionRecordWrites) => Promise<T>) =>
+      deps.withRecordWrites!(writeSignal, (writes) => work({
+        setFields: async (input) => {
+          try {
+            const result = await writes.setFields(input);
+            if (Object.keys(result.replaced).length > 0 || Object.keys(result.sharedFileUpdates ?? {}).length > 0) engineWriteAttempted = true;
+            return result;
+          } catch (error) {
+            engineWriteAttempted = true;
+            throw error;
+          }
+        },
+        create: (input) => { engineWriteAttempted = true; return writes.create(input); },
+      })),
   };
   const backend: StepBackend = {
+    needsDurability: () => engineWriteAttempted,
+    madeDurable: () => { engineWriteAttempted = false; },
     async step(work) {
       await checkNow(true);
       const priorCodeReach = new Map(codeReach);
@@ -643,10 +690,17 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
       if (created?.kind === "dataset-created") return { id: String(created.recordId), key: created.recordId, path: datasetRecordKey(created.rules.datasetId, created.tableId, created.recordId) };
       return null;
     },
+    isWriteAction(effect) {
+      const dataset = [...inventory.datasets.values()].find(({ rules }) => rules.definition.datasetId === effect.rules.datasetId);
+      return dataset?.rules.definition.operations.find(operation => operation.operationId === effect.operationId)?.readOnly === false;
+    },
     async apply(run, effect, place, chat) {
+      if (current !== null && (effect.kind === "message" || effect.kind === "wake") && await deps.chat.hasMessage(effect.messageId)) {
+        return [{ kind: "message", messageId: effect.messageId, name: effect.kind === "message" ? effect.name : "your agent" }];
+      }
       await authorizeCode(savedCodeTargets({ ordinal: place.ordinal, effects: [effect] }));
       const datasetEffect = effect.kind === "dataset-edit" || effect.kind === "dataset-create" || effect.kind === "dataset-action";
-      if (!datasetEffect || deps.authorizeDataset === undefined) await checkNow();
+      const currentRoster = !datasetEffect || deps.authorizeDataset === undefined ? await checkNow() : null;
       const effectPath = effect.kind === "set" ? effect.target.collectionPath : "collectionPath" in effect ? effect.collectionPath ?? pathOf(place.ordinal) : pathOf(place.ordinal);
       await verifyTarget(effectPath);
       if (effect.kind === "dataset-edit" || effect.kind === "dataset-create" || effect.kind === "dataset-action") {
@@ -667,12 +721,29 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
         return result ?? { outcome: { kind: "wait", reason: "engine" } };
       }
       if (effect.kind === "message" || effect.kind === "notice" || effect.kind === "wake") {
+        if (current !== null && currentRoster !== null) {
+          const reach: ReachStep[] = effect.kind === "message"
+            ? [{ kind: "post", group: { channelWireId: effect.channelWireId, name: effect.name } }]
+            : effect.kind === "notice"
+              ? [{ kind: "notify", person: { userId: effect.notice.recipientUserId, name: effect.name } }]
+              : [{ kind: "personal", person: { userId: effect.person, name: deps.personName(effect.person) } }];
+          if (await deps.checkReach?.(reach, currentRoster)) return { outcome: { kind: "wait", reason: "held" } };
+          const checked = await checkPlannedMessages(deps, { automationId: claim.automationId, automation, collection, roster: currentRoster }, [{ ordinal: place.ordinal, effects: [effect] }], chat);
+          if ("outcome" in checked) return checked;
+          chat = checked.chat;
+          if (effect.kind === "wake") {
+            const [reach] = checkAutomationReach(currentRoster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, collection.path),
+              steps: [{ kind: "personal", person: { userId: effect.person, name: deps.personName(effect.person) } }] });
+            if (reach && !reach.allowed) return { outcome: failed(reach.reason) };
+          }
+        }
+        if (effect.kind === "message") engineWriteAttempted = true;
         return applyChatEffect(deps, { run, signal, automationName: automation.name, depth: claim.depth + 1, chat }, effect);
       }
       if (!deps.withRecordWrites || !deps.withReads || !deps.collectionPathOf || !deps.collectionIdOf) {
         throw new Error("The workspace engine is unavailable.");
       }
-      return applyDocumentEffect(deps as CollectionAutomationRunDependencies, { run, author, signal, ordinal: place.ordinal, automationName: automation.name, depth: claim.depth + 1, chat }, effect, place.mode);
+      return applyDocumentEffect(documentDeps as CollectionAutomationRunDependencies, { run, author, signal, ordinal: place.ordinal, automationName: automation.name, depth: claim.depth + 1, chat }, effect, place.mode);
     },
   };
   return { backend, ctx, state, resuming: current !== null };

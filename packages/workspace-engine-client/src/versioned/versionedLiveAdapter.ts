@@ -1,3 +1,5 @@
+import { LinksInInput, LinksInResult, LinksResolveInput, LinksResolveResult } from "@dohc/workspace-contracts/links";
+import type { HistoryOperationsStore, HistoryOperation, HistoryUndoResult } from "@dohc/workspace-contracts/engine";
 import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "./engineTextLimits";
 import type { SharedFileUpdate, SharedFileUpdateState } from "../ydoc/ydocWireContract";
 import { createHash, randomUUID } from "node:crypto";
@@ -36,6 +38,7 @@ import {
   type AutomationRetryParams,
   type AutomationScheduleMarksResult,
   type AutomationSettleParams,
+  type AutomationMakeDurableParams,
   type AutomationSubscribeParams,
   type AutomationSubscribeResult,
   type AutomationUnsubscribeParams,
@@ -44,6 +47,8 @@ import {
   type AutomationWatchGroupsParams,
   type AutomationWatchGroupsResult,
   type CaptureFlushResult,
+  type CaptureRecoveryImportParams,
+  type CaptureRecoveryImportResult,
   type CaptureMoveFileResult,
   type CollectionGetParams,
   type CollectionGetRecordParams,
@@ -88,6 +93,8 @@ import {
   type SourceCapture,
 } from "./versionedWireContract";
 import { CONFLICT_ROW_HARD_CAP_BYTES } from "./engineTextLimits";
+
+import { decodeFileResolveResult, MAX_FILE_RESOLVE_TARGETS, MAX_FILE_RESOLVE_BYTES, type FileResolveTarget, type FileResolveResult } from "../daemon/fileResolution";
 
 export class VersionedAdapterCapabilityError extends Error {
   constructor(message: string) {
@@ -178,7 +185,7 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
-export class VersionedLiveAdapter {
+export class VersionedLiveAdapter implements HistoryOperationsStore {
   readonly workspace: WorkspaceHandle;
   readonly workspaceId: string;
   private readonly requester: WorkspaceDaemonRequester;
@@ -455,7 +462,6 @@ export class VersionedLiveAdapter {
         : {}),
       ...(input.author ? { author: input.author } : {}),
       ...(input.momentId !== undefined ? { momentId: input.momentId } : {}),
-      requestId,
     };
     if (Buffer.byteLength(input.text, "utf8") > MAX_DESKTOP_CAPTURE_TEXT_BYTES) {
       const bytes = Buffer.from(input.text, "utf8");
@@ -506,7 +512,6 @@ export class VersionedLiveAdapter {
             : {}),
           ...(input.author ? { author: input.author } : {}),
           ...(input.momentId !== undefined ? { momentId: input.momentId } : {}),
-          requestId,
         },
         { idempotencyKey: requestId },
       );
@@ -529,7 +534,6 @@ export class VersionedLiveAdapter {
           : {}),
         ...(input.author ? { author: input.author } : {}),
         ...(input.momentId !== undefined ? { momentId: input.momentId } : {}),
-        requestId,
       },
       { idempotencyKey: requestId },
     );
@@ -764,7 +768,6 @@ export class VersionedLiveAdapter {
     metadata: AdapterWriteMetadata;
   }): Promise<VersionedMethodResultMap["versionedText.merge"]> {
     this.assertWorkspace(input.workspaceId);
-    const requestId = randomUUID();
     return this.request(
       VERSIONED_METHOD.versionsMerge,
       {
@@ -779,9 +782,8 @@ export class VersionedLiveAdapter {
         ...(input.metadata.correlationId !== undefined
           ? { correlationId: input.metadata.correlationId }
           : {}),
-        requestId,
       },
-      { idempotencyKey: requestId },
+      { idempotencyKey: randomUUID() },
     );
   }
 
@@ -912,6 +914,38 @@ export class VersionedLiveAdapter {
     });
   }
 
+  async incomingLinks(input: LinksInInput): Promise<LinksInResult> {
+    return LinksInResult.parse(await this.requester.request("links.in", LinksInInput.parse(input), { workspace: this.workspace }));
+  }
+  async resolveLinks(input: LinksResolveInput): Promise<LinksResolveResult> {
+    const params = LinksResolveInput.parse(input);
+    if (Buffer.byteLength(JSON.stringify(params)) > 48 * 1024) throw new Error("links.resolve exceeds 48 KiB.");
+    const result = LinksResolveResult.parse(await this.requester.request("links.resolve", params, { workspace: this.workspace }));
+    if (result.results.length !== params.literals.length) throw new DaemonProtocolError("links.resolve returned a different literal count.");
+    return result;
+  }
+
+  /** Resolve only the requested file identities without listing or reading bodies. */
+  async resolveFiles(input: {
+    workspaceId: string;
+    versionId?: string;
+    targets: readonly FileResolveTarget[];
+    signal?: AbortSignal;
+  }): Promise<FileResolveResult> {
+    this.assertWorkspace(input.workspaceId);
+    input.signal?.throwIfAborted();
+    const params = { ...(input.versionId !== undefined ? { versionId: input.versionId } : {}), targets: [...input.targets] };
+    if (params.targets.length > MAX_FILE_RESOLVE_TARGETS || Buffer.byteLength(JSON.stringify(params)) > MAX_FILE_RESOLVE_BYTES) {
+      throw new Error("files.resolve exceeds its target or byte cap.");
+    }
+    const result = decodeFileResolveResult(await this.requester.request("files.resolve", params, { workspace: this.workspace }));
+    input.signal?.throwIfAborted();
+    if (result.results.length !== input.targets.length || (input.versionId !== undefined && result.versionId !== input.versionId)) {
+      throw new DaemonProtocolError("files.resolve returned a different version or target count.");
+    }
+    return result;
+  }
+
   /**
    * Lists every file in the version, or only files under the folder `under`.
    * The engine orders paths bytewise, so a folder's files are one run that
@@ -937,6 +971,25 @@ export class VersionedLiveAdapter {
       afterPath = inside.length === page.files.length ? page.nextAfterPath ?? undefined : undefined;
     } while (afterPath !== undefined);
     return files;
+  }
+
+  /** One page of the files under the folder `under` after `afterPath`, or from the folder's start. */
+  async listTextFilePage(input: {
+    workspaceId: string;
+    versionId: string;
+    under: string;
+    afterPath?: string;
+    limit: number;
+  }): Promise<{ files: VersionedTextListEntry[]; more: boolean }> {
+    this.assertWorkspace(input.workspaceId);
+    const prefix = `${input.under}/`;
+    const page = await this.request(VERSIONED_METHOD.textList, {
+      versionId: input.versionId,
+      limit: input.limit,
+      afterPath: input.afterPath ?? prefix,
+    });
+    const files = page.files.filter((file) => file.path.startsWith(prefix));
+    return { files, more: files.length === page.files.length && page.nextAfterPath !== null };
   }
 
   async captureSourceMetadata(input: {
@@ -1032,7 +1085,6 @@ export class VersionedLiveAdapter {
     captureHoldId?: string;
   }): Promise<VersionedMethodResultMap["versionedText.rename"]> {
     this.assertWorkspace(input.workspaceId);
-    const requestId = randomUUID();
     return this.request(
       VERSIONED_METHOD.textRename,
       {
@@ -1049,9 +1101,8 @@ export class VersionedLiveAdapter {
           : {}),
         ...(input.author ? { author: input.author } : {}),
         ...(input.captureHoldId !== undefined ? { captureHoldId: input.captureHoldId } : {}),
-        requestId,
       },
-      { idempotencyKey: requestId },
+      { idempotencyKey: randomUUID() },
     );
   }
 
@@ -1074,7 +1125,6 @@ export class VersionedLiveAdapter {
         "versionedText.delete does not accept a caller-supplied moment id.",
       );
     }
-    const requestId = input.requestId ?? randomUUID();
     return this.request(
       VERSIONED_METHOD.textDelete,
       {
@@ -1093,9 +1143,8 @@ export class VersionedLiveAdapter {
           : {}),
         ...(input.author ? { author: input.author } : {}),
         ...(input.captureHoldId !== undefined ? { captureHoldId: input.captureHoldId } : {}),
-        requestId,
       },
-      { idempotencyKey: requestId },
+      { idempotencyKey: input.requestId ?? randomUUID() },
     );
   }
 
@@ -1108,12 +1157,7 @@ export class VersionedLiveAdapter {
     author?: WriteAuthor;
   }): Promise<void> {
     this.assertWorkspace(input.workspaceId);
-    const requestId = randomUUID();
-    await this.request(
-      VERSIONED_METHOD.textRollback,
-      { ...input, requestId },
-      { idempotencyKey: requestId },
-    );
+    await this.request(VERSIONED_METHOD.textRollback, input, { idempotencyKey: randomUUID() });
   }
 
   async listMoments(input: {
@@ -1138,21 +1182,19 @@ export class VersionedLiveAdapter {
     });
   }
 
-  async readHistoryPage(input: {
-    workspaceId: string;
-    objectId?: string;
-    limit?: number;
-    beforeMomentOrder?: number;
-  }): Promise<VersionedMethodResultMap["history.page"]> {
+  async readHistoryPage(input: VersionedMethodParamsMap["history.page"]): Promise<VersionedMethodResultMap["history.page"]> {
     this.assertWorkspace(input.workspaceId);
-    return this.request(VERSIONED_METHOD.historyPage, {
-      workspaceId: input.workspaceId,
-      ...(input.objectId !== undefined ? { objectId: input.objectId } : {}),
-      ...(input.limit !== undefined ? { limit: input.limit } : {}),
-      ...(input.beforeMomentOrder !== undefined
-        ? { beforeMomentOrder: input.beforeMomentOrder }
-        : {}),
-    });
+    return this.request(VERSIONED_METHOD.historyPage, input);
+  }
+
+  async readHistoryOperation(input: {workspaceId: string; operationId: string}): Promise<HistoryOperation> {
+    this.assertWorkspace(input.workspaceId);
+    return this.request(VERSIONED_METHOD.historyOperations, {operationId: input.operationId});
+  }
+
+  async undoHistoryOperation(input: {workspaceId: string; operationId: string; requestId: string; author?: WriteAuthor}): Promise<HistoryUndoResult> {
+    this.assertWorkspace(input.workspaceId);
+    return this.request(VERSIONED_METHOD.historyUndo, {operationId: input.operationId, ...(input.author ? {author: input.author} : {})}, {idempotencyKey: input.requestId});
   }
 
   async getMoment(input: {
@@ -1161,6 +1203,18 @@ export class VersionedLiveAdapter {
   }): Promise<MomentRecord | null> {
     this.assertWorkspace(input.workspaceId);
     return this.request(VERSIONED_METHOD.momentsGet, {
+      momentId: input.momentId,
+    });
+  }
+
+  async publicationApplied(input: {
+    workspaceId: string;
+    requestId: string;
+    momentId: string;
+  }): Promise<boolean> {
+    this.assertWorkspace(input.workspaceId);
+    return this.request(VERSIONED_METHOD.publicationApplied, {
+      requestId: input.requestId,
       momentId: input.momentId,
     });
   }
@@ -1263,6 +1317,11 @@ export class VersionedLiveAdapter {
     input: AutomationClaimNextParams,
   ): Promise<AutomationClaimNextResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.automationsClaimNext, input);
+  }
+
+  /** Syncs earlier engine writes; the claim may belong to an external ledger. */
+  async makeAutomationWritesDurable(input: AutomationMakeDurableParams = {}): Promise<void> {
+    await this.workspaceRequest(WORKSPACE_METHOD.automationsMakeDurable, input);
   }
 
   /** Settles a running claim as done, or failed with its error text. */
@@ -1596,6 +1655,10 @@ export class VersionedLiveAdapter {
     return this.workspaceRequest(WORKSPACE_METHOD.watcherStatus, {});
   }
 
+  async importRecovery(input: CaptureRecoveryImportParams): Promise<CaptureRecoveryImportResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.captureImportRecovery, input);
+  }
+
   async clearCaptureRecovery(momentId: string): Promise<void> {
     await this.workspaceRequest(WORKSPACE_METHOD.captureClearRecovery, { momentId });
   }
@@ -1616,14 +1679,18 @@ export class VersionedLiveAdapter {
     return this.workspaceRequest(WORKSPACE_METHOD.captureReconcile, {});
   }
 
+  async retryHeldCapture(path: string) {
+    return this.workspaceRequest(WORKSPACE_METHOD.captureRetryHeld, { path });
+  }
+
   async setCaptureAuthor(author: AgentAuthor | null): Promise<void> {
     await this.workspaceRequest(WORKSPACE_METHOD.captureSetAuthor, { author });
   }
 
   // Capture records nothing until the hold is released, its lease runs out
   // unrenewed, or the workspace closes.
-  async holdCapture(): Promise<{ holdId: string; leaseMs: number }> {
-    return await this.workspaceRequest(WORKSPACE_METHOD.captureHold, {});
+  async holdCapture(input: { operationId?: string } = {}): Promise<{ holdId: string; leaseMs: number }> {
+    return await this.workspaceRequest(WORKSPACE_METHOD.captureHold, input);
   }
 
   async renewCapture(holdId: string): Promise<boolean> {

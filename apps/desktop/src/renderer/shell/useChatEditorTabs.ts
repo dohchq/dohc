@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { bridge } from "../bridge";
-import { parseChatTabPath } from "../workbench/workbenchState";
+import { parseTab } from "../workbench/workbenchState";
 import type { ChatsDrafts, ChatsNav } from "../workbench/ChatsView";
 import { chatEditorPath, chatEditorTitle, chatsNavigationLeavesConversation, chatsNavigationRequiresRemount } from "./chatsNav";
 
@@ -25,6 +25,8 @@ const EMPTY_DRAFTS: ChatsDrafts = {
   dmDraft: "",
   replyTarget: null,
   resolveTargetMessageId: null,
+  poll: null,
+  newThreadPoll: null,
 };
 
 // Inactive editors unmount. Keep only their navigation and unsent input here;
@@ -59,7 +61,8 @@ export function useChatEditorTabs(input: {
         session.current.key = sessionKey;
         session.current.generation += 1;
         for (const path of store.current.entries.keys()) {
-          const kind = parseChatTabPath(path)?.kind;
+          const tab = parseTab(path);
+          const kind = tab.kind === "chat" ? tab.target.kind : null;
           if (kind !== "dm" && kind !== "new") continue;
           store.current.entries.delete(path);
         }
@@ -119,7 +122,11 @@ export function useChatEditorTabs(input: {
         }
         // A thread in this tab belongs to this channel, whose new post the
         // person may have started before opening the thread.
-        entry.drafts = entry.drafts && { ...EMPTY_DRAFTS, newThreadBody: entry.drafts.newThreadBody };
+        entry.drafts = entry.drafts && {
+          ...EMPTY_DRAFTS,
+          newThreadBody: entry.drafts.newThreadBody,
+          newThreadPoll: entry.drafts.newThreadPoll,
+        };
       }
       const typed = entry.drafts?.newThreadBody.trim() ? `${entry.drafts.newThreadBody}\n\n` : "";
       entry.drafts = { ...(entry.drafts ?? EMPTY_DRAFTS), newThreadBody: `${typed}${prefill}` };
@@ -161,7 +168,8 @@ export function useChatEditorTabs(input: {
       .map((path) => {
         const entry = get(path);
         entry.restoreAttempted = true;
-        return { path, entry, target: parseChatTabPath(path) };
+        const tab = parseTab(path);
+        return { path, entry, target: tab.kind === "chat" ? tab.target : null };
       });
     const remember = (path: string, entry: ChatEditor, nav?: ChatsNav) => {
       if (!owner.active || store.current !== owner || !session.current.ready ||

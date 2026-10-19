@@ -1,3 +1,4 @@
+import { STORE_BUSY_RETRY_BUDGET_MS, storeBusyBackoffMs } from "./storeBusyRetry";
 import {
   DaemonRefusalError,
   isDaemonReconnectError,
@@ -69,6 +70,8 @@ const INITIAL_CAPTURE_SETTLED_EVENT = "capture.initialSettled";
 // separate from the much shorter budget for recovering a failed transport.
 const INITIAL_CAPTURE_WAIT_MS = 120_000;
 
+type StoreBusyRetryState = { deadline?: number; attempts: number };
+
 class InitialCaptureBindingChangedError extends Error {}
 
 function isInitialCaptureSettledEvent(
@@ -84,6 +87,9 @@ interface SessionEntry {
   readonly workspaceId: string;
   readonly rootPath: string;
   binding: EngineWorkspaceBinding | null;
+  // A binding was published once. Until then nothing was accepted through
+  // this session, so quit may abandon its open.
+  opened: boolean;
   opening: {
     client: EngineDaemonClient;
     promise: Promise<EngineWorkspaceBinding>;
@@ -221,13 +227,14 @@ export class EngineWorkspaceRetryDeadlineError extends Error {
   }
 }
 
-// A bounded region was asked to start after `beginShutdown`. It is refused
-// before the first daemon call, because the app is quitting and the work is
-// abandonable by construction.
+// Work that quit abandons: a bounded region asked to start after
+// `beginShutdown`, or a run that would wait on a workspace's first open.
+// Either is refused before it reaches the daemon or stops waiting, because the
+// app is quitting and the work is abandonable by construction.
 export class EngineWorkspaceShuttingDownError extends Error {
   constructor() {
     super(
-      "Rust engine refused a bounded retry region: the app is quitting. " +
+      "Rust engine refused work that waits on an open: the app is quitting. " +
         "Nothing new starts during teardown; retry after the next launch.",
     );
     this.name = "EngineWorkspaceShuttingDownError";
@@ -431,6 +438,16 @@ export class EngineWorkspaceSessions {
     this.workspaceOpenDeadlineMs = deadline ?? WORKSPACE_OPEN_DEADLINE_MS;
   }
 
+  /** Checks publication without opening a workspace or calling the daemon. */
+  hasAvailableClient(): boolean {
+    try {
+      this.source.currentClient();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   /** Uses an existing binding without opening or reconnecting a workspace. */
   async runIfOpen<T>(
     workspace: EngineWorkspace,
@@ -463,12 +480,14 @@ export class EngineWorkspaceSessions {
       let rebindStarted = false;
       let lastError: unknown;
       let initialCaptureDeadline: number | undefined;
+      const storeBusy: StoreBusyRetryState = { attempts: 0 };
       for (let attempt = 1; attempt <= maxAttempts;) {
         const binding = await this.openForRun(
           workspace,
           entry,
           options,
           rebindStarted,
+          storeBusy,
         );
         // The second door: the operation is daemon work this class does not
         // issue itself, and the rebind above can take the whole window with it.
@@ -517,27 +536,11 @@ export class EngineWorkspaceSessions {
           ) {
             entry.binding = null;
           }
-          // The busy store, collected for every method rather than for
-          // `workspace.open` alone. The engine answers it on any call, and a
-          // contract only three surfaces collected on left the rest reporting
-          // a kebab-case wire message to the user for a condition that clears
-          // by itself (#658, and #595 round 14's rule about advertising
-          // retries nobody performs).
-          //
-          // Safe for every method, including the non-idempotent ones, and
-          // only for this class: a busy store is raised by `BEGIN IMMEDIATE`
-          // or by the commit, so the transaction did not commit and a second
-          // attempt cannot apply anything twice.
-          //
-          // Deliberately not the whole `afterBackoff` disposition, which also
-          // carries DEADLINE_EXCEEDED. A deadline interrupts between durable
-          // units and leaves work already committed durable
-          // (`dohc-engine-runtime` actor), so replaying it is a second write —
-          // exactly what the `retryTransportErrors` opt-in above exists to
-          // keep callers in charge of. The protocol calls that disposition
-          // retryable because retryable mutations carry idempotency keys, and
-          // this wrapper cannot know whether the operation it was handed does.
-          const retryAfterBackoff = isEngineStoreBusyRefusal(error);
+          // Store admission refuses before the transaction or mutation closure.
+          // Retrying preserves the binding and has its own total catch-up budget.
+          // Do not retry the whole afterBackoff class: deadline refusals can
+          // follow committed work and need the caller's idempotency decision.
+          const retryAfterStoreBusy = isEngineStoreBusyRefusal(error);
           const retryAfterInitialCapture =
             options.retryInitialCapture === true &&
             this.activeBudget() !== undefined &&
@@ -569,10 +572,14 @@ export class EngineWorkspaceSessions {
             }
             continue;
           }
+          if (retryAfterStoreBusy) {
+            await this.waitForStoreBusy(workspace.workspaceId, error, storeBusy);
+            continue;
+          }
           this.noteBudgetAttempt(error);
           // A failure this ladder will not retry never reaches the gates: a
           // permission refusal is not a timeout however long we waited.
-          if (!retryAfterReconnect && !retryAfterTransport && !retryAfterBackoff) {
+          if (!retryAfterReconnect && !retryAfterTransport) {
             throw error;
           }
           rebindStarted = true;
@@ -581,7 +588,7 @@ export class EngineWorkspaceSessions {
             workspaceId: workspace.workspaceId,
             attempt,
             lastAttempt: attempt >= maxAttempts,
-            backoff: retryAfterTransport || retryAfterBackoff,
+            backoff: retryAfterTransport,
             cause: error,
           });
           if (next === "stop") throw error;
@@ -784,6 +791,26 @@ export class EngineWorkspaceSessions {
     );
   }
 
+  private async waitForStoreBusy(
+    workspaceId: string,
+    error: unknown,
+    retry: StoreBusyRetryState,
+  ): Promise<void> {
+    retry.deadline ??= this.now() + STORE_BUSY_RETRY_BUDGET_MS;
+    const remaining = retry.deadline - this.now();
+    if (remaining <= 0) throw error;
+    this.noteBudgetAttempt(error);
+    const next = await this.settleAttempt({
+      workspaceId,
+      attempt: ++retry.attempts,
+      lastAttempt: false,
+      backoff: true,
+      delayMs: Math.min(storeBusyBackoffMs(retry.attempts), remaining),
+      cause: error,
+    });
+    if (next === "stop" || this.now() >= retry.deadline) throw error;
+  }
+
   /**
    * What happens after one failed attempt, for every ladder that has them:
    * the operation retries, the open ladder, and the client-churn loop.
@@ -812,6 +839,7 @@ export class EngineWorkspaceSessions {
     // Transport retries wait; an `afterReconnect` retry takes no backoff at
     // all, and used to skip these gates entirely because of it.
     backoff: boolean;
+    delayMs?: number;
     cause: unknown;
   }): Promise<"retry" | "stop"> {
     const checkDeadline = (): void => {
@@ -855,7 +883,7 @@ export class EngineWorkspaceSessions {
     // deadline must not ride the backoff over the line and then start a fresh
     // open on a spent budget.
     await this.interruptibleSleep(
-      transportBackoffMs(gate.attempt),
+      gate.delayMs ?? transportBackoffMs(gate.attempt),
       abandonable,
     );
     // Same scope as before the wait: quit ends a bounded region's retries, and
@@ -1002,6 +1030,7 @@ export class EngineWorkspaceSessions {
         workspaceId: workspace.workspaceId,
         rootPath: workspace.rootPath,
         binding: null,
+        opened: false,
         opening: null,
         closing: null,
         retiring: false,
@@ -1016,7 +1045,7 @@ export class EngineWorkspaceSessions {
       entry.rootPath !== workspace.rootPath
     ) {
       throw new Error(
-        `Rust engine workspace authority changed for ${workspace.workspaceId}.`,
+        "This workspace no longer matches the open session. Open the workspace again.",
       );
     }
     return entry;
@@ -1073,12 +1102,13 @@ export class EngineWorkspaceSessions {
     entry: SessionEntry,
     options: EngineWorkspaceRunOptions,
     rebindStarted: boolean,
+    storeBusy: StoreBusyRetryState,
   ): Promise<EngineWorkspaceBinding> {
     const maxAttempts = options.retryTransportErrors
       ? this.transportRebindAttempts
       : 2;
     let lastError: unknown;
-    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    for (let attempt = 1; attempt <= maxAttempts;) {
       try {
         return await this.open(workspace, entry, options);
       } catch (error) {
@@ -1090,6 +1120,10 @@ export class EngineWorkspaceSessions {
         // region gates in place, a quit refusal cannot reach the wrapping
         // branch below, so no test can tell the wrap from the rethrow.)
         if (isEngineWorkspaceOpenRefusedError(error)) throw error;
+        if (isEngineStoreBusyRefusal(error)) {
+          await this.waitForStoreBusy(workspace.workspaceId, error, storeBusy);
+          continue;
+        }
         lastError = error;
         this.noteBudgetAttempt(error);
         // Every retry decision this ladder makes settles here, including the
@@ -1111,6 +1145,7 @@ export class EngineWorkspaceSessions {
           cause: error,
         });
         if (next === "stop") break;
+        attempt += 1;
       }
     }
     if (rebindStarted) {
@@ -1132,13 +1167,16 @@ export class EngineWorkspaceSessions {
       const client = this.source.currentClient();
       if (entry.binding?.client === client) return entry.binding;
       if (entry.binding?.client !== client) entry.binding = null;
-      if (entry.opening?.client === client) return await entry.opening.promise;
+      if (entry.opening?.client === client) {
+        return await this.untilFirstOpenAbandoned(entry, entry.opening.promise);
+      }
+      if (this.shuttingDown && !entry.opened) throw new EngineWorkspaceShuttingDownError();
 
       const promise = this.openWithClient(client, workspace);
       entry.opening = { client, promise };
       let binding: EngineWorkspaceBinding;
       try {
-        binding = await promise;
+        binding = await this.untilFirstOpenAbandoned(entry, promise);
       } finally {
         if (entry.opening?.promise === promise) entry.opening = null;
       }
@@ -1180,12 +1218,36 @@ export class EngineWorkspaceSessions {
         continue;
       }
       entry.binding = binding;
+      entry.opened = true;
       try {
         this.onOpened?.(workspace);
       } catch (error) {
         console.warn("[engine] workspace-open observer failed", error);
       }
       return binding;
+    }
+  }
+
+  // Quit does not wait on a workspace's first open. Nothing was accepted
+  // through the session yet, and the daemon finishes the open, then closes
+  // the workspace itself, after the app exits. A reopen is not abandoned:
+  // a live document's accepted write may need it.
+  private async untilFirstOpenAbandoned(
+    entry: SessionEntry,
+    open: Promise<EngineWorkspaceBinding>,
+  ): Promise<EngineWorkspaceBinding> {
+    if (entry.opened) return await open;
+    const quit = this.shutdownController.signal;
+    if (quit.aborted) throw new EngineWorkspaceShuttingDownError();
+    let abandon!: () => void;
+    const abandoned = new Promise<never>((_resolve, reject) => {
+      abandon = () => reject(new EngineWorkspaceShuttingDownError());
+    });
+    quit.addEventListener("abort", abandon, { once: true });
+    try {
+      return await Promise.race([open, abandoned]);
+    } finally {
+      quit.removeEventListener("abort", abandon);
     }
   }
 

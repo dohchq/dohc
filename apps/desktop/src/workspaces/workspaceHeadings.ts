@@ -289,7 +289,3 @@ export function findWorkspaceHeading(
   }
   return null;
 }
-
-export function workspaceHeadingSection(markdown: string, heading: WorkspaceHeading): string {
-  return markdown.slice(heading.startOffset, heading.endOffset).trimEnd();
-}

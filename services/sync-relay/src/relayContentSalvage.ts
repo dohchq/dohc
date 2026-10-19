@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { validateUserMaterializePath } from "@dohc/workspace-core";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
+import { parseRelaySnapshotManifest } from "./relaySnapshot";
 
 const sha256 = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 async function fileDigest(path: string): Promise<string> {
@@ -29,10 +30,7 @@ export async function salvageRelayContent(directory: string, output: string): Pr
   await canonical(directory);
   await canonical(dirname(output));
   if (!isAbsolute(output) || resolve(output) !== output) throw new Error("Use an absolute new output directory.");
-  const manifest = JSON.parse(await readFile(join(directory, "manifest.json"), "utf8"));
-  if (manifest?.version !== 1 || manifest.kind !== "dohc-relay-snapshot" || !/^[a-f0-9]{64}$/.test(manifest.sha256)) {
-    throw new Error("This is not a completed relay snapshot.");
-  }
+  const manifest = parseRelaySnapshotManifest(JSON.parse(await readFile(join(directory, "manifest.json"), "utf8")));
   const source = join(directory, "relay.sqlite");
   await canonical(source);
   for (const suffix of ["-wal", "-shm", "-journal"]) {
@@ -56,7 +54,8 @@ export async function salvageRelayContent(directory: string, output: string): Pr
     const checks = db.prepare("PRAGMA integrity_check").all();
     if (checks.length !== 1 || checks[0]?.integrity_check !== "ok") throw new Error("The snapshot failed SQLite integrity checks.");
     const marker = db.prepare("SELECT * FROM sync_relay_continuity").get();
-    if (!marker || marker.namespace !== manifest.namespace || marker.generation !== manifest.generation || marker.stamp !== manifest.stamp) {
+    if (!marker || marker.namespace !== manifest.namespace || marker.generation !== manifest.generation || marker.stamp !== manifest.stamp ||
+        marker.nonce !== manifest.nonce) {
       throw new Error("Snapshot provenance does not match its database.");
     }
     const content = db.prepare("SELECT content, byte_length FROM sync_relay_blobs WHERE workspace_id=? AND sha256=?");

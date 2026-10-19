@@ -153,6 +153,15 @@ impl FilesActor {
         bounds: ScanBounds,
         rehydrated: Option<(ScanManifest, ScanGeneration)>,
     ) -> Result<Self, FilesError> {
+        Self::spawn_with_paths(root, bounds, rehydrated, None)
+    }
+
+    fn spawn_with_paths(
+        root: PathBuf,
+        bounds: ScanBounds,
+        rehydrated: Option<(ScanManifest, ScanGeneration)>,
+        paths: Option<Vec<String>>,
+    ) -> Result<Self, FilesError> {
         debug_assert_off_runtime();
         let (tx, rx) = mpsc::channel::<Command>(CHANNEL_CAPACITY);
         // Reserve the dedicated Close slot up front (the channel is empty, so
@@ -171,6 +180,7 @@ impl FilesActor {
                     root,
                     bounds,
                     rehydrated,
+                    paths,
                     rx,
                     worker_state,
                     worker_overflow,
@@ -216,11 +226,23 @@ impl FilesActor {
         bounds: ScanBounds,
         rehydrated: Option<(ScanManifest, ScanGeneration)>,
     ) -> Result<Self, FilesError> {
+        Self::spawn_async_with_paths(root, bounds, rehydrated, None).await
+    }
+
+    /// Reconcile only the supplied exact paths, retaining the ordinary hash and apply pipeline.
+    pub async fn spawn_async_with_paths(
+        root: PathBuf,
+        bounds: ScanBounds,
+        rehydrated: Option<(ScanManifest, ScanGeneration)>,
+        paths: Option<Vec<String>>,
+    ) -> Result<Self, FilesError> {
         let (tx, rx) = oneshot::channel();
         std::thread::Builder::new()
             .name("dohc-files-spawn".to_owned())
             .spawn(move || {
-                let _ = tx.send(FilesActor::spawn_with_manifest(root, bounds, rehydrated));
+                let _ = tx.send(FilesActor::spawn_with_paths(
+                    root, bounds, rehydrated, paths,
+                ));
             })
             .map_err(|_| FilesError::PoolUnavailable {
                 reason: "could not spawn files actor startup thread",
@@ -379,12 +401,17 @@ impl FilesHandle {
     /// cancelled (stopping the scan at its next between-unit boundary) and
     /// [`FilesError::DeadlineExceeded`] is returned. A reconcile that already
     /// prepared before the deadline is returned, but no generation advances
-    /// until its capture receipt is acknowledged.
+    /// until its capture receipt is acknowledged. A zero deadline cancels the
+    /// token and returns without enqueueing work.
     pub async fn reconcile_with_deadline(
         &self,
         token: CancellationToken,
         deadline: std::time::Duration,
     ) -> Result<ReconcileRun, FilesError> {
+        if deadline.is_zero() {
+            token.cancel();
+            return Err(FilesError::DeadlineExceeded);
+        }
         let deadline_at = tokio::time::Instant::now() + deadline;
         let (reply, reply_rx) = oneshot::channel();
 
@@ -421,10 +448,12 @@ fn debug_assert_off_runtime() {
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn worker_main(
     root: PathBuf,
     bounds: ScanBounds,
     rehydrated: Option<(ScanManifest, ScanGeneration)>,
+    paths: Option<Vec<String>>,
     mut rx: mpsc::Receiver<Command>,
     state: Arc<AtomicU8>,
     pending_overflow: Arc<AtomicBool>,
@@ -441,7 +470,7 @@ fn worker_main(
     }
     let _closed_guard = ClosedGuard(Arc::clone(&state));
 
-    let scanner = match Scanner::new(bounds) {
+    let scanner = match Scanner::new(bounds).map(|scanner| scanner.with_paths(paths)) {
         Ok(scanner) => scanner,
         Err(err) => {
             let _ = startup_tx.send(Err(err));
@@ -516,6 +545,57 @@ mod saturation_tests {
     use super::*;
     use dohc_test_scratch::ScratchDir;
 
+    #[tokio::test]
+    async fn expired_deadline_never_enters_a_ready_queue() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let handle = FilesHandle {
+            tx,
+            state: Arc::new(AtomicU8::new(LifecycleState::Ready.as_u8())),
+            pending_overflow: Arc::new(AtomicBool::new(false)),
+        };
+        let token = CancellationToken::new();
+
+        let err = handle
+            .reconcile_with_deadline(token.clone(), std::time::Duration::ZERO)
+            .await
+            .expect_err("deadline must trip");
+
+        assert_eq!(err.code(), "deadline-exceeded");
+        assert!(token.is_cancelled());
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn queued_reconcile_deadline_cancels_the_request() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let handle = FilesHandle {
+            tx,
+            state: Arc::new(AtomicU8::new(LifecycleState::Ready.as_u8())),
+            pending_overflow: Arc::new(AtomicBool::new(false)),
+        };
+        let token = CancellationToken::new();
+
+        // The queued command keeps its reply sender alive, but never replies.
+        let err = handle
+            .reconcile_with_deadline(token.clone(), std::time::Duration::from_millis(10))
+            .await
+            .expect_err("queued request must reach its deadline");
+
+        assert_eq!(err.code(), "deadline-exceeded");
+        assert!(token.is_cancelled());
+        let Command::Reconcile {
+            token: queued_token,
+            ..
+        } = rx.try_recv().expect("queued reconcile")
+        else {
+            panic!("expected a queued reconcile");
+        };
+        assert!(queued_token.is_cancelled());
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn overflow_is_never_lost_even_when_the_queue_is_saturated() {
         let workspace = ScratchDir::new().expect("workspace");
@@ -540,6 +620,7 @@ mod saturation_tests {
                     not_owned_paths: Vec::new(),
                     failed_applies: Vec::new(),
                     deferred_paths: Vec::new(),
+                    held_observations: Vec::new(),
                     crashed_after_durable_boundary: None,
                     degraded: false,
                 },

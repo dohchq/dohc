@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename } from "node:fs/promises";
+import { atomicWriteFile, type DurableFileOperations } from "../atomicReplaceFile";
 import { join } from "node:path";
 import { z } from "zod";
+import { SETTLEMENT_BINDING_CHANGED } from "./settlementRefusal";
 import { NoticeNotSentError } from "@dohc/automation-executor/automation-chat";
 import {
   isNoticeBody,
@@ -101,8 +103,9 @@ export interface NoticeStore {
   // Takes back a notice this computer posted: an unsent post goes, and a
   // sent one is dismissed.
   withdraw(noticeId: string): Promise<void>;
-  // Sends waiting posts and marks, then pulls changes. Never rejects.
-  sync(): Promise<void>;
+  // Sends waiting posts and marks, then pulls changes. A scoped pass stops
+  // when its caller is no longer current. Never rejects.
+  sync(isCurrent?: () => boolean): Promise<void>;
   refreshRefusals(openedWorkspaceId?: string): Promise<void>;
   // Stops refusal work for good, as quit does before workspaces close: work
   // not started yet never reads or dismisses a refusal, and the promise
@@ -288,14 +291,15 @@ export function createNoticeStore(deps: {
   dismissRefusal?(workspaceId: string, noticeId: string, refusalCoordinates: RefusalCoordinate[]): Promise<void>;
   nowMs?: () => number;
   outboxPostLimit?: number;
+  fileOperations?: DurableFileOperations;
 }): NoticeStore {
   const nowMs = deps.nowMs ?? Date.now;
   const outboxPostLimit = deps.outboxPostLimit ?? NOTICE_LIST_ROW_LIMIT;
   let localFile: LocalFile | null = null;
   const accountFiles = new Map<string, AccountFile>();
 
-  // Every read and write of the files runs in this queue, one at a time.
-  // Relay calls run outside it.
+  // File operations run one at a time; relay calls run outside the queue.
+  // Saves sync file data. On Windows, a power cut can still undo the rename.
   let queue: Promise<unknown> = Promise.resolve();
   function locked<T>(work: () => Promise<T>): Promise<T> {
     const run = queue.then(work);
@@ -337,10 +341,14 @@ export function createNoticeStore(deps: {
   }
 
   async function save(name: string, value: LocalFile | AccountFile): Promise<void> {
-    await mkdir(deps.directory, { recursive: true });
-    const path = join(deps.directory, name);
-    await writeFile(`${path}.tmp`, JSON.stringify(value), { mode: 0o600 });
-    await rename(`${path}.tmp`, path);
+    try {
+      await mkdir(deps.directory, { recursive: true });
+      await atomicWriteFile(join(deps.directory, name), JSON.stringify(value), deps.fileOperations);
+    } catch (error) {
+      localFile = null;
+      accountFiles.clear();
+      throw error;
+    }
   }
 
   async function loadLocal(): Promise<LocalFile> {
@@ -438,11 +446,13 @@ export function createNoticeStore(deps: {
 
   // The server has no notice list. Waiting notices move to this computer's
   // list, and one local notice says why, once per account.
-  async function noteRoutesMissing(account: NoticeAccount): Promise<void> {
+  async function noteRoutesMissing(session: NoticeSession): Promise<void> {
     const changed = await locked(async () => {
+      const account = session.account;
       const file = await loadAccount(account);
-      if (file.routesMissing && file.posts.length === 0 && file.marks.length === 0) return false;
       const local = await loadLocal();
+      if (!session.isCurrent()) throw new SessionChanged();
+      if (file.routesMissing && file.posts.length === 0 && file.marks.length === 0) return false;
       for (const { request, workspaceId, createdAtMs } of file.posts) {
         addLocal(local, {
           noticeId: request.noticeId, kind: request.kind, workspaceId,
@@ -588,63 +598,82 @@ export function createNoticeStore(deps: {
     }
   }
 
-  async function syncAccount(session: NoticeSession): Promise<void> {
+  async function syncAccount(session: NoticeSession, accountIsCurrent: () => boolean): Promise<void> {
     const account = session.account;
-    if (await sendPosts(session) === "routes-missing") return await noteRoutesMissing(account);
-    if (await sendMarks(session) === "routes-missing") return await noteRoutesMissing(account);
+    if (await sendPosts(session) === "routes-missing") return await noteRoutesMissing(session);
+    if (await sendMarks(session) === "routes-missing") return await noteRoutesMissing(session);
 
     let changed = false;
-    for (let more = true; more;) {
-      const cursor = await locked(async () => (await loadAccount(account)).cursor);
-      const query = new URLSearchParams({ limit: String(NOTICE_PAGE_MAX), ...(cursor === null ? {} : { cursor }) });
-      let page: z.infer<typeof RelayPage>;
-      try {
-        page = RelayPage.parse(await (await relay(session, `/sync/notices?${query}`)).json());
-      } catch (error) {
-        if (error instanceof RelayRefusal && error.reason === "routes-missing") {
-          return await noteRoutesMissing(account);
+    try {
+      for (let more = true; more;) {
+        const cursor = await locked(async () => (await loadAccount(account)).cursor);
+        const query = new URLSearchParams({ limit: String(NOTICE_PAGE_MAX), ...(cursor === null ? {} : { cursor }) });
+        let page: z.infer<typeof RelayPage>;
+        try {
+          page = RelayPage.parse(await (await relay(session, `/sync/notices?${query}`)).json());
+        } catch (error) {
+          if (error instanceof RelayRefusal && error.reason === "routes-missing") {
+            return await noteRoutesMissing(session);
+          }
+          throw error;
         }
-        throw error;
+        changed = await locked(async () => {
+          const file = await loadAccount(account);
+          if (!session.isCurrent()) throw new SessionChanged();
+          const merged = merge(file, page);
+          if (!merged && file.cursor === page.nextCursor && !file.routesMissing) return false;
+          file.cursor = page.nextCursor;
+          file.routesMissing = false;
+          await saveAccount(account, file);
+          return merged;
+        }) || changed;
+        more = page.hasMore;
       }
+      // Every sent post went out before this pull began, so the pull has
+      // settled it: its row arrived, or the relay already had that notice.
       changed = await locked(async () => {
         const file = await loadAccount(account);
-        const merged = merge(file, page);
-        if (!merged && file.cursor === page.nextCursor && !file.routesMissing) return false;
-        file.cursor = page.nextCursor;
-        file.routesMissing = false;
-        await saveAccount(account, file);
-        return merged;
+        const waiting = file.posts.filter((post) => !post.sent);
+        const settled = waiting.length !== file.posts.length;
+        file.posts = waiting;
+        const pruned = pruneAccount(file);
+        if (settled || pruned) await saveAccount(account, file);
+        return pruned;
       }) || changed;
-      more = page.hasMore;
+    } finally {
+      // Saved rows outlive the share scope; announce them for this account.
+      if (changed && accountIsCurrent()) deps.onChanged();
     }
-    // Every sent post went out before this pull began, so the pull has
-    // settled it: its row arrived, or the relay already had that notice.
-    changed = await locked(async () => {
-      const file = await loadAccount(account);
-      const waiting = file.posts.filter((post) => !post.sent);
-      const settled = waiting.length !== file.posts.length;
-      file.posts = waiting;
-      const pruned = pruneAccount(file);
-      if (settled || pruned) await saveAccount(account, file);
-      return pruned;
-    }) || changed;
-    if (changed) deps.onChanged();
   }
 
   let running: Promise<void> | null = null;
   let again = false;
-  function sync(): Promise<void> {
+  let nextCurrent: (() => boolean) | undefined;
+  function sync(isCurrent?: () => boolean): Promise<void> {
     if (running) {
+      // An account-wide request must survive the closure of a share window.
+      if (!again) nextCurrent = isCurrent;
+      else if (nextCurrent && isCurrent) {
+        const waiting = nextCurrent;
+        nextCurrent = () => waiting() || isCurrent();
+      } else nextCurrent = undefined;
       again = true;
       return running;
     }
+    nextCurrent = isCurrent;
     running = (async () => {
       try {
         do {
           again = false;
+          const current = nextCurrent;
+          nextCurrent = undefined;
           try {
             const session = await deps.session();
-            if (session) await syncAccount(session);
+            if (current && !current()) continue;
+            if (session) await syncAccount(current ? {
+              ...session, isCurrent: () => current() && session.isCurrent(),
+            } : session, session.isCurrent);
+            if (current && !current()) continue;
             const pruned = await locked(async () => {
               const local = await loadLocal();
               if (!pruneLocal(local)) return false;
@@ -654,7 +683,7 @@ export function createNoticeStore(deps: {
             if (pruned) deps.onChanged();
           } catch (error) {
             // A pass for a session that ended stops; the next pass uses the new one.
-            if (error instanceof SessionChanged) again = true;
+            if (error instanceof SessionChanged) { if (!current) again = true; }
             else console.warn("[notices] sync failed; the next pass tries again", error);
           }
         } while (again);
@@ -699,15 +728,19 @@ export function createNoticeStore(deps: {
           const document = refusal.document;
           const name = document?.path ? `“${[...document.path].slice(0, 180).join("")}”` : "a file";
           const tooLarge = /too large|exceeds|projection.*limit/iu.test(refusal.reason);
-          const body = `dohc could not update ${name}.${tooLarge ? " The change is too large." : ""} ${document?.conflictId
+          const bindingChanged = refusal.reason === SETTLEMENT_BINDING_CHANGED;
+          const target = NoticeTargetShape.safeParse(document?.path ? { path: document.path } : {}).data ?? {};
+          const body = bindingChanged
+            ? `The name, location, or sharing of ${name} changed before this save arrived.${target.path ? " Open the file to continue." : ""}`
+            : `dohc could not update ${name}.${tooLarge ? " The change is too large." : ""} ${document?.conflictId
             ? "Open its conflict and choose a copy."
             : tooLarge ? "Make the file smaller on the other computer, then try sync again." : "Review the file on the other computer, then try sync again."}`;
           rows.push(LocalRow.parse({ noticeId: refusal.noticeId, workspaceId, kind: "sync-refusal",
             refusalCoordinates, pendingRefusalDismissals,
-            title: "A change needs your review", body,
+            title: bindingChanged ? "dohc skipped an earlier save" : "A change needs your review", body,
             detail: [refusal.reason, `Workspace: ${workspaceId}`, `Object: ${document?.objectId ?? "unknown"}`,
               `Lineage: ${document?.lineageClaimId ?? "unknown"}`, `Origin: ${refusal.originId}:${refusal.originSeq}`].join("\n"),
-            target: NoticeTargetShape.safeParse(document?.path ? { path: document.path } : {}).data ?? {},
+            target,
             createdAtMs: previous?.dismissedAtMs == null ? previous?.createdAtMs ?? nowMs() : nowMs(),
             readAtMs: withoutCoordinates(refusalCoordinates, previous?.refusalCoordinates ?? []).length === 0
               ? previous?.readAtMs ?? null : null, dismissedAtMs: null }));
@@ -824,7 +857,7 @@ export function createNoticeStore(deps: {
       if (!(error instanceof RelayRefusal)) throw error;
       switch (error.reason) {
         case "routes-missing":
-          await noteRoutesMissing(session.account);
+          await noteRoutesMissing(session);
           throw new NoticeNotSentError("Your server doesn't sync notices. Update the server, then try again.");
         case "refused":
           throw new NoticeNotSentError("This person can't open what the notice points to.");

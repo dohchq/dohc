@@ -5,10 +5,86 @@ import type { ActiveAgentRun } from "./activeAgentRun";
 import {
   AgentIntegrationState,
   createAgentIntegration as createPhysicalAgentIntegration,
-  type McpServerHandle,
 } from "./AgentIntegration";
 import { createInMemoryAgentIntegration as createAgentIntegration } from "./AgentIntegration.testSupport";
 import { createTestScratch } from "../workspaces/testTemp";
+
+const historyRead = vi.hoisted(() => ({ failure: null as Error | null }));
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    readFile: (...args: Parameters<typeof actual.readFile>) => {
+      if (historyRead.failure && String(args[0]).endsWith("agent-runs.json")) {
+        return Promise.reject(historyRead.failure);
+      }
+      return actual.readFile(...args);
+    },
+  };
+});
+
+// Holds the first attribution clear (end A's) until the test releases it.
+// "queued" settles capture calls in order like workspaceEngineCapture's
+// enqueueResult; "independent" lets later calls settle around the held one.
+function heldClearRace(root: string, order: "queued" | "independent") {
+  const state = new AgentIntegrationState();
+  const ids = ["run-a", "run-b"];
+  const clearHeld = Promise.withResolvers<void>();
+  const releaseClear = Promise.withResolvers<void>();
+  const laterCaptureCalled = Promise.withResolvers<void>();
+  let holding = false;
+  let queue = Promise.resolve();
+  let slot = null as ActiveAgentRun | null;
+  function capture(run: ActiveAgentRun | null): Promise<void> {
+    const hold = run === null && !holding;
+    if (hold) holding = true;
+    else if (holding) laterCaptureCalled.resolve();
+    const task = async () => {
+      if (!hold) return;
+      clearHeld.resolve();
+      await releaseClear.promise;
+    };
+    if (order === "independent") return task();
+    const result = queue.then(task);
+    queue = result.catch(() => undefined);
+    return result;
+  }
+  async function clear(runId: string) {
+    if (slot?.agentRunId !== runId) return;
+    await capture(null);
+    if (slot?.agentRunId === runId) slot = null;
+  }
+  const integration = createPhysicalAgentIntegration({
+    localPersonId: () => "person-local",
+    installId: () => "install-local",
+    workspaceIds: () => ["ws"],
+    createId: () => ids.shift() ?? "run-extra",
+    acquire: () => ({
+      attachmentId: Symbol.for("test-held-clear-attachment"),
+      workspaceId: "ws",
+      rootPath: root,
+      state,
+      assertCurrent: () => undefined,
+      setAgentRun: async (run) => {
+        const owned = state.activeRun?.id;
+        if (owned) await clear(owned);
+        if (!run) return;
+        if (slot) throw new Error("Another agent run is already active in this workspace.");
+        slot = run;
+        await capture(run);
+      },
+      release: () => undefined,
+    }),
+  });
+  return {
+    integration,
+    state,
+    slot: () => slot,
+    clearHeld: clearHeld.promise,
+    laterCaptureCalled: laterCaptureCalled.promise,
+    releaseClear: () => releaseClear.resolve(),
+  };
+}
 
 async function withWorkspace<T>(
   fn: (input: { root: string; setSlot: (r: ActiveAgentRun | null) => void; slots: Array<ActiveAgentRun | null> }) => Promise<T>,
@@ -64,30 +140,20 @@ describe("AgentIntegration", () => {
     });
   });
 
-  it("spawns and stops the managed MCP child across a run, reflected in status", async () => {
+  it("reports the active run, then the completed run, in status", async () => {
     await withWorkspace(async ({ root, setSlot }) => {
-      const stop = vi.fn();
-      const spawnMcpServer = vi.fn(
-        (_input: { root: string; home: string }): McpServerHandle => ({ stop }),
-      );
       const integration = createAgentIntegration({
         rootFor: () => root,
         setAgentRun: (_id, run) => setSlot(run),
-        spawnMcpServer,
-        home: "/state/home",
       });
 
       const run = await integration.startAgentRun("ws");
-      expect(spawnMcpServer).toHaveBeenCalledWith({ root, home: "/state/home" });
       expect(await integration.getAgentRunStatus("ws")).toMatchObject({
-        mcpEnabled: true,
         activeRun: { id: run.id },
       });
 
       await integration.endAgentRun("ws", run.id, "complete");
-      expect(stop).toHaveBeenCalledOnce();
       expect(await integration.getAgentRunStatus("ws")).toMatchObject({
-        mcpEnabled: false,
         activeRun: null,
         lastRun: { id: run.id, status: "complete" },
       });
@@ -107,45 +173,296 @@ describe("AgentIntegration", () => {
       await integration.endAgentRun("ws", a.id);
       expect(slots.at(-1)).toEqual({ agentId: "dohc-mcp", onBehalfOf: "person-local", agentRunId: b.id, depth: 0 });
       expect(await integration.getAgentRunStatus("ws")).toMatchObject({
-        mcpEnabled: true,
         activeRun: { id: b.id },
       });
     });
   });
 
-  it("ignores malformed persisted run records while keeping valid history", async () => {
+  it.each([
+    ["invalid JSON", "[{"],
+    ["null", "null"],
+    ["object", "{}"],
+    ["invalid record", '[{"id":"bad-start","startedAt":"yesterday","status":"complete"}]'],
+    ["mixed valid and invalid records", JSON.stringify([
+      { id: "run-valid", startedAt: 1, endedAt: 2, agentId: "dohc-mcp", onBehalfOf: "person-local", status: "failed" },
+      { id: "bad-status", startedAt: 3, agentId: "dohc-mcp", onBehalfOf: "person-local", status: "done" },
+    ])],
+  ])("preserves history and keeps an active run stoppable when history contains %s", async (_label, source) => {
     await withWorkspace(async ({ root, setSlot }) => {
-      await mkdir(join(root, ".dohc"), { recursive: true });
-      await writeFile(
-        join(root, ".dohc/agent-runs.json"),
-        JSON.stringify([
-          { id: "bad-start", startedAt: "yesterday", status: "complete" },
-          {
-            id: "run-valid",
-            startedAt: 1,
-            endedAt: 2,
-            agentId: "dohc-mcp",
-            onBehalfOf: "person-local",
-            status: "failed",
+      const setAgentRun = vi.fn((_id: string, run: ActiveAgentRun | null) => setSlot(run));
+      const onRunEnded = vi.fn();
+      const integration = createAgentIntegration({
+        rootFor: () => root,
+        setAgentRun,
+        onRunEnded,
+      });
+      const run = await integration.startAgentRun("ws");
+      const path = join(root, ".dohc", "agent-runs.json");
+      await writeFile(path, source);
+      const bytes = await readFile(path);
+      setAgentRun.mockClear();
+      await expect(integration.startAgentRun("ws")).rejects.toThrow(/agent run history/);
+      await expect(integration.getAgentRunStatus("ws")).resolves.toMatchObject({
+        activeRun: { id: run.id, status: "running" },
+      });
+      expect(setAgentRun).not.toHaveBeenCalled();
+      await expect(integration.endAgentRun("ws", run.id)).rejects.toThrow(/agent run history/);
+      await expect(integration.getAgentRunStatus("ws")).resolves.toEqual({
+        activeRun: null,
+        lastRun: null,
+      });
+      expect(await readFile(path)).toEqual(bytes);
+      expect(await readdir(join(root, ".dohc"))).toEqual(["agent-runs.json"]);
+      expect(setAgentRun).toHaveBeenCalledExactlyOnceWith("ws", null);
+      expect(onRunEnded).not.toHaveBeenCalled();
+      await writeFile(path, JSON.stringify([run]));
+      await expect(integration.getAgentRunStatus("ws")).resolves.toMatchObject({
+        activeRun: null,
+      });
+      setAgentRun.mockClear();
+      await integration.endAgentRun("ws", run.id);
+      // The run's attribution was already cleared; only its history is recorded.
+      expect(setAgentRun).not.toHaveBeenCalled();
+      expect(onRunEnded).toHaveBeenCalledOnce();
+    });
+  });
+
+  it("preserves readable bytes after a transient history read failure and retries", async () => {
+    await withWorkspace(async ({ root, setSlot }) => {
+      const setAgentRun = vi.fn((_id: string, run: ActiveAgentRun | null) => setSlot(run));
+      const integration = createAgentIntegration({ rootFor: () => root, setAgentRun });
+      const run = await integration.startAgentRun("ws");
+      const path = join(root, ".dohc", "agent-runs.json");
+      const bytes = await readFile(path);
+      setAgentRun.mockClear();
+      historyRead.failure = Object.assign(new Error("temporarily unreadable"), { code: "EACCES" });
+      try {
+        await expect(integration.startAgentRun("ws")).rejects.toThrow(/could not read/);
+        await expect(integration.getAgentRunStatus("ws")).resolves.toMatchObject({
+          activeRun: { id: run.id },
+        });
+        await expect(integration.endAgentRun("ws", run.id)).rejects.toThrow(/could not read/);
+        await expect(integration.getAgentRunStatus("ws")).resolves.toEqual({
+          activeRun: null,
+          lastRun: null,
+        });
+      } finally {
+        historyRead.failure = null;
+      }
+      expect(await readFile(path)).toEqual(bytes);
+      expect(setAgentRun).toHaveBeenCalledExactlyOnceWith("ws", null);
+      await expect(integration.getAgentRunStatus("ws")).resolves.toMatchObject({
+        activeRun: null,
+      });
+      await integration.endAgentRun("ws", run.id);
+      const next = await integration.startAgentRun("ws");
+      const runs = JSON.parse(await readFile(path, "utf8"));
+      expect(runs).toHaveLength(2);
+      expect(runs[0]).toMatchObject({ id: run.id, status: "complete" });
+      expect(runs[1]).toMatchObject({ id: next.id, status: "running" });
+    });
+  });
+
+  it("never stops a newer active run when an older run's history update fails", async () => {
+    await withWorkspace(async ({ root, setSlot }) => {
+      const setAgentRun = vi.fn((_id: string, run: ActiveAgentRun | null) => setSlot(run));
+      const integration = createAgentIntegration({
+        rootFor: () => root,
+        setAgentRun,
+      });
+      const older = await integration.startAgentRun("ws");
+      const newer = await integration.startAgentRun("ws");
+      const path = join(root, ".dohc", "agent-runs.json");
+      await writeFile(path, "corrupt history\n");
+      setAgentRun.mockClear();
+      await expect(integration.endAgentRun("ws", older.id)).rejects.toThrow(/invalid JSON/);
+      expect(setAgentRun).not.toHaveBeenCalled();
+      await expect(integration.getAgentRunStatus("ws")).resolves.toMatchObject({
+        activeRun: { id: newer.id },
+      });
+      await expect(integration.endAgentRun("ws", newer.id)).rejects.toThrow(/invalid JSON/);
+      expect(setAgentRun).toHaveBeenCalledExactlyOnceWith("ws", null);
+      await expect(integration.getAgentRunStatus("ws")).resolves.toMatchObject({
+        activeRun: null,
+      });
+      expect(await readFile(path, "utf8")).toBe("corrupt history\n");
+    });
+  });
+
+  it("keeps a run visible and stoppable when clearing its attribution fails over unreadable history", async () => {
+    await withWorkspace(async ({ root, setSlot }) => {
+      const clearFailure = new Error("capture refused the clear");
+      let refuseClear = false;
+      const integration = createAgentIntegration({
+        rootFor: () => root,
+        setAgentRun: (_id, run) => {
+          if (!run && refuseClear) throw clearFailure;
+          setSlot(run);
+        },
+      });
+      const run = await integration.startAgentRun("ws");
+      const path = join(root, ".dohc", "agent-runs.json");
+      await writeFile(path, "corrupt history\n");
+      refuseClear = true;
+      await expect(integration.endAgentRun("ws", run.id)).rejects.toBe(clearFailure);
+      await expect(integration.getAgentRunStatus("ws")).resolves.toMatchObject({
+        activeRun: { id: run.id },
+      });
+      refuseClear = false;
+      await expect(integration.endAgentRun("ws", run.id)).rejects.toThrow(/invalid JSON/);
+      await expect(integration.getAgentRunStatus("ws")).resolves.toMatchObject({
+        activeRun: null,
+      });
+      expect(await readFile(path, "utf8")).toBe("corrupt history\n");
+    });
+  });
+
+  it("ending an older run while a newer run installs keeps the newer run's state and attribution", async () => {
+    await withWorkspace(async ({ root }) => {
+      const state = new AgentIntegrationState();
+      const ids = ["run-a", "run-b"];
+      const installed = Promise.withResolvers<void>();
+      const held = Promise.withResolvers<void>();
+      // Mirrors workspaceActivity: a claim installs its slot before capture
+      // settles, and a clear only removes the run it names.
+      let slot = null as ActiveAgentRun | null;
+      async function capture(run: ActiveAgentRun | null) {
+        if (run?.agentRunId === "run-b") {
+          installed.resolve();
+          await held.promise;
+        }
+      }
+      async function clear(runId: string) {
+        if (slot?.agentRunId !== runId) return;
+        await capture(null);
+        if (slot?.agentRunId === runId) slot = null;
+      }
+      const integration = createPhysicalAgentIntegration({
+        localPersonId: () => "person-local",
+        installId: () => "install-local",
+        workspaceIds: () => ["ws"],
+        createId: () => ids.shift() ?? "run-extra",
+        // Mirrors main.ts's adapter: a start clears the previous owned run,
+        // and a stop clears only the run this state owns.
+        acquire: () => ({
+          attachmentId: Symbol.for("test-race-attachment"),
+          workspaceId: "ws",
+          rootPath: root,
+          state,
+          assertCurrent: () => undefined,
+          setAgentRun: async (run) => {
+            const owned = state.activeRun?.id;
+            if (owned) await clear(owned);
+            if (!run) return;
+            if (slot) throw new Error("Another agent run is already active in this workspace.");
+            slot = run;
+            await capture(run);
           },
-          {
-            id: "bad-status",
-            startedAt: 3,
-            agentId: "dohc-mcp",
-            onBehalfOf: "person-local",
-            status: "done",
+          release: () => undefined,
+        }),
+      });
+
+      const a = await integration.startAgentRun("ws");
+      const starting = integration.startAgentRun("ws");
+      await installed.promise;
+      expect(state.activeRun?.id).toBe(a.id);
+      const ending = integration.endAgentRun("ws", a.id);
+      held.resolve();
+      const [b] = await Promise.all([starting, ending]);
+
+      expect(b.id).toBe("run-b");
+      expect(state.activeRun?.id).toBe(b.id);
+      expect(slot?.agentRunId).toBe(b.id);
+      const runs = JSON.parse(await readFile(join(root, ".dohc", "agent-runs.json"), "utf8"));
+      expect(runs).toMatchObject([
+        { id: a.id, status: "complete" },
+        { id: b.id, status: "running" },
+      ]);
+    });
+  });
+
+  it("a newer run waits behind an older run's queued attribution clear", async () => {
+    await withWorkspace(async ({ root }) => {
+      const race = heldClearRace(root, "queued");
+      const a = await race.integration.startAgentRun("ws");
+      const ending = race.integration.endAgentRun("ws", a.id);
+      await race.clearHeld;
+      const starting = race.integration.startAgentRun("ws");
+      await race.laterCaptureCalled;
+      // B's own clear of A queues behind the held one, so B cannot install yet.
+      expect(race.state.activeRun?.id).toBe(a.id);
+      expect(race.slot()?.agentRunId).toBe(a.id);
+      race.releaseClear();
+      const [b] = await Promise.all([starting, ending]);
+
+      expect(race.state.activeRun?.id).toBe(b.id);
+      expect(race.slot()?.agentRunId).toBe(b.id);
+    });
+  });
+
+  it("an older run's late attribution clear never drops a newer run that installed around it", async () => {
+    await withWorkspace(async ({ root }) => {
+      const race = heldClearRace(root, "independent");
+      const a = await race.integration.startAgentRun("ws");
+      const ending = race.integration.endAgentRun("ws", a.id);
+      await race.clearHeld;
+      const b = await race.integration.startAgentRun("ws");
+      expect(race.state.activeRun?.id).toBe(b.id);
+      expect(race.slot()?.agentRunId).toBe(b.id);
+      race.releaseClear();
+      await ending;
+
+      expect(race.state.activeRun?.id).toBe(b.id);
+      expect(race.slot()?.agentRunId).toBe(b.id);
+      const runs = JSON.parse(await readFile(join(root, ".dohc", "agent-runs.json"), "utf8"));
+      expect(runs).toMatchObject([
+        { id: a.id, status: "complete" },
+        { id: b.id, status: "running" },
+      ]);
+    });
+  });
+
+  it("preserves the start refusal when recording its failed status cannot read history", async () => {
+    await withWorkspace(async ({ root }) => {
+      const primary = new Error("slot occupied");
+      const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        const path = join(root, ".dohc", "agent-runs.json");
+        const integration = createAgentIntegration({
+          rootFor: () => root,
+          setAgentRun: async () => {
+            await writeFile(path, "external corrupt history\n");
+            throw primary;
           },
-        ]),
-      );
+        });
+        await expect(integration.startAgentRun("ws")).rejects.toBe(primary);
+        expect(await readFile(path, "utf8")).toBe("external corrupt history\n");
+        expect(logged).toHaveBeenCalledWith(
+          "[desktop] Could not record the failed agent run",
+          expect.objectContaining({ message: expect.stringContaining("invalid JSON") }),
+        );
+      } finally {
+        logged.mockRestore();
+      }
+    });
+  });
+
+  it("does not start a run when an inactive workspace's history is unreadable", async () => {
+    await withWorkspace(async ({ root, setSlot, slots }) => {
+      await mkdir(join(root, ".dohc"));
+      const path = join(root, ".dohc", "agent-runs.json");
+      await writeFile(path, "not JSON\n");
       const integration = createAgentIntegration({
         rootFor: () => root,
         setAgentRun: (_id, run) => setSlot(run),
       });
-
-      await expect(integration.getAgentRunStatus("ws")).resolves.toMatchObject({
+      await expect(integration.startAgentRun("ws")).rejects.toThrow(/invalid JSON/);
+      await expect(integration.getAgentRunStatus("ws")).resolves.toEqual({
         activeRun: null,
-        lastRun: { id: "run-valid", status: "failed" },
+        lastRun: null,
       });
+      expect(slots).toEqual([]);
+      expect(await readFile(path, "utf8")).toBe("not JSON\n");
     });
   });
 
@@ -180,7 +497,7 @@ describe("AgentIntegration", () => {
       rootFor: () => null,
       setAgentRun: () => {},
     });
-    await expect(integration.startAgentRun("nope")).rejects.toThrow(/Unknown workspace/);
+    await expect(integration.startAgentRun("nope")).rejects.toThrow("This workspace is not open. Open it again.");
   });
 
   it("records a failed start when the workspace attribution slot is occupied", async () => {
@@ -210,6 +527,7 @@ describe("AgentIntegration", () => {
       const allowSettle = Promise.withResolvers<void>();
       const integration = createPhysicalAgentIntegration({
         localPersonId: () => "person-local",
+        installId: () => "install-local",
         workspaceIds: () => ["ws"],
         acquire: () => {
           const heldState = currentState;
@@ -220,7 +538,7 @@ describe("AgentIntegration", () => {
             state: heldState,
             assertCurrent: () => {
               if (currentState !== heldState) {
-                throw new Error("retired workspace authority");
+                throw new Error("This workspace was closed. Open it again.");
               }
             },
             setAgentRun: async () => {
@@ -237,7 +555,7 @@ describe("AgentIntegration", () => {
       currentState = successorState;
       allowSettle.resolve();
 
-      await expect(starting).rejects.toThrow("retired workspace authority");
+      await expect(starting).rejects.toThrow("This workspace was closed. Open it again.");
       expect(oldState.activeRun).toBeNull();
       expect(successorState.activeRun).toBeNull();
     });
@@ -250,6 +568,7 @@ describe("AgentIntegration", () => {
       const release = vi.fn();
       const integration = createPhysicalAgentIntegration({
         localPersonId: () => "person-local",
+        installId: () => "install-local",
         workspaceIds: () => ["ws"],
         acquire: () => ({
           attachmentId: Symbol.for("test-retired-after-persist"),
@@ -257,7 +576,7 @@ describe("AgentIntegration", () => {
           rootPath: root,
           state,
           assertCurrent: () => {
-            throw new Error("retired workspace authority");
+            throw new Error("This workspace was closed. Open it again.");
           },
           setAgentRun,
           release,
@@ -265,7 +584,7 @@ describe("AgentIntegration", () => {
       });
 
       await expect(integration.startAgentRun("ws")).rejects.toThrow(
-        "retired workspace authority",
+        "This workspace was closed. Open it again.",
       );
       expect(setAgentRun).not.toHaveBeenCalled();
       expect(release).toHaveBeenCalledOnce();
@@ -282,10 +601,6 @@ describe("AgentIntegration", () => {
     const firstFailure = new Error("first workspace slot refused cleanup");
     const firstState = new AgentIntegrationState();
     const secondState = new AgentIntegrationState();
-    const firstStop = vi.fn();
-    const secondStop = vi.fn();
-    firstState.mcp = { stop: firstStop };
-    secondState.mcp = { stop: secondStop };
     firstState.activeRun = {
       id: "run-first",
       startedAt: 1,
@@ -304,6 +619,7 @@ describe("AgentIntegration", () => {
     const clearedSlots: string[] = [];
     const integration = createPhysicalAgentIntegration({
       localPersonId: () => "person-local",
+      installId: () => "install-local",
       workspaceIds: () => ["workspace-first", "workspace-second"],
       acquire: (workspaceId) => ({
         attachmentId: Symbol.for(`test-workspace-attachment:${workspaceId}`),
@@ -322,12 +638,104 @@ describe("AgentIntegration", () => {
 
     await expect(integration.stopAll()).rejects.toBe(firstFailure);
 
-    expect(firstStop).toHaveBeenCalledOnce();
-    expect(secondStop).toHaveBeenCalledOnce();
     expect(clearedSlots).toEqual(["workspace-first", "workspace-second"]);
     expect(releases).toEqual(["workspace-first", "workspace-second"]);
     expect(firstState.activeRun?.id).toBe("run-first");
     expect(secondState.activeRun).toBeNull();
+  });
+
+  it("marks a run its process left running as interrupted when the next process starts", async () => {
+    await withWorkspace(async ({ root, setSlot }) => {
+      const before = createAgentIntegration({ rootFor: () => root, setAgentRun: (_id, run) => setSlot(run) });
+      const run = await before.startAgentRun("ws");
+      // The process dies here: nothing ends the run.
+      const after = createAgentIntegration({ rootFor: () => root, setAgentRun: (_id, next) => setSlot(next), now: () => 99 });
+      await expect(after.getAgentRunStatus("ws")).resolves.toEqual({
+        activeRun: null,
+        lastRun: expect.objectContaining({ id: run.id, status: "interrupted", endedAt: 99 }),
+      });
+      const persisted = JSON.parse(await readFile(join(root, ".dohc", "agent-runs.json"), "utf8"));
+      expect(persisted).toMatchObject([{ id: run.id, status: "interrupted", endedAt: 99 }]);
+    });
+  });
+
+  it("sweeps another process's and unmarked running runs, and keeps this process's, finished, and other installs' runs", async () => {
+    await withWorkspace(async ({ root, setSlot }) => {
+      await mkdir(join(root, ".dohc"));
+      const path = join(root, ".dohc", "agent-runs.json");
+      const run = (id: string, fields: Record<string, unknown> = {}) => ({
+        id, startedAt: 1, agentId: "dohc-mcp", onBehalfOf: "person-local", status: "running", ...fields,
+      });
+      const runs = [
+        run("earlier-process", { incarnation: "process-1", installId: "install-local" }),
+        run("unmarked"),
+        run("this-process", { incarnation: "process-2", installId: "install-local" }),
+        run("other-install", { incarnation: "process-9", installId: "install-other" }),
+        run("finished", { status: "complete", endedAt: 2, incarnation: "process-1", installId: "install-local" }),
+        run("failed", { status: "failed", endedAt: 3 }),
+      ];
+      await writeFile(path, JSON.stringify(runs));
+      const integration = createAgentIntegration({
+        rootFor: () => root,
+        setAgentRun: (_id, next) => setSlot(next),
+        incarnation: "process-2",
+        now: () => 50,
+      });
+      await integration.getAgentRunStatus("ws");
+      expect(JSON.parse(await readFile(path, "utf8"))).toEqual([
+        { ...runs[0], status: "interrupted", endedAt: 50 },
+        { ...runs[1], status: "interrupted", endedAt: 50 },
+        runs[2],
+        runs[3],
+        runs[4],
+        runs[5],
+      ]);
+      // Each workspace sweeps once per process.
+      await writeFile(path, JSON.stringify([run("written-later")]));
+      await integration.getAgentRunStatus("ws");
+      expect(JSON.parse(await readFile(path, "utf8"))).toMatchObject([{ id: "written-later", status: "running" }]);
+    });
+  });
+
+  it("writes nothing when no run needs settling", async () => {
+    await withWorkspace(async ({ root, setSlot }) => {
+      await mkdir(join(root, ".dohc"));
+      const path = join(root, ".dohc", "agent-runs.json");
+      const source = JSON.stringify([
+        { id: "done", startedAt: 1, endedAt: 2, agentId: "dohc-mcp", onBehalfOf: "person-local", status: "complete" },
+      ]);
+      await writeFile(path, source);
+      const integration = createAgentIntegration({ rootFor: () => root, setAgentRun: (_id, run) => setSlot(run) });
+      await integration.getAgentRunStatus("ws");
+      expect(await readFile(path, "utf8")).toBe(source);
+    });
+  });
+
+  it("leaves unreadable history unwritten, falls back for status, and sweeps once it is repaired", async () => {
+    await withWorkspace(async ({ root, setSlot }) => {
+      await mkdir(join(root, ".dohc"));
+      const path = join(root, ".dohc", "agent-runs.json");
+      await writeFile(path, "not JSON\n");
+      const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        const integration = createAgentIntegration({
+          rootFor: () => root,
+          setAgentRun: (_id, run) => setSlot(run),
+          now: () => 7,
+        });
+        await expect(integration.getAgentRunStatus("ws")).resolves.toEqual({ activeRun: null, lastRun: null });
+        expect(await readFile(path, "utf8")).toBe("not JSON\n");
+        expect(await readdir(join(root, ".dohc"))).toEqual(["agent-runs.json"]);
+        await writeFile(path, JSON.stringify([
+          { id: "left-open", startedAt: 1, agentId: "dohc-mcp", onBehalfOf: "person-local", status: "running" },
+        ]));
+        await expect(integration.getAgentRunStatus("ws")).resolves.toMatchObject({
+          lastRun: { id: "left-open", status: "interrupted", endedAt: 7 },
+        });
+      } finally {
+        logged.mockRestore();
+      }
+    });
   });
 
   // Same boundary as workspaceUiState: a malicious attached workspace can ship

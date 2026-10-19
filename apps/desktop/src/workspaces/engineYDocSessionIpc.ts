@@ -1,4 +1,6 @@
+import { isTypingSessionUnresolved } from "./outageTypingRecovery";
 import { SharedDocumentWaitingError } from "../ipc/sharedDocumentOpenState";
+import { isCaptureFileHeldRefusal } from "../ipc/errorWords";
 import { engineSaveState } from "./engineYDocSaveState";
 import { createHash } from "node:crypto";
 import { accessSync, constants as fsConstants } from "node:fs";
@@ -42,7 +44,9 @@ import {
   type RetryEngineYDocSavePayload as RetrySavePayload,
   type RetryEngineYDocSaveResult as RetrySaveResult,
   type ReadOnlyTransitionCause,
+  type SaveFailureReason,
 } from "../ipc/bridgeContract";
+import { isPrivacyDenial } from "./privacyDenial";
 import { CHANNELS, type EngineYDocSaveStateName } from "../ipc/channels";
 import {
   createEngineYDocSaveSeqState,
@@ -60,9 +64,11 @@ import type {
   WorkspaceFileMutationYDocPort,
 } from "./workspaceFileMutationOwner";
 import {
+  YDocSessionClosedError,
   isYDocPathNotInVersionError,
   isYDocRemovalInProgressError,
   isYDocSessionUnreleasedError,
+  isVolumeSharesNewFilesCause,
   type EngineYDocSaveEvent,
   type WorkspaceEngineCapture,
   type WorkspaceEngineYDocProviderSession,
@@ -90,7 +96,7 @@ export type EngineYDocSessionProvider = Omit<WorkspaceEngineYDocProviderSession,
 };
 export interface EngineYDocSessionCapture {
   waitForAdmission?(path: string, signal: AbortSignal): Promise<boolean>;
-  openYDocSession(input: Omit<Parameters<WorkspaceEngineCapture["openYDocSession"]>[0], "onSaveState"> & {onSaveState?: (state: EngineYDocSaveStateName, token: number, event: EngineYDocSaveEvent, authorCapacity?: boolean, readOnlyCause?: ReadOnlyTransitionCause) => void}): Promise<EngineYDocSessionProvider>;
+  openYDocSession(input: Omit<Parameters<WorkspaceEngineCapture["openYDocSession"]>[0], "onSaveState"> & {onSaveState?: (state: EngineYDocSaveStateName, token: number, event: EngineYDocSaveEvent, authorCapacity?: boolean, readOnlyCause?: ReadOnlyTransitionCause, failure?: unknown) => void}): Promise<EngineYDocSessionProvider>;
 }
 
 type SharedAdmissionWait = {cancel: AbortController; authorityId: symbol; generation: number};
@@ -131,22 +137,25 @@ interface EngineYDocSessionIpcOptions {
   localPersonId: () => string;
 }
 
-// Whether the file refuses writes. A missing file, or one that cannot be
-// checked, is not read-only.
-function fileIsReadOnly(absolutePath: string): boolean {
+// Why the file refuses writes. The engine names a volume that adds sharing
+// permissions to new files; otherwise the file is checked. A missing file, or
+// one that cannot be checked, names no reason.
+function saveFailureReason(absolutePath: string, failure: unknown): SaveFailureReason {
+  if (isVolumeSharesNewFilesCause(failure)) return "volume-shares-new-files";
   try {
     accessSync(absolutePath, fsConstants.W_OK);
-    return false;
+    return null;
   } catch (error) {
+    if (isPrivacyDenial(error)) return "privacy-denied";
     const code = (error as NodeJS.ErrnoException).code;
-    return code === "EACCES" || code === "EPERM";
+    return code === "EACCES" || code === "EPERM" ? "read-only" : null;
   }
 }
 
 interface SessionEvent {
   readOnlyCause?: ReadOnlyTransitionCause;
   authorCapacity?: boolean;
-  saveFailure?: { readOnly: boolean };
+  saveFailure?: { reason: SaveFailureReason };
   editRefusal?: import("../ipc/bridgeContract").EngineYDocSaveStateEvent["editRefusal"];
   state: EngineYDocSaveStateName;
   seq: number;
@@ -665,7 +674,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         const emit = (event: SessionEvent): void => {
           if (lastEvent?.state === event.state &&
             (event.state === "settling" || lastEvent.seq === event.seq) &&
-            lastEvent.saveFailure?.readOnly === event.saveFailure?.readOnly &&
+            lastEvent.saveFailure?.reason === event.saveFailure?.reason &&
             lastEvent.authorCapacity === event.authorCapacity &&
             lastEvent.readOnlyCause === event.readOnlyCause &&
             lastEvent.editRefusal?.requestId === event.editRefusal?.requestId &&
@@ -695,7 +704,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
                 editRefusal: { workspaceId: workspace.workspaceId, path: canonicalPath, requestId, message },
               }));
             },
-            onSaveState: (state, token, event, authorCapacity, readOnlyCause) => {
+            onSaveState: (state, token, event, authorCapacity, readOnlyCause, failure) => {
               if (state === "read-only") currentReadOnlyCause = readOnlyCause ?? "reconnecting";
               const seq =
                 event === "start"
@@ -703,10 +712,11 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
                   : event === "outcome"
                     ? noteSettleOutcome(saveSeq, token)
                     : 0;
-              // A settle that could not write the file. The read-only check is
-              // one stat, made only on a failure, so the notice can name it.
+              // A settle that could not write the file. The reason check is
+              // one or two access calls, made only on a failure, so the notice
+              // can name it.
               const saveFailure = state === "error" && event === "outcome" && !authorCapacity
-                ? { readOnly: fileIsReadOnly(join(workspace.rootPath, canonicalPath)) }
+                ? { reason: saveFailureReason(join(workspace.rootPath, canonicalPath), failure) }
                 : undefined;
               publish(() => emit({
                 state, seq, ...(authorCapacity ? { authorCapacity: true } : {}),
@@ -919,15 +929,22 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           authorityId: owned.workspace.attachmentId, path: owned.path,
           source: arrivalSource(sender, input.sessionId), requestId: input.requestId, update: input.update,
         }, this.#localPersonId);
-        owned.provider.applyLocalUpdate(
-          input.update,
-          () => noteLocalEdit(owned.saveSeq, input.seq),
-          // Shared-view admission keeps its current contract until A2.
-          this.#isSharedView(owned.workspace)
-            ? { idempotencyKey: input.requestId, attribution: { actorKind: "human", onBehalfOf: person } }
-            : { idempotencyKey: input.requestId, actorOriginId: person,
-                attribution: { actorKind: "human", onBehalfOf: person, depth: 0 } },
-        );
+        try {
+          owned.provider.applyLocalUpdate(
+            input.update,
+            () => noteLocalEdit(owned.saveSeq, input.seq),
+            // Shared-view admission keeps its current contract until A2.
+            this.#isSharedView(owned.workspace)
+              ? { idempotencyKey: input.requestId, attribution: { actorKind: "human", onBehalfOf: person } }
+              : { idempotencyKey: input.requestId, actorOriginId: person,
+                  attribution: { actorKind: "human", onBehalfOf: person, depth: 0 } },
+          );
+        } catch (error) {
+          if (error instanceof YDocSessionClosedError) {
+            return { accepted: false, reason: "session-unavailable" };
+          }
+          throw error;
+        }
         return { accepted: true };
       },
     );
@@ -1323,6 +1340,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
             workspaceId: outbound.workspaceId,
             path: outbound.path,
             ...message.event,
+            typingUnresolved: isTypingSessionUnresolved(outbound.workspaceId,outbound.path),
             ...(message.closing ? { closing: true } : {}),
             ...engineSaveState(message.event.state, message.event.editRefusal),
           }),
@@ -1363,6 +1381,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
   }
 
   #openRefusal(error: unknown): OpenResult {
+    if (isCaptureFileHeldRefusal(error)) return unavailableOpen({ captureHeld: true });
     if (isYDocPathNotInVersionError(error)) {
       return unavailableOpen({ notInVersion: true });
     }

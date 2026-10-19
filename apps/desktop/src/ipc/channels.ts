@@ -1,6 +1,19 @@
+import type { CommandId } from "../renderer/commands/commandRows";
+import type { ShortcutId } from "../shortcuts/shortcutRegistry";
+
 // Closed tuples and channel names shared by main, the bridge contract, and the
-// preload. This module imports nothing so main-side modules can read a tuple
+// preload. This module has no runtime imports so main-side modules can read a tuple
 // without loading the whole contract.
+
+// Edit > Find on macOS. The shell hands each to the editor that has focus,
+// which runs what the shortcut of the same id runs.
+export const EDITOR_MENU_COMMANDS = [
+  "editor-find",
+  "editor-replace",
+  "find-again-next",
+  "find-again-previous",
+] as const satisfies readonly ShortcutId[];
+export type EditorMenuCommand = (typeof EDITOR_MENU_COMMANDS)[number];
 
 export const MENU_COMMANDS = [
   "new-file",
@@ -12,14 +25,22 @@ export const MENU_COMMANDS = [
   "command-palette",
   "quick-open",
   "toggle-sidebar",
-  "toggle-chats",
+  "show-chats",
+  "toggle-about",
   "toggle-theme",
   "settings",
   "check-updates",
   "install-update",
   "new-editor-group-right",
   "close-tab",
-] as const;
+  "next-tab",
+  "previous-tab",
+  ...EDITOR_MENU_COMMANDS,
+] as const satisfies readonly (CommandId | "command-palette" | EditorMenuCommand)[];
+
+export function isEditorMenuCommand(command: unknown): command is EditorMenuCommand {
+  return (EDITOR_MENU_COMMANDS as readonly unknown[]).includes(command);
+}
 
 // Explorer context menu: the renderer names what was right-clicked, main pops
 // a native menu built from main-owned labels over this closed set, and the
@@ -56,6 +77,17 @@ export const WORKBENCH_MENU_COMMANDS = [
   "toggle-theme",
   "unpin-app",
 ] as const;
+
+// How much one OS drag-in imports: up to 100 dropped items, up to 1,000
+// files and folders in all once dropped folders are opened, and up to 10,000
+// entries those folders hold that dohc leaves out, such as .DS_Store. The
+// bridge contract and the shell hold the first; the drag-in screen holds all.
+export const DROP_IMPORT_LIMITS = { items: 100, entries: 1000, skipped: 10_000 } as const;
+export const DROP_IMPORT_REFUSALS = {
+  items: `dohc imports up to ${DROP_IMPORT_LIMITS.items} dropped items at once. Drop fewer at a time.`,
+  entries: `dohc imports up to ${DROP_IMPORT_LIMITS.entries.toLocaleString("en-US")} files and folders from one drop. Drop fewer folders at a time.`,
+  skipped: `dohc reads up to ${DROP_IMPORT_LIMITS.skipped.toLocaleString("en-US")} files it leaves out, such as .DS_Store, in one drop. Drop fewer folders at a time.`,
+} as const;
 
 // Workspace content search streams batches main→renderer. The bounds mirror
 // workspaceSearch.ts (the producer); bridgeContract's SearchResultsEvent
@@ -124,32 +156,15 @@ export const CHANNELS = {
   openWorkspaceManager: "desktop:open-workspace-manager",
   closeThisWindow: "desktop:close-this-window",
   revealWorkspaceFolder: "desktop:reveal-workspace-folder",
-  listWorkspaceFiles: "desktop:list-workspace-files",
   createCollectionRecord: "desktop:create-collection-record",
-  createWorkspaceFile: "desktop:create-workspace-file",
-  createWorkspaceFolder: "desktop:create-workspace-folder",
-  moveWorkspacePath: "desktop:move-workspace-path",
-  deleteWorkspacePath: "desktop:delete-workspace-path",
-  exportWorkspaceZip: "desktop:export-workspace-zip",
-  exportDocumentFile: "desktop:export-document-file",
   showExplorerMenu: "desktop:show-explorer-menu",
   showWorkbenchMenu: "desktop:show-workbench-menu",
-  importWorkspaceFiles: "desktop:import-workspace-files",
-  readWorkspaceText: "desktop:read-workspace-text",
-  writeWorkspaceText: "desktop:write-workspace-text",
-  writeWorkspaceAsset: "desktop:write-workspace-asset",
-  pickImageFiles: "desktop:pick-image-files",
-  openFileExternally: "desktop:open-file-externally",
   readWorkspaceGraph: "desktop:read-workspace-graph",
-  getBacklinks: "desktop:get-backlinks",
   listWorkspaceHeadings: "desktop:list-workspace-headings",
-  listChatFileMentions: "desktop:list-chat-file-mentions",
-  listChatBookmarks: "desktop:list-chat-bookmarks",
-  saveChatBookmark: "desktop:save-chat-bookmark",
-  archiveChatBookmark: "desktop:archive-chat-bookmark",
   listCollections: "desktop:list-collections",
   getCollection: "desktop:get-collection",
   queryCollectionRecords: "desktop:query-collection-records",
+  historyNamesChanged: "desktop:history-names-changed",
   getCollectionRecordHistory: "desktop:get-collection-record-history",
   locateRecordHistoryRun: "desktop:locate-record-history-run",
   readWorkspaceDatabase: "desktop:read-workspace-database",
@@ -167,65 +182,22 @@ export const CHANNELS = {
   cloudLoginPoll: "desktop:cloud-login-poll",
   cloudStatus: "desktop:cloud-status",
   cloudLogout: "desktop:cloud-logout",
-  getShareHandoffStatus: "desktop:get-share-handoff-status",
-  acceptShareHandoff: "desktop:accept-share-handoff",
-  retryShareHandoff: "desktop:retry-share-handoff",
-  dismissShareHandoff: "desktop:dismiss-share-handoff",
   shareHandoffStatus: "desktop:share-handoff-status",
   cloudEnableSync: "desktop:cloud-enable-sync",
   cloudJoinWorkspace: "desktop:cloud-join-workspace",
-  createRelayShare: "desktop:create-relay-share",
-  listRelayShares: "desktop:list-relay-shares",
-  getRelayReceivedShare: "desktop:get-relay-received-share",
-  revokeRelayShare: "desktop:revoke-relay-share",
-  undoRelayShare: "desktop:undo-relay-share",
-  createRelayShareLink: "desktop:create-relay-share-link",
-  addRelayShareLink: "desktop:add-relay-share-link",
-  listRelayShareLinks: "desktop:list-relay-share-links",
-  ownerRestore: "desktop:owner-restore",
-  listOwnerLiveDocuments: "desktop:list-owner-live-documents",
-  listOwnerLiveRefusals: "desktop:list-owner-live-refusals",
-  retryOwnerLiveShare: "desktop:retry-owner-live-share",
-  stopOwnerLiveDocument: "desktop:stop-owner-live-document",
-  resumeOwnerLiveDocument: "desktop:resume-owner-live-document",
   publishOwnerApp: "desktop:publish-owner-app",
   ownerAppResponses: "desktop:owner-app-responses",
-  dataset: "desktop:dataset",
-  retuneRelayShareLink: "desktop:retune-relay-share-link",
-  rotateRelayShareLink: "desktop:rotate-relay-share-link",
-  revokeRelayShareLink: "desktop:revoke-relay-share-link",
-  listRelayShareDiscussion: "desktop:list-relay-share-discussion",
-  pollRelayShareDiscussionActivity:
-    "desktop:poll-relay-share-discussion-activity",
-  cancelRelayShareDiscussionActivity:
-    "desktop:cancel-relay-share-discussion-activity",
-  appendRelayShareDiscussion: "desktop:append-relay-share-discussion",
-  deleteRelayShareDiscussionMessage:
-    "desktop:delete-relay-share-discussion-message",
-  blockRelayShareDiscussionPrincipal:
-    "desktop:block-relay-share-discussion-principal",
-  unblockRelayShareDiscussionPrincipal:
-    "desktop:unblock-relay-share-discussion-principal",
-  pauseRelayShareDiscussion: "desktop:pause-relay-share-discussion",
-  resumeRelayShareDiscussion: "desktop:resume-relay-share-discussion",
-  promoteRelayShareGrant: "desktop:promote-relay-share-grant",
-  revokeRelayShareGrant: "desktop:revoke-relay-share-grant",
-  shareChatChannel: "desktop:share-chat-channel",
-  listChatChannelShares: "desktop:list-chat-channel-shares",
-  listJoinedSharedChannels: "desktop:list-joined-shared-channels",
-  joinSharedChannel: "desktop:join-shared-channel",
-  leaveSharedChannel: "desktop:leave-shared-channel",
-  openSharedView: "desktop:open-shared-view",
-  refreshSharedView: "desktop:refresh-shared-view",
-  dismissShareSkips: "desktop:dismiss-share-skips",
   // An automation claim failed or a retry queued one: run history reads again.
   automationRunsChanged: "desktop:automation-runs-changed",
   // The crash report changed; the renderer reads it again.
   crashReportChanged: "desktop:crash-report-changed",
+  // A timed save stopped counting, because the usage record changed outside dohc.
+  usageRecordStopped: "desktop:usage-record-stopped",
   noticesChanged: "desktop:notices-changed",
   // Which of the owner's computers runs a workspace's schedules changed.
   scheduleHostChanged: "desktop:schedule-host-changed",
   chatDispatchNotices: "desktop:chat-dispatch-notices",
+  agentRunState: "desktop:agent-run-state",
   // Collection automations: main parses and writes automations.yaml.
   listCollectionAutomations: "desktop:list-collection-automations",
   switchCollectionAutomation: "desktop:switch-collection-automation",
@@ -261,44 +233,13 @@ export const CHANNELS = {
   pressAutomationButton: "desktop:press-automation-button",
   automationRunSettled: "desktop:automation-run-settled",
   automationRunWaiting: "desktop:automation-run-waiting",
-  // Share changes. The first three act on a workspace this
-  // machine owns; the last three act from inside an edit-level share view.
-  listShareProposals: "desktop:list-share-proposals",
-  readShareProposalChanges: "desktop:read-share-proposal-changes",
-  readShareProposalFileContent: "desktop:read-share-proposal-file-content",
-  settleShareProposal: "desktop:settle-share-proposal",
-  submitShareChanges: "desktop:submit-share-changes",
-  pushShareDirectWrites: "desktop:push-share-direct-writes",
+  // Reports direct writes pushed from an edit-level share view.
   shareDirectWritesPushed: "desktop:share-direct-writes-pushed",
-  listMyShareChanges: "desktop:list-my-share-changes",
-  withdrawShareChanges: "desktop:withdraw-share-changes",
-  mountShare: "desktop:mount-share",
-  refreshShareMounts: "desktop:refresh-share-mounts",
-  unmountShare: "desktop:unmount-share",
   openWorkspace: "desktop:open-workspace",
   listEngineMoments: "desktop:list-engine-moments",
   readEngineMoment: "desktop:read-engine-moment",
   restoreEngineMomentFile: "desktop:restore-engine-moment-file",
-  listFileChats: "desktop:list-file-chats",
-  createFileChat: "desktop:create-file-chat",
-  listChatMessages: "desktop:list-chat-messages",
-  getChatThreadRevision: "desktop:get-chat-thread-revision",
-  sendChatMessage: "desktop:send-chat-message",
-  listChatThreadDecisions: "desktop:list-chat-thread-decisions",
-  resolveChatDecision: "desktop:resolve-chat-decision",
-  listChatThreadAttachments: "desktop:list-chat-thread-attachments",
   chatRunRecordsForThread: "desktop:chat-run-records-for-thread",
-  listChatChannels: "desktop:list-chat-channels",
-  listChatFollows: "desktop:list-chat-follows",
-  setChatFollow: "desktop:set-chat-follow",
-  listPersonalChatFeed: "desktop:list-personal-chat-feed",
-  markPersonalChatFeedSeen: "desktop:mark-personal-chat-feed-seen",
-  createChatChannel: "desktop:create-chat-channel",
-  listChannelThreads: "desktop:list-channel-threads",
-  startChannelThread: "desktop:start-channel-thread",
-  markChatThreadRead: "desktop:mark-chat-thread-read",
-  listChatReactions: "desktop:list-chat-reactions",
-  setChatReaction: "desktop:set-chat-reaction",
   syncDms: "desktop:sync-dms",
   acceptDm: "desktop:accept-dm",
   declineDm: "desktop:decline-dm",
@@ -325,22 +266,12 @@ export const CHANNELS = {
   chatDispatchStateForThread: "desktop:chat-dispatch-state-for-thread",
   runnerSelfTest: "desktop:runner-self-test",
   detectAgentTools: "desktop:detect-agent-tools",
-  getUserSettings: "desktop:get-user-settings",
-  setUserSettings: "desktop:set-user-settings",
-  resetUserSettings: "desktop:reset-user-settings",
-  reloadUserSettings: "desktop:reload-user-settings",
-  setAppPinned: "desktop:set-app-pinned",
-  getUserSettingsFilePath: "desktop:get-user-settings-file-path",
-  openUserSettingsFile: "desktop:open-user-settings-file",
-  openWorkspaceSettingsFile: "desktop:open-workspace-settings-file",
-  getWorkspaceSettings: "desktop:get-workspace-settings",
-  setWorkspaceSettings: "desktop:set-workspace-settings",
-  resetWorkspaceSettings: "desktop:reset-workspace-settings",
   setTitlebarTheme: "desktop:set-titlebar-theme",
+  windowFullScreen: "desktop:window-full-screen",
   stepWindowZoom: "desktop:step-window-zoom",
+  agentColorChanged: "desktop:agent-color-changed",
   userSettingsChanged: "desktop:user-settings-changed",
-  getWorkspaceUiState: "desktop:get-workspace-ui-state",
-  setWorkspaceUiState: "desktop:set-workspace-ui-state",
+  folderAppChanged: "desktop:folder-app-changed",
   searchResults: "desktop:search-results",
   engineYDocOpen: "desktop:engine-ydoc-open",
   engineYDocReadArtifactAsset: "desktop:engine-ydoc-read-artifact-asset",
@@ -368,6 +299,7 @@ export const CHANNELS = {
   holdQuit: "desktop:hold-quit",
   resumeQuit: "desktop:resume-quit",
   workspaceActivity: "desktop:workspace-activity",
+  captureHolds: "desktop:capture-holds",
   cloudSessionChanged: "desktop:cloud-session-changed",
   firstPaint: "desktop:first-paint",
   // Dev tools (DOHC_DEV_TOOLS=1, unpackaged only): the debug panel's

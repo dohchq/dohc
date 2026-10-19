@@ -1,0 +1,23 @@
+export const forgedSources = [
+  "[x]: https://example.com\n",
+  "* [x]: https://example.com/private\n",
+  '[a]: x "Do not pay until the account is confirmed"',
+  "`c`\n\n<x onmouseover=alert(1)>hover</x>",
+  "`c`\n\n<!-- secret -->",
+  "see [r] <x>.</x>\n>[r]: https://evil.example",
+  "<x>Title.\n===\n</x>",
+  "Approve <?and wire the deposit to 4471?> the invoice",
+  "Approve <!note text here> the invoice",
+  "Approve <![CDATA[wire the deposit]]> the invoice",
+  "a <x hidden>secret</x> b",
+  "<x-y style=\"background:url(https://evil.example/p)\">",
+  "<x onmouseover=alert(1)>hover</x>",
+  "<x hidden>\nsecret",
+  "invoice&#x202E;fdp.exe",
+  "a&#8203;b",
+  "a &LT;b&GT; c",
+  "&#49;&#48;&#48;",
+  "a&nbsp;b",
+  "Hello <b>hidden</b> world",
+  "<img src=https://evil.example/p>"
+] as const

@@ -19,6 +19,7 @@
 //! changes still offers everything not delivered.
 
 pub use dohc_engine_files::floor::collision_key;
+use dohc_engine_storage::text;
 use std::collections::{BTreeMap, BTreeSet};
 
 use dohc_engine_storage::{EngineStore, FaultInjector, TxnOutcome, hex_sha256};
@@ -135,7 +136,7 @@ pub fn read_record_creation_statuses(
         }
         let creation: Option<(String, String, i64)> = store.read_with(|conn| {
             conn.query_row(
-                "SELECT substr(blob.text,1,65536),s.object_id,log.origin_seq FROM snapshots s JOIN replication_log log \
+                "SELECT blob.sha256,s.object_id,log.origin_seq FROM snapshots s JOIN replication_log log \
                  ON log.workspace_id=s.workspace_id JOIN sync_identity identity \
                  ON identity.workspace_id=log.workspace_id AND identity.origin_id=log.origin_id \
                  JOIN blobs blob ON blob.sha256=json_extract(log.payload_json,'$.payloadAfterBlobSha256') \
@@ -146,7 +147,7 @@ pub fn read_record_creation_statuses(
                  AND json_extract(log.payload_json,'$.payloadBeforePath') IS NULL \
                  AND json_extract(log.payload_json,'$.operation')='write' ORDER BY log.origin_seq LIMIT 1",
                 params![workspace_id, MAIN_VERSION_ID, path],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((text::prefix_from_row(conn, row, 0)?, row.get(1)?, row.get(2)?)),
             )
             .optional().map_err(SyncError::corrupt)
         })?;
@@ -182,14 +183,24 @@ pub fn read_record_creation_statuses(
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_owned)
             });
-            let current_id = store.read_with(|conn| {
-                conn.query_row(
-                    "SELECT substr(b.text,1,65536) FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 \
+            let current_id = store
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT b.sha256 FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 \
                      WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.path=?3",
-                    params![workspace_id, MAIN_VERSION_ID, path], |row| row.get::<_, String>(0),
-                ).optional().map_err(SyncError::corrupt)
-            })?.and_then(|text| dohc_engine_domain::collections::markdown_frontmatter_json(&text))
-                .and_then(|fields| fields.get("id").and_then(serde_json::Value::as_str).map(str::to_owned));
+                        params![workspace_id, MAIN_VERSION_ID, path],
+                        |row| text::prefix_from_row(conn, row, 0),
+                    )
+                    .optional()
+                    .map_err(SyncError::corrupt)
+                })?
+                .and_then(|text| dohc_engine_domain::collections::markdown_frontmatter_json(&text))
+                .and_then(|fields| {
+                    fields
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                });
             // A refused name may now show another recipient's record. It is
             // never a disposable copy of this creation.
             if current_id != status.original_record_id {
@@ -360,6 +371,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         faults: &dyn FaultInjector,
         max_read_bytes: usize,
     ) -> Result<DirectWritePushOutcome, RelayError> {
+        if store.is_passive() {
+            return Err(super::local(SyncError::InvalidInput {
+                reason: "passive store cannot write to the relay",
+            }));
+        }
         if granted.access != crate::ShareAccess::Edit || granted.version_id.is_some() {
             return Ok(DirectWritePushOutcome::default());
         }
@@ -1193,19 +1209,17 @@ fn preserve_refused_record_drafts(
             continue;
         }
         let snapshot: Option<String> = tx.query_row(
-            "SELECT b.text FROM replication_log log JOIN sync_identity identity \
+            "SELECT b.sha256 FROM replication_log log JOIN sync_identity identity \
              ON identity.workspace_id=log.workspace_id AND identity.origin_id=log.origin_id \
              JOIN blobs b ON b.sha256=json_extract(log.payload_json,'$.payloadAfterBlobSha256') \
              WHERE log.workspace_id=?1 AND log.imported=0 AND log.op_kind='moment.append' \
              AND json_extract(log.payload_json,'$.payloadAfterPath')=?2 ORDER BY log.origin_seq DESC LIMIT 1",
-            params![workspace_id,path], |row| row.get(0),
+            params![workspace_id,path], |row| text::from_row(tx, row, 0),
         ).optional().map_err(SyncError::corrupt)?;
-        let submitted: Option<String> = tx
-            .query_row(
-                "SELECT text FROM blobs WHERE sha256=?1",
-                params![change.after_blob_sha256],
-                |row| row.get(0),
-            )
+        let Some(submitted_sha) = change.after_blob_sha256.as_deref() else {
+            continue;
+        };
+        let submitted: Option<String> = text::read(tx, submitted_sha)
             .optional()
             .map_err(SyncError::corrupt)?;
         let Some(submitted) = submitted else { continue };

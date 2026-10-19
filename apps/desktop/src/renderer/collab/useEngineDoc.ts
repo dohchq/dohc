@@ -2,6 +2,7 @@ import type { ReadOnlyTransitionCause } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { rearmDesktopAdmission } from "./rearmDesktopAdmission";
 import type { SharedDocumentOpenState } from "../../ipc/sharedDocumentOpenState";
+import { captureHeldLiveMessage } from "../../ipc/errorWords";
 import { UNKNOWN_SAVE_STATE, type SaveState } from "@dohc/workspace-contracts/save-state";
 import { useEffect, useRef, useState } from "react";
 import type * as Y from "yjs";
@@ -21,6 +22,8 @@ import {
 } from "./engineDocLease";
 
 export type { EngineRemovalInProgress };
+
+const NO_DRAFT_IDS: readonly number[] = [];
 
 // The engine Y.Doc editor hook for live files. Given a workspace, path, and
 // format kind, it opens a live engine Y.Doc session in main over IPC and binds
@@ -92,6 +95,7 @@ export type UseEngineDoc = {
   // stays read-only, states the reason, and offers a retry (bump retryKey),
   // which is also what discharges what the failure left behind.
   engineMayHoldDocument: boolean;
+  openRefusal?: string;
   // The canonical drawing's image records conflict with authoritative
   // storage. Retrying cannot repair this state.
   artifactAssetsInvalid: boolean;
@@ -115,7 +119,14 @@ export type UseEngineDoc = {
   // The live session became read-only after it opened. Unconfirmed local
   // edits are retained for recovery; a clean access stop creates no draft.
   readOnlyWhileEditing: boolean;
+  // The recovery row that read-only transition created, if it still exists.
+  readOnlyDraftId: number | null;
   readOnlyCause: ReadOnlyTransitionCause | null;
+  // Try again for a history replacement that could not set the earlier edits
+  // aside. The editor stays frozen until it succeeds.
+  retryReplacement: (() => void) | null;
+  // The recovery rows holding edits a finished history replacement set aside.
+  replacedDraftIds: readonly number[];
   // An open lost to a delete or move interval. This is not a terminal outcome:
   // the operation can still fail, so the caller stays read-only and retries.
   removalInProgress: EngineRemovalInProgress | null;
@@ -256,7 +267,7 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
   const opening = input.enabled && outcome === null;
   const notInVersion = outcome?.kind === "not-in-version";
   const documentUnavailable = outcome?.kind === "document-unavailable";
-  const engineMayHoldDocument = outcome?.kind === "engine-may-hold-document";
+  const engineMayHoldDocument = outcome?.kind === "engine-may-hold-document" || outcome?.kind === "capture-held";
   const artifactAssetsInvalid = outcome?.kind === "artifact-assets-invalid";
   const artifactAssets =
     outcome?.kind === "bound" ? outcome.artifactAssets : [];
@@ -286,11 +297,15 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
   const readOnlyWhileEditing =
     outcome?.kind === "bound" &&
     settled?.readOnlyTransition?.token === outcome.token;
+  const readOnlyDraftId = readOnlyWhileEditing
+    ? (settled?.readOnlyTransition?.draftId ?? null)
+    : null;
   const history = readOnlyHistory?.versionKey === versionKey && readOnlyHistory.retryKey === retryKey
     ? readOnlyHistory : null;
   const readOnlyCause = !input.enabled
     ? input.accessEnded && history?.bound ? "access-ended" : history?.cause ?? null
     : readOnlyWhileEditing ? settled!.readOnlyTransition!.cause : null;
+  const retryReplacement = readOnlyWhileEditing ? settled!.readOnlyTransition!.retry ?? null : null;
   const permanentFailureWhileEditing =
     outcome?.kind === "bound" &&
     settled?.permanentFailure?.token === outcome.token;
@@ -318,6 +333,7 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     liveHostUnavailable: outcome?.kind === "live-host-unavailable" || outcome?.kind === "shared-waiting",
     sharedWaiting: outcome?.kind === "shared-waiting" ? outcome.waiting : null,
     engineMayHoldDocument,
+    openRefusal: outcome?.kind === "capture-held" ? captureHeldLiveMessage(input.path) : undefined,
     artifactAssetsInvalid,
     deletedWhileEditing,
     goneCause,
@@ -325,7 +341,10 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     recoveryAssets,
     permanentFailureWhileEditing,
     readOnlyWhileEditing,
+    readOnlyDraftId,
     readOnlyCause,
+    retryReplacement,
+    replacedDraftIds: settled?.replacedDraftIds ?? NO_DRAFT_IDS,
     removalInProgress,
     artifactAssets,
     readArtifactAsset,

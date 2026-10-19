@@ -8,9 +8,11 @@ import {
   MAX_SHARE_PATH_CHARS,
   isShareablePathList,
   MAX_SHARE_VERSION_ID_CHARS,
+  SHARE_ACCESS_VALUES,
   type ShareAccess,
   isShareAccessValue,
   isValidShareVersionId,
+  visibleSharePath,
 } from "@dohc/security-contract/share-selector";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { asRecord } from "@dohc/workspace-core";
@@ -133,6 +135,16 @@ export function fileHalfOfGroup(selector: GroupShareSelector): ShareSelector {
     versionId: null,
     access: selector.access === "read-write" ? "edit" : "view",
   };
+}
+
+// The levels a link on this share can hold, lowest first. A Group link holds
+// the Group's levels and a file link the file levels; neither takes the
+// other's. A chat-only share has no links.
+const GROUP_LINK_ACCESS_LEVELS: readonly ChatShareAccess[] = ["read-only", "read-write"];
+export function linkAccessLevels(selector: StoredAnyShareSelector | null): readonly string[] {
+  if (!selector) return [];
+  if (!("kind" in selector)) return SHARE_ACCESS_VALUES;
+  return selector.kind === "group" ? GROUP_LINK_ACCESS_LEVELS : [];
 }
 
 // A selector with a file side: a path grant, or a group's folder.
@@ -556,32 +568,13 @@ function isCanonicalSharePath(path: string): boolean {
   return validated.ok && validated.normalized === path;
 }
 
-// The same gate, answering with the NORMALIZED path it proved. A caller that
-// serves or stores a path must serve this one: the check normalizes before
-// deciding, so serving the caller's own spelling would persist a string this
-// relay never validated — and one the granter may be unable to resolve.
-export function visibleSharePath(selector: ShareSelector, path: string): string | null {
-  const validated = validateUserWritePath(path);
-  if (!validated.ok) return null;
-  if (classifyEngineFilePath(validated.normalized).kind !== "tracked") return null;
-  const selected =
-    selector.paths.length === 0
-      ? selector.versionId !== null
-      : selector.paths.some(
-          (granted) =>
-            validated.normalized === granted ||
-            validated.normalized.startsWith(`${granted}/`),
-        );
-  return selected ? validated.normalized : null;
-}
-
 // The one version a path/version share exposes, and the rule both sides
 // state: a served op must name exactly this version — the selector's
 // `versionId`, or `main` when the selector names none. A descendant, a fork,
 // or any other lineage is not admitted, on either side. The recipient runs the
 // same equality against the selector it recorded when it accepted the share
 // (`crates/dohc-engine-sync/src/share.rs`, `enforce_share_view_boundary`).
-export function targetVersionId(selector: ShareSelector): string {
+export function targetVersionId(selector: Pick<ShareSelector, "versionId">): string {
   return selector.versionId ?? MAIN_VERSION_ID;
 }
 
@@ -982,10 +975,9 @@ function resolvedThreadPath(
 // owner's log to the file's current path and tested by name, never taken from
 // a client's word or from the display-only `linkedPathHint`.
 //
-// Across the boundary a thread's link travels as `linkedPath` and never as
-// `linkedObjectId`: the served moment deliberately drops the granter's object
-// id (see the moment branch below), so the recipient's store mints its own and
-// a granter object id would mean nothing there.
+// This filter serves the admitted path. Recipient decoration replaces it with
+// a per-recipient object token and a serve-time path hint when a key is present.
+// The granter's real object id never crosses the boundary.
 //
 // Chat ops are blob-free, so every decision here carries `blobSha256s: []` —
 // the share-blob route reads exactly that to decide reachability, and a chat
@@ -1041,10 +1033,9 @@ function filterFileChatOpForPathShare(
     served.linkedPath = servedPath;
     return { allowed: true, payload: served, blobSha256s: [] };
   }
-  // The four thread-scoped kinds serve their allowlist and nothing else. The
-  // attachment row stays the opaque chip the channel branch serves: its
-  // objectId/pathHint could name a file outside the share, so they are absent
-  // from the list and the recipient renders a chip it cannot follow.
+  // The four thread-scoped kinds first serve their allowlist. Recipient
+  // decoration adds token/path metadata only for attachments inside the selector.
+  // Outside-selector attachments stay opaque, without an object id or path.
   return {
     allowed: true,
     payload: pickServed(record, SERVED_CHAT_FIELDS[opKind as keyof typeof SERVED_CHAT_FIELDS]),

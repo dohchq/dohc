@@ -1,9 +1,11 @@
-import { existsSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, type Stats } from "node:fs";
 import { classifyPath, hasEngineIgnoredSegment } from "@dohc/workspace-core";
 import {
   lstat,
   mkdtemp,
   mkdir,
+  rename,
   rm,
   readdir,
   readFile,
@@ -11,10 +13,11 @@ import {
   symlink,
   utimes,
   writeFile,
+  type FileHandle,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   classifyEndProbe,
   classifyLadderProbe,
@@ -31,6 +34,7 @@ import {
   listFiles,
   movePath,
   prepareWorkspaceDelete,
+  screenDroppedPaths,
 } from "./workspaceFiles";
 import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
 import { createTestScratch } from "./testTemp";
@@ -41,6 +45,56 @@ let root: string;
 beforeEach(async () => {
   root = await createTestScratch("dohc-files-");
 });
+
+// Steps an import takes on disk, so a test can change the disk between two
+// of them as another process could. Each hook is one test's, and runs only
+// for the path it names.
+const fsHooks: {
+  beforeLstat?: (path: string) => Promise<void>;
+  lstatResult?: (path: string, stats: Stats) => void;
+  beforeOpen?: (path: string) => Promise<void>;
+  opened?: (path: string, handle: FileHandle) => FileHandle;
+  afterMkdir?: (path: string) => Promise<void>;
+} = {};
+afterEach(() => {
+  delete fsHooks.beforeLstat;
+  delete fsHooks.lstatResult;
+  delete fsHooks.beforeOpen;
+  delete fsHooks.opened;
+  delete fsHooks.afterMkdir;
+});
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    lstat: (async (path: Parameters<typeof actual.lstat>[0], options?: Parameters<typeof actual.lstat>[1]) => {
+      await fsHooks.beforeLstat?.(String(path));
+      const stats = await actual.lstat(path, options);
+      if (!options?.bigint) fsHooks.lstatResult?.(String(path), stats as Stats);
+      return stats;
+    }) as typeof actual.lstat,
+    open: (async (...args: Parameters<typeof actual.open>) => {
+      await fsHooks.beforeOpen?.(String(args[0]));
+      const handle = await actual.open(...args);
+      return fsHooks.opened?.(String(args[0]), handle) ?? handle;
+    }) as typeof actual.open,
+    mkdir: (async (...args: Parameters<typeof actual.mkdir>) => {
+      const made = await actual.mkdir(...args);
+      await fsHooks.afterMkdir?.(String(args[0]));
+      return made;
+    }) as typeof actual.mkdir,
+  };
+});
+
+// Runs `step` the first time the hook sees `path`.
+function once(path: string, step: () => Promise<void>): (seen: string) => Promise<void> {
+  let ran = false;
+  return async (seen) => {
+    if (ran || seen !== path) return;
+    ran = true;
+    await step();
+  };
+}
 
 it("refreshes listing metadata without following replacement symlinks or reserved paths", async () => {
   await writeFile(join(root, "note.md"), "---\nicon: local\n---\n");
@@ -1021,7 +1075,7 @@ describe("copyIntoWorkspace", () => {
 });
 
 describe("importDroppedPaths", () => {
-  it("imports regular files and skips directories, symlinks, and relative paths", async () => {
+  it("imports regular files and folders, and skips symlinks and relative paths", async () => {
     const outside = await createTestScratch("dohc-drop-");
     await writeFile(join(outside, "doc.md"), "dropped");
     await mkdir(join(outside, "folder"), { recursive: true });
@@ -1037,12 +1091,90 @@ describe("importDroppedPaths", () => {
       ],
       [root],
     );
-    // Only the real regular file imports. The directory, the symlink (refused
-    // before it follows to target.md), and the relative path are all skipped —
-    // and the skip count says so instead of the batch silently shrinking.
-    expect(outcome).toEqual({ imported: ["doc.md"], skipped: 3 });
+    // The symlink (refused before it follows to target.md) and the relative
+    // path are skipped, and the skip count says so instead of the batch
+    // silently shrinking. The empty folder lands, and the outcome counts it.
+    expect(outcome).toEqual({ imported: ["doc.md"], skipped: 2, folders: 1 });
+    expect((await stat(join(root, "folder"))).isDirectory()).toBe(true);
     expect(existsSync(join(root, "target.md"))).toBe(false);
   });
+
+  // Finder drags a folder, or a bundle document such as .rtfd, as one item.
+  it("copies a dropped folder whole, leaving OS files behind and skipping links", async () => {
+    const outside = await createTestScratch("dohc-drop-");
+    const secrets = await createTestScratch("dohc-secrets-");
+    await writeFile(join(secrets, "id_rsa"), "PRIVATE KEY");
+    const trip = join(outside, "Trip");
+    await mkdir(join(trip, "photos"), { recursive: true });
+    await mkdir(join(trip, "empty"), { recursive: true });
+    await mkdir(join(trip, "Report.rtfd"), { recursive: true });
+    await mkdir(join(trip, ".git"), { recursive: true });
+    await writeFile(join(trip, "plan.md"), "# Plan");
+    await writeFile(join(trip, "photos", "beach.jpg"), "jpg-bytes");
+    await writeFile(join(trip, "photos", ".DS_Store"), "finder");
+    await writeFile(join(trip, "Report.rtfd", "TXT.rtf"), "{\\rtf1}");
+    await writeFile(join(trip, ".git", "config"), "[core]");
+    await symlink(join(secrets, "id_rsa"), join(trip, "key.txt"), "file");
+    await symlink(secrets, join(trip, "linked"), "dir");
+
+    const outcome = await importDroppedPaths(root, [trip], [root]);
+    // Two links skipped; .DS_Store and .git are not workspace files at all.
+    // The walk reads each folder in the order the disk lists it.
+    expect({ ...outcome, imported: outcome.imported.sort() }).toEqual({
+      imported: ["Trip/Report.rtfd/TXT.rtf", "Trip/photos/beach.jpg", "Trip/plan.md"],
+      skipped: 2,
+      folders: 4,
+    });
+    expect(await readFile(join(root, "Trip", "photos", "beach.jpg"), "utf8")).toBe("jpg-bytes");
+    expect((await readdir(join(root, "Trip"))).sort()).toEqual(["Report.rtfd", "empty", "photos", "plan.md"]);
+    expect(await readdir(join(root, "Trip", "photos"))).toEqual(["beach.jpg"]);
+  });
+
+  it("lands a dropped folder beside one with its name, as a file would", async () => {
+    const outside = await createTestScratch("dohc-drop-");
+    await mkdir(join(outside, "Trip"), { recursive: true });
+    await writeFile(join(outside, "Trip", "plan.md"), "incoming");
+    await mkdir(join(outside, "Report.rtfd"), { recursive: true });
+    await writeFile(join(outside, "Report.rtfd", "TXT.rtf"), "incoming");
+    await mkdir(join(root, "inbox", "Trip"), { recursive: true });
+    await writeFile(join(root, "inbox", "Trip", "plan.md"), "existing");
+    await mkdir(join(root, "inbox", "Report.rtfd"), { recursive: true });
+
+    const outcome = await importDroppedPaths(
+      root,
+      [join(outside, "Trip"), join(outside, "Report.rtfd")],
+      [root],
+      "inbox",
+    );
+    expect(outcome).toEqual({
+      imported: ["inbox/Trip (2)/plan.md", "inbox/Report (2).rtfd/TXT.rtf"],
+      skipped: 0,
+      folders: 2,
+    });
+    expect(await readFile(join(root, "inbox", "Trip", "plan.md"), "utf8")).toBe("existing");
+    expect(await readFile(join(root, "inbox", "Trip (2)", "plan.md"), "utf8")).toBe("incoming");
+  });
+
+  // The screen checks each entry and its folder again, about 16 ms an entry on the shared
+  // Windows host, and this test screens about 2,000. That takes 20 to 30 s on a quiet host.
+  it("takes 1,000 files and folders from a drop with folders, and refuses the whole drop past that", async () => {
+    const outside = await createTestScratch("dohc-many-");
+    const fits = join(outside, "fits");
+    await mkdir(join(fits, "inner"), { recursive: true });
+    // The two folders and 998 files make 1,000.
+    await Promise.all(Array.from({ length: 998 }, (_, i) => writeFile(join(fits, "inner", `f-${i}.md`), "x")));
+    const landed = await importDroppedPaths(root, [fits], [root]);
+    expect([landed.imported.length, landed.folders]).toEqual([998, 2]);
+
+    const over = join(outside, "over");
+    await mkdir(over, { recursive: true });
+    await writeFile(join(outside, "loose.md"), "x");
+    await Promise.all(Array.from({ length: 999 }, (_, i) => writeFile(join(over, `f-${i}.md`), "x")));
+    // A file, the folder, and its 999 files make 1,001: nothing lands.
+    await expect(importDroppedPaths(root, [join(outside, "loose.md"), over], [root]))
+      .rejects.toThrow("dohc imports up to 1,000 files and folders from one drop. Drop fewer folders at a time.");
+    expect(await readdir(root)).toEqual(["fits"]);
+  }, 120_000);
 
   it("refuses a symlink pointing at a secret outside the workspace (exfil vector)", async () => {
     // A compromised renderer forging droppedPaths could plant a symlink to a
@@ -1069,7 +1201,284 @@ describe("importDroppedPaths", () => {
         return p;
       }),
     );
-    await expect(importDroppedPaths(root, paths, [root])).rejects.toThrow(/Too many/);
+    await expect(importDroppedPaths(root, paths, [root]))
+      .rejects.toThrow("dohc imports up to 100 dropped items at once. Drop fewer at a time.");
+  });
+
+  // The validator decodes %2f and reads \ as a separator, so these names
+  // would land as cfg/evil, through the link cfg, outside the workspace.
+  it("refuses a name the destination would rewrite, which would land through a link", async () => {
+    const outside = await createTestScratch("dohc-drop-");
+    const elsewhere = await createTestScratch("dohc-elsewhere-");
+    await symlink(elsewhere, join(root, "cfg"), "dir");
+    const encodedFile = join(outside, "cfg%2fevil");
+    await writeFile(encodedFile, "file");
+    const encodedFolder = join(outside, "cfg%2Fdeep");
+    await mkdir(encodedFolder);
+    await writeFile(join(encodedFolder, "a.md"), "folder");
+    const trip = join(outside, "Trip");
+    await mkdir(trip);
+    await writeFile(join(trip, "x%2fy.md"), "nested");
+    await writeFile(join(trip, "ok.md"), "ok");
+    const dropped = [encodedFile, encodedFolder, trip];
+    if (process.platform !== "win32") {
+      const backslashed = join(outside, "cfg\\evil2");
+      await mkdir(backslashed);
+      await writeFile(join(backslashed, "a.md"), "backslash");
+      dropped.push(backslashed);
+    }
+
+    const outcome = await importDroppedPaths(root, dropped, [root]);
+    expect(outcome).toEqual({ imported: ["Trip/ok.md"], skipped: dropped.length, folders: 1 });
+    expect(await readdir(elsewhere)).toEqual([]);
+    // The file dialog's path takes the same check.
+    expect(await copyIntoWorkspace(root, [encodedFile])).toEqual({ imported: [], skipped: 1 });
+    expect(await readdir(elsewhere)).toEqual([]);
+  });
+
+  // A nested name is checked where it lands: only the workspace root reserves
+  // shared-with-me.
+  it("checks each name where it lands, so only the root reserves shared-with-me", async () => {
+    const outside = await createTestScratch("dohc-drop-");
+    await mkdir(join(outside, "Trip", SHARED_WITH_ME_FOLDER), { recursive: true });
+    await writeFile(join(outside, "Trip", SHARED_WITH_ME_FOLDER, "notes.md"), "notes");
+    await mkdir(join(outside, SHARED_WITH_ME_FOLDER));
+    await writeFile(join(outside, SHARED_WITH_ME_FOLDER, "plan.md"), "plan");
+    await mkdir(join(root, "docs"));
+
+    expect(await importDroppedPaths(root, [join(outside, "Trip"), join(outside, SHARED_WITH_ME_FOLDER)], [root]))
+      .toEqual({ imported: [`Trip/${SHARED_WITH_ME_FOLDER}/notes.md`], skipped: 1, folders: 2 });
+    expect(await importDroppedPaths(root, [join(outside, SHARED_WITH_ME_FOLDER)], [root], "docs"))
+      .toEqual({ imported: [`docs/${SHARED_WITH_ME_FOLDER}/plan.md`], skipped: 0, folders: 1 });
+  });
+
+  // Another process that can write the dropped folder, but not read the
+  // secret, swaps what the screen saw for a link before the copy.
+  it.each(["file", "folder"] as const)("never copies a %s swapped for a link after the screen", async (swapped) => {
+    const outside = await createTestScratch("dohc-drop-");
+    const secrets = await createTestScratch("dohc-secrets-");
+    await writeFile(join(secrets, "a.md"), "SECRET");
+    const trip = join(outside, "Trip");
+    await mkdir(join(trip, "notes"), { recursive: true });
+    await writeFile(join(trip, "notes", "a.md"), "notes");
+
+    const screened = await screenDroppedPaths([trip], [root], "");
+    if (swapped === "file") {
+      await rm(join(trip, "notes", "a.md"));
+      await symlink(join(secrets, "a.md"), join(trip, "notes", "a.md"), "file");
+    } else {
+      await rm(join(trip, "notes"), { recursive: true });
+      await symlink(secrets, join(trip, "notes"), "dir");
+    }
+    const outcome = await copyIntoWorkspace(root, screened.usable);
+    expect(outcome.imported).toEqual([]);
+    expect(outcome.stop).toMatchObject({
+      file: swapped === "file" ? "Trip/notes/a.md" : "Trip/notes",
+      refusal: "changed",
+    });
+    expect(existsSync(join(root, "Trip", "notes", "a.md"))).toBe(false);
+  });
+
+  // Folders that landed are progress: the same drop again would land as
+  // Trip (2), so the result says the import stopped partway.
+  it("never copies a dropped file swapped for a link after the screen", async () => {
+    const outside = await createTestScratch("dohc-drop-");
+    const secrets = await createTestScratch("dohc-secrets-");
+    await writeFile(join(secrets, "id_rsa"), "SECRET");
+    await writeFile(join(outside, "notes.md"), "notes");
+
+    const screened = await screenDroppedPaths([join(outside, "notes.md")], [root], "");
+    await rm(join(outside, "notes.md"));
+    await symlink(join(secrets, "id_rsa"), join(outside, "notes.md"), "file");
+    expect(await copyIntoWorkspace(root, screened.usable)).toMatchObject({
+      imported: [],
+      stop: { file: "notes.md", refusal: "changed" },
+    });
+    expect(await readdir(root)).toEqual([]);
+  });
+
+  it("reports folders that landed before a stop as an interrupted import", async () => {
+    const outside = await createTestScratch("dohc-drop-");
+    const trip = join(outside, "Trip");
+    await mkdir(join(trip, "sub"), { recursive: true });
+    await writeFile(join(trip, "sub", "a.md"), "a");
+    const screened = await screenDroppedPaths([trip], [root], "");
+    await rm(join(trip, "sub", "a.md"));
+    await writeFile(join(trip, "sub", "a.md"), "replaced");
+
+    expect(await copyIntoWorkspace(root, screened.usable)).toMatchObject({
+      imported: [],
+      interrupted: true,
+      folders: 2,
+      stop: { file: "Trip/sub/a.md", refusal: "changed" },
+    });
+  });
+
+  it("refuses a drop whose folders hold more than 10,000 entries it leaves out", async () => {
+    const outside = await createTestScratch("dohc-many-");
+    const trip = join(outside, "Trip");
+    await mkdir(trip);
+    await writeFile(join(trip, "plan.md"), "plan");
+    // In batches: 10,000 files open at once run out of handles on Windows.
+    for (let start = 0; start < 10_000; start += 500) {
+      await Promise.all(Array.from({ length: 500 }, (_, i) => writeFile(join(trip, `._${start + i}`), "")));
+    }
+    expect((await importDroppedPaths(root, [trip], [root])).imported).toEqual(["Trip/plan.md"]);
+
+    await writeFile(join(trip, "._10000"), "");
+    await expect(importDroppedPaths(root, [trip], [root], "Trip")).rejects.toThrow(
+      "dohc reads up to 10,000 files it leaves out, such as .DS_Store, in one drop. Drop fewer folders at a time.",
+    );
+    expect(await readdir(join(root, "Trip"))).toEqual(["plan.md"]);
+  });
+
+  // A folder swapped for a link while the screen reads it, and put back
+  // before the copy, would have the screen record the link target's files.
+  it("refuses an entry seen through a folder swapped for a link during the screen", async () => {
+    const outside = await createTestScratch("dohc-drop-");
+    const secrets = await createTestScratch("dohc-secrets-");
+    await writeFile(join(secrets, "a.md"), "SECRET");
+    const trip = join(outside, "Trip");
+    await mkdir(join(trip, "sub"), { recursive: true });
+    await writeFile(join(trip, "sub", "a.md"), "a");
+    fsHooks.beforeLstat = once(join(trip, "sub", "a.md"), async () => {
+      await rename(join(trip, "sub"), join(outside, "real-sub"));
+      await symlink(secrets, join(trip, "sub"), "dir");
+    });
+
+    await expect(screenDroppedPaths([trip], [root], "")).rejects.toThrow("sub changed after dohc checked it.");
+  });
+
+  // The forged identity stands for a screen that recorded the link target's
+  // file. The folder check after the open still refuses the read.
+  it("checks the file's folder again after opening it", async () => {
+    const outside = await createTestScratch("dohc-drop-");
+    const secrets = await createTestScratch("dohc-secrets-");
+    await writeFile(join(secrets, "a.md"), "SECRET");
+    const trip = join(outside, "Trip");
+    await mkdir(join(trip, "sub"), { recursive: true });
+    await writeFile(join(trip, "sub", "a.md"), "a");
+    const [screened] = (await screenDroppedPaths([trip], [root], "")).usable;
+    const secret = await lstat(join(secrets, "a.md"), { bigint: true });
+    const entry = screened!.entries!.find((candidate) => candidate.path === "sub/a.md")!;
+    entry.identity = { dev: secret.dev, ino: secret.ino };
+    fsHooks.beforeOpen = once(join(trip, "sub", "a.md"), async () => {
+      await rename(join(trip, "sub"), join(outside, "real-sub"));
+      await symlink(secrets, join(trip, "sub"), "dir");
+    });
+
+    expect(await copyIntoWorkspace(root, [screened!])).toMatchObject({
+      imported: [],
+      stop: { file: "Trip/sub/a.md", refusal: "changed" },
+    });
+    expect(existsSync(join(root, "Trip", "sub", "a.md"))).toBe(false);
+  });
+
+  // A process that can write the workspace, such as an agent, swaps a folder
+  // the import just made for a link out of the workspace.
+  it("never creates through a destination folder swapped for a link", async () => {
+    const outside = await createTestScratch("dohc-drop-");
+    const elsewhere = await createTestScratch("dohc-elsewhere-");
+    const trip = join(outside, "Trip");
+    await mkdir(join(trip, "sub"), { recursive: true });
+    await writeFile(join(trip, "sub", "a.md"), "a");
+    fsHooks.afterMkdir = once(join(root, "Trip", "sub"), async () => {
+      await rm(join(root, "Trip", "sub"), { recursive: true });
+      await symlink(elsewhere, join(root, "Trip", "sub"), "dir");
+    });
+
+    expect(await importDroppedPaths(root, [trip], [root])).toMatchObject({
+      imported: [],
+      interrupted: true,
+      stop: { file: "Trip/sub/a.md", refusal: "changed" },
+    });
+    expect(await readdir(elsewhere)).toEqual([]);
+  });
+
+  it("removes a file whose copy failed, and reports the failure", async () => {
+    const outside = await createTestScratch("dohc-drop-");
+    const trip = join(outside, "Trip");
+    await mkdir(trip);
+    await writeFile(join(trip, "a.md"), "a".repeat(64));
+    const target = join(root, "Trip", "a.md");
+    fsHooks.opened = (path, handle) => path !== target ? handle : new Proxy(handle, {
+      get(real, property) {
+        if (property === "write") {
+          return async () => {
+            throw Object.assign(new Error("EIO: i/o error, write"), { code: "EIO" });
+          };
+        }
+        const value: unknown = Reflect.get(real, property, real);
+        return typeof value === "function" ? value.bind(real) : value;
+      },
+    });
+
+    expect(await importDroppedPaths(root, [trip], [root])).toMatchObject({
+      imported: [],
+      interrupted: true,
+      stop: { file: "Trip/a.md", code: "EIO", detail: "EIO: i/o error, write" },
+    });
+    expect(await readdir(join(root, "Trip"))).toEqual([]);
+  });
+
+  // Another user owns /Users/Shared/evil and swaps proj for a link to this
+  // user's home while the drop of evil/proj/Documents is screened. Making a
+  // link another uid owns takes root, so the test reports that owner for the
+  // link it made.
+  it.skipIf(process.platform === "win32")("refuses a drop reached through a link another user owns", async () => {
+    const outside = await createTestScratch("dohc-drop-");
+    const home = await createTestScratch("dohc-home-");
+    await mkdir(join(home, "Documents"));
+    await writeFile(join(home, "Documents", "tax.md"), "SECRET");
+    await mkdir(join(outside, "evil"));
+    const link = join(outside, "evil", "proj");
+    await symlink(home, link, "dir");
+    fsHooks.lstatResult = (path, stats) => {
+      if (path === link) stats.uid = process.getuid!() + 1;
+    };
+
+    await expect(importDroppedPaths(root, [join(link, "Documents")], [root])).rejects.toThrow(
+      "dohc did not import Documents, because a link another user owns leads to it. Drop it from a folder you own.",
+    );
+    expect(await readdir(root)).toEqual([]);
+    // The same link is this user's own choice when this user owns it.
+    delete fsHooks.lstatResult;
+    expect((await importDroppedPaths(root, [join(link, "Documents")], [root])).imported).toEqual(["Documents/tax.md"]);
+  });
+
+  // HFS+ stores names decomposed, so the folder made for Café reads back as
+  // Cafe plus a combining accent, and its files must still land.
+  it.skipIf(process.platform !== "darwin")("imports a folder with a composed name onto an HFS+ volume", async () => {
+    const scratch = await createTestScratch("dohc-hfs-");
+    const image = join(scratch, "hfs.dmg");
+    const mount = join(scratch, "mnt");
+    await mkdir(mount);
+    try {
+      execFileSync("hdiutil", ["create", "-quiet", "-size", "20m", "-fs", "HFS+", "-volname", "DOHCHFS", image]);
+      execFileSync("hdiutil", ["attach", "-quiet", "-nobrowse", "-mountpoint", mount, image]);
+    } catch {
+      console.warn("SKIP: hdiutil could not attach an HFS+ image here");
+      return;
+    }
+    try {
+      const workspace = join(mount, "ws");
+      await mkdir(workspace);
+      const outside = await createTestScratch("dohc-drop-");
+      const cafe = join(outside, "Caf\u00e9");
+      await mkdir(join(cafe, "Cr\u00e8me"), { recursive: true });
+      await writeFile(join(cafe, "a.md"), "a");
+      await writeFile(join(cafe, "Cr\u00e8me", "b.md"), "b");
+
+      const outcome = await importDroppedPaths(workspace, [cafe], [workspace]);
+      expect({ ...outcome, imported: outcome.imported.sort() }).toEqual({
+        imported: ["Caf\u00e9/Cr\u00e8me/b.md", "Caf\u00e9/a.md"],
+        skipped: 0,
+        folders: 2,
+      });
+      expect(await readFile(join(workspace, "Caf\u00e9", "Cr\u00e8me", "b.md"), "utf8")).toBe("b");
+    } finally {
+      execFileSync("hdiutil", ["detach", "-quiet", "-force", mount]);
+    }
   });
 
   it("refuses sources inside any registered workspace's .dohc", async () => {

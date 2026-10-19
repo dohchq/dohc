@@ -1,3 +1,4 @@
+import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
 import type {
   EngineDaemonClient,
 } from "@dohc/workspace-engine-client/daemon";
@@ -5,8 +6,8 @@ import type {
   EngineWorkspaceBinding,
   EngineWorkspaceRunOptions,
   EngineWorkspace,
-  EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
+import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import {
   isWorkspaceUpdatingRefusal,
   VERSIONED_METHOD,
@@ -19,8 +20,11 @@ import {
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
+import { LIVE_UPDATE_IDENTIFIER_MAX_BYTES } from "@dohc/live-session-contract/live-update-admission";
 import { describe, expect, it, vi } from "vitest";
 import { createCaptureLiveStores as createAttachedCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
+import { createTestScratch } from "./testTemp";
+import { restoreDirectWrites, type StopAndRestoreDependencies } from "./stopAndRestore";
 
 vi.mock("node:timers/promises", { spy: true });
 
@@ -240,6 +244,53 @@ const moment = {
   beforeInbandLimitBytes: null,
 } as const;
 
+describe("Stop and restore relay confirmation through the moment reader", () => {
+  it.each(["confirmed", "local", "mixed", "unattributed"] as const)(
+    "checks %s live settlement authors from the daemon",
+    async kind => {
+      const human = { kind: "human", humanId: "ana", ...(kind === "local" ? {} : { humanName: "Ana", relayConfirmed: true }) };
+      const created = { ...moment, momentId: "created", beforePresent: false,
+        authors: [{ kind: "named", userId: "ana", grantId: "grant", grantGeneration: 1 }] };
+      const later = { ...moment, momentId: `moment-ydoc-${"b".repeat(64)}`, metadataOrigin: "local-file",
+        beforeBlobSha256: moment.afterBlobSha256, afterBlobSha256: "b".repeat(64), afterText: "Changed",
+        authors: kind === "mixed" ? [human, { kind: "human", humanId: "owner", humanName: "Owner", relayConfirmed: true }]
+          : kind === "unattributed" ? [human, { kind: "unattributed" }] : [human] };
+      const client = clientFor(async request => {
+        expect(request.method).toBe(VERSIONED_METHOD.momentsGet);
+        return { id: request.id, result: (request.params as { momentId: string }).momentId === "created" ? created : later };
+      });
+      const { store } = createCaptureLiveStores(
+        { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessionsFor(client),
+      );
+      const restore = vi.fn<StopAndRestoreDependencies["restore"]>(async () => ({
+        kind: "restored", receipt: { path: moment.path, restoredMomentId: "back", removed: true },
+      }));
+      const outcome = await restoreDirectWrites({
+        moment: id => store.getMoment({ workspaceId: WORKSPACE_ID, momentId: id }),
+        momentsAfter: async () => [later.momentId], assertCurrent() {}, restore,
+        folderEntries: async () => [], removeEmptyFolder: async () => {},
+        undoRuns: async () => { throw new Error("no automations"); },
+      }, [{ momentId: created.momentId, objectId: moment.objectId, path: moment.path, created: true }]);
+      if (kind === "confirmed") {
+        expect(outcome).toMatchObject({ restored: [{ path: moment.path, removed: true }], review: [] });
+        expect(restore).toHaveBeenCalledWith(created.momentId, later.momentId, false);
+      } else {
+        expect(outcome).toMatchObject({ restored: [], review: [{ path: moment.path, reason: "changed-since",
+          changedBy: kind === "local" ? "Person ana" : kind === "unattributed" ? "An unrecorded author" : "Another author" }] });
+        expect(restore).not.toHaveBeenCalled();
+      }
+    },
+  );
+  it.each([false, "true", null])("refuses a snapshot person's relay confirmation of %s", async marker => {
+    const later = { ...moment, authors: [{ kind: "human", humanId: "ana", humanName: "Ana", relayConfirmed: marker }] };
+    const client = clientFor(async request => ({ id: request.id, result: later }));
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessionsFor(client),
+    );
+    await expect(store.getMoment({ workspaceId: WORKSPACE_ID, momentId: later.momentId })).rejects.toThrow();
+  });
+});
+
 function conflict(status: "open" | "resolved" = "open"): ConflictRecord {
   const state = {
     path: snapshot.path,
@@ -310,7 +361,7 @@ describe("createCaptureLiveStores", () => {
       id: request.id,
       result:
         request.method === WORKSPACE_METHOD.captureFlush
-          ? { settled: true, running: true, degraded: false }
+          ? { settled: true, running: true, degraded: false, heldFiles: [] }
           : { updated: true },
     }));
     const { store } = createCaptureLiveStores(
@@ -342,7 +393,7 @@ describe("createCaptureLiveStores", () => {
       if (request.method === WORKSPACE_METHOD.captureSetAuthor) throw SENTINEL;
       return {
         id: request.id,
-        result: { settled: true, running: true, degraded: false },
+        result: { settled: true, running: true, degraded: false, heldFiles: [] },
       };
     });
     const { store } = createCaptureLiveStores(
@@ -357,7 +408,13 @@ describe("createCaptureLiveStores", () => {
   });
 
   it("mutation proof: rejects an unsettled daemon capture flush", async () => {
-    const client = clientFor(async (request) => ({
+    let now = 0;
+    const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
+    vi.mocked(delay).mockImplementation(async (ms, value) => { now += ms ?? 0; return value; });
+    const requests: Request[] = [];
+    const client = clientFor(async (request) => {
+      requests.push(request);
+      return {
       id: request.id,
       result:
         request.method === WORKSPACE_METHOD.watcherStatus
@@ -366,19 +423,337 @@ describe("createCaptureLiveStores", () => {
               degraded: false,
               terminal: false,
               phase: "ready",
-              noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [],
+              noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [],
             }
-          : { settled: false, running: true, degraded: true },
-    }));
+          : { settled: false, running: true, degraded: true, heldFiles: [] },
+      };
+    });
     const { store } = createCaptureLiveStores(
       { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
       sessionsFor(client),
     );
 
-    await expect(store.flushCapture?.()).rejects.toThrow("did not settle");
+    try {
+      await expect(store.flushCapture?.()).rejects.toThrow("did not settle");
+      expect(now).toBe(1_000);
+      expect(requests.filter(request => request.method === WORKSPACE_METHOD.captureFlush)).toHaveLength(51);
+    } finally {
+      clock.mockRestore();
+      vi.mocked(delay).mockRestore();
+    }
+  });
+
+  it.each(["first flush", "watcher status", "later flush"])(
+    "bounds the whole flush when %s hangs without a request deadline",
+    async (hangingCall) => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+      vi.mocked(delay).mockImplementation((ms, value) =>
+        new Promise(resolve => setTimeout(() => resolve(value), ms)),
+      );
+      const requests: Request[] = [];
+      let finish!: () => void;
+      const pending = new Promise<void>(resolve => { finish = resolve; });
+      const client = clientFor(async request => {
+        requests.push(request);
+        const hangs = hangingCall === "first flush" ||
+          (hangingCall === "watcher status" && request.method === WORKSPACE_METHOD.watcherStatus) ||
+          (hangingCall === "later flush" && requests.length === 3);
+        if (hangs) {
+          await pending;
+        }
+        return { id: request.id, result: request.method === WORKSPACE_METHOD.watcherStatus
+          ? { running: true, degraded: false, terminal: false, phase: "ready",
+              noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [] }
+          : { settled: false, running: true, degraded: false, heldFiles: [] } };
+      });
+      const { store } = createCaptureLiveStores(
+        { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessionsFor(client),
+      );
+      let result: unknown;
+      const flushing = store.flushCapture!().catch(error => { result = error; });
+      try {
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(result).toBeInstanceOf(Error);
+        expect((result as Error).message).toBe(`Engine capture for ${WORKSPACE_ID} did not settle.`);
+        expect(requests.every(request => request.deadlineMs === undefined)).toBe(true);
+        expect(performance.now()).toBe(30_000);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        const requestCount = requests.length;
+        finish();
+        await vi.runAllTimersAsync();
+        await flushing;
+        expect(requests).toHaveLength(requestCount);
+        vi.mocked(delay).mockRestore();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("does not reopen a closed workspace when an expired flush answers unsettled", async () => {
+    const workspace = {
+      workspaceId: WORKSPACE_ID,
+      rootPath: await createTestScratch("dohc-expired-flush-"),
+      attachmentId: Symbol("expired-flush"),
+    };
+    const requests: Request[] = [];
+    const reply = Promise.withResolvers<void>();
+    const started = Promise.withResolvers<void>();
+    const client = clientFor(async request => {
+      requests.push(request);
+      if (request.method === WORKSPACE_METHOD.open) {
+        return { id: request.id, result: { workspace: WORKSPACE_HANDLE } };
+      }
+      if (request.method === WORKSPACE_METHOD.close) {
+        return { id: request.id, result: { closed: true } };
+      }
+      if (request.method === WORKSPACE_METHOD.captureFlush) {
+        started.resolve();
+        await reply.promise;
+        return { id: request.id, result: { settled: false, running: true, degraded: false, heldFiles: [] } };
+      }
+      throw new Error(`Unexpected method: ${request.method}`);
+    });
+    const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
+    const { store } = createCaptureLiveStores(workspace, sessions);
+    await sessions.run(workspace, async () => undefined);
+    const runs = vi.spyOn(sessions, "run");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    const flushing = store.flushCapture!().catch(error => error);
+    try {
+      await started.promise;
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(await flushing).toEqual(new Error(`Engine capture for ${WORKSPACE_ID} did not settle.`));
+      const closing = store.close!();
+      reply.resolve();
+      await closing;
+      // Drain the abandoned session runs, including a follow-up queued behind close.
+      await Promise.allSettled(runs.mock.results.map(result => result.value));
+      expect(requests.map(request => request.method)).toEqual([
+        WORKSPACE_METHOD.open,
+        WORKSPACE_METHOD.captureFlush,
+        WORKSPACE_METHOD.close,
+      ]);
+    } finally {
+      reply.resolve();
+      await flushing;
+      await sessions.closeAll();
+      runs.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("leaves no poll or follow-up request after the total deadline", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    vi.mocked(delay).mockImplementation((ms, value) =>
+      new Promise(resolve => setTimeout(() => resolve(value), ms)),
+    );
+    const requests: Request[] = [];
+    const client = clientFor(async request => {
+      requests.push(request);
+      if (request.method === WORKSPACE_METHOD.captureFlush) {
+        await new Promise<void>(resolve => setTimeout(resolve, 29_990));
+        return { id: request.id, result: { settled: false, running: true, degraded: false, heldFiles: [] } };
+      }
+      return { id: request.id, result: { running: true, degraded: false, terminal: false, phase: "ready",
+        noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [] } };
+    });
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessionsFor(client),
+    );
+    let result: unknown = "pending";
+    const flushing = store.flushCapture!().catch(error => { result = error; });
+    try {
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(result).toBe("pending");
+      await vi.advanceTimersByTimeAsync(1);
+      expect((result as Error).message).toContain("did not settle");
+      expect(requests.map(request => request.method)).toEqual([
+        WORKSPACE_METHOD.captureFlush, WORKSPACE_METHOD.watcherStatus,
+      ]);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      await vi.runAllTimersAsync();
+      await flushing;
+      vi.mocked(delay).mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("uses the normal request timeout across capture attempts and status reads", async () => {
+    let now = 0;
+    const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
+    vi.mocked(delay).mockImplementation(async (ms, value) => { now += ms ?? 0; return value; });
+    const requests: Request[] = [];
+    const durations = [100, 50, 300, 10];
+    const client = clientFor(async request => {
+      requests.push(request);
+      now += durations[requests.length - 1]!;
+      return { id: request.id, result: request.method === WORKSPACE_METHOD.watcherStatus
+        ? { running: true, degraded: false, terminal: false, phase: "ready",
+            noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [] }
+        : { settled: requests.length === 4, running: true, degraded: false, heldFiles: [] } };
+    });
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessionsFor(client),
+    );
+    try {
+      await store.flushCapture!();
+      expect(requests.map(request => request.deadlineMs)).toEqual([undefined, undefined, undefined, undefined]);
+      expect(now).toBe(500);
+    } finally {
+      clock.mockRestore();
+      vi.mocked(delay).mockRestore();
+    }
+  });
+
+  it("bounds session binding and starts no request after the deadline", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    const requests: Request[] = [];
+    let bind!: () => void;
+    const binding = new Promise<void>(resolve => { bind = resolve; });
+    const client = clientFor(async request => {
+      requests.push(request);
+      return { id: request.id, result: { settled: true, running: true, degraded: false, heldFiles: [] } };
+    });
+    const sessions = sessionsFor(client);
+    const run = sessions.run.bind(sessions);
+    let pending!: Promise<unknown>;
+    vi.spyOn(sessions, "run").mockImplementation((...args) => {
+      pending = binding.then(() => run(...args));
+      return pending;
+    });
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessions,
+    );
+    let result: unknown;
+    const flushing = store.flushCapture!().catch(error => { result = error; });
+    try {
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(result).toBeInstanceOf(Error);
+      expect((result as Error).message).toContain("did not settle");
+    } finally {
+      bind();
+      await pending.catch(() => undefined);
+      await flushing;
+      vi.useRealTimers();
+    }
+    expect(requests).toEqual([]);
+  });
+
+  it("keeps the exhausted-flush error for a daemon deadline refusal", async () => {
+    const clock = vi.spyOn(performance, "now").mockReturnValue(0);
+    const client = clientFor(async request => {
+      throw { wireError: { code: "DEADLINE_EXCEEDED", message: "deadline exceeded", retry: "afterBackoff" } };
+    });
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessionsFor(client),
+    );
+    try {
+      await expect(store.flushCapture!()).rejects.toThrow(`Engine capture for ${WORKSPACE_ID} did not settle.`);
+    } finally { clock.mockRestore(); }
+  });
+
+  it("returns immediately when the first capture flush settles", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    const requests: Request[] = [];
+    const client = clientFor(async request => {
+      requests.push(request);
+      return { id: request.id, result: { settled: true, running: true, degraded: false, heldFiles: [] } };
+    });
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessionsFor(client),
+    );
+    try {
+      await store.flushCapture!();
+      expect(requests.map(request => request.method)).toEqual([WORKSPACE_METHOD.captureFlush]);
+      expect(requests[0]?.deadlineMs).toBeUndefined();
+      expect(performance.now()).toBe(0);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("accepts a settled answer before the outer timer fires", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    const client = clientFor(async request => {
+      vi.spyOn(performance, "now").mockReturnValue(30_001);
+      return { id: request.id, result: { settled: true, running: true, degraded: false, heldFiles: [] } };
+    });
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessionsFor(client),
+    );
+    try {
+      await store.flushCapture!();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.mocked(performance.now).mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("allows a first capture flush that takes several seconds to settle", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    const client = clientFor(async request => {
+      await new Promise<void>(resolve => setTimeout(resolve, 6_000));
+      return { id: request.id, result: { settled: true, running: true, degraded: false, heldFiles: [] } };
+    });
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessionsFor(client),
+    );
+    let result: unknown = "pending";
+    const flushing = store.flushCapture!().then(() => { result = "settled"; }, error => { result = error; });
+    try {
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(result).toBe("pending");
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(result).toBe("settled");
+      expect(performance.now()).toBe(6_000);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      await vi.runAllTimersAsync();
+      await flushing;
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds repeated slow capture attempts to one 30-second deadline", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    vi.mocked(delay).mockImplementation((ms, value) =>
+      new Promise(resolve => setTimeout(() => resolve(value), ms)),
+    );
+    const requests: Request[] = [];
+    const client = clientFor(async request => {
+      requests.push(request);
+      if (request.method === WORKSPACE_METHOD.watcherStatus) {
+        return { id: request.id, result: { running: true, degraded: false, terminal: false, phase: "ready",
+          noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [] } };
+      }
+      await new Promise<void>(resolve => setTimeout(resolve, 6_000));
+      return { id: request.id, result: { settled: false, running: true, degraded: false, heldFiles: [] } };
+    });
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessionsFor(client),
+    );
+    let result: unknown;
+    const flushing = store.flushCapture!().catch(error => { result = error; });
+    try {
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect((result as Error).message).toBe(`Engine capture for ${WORKSPACE_ID} did not settle.`);
+      expect(requests.filter(request => request.method === WORKSPACE_METHOD.captureFlush)).toHaveLength(5);
+      expect(requests.every(request => request.deadlineMs === undefined)).toBe(true);
+      expect(performance.now()).toBe(30_000);
+    } finally {
+      await vi.runAllTimersAsync();
+      await flushing;
+      expect(vi.getTimerCount()).toBe(0);
+      expect(requests).toHaveLength(6);
+      vi.mocked(delay).mockRestore();
+      vi.useRealTimers();
+    }
   });
 
   it("abandons an in-flight capture flush when shutdown aborts", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
     const controller = new AbortController();
     let entered!: () => void;
     let finish!: () => void;
@@ -387,7 +762,7 @@ describe("createCaptureLiveStores", () => {
     const client = clientFor(async request => {
       entered();
       await pending;
-      return {id: request.id, result: {settled: true, running: true, degraded: false}};
+      return {id: request.id, result: {settled: true, running: true, degraded: false, heldFiles: []}};
     });
     const {store} = createCaptureLiveStores({workspaceId: WORKSPACE_ID, rootPath: "C:/workspace"}, sessionsFor(client), controller.signal);
     const flushing = store.flushCapture!();
@@ -396,10 +771,16 @@ describe("createCaptureLiveStores", () => {
     controller.abort();
     try {
       expect(await Promise.race([outcome, pending.then(() => "flush was not abandoned")])).toMatchObject({name: "AbortError"});
-    } finally {finish();}
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      finish();
+      await outcome;
+      vi.useRealTimers();
+    }
   });
 
   it("cancels capture polling between attempts and rejects a flush after shutdown", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
     const controller = new AbortController();
     const requests: Request[] = [];
     const client = clientFor(async request => {
@@ -408,30 +789,35 @@ describe("createCaptureLiveStores", () => {
         controller.abort();
         return { id: request.id, result: {
           running: true, degraded: false, terminal: false, phase: "ready",
-          noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [],
+          noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [],
         } };
       }
-      return { id: request.id, result: { settled: false, running: true, degraded: false } };
+      return { id: request.id, result: { settled: false, running: true, degraded: false, heldFiles: [] } };
     });
     const { store } = createCaptureLiveStores(
       { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
       sessionsFor(client), controller.signal,
     );
-    await expect(store.flushCapture?.()).rejects.toMatchObject({ name: "AbortError" });
-    await expect(store.flushCapture?.()).rejects.toBe(controller.signal.reason);
-    expect(requests.map(request => request.method)).toEqual([
-      WORKSPACE_METHOD.captureFlush, WORKSPACE_METHOD.watcherStatus,
-    ]);
+    try {
+      await expect(store.flushCapture?.()).rejects.toMatchObject({ name: "AbortError" });
+      await expect(store.flushCapture?.()).rejects.toBe(controller.signal.reason);
+      expect(requests.map(request => request.method)).toEqual([
+        WORKSPACE_METHOD.captureFlush, WORKSPACE_METHOD.watcherStatus,
+      ]);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
   });
 
   it("preserves the shutdown reason when capture polling aborts during sleep", async () => {
-    const timers = await vi.importActual<typeof import("node:timers/promises")>("node:timers/promises");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
     const controller = new AbortController();
     const requests: Request[] = [];
     let entered!: () => void;
     const started = new Promise<void>(resolve => { entered = resolve; });
-    vi.mocked(delay).mockImplementationOnce((...args) => {
-      const sleeping = timers.setTimeout(...args);
+    vi.mocked(delay).mockImplementationOnce((_ms, _value, options) => {
+      const sleeping = new Promise<never>((_resolve, reject) => {
+        options?.signal?.addEventListener("abort", () => reject(new Error("poll aborted")), { once: true });
+      });
       entered();
       return sleeping;
     });
@@ -442,9 +828,9 @@ describe("createCaptureLiveStores", () => {
         result: request.method === WORKSPACE_METHOD.watcherStatus
           ? {
               running: true, degraded: false, terminal: false, phase: "ready",
-              noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [],
+              noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [],
             }
-          : { settled: false, running: true, degraded: false },
+          : { settled: false, running: true, degraded: false, heldFiles: [] },
       };
     });
     const { store } = createCaptureLiveStores(
@@ -455,10 +841,13 @@ describe("createCaptureLiveStores", () => {
     await started;
     controller.abort(SENTINEL);
 
-    expect(await outcome).toBe(SENTINEL);
-    expect(requests.map(request => request.method)).toEqual([
-      WORKSPACE_METHOD.captureFlush, WORKSPACE_METHOD.watcherStatus,
-    ]);
+    try {
+      expect(await outcome).toBe(SENTINEL);
+      expect(requests.map(request => request.method)).toEqual([
+        WORKSPACE_METHOD.captureFlush, WORKSPACE_METHOD.watcherStatus,
+      ]);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
   });
 
   it("classifies an unsettled initial capture before bounded settle polling", async () => {
@@ -474,9 +863,9 @@ describe("createCaptureLiveStores", () => {
                 degraded: false,
                 terminal: false,
                 phase: "importing",
-                noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [],
+                noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [],
               }
-            : { settled: false, running: true, degraded: false },
+            : { settled: false, running: true, degraded: false, heldFiles: [] },
       };
     });
     const { store } = createCaptureLiveStores(
@@ -551,10 +940,11 @@ describe("createCaptureLiveStores", () => {
       text: "hello", createOnly, requestId: "caller-stable", expectedSha256: "a".repeat(64), metadata: { origin: "api" },
     })).rejects.toBe(SENTINEL);
     expect(requests).toHaveLength(2);
-    expect(requests[0]?.params).toMatchObject({ createOnly, requestId: "caller-stable", expectedSha256: "a".repeat(64) });
+    expect(requests[0]?.params).toMatchObject({ createOnly, expectedSha256: "a".repeat(64) });
+    expect(requests[0]?.params).not.toHaveProperty("requestId");
+    expect(requests[0]?.idempotencyKey).toBe("caller-stable");
     expect(requests[1]?.params).toEqual(requests[0]?.params);
     expect(requests[1]?.idempotencyKey).toBe(requests[0]?.idempotencyKey);
-    expect(requests[0]?.params).toMatchObject({ requestId: requests[0]?.idempotencyKey });
   });
 
   it("retries transport failures for reads but not mutations", async () => {
@@ -601,12 +991,12 @@ describe("createCaptureLiveStores", () => {
     });
   });
 
-  it("translates capture origins and flattens daemon conflict side states", async () => {
+  it.each(["open", "resolved"] as const)("translates %s conflicts into public records", async (status) => {
     const client = clientFor(async (request) => {
       expect(request.method).toBe(WORKSPACE_METHOD.conflictsList);
       return {
         id: request.id,
-        result: { conflicts: [conflict()], nextAfterConflictId: null },
+        result: { conflicts: [conflict(status)], nextAfterConflictId: null },
       };
     });
     const { store } = createCaptureLiveStores(
@@ -614,9 +1004,8 @@ describe("createCaptureLiveStores", () => {
       sessionsFor(client),
     );
 
-    await expect(
-      store.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" }),
-    ).resolves.toMatchObject({
+    const result = await store.listTextConflicts({ workspaceId: WORKSPACE_ID, status });
+    expect(result).toMatchObject({
       nextAfterConflictId: null,
       conflicts: [
         {
@@ -634,6 +1023,11 @@ describe("createCaptureLiveStores", () => {
         },
       ],
     });
+    if (status === "open") {
+      expect(result.conflicts[0]).not.toHaveProperty("resolution");
+    } else {
+      expect(result.conflicts[0]?.resolution).toBe("applied-incoming");
+    }
   });
 
   it("preserves nonempty binary conflict-side byte lengths", async () => {
@@ -1616,13 +2010,22 @@ describe("createCaptureLiveStores", () => {
     },
   );
 
+  const LONGEST_LIVE_ID = "\"".repeat(LIVE_UPDATE_IDENTIFIER_MAX_BYTES);
   it.each(([VERSIONED_METHOD.momentsGet, VERSIONED_METHOD.momentsList] as const).flatMap((method) => [
     { method, author: { kind: "named", userId: "ana", grantId: "grant", grantGeneration: 2 } as const },
     { method, author: { kind: "link", grantId: "grant", grantGeneration: 2, principalId: "holder" } as const },
-    { method, author: { kind: "link", publicPrincipalId: "public-holder", label: "Ana" } as const },
+    // The longest identifiers a live share admits: 512 UTF-8 bytes, at the largest generation.
+    { method, author: { kind: "named", userId: LONGEST_LIVE_ID, grantId: LONGEST_LIVE_ID, grantGeneration: Number.MAX_SAFE_INTEGER } as const },
+    { method, author: { kind: "link", grantId: LONGEST_LIVE_ID, grantGeneration: Number.MAX_SAFE_INTEGER, principalId: LONGEST_LIVE_ID } as const },
     { method, author: { kind: "agent", agentId: "agent" } as const },
     { method, author: { kind: "automation", automationId: "collection:Tasks#stamp", depth: 4 } as const },
     { method, author: { kind: "human", humanId: "ada", onBehalfOf: "ada" } as const },
+    // A live author snapshot: the relay-admitted account holder or link holder, and a declared agent.
+    { method, author: { kind: "human", humanId: "owner", humanName: "Owner" } as const },
+    { method, author: { kind: "human", humanId: LONGEST_LIVE_ID, humanName: LONGEST_LIVE_ID } as const },
+    { method, author: { kind: "link", publicPrincipalId: LONGEST_LIVE_ID, label: LONGEST_LIVE_ID } as const },
+    { method, author: { kind: "agent", agentId: "writer", agentName: "Writer", onBehalfOf: "owner", depth: 1 } as const },
+    { method, author: { kind: "link", publicPrincipalId: "public-holder", label: "Ana" } as const },
     { method, author: { kind: "human", humanId: "ada", humanName: "Ada" } as const },
     { method, author: { kind: "unattributed" } as const },
   ]))(
@@ -1902,11 +2305,11 @@ describe("createCaptureLiveStores", () => {
             name: "Main",
             createdAtMs: 0,
           },
-          textMomentPage: {
+
             moments: [],
-            nextBeforeMomentOrder: null,
+            nextCursor: null,
             latestMomentOrder: -1,
-          },
+          ...historyPageFields,
           protectedMoments: [
             {
               id: "secret-moment",
@@ -1924,7 +2327,7 @@ describe("createCaptureLiveStores", () => {
               protected: true,
             },
           ],
-          protectedTruncated: true,
+
         },
       };
     });
@@ -1937,8 +2340,7 @@ describe("createCaptureLiveStores", () => {
       store.listHistoryPage({ workspaceId: WORKSPACE_ID, objectId: "object-1", limit: 200 }),
     ).resolves.toMatchObject({
       activeVersion: { id: "main" },
-      textMomentPage: { moments: [], nextBeforeMomentOrder: null },
-      protectedMoments: [
+       moments: [], nextCursor: null, protectedMoments: [
         {
           id: "secret-moment",
           workspaceId: WORKSPACE_ID,
@@ -1951,7 +2353,7 @@ describe("createCaptureLiveStores", () => {
           protected: true,
         },
       ],
-      protectedTruncated: true,
+
     });
     expect(requests).toHaveLength(1);
     expect(requests[0]?.params).toEqual({
@@ -1962,6 +2364,7 @@ describe("createCaptureLiveStores", () => {
   });
 
   it("keeps live and recovery origins on history moments and nowhere else", async () => {
+    const historyMoment = { beforePath: null, ...Object.fromEntries(Object.entries(moment).filter(([key]) => ["momentOrder", "momentId", "versionId", "objectId", "path", "recordedAtMs", "operation", "afterContentKind", "afterByteLength", "metadataOrigin", "metadataSummary", "metadataCorrelationId", "authors", "syncRecordOnly"].includes(key))) };
     const client = clientFor(async (request) => {
       if (request.method === VERSIONED_METHOD.historyPage) {
         return {
@@ -1974,18 +2377,17 @@ describe("createCaptureLiveStores", () => {
               name: "Main",
               createdAtMs: 0,
             },
-            textMomentPage: {
+
               moments: [
-                { ...moment, metadataOrigin: "ydoc" },
-                { ...moment, momentId: "recovery", metadataOrigin: "capture-recovery" },
-                { ...moment, momentId: "cleared-recovery", metadataOrigin: "capture-recovery-cleared" },
-                { ...moment, momentOrder: 0, momentId: "captured", metadataOrigin: "capture" },
+                { ...historyMoment, metadataOrigin: "ydoc" },
+                { ...historyMoment, momentId: "recovery", metadataOrigin: "capture-recovery" },
+                { ...historyMoment, momentId: "cleared-recovery", metadataOrigin: "capture-recovery-cleared" },
+                { ...historyMoment, momentOrder: 0, momentId: "captured", metadataOrigin: "capture" },
               ],
-              nextBeforeMomentOrder: null,
+              nextCursor: null,
               latestMomentOrder: 1,
-            },
-            protectedMoments: [],
-            protectedTruncated: false,
+          protectedMoments: [], startCursor: historyCursor(), versionMarkers: [],
+
           },
         };
       }
@@ -1999,7 +2401,7 @@ describe("createCaptureLiveStores", () => {
 
     const page = await store.listHistoryPage({ workspaceId: WORKSPACE_ID, limit: 200 });
     expect(
-      page.textMomentPage.moments.map((entry) => entry.metadata.origin),
+      page.moments.map((entry) => entry.metadata.origin),
     ).toEqual(["ydoc", "capture-recovery", "capture-recovery-cleared", "local-file"]);
     // A snapshot's metadata shares the write type, so no write can carry the
     // live origin forward.

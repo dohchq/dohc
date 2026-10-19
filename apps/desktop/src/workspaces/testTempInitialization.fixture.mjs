@@ -1,15 +1,18 @@
-import fsSync, { existsSync, mkdirSync, utimesSync } from "node:fs";
+import fsSync, { chmodSync, existsSync, mkdirSync, readdirSync, utimesSync } from "node:fs";
 import fs from "node:fs/promises";
 import { registerHooks, syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 const mode = process.argv[2];
-const parent = join(tmpdir(), "dohc-test-scratch");
+const parent = join(tmpdir(), process.platform === "win32" ? "dohc-test-scratch" : `dohc-scratch-${process.getuid()}`);
 const aged = join(parent, "fixture-123-0000000000000001");
-mkdirSync(aged, { recursive: true });
+mkdirSync(parent, { recursive: true, mode: 0o700 });
+mkdirSync(aged);
 const old = new Date(Date.now() - 49 * 60 * 60 * 1000);
 utimesSync(aged, old, old);
+// Another account could enter a parent with this mode.
+if (mode === "loose-parent") chmodSync(parent, 0o755);
 
 let scans = 0;
 let rootCreates = 0;
@@ -39,7 +42,8 @@ const setupUrl = new URL("../testSetup.ts", import.meta.url).href;
 const helperUrl = new URL("./testTemp.ts", import.meta.url).href;
 registerHooks({
   resolve(specifier, context, next) {
-    if (context.parentURL === setupUrl) {
+    // The next-file mode imports the setup again, as vitest runs it again for each file.
+    if (context.parentURL?.split("?")[0] === setupUrl) {
       if (specifier === "vitest") {
         return { url: "data:text/javascript,export function afterEach(){};export function afterAll(){};export function inject(){}", shortCircuit: true };
       }
@@ -50,10 +54,26 @@ registerHooks({
 });
 
 const helper = await import(helperUrl);
-if (mode.endsWith("failure")) {
+if (mode === "loose-parent") {
+  const error = await helper.createTestScratch("loose-").catch((caught) => caught);
+  console.log(JSON.stringify({ scans, rootCreates, refused: /lets other accounts in/.test(error?.message), entries: readdirSync(parent) }));
+} else if (mode.endsWith("failure")) {
   const first = await helper.createTestScratch("first-").catch((error) => error);
   const second = await helper.createTestScratch("second-").catch((error) => error);
   console.log(JSON.stringify({ scans, rootCreates, sameFailure: first === failure && second === failure }));
+} else if (mode === "next-file") {
+  // A shared worker's next file allocates after the last file's suite cleanup removed the empty root.
+  await import(setupUrl);
+  await helper.createTestScratch("first-file-");
+  await helper.cleanupTestScratch();
+  await helper.cleanupSuiteTestScratch();
+  const rootRemoved = !existsSync(helper.testScratchRunRoot());
+  await import(`${setupUrl}?next-file`);
+  const next = await helper.createTestScratch("next-file-");
+  const nextExists = existsSync(next);
+  await helper.cleanupTestScratch();
+  await helper.cleanupSuiteTestScratch();
+  console.log(JSON.stringify({ scans, rootCreates, rootRemoved, nextExists }));
 } else {
   if (mode === "setup") {
     await import(setupUrl);

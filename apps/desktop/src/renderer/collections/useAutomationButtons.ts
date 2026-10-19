@@ -2,6 +2,7 @@ import { useEffect, useRef, useSyncExternalStore } from "react";
 import type { AutomationButtonState } from "@dohc/automation-executor/automation-buttons";
 import { PRESS_WAITING } from "@dohc/automation-executor/press-waiting";
 import type { AutomationRunSettledEvent } from "../../ipc/bridgeContract";
+import { isWorkspaceUpdatingError } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
 
 // Button fields for one Collection in one window: what each button shows,
@@ -14,7 +15,15 @@ import { bridge } from "../bridge";
 // button subscribes to its own field and record, so a press re-renders only
 // that button, and a table's cells keep their elements and focus.
 
-export type ReportButtonError = (fallback: string, error: unknown, retry: (() => void) | null) => void;
+// `identity` names what failed, such as one database cell, when the words
+// alone may not tell two failures apart. Its Notice then replaces only a
+// Notice of the same identity; without one, the words decide.
+export type ReportButtonError = (
+  fallback: string,
+  error: unknown,
+  retry: (() => void) | null,
+  identity?: string,
+) => void;
 /** Whose buttons a store shows: a document Collection's, or one table's of a dataset Collection. */
 export type ButtonsOf = { collectionPath: string } | { datasetId: string; table: string };
 export interface ButtonReporter {
@@ -75,6 +84,20 @@ export type AutomationButtons = ReturnType<typeof createAutomationButtons>;
 // report for a run that ends after its tab closed. The shell's toasts belong
 // to the workspace, so one reporter serves every Collection in it.
 const reporters = new Map<string, ButtonReporter>();
+type ButtonResult = "settled" | "relayed";
+const buttonResults = new Map<string, Set<(kind: ButtonResult) => void>>();
+export function onAutomationButtonResult(workspaceId: string, listener: (kind: ButtonResult) => void): () => void {
+  const listeners = buttonResults.get(workspaceId) ?? new Set();
+  listeners.add(listener);
+  buttonResults.set(workspaceId, listeners);
+  return () => {
+    listeners.delete(listener);
+    if (listeners.size === 0) buttonResults.delete(workspaceId);
+  };
+}
+function buttonResult(workspaceId: string, kind: ButtonResult): void {
+  for (const listener of buttonResults.get(workspaceId) ?? []) listener(kind);
+}
 // Rises when a workspace's buttons are torn down, so a reply or a Try again
 // from before does nothing.
 const generations = new Map<string, number>();
@@ -136,6 +159,7 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
 
   function settle(key: string, run: Run, outcome: Outcome): void {
     finish(key);
+    buttonResult(workspaceId, "settled");
     const { onNotice } = report();
     if (outcome.outcome === "done") onNotice(`Ran ${run.field} on ${run.label}`);
     else if (outcome.outcome === "skipped") onNotice(`${run.field} made no changes to ${run.label}`);
@@ -166,6 +190,10 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
       everyChanged();
     } catch (error) {
       if (closed || request !== requests) return;
+      // The engine is still reading a new workspace's files. A document
+      // Collection's surfaces read again on the whole-workspace activity
+      // main sends when it finishes, so its buttons stay checking until then.
+      if ("collectionPath" in of && isWorkspaceUpdatingError(error)) return;
       setChecking(false);
       report().onError("dohc could not read this Collection's buttons.", error, () => void live()?.refresh());
     }
@@ -250,6 +278,7 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
           // edits, and a failure as that host's one notice, so this window
           // reports nothing and the button is free again.
           finish(key);
+          buttonResult(workspaceId, "relayed");
           return;
         }
         run.claimId = result.claimId;

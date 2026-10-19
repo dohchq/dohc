@@ -92,6 +92,44 @@ fn stage_job(store: &mut EngineStore, content: &[u8], job: &MaterializationJobSp
         .expect("enqueue");
 }
 
+/// An older build queued a write for Finder's `.DS_Store`, a path the floor
+/// now excludes. Replay ends the job without touching the file, so it never
+/// fails again.
+#[test]
+fn a_job_at_an_ignored_path_ends_without_touching_the_file() {
+    let sc = Scratch::new("ignored-job");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    std::fs::write(sc.target(".DS_Store"), b"this device's view").expect("finder file");
+    let content = b"another device's view";
+    let job = spec(
+        "j-ds",
+        ".DS_Store",
+        &hex_sha256(content),
+        Preimage::Absent,
+        1,
+        10,
+    );
+    stage_job(&mut store, content, &job);
+
+    assert_eq!(
+        drain(&store, &sc, &StdReplacer, &NoFaults),
+        vec![JobOutcome::AlreadyMaterialized]
+    );
+    assert_eq!(store.pending_materialization_count().expect("pending"), 0);
+    assert_eq!(
+        store
+            .load_materialization_job("j-ds")
+            .expect("job")
+            .expect("row")
+            .status,
+        dohc_engine_storage::JobStatus::Cancelled
+    );
+    assert_eq!(
+        std::fs::read(sc.target(".DS_Store")).expect("finder file"),
+        b"this device's view"
+    );
+}
+
 #[test]
 fn materializes_a_new_file_and_marks_complete() {
     let sc = Scratch::new("basic");
@@ -111,6 +149,7 @@ fn materializes_a_new_file_and_marks_complete() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::per_os(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -176,6 +215,7 @@ fn ordinary_write_refuses_symlinked_ancestor_then_recovers_with_real_directory()
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -206,6 +246,7 @@ fn ordinary_write_refuses_symlinked_ancestor_then_recovers_with_real_directory()
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -262,6 +303,7 @@ fn ordinary_write_temp_symlink_blocks_only_that_job_then_recovers() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -294,6 +336,7 @@ fn ordinary_write_temp_symlink_blocks_only_that_job_then_recovers() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -348,6 +391,7 @@ fn ordinary_delete_refuses_symlinked_ancestor_then_recovers_with_real_directory(
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -367,6 +411,7 @@ fn ordinary_delete_refuses_symlinked_ancestor_then_recovers_with_real_directory(
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -409,6 +454,7 @@ fn ordinary_conflict_sibling_refuses_symlinked_ancestor_then_recovers() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -432,6 +478,7 @@ fn ordinary_conflict_sibling_refuses_symlinked_ancestor_then_recovers() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -479,6 +526,7 @@ fn job_committed_but_pipeline_unrun_replays_after_restart() {
             &store,
             sc.workspace(),
             &MaterializeOptions {
+                holds: None,
                 policy: DurabilityPolicy::none(),
                 replacer: &StdReplacer,
                 backoff: &NoBackoff,
@@ -500,6 +548,7 @@ fn job_committed_but_pipeline_unrun_replays_after_restart() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -529,6 +578,7 @@ fn crash_after_temp_write_leaves_no_torn_target_and_replay_completes() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -550,6 +600,7 @@ fn crash_after_temp_write_leaves_no_torn_target_and_replay_completes() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -576,6 +627,7 @@ fn crash_after_flush_before_rename_replays_to_completion() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::per_os(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -594,6 +646,7 @@ fn crash_after_flush_before_rename_replays_to_completion() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -619,6 +672,7 @@ fn crash_after_rename_before_complete_replays_exactly_once() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -637,6 +691,7 @@ fn crash_after_rename_before_complete_replays_exactly_once() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -674,6 +729,7 @@ fn external_newer_content_is_preserved_not_clobbered() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -726,6 +782,7 @@ fn delete_job_replays_after_remove_before_complete() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -744,6 +801,7 @@ fn delete_job_replays_after_remove_before_complete() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -754,6 +812,21 @@ fn delete_job_replays_after_remove_before_complete() {
     .expect("replay");
     assert_eq!(recovered[0].outcome, JobOutcome::AlreadyMaterialized);
     assert!(!sc.target("a.md").exists());
+    #[cfg(unix)]
+    {
+        let rows = store.retained_displacements_after(0).expect("retained");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            std::fs::read(sc.workspace().join(&rows[0].source_path)).unwrap(),
+            old
+        );
+        assert_eq!(
+            displaced_files(&sc).len(),
+            1,
+            "the original remains reachable during Q"
+        );
+    }
+    #[cfg(not(unix))]
     assert!(displaced_files(&sc).is_empty(), "the deleted copy is gone");
     assert!(
         store
@@ -792,6 +865,7 @@ fn delete_job_syncs_parent_dir_before_marking_complete() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::per_os(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -810,6 +884,7 @@ fn delete_job_syncs_parent_dir_before_marking_complete() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::per_os(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -846,6 +921,7 @@ fn superseded_lower_generation_job_is_skipped() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -863,6 +939,7 @@ fn superseded_lower_generation_job_is_skipped() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -978,6 +1055,7 @@ fn secret_non_transient_replace_error_removes_plaintext_temp() {
         &job,
         b"SECRET=plaintext",
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &NonTransientFailingReplacer,
             backoff: &NoBackoff,
@@ -1035,6 +1113,7 @@ fn bounded_retry_succeeds_below_the_cap_with_exact_attempt_count_and_backoff() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &replacer,
             backoff: &backoff,
@@ -1074,6 +1153,7 @@ fn bounded_retry_fails_closed_at_the_cap_and_leaves_job_pending() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &replacer,
             backoff: &backoff,
@@ -1165,6 +1245,7 @@ fn every_materialize_fault_point_has_a_live_call_site() {
             &store,
             sc.workspace(),
             &MaterializeOptions {
+                holds: None,
                 policy: DurabilityPolicy::none(),
                 replacer: if point == FaultPoint::MaterializeAfterKnownCopyDeletion {
                     &StdReplacer
@@ -1203,6 +1284,7 @@ fn drain(
         store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer,
             backoff: &NoBackoff,
@@ -1287,9 +1369,22 @@ fn read(sc: &Scratch, rel: &str) -> Option<Vec<u8>> {
     std::fs::read(sc.target(rel)).ok()
 }
 
-/// Nothing is left in staging and no displacement row remains.
+/// Every remaining staged original has a retained row; no unknown copy remains.
 fn assert_nothing_displaced(sc: &Scratch, store: &EngineStore) {
-    assert!(displaced_files(sc).is_empty(), "{:?}", displaced_files(sc));
+    let mut expected: Vec<String> = Vec::new();
+    #[cfg(unix)]
+    for row in store.retained_displacements_after(0).expect("retained") {
+        assert!(sc.workspace().join(&row.source_path).exists());
+        assert!(
+            store.holds_content(&row.digest).unwrap(),
+            "known baseline is recoverable"
+        );
+        expected.push(staged(row.source_path.rsplit('/').next().unwrap()));
+    }
+    expected.sort();
+    let mut actual = displaced_files(sc);
+    actual.sort();
+    assert_eq!(actual, expected);
     assert!(
         store
             .list_unsettled_displacements()
@@ -1510,6 +1605,7 @@ fn a_kept_file_is_saved_as_a_visible_copy() {
     assert_eq!(kept.len(), 1, "{kept:?}");
     std::fs::write(sc.target("a (kept copy).md"), b"taken").expect("occupy the first name");
     let options = MaterializeOptions {
+        holds: None,
         policy: DurabilityPolicy::none(),
         replacer: &StdReplacer,
         backoff: &NoBackoff,
@@ -1600,6 +1696,7 @@ fn keep_displaced(sc: &Scratch, store: &EngineStore, rel: &str, bytes: &[u8]) ->
 
 fn kept_copy_options() -> MaterializeOptions<'static> {
     MaterializeOptions {
+        holds: None,
         policy: DurabilityPolicy::none(),
         replacer: &StdReplacer,
         backoff: &NoBackoff,
@@ -1675,30 +1772,62 @@ fn a_different_file_with_the_same_bytes_is_not_taken_for_the_kept_copy() {
     );
 }
 
-/// A copy's workspace path stays within the engine's path limit, so capture
-/// records it. Where not one stem byte fits, the kept file and its row stay.
+/// The longest workspace path a kept copy takes here: the engine's limit, or
+/// less on macOS, which refuses a whole path of 1,024 bytes.
+fn kept_copy_path_limit(sc: &Scratch) -> usize {
+    let root = sc
+        .workspace()
+        .canonicalize()
+        .expect("root")
+        .as_os_str()
+        .len();
+    if cfg!(target_vendor = "apple") {
+        1_024.min(1_022 - root)
+    } else {
+        1_024
+    }
+}
+
+/// Folders named `ddd…`, none longer than 201 bytes, `len` bytes in all.
+fn folders(len: usize) -> String {
+    let mut segments = Vec::new();
+    let mut left = len;
+    while left > 201 {
+        segments.push("d".repeat(200));
+        left -= 201;
+    }
+    segments.push("d".repeat(left));
+    segments.join("/")
+}
+
+/// A copy's path stays within the engine's path limit and the OS's, so
+/// capture records it. Where not one stem byte fits, the kept file and its
+/// row stay.
 #[test]
 fn a_kept_copy_fits_the_workspace_path_limit_or_stays_kept() {
     let sc = Scratch::new("kept-copy-path-limit");
     let store = EngineStore::open(&sc.db(), 1).expect("open");
     let options = MaterializeOptions {
+        holds: None,
         policy: DurabilityPolicy::none(),
         replacer: &StdReplacer,
         backoff: &NoBackoff,
         now_ms: 30,
         faults: &NoFaults,
     };
-    let deep = ["d"; 4].map(|letter| letter.repeat(200)).join("/");
+    let limit = kept_copy_path_limit(&sc);
+    // The folders leave 220 bytes for a file name.
+    let deep = folders(limit - 221);
 
     let long = format!("{deep}/{}.md", "x".repeat(207));
-    assert!(long.len() < 1_024);
+    assert!(long.len() < limit);
     let id = keep_displaced(&sc, &store, &long, b"long");
     let KeptCopySave::Saved(copy) =
         save_kept_displacement(&store, sc.workspace(), "ws", id, &options).expect("save")
     else {
         panic!("a shorter stem fits");
     };
-    assert_eq!(copy.len(), 1_024, "{copy}");
+    assert_eq!(copy.len(), limit, "{copy}");
     assert!(copy.ends_with("x (kept copy).md"), "{copy}");
     assert_eq!(
         dohc_engine_files::classify_engine_file_path(&copy),
@@ -1707,7 +1836,7 @@ fn a_kept_copy_fits_the_workspace_path_limit_or_stays_kept() {
     assert_eq!(read(&sc, &copy).as_deref(), Some(&b"long"[..]));
 
     let full = format!("{deep}/{}/a", "e".repeat(216));
-    assert_eq!(full.len(), 1_022);
+    assert_eq!(full.len(), limit - 2);
     let id = keep_displaced(&sc, &store, &full, b"full");
     assert_eq!(
         save_kept_displacement(&store, sc.workspace(), "ws", id, &options).expect("save"),
@@ -1726,6 +1855,29 @@ fn a_kept_copy_fits_the_workspace_path_limit_or_stays_kept() {
             .collect::<Vec<_>>(),
         vec![id]
     );
+}
+
+/// A kept file whose own path is too long for macOS to name, where no copy
+/// can go beside it, stays kept with its row instead of failing the save.
+#[cfg(target_vendor = "apple")]
+#[test]
+fn a_kept_file_past_the_os_path_limit_stays_kept() {
+    let sc = Scratch::new("kept-copy-os-limit");
+    let store = EngineStore::open(&sc.db(), 1).expect("open");
+    let limit = kept_copy_path_limit(&sc);
+    let rel = format!("{}/{}.md", folders(limit - 60), "z".repeat(100));
+    assert!(rel.len() > limit && rel.len() < 1_024, "{}", rel.len());
+    let id = keep_displaced(&sc, &store, &rel, b"past the limit");
+    assert_eq!(
+        save_kept_displacement(&store, sc.workspace(), "ws", id, &kept_copy_options())
+            .expect("save"),
+        KeptCopySave::NoValidName
+    );
+    assert_eq!(
+        std::fs::read(sc.target(&staged("6a6f62.0"))).expect("kept"),
+        b"past the limit"
+    );
+    assert_eq!(store.list_kept_displacements("ws").expect("kept").len(), 1);
 }
 
 /// A replace that finds nothing unexpected writes no displacement row: the
@@ -2244,6 +2396,7 @@ fn a_handle_without_delete_sharing_fails_closed_without_moving_anything() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -2468,6 +2621,7 @@ fn a_failed_return_is_retried_and_the_file_comes_back() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &failing,
             backoff: &NoBackoff,
@@ -2485,6 +2639,7 @@ fn a_failed_return_is_retried_and_the_file_comes_back() {
         "ws",
         "a.md",
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -2863,6 +3018,7 @@ fn a_locked_put_back_of_a_newer_save_returns_it_on_the_next_run() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &TwoSaves::new(false, true),
             backoff: &NoBackoff,
@@ -2903,6 +3059,7 @@ fn a_power_loss_after_the_synced_row_still_returns_the_newer_save() {
             &store,
             sc.workspace(),
             &MaterializeOptions {
+                holds: None,
                 policy: DurabilityPolicy::none(),
                 replacer: &replacer,
                 backoff: &NoBackoff,
@@ -3008,6 +3165,7 @@ fn recovery_after_a_restart_on_a_drive_without_atomic_renames_reports_the_limit(
         sc.workspace(),
         None,
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &NoAtomicRename,
             backoff: &NoBackoff,
@@ -3089,6 +3247,7 @@ fn a_fallback_rename_that_reports_failure_after_moving_still_reports_the_limit()
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &FallbackRenameFailsAfterMoving,
             backoff: &NoBackoff,
@@ -3212,6 +3371,7 @@ fn a_crash_mid_batch_recovers_every_job() {
 
 fn sweep_options() -> MaterializeOptions<'static> {
     MaterializeOptions {
+        holds: None,
         policy: DurabilityPolicy::none(),
         replacer: &StdReplacer,
         backoff: &NoBackoff,
@@ -3224,6 +3384,106 @@ fn sweep_options() -> MaterializeOptions<'static> {
 fn put_staged(sc: &Scratch, name: &str, bytes: &[u8]) {
     std::fs::create_dir_all(sc.target(STAGING)).expect("staging");
     std::fs::write(sc.target(&staged(name)), bytes).expect("staged file");
+}
+
+#[cfg(windows)]
+fn recover_with_unresolvable_target(missing: bool) {
+    for path_only in [false, true] {
+        // The path sweep selects open rows; unreadable kept rows use startup recovery.
+        if !missing && path_only {
+            continue;
+        }
+        let sc = Scratch::new("recovery-junction");
+        let elsewhere = Scratch::new("recovery-junction-target");
+        std::fs::write(elsewhere.target("a.md"), OUTSIDE).unwrap();
+        assert!(
+            std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(sc.target("notes"))
+                .arg(elsewhere.workspace())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let mut store = EngineStore::open(&sc.db(), 1).unwrap();
+        stage_job(
+            &mut store,
+            OURS,
+            &spec(
+                "j1",
+                "notes/a.md",
+                &hex_sha256(OURS),
+                Preimage::Absent,
+                1,
+                1,
+            ),
+        );
+        put_staged(&sc, "6a31.0", PREIMAGE);
+        let displacement = DisplacementSpec {
+            job_id: "j1".into(),
+            workspace_id: "ws".into(),
+            target_path: "notes/a.md".into(),
+            displaced_name: "6a31.0".into(),
+            expected_sha256: hex_sha256(PREIMAGE),
+            content_sha256: Some(hex_sha256(OURS)),
+            now_ms: 2,
+        };
+        if missing {
+            store.open_displacement(&displacement).unwrap();
+            std::fs::remove_file(sc.target(&staged("6a31.0"))).unwrap();
+        } else {
+            store.keep_displacement(&displacement, None).unwrap();
+            std::fs::hard_link(sc.target(&staged("6a31.0")), sc.target("visible.md")).unwrap();
+        }
+        // Recovery follows reopening, with a target that now fails Windows resolution.
+        drop(store);
+        let store = EngineStore::open(&sc.db(), 3).unwrap();
+        let result = if path_only {
+            recover_path_displacements(&store, sc.workspace(), "ws", "notes/a.md", &sweep_options())
+        } else {
+            recover_displacements(&store, sc.workspace(), Some("ws"), &sweep_options())
+        };
+        remove_dir_alias(&sc.target("notes"));
+        result.expect("recovery must finish its staging-only steps");
+        assert_eq!(std::fs::read(elsewhere.target("a.md")).unwrap(), OUTSIDE);
+        if missing {
+            assert!(store.list_unsettled_displacements().unwrap().is_empty());
+            assert_eq!(
+                store
+                    .load_materialization_job("j1")
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                JobStatus::Pending
+            );
+        } else {
+            assert_eq!(
+                store
+                    .load_materialization_job("j1")
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                JobStatus::Conflict
+            );
+            assert_eq!(store.list_kept_displacements("ws").unwrap().len(), 1);
+            assert_eq!(read(&sc, "visible.md").as_deref(), Some(PREIMAGE));
+            assert_eq!(read(&sc, &staged("6a31.0")).as_deref(), Some(PREIMAGE));
+        }
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn missing_staged_file_is_discarded_before_target_resolution() {
+    recover_with_unresolvable_target(true);
+}
+
+#[cfg(windows)]
+#[test]
+fn linked_kept_file_conflicts_before_target_resolution() {
+    recover_with_unresolvable_target(false);
 }
 
 /// A staged file whose job the store no longer has is never deleted, even
@@ -3561,6 +3821,7 @@ fn newest_staged_copy_returns_first_after_a_crash_during_adoption() {
             put_staged(&sc, "6a31.1", OUTSIDE);
             let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterDisplacementJournal);
             let options = MaterializeOptions {
+                holds: None,
                 faults: faults.as_ref(),
                 ..sweep_options()
             };
@@ -3598,6 +3859,61 @@ impl AtomicReplacer for CrossVolumeStage {
             std::fs::write(target, OUTSIDE)?;
         }
         Err(std::io::Error::from(std::io::ErrorKind::CrossesDevices))
+    }
+}
+
+#[test]
+fn review2_cross_volume_preserves_unknown_matching_preimages() {
+    for delete in [false, true] {
+        let sc = Scratch::new("cross-volume-unknown-preimage");
+        let mut store = EngineStore::open(&sc.db(), 1).unwrap();
+        std::fs::write(sc.target("a.md"), OUTSIDE).unwrap();
+        let job = spec(
+            "unknown-cross-volume",
+            "a.md",
+            &hex_sha256(if delete { b"" } else { OURS }),
+            Preimage::Present(hex_sha256(OUTSIDE)),
+            1,
+            10,
+        );
+        if delete {
+            store.put_binary_blob(b"").unwrap();
+            store
+                .write_with(&NoFaults, |tx| enqueue_delete_job(tx, &job))
+                .unwrap();
+        } else {
+            stage_job(&mut store, OURS, &job);
+        }
+        assert!(!store.holds_content(&hex_sha256(OUTSIDE)).unwrap());
+        assert_eq!(
+            drain(&store, &sc, &CrossVolumeStage { change: false }, &NoFaults),
+            vec![JobOutcome::Conflict]
+        );
+        assert_eq!(read(&sc, "a.md").as_deref(), Some(OUTSIDE));
+        if !delete {
+            assert!(
+                std::fs::read_dir(sc.workspace()).unwrap().any(|entry| {
+                    let path = entry.unwrap().path();
+                    path.is_file()
+                        && path != sc.target("a.md")
+                        && std::fs::read(path).unwrap() == OURS
+                }),
+                "the selected write must survive as a conflict copy"
+            );
+        }
+        drop(store);
+        let store = EngineStore::open(&sc.db(), 30).unwrap();
+        assert!(drain(&store, &sc, &CrossVolumeStage { change: false }, &NoFaults).is_empty());
+        assert_eq!(read(&sc, "a.md").as_deref(), Some(OUTSIDE));
+        assert_eq!(
+            store
+                .load_materialization_job("unknown-cross-volume")
+                .unwrap()
+                .unwrap()
+                .status,
+            JobStatus::Conflict
+        );
+        assert_nothing_displaced(&sc, &store);
     }
 }
 

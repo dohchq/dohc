@@ -1,3 +1,4 @@
+import { LinksInInput, LinksResolveInput, LinksInResult, LinksResolveResult } from "@dohc/workspace-contracts/links";
 import { errorMessage } from "./workspaceError";
 import type { ShareUnconfirmedChanges } from "./shareViewInfo";
 import { createHash } from "node:crypto";
@@ -16,7 +17,7 @@ import {
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
-import type { ListWorkspaceFilesResult } from "../ipc/bridgeContract";
+import type { WorkspacePathListing } from "../ipc/bridgeContract";
 import {
   assertActiveWorkspaceOperationLease,
   mediaTypeForExtension,
@@ -44,8 +45,13 @@ import {
   recordedShareSelector,
   SharePinInvalidError,
 } from "./shareViewRecords";
+import {
+  SHARE_VIEW_REOPEN_MESSAGE,
+  shareViewIdentityIsIntact,
+} from "./shareViewMarker";
 import { shareViewTakesLocalWrites } from "./shareWriteGate";
 import { isEngineTransportFailure } from "./shareViewEngineFailure";
+import { resolveEngineFileTargets } from "./resolveEngineFiles";
 import { createShareViewFileChanges } from "./shareViewFileChanges";
 import {
   type ShareViewFilesOwnerCapability,
@@ -174,8 +180,10 @@ export type ShareViewReconcileOutcome =
     };
 
 export interface ShareViewFiles {
+  linksIn(target: ShareViewFilesTarget, input: LinksInInput): Promise<LinksInResult>;
+  linksResolve(target: ShareViewFilesTarget, input: LinksResolveInput): Promise<LinksResolveResult>;
   end(lease: WorkspaceOperationLease, target: ShareViewFilesTarget, assertCurrent: () => void): Promise<void>;
-  narrow(lease: WorkspaceOperationLease, target: ShareViewFilesTarget, assertCurrent: () => void, commit: (unsavedPaths: string[] | null, unconfirmedChanges: ShareUnconfirmedChanges) => void): Promise<void>;
+  narrow(lease: WorkspaceOperationLease, target: ShareViewFilesTarget, assertCurrent: () => void, commit: (unsavedPaths: string[] | null, unconfirmedChanges: ShareUnconfirmedChanges) => Promise<void>): Promise<void>;
   mount(
     lease: WorkspaceOperationLease,
     target: PreparedShareViewFilesMount,
@@ -189,10 +197,11 @@ export interface ShareViewFiles {
     target: ShareViewFilesTarget,
     request: ShareViewFileReadRequest,
   ): Promise<ShareViewFileReadOutcome>;
+  lookup(target: ShareViewFilesTarget, paths: readonly string[]): Promise<WorkspacePathListing>;
   list(
     target: ShareViewFilesTarget,
-    options?: { includeContentIdentity?: boolean },
-  ): Promise<ListWorkspaceFilesResult>;
+    options?: { includeContentIdentity?: boolean; under?: string },
+  ): Promise<WorkspacePathListing>;
   projectionStatus(
     target: ShareViewFilesTarget,
   ): Promise<ShareViewProjectionStatus>;
@@ -200,6 +209,8 @@ export interface ShareViewFiles {
     lease: WorkspaceOperationLease,
     target: ShareViewFilesTarget,
     request: ShareViewReconcileRequest,
+    // Internal pull scheduling state; never part of the refresh result.
+    onCursorCommitted?: (cursor: number) => void,
   ): Promise<ShareViewReconcileOutcome>;
   unmount(
     lease: WorkspaceOperationLease,
@@ -333,6 +344,9 @@ function assertActiveTarget(
 function writableSelector(target: ActiveShareViewFilesTarget) {
   const selector = recordedShareSelector(target.grantedSelector);
   if (selector === null) throw new SharePinInvalidError(target.shareId);
+  if (target.kind === "standalone" && !shareViewIdentityIsIntact(target)) {
+    throw new SharedFileReadOnlyError(SHARE_VIEW_REOPEN_MESSAGE);
+  }
   if (
     target.kind === "mount" ||
     !shareViewTakesLocalWrites({
@@ -847,6 +861,7 @@ export function createShareViewFiles(
     target: ActiveShareViewFilesTarget,
     request: ShareViewReconcileRequest,
     owner: ShareViewFilesOwnerCapability,
+    onCursorCommitted?: (cursor: number) => void,
   ): Promise<ShareViewReconcileOutcome> {
     const lifecycle = createShareViewLifecycle(owner);
     if (target.kind === "mount") {
@@ -960,6 +975,7 @@ export function createShareViewFiles(
                 recordRefusals,
                 captured: recovered,
                 preservedPaths: target.unsavedPaths,
+                onCursorCommitted,
               })
             : await lifecycle.refreshCaptured({
                 rootDir: target.rootPath,
@@ -972,6 +988,7 @@ export function createShareViewFiles(
                 recordRefusals,
                 captured: recovered,
                 preservedPaths: target.unsavedPaths,
+                onCursorCommitted,
               });
       }
     }
@@ -1072,7 +1089,7 @@ export function createShareViewFiles(
         assertCurrent();
         const captured = await captureBeforeRestriction(lease, target);
         assertCurrent();
-        commit(captured.unsavedPaths, captured.unconfirmedChanges);
+        await commit(captured.unsavedPaths, captured.unconfirmedChanges);
       });
     },
     async mount(lease, prepared) {
@@ -1148,6 +1165,21 @@ export function createShareViewFiles(
       });
     },
 
+    async linksIn(requested, input) {
+      return withCurrentTarget(requested, target => withStore(target, async store => {
+        const page = await store.incomingLinks(LinksInInput.parse(input));
+        const tracked = (path: string) => classifyEngineFilePath(path).kind === "tracked";
+        return page && tracked(page.subject.path) ? { ...page, entries: page.entries.filter(row => tracked(row.source)), unchecked: page.unchecked.filter(tracked) } : null;
+      }));
+    },
+    async linksResolve(requested, input) {
+      return withCurrentTarget(requested, target => withStore(target, async store => {
+        const parsed = LinksResolveInput.parse(input);
+        if (classifyEngineFilePath(validatedReadPath(parsed.source)).kind !== "tracked") throw new SharedFileReadOnlyError("This path is not available through the shared view.");
+        const result = await store.resolveLinks(parsed);
+        return { ...result, results: result.results.map(row => row && classifyEngineFilePath(row.path ?? row.create).kind === "tracked" ? row : null) };
+      }));
+    },
     async read(requested, request) {
       return withCurrentTarget(requested, async (target) => {
         const path = validatedReadPath(request.path);
@@ -1178,6 +1210,21 @@ export function createShareViewFiles(
       });
     },
 
+    async lookup(requested, paths) {
+      return withCurrentTarget(requested, target => withStore(target, async store => {
+        const main = await store.ensureMainVersion({ workspaceId: target.storeWorkspaceId });
+        const files: WorkspaceFileListingEntry[] = [];
+        const resolved = await resolveEngineFileTargets(store, target.storeWorkspaceId,
+          paths.map(path => ({ path })), undefined, main.id);
+        resolved.forEach((file, index) => {
+          if (file.status === "found" && file.path === paths[index] && classifyEngineFilePath(file.path).kind === "tracked") {
+            files.push({ path: file.path, kind: classifyPath(file.path).kind });
+          }
+        });
+        return { files, folders: [] };
+      }));
+    },
+
     async list(requested, options) {
       return withCurrentTarget(requested, async (target) => {
         const iconCache =
@@ -1189,6 +1236,7 @@ export function createShareViewFiles(
           const metadata = await store.listTextFileMetadata({
             workspaceId: target.storeWorkspaceId,
             versionId: main.id,
+            ...(options?.under === undefined ? {} : { under: options.under }),
           });
           const visible = metadata.filter(
             (entry) => classifyEngineFilePath(entry.path).kind === "tracked",
@@ -1309,13 +1357,13 @@ export function createShareViewFiles(
       });
     },
 
-    async reconcile(lease, requested, request) {
+    async reconcile(lease, requested, request, onCursorCommitted) {
       assertLease(lease);
       return withCurrentTarget(requested, async (target) => {
         assertLease(lease, target);
         assertActiveTarget(target);
         return withOwnerCapability(lease, target, (owner) =>
-          reconcileWithOwner(lease, target, request, owner),
+          reconcileWithOwner(lease, target, request, owner, onCursorCommitted),
         );
       });
     },

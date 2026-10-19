@@ -1,10 +1,10 @@
 import { expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { createAppLaunchHandler } from "./appLaunch";
-import { parseAppLaunchConfig } from "./appLaunchConfig";
+import { parse } from "tldts";
 const config={viewerOrigin:'https://viewer.example.com',appDomain:'example.net'},publicationId='a'.repeat(64);
-function fixture(hold:()=>Promise<void>=async()=>{}){let now=1000000,revision=1,active=true,capability="server-capability";const requests:Request[]=[];const bytes=Buffer.from("document.getElementById('root').textContent='App loaded';");const file={path:'bundle.js',sha256:createHash('sha256').update(bytes).digest('hex'),byteLength:bytes.length,contentType:'text/javascript; charset=utf-8'};
-const handler=createAppLaunchHandler({config,relayUrl:'https://relay.example.org',nowMs:()=>now,resolveMaterial:async(_d,c)=>c==='viewer=session'?{ok:true,capabilityToken:'server-capability',profileSecret:'server-profile',setCookie:null,currentCapability:async()=>capability}:{ok:false,status:404},fetchRelay:async r=>{requests.push(r);await hold();if(r.headers.get('authorization')!==`LinkCapability ${capability}`)return new Response(null,{status:401});expect(r.headers.get('x-dohc-link-profile-secret')).toBe('server-profile');if(!active)return new Response(null,{status:404});const u=new URL(r.url);if(u.pathname.endsWith('/backend/invoke')){const body=await r.json();return body.authorityRevision===revision?Response.json({result:body.input,revision:1,replayed:false}):new Response(null,{status:404});}if(u.pathname.endsWith('/blobs/'+file.sha256))return u.search===`?authorityRevision=${revision}`?new Response(bytes,{headers:{'content-type':file.contentType}}):new Response(null,{status:404});return Response.json({publicationId,authorityRevision:revision,files:[file]});}});
+function fixture(hold:()=>Promise<void>=async()=>{},appDomain=config.appDomain){let now=1000000,revision=1,active=true,capability="server-capability";const requests:Request[]=[];const bytes=Buffer.from("document.getElementById('root').textContent='App loaded';");const file={path:'bundle.js',sha256:createHash('sha256').update(bytes).digest('hex'),byteLength:bytes.length,contentType:'text/javascript; charset=utf-8'};
+const handler=createAppLaunchHandler({config:{...config,appDomain},relayUrl:'https://relay.example.org',nowMs:()=>now,resolveMaterial:async(_d,c)=>c==='viewer=session'?{ok:true,capabilityToken:'server-capability',profileSecret:'server-profile',setCookie:null,currentCapability:async()=>capability}:{ok:false,status:404},fetchRelay:async r=>{requests.push(r);await hold();if(r.headers.get('authorization')!==`LinkCapability ${capability}`)return new Response(null,{status:401});expect(r.headers.get('x-dohc-link-profile-secret')).toBe('server-profile');if(!active)return new Response(null,{status:404});const u=new URL(r.url);if(u.pathname.endsWith('/backend/invoke')){const body=await r.json();return body.authorityRevision===revision?Response.json({result:body.input,revision:1,replayed:false}):new Response(null,{status:404});}if(u.pathname.endsWith('/blobs/'+file.sha256))return u.search===`?authorityRevision=${revision}`?new Response(bytes,{headers:{'content-type':file.contentType}}):new Response(null,{status:404});return Response.json({publicationId,authorityRevision:revision,files:[file]});}});
 const request=(url:string,body:string,headers:Record<string,string>={})=>new Request(url,{method:'POST',body,headers:{host:new URL(url).host,...headers}});
 const issue=()=>handler.handle(request(config.viewerOrigin+'/api/apps/launch',JSON.stringify({discriminator:'abcdefghijkl',publicationId}),{origin:config.viewerOrigin,'content-type':'application/json',cookie:'viewer=session'}));
 const redeem=(launch:{action:string;handoff:string})=>handler.handle(request(launch.action,new URLSearchParams({handoff:launch.handoff}).toString(),{origin:config.viewerOrigin,'content-type':'application/x-www-form-urlencoded'}));
@@ -17,7 +17,16 @@ it.each(['/collection','/backend'])('uses identical refusal headers for revoked,
   const responses=await Promise.all([send(app.origin,app.cookie),send(app.origin,'bad=cookie'),send('https://'+'z'.repeat(43)+'.example.net',app.cookie)]);
   for(const response of responses){expect(response.status).toBe(404);expect(response.headers.get('referrer-policy')).toBe('no-referrer');expect(Object.fromEntries(response.headers)).toEqual(Object.fromEntries(responses[0]!.headers));expect(await response.json()).toEqual({ok:false,error:'not found'});}
 });
-it('requires separate registrable domains including private PSL suffixes',()=>{expect(parseAppLaunchConfig(config)).toEqual(config);for(const appDomain of ['com','example.com','apps.example.com','localhost','127.0.0.1','github.io','EXAMPLE.NET'])expect(()=>parseAppLaunchConfig({...config,appDomain})).toThrow();expect(()=>parseAppLaunchConfig({viewerOrigin:'https://a.github.io',appDomain:'b.github.io'})).not.toThrow();});
+it.each(['vercel.app','github.io'])('launches and serves apps under private suffix %s',async appDomain=>{
+  const f=fixture(undefined,appDomain),app=await launch(f),host=new URL(app.origin).hostname;
+  expect(host).toMatch(new RegExp('^[a-f0-9]{48}\\.'+appDomain.replaceAll('.','\\.')+'$'));
+  expect(parse(host,{allowPrivateDomains:true}).domain).toBe(host);
+  expect(f.handler.matches(f.request(app.origin+'/document',''))).toBe(true);
+  for(const invalidHost of ['a'.repeat(47)+'.'+appDomain,'nested.'+host,host+'.example.org']) {
+    expect(f.handler.matches(f.request('https://'+invalidHost+'/document',''))).toBe(false);
+  }
+  const response=await app.read();expect(response.status).toBe(200);expect(await response.text()).toContain('App loaded');
+});
 it('requires viewer cookies and exact origin',async()=>{const f=fixture();for(const custom of [{origin:'null',cookie:'viewer=session'},{origin:config.viewerOrigin,cookie:'bad'}] as Array<Record<string,string>>)expect((await f.handler.handle(f.request(config.viewerOrigin+'/api/apps/launch',JSON.stringify({discriminator:'abcdefghijkl',publicationId}),{...custom,'content-type':'application/json'}))).status).toBe(404);expect(f.requests).toHaveLength(0);});
 it('rechecks relay and keeps credentials out of opaque document',async()=>{const f=fixture(),app=await launch(f);expect(app.response.headers.get('set-cookie')).toContain('Secure; HttpOnly; SameSite=Strict; Path=/');expect(app.html).toContain("frame.sandbox='allow-scripts allow-forms allow-downloads'");expect(app.html).not.toContain('server-capability');expect(app.html).not.toContain('server-profile');const doc=await app.read();expect(doc.status).toBe(200);const text=await doc.text();expect(text).toContain('App loaded');expect(text).not.toContain(app.proof);expect(text).not.toContain(app.cookie);expect(f.requests).toHaveLength(4);});
 it('atomically consumes concurrent handoffs once',async()=>{const f=fixture(),handoff=await(await f.issue()).json();expect((await Promise.all([f.redeem(handoff),f.redeem(handoff)])).map(r=>r.status).sort()).toEqual([200,404]);});
@@ -180,4 +189,20 @@ it('keeps revoked bootstrap cookies opaque when their local request budget is ex
   }
   const unknown=await f.handler.handle(new Request(app.origin+'/bootstrap',{headers:{host:new URL(app.origin).host}}));
   expect(unknown.status).toBe(404);expect(await unknown.json()).toEqual({ok:false,error:'not found'});
+});
+
+it("drops a publication's launch and staged document when its owner is deleted", async () => {
+  const f = fixture(), app = await launch(f);
+  f.handler.deleteAccount("deleted-owner", [], [publicationId]);
+  expect((await app.read()).status).toBe(404);
+  expect((await f.redeem(app.handoff)).status).toBe(404);
+});
+it("refuses an in-flight launch after its publication is deleted", async () => {
+  let release!: () => void, entered!: () => void;
+  const waiting = new Promise<void>(resolve => {entered = resolve;});
+  const hold = new Promise<void>(resolve => {release = resolve;});
+  const f = fixture(async () => {entered(); await hold;});
+  const pending = f.issue(); await waiting;
+  f.handler.deleteAccount("deleted-owner", [], [publicationId]); release();
+  expect((await pending).status).toBe(404);
 });

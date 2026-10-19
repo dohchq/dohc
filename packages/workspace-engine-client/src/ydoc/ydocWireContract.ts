@@ -56,6 +56,11 @@ export type ChangeAttributionWire = JsonObject & {
 export type YdocRecordUpdateParams = JsonObject & {
   sessionId: string;
   updateBase64: string;
+  // The lineage claim this update's document was built on, as last observed
+  // from open, record, or resync. The engine refuses the update with
+  // ydoc-lineage-stale unless it matches the session's claim; null matches
+  // only an unclaimed lineage.
+  expectedLineageClaimId: string | null;
   actorOriginId?: string;
   attribution?: ChangeAttributionWire;
   trustedAutomationDraft?: boolean;
@@ -211,8 +216,10 @@ const OpenResultSchema = mutableStruct({
 const RecordUpdateResultSchema = Schema.Union([mutableStruct({
   seq: Schema.Int,
   lineageClaimId: Schema.NullOr(Schema.String),
+  lineageOriginatedHere: Schema.Boolean,
 }), mutableStruct({
   lineageClaimId: Schema.String,
+  lineageOriginatedHere: Schema.Boolean,
   ownerDraft: mutableStruct(OwnerAppendFields),
 })]);
 const ResyncResultSchema = mutableStruct({

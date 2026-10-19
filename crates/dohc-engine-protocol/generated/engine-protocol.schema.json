@@ -251,12 +251,12 @@
           "const": "INVALID_PARAMS"
         },
         {
-          "description": "The request deadline elapsed before the engine finished.",
+          "description": "The request deadline elapsed and the work did not happen. A request\nwhose work landed before its deadline answers with that work's result.",
           "type": "string",
           "const": "DEADLINE_EXCEEDED"
         },
         {
-          "description": "The request was cancelled by the client or by session teardown.",
+          "description": "The client or session teardown cancelled the request and the work did\nnot happen. A request whose work landed first answers with its result.",
           "type": "string",
           "const": "CANCELLED"
         },
@@ -264,11 +264,6 @@
           "description": "Bounded queues are full; explicit backpressure.",
           "type": "string",
           "const": "OVERLOADED"
-        },
-        {
-          "description": "Collection reconciliation waits for an open document's session lease.",
-          "type": "string",
-          "const": "COLLECTION_RECONCILIATION_LEASE_HELD"
         },
         {
           "description": "The session generation is no longer valid (engine restarted).",
@@ -406,6 +401,11 @@
           "const": "RELAY_INVALID_RESPONSE"
         },
         {
+          "description": "The relay address is not an https origin, so the engine refused it\nbefore sending anything.",
+          "type": "string",
+          "const": "RELAY_HTTPS_REQUIRED"
+        },
+        {
           "description": "Internal engine failure; details in redacted diagnostics only.",
           "type": "string",
           "const": "INTERNAL"
@@ -483,7 +483,7 @@
           "minimum": 0
         },
         "maxFrameBytes": {
-          "description": "The largest control frame the client will accept. The engine clamps it\ninto `[MIN_NEGOTIABLE_FRAME_BYTES, engine default]` and echoes the\neffective value in `helloAck.limits`. Collection responses size\nthemselves to it; other families keep their own fixed bounds, and a\nsecret read can still exceed a lowered limit.",
+          "description": "The largest control frame the client will accept. The engine clamps it\ninto `[MIN_NEGOTIABLE_FRAME_BYTES, engine default]` and echoes the\neffective value in `helloAck.limits`. Every outbound control frame\nrespects it. A reply that cannot fit returns `INTERNAL` with message\n`response-wire-limit-exceeded` and retry `afterBackoff`, keeping the\nconnection open. The request may have committed; retry mutations with\nthe same idempotency key. Oversized events are dropped.",
           "type": [
             "integer",
             "null"
@@ -557,7 +557,7 @@
       "type": "object",
       "properties": {
         "deadlineMs": {
-          "description": "Relative deadline. The engine clamps it to its maximum and fails the\nrequest with `DEADLINE_EXCEEDED` when it elapses.",
+          "description": "Relative deadline. The engine clamps it to its maximum. When it\nelapses, a request whose work did not happen fails with\n`DEADLINE_EXCEEDED`; one whose work landed answers with its result.\nA live acknowledgement stopped after its work landed gets no answer,\nso `liveApplication.settle` and `liveApplication.fenceRestore` require\na deadline, and the caller treats its expiry as an unknown outcome.",
           "type": [
             "integer",
             "null"

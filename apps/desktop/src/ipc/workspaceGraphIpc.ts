@@ -1,12 +1,12 @@
+import { workspaceFileRefs } from "../workspaces/workspaceFileReferenceScopes";
+import { type EngineFileReferenceTarget, type EngineFileResolver } from "../workspaces/resolveEngineFiles";
 import { CHANNELS } from "./channels";
 import {
-  GetBacklinksPayload,
-  GetBacklinksResult,
   ListWorkspaceHeadingsPayload,
   ListWorkspaceHeadingsResult,
   ReadWorkspaceGraphPayload,
   WorkspaceGraphResult,
-  type ListWorkspaceFilesResult,
+  type WorkspacePathListing,
   type ReadWorkspaceTextResult,
 } from "./bridgeContract";
 import type { RegistryEntry } from "../workspaces/registryStore";
@@ -14,6 +14,7 @@ import type { EngineWorkspace } from "@dohc/workspace-engine-client/daemon";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import type { WorkspaceGraphIndex } from "../workspaces/workspaceGraph";
 import type { WorkspaceFileListingCache } from "../workspaces/workspaceFileListingCache";
+import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { workspaceHasReceivedShareState } from "../workspaces/shareViewFilesTarget";
 import { addChatMentionsToWorkspaceGraph } from "../workspaces/chatMentionGraphOverlay";
 import {
@@ -28,7 +29,7 @@ export function registerWorkspaceGraphIpcHandlers<
   Operation extends {
     workspace: Workspace;
     state: {
-      workspaceGraph: Pick<WorkspaceGraphIndex, "readGraph" | "readBacklinks">;
+      workspaceGraph: Pick<WorkspaceGraphIndex, "readGraph">;
     };
   },
 >(dependencies: {
@@ -44,7 +45,7 @@ export function registerWorkspaceGraphIpcHandlers<
     work: (operation: Operation) => Result | Promise<Result>,
   ): Promise<Result>;
   workspaceFileListings: Pick<WorkspaceFileListingCache, "list">;
-  listOwnedWorkspaceFilesFor(workspace: Workspace): Promise<ListWorkspaceFilesResult>;
+  listOwnedWorkspaceFilesFor(workspace: Workspace): Promise<WorkspacePathListing>;
   readOwnedWorkspaceTextFor(
     workspace: Workspace,
     path: string,
@@ -58,10 +59,7 @@ export function registerWorkspaceGraphIpcHandlers<
     DesktopLinkedChatStore,
     "listThreads" | "listChannels" | "getChannelWireId" | "listThreadAttachments"
   >;
-  activeEngineFileIndex(workspace: EngineWorkspace): Promise<{
-    pathByObjectId: Map<string, string>;
-    objectIdByPath: Map<string, string>;
-  }>;
+  resolveEngineFiles: EngineFileResolver<EngineWorkspace>;
 }): void {
   const {
     registerHandler,
@@ -73,7 +71,7 @@ export function registerWorkspaceGraphIpcHandlers<
     requireEngineCapture,
     syncWorkspaceSharedChannels,
     linkedChatStoreFor,
-    activeEngineFileIndex,
+    resolveEngineFiles,
   } = dependencies;
   function ownedWorkspaceGraphSource(workspace: Workspace) {
     const hasShareState = workspaceHasReceivedShareState(workspace);
@@ -112,10 +110,10 @@ export function registerWorkspaceGraphIpcHandlers<
           ownedWorkspaceGraphSource(workspace),
         );
         if (!input.includeChatMentions) return WorkspaceGraphResult.parse(graph);
-        const { workspace: engineWorkspace } = await requireEngineCapture(
+        const engineWorkspace = shareViewIsPresent(workspace.shareView) ? workspace : (await requireEngineCapture(
           workspace.workspaceId,
           "Chat mentions",
-        );
+        )).workspace;
         const rowsUncovered = await syncWorkspaceSharedChannels(
           engineWorkspace.workspaceId,
         );
@@ -140,21 +138,38 @@ export function registerWorkspaceGraphIpcHandlers<
             ] as const),
           ),
         );
-        const activeFiles = await activeEngineFileIndex(engineWorkspace);
+        const threadAttachments = await Promise.all(threads.map(thread => store.listThreadAttachments(engineWorkspace.workspaceId, thread.id)));
+        const mentionTargets = threadAttachments.flat().flatMap<EngineFileReferenceTarget>(attachment => attachment.objectId
+          ? workspaceFileRefs(workspace, attachment.objectId)
+          : attachment.pathHint ? [{ path: attachment.pathHint }] : []);
+        const targets = [...new Map(mentionTargets.map(target => [JSON.stringify(target), target])).values()];
+        const resolvedFiles = await resolveEngineFiles(engineWorkspace, targets);
+        const basePaths = new Set(graph.nodes.map(node => node.path));
+        const hintPaths = new Map<string, string>();
+        targets.forEach((target, index) => {
+          const result = resolvedFiles[index];
+          if ("path" in target && result?.status === "found") hintPaths.set(target.path, result.path);
+        });
+        const activeFiles = {
+          pathByObjectId: new Map<string, string>(),
+          objectIdByPath: new Map<string, string>(),
+        };
+        for (const file of resolvedFiles) {
+          if (file.status !== "found" || !basePaths.has(file.path)) continue;
+          activeFiles.pathByObjectId.set(file.objectId, file.path);
+          activeFiles.objectIdByPath.set(file.path, file.objectId);
+        }
         const authorizedMentions = (
           await Promise.all(
-            threads.map(async (thread) => {
-              const attachments = await store.listThreadAttachments(
-                engineWorkspace.workspaceId,
-                thread.id,
-              );
+            threads.map(async (thread, index) => {
+              const attachments = threadAttachments[index]!;
               return attachments.flatMap((attachment) => {
                 // Stable object identity owns path resolution. A hint is usable
                 // only for legacy/opaque rows where no object identity exists; an
                 // object that disappeared from the active version fails closed.
                 const filePath = attachment.objectId
                   ? activeFiles.pathByObjectId.get(attachment.objectId)
-                  : attachment.pathHint;
+                  : attachment.pathHint ? hintPaths.get(attachment.pathHint) : undefined;
                 const fileObjectId =
                   attachment.objectId ??
                   (filePath ? activeFiles.objectIdByPath.get(filePath) : undefined);
@@ -254,24 +269,6 @@ export function registerWorkspaceGraphIpcHandlers<
           })),
         });
       },
-    );
-  });
-
-  registerHandler(CHANNELS.getBacklinks, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = GetBacklinksPayload.parse(payload);
-    return withRendererWorkspaceOperation(
-      event.sender,
-      input.workspaceId,
-      "Backlink read stopped because this window changed workspaces.",
-      async (operation) =>
-        GetBacklinksResult.parse({
-          sources: await operation.state.workspaceGraph.readBacklinks(
-            operation.workspace.rootPath,
-            input.path,
-            ownedWorkspaceGraphSource(operation.workspace),
-          ),
-        }),
     );
   });
 

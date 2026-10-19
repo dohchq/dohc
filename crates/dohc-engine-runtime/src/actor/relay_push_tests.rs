@@ -6,6 +6,12 @@ use dohc_engine_sync::{ReplicationEnvelope, journal_moment_append_in_tx, read_pu
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use std::collections::{BTreeMap, BTreeSet};
 
+#[path = "relay_cache_tests.rs"]
+pub(super) mod cache_tests;
+
+#[path = "relay_push_retention_tests.rs"]
+mod retention_tests;
+
 const WORKSPACE: &str = "ws";
 const ORIGIN: &str = "local";
 const PREFIX_OPS: usize = dohc_engine_sync::MAX_PUSH_OPS_PER_BATCH;
@@ -45,7 +51,19 @@ fn fixture_with_files(files: usize) -> (ScratchDir, std::path::PathBuf, EngineSt
 }
 
 fn append_file(store: &mut EngineStore, index: usize) {
-    let moment_id = format!("moment-{index}");
+    append_file_as(store, index, &format!("moment-{index}"));
+}
+
+fn append_file_as(store: &mut EngineStore, index: usize, moment_id: &str) {
+    append_file_bytes(
+        store,
+        index,
+        moment_id,
+        format!("binary content {index}").into_bytes(),
+    );
+}
+
+fn append_file_bytes(store: &mut EngineStore, index: usize, moment_id: &str, bytes: Vec<u8>) {
     VersionedTextStore::new(store)
         .write_binary(
             &WriteBinary {
@@ -53,8 +71,8 @@ fn append_file(store: &mut EngineStore, index: usize) {
                 version_id: "main".to_owned(),
                 object_id: format!("object-{index}"),
                 path: format!("files/{index}.bin"),
-                bytes: format!("binary content {index}").into_bytes(),
-                moment_id: moment_id.clone(),
+                bytes,
+                moment_id: moment_id.to_owned(),
                 metadata_origin: "api".to_owned(),
                 metadata_summary: None,
                 metadata_correlation_id: None,
@@ -67,7 +85,7 @@ fn append_file(store: &mut EngineStore, index: usize) {
         .expect("write content-bearing moment");
     store
         .write_with(&NoFaults, |tx| {
-            journal_moment_append_in_tx(tx, WORKSPACE, &moment_id)
+            journal_moment_append_in_tx(tx, WORKSPACE, moment_id)
         })
         .expect("journal moment");
 }
@@ -94,6 +112,13 @@ struct Relay {
 impl Relay {
     fn answer(&mut self, request: &RelayIoRequest) -> RelayIoResponse {
         match request {
+            RelayIoRequest::UploadBlobs(requests) => {
+                assert!((2..=dohc_engine_sync::MAX_BLOB_UPLOAD_BATCH).contains(&requests.len()));
+                for request in requests {
+                    self.answer(&RelayIoRequest::UploadBlob(request.clone()));
+                }
+                RelayIoResponse::UploadBlob
+            }
             RelayIoRequest::BlobsHave(request) => {
                 assert!(request.sha256s.len() <= PREFIX_OPS);
                 self.inventories += 1;
@@ -138,6 +163,7 @@ impl Relay {
                 self.skipped += skipped;
                 RelayIoResponse::Push(PushResponse {
                     settlement_refusals: Vec::new(),
+                    hosted_refusals: Vec::new(),
                     accepted: request.ops.len(),
                     inserted,
                     skipped,
@@ -173,6 +199,7 @@ fn step(
         push_operation(),
         &LeaseRegistry::default(),
         &ClaimAnnouncer::default(),
+        &mut crate::actor::live_application::Registry::default(),
     ) {
         Err(RuntimeError::Relay(RelayError::Local(reason))) if reason == RELAY_IO_PENDING => None,
         Ok(mut outcome) => {
@@ -221,6 +248,81 @@ fn finish(store: &mut EngineStore, relay: &mut Relay) {
         }
     }
     panic!("push passes made no progress");
+}
+
+#[test]
+fn deferred_conflict_rewind_refetches_the_relay_maximum() {
+    let (_scratch, _path, mut store) = fixture_with_files(3);
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE sync_relay_push_state SET pushed_seq=1", [])
+                .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .unwrap();
+    let transport = DeferredRelayTransport::default();
+    let mut cache = WriterDocCache::new();
+    let mut relay = Relay::default();
+    let mut probes = 0;
+    let mut restored_prefixes = 0;
+    for _ in 0..20 {
+        match execute_relay_operation(
+            &mut store,
+            &mut cache,
+            transport.clone(),
+            push_operation(),
+            &LeaseRegistry::default(),
+            &ClaimAnnouncer::default(),
+            &mut crate::actor::live_application::Registry::default(),
+        ) {
+            Err(RuntimeError::Relay(RelayError::OriginDiverged)) => {
+                assert_eq!(probes, 2, "the second conflict must recheck the relay");
+                assert_eq!(restored_prefixes, 1);
+                assert_eq!(read_pushed_seq(&store, WORKSPACE, ORIGIN).unwrap(), 1);
+                return;
+            }
+            Err(RuntimeError::Relay(RelayError::Local(reason))) if reason == RELAY_IO_PENDING => {}
+            other => panic!("unexpected rewind result: {other:?}"),
+        }
+        let request = transport.take_pending().expect("deferred rewind request");
+        let response = match &request {
+            RelayIoRequest::Push(push) if push.ops.is_empty() => {
+                assert_eq!(push.after_seq, 1);
+                probes += 1;
+                Ok(RelayIoResponse::Push(PushResponse {
+                    settlement_refusals: Vec::new(),
+                    hosted_refusals: Vec::new(),
+                    accepted: 0,
+                    inserted: 0,
+                    skipped: 0,
+                    current_max_origin_seq: if probes == 1 { 0 } else { 1 },
+                }))
+            }
+            RelayIoRequest::Push(push) if push.after_seq == 1 => Err(RelayError::Conflict),
+            RelayIoRequest::Push(push) if push.ops.len() > 1 => {
+                // Force one acknowledged prefix before retrying the original conflicting suffix.
+                Err(RelayError::SettlementProofBudget)
+            }
+            RelayIoRequest::Push(push) => {
+                assert_eq!(push.after_seq, 0);
+                assert_eq!(push.ops[0].origin_seq, 1);
+                restored_prefixes += 1;
+                Ok(RelayIoResponse::Push(PushResponse {
+                    settlement_refusals: Vec::new(),
+                    hosted_refusals: Vec::new(),
+                    accepted: 1,
+                    inserted: 1,
+                    skipped: 0,
+                    current_max_origin_seq: 1,
+                }))
+            }
+            _ => Ok(relay.answer(&request)),
+        };
+        transport.complete(request, response);
+    }
+    panic!(
+        "cached conflict probe repeated the rewind: probes={probes}, restored_prefixes={restored_prefixes}"
+    );
 }
 
 #[test]
@@ -280,72 +382,76 @@ fn deferred_proof_budget_reduces_batches_and_acknowledges_each_prefix() {
 }
 
 #[test]
-fn consumed_upload_updates_only_the_matching_inventory_identity() {
-    let transport = DeferredRelayTransport::default();
-    let upload = BlobUploadRequest {
-        workspace_id: WORKSPACE.to_owned(),
-        replication_epoch: "epoch".to_owned(),
-        stream_identity: "stream".to_owned(),
-        sha256: hex_sha256(b"uploaded"),
-        bytes: b"uploaded".to_vec(),
-    };
-    let original = BlobHaveRequest {
-        workspace_id: upload.workspace_id.clone(),
-        replication_epoch: upload.replication_epoch.clone(),
-        stream_identity: upload.stream_identity.clone(),
-        sha256s: vec![upload.sha256.clone(), hex_sha256(b"still missing")],
-    };
-    let inventories = [
-        original.clone(),
-        BlobHaveRequest {
-            workspace_id: "other-workspace".to_owned(),
-            ..original.clone()
-        },
-        BlobHaveRequest {
-            replication_epoch: "other-epoch".to_owned(),
-            ..original.clone()
-        },
-        BlobHaveRequest {
-            stream_identity: "other-stream".to_owned(),
-            ..original.clone()
-        },
-    ];
-    for request in &inventories {
+fn completed_have_confirmations_do_not_cross_blob_identities() {
+    for key in ["workspace", "epoch", "stream"] {
+        let (_scratch, _path, mut store) = fixture_with_files(1);
+        let transport = DeferredRelayTransport::default();
+        let mut cache = WriterDocCache::new();
+        let mut relay = Relay::default();
+        assert_eq!(step(&mut store, &mut cache, &transport), None);
+        let RelayIoRequest::BlobsHave(have) = transport.take_pending().unwrap() else {
+            panic!("expected initial inventory");
+        };
+        let mut other = have.clone();
+        match key {
+            "workspace" => other.workspace_id = "another-workspace".into(),
+            "epoch" => other.replication_epoch = "another-epoch".into(),
+            "stream" => other.stream_identity = "another-stream".into(),
+            _ => unreachable!(),
+        }
         transport.complete(
-            RelayIoRequest::BlobsHave(request.clone()),
+            RelayIoRequest::BlobsHave(other),
             Ok(RelayIoResponse::BlobsHave(BlobHaveResponse {
-                missing: request.sha256s.clone(),
+                missing: Vec::new(),
             })),
         );
-    }
-    transport.complete(
-        RelayIoRequest::UploadBlob(upload.clone()),
-        Ok(RelayIoResponse::UploadBlob),
-    );
-    // Merely completing I/O cannot change inventories before its writer consumes it.
-    assert_eq!(
-        transport.blobs_have(original.clone()).unwrap().missing,
-        original.sha256s
-    );
-    transport
-        .upload_blob(upload)
-        .expect("consume uploaded blob");
-    assert_eq!(
-        transport.blobs_have(original.clone()).unwrap().missing,
-        vec![hex_sha256(b"still missing")]
-    );
-    for request in &inventories[1..] {
-        assert_eq!(
-            transport.blobs_have(request.clone()).unwrap().missing,
-            request.sha256s
+        let request = RelayIoRequest::BlobsHave(have);
+        let response = relay.answer(&request);
+        transport.complete(request, Ok(response));
+        assert_eq!(step(&mut store, &mut cache, &transport), None);
+        let request = transport.take_pending().unwrap();
+        assert!(
+            matches!(request, RelayIoRequest::UploadBlob(_)),
+            "{key} confirmation leaked into this push"
         );
+        let response = relay.answer(&request);
+        transport.complete(request, Ok(response));
+        assert!(
+            transport
+                .state
+                .lock()
+                .unwrap()
+                .completed
+                .iter()
+                .all(|(request, _)| !matches!(
+                    request,
+                    RelayIoRequest::UploadBlob(_) | RelayIoRequest::UploadBlobs(_)
+                )),
+            "successful uploads retain no request payload"
+        );
+        assert_eq!(step(&mut store, &mut cache, &transport), None);
+        let request = transport.take_pending().unwrap();
+        assert!(matches!(request, RelayIoRequest::Push(_)));
+        let response = relay.answer(&request);
+        transport.complete(request, Ok(response));
+        assert_eq!(step(&mut store, &mut cache, &transport), Some((1, false)));
+        assert_eq!(relay.inventories, 1);
     }
-    assert!(transport.take_pending().is_none());
 }
 
-#[tokio::test]
-async fn cancellation_during_deferred_upload_preserves_acknowledged_prefix() {
-    let (_scratch, path, mut store) = fixture();
+/// Push after an acknowledged prefix, cancelling the request when `cancel_at`
+/// is first issued. Returns the outcome, the relay, and the digests the
+/// request at which it cancelled uploads.
+async fn push_cancelled_at(
+    cancel_at: fn(&RelayIoRequest) -> bool,
+) -> (
+    Result<RelayOperationOutcome, RuntimeError>,
+    ScratchDir,
+    std::path::PathBuf,
+    Relay,
+    Vec<String>,
+) {
+    let (scratch, path, mut store) = fixture();
     let mut relay = Relay::default();
     assert_eq!(pump_pass(&mut store, &mut relay), (PREFIX_OPS, true));
     drop(store);
@@ -353,10 +459,11 @@ async fn cancellation_during_deferred_upload_preserves_acknowledged_prefix() {
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&path, 2_100).expect("open actor").actor;
     let token = CancellationToken::new();
+    let request_token = token.clone();
     let relay = Arc::new(Mutex::new(relay));
-    let cancelled_upload = Arc::new(Mutex::new(None));
+    let cancelled_uploads = Arc::new(Mutex::new(Vec::new()));
     let io_relay = Arc::clone(&relay);
-    let io_cancelled_upload = Arc::clone(&cancelled_upload);
+    let io_cancelled_uploads = Arc::clone(&cancelled_uploads);
     let outcome = actor
         .relay_with_io(
             false,
@@ -364,50 +471,106 @@ async fn cancellation_during_deferred_upload_preserves_acknowledged_prefix() {
             LeaseRegistry::default(),
             token.clone(),
             None,
-            move |request, token| {
+            move |request, _token| {
                 let relay = Arc::clone(&io_relay);
-                let cancelled_upload = Arc::clone(&io_cancelled_upload);
+                let cancelled_uploads = Arc::clone(&io_cancelled_uploads);
+                let request_token = request_token.clone();
                 async move {
-                    if let RelayIoRequest::UploadBlob(upload) = &request {
-                        *cancelled_upload.lock().unwrap() = Some(upload.sha256.clone());
-                        token.cancel();
-                        std::future::pending::<Result<RelayIoResponse, RelayError>>().await
-                    } else {
-                        Ok(relay.lock().unwrap().answer(&request))
+                    if !request_token.is_cancelled() && cancel_at(&request) {
+                        let uploads = match &request {
+                            RelayIoRequest::UploadBlob(upload) => std::slice::from_ref(upload),
+                            RelayIoRequest::UploadBlobs(uploads) => uploads.as_slice(),
+                            _ => &[],
+                        };
+                        *cancelled_uploads.lock().unwrap() =
+                            uploads.iter().map(|upload| upload.sha256.clone()).collect();
+                        request_token.cancel();
                     }
+                    Ok(relay.lock().unwrap().answer(&request))
                 }
             },
         )
         .await;
-    assert!(matches!(outcome, Err(RuntimeError::Cancelled)));
-    assert!(token.is_cancelled());
-    let cancelled_upload = cancelled_upload
-        .lock()
-        .unwrap()
-        .clone()
-        .expect("upload reached");
+    assert!(token.is_cancelled(), "the request was cancelled");
     supervisor.close(&path).expect("close actor");
+    let relay = std::mem::take(&mut *relay.lock().unwrap());
+    let cancelled_uploads = std::mem::take(&mut *cancelled_uploads.lock().unwrap());
+    (outcome, scratch, path, relay, cancelled_uploads)
+}
+
+#[tokio::test]
+async fn a_push_cancelled_after_its_upload_is_issued_answers_with_what_it_pushed() {
+    let (outcome, _scratch, path, mut relay, cancelled_uploads) = push_cancelled_at(|request| {
+        matches!(
+            request,
+            RelayIoRequest::UploadBlob(_) | RelayIoRequest::UploadBlobs(_)
+        )
+    })
+    .await;
+    assert!(!cancelled_uploads.is_empty(), "an upload was issued");
+    assert!(
+        cancelled_uploads
+            .iter()
+            .all(|sha| relay.blobs.contains(sha)),
+        "the upload issued before cancellation landed"
+    );
+    assert!(
+        matches!(
+            outcome,
+            Ok(RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
+                pushed: PREFIX_OPS,
+                has_more: true,
+                ..
+            }))
+        ),
+        "{outcome:?}"
+    );
+    let mut store = EngineStore::open(&path, 2_200).expect("reopen store");
+    assert_eq!(
+        read_pushed_seq(&store, WORKSPACE, ORIGIN).unwrap(),
+        2 * PREFIX_OPS as i64 - 1
+    );
+    assert_eq!(relay.ops.len(), 2 * PREFIX_OPS);
+    finish(&mut store, &mut relay);
+    assert_eq!(relay.skipped, 0);
+}
+
+#[tokio::test]
+async fn a_push_cancelled_during_its_inventory_read_preserves_the_acknowledged_prefix() {
+    let (outcome, _scratch, path, mut relay, _) =
+        push_cancelled_at(|request| matches!(request, RelayIoRequest::BlobsHave(_))).await;
+    assert!(
+        matches!(outcome, Err(RuntimeError::Cancelled)),
+        "{outcome:?}"
+    );
     let mut store = EngineStore::open(&path, 2_200).expect("reopen store");
     assert_eq!(
         read_pushed_seq(&store, WORKSPACE, ORIGIN).unwrap(),
         PREFIX_OPS as i64 - 1
     );
-    let mut relay = relay.lock().unwrap();
     assert_eq!(relay.ops.len(), PREFIX_OPS);
-    assert!(!relay.blobs.contains(&cancelled_upload));
     finish(&mut store, &mut relay);
     assert_eq!(relay.skipped, 0);
 }
 
 #[tokio::test]
 async fn deferred_push_requires_hosted_author_proof_and_preserves_neutral_markers() {
+    // Even a live settlement moment on the native lane needs a proof.
+    let settlement = format!("moment-ydoc-{}", "a".repeat(64));
     for authors in [
         serde_json::json!([{"kind":"human","humanId":"recipient","humanName":"Recipient"}]),
         serde_json::json!([{"kind":"link","publicPrincipalId":"recipient","label":"Edit link"}]),
         serde_json::json!([{"kind":"unattributed"}]),
     ] {
-        for native_settlements in [false, true] {
-            let (_scratch, path, mut store) = fixture_with_files(2);
+        for (moment_id, native_settlements) in [
+            (settlement.as_str(), false),
+            (settlement.as_str(), true),
+            ("moment-0", false),
+            ("moment-0", true),
+        ] {
+            let (_scratch, path, mut store) = fixture_with_files(0);
+            append_file_as(&mut store, 0, moment_id);
+            append_file(&mut store, 1);
             store.write_with(&NoFaults, |tx| {
             tx.execute("UPDATE replication_log SET payload_json=json_set(payload_json,'$.authors',json(?1)) WHERE op_kind='moment.append' AND origin_seq=0", [authors.to_string()]).map_err(StorageError::persist_public)?;
             Ok::<_, StorageError>(())
@@ -462,7 +625,7 @@ async fn deferred_push_requires_hosted_author_proof_and_preserves_neutral_marker
 }
 
 #[test]
-fn writer_mutation_rebuilds_deferred_preparation_and_pushes_new_coordinates() {
+fn prepared_push_keeps_its_bounded_page_after_a_writer_append() {
     let (_scratch, _path, mut store) = fixture_with_files(1);
     let transport = DeferredRelayTransport::default();
     let mut cache = WriterDocCache::new();
@@ -479,11 +642,10 @@ fn writer_mutation_rebuilds_deferred_preparation_and_pushes_new_coordinates() {
     append_file(&mut store, 1);
     assert_eq!(read_pushed_seq(&store, WORKSPACE, ORIGIN).unwrap(), -1);
     assert_eq!(step(&mut store, &mut cache, &transport), None);
-    let request = transport.take_pending().expect("rebuilt inventory");
-    let RelayIoRequest::BlobsHave(inventory) = &request else {
-        panic!("preparation was not rebuilt: {request:?}");
+    let request = transport.take_pending().expect("prepared upload");
+    let RelayIoRequest::UploadBlob(_) = &request else {
+        panic!("later append restarted the prepared page: {request:?}");
     };
-    assert_eq!(inventory.sha256s.len(), 2);
     let response = relay.answer(&request);
     transport.complete(request, Ok(response));
 
@@ -494,7 +656,9 @@ fn writer_mutation_rebuilds_deferred_preparation_and_pushes_new_coordinates() {
             assert_eq!(relay.ops.keys().copied().collect::<Vec<_>>(), vec![0, 1]);
             assert_eq!(relay.inserted, 2);
             assert_eq!(relay.skipped, 0);
-            assert_eq!(relay.pushes.len(), 1);
+            assert_eq!(relay.pushes.len(), 2);
+            assert_eq!(relay.pushes[0].ops.len(), 1);
+            assert_eq!(relay.pushes[1].ops.len(), 1);
             assert_eq!(relay.inventories, 2);
             assert_eq!(relay.uploads.len(), 2);
             assert!(relay.uploads.values().all(|count| *count == 1));
@@ -504,7 +668,7 @@ fn writer_mutation_rebuilds_deferred_preparation_and_pushes_new_coordinates() {
         let response = relay.answer(&request);
         transport.complete(request, Ok(response));
     }
-    panic!("rebuilt page did not finish");
+    panic!("retained page did not finish");
 }
 
 #[test]

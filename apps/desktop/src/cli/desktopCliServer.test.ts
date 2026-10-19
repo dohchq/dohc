@@ -1,3 +1,9 @@
+import { getShareCopyDetails } from "@dohc/mcp/tools";
+import { createShareCopyReader } from "../ipc/shareCopyHandler";
+import { workspaceRemoteMatchesCredentials } from "../workspaces/chatRelayIdentity";
+import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
+import { closeTestStorages, testStorage, testHandler, request as relayRequest, inspectDatabase, storagePath, SHARE_WEB_ORIGIN, RELAY_EXCHANGE_KEY } from "@dohc/sync-relay/testing";
+import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
 import { createHash } from "node:crypto";
 import { AuthoredTextChangedError } from "../workspaces/workspaceEngineCapture";
 import { parseCliResult, type CliFileWrite } from "@dohc/cli/protocol";
@@ -11,7 +17,7 @@ import { documentMarkdown, markdownToYDoc } from "@dohc/ydoc-projection";
 import { directDocumentProjection } from "../workspaces/documentProjection";
 import { CHATS_METHOD, WORKSPACE_METHOD, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { executeCli } from "@dohc/cli";
-import { CLI_PROTOCOL_VERSION, cliTransportResponseSchema, type CliRequestWithoutToken } from "@dohc/cli/protocol";
+import { CLI_JSON_SCHEMA_VERSION, CLI_PROTOCOL_VERSION, cliTransportResponseSchema, type CliRequestWithoutToken } from "@dohc/cli/protocol";
 import { VersionedTextStoreError } from "@dohc/workspace-contracts/engine";
 import { createDesktopCliServer } from "./desktopCliServer";
 import { handleCliRequestLine } from "./cliServer";
@@ -25,6 +31,11 @@ import type { AuthoredPathChanges, WorkspaceEngineMomentSummary, WorkspaceEngine
 import { readWorkspaceEnginePolicy } from "../workspaces/workspaceEnginePolicyFile";
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import { createWorkspaceAuthorityOwner } from "../workspaces/workspaceAuthorityOwner";
+import { createWorkspaceFolder } from "../workspaces/createWorkspaceFolder";
+import { realpathSync } from "node:fs";
+import { readDeleteRecovery, waitForRecovery } from "../workspaces/workspaceDeleteRecovery";
+import { readMoveRecovery } from "../workspaces/workspaceMoveRecovery";
+import * as workspaceFileMoves from "../workspaces/workspaceFileMoves";
 
 function deferred() {
   let release!: () => void;
@@ -36,7 +47,7 @@ type State = Record<string, never>;
 type Dependencies = Parameters<typeof createDesktopCliServer<State>>[0];
 type Capture = NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>;
 
-function fixture(rootPath = resolve("cli-workspace")) {
+function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: string) => string = resolve) {
   const workspace: RegistryEntry = {
     workspaceId: "workspace", rootPath, kind: "personal", mode: "local-first",
     remote: { serverUrl: "https://cloud.test", ownerUserId: "owner" },
@@ -44,7 +55,7 @@ function fixture(rootPath = resolve("cli-workspace")) {
   const rows = new Map([[workspace.workspaceId, workspace]]);
   const authorities = createWorkspaceAuthorityOwner({
     findWorkspace: (id) => rows.get(id) ?? null,
-    canonicalizeRoot: resolve,
+    canonicalizeRoot,
     createState: (): State => ({}),
   });
   const store = {
@@ -60,7 +71,7 @@ function fixture(rootPath = resolve("cli-workspace")) {
     listKeptCopies: vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["listKeptCopies"]>(),
     saveKeptCopy: vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["saveKeptCopy"]>(),
     listVersions: vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["listVersions"]>(
-      async () => ({ versions: [], activeVersionId: "main" })),
+      async () => ({ versions: [], activeVersionId: "main" })), ...historyPageFields,
     // Writes the file as the capture chain does, refusing one that exists.
     writeAuthoredFile: vi.fn<Capture["writeAuthoredFile"]>(async (absolutePath, text, _author, options) => {
       await mkdir(dirname(absolutePath), { recursive: true });
@@ -70,7 +81,7 @@ function fixture(rootPath = resolve("cli-workspace")) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
         throw new VersionedTextStoreError("target-path-exists", "File already exists");
       }
-      return { resolvedAbsolutePath: absolutePath, materializeOutcome: "applied" };
+      return { resolvedAbsolutePath: absolutePath, materializeOutcome: "applied", objectId: "object", momentId: "moment", deduped: false };
     }),
     // Runs the move or delete as the capture does, with no live documents to
     // settle: the policy is read once the change runs, History holds every
@@ -103,12 +114,13 @@ function fixture(rootPath = resolve("cli-workspace")) {
     notifyRenderer: () => undefined,
   });
   const dependencies: Dependencies = {
+    links: { incoming: vi.fn(async () => null), resolve: vi.fn(async () => ({ versionId: "main", results: [], mountsCovered: true })) },
     automations: () => ({ automationIdAt: vi.fn(), runs: vi.fn(), run: vi.fn(), retry: vi.fn() }),
     buttons: () => ({ inspect: vi.fn(async () => []), press: vi.fn() }),
     findWorkspace: (id) => rows.get(id) ?? null,
     listWorkspaces: () => [...rows.values()],
     openWorkspaceActivity: vi.fn(async () => undefined),
-    activity: { engineCaptureFor: vi.fn(() => currentCapture), queueCloudSync: vi.fn(), agentRunDepth: vi.fn(() => 0) },
+    activity: { engineCaptureFor: vi.fn(() => currentCapture), queueCloudSync: vi.fn(), agentRunDepth: vi.fn(() => 0), dispatchedAgentRun: vi.fn(() => false) },
     linkedChatStoreFor: vi.fn(() => store),
     currentDaemon: vi.fn(() => daemon),
     agentDispatchStoreHandleFor: vi.fn(() => ({ store: dispatchStore })),
@@ -147,6 +159,23 @@ function fixture(rootPath = resolve("cli-workspace")) {
 afterEach(() => vi.restoreAllMocks());
 
 describe("desktop CLI workspace context", () => {
+  it("binds sync stop to the registered workspace and fences a retired attachment", async () => {
+    const f = fixture();
+    f.dependencies.stopWorkspaceSync = vi.fn(async (operation, author) => {
+      operation.assertCurrent();
+      expect(operation.workspace.workspaceId).toBe(f.workspace.workspaceId);
+      expect(author).toBeUndefined();
+      return { ok: true as const, workspaceId: operation.workspace.workspaceId, workspaceSynced: false as const };
+    });
+    const server = f.create();
+    const context = await server.openCliWorkspace(f.workspace);
+    await expect(context.stopSync!()).resolves.toMatchObject({ ok: true, workspaceId: "workspace" });
+    const retired = f.authorities.invalidate("workspace");
+    await retired;
+    await expect(context.stopSync!()).rejects.toThrow("This workspace changed while this ran. Try again.");
+    expect(f.dependencies.stopWorkspaceSync).toHaveBeenCalledOnce();
+  });
+
   it("keeps owner app actions bound to the CLI's original physical attachment", async () => {
     const f = fixture();
     const publish = vi.fn<NonNullable<Dependencies["ownerAppPublication"]>>(async () => ({ kind: "cancelled" }));
@@ -156,7 +185,7 @@ describe("desktop CLI workspace context", () => {
     expect(await context.appPublication!(request)).toEqual({ kind: "cancelled" });
     expect(publish).toHaveBeenCalledWith(request, null);
     await f.authorities.invalidate(f.workspace.workspaceId);
-    await expect(context.appPublication!(request)).rejects.toThrow("attachment changed");
+    await expect(context.appPublication!(request)).rejects.toThrow("This workspace changed while this ran. Try again.");
     expect(publish).toHaveBeenCalledOnce();
   });
   it.each(["missing", "different root"])("rejects a %s registry request before activity admission", async (reason) => {
@@ -222,7 +251,7 @@ describe("desktop CLI workspace context", () => {
     const { byteLength: _bytes, contentKind: _kind, authors: _authors, ...plain } = moment;
     f.capture.listMoments.mockResolvedValue({ moments: [moment, { ...plain, id: "plain" },
       { ...moment, id: "protected", protected: true }, { ...moment, id: "objectless", objectId: "" }],
-      nextBeforeMomentOrder: null, latestMomentOrder: 3, activeVersionId: "version", protectedTruncated: false });
+      nextCursor: null, latestMomentOrder: 3, activeVersionId: "version", ...historyPageFields,  });
     const context = await f.create().openCliWorkspace(f.workspace);
     const { protected: _protected, ...expected } = moment;
     const { protected: _plainProtected, ...plainExpected } = plain;
@@ -266,7 +295,7 @@ describe("desktop CLI workspace context", () => {
       f.capture.listMoments.mockResolvedValue({
         moments: [summary("notes", "notes.md"), summary("journal", "private/journal.md"),
           { ...summary("moved", "notes/moved.md"), operation: "rename", metadata: { origin: "local-file", summary: renamed } }],
-        nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
+        nextCursor: null, latestMomentOrder: 1, activeVersionId: "main", ...historyPageFields,
       });
       f.capture.readMoment.mockImplementation(async (id) => ({ protected: false, moment: details[id]! }));
       await f.create().startDesktopCliServer();
@@ -525,7 +554,7 @@ describe("desktop CLI workspace context", () => {
       drained = f.authorities.invalidate("workspace");
       f.rows.set("workspace", { ...f.workspace });
     } finally { held.release(); await result; await drained; }
-    expect(await result).toMatchObject({ message: expect.stringContaining("retired workspace authority") });
+    expect(await result).toMatchObject({ message: expect.stringContaining("This workspace was closed. Open it again.") });
     expect(opened).not.toHaveBeenCalled();
   });
 });
@@ -681,6 +710,25 @@ describe("raw fileWrite socket requests", () => {
     expect(f.capture.writeAuthoredFile).not.toHaveBeenCalled();
   });
 
+  it("writes for an agent in a workspace opened through a link", async () => {
+    const real = await createTestScratch("dohc-cli-linked-real-");
+    const opened = join(await createTestScratch("dohc-cli-linked-"), "linked");
+    await symlink(real, opened, process.platform === "win32" ? "junction" : "dir");
+    const registered = await createWorkspaceFolder({
+      rootPath: opened, homeDir: await createTestScratch("dohc-cli-linked-home-"), kind: "personal",
+    });
+    // The authority resolves roots the way main does.
+    const f = fixture(registered.rootPath, (root) => realpathSync.native(root));
+    await f.create().startDesktopCliServer();
+    const line = await handleCliRequestLine(JSON.stringify({
+      token: "a".repeat(64), protocolVersion: CLI_PROTOCOL_VERSION, verb: "fileWrite",
+      args: { cwd: opened, actor: "agent", requestId: "linked", files: [{ path: "plain.txt", contentBase64: "bmV3" }] },
+    }), "a".repeat(64), f.options());
+    const transport = cliTransportResponseSchema.parse(JSON.parse(line));
+    expect(transport.ok ? parseCliResult("fileWrite", transport.result) : transport.error).toEqual({ ok: true, written: ["plain.txt"] });
+    expect(await readFile(join(real, "plain.txt"), "utf8")).toBe("new");
+  });
+
   it("returns currentSha256 through the raw request on a stale write", async () => {
     const f = await setup();
     await writeFile(join(f.workspace.rootPath, "plain.txt"), "original");
@@ -691,11 +739,74 @@ describe("raw fileWrite socket requests", () => {
 
 });
 
+describe("completed CLI writes during workspace close", () => {
+  it.each(["fileWrite", "collectionSetFields"] as const)("returns a completed %s after its workspace closes", async verb => {
+    const root = await createTestScratch("dohc-cli-completed-write-");
+    await mkdir(join(root, ".dohc"));
+    const f = fixture(root);
+    const doc = new Y.Doc();
+    let committed = false;
+    let drained: Promise<void> | undefined;
+    f.dependencies.withPhysicalWorkspaceOperation = (id, work) => f.authorities.withOperation(id, async operation => {
+      const result = await work(operation);
+      if (committed && !drained) drained = f.authorities.invalidate(id);
+      return result;
+    });
+    const write = f.capture.writeAuthoredFile.getMockImplementation()!;
+    f.capture.writeAuthoredFile.mockImplementation(async (...args) => {
+      const result = await write(...args);
+      committed = true;
+      return result;
+    });
+    const session = {
+      doc, initialUpdate: Y.encodeStateAsUpdate(doc),
+      applyDecidedLocalUpdate: async (decide: (doc: Y.Doc) => Uint8Array | null, armed?: () => void) => {
+        const update = decide(doc);
+        if (update === null) return false;
+        Y.applyUpdate(doc, update); armed?.(); return true;
+      },
+      settleNow: async () => {
+        await mkdir(join(root, "tasks"), { recursive: true });
+        await writeFile(join(root, "tasks/one.md"), `---\nstatus: ${doc.getMap("frontmatter").get("status")}\n---\n`);
+        committed = true;
+        return { materialized: true };
+      },
+      close: vi.fn(async () => undefined),
+    } as unknown as WorkspaceEngineYDocProviderSession;
+    f.dependencies.collectionEditContextFor = async (operation, person, signal) => desktopRecordEditContext({
+      person, workspaceRoot: operation.workspace.rootPath,
+      capture: { openRecordSession: async () => session, writeAuthoredFile: vi.fn() },
+      withAdapter: async () => null, onCaptureSettled: () => () => undefined, signal,
+    });
+    await f.create().startDesktopCliServer();
+    try {
+      const args = verb === "fileWrite"
+        ? { files: [{ path: "plain.txt", contentBase64: Buffer.from("finished").toString("base64"), createOnly: true }], requestId: "completed" }
+        : { recordPath: "tasks/one.md", fields: { status: "done" } };
+      const line = await handleCliRequestLine(JSON.stringify({
+        token: "a".repeat(64), protocolVersion: CLI_PROTOCOL_VERSION, verb, args: { cwd: root, actor: "agent", ...args },
+      }), "a".repeat(64), f.options());
+      const transport = cliTransportResponseSchema.parse(JSON.parse(line));
+      expect(committed).toBe(true);
+      expect(drained).toBeDefined();
+      expect(await readFile(join(root, verb === "fileWrite" ? "plain.txt" : "tasks/one.md"), "utf8"))
+        .toBe(verb === "fileWrite" ? "finished" : "---\nstatus: done\n---\n");
+      expect(transport.ok ? parseCliResult(verb, transport.result) : transport.error)
+        .toEqual(verb === "fileWrite" ? { ok: true, written: ["plain.txt"] } : { ok: true, recordPath: "tasks/one.md" });
+      if (verb === "collectionSetFields") expect(session.close).toHaveBeenCalledOnce();
+    } finally {
+      await drained;
+      await f.authorities.close();
+      doc.destroy();
+    }
+  });
+});
 describe("raw fileMove and fileDelete socket requests", () => {
-  async function setup() {
+  async function setup(configure?: (f: ReturnType<typeof fixture>) => void) {
     const root = await createTestScratch("dohc-cli-file-move-");
     await mkdir(join(root, ".dohc"));
     const f = fixture(root);
+    configure?.(f);
     await f.create().startDesktopCliServer();
     const invoke = async (verb: "fileMove" | "fileDelete", args: Record<string, unknown>, actor = "agent") => {
       const line = await handleCliRequestLine(JSON.stringify({
@@ -707,8 +818,180 @@ describe("raw fileMove and fileDelete socket requests", () => {
     return { ...f, root, invoke };
   }
 
+  it.each(["fileDelete", "fileMove"] as const)("returns a completed %s with Undo after its workspace closes", async verb => {
+    let drained: Promise<void> | undefined;
+    const f = await setup(f => {
+      f.dependencies.withPhysicalWorkspaceOperation = (id, work) => f.authorities.withOperation(id, async operation => {
+        const result = await work(operation);
+        // Retire after preparation returns, before completion runs.
+        if (vi.mocked(f.capture.changePathsAs).mock.calls.length) drained = f.authorities.invalidate(id);
+        return result;
+      });
+    });
+    await writeFile(join(f.root, "plain.txt"), "original");
+    try {
+      const result = await f.invoke(verb, verb === "fileDelete"
+        ? { path: "plain.txt" } : { fromPath: "plain.txt", toPath: "moved.txt" });
+      const { operationId } = vi.mocked(f.capture.changePathsAs).mock.calls[0]![1];
+      expect(result).toMatchObject({ ok: true, operationId, undo: { available: true } });
+      await expect(lstat(join(f.root, "plain.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+      await waitForRecovery(operationId);
+      if (verb === "fileDelete") {
+        expect(f.dependencies.trashItem).toHaveBeenCalledOnce();
+        const record = await readDeleteRecovery(f.root, operationId);
+        expect(record).toMatchObject({ operationId, tracked: true, staged: expect.any(String) });
+        expect(await readFile(join(f.root, ".dohc/trash", record!.staged!), "utf8")).toBe("original");
+      } else {
+        expect(await readMoveRecovery(f.root, operationId)).toMatchObject({ operationId, tracked: true, from: "plain.txt", to: "moved.txt" });
+        expect(await readFile(join(f.root, "moved.txt"), "utf8")).toBe("original");
+      }
+    } finally {
+      await drained;
+      await f.authorities.close();
+    }
+  });
+
+  it.each(["fileDelete", "fileMove"] as const)("keeps a failed %s failed when the workspace closes after preparation", async verb => {
+    let drained: Promise<void> | undefined;
+    const f = await setup(f => {
+      f.dependencies.withPhysicalWorkspaceOperation = (id, work) => f.authorities.withOperation(id, async operation => {
+        const result = await work(operation);
+        if (vi.mocked(f.capture.changePathsAs).mock.calls.length) drained = f.authorities.invalidate(id);
+        return result;
+      });
+    });
+    await writeFile(join(f.root, "plain.txt"), "original");
+    vi.mocked(f.capture.changePathsAs).mockRejectedValueOnce(new Error("History could not record this change."));
+    try {
+      expect(await f.invoke(verb, verb === "fileDelete"
+        ? { path: "plain.txt" } : { fromPath: "plain.txt", toPath: "moved.txt" }))
+        .toMatchObject({ ok: false, reason: "History could not record this change." });
+      expect(await readFile(join(f.root, "plain.txt"), "utf8")).toBe("original");
+      expect(f.dependencies.trashItem).not.toHaveBeenCalled();
+    } finally {
+      await drained;
+      await f.authorities.close();
+    }
+  });
+
+  it.each(["fileDelete", "fileMove"] as const)("reports a rejecting %s completion after the workspace closes", async verb => {
+    const finish = vi.fn(async () => { throw new Error("Completion failed."); });
+    vi.spyOn(workspaceFileMoves, verb === "fileDelete" ? "prepareDeleteWorkspacePathAs" : "prepareMoveWorkspacePathAs")
+      .mockResolvedValueOnce(finish);
+    let drained: Promise<void> | undefined;
+    const f = await setup(f => {
+      let calls = 0;
+      f.dependencies.withPhysicalWorkspaceOperation = (id, work) => f.authorities.withOperation(id, async operation => {
+        const result = await work(operation);
+        // The first operation opens the CLI context; the next prepares the change.
+        if (++calls === 2) drained = f.authorities.invalidate(id);
+        return result;
+      });
+    });
+    try {
+      expect(await f.invoke(verb, verb === "fileDelete"
+        ? { path: "plain.txt" } : { fromPath: "plain.txt", toPath: "moved.txt" }))
+        .toMatchObject({ ok: false, reason: "Completion failed." });
+      expect(finish).toHaveBeenCalledOnce();
+      expect(drained).toBeDefined();
+    } finally {
+      await drained;
+      await f.authorities.close();
+    }
+  });
+
+  it("returns the final recovery record when system trash takes a delete after close", async () => {
+    let drained: Promise<void> | undefined;
+    const f = await setup(f => {
+      f.dependencies.withPhysicalWorkspaceOperation = (id, work) => f.authorities.withOperation(id, async operation => {
+        const result = await work(operation);
+        if (vi.mocked(f.capture.changePathsAs).mock.calls.length) drained = f.authorities.invalidate(id);
+        return result;
+      });
+      f.dependencies.trashItem = vi.fn(async path => {
+        expect(drained).toBeDefined();
+        await drained;
+        await rm(path);
+      });
+    });
+    await writeFile(join(f.root, "plain.txt"), "original");
+    try {
+      const result = await f.invoke("fileDelete", { path: "plain.txt" });
+      const { operationId } = vi.mocked(f.capture.changePathsAs).mock.calls[0]![1];
+      expect(result).toMatchObject({ ok: true, trashed: true, operationId, undo: { available: true } });
+      expect(f.dependencies.trashItem).toHaveBeenCalledOnce();
+      await waitForRecovery(operationId);
+      const record = await readDeleteRecovery(f.root, operationId);
+      expect(record).toMatchObject({ operationId, tracked: true, paths: [] });
+      expect(record).not.toHaveProperty("staged");
+      expect(record).not.toHaveProperty("noUndo");
+      await expect(lstat(join(f.root, "plain.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await drained;
+      await f.authorities.close();
+    }
+  });
+
+  it("saves recovery and restores a delete retired between the trash move and markDeleted", async () => {
+    const f = await setup();
+    await mkdir(join(f.root, "folder"));
+    await writeFile(join(f.root, "folder/tracked.txt"), "tracked original");
+    const rowless = Buffer.from([0xff, 0x00, 0xfe]);
+    await writeFile(join(f.root, "folder/rowless.bin"), rowless);
+    let drained: Promise<void> | undefined;
+    let attachmentId: symbol | undefined;
+    vi.mocked(f.capture.changePathsAs).mockImplementation(async (_paths, _authored, work) => work({
+      policy: await readWorkspaceEnginePolicy(f.root),
+      recordDisk: async () => ["folder/tracked.txt"],
+      delete: async () => {
+        // History records the delete after the folder has moved into the trash.
+        await expect(lstat(join(f.root, "folder"))).rejects.toMatchObject({ code: "ENOENT" });
+        attachmentId = f.authorities.currentBinding(f.workspace.workspaceId).attachmentId;
+        drained = f.authorities.invalidate(f.workspace.workspaceId);
+        return "delete-moment";
+      },
+      moveFile: async () => false, rename: async () => undefined, undoDelete: async () => undefined,
+    }));
+    const history = {
+      readHistoryPage: vi.fn(async () => ({ moments: [
+        { momentId: "delete-moment", operation: "delete", path: "folder/tracked.txt" },
+      ], protectedMoments: [], nextCursor: null })),
+      undoHistoryOperation: vi.fn(async (input: { operationId: string }) => {
+        await mkdir(join(f.root, "folder"), { recursive: true });
+        await writeFile(join(f.root, "folder/tracked.txt"), "tracked original");
+        return { operationId: input.operationId, versionId: "main", momentCount: 1,
+          compensationOperationId: "dohc-operation:11111111-1111-4111-8111-111111111111",
+          deduped: false, materialized: true };
+      }),
+    };
+    f.dependencies.withEngineAdapter = async (_workspace, work) => work(history as unknown as VersionedLiveAdapter);
+    try {
+      const result = await f.invoke("fileDelete", { path: "folder" });
+      expect(result).toMatchObject({ ok: true, operationId: expect.stringMatching(/^dohc-operation:/), undo: { available: true } });
+      if (!result.ok || !("operationId" in result) || typeof result.operationId !== "string") throw new Error("Delete returned no operation id");
+      const { operationId } = result;
+      await drained;
+      await waitForRecovery(operationId);
+      const record = await readDeleteRecovery(f.root, operationId);
+      expect(record).toMatchObject({ tracked: true, paths: ["folder/rowless.bin"], staged: expect.any(String) });
+      expect(await readFile(join(f.root, ".dohc/trash", record!.staged!, "rowless.bin"))).toEqual(rowless);
+      expect(f.dependencies.markDeletedUnderPath).toHaveBeenCalledWith(attachmentId, "folder");
+      expect(f.dependencies.trashItem).toHaveBeenCalledOnce();
+      const reopened = await f.create().openCliWorkspace(f.workspace);
+      expect(await reopened.historyUndo!({ operationId }, { attribution: { actorKind: "agent", onBehalfOf: "person-local" } }))
+        .toMatchObject({ ok: true, tracked: { state: "restored", momentCount: 1 }, restored: ["folder/rowless.bin"], remaining: [] });
+      expect(history.undoHistoryOperation).toHaveBeenCalledOnce();
+      expect(await readFile(join(f.root, "folder/tracked.txt"), "utf8")).toBe("tracked original");
+      expect(await readFile(join(f.root, "folder/rowless.bin"))).toEqual(rowless);
+    } finally {
+      await drained;
+      await f.authorities.close();
+    }
+  });
+
   it.each(["delete", "overwrite"] as const)("a hung trash during %s holds neither file verbs nor workspace close", async change => {
     const f = await setup();
+    const context = await f.create().openCliWorkspace(f.workspace);
     await writeFile(join(f.root, "first.txt"), "first");
     await writeFile(join(f.root, "source.txt"), "source");
     await writeFile(join(f.root, "next.txt"), "next");
@@ -720,12 +1003,20 @@ describe("raw fileMove and fileDelete socket requests", () => {
     const pending = change === "delete" ? f.invoke("fileDelete", { path: "first.txt" })
       : f.invoke("fileMove", { fromPath: "source.txt", toPath: "first.txt", overwrite: true });
     await entered.promise;
+    let undo: Promise<unknown> | undefined;
     try {
+      if (change === "delete") {
+        const { operationId } = vi.mocked(f.capture.changePathsAs).mock.calls[0]![1];
+        undo = context.historyUndo!({ operationId }, { attribution: { actorKind: "agent", onBehalfOf: "person-local", depth: 0 } })
+          .catch(error => ({ ok: false, reason: error.message }));
+      }
       expect(await f.invoke("fileMove", { fromPath: "next.txt", toPath: "after.txt" })).toMatchObject({ ok: true });
       await f.authorities.close();
+      if (undo) expect(await undo).toEqual({ ok: false, reason: "This workspace was closed. Open it again." });
     } finally {
       released.release();
       expect(await pending).toMatchObject({ ok: true });
+      await undo;
     }
   });
 
@@ -764,12 +1055,192 @@ describe("raw fileMove and fileDelete socket requests", () => {
     vi.mocked(f.dependencies.activity.agentRunDepth).mockReturnValue(4);
     await writeFile(join(f.root, "plain.txt"), "original");
     expect(await f.invoke("fileMove", { fromPath: "plain.txt", toPath: "moved.txt", ...(agent ? { agent } : {}) }))
-      .toEqual({ ok: true, fromPath: "plain.txt", toPath: "moved.txt" });
+      .toEqual({ ok: true, operationId: expect.stringMatching(/^dohc-operation:[0-9a-f-]{36}$/), fromPath: "plain.txt", toPath: "moved.txt", undo: { available: true } });
     expect(await f.invoke("fileDelete", { path: "moved.txt", ...(agent ? { agent } : {}) })).toMatchObject({ ok: true, path: "moved.txt", trashed: false, trashPath: expect.stringMatching(/^\.dohc\/trash\//) });
     const author = { kind: "agent", agentId: agent ?? "dohc-mcp", onBehalfOf: "person-local", depth: 4 };
     expect(vi.mocked(f.capture.changePathsAs).mock.calls.map(call => call[1])).toEqual([
-      { operation: "move", author, correlationId: "fileMove:raw" }, { operation: "delete", author, correlationId: "fileDelete:raw" },
+      { operation: "move", author, operationId: expect.stringMatching(/^dohc-operation:/) }, { operation: "delete", author, operationId: expect.stringMatching(/^dohc-operation:/) },
     ]);
     expect(f.dependencies.markDeletedUnderPath).toHaveBeenCalledWith(expect.any(Symbol), "moved.txt");
   });
+});
+
+it("keeps the saved pause result when the physical attachment retires before the socket reply", async () => {
+  const f = fixture();
+  let drained: Promise<void> | undefined;
+  f.dependencies.stopWorkspaceSync = vi.fn<NonNullable<Dependencies["stopWorkspaceSync"]>>(async operation => {
+    const workspaceId = operation.workspace.workspaceId;
+    drained = f.authorities.invalidate(workspaceId);
+    return { ok: true, workspaceId, workspaceSynced: false };
+  });
+  const context = await f.create().openCliWorkspace(f.workspace);
+  const author = { kind: "agent" as const, agentId: "Claude", onBehalfOf: "person-local", depth: 0 };
+  await expect(context.stopSync!(author)).resolves.toMatchObject({ ok: true, workspaceId: "workspace", workspaceSynced: false });
+  await drained;
+});
+
+// Exercise both agent doors through desktop attachment admission and the real relay copy route.
+afterEach(closeTestStorages);
+async function shareCopyFixture() {
+  const root = await createTestScratch("dohc-cli-share-copy-");
+  const f = fixture(root);
+  const storage = await testStorage();
+  storage.claimWorkspace({ workspaceId: "workspace", ownerUserId: "owner", createdAtMs: 1 });
+  storage.claimWorkspace({ workspaceId: "other-workspace", ownerUserId: "owner", createdAtMs: 1 });
+  const share = { shareId: "share", workspaceId: "workspace", granterUserId: "owner",
+    selectorJson: JSON.stringify({ paths: ["docs"], versionId: null }), createdAtMs: 1 };
+  const grant = { grantId: "grant", shareId: "share", principalKind: "user" as const, principalUserId: "friend",
+    principalEmail: null, access: "edit", generation: 1, status: "active" as const, createdAtMs: 1, revokedAtMs: null, parentGrantId: null };
+  storage.createShare({ share, grant });
+  storage.createShare({ share: { ...share, shareId: "foreign", workspaceId: "other-workspace" },
+    grant: { ...grant, shareId: "foreign", grantId: "foreign-grant" } });
+  const handler = testHandler(storage, { relayExchangeKey: RELAY_EXCHANGE_KEY, namedBrowserSessionLimits: {
+    maxSessions: 8, retentionMs: 30000, maxPendingRequests: 4, maxRequestBytes: 16384, maxResponseBytes: 16384, timeoutMs: 1000,
+  } });
+  let credentials: CloudCredentials = { serverUrl: "https://cloud.test", relayUrl: "https://relay.test",
+    userId: "owner", email: "owner@test", token: "secret" };
+  let generation = 1;
+  const remote = vi.fn(async (workspace: RegistryEntry) => {
+    if (!workspaceRemoteMatchesCredentials(workspace.remote!, credentials)) throw Error("Sign in to the account that synced this workspace.");
+    return { credentials, credentialGeneration: generation };
+  });
+  const relay = vi.fn(async (account: CloudCredentials, path: string) => {
+    const response = await handler(relayRequest(account.userId, path));
+    if (!response.ok) throw Error(response.status === 404 ? "Share not found." : "Relay failure: " + response.status);
+    return response.json();
+  });
+  f.dependencies.shareCopy = createShareCopyReader({ remoteForWorkspace: remote, currentCredentialGeneration: () => generation, relayJson: relay });
+  await f.create().startDesktopCliServer();
+  const transport = async (input: CliRequestWithoutToken) => {
+    const line = await handleCliRequestLine(JSON.stringify({ ...input, token: "a".repeat(64) }), "a".repeat(64), f.options());
+    const response = cliTransportResponseSchema.parse(JSON.parse(line));
+    if (!response.ok) throw Error(response.error);
+    return response.result;
+  };
+  const copy = async (door: "cli" | "mcp", shareId = "share", grantId = "grant") => {
+    if (door === "mcp") return getShareCopyDetails({ root, home: "state", request: transport }, { shareId, grantId });
+    const result = await executeCli({ argv: ["share", "copy", shareId, grantId, "--json"], cwd: root, env: {}, request: transport });
+    if (result.exitCode !== 0) return { ok: false, reason: result.stderr };
+    const { schemaVersion: _schemaVersion, ...details } = JSON.parse(result.stdout);
+    return details;
+  };
+  return { ...f, copy, remote, relay, storage, rotate: () => { generation++; },
+    otherAccount: () => { credentials = { ...credentials, userId: "stranger" }; } };
+}
+
+describe.each(["cli", "mcp"] as const)("share copy through %s", door => {
+  it("returns the owner's exact details without credentials", async () => {
+    const f = await shareCopyFixture();
+    expect(await f.copy(door)).toEqual({ status: "active", shareCode: "dohc-share:share:https://relay.test",
+      browserInvitationUrl: SHARE_WEB_ORIGIN + "/s/edit/grant" });
+    expect(f.relay.mock.lastCall?.[1]).toBe("/sync/workspace/shares/share/grants/grant/copy");
+  });
+  it("refuses another account before contacting the relay", async () => {
+    const f = await shareCopyFixture(); f.otherAccount();
+    expect(await f.copy(door)).toMatchObject({ ok: false, reason: expect.stringContaining("Sign in") });
+    expect(f.relay).not.toHaveBeenCalled();
+  });
+  it("refuses when the relay workspace belongs to another account", async () => {
+    const f = await shareCopyFixture();
+    const db = inspectDatabase(storagePath(f.storage));
+    try {
+      db.prepare("UPDATE sync_relay_workspaces SET owner_user_id = 'stranger' WHERE workspace_id = 'workspace'").run();
+    } finally { db.close(); }
+    expect(await f.copy(door)).toMatchObject({ ok: false, reason: expect.stringContaining("not found") });
+    expect(f.remote).toHaveBeenCalledOnce();
+    expect(f.relay).toHaveBeenCalledOnce();
+  });
+  it("refuses a received workspace at socket per-verb admission", async () => {
+    const f = await shareCopyFixture(); vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({});
+    expect(await f.copy(door)).toMatchObject({ ok: false, reason: expect.stringContaining("owning workspace") });
+    expect(f.remote).not.toHaveBeenCalled();
+  });
+  it("refuses a received marker before reading credentials", async () => {
+    const f = await shareCopyFixture(); f.workspace.shareView = {} as RegistryEntry["shareView"];
+    expect(await f.copy(door)).toMatchObject({ ok: false, reason: expect.stringContaining("original workspace") });
+    expect(f.remote).not.toHaveBeenCalled();
+  });
+  it.each(["unknown", "link", "damaged", "foreign-workspace", "foreign-grant"])("refuses an %s grant", async kind => {
+    const f = await shareCopyFixture();
+    const db = inspectDatabase(storagePath(f.storage));
+    try {
+      if (kind === "link") db.prepare("UPDATE sync_relay_share_grants SET principal_kind = 'link', principal_user_id = NULL WHERE grant_id = 'grant'").run();
+      if (kind === "damaged") db.prepare("UPDATE sync_relay_shares SET selector_json = '{}' WHERE share_id = 'share'").run();
+    } finally { db.close(); }
+    const result = await f.copy(door, kind === "foreign-workspace" ? "foreign" : "share",
+      kind === "unknown" ? "unknown" : kind.startsWith("foreign") ? "foreign-grant" : "grant");
+    expect(result).toMatchObject({ ok: false, reason: expect.stringContaining("not found") });
+  });
+  it("returns only ended after revocation", async () => {
+    const f = await shareCopyFixture(); f.storage.revokeShare("share", 2);
+    expect(await f.copy(door)).toEqual({ status: "ended" });
+  });
+  it.each(["workspaceId", "shareId", "grantId"])("refuses mismatched %s in the relay reply", async key => {
+    const f = await shareCopyFixture();
+    f.relay.mockResolvedValue({ workspaceId: "workspace", shareId: "share", grantId: "grant", status: "active", [key]: "other" });
+    expect(await f.copy(door)).toMatchObject({ ok: false, reason: expect.stringContaining("share changed") });
+  });
+  it("discards a reply after the credential generation changes", async () => {
+    const f = await shareCopyFixture();
+    f.relay.mockImplementation(async () => { f.rotate(); return { workspaceId: "workspace", shareId: "share", grantId: "grant", status: "active" }; });
+    expect(await f.copy(door)).toMatchObject({ ok: false });
+  });
+  it("refuses a retired desktop attachment before reading credentials", async () => {
+    const f = await shareCopyFixture(); const context = await f.create().openCliWorkspace(f.workspace);
+    await f.authorities.invalidate("workspace");
+    await expect(context.shareCopy!({ shareId: "share", grantId: "grant" })).rejects.toThrow("This workspace changed while this ran. Try again.");
+    expect(f.remote).not.toHaveBeenCalled();
+  });
+});
+
+it("gives CLI and MCP the IPC link answer in a share without Chats capture", async () => {
+  const f = fixture(await createTestScratch("links-share-cli-"));
+  f.setCapture(null); f.setDaemon(null);
+  f.dependencies.sharedViewOf = () => ({ shareId: "share" }) as ReturnType<Dependencies["sharedViewOf"]>;
+  const resolved = { versionId: "main", results: [{ path: "target.md", fragment: "heading" }], mountsCovered: true };
+  const input = { source: "source.md", literals: [{ kind: "wikilink" as const, literal: "target#heading" }] };
+  f.dependencies.links.resolve = vi.fn(async () => resolved);
+  await f.create().startDesktopCliServer();
+  const token = "a".repeat(64);
+  const send = async (request: CliRequestWithoutToken) => {
+    const response = cliTransportResponseSchema.parse(JSON.parse(await handleCliRequestLine(JSON.stringify({ ...request, token }), token, f.options())));
+    if (!response.ok) throw new Error(response.error);
+    return response.result;
+  };
+  const cli = await executeCli({ argv: ["links", "resolve", "source.md", JSON.stringify(input.literals), "--json"], cwd: f.workspace.rootPath, env: {}, request: send });
+  expect(cli.exitCode).toBe(0);
+  expect(JSON.parse(cli.stdout)).toMatchObject(resolved);
+  const { linksResolve } = await import("@dohc/mcp/tools");
+  expect(await linksResolve({ root: f.workspace.rootPath, home: "state", request: send }, input)).toEqual(resolved);
+  expect(f.dependencies.openWorkspaceActivity).not.toHaveBeenCalled();
+  expect(f.dependencies.linkedChatStoreFor).not.toHaveBeenCalled();
+  expect(f.dependencies.links.resolve).toHaveBeenCalledTimes(2);
+  const held = deferred();
+  f.dependencies.links.resolve = vi.fn(async () => { await held.promise; return resolved; });
+  const pending = f.options().links!.resolve(f.workspace, input);
+  await vi.waitFor(() => expect(f.dependencies.links.resolve).toHaveBeenCalledOnce());
+  const retired = f.authorities.invalidate(f.workspace.workspaceId);
+  held.release();
+  // Finished work reports as finished when the workspace closes during it.
+  await expect(pending).resolves.toEqual(resolved);
+  await retired;
+});
+
+it("returns an incoming page directly through CLI and MCP", async () => {
+  const f = fixture(await createTestScratch("links-in-cli-"));
+  const page = { versionId: "main", subject: { path: "a.md", objectId: "a" }, entries: [], unchecked: [], complete: true, indexBuilding: false, mountsCovered: true, nextCursor: null };
+  f.dependencies.links.incoming = vi.fn(async () => page);
+  await f.create().startDesktopCliServer();
+  const token = "a".repeat(64);
+  const send = async (request: CliRequestWithoutToken) => {
+    const response = cliTransportResponseSchema.parse(JSON.parse(await handleCliRequestLine(JSON.stringify({ ...request, token }), token, f.options())));
+    if (!response.ok) throw new Error(response.error);
+    return response.result;
+  };
+  const subject = { path: "a.md" };
+  const cli = await executeCli({ argv: ["links", "in", JSON.stringify(subject), "--json"], cwd: f.workspace.rootPath, env: {}, request: send });
+  expect(cli.exitCode).toBe(0);
+  expect(JSON.parse(cli.stdout)).toEqual({ schemaVersion: CLI_JSON_SCHEMA_VERSION, ...page });
+  const { linksIn } = await import("@dohc/mcp/tools");
+  expect(await linksIn({ root: f.workspace.rootPath, home: "state", request: send }, { subject })).toEqual(page);
 });

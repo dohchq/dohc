@@ -93,9 +93,13 @@ test("a sync the server cannot take names the server, offers Try again, and clea
       "dohc could not reach the server.",
     );
 
-    // Try again from the row, while the server is still down: the title bar
-    // shows the pass, and its failure interrupts with Try again and copy.
-    await notices.getByRole("button", { name: "Try again" }).click();
+    // Try again from the row, while the server is still down: the dismissed
+    // toast returns, so the pass ran, and it interrupts with Try again and copy.
+    // Live editing files its own Try again row for the same outage, so the
+    // click goes to the one row that names this failure.
+    const syncRow = notices.locator("[data-notice-row]", { hasText: "dohc could not reach the server." });
+    await expect(syncRow).toHaveCount(1);
+    await syncRow.getByRole("button", { name: "Try again" }).click();
     await expect(toast).toContainText("dohc could not reach the server.", { timeout: 60_000 });
     await expect(page.getByTestId("workspace-shell-error-retry")).toBeVisible();
     await expect(page.getByTestId("workspace-shell-error-copy")).toBeVisible();
@@ -110,8 +114,10 @@ test("a sync the server cannot take names the server, offers Try again, and clea
 
     const seen = await labels();
     expect(seen.filter((label) => label.includes("Saving"))).toEqual([]);
+    // "Syncing…" is not asserted: a pass to a stopped local server can fail
+    // before the title bar paints it. The returning toast and the recovery
+    // above prove each Try again ran a pass.
     expect(seen).toContain("Server unreachable");
-    expect(seen).toContain("Syncing…");
   } finally {
     await relay?.stop();
     await cleanupDesktopWorkspace(desktop, temp);

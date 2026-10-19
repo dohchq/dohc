@@ -5,16 +5,21 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./artifact-markdown-guard": "./src/artifact-markdown-guard.ts",
     "./body-fragment": "./src/body-fragment.ts",
+    "./engine-markdown-reader": "./src/engine-markdown-reader.ts",
     "./browser-editor": "./src/browser-editor.ts",
     "./frontmatter": "./src/frontmatter.ts",
+    "./frontmatter-map": "./src/frontmatter-map.ts",
     "./live-journal-validation": "./src/live-journal-validation.ts",
     "./image-src": "./src/image-src.ts",
+    "./markdown-extensions": "./src/dohc-markdown-extensions.ts",
     "./restore-proof": "./src/liveRestoreProof.ts",
     "./named-live-provider": "./src/namedLiveProvider.ts",
     "./named-live-browser-transport": "./src/namedLiveBrowserTransport.ts"
   },
   "scripts": {
+    "build:engine-reader": "node scripts/build-engine-reader.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
@@ -24,6 +29,7 @@
     "@dohc/workspace-core": "workspace:*",
     "@tiptap/core": "^3.30.5",
     "@tiptap/extension-list": "3.30.5",
+    "@tiptap/extension-paragraph": "3.30.5",
     "@tiptap/extension-table": "^3.30.5",
     "@tiptap/markdown": "^3.30.5",
     "@tiptap/pm": "^3.30.5",
@@ -35,7 +41,9 @@
     "yjs": "13.6.30"
   },
   "devDependencies": {
+    "@babel/parser": "7.29.8",
     "@types/node": "^24.13.3",
+    "esbuild": "0.28.1",
     "typescript": "^7.0.2",
     "vitest": "^4.1.11"
   }

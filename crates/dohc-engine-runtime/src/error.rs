@@ -7,6 +7,12 @@ use dohc_engine_storage::StorageError;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum RuntimeError {
+    #[error("capture-file-held: {path}")]
+    CaptureFileHeld { path: String },
+    #[error("capture-not-owned: {path}")]
+    CaptureNotOwnedAfterHold { path: String },
+    #[error("capture-recovery-refused: {reason}")]
+    RecoveryImportRefused { reason: &'static str },
     /// The engine.db path could not be resolved to a canonical identity
     /// (parent directory missing or not canonicalizable).
     #[error("could not resolve engine.db identity: {reason}")]
@@ -69,6 +75,12 @@ pub enum RuntimeError {
         record_facts: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
     },
 
+    /// A hosted document that left the scope cannot park: the file at its
+    /// path holds bytes other than its head. Nothing but the engine writes to
+    /// a session host's root, so this is a bug, never a person's edit.
+    #[error("hosted-file-unexpected: {path} holds bytes other than its document's head")]
+    HostedFileUnexpected { path: String },
+
     /// Sync delivered a drawing delete before one of its owned asset deletes.
     /// The rollback must wait so its normal compensation can converge on peers.
     #[error(
@@ -111,6 +123,8 @@ impl RuntimeError {
     /// The stable machine code, preserving the storage code where wrapped.
     pub fn code(&self) -> &'static str {
         match self {
+            RuntimeError::CaptureFileHeld { .. } => "capture-file-held",
+            RuntimeError::CaptureNotOwnedAfterHold { .. } => "capture-not-owned",
             RuntimeError::Identity { .. } => "identity-unresolved",
             RuntimeError::Storage(err) => err.code(),
             RuntimeError::Domain(err) => err.code(),
@@ -130,6 +144,8 @@ impl RuntimeError {
                     }
                     ApplicationError::Corrupt => "live-application-corrupt",
                     ApplicationError::Conflict => "live-application-conflict",
+                    ApplicationError::HostedDocumentUnready => "hosted-document-unready",
+                    ApplicationError::LiveDocumentWithoutLineage => "live-document-without-lineage",
                     ApplicationError::ConfiguredBudgetMismatch => {
                         "owner-outbox-configured-budget-mismatch"
                     }
@@ -140,14 +156,16 @@ impl RuntimeError {
                     }
                 }
             }
+            RuntimeError::RecoveryImportRefused { .. } => "capture-recovery-refused",
             RuntimeError::Sync(err) => err.code(),
             RuntimeError::Relay(_) => "relay-failed",
             RuntimeError::Search(err) => err.code(),
-            RuntimeError::Materialize(_) => "materialize-failed",
+            RuntimeError::Materialize(error) => error.code(),
             RuntimeError::ActiveVersionMaterializationIncomplete { .. } => "materialize-failed",
             RuntimeError::YdocArtifactAssetsPending => "ydoc-artifact-assets-pending",
             RuntimeError::YdocArtifactAssetsInvalid => "ydoc-artifact-assets-invalid",
             RuntimeError::YdocOpenConflict { .. } => "ydoc-conflict-open",
+            RuntimeError::HostedFileUnexpected { .. } => "hosted-file-unexpected",
             RuntimeError::SceneAssetDeletePending => "scene-asset-delete-pending",
             RuntimeError::ThreadSpawn(_) => "thread-spawn-failed",
             RuntimeError::ActorUnavailable => "actor-unavailable",
@@ -156,6 +174,30 @@ impl RuntimeError {
             RuntimeError::WorkerPanicked => "worker-panicked",
             RuntimeError::Cancelled => "cancelled",
             RuntimeError::OperationCrashed => "operation-crashed",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RuntimeError;
+    use dohc_engine_files::MaterializeError;
+
+    #[test]
+    fn conditional_restore_delete_materialization_codes_preserve_reason() {
+        for error in [
+            MaterializeError::SymlinkTarget,
+            MaterializeError::RecoveryUnavailable,
+            MaterializeError::FileLocked,
+            MaterializeError::Io {
+                path: "record.md".into(),
+                kind: std::io::ErrorKind::PermissionDenied,
+                raw_os_error: None,
+                privacy_denied: false,
+            },
+        ] {
+            let code = error.code();
+            assert_eq!(RuntimeError::Materialize(error).code(), code);
         }
     }
 }

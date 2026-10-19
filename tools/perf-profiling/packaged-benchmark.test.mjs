@@ -1,4 +1,8 @@
+import './document-size.test.mjs';
+import './go-to-index-fixture.test.mjs';
+import './go-to-packaged-fixture.test.mjs';
 import test from 'node:test';
+import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
@@ -11,8 +15,9 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { parseOptions, createEvidenceDirectory, benchmarkEnvironment, packagedLaunchArgs } from './packaged-benchmark-options.mjs';
 import { startWindowController, waitForVisibleWindow } from './window-controller.mjs';
 import { closeOwnedPackage, observeExit, benchmarkCancellation, verifyRestartInput } from './packaged-process.mjs';
+import { parseCpuTime, parseMacProcessSnapshot } from './packaged-process-snapshot.mjs';
 import { summarize } from './summarize-packaged-benchmark.mjs';
-import { compareSummaries, DEFAULT_MARGIN } from './compare-packaged-benchmark.mjs';
+import { compareSummaries, DEFAULT_MARGIN, METRIC_VERSION } from './compare-packaged-benchmark.mjs';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { observeStartupReadiness, startupTargetFromRegistry } from './startup-readiness.mjs';
 import { observeSurface, observeSearchSubmit, seededPostThreadId, collectionFixtureFiles, recordId, classifyProcess, aggregateByKind } from './packaged-surfaces.mjs';
@@ -409,13 +414,51 @@ test('strict release CLI rejects typos, duplicates, missing provenance and ambig
   assert.throws(() => parseOptions(required.filter((_, i) => i !== 2 && i !== 3)), /package-commit/);
   assert.throws(() => parseOptions([...required, '--scenario', 'go-to']), /at least 4243/);
 });
+test('traced typing is a full-scenario option', () => {
+  assert.equal(parseOptions(required).typingTrace, false);
+  assert.equal(parseOptions([...required, '--typing-trace', 'true']).typingTrace, true);
+  assert.throws(() => parseOptions([...required, '--typing-trace', 'true', '--scenario', 'startup']), /requires --scenario full/);
+  assert.throws(() => parseOptions([...required, '--typing-trace', 'yes']), /typing-trace/);
+});
+test('a package directory names the platform executable', () => {
+  const options = parseOptions(['--package-dir', '/packages/dohc', '--package-commit', 'a'.repeat(40), '--output', '/perf/out', '--label', 'baseline']);
+  assert.equal(options.binary, resolve(process.platform === 'darwin' ? '/packages/dohc/Contents/MacOS/dohc' : '/packages/dohc/dohc.exe'));
+});
+test('the macOS sampler keeps the app tree with CPU time and physical footprint', () => {
+  assert.equal(parseCpuTime('0:01.50'), 1500);
+  assert.equal(parseCpuTime('1:02:03.04'), 3723040);
+  assert.equal(parseCpuTime('2-00:00:01.00'), 172801000);
+  const ps = [
+    '    1     0   1:00.00  1000 Mon Oct 19 06:00:00 2026  ',
+    '  100     1   0:02.50 20000 Mon Oct 19 06:01:00 2026  ',
+    '  101   100   0:01.25 10000 Mon Oct 19 06:01:01 2026  ',
+    '  102   101   0:00.10  5000 Mon Oct  5 06:01:02 2026  ',
+    '  200     1   0:09.00  9000 Mon Oct 19 06:02:00 2026  ',
+  ].join('\n');
+  const snapshot = parseMacProcessSnapshot({ ps, appPid: 100, startedAtMs: 1, completedAtMs: 2,
+    commands: '  100 /Apps/dohc.app/Contents/MacOS/dohc --user-data-dir=/p\n  101 /Apps/dohc.app/Contents/Frameworks/dohc Helper (Renderer).app/Contents/MacOS/dohc Helper (Renderer) --type=renderer\n',
+    executables: '  100 /Apps/dohc.app/Contents/MacOS/dohc\n  101 /Apps/dohc.app/Contents/Frameworks/dohc Helper (Renderer).app/Contents/MacOS/dohc Helper (Renderer)\n  102 /Apps/dohc.app/Contents/Resources/workspace-engine/dohc-workspace-engine\n',
+    footprint: 'dohc [100]: 64-bit    Footprint: 2000 B (16384 bytes per page)\ndohc Helper (Renderer) [101]: 64-bit    Footprint: 3000 B (16384 bytes per page)\n' });
+  assert.deepEqual(snapshot.processes.map(p => [p.pid, p.parentPid, p.cpuMs, p.workingSetBytes, p.privateBytes, p.name]), [
+    [100, 1, 2500, 20480000, 2000, 'dohc'],
+    [101, 100, 1250, 10240000, 3000, 'dohc Helper (Renderer)'],
+    [102, 101, 100, 5120000, null, 'dohc-workspace-engine'],
+  ]);
+  assert.deepEqual(aggregateByKind(snapshot, 100).kinds, {
+    main: { count: 1, workingSetBytes: 20480000, privateBytes: 2000 },
+    renderer: { count: 1, workingSetBytes: 10240000, privateBytes: 3000 },
+    engine: { count: 1, workingSetBytes: 5120000, privateBytes: 0 },
+  });
+});
 test('surface scenarios parse with their own sizes and defaults', () => {
-  for (const scenario of ['go-to', 'command-palette', 'search', 'chat-history', 'collection', 'soak']) {
+  for (const scenario of ['go-to', 'go-to-mixed', 'command-palette', 'search', 'chat-history', 'collection', 'soak']) {
     const options = parseOptions([...required, '--scenario', scenario, '--files', '5000']);
     assert.deepEqual([options.scenario, options.soakMinutes, options.chatMessages, options.records], [scenario, 10, 200, 500]);
     assert.equal(options.runCount, scenario === 'collection' ? 5 : 3);
   }
   assert.equal(parseOptions([...required, '--scenario', 'go-to', '--files', '4243']).fixtureFiles, 4243);
+  assert.throws(() => parseOptions([...required, '--scenario', 'go-to-mixed']), /at least 5000/);
+  assert.equal(parseOptions([...required, '--scenario', 'go-to-mixed', '--files', '5000']).fixtureFiles, 5000);
   assert.equal(parseOptions([...required, '--scenario', 'soak', '--soak-minutes', '3', '--profile-renderer', 'true']).soakMinutes, 3);
   assert.equal(parseOptions([...required, '--scenario', 'chat-history', '--chat-messages', '2']).chatMessages, 2);
   assert.equal(parseOptions([...required, '--scenario', 'collection', '--records', '1']).records, 1);
@@ -431,6 +474,33 @@ test('evidence directory is exclusive even for concurrent starts', async t => {
   await writeFile(join(output, 'keep.txt'), 'evidence');
   await assert.rejects(createEvidenceDirectory(output), { code: 'EEXIST' });
   assert.equal(await readFile(join(output, 'keep.txt'), 'utf8'), 'evidence');
+});
+test('a scenario that seeds through the Windows job object refuses on a Mac', { skip: process.platform !== 'darwin' }, async t => {
+  const root = await mkdtemp(join(tmpdir(), 'dohc-release-mac-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const result = spawnSync(process.execPath, ['tools/perf-profiling/packaged-benchmark.mjs', '--binary', join(root, 'dohc'), '--package-commit', 'a'.repeat(40),
+    '--output', join(root, 'run'), '--label', 'baseline', '--scenario', 'chat-history'], { encoding: 'utf8', timeout: 20_000 });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /--scenario chat-history requires Windows/);
+  await assert.rejects(readFile(join(root, 'run', 'result.json')), { code: 'ENOENT' });
+});
+test('a Mac app bundle resolves its executable and Resources', { skip: process.platform !== 'darwin' }, async t => {
+  const root = await mkdtemp(join(tmpdir(), 'dohc-release-mac-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const bundle = join(root, 'dohc.app');
+  await mkdir(join(bundle, 'Contents/MacOS'), { recursive: true });
+  await mkdir(join(bundle, 'Contents/Resources'), { recursive: true });
+  await writeFile(join(bundle, 'Contents/MacOS/dohc'), 'app');
+  await writeFile(join(bundle, 'Contents/Resources/app.asar'), 'asar');
+  const output = join(root, 'run');
+  const result = spawnSync(process.execPath, ['tools/perf-profiling/packaged-benchmark.mjs', '--package-dir', bundle, '--package-commit', 'a'.repeat(40),
+    '--output', output, '--label', 'baseline'], { encoding: 'utf8', timeout: 20_000 });
+  assert.equal(result.status, 1, result.stderr);
+  const failed = JSON.parse(await readFile(join(output, 'result.json'), 'utf8'));
+  assert.equal(failed.binary, join(bundle, 'Contents/MacOS/dohc'));
+  assert.equal(failed.settings.metricVersion, METRIC_VERSION);
+  // The engine is the first missing file, at the bundle's Resources path and without .exe.
+  assert.match(failed.error, /ENOENT.*dohc\.app\/Contents\/Resources\/workspace-engine\/dohc-workspace-engine'/);
 });
 test('missing package binary finalizes a CLI failure receipt', { skip: process.platform !== 'win32' }, async t => {
   const root = await mkdtemp(join(tmpdir(), 'dohc-release-setup-'));
@@ -1303,6 +1373,17 @@ const receipt = ({ status = 'complete', open = [100, 105, 110, 115, 120], typed 
 });
 const compared = async (baseline, candidate, margin) => compareSummaries(await summarize(receipt(baseline)), await summarize(receipt(candidate)), margin);
 
+test('the comparison refuses receipts from another metric version or typing timing', async () => {
+  const withSettings = async settings => { const data = receipt(); Object.assign(data.settings, settings); return summarize(data); };
+  const current = await withSettings({ metricVersion: METRIC_VERSION, typingTrace: false });
+  assert.equal(compareSummaries(current, current).pass, true);
+  const older = compareSummaries(await withSettings({}), current);
+  assert.equal(older.pass, false);
+  assert.ok(older.problems.includes(`The baseline uses metric version 1 and the candidate version ${METRIC_VERSION}. Measure both packages with the same harness.`), older.problems.join('\n'));
+  const traced = compareSummaries(current, await withSettings({ metricVersion: METRIC_VERSION, typingTrace: true }));
+  assert.equal(traced.pass, false);
+  assert.deepEqual(traced.problems, ['The receipts differ in typingTrace.']);
+});
 test('automation comparison uses the median at 25% despite a slower p95', async () => {
   assert.deepEqual(DEFAULT_MARGIN, { percent: 10, automationPercent: 25, floorMs: 17 });
   const same = await compared({}, {});
@@ -1677,4 +1758,46 @@ test('heap snapshots soak captures a later due minute crossed during the first p
   f.chunk('{"second":true}'); f.captures[1].resolve(); await soak;
   assert.deepEqual(f.controller.records.map(r => r.cycle), [1, 1]);
   assert.equal(f.controller.records[0].pauseMs, 3000000);
+});
+
+// Run the actual signal setup and cleanup paths without launching Electron.
+for (const [name, scenario, abort, expectedCode] of [
+  ['document deadline', 'document-size', 'deadline', undefined],
+  ['presence admission loss', 'presence', 'slot', 1],
+  ['presence interrupt', 'presence', 'interrupt', 130],
+]) test(`benchmark cancellation preserves exit status for ${name} through cleanup errors`, async () => {
+  const source = await readFile(new URL('./packaged-benchmark.mjs', import.meta.url), 'utf8');
+  const setup = source.slice(source.indexOf('const cancellation = benchmarkCancellation();'), source.indexOf("await json(join(output, 'result.json'), receipt);"));
+  const teardown = source.slice(source.lastIndexOf('} catch (error) {'));
+  const interrupt = new AbortController(), slot = new AbortController();
+  const process = { env: {} }, receipt = {}, cleanup = [];
+  await vm.runInNewContext(`(async () => {
+    const root = '.', output = '.', feedRequests = [], json = async () => {}, join = (...parts) => parts.join('/');
+    const dirname = () => '.', writeFile = async () => {}, console = { error() {} };
+    let profilingSlot, feed, presenceFixture, goToFixture, helperStartup;
+    const workload = Promise.resolve();
+    const active = { logPath: 'run.log', logs: () => '' };
+    const closeOwnedPackage = async () => { cleanup.push('package'); throw Error('package cleanup'); };
+    const windowController = { close: async () => { cleanup.push('helper'); throw Error('helper cleanup'); } };
+    ${setup}
+    abort(documentDeadline);
+    benchmarkSignal.throwIfAborted();
+    ${teardown}
+  })()`, {
+    AbortController, AbortSignal, scenario, process, receipt, cleanup,
+    benchmarkCancellation: () => ({ signal: interrupt.signal, dispose() { cleanup.push('dispose'); } }),
+    acquireProfilingSlot: () => ({ signal: slot.signal, evidence: {}, release() { cleanup.push('release'); } }),
+    abort(deadline) {
+      const reason = Error(name);
+      if (abort === 'deadline') deadline.abort(reason);
+      else if (abort === 'slot') slot.abort(reason);
+      else { process.exitCode = 130; interrupt.abort(reason); }
+    },
+  });
+  assert.equal(process.exitCode, expectedCode);
+  assert.equal(receipt.status, 'failed');
+  assert.match(receipt.error, new RegExp(name));
+  assert.match(receipt.shutdownError, /package cleanup/);
+  assert.match(receipt.helperCleanupError, /helper cleanup/);
+  assert.deepEqual(cleanup, ['package', 'helper', ...(scenario === 'presence' ? ['release'] : []), 'dispose']);
 });

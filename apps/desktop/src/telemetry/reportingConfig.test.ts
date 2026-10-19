@@ -1,10 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { errorService, resolveReporting, usageService, type ReportingBuild } from "./reportingConfig";
+import { posthogProject, resolveReporting, type ReportingBuild } from "./reportingConfig";
 
 const BUILD: ReportingBuild = {
   posthogKey: "phc_abcdefghij0123456789",
   posthogHost: "https://us.i.posthog.com",
-  sentryDsn: "https://abcdef0123456789abcdef0123456789@o1.ingest.us.sentry.io/4501",
   dist: "win-x64",
 };
 
@@ -14,19 +13,22 @@ function resolve(overrides: Partial<Parameters<typeof resolveReporting>[0]> = {}
     packaged: true,
     env: {},
     argv: [],
-    version: "1.2.3",
-    channel: "latest",
     ...overrides,
   });
 }
 
 describe("which builds report", () => {
-  it("names both services for a configured packaged build", () => {
+  it("sends both kinds of report to the build's PostHog project", () => {
     const reporting = resolve();
-    expect(reporting?.usage?.url.href).toBe("https://us.i.posthog.com/batch/");
-    expect(reporting?.errors?.url.href).toBe("https://o1.ingest.us.sentry.io/api/4501/envelope/");
-    expect(reporting?.errors?.publicKey).toBe("abcdef0123456789abcdef0123456789");
-    expect(reporting).toMatchObject({ release: "dohc-desktop@1.2.3", dist: "win-x64", environment: "latest" });
+    expect(reporting?.usage).toEqual({ url: new URL("https://us.i.posthog.com/batch/"), key: BUILD.posthogKey });
+    expect(reporting?.errors).toEqual({ host: "https://us.i.posthog.com", key: BUILD.posthogKey });
+    expect(reporting?.dist).toBe("win-x64");
+  });
+
+  it("keeps a host's path prefix", () => {
+    const reporting = resolve({ build: { ...BUILD, posthogHost: "https://ph.example.test/ingest/" } });
+    expect(reporting?.usage?.url.href).toBe("https://ph.example.test/ingest/batch/");
+    expect(reporting?.errors?.host).toBe("https://ph.example.test/ingest");
   });
 
   it("sends nothing from a development build, a test run, or an isolated test launch", () => {
@@ -43,11 +45,11 @@ describe("which builds report", () => {
     expect(resolve({ env: { DOHC_TELEMETRY: "on", DO_NOT_TRACK: "0" } })).not.toBeNull();
   });
 
-  it("sends nothing from a build that names no service, and names only what is valid", () => {
+  it("sends nothing from a build that names no usable project", () => {
     expect(resolve({ build: null })).toBeNull();
-    expect(resolve({ build: { posthogKey: "", posthogHost: "", sentryDsn: "", dist: "" } })).toBeNull();
-    expect(resolve({ build: { ...BUILD, sentryDsn: "" } })?.errors).toBeNull();
-    expect(resolve({ build: { ...BUILD, posthogKey: "" } })?.usage).toBeNull();
+    expect(resolve({ build: { posthogKey: "", posthogHost: "", dist: "" } })).toBeNull();
+    expect(resolve({ build: { ...BUILD, posthogKey: "" } })).toBeNull();
+    expect(resolve({ build: { ...BUILD, posthogHost: "" } })).toBeNull();
   });
 
   it("falls back to this platform for a dist that is not a plain name", () => {
@@ -55,21 +57,13 @@ describe("which builds report", () => {
   });
 });
 
-describe("service addresses", () => {
-  it("accepts only https PostHog hosts and project keys", () => {
-    expect(usageService("phc_abcdefghij0123", "https://eu.i.posthog.com/")?.url.href).toBe("https://eu.i.posthog.com/batch/");
-    expect(usageService("phc_abcdefghij0123", "https://ph.example.test/ingest")?.url.href).toBe("https://ph.example.test/ingest/batch/");
-    expect(usageService("phc_abcdefghij0123", "http://us.i.posthog.com")).toBeNull();
-    expect(usageService("phc_abcdefghij0123", "https://user:pass@us.i.posthog.com")).toBeNull();
-    expect(usageService("phx_personal_key_0123", "https://us.i.posthog.com")).toBeNull();
-  });
-
-  it("builds the envelope endpoint from a DSN, keeping a path prefix", () => {
-    expect(errorService("https://abcdef0123456789@sentry.example.test/prefix/7")?.url.href)
-      .toBe("https://sentry.example.test/prefix/api/7/envelope/");
-    expect(errorService("http://abcdef0123456789@sentry.example.test/7")).toBeNull();
-    expect(errorService("https://sentry.example.test/7")).toBeNull();
-    expect(errorService("https://abcdef0123456789@sentry.example.test/project")).toBeNull();
-    expect(errorService("not a dsn")).toBeNull();
+describe("project settings", () => {
+  it("accepts only https hosts and project keys", () => {
+    expect(posthogProject(" phc_abcdefghij0123 ", "https://eu.i.posthog.com/")?.key).toBe("phc_abcdefghij0123");
+    expect(posthogProject("phc_abcdefghij0123", "http://us.i.posthog.com")).toBeNull();
+    expect(posthogProject("phc_abcdefghij0123", "https://user:pass@us.i.posthog.com")).toBeNull();
+    expect(posthogProject("phc_abcdefghij0123", "https://us.i.posthog.com/?x=1")).toBeNull();
+    expect(posthogProject("phc_abcdefghij0123", "not a host")).toBeNull();
+    expect(posthogProject("phx_personal_key_0123", "https://us.i.posthog.com")).toBeNull();
   });
 });

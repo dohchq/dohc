@@ -5,21 +5,23 @@
 // This module is deliberately engine-agnostic: it knows only Tiptap + Yjs, no
 // engine.db, no sqlite, no storage. That keeps it importable from both the
 // node-side engine driver and the browser-side editor.
+//
+// The schema definitions alone live in `@dohc/ydoc-projection/markdown-extensions`,
+// so an editor can build the schema without loading the conversions.
 export {
-  DohcMarkdownTable,
   getDohcProseMirrorSchema,
   getDohcYDocFrontmatter,
   getDohcYDocMeta,
   getDohcYDocPlainText,
   markdownToYDoc,
+  parseRichdocMarkdown,
   plainTextToYDoc,
   serializeRichdocBody,
   startsWithFrontmatter,
   yDocToMarkdown,
 } from "./import-export.js";
 export { getDohcYDocBodyFragment } from "./body-fragment.js";
-export { dohcMarkdownExtensions } from "./dohc-markdown-extensions.js";
-export { codeBlockFence } from "./markdown-fence.js";
+export { yDocToArtifactMarkdown, createArtifactMarkdownProjector } from "./artifact-markdown.js";
 export {
   documentCreateUpdate,
   FRONTMATTER_REFUSAL,

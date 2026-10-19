@@ -1,3 +1,4 @@
+import {fetchShareWeb} from "./apiVersion";
 import {normalizeShareLabel} from "@dohc/security-contract/share-labels";
 import {parseLiveUpdateIdentifier} from "@dohc/live-session-contract/live-update-admission";
 import {LiveAuthorityUnavailableError, parseNamedLiveBrowserLimits, type NamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
@@ -12,7 +13,7 @@ export interface NamedRecipientFiles {subjectName: string | null; sharerName: st
 export class ShareAccessRemovedError extends Error { constructor() { super("The owner removed your access."); } }
 export async function namedRequest(path: string, signal: AbortSignal, body?: unknown): Promise<unknown> {
   signal = AbortSignal.any([signal, AbortSignal.timeout(RETRY_BUDGET_MS)]);
-  const response = await fetch(path, {method: body === undefined ? "GET" : "POST", credentials: "same-origin", cache: "no-store",
+  const response = await fetchShareWeb(path, {method: body === undefined ? "GET" : "POST", credentials: "same-origin", cache: "no-store",
     redirect: "error", signal, headers: {accept: "application/json", ...(body === undefined ? {} : {"content-type": "application/json"})},
     ...(body === undefined ? {} : {body: JSON.stringify(body)})});
   try {
@@ -56,7 +57,7 @@ export function accountUser(value: unknown): {id: string; name: string} | null {
 }
 export function namedFiles(value: unknown, userId: string, grantId: string): NamedRecipientFiles {
   if (!record(value) || Object.keys(value).sort().join() !== "access,files,grantId,limits,shareId,sharerName,subjectName,userId,workspaceId" ||
-    value.access !== "edit" || value.userId !== userId || value.grantId !== grantId || !Array.isArray(value.files)) throw Error("Invalid selection");
+    value.access !== "edit" || value.userId !== userId || value.grantId !== grantId || value.workspaceId !== `named:${grantId}` || !Array.isArray(value.files)) throw Error("Invalid selection");
   const seen = new Set<string>();
   const files = value.files.map(file => {
     if (!record(file) || Object.keys(file).sort().join() !== "objectId,path" || typeof file.path !== "string" ||
@@ -64,6 +65,6 @@ export function namedFiles(value: unknown, userId: string, grantId: string): Nam
     const objectId = parseLiveUpdateIdentifier(file.objectId); seen.add(objectId);
     return {objectId, path: file.path};
   });
-  return {subjectName: normalizeShareLabel(value.subjectName), sharerName: normalizeShareLabel(value.sharerName, 320), access: "edit", userId, grantId, workspaceId: parseLiveUpdateIdentifier(value.workspaceId), shareId: parseLiveUpdateIdentifier(value.shareId),
+  return {subjectName: normalizeShareLabel(value.subjectName), sharerName: normalizeShareLabel(value.sharerName, 320), access: "edit", userId, grantId, workspaceId: `named:${grantId}`, shareId: parseLiveUpdateIdentifier(value.shareId),
     files, limits: parseNamedLiveBrowserLimits(value.limits)};
 }

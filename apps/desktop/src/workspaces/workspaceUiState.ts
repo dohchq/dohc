@@ -1,6 +1,6 @@
-import { randomUUID } from "node:crypto";
-import { lstat, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { atomicReplaceFile } from "../atomicReplaceFile";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 
 // Main-side store for per-workspace UI state (.dohc/ui-state.json), the same
@@ -14,7 +14,6 @@ import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 
 const UI_STATE_FILE = "ui-state.json";
 const writeQueues = new Map<string, Promise<void>>();
-const WINDOWS_RENAME_RETRY_CODES = new Set(["EACCES", "EBUSY", "EPERM"]);
 
 // The known WorkspaceUiState fields bound a legitimate file to a few KB; this
 // cap (with margin) only exists so a foreign multi-hundred-MB ui-state.json
@@ -38,26 +37,6 @@ export async function readUiStateFile(rootPath: string): Promise<unknown> {
   }
 }
 
-function errorCode(error: unknown): string | undefined {
-  return typeof error === "object" && error !== null && "code" in error
-    ? String((error as { code?: unknown }).code)
-    : undefined;
-}
-
-async function renameWithRetry(source: string, destination: string): Promise<void> {
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      await rename(source, destination);
-      return;
-    } catch (error) {
-      if (attempt >= 5 || !WINDOWS_RENAME_RETRY_CODES.has(errorCode(error) ?? "")) {
-        throw error;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 8 * 2 ** attempt));
-    }
-  }
-}
-
 async function writeUiStateFileNow(
   rootPath: string,
   state: unknown,
@@ -65,14 +44,7 @@ async function writeUiStateFileNow(
   const path = join(await resolveWorkspaceMetadataDir(rootPath), UI_STATE_FILE);
   // Atomic temp+rename so a crash mid-write never truncates the state file
   // (agent-runs.json idiom; the unique suffix keeps concurrent writers apart).
-  const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
-  try {
-    await writeFile(tmp, `${JSON.stringify(state, null, 2)}\n`);
-    await renameWithRetry(tmp, path);
-  } finally {
-    // Failed rename attempts must not accumulate metadata temp files forever.
-    await rm(tmp, { force: true }).catch(() => undefined);
-  }
+  await atomicReplaceFile(path, (tmp) => writeFile(tmp, `${JSON.stringify(state, null, 2)}\n`));
 }
 
 export function writeUiStateFile(

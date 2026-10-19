@@ -5,7 +5,7 @@
   "version": "0.1.0",
   "type": "module",
   "engines": {
-    "node": ">=24.14.0",
+    "node": ">=24.16.0",
     "pnpm": "11.20.0"
   },
   "exports": {
@@ -41,9 +41,9 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@dohc/workspace-auth": "workspace:*",
     "@dohc/app-backend-runtime": "workspace:*",
     "@dohc/sync-relay": "workspace:*",
-    "@dohc/workspace-auth": "workspace:*",
     "@modelcontextprotocol/client": "2.0.0",
     "@peculiar/x509": "^2.1.0",
     "@playwright/test": "^1.62.1",

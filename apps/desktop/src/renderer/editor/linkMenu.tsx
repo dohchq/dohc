@@ -1,4 +1,6 @@
+import { hasPrimaryModifier, shortcutTitle } from "../../shortcuts/shortcutRegistry";
 import { isEditableEditor } from "./pmHelpers";
+import { isComposingKey, isMacContextClick } from "../ui/keys";
 // Link editing UI: the StarterKit Link mark + autolink are already active in
 // the schema (round-trips as `[text](url)` via @tiptap/markdown) — this file
 // is the missing UI layer on top of it.
@@ -240,7 +242,9 @@ export function makeLinkMenuPlugin({
           return false;
         }
 
-        if (event.metaKey || event.ctrlKey) {
+        const platform = window.dohcDesktop?.platform;
+        if (isMacContextClick(event, platform)) return false;
+        if (hasPrimaryModifier(event, platform)) {
           event.preventDefault();
           void openLinkExternally(anchor.getAttribute("href") ?? "");
           return true;
@@ -382,7 +386,7 @@ export function LinkMenu({
             setInvalid(false);
           }}
           onKeyDown={(event) => {
-            if (event.key === "Enter") {
+            if (event.key === "Enter" && !isComposingKey(event)) {
               event.preventDefault();
               confirm();
             }
@@ -436,7 +440,7 @@ export function LinkBubbleButton({
     <button
       type="button"
       aria-label="Link"
-      title="Link (Cmd+K)"
+      title={`Link (${shortcutTitle("editor-link", window.dohcDesktop?.platform)})`}
       className={`dohc-bubble-menu__button${active ? " is-active" : ""}`}
       onClick={() => onOpen(computeLinkMenuState(editor.view))}
     >

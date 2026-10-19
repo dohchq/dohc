@@ -4,51 +4,6 @@ import { dirname, join, matchesGlob, posix, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const require = createRequire(new URL("../../apps/desktop/package.json", import.meta.url));
-const dependencyFields = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"];
-const productionInputs = { "@dohc/site": ["@dohc/desktop"] };
-// These inputs include ordinary tests and separate native/browser proofs.
-// Test consumers do not become changed production packages themselves.
-const testInputs = {
-  "@dohc/desktop": ["@dohc/site", "@dohc/share-web", "@dohc/workspace-api", "@dohc/workspace-postgres"],
-  "@dohc/workspace-auth": ["@dohc/workspace-postgres"],
-  "@dohc/ydoc-projection": ["@dohc/sync-relay", "@dohc/workspace-engine-client", "@dohc/share-web", "@dohc/desktop",
-    "@dohc/service-http", "@dohc/workspace-auth"],
-  "@dohc/share-web": ["@dohc/desktop", "@dohc/mcp", "@dohc/cli", "@dohc/workspace-postgres", "@dohc/workspace-engine-client"],
-  "@dohc/sync-relay": ["@dohc/share-web", "@dohc/desktop"],
-  "@dohc/workspace-api": ["@dohc/workspace-postgres"],
-};
-// These helpers feed browser proofs and the declared desktop test below.
-// The onboarding helper imports the API harness, which reads Postgres SQL.
-const desktopProofInputs = {
-  "@dohc/workspace-api": ["e2e/helpers/selfHostOnboarding.ts"],
-  "@dohc/workspace-postgres": ["e2e/helpers/selfHostOnboarding.ts"],
-  "@dohc/share-web": ["e2e/helpers/selfHostOnboarding.ts", "e2e/helpers/sharedDatasetBrowser.ts", "e2e/collection-link-lane.spec.ts", "e2e/recipient-record-creation.spec.ts"],
-};
-// Keep a helper wrapper from hiding a new unit-test dependency on these inputs.
-const desktopProofConsumers = {
-  "apps/desktop/e2e/helpers/selfHostOnboarding": ["apps/desktop/e2e/self-host-onboarding.spec.ts", "apps/desktop/e2e/shared-continuity.spec.ts",
-    "apps/desktop/e2e/collection-link-lane.spec.ts",
-    "apps/desktop/e2e/recipient-record-creation.spec.ts",
-    "apps/desktop/src/workspaces/twoDaemonSync.e2e.test.ts"],
-  "apps/desktop/e2e/helpers/sharedDatasetBrowser": [
-    "apps/desktop/e2e/apps.spec.ts", "apps/desktop/e2e/collection-link-lane.spec.ts",
-    "apps/desktop/e2e/dataset-completion.spec.ts", "apps/desktop/e2e/dataset-shared-form.spec.ts",
-  ],
-};
-// External consumers can select compatibility files. A production change in
-// the consumer or an input without a file map still selects its complete suite.
-const externalTestFiles = {
-  "@dohc/desktop": {
-    "@dohc/site": ["src/renderer/tokens.test.ts", "src/renderer/workbench/ChatLane.test.tsx", "src/renderer/workbench/ProductDemo.test.tsx"],
-    "@dohc/share-web": ["src/workspaces/twoDaemonSync.e2e.test.ts"],
-    "@dohc/workspace-api": ["src/workspaces/twoDaemonSync.e2e.test.ts"],
-    "@dohc/workspace-postgres": ["src/workspaces/twoDaemonSync.e2e.test.ts"],
-  },
-  "@dohc/ydoc-projection": {
-    "@dohc/desktop": ["src/liveRestoreDrain.test.ts", "src/ownerDesktopTransport.test.ts"],
-  },
-};
-const databasePackages = new Set(["@dohc/workspace-postgres", "@dohc/workspace-auth", "@dohc/workspace-api", "@dohc/share-web"]);
 
 export function readWorkspacePackages(root) {
   const workspace = require("js-yaml").load(readFileSync(join(root, "pnpm-workspace.yaml"), "utf8"));
@@ -66,141 +21,90 @@ export function readWorkspacePackages(root) {
   }).filter(pkg => pkg.path !== "").sort((a, b) => a.name.localeCompare(b.name));
 }
 
-function dependencies(pkg) {
-  return new Set(dependencyFields.flatMap(field => Object.keys(pkg.manifest[field] ?? {})));
-}
-
-function owner(path, packages) {
-  return packages.filter(pkg => path === pkg.path || path.startsWith(pkg.path + "/"))
-    .sort((a, b) => b.path.length - a.path.length)[0];
-}
-
-function sharedInput(path) {
-  // Examples feed desktop staging, relay compiler tests, and runtime tests.
-  // Native fixtures and goldens are also imported directly by JavaScript tests.
-  // The shutdown budgets also feed plain Node debug and verification proofs.
-  return /^(?:crates|vendor|scripts|tools|examples|patches|\.cargo|\.config|\.github)\//u.test(path)
-    || path === "apps/desktop/src/shutdownBudgets.ts"
-    || /(?:^|\/)package\.json$/u.test(path)
-    || /(?:^|\/)(?:tsconfig[^/]*\.json|[^/]+\.config\.[^/]+|\.env(?:\.[^/]*)?)$/u.test(path)
-    || /^apps\/desktop\/scripts\//u.test(path);
-}
-
-// The states page compares every shared renderer part with its pixel
-// baselines, so a renderer change or a change to the gallery itself runs it.
-function statesPageInput(path) {
-  return /^apps\/desktop\/(?:src\/renderer\/|e2e\/states-page)/u.test(path);
-}
-
-function result(selected, affected, full, reason, statesPage = full) {
-  const testFiles = {};
-  if (!full) for (const name of selected) {
-    if (affected.has(name)) continue;
-    const inputs = testInputs[name]?.filter(input => affected.has(input)) ?? [];
-    if (inputs.length && inputs.every(input => externalTestFiles[name]?.[input])) {
-      testFiles[name] = [...new Set(inputs.flatMap(input => externalTestFiles[name][input]))].sort();
-    }
+/**
+ * The workspace packages a change can affect: the packages its files are in,
+ * and every package that depends on one of them, directly or through others.
+ * Null means every package, because a file outside all packages, such as a
+ * lockfile, a crate, or a root script that package tests import, can affect
+ * any of them, and so does an empty change. Documentation changes affect none.
+ * `packages` carry a path relative to the repository root and their manifest.
+ * `references` are [target, importer] package names from packageReferences: a
+ * package whose files another package reaches into affects that package too.
+ */
+export function affectedPackages(files, packages, references = []) {
+  // With no changed file to attribute, as in an explicit job on an unchanged branch, every package runs.
+  if (!files.length) return null;
+  const owners = new Set();
+  for (const file of files) {
+    // docs/reference holds generated references that package tests compare against, so it is not documentation here.
+    if ((file.startsWith("docs/") || file.endsWith(".md")) && !file.startsWith("docs/reference/")) continue;
+    const owner = packages.filter(pkg => file.startsWith(`${pkg.path}/`)).sort((a, b) => b.path.length - a.path.length)[0];
+    if (!owner) return null;
+    owners.add(owner.name);
   }
-  const desktopScripts = selected.has("@dohc/desktop") && !testFiles["@dohc/desktop"];
-  const proofs = {
-    accounts: selected.has("@dohc/workspace-api"),
-    selfHostNative: selected.has("@dohc/share-web"),
-    desktop: desktopScripts || Object.keys(desktopProofInputs).some(input => affected.has(input)),
-  };
-  proofs.statesPage = proofs.desktop && statesPage;
-  return {
-    packages: [...selected].sort(), affected: [...affected].sort(), full, reason, proofs, testFiles, desktopScripts,
-    repository: full ? "full" : "source",
-    needs: {
-      postgres: proofs.desktop || proofs.selfHostNative || [...selected].some(name => databasePackages.has(name)),
-      engine: proofs.desktop || proofs.selfHostNative,
-      desktop: proofs.desktop,
-    },
-  };
-}
-
-export function selectJavaScript(files, packages, { full = false } = {}) {
-  const all = new Set(packages.map(pkg => pkg.name));
-  const everything = reason => result(all, all, true, reason);
-  if (full) return everything("Full JavaScript verification was requested.");
-  const affected = new Set();
-  for (const original of files) {
-    const path = original.replaceAll("\\", "/");
-    if (sharedInput(path)) return everything(`Shared verification input changed: ${path}`);
-    const pkg = owner(path, packages);
-    if (!pkg) return everything(`No package owns the changed JavaScript input: ${path}`);
-    affected.add(pkg.name);
-  }
+  const dependents = new Map(packages.map(pkg => [pkg.name, []]));
   for (const pkg of packages) {
-    for (const field of dependencyFields) {
-      for (const [name, version] of Object.entries(pkg.manifest[field] ?? {})) {
-        if (String(version).startsWith("workspace:") && !all.has(name)) return everything(`Unresolved workspace dependency: ${pkg.name} -> ${name}`);
+    for (const field of ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"]) {
+      // An alias such as "renamed": "workspace:@dohc/a@*" depends on @dohc/a.
+      for (const [name, spec] of Object.entries(pkg.manifest[field] ?? {})) {
+        const target = /^workspace:((?:@[^/@]+\/)?[^@]+)@/u.exec(String(spec))?.[1] ?? name;
+        dependents.get(target)?.push(pkg.name);
       }
     }
   }
-  const graph = packages.map(pkg => ({ name: pkg.name, inputs: new Set([...dependencies(pkg), ...(productionInputs[pkg.name] ?? [])]) }));
-  let previousSize;
-  do {
-    previousSize = affected.size;
-    for (const { name, inputs } of graph) if ([...inputs].some(input => affected.has(input))) affected.add(name);
-  } while (affected.size !== previousSize);
-  const selected = new Set(affected);
-  for (const pkg of packages) if (testInputs[pkg.name]?.some(input => affected.has(input))) selected.add(pkg.name);
-  return result(selected, affected, false, files.length ? "Changed packages, production dependents, and external test consumers." : "No JavaScript inputs changed.",
-    files.some(path => statesPageInput(path.replaceAll("\\", "/"))));
+  for (const [target, importer] of references) dependents.get(target)?.push(importer);
+  const pending = [...owners];
+  while (pending.length) for (const name of dependents.get(pending.pop())) if (!owners.has(name)) { owners.add(name); pending.push(name); }
+  return [...owners].sort();
 }
 
-// This guard checks literal imports, CSS sources, and fixture paths. Computed
-// paths and subprocess inputs still need an explicit input audit during review.
-export function uncoveredWorkspaceInputs(files, packages) {
-  const findings = [];
-  for (const { path, source } of files) {
-    const consumer = owner(path, packages);
-    if (!consumer || path.endsWith("/package.json")) continue;
-    const declared = dependencies(consumer);
-    const testFile = /(?:^|\/)e2e\//u.test(path) || /\.(?:test(?:-d)?|spec|integration(?:-helper)?)\.[^/]+$/u.test(path)
-      || path === "packages/ydoc-projection/src/liveCommittedDeliveryTestSupport.ts";
-    for (const match of source.matchAll(/(["'`])((?:\.{1,2}\/|@dohc\/)[^"'`\r\n]+)\1/gu)) {
-      const reference = match[2];
-      const inputPath = posix.normalize(posix.join(posix.dirname(path), reference));
-      const proofConsumers = desktopProofConsumers[inputPath.replace(/\.[cm]?[jt]sx?$/u, "")];
-      if (proofConsumers && !proofConsumers.includes(path)) {
-        findings.push({ path, reference, consumer: consumer.name, input: "@dohc/desktop" });
-        continue;
+/**
+ * Packages that reach into another package's files by relative path, which no
+ * manifest declares: a test in sync-relay that imports a desktop source file, or
+ * reads a fixture from another package. Returns [target, importer] name pairs.
+ * `packages` carry paths relative to `root`; build output is not read.
+ */
+export function packageReferences(root, packages) {
+  const owner = path => packages.filter(pkg => path === pkg.path || path.startsWith(`${pkg.path}/`)).sort((a, b) => b.path.length - a.path.length)[0];
+  const skipped = name => /(^|\/)(node_modules|dist|build|coverage)$/u.test(name.replaceAll("\\", "/"));
+  const references = new Set();
+  for (const pkg of packages) {
+    for (const file of globSync(`${pkg.path}/**/*.{ts,tsx,mts,cts,js,mjs,cjs}`, { cwd: root, exclude: skipped })) {
+      const path = file.replaceAll("\\", "/");
+      if (owner(path)?.name !== pkg.name) continue;
+      for (const match of readFileSync(join(root, path), "utf8").matchAll(/["'\x60](\.\.\/[^"'\x60\s$]*)["'\x60]/gu)) {
+        const target = owner(posix.normalize(posix.join(posix.dirname(path), match[1])));
+        if (target && target.name !== pkg.name) references.add(`${target.name}\n${pkg.name}`);
       }
-      const input = reference.startsWith("@dohc/")
-        ? packages.find(pkg => pkg.name === reference.split("/").slice(0, 2).join("/"))
-        : owner(inputPath, packages);
-      if (!input || input.name === consumer.name || declared.has(input.name) || productionInputs[consumer.name]?.includes(input.name)) continue;
-      if (consumer.name === "@dohc/desktop" && desktopProofInputs[input.name]?.includes(posix.relative(consumer.path, path))) continue;
-      if (testFile && testInputs[consumer.name]?.includes(input.name)) {
-        const files = externalTestFiles[consumer.name]?.[input.name];
-        if (!files || files.includes(posix.relative(consumer.path, path))) continue;
-      }
-      findings.push({ path, reference, consumer: consumer.name, input: input.name });
     }
   }
-  return findings;
+  return [...references].sort().map(pair => pair.split("\n"));
 }
 
 const gateReadCalls = new Set(["include_str!", "include_bytes!", "read_to_string", "fs::read", "File::open",
   "readFileSync", "readFile", "createReadStream", "existsSync"]);
 const gatePathCalls = new Set(["Path::new", "PathBuf::from", "URL", "join", "resolve"]);
 
-export function workflowFilters(workflow) {
+function workflowFilters(workflow) {
   const yaml = require("js-yaml");
   const document = yaml.load(workflow);
   const filterStep = document.jobs.changes.steps.find(step => step.with?.filters);
   return yaml.load(filterStep.with.filters);
 }
 
+const matchesFilter = (files, patterns) => files.some(file => patterns.some(pattern => matchesGlob(file, pattern)));
+
 function gatesFromFilters(files, filters) {
-  return Object.fromEntries(["rust", "js"].map(name =>
-    [name, files.some(file => filters[name].some(pattern => matchesGlob(file, pattern)))]));
+  return Object.fromEntries(["rust", "js"].map(name => [name, matchesFilter(files, filters[name])]));
 }
 
 export function selectedGates(files, workflow) {
   return gatesFromFilters(files, workflowFilters(workflow));
+}
+
+/** Whether a change reaches a file that the repository tests read, so the JavaScript gate runs every one of them. */
+export function selectsRepositoryTests(files, workflow) {
+  return matchesFilter(files, workflowFilters(workflow).repository);
 }
 
 export const isGateReader = path => /\.(?:rs|[cm]?[jt]sx?)$/u.test(path);

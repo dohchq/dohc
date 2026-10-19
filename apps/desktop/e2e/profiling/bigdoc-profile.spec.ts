@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { DOCUMENT_END } from "../helpers/keys";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { explorerRow, revealExplorerPath } from "../helpers/workspace";
@@ -34,7 +35,7 @@ test("profiles opening, typing in, and saving the 250 KiB document", async () =>
       "true",
     );
     await editor.click();
-    await page.keyboard.press("ControlOrMeta+End");
+    await page.keyboard.press(DOCUMENT_END);
     const typedText = "profilex-0123456789-abcdefghij";
     expect(typedText).toHaveLength(30);
     const typingStartedAt = performance.now();

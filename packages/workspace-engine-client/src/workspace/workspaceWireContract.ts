@@ -20,6 +20,7 @@ import type { JsonValue } from "../protocol";
 export const WORKSPACE_METHOD = {
   open: "workspace.open",
   close: "workspace.close",
+  replicaCut: "replica.cut",
   conflictsList: "conflicts.list",
   conflictsOpen: "conflicts.open",
   conflictsResolve: "conflicts.resolve",
@@ -32,10 +33,12 @@ export const WORKSPACE_METHOD = {
   searchQueryChatMessagesGranular: "search.queryChatMessagesGranular",
   watcherStatus: "watcher.status",
   captureClearRecovery: "capture.clearRecovery",
+  captureImportRecovery: "capture.importRecovery",
   keptCopiesList: "keptCopies.list",
   keptCopiesSave: "keptCopies.save",
   captureFlush: "capture.flush",
   captureReconcile: "capture.reconcile",
+  captureRetryHeld: "capture.retryHeld",
   captureSetAuthor: "capture.setAuthor",
   captureHold: "capture.hold",
   captureRenew: "capture.renew",
@@ -51,6 +54,7 @@ export const WORKSPACE_METHOD = {
   automationsListClaims: "automations.listClaims",
   automationsGetClaim: "automations.getClaim",
   automationsPruneHistory: "automations.pruneHistory",
+  automationsMakeDurable: "automations.makeDurable",
   automationsSettle: "automations.settle",
   automationsRetry: "automations.retry",
   automationsRelease: "automations.release",
@@ -88,8 +92,17 @@ export type WorkspaceOpenParams = WorkspaceJsonObject & {
       })
     | null;
   captureMode?: "none";
+  storeMode?: "passive";
   recoverRunningDispatches?: boolean;
 };
+export type CaptureRecoveryImportParams = WorkspaceJsonObject & {
+  versionId: string; objectId: string; path: string;
+  expectedClaimId: string | null; expectedStateVectorSha256: string;
+  expectedDiskSha256: string | null; admittedBaseBase64: string; text: string;
+  updates: { requestId: string; updateBase64: string; actorOriginId?: string;
+    attribution?: import("../ydoc/ydocWireContract").ChangeAttributionWire }[];
+};
+export type CaptureRecoveryImportResult = WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.captureImportRecovery];
 type WorkspaceEmptyParams = WorkspaceJsonObject;
 export type CollectionGetParams = WorkspaceJsonObject &
   CollectionGetContractParams;
@@ -265,6 +278,8 @@ export type AutomationClaimNextParams = WorkspaceJsonObject & {
   automationIdPrefix: string;
 };
 
+export type AutomationMakeDurableParams = WorkspaceJsonObject & { claimId?: string };
+
 export type AutomationSettleParams = WorkspaceJsonObject & {
   claimId: string;
   state: "done" | "failed";
@@ -426,6 +441,7 @@ type CaptureSetAuthorParams = WorkspaceJsonObject & {
 };
 
 export type WorkspaceMethodParamsMap = {
+  [WORKSPACE_METHOD.replicaCut]: WorkspaceJsonObject & { selectors: Array<{versionId: string | null; paths: string[]}>; knownTextShas?: string; position?: {revision:number;logCursor:number;journalCursor:number} | null; cursor?: {path:string;objectId:string;versionId:string} | null };
   [WORKSPACE_METHOD.open]: WorkspaceOpenParams;
   [WORKSPACE_METHOD.close]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.conflictsList]: ConflictListParams;
@@ -440,12 +456,14 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.searchQueryChatMessagesGranular]: SearchQueryChatMessagesGranularParams;
   [WORKSPACE_METHOD.watcherStatus]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.captureClearRecovery]: WorkspaceJsonObject & { momentId: string };
+  [WORKSPACE_METHOD.captureImportRecovery]: CaptureRecoveryImportParams;
   [WORKSPACE_METHOD.keptCopiesList]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.keptCopiesSave]: WorkspaceJsonObject & { id: number };
   [WORKSPACE_METHOD.captureFlush]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.captureReconcile]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.captureRetryHeld]: WorkspaceJsonObject & { path: string };
   [WORKSPACE_METHOD.captureSetAuthor]: CaptureSetAuthorParams;
-  [WORKSPACE_METHOD.captureHold]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.captureHold]: WorkspaceJsonObject & { operationId?: string };
   [WORKSPACE_METHOD.captureRenew]: WorkspaceJsonObject & { holdId: string };
   [WORKSPACE_METHOD.captureRelease]: WorkspaceJsonObject & { holdId: string };
   [WORKSPACE_METHOD.captureMoveFile]: WorkspaceJsonObject & { holdId: string; fromPath: string; toPath: string };
@@ -459,6 +477,7 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.automationsListClaims]: AutomationListClaimsParams;
   [WORKSPACE_METHOD.automationsGetClaim]: AutomationGetClaimParams;
   [WORKSPACE_METHOD.automationsPruneHistory]: AutomationPruneHistoryParams;
+  [WORKSPACE_METHOD.automationsMakeDurable]: AutomationMakeDurableParams;
   [WORKSPACE_METHOD.automationsSettle]: AutomationSettleParams;
   [WORKSPACE_METHOD.automationsRetry]: AutomationRetryParams;
   [WORKSPACE_METHOD.automationsRelease]: AutomationReleaseParams;
@@ -971,6 +990,12 @@ const CollectionGetRecordResultSchema = mutableStruct({
             automationName: Schema.String,
           }),
         ),
+        linkAuthor: Schema.NullOr(mutableStruct({
+          kind: Schema.Literal("link"),
+          grantId: Schema.String,
+          grantGeneration: Schema.Int,
+          publicPrincipalId: Schema.String,
+        })),
       }),
     ),
   ),
@@ -1009,7 +1034,21 @@ const GranularChatMessageSearchResponseSchema = mutableStruct({
   saturated: Schema.Boolean,
 });
 
+const CaptureFileHoldSchema = mutableStruct({
+  workspaceId: Schema.NonEmptyString,
+  sourceVersionId: Schema.NonEmptyString,
+  objectId: Schema.NonEmptyString,
+  path: Schema.NonEmptyString,
+  observedSha256: Schema.NonEmptyString,
+  observedSize: Schema.Int,
+  reason: Schema.Literal("ydoc-resolution-not-representable"),
+  observedAtMs: Schema.Int,
+  attemptCount: Schema.Int,
+  retryRequested: Schema.Boolean,
+});
+
 const CaptureFlushResultSchema = mutableStruct({
+  heldFiles: Schema.mutable(Schema.Array(CaptureFileHoldSchema)),
   settled: Schema.Boolean,
   running: Schema.Boolean,
   degraded: Schema.Boolean,
@@ -1213,6 +1252,16 @@ const AutomationScheduleMarkSchema = mutableStruct({
 });
 
 const WorkspaceResultSchemas = {
+  [WORKSPACE_METHOD.replicaCut]: mutableStruct({
+    workspaceId: Schema.String, revision: Schema.Int, logCursor: Schema.Int, journalCursor: Schema.Int,
+    files: Schema.mutable(Schema.Array(mutableStruct({versionId: Schema.String, objectId: Schema.String, path: Schema.String,
+      contentKind: Schema.Literals(["text", "binary"]), sha256: Schema.String, byteLength: Schema.Int,
+      lineageClaimId: NullableString, restoreGeneration: NullableInt}))),
+    texts: Schema.mutable(Schema.Array(mutableStruct({sha256: Schema.String, text: Schema.String}))),
+    moved: Schema.Boolean,
+    nextCursor: Schema.NullOr(mutableStruct({path: Schema.String, objectId: Schema.String, versionId: Schema.String})),
+    refusedFiles: Schema.mutable(Schema.Array(mutableStruct({path: Schema.String, objectId: Schema.String, versionId: Schema.String, sha256: Schema.String, reason: Schema.Literal("text-frame-limit")}))),
+  }),
   [WORKSPACE_METHOD.open]: mutableStruct({ workspace: Schema.String }),
   [WORKSPACE_METHOD.close]: mutableStruct({ closed: Schema.Boolean }),
   [WORKSPACE_METHOD.conflictsList]: mutableStruct({
@@ -1241,6 +1290,7 @@ const WorkspaceResultSchemas = {
   [WORKSPACE_METHOD.searchQueryChatMessagesGranular]:
     GranularChatMessageSearchResponseSchema,
   [WORKSPACE_METHOD.watcherStatus]: mutableStruct({
+    heldFiles: Schema.mutable(Schema.Array(CaptureFileHoldSchema)),
     running: Schema.Boolean,
     degraded: Schema.Boolean,
     terminal: Schema.Boolean,
@@ -1262,9 +1312,12 @@ const WorkspaceResultSchemas = {
       objectId: Schema.NonEmptyString,
       path: Schema.NonEmptyString,
       captureMomentId: Schema.NonEmptyString,
+      deleted: Schema.Boolean,
     }))),
   }),
   [WORKSPACE_METHOD.captureClearRecovery]: mutableStruct({ cleared: Schema.Boolean }),
+  [WORKSPACE_METHOD.captureImportRecovery]: mutableStruct({ committed: Schema.Literal(true),
+    outcome: Schema.Literals(["replayed", "imported", "covered"]), momentId: Schema.NullOr(Schema.String) }),
   [WORKSPACE_METHOD.keptCopiesList]: mutableStruct({
     keptCopies: Schema.mutable(
       Schema.Array(
@@ -1284,6 +1337,10 @@ const WorkspaceResultSchemas = {
   ]),
   [WORKSPACE_METHOD.captureFlush]: CaptureFlushResultSchema,
   [WORKSPACE_METHOD.captureReconcile]: CaptureFlushResultSchema,
+  [WORKSPACE_METHOD.captureRetryHeld]: mutableStruct({
+    ...CaptureFlushResultSchema.fields,
+    retried: Schema.Boolean,
+  }),
   [WORKSPACE_METHOD.captureSetAuthor]: mutableStruct({
     updated: Schema.Literal(true),
   }),
@@ -1368,6 +1425,7 @@ const WorkspaceResultSchemas = {
     pruned: Schema.Int,
     more: Schema.Boolean,
   }),
+  [WORKSPACE_METHOD.automationsMakeDurable]: mutableStruct({}),
   [WORKSPACE_METHOD.automationsSettle]: AutomationClaimSummarySchema,
   [WORKSPACE_METHOD.automationsRetry]: AutomationClaimSummarySchema,
   [WORKSPACE_METHOD.automationsRelease]: AutomationClaimSummarySchema,
@@ -1523,4 +1581,14 @@ export function decodeWorkspaceResult<M extends WorkspaceMethod>(
     ) as WorkspaceMethodResultMap[M];
   }
   return decoded;
+}
+
+export type ReplicaCurrentViewPage = WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.replicaCut];
+export type ReplicaCurrentView = Omit<ReplicaCurrentViewPage, "moved" | "nextCursor" | "refusedFiles"> & {omitted: ReplicaCurrentViewPage["refusedFiles"]};
+export type ReplicaCurrentViewPosition = Pick<ReplicaCurrentView, "revision" | "logCursor" | "journalCursor">;
+export type ReplicaCurrentViewCursor = NonNullable<ReplicaCurrentViewPage["nextCursor"]>;
+export type ReplicaCurrentViewSelector = WorkspaceMethodParamsMap[typeof WORKSPACE_METHOD.replicaCut]["selectors"][number];
+
+export function decodeReplicaCurrentView(value: unknown): ReplicaCurrentViewPage {
+  return decodeWorkspaceResult(WORKSPACE_METHOD.replicaCut,value as JsonValue);
 }

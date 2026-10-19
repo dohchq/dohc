@@ -40,7 +40,10 @@ export const VERSIONED_METHOD = {
   secretsMomentsGet: "secrets.moments.get",
   momentsList: "moments.list",
   momentsGet: "moments.get",
+  publicationApplied: "versionedText.publicationApplied",
   historyPage: "history.page",
+  historyOperations: "history.operations",
+  historyUndo: "history.undo",
   searchEnsureIndex: "search.ensureIndex",
 } as const;
 
@@ -81,7 +84,6 @@ type MutationMetadata = JsonObject & {
   workspaceId?: string;
   origin?: VersionedOrigin;
   author?: WriteAuthor;
-  requestId?: string;
   nowMs?: number;
   summary?: string;
   correlationId?: string;
@@ -300,12 +302,15 @@ type MomentsListParams = JsonObject & {
 };
 
 type MomentsGetParams = JsonObject & { momentId: string };
+type PublicationAppliedParams = JsonObject & { requestId: string; momentId: string };
 
 type HistoryPageParams = JsonObject & {
   workspaceId: string;
+  operationId?: string;
+  versionId?: string;
   objectId?: string;
   limit?: number;
-  beforeMomentOrder?: number;
+  cursor?: HistoryCursor;
 };
 
 type SearchEnsureIndexParams = JsonObject & {
@@ -368,6 +373,7 @@ type MaterializeOutcome =
   | "skipped"
   | "conflict"
   | "superseded"
+  | "parked"
   | "error";
 
 type VersionedTextRenameResult = typeof TextRenameResultSchema.Type;
@@ -503,7 +509,10 @@ export type VersionedMethodParamsMap = {
   [VERSIONED_METHOD.secretsMomentsGet]: SecretsMomentsGetParams;
   [VERSIONED_METHOD.momentsList]: MomentsListParams;
   [VERSIONED_METHOD.momentsGet]: MomentsGetParams;
+  [VERSIONED_METHOD.publicationApplied]: PublicationAppliedParams;
   [VERSIONED_METHOD.historyPage]: HistoryPageParams;
+  [VERSIONED_METHOD.historyOperations]: JsonObject & {operationId: string};
+  [VERSIONED_METHOD.historyUndo]: JsonObject & {operationId: string; author?: WriteAuthor};
   [VERSIONED_METHOD.searchEnsureIndex]: SearchEnsureIndexParams;
 };
 
@@ -543,7 +552,10 @@ export type VersionedMethodResultMap = {
   [VERSIONED_METHOD.secretsMomentsGet]: SecretsMomentsGetResult;
   [VERSIONED_METHOD.momentsList]: MomentsListResult;
   [VERSIONED_METHOD.momentsGet]: MomentsGetResult;
+  [VERSIONED_METHOD.publicationApplied]: boolean;
   [VERSIONED_METHOD.historyPage]: HistoryPageResult;
+  [VERSIONED_METHOD.historyOperations]: typeof HistoryOperationSchema.Type;
+  [VERSIONED_METHOD.historyUndo]: typeof HistoryUndoSchema.Type;
   [VERSIONED_METHOD.searchEnsureIndex]: SearchEnsureIndexResult;
 };
 
@@ -582,6 +594,7 @@ const MaterializeOutcomeSchema = Schema.Literals([
   "skipped",
   "conflict",
   "superseded",
+  "parked",
   "error",
 ]);
 const EmptyObjectSchema = Schema.Record(Schema.String, Schema.Never);
@@ -631,6 +644,8 @@ const BinaryWriteSnapshotWireSchema = mutableStruct({
 const AgentAuthorSchema = mutableStruct({
   kind: Schema.Literal("agent"),
   agentId: Schema.String,
+  // The name a live author snapshot declared for its agent.
+  agentName: Schema.optionalKey(Schema.String),
   onBehalfOf: Schema.optionalKey(Schema.String),
   agentRunId: Schema.optionalKey(Schema.String),
   // Named only past 0, by a run an automation started.
@@ -667,8 +682,16 @@ const AutomationAuthorSchema = mutableStruct({
 const HumanAuthorSchema = mutableStruct({
   kind: Schema.Literal("human"),
   humanId: Schema.String,
-  humanName: Schema.optionalKey(Schema.String),
+  relayConfirmed: Schema.optionalKey(Schema.Literal(true)),
   onBehalfOf: Schema.optionalKey(Schema.String),
+});
+// A relay-admitted live author snapshot names the account holder with the
+// name the relay stored for them. Its link holder is LiveLinkAuthorSchema.
+const SnapshotHumanAuthorSchema = mutableStruct({
+  kind: Schema.Literal("human"),
+  humanId: Schema.String,
+  humanName: Schema.String,
+  relayConfirmed: Schema.optionalKey(Schema.Literal(true)),
 });
 const CorruptAuthorSchema = mutableStruct({ corrupt: Schema.Literal(true) });
 const MomentAuthorsSchema = Schema.NullOr(
@@ -681,6 +704,7 @@ const MomentAuthorsSchema = Schema.NullOr(
       LinkAuthorSchema,
       LiveLinkAuthorSchema,
       AutomationAuthorSchema,
+      SnapshotHumanAuthorSchema,
       CorruptAuthorSchema,
       mutableStruct({ kind: Schema.Literal("unattributed") }),
     ]),
@@ -982,11 +1006,32 @@ const MomentsListResultSchema = mutableStruct({
   nextBeforeMomentOrder: NullableInt,
   latestMomentOrder: Schema.Int,
 });
+const HistoryMomentPositionSchema = mutableStruct({ recordedAtMs: Schema.Int, momentOrder: Schema.Int });
+const HistoryMarkerPositionSchema = mutableStruct({ createdAtMs: Schema.Int, versionId: Schema.String });
+const HistoryCursorSchema = mutableStruct({
+  format: Schema.Literal(1), engineUuid: Schema.String, workspaceId: Schema.String,
+  versionId: Schema.String, objectId: NullableString, operationId: NullableString,
+  textFence: Schema.Int, protectedFence: Schema.Int, markerFence: Schema.Int,
+  text: Schema.NullOr(HistoryMomentPositionSchema), protected: Schema.NullOr(HistoryMomentPositionSchema),
+  marker: Schema.NullOr(HistoryMarkerPositionSchema),
+});
+export type HistoryCursor = typeof HistoryCursorSchema.Type;
+const HistoryMomentMetadataSchema = mutableStruct({
+  momentOrder: Schema.Int, momentId: Schema.String, versionId: Schema.String, objectId: Schema.String,
+  path: Schema.String, beforePath: NullableString, recordedAtMs: Schema.Int, operation: Schema.Literals(["write", "delete", "rename"]),
+  afterContentKind: ContentKindSchema, afterByteLength: NullableInt, metadataOrigin: Schema.String,
+  metadataSummary: Schema.optionalKey(NullableString), metadataCorrelationId: Schema.optionalKey(NullableString),
+  authors: MomentAuthorsSchema, syncRecordOnly: Schema.Boolean,
+});
+export type HistoryMomentMetadata = typeof HistoryMomentMetadataSchema.Type;
+const HistoryOperationSchema = mutableStruct({operationId: Schema.String, versionId: Schema.String, momentCount: Schema.Int});
+const HistoryUndoSchema = mutableStruct({...HistoryOperationSchema.fields, compensationOperationId: Schema.String, deduped: Schema.Boolean, materialized: Schema.Boolean});
 const HistoryPageResultSchema = mutableStruct({
   activeVersion: VersionRecordSchema,
-  textMomentPage: MomentsListResultSchema,
+  moments: Schema.mutable(Schema.Array(HistoryMomentMetadataSchema)),
   protectedMoments: Schema.mutable(Schema.Array(SecretMomentRecordSchema)),
-  protectedTruncated: Schema.Boolean,
+  versionMarkers: Schema.mutable(Schema.Array(VersionRecordSchema)),
+  startCursor: HistoryCursorSchema, nextCursor: Schema.NullOr(HistoryCursorSchema), latestMomentOrder: Schema.Int,
 });
 const TextListResultSchema = mutableStruct({
   files: Schema.mutable(
@@ -1062,7 +1107,10 @@ const VersionedResultSchemas = {
   [VERSIONED_METHOD.secretsMomentsGet]: Schema.NullOr(SecretMomentRecordSchema),
   [VERSIONED_METHOD.momentsList]: MomentsListResultSchema,
   [VERSIONED_METHOD.momentsGet]: Schema.NullOr(MomentRecordSchema),
+  [VERSIONED_METHOD.publicationApplied]: Schema.Boolean,
   [VERSIONED_METHOD.historyPage]: HistoryPageResultSchema,
+  [VERSIONED_METHOD.historyOperations]: HistoryOperationSchema,
+  [VERSIONED_METHOD.historyUndo]: HistoryUndoSchema,
   [VERSIONED_METHOD.searchEnsureIndex]: EmptyObjectSchema,
 } as const;
 

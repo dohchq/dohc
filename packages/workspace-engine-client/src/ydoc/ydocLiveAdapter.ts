@@ -579,6 +579,13 @@ interface LocalRecordCapture {
   rejection?: Error;
 }
 
+// The document a run of local records was made on, within one lineage claim.
+// Once the lineage changes, the generation is refused and none of its records
+// reach the engine again. A lineage replacement starts the next generation.
+interface DocumentGeneration {
+  refusal?: YdocAdapterError;
+}
+
 interface LocalUpdateRecord {
   readonly updateBase64: string;
   readonly idempotencyKey: string;
@@ -586,7 +593,15 @@ interface LocalUpdateRecord {
   readonly attribution?: ChangeAttributionWire;
   readonly trustedAutomationDraft?: boolean;
   readonly seed: boolean;
+  readonly generation: DocumentGeneration;
   refusal?: unknown;
+}
+
+const LINEAGE_CHANGED_WHILE_RECORDING =
+  "The document lineage changed while the edit was being recorded. The edit remains in this editor and was not applied to the winning lineage.";
+
+export function isLineageChange(error: unknown): boolean {
+  return error instanceof YdocAdapterError && error.code === "lineage-changed";
 }
 
 export class YdocAdapterSession {
@@ -634,9 +649,10 @@ export class YdocAdapterSession {
   // by the session because the session is what the engine refused, and read
   // by close() to decide whether releasing would discard the only copy.
   private quarantinedError: YdocSessionQuarantinedError | null = null;
-  private staleError: YdocResyncNeededError | null = null;
+  private staleError: YdocAdapterError | null = null;
   private resyncPending: Promise<Uint8Array> | null = null;
   private droppedWhileStale = false;
+  private generation: DocumentGeneration = {};
   private nextLocalUpdateSeq = 1;
   private readonly pendingRecords = new Set<LocalUpdateRecord>();
   private acknowledgedDoc = new Y.Doc();
@@ -644,7 +660,7 @@ export class YdocAdapterSession {
   ownerDraft: YdocOwnerDraft | undefined;
   private readonly remoteUpdateListeners = new Set<(update: Uint8Array) => void>();
   private readonly durableLocalChangeListeners = new Set<() => void>();
-  private readonly localUpdateAcknowledgedListeners = new Set<(id: string) => void>();
+  private readonly localUpdateAcknowledgedListeners = new Set<(id: string, lane: "journal" | "owner-outbox") => void>();
   private readonly localUpdateRefusedListeners = new Set<(id: string, error: unknown) => void>();
   private readonly ownerDraftChangedListeners = new Set<() => void>();
   private readonly remoteApplyErrorListeners = new Set<
@@ -739,6 +755,7 @@ export class YdocAdapterSession {
         updateBase64: bytesToBase64(update),
         idempotencyKey: `${this.sessionId}:recovery-base:${this.nextLocalUpdateSeq++}`,
         seed: true,
+        generation: this.generation,
       });
     } catch (error) {
       if (!isYdocUpdateAdmissionRefusal(error)) throw error;
@@ -809,6 +826,9 @@ export class YdocAdapterSession {
     options?: ApplyLocalUpdateOptions,
     seedUpdate = false,
   ): Promise<YdocRecordUpdateResult | undefined> {
+    // An edit on a document whose lineage changed waits for no engine answer:
+    // it cannot enter the winning lineage.
+    if (this.generation.refusal) throw this.generation.refusal;
     const record: LocalUpdateRecord = {
       updateBase64: bytesToBase64(update),
       idempotencyKey: options?.idempotencyKey ?? `${this.sessionId}:${this.nextLocalUpdateSeq++}`,
@@ -816,6 +836,7 @@ export class YdocAdapterSession {
       ...(options?.attribution ? { attribution: structuredClone(options.attribution) } : {}),
       ...(options?.trustedAutomationDraft ? {trustedAutomationDraft: true} : {}),
       seed: seedUpdate,
+      generation: this.generation,
     };
     const retainedBytes = record.updateBase64.length * 2 +
       (record.actorOriginId?.length ?? 0) * 2 +
@@ -839,8 +860,9 @@ export class YdocAdapterSession {
       try {
         return await this.requestRecordUpdate(record);
       } catch (refusal) {
-        // Recovery cannot repair a definite refusal of this original input.
-        if (isYdocUpdateAdmissionRefusal(refusal)) throw refusal;
+        // Recovery cannot repair a definite refusal of this original input,
+        // nor return it to a lineage that has already changed.
+        if (isYdocUpdateAdmissionRefusal(refusal) || isLineageChange(refusal)) throw refusal;
         try {
           return await this.recoverCanonicalState(record);
         } catch (recoveryFailure) {
@@ -896,6 +918,10 @@ export class YdocAdapterSession {
    * as it was. Killing it for a condition that clears in milliseconds would
    * turn a pause into a dead document.
    *
+   * A lineage change is not uncertainty either: the engine holds the winning
+   * lineage, and this document's edits cannot enter it. The session hands
+   * over to the winner instead.
+   *
    * The chain is then neutralized either way, so one refusal cannot reject
    * every operation queued behind it, and the rejection is claimed once here
    * so a caller that ignores it does not trip an unhandled rejection.
@@ -912,7 +938,8 @@ export class YdocAdapterSession {
       },
       (error: unknown) => {
         // Transient refusals leave the originals queued for another attempt.
-        if (!isTransientEngineRefusal(error) && !isYdocUpdateAdmissionRefusal(error)) this.quarantine(error);
+        if (!isTransientEngineRefusal(error) && !isYdocUpdateAdmissionRefusal(error) &&
+          !isLineageChange(error)) this.quarantine(error);
         this.surfaceSessionError(error);
         throw error;
       },
@@ -921,7 +948,13 @@ export class YdocAdapterSession {
       () => undefined,
       () => undefined,
     );
-    void guarded.catch(() => undefined);
+    void guarded.catch((error: unknown) => {
+      // The handover resync waits for the record chain, so it starts only
+      // once this operation has settled, never from inside it.
+      if (isLineageChange(error) && this.generation.refusal !== undefined && !this.closed) {
+        void this.resync().catch((cause: unknown) => this.surfaceSessionError(cause));
+      }
+    });
     return guarded;
   }
 
@@ -937,7 +970,7 @@ export class YdocAdapterSession {
       this.assertRecordable();
       const records = originals.filter(record => this.pendingRecords.has(record));
       if (records.length === 0) return;
-      await this.mergeRecoveryState();
+      await this.mergeRecoveryState(this.generation);
       for (const record of records) {
         await this.requestRecordUpdate(record);
       }
@@ -948,9 +981,12 @@ export class YdocAdapterSession {
   private async requestRecordUpdate(
     record: LocalUpdateRecord,
   ): Promise<YdocRecordUpdateResult> {
+    const generation = record.generation;
+    if (generation.refusal) throw generation.refusal;
     const params: YdocRecordUpdateParams = {
       sessionId: this.sessionId,
       updateBase64: record.updateBase64,
+      expectedLineageClaimId: this.lineageClaimId,
       ...(record.actorOriginId ? { actorOriginId: record.actorOriginId } : {}),
       ...(record.attribution ? { attribution: structuredClone(record.attribution) } : {}),
       ...(record.trustedAutomationDraft ? {trustedAutomationDraft: true} : {}),
@@ -987,10 +1023,18 @@ export class YdocAdapterSession {
       }
       throw error;
     }
+    // Only an answer within this document's lineage acknowledges the edit.
+    if (generation.refusal) throw generation.refusal;
+    if (!this.continuesLineage(result)) throw this.refuseGeneration(generation, LINEAGE_CHANGED_WHILE_RECORDING);
     Y.applyUpdate(this.acknowledgedDoc, base64ToBytes(record.updateBase64));
     this.removePendingRecord(record);
-    if (!record.seed) this.notifyListeners(this.localUpdateAcknowledgedListeners, record.idempotencyKey);
-    this.lineageClaimId = result.lineageClaimId;
+    if (!record.seed) {
+      const lane = "ownerDraft" in result ? "owner-outbox" : "journal";
+      for (const listener of this.localUpdateAcknowledgedListeners) {
+        try { listener(record.idempotencyKey, lane); }
+        catch (error) { this.surfaceSessionError(error); }
+      }
+    }
     if ("ownerDraft" in result && this.ownerDraft) {
       this.ownerDraft = { ...this.ownerDraft, outboxId: result.ownerDraft.outboxId,
         pendingBytes: result.ownerDraft.pendingBytes, state: result.ownerDraft.state };
@@ -1022,13 +1066,12 @@ export class YdocAdapterSession {
     refusedDoc.destroy();
   }
 
-  private async mergeRecoveryState(): Promise<void> {
+  private async mergeRecoveryState(generation: DocumentGeneration): Promise<void> {
+    if (generation.refusal) throw generation.refusal;
     const durableState = await this.requestResyncState();
+    if (generation.refusal) throw generation.refusal;
     if (!this.continuesLineage(durableState)) {
-      throw new YdocAdapterError(
-        "lineage-changed",
-        "The document lineage changed while the edit was being recorded. The edit remains in this editor and was not applied to the winning lineage.",
-      );
+      throw this.refuseGeneration(generation, LINEAGE_CHANGED_WHILE_RECORDING);
     }
     const durableVector = Y.decodeStateVector(Y.encodeStateVectorFromUpdate(durableState.update));
     const acknowledgedVector = Y.decodeStateVector(Y.encodeStateVector(this.acknowledgedDoc));
@@ -1042,8 +1085,19 @@ export class YdocAdapterSession {
   private async recoverCanonicalState(
     record: LocalUpdateRecord,
   ): Promise<YdocRecordUpdateResult> {
-    await this.mergeRecoveryState();
+    await this.mergeRecoveryState(record.generation);
     return this.requestRecordUpdate(record);
+  }
+
+  /**
+   * Refuse every record of a document whose lineage changed, before any of
+   * them reaches the engine, and hold the session stale until the resync
+   * hands it to the winning lineage.
+   */
+  private refuseGeneration(generation: DocumentGeneration, message: string): YdocAdapterError {
+    generation.refusal ??= new YdocAdapterError("lineage-changed", message);
+    if (generation === this.generation) this.staleError ??= generation.refusal;
+    return generation.refusal;
   }
 
   async adoptCollectionRecord(): Promise<"settled" | "ownerPending" | "declined"> {
@@ -1113,7 +1167,7 @@ export class YdocAdapterSession {
     return () => this.durableLocalChangeListeners.delete(handler);
   }
 
-  onLocalUpdateAcknowledged(handler: (id: string) => void): () => void {
+  onLocalUpdateAcknowledged(handler: (id: string, lane: "journal" | "owner-outbox") => void): () => void {
     this.localUpdateAcknowledgedListeners.add(handler);
     return () => this.localUpdateAcknowledgedListeners.delete(handler);
   }
@@ -1219,9 +1273,12 @@ export class YdocAdapterSession {
         const result = await this.requestResyncState();
         if (this.closed) throw new YdocAdapterError("session-closed", "The Y.Doc adapter session is closed.");
         const update = result.update;
-        if (!this.continuesLineage(result)) {
-          const refusal = new YdocAdapterError("lineage-changed",
+        // A refused generation is replaced even if this read shows its claim:
+        // its records never reach the engine again.
+        if (this.generation.refusal !== undefined || !this.continuesLineage(result)) {
+          const refusal = this.refuseGeneration(this.generation,
             "The document lineage changed. The earlier edits cannot enter this lineage.");
+          this.generation = {};
           for (const record of this.pendingRecords) {
             record.refusal = refusal;
             this.removePendingRecord(record);
@@ -1415,7 +1472,7 @@ export class YdocAdapterSession {
         if (this.activeLocalRecordCapture !== null) {
           this.activeLocalRecordCapture.rejection = rejection;
         }
-        if (!isYdocUpdateAdmissionRefusal(rejection)) this.quarantine(rejection);
+        if (!isYdocUpdateAdmissionRefusal(rejection) && !isLineageChange(rejection)) this.quarantine(rejection);
         this.surfaceSessionError(rejection);
       } else {
         this.surfaceSessionError(error);
@@ -1480,8 +1537,8 @@ export class YdocAdapterSession {
   }
 
   // A pending resync does not stop an ordinary session from journaling. The
-  // engine appends a local update only to the lineage the session holds, so
-  // the resync merges both sides. A keystroke refused here would instead tear
+  // engine appends a local update only to the lineage its expected claim
+  // names, so the resync merges both sides. A keystroke refused here would instead tear
   // the session down and rebuild it. An owner draft still waits, because its
   // append names the draft revision the resync renews.
   private assertRecordable(): void {

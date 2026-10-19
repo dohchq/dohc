@@ -2,10 +2,13 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ReadCrashReportResult } from "../ipc/bridgeContract";
+import type { MenuCommand, ReadCrashReportResult, UpdateCheckResult } from "../ipc/bridgeContract";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { deferred } from "../testing/deferred";
 import { byRecency, openedLabel, WorkspaceManager } from "./WorkspaceManager";
+
+let menuListener: ((command: MenuCommand) => void) | null = null;
+const sendMenuCommand = (command: MenuCommand) => act(() => menuListener?.(command));
 
 const bridge = {
   getDefaultWorkspaceRoot: vi.fn(async () => "/home/sam/dohc"),
@@ -37,6 +40,13 @@ const bridge = {
   openWorkspaceWindow: vi.fn(async () => undefined),
   openWorkspaceManager: vi.fn(async () => undefined),
   closeThisWindow: vi.fn(async () => undefined),
+  onMenuCommand: vi.fn((listener: (command: MenuCommand) => void) => {
+    menuListener = listener;
+    return () => { if (menuListener === listener) menuListener = null; };
+  }),
+  checkForUpdates: vi.fn(async (): Promise<UpdateCheckResult> => ({
+    checked: true, state: { status: "checking", message: "Checking for updates" },
+  })),
   // The notice dock the connection surfaces raise their failures into.
   getUpdateState: vi.fn(async () => ({ status: "idle" as const, message: "Up to date" })),
   onUpdateState: vi.fn(() => () => undefined),
@@ -45,7 +55,7 @@ const bridge = {
   dismissCrashReport: vi.fn(async () => undefined),
   onCrashReportChanged: vi.fn(() => () => undefined),
   windowRole: "workspace",
-  platform: "linux",
+  platform: "linux" as NodeJS.Platform,
 };
 
 const KNOWN = [
@@ -326,6 +336,32 @@ describe("workspace manager", () => {
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
+  it.each(["linux", "darwin"] as const)("answers the menu commands that need no workspace (%s)", async (platform) => {
+    bridge.platform = platform;
+    try {
+      render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
+      await screen.findByText("/home/sam/dohc/");
+
+      bridge.checkForUpdates.mockResolvedValueOnce({
+        checked: false, state: { status: "error", message: "This build does not update itself." },
+      });
+      sendMenuCommand("check-updates");
+      expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain("No update check was started.");
+      expect(bridge.checkForUpdates).toHaveBeenCalledOnce();
+
+      // Workspace commands have nothing to act on here.
+      sendMenuCommand("settings");
+      sendMenuCommand("new-file");
+      expect(screen.queryByRole("dialog")).toBeNull();
+
+      // Nothing here is a tab, so Close tab closes the window on macOS.
+      sendMenuCommand("close-tab");
+      expect(bridge.closeThisWindow).toHaveBeenCalledTimes(platform === "darwin" ? 1 : 0);
+    } finally {
+      bridge.platform = "linux";
+    }
+  });
+
   it("shows a crash report, and hands Send report to main", async () => {
     const user = userEvent.setup();
     const text = "dohc crash report\n\nProcess: window";
@@ -466,7 +502,7 @@ describe("workspace manager with registered workspaces", () => {
     await user.keyboard("{ArrowDown}");
     expect(screen.getByRole("menu", { name: "More for team" })).toBeTruthy();
     expect(trigger.getAttribute("aria-expanded")).toBe("true");
-    const reveal = screen.getByRole("menuitem", { name: "Reveal in folder" });
+    const reveal = screen.getByRole("menuitem", { name: "Show in file manager" });
     await waitFor(() => expect(document.activeElement).toBe(reveal));
 
     await user.keyboard("{ArrowDown}");
@@ -504,14 +540,23 @@ describe("workspace manager with registered workspaces", () => {
     expect(Number.parseFloat(menu.style.left)).toBe(304 - 176);
   });
 
-  it("reveals a workspace folder from the row menu", async () => {
-    const user = userEvent.setup();
-    render(
-      <WorkspaceManager workspaces={KNOWN} current={null} onForgot={async () => KNOWN} onOpenWorkspace={() => {}} />,
-    );
-    await user.click(await screen.findByRole("button", { name: "More for personal" }));
-    await user.click(screen.getByRole("menuitem", { name: "Reveal in folder" }));
-    expect(bridge.revealWorkspaceFolder).toHaveBeenCalledWith({ workspaceId: "ws-a" });
+  it.each([
+    ["darwin", "Show in Finder"],
+    ["win32", "Show in File Explorer"],
+    ["linux", "Show in file manager"],
+  ] as const)("reveals a workspace folder from the row menu, named for the %s file manager", async (platform, label) => {
+    bridge.platform = platform;
+    try {
+      const user = userEvent.setup();
+      render(
+        <WorkspaceManager workspaces={KNOWN} current={null} onForgot={async () => KNOWN} onOpenWorkspace={() => {}} />,
+      );
+      await user.click(await screen.findByRole("button", { name: "More for personal" }));
+      await user.click(screen.getByRole("menuitem", { name: label }));
+      expect(bridge.revealWorkspaceFolder).toHaveBeenCalledWith({ workspaceId: "ws-a" });
+    } finally {
+      bridge.platform = "linux";
+    }
   });
 
   it("shows no list on first run", async () => {

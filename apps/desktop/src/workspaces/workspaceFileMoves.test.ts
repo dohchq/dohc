@@ -1,3 +1,6 @@
+import { createEngineFileResolver, workspaceFileRef } from "./resolveEngineFiles";
+import type { WorkspaceFileRef } from "@dohc/workspace-contracts/workspace-ref";
+import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { lstat, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { basename, dirname, join, sep } from "node:path";
@@ -15,6 +18,7 @@ import { deleteWorkspacePathByHand, prepareDeleteWorkspacePathAs, prepareMoveWor
 import { createLocalChangeAuthor } from "@dohc/workspace-core";
 import { desktopRecordEditContext } from "./desktopRecordEdits";
 import { listEngineMomentsForIpc } from "../ipc/engineHistoryIpc";
+import { neutralHistoryPresentations } from "../testing/historyPageFixture";
 import { engineMomentSourceLabel } from "../renderer/workbench/EngineHistory";
 
 // Filesystem refusals a test switches on for chosen paths.
@@ -91,11 +95,12 @@ async function fixture(options: {
     state: {}, signal: new AbortController().signal, assertCurrent: vi.fn() };
   const workspaceId = "file-moves-test";
   let capture: WorkspaceEngineCapture | undefined;
+  const attachmentId = Symbol("attachment");
+  const sessions = mockDaemonSessions({ rootPath, workspaceId, loopback: new VersionedLoopbackEngine(), nativeMove: options.nativeMove ?? true,
+    ...(options.beforeRequest ? { beforeRequest: options.beforeRequest } : {}),
+    ...(options.afterRequest ? { afterRequest: options.afterRequest } : {}) });
   const engine = () => {
-    capture ??= createWorkspaceEngineCapture({ workspaceId, rootPath, attachmentId: Symbol("attachment"),
-      rustEngineSessions: mockDaemonSessions({ rootPath, workspaceId, loopback: new VersionedLoopbackEngine(), nativeMove: options.nativeMove ?? true,
-        ...(options.beforeRequest ? { beforeRequest: options.beforeRequest } : {}),
-        ...(options.afterRequest ? { afterRequest: options.afterRequest } : {}) }) });
+    capture ??= createWorkspaceEngineCapture({ workspaceId, rootPath, attachmentId, rustEngineSessions: sessions });
     return capture;
   };
   const trashItem = vi.fn(async (absolute: string) => { await rename(absolute, join(systemTrash, basename(absolute))); });
@@ -112,14 +117,21 @@ async function fixture(options: {
   const added = async (seen: ReadonlySet<string>) => (await rows()).filter(row => !seen.has(row.id))
     .map(row => ({ operation: row.operation, path: row.path, agentId: row.authors?.find(author => author.kind === "agent")?.agentId }))
     .sort((a, b) => a.path.localeCompare(b.path) || a.operation.localeCompare(b.operation));
-  const workspaceTrash = async () => existsSync(join(rootPath, ".dohc/trash")) ? await readdir(join(rootPath, ".dohc/trash")) : [];
+  const workspaceTrash = async () => existsSync(join(rootPath, ".dohc/trash")) ? (await readdir(join(rootPath, ".dohc/trash"))).filter(name => !/^(?:delete|move)-[a-f0-9]{64}\.json$/.test(name)) : [];
   // The system trash keeps the workspace trash's entry name, which ends with the file's own name.
   const systemTrashed = async (name: string) => {
     const entry = (await readdir(systemTrash)).find(entry => entry.endsWith(`-${name}`));
     if (entry === undefined) throw new Error(`${name} is not in the system trash`);
     return join(systemTrash, entry);
   };
-  return { rootPath, systemTrash, systemTrashed, operation, engine, trashItem, markDeleted, settle, rows, start, added, workspaceTrash,
+  const resolveRefs = createEngineFileResolver<{ workspaceId: string; rootPath: string; attachmentId: symbol }>((workspace, work) =>
+    sessions.run(workspace, binding => work(new VersionedLiveAdapter(binding.client, binding.workspace, { workspaceId }))));
+  const reference = async (path: string) => {
+    const objectId = await engine().fileObjectIdForPath(path);
+    if (!objectId) throw new Error("Fixture path is untracked: " + path);
+    return workspaceFileRef(workspaceId, objectId);
+  };
+  return { reference, resolve: (refs: WorkspaceFileRef[]) => resolveRefs({ workspaceId, rootPath, attachmentId }, refs), rootPath, systemTrash, systemTrashed, operation, engine, trashItem, markDeleted, settle, rows, start, added, workspaceTrash,
     move: (fromPath: string, toPath: string, by: MomentWriteAuthor = named, overwrite?: boolean) =>
       prepareMoveWorkspacePathAs(operation, { fromPath, toPath, ...(overwrite ? { overwrite } : {}) }, by, pathOptions()).then(finish => finish()),
     remove: (path: string, by: MomentWriteAuthor = named) => prepareDeleteWorkspacePathAs(operation, path, by, pathOptions()).then(finish => finish()),
@@ -143,7 +155,7 @@ describe("agent moves and deletes", () => {
       await write(f.rootPath, "source.txt", "new save");
     };
     try {
-      expect(await f.move("source.txt", "target.txt")).toEqual({ ok: true, fromPath: "source.txt", toPath: "target.txt" });
+      expect(await f.move("source.txt", "target.txt")).toMatchObject({ ok: true, operationId: expect.stringMatching(/^dohc-operation:[0-9a-f-]{36}$/), fromPath: "source.txt", toPath: "target.txt" });
       expect(requests).toContain("capture.moveFile");
       expect(links).toHaveLength(1);
       expect(await readFile(join(f.rootPath, "target.txt"), "utf8")).toBe("original");
@@ -173,9 +185,9 @@ describe("agent moves and deletes", () => {
     expect(outside.every(row => row.authors === undefined)).toBe(true);
     for (const row of outside) seen.add(row.id);
 
-    expect(await f.move("person.txt", "agent.txt")).toEqual({ ok: true, fromPath: "person.txt", toPath: "agent.txt" });
-    expect(await f.move("notes", "archive/notes", unnamed)).toEqual({ ok: true, fromPath: "notes", toPath: "archive/notes" });
-    expect(await f.remove("photo.bin")).toEqual({ ok: true, path: "photo.bin", trashed: true });
+    expect(await f.move("person.txt", "agent.txt")).toMatchObject({ ok: true, operationId: expect.stringMatching(/^dohc-operation:[0-9a-f-]{36}$/), fromPath: "person.txt", toPath: "agent.txt" });
+    expect(await f.move("notes", "archive/notes", unnamed)).toMatchObject({ ok: true, operationId: expect.stringMatching(/^dohc-operation:[0-9a-f-]{36}$/), fromPath: "notes", toPath: "archive/notes" });
+    expect(await f.remove("photo.bin")).toMatchObject({ ok: true, path: "photo.bin", trashed: true });
     await f.settle();
 
     expect(await f.added(seen)).toEqual([
@@ -335,7 +347,7 @@ describe("agent moves and deletes", () => {
     } });
     await write(f.rootPath, "a.txt", "mine");
     const seen = await f.start();
-    expect(await f.move("a.txt", "b.txt")).toEqual({ ok: true, fromPath: "a.txt", toPath: "b.txt" });
+    expect(await f.move("a.txt", "b.txt")).toMatchObject({ ok: true, operationId: expect.stringMatching(/^dohc-operation:[0-9a-f-]{36}$/), fromPath: "a.txt", toPath: "b.txt" });
     expect(await readFile(join(f.rootPath, "b.txt"), "utf8")).toBe("mine");
     expect(await readFile(join(f.rootPath, "a.txt"), "utf8")).toBe("theirs");
     // Their file reaches History through the watcher, without an author.
@@ -421,7 +433,7 @@ describe("agent moves and deletes", () => {
     } });
     await write(f.rootPath, "note.txt", "mine");
     await f.start();
-    expect(await f.remove("note.txt")).toEqual({ ok: true, path: "note.txt", trashed: true });
+    expect(await f.remove("note.txt")).toMatchObject({ ok: true, path: "note.txt", trashed: true });
     expect(f.trashItem).toHaveBeenCalledOnce();
     expect(f.trashItem.mock.calls[0]?.[0]).toContain(join(".dohc", "trash"));
     expect(await readFile(join(f.rootPath, "note.txt"), "utf8")).toBe("theirs");
@@ -458,7 +470,7 @@ describe("agent moves and deletes", () => {
     await write(f.rootPath, "b.txt", "old");
     const seen = await f.start();
     expect(await f.move("a.txt", "b.txt")).toMatchObject({ ok: false, reason: expect.stringContaining("already exists") });
-    expect(await f.move("a.txt", "b.txt", named, true)).toEqual({ ok: true, fromPath: "a.txt", toPath: "b.txt",
+    expect(await f.move("a.txt", "b.txt", named, true)).toMatchObject({ ok: true, operationId: expect.stringMatching(/^dohc-operation:[0-9a-f-]{36}$/), fromPath: "a.txt", toPath: "b.txt",
       replaced: { path: "b.txt", trashed: true, withoutHistory: [] } });
     expect(await readFile(join(f.rootPath, "b.txt"), "utf8")).toBe("new");
     expect(await readFile(await f.systemTrashed("b.txt"), "utf8")).toBe("old");
@@ -500,7 +512,7 @@ describe("agent moves and deletes", () => {
     expect(await f.remove("Notes.txt")).toMatchObject({ ok: true });
     expect(await f.move("Draft.txt", "moved.txt")).toMatchObject({ ok: true });
     // A rename of case alone still renames.
-    expect(await f.move("keep.txt", "Keep.txt")).toEqual({ ok: true, fromPath: "keep.txt", toPath: "Keep.txt" });
+    expect(await f.move("keep.txt", "Keep.txt")).toMatchObject({ ok: true, operationId: expect.stringMatching(/^dohc-operation:[0-9a-f-]{36}$/), fromPath: "keep.txt", toPath: "Keep.txt" });
     // The destination names the folder that holds the source.
     expect(await f.move("a/b.txt", "A", named, true)).toMatchObject({ ok: false, reason: expect.stringContaining("one holds the other") });
     await f.settle();
@@ -580,8 +592,12 @@ describe("agent moves and deletes", () => {
     await write(f.rootPath, "dir/people.csv", csv);
     await write(f.rootPath, "dir/a.txt", "a");
     const seen = await f.start();
+    expect(await f.engine().fileObjectIdForPath("dir/large.png")).toBeNull();
+    expect(await f.engine().fileObjectIdForPath("dir/large.txt")).toBeNull();
     const result = change === "move" ? await f.move("dir", "moved") : await f.remove("dir");
     const base = change === "move" ? "moved" : "dir";
+    expect(await f.engine().fileObjectIdForPath(base + "/large.png")).toBeNull();
+    expect(await f.engine().fileObjectIdForPath(base + "/large.txt")).toBeNull();
     expect(result).toMatchObject({ ok: true, withoutHistory: [base + "/people.csv"] });
     const kept = change === "move" ? join(f.rootPath, "moved") : await f.systemTrashed("dir");
     const retained = await readFile(join(kept, "people.csv"));
@@ -723,7 +739,7 @@ describe("agent moves and deletes", () => {
     const entered = barrier(), finish = barrier();
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
-      const pending = f.engine().changePathsAs(["a.txt"], { operation: "delete", author: named, correlationId: "renew-test" },
+      const pending = f.engine().changePathsAs(["a.txt"], { operation: "delete", author: named, operationId: "dohc-operation:renew-test" },
         async () => { entered.release(); await finish.promise; }, () => []);
       await entered.promise;
       await vi.advanceTimersByTimeAsync(10_000);
@@ -924,7 +940,7 @@ describe("a person's delete", () => {
         trace.push("trash");
         await rename(absolute, join(f.systemTrash, basename(absolute)));
       });
-      expect(await f.removeByHand("tasks/hand.md")).toEqual({ trashed: true });
+      expect(await f.removeByHand("tasks/hand.md")).toMatchObject({ trashed: true });
       // The system trash holds it from its own place, so its Restore returns it there.
       expect(f.trashItem.mock.calls).toEqual([[join(f.rootPath, "tasks/hand.md")]]);
       expect(await readFile(join(f.systemTrash, "hand.md"), "utf8")).toBe("# Outside edit\n");
@@ -937,7 +953,7 @@ describe("a person's delete", () => {
       ]);
       // History shows it as the person's own file edit.
       const history = await listEngineMomentsForIpc(() => f.engine().listMoments(),
-        { agent: () => undefined, person: () => "Ice", automation: () => null, named: () => "" });
+        { agent: () => undefined, person: () => "Ice", automation: () => null, named: () => "", presentations: neutralHistoryPresentations });
       if (!("moments" in history)) throw new Error("History was updating.");
       const shown = history.moments.find(moment => moment.operation === "delete" && moment.path === "tasks/hand.md");
       expect(shown).toMatchObject({ origin: "local-file", authors: [person] });
@@ -952,7 +968,7 @@ describe("a person's delete", () => {
     const seen = await f.start();
     try {
       const authored = { operation: "delete" as const,
-        author: { kind: "human" as const, humanId: "local:installation" }, correlationId: "snapshot" };
+        author: { kind: "human" as const, humanId: "local:installation" }, operationId: "dohc-operation:snapshot" };
       const changing = f.engine().changePathsAs(["tasks/hand.md"], authored, async engine => {
         await rm(join(f.rootPath, "tasks/hand.md"));
         return await engine.delete("tasks/hand.md");
@@ -1010,7 +1026,7 @@ describe("a person's delete", () => {
     const seen = await f.start();
     f.trashItem.mockRejectedValueOnce(new Error("No system trash here."));
     try {
-      expect(await f.removeByHand("tasks/hand.md")).toEqual({ trashed: false });
+      expect(await f.removeByHand("tasks/hand.md")).toMatchObject({ trashed: false });
       expect(existsSync(join(f.rootPath, "tasks/hand.md"))).toBe(false);
       const [staged] = await f.workspaceTrash();
       expect(await readFile(join(f.rootPath, ".dohc/trash", staged!), "utf8")).toBe("# Hand made\n");
@@ -1025,7 +1041,7 @@ describe("a person's delete", () => {
     await write(f.rootPath, "tasks/hand.md", "# Hand made\n");
     const seen = await f.start();
     try {
-      expect(await f.removeByHand("tasks/hand.md", null)).toEqual({ trashed: true });
+      expect(await f.removeByHand("tasks/hand.md", null)).toMatchObject({ trashed: true });
       expect(await readFile(join(f.systemTrash, "hand.md"), "utf8")).toBe("# Hand made\n");
       expect(f.markDeleted).toHaveBeenCalledWith("tasks/hand.md");
       expect((await f.rows()).filter(row => !seen.has(row.id) && row.authors !== undefined)).toEqual([]);
@@ -1040,7 +1056,7 @@ describe("a person's delete", () => {
     await symlink(external, join(f.rootPath, "tasks/link"), process.platform === "win32" ? "junction" : "dir");
     const seen = await f.start();
     try {
-      expect(await f.removeByHand("tasks/link")).toEqual({ trashed: true });
+      expect(await f.removeByHand("tasks/link")).toMatchObject({ trashed: true });
       expect(f.trashItem.mock.calls).toEqual([[join(f.rootPath, "tasks/link")]]);
       expect((await lstat(join(f.systemTrash, "link"))).isSymbolicLink()).toBe(true);
       expect(await readFile(join(external, "kept.txt"), "utf8")).toBe("outside");
@@ -1065,7 +1081,7 @@ describe("a person's delete", () => {
     await symlink(external, join(f.rootPath, "tasks/link"), process.platform === "win32" ? "junction" : "dir");
     const seen = await f.start();
     try {
-      expect(await f.removeByHand("tasks")).toEqual({ trashed: true });
+      expect(await f.removeByHand("tasks")).toMatchObject({ trashed: true });
       expect(f.trashItem.mock.calls).toEqual([[join(f.rootPath, "tasks")]]);
       expect(await readFile(join(f.systemTrash, "tasks", "build", "out.js"), "utf8")).toBe("built");
       expect(await readFile(join(f.systemTrash, "tasks", ".env"), "utf8")).toBe("SECRET=kept private");
@@ -1087,7 +1103,7 @@ describe("a person's delete", () => {
     const seen = await f.start();
     await write(f.rootPath, "notes/bell\u0007.md", "ring");
     try {
-      expect(await f.removeByHand("notes/bell\u0007.md")).toEqual({ trashed: true });
+      expect(await f.removeByHand("notes/bell\u0007.md")).toMatchObject({ trashed: true });
       expect(f.trashItem.mock.calls).toHaveLength(1);
       expect(f.trashItem.mock.calls[0]?.[0].endsWith("bell\u0007.md")).toBe(true);
       expect(existsSync(join(f.rootPath, "notes/bell\u0007.md"))).toBe(false);
@@ -1104,7 +1120,7 @@ describe("a person's delete", () => {
     await write(f.rootPath, "tasks/hand.md", "# Hand made\n");
     const seen = await f.start();
     try {
-      expect(await f.removeByHand("tasks/hand.md")).toEqual({ trashed: true });
+      expect(await f.removeByHand("tasks/hand.md")).toMatchObject({ trashed: true });
       expect(await readFile(join(f.rootPath, "tasks/hand.md"), "utf8")).toBe("new");
       expect(await readFile(join(f.systemTrash, "hand.md"), "utf8")).toBe("# Hand made\n");
       expect((await f.rows()).filter(row => !seen.has(row.id) && row.operation === "delete")).toMatchObject([
@@ -1154,4 +1170,144 @@ describe("empty-folder rollback admission", () => {
     expect((await lstat(join(rootPath, "app"))).isDirectory()).toBe(true);
     expect(trashItem).not.toHaveBeenCalled();
   });
+});
+
+
+describe("WorkspaceRef move identity", () => {
+  it.each(["single", "folder", "binary"])("keeps native identity through a coordinated %s move", async kind => {
+    const f = await fixture();
+    const from = kind === "folder" ? "dir/a.txt" : kind === "binary" ? "photo.bin" : "a.txt";
+    const to = kind === "folder" ? "moved/a.txt" : kind === "binary" ? "renamed.bin" : "renamed.txt";
+    await write(f.rootPath, from, kind === "binary" ? new Uint8Array([0, 255]) : "a");
+    if (kind === "folder") await write(f.rootPath, "dir/b.txt", "b");
+    await f.start();
+    try {
+      const original = await f.reference(from);
+      const sibling = kind === "folder" ? await f.reference("dir/b.txt") : null;
+      expect(await f.move(kind === "folder" ? "dir" : from, kind === "folder" ? "moved" : to)).toMatchObject({ ok: true });
+      await f.settle();
+      expect(await f.resolve([original])).toMatchObject([{ status: "found", path: to, objectId: original.target.objectId }]);
+      expect((await f.reference(to)).target).toEqual(original.target);
+      if (sibling) expect(await f.resolve([sibling])).toMatchObject([{ status: "found", path: "moved/b.txt", objectId: sibling.target.objectId }]);
+    } finally { await f.engine().stop(); }
+  });
+
+  it("changes identity after an external mv and never resolves a stale id to a replacement at its old path", async () => {
+    const f = await fixture();
+    await write(f.rootPath, "a.txt", "a");
+    await f.start();
+    try {
+      const original = await f.reference("a.txt");
+      await rename(join(f.rootPath, "a.txt"), join(f.rootPath, "external.txt"));
+      await f.settle();
+      expect((await f.reference("external.txt")).target).not.toEqual(original.target);
+      await write(f.rootPath, "a.txt", "replacement");
+      await f.settle();
+      expect((await f.reference("a.txt")).target).not.toEqual(original.target);
+      expect(await f.resolve([original])).toEqual([{ status: "absent" }]);
+    } finally { await f.engine().stop(); }
+  });
+
+  it("changes identity after delete and recreate", async () => {
+    const f = await fixture();
+    await write(f.rootPath, "a.txt", "a");
+    await f.start();
+    try {
+      const original = await f.reference("a.txt");
+      await f.remove("a.txt");
+      await f.settle();
+      await write(f.rootPath, "a.txt", "a");
+      await f.settle();
+      expect((await f.reference("a.txt")).target).not.toEqual(original.target);
+      expect(await f.resolve([original])).toEqual([{ status: "absent" }]);
+    } finally { await f.engine().stop(); }
+  });
+
+  it("does not claim a failed folder move reached its destination", async () => {
+    const f = await fixture({ beforeRequest: refusedFor(VERSIONED_METHOD.textRename, "dir/2.txt") });
+    for (const n of [1, 2]) await write(f.rootPath, "dir/" + n + ".txt", String(n));
+    await f.start();
+    try {
+      const refs = await Promise.all([f.reference("dir/1.txt"), f.reference("dir/2.txt")]);
+      expect(await f.move("dir", "moved")).toMatchObject({ ok: false });
+      await f.settle();
+      const results = await f.resolve(refs);
+      expect(results[0]).toMatchObject({ status: "found", path: "dir/1.txt", objectId: refs[0]!.target.objectId });
+      expect(results.every(file => file.status === "absent" || (file.status === "found" && file.path.startsWith("dir/")))).toBe(true);
+      expect(await f.engine().fileObjectIdForPath("moved/1.txt")).toBeNull();
+    } finally { await f.engine().stop(); }
+  });
+});
+
+describe("History operation admission",()=>{
+  it("mints distinct operation IDs for move, agent delete and person delete",async()=>{
+    const requests:Request[]=[];
+    const f=await fixture({beforeRequest:request=>{requests.push(request);}});
+    for(const name of ["move.txt","agent.txt","person.txt"]) await write(f.rootPath,name,name);
+    await f.start();
+    try {
+      const moved = await f.move("move.txt","moved.txt");
+      expect(moved).toMatchObject({ok:true});
+      const removed = await f.remove("agent.txt");
+      expect(removed).toMatchObject({ok:true});
+      const personRemoved = await f.removeByHand("person.txt");
+      expect(personRemoved).toMatchObject({trashed:true});
+      const ids=requests.filter(r=>r.method==="capture.hold").map(r=>(r.params as {operationId?:string}).operationId).filter(id=>id!==undefined);
+      expect(ids).toHaveLength(3);
+      expect([moved, removed, personRemoved].map(result => "operationId" in result ? result.operationId : undefined)).toEqual(ids);
+      expect(new Set(ids).size).toBe(3);
+      for(const id of ids) expect(id).toMatch(/^dohc-operation:[a-f0-9-]{36}$/);
+      for(const r of requests.filter(r=>r.method==="versionedText.rename" || r.method==="versionedText.delete")) expect(r.params).not.toHaveProperty("correlationId");
+    } finally {await f.engine().stop();}
+  });
+  it("refuses reserved caller IDs at authored write, restore and app-response removal",async()=>{
+    const f=await fixture();
+    await write(f.rootPath,"kept.md","Before");
+    await f.start();
+    const id="dohc-operation:forged";
+    try {
+      await expect(f.engine().writeAuthoredFile(join(f.rootPath,"kept.md"),"After",named,{correlationId:id})).rejects.toThrow("Reserved operation id.");
+      await expect(f.engine().writeAuthoredFile(join(f.rootPath,"kept.md"),"After",named,{requestId:id})).rejects.toThrow("Reserved operation id.");
+      await expect(f.engine().restoreFileToBeforeMoment("before",person,{expectedHeadMomentId:"head",requestId:id})).rejects.toThrow("Reserved operation id.");
+      await expect(f.engine().undoAcceptedAppResponse({requestId:id,acceptanceId:"a",objectId:"o",momentId:"m",publicPrincipalId:"p",versionId:"main",collectionPath:"responses",path:"responses/a.md",grantId:"g"})).rejects.toThrow("Reserved operation id.");
+      expect(await readFile(join(f.rootPath,"kept.md"),"utf8")).toBe("Before");
+    } finally {await f.engine().stop();}
+  });
+});
+
+it("limits move metadata reads to its roots and removes stale descendants without touching prefix siblings", async () => {
+  let held = false;
+  const requests: Request[] = [];
+  const f = await fixture({ beforeRequest: async request => {
+    requests.push(request);
+    if (request.method === "capture.hold") { held = true; await rm(join(f.rootPath, "dir/stale.txt")); }
+  } });
+  for (const path of ["dir/kept.txt", "dir/stale.txt", "directory/sibling.txt"]) await write(f.rootPath, path, path);
+  await f.start(); requests.length = 0;
+  try {
+    const sibling = await f.engine().fileObjectIdForPath("directory/sibling.txt");
+    expect(await f.move("dir", "moved")).toMatchObject({ ok: true });
+    expect(held).toBe(true);
+    const holdIndex = requests.findIndex(request => request.method === "capture.hold");
+    const lists = requests.slice(holdIndex).filter(request => request.method === VERSIONED_METHOD.textList);
+    expect(lists.length).toBeGreaterThan(0);
+    expect(lists.every(request => ["dir/", "moved/"].includes((request.params as { afterPath?: string }).afterPath ?? ""))).toBe(true);
+    expect(await f.engine().fileObjectIdForPath("dir/stale.txt")).toBeNull();
+    expect(await f.engine().fileObjectIdForPath("directory/sibling.txt")).toBe(sibling);
+    expect(await f.engine().fileObjectIdForPath("moved/kept.txt")).not.toBeNull();
+  } finally { await f.engine().stop(); }
+});
+
+it("cleans an exact root head that becomes oversized under the capture hold", async () => {
+  const f = await fixture({ beforeRequest: async request => {
+    if (request.method === "capture.hold") await write(f.rootPath, "a.txt", "x".repeat(11 * 1024 * 1024));
+  } });
+  await write(f.rootPath, "a.txt", "tracked first"); await f.start();
+  try {
+    expect(await f.engine().fileObjectIdForPath("a.txt")).not.toBeNull();
+    expect(await f.move("a.txt", "b.txt")).toMatchObject({ ok: true, withoutHistory: ["b.txt"] });
+    expect(await f.engine().fileObjectIdForPath("a.txt")).toBeNull();
+    expect(await f.engine().fileObjectIdForPath("b.txt")).toBeNull();
+    expect((await readFile(join(f.rootPath, "b.txt"))).length).toBe(11 * 1024 * 1024);
+  } finally { await f.engine().stop(); }
 });

@@ -2,8 +2,9 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ViewActions } from "../fileInspectorUi";
 import type { SettingsSaveState } from "../settings/SettingsDialog";
-import { SAVE_STATE, StateMark, type SaveStateKey, type StatePresentation } from "./StateMark";
+import { ACCESS_STATE, SAVE_STATE, StateMark, type AccessStateKey, type SaveStateKey, type StatePresentation } from "./StateMark";
 
 afterEach(cleanup);
 
@@ -43,6 +44,21 @@ describe("StateMark", () => {
     }
   });
 
+  it("settles an access list only when main checked it within its window", () => {
+    // Stale is the last list dohc received, and unknown is no list at all:
+    // neither may read as done, and unknown must never read as no access.
+    expect((Object.keys(ACCESS_STATE) as AccessStateKey[]).filter((key) => ACCESS_STATE[key].mark === "settled")).toEqual(["access-fresh"]);
+    // A stale list is settled but old: no check runs for it, so it never
+    // takes the ring that says dohc is still working.
+    expect(ACCESS_STATE["access-stale"].mark).toBe("dated");
+    expect(ACCESS_STATE["access-unknown"].mark).toBe("attention");
+    render(<StateMark testId="mark" state="unknown" shown="access-unknown" />);
+    const chip = screen.getByTestId("mark");
+    expect(chip.getAttribute("data-state")).toBe("unknown");
+    expect(chip.textContent).toBe("Unknown");
+    expect(chip.getAttribute("title")).toContain("This does not mean that no one has access.");
+  });
+
   it("renders every state with its mark, its label, and the stored state", () => {
     for (const key of KEYS) {
       const { container, unmount } = render(<StateMark testId="mark" state={key} shown={key} />);
@@ -71,6 +87,26 @@ describe("StateMark", () => {
   it("lets the caller's title replace the row's", () => {
     render(<StateMark testId="mark" state="error" shown="error" title="The disk is full." />);
     expect(screen.getByTestId("mark").getAttribute("title")).toBe("The disk is full.");
+  });
+
+  // jsdom lays nothing out, so this reads the rules that size the header: a
+  // narrow window cuts the chip's label, never Try again.
+  it("keeps Try again whole in a narrow header and cuts the chip's label instead", () => {
+    const { container } = render(
+      <ViewActions status={<StateMark testId="mark" truncate state="read-only" shown="read-only-transition" onRetry={() => undefined} />} />,
+    );
+    const status = container.querySelector<HTMLElement>("[data-view-status]")!;
+    // Each column is as narrow as its item allows, so the button's own minimum counts.
+    expect(status.className).toContain("auto-cols-[minmax(auto,max-content)]");
+    const retry = screen.getByTestId("mark-retry");
+    expect(retry.parentElement).toBe(status);
+    expect(retry.className.split(" ")).toEqual(expect.arrayContaining(["shrink-0", "whitespace-nowrap"]));
+    expect(retry.closest(".truncate")).toBeNull();
+    // The chip has its own column and keeps room for its mark and an ellipsis.
+    const chip = screen.getByTestId("mark");
+    expect(chip.parentElement!.parentElement).toBe(status);
+    expect(chip.parentElement!.className.split(" ")).toContain("min-w-[25px]");
+    expect(chip.querySelector(".truncate")?.textContent).toBe("Read-only");
   });
 
   // A narrow header cuts the label short. The chip then takes focus and its

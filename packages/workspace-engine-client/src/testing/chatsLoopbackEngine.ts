@@ -530,7 +530,7 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.threadStart:
       return [
         "channelId", "threadId", "messageId", "title", "lane", "authorKind", "authorDisplayName", "authorOwnerDisplayName",
-        "authorUserId", "origin", "body", "needsDecision", "options", "attachments", "automation", "nowMs",
+        "authorUserId", "authorActorKey", "origin", "body", "needsDecision", "options", "attachments", "automation", "nowMs",
       ];
     case CHATS_METHOD.threadCreate: return ["threadId", "title", "linkedFile", "nowMs"];
     case CHATS_METHOD.threadsListForFile: return ["objectId", "pageLimit", "cursor"];
@@ -545,7 +545,7 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.messageSend:
       return [
         "threadId", "messageId", "authorKind", "authorDisplayName", "authorOwnerDisplayName", "authorUserId",
-        "parentMessageId", "origin", "body", "needsDecision", "options", "attachments", "automation", "nowMs",
+        "parentMessageId", "authorActorKey", "origin", "body", "needsDecision", "options", "attachments", "automation", "nowMs",
       ];
     case CHATS_METHOD.messagesList:
       return ["threadId", "limit", "afterMessageOrder"];
@@ -613,7 +613,7 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.dispatchRunRecordsForThread:
       return ["threadId", "limit", "pageLimit", "cursor"];
     case CHATS_METHOD.dispatchGetRunRecord:
-    case CHATS_METHOD.dispatchMarkFailureNotePosted:
+    case CHATS_METHOD.dispatchMarkFailureHandled:
       return ["runId"];
     case CHATS_METHOD.dispatchRecentCount: return ["threadId", "sinceMs"];
     case CHATS_METHOD.dispatchFailPendingForThread: return ["threadId", "reason"];
@@ -849,8 +849,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
         return this.recordRunMessage(state, workspace, params);
       case CHATS_METHOD.dispatchSetThreadPaused:
         return this.setThreadPaused(state, workspace, params);
-      case CHATS_METHOD.dispatchMarkFailureNotePosted:
-        return this.markFailureNotePosted(state, workspace, params);
+      case CHATS_METHOD.dispatchMarkFailureHandled:
+        return this.markFailureHandled(state, workspace, params);
       case CHATS_METHOD.dispatchRequeueFailedTrigger:
         return this.requeueFailed(state, workspace, params);
       case CHATS_METHOD.dispatchListAppQuitRecoveries:
@@ -1429,16 +1429,18 @@ export class ChatsLoopbackEngine implements EngineTransport {
     atMs: number,
   ): ChatMessage {
     const options = params.options;
-    if (options !== undefined && !Array.isArray(options)) throw new Error("invalid-poll-options");
+    // The daemon refuses options of the wrong type while it parses the request.
+    if (options !== undefined && !Array.isArray(options)) throw new Error("invalid parameters");
     const pollOptions: string[] = [];
     if (Array.isArray(options)) {
-      if (options.length > 12) throw new Error("invalid-poll-options");
+      if (options.length > 12) throw new Error("A poll has at most twelve choices.");
       for (const raw of options) {
-        if (typeof raw !== "string") throw new Error("invalid-poll-options");
+        if (typeof raw !== "string") throw new Error("invalid parameters");
         const option = raw.trim();
-        if (!option || option.length > 200 || /[\r\n]/u.test(option) || pollOptions.includes(option)) {
-          throw new Error("invalid-poll-options");
+        if (!option || option.length > 200 || /[\r\n]/u.test(option)) {
+          throw new Error("Each choice is one line of at most 200 characters.");
         }
+        if (pollOptions.includes(option)) throw new Error("Each choice appears once.");
         pollOptions.push(option);
       }
     }
@@ -1472,6 +1474,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
       if (authorKind === "human") throw new Error("invalid-sender");
       message.authorOwnerDisplayName = normalizeNonempty(ownerName, "invalid-sender");
     }
+    const authorActorKey = optionalString(params, "authorActorKey");
+    if (authorActorKey !== undefined) message.authorActorKey = authorActorKey;
     const authorUserId = optionalString(params, "authorUserId");
     const parentMessageId = optionalString(params, "parentMessageId");
     if (authorUserId !== undefined) message.authorUserId = authorUserId;
@@ -2585,7 +2589,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
       triggerMessageId: dispatch.triggerMessageId,
       command: optionalString(params, "command") ?? "",
       startedAtMs: atMs,
-      failureNotePosted: false,
+      failureHandled: false,
     };
     const logPath = optionalString(params, "logPath");
     if (logPath !== undefined) run.logPath = logPath;
@@ -2800,14 +2804,14 @@ export class ChatsLoopbackEngine implements EngineTransport {
     return jsonResult(pause);
   }
 
-  private markFailureNotePosted(
+  private markFailureHandled(
     state: WorkspaceState,
     workspace: string,
     params: ChatsJsonObject,
   ): JsonValue {
     const run = state.runs.get(requiredString(params, "runId"));
     if (!run || run.workspaceId !== workspace) throw new Error("run-not-found");
-    run.failureNotePosted = true;
+    run.failureHandled = true;
     return jsonResult(run);
   }
 

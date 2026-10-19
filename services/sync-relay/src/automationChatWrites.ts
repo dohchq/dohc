@@ -3,6 +3,7 @@ import {
   NoticeNotSentError,
   AutomationWakeSent,
   readChatDirectory,
+  hasChatMessage,
 } from "@dohc/automation-executor/automation-chat";
 import type {AutomationChatDependencies} from "@dohc/automation-executor/collection-automation-run";
 import type {LinkedChatStore} from "@dohc/workspace-contracts/engine";
@@ -58,6 +59,7 @@ export function replicaAutomationChat(input: {
   const {replica, store} = input;
   const {workspaceId} = replica;
   return {
+    hasMessage: (messageId) => hasChatMessage(store, workspaceId, messageId),
     directory: async (roster, needs) =>
       replica.signal.aborted ? null : await readChatDirectory(store, workspaceId, roster, needs),
     async write(signal, message, savedRun) {
@@ -85,6 +87,7 @@ export function replicaAutomationChat(input: {
         author: {kind: "automation" as const, displayName: message.automation.name},
         authorOwnerDisplayName,
         authorUserId: replica.ownerUserId,
+        authorActorKey: null,
         automation: {automationId: message.automation.automationId, chainDepth: message.automation.depth},
         body: message.body,
       };

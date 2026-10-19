@@ -18,16 +18,13 @@ import { createRecoveryInstaller, type RecoveryInstallOptions } from "./recovery
 import { equalRecoveryCursor } from "./recovery-record.js";
 import type { CheckpointStageAllocation } from "./checkpoint-storage.js";
 import { createDatasetReplicaHost } from "./replica-host.js";
-import { readDatasetHistory, readDatasetHistoryRevision } from "./dataset-history.js";
+import { datasetHistoryLineage, historyStatement, readDatasetHistory, readDatasetHistoryRevision } from "./dataset-history.js";
 import { initializeDatasetAttempts, reviewDatasetAttempts, reconcileDatasetAttempt, cancelDatasetAttempt, assertDatasetAttemptsCommitted, assertDatasetAttemptNotCancelled } from "./dataset-attempts.js";
 import { createDatasetAutomationClaims, DATASET_AUTOMATION_CHAIN_DEPTH, type DatasetActor, type DatasetPressed, type DatasetPressInput } from "./dataset-automation-claims.js";
+import { DatasetHostError } from "@dohc/app-backend-runtime/dataset-error";
+export { DatasetHostError } from "@dohc/app-backend-runtime/dataset-error";
 
 export type DatasetAccess = { kind: "data" } | { kind: "app"; appId: string };
-export class DatasetHostError extends Error {
-  constructor(readonly code: "not_authorized" | "conflict" | "invalid", message: string) {
-    super(message); this.name = "DatasetHostError";
-  }
-}
 /** Resolve only immutable revisions already approved at this host; callers cannot supply compatibility. */
 export function resolveCompatibleDatasetRevision(db: JournalDb, key: DatasetScope, reference: { revision: number; revisionSha256: string }, current?: DatasetRevision): DatasetRevision {
   const row = current ? undefined : db.prepare("SELECT revision_json FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId);
@@ -766,17 +763,19 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       const current = journal.head(key, () => { owner(context, key); });
       return { revision: revision(key), ...artifacts(key), active: current.active && !lifecycle(key).archived, cursor: current.cursor };
     },
-    history(context: Context, raw: DatasetScope & { beforeRevision?: number; limit?: number }) {
+    history(context: Context, raw: DatasetScope & { beforeRevision?: number; limit?: number; metadataOnly?: boolean }) {
       const key = scope(raw), limit = raw.limit ?? 50;
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 || raw.beforeRevision !== undefined && (!Number.isSafeInteger(raw.beforeRevision) || raw.beforeRevision < 1)) throw new DatasetHostError("invalid", "Invalid Collection history page.");
       return transaction(() => {
-        owner(context, key); const approved = revision(key);
+        owner(context, key); const approved = raw.metadataOnly ? undefined : revision(key);
         const head = db.prepare("SELECT revision FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId, key.datasetId);
         if (!head) throw new DatasetHostError("conflict", "Collection history is unavailable.");
         const before = raw.beforeRevision ?? Number.MAX_SAFE_INTEGER;
-        const page = readDatasetHistory(db, key, approved, before, limit);
+        const page = readDatasetHistory(db, key, approved, before, limit, raw.metadataOnly);
+        const name = raw.metadataOnly ? historyStatement(db, "SELECT json_extract(revision_json,'$.definition.name') AS name FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId, key.datasetId)?.name : undefined;
         owner(context, key);
-        return { datasetId: key.datasetId, headRevision: Number(head.revision), ...page };
+        return { datasetId: key.datasetId, headRevision: Number(head.revision), ...page,
+          ...(raw.metadataOnly ? { lineage: datasetHistoryLineage(db, key), name: String(name ?? key.datasetId), archived: lifecycle(key).archived } : {}) };
       });
     },
     historyRevision(context: Context, raw: DatasetScope & { revisionSha256: string }) {
@@ -894,5 +893,12 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       });
     },
   };
-  return host;
+  return Object.assign(host, {
+    async retireScope(key: DatasetScope): Promise<void> {
+      await options.supervisor.retire?.(key);
+      for (const [id, saved] of migrationCandidates) {
+        if (saved.candidate.expected.workspaceId === key.workspaceId && saved.candidate.expected.datasetId === key.datasetId) migrationCandidates.delete(id);
+      }
+    },
+  });
 }

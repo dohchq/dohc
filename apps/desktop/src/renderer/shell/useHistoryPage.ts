@@ -2,20 +2,24 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   EngineMomentRecord,
   HistoryPolicyUnreadableResult,
-  ListEngineMomentsResponse,
-  ListEngineMomentsResult,
+  ListHistoryResult,
+  TimelineCursor,
+  TimelineEntry,
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 
-// The engine history page: newest-first moments, the keyset cursor for older
-// pages, and the latest order of the answer on screen. A refresh replaces
-// that order outright; the shell keeps its own floor for the open-file
-// refresh key.
+type ReadyHistory = Extract<ListHistoryResult, { status: "ready" }>;
+
+// The History timeline: newest-first file moments, version markers and
+// Collection changes, and the cursor main hands back for older pages. The
+// source fields describe the whole chain the cursor carries, so the newest
+// page's values stand. Which rows a page holds says nothing about whether a
+// file changed: the shell reads that separately.
 export type HistoryPage = {
-  moments: EngineMomentRecord[];
-  nextBeforeMomentOrder: number | null;
-  latestMomentOrder: number;
-  protectedTruncated: boolean;
+  entries: TimelineEntry[];
+  nextCursor: TimelineCursor | null;
+  unavailableSources: ReadyHistory["unavailableSources"];
+  omittedSources: number;
 };
 
 // Why there is no page. A null timeline is not "no changes": it is also a
@@ -31,11 +35,41 @@ export type HistoryReadState = "loading" | "failed" | "updating";
 // flush another 1.85 seconds of breathing room without leaving the panel in
 // an unbounded spinner. After this ladder, the inline Try again remains.
 const HISTORY_UPDATING_RETRY_DELAYS_MS = [100, 250, 500, 1_000] as const;
-const HISTORY_PAGE_LIMIT = 200;
+const HISTORY_PAGE_LIMIT = 50;
+
+type MomentPosition = Pick<EngineMomentRecord, "recordedAtMs" | "momentOrder" | "protected">;
+
+// Match the engine's newest-first merge: time, text before protected, then order.
+function compareMomentPositions(left: MomentPosition, right: MomentPosition): number {
+  return right.recordedAtMs - left.recordedAtMs ||
+    Number(left.protected === true) - Number(right.protected === true) ||
+    right.momentOrder - left.momentOrder;
+}
 
 function waitForHistoryRetry(delayMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
+
+// The order of the engine's newest file moment, which tells the shell an
+// open file may have changed, or null while History's rules hide it (the
+// page read on the same refresh shows that). An `updating` answer is retried
+// on the page's ladder while `current` holds. A ladder that ends still
+// updating rejects, so the caller can say so and offer Try again.
+export async function readNewestMomentOrder(workspaceId: string, current: () => boolean): Promise<number | null> {
+  for (let attempt = 0; ; attempt += 1) {
+    const answer = await bridge().listEngineMoments({ workspaceId, limit: 1 });
+    if (!("status" in answer)) return answer.latestMomentOrder;
+    if (answer.status === "policy-unreadable" || !current()) return null;
+    if (attempt === HISTORY_UPDATING_RETRY_DELAYS_MS.length) {
+      throw new Error("Recent changes are still being added to History.");
+    }
+    await waitForHistoryRetry(HISTORY_UPDATING_RETRY_DELAYS_MS[attempt]);
+    if (!current()) return null;
+  }
+}
+
+const fileMoments = (entries: readonly TimelineEntry[]): EngineMomentRecord[] =>
+  entries.flatMap((entry) => (entry.kind === "file" ? [entry.moment] : []));
 
 type HeldRefresh = { token: number; activeVersionId: string; commit: () => void };
 
@@ -59,20 +93,17 @@ export type HistoryPageOwner = {
   observeVersion: (token: number, versionId: string) => boolean;
 };
 
-// The engine history page, judged by the same issue counter the shell's
-// status lanes, opening, agent observation and version callbacks share. The
-// shell issues refresh and version tokens; only pagination and cleanup take
-// tokens here.
+// The History page, judged by the same issue counter the shell's status
+// lanes, opening, agent observation and version callbacks share. The shell
+// issues refresh and version tokens; only pagination and cleanup take tokens
+// here. An answer must also name this hook's workspace. A received share
+// keeps only its file History.
 //
-// Two orders decide everything:
-//
-// - Success is latest COMMITTED wins. A request in flight has answered
-//   nothing, and one that fails never will, so superseding on ISSUE would
-//   throw away the only answer there was. Only an answer older than what is
-//   already displayed is dropped.
-// - Failure, `updating` and the retry ladder are newest refresh ISSUED wins.
-//   Only the newest refresh may call the surface unloadable: an older read
-//   failing while a newer one is still in flight has settled nothing.
+// One order decides a refresh: the newest refresh ISSUED wins. Only its
+// answer may commit, and only it may call the surface unloadable. An older
+// answer is superseded whether the newer read is still in flight or has
+// failed; a failed newer read keeps the rows on screen. A pagination extends
+// the rows on screen, so it commits while nothing newer has committed.
 //
 // `markReady` is captured when a refresh is issued, so a held refresh that
 // commits later marks the selection generation it was issued under.
@@ -80,6 +111,7 @@ export function useHistoryPage(
   issue: { current: number },
   workspaceId: string,
   markReady: () => void,
+  receivedShare = false,
 ): {
   page: HistoryPage | null;
   loadingMore: boolean;
@@ -119,7 +151,7 @@ export function useHistoryPage(
     versionId: null,
   });
 
-  const owner = useMemo<HistoryPageOwner>(() => {
+  const { owner, hideForPolicy } = useMemo(() => {
     const setPage = (next: HistoryPage | null) => {
       latestPage.current = next;
       setPageState(next);
@@ -148,25 +180,38 @@ export function useHistoryPage(
     const isStale = (token: number, versionId: string) =>
       versionId !== activeVersion.current.versionId &&
       token < activeVersion.current.token;
-    // Retries an `updating` answer while this refresh is still the newest one
-    // issued. A superseded refresh stops at the next check, before and after
-    // each timer.
-    const readNewestPage = async (token: number): Promise<ListEngineMomentsResponse> => {
+    // Reads one page from the cursor main handed back, unchanged. Retries an
+    // `updating` answer while the read that asked is still current; one that
+    // is no longer current stops at the next check, before and after each
+    // timer.
+    const readPage = async (
+      cursor: TimelineCursor | undefined,
+      current: () => boolean,
+    ): Promise<ListHistoryResult> => {
       for (let attempt = 0; ; attempt += 1) {
-        const response = await bridge().listEngineMoments({
+        const response = await bridge().listHistory({
           workspaceId,
           limit: HISTORY_PAGE_LIMIT,
+          ...(cursor ? { cursor } : {}),
         });
-        if (!("status" in response) || response.status === "policy-unreadable") return response;
-        if (
-          attempt === HISTORY_UPDATING_RETRY_DELAYS_MS.length ||
-          token !== newestRefresh.current
-        ) {
-          return response;
-        }
+        if (response.status !== "updating") return response;
+        if (attempt === HISTORY_UPDATING_RETRY_DELAYS_MS.length || !current()) return response;
         await waitForHistoryRetry(HISTORY_UPDATING_RETRY_DELAYS_MS[attempt]);
-        if (token !== newestRefresh.current) return response;
+        if (!current()) return response;
       }
+    };
+    // A received share has only its imported file History, so nothing else
+    // reaches its timeline.
+    const pageOf = (answer: ReadyHistory): HistoryPage => {
+      const entries = receivedShare
+        ? answer.entries.filter((entry) => entry.kind === "file")
+        : answer.entries;
+      return {
+        entries,
+        nextCursor: answer.nextCursor,
+        unavailableSources: receivedShare ? [] : answer.unavailableSources,
+        omittedSources: receivedShare ? 0 : answer.omittedSources,
+      };
     };
 
     const refresh = async (token: number): Promise<void> => {
@@ -175,15 +220,15 @@ export function useHistoryPage(
       // different thing from knowing the last read failed. Saying so here is
       // also what makes the retry control show that it is working.
       setReadState("loading");
-      let response: ListEngineMomentsResponse;
+      let response: ListHistoryResult;
       try {
-        response = await readNewestPage(token);
+        response = await readPage(undefined, () => token === newestRefresh.current);
       } catch (error) {
         if (token !== newestRefresh.current) return;
         setReadState("failed");
         throw error;
       }
-      if ("status" in response) {
+      if (response.status !== "ready") {
         if (token === newestRefresh.current) {
           if (response.status === "policy-unreadable") {
             if (token > committed.current) hideForPolicy(token, response);
@@ -192,25 +237,24 @@ export function useHistoryPage(
         }
         return;
       }
-      const answer: ListEngineMomentsResult = response;
-      if (token <= committed.current) return;
+      const answer = response;
+      // A page for another workspace answers nothing here, and a refresh
+      // someone has asked again has been superseded.
+      if (answer.workspaceId !== workspaceId) return;
+      if (token !== newestRefresh.current || token <= committed.current) return;
       // An answer describing the version the user left is not late. It is
       // about somewhere else.
-      if (isStale(token, answer.activeVersionId)) return;
-      noteVersion(token, answer.activeVersionId);
+      if (isStale(token, answer.versionId)) return;
+      noteVersion(token, answer.versionId);
       const commit = () => {
         committed.current = token;
-        committedVersionId.current = answer.activeVersionId;
+        committedVersionId.current = answer.versionId;
         setPolicyError(null);
-        // A refresh returns to the newest page; older pages reload on demand,
-        // so any load-more it supersedes is over.
+        // A refresh returns to the newest page and starts a new source
+        // chain; older pages reload on demand, so any load-more it
+        // supersedes is over.
         setLoadingMore(false);
-        setPage({
-          moments: answer.moments,
-          nextBeforeMomentOrder: answer.nextBeforeMomentOrder,
-          latestMomentOrder: answer.latestMomentOrder,
-          protectedTruncated: answer.protectedTruncated,
-        });
+        setPage(pageOf(answer));
         // Readiness belongs to the page that actually commits. A newer
         // activity refresh can beat the workspace-open refresh; marking only
         // the caller's promise left the profiler waiting even though the
@@ -218,20 +262,16 @@ export function useHistoryPage(
         markReady();
       };
       // Blocked by a newer pagination: hold this answer instead of throwing
-      // it away, and let the pagination's settlement decide. The newest held
-      // answer is kept, since an older one could never win afterwards.
+      // it away, and let the pagination's settlement decide.
       if (token < pendingPage.current) {
-        const held = heldRefresh.current;
-        if (!held || token > held.token) {
-          heldRefresh.current = { token, activeVersionId: answer.activeVersionId, commit };
-        }
+        heldRefresh.current = { token, activeVersionId: answer.versionId, commit };
         return;
       }
       commit();
     };
 
     const loadMore = async (): Promise<void> => {
-      const cursor = latestPage.current?.nextBeforeMomentOrder;
+      const cursor = latestPage.current?.nextCursor;
       if (cursor === null || cursor === undefined || loadingMoreNow.current) return;
       const token = ++issue.current;
       // The version this page belongs to: the one the displayed timeline
@@ -240,40 +280,36 @@ export function useHistoryPage(
       pendingPage.current = token;
       setLoadingMore(true);
       try {
-        const answer = await bridge().listEngineMoments({
-          workspaceId,
-          limit: HISTORY_PAGE_LIMIT,
-          beforeMomentOrder: cursor,
-        });
+        const answer = await readPage(
+          cursor,
+          () => pendingPage.current === token && token > committed.current,
+        );
         // The displayed page remains the honest last answer while capture is
         // settling. Releasing the button below gives the user a bounded
         // retry; this expected progress result is never a global error.
-        if ("status" in answer) {
+        if (answer.status !== "ready") {
           if (answer.status === "policy-unreadable" && token > committed.current &&
             token >= newestRefresh.current && (pageVersionId === null || !isStale(token, pageVersionId))) {
             hideForPolicy(token, answer);
           }
           return;
         }
+        if (answer.workspaceId !== workspaceId) return;
         // The committed-answer rule, applied to this page as well, plus the
         // one question an append owes: the page must describe the same
         // version as the timeline it extends.
-        const stale = isStale(token, answer.activeVersionId);
-        if (!stale) noteVersion(token, answer.activeVersionId);
+        const stale = isStale(token, answer.versionId);
+        if (!stale) noteVersion(token, answer.versionId);
         const current = latestPage.current;
         if (
           current &&
           token > committed.current &&
           !stale &&
-          answer.activeVersionId === committedVersionId.current
+          answer.versionId === committedVersionId.current
         ) {
           committed.current = token;
-          setPage({
-            moments: [...current.moments, ...answer.moments],
-            nextBeforeMomentOrder: answer.nextBeforeMomentOrder,
-            latestMomentOrder: Math.max(current.latestMomentOrder, answer.latestMomentOrder),
-            protectedTruncated: current.protectedTruncated || answer.protectedTruncated,
-          });
+          const earlier = pageOf(answer);
+          setPage({ ...earlier, entries: [...current.entries, ...earlier.entries] });
         }
       } catch (error) {
         // A failure IS an answer for the version rule: it answers about
@@ -295,6 +331,7 @@ export function useHistoryPage(
           heldRefresh.current = null;
           if (
             held &&
+            held.token === newestRefresh.current &&
             held.token > committed.current &&
             !isStale(held.token, held.activeVersionId)
           ) {
@@ -325,7 +362,7 @@ export function useHistoryPage(
       return true;
     };
 
-    return {
+    const owner: HistoryPageOwner = {
       refresh,
       supersede: (token) => {
         newestRefresh.current = token;
@@ -333,7 +370,8 @@ export function useHistoryPage(
       loadMore,
       observeVersion,
     };
-  }, [issue, markReady, workspaceId]);
+    return { owner, hideForPolicy };
+  }, [issue, markReady, workspaceId, receivedShare]);
 
   // The owner is gone, so every read in flight is stale: the counter moves
   // past every issued token, both marks jump to it, and nothing held or
@@ -350,6 +388,81 @@ export function useHistoryPage(
     },
     [issue],
   );
+
+  const [namesRevision, setNamesRevision] = useState<{ workspaceId: string } | null>(null);
+  const namedRevision = useRef<typeof namesRevision>(null);
+  useEffect(() => bridge().onHistoryNamesChanged?.(event => {
+    if (event.workspaceId === workspaceId) setNamesRevision({ workspaceId });
+  }), [workspaceId]);
+  useEffect(() => {
+    const shown = latestPage.current;
+    const shownMoments = shown ? fileMoments(shown.entries) : [];
+    if (
+      namesRevision?.workspaceId !== workspaceId || namedRevision.current === namesRevision ||
+      loadingMore || shown === null || shownMoments.length === 0
+    ) return;
+    let liveRequest = true;
+    const watermark = committed.current;
+    const version = committedVersionId.current;
+    const refreshAtStart = newestRefresh.current;
+    const live = () => liveRequest && !loadingMoreNow.current && latestPage.current === shown && committed.current === watermark && committedVersionId.current === version;
+    const oldest = shownMoments.reduce((last, moment) => compareMomentPositions(moment, last) > 0 ? moment : last);
+    // Deletion can move a page cut past its original cursor. Bound the scan
+    // by the file position the cursor reached, including progress through
+    // filtered, marker-only or Collection-only pages. At equal times, markers
+    // follow both moment streams.
+    const reachedEnd = ({ engine, engineDone }: TimelineCursor) =>
+      engineDone || engine === null ||
+      (engine.text !== null && compareMomentPositions(engine.text, oldest) >= 0) ||
+      (engine.protected !== null && compareMomentPositions({ ...engine.protected, protected: true }, oldest) >= 0) ||
+      (engine.marker !== null && engine.marker.createdAtMs <= oldest.recordedAtMs);
+    const scan = async () => {
+      const named = new Map<string, EngineMomentRecord>();
+      const remaining = new Set(shownMoments.map(moment => moment.id));
+      const seenCursors = new Set<string>();
+      let cursor: TimelineCursor | undefined;
+      do {
+        const response = await bridge().listHistory({ workspaceId, limit: HISTORY_PAGE_LIMIT, ...(cursor ? { cursor } : {}) });
+        if (!live()) return false;
+        // The rules turned unreadable under the shown rows. Hide them as a
+        // refresh would, unless a newer refresh is already asking.
+        if (response.status === "policy-unreadable") {
+          if (newestRefresh.current === refreshAtStart) {
+            namedRevision.current = namesRevision;
+            hideForPolicy(++issue.current, response);
+          }
+          return true;
+        }
+        if (response.status !== "ready" || response.workspaceId !== workspaceId || response.versionId !== version) return false;
+        for (const moment of fileMoments(response.entries)) {
+          named.set(moment.id, moment);
+          remaining.delete(moment.id);
+        }
+        if (remaining.size === 0 || response.nextCursor === null || reachedEnd(response.nextCursor)) break;
+        const position = JSON.stringify(response.nextCursor);
+        if (seenCursors.has(position)) return false;
+        seenCursors.add(position);
+        cursor = response.nextCursor;
+      } while (live());
+      if (!live()) return false;
+      const next = { ...shown, entries: shown.entries.map((entry) => {
+        const renamed = entry.kind === "file" ? named.get(entry.moment.id) : undefined;
+        return renamed ? { kind: "file" as const, moment: renamed } : entry;
+      }) };
+      latestPage.current = next;
+      // An append keeps earlier rows. Consume the event only once their
+      // names reach the page; an interrupted scan runs on the new page.
+      namedRevision.current = namesRevision;
+      setPageState(next);
+      return true;
+    };
+    void (async () => {
+      for (let attempt = 0; attempt < 2 && live(); attempt++) {
+        try { if (await scan()) return; } catch { /* Retry once while this page is still current. */ }
+      }
+    })();
+    return () => { liveRequest = false; };
+  }, [workspaceId, owner, hideForPolicy, issue, page, loadingMore, namesRevision]);
 
   return { page, loadingMore, readState, policyError, ...owner };
 }

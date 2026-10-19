@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { ENGINE_STORE_BACKUP_DIR } from "../ipc/bridgeContract";
+import { PRIVACY_DENIED_WORDS } from "../ipc/errorWords";
 import type { OwnerLiveDocumentsResult, McpConfigResult, NoticeRow, RebuildEngineStoreResult, ResolveAutomationControlsResult, SyncStatusResult, EngineYDocSaveStateEvent } from "../ipc/bridgeContract";
 import type { SentNotices } from "./shell/useSentNotices";
 import type { OpenOnSwitch } from "./shell/useSentNoticeProps";
@@ -20,6 +21,41 @@ import { DesktopWorkspaceShell, WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, READY_U
 // generic error. The notice explains what was found; the rebuild is explicit
 // (a confirmed click), states the destination before anything moves, and the
 // success copy names the reverse path.
+it("keeps a failed document Stop in Notices with Try again and Copy details",async () => {
+  const bridge=makeBridge(Promise.resolve(null));
+  bridge.getSyncStatus=vi.fn(async () => ({...SYNC_STATUS,ownerLiveStopFailures:[{path:"a.md",detail:"corrupt"}]}));
+  renderShell(bridge);
+  const user=userEvent.setup();
+  await user.click(await screen.findByTestId("notice-center-toggle"));
+  const notices=await screen.findByTestId("notice-center");
+  const row=(await within(notices).findByText('dohc could not stop live editing for "a.md".')).closest("li")!;
+  expect(within(row).getByRole("button",{name:"Copy error details"})).toBeTruthy();
+  await user.click(within(row).getByRole("button",{name:"Try again"}));
+  await waitFor(() => expect(bridge.stopOwnerLiveDocument).toHaveBeenCalledWith({workspaceId:WORKSPACE.workspaceId,path:"a.md"}));
+  expect(within(notices).queryByText("corrupt")).toBeNull();
+});
+
+it("dismisses unfinished Stop and restore through its workspace operation before removing the Notice", async () => {
+  const bridge = makeBridge(Promise.resolve(null));
+  const target = {kind: "person" as const, userId: "ana"};
+  bridge.pendingStopAndRestores.mockResolvedValue([{target, label: "Ana", receipts: [], filesUndone: false,
+    result: {status: "restored", restored: [], review: [], runsUndone: 0, runsLeft: 0, keptFields: [], fieldsMissing: 0,
+      runChangesKept: 0, wroteAutomations: false, sendsMessages: false, unfinished: {step: "files", message: "Interrupted"}}}]);
+  const dismissed = deferred<void>();
+  bridge.dismissStopAndRestore.mockImplementation(() => dismissed.promise);
+  const user = userEvent.setup();
+  renderShell(bridge);
+  await user.click(await screen.findByTestId("notice-center-toggle"));
+  const message = "dohc stopped before restoring every file.";
+  const row = (await within(await screen.findByTestId("notice-center")).findByText(message)).closest("li");
+  if (row === null) throw new Error("No restore Notice row");
+  await user.click(within(row).getByRole("button", {name: "Dismiss notice"}));
+  expect(bridge.dismissStopAndRestore).toHaveBeenCalledWith({workspaceId: WORKSPACE.workspaceId, target});
+  expect(row.isConnected).toBe(true);
+  await act(async () => dismissed.resolve());
+  await waitFor(() => expect(row.isConnected).toBe(false));
+});
+
 it("reports an edit refusal once through Notices, without an ineffective retry", async () => {
   const bridge = makeBridge(Promise.resolve(null));
   const listeners = new Set<(event: EngineYDocSaveStateEvent) => void>();
@@ -893,6 +929,77 @@ describe("workspace shell errors", () => {
     ]);
   });
 
+  it("stops a workspace macOS refuses, and offers System Settings beside Try again", async () => {
+    const bridge = makeBridge(Promise.resolve(null), "darwin");
+    bridge.openWorkspace.mockRejectedValueOnce(new Error(
+      "Error invoking remote method 'desktop:open-workspace': Error [privacy-denied]: EPERM: operation not permitted, opendir '/Users/me/Documents/Trip'",
+    ));
+    renderShell(bridge);
+
+    const recovery = await screen.findByTestId("workspace-open-failed");
+    expect(recovery.textContent).toContain(PRIVACY_DENIED_WORDS);
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    fireEvent.click(within(recovery).getByRole("button", { name: "Open System Settings" }));
+    expect(bridge.openSystemPrivacySettings).toHaveBeenCalledOnce();
+    expect(screen.getByTestId("workspace-open-failed")).toBe(recovery);
+
+    fireEvent.click(within(recovery).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridge.openWorkspace).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+  });
+
+  it("files a toast with Try again when System Settings does not open", async () => {
+    const bridge = makeBridge(Promise.resolve(null), "darwin");
+    bridge.openWorkspace.mockRejectedValue(new Error(
+      "Error invoking remote method 'desktop:open-workspace': Error [privacy-denied]: EPERM: operation not permitted, opendir '/Users/me/Documents/Trip'",
+    ));
+    bridge.openSystemPrivacySettings
+      .mockRejectedValueOnce(new Error(
+        "Error invoking remote method 'desktop:open-system-privacy-settings': Error: Failed to open URL",
+      ))
+      .mockResolvedValueOnce(undefined);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const recovery = await screen.findByTestId("workspace-open-failed");
+    fireEvent.click(within(recovery).getByRole("button", { name: "Open System Settings" }));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("dohc could not open System Settings. Failed to open URL");
+    await user.click(within(toast).getByRole("button", { name: "Copy error details" }));
+    expect(await navigator.clipboard.readText()).toContain("dohc could not open System Settings.");
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    const row = (await within(await screen.findByTestId("notice-center"))
+      .findByText("dohc could not open System Settings. Failed to open URL")).closest("li")!;
+    expect(within(row).getByRole("button", { name: "Try again" })).toBeTruthy();
+    expect(within(row).getByRole("button", { name: "Copy error details" })).toBeTruthy();
+
+    await user.click(within(row).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridge.openSystemPrivacySettings).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(row.isConnected).toBe(false));
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(screen.getByTestId("workspace-open-failed")).toBeTruthy();
+  });
+
+  it("offers System Settings on a toast when macOS refuses one read", async () => {
+    const bridge = makeBridge(Promise.resolve(null), "darwin");
+    bridge.listWorkspaceFiles.mockRejectedValueOnce(new Error(
+      "Error invoking remote method 'desktop:list-workspace-files': DaemonRefusalError [INTERNAL]: privacy-denied",
+    ));
+    renderShell(bridge);
+
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(`Could not refresh workspace files. ${PRIVACY_DENIED_WORDS}`);
+    fireEvent.click(within(toast).getByTestId("workspace-shell-error-action"));
+    expect(bridge.openSystemPrivacySettings).toHaveBeenCalledOnce();
+    expect(within(toast).getByTestId("workspace-shell-error-action").textContent).toBe("Open System Settings");
+
+    fireEvent.click(screen.getByTestId("workspace-shell-error-retry"));
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2));
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
   it("retries a failed initial listing without reopening the workspace", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.listWorkspaceFiles.mockRejectedValueOnce(new Error("Listing failed"));
@@ -1155,7 +1262,7 @@ describe("notices sent to you", () => {
     bridge.listCollectionAutomationRuns.mockImplementation(async ({ automationId }) => ({ status: "listed", runs: [{
       claimId: automationId.endsWith("#first") ? "atc_first" : "atc_second", state: "failed" as const,
       error: "The record is open elsewhere.", createdAtMs: 5_000, updatedAtMs: 5_000,
-      trigger: { kind: "changed", recordId: "rec_1", by: "human", sharedAuthor: null, depth: 0 }, writes: [], definitionChanged: false, neverStarted: false, chainStopped: false, undone: false,
+      trigger: { kind: "changed", recordId: "rec_1", by: "human", sharedAuthor: null, depth: 0 }, writes: [], definitionChanged: false, neverStarted: false, chainStopped: false, undoUnfinished: false, undone: false,
     }], next: null }));
     return bridge;
   }
@@ -1192,6 +1299,33 @@ describe("notices sent to you", () => {
   it("opens the file a notice named once the workspace it switched to is ready", async () => {
     renderWithNotices(makeBridge(Promise.resolve(null)), { openOnReady: "b.md" });
     await screen.findByTestId("tab-b.md");
+  });
+
+  it("opens a file the OS opened with dohc in this workspace, each time main sends it", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    renderWithNotices(bridge, {});
+    // Main can send it before this workspace is ready; it opens once it is.
+    act(() => bridge.emitWorkspaceActivated({ ...WORKSPACE, workspaceId: "ws-other" }, "other.md"));
+    act(() => bridge.emitWorkspaceActivated(WORKSPACE, "b.md"));
+    await screen.findByTestId("tab-b.md");
+    expect(screen.queryByTestId("tab-other.md")).toBeNull();
+    act(() => bridge.emitMenuCommand("close-tab"));
+    await waitFor(() => expect(screen.queryByTestId("tab-b.md")).toBeNull());
+    act(() => bridge.emitWorkspaceActivated(WORKSPACE, "b.md"));
+    await screen.findByTestId("tab-b.md");
+  });
+
+  it("hears a file main sends while it answers this workspace's open, before the reply", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    // Main's open handler sends the file, then replies. A listener that the
+    // shell installed only after the reply would miss it.
+    bridge.openWorkspace.mockImplementation(async () => {
+      bridge.emitWorkspaceActivated(WORKSPACE, "b.md");
+      return SYNC_STATUS;
+    });
+    renderWithNotices(bridge, {});
+    await screen.findByTestId("tab-b.md");
+    expect(bridge.openWorkspace).toHaveBeenCalledTimes(1);
   });
 
   it("opens no runs for a notice whose Open was cancelled while main looked the automation up", async () => {
@@ -1457,9 +1591,61 @@ describe("file transfers", () => {
     expect(within(notices).queryByRole("button", { name: "Try again" })).toBeNull();
   });
 
+  async function dropFromOs(bridge: ReturnType<typeof makeBridge>, paths: string[]) {
+    bridge.getDroppedFilePaths.mockReturnValue(paths);
+    const tree = await screen.findByTestId("file-tree");
+    fireEvent.drop(tree, { dataTransfer: { files: [new File([], "dropped")], types: ["Files"] } });
+  }
+
+  it("says how many folders a drop of empty folders created", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({ imported: [], skipped: 0, folders: 2 });
+    renderShell(bridge);
+
+    await dropFromOs(bridge, ["/outside/Empty"]);
+    await waitFor(() => expect(bridge.importWorkspaceFiles).toHaveBeenCalledWith({
+      workspaceId: "ws-shell-test", droppedPaths: ["/outside/Empty"],
+    }));
+    expect((await screen.findByTestId("workspace-shell-notice")).textContent).toContain("Created 2 folders.");
+  });
+
+  // Folders that landed are progress: the same drop again would land beside
+  // them, so the notice names them and the Explorer shows them.
+  it("names the folders a stopped drop created, and refreshes the Explorer", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({
+      imported: [],
+      skipped: 0,
+      interrupted: true,
+      folders: 2,
+      stop: { file: "Trip/sub/a.md", refusal: "changed" },
+    });
+    renderShell(bridge);
+    await screen.findByTestId("file-tree");
+    const listings = bridge.listWorkspaceFiles.mock.calls.length;
+
+    await dropFromOs(bridge, ["/outside/Trip"]);
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
+      "Created 2 folders before the import stopped. dohc did not import a.md, because a file or folder changed while dohc copied it. Delete the empty folders before you import again.",
+    );
+    await waitFor(() => expect(bridge.listWorkspaceFiles.mock.calls.length).toBeGreaterThan(listings));
+  });
+
+  // The contract refuses the payload, so the shell says why first.
+  it("refuses more than 100 dropped items with the limit", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    renderShell(bridge);
+
+    await dropFromOs(bridge, Array.from({ length: 101 }, (_, i) => `/outside/f-${i}.md`));
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
+      "Could not import files. dohc imports up to 100 dropped items at once. Drop fewer at a time.",
+    );
+    expect(bridge.importWorkspaceFiles).not.toHaveBeenCalled();
+  });
+
   function sharedViewBridge(refreshOk: boolean[]) {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listWorkspaceFiles.mockResolvedValue({ files: [{ path: "notes/a.md", kind: "file" }], folders: ["notes"] });
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] }, files: [{ path: "notes/a.md", kind: "file" }], folders: ["notes"] });
     bridge.showExplorerMenu.mockResolvedValue("import-files");
     bridge.refreshSharedView = vi.fn(async () =>
       refreshOk.shift() === false
@@ -1524,7 +1710,7 @@ describe("file transfers", () => {
 
   it("names what landed and why an ordinary import stopped, keeps the raw error for Copy, and Try again asks for files for the same folder", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listWorkspaceFiles.mockResolvedValue({ files: [{ path: "notes/a.md", kind: "file" }], folders: ["notes"] });
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] }, files: [{ path: "notes/a.md", kind: "file" }], folders: ["notes"] });
     bridge.showExplorerMenu.mockResolvedValue("import-files");
     bridge.importWorkspaceFiles.mockResolvedValueOnce({
       imported: ["notes/one.md"],
@@ -1622,7 +1808,8 @@ describe("file transfers", () => {
   });
 
   // Try again removes the row before it runs. When the shared view cannot
-  // refresh first, the person still learns why no file picker opened.
+  // refresh first, the person still learns why no file picker opened. A
+  // damaged share offers no import, so the share is damaged after the import.
   it("says why no file picker opened when the shared view does not refresh before Try again", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.importWorkspaceFiles.mockResolvedValueOnce({
@@ -1630,14 +1817,24 @@ describe("file transfers", () => {
       skipped: 0,
       interrupted: true,
     });
-    renderShell(bridge, {
-      ...WORKSPACE,
-      shareView: { shareId: "share-1", granterEmail: "granter@dohc.test", damaged: true as const },
-    });
+    const shareView = { shareId: "share-1", granterEmail: "granter@dohc.test", access: "edit" as const };
+    const view = renderShell(bridge, { ...WORKSPACE, shareView });
     const user = userEvent.setup();
 
     await user.keyboard("{Control>}k{/Control}");
     await user.click(await screen.findByText("Import files"));
+    const damaged = { ...WORKSPACE, shareView: { ...shareView, damaged: true as const } };
+    view.rerender(
+      <>
+        <CollectionFieldWriteHost />
+        <DesktopWorkspaceShell
+          workspace={damaged}
+          workspaces={[damaged]}
+          {...shellBootstrapProps(bridge)}
+          onSwitchWorkspace={() => {}}
+        />
+      </>,
+    );
     const toast = await screen.findByTestId("workspace-shell-error");
     await user.click(within(toast).getByTestId("workspace-shell-error-retry"));
 
@@ -2074,20 +2271,25 @@ describe("owner live documents", () => {
     );
     expect(screen.queryByTestId("settings-row-live-documents")).toBeNull();
     expect(
-      screen.getByRole("button", { name: "Open sync and sharing" }),
-    ).toBeTruthy();
+      (await screen.findByRole("switch", { name: "Sync this workspace" })).getAttribute("aria-checked"),
+    ).toBe("false");
   });
 
-  // Closing the connection dialog re-reads the status this gate is derived
-  // from, so the list arrives without a restart or a workspace switch.
+  // Turning sync on re-reads the status this gate is derived from, so the
+  // list arrives without a restart or a workspace switch.
   it("offers the live document list once this workspace syncs", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
     let workspaceSynced = false;
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      cloudEnableSync: vi.fn(async () => {
+        workspaceSynced = true;
+      }),
+    });
     bridge.cloudStatus = vi.fn(async () => ({
       connected: true,
       email: "me@dohc.test",
       serverUrl: "https://cloud.dohc.test",
       workspaceSynced,
+      workspaceSyncConnected: workspaceSynced,
     }));
     const user = userEvent.setup();
     renderShell(bridge);
@@ -2096,73 +2298,400 @@ describe("owner live documents", () => {
     await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalled());
     expect(screen.queryByTestId("settings-row-live-documents")).toBeNull();
 
-    await user.click(screen.getByRole("button", { name: "Open sync and sharing" }));
-    await screen.findByTestId("cloud-sync-panel");
-    workspaceSynced = true;
+    await user.click(await screen.findByRole("switch", { name: "Sync this workspace" }));
+
+    expect(bridge.cloudEnableSync).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId });
+    expect(await screen.findByTestId("settings-row-live-documents")).toBeTruthy();
+  });
+});
+
+// Connect server is one path: signed in, the account and the sync switch are
+// settings; signed out, connecting is the Cloud dialog.
+describe("Connect server", () => {
+  const SIGNED_OUT = { connected: false, email: "", serverUrl: "", workspaceSynced: false };
+  const openFromPalette = async (user: ReturnType<typeof userEvent.setup>) => {
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Connect server"));
+  };
+
+  it("opens Settings' Sync and sharing page while signed in", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.cloudStatus = vi.fn(async () => ({
+      connected: true,
+      email: "me@dohc.test",
+      serverUrl: "https://cloud.dohc.test",
+      workspaceSynced: false,
+    }));
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalled());
+
+    await openFromPalette(user);
+
+    const section = await screen.findByTestId("settings-section-cloud");
+    expect(within(section).getByTestId("settings-row-account").textContent).toContain("me@dohc.test");
+    expect(screen.queryByTestId("cloud-sync-panel")).toBeNull();
+  });
+
+  it("opens the Cloud dialog while signed out, from the palette and from Settings", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.cloudStatus = vi.fn(async () => SIGNED_OUT);
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalled());
+
+    await openFromPalette(user);
+    expect(await screen.findByTestId("cloud-server-url")).toBeTruthy();
+    expect(screen.queryByTestId("settings-dialog")).toBeNull();
     await user.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByTestId("cloud-sync-panel")).toBeNull());
 
-    await openCloudSettings(user);
-    expect(await screen.findByTestId("settings-row-live-documents")).toBeTruthy();
+    await user.click(await screen.findByTestId("activity-settings"));
+    await user.click(await screen.findByTestId("settings-nav-cloud"));
+    await user.click(await screen.findByTestId("settings-cloud-connect"));
+    expect(await screen.findByTestId("cloud-server-url")).toBeTruthy();
+    expect(screen.queryByTestId("settings-dialog")).toBeNull();
   });
 
-  // Ending a share is reversible for 10 minutes, so the notice carries Undo.
-  // The shell holds it: it works after Settings closes, from the toast and
-  // from the Notices row the toast leaves behind.
-  it("offers Undo for an ended share on the toast and in Notices after Settings closes", async () => {
+  // The next step after signing in is the sync switch, so the dialog hands
+  // over to the page that holds it.
+  it("moves on to Settings' Sync and sharing page once sign-in completes", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let connected = false;
+      const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+        cloudLoginStart: vi.fn(async () => ({ userCode: "ABCD", verificationUri: "https://cloud.dohc.test/device" })),
+        cloudLoginPoll: vi.fn(async () => {
+          connected = true;
+          return { status: "complete" as const, email: "me@dohc.test" };
+        }),
+      });
+      bridge.cloudStatus = vi.fn(async () =>
+        connected
+          ? { connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test", workspaceSynced: false }
+          : SIGNED_OUT,
+      );
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      renderShell(bridge);
+      await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalled());
+
+      await openFromPalette(user);
+      await user.type(await screen.findByTestId("cloud-server-url"), "https://cloud.dohc.test");
+      await user.click(screen.getByTestId("cloud-connect-start"));
+      await screen.findByTestId("cloud-user-code");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+
+      const section = await screen.findByTestId("settings-section-cloud");
+      expect(screen.queryByTestId("cloud-sync-panel")).toBeNull();
+      expect((await within(section).findByTestId("settings-row-account")).textContent).toContain("me@dohc.test");
+      expect(within(section).getByRole("switch", { name: "Sync this workspace" })).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // The titlebar's workspace menu holds Connect server.
+  const connectFromTitlebarMenu = async (bridge: ReturnType<typeof makeBridge>) => {
+    bridge.showWorkbenchMenu.mockResolvedValueOnce("connect-cloud");
+    fireEvent.contextMenu(await screen.findByTestId("workspace-switcher"));
+    await waitFor(() => expect(bridge.showWorkbenchMenu).toHaveBeenCalledWith(expect.objectContaining({ context: "status" })));
+  };
+
+  it.each([
+    ["signed in, to Settings", { connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test", workspaceSynced: false }, "settings-section-cloud"],
+    ["signed out, to the Cloud dialog", SIGNED_OUT, "cloud-server-url"],
+  ] as const)("routes the titlebar menu's Connect server the same way: %s", async (_case, status, opens) => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listRelayShares = vi.fn().mockResolvedValue({
-      granted: [
-        {
-          shareId: "share-1",
-          workspaceId: WORKSPACE.workspaceId,
-          recipientUserId: "friend",
-          recipientEmail: "friend@dohc.test",
-          selector: { paths: ["docs"], versionId: null },
-          access: "view",
-          grantId: "grant-1",
-          generation: 1,
-          createdAtMs: 1000,
-          revokedAtMs: null,
-          shareCode: "dohc-share:share-1:http://relay.test",
-        },
-      ],
-      received: [],
-      removed: [],
+    bridge.cloudStatus = vi.fn(async () => status);
+    renderShell(bridge, WORKSPACE, [WORKSPACE, OTHER_WORKSPACE]);
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalled());
+    await act(async () => {});
+
+    await connectFromTitlebarMenu(bridge);
+
+    expect(await screen.findByTestId(opens)).toBeTruthy();
+    if (status.connected) expect(screen.queryByTestId("cloud-sync-panel")).toBeNull();
+    else expect(screen.queryByTestId("settings-dialog")).toBeNull();
+  });
+
+  // Nobody knows yet whether the person is signed in. The dialog would show
+  // a session's account row a second time, so Settings answers instead.
+  it("opens Settings while the status is still unknown", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.cloudStatus = vi.fn(() => new Promise<never>(() => {}));
+    renderShell(bridge, WORKSPACE, [WORKSPACE, OTHER_WORKSPACE]);
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalled());
+
+    await connectFromTitlebarMenu(bridge);
+
+    expect(await screen.findByTestId("settings-cloud-checking")).toBeTruthy();
+    expect(screen.queryByTestId("cloud-sync-panel")).toBeNull();
+  });
+
+  // The shell's status said signed out, but the dialog's own check finds a
+  // session: the dialog hands it to Settings rather than showing the account.
+  it("hands a session the dialog finds to Settings", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.cloudStatus = vi.fn()
+      .mockResolvedValueOnce(SIGNED_OUT)
+      .mockResolvedValue({ connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test", workspaceSynced: false });
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalledTimes(1));
+    await act(async () => {});
+
+    await openFromPalette(user);
+
+    const section = await screen.findByTestId("settings-section-cloud");
+    await waitFor(() => expect(screen.queryByTestId("cloud-sync-panel")).toBeNull());
+    expect((await within(section).findByTestId("settings-row-account")).textContent).toContain("me@dohc.test");
+    expect(screen.getAllByTestId("settings-row-account")).toHaveLength(1);
+  });
+
+  // Access's setup notes, in About and the Sharing view: signed out, Connect
+  // server starts the connect flow; signed in to an account the workspace's
+  // sync does not match, the note opens Settings, where Try again lives.
+  it.each([
+    ["signed out", SIGNED_OUT, "sharing-received-unknown", "signed-out", "Connect server", "cloud-server-url"],
+    [
+      "paused for its account",
+      { connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test", workspaceSynced: true, workspaceSyncConnected: false },
+      "sharing-granted-unknown", "other-account", "Sync and sharing", "settings-section-cloud",
+    ],
+  ] as const)("routes Access's setup action when %s", async (_case, status, noteId, reason, action, opens) => {
+    const unknownAnswer = {
+      ref: null, rows: [], visibility: "unknown" as const, nextCursor: null, checkedAtMs: null, freshness: "unknown" as const,
+      coverage: { kind: "unavailable" as const, complete: false, observation: "interval" as const },
+    };
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      listSharingAccess: vi.fn(async () => unknownAnswer),
+      requestAccessRefresh: vi.fn(async () => undefined),
     });
+    bridge.cloudStatus = vi.fn(async () => status);
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalled());
+
+    await user.click(await screen.findByTestId("activity-sharing"));
+    const note = await screen.findByTestId(noteId);
+    await waitFor(() => expect(note.getAttribute("data-reason")).toBe(reason));
+    await user.click(within(note).getByRole("button", { name: action }));
+
+    expect(await screen.findByTestId(opens)).toBeTruthy();
+    if (opens === "settings-section-cloud") {
+      expect(screen.queryByTestId("cloud-sync-panel")).toBeNull();
+      expect(await screen.findByTestId("cloud-relink-workspace")).toBeTruthy();
+    } else {
+      expect(screen.queryByTestId("settings-dialog")).toBeNull();
+    }
+  });
+});
+
+// Turning sync on sends no session event, and the switch shows on from the
+// click, which invites closing Settings. The answer still reaches the shell.
+describe("sync answers after Settings closed", () => {
+  const SIGNED_IN = { connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test", workspaceSynced: false };
+
+  async function startEnableThenClose(bridge: ReturnType<typeof makeBridge> & { cloudEnableSync: ReturnType<typeof vi.fn> }) {
+    const user = userEvent.setup();
+    await user.click(await screen.findByTestId("activity-settings"));
+    await user.click(await screen.findByTestId("settings-nav-cloud"));
+    await user.click(await screen.findByRole("switch", { name: "Sync this workspace" }));
+    await waitFor(() => expect(bridge.cloudEnableSync).toHaveBeenCalled());
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
+  }
+
+  it("reads the status again when an enable finishes after Settings closed", async () => {
+    const enable = deferred<void>();
+    let synced = false;
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      cloudEnableSync: vi.fn(async () => {
+        await enable.promise;
+        synced = true;
+      }),
+    });
+    bridge.cloudStatus = vi.fn(async () => ({ ...SIGNED_IN, workspaceSynced: synced, workspaceSyncConnected: synced }));
+    renderShell(bridge);
+
+    await startEnableThenClose(bridge);
+    // Closing reads once, before the enable has finished.
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalledTimes(2));
+    expect(await bridge.cloudStatus.mock.results[1]!.value).toMatchObject({ workspaceSynced: false });
+    await act(async () => {
+      enable.resolve();
+    });
+
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalledTimes(3));
+    expect(await bridge.cloudStatus.mock.results[2]!.value).toMatchObject({ workspaceSynced: true });
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  // Another window's Try again can make main adopt this account's saved
+  // session without a session announcement. Closing Settings reads the
+  // status again, so reopening shows the workspace syncing.
+  it("reads the status again when Settings closes, after it changed elsewhere", async () => {
+    let paused = true;
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.cloudStatus = vi.fn(async () => ({ ...SIGNED_IN, workspaceSynced: true, workspaceSyncConnected: !paused }));
     const user = userEvent.setup();
     renderShell(bridge);
 
-    await openCloudSettings(user);
-    await user.click(await screen.findByTestId("shared-by-me-revoke-start"));
-    await user.click(screen.getByTestId("shared-by-me-revoke"));
-    const toast = await screen.findByTestId("workspace-shell-notice");
-    expect(toast.textContent).toContain(
-      "Ended the share of docs with friend@dohc.test. You can undo this for 10 minutes.",
-    );
-    expect(within(toast).getByRole("button", { name: "Undo" })).toBeTruthy();
+    await user.click(await screen.findByTestId("activity-settings"));
+    await user.click(await screen.findByTestId("settings-nav-cloud"));
+    expect(await screen.findByTestId("cloud-workspace-relink")).toBeTruthy();
+    expect(bridge.cloudStatus).toHaveBeenCalledTimes(1);
 
+    paused = false;
     await user.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalledTimes(2));
 
-    // Closing the toast keeps the row, and the row keeps the Undo.
-    await user.click(screen.getByRole("button", { name: "Dismiss workspace notice" }));
-    expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
-    await user.click(screen.getByTestId("notice-center-toggle"));
-    const notices = await screen.findByTestId("notice-center");
-    expect(notices.textContent).toContain("Ended the share of docs with friend@dohc.test.");
-    await user.click(within(notices).getByRole("button", { name: "Undo" }));
+    await user.click(await screen.findByTestId("activity-settings"));
+    await user.click(await screen.findByTestId("settings-nav-cloud"));
+    await screen.findByTestId("settings-row-sync-workspace");
+    expect(screen.queryByTestId("cloud-workspace-relink")).toBeNull();
+  });
 
-    await waitFor(() =>
-      expect(bridge.undoRelayShare).toHaveBeenCalledWith({ shareId: "share-1", undoId: "undo-1" }),
+  it("reports an enable that fails after Settings closed, and its Try again opens Settings", async () => {
+    const enable = deferred<void>();
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      cloudEnableSync: vi.fn(() => enable.promise),
+    });
+    bridge.cloudStatus = vi.fn(async () => SIGNED_IN);
+    renderShell(bridge);
+
+    await startEnableThenClose(bridge);
+    await act(async () => {
+      enable.reject(new Error("dohc could not reach the relay."));
+    });
+
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("dohc could not reach the relay.");
+    // No page is watching the attempt, and the notice carries no address, so
+    // Try again opens the place that holds the switch.
+    await userEvent.setup().click(screen.getByTestId("workspace-shell-error-retry"));
+    expect(await screen.findByTestId("settings-section-cloud")).toBeTruthy();
+    expect(screen.queryByTestId("cloud-sync-panel")).toBeNull();
+    expect(bridge.cloudEnableSync).toHaveBeenCalledTimes(1);
+  });
+
+  // Pausing needs no account, so a signed-out pause's Try again goes back to
+  // the switch, not to Connect server.
+  it("reopens Settings for a signed-out pause that fails after Settings closed", async () => {
+    const stop = deferred<never>();
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      cloudStopSync: vi.fn(() => stop.promise),
+    });
+    bridge.cloudStatus = vi.fn(async () => ({
+      connected: false, email: "", serverUrl: "", workspaceSynced: true, workspaceSyncConnected: false, workspaceSyncOwned: true,
+    }));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("activity-settings"));
+    await user.click(await screen.findByTestId("settings-nav-cloud"));
+    await user.click(await screen.findByRole("switch", { name: "Sync this workspace" }));
+    await waitFor(() => expect(bridge.cloudStopSync).toHaveBeenCalled());
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
+    await act(async () => {
+      stop.reject(new Error("dohc could not pause sync for this workspace."));
+    });
+
+    await user.click(await screen.findByTestId("workspace-shell-error-retry"));
+    expect(await screen.findByTestId("settings-section-cloud")).toBeTruthy();
+    expect(screen.queryByTestId("cloud-server-url")).toBeNull();
+    expect(bridge.cloudStopSync).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not show one workspace's failed enable in the next workspace", async () => {
+    const enable = deferred<void>();
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      cloudEnableSync: vi.fn(() => enable.promise),
+    });
+    bridge.cloudStatus = vi.fn(async () => SIGNED_IN);
+    vi.stubGlobal("dohcDesktop", bridge);
+    const shell = (workspace: Workspace) => (
+      <DesktopWorkspaceShell
+        workspace={workspace}
+        workspaces={[WORKSPACE, OTHER_WORKSPACE]}
+        {...shellBootstrapProps(bridge)}
+        onSwitchWorkspace={() => {}}
+      />
     );
-    await waitFor(() =>
-      expect(screen.getByTestId("workspace-shell-notice").textContent).toContain(
-        "Restored the share of docs with friend@dohc.test.",
-      ),
+    const view = render(shell(WORKSPACE));
+
+    await startEnableThenClose(bridge);
+    view.rerender(shell(OTHER_WORKSPACE));
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenLastCalledWith({ workspaceId: OTHER_WORKSPACE.workspaceId }));
+    const reads = bridge.cloudStatus.mock.calls.length;
+    await act(async () => {
+      enable.reject(new Error("dohc could not reach the relay."));
+    });
+
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(bridge.cloudStatus.mock.calls.length).toBe(reads);
+  });
+});
+
+// Disconnect reaches every workspace, so its failure is news in whichever
+// workspace is open when it arrives, unlike an enable.
+describe("a Disconnect failure after the workspace changed", () => {
+  it.each([
+    ["the same shell, given another workspace", false],
+    ["a new shell for the other workspace", true],
+  ])("reaches the open workspace's notices: %s", async (_case, remount) => {
+    const logout = deferred<void>();
+    let signedIn = true;
+    const sessionListeners: Array<(event: { sessionKey: string | null; phase: "changing" | "ready" }) => void> = [];
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      cloudLogout: vi.fn(() => logout.promise),
+    });
+    bridge.onCloudSessionChanged = vi.fn((listener: (event: { sessionKey: string | null; phase: "changing" | "ready" }) => void) => {
+      sessionListeners.push(listener);
+      return () => {};
+    });
+    bridge.cloudStatus = vi.fn(async () =>
+      signedIn
+        ? { connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test", workspaceSynced: false }
+        : { connected: false, email: "", serverUrl: "", workspaceSynced: false },
     );
-    // The Undo row ran once and is gone.
-    expect(screen.queryByText(/You can undo this for 10 minutes/)).toBeNull();
+    vi.stubGlobal("dohcDesktop", bridge);
+    const shell = (workspace: Workspace) => (
+      <DesktopWorkspaceShell
+        {...(remount ? { key: workspace.workspaceId } : {})}
+        workspace={workspace}
+        workspaces={[WORKSPACE, OTHER_WORKSPACE]}
+        {...shellBootstrapProps(bridge)}
+        onSwitchWorkspace={() => {}}
+      />
+    );
+    const view = render(shell(WORKSPACE));
+    const user = userEvent.setup();
+    await user.click(await screen.findByTestId("activity-settings"));
+    await user.click(await screen.findByTestId("settings-nav-cloud"));
+    await user.click(await screen.findByTestId("cloud-disconnect"));
+    await waitFor(() => expect(bridge.cloudLogout).toHaveBeenCalled());
+
+    // Main announces the logout before the step that fails: the shell drops
+    // its status, and the account row leaves the page.
+    signedIn = false;
+    act(() => {
+      for (const listener of [...sessionListeners]) listener({ sessionKey: null, phase: "ready" });
+    });
+    await waitFor(() => expect(screen.queryByTestId("settings-row-account")).toBeNull());
+
+    view.rerender(shell(OTHER_WORKSPACE));
+    await act(async () => {
+      logout.reject(new Error("dohc could not stop sync for Notes."));
+    });
+
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
+      "dohc could not stop sync for Notes.",
+    );
   });
 });
 
@@ -2186,7 +2715,11 @@ describe("connection dialog retries", () => {
     const user = userEvent.setup();
     renderShell(bridge);
 
-    await user.click(await screen.findByTestId("activity-cloud"));
+    const openConnect = async () => {
+      await user.keyboard("{Control>}k{/Control}");
+      await user.click(await screen.findByText("Connect server"));
+    };
+    await openConnect();
     await user.type(
       await screen.findByTestId("cloud-server-url"),
       "https://dohc.example.test",
@@ -2196,7 +2729,7 @@ describe("connection dialog retries", () => {
 
     await user.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByTestId("cloud-sync-panel")).toBeNull());
-    await user.click(screen.getByTestId("activity-cloud"));
+    await openConnect();
     expect(
       ((await screen.findByTestId("cloud-server-url")) as HTMLInputElement).value,
     ).toBe("");
@@ -2212,6 +2745,57 @@ describe("connection dialog retries", () => {
 });
 
 describe("unavailable MCP launcher settings", () => {
+  it("retries a stopped run's history from Notices after Settings closes", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const run = { id: "run-old", startedAt: 1, agentId: "agent-1", onBehalfOf: "ice", status: "running" as const };
+    let activeRun: typeof run | null = run;
+    bridge.getAgentRunStatus.mockImplementation(async () => ({ activeRun, lastRun: null }));
+    bridge.endAgentRun.mockImplementationOnce(async () => {
+      activeRun = null;
+      throw new Error("Repair .dohc/agent-runs.json, then try again.");
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await within(await screen.findByTestId("command-palette")).findByText("Settings: Open Agents (MCP)"));
+    await waitFor(() => expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"));
+    await user.click(screen.getByTestId("mcp-enable-toggle"));
+    await screen.findByTestId("workspace-shell-error");
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notice = await within(await screen.findByTestId("notice-center")).findByText("Repair .dohc/agent-runs.json, then try again.");
+    const row = notice.closest("li");
+    if (!row) throw new Error("The agent failure has no Notices row.");
+    await user.click(within(row).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridge.endAgentRun).toHaveBeenCalledTimes(2));
+    expect(bridge.endAgentRun).toHaveBeenLastCalledWith({ workspaceId: WORKSPACE.workspaceId, runId: run.id });
+    expect(bridge.startAgentRun).not.toHaveBeenCalled();
+  });
+
+  it("keeps an agent settings retry in Notices when it fails after Settings closes", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const message = "dohc could not load agent settings.";
+    bridge.getMcpConfig.mockRejectedValueOnce(new Error(message));
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await within(await screen.findByTestId("command-palette")).findByText("Settings: Open Agents (MCP)"));
+    await screen.findByTestId("workspace-shell-error");
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
+    bridge.getMcpConfig.mockRejectedValueOnce(new Error(message));
+    await user.click(screen.getByTestId("workspace-shell-error-retry"));
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(message);
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notice = await within(await screen.findByTestId("notice-center")).findByText(message);
+    const row = notice.closest("li");
+    if (!row) throw new Error("The load failure has no Notices row.");
+    await user.click(within(row).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridge.getMcpConfig).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(screen.queryByText(message)).toBeNull());
+  });
+
   it("shows the launcher error without a copyable config", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.getMcpConfig = vi.fn(
@@ -2226,7 +2810,7 @@ describe("unavailable MCP launcher settings", () => {
     await user.keyboard("{Control>}k{/Control}");
     await user.click(
       await within(await screen.findByTestId("command-palette")).findByText(
-        "Settings: Open Agents & MCP",
+        "Settings: Open Agents (MCP)",
       ),
     );
 

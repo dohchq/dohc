@@ -1,3 +1,4 @@
+import {accountIsFenced} from "./storage/accountDeletion";
 import {parseRoute} from "./relayRoute";
 import {parsePublicEditRelease, type PublicEditRelease} from "@dohc/security-contract";
 import {normalizeLinkRefusal} from "./linkRefusal";
@@ -13,6 +14,7 @@ import { createOwnerAppPublicationRoutes } from "./ownerAppPublicationRoutes";
 import {readOwnerAppResponses} from "./ownerAppResponseRoutes";
 import { createLinkAppPublicationRoutes } from "./linkAppPublicationRoutes";
 import { createLinkAppCollectionRoutes, type AppCollectionPolicy } from "./appCollectionRoutes";
+import {createNamedRecipientChat} from "./namedRecipientChat";
 import {createNamedRecipientDocuments} from "./namedRecipientDocuments";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import {
@@ -56,6 +58,7 @@ import { createLinkCredentialRoutes } from "./linkCredentialRoutes";
 import { accountDisplayName, createDiscussionRoutes } from "./discussionRoutes";
 import {shareSenderLabel as formatShareSender} from "@dohc/security-contract/share-labels";
 import { createShareReadQueries } from "./shareReadQueries";
+import { createLinkChatRoutes } from "./linkChatRoutes";
 import { createLinkReadRoutes } from "./linkReadRoutes";
 import { createShareSummaries } from "./shareSummaries";
 import { createShareGrantRoutes } from "./shareGrantRoutes";
@@ -84,6 +87,7 @@ import {
 } from "./linkSecurity";
 import { DiscussionActivityHub } from "./discussionActivity";
 import { PresenceHub } from "./presence";
+import { ReplicaWatches } from "./replicaWatches";
 import { createPresenceRoutes } from "./presenceRoutes";
 import { createProposalRoutes } from "./proposalRoutes";
 import { parseShareId, parseWorkspaceId } from "./requestInputs";
@@ -121,6 +125,7 @@ export interface CreateSyncRelayHandlerOptions {
   lookupVerifiedUserEmail?: (userId: string) => Promise<string | null> | string | null;
   // Display-only reverse lookup for share listings; never used for authz.
   lookupUserEmail?: (userId: string) => Promise<string | null> | string | null;
+  lookupUserEmails?: (userIds: readonly string[]) => Promise<ReadonlyMap<string, string>>;
   // Better Auth display name for discussion authorship; never used for authz.
   lookupUserDisplayName?: (
     userId: string,
@@ -140,6 +145,7 @@ export interface CreateSyncRelayHandlerOptions {
   // Wake-only long-poll coordination. Durable revisions and data stay in
   // storage, so replacing this hub cannot invalidate a client watermark.
   discussionActivity?: DiscussionActivityHub;
+  replicaWatches?: Pick<ReplicaWatches, "watched">;
   // Relay-instance HMAC key. When absent, every link route refuses without
   // touching storage. main.ts requires it outside development and test.
   linkKey?: string | Uint8Array;
@@ -191,12 +197,14 @@ export function createSyncRelayHandler({
   resolveUserIdByEmail,
   lookupVerifiedUserEmail,
   lookupUserEmail,
+  lookupUserEmails,
   lookupUserDisplayName,
   newShareId = () => randomUUID(),
   newGrantId = () => randomUUID(),
   newId = () => randomUUID(),
   presence = new PresenceHub(),
   discussionActivity = new DiscussionActivityHub(),
+  replicaWatches = new ReplicaWatches(discussionActivity),
   linkKey,
   shareWebOrigin,
   relayExchangeKey,
@@ -245,8 +253,19 @@ export function createSyncRelayHandler({
   serverRuns = () => undefined,
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler & {
   resolveNamedBrowserSession: ReturnType<typeof createNamedLiveBrowserHttp>["resolve"];
+  deleteAccount(userId: string, workspaceIds: readonly string[], shareIds: readonly string[]): void;
   readOwnerShares(ownerUserId: string, path: string): Promise<{ status: number; body: unknown }>;
 } {
+  const accountActor = resolveActor;
+  const requireUnfencedActor = (actor: Awaited<ReturnType<ResolveActor>>) => {
+    if (accountIsFenced(storage, actor.userId)) throw notFound();
+    return actor;
+  };
+  resolveActor = (request, workspaceId) => {
+    const actor = accountActor(request, workspaceId);
+    return typeof (actor as {then?: unknown}).then === "function"
+      ? Promise.resolve(actor).then(requireUnfencedActor) : requireUnfencedActor(actor as Awaited<ReturnType<ResolveActor>>);
+  };
   const publicEditRelease = parsePublicEditRelease(releaseInput);
   const respondToDataset = datasetHost ? createDatasetRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs, pressDataset}) : undefined;
   const respondToDatasetReplica = datasetHost ? createDatasetReplicaRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
@@ -299,7 +318,7 @@ export function createSyncRelayHandler({
     newestFilteredOpFreshness,
     historicalSharedBlob,
     linkRevisionByteLength,
-  } = createShareReadQueries(storage, linkFreshnessPageSize);
+  } = createShareReadQueries(storage, linkFreshnessPageSize, linkKey);
 
   async function shareSenderLabel(granterUserId: string, knownEmail?: string | null): Promise<string> {
     const name = await accountDisplayName(lookupUserDisplayName, granterUserId);
@@ -364,7 +383,7 @@ export function createSyncRelayHandler({
     throw notFound();
   }
 
-  const { respondToSharePresence, respondToWorkspacePresence } = createPresenceRoutes(
+  const { respondToSharePresence, respondToWorkspacePresence, deleteAccount: deletePresenceAccount } = createPresenceRoutes(
     presence,
     nowMs,
     storage,
@@ -397,6 +416,7 @@ export function createSyncRelayHandler({
     storage,
     nowMs,
     discussionActivity,
+    replicaWatches,
     lookupUserDisplayName,
   );
 
@@ -438,6 +458,11 @@ export function createSyncRelayHandler({
     lookupUserDisplayName,
   );
 
+  const namedChat = namedBrowserSessionLimits ? createNamedRecipientChat({
+    storage, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits,
+    resolveActor, lookupUserDisplayName, claimPendingShares, activity: discussionActivity, nowMs, requireShareAction, transport: respondToNamedShareTransport, reads: {chatResolverFor},
+  }) : undefined;
+
   const { respondToShareProposals, respondToWorkspaceProposals } = createProposalRoutes(
     storage,
     nowMs,
@@ -451,6 +476,7 @@ export function createSyncRelayHandler({
 
   const respondToCollectionWrites = createCollectionWriteRoutes({
     storage,
+    lookupUserDisplayName,
     rateLimiter: collectionWriteRateLimiter,
     nowMs,
     newId,
@@ -479,8 +505,12 @@ export function createSyncRelayHandler({
     receivedShareSummary,
     independentGrantSummary,
     linkInventorySummary,
+    namedBrowserInvitation,
     publicEditRelease,
     shareSenderLabel,
+    undefined,
+    lookupUserEmails,
+    linkKey,
   );
   const { respondToShareInventory, respondToWorkspaceLinkInventory } = shareInventoryRoutes(claimPendingShares);
   // The server reads the owner's shares without the owner there, so it
@@ -648,6 +678,17 @@ export function createSyncRelayHandler({
     publicEditRelease,
   );
 
+  const respondToLinkChat = createLinkChatRoutes({
+    storage,
+    requireLinkRead,
+    requireFreshLinkRead,
+    linkJsonResponse,
+    readLimiters: { capability: linkReadRateLimiter, grant: linkGrantReadRateLimiter },
+    followLimiters: { capability: linkLogReadRateLimiter, grant: linkGrantLogReadRateLimiter },
+    activity: discussionActivity,
+    reads: { chatResolverFor },
+  });
+
   const respondToLinkRead = createLinkReadRoutes(
     storage,
     nowMs,
@@ -666,9 +707,10 @@ export function createSyncRelayHandler({
     discussionActivity,
     admitLinkBlobBytes,
     respondWithLinkBytes,
+    linkKey,
   );
 
-  const respondToOwnerRestore = createOwnerRestoreRoutes({storage, host: ownerRestoreHost, nowMs, newId});
+  const respondToOwnerRestore = createOwnerRestoreRoutes({storage, host: ownerRestoreHost, nowMs, newId, lookupUserEmail});
   const respondToOwnerAppPublication = createOwnerAppPublicationRoutes({storage, limits: appPublicationLimits, collectionsEnabled: appCollectionPolicy !== undefined, nowMs});
   const respondToLinkAppPublication = createLinkAppPublicationRoutes({storage, limits: appPublicationLimits, linkKey: linkKey!, publicEditRelease, nowMs,
     requireLinkRead, capabilityLimiter: linkReadRateLimiter, grantLimiter: linkGrantReadRateLimiter,
@@ -683,6 +725,9 @@ export function createSyncRelayHandler({
       }
       if (pathname === "/sync/live/named-documents") {
         return namedDocuments ? await namedDocuments(request) : errorResponse(notFound());
+      }
+      if (pathname.startsWith("/sync/named-chat/")) {
+        return namedChat ? await namedChat(request) : errorResponse(notFound());
       }
       const route = parseRoute(request);
       if (route.route === "link-exchange") {
@@ -707,6 +752,9 @@ export function createSyncRelayHandler({
       }
       if (route.route === "link-discussion-activity") {
         return await respondToLinkDiscussionActivity(request);
+      }
+      if (route.route === "link-chat-channels" || route.route === "link-chat-messages") {
+        return await respondToLinkChat(request, route);
       }
       if (route.route === "link-collection-writes") {
         if (!respondToLinkCollectionWrites) throw notFound();
@@ -860,7 +908,7 @@ export function createSyncRelayHandler({
         return await respondToWorkspaceRegistration(request, actor);
       }
 
-      if (route.route === "shares-list" || route.route === "share" || route.route === "share-access") {
+      if (route.route === "shares-list" || route.route === "share" || route.route === "share-access" || route.route === "share-copy") {
         return await respondToShareInventory(request, route, actor);
       }
 
@@ -967,6 +1015,12 @@ export function createSyncRelayHandler({
     return normalizeLinkRefusal(result, path);
   };
   return Object.assign(handle, {
+    deleteAccount(userId: string, workspaceIds: readonly string[], shareIds: readonly string[]) {
+      presence.deleteAccount(userId, workspaceIds);
+      deletePresenceAccount(userId);
+      namedBrowser?.deleteAccount(userId, workspaceIds);
+      for (const shareId of shareIds) terminateLinkStreamsForShare(shareId);
+    },
     resolveNamedBrowserSession: (request: Request, discriminator: string) => namedBrowser?.resolve(request, discriminator) ?? Promise.resolve(null),
     /**
      * A GET of the owner's share listings, answered in process as the

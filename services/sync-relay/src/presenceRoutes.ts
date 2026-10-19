@@ -1,3 +1,4 @@
+import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import { jsonResponse } from "@dohc/service-http";
 import {
   PresenceCapacityError,
@@ -11,7 +12,6 @@ import {
   chatSideOf,
   parseChatThreadTopic,
   targetVersionId,
-  visibleSharePath,
   type ChatShareThreadResolver,
 } from "./shareFilter";
 import type { AuthorizedShareAction } from "./shareAuthorization";
@@ -256,5 +256,5 @@ export function createPresenceRoutes(
     const topic = parsePresenceTopic(new URL(request.url).searchParams.get("topic"));
     return await respondPresence(request, workspaceId, topic, userId);
   };
-  return { respondToSharePresence, respondToWorkspacePresence };
+  return { respondToSharePresence, respondToWorkspacePresence, deleteAccount: project.deleteAccount };
 }

@@ -7,7 +7,7 @@ import {
   DEFAULT_RUNNER_SETTINGS,
   DEFAULT_SIDEBAR_SETTINGS,
   DEFAULT_USER_SETTINGS,
-  DesktopUserSettings,
+  DesktopUserSettings, AgentColors,
   RunnerSettings,
   clampZoomLevel,
   effectiveThemeMode,
@@ -543,6 +543,18 @@ describe("desktop user settings store", () => {
     });
   });
 
+  it("keeps Chats in the sidebar order and hidden list", async () => {
+    const root = await createTestScratch("dohc-user-settings-");
+    const withChats: DesktopUserSettings = {
+      ...DEFAULT_USER_SETTINGS,
+      sidebar: { order: ["chats", "explorer", "search", "graph", "sites", "history"], hidden: ["chats"], pinnedApps: {} },
+    };
+    await writeUserSettingsFile(root, withChats, DEFAULT_USER_SETTINGS);
+    const read = await readUserSettingsFile(root);
+    expect(read.settings.sidebar).toEqual(withChats.sidebar);
+    expect(read.ignored ?? []).toEqual([]);
+  });
+
   it("refuses to read a symlinked user settings file", async () => {
     const root = await createTestScratch("dohc-user-settings-");
     const outside = await createTestScratch("dohc-user-settings-");
@@ -563,4 +575,61 @@ describe("desktop user settings store", () => {
       source: "recovered",
     });
   });
+});
+
+
+describe("private agent colour storage", () => {
+  it("bounds the map and each UTF-8 key", () => {
+    expect(AgentColors.safeParse(Object.fromEntries(Array.from({ length: 256 }, (_, n) => [String(n), "blue"]))).success).toBe(true);
+    expect(AgentColors.safeParse(Object.fromEntries(Array.from({ length: 257 }, (_, n) => [String(n), "blue"]))).success).toBe(false);
+    expect(AgentColors.safeParse({ ["é".repeat(1024)]: "blue" }).success).toBe(true);
+    expect(AgentColors.safeParse({ ["é".repeat(1025)]: "blue" }).success).toBe(false);
+    expect(AgentColors.safeParse({ agent: "olive" }).success).toBe(false);
+  });
+  it("ignores one bad entry alone and drops stored olive for a person", async () => {
+    const dir = await createTestScratch("agent-colors-lenient-");
+    await writeFile(join(dir, USER_SETTINGS_FILE), JSON.stringify({ ...DEFAULT_USER_SETTINGS,
+      appearance: { ...DEFAULT_USER_SETTINGS.appearance, yourColor: "olive", agentColors: { good: "rose", bad: "olive", ["x".repeat(2049)]: "blue" } } }));
+    const result = await readUserSettingsFile(dir);
+    expect(result.settings.appearance.yourColor).toBeNull();
+    expect(result.settings.appearance.agentColors).toEqual({ good: "rose" });
+    expect(result.ignored).toEqual([{ key: "appearance.yourColor", reason: "invalid" }]);
+  });
+});
+
+
+it("keeps a presentation reader current across writes, reloads and reset", async () => {
+  const { agentColorsForPresentation, updateUserSettingsFile } = await import("./userSettingsStore");
+  const dir = await createTestScratch("agent-colors-reader-");
+  const colors = await agentColorsForPresentation(dir);
+  expect(colors()).toBeUndefined();
+  await updateUserSettingsFile(dir, current => ({ ...current, appearance: { ...current.appearance, agentColors: { agent: "rose" } } }));
+  expect(colors()).toEqual({ agent: "rose" });
+  await writeFile(join(dir, USER_SETTINGS_FILE), JSON.stringify({ ...DEFAULT_USER_SETTINGS,
+    appearance: { ...DEFAULT_USER_SETTINGS.appearance, agentColors: { agent: "blue" } } }));
+  await reloadUserSettingsFile(dir);
+  expect(colors()).toEqual({ agent: "blue" });
+  await replaceUserSettingsFile(dir, DEFAULT_USER_SETTINGS);
+  expect(colors()).toBeUndefined();
+});
+
+
+it("refuses a bounded colour map that would make the settings file unreadable on restart", async () => {
+  const { updateUserSettingsFile } = await import("./userSettingsStore");
+  const dir = await createTestScratch("agent-colors-size-");
+  const path = await ensureUserSettingsFile(dir);
+  const before = await readFile(path, "utf8");
+  const agentColors = Object.fromEntries(Array.from({ length: 256 }, (_, index) => [String(index) + "x".repeat(1100), "blue"]));
+  await expect(updateUserSettingsFile(dir, current => ({ ...current,
+    appearance: { ...current.appearance, agentColors: AgentColors.parse(agentColors) } }))).rejects.toThrow("256 KB");
+  expect(await readFile(path, "utf8")).toBe(before);
+});
+
+it("keeps public ignored-key notices after many invalid private colours", async () => {
+  const dir = await createTestScratch("agent-colors-notices-");
+  await writeFile(join(dir, USER_SETTINGS_FILE), JSON.stringify({ ...DEFAULT_USER_SETTINGS,
+    appearance: { ...DEFAULT_USER_SETTINGS.appearance,
+      agentColors: Object.fromEntries(Array.from({ length: 60 }, (_, n) => [String(n), "olive"])) },
+    unknownSetting: true }));
+  expect((await readUserSettingsFile(dir)).ignored).toEqual([{ key: "unknownSetting", reason: "unknown" }]);
 });

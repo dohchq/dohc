@@ -1,15 +1,15 @@
 import { parseApprovalAgent } from "@dohc/security-contract/approval-provenance";
+import { isChatShareAccessValue } from "@dohc/security-contract/share-grant";
 import { normalizeShareLabel } from "@dohc/security-contract/share-labels";
 import { jsonResponse } from "@dohc/service-http";
 import type {PublicEditRelease} from "@dohc/security-contract";
-import { shareAccessRank } from "@dohc/security-contract/share-selector";
 import type { DiscussionActivityHub } from "./discussionActivity";
 import { badRequest, notFound, RELAY_ERRORS, relayError } from "./errors";
 import type { createLinkResponseStreams } from "./linkResponseStreams";
 import { hashLinkBearer, isPublicLinkAccess } from "./linkSecurity";
 import { parseShareId, parseString, parseWorkspaceId, readJsonObject } from "./requestInputs";
 import { selectorTargetsBlockedChannel } from "./shareAuthorization";
-import { parseStoredAnyShareSelectorJson, validateChatChannelShareSelector, validateChatShareAccess, validateFileShareAccess, validateGroupShareSelector, validateShareSelector } from "./shareFilter";
+import { fileHalfOfGroup, linkAccessLevels, parseStoredAnyShareSelectorJson, validateChatChannelShareSelector, validateChatShareAccess, validateFileShareAccess, validateGroupShareSelector, validateShareSelector } from "./shareFilter";
 import type { createShareSummaries } from "./shareSummaries";
 import type { SyncRelayShareGrantRow, SyncRelayShareWithGrantRow, SyncRelayStorage } from "./storage";
 import { MAX_ORIGIN_ID_CHARS, MAX_SHARE_ID_CHARS } from "./wireLimits";
@@ -88,6 +88,23 @@ export function createShareGrantRoutes(
       throw relayError("invalid_access", "Edit links require files on the main version.");
     }
   };
+  // A link on a Group share holds Group access. Read-write edits the Group's
+  // folder, so it needs the release an Edit link needs.
+  const validateShareLinkAccess = (value: unknown, selectorJson: string): string => {
+    const selector = parseStoredAnyShareSelectorJson(selectorJson);
+    if (selector && "kind" in selector && selector.kind === "group") {
+      if (!isChatShareAccessValue(value)) {
+        throw relayError("invalid_access", 'access must be "read-only" or "read-write"');
+      }
+      if (!isPublicLinkAccess(fileHalfOfGroup({ ...selector, access: value }).access, publicEditRelease)) {
+        throw relayError("invalid_access", 'access must be "read-only"');
+      }
+      return value;
+    }
+    const access = validatePublicLinkAccess(value, publicEditRelease);
+    requireEditableSelector(access, selectorJson);
+    return access;
+  };
   // The share and an active grant of `kind` on it, when the actor owns both
   // the share and its workspace right now. Anything else is a generic 404.
   // Lifecycle steps must reach any active grant, including one that is no
@@ -159,8 +176,7 @@ export function createShareGrantRoutes(
         actor,
       );
       requireShareWorkspace(share, workspaceId);
-      validatePublicLinkAccess(grant.access, publicEditRelease);
-      requireEditableSelector(grant.access, share.selectorJson);
+      validateShareLinkAccess(grant.access, share.selectorJson);
       const expectedDependentGrantIds = parseExpectedDependentGrantIds(input, [
         "workspaceId",
         "expectedDependentGrantIds",
@@ -179,8 +195,7 @@ export function createShareGrantRoutes(
             actor,
           );
           requireShareWorkspace(current.share, workspaceId);
-          validatePublicLinkAccess(current.grant.access, publicEditRelease);
-          requireEditableSelector(current.grant.access, current.share.selectorJson);
+          validateShareLinkAccess(current.grant.access, current.share.selectorJson);
         },
         mintCredential: () => {
           secret = newLinkBearer();
@@ -218,15 +233,15 @@ export function createShareGrantRoutes(
         actor,
       );
       requireShareWorkspace(share, workspaceId);
-      if (!["view", "comment", "edit"].includes(grant.access)) throw notFound();
+      const levels = linkAccessLevels(parseStoredAnyShareSelectorJson(share.selectorJson));
+      if (!levels.includes(grant.access)) throw notFound();
       const expectedDependentGrantIds = parseExpectedDependentGrantIds(input, [
         "workspaceId",
         "access",
         "expectedDependentGrantIds",
       ]);
-      const access = validatePublicLinkAccess(input.access, publicEditRelease);
-      requireEditableSelector(access, share.selectorJson);
-      const widening = shareAccessRank(access) > shareAccessRank(grant.access);
+      const access = validateShareLinkAccess(input.access, share.selectorJson);
+      const widening = levels.indexOf(access) > levels.indexOf(grant.access);
       if (widening && (!linkKey || !shareWebOrigin)) throw notFound();
       let secret: string | null = null;
       const result = storage.retuneShareGrant({
@@ -492,22 +507,26 @@ export function createShareGrantRoutes(
       if (Object.keys(input).some((key) => key !== "access")) {
         throw badRequest("A link accepts only access.");
       }
-      const access = validatePublicLinkAccess(input.access, publicEditRelease);
+      // Refused before the lookup, so the answer never depends on the share.
+      if (!isChatShareAccessValue(input.access)) validatePublicLinkAccess(input.access, publicEditRelease);
       const share = storage.getShare(route.shareId);
       const selector = share
         ? parseStoredAnyShareSelectorJson(share.selectorJson)
         : null;
+      // A file share or a Group share. A chat-only share has no files.
+      const kind = (selector as { kind?: unknown } | null)?.kind;
       if (
         !share ||
         share.workspaceId !== route.workspaceId ||
         share.granterUserId !== actor.userId ||
         !storage.workspaceIsOwnedBy(share.workspaceId, actor.userId) ||
         !selector ||
-        "kind" in selector
+        (kind !== undefined && kind !== "group") ||
+        selectorTargetsBlockedChannel(storage, share.workspaceId, selector)
       ) {
         throw notFound();
       }
-      requireEditableSelector(access, share.selectorJson);
+      const access = validateShareLinkAccess(input.access, share.selectorJson);
       const secret = newLinkBearer();
       const grantId = newGrantId();
       const createdAtMs = nowMs();
@@ -662,7 +681,7 @@ export function createShareGrantRoutes(
           selector,
           access,
           grantId,
-          ...namedBrowserInvitation(grantId, selector, access),
+          ...namedBrowserInvitation(route.workspaceId, grantId, selector, access),
           generation: 1,
           createdAtMs,
         });
@@ -718,7 +737,7 @@ export function createShareGrantRoutes(
         selector,
         access,
         grantId,
-        ...namedBrowserInvitation(grantId, selector, access),
+        ...namedBrowserInvitation(route.workspaceId, grantId, selector, access),
         generation: 1,
         createdAtMs,
       });

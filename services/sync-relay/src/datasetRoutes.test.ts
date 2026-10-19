@@ -708,3 +708,41 @@ it("records owner-only agent approvals through activation and migration routes",
   expect(history.entries[0].approvalAgent).toEqual(approvalAgent);
   expect(f.storage.db.prepare("SELECT COUNT(*) n FROM dohc_dataset_approval_provenance").get()!.n).toBe(2);
 });
+
+it("preserves schema dates in a Collection transfer over HTTP across historical and current checkpoints",async()=>{
+  const source=await httpFixture(),target=await httpFixture();await source.activate();
+  const owner={kind:"named" as const,workspaceId:"w",userId:"owner"},scope={workspaceId:"w",datasetId:id(1)};
+  for(const ordinal of [2,3]){
+    source.advance(100);
+    const next=structuredClone(definition);next.name="Requests "+ordinal;
+    const approved=describeDatasetRevision({definition:next,revision:ordinal,schemaSql,operationSource});
+    const preview=await source.host.prepareMigration(owner,{workspaceId:"w",revision:approved,schemaSql,operationSource,expected:source.host.approvedArtifacts(owner,scope).cursor,migrationSql:"SELECT 1;"});
+    await source.host.approveMigration(owner,{...scope,candidateId:preview.candidateId,checkpointSha256:preview.checkpointSha256});
+  }
+  const original=source.host.history(owner,scope).entries;
+  expect(original).toMatchObject([{recordedAtMs:210},{recordedAtMs:110}]);
+  const journal=createDatasetJournal({db:source.storage.db,transaction:run=>source.storage.tx(run)}),cursor=journal.head(scope,()=>{}).cursor;
+  journal.fence({expected:cursor,authorize(){}});
+  const archive=await source.host.exportRecovery(owner,scope);
+  try{
+    const chunks=[];for await(const bytes of archive.stream())chunks.push(bytes);
+    const manifestSha256=createHash("sha256").update(encodeRecoveryManifest(archive.manifest,{maxTotalBytes:source.storage.options.workspaceQuotaBytes})).digest("hex");
+    const response=await target.handler(new Request("https://relay/sync/w/datasets/"+id(1)+"/imports/dated-transfer",{method:"POST",headers:{authorization:"Bearer owner","content-type":"application/octet-stream","x-dohc-dataset-manifest-sha256":manifestSha256,"x-dohc-dataset-source-cursor":JSON.stringify(cursor)},body:Buffer.concat(chunks)}));
+    expect(response.status).toBe(200);
+    expect(target.host.history(owner,scope).entries).toEqual(original);
+    target.storage.tx(()=>target.storage.db.prepare("DELETE FROM sync_relay_dataset_usage WHERE workspace_id=? AND dataset_id=?").run(scope.workspaceId,scope.datasetId));
+    expect(target.storage.db.prepare("SELECT COUNT(*) n FROM dohc_dataset_checkpoint_times").get()!.n).toBe(0);
+  }finally{await archive.dispose();}
+});
+
+it("serves owner-only metadata History and validates its boolean query", async () => {
+  const f = await httpFixture();
+  expect((await f.activate()).status).toBe(200);
+  await f.host.invoke({ kind: "named", workspaceId: "w", userId: "owner" }, { workspaceId: "w", datasetId: id(1), revision: 1, revisionSha256: revision.revisionSha256, operationId: id(5), input: { name: "Private" }, idempotencyKey: "metadata" });
+  const response = await f.http(`${f.path}/history?metadataOnly=true`);
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({ lineage: expect.stringMatching(/^[a-f0-9]{64}$/), archived: false, olderRecordedAtMs: expect.any(Number), entries: [{ revision: 1 }] });
+  expect((await f.http(`${f.path}/history?metadataOnly=false`)).status).toBe(200);
+  for (const query of ["metadataOnly=1", "metadataOnly=true&metadataOnly=false"]) expect((await f.http(`${f.path}/history?${query}`)).status).toBe(400);
+  expect((await f.http(`${f.path}/history?metadataOnly=true`, undefined, { authorization: "Bearer helper" })).status).toBe(404);
+});

@@ -11,12 +11,51 @@ import type { FormerEditor, ReachRoster, RosterGrant, RosterProblem } from "./au
 // check.
 const MAX_INVENTORY_PAGES = 50;
 
+const EndedHolder = z.object({
+  grantId: z.string().min(1).max(256), recipientUserId: z.string().min(1).max(256),
+  recipientEmail: z.string().min(1).max(320).nullable(), parentGrantId: z.string().min(1).max(256),
+});
+export type HistoryAccount = z.infer<typeof EndedHolder>;
+export type HistoryAccountIds = { grantIds: readonly string[]; userIds: readonly string[] };
+
+/** Owner-only History attribution, fetched separately from the reach roster. */
+export async function lookupHistoryAccounts(
+  workspaceId: string, get: (path: string) => Promise<{ status: number; body: unknown }>, ids: HistoryAccountIds,
+): Promise<HistoryAccount[] | null> {
+  if (ids.grantIds.length + ids.userIds.length === 0) return [];
+  if (ids.grantIds.length + ids.userIds.length > 200) return null;
+  const query = new URLSearchParams();
+  for (const id of ids.grantIds) query.append("historyGrantId", id);
+  for (const id of ids.userIds) query.append("historyUserId", id);
+  try {
+    const response = await get(`/sync/${encodeURIComponent(workspaceId)}/shares/links?${query}`);
+    if (response.status !== 200) return null;
+    const parsed = z.object({ holders: z.array(EndedHolder).max(200) }).safeParse(response.body);
+    if (!parsed.success || parsed.data.holders.some(holder => !ids.grantIds.includes(holder.grantId) && !ids.userIds.includes(holder.recipientUserId))) return null;
+    return parsed.data.holders;
+  } catch { return null; }
+}
+
 const ID = z.string().min(1).max(256);
 const PATHS = z.array(z.string().refine(isShareablePath)).max(MAX_SHARE_PATHS);
 const VERSION_ID = z.string().refine(isValidShareVersionId);
 const CHAT_ACCESS = z.enum(["read-write", "read-only"]);
+const GENERATION = z.number().int().min(1).max(Number.MAX_SAFE_INTEGER);
+const GRANTER_DISPLAY = {
+  granterUserId: ID,
+  granterEmail: z.string().max(320).nullable(),
+};
+const DISPLAY = {
+  ...GRANTER_DISPLAY,
+  subjectName: z.string().max(320).nullable(),
+  sharerName: z.string().max(320).nullable(),
+};
 const BASE = {
+  ...DISPLAY,
+  shareId: ID,
   grantId: ID,
+  generation: GENERATION,
+  status: z.enum(["active", "revoked"]),
   recipientUserId: ID.nullable(),
   recipientEmail: z.string().min(1).max(320).nullable(),
 };
@@ -51,7 +90,6 @@ export type ListedGrant = z.infer<typeof ListedGrantSchema>;
 // Collection's automations.yaml directly (ADR 0013), so the reach check can
 // still hold what it may have written. `automationsGeneration` is the newest
 // grant generation it wrote one under, or null.
-const GENERATION = z.number().int().min(1).max(Number.MAX_SAFE_INTEGER);
 const ListedLinkSchema = z.object({
   grant: GrantSchema.refine((grant) => grant.recipientUserId === null && grant.recipientEmail === null),
   ended: z.boolean(),
@@ -73,7 +111,8 @@ export type FormerGrant = z.infer<typeof FormerGrantSchema>;
 
 // A person's grant that was revoked without writing automations. Only
 // History reads it, to name who wrote through it; reach never does.
-const EndedGrantSchema = z.object({ grantId: ID, recipientUserId: ID, recipientEmail: z.string().min(1).max(320) });
+const EndedGrantSchema = z.object({ ...BASE, status: z.literal("revoked") })
+  .refine(grant => grant.recipientUserId !== null || grant.recipientEmail !== null);
 export type EndedGrant = z.infer<typeof EndedGrantSchema>;
 
 const ProblemSchema = z.union([
@@ -153,15 +192,19 @@ const RowState = z.object({
   automationsGeneration: GENERATION.nullable(),
 });
 const LinkRow = z.object({
+  subjectName: DISPLAY.subjectName,
+  sharerName: DISPLAY.sharerName,
+  shareId: ID,
+  generation: GENERATION,
   grantId: z.unknown(),
   status: z.enum(["active", "revoked"]),
   selector: z.unknown(),
   access: z.unknown(),
   automationsGeneration: GENERATION.nullable(),
-  dependents: z.array(z.object({ grantId: z.unknown(), recipientUserId: z.unknown(), recipientEmail: z.unknown(), access: z.unknown() })),
+  dependents: z.array(z.object({ grantId: z.unknown(), recipientUserId: z.unknown(), recipientEmail: z.unknown(), access: z.unknown(), generation: GENERATION })),
 });
 
-const GrantedPage = z.object({ granted: z.array(z.unknown()), nextCursor: z.string().min(1).max(1024).optional() });
+const GrantedPage = z.object({ ...GRANTER_DISPLAY, granted: z.array(z.unknown()), nextCursor: z.string().min(1).max(1024).optional() });
 
 const LinkPage = z.object({ links: z.array(z.unknown()), nextCursor: z.string().min(1).max(1024).optional() });
 
@@ -191,7 +234,8 @@ function grantedListing(
     const revoked = state.success && state.data.revokedAtMs !== null;
     if (revoked && generation === null) {
       const ended = EndedGrantSchema.safeParse(row);
-      if (ended.success) endedGrants.push(ended.data);
+      if (!ended.success) return { grants: null, problem: { kind: "unusable-listing" } };
+      endedGrants.push(ended.data);
       continue;
     }
     const grant = ListedGrantSchema.safeParse(row);
@@ -199,6 +243,7 @@ function grantedListing(
       const email = RecipientEmail.safeParse(row);
       return { grants: null, problem: { kind: "damaged-share", recipientEmail: email.success ? email.data.recipientEmail : null } };
     }
+    if (grant.data.status !== (revoked ? "revoked" : "active")) return { grants: null, problem: { kind: "unusable-listing" } };
     if (!revoked) grants.push(grant.data);
     if (generation !== null && (revoked || rosterGrantOf(grant.data).files?.access !== "edit")) {
       formerGrants.push({ grant: grant.data, automationsGeneration: generation });
@@ -207,12 +252,8 @@ function grantedListing(
   return { grants, formerGrants, endedGrants };
 }
 
-// One page of the owner's share links: each link that can edit files or
-// wrote automations directly, and the dependents of every active link. A
-// link that can only view never edits an automation and reaches nothing for
-// one, so leaving it out keeps a workspace with many such links cheap to
-// check.
-function linkListing(links: readonly unknown[]): RosterListing {
+// Retain every active link for Access. Automation reach applies its own Edit rules.
+function linkListing(links: readonly unknown[], granter: Pick<ListedGrant, "granterUserId" | "granterEmail">): RosterListing {
   const grants: ListedGrant[] = [];
   const listed: ListedLink[] = [];
   const damaged = { grants: null, problem: { kind: "damaged-link" } } as const;
@@ -228,15 +269,15 @@ function linkListing(links: readonly unknown[]): RosterListing {
     const wroteAutomations = link.data.automationsGeneration !== null;
     if (ended && !wroteAutomations) continue;
     const own = ListedLinkSchema.safeParse({
-      grant: { grantId: link.data.grantId, recipientUserId: null, recipientEmail: null, selector: link.data.selector, access: link.data.access },
+      grant: { ...link.data, ...granter, recipientUserId: null, recipientEmail: null },
       ended,
       automationsGeneration: link.data.automationsGeneration,
     });
     if (!own.success) return damaged;
-    if (wroteAutomations || (!ended && rosterGrantOf(own.data.grant).files?.access === "edit")) listed.push(own.data);
+    listed.push(own.data);
     if (ended) continue;
     for (const dependent of link.data.dependents) {
-      const grant = ListedGrantSchema.safeParse({ ...dependent, selector: link.data.selector });
+      const grant = ListedGrantSchema.safeParse({ ...link.data, ...dependent, ...granter, status: "active", selector: link.data.selector });
       if (!grant.success) return damaged;
       grants.push(grant.data);
     }
@@ -287,6 +328,7 @@ export async function listRosterGrants(
   const formerGrants: FormerGrant[] = [];
   const endedGrants: EndedGrant[] = [];
   const grantedCursors = new Set<string>();
+  let granter: Pick<ListedGrant, "granterUserId" | "granterEmail"> | undefined;
   let grantedCursor: string | undefined;
   for (let page = 0; ; page += 1) {
     if (page === MAX_INVENTORY_PAGES) return UNUSABLE_ROSTER;
@@ -295,6 +337,7 @@ export async function listRosterGrants(
     if (!shares.ok) return shares.answer;
     const body = GrantedPage.safeParse(shares.body);
     if (!body.success) return UNUSABLE_ROSTER;
+    granter = { granterUserId: body.data.granterUserId, granterEmail: body.data.granterEmail };
     const granted = grantedListing(workspaceId, body.data.granted);
     if (granted.grants === null) return answered(granted);
     grants.push(...granted.grants);
@@ -305,6 +348,7 @@ export async function listRosterGrants(
     if (grantedCursors.has(grantedCursor)) return UNUSABLE_ROSTER;
     grantedCursors.add(grantedCursor);
   }
+  if (!granter) return UNUSABLE_ROSTER;
   const links: ListedLink[] = [];
   const cursors = new Set<string>();
   let cursor: string | undefined;
@@ -315,7 +359,7 @@ export async function listRosterGrants(
     if (!answer.ok) return answer.answer;
     const body = LinkPage.safeParse(answer.body);
     if (!body.success) return UNUSABLE_ROSTER;
-    const linked = linkListing(body.data.links);
+    const linked = linkListing(body.data.links, granter);
     if (linked.grants === null) return answered(linked);
     grants.push(...linked.grants);
     links.push(...linked.links);

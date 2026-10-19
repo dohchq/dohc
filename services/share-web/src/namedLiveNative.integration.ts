@@ -33,7 +33,7 @@ const validationPolicy = { maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000
 const frames = { receive: { maxFrameBytes: 65536, maxStateVectorBytes: 100000, maxUpdateBytes: 1000000, maxSyncBytes: 2000000 },
   maxQueuedBytes: 2000000, maxQueuedFrames: 64, maxControlBytes: 131072, maxControlFrames: 8, maxAssemblyBytes: 2000000 };
 const browserLimits = { maxPendingRequests: 4, maxRequestBytes: 4096, maxResponseBytes: 8192, timeoutMs: 30000 };
-const routeLimits = { maxConnections: 4, maxConnectionsPerSession: 3, maxConnectionsPerPrincipal: 3, maxConnectionsPerGrant: 4,
+const routeLimits = { maxConnections: 4, maxConnectionsPerWorkspace: 96, reservedOwnerConnections: 0, maxConnectionsPerSession: 3, maxConnectionsPerPrincipal: 3, maxConnectionsPerGrant: 4, maxBufferedBytes: 134217728,
   maxPendingRequests: 4, maxRequestBytes: 4096, maxResponseBytes: 8192, maxPendingBytes: 2000000, maxFragments: 8, maxBufferedChunks: 64,
   upgradeTimeoutMs: 30000, idleTimeoutMs: 60000, drainTimeoutMs: 1000 };
 const audience = "https://share.example.test", exchangeKey = "native-network-exchange-".repeat(2), ticketKey = "native-network-tickets-".repeat(2);
@@ -126,7 +126,7 @@ it("preserves native ACKs, accepted feed, and registration lifetime through the 
     const { storage } = deployment;
     expect(storage.claimWorkspace({ workspaceId: "workspace", ownerUserId: "owner", createdAtMs: 1 })).toBe("created");
     expect(storage.provisionLiveHostControl({ mode: "service", hostId: "service", updatedAtMs: 1, guard: storage.captureStanding() }).ok).toBe(true);
-    active = await startServiceLiveHost({ configPath: serviceConfig, ...deployment, frameChanges });
+    active = await startServiceLiveHost({trustedAccount: (accountId: string) => ({accountId, name: accountId}), configPath: serviceConfig, ...deployment, frameChanges });
     const baseline = Y.encodeStateAsUpdate(ownerDoc), document = { workspaceId: "workspace", mainVersionId: mainVersionId!, objectId: "object", lineageClaimId: hash(baseline) };
     const registration = createLiveMarkdownRegistrationValidator(validationPolicy)({ document, currentPath: "docs/a.md", checkpoint: baseline });
     if (registration.kind !== "accepted") throw new Error(JSON.stringify(registration));
@@ -159,8 +159,8 @@ it("preserves native ACKs, accepted feed, and registration lifetime through the 
     const application = createShareWebApplication({ relayUrl, publicRelayUrl: audience, relayExchangeKey: exchangeKey, publicHosts: new Set([new URL(audience).host]),
       accountAuth: { publicOrigin: audience, upstreamUrl: "http://127.0.0.1:1" }, namedBrowserSessionLimits: browserLimits, namedLiveTickets: true });
     const gateway = createLiveGateway({ publicOrigin: audience, publicHosts: new Set([new URL(audience).host]),
-      limits: { maxConnections: 4, maxConnectionsPerSession: 3, maxConnectionsPerPrincipal: 3, maxConnectionsPerGrant: 4, maxFrameBytes: 65536,
-        maxPendingBytes: 2000000, maxPendingFrames: 64, maxFragments: 8, maxBufferedChunks: 64, upgradeTimeoutMs: 30000, idleTimeoutMs: 60000, drainTimeoutMs: 1000 },
+      limits: { maxConnections: 4, maxConnectionsPerWorkspace: 96, reservedOwnerConnections: 0, maxConnectionsPerSession: 3, maxConnectionsPerPrincipal: 3, maxConnectionsPerGrant: 4, maxBufferedBytes: 134217728, maxFrameBytes: 65536,
+        maxPendingBytes: 4 * 1024 * 1024, maxPendingFrames: 64, maxFragments: 8, maxBufferedChunks: 64, upgradeTimeoutMs: 30000, idleTimeoutMs: 60000, drainTimeoutMs: 1000 },
       resolveSession: async (request, discriminator, signal) => { const authenticated = namedLiveGatewayRequest(request, audience, signal);
         return authenticated ? application.resolveNamedBrowserSession(authenticated, discriminator) : null; },
       openHostRoute: createNamedLiveRelayRoute({ relayUrl, publicOrigin: audience, exchangeKey, handshakeTimeoutMs: 30000 }),

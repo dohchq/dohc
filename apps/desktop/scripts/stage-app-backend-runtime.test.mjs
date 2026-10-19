@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createRequire } from 'node:module';
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { load } from 'js-yaml';
 import { stageAppBackendRuntime, requireAppBackendRuntime } from './stage-app-backend-runtime.mjs';
@@ -16,7 +16,8 @@ const builderRequire = createRequire(require.resolve('electron-builder/package.j
 const { getFileMatchers, copyFiles } = builderRequire('app-builder-lib/out/fileMatcher.js');
 
 test('packaging preserves the relocated child and Wasm closure and rejects resource drift', async t => {
-  const root = await mkdtemp(join(tmpdir(), 'dohc-app-runtime-package-'));
+  // A Collection's folder may not contain links, and macOS's temp folder is one.
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'dohc-app-runtime-package-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const source = join(root, 'source');
   await stageAppBackendRuntime({ destination: join(source, 'resources/app-backend-runtime') });
@@ -29,11 +30,14 @@ test('packaging preserves the relocated child and Wasm closure and rejects resou
   await rm(source, { recursive: true, force: true });
   const staged = join(resources, 'app-backend-runtime');
   await requireAppBackendRuntime(staged);
-  if (process.platform === 'win32' && process.arch === 'x64') {
-    const binaryDirectory = join(resources, 'app-compiler/node_modules/@esbuild/win32-x64');
-    await mkdir(binaryDirectory, { recursive: true });
+  const target = `${process.platform}-${process.arch}`;
+  const native = target === 'win32-x64' ? 'win32-x64/esbuild.exe'
+    : ['darwin-arm64', 'linux-arm64', 'linux-x64'].includes(target) ? `${target}/bin/esbuild` : undefined;
+  if (native) {
+    const binary = join(resources, 'app-compiler/node_modules/@esbuild', native);
+    await mkdir(dirname(binary), { recursive: true });
     const compilerRequire = createRequire(require.resolve('esbuild'));
-    await cp(compilerRequire.resolve('@esbuild/win32-x64/esbuild.exe'), join(binaryDirectory, 'esbuild.exe'));
+    await cp(compilerRequire.resolve(`@esbuild/${native}`), binary);
     const compile = await createInstalledDatasetCompiler(resources);
     const source = 'type Value=number;globalThis.operations={read(){const value:Value=42;return {value};}};';
     const installedOutput = await compile(source, 'data/operations.ts', new AbortController().signal);

@@ -179,7 +179,7 @@ export function createTryInVersionSessions(options: TryInVersionSessionsOptions)
     const existing = sessions.get(workspaceId);
     if (existing && existing.state.status === "running") {
       throw new Error(
-        "An agent is already trying something in this workspace. Wait for it to finish, or stop it from Settings → Agents & MCP.",
+        "An agent is already trying something in this workspace. Wait for it to finish, or stop it from Settings → Agents.",
       );
     }
     const ops = await options.operationsFor(workspaceId);

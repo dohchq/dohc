@@ -1,5 +1,6 @@
 use super::*;
 use crate::{ContentKind, Ydoc};
+use dohc_engine_storage::text;
 
 /// A complete cut acquired by the authenticated owner transport. Parsing this
 /// value does not authenticate it. The renderer must not construct this input.
@@ -532,6 +533,93 @@ mod tests {
         );
     }
     #[test]
+    fn native_outbox_headers_keep_only_recorded_human_edits() {
+        use dohc_engine_domain::{ChangeActorKind, ChangeAttribution};
+        for kind in [
+            Some(ChangeActorKind::Human),
+            Some(ChangeActorKind::Automation),
+            None,
+        ] {
+            let mut f = Fixture::new();
+            f.adopt().unwrap();
+            let bytes = f.doc.richdoc_append_paragraph("native edit");
+            let attribution = kind.map(|actor_kind| ChangeAttribution {
+                actor_kind,
+                on_behalf_of: None,
+                depth: 0,
+                run: None,
+            });
+            crate::record_local_update(
+                &mut f.store,
+                &mut WriterDocCache::new(),
+                &f.key,
+                &bytes,
+                crate::LocalAppend {
+                    actor_origin_id: Some("writer"),
+                    attribution: attribution.as_ref(),
+                    ..Default::default()
+                },
+                &NoFaults,
+                11,
+                |tx, outcome, _| {
+                    owner_outbox::append_adopted_local_update_in_tx(
+                        tx,
+                        &f.key,
+                        "owner.md",
+                        outcome.seq,
+                        &bytes,
+                        11,
+                    )
+                },
+            )
+            .unwrap();
+            let outbox_id: String = f
+                .store
+                .read_with(|conn| {
+                    conn.query_row("SELECT outbox_id FROM owner_ydoc_outboxes", [], |row| {
+                        row.get(0)
+                    })
+                })
+                .unwrap();
+            let pending = owner_outbox::read_pending(&f.store, "workspace", &outbox_id).unwrap();
+            let entry = pending.entries.last().unwrap();
+            let header = match owner_outbox::read_pending_page(
+                &f.store,
+                "workspace",
+                &outbox_id,
+                None,
+                1 << 20,
+            )
+            .unwrap()
+            {
+                owner_outbox::OwnerOutboxPageResult::Page(page) => page,
+                _ => panic!("unchanged outbox"),
+            };
+            let page = owner_outbox::read_pending_page(
+                &f.store,
+                "workspace",
+                &outbox_id,
+                Some(owner_outbox::OwnerOutboxReadCursor {
+                    snapshot: header.cursor.snapshot,
+                    part: owner_outbox::OwnerOutboxReadPart::EntryHeader,
+                    sequence: entry.sequence,
+                    offset: 0,
+                }),
+                1 << 20,
+            )
+            .unwrap();
+            let owner_outbox::OwnerOutboxPageResult::Page(page) = page else {
+                panic!("unchanged entry")
+            };
+            let json: serde_json::Value = serde_json::from_slice(&page.bytes).unwrap();
+            assert_eq!(
+                json.get("personEdit"),
+                (kind == Some(ChangeActorKind::Human)).then_some(&serde_json::Value::Bool(true))
+            );
+        }
+    }
+
+    #[test]
     fn first_adoption_seeds_only_pending_local_state_and_preserves_history() {
         let mut f = Fixture::new();
         f.local_edit_before_adoption();
@@ -544,6 +632,17 @@ mod tests {
         let (bytes, pending, created, coverage): (Vec<u8>, i64, i64, i64) = f.store.read_with(|tx| tx.query_row(
             "SELECT b.bytes,e.pending,e.created_at_ms,a.covered_outbox_sequence FROM owner_ydoc_outbox_entries e JOIN binary_blobs b ON b.sha256=e.update_blob_digest CROSS JOIN live_owner_adoptions a", [], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))).unwrap();
         assert_eq!((pending, created, coverage), (1, 10, 0));
+        let credited: Option<bool> = f
+            .store
+            .read_with(|tx| {
+                tx.query_row(
+                    "SELECT person_edit FROM owner_ydoc_outbox_entries",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(credited, None);
         let seeded = Ydoc::wire();
         seeded.apply(&bytes).unwrap();
         assert!(crate::replay_parity::structurally_equal_v2(&f.doc, &seeded).unwrap());
@@ -1173,13 +1272,7 @@ pub(super) fn read_adoption_source(
             return Err(ApplicationError::Corrupt);
         }
     }
-    let text: String = conn
-        .query_row(
-            "SELECT text FROM blobs WHERE sha256=?1 AND byte_length=?2",
-            params![digest, length],
-            |r| r.get(0),
-        )
-        .map_err(read_sql)?;
+    let text: String = text::read_sized(conn, &digest, length).map_err(read_sql)?;
     if text.len() as i64 != length || hex_sha256(text.as_bytes()) != digest {
         return Err(ApplicationError::Corrupt);
     }
@@ -1414,7 +1507,7 @@ pub fn adopt_owner_committed(
             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
             params![held.namespace,cut.adoption_id,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,binding_json,cut.source_moment_id,cut.source_digest,cut.source_byte_length,cut.baseline_moment_relay_sequence,cut.baseline_registered_at_ms,evidence_digest,coverage,covered_sequence,marker.head_update_seq,terminal_cursor,serde_json::to_string(&cut.terminal_receipt).map_err(|_|ApplicationError::Corrupt)?,serde_json::to_string(&held.coordinate).map_err(|_|ApplicationError::Corrupt)?,cut.outbox_limits.max_pending_bytes,cut.outbox_limits.max_pending_age_ms]).map_err(write_sql)?;
         accepted_history::initialize(tx, &held, &cut.baseline_bytes)?;
-        for event in &cut.events { accepted_history::append(tx, &held, event, max_bytes)?; }
+        for event in &cut.events { accepted_history::append_native(tx, &held, event, max_bytes)?; }
         follow_up(tx, &held.namespace, b, cut.events.len() as i64)?;
         Ok(OwnerAdoptionAck { adoption_id:cut.adoption_id.clone(),local_ydoc_sequence:marker.head_update_seq,terminal_cursor,adoption_replayed:false })
     })?;

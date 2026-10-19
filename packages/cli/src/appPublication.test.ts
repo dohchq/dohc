@@ -14,7 +14,8 @@ describe("owner publication review contract", () => {
       operationIds: ["00000000-0000-4000-8000-000000000002"], operations: [{ operationId: "00000000-0000-4000-8000-000000000002", name: "submit", access: "link", readOnly: false }] };
     expect(OwnerAppPublicationResult.parse({ ...prepared, capabilities: [datasetCapability] })).toMatchObject({ capabilities: [datasetCapability] });
     const publication = { publicationId: "b".repeat(64), authorityRevision: 1, appRoot: "app", sourceRevision: "c".repeat(64), active: true, datasetCapability };
-    expect(OwnerAppPublicationResult.parse({ kind: "localListed", publications: [publication] })).toEqual({ kind: "localListed", publications: [publication] });
+    const local = { ...publication, approved: true };
+    expect(OwnerAppPublicationResult.parse({ kind: "localListed", publications: [local] })).toEqual({ kind: "localListed", publications: [local] });
     const shared = { ...publication, shareId: "share", grantId: "grant", linkCurrent: true, manifestUnavailable: false, collectionCapability: null };
     expect(OwnerAppPublicationResult.parse({ kind: "listed", publications: [shared], nextCursor: null })).toEqual({ kind: "listed", publications: [shared], nextCursor: null });
     expect(OwnerAppPublicationResult.safeParse({ ...prepared, capabilities: [{ ...datasetCapability, source: "replace rules" }] }).success).toBe(false);
@@ -38,6 +39,16 @@ describe("owner publication review contract", () => {
   });
   it("preserves every approved collection field for CLI readers", () => {
     expect(OwnerAppPublicationResult.parse(prepared)).toEqual(prepared);
+  });
+  it("lists local Collection apps with unconfirmed responses and keeps an unconfirmed withdrawal distinct", () => {
+    const local = { publicationId: "b".repeat(64), authorityRevision: 3, appRoot: "app", sourceRevision: "c".repeat(64), approved: false, active: false, collectionCapability: capability, pendingCreates: 2 };
+    expect(OwnerAppPublicationResult.parse({ kind: "localListed", publications: [local] })).toEqual({ kind: "localListed", publications: [local] });
+    expect(OwnerAppPublicationResult.safeParse({ kind: "localListed", publications: [{ ...local, datasetCapability: null }] }).success).toBe(false);
+    const { pendingCreates: _, ...withoutPending } = local;
+    expect(OwnerAppPublicationResult.safeParse({ kind: "localListed", publications: [withoutPending] }).success).toBe(false);
+    const unconfirmed = { kind: "withdrawalUnconfirmed", publicationId: "b".repeat(64), authorityRevision: 3, unresolvedCreates: 2 };
+    expect(OwnerAppPublicationResult.parse(unconfirmed)).toEqual(unconfirmed);
+    expect(OwnerAppPublicationResult.safeParse({ ...unconfirmed, unresolvedCreates: 0 }).success).toBe(false);
   });
   it.each([
     { ...capability, schemaSha256: "caller supplied" },
@@ -64,4 +75,13 @@ it("refuses bearer material in publication results", () => {
   expect(OwnerAppPublicationResult.parse(published)).toEqual(published);
   expect(OwnerAppPublicationResult.safeParse({...published,url:"https://relay.example/s/#secret"}).success).toBe(false);
   expect(OwnerAppPublicationResult.safeParse({...published,urlUnavailable:{grantId:"g"}}).success).toBe(false);
+});
+
+it("preserves the operator record in owner listings and rejects caller-selected actors", () => {
+  const operatorTakedown = {actor: "operator", disabledAtMs: 30, reason: "Confirmed phishing"};
+  const publication = {publicationId: "a".repeat(64), authorityRevision: 2, shareId: "s", grantId: "g", active: false,
+    linkCurrent: true, manifestUnavailable: true, collectionCapability: null, datasetCapability: null, operatorTakedown};
+  const value = {kind: "listed", publications: [publication], nextCursor: null};
+  expect(OwnerAppPublicationResult.parse(value)).toEqual(value);
+  expect(OwnerAppPublicationResult.safeParse({...value, publications: [{...publication, operatorTakedown: {...operatorTakedown, actor: "owner"}}]}).success).toBe(false);
 });

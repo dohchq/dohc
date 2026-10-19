@@ -8,19 +8,20 @@ export async function runCanonicalCancellationFixture(root, sourceRoot) {
   // use offline adapters. No database or native build starts in this fixture.
   const put = (path, text) => { mkdirSync(dirname(join(root,path)),{recursive:true}); writeFileSync(join(root,path),text); };
   put('package.json','{"type":"module"}');
-  for(const file of ['verify.mjs','js-tests.mjs','selection.mjs','renderer-selection.mjs','process.mjs','cancellation.mjs','timing.mjs'])
+  for(const file of ['verify.mjs','ticket-evidence.mjs','queue.mjs','js-tests.mjs','selection.mjs','process.mjs','cancellation.mjs','timing.mjs','flaky.mjs'])
     put(`scripts/verification/${file}`,readFileSync(join(sourceRoot,'scripts/verification',file)));
-  put('tools/rust-engine-program/git-read.mjs',readFileSync(join(sourceRoot,'tools/rust-engine-program/git-read.mjs')));
+  for(const file of ['git-read.mjs','gate-commands.mjs'])put(`tools/rust-engine-program/${file}`,readFileSync(join(sourceRoot,'tools/rust-engine-program',file)));
   put('apps/desktop/package.json','{}');
+  put('apps/desktop/scripts/ensure-electron-installed.mjs','');
   put('scripts/verification/rust-reuse.mjs', "export const rustIdentity=()=>({});export const finishRustEvidence=()=>({kind:'fixture'});export const refreshRustReuse=()=>{throw Error('unexpected reuse');};");
-  put('pnpm-workspace.yaml','fixture workspace');
+  put('scripts/verification/linux.mjs', "export const linuxDistro=()=>null;export const linuxRustJob=()=>{throw Error('unexpected Linux job');};");
   put('.github/workflows/pr-checks.yml','fixture workflow');
-  put('node_modules/js-yaml/index.js',"exports.load=s=>s==='fixture workspace'?{packages:['packages/*']}:s==='fixture workflow'?{jobs:{changes:{steps:[{with:{filters:'fixture filters'}}]}}}:{rust:[],js:['**']};");
+  put('node_modules/js-yaml/index.js',"exports.load=s=>s==='fixture workflow'?{jobs:{changes:{steps:[{with:{filters:'fixture filters'}}]}}}:{rust:[],js:['**'],repository:[]};");
   put('node_modules/pnpm/package.json',JSON.stringify({main:'package.json',bin:{pnpm:'fixture.mjs'}}));
   put('scripts/verification/doctor.mjs','export const doctor=()=>({checks:[]});');
-  put('scripts/verification/admission.mjs',"export const admissionPreflight=()=>{};export const installedDependenciesMatch=()=>false;export const verificationAdmission=()=>({lightweight:false,reason:'fixture full lane'});");
-  put('scripts/verification/build.mjs',`export const prepare=async()=>{}; export const assertPrepared=()=>({}); export const sourceFingerprint=()=> 'fixture'; export const buildEnvironment=()=>process.env; export const stagedEnginePath='fixture-engine'; export const assertIndependentStagedEngine=()=>{}; export const hashFile=()=>{throw Error('native proof started after cancellation');};`);
-  put('tools/rust-engine-program/build-slot.mjs','export const acquireExclusiveSlot=()=>null;export const acquireVerificationSlot=()=>null;');
+  put('scripts/verification/admission.mjs',"export const admissionPreflight=()=>{};export const installedDependenciesMatch=()=>false;");
+  put('scripts/verification/build.mjs',`export const prepare=async()=>{}; export const assertPrepared=()=>({}); export const sourceFingerprint=()=> 'fixture'; export const buildEnvironment=()=>process.env; export const withBuildBudget=action=>action(process.env); export const stagedEnginePath='fixture-engine'; export const assertIndependentStagedEngine=()=>{}; export const hashFile=()=>{throw Error('native proof started after cancellation');};`);
+  put('tools/rust-engine-program/build-slot.mjs','export const acquireExclusiveSlot=()=>null;export const acquireVerificationSlot=()=>null;export const resolveBuildBudget=()=>null;export const buildQueueStatus=()=>({owners:[]});export const maxVerificationLanes=4;export const readVerificationLanes=()=>1;export const heldVerificationSlots=()=>[];');
   put('tools/rust-engine-program/tree-provenance.mjs',"export const readTreeState=()=>({head:'fixture'});export const classifyTreeProvenance=()=>({status:'PASS'});");
   const packages = ['ydoc-projection','workspace-auth','z-queued'];
   for(const name of packages) put(`packages/${name}/package.json`,JSON.stringify({name:`@dohc/${name}`,scripts:{test:'vitest run'}}));

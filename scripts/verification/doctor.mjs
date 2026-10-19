@@ -11,7 +11,7 @@ export function doctor({ ready = false, engine = true, desktop = true, browser =
   const add = (name, ok, detail, optional = false) => checks.push({ name, state: ok ? "PASS" : optional ? "PENDING" : "FAIL", detail });
   const pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));
   const [major, minor] = process.versions.node.split(".").map(Number);
-  add("node", major > 24 || major === 24 && minor >= 14, process.version);
+  add("node", major > 24 || major === 24 && minor >= 16, process.version);
   if (process.platform === "win32") {
     try {
       const version = execFileSync("pwsh.exe", ["-NoProfile", "-NonInteractive", "-Command", "$PSVersionTable.PSVersion.ToString()"], {
@@ -37,7 +37,7 @@ export function doctor({ ready = false, engine = true, desktop = true, browser =
   }
   catch { add("electron binary", false, "Run node apps/desktop/scripts/ensure-electron-installed.mjs."); }
   for (const tool of engine || desktop ? ["rustc", "cargo"] : []) {
-    try { add(tool, true, execFileSync(tool, ["--version"], { encoding: "utf8", env: { ...process.env, RUSTUP_AUTO_INSTALL: "0" } }).trim()); }
+    try { add(tool, true, execFileSync(tool, ["--version"], { encoding: "utf8", windowsHide: true, env: { ...process.env, RUSTUP_AUTO_INSTALL: "0" } }).trim()); }
     catch { add(tool, false, "Install the repository Rust toolchain."); }
   }
   const free = freeDiskGb(repoRoot);

@@ -5,7 +5,7 @@ it exchanges a fragment secret with the sync relay, stores the returned relay ca
 bounded in-memory session, and sends only an HttpOnly session cookie to the
 browser.
 
-Production operators must set four values:
+Production operators must set five values:
 
 - `DOHC_SHARE_WEB_RELAY_URL`: the internal relay origin that `share-web` calls.
 - `DOHC_SHARE_WEB_PUBLIC_RELAY_URL`: the relay origin a desktop client can
@@ -15,6 +15,10 @@ Production operators must set four values:
 - `DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY`: the same workload secret configured as
   `DOHC_RELAY_EXCHANGE_KEY` on the relay, with at least 32 characters. Never
   expose it to the browser.
+- `DOHC_SHARE_WEB_INTERNAL_HOSTS`: exact comma-separated HTTP `Host` values
+  for internal deletion calls, such as `share-web:1790`. Startup requires this
+  list when the relay exchange key is configured. The public proxy must answer
+  404 for `/internal/*`.
 
 `DOHC_SHARE_WEB_PORT` defaults to `1790`.
 
@@ -80,9 +84,9 @@ See the [app backend guide](../../docs/how-to/app-backend.md) for publication,
 runtime packaging, private uploads, and recovery.
 
 Browser launch also requires `DOHC_SHARE_WEB_APP_DOMAIN` and
-`DOHC_SHARE_WEB_PUBLIC_ORIGIN`. The app domain must be a separate configured
-registrable domain. App launch stays off when the app domain is unset. Setting
-it without a public origin stops share-web at startup.
+`DOHC_SHARE_WEB_PUBLIC_ORIGIN`. See [app domains](#app-domains) for the domain
+and isolation requirements. App launch stays off when the app domain is unset.
+Setting it without a public origin stops share-web at startup.
 
 Launch issuance allows each authorized link browser profile or signed-in account
 session a burst of 12, refilling 0.2 per second. People on the same network have
@@ -108,14 +112,25 @@ Give the viewer one public HTTPS base origin, such as
 rejects every other Host. Terminate TLS at the reverse proxy and forward the
 original Host unchanged. Do not put a caching proxy in front of `share-web`.
 
-Set `DOHC_SHARE_WEB_TRUSTED_PROXIES` to the exact network peer addresses of
-proxies that may supply `X-Forwarded-For`. Leave it empty when no trusted proxy
-connects to `share-web`. The service ignores `X-Forwarded-For` from an
-untrusted peer. For a trusted peer, it scans the list from right to left and
-uses the first address that is not a trusted proxy. The service sends that
-derived address to its internal handler as `x-dohc-share-web-client-ip` for
-pre-authentication rate limiting. The public proxy must not accept that
-internal header from clients.
+Set `DOHC_SHARE_WEB_TRUSTED_PROXIES` to the network peer addresses of proxies
+that may supply `X-Forwarded-For`. Separate entries with commas and no spaces.
+Each entry must be one IPv4 or IPv6 address. The service refuses to start on a
+hostname, CIDR range, port, bracketed address, or IPv6 zone such as `%eth0`.
+Leave the value empty when no trusted proxy connects to `share-web`.
+
+The service compares addresses in one canonical form. IPv6 addresses match
+regardless of letter case or zero compression, and an IPv4-mapped IPv6 address
+such as `::ffff:10.0.0.2` matches `10.0.0.2`.
+
+The service ignores `X-Forwarded-For` from an untrusted peer and uses the peer
+address. For a trusted peer, it scans the list from right to left, skips empty
+entries, and uses the first address that is not a trusted proxy. If it reaches
+an entry that is not an IP address first, it uses the peer address. If the
+header is missing or names only trusted proxies, it uses `unknown`. A peer
+without an IP address also uses `unknown`, and all `unknown` requests share
+one per-address allowance. The service sends the derived address to its
+internal handler as `x-dohc-share-web-client-ip` for pre-authentication rate
+limiting. The public proxy must not accept that internal header from clients.
 
 Link exchange admits valid credentials per share grant, so people on one network
 do not share the invalid-credential allowance. The relay allows a burst of 960
@@ -202,6 +217,112 @@ Share-web refuses editor requests when its named editor is unconfigured.
 Live browser editing covers shared Markdown files. Other files retain their existing sharing permissions and change-submission flow.
 Desktop share codes remain available when browser invitations are unconfigured.
 
+## Named recipient chat HTTP
+
+These endpoints serve named recipients and agents holding their account session.
+They require the named browser session limits, account authentication, and relay exchange configuration.
+Chat does not require live tickets, a document host, or editor limits.
+
+Named chat invitations use `/s/chat/<encoded-grantId>`.
+The browser view signs in with the invited account, then reads, follows, and posts through these endpoints.
+The URL identifies a share. It carries no credential.
+The relay resolves the signed-in account and uses the same grants as the recipient desktop.
+A recipient with several grants gets the highest permitted access on that share.
+
+Send the account session cookie to share-web.
+For POST requests, send `Origin: <public-origin>` and `Content-Type: application/json`.
+GET requests can omit Origin. Browser requests must come from the configured public Host.
+Share-web forwards only recognized account cookies and its trusted relay exchange key.
+
+- `GET /api/named-chat/channels?grantId=<id>` resolves an invitation to its share.
+  It returns `{shareId, userId, maxPostBytes, maxBodyBytes, channels: [{channelWireId, name, kind, access}]}`.
+  A channel or Group share exposes one channel. `name` and `kind` can be null.
+  Access is `read-only` or `read-write`, including the desktop's append restrictions.
+  `maxPostBytes` bounds the complete UTF-8 POST JSON at both services. `maxBodyBytes` bounds the normalized message body.
+- `GET /api/named-chat/messages?shareId=<id>&channelWireId=<wire-id>&limit=50` returns the newest page first.
+  The response is `{shareId, channelWireId, messages, nextCursor, olderCursor}`.
+  Messages appear in descending relay sequence order. The limit defaults to 100 and cannot exceed 100.
+  Save the first page's `nextCursor` to follow new messages.
+  Pass `before=<olderCursor>` to read older pages. Stop when `olderCursor` is null.
+  Each page scans at most 2,000 workspace log rows and resolves earliest thread bindings once in SQL.
+  The relay applies the share filter before returning messages.
+  Empty pages can advance through other channels. Follow and older cursors include those scanned rows.
+  Older-page watermarks must not replace the saved following cursor.
+- `GET /api/named-chat/messages?shareId=<id>&channelWireId=<wire-id>&since=<nextCursor>&hold=30000&limit=50` follows new messages.
+  The response is `{shareId, channelWireId, messages, nextCursor, hasMore}`.
+  Messages appear in ascending relay sequence order. Save each returned cursor, including on empty pages.
+  If `hasMore` is true, read the next page immediately.
+  Hold defaults to zero and accepts integer milliseconds from zero through 30,000.
+  A caught-up read waits for workspace log activity or the timeout.
+  Cancellation releases the parked waiter. The relay hub bounds waiter counts.
+  Follow reads use a separate pool at both services, leaving other requests available.
+  The relay caps follow requests per account at the configured `maxPendingRequests`.
+  Share-web applies the same cap per account cookie; each service also caps total follow requests at 4,096.
+  Browser follows are capped at 128 per workspace, leaving wake-hub capacity for ordinary log readers.
+- `POST /api/named-chat/messages` accepts this body:
+
+  ```json
+  {
+    "shareId": "share-id",
+    "channelWireId": "channel-wire-id",
+    "id": "client-retry-id",
+    "threadId": "existing-thread-id",
+    "body": "Hello",
+    "authorKind": "human"
+  }
+  ```
+
+Omit `threadId` to create a chat thread and its first message atomically.
+An existing thread must belong to the selected channel.
+Post IDs are non-empty, trimmed strings of at most 256 UTF-16 code units, without control characters.
+The relay assigns the message ID, timestamp, and authenticated `authorUserId`.
+An optional `authorUserId` must equal that account; a different claim receives 403.
+Author kind accepts `human` or `agent`. Browser sessions cannot post as automations.
+For a human, omit `authorDisplayName`; the relay uses the authenticated account's name, or `Unnamed` when none is available.
+For an agent, send `authorKind: "agent"` and `authorDisplayName: "Planner"` with the same message fields.
+The agent name must be trimmed, non-empty, and at most 200 UTF-16 code units.
+The relay stores the authenticated account's name as `authorOwnerDisplayName`.
+Client-supplied owner names and human names are refused.
+The body normalizes CRLF and CR to LF, trims its end, and must be non-empty.
+The complete POST JSON must fit the returned `maxPostBytes`, 16 KiB in the self-hosted profile.
+The normalized body must also fit `maxBodyBytes`.
+The relay checks the response budget before appending the thread and message.
+JSON escaping and metadata count toward that limit.
+
+A successful post returns `{shareId, channelWireId, message}`.
+Reuse the client ID and normalized request fields on retry.
+The same account, share, ID, and fields return the original result.
+Changed fields receive 409. Use a new ID for a new message.
+The thread and message use the existing named log append, including its transaction authorization check.
+The relay refuses reactions, decisions, attachments, channel creation, and extra body fields.
+The ordinary recipient log route reserves `browser-chat` for these server-assigned sequences.
+
+Every message contains `relaySeq`, `messageId`, `threadId`, `authorUserId`,
+`authorDisplayName`, `authorKind`, `authorOwnerDisplayName`, `createdAtMs`, `body`, and `bodyTooLarge`.
+The user ID and owner name are null when absent.
+If a body cannot fit the response budget, `body` is null and `bodyTooLarge` is true.
+If metadata fills a page, the relay returns the prefix that fits and continues after its last message.
+If one message's metadata cannot fit alone, the relay returns a minimal omission marker.
+Its message ID is `omitted:<relaySeq>`; its thread ID and display names are empty, and its user ID is null.
+The marker retains the sequence, author kind, and timestamp, with a null body and `bodyTooLarge: true`.
+Other messages and later pages remain readable.
+No engine is needed to read this JSON.
+
+Oversized posts return 413 with `payload_too_large`. Full request pools return 429 with `share_access_rate_limited`.
+Responses are private and never cached.
+Read-only posts receive 403 at the relay, even when share-web is bypassed.
+Missing or removed access receives 404. Invalid fields receive 400 or 403.
+Waiter capacity receives 429. Response size overflow receives 413; request a smaller page.
+The configured named session request and response byte limits also apply.
+Share-web refuses malformed, oversized, redirected, or non-JSON relay responses.
+Link holders cannot use these endpoints or create chat link grants.
+
+The corresponding trusted relay endpoints use `/sync/named-chat/channels` and `/sync/named-chat/messages`.
+They require the recipient account cookie, configured public Origin, and relay exchange key.
+The desktop transport also accepts `hold` on `GET /sync/shares/:shareId/log`.
+It retains its existing envelope, channel filtering, and cursor contract.
+
+
 ## Storage and recovery
 
 The supported Compose deployment runs one `share-web` instance.
@@ -211,7 +332,8 @@ Do not run multiple instances because they do not share viewer session state.
 
 The relay stores its database in `dohc_self_host_sync_relay`.
 The separate `dohc_self_host_relay_continuity` volume holds configuration, the writer lock and independent continuity.
-These paths belong to one physical host. Cross-host takeover and network filesystems are unsupported.
+Only one host uses these volumes at a time. Network filesystems and hosts that share the volumes are unsupported.
+To move a deployment to a new host, keep these volumes on an attached disk and follow [Move to a new host](../../docs/how-to/self-host-recovery.md#move-to-a-new-host).
 The deployment's initializer creates a fresh configuration only when its required storage is empty.
 Ordinary relay startup never initializes missing continuity.
 Preserve partial state if fresh initialization is interrupted; do not delete established volumes to retry setup.
@@ -375,10 +497,17 @@ The command does not build Rust or select a default executable.
 
 ## App domains
 
-Use a separate registrable domain for apps. For example, a viewer at
-`https://share.example.com` can use `DOHC_SHARE_WEB_APP_DOMAIN=example.net`.
-Set the domain without a scheme, port, or wildcard. Subdomains of the viewer's
-registrable domain are refused.
+Use a registrable domain or a suffix in the private section of the Public Suffix
+List for apps. For example, a viewer at `https://share.example.com` can use
+`DOHC_SHARE_WEB_APP_DOMAIN=example.net` or a private suffix you control.
+Use an app domain you control.
+Set the domain without a scheme, port, or wildcard. The viewer must use HTTPS
+without a port. It must not be the app domain or a host under it.
+The app domain must not be the viewer's registrable domain or a host under it.
+Launch hosts must not be public suffixes.
+For example, `https://share.vercel.app` cannot be the viewer when the app domain
+is `vercel.app`.
+Accepted suffixes come from the Public Suffix List copy bundled with tldts; newly listed suffixes require a tldts update.
 
 Point wildcard DNS for `*.example.net` at the share-web proxy and install a
 matching wildcard TLS certificate. Forward those requests to the same share-web

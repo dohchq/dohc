@@ -1,17 +1,15 @@
 use crate::EngineService;
 use crate::rpc::error::map_runtime;
 use crate::rpc::history::moment_json;
-use crate::rpc::history::withhold_moment_texts;
+use crate::rpc::history::withheld_moment_json;
 use crate::rpc::reads::RESPONSE_FRAME_BYTES;
+use crate::rpc::reads::TextBody;
 use crate::rpc::reads::byte_budget_cut_serialized_with_row_cap;
 use crate::rpc::reads::file_object_json;
 use crate::rpc::reads::json_string_encoded_len;
 use crate::rpc::reads::response_encoded_bytes;
-use crate::rpc::reads::settled_snapshot_json;
 use crate::rpc::reads::snapshot_json;
 use crate::rpc::reads::snapshot_metadata_json;
-use crate::rpc::reads::withhold_over_cap_text;
-use crate::rpc::reads::withhold_text;
 use crate::rpc::relay::sharing_declined_json;
 use crate::rpc::request::MAX_METADATA_FIELD_BYTES;
 use crate::rpc::request::OperationCancellation;
@@ -26,8 +24,10 @@ use dohc_engine_domain::ConflictFileState;
 use dohc_engine_domain::ConflictMetadata;
 use dohc_engine_domain::ConflictResolution;
 use dohc_engine_domain::ConflictStatus;
+use dohc_engine_domain::MomentRecord;
 use dohc_engine_domain::ResolveConflictKind;
 use dohc_engine_domain::ResolveTextConflict;
+use dohc_engine_domain::ResolveTextConflictResult;
 use dohc_engine_domain::TextConflict;
 use dohc_engine_domain::TextSnapshot;
 use dohc_engine_protocol::error::ErrorCode;
@@ -358,8 +358,8 @@ fn parse_resolution(raw: &str) -> Result<ConflictResolution, WireError> {
     }
 }
 
-/// The conflict a resolution closed, with every side's body withheld past the
-/// in-band cap.
+/// The answer to one local resolution, each body withheld past the in-band
+/// cap, or every body withheld when `withhold_all` is set.
 ///
 /// One rule bounds this whole answer, because no part of it may grow with a
 /// body. The answer carries five text bodies — three sides, the settled
@@ -374,68 +374,45 @@ fn parse_resolution(raw: &str) -> Result<ConflictResolution, WireError> {
 /// The conflict listing shares the withholding, not the trigger: it carries
 /// bodies in band up to `CONFLICT_ROW_HARD_CAP_BYTES` per row, and degrades
 /// only a row past that (`conflicts_list`).
-fn settled_conflict_json(conflict: &TextConflict) -> Value {
-    let mut value = conflict_json(conflict);
-    withhold_conflict_side_texts(&mut value);
-    value
+fn resolve_answer_json(result: &ResolveTextConflictResult, withhold_all: bool) -> Value {
+    let body = if withhold_all {
+        TextBody::Withheld
+    } else {
+        TextBody::Capped
+    };
+    let moment = |record: &MomentRecord| {
+        if withhold_all {
+            withheld_moment_json(record)
+        } else {
+            moment_json(record)
+        }
+    };
+    json!({
+        "conflict": conflict_json(&result.conflict, body),
+        "write": result.write.as_ref().map(|write| json!({
+            "object": file_object_json(&write.object),
+            "snapshot": snapshot_json(&write.snapshot, body),
+            "moment": moment(&write.moment),
+        })),
+        // The preimage is described by the MOMENT, not by the text view of
+        // the head it removed. A resolution can remove a binary head, whose
+        // view carries empty text and the binary hash in `blob_sha256` —
+        // `snapshot_json` would report that as an empty TEXT file. So
+        // `delete.before` carries no body to withhold.
+        "delete": result.delete.as_ref().map(|delete| json!({
+            "object": file_object_json(&delete.object),
+            "before": snapshot_metadata_json(
+                &delete.before,
+                &delete.moment.before_content_kind,
+                delete.moment.before_binary_sha256.as_deref(),
+                delete.moment.before_byte_length,
+            ),
+            "moment": moment(&delete.moment),
+        })),
+    })
 }
 
-/// Withhold every over-cap side body of one serialized conflict, in place.
-/// Each side keeps its digest, byte length and `inbandLimitBytes`, so the
-/// caller hydrates through `versionedText.readBlob`.
-fn withhold_conflict_side_texts(value: &mut Value) {
-    for side in ["base", "current", "incoming"] {
-        if let Some(snapshot) = value[side].get_mut("snapshot")
-            && !snapshot.is_null()
-        {
-            withhold_over_cap_text(snapshot);
-        }
-    }
-}
-
-/// Withhold every side body of one serialized conflict, whatever each body's
-/// own size.
-///
-/// The per-body rule above cannot degrade an aggregate overrun: three sides of
-/// 128 KiB each are individually in band, and beside metadata near
-/// `CONFLICT_METADATA_BUDGET_BYTES` their sum still carries the row past
-/// `CONFLICT_ROW_HARD_CAP_BYTES`. Withholding only the over-cap bodies would
-/// leave the row over the cap and dead-end the cursor — the failure is the
-/// sum, so the remedy has to be the sum. With every body withheld, what
-/// remains is bounded at open, so the row provably fits.
-fn withhold_all_conflict_side_texts(value: &mut Value) {
-    for side in ["base", "current", "incoming"] {
-        if let Some(snapshot) = value[side].get_mut("snapshot")
-            && !snapshot.is_null()
-        {
-            withhold_text(snapshot);
-        }
-    }
-}
-
-/// Withhold every body one resolve answer carries: the conflict's three sides,
-/// the settled snapshot, and both moments' payloads. The removed head is
-/// described by its moment, so `delete.before` carries no body to withhold.
-fn withhold_all_resolve_answer_texts(answer: &mut Value) {
-    withhold_all_conflict_side_texts(&mut answer["conflict"]);
-    for block in ["write", "delete"] {
-        let Some(block) = answer.get_mut(block).filter(|value| !value.is_null()) else {
-            continue;
-        };
-        if let Some(snapshot) = block.get_mut("snapshot")
-            && !snapshot.is_null()
-        {
-            withhold_text(snapshot);
-        }
-        if let Some(moment) = block.get_mut("moment")
-            && !moment.is_null()
-        {
-            withhold_moment_texts(moment);
-        }
-    }
-}
-
-fn conflict_json(conflict: &TextConflict) -> Value {
+fn conflict_json(conflict: &TextConflict, body: TextBody) -> Value {
     json!({
         "id": conflict.conflict_id,
         "workspaceId": conflict.workspace_id,
@@ -456,20 +433,20 @@ fn conflict_json(conflict: &TextConflict) -> Value {
             "summary": conflict.metadata.summary,
             "correlationId": conflict.metadata.correlation_id
         },
-        "base": conflict_state_json(&conflict.base),
-        "current": conflict_state_json(&conflict.current),
-        "incoming": conflict_state_json(&conflict.incoming)
+        "base": conflict_state_json(&conflict.base, body),
+        "current": conflict_state_json(&conflict.current, body),
+        "incoming": conflict_state_json(&conflict.incoming, body)
     })
 }
 
-fn conflict_state_json(state: &ConflictFileState) -> Value {
+fn conflict_state_json(state: &ConflictFileState, body: TextBody) -> Value {
     json!({
         "path": state.path,
         "contentKind": match state.content_kind {
             ConflictContentKind::Text => "text",
             ConflictContentKind::Binary => "binary",
         },
-        "snapshot": state.snapshot.as_ref().map(snapshot_json),
+        "snapshot": state.snapshot.as_ref().map(|snapshot| snapshot_json(snapshot, body)),
         "binarySha256": state.binary_sha256,
         "binaryByteLength": state.binary_byte_length,
         "binaryObjectId": state.binary_object_id,
@@ -563,21 +540,26 @@ impl EngineService {
         // The domain query returns sixteen candidates plus one lookahead, with
         // LIMIT applied before its blob joins hydrate the three text sides.
         let candidates = conflicts.len().min(CONFLICTS_RESPONSE_ROW_LIMIT);
-        let mut rows: Vec<Value> = conflicts[..candidates].iter().map(conflict_json).collect();
+        let mut rows: Vec<Value> = conflicts[..candidates]
+            .iter()
+            .map(|conflict| conflict_json(conflict, TextBody::Full))
+            .collect();
         // A row past the hard cap can never ship in band, and refusing it
         // would refuse its healthy neighbors and dead-end the cursor: an
         // over-cap row that is not first ends the page, the cursor advances
         // to it, and the next request makes it the leading row. Degrade that
-        // row instead: withhold each over-cap side body, so the `blobSha256`
-        // and `inbandLimitBytes` beside it route the caller to
+        // row instead: withhold each side body, so the `blobSha256` and
+        // `inbandLimitBytes` beside it route the caller to
         // `versionedText.readBlob` — the hydration `versionedText.read`
         // already uses.
-        for row in &mut rows {
+        for (row, conflict) in rows.iter_mut().zip(&conflicts) {
             if serde_json::to_string(row).map_or(0, |s| s.len()) > CONFLICT_ROW_HARD_CAP_BYTES {
-                // Every body, not just the over-cap ones: the row crossed on
-                // the sum of its parts, so withholding only the parts that
-                // individually cross can leave it over the cap.
-                withhold_all_conflict_side_texts(row);
+                // Every body, not just the over-cap ones: three sides of
+                // 128 KiB each are individually in band, and beside metadata
+                // near `CONFLICT_METADATA_BUDGET_BYTES` their sum still
+                // carries the row past the cap. With every body withheld,
+                // what remains is bounded at open, so the row fits.
+                *row = conflict_json(conflict, TextBody::Withheld);
             }
         }
         let included = byte_budget_cut_serialized_with_row_cap(
@@ -613,10 +595,13 @@ impl EngineService {
                     .map(|conflict| conflict.conflict_id.clone())
             })
             .flatten();
-        let mut page = json!({
-            "conflicts": rows[..included].to_vec(),
-            "nextAfterConflictId": next_after_conflict_id,
-        });
+        let page_json = |rows: &[Value]| {
+            json!({
+                "conflicts": rows,
+                "nextAfterConflictId": next_after_conflict_id,
+            })
+        };
+        let mut page = page_json(&rows[..included]);
         // The cap above bounds a ROW; the frame carries the PAGE. The
         // continuation is appended after the cut — a second copy of one row's
         // id — and a body admitted in band can leave no room for it, so a row
@@ -633,9 +618,11 @@ impl EngineService {
         // first only while the running total stays inside it, and its
         // continuation is one of those rows' ids.
         if response_encoded_bytes(id, &page) > RESPONSE_FRAME_BYTES {
-            for row in page["conflicts"].as_array_mut().into_iter().flatten() {
-                withhold_all_conflict_side_texts(row);
-            }
+            let withheld: Vec<Value> = conflicts[..included]
+                .iter()
+                .map(|conflict| conflict_json(conflict, TextBody::Withheld))
+                .collect();
+            page = page_json(&withheld);
             let observed = response_encoded_bytes(id, &page);
             if observed > RESPONSE_FRAME_BYTES {
                 // The last line of defense for the page, in the shape the row
@@ -675,12 +662,12 @@ impl EngineService {
                 )
                 .await
                 .map_err(map_runtime)?;
-            // Without capture nothing keeps a reconcile that failed, so a
-            // replay reconciles too.
+            // A replay reconciles too: the update its original owed may not
+            // have run.
             if matches!(&result.primary, ApplyDisposition::Applied(_))
                 || self.reconciles_collections_itself(&open)
             {
-                self.collections_changed(ctx, &open).await?;
+                self.collections_changed(ctx, &open).await;
             }
             return Ok(replicated_conflict_json(result));
         }
@@ -697,7 +684,7 @@ impl EngineService {
             .await
             .map_err(map_runtime)?;
         if inserted || self.reconciles_collections_itself(&open) {
-            self.collections_changed(ctx, &open).await?;
+            self.collections_changed(ctx, &open).await;
         }
         Ok(json!({ "inserted": inserted }))
     }
@@ -733,12 +720,12 @@ impl EngineService {
                 )
                 .await
                 .map_err(map_runtime)?;
-            // Without capture nothing keeps a reconcile that failed, so a
-            // replay reconciles too.
+            // A replay reconciles too: the update its original owed may not
+            // have run.
             if matches!(&result.primary, ApplyDisposition::Applied(_))
                 || self.reconciles_collections_itself(&open)
             {
-                self.collections_changed(ctx, &open).await?;
+                self.collections_changed(ctx, &open).await;
             }
             return Ok(replicated_conflict_json(result));
         }
@@ -844,29 +831,8 @@ impl EngineService {
             )
             .await
             .map_err(map_runtime)?;
-        self.collections_changed(ctx, &open).await?;
-        let mut answer = json!({
-            "conflict": settled_conflict_json(&result.conflict),
-            "write": result.write.as_ref().map(|write| json!({
-                "object": file_object_json(&write.object),
-                "snapshot": settled_snapshot_json(&write.snapshot),
-                "moment": moment_json(&write.moment),
-            })),
-            // The preimage is described by the MOMENT, not by the text view of
-            // the head it removed. A resolution can remove a binary head, whose
-            // view carries empty text and the binary hash in `blob_sha256` —
-            // `snapshot_json` would report that as an empty TEXT file.
-            "delete": result.delete.as_ref().map(|delete| json!({
-                "object": file_object_json(&delete.object),
-                "before": snapshot_metadata_json(
-                    &delete.before,
-                    &delete.moment.before_content_kind,
-                    delete.moment.before_binary_sha256.as_deref(),
-                    delete.moment.before_byte_length,
-                ),
-                "moment": moment_json(&delete.moment),
-            })),
-        });
+        self.collections_changed(ctx, &open).await;
+        let mut answer = resolve_answer_json(&result, false);
         // One frame carries the whole answer, and this one reports a mutation
         // that already committed: an over-frame answer loses the caller's
         // acknowledgement for work the workspace kept. Each body is withheld
@@ -885,7 +851,7 @@ impl EngineService {
         // is not an option: the resolution has committed, and a refusal would
         // report a mutation that happened as one that did not.
         if response_encoded_bytes(id, &answer) > RESPONSE_FRAME_BYTES {
-            withhold_all_resolve_answer_texts(&mut answer);
+            answer = resolve_answer_json(&result, true);
         }
         Ok(answer)
     }

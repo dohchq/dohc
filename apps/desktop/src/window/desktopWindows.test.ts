@@ -19,9 +19,15 @@ let nextSender = 1;
 class Contents extends EventEmitter {
   readonly id = nextSender++;
   destroyed = false;
+  // A loaded renderer unless the window was just created.
+  url = "app://renderer";
+  loading = false;
   setZoomLevel = vi.fn();
   send = vi.fn();
   isDestroyed() { return this.destroyed; }
+  isCrashed() { return false; }
+  getURL() { return this.url; }
+  isLoadingMainFrame() { return this.loading; }
   get native(): WebContents { return this as unknown as WebContents; }
 }
 
@@ -34,7 +40,11 @@ class Window extends EventEmitter {
   isMinimized() { return this.minimized; }
   destroy() { this.destroyed = true; this.emit("closed"); }
   get native(): BrowserWindow { return this as unknown as BrowserWindow; }
-  finishLoad() { this.webContents.emit("did-finish-load"); }
+  startLoad() { this.webContents.url = ""; this.webContents.loading = true; return this; }
+  finishLoad() {
+    this.webContents.url = "app://renderer"; this.webContents.loading = false;
+    this.webContents.emit("did-finish-load");
+  }
   failLoad(isMainFrame = true) {
     this.webContents.emit("did-fail-load", {}, -105, "ERR_NAME_NOT_RESOLVED", "app://renderer", isMainFrame);
   }
@@ -71,8 +81,8 @@ function fixture(platform: NodeJS.Platform = "win32", workspaceSummaries?: Depen
     app: {
       isReady: () => ready, isPackaged: false, getVersion: () => "1.2.3",
       clearRecentDocuments: vi.fn(), addRecentDocument: vi.fn(), setUserTasks: vi.fn(() => true),
+      setAboutPanelOptions: vi.fn(),
     },
-    BrowserWindow: { getAllWindows: () => all.map((item) => item.native) },
     Menu: {
       buildFromTemplate: vi.fn((template) => { templates.push(template); return { template } as unknown as Menu; }),
       setApplicationMenu: vi.fn(),
@@ -89,7 +99,7 @@ function fixture(platform: NodeJS.Platform = "win32", workspaceSummaries?: Depen
     stepWindowZoom: vi.fn(async () => structuredClone(stored)),
     createMainWindow: vi.fn((options) => {
       createdOptions.push(options);
-      const window = new Window(); all.push(window); return window.native;
+      const window = new Window().startLoad(); all.push(window); return window.native;
     }),
     preloadArguments: ["--dohc-dev-tools"],
     get rendererWorkspaceSessions() { return currentSessions; },
@@ -203,12 +213,15 @@ describe("desktop workspace windows", () => {
     f.windows.trackWorkspaceWindow(first.native); f.windows.trackWorkspaceWindow(second.native);
     expect(f.windows.liveWorkspaceWindow()).toBe(first.native);
     expect(f.windows.targetWindow(undefined)).toBe(first.native);
-    expect(f.windows.targetWindow(utility.native)).toBe(utility.native);
+    // The hidden export window shows nothing, so it is never a target.
+    expect(f.windows.targetWindow(utility.native)).toBe(first.native);
     first.destroy();
     expect(f.windows.workspaceWindows.allLive()).toEqual([second.native]);
     second.destroy();
     expect(f.windows.liveWorkspaceWindow()).toBeUndefined();
-    expect(f.windows.targetWindow(undefined)).toBe(utility.native);
+    expect(f.windows.targetWindow(utility.native)).toBeUndefined();
+    const manager = f.windows.showOrCreateManagerWindow();
+    expect(f.windows.targetWindow(utility.native)).toBe(manager);
   });
 
   it("activates the target window and prioritizes that workspace without changing the input list", async () => {
@@ -405,11 +418,12 @@ describe("desktop workspace windows", () => {
     const f = fixture(); const window = new Window(); window.minimized = true;
     f.windows.trackWorkspaceWindow(window.native); f.windows.refreshApplicationMenu();
     const manager = f.windows.showOrCreateManagerWindow();
-    const recent = submenu(item(f, "File", "Open Recent"))[1]!;
+    const recent = submenu(item(f, "File", "Open recent"))[1]!;
     click(recent, manager);
     await vi.waitFor(() => expect(window.webContents.send).toHaveBeenCalledWith(CHANNELS.workspaceActivated, workspace("b")));
     expect(f.all[0]!.webContents.send).not.toHaveBeenCalled();
     expect(window.restore).toHaveBeenCalledOnce(); expect(window.focus).toHaveBeenCalledOnce();
+    f.all[0]!.finishLoad();
     click(item(f, "Go", "Settings"), manager);
     expect(manager.webContents.send).toHaveBeenCalledWith(CHANNELS.menuCommand, "settings");
   });
@@ -535,9 +549,9 @@ describe("desktop native menus", () => {
       if (!handler) throw new Error(`Missing registered handler ${channel}`);
       return handler({ trusted: true, sender }, payload);
     };
-    const recentEntries = () => submenu(item(f, "File", "Open Recent"));
+    const recentEntries = () => submenu(item(f, "File", "Open recent"));
     f.windows.refreshNativeWorkspaceSurfaces();
-    expect(recentEntries()).toEqual([{ label: "No Recent Workspaces", enabled: false }]);
+    expect(recentEntries()).toEqual([{ label: "No recent workspaces", enabled: false }]);
     const root = await invoke(CHANNELS.getDefaultWorkspaceRoot) as string;
     const created = await invoke(CHANNELS.createLocalWorkspace, {
       rootPath: join(root, "Created Project"), kind: "personal",
@@ -546,11 +560,12 @@ describe("desktop native menus", () => {
     expect(recentEntries()).toMatchObject([{ label: "Created Project", sublabel: created.rootPath }]);
     expect(f.templates).toHaveLength(2);
 
+    const attachedPath = roots.usableRoot(join(root, "Attached Project"));
     const attached = await createWorkspaceFolder({
-      rootPath: roots.usableRoot(join(root, "Attached Project")), kind: "shared",
+      rootPath: attachedPath, homeDir: home, kind: "shared",
       workspaceId: "attached-workspace",
     });
-    await expect(invoke(CHANNELS.attachWorkspaceFolder, { rootPath: attached.rootPath })).resolves.toEqual(attached);
+    await expect(invoke(CHANNELS.attachWorkspaceFolder, { rootPath: attachedPath })).resolves.toEqual(attached);
     expect(createRegistryStore(registryFile).list()).toEqual([created, attached]);
     expect(recentEntries()).toMatchObject([
       { label: "Created Project", sublabel: created.rootPath },
@@ -565,7 +580,7 @@ describe("desktop native menus", () => {
       { title: "Open Created Project", description: created.rootPath },
       { title: "Open Attached Project", description: attached.rootPath },
     ]);
-    await expect(invoke(CHANNELS.attachWorkspaceFolder, { rootPath: attached.rootPath })).rejects.toThrow("already attached");
+    await expect(invoke(CHANNELS.attachWorkspaceFolder, { rootPath: attachedPath })).rejects.toThrow("already attached");
     expect(f.templates).toHaveLength(3);
     expect(createRegistryStore(registryFile).list()).toEqual([created, attached]);
 
@@ -583,9 +598,9 @@ describe("desktop native menus", () => {
     expect(f.dependencies.app.clearRecentDocuments).not.toHaveBeenCalled();
     expect(f.windows.applicationMenuCanInstallUpdate).toBeNull();
     f.setReady(true); f.windows.refreshApplicationMenu();
-    expect(item(f, "Help", "Update and Restart").enabled).toBe(false);
+    expect(item(f, "Help", "Update and restart").enabled).toBe(false);
     f.setCanInstall(true); f.windows.refreshApplicationMenu();
-    expect(item(f, "Help", "Update and Restart").enabled).toBe(true);
+    expect(item(f, "Help", "Update and restart").enabled).toBe(true);
     expect(f.windows.applicationMenuCanInstallUpdate).toBe(true);
   });
 
@@ -593,11 +608,11 @@ describe("desktop native menus", () => {
     const f = fixture(); const first = new Window(); const explicit = new Window();
     f.windows.trackWorkspaceWindow(first.native); f.windows.trackWorkspaceWindow(explicit.native);
     f.windows.refreshApplicationMenu();
-    click(item(f, "File", "New File"));
+    click(item(f, "File", "New file"));
     expect(first.webContents.send).toHaveBeenCalledWith(CHANNELS.menuCommand, "new-file");
     click(item(f, "Go", "Settings"), explicit.native);
     expect(explicit.webContents.send).toHaveBeenCalledWith(CHANNELS.menuCommand, "settings");
-    const recent = submenu(item(f, "File", "Open Recent"))[1]!;
+    const recent = submenu(item(f, "File", "Open recent"))[1]!;
     click(recent, explicit.native);
     expect(explicit.webContents.send).toHaveBeenCalledWith(CHANNELS.workspaceActivated, workspace("b"));
     expect(f.windows.prioritizePreferredWorkspace([workspace("a"), workspace("b")], explicit.webContents.native)[0]!.workspaceId).toBe("b");
@@ -621,13 +636,13 @@ describe("desktop native menus", () => {
     expect(f.dependencies.app.clearRecentDocuments).not.toHaveBeenCalled();
     expect(f.dependencies.app.addRecentDocument).not.toHaveBeenCalled();
     expect(f.dependencies.app.setUserTasks).not.toHaveBeenCalled();
-    expect(submenu(item(f, "File", "Open Recent"))).toHaveLength(1);
+    expect(submenu(item(f, "File", "Open recent"))).toHaveLength(1);
   });
 
   it("reuses native recents for cloned roots while rebuilding current menus", () => {
     const f = fixture();
     f.windows.refreshNativeWorkspaceSurfaces();
-    expect(item(f, "Help", "Update and Restart").enabled).toBe(false);
+    expect(item(f, "Help", "Update and restart").enabled).toBe(false);
 
     const rows = [workspace("replacement", workspace("a").rootPath), workspace("b")];
     f.setRows(rows);
@@ -640,10 +655,10 @@ describe("desktop native menus", () => {
     expect(f.dependencies.app.addRecentDocument).toHaveBeenCalledTimes(2);
     expect(f.dependencies.app.setUserTasks).toHaveBeenCalledOnce();
     expect(f.dependencies.Menu.setApplicationMenu).toHaveBeenCalledTimes(3);
-    expect(item(f, "Help", "Update and Restart").enabled).toBe(true);
+    expect(item(f, "Help", "Update and restart").enabled).toBe(true);
     const target = new Window();
     f.windows.trackWorkspaceWindow(target.native);
-    click(submenu(item(f, "File", "Open Recent"))[0]!, target.native);
+    click(submenu(item(f, "File", "Open recent"))[0]!, target.native);
     expect(target.webContents.send).toHaveBeenCalledWith(CHANNELS.workspaceActivated, rows[0]);
     expect(f.dependencies.app.clearRecentDocuments).toHaveBeenCalledOnce();
   });
@@ -714,7 +729,7 @@ describe("desktop native menus", () => {
     expect(tasks).toHaveLength(10);
     expect(tasks[0]).toEqual({ program: "C:\\dohc\\dohc.exe", iconPath: "C:\\dohc\\dohc.exe", iconIndex: 0,
       arguments: '--open-workspace "C:\\say\\"hi\\\\"', title: 'Open say"hi', description: rows[0].rootPath });
-    expect(submenu(item(f, "File", "Open Recent"))).toHaveLength(10);
+    expect(submenu(item(f, "File", "Open recent"))).toHaveLength(10);
   });
 
   it("tolerates a malformed registry for native menus while leaving strict reads with their caller", () => {
@@ -722,7 +737,7 @@ describe("desktop native menus", () => {
     f.windows.refreshNativeWorkspaceSurfaces();
     expect(f.dependencies.app.addRecentDocument).not.toHaveBeenCalled();
     expect(f.dependencies.app.setUserTasks).toHaveBeenCalledWith([]);
-    expect(submenu(item(f, "File", "Open Recent"))).toEqual([{ label: "No Recent Workspaces", enabled: false }]);
+    expect(submenu(item(f, "File", "Open recent"))).toEqual([{ label: "No recent workspaces", enabled: false }]);
     expect(() => f.dependencies.workspaceSummaries()).toThrow("registry failed");
   });
 
@@ -738,7 +753,7 @@ describe("desktop native menus", () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     vi.mocked(f.dependencies.stepWindowZoom).mockRejectedValueOnce(error);
     vi.mocked(f.dependencies.dialog.showErrorBox).mockImplementation(() => { reported.resolve(); });
-    f.windows.refreshApplicationMenu(); click(item(f, "View", "Zoom In"));
+    f.windows.refreshApplicationMenu(); click(item(f, "View", "Zoom in"));
     await reported.promise;
     expect(f.dependencies.stepWindowZoom).toHaveBeenCalledExactlyOnceWith("in");
     // The refusal already names the file and the way out.
@@ -751,5 +766,97 @@ describe("desktop native menus", () => {
     expect(f.dependencies.dialog.showMessageBox).toHaveBeenCalledWith({
       title: "About dohc", message: "dohc", detail: "Version 1.2.3\nYour workspace is a folder.",
     });
+    expect(f.dependencies.app.setAboutPanelOptions).not.toHaveBeenCalled();
   });
+
+  it("names dohc and its version in the macOS About panel", () => {
+    const f = fixture("darwin"); f.windows.refreshApplicationMenu();
+    expect(f.dependencies.app.setAboutPanelOptions).toHaveBeenCalledWith({
+      applicationName: "dohc", applicationVersion: "1.2.3", version: "",
+    });
+  });
+
+  it("opens one window for menu commands chosen with none open, and sends each once, in order, when it loads", async () => {
+    const f = fixture("darwin"); f.windows.refreshApplicationMenu();
+    const appMenu = submenu(f.templates.at(-1)![0]!);
+    click(appMenu.find((entry) => entry.label === "Settings…")!);
+    click(item(f, "File", "New file"));
+    click(item(f, "File", "Close tab"));
+    expect(f.dependencies.createMainWindow).toHaveBeenCalledOnce();
+    const created = f.all[0]!;
+    expect(f.windows.workspaceWindows.allLive()).toEqual([created.native]);
+    expect(created.webContents.send).not.toHaveBeenCalled();
+    created.emit("ready-to-show");
+    expect(created.show).toHaveBeenCalledOnce(); expect(created.focus).toHaveBeenCalledOnce();
+    created.finishLoad();
+    await vi.waitFor(() => expect(created.webContents.send).toHaveBeenCalledTimes(3));
+    expect(created.webContents.send.mock.calls).toEqual([
+      [CHANNELS.menuCommand, "settings"], [CHANNELS.menuCommand, "new-file"], [CHANNELS.menuCommand, "close-tab"],
+    ]);
+    // A loaded window takes a command at once.
+    click(item(f, "File", "New folder"));
+    expect(created.webContents.send).toHaveBeenLastCalledWith(CHANNELS.menuCommand, "new-folder");
+    expect(created.webContents.send).toHaveBeenCalledTimes(4);
+  });
+
+  it("holds menu commands for a window still loading, such as the first one at launch", async () => {
+    const f = fixture("darwin"); const starting = new Window().startLoad();
+    f.windows.trackWorkspaceWindow(starting.native); f.windows.refreshApplicationMenu();
+    click(item(f, "File", "New file"), starting.native);
+    click(item(f, "File", "Close tab"));
+    expect(starting.webContents.send).not.toHaveBeenCalled();
+    starting.finishLoad();
+    await vi.waitFor(() => expect(starting.webContents.send).toHaveBeenCalledTimes(2));
+    expect(starting.webContents.send.mock.calls).toEqual([
+      [CHANNELS.menuCommand, "new-file"], [CHANNELS.menuCommand, "close-tab"],
+    ]);
+    expect(f.dependencies.createMainWindow).not.toHaveBeenCalled();
+  });
+
+  it("sends a command chosen after a window finished loading but before it stopped", async () => {
+    const f = fixture("darwin"); const window = new Window();
+    window.webContents.loading = true;
+    f.windows.trackWorkspaceWindow(window.native); f.windows.refreshApplicationMenu();
+    click(item(f, "File", "New file"));
+    expect(window.webContents.send).not.toHaveBeenCalled();
+    window.webContents.loading = false;
+    window.webContents.emit("did-stop-loading");
+    await vi.waitFor(() => expect(window.webContents.send).toHaveBeenCalledWith(CHANNELS.menuCommand, "new-file"));
+  });
+
+  it("opens a workspace window instead of sending a command to the hidden export window", () => {
+    const f = fixture("darwin"); const exportWindow = new Window(); f.windows.refreshApplicationMenu();
+    click(item(f, "File", "New file"), exportWindow.native);
+    expect(exportWindow.webContents.send).not.toHaveBeenCalled();
+    expect(f.dependencies.createMainWindow).toHaveBeenCalledOnce();
+    expect(f.windows.workspaceWindows.allLive()).toEqual([f.all[0]!.native]);
+  });
+
+  it("drops a window-less menu command when its new window closes before it loads", () => {
+    const f = fixture("darwin"); f.windows.refreshApplicationMenu();
+    click(item(f, "File", "New file"));
+    const closing = f.all[0]!;
+    closing.destroy();
+    closing.finishLoad();
+    expect(closing.webContents.send).not.toHaveBeenCalled();
+  });
+});
+
+
+it("sends agent hues only to each window's currently admitted workspace", async () => {
+  const f = fixture();
+  const first = new Window(), same = new Window(), other = new Window(), utility = new Window();
+  for (const window of [first, same, other]) f.windows.trackWorkspaceWindow(window.native);
+  await f.sessions.open(first.webContents.native, { ...workspace("a"), attachmentId: Symbol() }, "doc-first");
+  await f.sessions.open(same.webContents.native, { ...workspace("a"), attachmentId: Symbol() }, "doc-same");
+  await f.sessions.open(other.webContents.native, { ...workspace("b"), attachmentId: Symbol() }, "doc-other");
+  const event = { workspaceId: "a", group: "issued", hue: "blue" } as const;
+  f.windows.broadcastAgentColor(event);
+  for (const window of [first, same]) expect(window.webContents.send).toHaveBeenCalledExactlyOnceWith(CHANNELS.agentColorChanged, event);
+  expect(other.webContents.send).not.toHaveBeenCalled();
+  expect(utility.webContents.send).not.toHaveBeenCalled();
+  await f.sessions.retireAfterCrash(first.webContents.native);
+  first.webContents.send.mockClear();
+  f.windows.broadcastAgentColor(event);
+  expect(first.webContents.send).not.toHaveBeenCalled();
 });

@@ -18,20 +18,17 @@ export function resolveDesktopIconDirectory(options: {
 }
 
 /**
- * Electron changes window icons on Windows/X11 and the application Dock icon
- * on macOS. Wayland shells keep launcher-owned icons, so runtime updates there
- * may be ignored. This split avoids calling unsupported platform APIs.
+ * Electron changes window icons on Windows/X11. Wayland shells keep
+ * launcher-owned icons, so runtime updates there may be ignored. macOS draws
+ * the Dock from the package's icon.icns, which sits on Apple's icon grid; a
+ * runtime image would replace it with the bare mark, so macOS gets none.
  */
 export function applyDesktopIconToPlatform(options: {
   platform: NodeJS.Platform;
   iconPath: string;
   windows: ReadonlyArray<IconWindow>;
-  setDockIcon?: (iconPath: string) => void;
 }): void {
-  if (options.platform === "darwin") {
-    options.setDockIcon?.(options.iconPath);
-    return;
-  }
+  if (options.platform === "darwin") return;
   for (const window of options.windows) window.setIcon(options.iconPath);
 }
 

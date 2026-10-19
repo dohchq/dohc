@@ -9,12 +9,12 @@ use std::time::Duration;
 use dohc_engine_storage::{EngineStore, NoFaults, StorageError, TxnOutcome, hex_sha256};
 use dohc_engine_sync::{
     BlobDownloadBatchRequest, BlobDownloadSpec, BlobHaveRequest, BlobKind, BlobUploadRequest,
-    ClaimRequest, EpochRequest, KeyEnvelopeDownloadRequest, KeyEnvelopeRequest,
-    LogCoordinateRequest, LogCoordinateResponse, NoLiveLeases, ObservedBytes, ProbeRequest,
-    PullRequest, RelayError, RelaySyncClient, RelayTransport, ReplicationEnvelope,
-    ShareBlobRequest, ShareLogPushRequest, ShareReplicationEnvelope, ShareViewRequest,
-    SharedChannelRequest, SyncPassOutcome, blob_ceiling, journal_local_replication_op,
-    read_pushed_seq, read_relay_cursor,
+    ClaimRequest, EpochRequest, HostedPullRequest, HostedPullResponse, HostedScope,
+    HostedScopeDocument, KeyEnvelopeDownloadRequest, KeyEnvelopeRequest, LogCoordinateRequest,
+    LogCoordinateResponse, NoLiveLeases, ObservedBytes, ProbeRequest, PullRequest, RelayError,
+    RelaySyncClient, RelayTransport, ReplicationEnvelope, ShareBlobRequest, ShareLogPushRequest,
+    ShareReplicationEnvelope, ShareViewRequest, SharedChannelRequest, SyncPassOutcome,
+    blob_ceiling, journal_local_replication_op, read_pushed_seq, read_relay_cursor,
 };
 use dohc_engine_sync_http::HttpRelayTransport;
 use dohc_engine_testkit::open_store;
@@ -93,6 +93,17 @@ struct FakeServer {
 
 impl FakeServer {
     fn start(handler: impl Fn(TestRequest) -> TestResponse + Send + Sync + 'static) -> Self {
+        Self::start_with_workers(handler, false)
+    }
+
+    fn concurrent(handler: impl Fn(TestRequest) -> TestResponse + Send + Sync + 'static) -> Self {
+        Self::start_with_workers(handler, true)
+    }
+
+    fn start_with_workers(
+        handler: impl Fn(TestRequest) -> TestResponse + Send + Sync + 'static,
+        concurrent: bool,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake relay");
         listener
             .set_nonblocking(true)
@@ -102,6 +113,7 @@ impl FakeServer {
         let thread_stop = Arc::clone(&stop);
         let handler = Arc::new(handler);
         let thread = thread::spawn(move || {
+            let mut workers = Vec::new();
             while !thread_stop.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
@@ -109,8 +121,16 @@ impl FakeServer {
                             continue;
                         }
                         if let Ok(request) = read_request(&mut stream) {
-                            let response = handler(request);
-                            let _ = write_response(&mut stream, response);
+                            let handler = Arc::clone(&handler);
+                            let serve = move || {
+                                let response = handler(request);
+                                let _ = write_response(&mut stream, response);
+                            };
+                            if concurrent {
+                                workers.push(thread::spawn(serve));
+                            } else {
+                                serve();
+                            }
                         }
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -118,6 +138,9 @@ impl FakeServer {
                     }
                     Err(_) => break,
                 }
+            }
+            for worker in workers {
+                worker.join().expect("join fake relay worker");
             }
         });
         Self {
@@ -237,6 +260,118 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 fn transport(server: &FakeServer) -> HttpRelayTransport {
     HttpRelayTransport::new_insecure_loopback_for_tests(&server.base_url, "test-token")
         .expect("HTTP relay transport")
+}
+
+fn batch_uploads() -> Vec<BlobUploadRequest> {
+    (0..4)
+        .map(|index| {
+            let bytes = format!("batch blob {index}").into_bytes();
+            BlobUploadRequest {
+                workspace_id: "ws".into(),
+                replication_epoch: "epoch".into(),
+                stream_identity: "stream".into(),
+                sha256: hex_sha256(&bytes),
+                bytes,
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn upload_batch_joins_every_worker_after_a_failure() {
+    use std::sync::{Condvar, mpsc};
+    let (started, starts) = mpsc::channel();
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let held = Arc::clone(&gate);
+    let finished = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let completed = Arc::clone(&finished);
+    let server = FakeServer::concurrent(move |request| {
+        started.send(()).unwrap();
+        if request.body == b"batch blob 0" {
+            return TestResponse::json(403, json!({"ok": false}));
+        }
+        let (lock, ready) = &*held;
+        let (open, timeout) = ready
+            .wait_timeout_while(lock.lock().unwrap(), Duration::from_secs(5), |open| !*open)
+            .unwrap();
+        assert!(*open && !timeout.timed_out(), "worker was not released");
+        completed.fetch_add(1, Ordering::SeqCst);
+        TestResponse::json(200, json!({"ok": true}))
+    });
+    let transport = transport(&server);
+    let (sent, result) = mpsc::channel();
+    let upload = thread::spawn(move || sent.send(transport.upload_blobs(batch_uploads())).unwrap());
+    for _ in 0..4 {
+        starts
+            .recv_timeout(Duration::from_secs(5))
+            .expect("all workers start");
+    }
+    let early = result.try_recv();
+    *gate.0.lock().unwrap() = true;
+    gate.1.notify_all();
+    upload.join().unwrap();
+    assert!(
+        matches!(early, Err(mpsc::TryRecvError::Empty)),
+        "batch returned while PUTs were held"
+    );
+    assert_eq!(result.recv().unwrap(), Err(RelayError::Forbidden));
+    assert_eq!(finished.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn upload_batch_returns_errors_in_request_order() {
+    use std::sync::{Condvar, mpsc};
+    let (sent, later) = mpsc::channel();
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let held = Arc::clone(&gate);
+    let server = FakeServer::concurrent(move |request| {
+        if request.body == b"batch blob 0" {
+            let (open, timeout) = held
+                .1
+                .wait_timeout_while(held.0.lock().unwrap(), Duration::from_secs(5), |open| {
+                    !*open
+                })
+                .unwrap();
+            assert!(*open && !timeout.timed_out());
+            TestResponse::json(403, json!({"ok": false}))
+        } else {
+            sent.send(()).unwrap();
+            TestResponse::json(401, json!({"ok": false}))
+        }
+    });
+    let transport = transport(&server);
+    let upload = thread::spawn(move || transport.upload_blobs(batch_uploads()));
+    for _ in 0..3 {
+        later
+            .recv_timeout(Duration::from_secs(5))
+            .expect("later errors finish first");
+    }
+    *gate.0.lock().unwrap() = true;
+    gate.1.notify_all();
+    assert_eq!(upload.join().unwrap(), Err(RelayError::Forbidden));
+}
+
+#[test]
+fn upload_batch_uses_the_hosted_blob_route() {
+    let routes = Arc::new(Mutex::new(BTreeSet::new()));
+    let seen = Arc::clone(&routes);
+    let server = FakeServer::concurrent(move |request| {
+        assert_eq!(request.method, "PUT");
+        assert_eq!(request.header("authorization"), Some("Bearer test-token"));
+        assert!(request.target.contains("replicationEpoch=epoch"));
+        assert!(request.target.contains("streamIdentity=stream"));
+        assert_eq!(
+            request.path(),
+            format!("/sync/ws/hosted/blobs/{}", hex_sha256(&request.body))
+        );
+        seen.lock().unwrap().insert(request.path().to_owned());
+        TestResponse::json(200, json!({"ok": true}))
+    });
+    transport(&server)
+        .hosted()
+        .upload_blobs(batch_uploads())
+        .unwrap();
+    assert_eq!(routes.lock().unwrap().len(), 4);
 }
 
 fn probe(transport: &HttpRelayTransport) -> Result<dohc_engine_sync::ProbeResponse, RelayError> {
@@ -448,6 +583,8 @@ fn push_chunks_ops_and_blob_have_at_server_boundaries() {
     expected_sha256s.sort();
     assert_eq!(state.have_sha256s, expected_sha256s);
     assert_eq!(state.blob_puts.len(), 2);
+    state.blob_puts.sort();
+    state.missing_sha256s.sort();
     assert_eq!(state.blob_puts, state.missing_sha256s);
     assert_eq!(state.auth_failures, 0);
 }
@@ -1068,7 +1205,7 @@ fn pull_cursor_stays_deferred_across_crash_and_refetches_ops() {
             .is_none(),
         "redelivery must still leave the cursor pending"
     );
-    assert_eq!(
+    assert!(matches!(
         client
             .commit_pull_cursor(
                 &mut reopened,
@@ -1079,8 +1216,8 @@ fn pull_cursor_stays_deferred_across_crash_and_refetches_ops() {
                 1_000
             )
             .expect("commit after materialization"),
-        TxnOutcome::Committed(Vec::new())
-    );
+        TxnOutcome::Committed(ref commit) if commit.sharing_declined.is_empty()
+    ));
     assert_eq!(
         read_relay_cursor(&reopened, "ws")
             .expect("cursor")
@@ -1173,7 +1310,11 @@ fn expected_relay_error(code: &str) -> RelayError {
         | "invalid_version" | "secret_path" | "too_many_paths" => RelayError::BadRequest,
         "blob_missing" => RelayError::BlobReferenceMissing,
         "blob_not_found" => RelayError::BlobMissing,
-        "conflict" | "dependents_changed" | "notice_list_full" | "stale" => RelayError::Conflict,
+        "conflict"
+        | "dependents_changed"
+        | "notice_list_full"
+        | "restore-in-progress"
+        | "stale" => RelayError::Conflict,
         "collection_write_rate_limited" => RelayError::HttpStatus(429),
         "discussion_limit_reached" => RelayError::QuotaExceeded,
         "discussion_rate_limited" => RelayError::DiscussionRateLimited,
@@ -1804,4 +1945,430 @@ fn shared_channel_pull_requires_authenticated_origin_metadata() {
         ops: Vec::new(),
     });
     assert!(matches!(result, Err(RelayError::InvalidResponse)));
+}
+
+/// The scope the fake hosted feed below holds.
+const SCOPE_TOKEN: &str = "scope-2";
+
+fn query(target: &str, key: &str) -> Vec<String> {
+    target
+        .split_once('?')
+        .map_or("", |(_, query)| query)
+        .split('&')
+        .filter_map(|part| part.split_once('='))
+        .filter(|(name, _)| *name == key)
+        .map(|(_, value)| value.to_owned())
+        .collect()
+}
+
+fn hosted_scope() -> Value {
+    json!({"token": SCOPE_TOKEN, "documents": [{"objectId": "doc-a", "path": "a.md"}]})
+}
+
+/// `GET /hosted/log` as the relay's scoped feed answers it: a request without
+/// the current scope learns it before any row, and a backfill of a document
+/// outside the scope is a bad request.
+fn hosted_feed(request: &TestRequest) -> TestResponse {
+    assert_eq!(
+        (request.method.as_str(), request.path()),
+        ("GET", "/sync/ws/hosted/log")
+    );
+    let query = |key| query(&request.target, key);
+    assert_eq!(request.header("authorization"), Some("Bearer test-token"));
+    assert_eq!(query("replicationEpoch"), ["epoch"]);
+    assert_eq!(query("streamIdentity"), ["stream"]);
+    assert_eq!(query("limit"), ["50"]);
+    let since: i64 = query("since")[0].parse().expect("since");
+    if query("scope") != [SCOPE_TOKEN] {
+        return TestResponse::json(
+            200,
+            json!({"ok": true, "scope": hosted_scope(), "ops": [], "nextCursor": since, "hasMore": false}),
+        );
+    }
+    if query("object").iter().any(|object| object != "doc-a") {
+        return TestResponse::json(
+            400,
+            json!({"ok": false, "code": "bad_request", "error": "object is not in this scope"}),
+        );
+    }
+    // The page passed rows the feed withholds, so its cursor is past its last row.
+    TestResponse::json(
+        200,
+        json!({
+            "ok": true,
+            "scope": hosted_scope(),
+            "ops": [remote_row("owner", 4, "live.audit.application", json!({"objectId": "doc-a"}))],
+            "nextCursor": 9,
+            "hasMore": true
+        }),
+    )
+}
+
+fn hosted_pull(scope_token: Option<&str>, object_id: Option<&str>) -> HostedPullRequest {
+    HostedPullRequest {
+        workspace_id: "ws".to_owned(),
+        replication_epoch: "epoch".to_owned(),
+        stream_identity: "stream".to_owned(),
+        scope_token: scope_token.map(str::to_owned),
+        object_id: object_id.map(str::to_owned),
+        cursor: 3,
+        limit: 50,
+    }
+}
+
+#[test]
+fn a_hosted_pull_learns_the_scope_then_reads_its_rows_and_backfills() {
+    let targets = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&targets);
+    let server = FakeServer::start(move |request| {
+        seen.lock().unwrap().push(request.target.clone());
+        hosted_feed(&request)
+    });
+    let transport = transport(&server).hosted();
+    let scope = HostedScope {
+        token: SCOPE_TOKEN.to_owned(),
+        documents: vec![HostedScopeDocument {
+            object_id: "doc-a".to_owned(),
+            path: "a.md".to_owned(),
+        }],
+    };
+
+    for (learning, sent) in [
+        (None, Vec::<String>::new()),
+        (Some("scope-1"), vec!["scope-1".to_owned()]),
+    ] {
+        assert_eq!(
+            transport.pull_hosted(hosted_pull(learning, None)),
+            Ok(HostedPullResponse {
+                scope: scope.clone(),
+                ops: Vec::new(),
+                next_cursor: 3,
+                has_more: false,
+            }),
+            "a request under {learning:?} applies nothing and keeps its cursor"
+        );
+        let target = targets.lock().unwrap().last().unwrap().clone();
+        assert_eq!(query(&target, "scope"), sent);
+    }
+
+    for backfill in [None, Some("doc-a")] {
+        let page = transport
+            .pull_hosted(hosted_pull(Some(SCOPE_TOKEN), backfill))
+            .expect("a page under the current scope");
+        assert_eq!(page.scope, scope);
+        assert_eq!((page.next_cursor, page.has_more), (9, true));
+        assert_eq!(page.ops.len(), 1);
+        assert_eq!(
+            (page.ops[0].workspace_id.as_str(), page.ops[0].relay_seq),
+            ("ws", Some(5))
+        );
+        let target = targets.lock().unwrap().last().unwrap().clone();
+        assert_eq!(
+            query(&target, "object"),
+            backfill.map(str::to_owned).into_iter().collect::<Vec<_>>()
+        );
+    }
+    assert_eq!(
+        transport.pull_hosted(hosted_pull(Some(SCOPE_TOKEN), Some("private"))),
+        Err(RelayError::BadRequest)
+    );
+}
+
+#[test]
+fn a_hosted_transport_sends_the_log_blobs_and_coordinates_to_the_hosted_feed() {
+    let bytes = b"hosted bytes".to_vec();
+    let sha256 = hex_sha256(&bytes);
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&requests);
+    let served = bytes.clone();
+    let server = FakeServer::start(move |request| {
+        let path = request.path().to_owned();
+        seen.lock()
+            .unwrap()
+            .push(format!("{} {path}", request.method));
+        let route = path.strip_prefix("/sync/ws").expect("a workspace route");
+        let route = route.strip_prefix("/hosted").unwrap_or(route);
+        match (request.method.as_str(), route) {
+            ("POST", "/blobs/have") => TestResponse::json(200, json!({"ok": true, "missing": []})),
+            ("PUT", _) => TestResponse::json(
+                200,
+                json!({"ok": true, "workspaceId": "ws", "sha256": route.trim_start_matches("/blobs/"),
+                    "byteLength": request.body.len(), "alreadyHad": false}),
+            ),
+            ("GET", blob) if blob.starts_with("/blobs/") => TestResponse::bytes(served.clone()),
+            ("GET", coordinate) if coordinate.starts_with("/log/") => {
+                TestResponse::json(200, json!({"ok": true, "status": "absent"}))
+            }
+            ("POST", "/log") => {
+                assert_eq!(request.json()["originId"], "service-host:host");
+                TestResponse::json(
+                    200,
+                    json!({"ok": true, "accepted": 0, "inserted": 0, "skipped": 0, "currentMaxOriginSeq": -1}),
+                )
+            }
+            other => panic!("unexpected request {other:?}"),
+        }
+    });
+    let exercise = |transport: &HttpRelayTransport, hosted: bool| {
+        transport
+            .blobs_have(BlobHaveRequest {
+                workspace_id: "ws".to_owned(),
+                replication_epoch: "epoch".to_owned(),
+                stream_identity: "stream".to_owned(),
+                sha256s: vec![sha256.clone()],
+            })
+            .expect("blob have");
+        transport
+            .upload_blob(BlobUploadRequest {
+                workspace_id: "ws".to_owned(),
+                replication_epoch: "epoch".to_owned(),
+                stream_identity: "stream".to_owned(),
+                sha256: sha256.clone(),
+                bytes: bytes.clone(),
+            })
+            .expect("blob upload");
+        let downloaded = transport
+            .download_blobs(BlobDownloadBatchRequest {
+                workspace_id: "ws".to_owned(),
+                replication_epoch: "epoch".to_owned(),
+                stream_identity: "stream".to_owned(),
+                blobs: vec![BlobDownloadSpec {
+                    sha256: sha256.clone(),
+                    limit_bytes: 1024,
+                }],
+            })
+            .expect("blob download");
+        assert_eq!(
+            downloaded.results[0].as_ref().map(|blob| &blob.bytes),
+            Ok(&bytes)
+        );
+        assert_eq!(
+            transport.lookup_log_coordinate(LogCoordinateRequest {
+                workspace_id: "ws".to_owned(),
+                replication_epoch: "epoch".to_owned(),
+                stream_identity: "stream".to_owned(),
+                origin_id: "owner".to_owned(),
+                origin_seq: 2,
+            }),
+            Ok(LogCoordinateResponse::Absent)
+        );
+        let push = dohc_engine_sync::PushRequest {
+            workspace_id: "ws".to_owned(),
+            replication_epoch: "epoch".to_owned(),
+            stream_identity: "stream".to_owned(),
+            origin_id: "service-host:host".to_owned(),
+            after_seq: -1,
+            ops: Vec::new(),
+        };
+        if hosted {
+            transport.push_hosted(push).expect("hosted push");
+        } else {
+            transport.push(push).expect("ordinary push");
+        }
+        std::mem::take(&mut *requests.lock().unwrap())
+    };
+    let routes = |prefix: &str| {
+        [
+            format!("POST {prefix}/blobs/have"),
+            format!("PUT {prefix}/blobs/{sha256}"),
+            format!("GET {prefix}/blobs/{sha256}"),
+            format!("GET {prefix}/log/owner/2"),
+            format!("POST {prefix}/log"),
+        ]
+    };
+    assert_eq!(
+        exercise(&transport(&server).hosted(), true),
+        routes("/sync/ws/hosted")
+    );
+    assert_eq!(
+        exercise(&transport(&server), false),
+        routes("/sync/ws"),
+        "an ordinary transport keeps the workspace routes"
+    );
+}
+
+#[test]
+fn hosted_feed_refusals_map_to_their_errors() {
+    let server = FakeServer::start(|request| match (request.method.as_str(), request.path()) {
+        ("POST", "/sync/ws/hosted/log") => TestResponse::json(
+            403,
+            json!({"ok": false, "code": "share_op_rejected", "error": "an op is outside the hosted documents"}),
+        ),
+        ("GET", "/sync/ws/hosted/log") => TestResponse::json(
+            404,
+            json!({"ok": false, "code": "not_found", "error": "not found"}),
+        ),
+        ("GET", _) => TestResponse::json(
+            404,
+            json!({"ok": false, "code": "blob_not_found", "error": "blob not found"}),
+        ),
+        other => panic!("unexpected request {other:?}"),
+    });
+    let hosted = transport(&server).hosted();
+    let push = dohc_engine_sync::PushRequest {
+        workspace_id: "ws".to_owned(),
+        replication_epoch: "epoch".to_owned(),
+        stream_identity: "stream".to_owned(),
+        origin_id: "service-host:host".to_owned(),
+        after_seq: -1,
+        ops: Vec::new(),
+    };
+    assert_eq!(
+        hosted.push_hosted(push.clone()),
+        Err(RelayError::ShareOperationRejected)
+    );
+    assert_eq!(
+        hosted.pull_hosted(hosted_pull(None, None)),
+        Err(RelayError::WorkspaceUnavailable),
+        "a workspace the relay does not host"
+    );
+    let outside = hosted
+        .download_blobs(BlobDownloadBatchRequest {
+            workspace_id: "ws".to_owned(),
+            replication_epoch: "epoch".to_owned(),
+            stream_identity: "stream".to_owned(),
+            blobs: vec![BlobDownloadSpec {
+                sha256: "a".repeat(64),
+                limit_bytes: 1024,
+            }],
+        })
+        .expect("a batch answers per blob");
+    assert_eq!(outside.results, vec![Err(RelayError::BlobMissing)]);
+
+    // An ordinary replica's transport serves no hosted feed and sends nothing.
+    let ordinary = transport(&server);
+    assert_eq!(
+        ordinary.pull_hosted(hosted_pull(None, None)),
+        Err(dohc_engine_sync::no_hosted_feed())
+    );
+    assert_eq!(
+        ordinary.push_hosted(push),
+        Err(dohc_engine_sync::no_hosted_feed())
+    );
+}
+
+/// A hosted transport reaches only the hosted feed: every ordinary workspace,
+/// claim, key and share route refuses without a request.
+#[test]
+fn a_hosted_transport_sends_nothing_to_an_ordinary_route() {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&requests);
+    let server = FakeServer::start(move |request| {
+        seen.lock().unwrap().push(request.target);
+        TestResponse::json(500, json!({"ok": false}))
+    });
+    let hosted = transport(&server).hosted();
+    let refused = Err::<(), _>(dohc_engine_sync::hosted_feed_only());
+    let refusals = [
+        hosted
+            .push(dohc_engine_sync::PushRequest {
+                workspace_id: "ws".to_owned(),
+                replication_epoch: "epoch".to_owned(),
+                stream_identity: "stream".to_owned(),
+                origin_id: "service-host:host".to_owned(),
+                after_seq: -1,
+                ops: Vec::new(),
+            })
+            .map(drop),
+        hosted
+            .pull(PullRequest {
+                workspace_id: "ws".to_owned(),
+                replication_epoch: "epoch".to_owned(),
+                stream_identity: "stream".to_owned(),
+                cursor: 0,
+                limit: 1,
+            })
+            .map(drop),
+        hosted
+            .probe(ProbeRequest {
+                workspace_id: "ws".to_owned(),
+                replication_epoch: "epoch".to_owned(),
+                stream_identity: "stream".to_owned(),
+            })
+            .map(drop),
+        hosted
+            .claim_workspace(ClaimRequest {
+                workspace_id: "ws".to_owned(),
+                replication_epoch: "epoch".to_owned(),
+                stream_identity: "stream".to_owned(),
+            })
+            .map(drop),
+        hosted
+            .rotate_epoch(EpochRequest {
+                workspace_id: "ws".to_owned(),
+                replication_epoch: "epoch".to_owned(),
+                stream_identity: "stream".to_owned(),
+            })
+            .map(drop),
+        hosted
+            .upload_key_envelope(KeyEnvelopeRequest {
+                workspace_id: "ws".to_owned(),
+                replication_epoch: "epoch".to_owned(),
+                stream_identity: "stream".to_owned(),
+                envelope_json: "{}".to_owned(),
+                if_match: None,
+            })
+            .map(drop),
+        hosted
+            .download_key_envelope(KeyEnvelopeDownloadRequest {
+                workspace_id: "ws".to_owned(),
+                replication_epoch: "epoch".to_owned(),
+                stream_identity: "stream".to_owned(),
+            })
+            .map(drop),
+        hosted
+            .share_log_push(ShareLogPushRequest {
+                share_id: "share-1".to_owned(),
+                origin_id: "member".to_owned(),
+                ops: Vec::new(),
+            })
+            .map(drop),
+        hosted
+            .shared_channel_pull(SharedChannelRequest {
+                share_id: "share-1".to_owned(),
+                channel_wire_id: "wire-1".to_owned(),
+                origin_id: "member".to_owned(),
+                cursor: 0,
+                ops: Vec::new(),
+            })
+            .map(drop),
+        hosted
+            .share_view_pull(ShareViewRequest {
+                share_id: "share-1".to_owned(),
+                cursor: 0,
+                limit: 1,
+            })
+            .map(drop),
+        hosted
+            .share_blob(ShareBlobRequest {
+                share_id: "share-1".to_owned(),
+                sha256: "b".repeat(64),
+            })
+            .map(drop),
+        hosted
+            .share_blob_upload(dohc_engine_sync::ShareBlobUploadRequest {
+                share_id: "share-1".to_owned(),
+                sha256: "b".repeat(64),
+                bytes: b"bytes".to_vec(),
+            })
+            .map(drop),
+        hosted
+            .share_proposal_submit(dohc_engine_sync::ShareProposalSubmitRequest {
+                share_id: "share-1".to_owned(),
+                submit_id: "submit".to_owned(),
+                ops: Vec::new(),
+            })
+            .map(drop),
+        hosted
+            .share_collection_write(dohc_engine_sync::ShareCollectionWriteRequest {
+                share_id: "share-1".to_owned(),
+                submit_id: "submit".to_owned(),
+                changes: Vec::new(),
+            })
+            .map(drop),
+    ];
+    for (index, refusal) in refusals.into_iter().enumerate() {
+        assert_eq!(refusal, refused, "ordinary route {index}");
+    }
+    assert!(requests.lock().unwrap().is_empty(), "{requests:?}");
 }

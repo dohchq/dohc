@@ -1,6 +1,10 @@
+import { withWorkspaceSyncTransition } from "../workspaces/stopWorkspaceSync";
+import { shareViewIsPresent } from "../workspaces/shareViewMarker";
+import { ownActorPresentation } from "../workspaces/actorPresentation";
 import { CHANNELS } from "./channels";
+import { registerOperations } from "./operationTable";
 import {
-  CloudEnableSyncPayload, CloudJoinWorkspacePayload, CloudJoinWorkspaceResult,
+  CloudEnableSyncPayload, workspaceSyncOperations, type CloudStopSyncResult, CloudJoinWorkspacePayload, CloudJoinWorkspaceResult,
   CloudLoginStartPayload, CloudLoginStartResult, CloudLoginPollResult,
   CloudStatusPayload, CloudStatusResult, SyncStatusResult, WorkspaceSummary,
 } from "./bridgeContract";
@@ -40,6 +44,7 @@ export function registerCloudIpcHandlers<
   refreshCredentialCache(): Promise<void>;
   warmCredentialCache(): Promise<void>;
   currentCredentials(): CloudCredentials | null;
+  localInstallationId(): string;
   loadAndCacheCurrentCredentials(): Promise<CloudCredentials | null>;
   closeAllRelayTransportWorkspaces(options?: { accountChanged?: boolean }): Promise<void>;
   activity: {
@@ -47,6 +52,9 @@ export function registerCloudIpcHandlers<
     enableCloud(workspace: RegistryEntry, options?: { joinBootstrap?: boolean }): Promise<unknown>;
     getStatus(workspaceId: string): SyncStatusResult;
   };
+  currentWorkspaceId(sender: Sender): string | null;
+  stopWorkspaceSync(operation: Operation): Promise<CloudStopSyncResult>;
+  syncPauseFor(workspace: RegistryEntry): SyncStatusResult["syncPause"];
   reconcileCloud(): void;
   notifyCloudSessionChanged(phase: "changing" | "ready"): void;
   notifyCloudSessionChangedWithKey(key: string | null, phase: "changing" | "ready"): void;
@@ -55,10 +63,6 @@ export function registerCloudIpcHandlers<
   engineDaemonStartup(): Promise<unknown>;
   requireEngineSessions(): EngineWorkspaceSessions;
   currentEngineSessions(): EngineWorkspaceSessions | null;
-  withPhysicalWorkspaceOperation<Result>(
-    workspaceId: string,
-    work: (operation: { readonly workspace: RegistryEntry & { readonly attachmentId: symbol }; assertCurrent(): void }) => Result | Promise<Result>,
-  ): Promise<Result>;
   withRendererWorkspaceOperation<Result>(
     sender: Sender, workspaceId: string, inactiveMessage: string,
     work: (operation: Operation) => Result | Promise<Result>,
@@ -74,7 +78,7 @@ export function registerCloudIpcHandlers<
   }): EngineRelayWorkspaceClient;
   enrollWorkspaceKeyEnvelope: typeof enrollWorkspaceKeyEnvelope;
   installWorkspaceDataKey: typeof installWorkspaceDataKey;
-  setWorkspaceRemote(workspaceId: string, remote: NonNullable<RegistryEntry["remote"]>): unknown;
+  setWorkspaceRemote(workspaceId: string, remote: NonNullable<RegistryEntry["remote"]>): Promise<void>;
   usableRoot(rootPath: string): string;
   readdir(rootPath: string): Promise<string[]>;
   mkdir(rootPath: string, options: { recursive: true }): Promise<unknown>;
@@ -90,9 +94,9 @@ export function registerCloudIpcHandlers<
     registerHandler, assertTrustedSender, cloudLogin, clearCachedCredentials,
     refreshCredentialCache, warmCredentialCache, currentCredentials,
     loadAndCacheCurrentCredentials, closeAllRelayTransportWorkspaces, activity,
-    reconcileCloud, notifyCloudSessionChanged, notifyCloudSessionChangedWithKey,
+    currentWorkspaceId, stopWorkspaceSync, syncPauseFor, reconcileCloud, notifyCloudSessionChanged, notifyCloudSessionChangedWithKey,
     notifyRenderer, findWorkspace, engineDaemonStartup,
-    requireEngineSessions, currentEngineSessions, withPhysicalWorkspaceOperation,
+    requireEngineSessions, currentEngineSessions,
     withRendererWorkspaceOperation, receivedShareEngine, readWorkspaceSecretState,
     readWorkspaceDataKeyForEnrollment, assertWritableWorkspace, relayClientForWorkspace,
     enrollWorkspaceKeyEnvelope, installWorkspaceDataKey, setWorkspaceRemote,
@@ -144,27 +148,34 @@ export function registerCloudIpcHandlers<
     const input = CloudStatusPayload.parse(payload ?? {});
     const status = await cloudLogin().status();
     await warmCredentialCache();
-    const workspace = input.workspaceId ? findWorkspace(input.workspaceId) : undefined;
+    let workspace: RegistryEntry | undefined;
     let workspaceSecretState: WorkspaceSecretState | undefined;
-    if (workspace) {
+    if (input.workspaceId) {
       // The shell asks at mount, which can precede the daemon handshake now
       // that the window loads during it.
       await engineDaemonStartup();
       const sessions = requireEngineSessions();
-      workspaceSecretState = await withPhysicalWorkspaceOperation(
-        workspace.workspaceId,
-        async (operation) =>
-          await readWorkspaceSecretState(
-            receivedShareEngine.workspaceForRegistered(operation.workspace),
-            sessions,
-          ),
-      );
+      ({ workspace, workspaceSecretState } = await withRendererWorkspaceOperation(
+        event.sender, input.workspaceId, "This workspace is no longer active.",
+        async (operation) => {
+          return {
+            workspace: operation.workspace,
+            workspaceSecretState: await readWorkspaceSecretState(
+              receivedShareEngine.workspaceForRegistered(operation.workspace),
+              sessions,
+            ),
+          };
+        },
+      ));
     }
     return CloudStatusResult.parse({
       ...status,
+      ownPresentation: ownActorPresentation(dependencies.localInstallationId(), currentCredentials()),
       ...(input.workspaceId
         ? {
+            workspaceSyncOwned: !!workspace && !shareViewIsPresent(workspace.shareView),
             workspaceSynced: !!workspace?.remote,
+            ...(!shareViewIsPresent(workspace?.shareView) && workspace?.syncPause ? { syncPause: syncPauseFor(workspace) } : {}),
             workspaceSyncConnected:
               !!workspace?.remote &&
               workspaceRemoteMatchesCredentials(
@@ -207,7 +218,8 @@ export function registerCloudIpcHandlers<
       event.sender,
       input.workspaceId,
       "Cloud enrollment stopped because this window changed workspaces.",
-      async (operation) => {
+      operation => withWorkspaceSyncTransition(input.workspaceId, async () => {
+        operation.assertCurrent();
         const workspace = operation.workspace;
         // A received share replicates through its pinned share lane. Enrolling its
         // projection as an owned workspace would claim someone else's filtered
@@ -245,6 +257,7 @@ export function registerCloudIpcHandlers<
         await enrollWorkspaceKeyEnvelope({
           workspaceId: workspace.workspaceId,
           dataKey,
+          resume: workspace.pausedRemote !== undefined,
           ...(input.passphrase === undefined
             ? {}
             : { passphrase: input.passphrase }),
@@ -253,15 +266,33 @@ export function registerCloudIpcHandlers<
             await installWorkspaceDataKey(workspace.rootPath, unwrapped),
         });
         operation.assertCurrent();
-        setWorkspaceRemote(workspace.workspaceId, {
+        await setWorkspaceRemote(workspace.workspaceId, {
           serverUrl: credentials.serverUrl,
           ownerUserId: credentials.userId,
         });
+        operation.assertCurrent();
         await activity.enableCloud(workspace);
         operation.assertCurrent();
         return SyncStatusResult.parse(activity.getStatus(workspace.workspaceId));
-      },
+      }),
     );
+  });
+
+  registerOperations<typeof workspaceSyncOperations, Event, Operation>({
+    handle: registerHandler,
+    assertTrustedSender,
+    withActiveWorkspace: (event: Event, workspaceId, message, work) =>
+      withRendererWorkspaceOperation(event.sender, workspaceId, message, work),
+  }, workspaceSyncOperations, {
+    cloudStopSync: async (_input, { event }) => {
+      const workspaceId = currentWorkspaceId(event.sender);
+      if (!workspaceId) throw new Error("Open a workspace to stop its sync.");
+      return withRendererWorkspaceOperation(
+        event.sender, workspaceId,
+        "This window changed workspaces. Open the workspace again to check its sync.",
+        operation => stopWorkspaceSync(operation),
+      );
+    },
   });
 
   // Join a synced workspace on this machine (0P-C): sync code from the
@@ -376,14 +407,14 @@ export function registerCloudIpcHandlers<
         // push can reach the relay before that pull succeeds — a fresh join can
         // never seed boilerplate into the remote or conflict against it.
         await openWorkspaceActivity(created, {
-          afterActivityOpen: async () => {
-            setWorkspaceRemote(created.workspaceId, {
+          afterActivityOpen: () => withWorkspaceSyncTransition(created.workspaceId, async () => {
+            await setWorkspaceRemote(created.workspaceId, {
               serverUrl: credentials.serverUrl,
               ownerUserId: credentials.userId,
             });
             await activity.enableCloud(created, { joinBootstrap: true });
             completeWorkspaceJoinBootstrap(created.workspaceId);
-          },
+          }),
         });
       },
       rollbackLabel: "join",

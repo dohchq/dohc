@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { observeWorkspaceFiles, type WorkspaceObservationCallbacks } from "./workspaceFileObservation";
-import type { FileObservationChanges } from "@dohc/workspace-engine-client/daemon";
+import { observeWorkspaceFiles, startWorkspaceFileObservation, type WorkspaceObservationCallbacks } from "./workspaceFileObservation";
+import type { EngineDaemonLifecycle, EngineWorkspaceSessions, FileObservationChanges } from "@dohc/workspace-engine-client/daemon";
+import type { Event } from "@dohc/workspace-engine-client";
 import { deferred } from "../testing/deferred";
 
 const answer = (revision: number, extra: Partial<FileObservationChanges> = {}): FileObservationChanges => ({
@@ -27,7 +28,7 @@ describe("workspace file observation", () => {
     await f.handle.ready;
     f.wake();
     await vi.advanceTimersByTimeAsync(0);
-    expect(f.callbacks.degraded).toHaveBeenLastCalledWith(true);
+    expect(f.callbacks.degraded).not.toHaveBeenCalledWith("read-failed");
     expect(read).toHaveBeenCalledTimes(2);
     f.wake();
     await vi.advanceTimersByTimeAsync(249);
@@ -38,7 +39,7 @@ describe("workspace file observation", () => {
     expect(f.callbacks.resync).toHaveBeenCalledOnce();
     expect(f.callbacks.facts).toHaveBeenCalledWith([{ path: "fresh.md", kind: "appeared" }]);
     expect(read.mock.calls[1]?.[0]).toEqual({ generation: "first", revision: 1 });
-    expect(f.callbacks.degraded).toHaveBeenLastCalledWith(false);
+    expect(f.callbacks.degraded).toHaveBeenLastCalledWith(null);
     await vi.advanceTimersByTimeAsync(10_000);
     expect(read).toHaveBeenCalledTimes(4);
     await f.handle.stop();
@@ -50,7 +51,7 @@ describe("workspace file observation", () => {
     const f = fixture(read);
     await vi.advanceTimersByTimeAsync(0);
     await f.handle.ready;
-    expect(f.callbacks.degraded).toHaveBeenCalledWith(true);
+    expect(f.callbacks.degraded).not.toHaveBeenCalledWith("read-failed");
     await f.handle.stop();
     await vi.advanceTimersByTimeAsync(10_000);
     expect(read).toHaveBeenCalledTimes(2);
@@ -59,7 +60,7 @@ describe("workspace file observation", () => {
   it("resolves readiness for a known degraded feed", async () => {
     const f = fixture(vi.fn().mockResolvedValue({ ...answer(0), ready: false, degraded: true }));
     await f.handle.ready;
-    expect(f.callbacks.degraded).toHaveBeenCalledWith(true);
+    expect(f.callbacks.degraded).toHaveBeenCalledWith("unavailable");
     await f.handle.stop();
   });
 
@@ -141,5 +142,145 @@ describe("workspace file observation", () => {
     await expect(f.handle.stop()).rejects.toThrow("drain unavailable");
     expect(read.mock.calls[1]).toEqual([{ generation: "first", revision: 1 }, true]);
     expect(f.onError).toHaveBeenCalledOnce();
+  });
+
+  it("reports only persistent read failures and lets Try again bypass the backoff", async () => {
+    vi.useFakeTimers();
+    const read = vi.fn().mockRejectedValue(new Error("read failed"));
+    const f = fixture(read);
+    await vi.advanceTimersByTimeAsync(0);
+    await f.handle.ready;
+    await vi.advanceTimersByTimeAsync(7_749);
+    expect(f.callbacks.degraded).not.toHaveBeenCalledWith("read-failed");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(read).toHaveBeenCalledTimes(6);
+    expect(f.callbacks.degraded).toHaveBeenLastCalledWith("read-failed");
+    const retry = f.handle.retry();
+    await expect(retry).rejects.toThrow("read failed");
+    expect(read).toHaveBeenCalledTimes(7);
+    read.mockResolvedValue(answer(1));
+    await f.handle.retry();
+    expect(read).toHaveBeenCalledTimes(8);
+    expect(f.callbacks.degraded).toHaveBeenLastCalledWith(null);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(read).toHaveBeenCalledTimes(8);
+    await f.handle.stop();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("keeps a flapping read quiet when each retry recovers", async () => {
+    vi.useFakeTimers();
+    const read = vi.fn().mockResolvedValue(answer(1));
+    const f = fixture(read);
+    await f.handle.ready;
+    for (let n = 0; n < 4; n++) {
+      read.mockRejectedValueOnce(new Error("transient failure"));
+      f.wake();
+      await vi.advanceTimersByTimeAsync(250);
+    }
+    expect(f.callbacks.degraded).not.toHaveBeenCalledWith("read-failed");
+    await f.handle.stop();
+  });
+
+  it("clears a failed read after restart while scanning, including Try again", async () => {
+    vi.useFakeTimers();
+    const read = vi.fn().mockResolvedValueOnce(answer(1)).mockRejectedValue(new Error("daemon stopped"));
+    const f = fixture(read);
+    await f.handle.ready;
+    f.wake();
+    await vi.advanceTimersByTimeAsync(7_750);
+    expect(f.callbacks.degraded).toHaveBeenLastCalledWith("read-failed");
+    read.mockResolvedValue({ ...answer(0, { cursor: { generation: "restarted", revision: 0 }, ready: false, resync: true }), degraded: false });
+    await f.handle.retry();
+    expect(f.callbacks.degraded).toHaveBeenLastCalledWith(null);
+    expect(f.callbacks.resync).toHaveBeenCalledOnce();
+    await f.handle.retry();
+    expect(f.callbacks.degraded).toHaveBeenLastCalledWith(null);
+    expect(read).toHaveBeenCalledTimes(9);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(read).toHaveBeenCalledTimes(9);
+    await f.handle.stop();
+  });
+
+  it("reports watcher degradation even when a successful read is ready", async () => {
+    const f = fixture(vi.fn().mockResolvedValue({ ...answer(1), degraded: true }));
+    await f.handle.ready;
+    expect(f.callbacks.degraded).toHaveBeenLastCalledWith("unavailable");
+    await f.handle.stop();
+  });
+
+  it("logs a drain timeout once even when the drain later rejects", async () => {
+    vi.useFakeTimers();
+    const pending = deferred<FileObservationChanges>();
+    const f = fixture(vi.fn().mockResolvedValueOnce(answer(1)).mockReturnValueOnce(pending.promise));
+    await f.handle.ready;
+    const result = expect(f.handle.stop()).rejects.toThrow("timed out");
+    await vi.advanceTimersByTimeAsync(5_000);
+    await result;
+    pending.reject(new Error("late drain failure"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.onError).toHaveBeenCalledOnce();
+  });
+
+  it.each(["read", "drain"])("bounds stop while a %s never answers and ignores its late facts", async blocked => {
+    vi.useFakeTimers();
+    const pending = deferred<FileObservationChanges>();
+    const read = vi.fn().mockResolvedValue(answer(3));
+    if (blocked === "read") read.mockReturnValueOnce(pending.promise);
+    else read.mockResolvedValueOnce(answer(1)).mockReturnValueOnce(pending.promise);
+    const f = fixture(read);
+    await vi.advanceTimersByTimeAsync(0);
+    const stopped = f.handle.stop();
+    expect(f.handle.stop()).toBe(stopped);
+    const result = vi.fn();
+    void stopped.then(() => result("resolved"), error => result(error.message));
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(result).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(result).toHaveBeenCalledExactlyOnceWith("File observation drain timed out after 5000ms");
+    pending.resolve(answer(2, { facts: [{ path: "late.md", kind: "changed" }] }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.callbacks.facts).not.toHaveBeenCalled();
+    expect(read).toHaveBeenCalledTimes(blocked === "read" ? 1 : 2);
+    expect(f.onError).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("subscribes to workspace events, forwards truncated capture broadly, and unsubscribes", async () => {
+    const eventHandlers = new Set<(event: Event) => void>();
+    const clientHandlers = new Set<() => void>();
+    const daemon: Pick<EngineDaemonLifecycle, "onEvent" | "onClientChanged"> = {
+      onEvent(handler) { eventHandlers.add(handler); return () => { eventHandlers.delete(handler); }; },
+      onClientChanged(handler) { clientHandlers.add(handler); return () => { clientHandlers.delete(handler); }; },
+    };
+    const emit = (name: string, payload: Event["payload"]) => {
+      for (const handler of eventHandlers) handler({ seq: 1, sessionGeneration: 1, name, payload });
+    };
+    const sendRequest = vi.fn(async (request: { id: number }) => ({ id: request.id, result: answer(1) }));
+    const sessions = {
+      run: async (_workspace: unknown, run: (binding: unknown) => Promise<unknown>) => run({ client: { sendRequest }, workspace: "binding" }),
+      assertCurrentBinding: vi.fn(),
+    } as unknown as EngineWorkspaceSessions;
+    const callbacks: WorkspaceObservationCallbacks = {
+      facts: vi.fn(), resync: vi.fn(async () => {}), captured: vi.fn(), pulled: vi.fn(), degraded: vi.fn(),
+    };
+    const handle = startWorkspaceFileObservation({ workspaceId: "a", rootPath: "/a", attachmentId: Symbol(),
+      kind: "personal", mode: "local-first" }, sessions, daemon, callbacks);
+    await handle.ready;
+    emit("capture.momentRecorded", { workspaceId: "a", paths: ["note.md"], appliedCount: 1, notOwnedCount: 0 });
+    expect(callbacks.captured).toHaveBeenCalledExactlyOnceWith(["note.md"]);
+    emit("capture.momentRecorded", { workspaceId: "b", paths: ["other.md"], appliedCount: 1, notOwnedCount: 0 });
+    expect(callbacks.captured).toHaveBeenCalledOnce();
+    emit("capture.momentRecorded", { workspaceId: "a", paths: ["note.md"], appliedCount: 2, notOwnedCount: 0 });
+    expect(callbacks.captured).toHaveBeenLastCalledWith(undefined);
+    emit("workspace.filesChanged", { workspaceId: "b", cursor: answer(1).cursor });
+    expect(sendRequest).toHaveBeenCalledOnce();
+    emit("workspace.filesChanged", { workspaceId: "a", cursor: answer(1).cursor });
+    await vi.waitFor(() => expect(sendRequest).toHaveBeenCalledTimes(2));
+    for (const handler of clientHandlers) handler();
+    await vi.waitFor(() => expect(sendRequest).toHaveBeenCalledTimes(3));
+    await handle.stop();
+    expect(eventHandlers.size).toBe(0);
+    expect(clientHandlers.size).toBe(0);
   });
 });

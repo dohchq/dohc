@@ -549,6 +549,7 @@ fn merge_materialization_is_gated_to_the_active_target_version_across_reopen() {
             &store,
             scratch.path(),
             &MaterializeOptions {
+                holds: None,
                 policy: DurabilityPolicy::per_os(),
                 replacer: &StdReplacer,
                 backoff: &NoBackoff,
@@ -663,9 +664,23 @@ fn compare_version_files_classifies_omits_identical_and_sorts() {
     )
     .expect("add");
 
-    let changes = vt
-        .compare_version_files(WS, "feat", "main")
-        .expect("compare versions");
+    let changes =
+        dohc_engine_testkit::version_comparison::compare_version_files(&vt, WS, "feat", "main")
+            .expect("compare versions");
+    let page = vt
+        .compare_version_files_page(WS, "feat", "main", None, 100)
+        .expect("compare metadata page");
+    assert_eq!(
+        page.entries
+            .iter()
+            .map(|entry| (&entry.path, entry.status))
+            .collect::<Vec<_>>(),
+        changes
+            .iter()
+            .map(|change| (&change.path, change.status))
+            .collect::<Vec<_>>(),
+        "metadata comparison must match the independent content oracle",
+    );
     assert_eq!(
         changes
             .iter()
@@ -803,9 +818,23 @@ fn compare_version_files_reports_binary_content_and_transitions() {
         Some(same_sha.as_str())
     );
 
-    let changes = vt
-        .compare_version_files(WS, "feat", "main")
-        .expect("compare versions");
+    let changes =
+        dohc_engine_testkit::version_comparison::compare_version_files(&vt, WS, "feat", "main")
+            .expect("compare versions");
+    let page = vt
+        .compare_version_files_page(WS, "feat", "main", None, 100)
+        .expect("compare metadata page");
+    assert_eq!(
+        page.entries
+            .iter()
+            .map(|entry| (&entry.path, entry.status))
+            .collect::<Vec<_>>(),
+        changes
+            .iter()
+            .map(|change| (&change.path, change.status))
+            .collect::<Vec<_>>(),
+        "metadata comparison must match the independent content oracle",
+    );
     assert_eq!(
         changes
             .iter()
@@ -1404,6 +1433,7 @@ fn merge_job_crash_then_external_edit_is_preserved_on_recovery() {
         &store,
         scratch.path(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::per_os(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -1422,6 +1452,7 @@ fn merge_job_crash_then_external_edit_is_preserved_on_recovery() {
         &store,
         scratch.path(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::per_os(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,

@@ -6,6 +6,10 @@ mod native_state;
 pub(super) const CHECKPOINT_EVENTS: i64 = 4095;
 const CHECKPOINT_BYTES: i64 = 20_971_520;
 const DOCUMENT: &str = "relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5";
+/// Every live application reads this until the next checkpoint. It finds the
+/// fence by its delivery and compares only columns stored before the restore
+/// proof, so it never walks the proof.
+pub(super) const NATIVE_APPEND_FENCE: &str = "SELECT operation_id=?2 AND new_generation=?4 AND workspace_id=?5 AND main_version_id=?6 AND object_id=?7 AND lineage_claim_id=?8 FROM live_restore_fences WHERE relay_database_namespace=?1 AND application_delivery_id=?3";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -47,10 +51,22 @@ fn parameters(held: &Registration) -> [&str; 5] {
     ]
 }
 
-pub(super) fn initial_digest(held: &Registration) -> Result<String, ApplicationError> {
+pub(super) fn initial_digest(
+    namespace: &str,
+    binding: &LiveObjectBinding,
+) -> Result<String, ApplicationError> {
     Ok(hex_sha256(
-        &serde_json::to_vec(&("accepted-history-v1", parameters(held)))
-            .map_err(|_| ApplicationError::Corrupt)?,
+        &serde_json::to_vec(&(
+            "accepted-history-v1",
+            [
+                namespace,
+                &binding.workspace_id,
+                &binding.main_version_id,
+                &binding.object_id,
+                &binding.lineage_claim_id,
+            ],
+        ))
+        .map_err(|_| ApplicationError::Corrupt)?,
     ))
 }
 
@@ -190,7 +206,7 @@ pub(super) fn initialize(
         terminal: None,
         binding: held.binding.clone(),
         state_digest: put_binary_blob(tx, baseline)?,
-        evidence_digest: initial_digest(held)?,
+        evidence_digest: initial_digest(&held.namespace, &held.binding)?,
     };
     insert_checkpoint(
         tx,
@@ -358,7 +374,7 @@ fn checkpoint_in(
     }
     if count == 0
         && (state_digest != held.binding.lineage_claim_id
-            || evidence_digest != initial_digest(held)?)
+            || evidence_digest != initial_digest(&held.namespace, &held.binding)?)
     {
         return Err(ApplicationError::Corrupt);
     }
@@ -380,7 +396,26 @@ fn checkpoint_in(
         let bound = if matches!(mode, CheckpointRead::NativeAppend) {
             // Historical restore JSON and content are checked by state replay.
             // Append still binds this checkpoint to the committed fence row.
-            conn.query_row("SELECT application_delivery_id=?3 AND new_generation=?4 AND workspace_id=?5 AND main_version_id=?6 AND object_id=?7 AND lineage_claim_id=?8 FROM live_restore_fences WHERE relay_database_namespace=?1 AND operation_id=?2",params![held.namespace,id,terminal.as_ref().ok_or(ApplicationError::Corrupt)?.delivery_id,binding.restore_fence_generation,binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id],|r|r.get::<_,bool>(0)).map_err(read_sql)?
+            conn.query_row(
+                NATIVE_APPEND_FENCE,
+                params![
+                    held.namespace,
+                    id,
+                    terminal
+                        .as_ref()
+                        .ok_or(ApplicationError::Corrupt)?
+                        .delivery_id,
+                    binding.restore_fence_generation,
+                    binding.workspace_id,
+                    binding.main_version_id,
+                    binding.object_id,
+                    binding.lineage_claim_id
+                ],
+                |r| r.get::<_, bool>(0),
+            )
+            .optional()
+            .map_err(read_sql)?
+            .unwrap_or(false)
         } else {
             conn.query_row("SELECT application_delivery_id=?3 AND new_generation=?4 AND json_extract(application_json,'$.admitted.accepted.binding')=?5 FROM live_restore_fences WHERE relay_database_namespace=?1 AND operation_id=?2",params![held.namespace,id,terminal.as_ref().ok_or(ApplicationError::Corrupt)?.delivery_id,binding.restore_fence_generation,serde_json::to_string(&binding).map_err(|_|ApplicationError::Corrupt)?],|r|r.get::<_,bool>(0)).map_err(read_sql)?
         };
@@ -549,7 +584,7 @@ fn segment_position(
 
 /// A full accepted history is initialized only by verified bootstrap or adoption.
 /// Other application users can keep applying without gaining restore authority.
-pub(super) fn append(
+pub(super) fn append_native(
     tx: &Transaction<'_>,
     held: &Registration,
     event: &AdmittedLiveUpdate,
@@ -686,26 +721,16 @@ fn append_inner(
     };
     let count = count + 1;
     let evidence = next_digest(&previous, count, &event.metadata)?;
-    let update = put_binary_blob(tx, &event.update_bytes)?;
-    tx.execute(
-        "INSERT INTO live_accepted_updates VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
-        params![
-            p[0],
-            p[1],
-            p[2],
-            p[3],
-            p[4],
-            count,
-            event.metadata.accepted.receipt.journal_cursor,
-            event.metadata.accepted.receipt.delivery_id,
-            native_state::json(&event.metadata)?,
-            update,
-            events,
-            bytes,
-            evidence
-        ],
-    )
-    .map_err(write_sql)?;
+    append(
+        tx,
+        &held.namespace,
+        &held.binding,
+        event,
+        count,
+        events,
+        bytes,
+        &evidence,
+    )?;
     if restored.is_some()
         || events == CHECKPOINT_EVENTS
         || bytes >= CHECKPOINT_BYTES
@@ -757,6 +782,47 @@ fn append_inner(
             budget,
         )?;
     }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn append(
+    tx: &Transaction<'_>,
+    namespace: &str,
+    binding: &LiveObjectBinding,
+    event: &AdmittedLiveUpdate,
+    count: i64,
+    events: i64,
+    bytes: i64,
+    evidence: &str,
+) -> Result<(), ApplicationError> {
+    let p = [
+        namespace,
+        &binding.workspace_id,
+        &binding.main_version_id,
+        &binding.object_id,
+        &binding.lineage_claim_id,
+    ];
+    let update = put_binary_blob(tx, &event.update_bytes)?;
+    tx.execute(
+        "INSERT INTO live_accepted_updates VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+        params![
+            p[0],
+            p[1],
+            p[2],
+            p[3],
+            p[4],
+            count,
+            event.metadata.accepted.receipt.journal_cursor,
+            event.metadata.accepted.receipt.delivery_id,
+            native_state::json(&event.metadata)?,
+            update,
+            events,
+            bytes,
+            evidence
+        ],
+    )
+    .map_err(write_sql)?;
     Ok(())
 }
 
@@ -980,7 +1046,7 @@ pub(super) fn accepted_source(
     require_document(held, &metadata.accepted.binding)?;
     metadata.accepted.receipt.validate()?;
     let previous = if count == 1 {
-        initial_digest(held)?
+        initial_digest(&held.namespace, &held.binding)?
     } else {
         let p = parameters(held);
         let length: i64 = conn.query_row(
@@ -1108,7 +1174,7 @@ mod tests {
                 binding,
                 live: true,
             };
-            let initial = initial_digest(&held).unwrap();
+            let initial = initial_digest(&held.namespace, &held.binding).unwrap();
             assert_eq!(initial, row["initialDigest"].as_str().unwrap(), "{case}");
             assert_eq!(
                 serde_json::to_string(&metadata).unwrap(),

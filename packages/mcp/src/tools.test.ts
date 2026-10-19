@@ -114,11 +114,11 @@ const emptyDesktopHistoryRequest: NonNullable<ToolContext["request"]> = async (r
   if (request.verb === "fileMove") {
     await mkdir(dirname(join(request.args.cwd, request.args.toPath)), { recursive: true });
     await rename(join(request.args.cwd, request.args.fromPath), join(request.args.cwd, request.args.toPath));
-    return { ok: true, fromPath: request.args.fromPath, toPath: request.args.toPath };
+    return { ok: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", undo: { available: true }, fromPath: request.args.fromPath, toPath: request.args.toPath };
   }
   if (request.verb === "fileDelete") {
     await rm(join(request.args.cwd, request.args.path), { recursive: true });
-    return { ok: true, path: request.args.path, trashed: true };
+    return { ok: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", undo: { available: true }, path: request.args.path, trashed: true };
   }
   if (request.verb === "moments") {
     return {
@@ -451,6 +451,30 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
+  it("workspace_status shows who paused without treating the retained binding as active sync", async () => {
+    await withWorkspace(async ctx => {
+      const syncPause = { atMs: 42, author: { kind: "agent", agentId: "Claude", onBehalfOf: "person-local", depth: 0 } };
+      await writeFile(join(ctx.home, "dohc-workspaces.json"), JSON.stringify({ version: 1, workspaces: [{
+        workspaceId: "ws-1", rootPath: ctx.root, kind: "personal", pausedRemote: { serverUrl: "https://server.test", ownerUserId: "owner" }, syncPause,
+      }] }));
+      expect(await workspaceStatus(ctx)).toMatchObject({ synced: false, scope: "local", syncPause });
+    });
+  });
+
+  it("workspace_status identifies this computer's person without an account", async () => {
+    await withWorkspace(async ctx => {
+      const syncPause = { atMs: 42, author: { kind: "person", personId: "local:person" } };
+      await writeFile(join(ctx.home, "dohc-local-id.json"), JSON.stringify({ id: "local:person" }));
+      await writeFile(join(ctx.home, "dohc-workspaces.json"), JSON.stringify({ version: 1, workspaces: [{
+        workspaceId: "ws-1", rootPath: ctx.root, kind: "personal", pausedRemote: { serverUrl: "https://server.test", ownerUserId: "owner" }, syncPause,
+      }] }));
+      expect(await workspaceStatus(ctx)).toMatchObject({ synced: false, syncPause: { atMs: 42,
+        author: { kind: "person", personId: "local:person", self: true } } });
+      await writeFile(join(ctx.home, "dohc-local-id.json"), JSON.stringify({ id: "local:other" }));
+      const other = await workspaceStatus(ctx);
+      expect(other.syncPause?.author).toEqual({ kind: "person", personId: "local:person", self: false });
+    });
+  });
   it("workspace_status reports a matching cloud credential as connected", async () => {
     await withWorkspace(async (ctx) => {
       await bindCloudWorkspace(ctx);
@@ -1546,6 +1570,58 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
+  it.each([
+    { name: 'data.csv', body: 'id,zip,x,x,x_2\na,02134,first,second,third',
+      rows: [{ id: 'a', zip: '02134', x: 'first', x_3: 'second', x_2: 'third' }] },
+    { name: 'data.json', body: '[{"id":"a","zip":"02134","flag":"true"}]',
+      rows: [{ id: 'a', zip: '02134', flag: 'true' }] },
+    { name: 'data.jsonl', body: '{"id":"a","zip":"02134","flag":"true"}',
+      rows: [{ id: 'a', zip: '02134', flag: 'true' }] },
+    { name: 'data.md', body: '| id | zip |\n| --- | --- |\n| a | 02134 |\n\n| id | zip |\n| --- | --- |\n| b | 99999 |',
+      rows: [{ id: 'a', zip: '02134' }] },
+  ])("import_data preserves source bytes and every value from $name", async ({ name, body, rows }) => {
+    await withWorkspace(async ctx => {
+      const source = Buffer.from(body);
+      await writeFile(join(ctx.root, name), source);
+      const request = vi.fn(emptyDesktopHistoryRequest);
+      const result = await importData({ ...ctx, request }, { sourcePath: name, databasePath: 'data.sqlite', tableName: 'rows' }, 'Import agent');
+      expect(result).toMatchObject({ ok: true, rowCount: rows.length });
+      expect(await queryDatabase(ctx, { databasePath: 'data.sqlite', sql: 'SELECT * FROM rows ORDER BY id' })).toMatchObject({ ok: true, rows });
+      expect(await readFile(join(ctx.root, name))).toEqual(source);
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(request).toHaveBeenCalledWith(expect.objectContaining({ verb: 'fileWrite', args: expect.objectContaining({
+        agent: 'Import agent', files: [expect.objectContaining({ path: 'data.sqlite', createOnly: true })],
+      }) }));
+    });
+  });
+
+  it.each([
+    { name: 'extra.csv', body: 'id,note\na,first,discarded' },
+    { name: 'unfinished.csv', body: 'id,note\na,"unfinished' },
+    { name: 'invalid.json', body: '[{"id":' },
+    { name: 'receipt.pdf', body: '%PDF-1.7\n| id | value |\n| --- | --- |\n| a | 1 |\n%%EOF' },
+  ])("import_data refuses $name without creating a destination or changing the source", async ({ name, body }) => {
+    await withWorkspace(async ctx => {
+      const source = Buffer.from(body);
+      await writeFile(join(ctx.root, name), source);
+      const request = vi.fn(emptyDesktopHistoryRequest);
+      expect(await importData({ ...ctx, request }, { sourcePath: name, databasePath: 'data.sqlite', tableName: 'rows' })).toMatchObject({ ok: false });
+      expect(request).not.toHaveBeenCalled();
+      await expect(stat(join(ctx.root, 'data.sqlite'))).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(await readFile(join(ctx.root, name))).toEqual(source);
+    });
+  });
+
+  it("import_data keeps existing destination bytes", async () => {
+    await withWorkspace(async ctx => {
+      await writeFile(join(ctx.root, 'data.csv'), 'id,note\na,first');
+      const original = Buffer.from('existing database bytes');
+      await writeFile(join(ctx.root, 'data.sqlite'), original);
+      expect(await importData(ctx, { sourcePath: 'data.csv', databasePath: 'data.sqlite', tableName: 'rows' })).toMatchObject({ ok: false });
+      expect(await readFile(join(ctx.root, 'data.sqlite'))).toEqual(original);
+    });
+  });
+
   it("import_data writes a visible .sqlite and query_database reads it back", async () => {
     await withWorkspace(async (ctx) => {
       await writeFile(join(ctx.root, "people.csv"), "id,name\n1,Ada\n2,Lin\n");
@@ -1577,7 +1653,7 @@ describe("mcp tools operate on allowed paths", () => {
 
       expect(imported).toMatchObject({
         ok: false,
-        reason: expect.stringContaining("EEXIST"),
+        reason: "File already exists",
       });
       await expect(readFile(join(ctx.root, "people.sqlite"), "utf8")).resolves.toBe("already here\n");
       await expect(listChanges(ctx, { limit: 10 })).resolves.toMatchObject({

@@ -1,3 +1,4 @@
+import type { HistoryCursor, HistoryMomentMetadata } from "@dohc/workspace-engine-client";
 import {
   VersionedTextStoreError,
   type VersionedTextStoreErrorCode,
@@ -12,6 +13,7 @@ import type {
   SecretFileStore,
   TextFileSnapshot,
   VersionRecord,
+  VersionedTextConflictRecord,
   VersionedTextFileState,
   VersionedTextMoment,
   VersionedTextMomentSummary,
@@ -50,10 +52,8 @@ import {
   type ShareMountEngineWorkspace,
 } from "@dohc/workspace-engine-client/daemon";
 
-// A manifest rebuild after a version switch costs one unsettled pass, so this
-// budget is generous by two orders of magnitude. It is bounded rather than
-// unbounded because a workspace under genuinely continuous mutation can keep
-// missing quiescence, and that must still surface as an error rather than hang.
+// Match the desktop relay pull's 30-second request deadline.
+const FLUSH_SETTLE_BUDGET_MS = 30_000;
 const FLUSH_SETTLE_ATTEMPTS = 50;
 const FLUSH_SETTLE_POLL_MS = 20;
 const ShareDeliveryStatus = z.object({ state: z.enum(["accepted", "pending", "refused"]) });
@@ -148,6 +148,9 @@ export interface CaptureTextFileMetadata {
 }
 
 export type CaptureVersionedTextStore = VersionedTextStore & {
+  resolveFiles: VersionedLiveAdapter["resolveFiles"];
+  incomingLinks: VersionedLiveAdapter["incomingLinks"];
+  resolveLinks: VersionedLiveAdapter["resolveLinks"];
   listUnconfirmedSharePaths(input: { workspaceId: string; shareId: string; grantedSelector: ShareViewSelector }): Promise<ShareUnconfirmedChanges>;
   // Preflight the author of the following rename or delete.
   checkMove(input: { workspaceId: string; versionId: string; path: string; author?: MomentWriteAuthor }): Promise<void>;
@@ -158,17 +161,13 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
   listTextFileMetadata(input: {
     workspaceId: string;
     versionId: string;
+    under?: string;
   }): Promise<CaptureTextFileMetadata[]>;
   listHistoryPage(input: {
-    workspaceId: string;
-    objectId?: string;
-    limit?: number;
-    beforeMomentOrder?: number;
+    workspaceId: string; versionId?: string; objectId?: string; limit?: number; cursor?: HistoryCursor;
   }): Promise<{
-    activeVersion: VersionRecord;
-    textMomentPage: Awaited<ReturnType<VersionedTextStore["listMoments"]>>;
-    protectedMoments: SecretFileMoment[];
-    protectedTruncated: boolean;
+    activeVersion: VersionRecord; moments: VersionedTextMomentSummary[]; protectedMoments: SecretFileMoment[];
+    versionMarkers: VersionRecord[]; startCursor: HistoryCursor; nextCursor: HistoryCursor | null; latestMomentOrder: number;
   }>;
   flushCapture?(): Promise<void>;
   reconcileCapture?(): Promise<void>;
@@ -180,7 +179,7 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
   setCaptureAuthor?(author: Extract<MomentWriteAuthor, { kind: "agent" }> | null): Promise<void>;
   // Capture records nothing from hold to release, or until the hold's lease
   // runs out unrenewed or the workspace closes.
-  holdCapture?(): Promise<{ holdId: string; leaseMs: number }>;
+  holdCapture?(input?: { operationId?: string }): Promise<{ holdId: string; leaseMs: number }>;
   renewCapture?(holdId: string): Promise<boolean>;
   releaseCapture?(holdId: string): Promise<boolean>;
   // One rename that refuses to replace, of a visible regular file, under a hold.
@@ -274,11 +273,19 @@ function authorFromWire(author: NonNullable<MomentRecord["authors"]>[number]): M
     );
   }
   if (author.kind === "unattributed") return { kind: "unattributed" };
+  if (author.kind === "human" && "humanName" in author) {
+    return {
+      kind: "human",
+      humanId: author.humanId,
+      humanName: author.humanName,
+      ...(author.relayConfirmed === true ? { relayConfirmed: true } : {}),
+    };
+  }
   if (author.kind === "human") {
     return {
       kind: "human",
       humanId: author.humanId,
-      ...(author.humanName !== undefined ? { humanName: author.humanName } : {}),
+      ...(author.relayConfirmed === true ? { relayConfirmed: true } : {}),
       ...(author.onBehalfOf !== undefined ? { onBehalfOf: author.onBehalfOf } : {}),
     };
   }
@@ -303,6 +310,7 @@ function authorFromWire(author: NonNullable<MomentRecord["authors"]>[number]): M
   return {
     kind: "agent",
     agentId: author.agentId,
+    ...(author.agentName !== undefined ? { agentName: author.agentName } : {}),
     ...(author.onBehalfOf !== undefined ? { onBehalfOf: author.onBehalfOf } : {}),
     ...(author.agentRunId !== undefined
       ? { agentRunId: author.agentRunId }
@@ -391,7 +399,7 @@ function momentFromWire(
 
 function momentSummaryFromWire(
   workspaceId: string,
-  moment: MomentRecord,
+  moment: HistoryMomentMetadata,
 ): VersionedTextMomentSummary {
   const authors = authorsFromWire(moment.authors);
   return {
@@ -421,9 +429,10 @@ function momentSummaryFromWire(
   };
 }
 
-function conflictFromWire(conflict: ConflictRecord) {
+function conflictFromWire(conflict: ConflictRecord): VersionedTextConflictRecord {
+  const { resolution, ...record } = conflict;
   return {
-    ...conflict,
+    ...record,
     base: conflictStateFromWire(conflict.base),
     current: conflictStateFromWire(conflict.current),
     incoming: conflictStateFromWire(conflict.incoming),
@@ -436,8 +445,8 @@ function conflictFromWire(conflict: ConflictRecord) {
         ? { correlationId: conflict.metadata.correlationId }
         : {}),
     }),
-    ...(conflict.resolution !== null
-      ? { resolution: conflict.resolution }
+    ...(resolution !== null
+      ? { resolution }
       : {}),
   };
 }
@@ -949,9 +958,16 @@ export function createCaptureLiveStores(
     checkMove: ({ author, ...input }: { workspaceId: string; versionId: string; path: string; author?: MomentWriteAuthor }) =>
       runRead(async (adapter) => await adapter.checkMove({ ...input, ...(author ? { author: adapterAuthor(author) } : {}) })),
 
+    incomingLinks: input => runRead(adapter => adapter.incomingLinks(input)),
+    resolveLinks: input => runRead(adapter => adapter.resolveLinks(input)),
+    async resolveFiles(input: Parameters<VersionedLiveAdapter["resolveFiles"]>[0]) {
+      return await runRead(adapter => adapter.resolveFiles(input));
+    },
+
     async listTextFileMetadata(input: {
       workspaceId: string;
       versionId: string;
+      under?: string;
     }): Promise<CaptureTextFileMetadata[]> {
       const rows = await runRead(
         async (adapter) => await adapter.listTextFileMetadata(input),
@@ -995,6 +1011,7 @@ export function createCaptureLiveStores(
       );
       return {
         materialized: raw.materialized,
+        deduped: raw.deduped,
         materializeOutcome: raw.materializeOutcome,
         object: raw.object,
         snapshot: snapshotFromWire(raw.snapshot, input.metadata),
@@ -1045,6 +1062,7 @@ export function createCaptureLiveStores(
       };
       return {
         materialized: raw.materialized,
+        deduped: raw.deduped,
         materializeOutcome: raw.materializeOutcome,
         object: raw.object,
         snapshot: snapshotFromWire(value, input.metadata),
@@ -1124,7 +1142,7 @@ export function createCaptureLiveStores(
       metadata: ActorNeutralWriteMetadata;
       author?: MomentWriteAuthor;
       captureHoldId?: string;
-    }) {
+    }): ReturnType<VersionedTextStore["renameTextFile"]> {
       const before = await store.readTextFile({
         workspaceId: input.workspaceId,
         versionId: input.versionId,
@@ -1188,30 +1206,19 @@ export function createCaptureLiveStores(
       return {
         ...page,
         moments: page.moments.map((moment) =>
-          momentSummaryFromWire(input.workspaceId, moment),
+          momentSummaryFromWire(input.workspaceId, {...moment, beforePath: moment.beforePath ?? null}),
         ),
       };
     },
 
     async listHistoryPage(input: {
-      workspaceId: string;
-      objectId?: string;
-      limit?: number;
-      beforeMomentOrder?: number;
+      workspaceId: string; versionId?: string; objectId?: string; limit?: number; cursor?: HistoryCursor;
     }) {
-      const page = await runRead(
-        async (adapter) => await adapter.readHistoryPage(input),
-      );
+      const page = await runRead(async adapter => await adapter.readHistoryPage(input));
       return {
-        activeVersion: page.activeVersion,
-        textMomentPage: {
-          ...page.textMomentPage,
-          moments: page.textMomentPage.moments.map((moment) =>
-            momentSummaryFromWire(input.workspaceId, moment),
-          ),
-        },
+        ...page,
+        moments: page.moments.map(moment => momentSummaryFromWire(input.workspaceId, moment)),
         protectedMoments: page.protectedMoments.map(secretMomentFromWire),
-        protectedTruncated: page.protectedTruncated,
       };
     },
 
@@ -1220,6 +1227,10 @@ export function createCaptureLiveStores(
       return moment === null
         ? null
         : momentFromWire(input.workspaceId, await hydratedMoment(moment));
+    },
+
+    async publicationApplied(input: { workspaceId: string; requestId: string; momentId: string }) {
+      return await runRead(async (adapter) => await adapter.publicationApplied(input));
     },
 
     async compareTextFileVersions(input: {
@@ -1265,7 +1276,7 @@ export function createCaptureLiveStores(
       sourceVersionId: string;
       path: string;
       metadata: ActorNeutralWriteMetadata;
-    }) {
+    }): ReturnType<VersionedTextStore["mergeTextFileFromVersion"]> {
       const before = await store.readTextFile({
         workspaceId: input.workspaceId,
         versionId: input.targetVersionId,
@@ -1427,50 +1438,68 @@ export function createCaptureLiveStores(
 
     async flushCapture() {
       captureWaitSignal?.throwIfAborted();
-      // `settled: false` is not an error. The daemon documents it as "state
-      // not comparable" — a layer down, a teardown race, or a workspace under
-      // continuous mutation — and expects the caller to poll. Every Rust-side
-      // consumer does (`flush_until_settled`); this one threw on the first
-      // unsettled answer.
-      //
-      // That made a normal sequence fail in the user's face. A version switch
-      // whose pre-switch reconcile saw change calls `request_manifest_refresh`,
-      // which bumps the driver's refresh epoch, so the next pass classifies the
-      // layer as PolicyChanged and drops it to rebuild the manifest — one
-      // deliberate unsettled pass, `running: false` with `degraded: false`.
-      // A second switch straight after the first therefore threw
-      // "did not settle" at whoever asked for it.
-      let outcome = await waitForCapture(() => runRead(async adapter => await adapter.flushCapture()));
-      if (!outcome.settled) {
-        const status = await waitForCapture(() => runRead(async adapter => await adapter.watcherStatus()));
-        if (status.phase === "starting" || status.phase === "importing") {
-          throw new DaemonRefusalError(
-            {
-              code: "OVERLOADED",
-              message: "Workspace is still updating. Try again.",
-              retry: "afterBackoff",
-            },
-            undefined,
-          );
-        }
-      }
-      for (
-        let attempt = 0;
-        !outcome.settled && attempt < FLUSH_SETTLE_ATTEMPTS;
-        attempt += 1
-      ) {
+      const deadline = performance.now() + FLUSH_SETTLE_BUDGET_MS;
+      let finished = false;
+      const didNotSettle = () => new Error(
+        `Engine capture for ${workspace.workspaceId} did not settle.`,
+      );
+      const assertActive = () => {
         captureWaitSignal?.throwIfAborted();
-        await delay(FLUSH_SETTLE_POLL_MS, undefined, { signal: captureWaitSignal }).catch(error => {
-          captureWaitSignal?.throwIfAborted();
-          throw error;
+        if (finished) throw didNotSettle();
+      };
+      const request = <T>(operation: (adapter: VersionedLiveAdapter) => Promise<T>) => {
+        assertActive();
+        return runRead(adapter => {
+          assertActive();
+          return operation(adapter);
         });
+      };
+      const settle = async () => {
+        // A manifest rebuild after switching versions needs an unsettled pass.
+        // Capture events report path progress or initial readiness, not quiescence.
+        let outcome = await request(adapter => adapter.flushCapture());
+        if (!outcome.settled) {
+          const status = await request(adapter => adapter.watcherStatus());
+          if (status.phase === "starting" || status.phase === "importing") {
+            throw new DaemonRefusalError(
+              {
+                code: "OVERLOADED",
+                message: "Workspace is still updating. Try again.",
+                retry: "afterBackoff",
+              },
+              undefined,
+            );
+          }
+        }
+        for (let attempt = 0; !outcome.settled && attempt < FLUSH_SETTLE_ATTEMPTS; attempt += 1) {
+          assertActive();
+          // Do not leave a poll scheduled beyond the total deadline.
+          await delay(Math.min(FLUSH_SETTLE_POLL_MS, Math.max(0, deadline - performance.now())), undefined, {
+            signal: captureWaitSignal,
+          }).catch(error => {
+            captureWaitSignal?.throwIfAborted();
+            throw error;
+          });
+          outcome = await request(adapter => adapter.flushCapture());
+        }
+        if (!outcome.settled) throw didNotSettle();
+      };
+      // Session binding and recovery also consume the same budget.
+      let timer!: ReturnType<typeof setTimeout>;
+      const expired = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(didNotSettle()), Math.max(0, deadline - performance.now()));
+      });
+      try {
+        await waitForCapture(() => Promise.race([settle(), expired]));
+      } catch (error) {
         captureWaitSignal?.throwIfAborted();
-        outcome = await waitForCapture(() => runRead(async adapter => await adapter.flushCapture()));
-      }
-      if (!outcome.settled) {
-        throw new Error(
-          `Engine capture for ${workspace.workspaceId} did not settle.`,
-        );
+        if (error instanceof DaemonRefusalError && error.wireCode === "DEADLINE_EXCEEDED") {
+          throw didNotSettle();
+        }
+        throw error;
+      } finally {
+        finished = true;
+        clearTimeout(timer);
       }
     },
 
@@ -1499,7 +1528,7 @@ export function createCaptureLiveStores(
       return await runMutation(async (adapter) => await adapter.saveKeptCopy(id));
     },
 
-    holdCapture: async () => await runMutation(async (adapter) => await adapter.holdCapture()),
+    holdCapture: async (input) => await runMutation(async (adapter) => await adapter.holdCapture(input)),
 
     renewCapture: async (holdId: string) =>
       await runMutation(async (adapter) => await adapter.renewCapture(holdId)),
@@ -1523,7 +1552,7 @@ export function createCaptureLiveStores(
     },
 
     close: async () => await sessions.closeWorkspace(workspace),
-  };
+  } satisfies CaptureVersionedTextStore;
 
   const secretStore = {
     async writeSecretFile(input: Parameters<SecretFileStore["writeSecretFile"]>[0]) {
@@ -1533,7 +1562,7 @@ export function createCaptureLiveStores(
           metadata: adapterMetadata(input.metadata),
         });
         return {
-          ...result,
+          changed: result.changed,
           ...(result.moment
             ? { moment: secretMomentFromWire(result.moment) }
             : {}),
@@ -1576,7 +1605,7 @@ export function createCaptureLiveStores(
       runRawMutation(async (adapter) => {
         const result = await adapter.applySecretFileFromVersion(input);
         return {
-          ...result,
+          changed: result.changed,
           ...(result.moment
             ? { moment: secretMomentFromWire(result.moment) }
             : {}),
@@ -1597,10 +1626,7 @@ export function createCaptureLiveStores(
     ) =>
       runRawRead(async (adapter) => await adapter.materializeSecretFile(input)),
     close: async () => await sessions.closeWorkspace(workspace),
-  };
+  } satisfies SecretFileStore;
 
-  return {
-    store: store as unknown as CaptureVersionedTextStore,
-    secretStore: secretStore as unknown as SecretFileStore,
-  };
+  return { store, secretStore };
 }

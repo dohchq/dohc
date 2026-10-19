@@ -44,7 +44,7 @@ function chatStore(options: { refuse?: Error; sent?: Sent[] } = {}) {
     },
     getMessage: async ({ messageId }) => {
       const sent = options.sent?.find((row) => row.id === messageId);
-      if (!sent) throw new Error("chat-message-not-found");
+      if (!sent) throw new Error("message-not-found");
       return sent as Awaited<ReturnType<ReplicaChatStore["getMessage"]>>;
     },
     findThreadChannelId: async ({ threadId }) => threadId === "thread-auto-1" ? "channel-planning" : "channel-other",
@@ -57,7 +57,7 @@ const message = (target: AutomationChatMessage["target"]): AutomationChatMessage
 });
 
 const savedRun = (): StoredRun => ({
-  version: 9, rules: null, collections: [], undoCalls: [], undoCovers: [], claimId: "claim", automationId: automation.automationId, definitionHash: "hash", keySeed: "hash",
+  durableEffects: 0, version: 13, rules: null, collections: [], undoCalls: [], undoCovers: [], claimId: "claim", automationId: automation.automationId, definitionHash: "hash", keySeed: "hash",
   startedAtMs: 10_000, finishedAtMs: 10_000, steps: [], applied: [], created: [], replans: [], undoRequests: [],
   readableFields: null, superseded: false, undo: null, undoKept: [], settled: true, outcome: { state: "done" },
 });
@@ -74,7 +74,7 @@ describe("an automation's messages on this server", () => {
     expect(writes).toEqual([{ method: "startChannelThread", input: {
       workspaceId: WORKSPACE, channelId: "channel-planning", lane: "posts", threadId: "thread-auto-1",
       messageId: "message-auto-1", idempotencyKey: "claim/hash/0/wake",
-      author: { kind: "automation", displayName: "Tell the group" }, authorOwnerDisplayName: "Ice", authorUserId: "owner",
+      author: { kind: "automation", displayName: "Tell the group" }, authorOwnerDisplayName: "Ice", authorUserId: "owner", authorActorKey: null,
       automation: { automationId: "collection:Tasks#tell", chainDepth: 2 }, body: "Packed.",
     } }]);
   });
@@ -84,7 +84,7 @@ describe("an automation's messages on this server", () => {
     const chat = replicaAutomationChat({ runStore, storage: { postAutomationWake: () => { throw new Error("unexpected wake"); } }, nowMs: () => 10_000, replica: replica(), store, ownerName: async () => "Ice" });
     await chat.write(new AbortController().signal, message({ kind: "direct-message", threadId: "thread-dm" }), savedRun());
     expect(writes).toEqual([{ method: "sendMessage", input: expect.objectContaining({
-      threadId: "thread-dm", idempotencyKey: "claim/hash/0/wake", authorUserId: "owner",
+      threadId: "thread-dm", idempotencyKey: "claim/hash/0/wake", authorUserId: "owner", authorActorKey: null,
       author: { kind: "automation", displayName: "Tell the group" },
     }) }]);
   });

@@ -41,10 +41,19 @@ tokio = { version = "1", features = [
 # O_NOFOLLOW for the capture sink's symlink-refusing reopen.
 libc = "0.2"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Keeps the engine's folder out of iCloud Drive.
+dohc-macos-files = { path = "../dohc-macos-files" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4.7"
+seccompiler = "0.5.0"
+rustix = { version = "1", features = ["process", "thread"] }
+
 [features]
 # Enables capture probe state and controls plus marker hooks (`*_for_harness`).
 # The probe type exists in all builds; production builds must not enable this feature.
-harness = []
+harness = ["dohc-engine-runtime/fault-injection"]
 
 [dev-dependencies]
 dohc-engine-collab = { path = "../dohc-engine-collab", features = ["test-support"] }

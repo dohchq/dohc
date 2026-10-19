@@ -4,16 +4,16 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
-  renameSync,
-  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+import { atomicReplaceFileSync } from "../atomicReplaceFile";
+import type { WorkspaceSyncPause } from "@dohc/workspace-contracts/workspace-sync";
 import type { RelayAutomationHost } from "@dohc/workspace-contracts/relay";
 import { createShareRosterStore } from "./shareRosterStore";
 import type { ShareRoster } from "../automations/shareRoster";
 import type { RosterListing } from "@dohc/automation-executor/roster-listing";
-import type { CreatedWorkspace } from "./createWorkspaceFolder";
+import { canonicalWorkspaceRoot, type CreatedWorkspace } from "./createWorkspaceFolder";
 import type { ConfirmedShareRemoval } from "./recipientShareReconciliation";
 import type { ShareUnconfirmedChanges, ShareViewSelector } from "./shareViewInfo";
 
@@ -219,9 +219,12 @@ export function acknowledgeShareSkips(
 // refreshed from the share, never pushed. `ended` marks a revoked share —
 // the local copy stays readable but stops refreshing.
 export interface ShareViewIdentity {
+  receivedIdentity?: import("./workspaceFileReferenceScopes").ReceivedReferencePin;
   subjectName?: string | null;
   sharerName?: string | null;
   shareId: string;
+  // The relay's workspace owner id; older views learn it on refresh.
+  granterUserId?: string;
   granterEmail: string | null;
   genericChatWritable: boolean;
   // The selector the relay stated for this share, pinned here when the record
@@ -260,6 +263,9 @@ export interface ShareViewIdentity {
 // read-write) pushed back through the member append route. `ended` marks a
 // revoked grant: the locally replayed copy stays readable but stops syncing.
 export interface JoinedSharedChannel {
+  // Authenticated account server captured at join. A relay endpoint is not an issuer.
+  // Older rows without this evidence keep unknown attribution.
+  serverUrl?: string;
   shareId: string;
   channelWireId: string;
   access: "read-write" | "read-only";
@@ -281,6 +287,8 @@ export interface JoinedSharedChannel {
 // share's filtered op log, never pushed. `ended` marks a revoked share:
 // the mounted copy stays readable but stops refreshing.
 export interface ShareMountRecord {
+  receivedIdentity?: import("./workspaceFileReferenceScopes").ReceivedReferencePin;
+  recipientUserId?: string;
   shareId: string;
   // Folder name under shared-with-me/ (a single path segment; re-validated
   // on every refresh — the registry file is data, not a write path).
@@ -310,6 +318,9 @@ export interface RegistryEntry extends CreatedWorkspace {
   lastOpenedAt?: number;
   // Present only after the user explicitly enables cloud sync.
   remote?: RemoteIdentity;
+  // This device stopped sync; retain the original owner for resumption.
+  pausedRemote?: RemoteIdentity;
+  syncPause?: WorkspaceSyncPause;
   // Durable join gate: true from registration until the first pull has
   // materialized and committed. Boot-time local writers must skip the entry.
   joinBootstrapPending?: true;
@@ -374,6 +385,16 @@ interface RegistryFile {
   workspaces: RegistryEntry[];
 }
 
+// An entry saved through a link moves to its folder's real path, the spelling
+// registration stores. A folder that is gone keeps its saved path.
+function withRealRoot(entry: RegistryEntry): RegistryEntry {
+  try {
+    return { ...entry, rootPath: canonicalWorkspaceRoot(entry.rootPath) };
+  } catch {
+    return entry;
+  }
+}
+
 export function createRegistryStore(registryFile: string) {
   // The process exclusively owns this file (single-instance lock), so the
   // parsed registry is cached after first read and refreshed on write.
@@ -428,7 +449,7 @@ export function createRegistryStore(registryFile: string) {
     if (!Array.isArray(obj.workspaces)) {
       throw new Error(`Workspace registry "workspaces" is not an array (${registryFile}).`);
     }
-    cache = { version: 1, workspaces: (obj.workspaces as RegistryEntry[]).map(withRoster) };
+    cache = { version: 1, workspaces: (obj.workspaces as RegistryEntry[]).map((entry) => withRoster(withRealRoot(entry))) };
     return cache;
   }
 
@@ -439,14 +460,12 @@ export function createRegistryStore(registryFile: string) {
     // flush the directory entry too before publishing the new cache value.
     // Node/libuv cannot fsync directory handles on Windows, where it returns
     // EPERM, so the flushed file plus atomic rename is the strongest Node API.
-    const tmp = `${registryFile}.tmp-${process.pid}`;
     let replaced = false;
     try {
-      writeAndSync(
+      atomicReplaceFileSync(registryFile, (tmp) => writeAndSync(
         tmp,
         Buffer.from(`${JSON.stringify(registry, null, 2)}\n`),
-      );
-      renameSync(tmp, registryFile);
+      ));
       replaced = true;
       if (process.platform !== "win32") {
         fsyncAndClose(openSync(directory, "r"));
@@ -455,14 +474,6 @@ export function createRegistryStore(registryFile: string) {
       // A failed directory sync happens after replacement. Drop the old cache
       // so the next read observes the file that rename made visible.
       if (replaced) cache = null;
-      // A failed write or rename must not leave this process's temp file
-      // behind. Cleanup is best-effort because the persistence error is the
-      // one the caller must receive.
-      try {
-        unlinkSync(tmp);
-      } catch {
-        // Keep the original persistence error.
-      }
       throw error;
     }
     cache = registry;
@@ -471,7 +482,7 @@ export function createRegistryStore(registryFile: string) {
   function updateWorkspaceEntry(
     workspaceId: string,
     update: (entry: Readonly<RegistryEntry>) => RegistryEntry | undefined,
-    missingMessage = `Unknown workspace: ${workspaceId}`,
+    missingMessage = "This workspace is not open. Open it again.",
   ): void {
     // Entry writers receive a read-only current value and return a replacement.
     // Only write() can publish that replacement to the cache, after rename.
@@ -525,10 +536,22 @@ export function createRegistryStore(registryFile: string) {
 
     setRemote(workspaceId: string, remote: RemoteIdentity): void {
       const entry = read().workspaces.find(entry => entry.workspaceId === workspaceId);
-      if (!entry) throw new Error(`Unknown workspace: ${workspaceId}`);
+      if (!entry) throw new Error("This workspace is not open. Open it again.");
+      const previous = entry.remote ?? entry.pausedRemote;
       const next = { ...entry, remote };
+      delete next.pausedRemote;
+      delete next.syncPause;
       updateWorkspaceEntry(workspaceId, () => next);
-      if (entry.remote?.serverUrl !== remote.serverUrl || entry.remote?.ownerUserId !== remote.ownerUserId) rosters.remove(entry);
+      if (previous?.serverUrl !== remote.serverUrl || previous?.ownerUserId !== remote.ownerUserId) rosters.remove(entry);
+    },
+
+    pauseRemote(workspaceId: string, syncPause?: WorkspaceSyncPause): void {
+      updateWorkspaceEntry(workspaceId, entry => {
+        if (!entry.remote) return undefined;
+        const next = { ...entry, pausedRemote: entry.remote, ...(syncPause ? { syncPause } : {}) };
+        delete next.remote;
+        return next;
+      });
     },
 
     // Unknown ids are ignored: an open racing a forget must not fail on the
@@ -608,7 +631,7 @@ export function createRegistryStore(registryFile: string) {
     setShareRoster(workspaceId: string, listing: RosterListing, pulledAfter: boolean, listedAtMs = Date.now()): void {
       const registry = read();
       const entry = registry.workspaces.find(entry => entry.workspaceId === workspaceId);
-      if (!entry) throw new Error(`Unknown workspace: ${workspaceId}`);
+      if (!entry) throw new Error("This workspace is not open. Open it again.");
       rosters.save(entry, listing, pulledAfter, listedAtMs);
     },
 
@@ -616,7 +639,7 @@ export function createRegistryStore(registryFile: string) {
     markShareRosterPulled(workspaceId: string): void {
       const registry = read();
       const entry = registry.workspaces.find(entry => entry.workspaceId === workspaceId);
-      if (!entry) throw new Error(`Unknown workspace: ${workspaceId}`);
+      if (!entry) throw new Error("This workspace is not open. Open it again.");
       rosters.markPulled(entry);
     },
 

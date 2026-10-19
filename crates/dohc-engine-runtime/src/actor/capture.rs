@@ -20,14 +20,998 @@ use dohc_engine_domain::{
     CaptureSecretRetire, DomainError, SecretFileStore, SecretMomentRecord, SecretWriteResult,
     VersionedTextStore, WriteResult, capture_ingest_binary_with_admission_in_tx,
     capture_ingest_in_batch_with_admission_in_tx, capture_ingest_with_admission_in_tx,
-    capture_manifest_seed, capture_retire_in_tx, capture_secret_retire_with,
-    ensure_main_version_in_tx,
+    capture_manifest_seed, capture_retire_in_tx, capture_retire_respelled_in_tx,
+    capture_secret_retire_with, ensure_main_version_in_tx,
 };
+use dohc_engine_files::floor::path_collision_key;
+use dohc_engine_storage::capture_file_holds::{self, CaptureFileHold};
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError, TxnOutcome};
 use rusqlite::{Connection, Transaction, params};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+
+#[cfg(test)]
+mod capture_file_hold_tests {
+    use super::*;
+    use dohc_engine_collab::{
+        ContentKind, LocalAppend, MarkerCreation, Regime, WriterDocCache, Ydoc,
+    };
+    use dohc_engine_storage::NoFaults;
+    use dohc_engine_testkit::{ScratchDir, engine_db_path};
+
+    fn input(path: &str, text: &str) -> CaptureIngest {
+        CaptureIngest {
+            workspace_id: "hold-proof".into(),
+            version_id: "main".into(),
+            path: path.into(),
+            text: text.into(),
+            metadata_origin: "capture".into(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            author_json: None,
+            now_ms: 5,
+            request_id: None,
+            claim_foreign_head: false,
+        }
+    }
+
+    fn seeded() -> (ScratchDir, EngineStore, CaptureIngest) {
+        let scratch = ScratchDir::new().unwrap();
+        let mut store = EngineStore::open(&engine_db_path(&scratch).unwrap(), 1).unwrap();
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("hold-proof", "main", 1, &NoFaults)
+            .unwrap();
+        let seed = input("held.md", "Before.\n");
+        let head = VersionedTextStore::new(&mut store)
+            .capture_ingest(&seed, &NoFaults)
+            .unwrap()
+            .snapshot;
+        let key = DocKey::new("hold-proof", "main", &head.object_id).unwrap();
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, &seed.text)
+            .unwrap();
+        dohc_engine_collab::record_local_update(
+            &mut store,
+            &mut WriterDocCache::new(),
+            &key,
+            &doc.encode_full_state(),
+            LocalAppend {
+                marker: Some(MarkerCreation {
+                    path: Some("held.md"),
+                    content_kind: ContentKind::Richdoc,
+                    regime: Regime::LocalOnly,
+                }),
+                is_seed: true,
+                seed_source_sha256: Some(&head.blob_sha256),
+                ..Default::default()
+            },
+            &NoFaults,
+            3,
+            |_tx, _outcome, _sha| Ok(()),
+        )
+        .unwrap();
+        (
+            scratch,
+            store,
+            input("held.md", &format!("{} too deep\n", "> ".repeat(121))),
+        )
+    }
+
+    #[test]
+    fn review2_unowned_release_only_reports_an_exact_hold() {
+        let (_scratch, mut store, refused) = seeded();
+        assert_eq!(
+            offer(&mut store, &refused).unwrap_err().code(),
+            "capture-file-held"
+        );
+        for path in ["HELD.MD", "held.md/trip.md"] {
+            assert!(
+                !clear_unowned_capture_hold(&mut store, "hold-proof", path, &NoFaults).unwrap()
+            );
+            assert!(
+                store
+                    .read_with(|conn| capture_file_holds::hold_in(conn, "hold-proof", "held.md"))
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        assert!(
+            clear_unowned_capture_hold(&mut store, "hold-proof", "held.md", &NoFaults).unwrap()
+        );
+    }
+
+    fn offer(store: &mut EngineStore, input: &CaptureIngest) -> Result<WriteResult, RuntimeError> {
+        capture_ingest_on_store(
+            store,
+            input,
+            &CaptureIndexing::Skip,
+            &LeaseRegistry::new(),
+            &NoFaults,
+            &CancellationToken::new(),
+        )
+    }
+
+    #[test]
+    fn fix2_recreated_unrepresentable_file_is_durably_held() {
+        let (scratch, mut store, refused) = seeded();
+        VersionedTextStore::new(&mut store)
+            .delete_text_file(
+                &dohc_engine_domain::DeleteTextFile {
+                    workspace_id: "hold-proof".into(),
+                    version_id: "main".into(),
+                    path: "held.md".into(),
+                    moment_id: "delete-before-recreate".into(),
+                    request_id: None,
+                    metadata_origin: "api".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 4,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        let error = offer(&mut store, &refused).unwrap_err();
+        drop(store);
+        let reopened = EngineStore::open(&engine_db_path(&scratch).unwrap(), 6).unwrap();
+        let held = reopened
+            .read_with(|conn| capture_file_holds::hold_in(conn, "hold-proof", "held.md"))
+            .unwrap();
+        assert_eq!(error.code(), "capture-file-held");
+        assert_eq!(
+            held.unwrap().observed_sha256,
+            dohc_engine_storage::hex_sha256(refused.text.as_bytes())
+        );
+    }
+
+    #[test]
+    fn fix3_recreated_hold_retires_atomically_without_a_snapshot() {
+        let (scratch, mut store, refused) = seeded();
+        VersionedTextStore::new(&mut store)
+            .delete_text_file(
+                &dohc_engine_domain::DeleteTextFile {
+                    workspace_id: "hold-proof".into(),
+                    version_id: "main".into(),
+                    path: "held.md".into(),
+                    moment_id: "delete-before-recreate".into(),
+                    request_id: None,
+                    metadata_origin: "api".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 4,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        assert_eq!(
+            offer(&mut store, &refused).unwrap_err().code(),
+            "capture-file-held"
+        );
+        let retire = CaptureRetire {
+            workspace_id: "hold-proof".into(),
+            version_id: "main".into(),
+            path: "held.md".into(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            now_ms: 6,
+            request_id: None,
+            only_if_text_head: true,
+            only_if_capture_origin: true,
+            allow_ydoc_origin: true,
+        };
+        let result = capture_retire_on_store(
+            &mut store,
+            &retire,
+            None,
+            scratch.path(),
+            &Root,
+            true,
+            &(),
+            &LeaseRegistry::new(),
+            &NoFaults,
+        );
+        assert!(
+            result.is_ok(),
+            "snapshotless held alias must retire: {result:?}"
+        );
+        assert_unheld(&store);
+        let aliases: i64 = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT count(*) FROM path_aliases WHERE path='held.md'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(aliases, 0);
+        assert_eq!(
+            offer(&mut store, &input("held.md", "Recreated normally.\n"))
+                .unwrap()
+                .snapshot
+                .text,
+            "Recreated normally.\n"
+        );
+    }
+
+    #[test]
+    fn fix2_unheld_foreign_text_and_binary_do_not_clear_a_hold() {
+        use rusqlite::hooks::{AuthAction, Authorization};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (_scratch, mut store, mut input) = seeded();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE snapshots SET metadata_origin='sync' WHERE path='held.md'",
+                    [],
+                )
+                .map_err(StorageError::persist_public)
+            })
+            .unwrap();
+        let deletes = Arc::new(AtomicUsize::new(0));
+        let observed = deletes.clone();
+        store
+            .read_with(|conn| {
+                conn.authorizer(Some(move |ctx: rusqlite::hooks::AuthContext<'_>| {
+                    if matches!(
+                        ctx.action,
+                        AuthAction::Delete {
+                            table_name: "capture_file_holds"
+                        }
+                    ) {
+                        observed.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Authorization::Allow
+                }))
+            })
+            .unwrap();
+        input.text = "Outside.\n".into();
+        assert!(matches!(
+            offer(&mut store, &input),
+            Err(RuntimeError::Domain(DomainError::CaptureNotOwned))
+        ));
+        assert!(matches!(
+            capture_ingest_binary_on_store(
+                &mut store,
+                &CaptureIngestBinary {
+                    workspace_id: input.workspace_id,
+                    version_id: input.version_id,
+                    path: input.path,
+                    bytes: b"binary".to_vec(),
+                    metadata_origin: "capture".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 7,
+                    request_id: None,
+                    claim_foreign_head: false,
+                },
+                &LeaseRegistry::new(),
+                &NoFaults,
+                &CancellationToken::new()
+            ),
+            Err(RuntimeError::Domain(DomainError::CaptureNotOwned))
+        ));
+        assert_eq!(
+            deletes.load(Ordering::Relaxed),
+            0,
+            "unheld ownership refusals must not open a hold-clearing transaction"
+        );
+    }
+
+    fn assert_unheld(store: &EngineStore) {
+        assert!(
+            store
+                .read_with(|conn| capture_file_holds::hold_in(conn, "hold-proof", "held.md"))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn fix1_hold_released_by_rename() {
+        let (_scratch, mut store, refused) = seeded();
+        assert_eq!(
+            offer(&mut store, &refused).unwrap_err().code(),
+            "capture-file-held"
+        );
+        VersionedTextStore::new(&mut store)
+            .rename_text_file(
+                &dohc_engine_domain::RenameTextFile {
+                    workspace_id: "hold-proof".into(),
+                    version_id: "main".into(),
+                    from_path: "held.md".into(),
+                    to_path: "moved.md".into(),
+                    moment_id: "rename-held".into(),
+                    request_id: None,
+                    metadata_origin: "api".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 6,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        assert_unheld(&store);
+        let captured = offer(&mut store, &input("held.md", "New file.\n")).unwrap();
+        assert_eq!(captured.snapshot.text, "New file.\n");
+    }
+
+    #[test]
+    fn fix1_hold_released_by_rollback_removing_alias() {
+        let (_scratch, mut store, refused) = seeded();
+        let initial = VersionedTextStore::new(&mut store)
+            .read_text("hold-proof", "main", "held.md")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            offer(&mut store, &refused).unwrap_err().code(),
+            "capture-file-held"
+        );
+        VersionedTextStore::new(&mut store)
+            .rollback_text_file_mutation(
+                &dohc_engine_domain::RollbackTextFileMutation {
+                    workspace_id: "hold-proof".into(),
+                    version_id: "main".into(),
+                    path: "held.md".into(),
+                    mutation_moment_id: initial.latest_moment_id,
+                    request_id: None,
+                    metadata_origin: "api".into(),
+                    author_json: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        assert_unheld(&store);
+        assert_eq!(
+            offer(&mut store, &input("held.md", "New file.\n"))
+                .unwrap()
+                .snapshot
+                .text,
+            "New file.\n"
+        );
+    }
+
+    #[test]
+    fn fix1_hold_does_not_claim_foreign_text_or_binary_head() {
+        for binary in [false, true] {
+            let (scratch, mut store, refused) = seeded();
+            assert_eq!(
+                offer(&mut store, &refused).unwrap_err().code(),
+                "capture-file-held"
+            );
+            let head = VersionedTextStore::new(&mut store)
+                .read_text("hold-proof", "main", "held.md")
+                .unwrap()
+                .unwrap();
+            let remote = VersionedTextStore::new(&mut store)
+                .write_text(
+                    &dohc_engine_domain::WriteText {
+                        workspace_id: "hold-proof".into(),
+                        version_id: "main".into(),
+                        object_id: head.object_id,
+                        path: "held.md".into(),
+                        text: "Remote edit.\n".into(),
+                        moment_id: "remote-edit".into(),
+                        metadata_origin: "sync".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 6,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+            std::fs::write(scratch.path().join("held.md"), &refused.text).unwrap();
+            store
+                .write_with(&NoFaults, |tx| {
+                    dohc_engine_storage::enqueue_job(
+                        tx,
+                        &dohc_engine_storage::MaterializationJobSpec {
+                            job_id: "relay-remote-edit".into(),
+                            workspace_id: "hold-proof".into(),
+                            target_path: "held.md".into(),
+                            content_sha256: remote.snapshot.blob_sha256.clone(),
+                            preimage: dohc_engine_storage::Preimage::Present(
+                                dohc_engine_storage::hex_sha256(refused.text.as_bytes()),
+                            ),
+                            target_generation: remote.moment.moment_order,
+                            now_ms: 6,
+                        },
+                    )
+                })
+                .unwrap();
+            let job = store
+                .load_materialization_job("relay-remote-edit")
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                dohc_engine_files::materialize_one(
+                    &store,
+                    scratch.path(),
+                    &job,
+                    &dohc_engine_files::MaterializeOptions {
+                        holds: None,
+                        policy: dohc_engine_files::DurabilityPolicy::per_os(),
+                        replacer: &dohc_engine_files::StdReplacer,
+                        backoff: &dohc_engine_files::NoBackoff,
+                        now_ms: 6,
+                        faults: &NoFaults,
+                    }
+                )
+                .unwrap(),
+                dohc_engine_files::JobOutcome::Parked
+            );
+            let error = if binary {
+                capture_ingest_binary_on_store(
+                    &mut store,
+                    &CaptureIngestBinary {
+                        workspace_id: "hold-proof".into(),
+                        version_id: "main".into(),
+                        path: "held.md".into(),
+                        bytes: vec![0, 1, 2],
+                        metadata_origin: "capture".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 7,
+                        request_id: None,
+                        claim_foreign_head: false,
+                    },
+                    &LeaseRegistry::new(),
+                    &NoFaults,
+                    &CancellationToken::new(),
+                )
+                .unwrap_err()
+            } else {
+                offer(&mut store, &input("held.md", "Outside edit.\n")).unwrap_err()
+            };
+            assert!(
+                matches!(error, RuntimeError::CaptureNotOwnedAfterHold { .. }),
+                "{error:?}"
+            );
+            assert_unheld(&store);
+            assert_eq!(
+                VersionedTextStore::new(&mut store)
+                    .read_text("hold-proof", "main", "held.md")
+                    .unwrap()
+                    .unwrap()
+                    .text,
+                "Remote edit.\n"
+            );
+        }
+    }
+
+    #[test]
+    fn fix1_missing_alias_refusal_does_not_abort_batch() {
+        let (scratch, mut store, refused) = seeded();
+        // Capture can recreate an alias over an existing lineage. If its fold
+        // refuses, rolling back the item also removes that provisional alias.
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute("DELETE FROM path_aliases WHERE path='held.md'", [])
+                    .map_err(StorageError::persist_public)
+            })
+            .unwrap();
+        let results = capture_ingest_batch_on_store(
+            &mut store,
+            &[refused, input("sibling.txt", "Sibling.\n")],
+            &Arc::new(crate::search::read_engine_search_policy(scratch.path())),
+            &LeaseRegistry::new(),
+            &NoFaults,
+            &CancellationToken::new(),
+            (scratch.path(), &Root),
+        )
+        .unwrap();
+        assert!(results[0].is_err());
+        assert!(results[1].is_ok());
+        assert_eq!(results[0].as_ref().unwrap_err().code(), "capture-file-held");
+        assert!(
+            store
+                .read_with(|conn| capture_file_holds::hold_in(conn, "hold-proof", "held.md"))
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn fix1_hold_batch_ownership_refusal_releases_only_its_hold() {
+        let (scratch, mut store, refused) = seeded();
+        assert_eq!(
+            offer(&mut store, &refused).unwrap_err().code(),
+            "capture-file-held"
+        );
+        let head = VersionedTextStore::new(&mut store)
+            .read_text("hold-proof", "main", "held.md")
+            .unwrap()
+            .unwrap();
+        VersionedTextStore::new(&mut store)
+            .write_text(
+                &dohc_engine_domain::WriteText {
+                    workspace_id: "hold-proof".into(),
+                    version_id: "main".into(),
+                    object_id: head.object_id,
+                    path: "held.md".into(),
+                    text: "Remote edit.\n".into(),
+                    moment_id: "remote-edit".into(),
+                    metadata_origin: "sync".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 6,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        let results = capture_ingest_batch_on_store(
+            &mut store,
+            &[
+                input("held.md", "Outside edit.\n"),
+                input("sibling.txt", "Sibling.\n"),
+            ],
+            &Arc::new(crate::search::read_engine_search_policy(scratch.path())),
+            &LeaseRegistry::new(),
+            &NoFaults,
+            &CancellationToken::new(),
+            (scratch.path(), &Root),
+        )
+        .unwrap();
+        assert!(matches!(
+            results[0],
+            Err(RuntimeError::CaptureNotOwnedAfterHold { .. })
+        ));
+        assert!(results[1].is_ok());
+        assert_unheld(&store);
+        assert_eq!(
+            VersionedTextStore::new(&mut store)
+                .read_text("hold-proof", "main", "held.md")
+                .unwrap()
+                .unwrap()
+                .text,
+            "Remote edit.\n"
+        );
+    }
+
+    #[test]
+    fn capture_file_hold_single_operation_acknowledges_without_a_moment() {
+        let (_scratch, mut store, refused) = seeded();
+        let error = offer(&mut store, &refused).unwrap_err();
+        assert_eq!(error.code(), "capture-file-held");
+        let (sha, count): (String, i64) = store.read_with(|conn| conn.query_row(
+            "SELECT h.observed_sha256,(SELECT COUNT(*) FROM moments WHERE workspace_id=h.workspace_id AND path=h.path) FROM capture_file_holds h",
+            [], |r| Ok((r.get(0)?, r.get(1)?)))).unwrap();
+        assert_eq!(
+            sha,
+            dohc_engine_storage::hex_sha256(refused.text.as_bytes())
+        );
+        assert_eq!(count, 1);
+        assert_eq!(
+            VersionedTextStore::new(&mut store)
+                .read_text("hold-proof", "main", "held.md")
+                .unwrap()
+                .unwrap()
+                .text,
+            "Before.\n"
+        );
+    }
+
+    fn operation_rename(store: &mut EngineStore) {
+        VersionedTextStore::new(store)
+            .rename_text_file_with(
+                &dohc_engine_domain::RenameTextFile {
+                    workspace_id: "hold-proof".into(),
+                    version_id: "main".into(),
+                    from_path: "held.md".into(),
+                    to_path: "moved.md".into(),
+                    moment_id: "operation-rename".into(),
+                    request_id: None,
+                    metadata_origin: "api".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: Some("dohc-operation:hold-proof".into()),
+                    author_json: None,
+                    now_ms: 4,
+                },
+                &NoFaults,
+                |tx, result| {
+                    dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+                        tx,
+                        "hold-proof",
+                        "main",
+                        &result.object.object_id,
+                        dohc_engine_sync::ResultingHead::Text {
+                            path: "moved.md",
+                            text: &result.after.text,
+                        },
+                        None,
+                        None,
+                        4,
+                    )
+                    .map_err(|e| {
+                        DomainError::Storage(StorageError::persist_public(std::io::Error::other(e)))
+                    })?;
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+    fn operation_undo(
+        store: &mut EngineStore,
+        root: &std::path::Path,
+        faults: &dyn FaultInjector,
+    ) -> Result<super::super::history_operations::HistoryUndoResult, RuntimeError> {
+        super::super::history_operations::history_undo_on_store(
+            store,
+            "hold-proof",
+            "dohc-operation:hold-proof",
+            "undo-hold-proof",
+            None,
+            root,
+            &(),
+            faults,
+            10,
+        )
+    }
+    #[test]
+    fn history_operation_held_rename_refuses_without_compensators_or_hold_changes() {
+        let (scratch, mut store, mut refused) = seeded();
+        operation_rename(&mut store);
+        refused.path = "moved.md".into();
+        refused.claim_foreign_head = true;
+        std::fs::write(scratch.path().join("moved.md"), &refused.text).unwrap();
+        assert_eq!(
+            offer(&mut store, &refused).unwrap_err().code(),
+            "capture-file-held"
+        );
+        let before = store
+            .read_with(|conn| capture_file_holds::list_in(conn, "hold-proof"))
+            .unwrap();
+        let n: i64 = store
+            .read_with(|conn| conn.query_row("SELECT COUNT(*) FROM moments", [], |r| r.get(0)))
+            .unwrap();
+        assert!(
+            matches!(operation_undo(&mut store,scratch.path(),&NoFaults),Err(RuntimeError::Domain(DomainError::UndoRefused {path,reason:"capture hold"})) if path=="moved.md")
+        );
+        assert_eq!(
+            store
+                .read_with(|conn| capture_file_holds::list_in(conn, "hold-proof"))
+                .unwrap(),
+            before
+        );
+        assert_eq!(
+            store
+                .read_with(|conn| conn
+                    .query_row("SELECT COUNT(*) FROM moments", [], |r| r.get::<_, i64>(0)))
+                .unwrap(),
+            n
+        );
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("moved.md")).unwrap(),
+            refused.text
+        );
+        assert!(!scratch.path().join("held.md").exists());
+    }
+    #[test]
+    fn history_operation_held_restoration_target_refuses_whole_undo() {
+        let (scratch, mut store, refused) = seeded();
+        VersionedTextStore::new(&mut store)
+            .delete_text_file(
+                &dohc_engine_domain::DeleteTextFile {
+                    workspace_id: "hold-proof".into(),
+                    version_id: "main".into(),
+                    path: "held.md".into(),
+                    moment_id: "operation-delete".into(),
+                    request_id: None,
+                    metadata_origin: "api".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: Some("dohc-operation:hold-proof".into()),
+                    author_json: None,
+                    now_ms: 4,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        std::fs::write(scratch.path().join("held.md"), &refused.text).unwrap();
+        assert_eq!(
+            offer(&mut store, &refused).unwrap_err().code(),
+            "capture-file-held"
+        );
+        let before = store
+            .read_with(|conn| capture_file_holds::list_in(conn, "hold-proof"))
+            .unwrap();
+        assert!(
+            matches!(operation_undo(&mut store,scratch.path(),&NoFaults),Err(RuntimeError::Domain(DomainError::UndoRefused {path,reason:"capture hold"})) if path=="held.md")
+        );
+        assert_eq!(
+            store
+                .read_with(|conn| capture_file_holds::list_in(conn, "hold-proof"))
+                .unwrap(),
+            before
+        );
+        assert_eq!(
+            store
+                .read_with(|conn| conn
+                    .query_row("SELECT COUNT(*) FROM moments", [], |r| r.get::<_, i64>(0)))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("held.md")).unwrap(),
+            refused.text
+        );
+    }
+    #[test]
+    fn history_operation_unrelated_hold_does_not_block_undo() {
+        let (scratch, mut store, refused) = seeded();
+        std::fs::write(scratch.path().join("held.md"), &refused.text).unwrap();
+        assert_eq!(
+            offer(&mut store, &refused).unwrap_err().code(),
+            "capture-file-held"
+        );
+        let before = store
+            .read_with(|conn| capture_file_holds::list_in(conn, "hold-proof"))
+            .unwrap();
+        offer(&mut store, &input("other.txt", "Other")).unwrap();
+        VersionedTextStore::new(&mut store)
+            .rename_text_file(
+                &dohc_engine_domain::RenameTextFile {
+                    workspace_id: "hold-proof".into(),
+                    version_id: "main".into(),
+                    from_path: "other.txt".into(),
+                    to_path: "renamed.txt".into(),
+                    moment_id: "operation-rename".into(),
+                    request_id: None,
+                    metadata_origin: "api".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: Some("dohc-operation:hold-proof".into()),
+                    author_json: None,
+                    now_ms: 4,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        std::fs::write(scratch.path().join("renamed.txt"), "Other").unwrap();
+        assert!(
+            operation_undo(&mut store, scratch.path(), &NoFaults)
+                .unwrap()
+                .materialized
+        );
+        assert_eq!(
+            store
+                .read_with(|conn| capture_file_holds::list_in(conn, "hold-proof"))
+                .unwrap(),
+            before
+        );
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("other.txt")).unwrap(),
+            "Other"
+        );
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("held.md")).unwrap(),
+            refused.text
+        );
+    }
+    #[test]
+    fn history_operation_pending_inverse_defers_capture_at_both_endpoints() {
+        struct Crash;
+        impl FaultInjector for Crash {
+            fn poll(&self, p: dohc_engine_storage::FaultPoint) -> dohc_engine_storage::FaultAction {
+                if p == dohc_engine_storage::FaultPoint::StorageAfterCommitBeforeAck {
+                    dohc_engine_storage::FaultAction::Crash
+                } else {
+                    dohc_engine_storage::FaultAction::Continue
+                }
+            }
+        }
+        let (scratch, mut store, _) = seeded();
+        operation_rename(&mut store);
+        std::fs::write(scratch.path().join("moved.md"), "Before.\n").unwrap();
+        assert!(matches!(
+            operation_undo(&mut store, scratch.path(), &Crash),
+            Err(RuntimeError::OperationCrashed)
+        ));
+        let count = store
+            .read_with(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM moments", [], |r| r.get::<_, i64>(0))
+            })
+            .unwrap();
+        for path in ["moved.md", "held.md"] {
+            assert!(matches!(
+                offer(&mut store, &input(path, "Before.\n")),
+                Err(RuntimeError::Sync(
+                    dohc_engine_sync::SyncError::RetryableState {
+                        reason: "history-undo-placement-pending"
+                    }
+                ))
+            ));
+        }
+        let retire = CaptureRetire {
+            workspace_id: "hold-proof".into(),
+            version_id: "main".into(),
+            path: "held.md".into(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            now_ms: 6,
+            request_id: None,
+            only_if_text_head: true,
+            only_if_capture_origin: false,
+            allow_ydoc_origin: true,
+        };
+        assert!(matches!(
+            capture_retire_on_store(
+                &mut store,
+                &retire,
+                None,
+                scratch.path(),
+                &Root,
+                true,
+                &(),
+                &LeaseRegistry::new(),
+                &NoFaults
+            ),
+            Err(RuntimeError::Sync(
+                dohc_engine_sync::SyncError::RetryableState {
+                    reason: "history-undo-placement-pending"
+                }
+            ))
+        ));
+        assert_eq!(
+            store
+                .read_with(|conn| conn
+                    .query_row("SELECT COUNT(*) FROM moments", [], |r| r.get::<_, i64>(0)))
+                .unwrap(),
+            count
+        );
+        assert_unheld(&store);
+        assert_eq!(
+            std::fs::read(scratch.path().join("moved.md")).unwrap(),
+            b"Before.\n"
+        );
+        assert!(!scratch.path().join("held.md").exists());
+        assert!(
+            operation_undo(&mut store, scratch.path(), &NoFaults)
+                .unwrap()
+                .materialized
+        );
+    }
+
+    #[test]
+    fn history_operation_restart_parked_placement_never_reports_restored() {
+        struct Crash;
+        impl FaultInjector for Crash {
+            fn poll(&self, p: dohc_engine_storage::FaultPoint) -> dohc_engine_storage::FaultAction {
+                if p == dohc_engine_storage::FaultPoint::StorageAfterCommitBeforeAck {
+                    dohc_engine_storage::FaultAction::Crash
+                } else {
+                    dohc_engine_storage::FaultAction::Continue
+                }
+            }
+        }
+        let (scratch, mut store, mut refused) = seeded();
+        refused.claim_foreign_head = true;
+        operation_rename(&mut store);
+        std::fs::write(scratch.path().join("moved.md"), "Before.\n").unwrap();
+        assert!(matches!(
+            operation_undo(&mut store, scratch.path(), &Crash),
+            Err(RuntimeError::OperationCrashed)
+        ));
+        drop(store);
+        let mut store = EngineStore::open(&engine_db_path(&scratch).unwrap(), 11).unwrap();
+        std::fs::write(scratch.path().join("held.md"), &refused.text).unwrap();
+        assert_eq!(
+            offer(&mut store, &refused).unwrap_err().code(),
+            "capture-file-held"
+        );
+        let before = store
+            .read_with(|conn| capture_file_holds::list_in(conn, "hold-proof"))
+            .unwrap();
+        let result = operation_undo(&mut store, scratch.path(), &NoFaults).unwrap();
+        assert!(result.deduped && !result.materialized);
+        assert_eq!(
+            store
+                .read_with(|conn| capture_file_holds::list_in(conn, "hold-proof"))
+                .unwrap(),
+            before
+        );
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("held.md")).unwrap(),
+            refused.text
+        );
+        assert_eq!(
+            store
+                .read_with(|conn| conn
+                    .query_row("SELECT COUNT(*) FROM moments", [], |r| r.get::<_, i64>(0)))
+                .unwrap(),
+            3
+        );
+        refused.text = "Repaired.\n".into();
+        std::fs::write(scratch.path().join("held.md"), &refused.text).unwrap();
+        assert_eq!(
+            offer(&mut store, &refused).unwrap().snapshot.text,
+            refused.text
+        );
+        assert_unheld(&store);
+        // Superseded Undo jobs no longer reserve the repaired path.
+        refused.text = "Continued.\n".into();
+        assert_eq!(
+            offer(&mut store, &refused).unwrap().snapshot.text,
+            refused.text
+        );
+    }
+
+    struct Root;
+    impl WorkspaceRootGuard for Root {
+        fn validate(&self, _: &std::path::Path) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn capture_file_hold_batch_savepoint_commits_both_siblings() {
+        let (scratch, mut store, refused) = seeded();
+        let inputs = [
+            input("first.txt", "First.\n"),
+            refused,
+            input("last.txt", "Last.\n"),
+        ];
+        let policy = Arc::new(crate::search::read_engine_search_policy(scratch.path()));
+        let results = capture_ingest_batch_on_store(
+            &mut store,
+            &inputs,
+            &policy,
+            &LeaseRegistry::new(),
+            &NoFaults,
+            &CancellationToken::new(),
+            (scratch.path(), &Root),
+        )
+        .unwrap();
+        assert!(results[0].is_ok());
+        assert_eq!(results[1].as_ref().unwrap_err().code(), "capture-file-held");
+        assert!(results[2].is_ok());
+        assert_eq!(
+            results[2].as_ref().unwrap().moment.moment_order,
+            results[0].as_ref().unwrap().moment.moment_order + 1
+        );
+        let holds: i64 = store
+            .read_with(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM capture_file_holds", [], |r| r.get(0))
+            })
+            .unwrap();
+        assert_eq!(holds, 1);
+    }
+
+    #[test]
+    fn capture_file_hold_changed_bytes_remain_pinned_to_the_source_version() {
+        let (_scratch, mut store, refused) = seeded();
+        assert_eq!(
+            offer(&mut store, &refused).unwrap_err().code(),
+            "capture-file-held"
+        );
+        store.write_with(&NoFaults, |tx| tx.execute(
+            "INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES ('hold-proof','later','named','Later',4)",
+            []).map_err(StorageError::persist_public)).unwrap();
+        let mut changed = input("held.md", "Representable.\n");
+        changed.version_id = "later".into();
+        let recovered = offer(&mut store, &changed).unwrap();
+        assert_eq!(recovered.snapshot.version_id, "main");
+        assert!(
+            VersionedTextStore::new(&mut store)
+                .read_text("hold-proof", "later", "held.md")
+                .unwrap()
+                .is_none()
+        );
+        let holds: i64 = store
+            .read_with(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM capture_file_holds", [], |r| r.get(0))
+            })
+            .unwrap();
+        assert_eq!(holds, 0);
+    }
+}
 
 /// Maximum work accepted by one capture batch actor command. Keeping both
 /// bounds here lets the actor serve queued interactive work between chunks.
@@ -38,17 +1022,6 @@ pub const MAX_CAPTURE_INGEST_BATCH_BYTES: usize = 4 * 1024 * 1024;
 /// root selected before an actor command entered the queue.
 pub trait WorkspaceRootGuard: Send + Sync {
     fn validate(&self, root_dir: &std::path::Path) -> Result<(), RuntimeError>;
-}
-
-type CommandWorkspaceRoot = (PathBuf, Option<Arc<dyn WorkspaceRootGuard>>);
-
-fn command_workspace_root_parts(
-    workspace_root: Option<&CommandWorkspaceRoot>,
-) -> (Option<&std::path::Path>, Option<&dyn WorkspaceRootGuard>) {
-    match workspace_root {
-        Some((root_dir, root_guard)) => (Some(root_dir.as_path()), root_guard.as_deref()),
-        None => (None, None),
-    }
 }
 
 pub(super) fn validate_workspace_root(
@@ -67,7 +1040,185 @@ enum CaptureIndexing {
     UseSnapshot(Arc<SearchPolicySnapshot>),
 }
 
+pub struct CapturePlacementPath {
+    pub path: String,
+    pub released_hold: bool,
+}
+
+pub struct CapturePassSettlement {
+    pub paths: Vec<CapturePlacementPath>,
+    pub repair_recoveries: bool,
+}
+
+/// Matches job targets that name `path` on a disk that ignores case or
+/// Unicode normalization, as capture holds match them.
+fn names_path(path: &str) -> impl Fn(&str) -> bool {
+    let path = path_collision_key(path);
+    move |target| path_collision_key(target) == path
+}
+
+fn select_released_switch_jobs(
+    conn: &Connection,
+    workspace_id: &str,
+    paths: &[CapturePlacementPath],
+    selected: &mut std::collections::HashSet<String>,
+) -> Result<(), RuntimeError> {
+    let released: Vec<String> = paths
+        .iter()
+        .filter(|path| path.released_hold)
+        .map(|path| path_collision_key(&path.path))
+        .collect();
+    for (id, target) in dohc_engine_storage::pending_switch_jobs_in(conn, workspace_id)? {
+        let target = path_collision_key(&target);
+        if released.iter().any(|path| {
+            target == *path
+                || target
+                    .strip_prefix(path)
+                    .is_some_and(|rest| rest.starts_with('/'))
+        }) {
+            selected.insert(id);
+        }
+    }
+    Ok(())
+}
+
 impl ActorHandle {
+    #[cfg(feature = "fault-injection")]
+    pub async fn capture_phase_totals_for_harness(
+        &self,
+    ) -> Result<dohc_engine_storage::capture_phase::Snapshot, RuntimeError> {
+        self.run(|_, _| Ok(dohc_engine_storage::capture_phase::snapshot()))
+            .await
+    }
+
+    pub async fn capture_notices(
+        &self,
+        workspace_id: String,
+    ) -> Result<
+        (
+            Vec<dohc_engine_domain::CaptureRecovery>,
+            Vec<CaptureFileHold>,
+        ),
+        RuntimeError,
+    > {
+        self.run(move |store, _| {
+            store.read_with(|conn| {
+                Ok((
+                    dohc_engine_domain::capture_recoveries_in(conn, &workspace_id)?,
+                    capture_file_holds::list_in(conn, &workspace_id)?,
+                ))
+            })
+        })
+        .await
+    }
+
+    /// Drain intents for settled observations after their capture commit.
+    /// A completed capture generation supersedes an older parked placement.
+    pub async fn finish_capture_pass(
+        &self,
+        workspace_id: String,
+        root_dir: PathBuf,
+        settlement: CapturePassSettlement,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        now_ms: i64,
+        root_guard: Arc<dyn WorkspaceRootGuard>,
+    ) -> Result<Vec<dohc_engine_sync::YdocRecoveryMaterialization>, RuntimeError> {
+        self.run(move |store, cache| {
+            let selected = if settlement.paths.is_empty() {
+                std::collections::HashSet::new()
+            } else {
+                store.read_with(|conn| {
+                    let mut query = conn.prepare_cached(
+                        "SELECT job_id FROM materialization_jobs WHERE workspace_id IN (?1,'') AND target_path=?2 AND status='pending'"
+                    ).map_err(StorageError::corrupt_public)?;
+                    let mut selected = std::collections::HashSet::new();
+                    let mut released = false;
+                    for path in &settlement.paths {
+                        released |= path.released_hold;
+                        let jobs = query.query_map(params![workspace_id, path.path], |row| row.get::<_, String>(0))
+                            .map_err(StorageError::corrupt_public)?;
+                        for job in jobs { selected.insert(job.map_err(StorageError::corrupt_public)?); }
+                    }
+                    if released {
+                        select_released_switch_jobs(conn, &workspace_id, &settlement.paths, &mut selected)?;
+                    }
+                    Ok::<_, RuntimeError>(selected)
+                })?
+            };
+            if !selected.is_empty() {
+                let released_hold_paths = settlement
+                    .paths
+                    .iter()
+                    .filter(|path| path.released_hold)
+                    .map(|path| path_collision_key(&path.path))
+                    .collect();
+                root_guard.validate(&root_dir)?;
+                let replay = super::materialization::replay_pending_materializations(
+                    store,
+                    &root_dir,
+                    super::materialization::MaterializationReplayScope {
+                        holds: None,
+                        workspace_id: &workspace_id,
+                        self_writes: Some(self_writes.as_ref()),
+                        progress: None,
+                        file_outcomes_settled: true,
+                        released_hold_paths: Some(&released_hold_paths),
+                    },
+                    now_ms,
+                    &dohc_engine_storage::NoFaults,
+                    Some(&selected),
+                    true,
+                );
+                cache.clear();
+                let summary = replay?;
+                if summary.failed > 0 {
+                    return Err(RuntimeError::ActiveVersionMaterializationIncomplete {
+                        failed_jobs: summary.failed,
+                    });
+                }
+            }
+            if !settlement.repair_recoveries {
+                return Ok(Vec::new());
+            }
+            let outcome = dohc_engine_sync::repair_conflicted_ydoc_recoveries(
+                store,
+                &workspace_id,
+                &dohc_engine_storage::NoFaults,
+            )
+            .map_err(RuntimeError::from);
+            if !matches!(&outcome, Ok(recoveries) if recoveries.is_empty()) {
+                cache.clear();
+            }
+            outcome
+        })
+        .await
+    }
+
+    pub async fn capture_file_holds(
+        &self,
+        workspace_id: String,
+    ) -> Result<Vec<CaptureFileHold>, RuntimeError> {
+        self.run(move |store, _| {
+            Ok(store.read_with(|conn| capture_file_holds::list_in(conn, &workspace_id))?)
+        })
+        .await
+    }
+
+    pub async fn retry_capture_file(
+        &self,
+        workspace_id: String,
+        path: String,
+    ) -> Result<bool, RuntimeError> {
+        self.run(move |store, _| {
+            match store.write_with(&dohc_engine_storage::NoFaults, |tx| {
+                capture_file_holds::request_retry_in(tx, &workspace_id, &path)
+            })? {
+                TxnOutcome::Committed(retried) => Ok(retried),
+                TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+            }
+        })
+        .await
+    }
     pub async fn capture_recoveries(
         &self,
         workspace_id: String,
@@ -97,16 +1248,6 @@ impl ActorHandle {
     }
     // --- Synchronous API (must be used outside a runtime) ---
 
-    /// Capture a text file on the actor's writer, blocking the calling thread.
-    pub fn capture_ingest_blocking(
-        &self,
-        input: CaptureIngest,
-        leases: LeaseRegistry,
-        faults: Arc<dyn FaultInjector>,
-    ) -> Result<WriteResult, RuntimeError> {
-        self.capture_ingest_blocking_with_indexing(input, CaptureIndexing::Skip, leases, faults)
-    }
-
     /// Capture and index text against one reconcile-owned policy snapshot.
     pub fn capture_ingest_with_search_policy_blocking(
         &self,
@@ -115,12 +1256,13 @@ impl ActorHandle {
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<WriteResult, RuntimeError> {
-        self.capture_ingest_blocking_with_indexing(
-            input,
-            CaptureIndexing::UseSnapshot(search_policy),
-            leases,
-            faults,
-        )
+        let indexing = CaptureIndexing::UseSnapshot(search_policy);
+        let token: CancellationToken = CancellationToken::new();
+        self.run_blocking(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                capture_ingest_on_store(store, &input, &indexing, &leases, faults.as_ref(), &token)
+            })
+        })
     }
 
     /// Capture a bounded text chunk in one durable transaction. A clean chunk
@@ -128,15 +1270,25 @@ impl ActorHandle {
     /// per-item savepoints so successful siblings still commit.
     pub fn capture_ingest_batch_blocking(
         &self,
-        inputs: Vec<CaptureIngest>,
+        inputs: impl Into<Arc<[CaptureIngest]>>,
         search_policy: Arc<SearchPolicySnapshot>,
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
         root_dir: PathBuf,
         root_guard: Arc<dyn WorkspaceRootGuard>,
     ) -> Result<Vec<Result<WriteResult, RuntimeError>>, RuntimeError> {
+        let inputs = inputs.into();
+        #[cfg(feature = "fault-injection")]
+        let mut roundtrip = dohc_engine_storage::capture_phase::Phase::new(
+            "queued_capture_batch",
+            inputs
+                .first()
+                .and_then(|i| i.metadata_correlation_id.as_deref()),
+            inputs.len(),
+            false,
+        );
         let token: CancellationToken = CancellationToken::new();
-        self.run_blocking(move |store, cache| {
+        let result = self.run_blocking(move |store, cache| {
             with_local_file_mutation_cache_reset(cache, || {
                 capture_ingest_batch_on_store(
                     store,
@@ -148,22 +1300,10 @@ impl ActorHandle {
                     (&root_dir, root_guard.as_ref()),
                 )
             })
-        })
-    }
-
-    fn capture_ingest_blocking_with_indexing(
-        &self,
-        input: CaptureIngest,
-        indexing: CaptureIndexing,
-        leases: LeaseRegistry,
-        faults: Arc<dyn FaultInjector>,
-    ) -> Result<WriteResult, RuntimeError> {
-        let token: CancellationToken = CancellationToken::new();
-        self.run_blocking(move |store, cache| {
-            with_local_file_mutation_cache_reset(cache, || {
-                capture_ingest_on_store(store, &input, &indexing, &leases, faults.as_ref(), &token)
-            })
-        })
+        });
+        #[cfg(feature = "fault-injection")]
+        roundtrip.finish(if result.is_ok() { "returned" } else { "error" });
+        result
     }
 
     /// Capture a binary file on the actor's writer, blocking the caller.
@@ -205,44 +1345,14 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         root_guard: Arc<dyn WorkspaceRootGuard>,
     ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
-        let workspace_root: Option<CommandWorkspaceRoot> = Some((root_dir, Some(root_guard)));
-        let token: CancellationToken = CancellationToken::new();
         self.run_blocking(move |store, _cache| {
-            let (root_dir, root_guard) = command_workspace_root_parts(workspace_root.as_ref());
             capture_secret_retire_on_store(
                 store,
                 &input,
-                root_dir,
-                root_guard,
+                &root_dir,
+                root_guard.as_ref(),
                 faults.as_ref(),
-                &token,
             )
-        })
-    }
-
-    /// Retire a captured path on the actor's writer, blocking the caller.
-    pub fn capture_retire_blocking(
-        &self,
-        input: CaptureRetire,
-        leases: LeaseRegistry,
-        faults: Arc<dyn FaultInjector>,
-    ) -> Result<CaptureRetireResult, RuntimeError> {
-        let self_writes: Option<Arc<dyn SelfWriteRecorder>> = None;
-        let token: CancellationToken = CancellationToken::new();
-        self.run_blocking(move |store, cache| {
-            with_local_file_mutation_cache_reset(cache, || {
-                capture_retire_on_store(
-                    store,
-                    &input,
-                    None,
-                    None,
-                    false,
-                    self_writes.as_deref(),
-                    &leases,
-                    faults.as_ref(),
-                    &token,
-                )
-            })
         })
     }
 
@@ -269,22 +1379,50 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         root_guard: Arc<dyn WorkspaceRootGuard>,
     ) -> Result<CaptureRetireResult, RuntimeError> {
-        let workspace_root: Option<CommandWorkspaceRoot> = Some((root_dir, Some(root_guard)));
-        let self_writes: Option<Arc<dyn SelfWriteRecorder>> = Some(self_writes);
-        let token: CancellationToken = CancellationToken::new();
         self.run_blocking(move |store, cache| {
-            let (root_dir, root_guard) = command_workspace_root_parts(workspace_root.as_ref());
             with_local_file_mutation_cache_reset(cache, || {
                 capture_retire_on_store(
                     store,
                     &input,
-                    root_dir,
-                    root_guard,
+                    None,
+                    &root_dir,
+                    root_guard.as_ref(),
                     confirm_absent,
-                    self_writes.as_deref(),
+                    self_writes.as_ref(),
                     &leases,
                     faults.as_ref(),
-                    &token,
+                )
+            })
+        })
+    }
+
+    /// Retire `input.path`, whose file the disk shows stored under `to`, another
+    /// spelling of it, with the bytes `to_sha256`. See
+    /// [`dohc_engine_domain::capture_retire_respelled_in_tx`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn capture_retire_respelled_blocking_guarded(
+        &self,
+        input: CaptureRetire,
+        to: String,
+        to_sha256: String,
+        root_dir: PathBuf,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        leases: LeaseRegistry,
+        faults: Arc<dyn FaultInjector>,
+        root_guard: Arc<dyn WorkspaceRootGuard>,
+    ) -> Result<CaptureRetireResult, RuntimeError> {
+        self.run_blocking(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                capture_retire_on_store(
+                    store,
+                    &input,
+                    Some((&to, &to_sha256)),
+                    &root_dir,
+                    root_guard.as_ref(),
+                    false,
+                    self_writes.as_ref(),
+                    &leases,
+                    faults.as_ref(),
                 )
             })
         })
@@ -358,7 +1496,22 @@ impl ActorHandle {
         version_id: String,
     ) -> Result<Vec<CaptureManifestSeedEntry>, RuntimeError> {
         self.run(move |store, _| {
-            capture_manifest_seed(store, &workspace_id, &version_id).map_err(RuntimeError::from)
+            let mut entries = capture_manifest_seed(store, &workspace_id, &version_id)?;
+            let holds = store.read_with(|conn| capture_file_holds::list_in(conn, &workspace_id))?;
+            let held_paths = dohc_engine_files::PlacementHolds::from_holds(&workspace_id, &holds);
+            entries.retain(|entry| !held_paths.blocks(&entry.path));
+            for hold in holds {
+                entries.push(CaptureManifestSeedEntry {
+                    path: hold.path,
+                    size: hold.observed_size,
+                    sha256: if hold.retry_requested {
+                        "held-retry".to_owned()
+                    } else {
+                        hold.observed_sha256
+                    },
+                });
+            }
+            Ok(entries)
         })
         .await
     }
@@ -376,46 +1529,6 @@ impl ActorHandle {
         })
         .await
     }
-
-    /// Retire a captured secret path on the actor's single writer thread.
-    pub async fn capture_secret_retire(
-        &self,
-        input: CaptureSecretRetire,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-    ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
-        self.run(move |store, _cache| {
-            capture_secret_retire_on_store(store, &input, None, None, faults.as_ref(), &token)
-        })
-        .await
-    }
-
-    /// Retire a captured path on the actor's single writer thread.
-    pub async fn capture_retire(
-        &self,
-        input: CaptureRetire,
-        leases: LeaseRegistry,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-    ) -> Result<CaptureRetireResult, RuntimeError> {
-        let self_writes: Option<Arc<dyn SelfWriteRecorder>> = None;
-        self.run(move |store, cache| {
-            with_local_file_mutation_cache_reset(cache, || {
-                capture_retire_on_store(
-                    store,
-                    &input,
-                    None,
-                    None,
-                    false,
-                    self_writes.as_deref(),
-                    &leases,
-                    faults.as_ref(),
-                    &token,
-                )
-            })
-        })
-        .await
-    }
 }
 
 fn capture_ingest_on_store(
@@ -426,6 +1539,15 @@ fn capture_ingest_on_store(
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<WriteResult, RuntimeError> {
+    #[cfg(feature = "fault-injection")]
+    let mut phase = dohc_engine_storage::capture_phase::Phase::new(
+        "actor_capture_text",
+        input.metadata_correlation_id.as_deref(),
+        1,
+        true,
+    );
+    #[cfg(feature = "fault-injection")]
+    phase.finish("attempted");
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
@@ -439,22 +1561,172 @@ fn capture_ingest_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    let outcome = store.write_with(faults, |tx| {
+    let outcome = match store.write_with(faults, |tx| {
         capture_ingest_in_tx(tx, input, indexing, leases, None)
-    })?;
+    }) {
+        Err(error) if unrepresentable(&error) => {
+            match store.write_with(faults, |tx| record_capture_file_hold_in(tx, input))? {
+                TxnOutcome::Committed(()) => {
+                    return Err(RuntimeError::CaptureFileHeld {
+                        path: input.path.clone(),
+                    });
+                }
+                TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+            }
+        }
+        Err(error @ RuntimeError::Domain(DomainError::CaptureNotOwned)) => {
+            if clear_unowned_capture_hold(store, &input.workspace_id, &input.path, faults)? {
+                return Err(RuntimeError::CaptureNotOwnedAfterHold {
+                    path: input.path.clone(),
+                });
+            }
+            return Err(error);
+        }
+        result => result?,
+    };
     match outcome {
         TxnOutcome::Committed(result) => Ok(result),
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
     }
 }
 
+fn pending_placement_in(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    path: &str,
+    held: bool,
+) -> Result<bool, RuntimeError> {
+    if held {
+        return Ok(true);
+    }
+    tx.prepare_cached(
+        "SELECT EXISTS(SELECT 1 FROM materialization_jobs \
+         WHERE workspace_id IN (?1,'') AND target_path=?2 AND status='pending')",
+    )
+    .map_err(StorageError::corrupt_public)?
+    .query_row(params![workspace_id, path], |row| row.get(0))
+    .map_err(StorageError::corrupt_public)
+    .map_err(RuntimeError::from)
+}
+
+fn clear_unowned_capture_hold(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    path: &str,
+    faults: &dyn FaultInjector,
+) -> Result<bool, RuntimeError> {
+    if store
+        .read_with(|conn| capture_file_holds::hold_in(conn, workspace_id, path))?
+        .is_none()
+    {
+        return Ok(false);
+    }
+    match store.write_with(faults, |tx| {
+        capture_file_holds::clear_in(tx, workspace_id, path)
+    })? {
+        TxnOutcome::Committed(()) => Ok(true),
+        TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
+}
+
+fn unrepresentable(error: &RuntimeError) -> bool {
+    matches!(error, RuntimeError::Sync(dohc_engine_sync::SyncError::InvalidInput { reason }) if *reason == capture_file_holds::NOT_REPRESENTABLE)
+}
+
+fn record_capture_file_hold_in(
+    tx: &Transaction<'_>,
+    input: &CaptureIngest,
+) -> Result<(), RuntimeError> {
+    let existing = capture_file_holds::pin_in(tx, &input.workspace_id, &input.path)?;
+    let version = existing.as_ref().map_or(input.version_id.as_str(), |hold| {
+        hold.source_version_id.as_str()
+    });
+    let object_id = dohc_engine_domain::ensure_capture_object_in_tx(
+        tx,
+        &input.workspace_id,
+        version,
+        &input.path,
+        input.now_ms,
+    )?;
+    capture_file_holds::record_in(
+        tx,
+        &CaptureFileHold {
+            workspace_id: input.workspace_id.clone(),
+            source_version_id: version.to_owned(),
+            object_id,
+            path: input.path.clone(),
+            observed_sha256: dohc_engine_storage::hex_sha256(input.text.as_bytes()),
+            observed_size: input.text.len() as u64,
+            reason: capture_file_holds::NOT_REPRESENTABLE.to_owned(),
+            observed_at_ms: input.now_ms,
+            attempt_count: 1,
+            retry_requested: false,
+        },
+    )?;
+    Ok(())
+}
+
+/// A held observation can only recover the object and version that refused it.
+fn pinned_capture_input<'a>(
+    tx: &Transaction<'_>,
+    input: &'a CaptureIngest,
+) -> Result<(std::borrow::Cow<'a, CaptureIngest>, bool), RuntimeError> {
+    let Some(hold) = capture_file_holds::pin_in(tx, &input.workspace_id, &input.path)? else {
+        return Ok((std::borrow::Cow::Borrowed(input), false));
+    };
+    if !hold.retry_requested
+        && hold.observed_sha256 == dohc_engine_storage::hex_sha256(input.text.as_bytes())
+    {
+        return Err(RuntimeError::CaptureFileHeld {
+            path: input.path.clone(),
+        });
+    }
+    let mut pinned = input.clone();
+    pinned.version_id = hold.source_version_id;
+    Ok((std::borrow::Cow::Owned(pinned), true))
+}
+
 struct CaptureBatchSharedContext {
     capture: CaptureIngestBatchContext,
     has_ydoc_state: Option<bool>,
     journals_file_moments: Option<bool>,
+    /// The item just ingested recovered a sibling file, whose moment took
+    /// the order after the item's own.
+    recovered_sibling: bool,
+}
+
+impl CaptureBatchSharedContext {
+    fn new(tx: &Transaction<'_>, first: &CaptureIngest) -> Result<Self, RuntimeError> {
+        Ok(Self {
+            capture: CaptureIngestBatchContext::new(tx, &first.workspace_id, &first.version_id)?,
+            has_ydoc_state: None,
+            journals_file_moments: None,
+            recovered_sibling: false,
+        })
+    }
+
+    /// After an item that recovered a sibling, the batch's reserved moment
+    /// order is behind the table. Read the high-water mark again before the
+    /// next item, so it does not propose the order the sibling took. An item
+    /// rolled back took its sibling with it; reading again then costs one
+    /// query and changes nothing.
+    fn settle_item(
+        &mut self,
+        tx: &Transaction<'_>,
+        first: &CaptureIngest,
+    ) -> Result<(), RuntimeError> {
+        if std::mem::take(&mut self.recovered_sibling) {
+            self.capture =
+                CaptureIngestBatchContext::new(tx, &first.workspace_id, &first.version_id)?;
+        }
+        Ok(())
+    }
 }
 
 struct PreparedCaptureRecovery {
+    /// The admitted object the lineage was read for. Capture may resolve the
+    /// path to a different, disambiguated object.
+    object_id: String,
     lineage: dohc_engine_sync::PreparedLocalYdocLineage,
     preserve: bool,
     authors: Option<String>,
@@ -467,6 +1739,7 @@ fn prepare_capture_recovery_in(
 ) -> Result<PreparedCaptureRecovery, RuntimeError> {
     let key = DocKey::new(&input.workspace_id, &input.version_id, object_id)?;
     let mut prepared = PreparedCaptureRecovery {
+        object_id: object_id.to_owned(),
         lineage: dohc_engine_sync::prepare_local_ydoc_lineage_in_tx(tx, &key)?,
         preserve: false,
         authors: None,
@@ -520,6 +1793,35 @@ fn capture_ingest_in_tx(
     leases: &LeaseRegistry,
     mut batch: Option<&mut CaptureBatchSharedContext>,
 ) -> Result<WriteResult, RuntimeError> {
+    let (pinned, held) = pinned_capture_input(tx, input)?;
+    let input = pinned.as_ref();
+    let placement_admission = if held {
+        Ok(())
+    } else {
+        match ensure_no_pending_undo_placement(tx, &input.workspace_id, &input.path) {
+            Err(error)
+                if input.claim_foreign_head
+                    && matches!(
+                        &error,
+                        RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState {
+                            reason: "history-undo-placement-pending"
+                        })
+                    ) =>
+            {
+                Err(error)
+            }
+            result => {
+                result?;
+                Ok(())
+            }
+        }
+    };
+    if held {
+        if let Some(shared) = batch.as_deref_mut() {
+            shared.recovered_sibling = true;
+        }
+        batch = None;
+    }
     let (actor_origin_id, attribution) =
         dohc_engine_domain::moment_author_attribution(input.author_json.as_deref());
     let mut admitted = false;
@@ -527,6 +1829,9 @@ fn capture_ingest_in_tx(
     let may_have_ydoc_state = batch
         .as_ref()
         .is_none_or(|batch| batch.has_ydoc_state != Some(false));
+    #[cfg(feature = "fault-injection")]
+    let domain_phase =
+        dohc_engine_storage::capture_phase::Measure::new("domain_and_lease_recovery");
     let mut result = match batch.as_deref_mut() {
         Some(batch) => capture_ingest_in_batch_with_admission_in_tx(
             tx,
@@ -554,9 +1859,14 @@ fn capture_ingest_in_tx(
             },
         )?,
     };
+    #[cfg(feature = "fault-injection")]
+    drop(domain_phase);
     if let Some(batch) = batch.as_deref_mut() {
         batch.capture.commit_result(&result)?;
     }
+    // A lineage read for an object the path no longer resolves to belongs to
+    // another file.
+    let recovery = recovery.filter(|prepared| prepared.object_id == result.snapshot.object_id);
     if let Some(prepared) = recovery.as_ref().filter(|prepared| prepared.preserve) {
         let projection = prepared
             .lineage
@@ -577,6 +1887,9 @@ fn capture_ingest_in_tx(
         }
     }
     if admitted {
+        #[cfg(feature = "fault-injection")]
+        let _collection_phase =
+            dohc_engine_storage::capture_phase::Measure::new("collection_and_lineage");
         let has_ydoc_state = match batch.as_deref_mut() {
             Some(batch) => match batch.has_ydoc_state {
                 Some(has_ydoc_state) => has_ydoc_state,
@@ -597,8 +1910,8 @@ fn capture_ingest_in_tx(
                 path: &result.snapshot.path,
                 text: &result.snapshot.text,
             };
-            match recovery {
-                Some(prepared) => dohc_engine_sync::reconcile_prepared_local_resulting_head_in_tx(
+            let reconciled = match recovery {
+                Some(prepared) => dohc_engine_sync::reconcile_prepared_local_head_in_tx(
                     tx,
                     prepared.lineage,
                     resulting,
@@ -606,7 +1919,8 @@ fn capture_ingest_in_tx(
                     attribution.as_ref(),
                     input.now_ms,
                 )?,
-                None => dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+                // Capture resolved the path to a new object, not the one admitted.
+                None => dohc_engine_sync::reconcile_local_head_in_tx(
                     tx,
                     &input.workspace_id,
                     &input.version_id,
@@ -616,7 +1930,11 @@ fn capture_ingest_in_tx(
                     attribution.as_ref(),
                     input.now_ms,
                 )?,
+            };
+            if let Some(batch) = batch.as_deref_mut() {
+                batch.recovered_sibling = reconciled.recovered_sibling;
             }
+            reconciled.facts
         } else {
             // No Y.Doc lineage exists in this version, so the file alone
             // carries the write.
@@ -644,6 +1962,8 @@ fn capture_ingest_in_tx(
         }
     }
     if !result.deduped {
+        #[cfg(feature = "fault-injection")]
+        let _search_phase = dohc_engine_storage::capture_phase::Measure::new("search");
         match indexing {
             CaptureIndexing::Skip => {}
             CaptureIndexing::ReadRoot(root_dir) => upsert_file_search_index(
@@ -669,6 +1989,8 @@ fn capture_ingest_in_tx(
             .map_err(RuntimeError::from)?,
         }
     }
+    #[cfg(feature = "fault-injection")]
+    let journal_phase = dohc_engine_storage::capture_phase::Measure::new("outbound_journal");
     match batch {
         Some(batch) => journal_moment_outbound_with_batch_in_tx(
             tx,
@@ -685,6 +2007,40 @@ fn capture_ingest_in_tx(
         ),
     }
     .map_err(RuntimeError::from)?;
+    #[cfg(feature = "fault-injection")]
+    drop(journal_phase);
+    // An alias change may have released the hold before this observation.
+    // Mark these captured bytes before replay can revive an older intent.
+    let pending_placement = pending_placement_in(tx, &input.workspace_id, &input.path, held)?;
+    if pending_placement {
+        dohc_engine_storage::record_completed_job(
+            tx,
+            &dohc_engine_storage::MaterializationJobSpec {
+                job_id: format!("capture-mat_{}", result.moment.moment_id),
+                workspace_id: input.workspace_id.clone(),
+                target_path: input.path.clone(),
+                content_sha256: result.snapshot.blob_sha256.clone(),
+                preimage: dohc_engine_storage::Preimage::Present(
+                    result.snapshot.blob_sha256.clone(),
+                ),
+                target_generation: result.moment.moment_order,
+                now_ms: input.now_ms,
+            },
+        )?;
+    }
+    if held {
+        capture_file_holds::rebase_switch_jobs_in(
+            tx,
+            &input.workspace_id,
+            names_path(&input.path),
+            &dohc_engine_storage::Preimage::Present(result.snapshot.blob_sha256.clone()),
+        )?;
+        capture_file_holds::clear_in(tx, &input.workspace_id, &input.path)?;
+    }
+    result.pending_placement = pending_placement;
+    result.released_capture_hold = held;
+    // Projection refusal may establish a hold; a valid pending observation rolls back.
+    placement_admission?;
     Ok(result)
 }
 
@@ -697,6 +2053,15 @@ fn capture_ingest_batch_on_store(
     token: &CancellationToken,
     workspace_root: (&std::path::Path, &dyn WorkspaceRootGuard),
 ) -> Result<Vec<Result<WriteResult, RuntimeError>>, RuntimeError> {
+    #[cfg(feature = "fault-injection")]
+    let mut phase = dohc_engine_storage::capture_phase::Phase::new(
+        "actor_capture_batch",
+        inputs
+            .first()
+            .and_then(|i| i.metadata_correlation_id.as_deref()),
+        inputs.len(),
+        true,
+    );
     let (root_dir, root_guard) = workspace_root;
     let Some(first) = inputs.first() else {
         return Ok(Vec::new());
@@ -769,7 +2134,17 @@ fn capture_ingest_batch_on_store(
         }
     })?;
     match outcome {
-        TxnOutcome::Committed(results) => Ok(results),
+        TxnOutcome::Committed(results) => {
+            #[cfg(feature = "fault-injection")]
+            {
+                phase.field(
+                    "failed_items",
+                    results.iter().filter(|r| r.is_err()).count() as u64,
+                );
+                phase.finish("committed");
+            }
+            Ok(results)
+        }
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
     }
 }
@@ -784,13 +2159,10 @@ fn capture_ingest_batch_all_or_none_in_tx(
         reason: "capture batch is empty",
     })?;
     let mut results = Vec::with_capacity(inputs.len());
-    let mut batch = CaptureBatchSharedContext {
-        capture: CaptureIngestBatchContext::new(tx, &first.workspace_id, &first.version_id)?,
-        has_ydoc_state: None,
-        journals_file_moments: None,
-    };
+    let mut batch = CaptureBatchSharedContext::new(tx, first)?;
     for input in inputs {
         let result = capture_ingest_in_tx(tx, input, indexing, leases, Some(&mut batch))?;
+        batch.settle_item(tx, first)?;
         results.push(result);
     }
     Ok(results)
@@ -806,11 +2178,7 @@ fn capture_ingest_batch_with_item_savepoints_in_tx(
         reason: "capture batch is empty",
     })?;
     let mut results = Vec::with_capacity(inputs.len());
-    let mut batch = CaptureBatchSharedContext {
-        capture: CaptureIngestBatchContext::new(tx, &first.workspace_id, &first.version_id)?,
-        has_ydoc_state: None,
-        journals_file_moments: None,
-    };
+    let mut batch = CaptureBatchSharedContext::new(tx, first)?;
     for input in inputs {
         let prior_capture = batch.capture.clone();
         tx.execute_batch("SAVEPOINT dohc_capture_batch_item")
@@ -828,9 +2196,28 @@ fn capture_ingest_batch_with_item_savepoints_in_tx(
                 )
                 .map_err(StorageError::persist_public)?;
                 batch.capture = prior_capture;
-                results.push(Err(error));
+                if unrepresentable(&error) {
+                    record_capture_file_hold_in(tx, input)?;
+                    results.push(Err(RuntimeError::CaptureFileHeld {
+                        path: input.path.clone(),
+                    }));
+                } else {
+                    if matches!(error, RuntimeError::Domain(DomainError::CaptureNotOwned))
+                        && capture_file_holds::hold_in(tx, &input.workspace_id, &input.path)?
+                            .is_some()
+                    {
+                        capture_file_holds::clear_in(tx, &input.workspace_id, &input.path)?;
+                        results.push(Err(RuntimeError::CaptureNotOwnedAfterHold {
+                            path: input.path.clone(),
+                        }));
+                        batch.settle_item(tx, first)?;
+                        continue;
+                    }
+                    results.push(Err(error));
+                }
             }
         }
+        batch.settle_item(tx, first)?;
     }
     Ok(results)
 }
@@ -866,9 +2253,19 @@ mod capture_batch_fast_path_tests {
         let mut store = EngineStore::open(&db, 1).expect("open store");
         let begun_savepoints = Arc::new(Mutex::new(Vec::new()));
         let observed_savepoints = Arc::clone(&begun_savepoints);
+        let trigger_compiles = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_compiles = Arc::clone(&trigger_compiles);
         store
             .read_with(|conn| {
                 conn.authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
+                    if matches!(
+                        context.action,
+                        AuthAction::Insert {
+                            table_name: "link_pending"
+                        }
+                    ) {
+                        observed_compiles.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                     if let AuthAction::Savepoint {
                         operation: TransactionOperation::Begin,
                         savepoint_name,
@@ -912,6 +2309,13 @@ mod capture_batch_fast_path_tests {
         .expect("capture clean batch");
 
         assert!(results.iter().all(Result::is_ok));
+        let compiles = trigger_compiles.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            compiles > 0 && compiles <= 4,
+            "link queue trigger programs compiled {compiles} times for one capture batch"
+        );
+        assert_eq!(store.table_row_count("link_pending").unwrap(), 0);
+        assert_eq!(store.table_row_count("link_aliases").unwrap(), 0);
         assert_eq!(
             *begun_savepoints.lock().expect("read begun savepoints"),
             vec!["dohc_capture_batch_fast"],
@@ -1048,6 +2452,15 @@ fn capture_ingest_binary_on_store(
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<CaptureIngestBinaryResult, RuntimeError> {
+    #[cfg(feature = "fault-injection")]
+    let mut phase = dohc_engine_storage::capture_phase::Phase::new(
+        "actor_capture_binary",
+        input.metadata_correlation_id.as_deref(),
+        1,
+        true,
+    );
+    #[cfg(feature = "fault-injection")]
+    phase.finish("attempted");
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
@@ -1062,8 +2475,20 @@ fn capture_ingest_binary_on_store(
         return Err(RuntimeError::Cancelled);
     }
     let outcome = store.write_with(faults, |tx| {
+        let hold = capture_file_holds::pin_in(tx, &input.workspace_id, &input.path)?;
+        let mut pinned = std::borrow::Cow::Borrowed(input);
+        if let Some(hold) = &hold {
+            pinned
+                .to_mut()
+                .version_id
+                .clone_from(&hold.source_version_id);
+        }
+        let input = pinned.as_ref();
         let mut admitted = false;
-        let result = capture_ingest_binary_with_admission_in_tx(
+        if hold.is_none() {
+            ensure_no_pending_undo_placement(tx, &input.workspace_id, &input.path)?;
+        }
+        let mut result = capture_ingest_binary_with_admission_in_tx(
             tx,
             input,
             |workspace_id, version_id, object_id| {
@@ -1095,12 +2520,71 @@ fn capture_ingest_binary_on_store(
         }
         journal_moment_outbound_in_tx(tx, &input.workspace_id, &result.moment_id, result.deduped)
             .map_err(RuntimeError::from)?;
+        result.pending_placement =
+            pending_placement_in(tx, &input.workspace_id, &input.path, hold.is_some())?;
+        result.released_capture_hold = hold.is_some();
+        if hold.is_some() {
+            capture_file_holds::rebase_switch_jobs_in(
+                tx,
+                &input.workspace_id,
+                names_path(&input.path),
+                &dohc_engine_storage::Preimage::Present(dohc_engine_storage::hex_sha256(
+                    &input.bytes,
+                )),
+            )?;
+            capture_file_holds::clear_in(tx, &input.workspace_id, &input.path)?;
+        }
         Ok::<_, RuntimeError>(result)
-    })?;
+    });
+    let outcome = match outcome {
+        Err(error @ RuntimeError::Domain(DomainError::CaptureNotOwned)) => {
+            if clear_unowned_capture_hold(store, &input.workspace_id, &input.path, faults)? {
+                return Err(RuntimeError::CaptureNotOwnedAfterHold {
+                    path: input.path.clone(),
+                });
+            }
+            return Err(error);
+        }
+        result => result?,
+    };
     match outcome {
         TxnOutcome::Committed(result) => Ok(result),
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
     }
+}
+
+pub(super) fn ensure_no_pending_undo_placement(
+    conn: &Connection,
+    workspace: &str,
+    path: &str,
+) -> Result<(), RuntimeError> {
+    let pending: bool = conn
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM materialization_jobs j
+         JOIN moments m ON m.workspace_id=j.workspace_id AND m.moment_order=j.target_generation
+         JOIN versioned_workspaces w ON w.workspace_id=m.workspace_id
+         JOIN snapshots s ON s.workspace_id=m.workspace_id AND s.version_id=m.version_id
+             AND s.object_id=m.object_id AND s.path=m.path
+         WHERE j.workspace_id=?1 AND j.target_path=?2 AND j.status='pending'
+             AND m.metadata_correlation_id GLOB 'dohc-operation:undo:*'
+             AND m.version_id=coalesce((SELECT version_id FROM active_versions
+                 WHERE workspace_id=m.workspace_id),w.main_version_id)
+             AND coalesce(s.binary_sha256,s.blob_sha256)=j.content_sha256
+             AND (j.operation='write' OR NOT EXISTS(SELECT 1 FROM path_aliases a
+                 WHERE a.workspace_id=m.workspace_id AND a.version_id=m.version_id
+                     AND a.path=j.target_path)))",
+        )
+        .map_err(StorageError::corrupt_public)?
+        .query_row(params![workspace, path], |r| r.get(0))
+        .map_err(StorageError::corrupt_public)?;
+    if pending {
+        return Err(RuntimeError::Sync(
+            dohc_engine_sync::SyncError::RetryableState {
+                reason: "history-undo-placement-pending",
+            },
+        ));
+    }
+    Ok(())
 }
 
 fn ensure_capture_target_not_leased(
@@ -1140,6 +2624,15 @@ fn capture_secret_on_store(
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<SecretWriteResult, RuntimeError> {
+    #[cfg(feature = "fault-injection")]
+    let mut phase = dohc_engine_storage::capture_phase::Phase::new(
+        "actor_capture_secret",
+        input.metadata_correlation_id.as_deref(),
+        1,
+        true,
+    );
+    #[cfg(feature = "fault-injection")]
+    phase.finish("attempted");
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
@@ -1163,17 +2656,20 @@ fn capture_secret_on_store(
 fn capture_secret_retire_on_store(
     store: &mut EngineStore,
     input: &CaptureSecretRetire,
-    root_dir: Option<&std::path::Path>,
-    root_guard: Option<&dyn WorkspaceRootGuard>,
+    root_dir: &std::path::Path,
+    root_guard: &dyn WorkspaceRootGuard,
     faults: &dyn FaultInjector,
-    token: &CancellationToken,
 ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
-    if token.is_cancelled() {
-        return Err(RuntimeError::Cancelled);
-    }
-    if let Some(root_dir) = root_dir {
-        validate_workspace_root(root_dir, root_guard)?;
-    }
+    #[cfg(feature = "fault-injection")]
+    let mut phase = dohc_engine_storage::capture_phase::Phase::new(
+        "actor_capture_secret_retire",
+        input.metadata_correlation_id.as_deref(),
+        1,
+        true,
+    );
+    #[cfg(feature = "fault-injection")]
+    phase.finish("attempted");
+    root_guard.validate(root_dir)?;
     ensure_mutation_version_on_store(
         store,
         &input.workspace_id,
@@ -1181,9 +2677,6 @@ fn capture_secret_retire_on_store(
         input.now_ms,
         faults,
     )?;
-    if token.is_cancelled() {
-        return Err(RuntimeError::Cancelled);
-    }
     capture_secret_retire_with(store, input, faults, journal_secret_delete_outbound_in_tx)
         .map_err(RuntimeError::from)
 }
@@ -1193,16 +2686,13 @@ fn capture_secret_retire_on_store(
 /// Runs on the actor thread, so no materialization is between its two renames.
 pub(super) fn confirm_absent_on_disk(
     store: &EngineStore,
-    root_dir: Option<&std::path::Path>,
+    root_dir: &std::path::Path,
     workspace_id: &str,
     path: &str,
     now_ms: i64,
 ) -> Result<(), RuntimeError> {
     let refuse =
         |reason| RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState { reason });
-    let Some(root_dir) = root_dir else {
-        return Err(refuse("absence-unconfirmed"));
-    };
     let displaced =
         || match dohc_engine_files::path_is_displaced(store, root_dir, workspace_id, path) {
             Err(dohc_engine_files::MaterializeError::Storage(err)) => Err(RuntimeError::from(err)),
@@ -1219,6 +2709,7 @@ pub(super) fn confirm_absent_on_disk(
             workspace_id,
             path,
             &dohc_engine_files::MaterializeOptions {
+                holds: None,
                 policy: dohc_engine_files::DurabilityPolicy::per_os(),
                 replacer: &dohc_engine_files::StdReplacer,
                 backoff: &dohc_engine_files::NoBackoff,
@@ -1250,20 +2741,24 @@ pub(super) fn confirm_absent_on_disk(
 fn capture_retire_on_store(
     store: &mut EngineStore,
     input: &CaptureRetire,
-    root_dir: Option<&std::path::Path>,
-    root_guard: Option<&dyn WorkspaceRootGuard>,
+    respelled_to: Option<(&str, &str)>,
+    root_dir: &std::path::Path,
+    root_guard: &dyn WorkspaceRootGuard,
     confirm_absent: bool,
-    self_writes: Option<&dyn SelfWriteRecorder>,
+    self_writes: &dyn SelfWriteRecorder,
     leases: &LeaseRegistry,
     faults: &dyn FaultInjector,
-    token: &CancellationToken,
 ) -> Result<CaptureRetireResult, RuntimeError> {
-    if token.is_cancelled() {
-        return Err(RuntimeError::Cancelled);
-    }
-    if let Some(root_dir) = root_dir {
-        validate_workspace_root(root_dir, root_guard)?;
-    }
+    #[cfg(feature = "fault-injection")]
+    let mut phase = dohc_engine_storage::capture_phase::Phase::new(
+        "actor_capture_retire",
+        input.metadata_correlation_id.as_deref(),
+        1,
+        true,
+    );
+    #[cfg(feature = "fault-injection")]
+    phase.finish("attempted");
+    root_guard.validate(root_dir)?;
     ensure_mutation_version_on_store(
         store,
         &input.workspace_id,
@@ -1271,9 +2766,6 @@ fn capture_retire_on_store(
         input.now_ms,
         faults,
     )?;
-    if token.is_cancelled() {
-        return Err(RuntimeError::Cancelled);
-    }
     if confirm_absent {
         confirm_absent_on_disk(
             store,
@@ -1284,7 +2776,46 @@ fn capture_retire_on_store(
         )?;
     }
     let outcome = store.write_with(faults, |tx| {
-        let result = capture_retire_in_tx(tx, input).map_err(RuntimeError::from)?;
+        let hold = capture_file_holds::pin_in(tx, &input.workspace_id, &input.path)?;
+        let placement_admission = if hold.is_none() {
+            ensure_no_pending_undo_placement(tx, &input.workspace_id, &input.path)
+        } else {
+            Ok(())
+        };
+        let mut pinned = std::borrow::Cow::Borrowed(input);
+        if let Some(hold) = &hold {
+            pinned
+                .to_mut()
+                .version_id
+                .clone_from(&hold.source_version_id);
+        }
+        let input = pinned.as_ref();
+        if let Some(hold) = &hold {
+            // A refused recreation has an alias but has never recorded a head.
+            // Remove only that held identity; the domain retire then sees absence.
+            tx.prepare_cached(
+                "DELETE FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 \
+                 AND path=?3 AND object_id=?4 AND NOT EXISTS (\
+                     SELECT 1 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 \
+                     AND object_id=?4)",
+            )
+            .map_err(StorageError::corrupt_public)?
+            .execute(params![
+                input.workspace_id,
+                input.version_id,
+                input.path,
+                hold.object_id,
+            ])
+            .map_err(StorageError::persist_public)?;
+        }
+        let mut result = match respelled_to {
+            Some((to, to_sha256)) => capture_retire_respelled_in_tx(tx, input, to, to_sha256),
+            None => capture_retire_in_tx(tx, input),
+        }
+        .map_err(RuntimeError::from)?;
+        if result.retired.is_some() {
+            placement_admission?;
+        }
         let mut asset_jobs = Vec::new();
         if !result.deduped
             && let Some(retired) = result.retired.as_ref()
@@ -1336,22 +2867,33 @@ fn capture_retire_on_store(
                 .map_err(RuntimeError::from)?;
             }
         }
+        result.pending_placement =
+            pending_placement_in(tx, &input.workspace_id, &input.path, hold.is_some())?;
+        result.released_capture_hold = hold.is_some();
+        if hold.is_some() {
+            capture_file_holds::rebase_switch_jobs_in(
+                tx,
+                &input.workspace_id,
+                names_path(&input.path),
+                &dohc_engine_storage::Preimage::Absent,
+            )?;
+            capture_file_holds::clear_in(tx, &input.workspace_id, &input.path)?;
+        }
         Ok::<_, RuntimeError>((result, asset_jobs))
     })?;
     match outcome {
         TxnOutcome::Committed((result, asset_jobs)) => {
-            if let (Some(root_dir), Some(self_writes)) = (root_dir, self_writes) {
-                validate_workspace_root(root_dir, root_guard)?;
-                materialize_scene_asset_deletes(
-                    store,
-                    root_dir,
-                    &input.workspace_id,
-                    &asset_jobs,
-                    self_writes,
-                    faults,
-                    root_guard,
-                )?;
-            }
+            root_guard.validate(root_dir)?;
+            materialize_scene_asset_deletes(
+                store,
+                root_dir,
+                &input.workspace_id,
+                &asset_jobs,
+                self_writes,
+                faults,
+                Some(root_guard),
+                None,
+            )?;
             Ok(result)
         }
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
@@ -1571,6 +3113,7 @@ mod capture_secret_root_guard_tests {
                                         reason: "cancelled quarantine".to_owned(),
                                         observed_binding: None,
                                     },
+                                    20,
                                     token.clone(),
                                 )
                                 .await

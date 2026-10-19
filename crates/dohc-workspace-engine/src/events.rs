@@ -1,11 +1,13 @@
 use crate::EngineService;
 use crate::lock;
-use crate::rpc::automations::automation_claim_json;
+use crate::rpc::automations::automation_claimed_event_json;
 use dohc_engine_domain::AutomationClaim;
 use serde_json::Value;
 use serde_json::json;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 /// Emitted once per settled capture batch / reconcile pass that settled any
 /// path — a repaint ping, not a moment ledger. Most emissions follow new
@@ -19,9 +21,11 @@ pub const CAPTURE_MOMENT_RECORDED_EVENT: &str = "capture.momentRecorded";
 /// Received Collection snapshot projection committed; no moment was recorded.
 pub const COLLECTIONS_PROJECTED_EVENT: &str = "collections.projected";
 
-/// Advisory wake-up after initial capture leaves Starting or Importing.
-/// The payload identifies the workspace; callers must retry their fenced read.
-/// Delivery can be dropped, so subscribers retain their retry timer.
+/// Wake-up after initial capture leaves Starting or Importing. The payload
+/// identifies the workspace; callers retry their fenced read. A receiver from
+/// `subscribe_with_wakes` gets it as a retained wake, once per workspace, even
+/// when the notice queue is full. A plain `subscribe` receiver gets it as an
+/// ordinary notice, which a full queue sheds.
 pub const CAPTURE_INITIAL_SETTLED_EVENT: &str = "capture.initialSettled";
 
 /// Sent once per workspace per engine process when a placement there had to
@@ -74,44 +78,57 @@ pub(super) const ENGINE_EVENT_QUEUE_CAPACITY: usize = 256;
 #[derive(Clone, Default)]
 pub struct EngineEvents {
     pub(super) subscriber: Arc<Mutex<Option<tokio::sync::mpsc::Sender<EngineEventNotice>>>>,
-    files: Arc<FileWakes>,
+    wakes: Arc<RetainedWakes>,
 }
 
+/// Wakes a full notice queue must not shed. Each is kept per key until the
+/// receiver takes it, and a newer wake for the same key replaces it, so they
+/// stay bounded by the file bindings open and the workspaces this engine
+/// opened.
 #[derive(Default)]
-struct FileWakes {
-    pending: Mutex<
+struct RetainedWakes {
+    files: Mutex<
         std::collections::BTreeMap<
             (String, String),
             dohc_engine_files::observation::ObservationCursor,
         >,
     >,
+    initial_settled: Mutex<std::collections::BTreeSet<String>>,
+    /// The current subscriber came from `subscribe_with_wakes`.
+    subscribed: AtomicBool,
     wake: tokio::sync::Notify,
 }
 
 pub struct EngineEventReceiver {
     ordinary: tokio::sync::mpsc::Receiver<EngineEventNotice>,
-    files: Option<Arc<FileWakes>>,
+    wakes: Option<Arc<RetainedWakes>>,
 }
 
 impl From<tokio::sync::mpsc::Receiver<EngineEventNotice>> for EngineEventReceiver {
     fn from(ordinary: tokio::sync::mpsc::Receiver<EngineEventNotice>) -> Self {
         Self {
             ordinary,
-            files: None,
+            wakes: None,
         }
     }
 }
 
 impl EngineEventReceiver {
     pub async fn recv(&mut self) -> Option<EngineEventNotice> {
-        let Some(files) = &self.files else {
+        let Some(wakes) = &self.wakes else {
             return self.ordinary.recv().await;
         };
         loop {
-            if let Some(((workspace_id, _generation), cursor)) = lock(&files.pending).pop_first() {
+            if let Some(((workspace_id, _generation), cursor)) = lock(&wakes.files).pop_first() {
                 return Some(EngineEventNotice {
                     name: "workspace.filesChanged".to_owned(),
                     payload: json!({ "workspaceId": workspace_id, "cursor": cursor }),
+                });
+            }
+            if let Some(workspace_id) = lock(&wakes.initial_settled).pop_first() {
+                return Some(EngineEventNotice {
+                    name: CAPTURE_INITIAL_SETTLED_EVENT.to_owned(),
+                    payload: json!({ "workspaceId": workspace_id }),
                 });
             }
             if let Ok(notice) = self.ordinary.try_recv() {
@@ -119,7 +136,7 @@ impl EngineEventReceiver {
             }
             tokio::select! {
                 biased;
-                () = files.wake.notified() => {},
+                () = wakes.wake.notified() => {},
                 notice = self.ordinary.recv() => return notice,
             }
         }
@@ -127,10 +144,14 @@ impl EngineEventReceiver {
 }
 
 impl EngineEvents {
-    pub fn subscribe_with_files(&self) -> EngineEventReceiver {
+    /// `subscribe`, plus the retained wakes: `workspace.filesChanged` and
+    /// `capture.initialSettled`, delivered before ordinary notices.
+    pub fn subscribe_with_wakes(&self) -> EngineEventReceiver {
+        let ordinary = self.subscribe();
+        self.wakes.subscribed.store(true, Ordering::Release);
         EngineEventReceiver {
-            ordinary: self.subscribe(),
-            files: Some(Arc::clone(&self.files)),
+            ordinary,
+            wakes: Some(Arc::clone(&self.wakes)),
         }
     }
 
@@ -139,12 +160,30 @@ impl EngineEvents {
         workspace: &str,
         cursor: dohc_engine_files::observation::ObservationCursor,
     ) {
-        lock(&self.files.pending).insert((workspace.to_owned(), cursor.generation.clone()), cursor);
-        self.files.wake.notify_one();
+        lock(&self.wakes.files).insert((workspace.to_owned(), cursor.generation.clone()), cursor);
+        self.wakes.wake.notify_one();
     }
 
     pub(crate) fn remove_files_wake(&self, workspace: &str, generation: &str) {
-        lock(&self.files.pending).remove(&(workspace.to_owned(), generation.to_owned()));
+        lock(&self.wakes.files).remove(&(workspace.to_owned(), generation.to_owned()));
+    }
+
+    /// Announce that `workspace` left its initial capture phase. A receiver
+    /// from `subscribe_with_wakes` keeps one wake per workspace until it takes
+    /// it; any other subscriber gets an ordinary notice. A wake stays after
+    /// its workspace closes: removing it by workspace could take a reopened
+    /// workspace's newer settle, and a stale wake only makes the client retry
+    /// a read.
+    pub(crate) fn emit_initial_settled(&self, workspace: &str) {
+        if !self.wakes.subscribed.load(Ordering::Acquire) {
+            self.emit(
+                CAPTURE_INITIAL_SETTLED_EVENT,
+                json!({ "workspaceId": workspace }),
+            );
+            return;
+        }
+        lock(&self.wakes.initial_settled).insert(workspace.to_owned());
+        self.wakes.wake.notify_one();
     }
 
     /// Route subsequent notices to the returned receiver, replacing any
@@ -155,6 +194,7 @@ impl EngineEvents {
     pub fn subscribe(&self) -> tokio::sync::mpsc::Receiver<EngineEventNotice> {
         let (tx, rx) = tokio::sync::mpsc::channel(ENGINE_EVENT_QUEUE_CAPACITY);
         *lock(&self.subscriber) = Some(tx);
+        self.wakes.subscribed.store(false, Ordering::Release);
         rx
     }
 
@@ -200,10 +240,10 @@ pub(super) fn emit_automation_claimed(
     claims: &[AutomationClaim],
 ) {
     for claim in claims {
-        let mut payload = automation_claim_json(claim);
-        let object = payload.as_object_mut().expect("claim is an object");
-        object.insert("workspaceId".to_owned(), json!(workspace_id));
-        events.emit(AUTOMATION_CLAIMED_EVENT, payload);
+        events.emit(
+            AUTOMATION_CLAIMED_EVENT,
+            automation_claimed_event_json(workspace_id, claim),
+        );
     }
 }
 
@@ -287,7 +327,7 @@ mod tests {
     #[tokio::test]
     async fn file_wake_coalesces_when_the_shared_notice_queue_is_full() {
         let events = EngineEvents::default();
-        let mut receiver = events.subscribe_with_files();
+        let mut receiver = events.subscribe_with_wakes();
         for _ in 0..ENGINE_EVENT_QUEUE_CAPACITY + 10 {
             events.emit("ordinary", json!({}));
         }
@@ -306,13 +346,13 @@ mod tests {
         for _ in 0..ENGINE_EVENT_QUEUE_CAPACITY {
             assert_eq!(receiver.recv().await.unwrap().name, "ordinary");
         }
-        assert!(lock(&events.files.pending).is_empty());
+        assert!(lock(&events.wakes.files).is_empty());
     }
 
     #[tokio::test]
     async fn file_wakes_for_distinct_bindings_do_not_replace_or_remove_each_other() {
         let events = EngineEvents::default();
-        let mut receiver = events.subscribe_with_files();
+        let mut receiver = events.subscribe_with_wakes();
         for generation in ["a", "b"] {
             events.emit_files_changed(
                 "workspace",
@@ -327,6 +367,55 @@ mod tests {
             receiver.recv().await.unwrap().payload["cursor"]["generation"],
             "b"
         );
+    }
+
+    #[tokio::test]
+    async fn initial_settle_is_delivered_once_when_the_shared_notice_queue_is_full() {
+        let events = EngineEvents::default();
+        let mut receiver = events.subscribe_with_wakes();
+        for _ in 0..ENGINE_EVENT_QUEUE_CAPACITY + 10 {
+            events.emit("ordinary", json!({}));
+        }
+        events.emit_initial_settled("workspace");
+        events.emit_initial_settled("workspace");
+        let wake = receiver.recv().await.unwrap();
+        assert_eq!(wake.name, CAPTURE_INITIAL_SETTLED_EVENT);
+        assert_eq!(wake.payload, json!({ "workspaceId": "workspace" }));
+        for _ in 0..ENGINE_EVENT_QUEUE_CAPACITY {
+            assert_eq!(receiver.recv().await.unwrap().name, "ordinary");
+        }
+        assert!(lock(&events.wakes.initial_settled).is_empty());
+        // The two settles arrived once: the next notice is the ordinary one.
+        events.emit("ordinary", json!({}));
+        assert_eq!(receiver.recv().await.unwrap().name, "ordinary");
+    }
+
+    #[tokio::test]
+    async fn initial_settles_for_two_workspaces_both_arrive() {
+        let events = EngineEvents::default();
+        let mut receiver = events.subscribe_with_wakes();
+        events.emit_initial_settled("b");
+        events.emit_initial_settled("a");
+        let mut settled = Vec::new();
+        for _ in 0..2 {
+            let wake = receiver.recv().await.unwrap();
+            assert_eq!(wake.name, CAPTURE_INITIAL_SETTLED_EVENT);
+            settled.push(wake.payload["workspaceId"].as_str().unwrap().to_owned());
+        }
+        settled.sort();
+        assert_eq!(settled, ["a", "b"]);
+    }
+
+    #[test]
+    fn initial_settle_without_retained_wakes_is_an_ordinary_notice_or_nothing() {
+        let events = EngineEvents::default();
+        // No subscriber: shed like every notice, and nothing is kept.
+        events.emit_initial_settled("workspace");
+        assert!(lock(&events.wakes.initial_settled).is_empty());
+        let mut rx = events.subscribe();
+        events.emit_initial_settled("workspace");
+        assert_eq!(rx.try_recv().unwrap().name, CAPTURE_INITIAL_SETTLED_EVENT);
+        assert!(lock(&events.wakes.initial_settled).is_empty());
     }
     use serde_json::Value;
     use serde_json::json;

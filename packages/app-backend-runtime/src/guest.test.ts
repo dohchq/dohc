@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { evaluate, hasStatement } from "./guest.ts";
 import type { GuestRequest } from "./guest.ts";
 import { DEFAULT_LIMITS } from "./protocol.ts";
@@ -28,6 +28,81 @@ async function withDatabase(run: (db: DatabaseSync) => Promise<void>): Promise<v
 }
 
 describe("reusable guest evaluator", () => {
+  it.each([
+    { body: "while (true) {}", source: undefined },
+    { body: "return null;", source: "while (true) {}" },
+    { body: "return { toJSON() { while (true) {} } };", source: undefined },
+  ])("names the time limit when the guest interrupts: $body", async ({ body, source }) => {
+    await withDatabase(async db => {
+      const operation = request(body, {
+        limits: { ...DEFAULT_LIMITS, evaluationMs: 100 },
+        ...(source === undefined ? {} : { source }),
+      });
+      await expect(evaluate(db, operation)).rejects.toThrow(
+        "App operation took longer than its 0.1-second time limit, so it stopped.",
+      );
+      expect((await evaluate(db, request("return 'next';"))).resultJson).toBe('"next"');
+    });
+  });
+
+  it("names the time limit for an expired database callback before preparing SQL", async () => {
+    const clock = vi.spyOn(performance, "now").mockReturnValue(0);
+    try {
+      await withDatabase(async db => {
+        const prepare = vi.spyOn(db, "prepare");
+        const operation = request("return ctx.db.query('SELECT * FROM items');", {
+          limits: {
+            ...DEFAULT_LIMITS, evaluationMs: 1250,
+            // Cross the deadline inside the callback, after any guest interrupt check.
+            get statements() { clock.mockReturnValue(1251); return DEFAULT_LIMITS.statements; },
+          },
+        });
+        const failure = await evaluate(db, operation).catch((error: unknown) => error);
+        expect(prepare).not.toHaveBeenCalled();
+        expect(failure).toMatchObject({ message: "App operation took longer than its 1.25-second time limit, so it stopped." });
+      });
+    } finally { clock.mockRestore(); }
+  });
+
+  it("names the time limit for a bootstrap failure before loading app source", async () => {
+    const clock = vi.spyOn(performance, "now").mockReturnValue(0);
+    try {
+      await withDatabase(async db => {
+        const operation = request("return null;", {
+          source: "invalid app source!",
+          inputJson: JSON.stringify(Array.from({ length: 10000 }, () => [1])),
+          limits: {
+            ...DEFAULT_LIMITS,
+            // Start the clock at zero, then expire it before bootstrap checks the deadline.
+            get evaluationMs() { clock.mockReturnValue(1251); return 1250; },
+          },
+        });
+        await expect(evaluate(db, operation)).rejects.toThrow("App operation took longer than its 1.25-second time limit, so it stopped.");
+      });
+    } finally { clock.mockRestore(); }
+  });
+
+  it.each([
+    { cause: "memory", inputJson: JSON.stringify("x".repeat(8 * 1024 * 1024)), message: "App operation needed more than its 16 MiB memory limit, so it stopped." },
+    { cause: "invalid JSON", inputJson: "{", message: "App operation context could not be initialized." },
+  ])("keeps a bootstrap failure's $cause cause before loading app source", async ({ inputJson, message }) => {
+    const clock = vi.spyOn(performance, "now").mockReturnValue(0);
+    try {
+      await withDatabase(async db => {
+        await expect(evaluate(db, request("return null;", {
+          source: "invalid app source!", inputJson,
+          limits: { ...DEFAULT_LIMITS, memoryBytes: 16 * 1024 * 1024 },
+        }))).rejects.toThrow(message);
+      });
+    } finally { clock.mockRestore(); }
+  });
+
+  it("keeps a guest exception named interrupted separate from a time limit", async () => {
+    await withDatabase(async db => {
+      await expect(evaluate(db, request("throw new Error('interrupted');"))).rejects.toThrow(/^App operation failed\.$/);
+    });
+  });
+
   it.each(["changes", "total_changes", "last_insert_rowid"])("hides retained %s counters through every authorizer reset", async counter => {
     await withDatabase(async db => {
       const operation = request(`
@@ -175,7 +250,7 @@ describe("guest memory", () => {
       const fill = "let held = []; try { for (;;) held.push(new Uint8Array(1 << 20)); } catch {}";
       // The deadline stops a loop that runs after the operation caught its out-of-memory error.
       await expect(evaluate(db, request(`${fill} while (true) {}`, { limits: { ...DEFAULT_LIMITS, evaluationMs: 100 } }), persistent))
-        .rejects.toThrow(/^App operation failed\.$/);
+        .rejects.toThrow("App operation took longer than its 0.1-second time limit, so it stopped.");
       // A host check keeps its own error.
       await expect(evaluate(db, request(`${fill} held = null; return 'x'.repeat(100);`, { limits: { ...DEFAULT_LIMITS, resultBytes: 10 } }), persistent))
         .rejects.toThrow(/^Operation result exceeds the app runtime limit\.$/);
@@ -207,7 +282,9 @@ describe("guest memory", () => {
         let held = [];
         try { for (;;) held.push(new Uint8Array(1 << 20)); } catch {}
         try { for (;;) held.push(new Uint8Array(4096)); } catch {}
-        try { for (;;) held.push([1]); } catch {}
+        // Fill the last bytes too, so early steps leave less than the 1 KiB message free.
+        // Smaller objects can leave the operation's own code no room to finish.
+        try { for (;;) held.push(new Uint8Array(64)); } catch {}
         for (; steps < 100 && held.length; steps++) {
           held.length -= 1;
           // The operation's own code can run out of memory too, so only a query's error is counted.

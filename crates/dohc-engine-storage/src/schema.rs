@@ -68,6 +68,9 @@ const SYNCHRONOUS_NORMAL: i64 = 1;
 /// The tables every valid v2 store must contain. Missing any of these on an
 /// otherwise-v2-stamped database is `state-corrupt`.
 const REQUIRED_TABLES: &[&str] = &[
+    "replica_frontiers",
+    "replica_documents",
+    "replica_first_seen",
     "live_audit_base_publications",
     "live_audit_bases",
     "live_audit_base_conflicts",
@@ -79,6 +82,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "live_audit_record_chunks",
     "live_audit_events",
     "live_audit_projection_authors",
+    "live_audit_projection_contributions",
     "live_audit_event_publications",
     "live_audit_event_conflicts",
     "live_accepted_updates",
@@ -108,11 +112,20 @@ const REQUIRED_TABLES: &[&str] = &[
     "versioned_workspaces",
     "versions",
     "active_versions",
+    "capture_file_holds",
     "file_objects",
     "blobs",
     "path_aliases",
     "snapshots",
     "fork_base_snapshots",
+    "links",
+    "link_sources",
+    "link_occurrence_keys",
+    "link_target_keys",
+    "link_pending",
+    "link_aliases",
+    "link_index_state",
+    "link_gc",
     "moments",
     "scene_asset_delete_authorities",
     "scene_asset_delete_authority_items",
@@ -131,6 +144,9 @@ const REQUIRED_TABLES: &[&str] = &[
     "binary_blobs",
     "materialization_jobs",
     "materialization_displacements",
+    "materialization_retained",
+    "materialization_displacement_reads",
+    "materialization_staging_locations",
     // R08 secret-backed-file tables.
     "secret_files",
     "secret_fork_bases",
@@ -145,6 +161,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "ydoc_recovery_decisions",
     "owner_ydoc_outboxes",
     "owner_ydoc_outbox_entries",
+    "owner_live_stops",
     "share_view_file_lane",
     "replication_pending_conflict_bundles",
     "replication_pending_conflict_ops",
@@ -171,6 +188,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "chat_bookmark_outbox",
     "chat_dispatch_ledger",
     "chat_dispatch_scan_cursor",
+    "chat_dispatch_local_discovery",
     "agent_run_records",
     "run_message_links",
     "chat_dispatch_pause",
@@ -193,6 +211,13 @@ const REQUIRED_TABLES: &[&str] = &[
     "shared_channel_peers",
     "shared_channel_push_state",
     "share_view_cursors",
+    "hosted_replicas",
+    "hosted_documents",
+    "hosted_withheld_befores",
+    "hosted_deferred_ops",
+    "hosted_retired_files",
+    "hosted_parked_snapshots",
+    "hosted_parked_path_aliases",
     // #646 PR3a proposal scan position.
     "share_proposal_push_state",
     // Item 12: the direct lane's position and per-file decisions.
@@ -223,6 +248,7 @@ enum Disposition {
 pub(crate) struct OpenedEngineDb {
     pub conn: Connection,
     pub freshly_created: bool,
+    pub checkpoints: Option<crate::checkpoint::Checkpoints>,
 }
 
 /// `work`, when given, counts the SQLite work of the open as it runs.
@@ -239,6 +265,66 @@ pub(crate) fn open_engine_db_with_root_token(
     now_ms: i64,
     root_token: Option<&str>,
     work: Option<Arc<AtomicU64>>,
+) -> Result<OpenedEngineDb, StorageError> {
+    open_engine_db_configured(path, now_ms, root_token, work, false, false)
+}
+
+pub(crate) fn store_is_passive(conn: &Connection) -> Result<bool, StorageError> {
+    let has_role: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('engine_ownership') WHERE name='store_role')",
+        [], |row| row.get(0),
+    ).map_err(StorageError::corrupt)?;
+    if !has_role {
+        let role_migrated: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM engine_migrations WHERE id='v2-engine-store-role' AND completed_at IS NOT NULL)",
+            [], |row| row.get(0),
+        ).map_err(StorageError::corrupt)?;
+        return if role_migrated {
+            Err(StorageError::StateCorrupt { source: None })
+        } else {
+            Ok(false)
+        };
+    }
+    let role: String = conn
+        .query_row(
+            "SELECT store_role FROM engine_ownership WHERE rowid_guard=1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(StorageError::corrupt)?;
+    match role.as_str() {
+        "owner" => Ok(false),
+        "passive" => Ok(true),
+        _ => Err(StorageError::StateCorrupt { source: None }),
+    }
+}
+
+pub(crate) fn open_engine_db_with_store_role(
+    path: &Path,
+    now_ms: i64,
+    root_token: Option<&str>,
+    work: Option<Arc<AtomicU64>>,
+    passive: bool,
+) -> Result<OpenedEngineDb, StorageError> {
+    open_engine_db_configured(path, now_ms, root_token, work, false, passive)
+}
+
+pub(crate) fn open_engine_db_for_actor(
+    path: &Path,
+    now_ms: i64,
+    root_token: Option<&str>,
+    work: Option<Arc<AtomicU64>>,
+) -> Result<OpenedEngineDb, StorageError> {
+    open_engine_db_configured(path, now_ms, root_token, work, true, false)
+}
+
+fn open_engine_db_configured(
+    path: &Path,
+    now_ms: i64,
+    root_token: Option<&str>,
+    work: Option<Arc<AtomicU64>>,
+    background_checkpoints: bool,
+    passive: bool,
 ) -> Result<OpenedEngineDb, StorageError> {
     // Step 1: "is this file empty?" is our question, not the VFS's.
     reject_undersized_database(path)?;
@@ -257,17 +343,40 @@ pub(crate) fn open_engine_db_with_root_token(
 
     // Step 2: session-scoped pragmas only — these do not touch the file.
     apply_session_pragmas(&conn)?;
+    if background_checkpoints {
+        conn.pragma_update(None, "wal_autocheckpoint", 0)
+            .map_err(StorageError::persist)?;
+    }
 
     // Step 3: classify from read-only queries. A rejected store returns here
     // before any persistent pragma runs, so the file is left byte-unchanged.
     let disposition = classify_fingerprint(&conn)?;
     crate::migration::refuse_declared_v1_evidence(&conn)?;
 
-    // Step 4: the store is ours — closing may checkpoint again, and the
-    // file-mutating pragmas are now safe.
-    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, false)
-        .map_err(StorageError::corrupt)?;
+    if disposition == Disposition::ExistingV2 {
+        if store_is_passive(&conn)? != passive {
+            return Err(StorageError::InvalidInput {
+                reason: "engine store role mismatch",
+            });
+        }
+        if passive {
+            crate::store::install_passive_guards(&conn)?;
+        }
+    }
+
+    // Step 4: the store is ours. Actor connections leave close checkpoints
+    // to the background connection, including failed startup and worker exits.
+    conn.set_db_config(
+        DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+        background_checkpoints,
+    )
+    .map_err(StorageError::corrupt)?;
     apply_persistent_pragmas(&conn)?;
+    let checkpoints = if background_checkpoints && !passive {
+        Some(crate::checkpoint::Checkpoints::start(path)?)
+    } else {
+        None
+    };
 
     // Production uses `NoFaults`, so a `Crashed` outcome is unreachable here
     // (the migration fault points are exercised by `migration.rs`'s tests).
@@ -278,21 +387,45 @@ pub(crate) fn open_engine_db_with_root_token(
         ctx.initial_root_token = root_token.map(str::to_owned);
     }
     let no_faults = NoFaults;
-    match run_migrations(
+    // Migrations must not originate operations or queue work for passive stores.
+    // Fresh passive stores migrate as owner before the role switch below. They
+    // contain no versions; migrations must not seed versions or local work there.
+    let newly_applied = match run_migrations(
         &mut conn,
         BASELINE_MIGRATIONS,
         &ctx,
         &no_faults as &dyn FaultInjector,
     )? {
-        MigrationOutcome::Applied { .. } => {}
+        MigrationOutcome::Applied { newly_applied } => newly_applied,
         MigrationOutcome::Crashed => return Err(StorageError::MigrationFailed { source: None }),
+    };
+
+    if passive {
+        if disposition == Disposition::Fresh {
+            conn.execute(
+                "UPDATE engine_ownership SET store_role='passive' WHERE rowid_guard=1",
+                [],
+            )
+            .map_err(StorageError::persist)?;
+        }
+        crate::store::install_passive_guards(&conn)?;
     }
 
     validate_v2(&conn)?;
     integrity_check(&conn)?;
     stop_counting(&conn)?;
+    crate::search_generation::install(&conn).map_err(StorageError::corrupt)?;
+    if let Some(checkpoints) = &checkpoints {
+        if disposition == Disposition::Fresh {
+            checkpoints.checkpoint_fresh_schema(&conn);
+        } else if newly_applied > 0 {
+            checkpoints.checkpoint_migration_tail_if_small(&conn);
+        }
+        checkpoints.request();
+    }
     Ok(OpenedEngineDb {
         conn,
+        checkpoints,
         freshly_created: disposition == Disposition::Fresh,
     })
 }
@@ -316,9 +449,11 @@ pub(crate) fn open_engine_db_read_only(
     validate_v2(&conn)?;
     integrity_check(&conn)?;
     stop_counting(&conn)?;
+    crate::search_generation::install(&conn).map_err(StorageError::corrupt)?;
     Ok(OpenedEngineDb {
         conn,
         freshly_created: false,
+        checkpoints: None,
     })
 }
 
@@ -361,7 +496,14 @@ fn apply_session_pragmas(conn: &Connection) -> Result<(), StorageError> {
     .map_err(StorageError::corrupt)?;
     conn.pragma_update(None, "foreign_keys", true)
         .map_err(StorageError::corrupt)?;
+    set_checkpoint_fullfsync(conn).map_err(StorageError::corrupt)?;
     Ok(())
+}
+
+/// A checkpoint must not recycle a durable WAL before its copied pages reach
+/// permanent storage on macOS. Every connection that checkpoints sets this.
+pub(crate) fn set_checkpoint_fullfsync(conn: &Connection) -> rusqlite::Result<()> {
+    conn.pragma_update(None, "checkpoint_fullfsync", cfg!(target_os = "macos"))
 }
 
 fn apply_persistent_pragmas(conn: &Connection) -> Result<(), StorageError> {
@@ -509,9 +651,47 @@ fn integrity_check(conn: &Connection) -> Result<(), StorageError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn passive_role_overrides_background_checkpoint_opt_in() {
+        let scratch =
+            dohc_test_scratch::ScratchDir::new_named("passive-checkpoint-opt-in").unwrap();
+        let path = scratch.path().join("engine.db");
+        for now_ms in [1, 2] {
+            let opened =
+                super::open_engine_db_configured(&path, now_ms, None, None, true, true).unwrap();
+            assert!(super::store_is_passive(&opened.conn).unwrap());
+            assert!(
+                opened.checkpoints.is_none(),
+                "passive role must override checkpoint opt-in"
+            );
+        }
+    }
+
     use super::REQUIRED_TABLES;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn checkpoint_fullfsync_is_set_for_the_connection_lifetime() {
+        let directory = dohc_test_scratch::ScratchDir::new_named("checkpoint-sync").unwrap();
+        let path = directory.path().join("store.sqlite");
+        let expected = i64::from(cfg!(target_os = "macos"));
+        let setting = |conn: &rusqlite::Connection| -> rusqlite::Result<i64> {
+            conn.pragma_query_value(None, "checkpoint_fullfsync", |row| row.get(0))
+        };
+        for _ in 0..2 {
+            let store = crate::EngineStore::open(&path, 0).unwrap();
+            store
+                .read_with(|conn| {
+                    assert_eq!(setting(conn)?, expected);
+                    Ok::<_, rusqlite::Error>(())
+                })
+                .unwrap();
+        }
+        // The background checkpointer copies WAL pages too.
+        let background = crate::checkpoint::Checkpoints::connection(&path).unwrap();
+        assert_eq!(setting(&background).unwrap(), expected);
+    }
 
     #[test]
     fn a_counted_open_counts_its_work_and_nothing_after() {

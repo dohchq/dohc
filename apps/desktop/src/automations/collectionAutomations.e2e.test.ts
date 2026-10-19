@@ -1,3 +1,4 @@
+import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
@@ -16,6 +17,9 @@ import { resolveWorkspaceMetadataDir } from "../workspaces/workspaceMetadata";
 import { waitForPathMoments } from "../workspaces/waitForPathMoments";
 import { createWorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
 import { createAutomationFormulaEvaluator } from "@dohc/automation-executor/automation-evaluator-host";
+import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
+import { applyDocumentEffect, newRun, type CollectionAutomationRunDependencies } from "@dohc/automation-executor/collection-automation-run";
+import { derivedRecordId } from "@dohc/automation-executor/record-ids";
 import { collectionAutomationId, localIsoTime } from "@dohc/automation-executor/automation-plan";
 import { createAutomationRunStore } from "@dohc/automation-executor/automation-run-store";
 import { CollectionAutomations, type CollectionAutomationEngine } from "@dohc/automation-executor/collection-automations";
@@ -81,7 +85,7 @@ async function harness(automations: string, run: (context: {
   const executor = new CollectionAutomations({
     withEngine,
     // These automations never post.
-    chat: { directory: async () => null, write: async () => { throw new Error("No chat in this test."); } },
+    chat: { hasMessage: async () => false, directory: async () => null, write: async () => { throw new Error("No chat in this test."); } },
     groupHost: async () => null,
     groupRelayRecord: async () => ({ generation: 0, handover: null }),
     reachRelayRecord: async () => ({ generation: 0, reach: null, everShared: false }),
@@ -281,7 +285,7 @@ it.skipIf(engine.missing)(
       await expect(deleteWorkspacePathByHand({ workspace, assertCurrent: () => undefined }, "Tasks/hand.md", person, {
         capture, requestId: "hand-delete", markDeleted: () => undefined,
         trashItem: async (target) => { await rename(target, join(systemTrash, basename(target))); },
-      })).resolves.toEqual({ trashed: true });
+      })).resolves.toMatchObject({ trashed: true, operationId: expect.stringMatching(/^dohc-operation:/), undo: { available: true } });
       expect(await readFile(join(systemTrash, "hand.md"), "utf8")).toContain(created.recordId);
       await expect(stat(join(root, "Tasks", "hand.md"))).rejects.toThrow();
 
@@ -300,3 +304,85 @@ it.skipIf(engine.missing)(
   },
   120_000,
 );
+
+it.skipIf(engine.missing).each(["deleted", "moved"] as const)(
+  "skips replay of a %s creation through the native engine and desktop facade",
+  async change => {
+    await harness("  - id: idle\n    name: Idle\n    when: {field-changed: Status, to: Never}\n    do: [{set: {Finished on: never}}]\n", async ctx => {
+      const parsed = parseAutomationsFile("version: 1\nautomations:\n  - id: replay\n    name: Replay\n    when: record-added\n    do: [{add-record: {Status: New}}]\n");
+      if (parsed.status !== "read" || parsed.entries[0]?.status !== "valid") throw Error("invalid automation");
+      const automation = parsed.entries[0].automation;
+      const signal = new AbortController().signal;
+      const run = newRun({ claimId: "creation-replay", automationId: "collection:Tasks#replay" }, automation, "key", 1);
+      const author = { kind: "automation" as const, automationId: run.automationId, depth: 1, run: { claimId: run.claimId, automationName: automation.name } };
+      const store = createAutomationRunStore(await createTestScratch("dohc-creation-replay-runs-"), resolveWorkspaceMetadataDir);
+      const dependencies = { store, withRecordWrites: async (_signal: AbortSignal, work: Parameters<CollectionAutomationRunDependencies["withRecordWrites"]>[1]) =>
+        work(collectionRecordWrites(ctx.recordContext(ctx.person, signal))) } as CollectionAutomationRunDependencies;
+      const effect = { kind: "add" as const, collectionPath: "Tasks", name: "made", recordId: derivedRecordId(run.claimId), fields: [] };
+      run.steps = [{ ordinal: 0, effects: [effect] }];
+      await store.save(run);
+      const context = { run, author, signal, ordinal: 0, automationName: automation.name, depth: 1, chat: null };
+      expect(await applyDocumentEffect(dependencies, context, effect, "fresh")).toMatchObject([{ kind: "created", path: "Tasks/made.md" }]);
+      if (change === "deleted") {
+        const trash = await createTestScratch("dohc-replay-trash-");
+        await deleteWorkspacePathByHand({ workspace: ctx.workspace, assertCurrent: () => undefined }, "Tasks/made.md", ctx.person, {
+          capture: ctx.capture, requestId: "replay-delete", markDeleted: () => undefined,
+          trashItem: target => rename(target, join(trash, "made.md")),
+        });
+      } else {
+        await ctx.withEngine(adapter => adapter.renameTextFile({ workspaceId: ctx.workspace.workspaceId, versionId: "main", fromPath: "Tasks/made.md", toPath: "moved.md", metadata: { origin: "api" } }));
+        await rename(join(ctx.root, "Tasks/made.md"), join(ctx.root, "moved.md"));
+        // A rebased plan can present the same key under a different target path.
+        effect.name = "rebased";
+      }
+      await ctx.capture.flush();
+      // Flush covers noticed changes; wait for this path change's projection.
+      await expect.poll(async () => {
+        const records = (await ctx.withEngine(adapter => adapter.queryCollectionRecords({ collectionPath: "Tasks" }))).records;
+        return records.map(record => record.id);
+      }, { timeout: 60_000 }).not.toContain(effect.recordId);
+      const result = await applyDocumentEffect(dependencies, context, effect, "may-have-landed");
+      expect(result).toMatchObject([{ kind: "skipped", reason: "The record was already created, then moved or deleted." }]);
+      expect((await ctx.withEngine(adapter => adapter.queryCollectionRecords({ collectionPath: "Tasks" }))).records.map(record => record.path)).toEqual(["Tasks/one.md"]);
+      await expect(stat(join(ctx.root, "Tasks", `${effect.name}.md`))).rejects.toThrow();
+    });
+  }, 120_000,
+);
+
+it.skipIf(engine.missing)("finishes a written but unadopted creation on native desktop replay", async () => {
+  await harness("  - id: idle\n    name: Idle\n    when: {field-changed: Status, to: Never}\n    do: [{set: {Finished on: never}}]\n", async ctx => {
+    const parsed = parseAutomationsFile("version: 1\nautomations:\n  - id: replay\n    name: Replay\n    when: record-added\n    do: [{add-record: {Status: New}}]\n");
+    if (parsed.status !== "read" || parsed.entries[0]?.status !== "valid") throw Error("invalid automation");
+    const automation = parsed.entries[0].automation, signal = new AbortController().signal;
+    const run = newRun({ claimId: "unadopted", automationId: "collection:Tasks#replay" }, automation, "key", 1);
+    const author = { kind: "automation" as const, automationId: run.automationId, depth: 1, run: { claimId: run.claimId, automationName: automation.name } };
+    const recordId = derivedRecordId(run.claimId), path = "Tasks/made.md";
+    const db = new DatabaseSync(join(ctx.root, ".dohc/engine/engine.db"));
+    db.exec("PRAGMA busy_timeout=10000");
+    db.exec("CREATE TRIGGER block_adoption BEFORE INSERT ON collection_records WHEN NEW.file_path = 'Tasks/made.md' BEGIN SELECT RAISE(FAIL, 'test adoption failure'); END");
+    const recordContext = ctx.recordContext(ctx.person, signal);
+    let adopting: Promise<void> | undefined;
+    try {
+      await recordContext.createFile(path, `---\nid: ${recordId}\n---\n`, author);
+      expect(await readFile(join(ctx.root, path), "utf8")).toContain(recordId);
+      expect((await ctx.withEngine(adapter => adapter.queryCollectionRecords({ collectionPath: "Tasks" }))).records.some(record => record.id === recordId)).toBe(false);
+      const subscribe = recordContext.onRecordsChanged;
+      recordContext.onRecordsChanged = listener => {
+        const unsubscribe = subscribe(listener);
+        db.exec("DROP TRIGGER block_adoption");
+        adopting = ctx.capture.flush();
+        return unsubscribe;
+      };
+      const store = createAutomationRunStore(await createTestScratch("dohc-unadopted-replay-runs-"), resolveWorkspaceMetadataDir);
+      const effect = { kind: "add" as const, collectionPath: "Tasks", name: "made", recordId, fields: [{ field: "Status", value: "New" }] };
+      run.steps = [{ ordinal: 0, effects: [effect] }]; await store.save(run);
+      const dependencies = { store, withRecordWrites: async (_signal: AbortSignal, work: Parameters<CollectionAutomationRunDependencies["withRecordWrites"]>[1]) =>
+        work(collectionRecordWrites(recordContext)) } as CollectionAutomationRunDependencies;
+      const result = await applyDocumentEffect(dependencies, { run, author, signal, ordinal: 0, automationName: automation.name, depth: 1, chat: null }, effect, "may-have-landed");
+      expect(adopting).toBeDefined(); await adopting;
+      expect(result).toMatchObject([{ kind: "created", recordId, path }, { kind: "field", field: "Status", after: "New" }]);
+      expect(run.created).toMatchObject([{ recordId, path }]);
+      expect((await ctx.withEngine(adapter => adapter.getCollectionRecord({ collectionPath: "Tasks", recordId, historyLimit: 1 }))).record.values).toContainEqual(expect.objectContaining({ field: "Status", value: "New" }));
+    } finally { db.exec("DROP TRIGGER IF EXISTS block_adoption"); db.close(); }
+  });
+}, 120_000);

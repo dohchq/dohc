@@ -73,6 +73,13 @@ impl ScanManifest {
         self.entries.remove(path);
     }
 
+    /// Drop the paths the floor excludes. The scanner never lists them, so
+    /// their absence could never be confirmed.
+    pub(crate) fn drop_excluded(&mut self) {
+        self.entries
+            .retain(|path, _| !crate::floor::is_excluded_file(path));
+    }
+
     /// Number of tracked entries.
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -91,17 +98,17 @@ pub struct ScanDiff {
     pub added: Vec<FileEntry>,
     pub changed: Vec<FileEntry>,
     pub removed: Vec<String>,
-    /// Previously-tracked paths that are still on disk but now exceed the size
-    /// cap (present in the current listing's `skipped` set). These must not be
-    /// classified `removed` — the file exists; only its content is too large to
-    /// re-hash. The reconcile keeps them tracked at their last-known-good
-    /// content (see `reconcile.rs`). A file that
+    /// Previously-tracked paths that are still on disk but whose content the
+    /// scan did not read: over the size cap, or evicted by a cloud provider
+    /// (present in the current listing's `skipped` set). These must not be
+    /// classified `removed` — the file exists. The reconcile keeps them
+    /// tracked at their last-known-good content (see `reconcile.rs`). A file that
     /// is truly gone from disk (absent from both files and skipped) is the only
     /// thing that reaches `removed`.
-    pub retained_over_cap: Vec<String>,
+    pub retained_unread: Vec<String>,
     /// Previously-tracked paths whose absence is not trustworthy because the
     /// path itself, or an ancestor directory, failed during this scan. Like an
-    /// over-cap retain, reconcile carries the prior manifest entry forward and
+    /// unread retain, reconcile carries the prior manifest entry forward and
     /// never emits a destructive retire.
     pub unconfirmed_removed: Vec<String>,
 }
@@ -118,7 +125,7 @@ impl ScanDiff {
         self.added.is_empty()
             && self.changed.is_empty()
             && self.removed.is_empty()
-            && self.retained_over_cap.is_empty()
+            && self.retained_unread.is_empty()
             && self.unconfirmed_removed.is_empty()
     }
 }
@@ -145,7 +152,7 @@ fn is_unchanged(prior: &ManifestEntry, current: &FileEntry) -> bool {
 /// The `max_entries` cap bounds the WORKING SET during construction, not after:
 /// `added + changed + removed` is checked as each entry is classified, so a
 /// runaway diff fails closed with [`FilesError::DiffTooLarge`] before it
-/// allocates the whole result (retained-over-cap is a no-op disposition and does
+/// allocates the whole result (retained-unread is a no-op disposition and does
 /// not count against the cap).
 fn diff_core<F>(
     prior: &ScanManifest,
@@ -171,7 +178,7 @@ where
         }
     }
 
-    // Presence is both tracked files and the skipped (over-cap-but-present)
+    // Presence is both tracked files and the skipped (over-cap or evicted)
     // set: a path present in either still exists on disk.
     let present: BTreeMap<&str, ()> = current
         .files
@@ -191,15 +198,16 @@ where
         .collect();
 
     let mut removed = Vec::new();
-    let mut retained_over_cap = Vec::new();
+    let mut retained_unread = Vec::new();
     let mut unconfirmed_removed = Vec::new();
     for path in prior.entries.keys() {
         if present.contains_key(path.as_str()) {
             continue; // classified unchanged/changed above
         }
         if skipped_present.contains_key(path.as_str()) {
-            // Still on disk, only now over the size cap → retain, never remove.
-            retained_over_cap.push(path.clone());
+            // Still on disk, only unread (over the cap or evicted) → retain,
+            // never remove.
+            retained_unread.push(path.clone());
         } else if failed_paths.iter().any(|failed| {
             failed.is_empty()
                 || path == failed
@@ -222,13 +230,13 @@ where
     added.sort_by(|a, b| a.path.cmp(&b.path));
     changed.sort_by(|a, b| a.path.cmp(&b.path));
     removed.sort();
-    retained_over_cap.sort();
+    retained_unread.sort();
     unconfirmed_removed.sort();
     Ok(ScanDiff {
         added,
         changed,
         removed,
-        retained_over_cap,
+        retained_unread,
         unconfirmed_removed,
     })
 }

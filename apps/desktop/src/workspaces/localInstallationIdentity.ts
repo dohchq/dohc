@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { atomicReplaceFileSync } from "../atomicReplaceFile";
 import { dirname } from "node:path";
 
 const errorCode = (error: unknown) => (error instanceof Error && "code" in error ? error.code : undefined);
@@ -43,19 +44,18 @@ export function readOrCreateLocalInstallationId(file: string, onError: (message:
 // target, so a crash leaves the old file or the complete new one.
 function saveNewId(file: string, onError: (message: string, error: unknown) => void): string {
   const id = `local:${randomUUID()}`;
-  const temporary = `${file}.tmp-${process.pid}-${randomUUID()}`;
   try {
     mkdirSync(dirname(file), { recursive: true });
-    const descriptor = openSync(temporary, "wx", 0o600);
-    try {
-      writeFileSync(descriptor, `${JSON.stringify({ id }, null, 2)}\n`);
-      fsyncSync(descriptor);
-    } finally {
-      closeSync(descriptor);
-    }
-    renameSync(temporary, file);
+    atomicReplaceFileSync(file, (temporary) => {
+      const descriptor = openSync(temporary, "wx", 0o600);
+      try {
+        writeFileSync(descriptor, `${JSON.stringify({ id }, null, 2)}\n`);
+        fsyncSync(descriptor);
+      } finally {
+        closeSync(descriptor);
+      }
+    });
   } catch (error) {
-    try { unlinkSync(temporary); } catch { /* Never created, or already renamed. */ }
     onError("dohc could not save this installation's id. It uses an unsaved one until it restarts.", error);
   }
   return id;

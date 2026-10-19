@@ -1,3 +1,5 @@
+import {reconcileOwnerLiveStops, type OwnerStopRetirementTarget} from "./ownerLiveStop";
+import { waitForEnginePublicationGate } from "./testEnginePublicationGate";
 import type { App, Dialog } from "electron";
 import {
   EngineWorkspaceSessions,
@@ -11,7 +13,9 @@ import {
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
-import { bridgeCaptureEventsToRenderer, bridgeNoAtomicPlacement } from "./captureActivityBridge";
+import {
+  CAPTURE_INITIAL_SETTLED_EVENT, COLLECTIONS_PROJECTED_EVENT, bridgeCaptureEventsToRenderer, bridgeNoAtomicPlacement,
+} from "./captureActivityBridge";
 import { bridgeAutomationClaimsToExecutors } from "./automationClaimsBridge";
 import type { WorkspaceActivityScope } from "../ipc/workspaceActivityBroadcast";
 import type { RegistryEntry } from "./registryStore";
@@ -35,10 +39,11 @@ export interface ServerOwnerDelivery {
     assertCurrent(): void;
     refusals(attempt: AbortSignal): Promise<void>;
     documents(signal: AbortSignal): Promise<unknown>;
+    retire(binding: OwnerStopRetirementTarget, signal: AbortSignal): Promise<number | null>;
   } | null>;
 }
 export type OwnerLiveDeliveryStatus = "preparing" | "active" | "retrying";
-type OwnerLiveDeliveryReason = "document-unavailable" | "workspace-changed" | "restart-required";
+type OwnerLiveDeliveryReason = "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted" | "restart-required";
 
 type EngineAuthorityState = {
   collectionAutomations: CollectionAutomationsLifecycle;
@@ -117,7 +122,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   let serverOwnerUnavailable = false;
   let activeOwnerWorkspace: string | undefined;
   const failedOwnerDocuments = new Map<string, Set<string>>();
+  const frozenOwnerDocuments = new Map<string, Set<string>>();
   const ownerDeliveryReason = new Map<string, OwnerLiveDeliveryReason>();
+  const ownerStopFailures = new Map<string, Map<string,{path:string;detail:string}>>();
   const setOwnerDeliveryStatus = (workspaceId: string, status: OwnerLiveDeliveryStatus | undefined, reason?: OwnerLiveDeliveryReason) => {
     if (ownerDeliveryStatus.get(workspaceId) === status && ownerDeliveryReason.get(workspaceId) === reason) return;
     if (status) ownerDeliveryStatus.set(workspaceId, status); else ownerDeliveryStatus.delete(workspaceId);
@@ -128,6 +135,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     ownerDeliveryGeneration += 1;
     for (const id of ownerDeliveryStatus.keys()) setOwnerDeliveryStatus(id, undefined);
     failedOwnerDocuments.clear();
+    frozenOwnerDocuments.clear();
+    ownerStopFailures.clear();
     const previous = ownerDelivery;
     ownerDelivery = undefined;
     if (previous) ownerDeliverySettled = Promise.all([ownerDeliverySettled, previous.stop()]).then(() => undefined);
@@ -144,7 +153,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         ownerDelivery = startServerOwnerDelivery({workspaceIds: () => server.workspaceIds(), ...profile,
           onError: error => console.error("[desktop] server owner delivery failed:", error),
           runPass: async (workspaceId, index, lifetime) => {
-            if (!workspaceAuthorities.withOperation) throw new Error("Owner delivery workspace authority is unavailable.");
+            if (!workspaceAuthorities.withOperation) throw new Error("This build is missing a dependency required for live editing.");
             activeOwnerWorkspace = workspaceId;
             try {return await workspaceAuthorities.withOperation(workspaceId, async operation => {
               const session = await server.connect(operation.workspace, AbortSignal.any([lifetime, operation.signal]));
@@ -152,23 +161,52 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               const signal = AbortSignal.any([lifetime, operation.signal, session.signal]);
               const check = () => {
                 signal.throwIfAborted(); operation.assertCurrent(); session.assertCurrent();
-                if (generation !== ownerDeliveryGeneration || isQuitting()) throw new Error("Owner delivery session retired.");
+                if (generation !== ownerDeliveryGeneration || isQuitting()) throw new Error("This live editing session ended.");
               };
               check();
               try {
               try {await session.refusals(signal);}
               catch (error) {check(); console.error("[desktop] owner live refusal discovery failed:", error);}
+              try {await sessions.run(operation.workspace,async binding => {
+                const client=daemon.currentClient();
+                if (!(client instanceof EngineClient)) throw new Error("Owner Stop requires the desktop daemon client.");
+                await reconcileOwnerLiveStops({client,workspaceHandle:binding.workspace,workspaceId,signal,
+                  onError:(row,error) => {
+                    const failures=ownerStopFailures.get(workspaceId) ?? new Map();
+                    const detail=error instanceof Error ? error.message : String(error);
+                    failures.set(row.document.objectId,{path:row.document.currentPath,detail});
+                    ownerStopFailures.set(workspaceId,failures);notifyRenderer({workspaceId});
+                  },
+                  onComplete:row => {if (ownerStopFailures.get(workspaceId)?.delete(row.document.objectId)) notifyRenderer({workspaceId});},
+                  retire:session.retire,assertCurrent:() => {check();sessions.assertCurrentBinding(operation.workspace,binding);}});
+              });
+              } catch (error) {check();console.error("[desktop] owner Stop discovery failed:",error);}
               const response = await session.documents(signal);
               const documents = readyOwnerDeliveryDocuments(response, workspaceId);
               check();
-              const rows = (response as {documents: {status: string; reason?: unknown}[]}).documents;
+              const {documents: rows, diverged} = response as {documents: {status: string; reason?: unknown}[]; diverged?: unknown};
               const preparing = rows.some(row => row.status === "preparing");
-              const unavailable = rows.some(row => row.status === "unavailable");
-              const reason = rows.some(row => row.status === "unavailable" && row.reason === "workspace-changed") ? "workspace-changed" :
-                rows.some(row => row.status === "unavailable" && row.reason === "document-unavailable") ? "document-unavailable" : undefined;
+              // The server reports a diverged copy even after its owner stopped every document.
+              const unavailable = diverged === true || rows.some(row => row.status === "unavailable");
+              const unavailableFor = (reason: OwnerLiveDeliveryReason) => rows.some(row => row.status === "unavailable" && row.reason === reason);
+              // A document the server refused stays stopped until its owner tries again, so no other reason hides it.
+              // One it cannot start goes before it: the owner must open it before a Resume can help.
+              // One that changed while live editing was off follows both: no Resume continues it.
+              // A diverged server copy goes first: only the server's operator can continue it.
+              const reason = diverged === true ? "session-host-diverged" :
+                unavailableFor("live-document-without-lineage") ? "live-document-without-lineage" :
+                unavailableFor("session-host-refused") ? "session-host-refused" :
+                unavailableFor("live-edit-unadmitted") ? "live-edit-unadmitted" :
+                unavailableFor("workspace-changed") ? "workspace-changed" :
+                unavailableFor("document-unavailable") ? "document-unavailable" : undefined;
+              const ownerMustAct = reason === "session-host-diverged" || reason === "live-document-without-lineage" ||
+                reason === "session-host-refused" || reason === "live-edit-unadmitted";
               const failures = failedOwnerDocuments.get(workspaceId) ?? new Set<string>();
+              const frozen = frozenOwnerDocuments.get(workspaceId) ?? new Set<string>();
               for (const path of failures) if (!documents.some(document => document.binding.currentPath === path)) failures.delete(path);
+              for (const path of frozen) if (!documents.some(document => document.binding.currentPath === path)) frozen.delete(path);
               failedOwnerDocuments.set(workspaceId, failures);
+              frozenOwnerDocuments.set(workspaceId, frozen);
               if (!documents.length) {
                 setOwnerDeliveryStatus(workspaceId, unavailable ? "retrying" : preparing ? "preparing" : undefined, reason);
                 return {documentCount: 0, acknowledged: false};
@@ -182,7 +220,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                 if (!(client instanceof EngineClient)) throw new Error("Owner delivery requires the desktop daemon client.");
                 const assertCurrent = () => {
                   check(); sessions.assertCurrentBinding(operation.workspace, binding);
-                  if (daemon.currentClient() !== client || binding.client !== source.currentClient()) throw new Error("Owner delivery daemon retired.");
+                  if (daemon.currentClient() !== client || binding.client !== source.currentClient()) throw new Error("This live editing session ended.");
                 };
                 assertCurrent();
                 return native.runNativeOwnerDeliveryPass({client, workspaceHandle: binding.workspace,
@@ -192,8 +230,11 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               check();
               if (result === "retry" || result === "frozen") failures.add(document.binding.currentPath);
               else failures.delete(document.binding.currentPath);
+              if (result === "frozen") frozen.add(document.binding.currentPath);
+              else if (result !== "retry") frozen.delete(document.binding.currentPath);
               if (result === "acknowledged" || result === "frozen") notifyRenderer({workspaceId});
-              setOwnerDeliveryStatus(workspaceId, failures.size || unavailable ? "retrying" : preparing ? "preparing" : "active", reason);
+              setOwnerDeliveryStatus(workspaceId, failures.size || unavailable ? "retrying" : preparing ? "preparing" : "active",
+                frozen.size && !ownerMustAct ? "document-unavailable" : reason);
               return {documentCount: documents.length, acknowledged: result === "acknowledged"};
               } catch (error) {
                 if (!operation.signal.aborted && !session.signal.aborted && generation === ownerDeliveryGeneration && !isQuitting()) {
@@ -213,8 +254,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         onError: error => console.error("[desktop] owner delivery failed:", error),
         runPass: async (document, lifetime) => {
           const credentials = dependencies.ownerDeliveryCredentials?.();
-          if (!credentials || !relayUrlsMatch(credentials.relayUrl, config.relayUrl) || !dependencies.findWorkspace(document.binding.workspaceId)) return "retry";
-          if (!workspaceAuthorities.withOperation) throw new Error("Owner delivery workspace authority is unavailable.");
+          const workspace = dependencies.findWorkspace(document.binding.workspaceId);
+          if (!credentials || !relayUrlsMatch(credentials.relayUrl, config.relayUrl) || !workspace || workspace.pausedRemote) return "retry";
+          if (!workspaceAuthorities.withOperation) throw new Error("This build is missing a dependency required for live editing.");
           return workspaceAuthorities.withOperation(document.binding.workspaceId, operation =>
             sessions.run(operation.workspace, async binding => {
               const client = daemon.currentClient();
@@ -223,7 +265,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               const assertCurrent = () => {
                 signal.throwIfAborted(); operation.assertCurrent();
                 sessions.assertCurrentBinding(operation.workspace, binding);
-                if (generation !== ownerDeliveryGeneration || isQuitting() || daemon.currentClient() !== client || binding.client !== source.currentClient()) throw new Error("Owner delivery daemon retired.");
+                if (generation !== ownerDeliveryGeneration || isQuitting() || daemon.currentClient() !== client || binding.client !== source.currentClient()) throw new Error("This live editing session ended.");
               };
               assertCurrent();
               const result = await native.runNativeOwnerDeliveryPass({client, workspaceHandle: binding.workspace,
@@ -259,7 +301,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         const workspaces = [];
         const bindingChecks: (() => void)[] = [];
         for (const workspaceId of config.workspaceIds) {
-          if (!dependencies.findWorkspace(workspaceId)) continue;
+          const entry = dependencies.findWorkspace(workspaceId);
+          if (!entry || entry.pausedRemote) continue;
           workspaces.push(await workspaceAuthorities.withAuthority(workspaceId,async lease => {
             lease.assertCurrent();
             const workspace = {workspaceId,rootPath: lease.binding.canonicalRootPath,attachmentId: lease.binding.attachmentId};
@@ -273,7 +316,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         }
         if (!workspaces.length) throw new Error("Owner host has no registered workspaces.");
         return {client,workspaces,assertCurrent: () => {
-          if (isQuitting() || ownerHostGeneration !== generation || daemon.currentClient() !== client) throw new Error("Owner host daemon retired.");
+          if (isQuitting() || ownerHostGeneration !== generation || daemon.currentClient() !== client) throw new Error("This live editing session ended.");
           for (const check of bindingChecks) check();
         }};
       },
@@ -285,6 +328,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   // settles; boot-time paths that need engine sessions await this first instead
   // of throwing the broken-invariant error at it.
   let engineDaemonStartup: Promise<boolean> = Promise.resolve(false);
+  // A workspace that opens proves the engine's workspace work, so the startup
+  // smoke runs only when none has opened by the time the launch settles.
+  const startupSmoke = Promise.withResolvers<"run" | "skip">();
   const relayTransportRoutes = new RelayTransportRouteGuard();
 
   // Narrowing for the engine-access gates. The invariant is real:
@@ -369,18 +415,18 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     // to explain that the engine could not start.
     try {
       if (process.env.DOHC_DESKTOP_OWNER_HOST_CONFIG) {
-        if (!dependencies.existingOwnerFor) throw new Error("Owner session authority is unavailable.");
+        if (!dependencies.existingOwnerFor) throw new Error("This build is missing a dependency required for live editing.");
         ownerHostModule = await import("./desktopOwnerHost");
         ownerHostConfig = ownerHostModule.readDesktopOwnerHostConfig(process.env.DOHC_DESKTOP_OWNER_HOST_CONFIG);
       }
       if (process.env.DOHC_DESKTOP_OWNER_DELIVERY_CONFIG) {
-        if (!dependencies.ownerDeliveryCredentials || !workspaceAuthorities.withOperation) throw new Error("Owner delivery authority is unavailable.");
+        if (!dependencies.ownerDeliveryCredentials || !workspaceAuthorities.withOperation) throw new Error("This build is missing a dependency required for live editing.");
         ownerDeliveryModule = await import("./desktopOwnerDelivery");
         nativeOwnerDeliveryModule = await import("./nativeOwnerDelivery");
         ownerDeliveryConfig = ownerDeliveryModule.readDesktopOwnerDeliveryConfig(process.env.DOHC_DESKTOP_OWNER_DELIVERY_CONFIG);
       }
       if (!ownerHostConfig && !ownerDeliveryConfig && dependencies.serverOwnerDelivery) {
-        if (!workspaceAuthorities.withOperation) throw new Error("Owner delivery authority is unavailable.");
+        if (!workspaceAuthorities.withOperation) throw new Error("This build is missing a dependency required for live editing.");
         try {
           serverOwnerConfig = await dependencies.serverOwnerDelivery.prepare();
           serverOwnerUnavailable = false;
@@ -395,8 +441,10 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       if (hostIngress && peerIngress && (hostIngress.configPath !== peerIngress.configPath ||
         hostIngress.client.aggregateBytes !== peerIngress.client.aggregateBytes || hostIngress.client.maxUploads !== peerIngress.client.maxUploads)) throw new Error("Private owner modes require the same native ingress configuration and client budget.");
       const ingress = hostIngress ?? peerIngress ?? (serverOwnerConfig && {configPath: serverOwnerConfig.nativeConfigPath, client: serverOwnerConfig.nativeClient});
+      let publications = 0;
       rustEngineDaemon = createRustEngineDaemon({
         ...(ingress ? {privateOwnerHost: ingress} : {}),
+        startupSmoke: startupSmoke.promise,
         ...testEngineRestartOverrides(),
         command: defaultEngineBinaryPath({
           isPackaged: app.isPackaged,
@@ -431,7 +479,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
             );
           }
         },
-        beforePublish: async () => {
+        beforePublish: async signal => {
+          const gate = process.env.DOHC_TEST_ENGINE_PUBLICATION_GATE;
+          if (publications++ > 0 && process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged && gate) await waitForEnginePublicationGate(gate, signal);
           stopOwnerHost();
           await stopOwnerDelivery();
           await Promise.all(workspaceAuthorities.workspaceIds().map((workspaceId) =>
@@ -459,10 +509,12 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         },
       });
       await rustEngineDaemon.start();
-      // Collection projection completion is a separate derived-state wake.
-      // Workspace activity owns capture and file observation delivery.
+      // Collection projection completion is a separate derived-state wake, and
+      // so is the end of a new workspace's first read: reads refused during it
+      // can be answered now. Workspace activity owns capture and file
+      // observation delivery.
       bridgeCaptureEventsToRenderer({ onEvent: listener => rustEngineDaemon!.onEvent(event => {
-        if (event.name === "collections.projected") listener(event);
+        if (event.name === COLLECTIONS_PROJECTED_EVENT || event.name === CAPTURE_INITIAL_SETTLED_EVENT) listener(event);
       }) }, scope => notifyRenderer(scope ? { ...scope, pathSetChanged: false } : undefined));
       // The first placement that falls back on a drive without atomic
       // renames announces it at once; the capture health poll is a backstop.
@@ -491,7 +543,10 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       // with headroom. The renderer names the wait.
       rustEngineWorkspaceSessions = new EngineWorkspaceSessions(relaySource, {
         workspaceOpenDeadlineMs: 120_000,
-        onOpened: workspace => dependencies.onWorkspaceOpened?.(workspace.workspaceId),
+        onOpened: workspace => {
+          startupSmoke.resolve("skip");
+          dependencies.onWorkspaceOpened?.(workspace.workspaceId);
+        },
       });
       const sessions = rustEngineWorkspaceSessions;
       rustEngineRelayClient = new EngineRelayClient({
@@ -505,9 +560,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       });
       startOwnerHost();
       startOwnerDelivery();
-      console.info(
-        "[desktop] Rust engine daemon handshake complete; startup smoke running.",
-      );
+      console.info("[desktop] Rust engine daemon handshake complete.");
       // Marked here, where the handshake actually completes — the bootstrap
       // gate's await also covers the cached-settings read, which would inflate
       // this mark.
@@ -551,6 +604,15 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     ownerLiveDeliveryStatus(workspaceId: string): OwnerLiveDeliveryStatus | undefined {
       return dependencies.serverOwnerDelivery?.workspaceIds().includes(workspaceId) ? serverOwnerUnavailable ? "retrying" : ownerDeliveryStatus.get(workspaceId) : undefined;
     },
+    ownerLiveStopFailures(workspaceId:string) {return [...(ownerStopFailures.get(workspaceId)?.values() ?? [])];},
+    clearOwnerLiveStopFailure(workspaceId:string,target:{objectId:string}|{path:string}) {
+      const failures=ownerStopFailures.get(workspaceId);if (!failures) return;
+      let changed=false;
+      for (const [key,failure] of failures) {
+        if ("objectId" in target ? key===target.objectId : failure.path===target.path) {failures.delete(key);changed=true;}
+      }
+      if (changed) notifyRenderer({workspaceId});
+    },
     ownerLiveDeliveryReason(workspaceId: string): OwnerLiveDeliveryReason | undefined {
       return dependencies.serverOwnerDelivery?.workspaceIds().includes(workspaceId) ? serverOwnerUnavailable ? "restart-required" : ownerDeliveryReason.get(workspaceId) : undefined;
     },
@@ -562,11 +624,15 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     get relayClient() { return rustEngineRelayClient; },
     get startup() { return engineDaemonStartup; },
     requireEngineSessions,
+    withOwnerHostPaused: <Result>(work: () => Promise<Result>) => withOwnerHostPaused(true, work),
     closeRelayTransportWorkspace,
     closeAllRelayTransportWorkspaces,
     start() {
       engineDaemonStartup = startRustEngineDaemon();
       return engineDaemonStartup;
+    },
+    launchSettled() {
+      startupSmoke.resolve("run");
     },
   };
 }

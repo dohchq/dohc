@@ -1,7 +1,9 @@
 import { FILE_KIND_RECORDS, fileKindForPath, type FileKindRecord } from "@dohc/workspace-contracts/kinds";
+import { hasPrimaryModifier } from "../../shortcuts/shortcutRegistry";
 import { useFocusSurface } from "../ui/focusReturn";
+import { isComposingKey, isDeleteKey } from "../ui/keys";
 import { DangerButton, SecondaryButton, SectionLabel } from "../ui/controls";
-import { KindGlyph } from "../ui/KindGlyph";
+import { FileGlyph, KindGlyph, listedFileKind, ObjectGlyph } from "../ui/KindGlyph";
 import { basenameOf, dirnameOf } from "../path";
 import {
   ChevronsUp,
@@ -11,8 +13,6 @@ import {
   Folder,
   FolderPlus,
   FolderOpen,
-  Globe2,
-  LayoutGrid,
   Pin,
   RefreshCw,
   X,
@@ -33,7 +33,6 @@ import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import type { DraftFlush } from "../useAutosavedTextDraft";
 import { Overlay } from "../Overlay";
-import { momentDiffName } from "./EditorTabs";
 import { planDrop, type DragSource } from "./file-tree-dnd";
 import { navigateTree, type FlatRow } from "./file-tree-nav";
 import { withMarkdownDefault, withRenameDefault } from "./new-file-name";
@@ -44,21 +43,12 @@ import {
 } from "./file-tree-optimistic";
 import { buildTree, type TreeNode } from "./path-tree";
 import {
+  parseTab,
+  TAB_KINDS,
   type EditorGroup,
   clampOpenEditorsHeight,
-  isCollectionTabPath,
-  isChatsTabPath,
-  chatTabDefaultTitle,
-  isGraphTabPath,
-  isHistoryTabPath,
-  isMomentDiffTabPath,
-  isSiteTabPath,
-  isVersionCompareTabPath,
-  isVirtualTabPath,
-  parseCollectionTabPath,
-  parseTransactionalCollectionTabPath,
-  parseSiteTabPath,
 } from "./workbenchState";
+import { TabGlyph, tabMark } from "./tabGlyph";
 import { useCommitOnRelease } from "./useCommitOnRelease";
 import { ipcErrorMessage } from "../ipcError";
 
@@ -119,6 +109,9 @@ export interface ExplorerProps {
   // collection's views; the chevron still expands the folder in place, and
   // keyboard expand/collapse is untouched.
   collectionFolders: ReadonlySet<string>;
+  // Folders main recognizes as apps. Their rows draw the app glyph; a row
+  // still opens and expands as any folder's does.
+  appFolders?: ReadonlySet<string>;
   onOpenCollection: (path: string) => void;
   dataCollections?: Array<{ datasetId: string; datasetPath: string | null; tableId: string; name: string; archived?: boolean }>;
   includeArchivedCollections?: boolean;
@@ -175,14 +168,6 @@ type TreeRenderItem =
 
 type VirtualRange = { start: number; end: number };
 
-// The listing, not the file name, says whether a file is a database: the kind
-// registry matches `.db` by extension alone.
-function explorerFileKind(path: string, listed: WorkspaceFileEntry["kind"] | null | undefined): FileKindRecord {
-  if (listed === "database") return FILE_KIND_RECORDS.database;
-  const kind = fileKindForPath(path);
-  return kind.displayKind === "database" ? FILE_KIND_RECORDS.binary : kind;
-}
-
 // The kind a create or rename draft will have once committed, so the glyph
 // follows the name as it is typed. `renameFrom` is the renamed file's path,
 // or null for a create. An empty draft shows the Markdown default.
@@ -200,17 +185,6 @@ const GLYPH_SIZE = 15;
 // The glyph is ink on a row with the selected fill and subtle elsewhere.
 function glyphTone(selected: boolean): string {
   return selected ? "text-ink" : "text-subtle";
-}
-
-// A page's `icon` frontmatter emoji stands in for its kind glyph
-// (Notion-style), in a box the glyph's size so the name does not move.
-function FileGlyph(props: { kind: FileKindRecord; icon: string | undefined; className: string }) {
-  if (!props.icon) return <KindGlyph kind={props.kind} size={GLYPH_SIZE} className={props.className} />;
-  return (
-    <span aria-hidden className="grid size-[15px] shrink-0 place-items-center text-[13px] leading-none">
-      {props.icon}
-    </span>
-  );
 }
 
 type DropPreview = {
@@ -247,28 +221,8 @@ function resolveTypedPath(value: string, contextDir: string): string {
 }
 
 export function editorTitle(path: string, label?: string): string {
-  if (parseTransactionalCollectionTabPath(path)) return label ?? "Collection";
-  if (isChatsTabPath(path)) return label ?? chatTabDefaultTitle(path);
-  if (isGraphTabPath(path)) return "Graph";
-  if (isCollectionTabPath(path)) {
-    return basenameOf(parseCollectionTabPath(path) ?? "Collection");
-  }
-  if (isHistoryTabPath(path)) return "History";
-  if (isMomentDiffTabPath(path)) {
-    return momentDiffName(label);
-  }
-  if (isSiteTabPath(path)) return `App: ${parseSiteTabPath(path) ?? "preview"}`;
-  if (isVersionCompareTabPath(path)) return "Compare with Main";
-  return basenameOf(path);
-}
-
-function OpenEditorIcon(props: { path: string; kind: WorkspaceFileEntry["kind"] | null; active: boolean }) {
-  const tone = glyphTone(props.active);
-  if (isVirtualTabPath(props.path)) {
-    const Icon = isSiteTabPath(props.path) ? Globe2 : LayoutGrid;
-    return <Icon size={GLYPH_SIZE} aria-hidden className={`shrink-0 ${tone}`} />;
-  }
-  return <KindGlyph kind={explorerFileKind(props.path, props.kind)} size={GLYPH_SIZE} className={tone} />;
+  const tab = parseTab(path);
+  return TAB_KINDS[tab.kind].explorerTitle(tab, label);
 }
 
 function SectionActionButton(props: {
@@ -335,6 +289,9 @@ export const TreeRow = memo(function TreeRow(props: {
   // views. Exposed as data-collection so tests can gate on the state before
   // clicking.
   collection: boolean;
+  // Main recognizes this folder as an app: the row draws the app glyph in
+  // the folder glyph's place, and says so as data-app.
+  app: boolean;
   selected: boolean;
   active: boolean;
   tabbable: boolean;
@@ -372,6 +329,7 @@ export const TreeRow = memo(function TreeRow(props: {
         data-path={row.fullPath}
         data-kind={row.isFolder ? "folder" : "file"}
         data-collection={props.collection ? "true" : undefined}
+        data-app={props.app ? "true" : undefined}
         data-drop-state={props.dropPreview?.kind}
         aria-level={row.depth + 1}
         aria-posinset={row.positionInSet}
@@ -442,7 +400,9 @@ export const TreeRow = memo(function TreeRow(props: {
                 className={`shrink-0 text-subtle transition-transform ${row.isExpanded ? "rotate-90" : ""}`}
               />
             </span>
-            {row.isExpanded ? (
+            {props.app ? (
+              <ObjectGlyph kind="app" size={GLYPH_SIZE} className={glyphClass} />
+            ) : row.isExpanded ? (
               <FolderOpen size={GLYPH_SIZE} aria-hidden className={`shrink-0 ${glyphClass}`} />
             ) : (
               <Folder size={GLYPH_SIZE} aria-hidden className={`shrink-0 ${glyphClass}`} />
@@ -452,8 +412,9 @@ export const TreeRow = memo(function TreeRow(props: {
           <>
             <span aria-hidden className="w-3 shrink-0" />
             <FileGlyph
-              kind={explorerFileKind(row.fullPath, row.kind)}
+              kind={listedFileKind(row.fullPath, row.kind)}
               icon={row.icon}
+              size={GLYPH_SIZE}
               className={glyphClass}
             />
           </>
@@ -631,7 +592,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   // don't rescan projected.files. A pinned row has no selected fill.
   function fileGlyph(path: string) {
     const file = fileByPath.get(path);
-    return <FileGlyph kind={explorerFileKind(path, file?.kind)} icon={file?.icon} className={glyphTone(false)} />;
+    return <FileGlyph kind={listedFileKind(path, file?.kind)} icon={file?.icon} size={GLYPH_SIZE} className={glyphTone(false)} />;
   }
 
   const expandedSet = useMemo(
@@ -824,7 +785,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     const target =
       focusedPath ??
       selectedPath ??
-      (activeTab && !isVirtualTabPath(activeTab) ? activeTab : null);
+      (activeTab && !TAB_KINDS[parseTab(activeTab).kind].virtual ? activeTab : null);
     if (!target) return "";
     return isFolderPath(target) ? target : dirnameOf(target);
   }, [activeTab, focusedPath, isFolderPath, selection]);
@@ -1078,7 +1039,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       const rowList = rowsRef.current;
       const isFolder =
         rowList.find((row) => row.fullPath === path)?.isFolder ?? false;
-      if (event.ctrlKey || event.metaKey) {
+      if (hasPrimaryModifier(event, window.dohcDesktop?.platform)) {
         setSelection((current) => {
           const next = new Set(current);
           if (next.has(path)) next.delete(path);
@@ -1403,7 +1364,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         if (target) beginRename(target, isFolderPath(target));
         return;
       }
-      if (event.key === "Delete") {
+      if (isDeleteKey(event)) {
         event.preventDefault();
         const targets = selection.size > 0 ? [...selection] : focusedPath ? [focusedPath] : [];
         if (targets.length > 0) setConfirmDelete(targets);
@@ -1487,7 +1448,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
               // An untouched rename is still the listed file, so the listing
               // keeps deciding whether it is a database.
               editing?.mode === "rename" && editValue.trim() === basenameOf(editing.path)
-                ? explorerFileKind(editing.path, fileByPath.get(editing.path)?.kind)
+                ? listedFileKind(editing.path, fileByPath.get(editing.path)?.kind)
                 : draftFileKind(editValue, editing?.mode === "rename" ? editing.path : null)
             }
             size={GLYPH_SIZE}
@@ -1510,11 +1471,17 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           readOnly={editPending}
           onChange={(event) => setEditValue(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === "Escape") finishEdit(false, true);
-            else if (event.key === "Enter") finishEdit(true, true);
             event.stopPropagation();
+            if (isComposingKey(event)) return;
+            if (event.key !== "Escape" && event.key !== "Enter") return;
+            // Focus returns to the row during this keydown. The key's default
+            // action would press that row and open a path the move has not made.
+            event.preventDefault();
+            finishEdit(event.key === "Enter", true);
           }}
           onBlur={() => { renameFocus.current = null; finishEdit(true); }}
+          // The name field takes the text menu, not the tree's menu.
+          onContextMenu={(event) => event.stopPropagation()}
           // The name keeps the row's exact type (13px sans, square) — F2
           // must not morph the label into a web-input pill — and the strong
           // border IS the focus affordance (the input is focused while open;
@@ -1615,6 +1582,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           key={item.key}
           row={row}
           collection={row.isFolder && props.collectionFolders.has(row.fullPath)}
+          app={row.isFolder && (props.appFolders?.has(row.fullPath) ?? false)}
           selected={selection.has(row.fullPath)}
           active={activeTab === row.fullPath}
           tabbable={tabbablePath === row.fullPath}
@@ -1796,10 +1764,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                               onClick={() => props.onActivateTab(group.id, tab.path)}
                               className="flex h-full min-w-0 flex-1 items-center gap-1.5 rounded-md py-0 pl-8 pr-9 text-left text-[13px] focus-visible:-outline-offset-2"
                             >
-                              <OpenEditorIcon
-                                path={tab.path}
-                                kind={fileByPath.get(tab.path)?.kind ?? null}
-                                active={active}
+                              <TabGlyph
+                                {...tabMark(tab.path, fileByPath)}
+                                size={GLYPH_SIZE}
+                                className={glyphTone(active)}
                               />
                               <span className="min-w-0 flex-1 truncate">{title}</span>
                               {dirty ? (
@@ -1959,7 +1927,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                           }}
                           className="flex h-7 w-full items-center gap-1.5 px-3 text-left text-[13px] text-muted hover:bg-hover hover:text-ink"
                         >
-                          {isFolderPath(path) ? (
+                          {props.appFolders?.has(path) ? (
+                            <ObjectGlyph kind="app" size={GLYPH_SIZE} className={glyphTone(false)} />
+                          ) : isFolderPath(path) ? (
                             <Folder size={GLYPH_SIZE} aria-hidden className={`shrink-0 ${glyphTone(false)}`} />
                           ) : (
                             fileGlyph(path)

@@ -1,5 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { desktopPins } from "../src/testPins";
+import { activityPin } from "../src/testPins";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   cleanupDesktopWorkspace,
@@ -127,7 +127,9 @@ test("the editor's listboxes keep the option Enter acts on in view as the arrows
     await capture(page, turnInto, "turn-into");
     await page.keyboard.press("Escape");
     await expect(turnInto).toBeHidden();
-    await page.keyboard.press("Control+k");
+    // Escape hands focus back to the editor on the next frame.
+    await expect(editor).toBeFocused();
+    await page.keyboard.press("ControlOrMeta+k");
     const linkForm = page.locator(".dohc-link-menu");
     await expect(linkForm).toBeVisible();
     await capture(page, linkForm, "link-form");
@@ -233,7 +235,7 @@ test("the chat mention list keeps the option Enter acts on in view as the arrows
     await page.emulateMedia({ reducedMotion: "reduce" });
     const workspace = await openWorkspaceFromFirstRun(page, temp);
     await waitForWorkspaceFile(page, workspace.workspaceId, PAGES.at(-1)!);
-    await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
+    await page.getByTestId(activityPin("chats")).click();
     await page.getByTestId("chats-channel").click();
     await page.getByTestId("chats-new-thread-composer").fill("Mentions");
     await page.getByTestId("chats-new-thread-composer").press("Enter");

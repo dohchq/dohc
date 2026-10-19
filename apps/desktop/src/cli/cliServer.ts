@@ -1,9 +1,13 @@
+import type { LinksInInput, LinksInResult, LinksResolveInput, LinksResolveResult } from "@dohc/workspace-contracts/links";
+import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
 import { creationPartialMessage } from "@dohc/cli/creation";
+import { atomicReplaceFileSync } from "../atomicReplaceFile";
 import { cliUsageInvocation, type CliUsageInvocation } from "../usage/cliUsage";
 import { nameSlug } from "@dohc/workspace-contracts/names";
 import { SHARED_AUTOMATION_HISTORY_REASON } from "@dohc/workspace-contracts/automation-controls";
 import type { WorkspacePolicyPath } from "@dohc/security-contract/effective-policy";
 import { readThreadDispatchState } from "../agents/threadDispatchState";
+import { UNNAMED_AGENT_ID } from "../agents/activeAgentRun";
 import {
   CLI_PROTOCOL_VERSION,
   MAX_CLI_REQUEST_BYTES,
@@ -80,7 +84,6 @@ import {
 import {
   mkdirSync,
   readFileSync,
-  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -275,6 +278,12 @@ function historyPolicyUnreadable(refusal: HistoryPolicyRefusal) {
 }
 
 export interface CliWorkspaceContext extends CliRegistryWorkspace {
+  stopSync?(author?: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor): Promise<CliResultByVerb["stopSync"]>;
+  shareCopy?(input: import("@dohc/workspace-contracts/share-copy").ShareCopyInput): Promise<import("@dohc/workspace-contracts/share-copy").ShareCopyResult>;
+  access?: {
+    object(input: import("zod").infer<typeof import("@dohc/workspace-contracts/access").ObjectAccessInput>): Promise<import("@dohc/workspace-contracts/access").AccessAnswer>;
+    sharing(input: import("zod").infer<typeof import("@dohc/workspace-contracts/access").SharingAccessInput>): Promise<import("@dohc/workspace-contracts/access").AccessAnswer>;
+  };
   // `agent` is the agent this socket's write is, or null for the person.
   dataset?(request: import("@dohc/cli/dataset").DatasetRequest, agent: LocalDatasetAgent | null): Promise<import("@dohc/cli/dataset").DatasetResult>;
   ownerAppResponses?(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest):Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>;
@@ -302,6 +311,8 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   collections?: CliCollectionsPort;
   documents?: CliDocumentsPort;
   writeFiles?(files: CliFileWrite[], origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileWrite"]>;
+  historyOperation?(input: { operationId: string; cursor?: string }): Promise<CliResultByVerb["historyOperation"]>;
+  historyUndo?(input: { operationId: string }, origin: LiveDocumentEditOrigin): Promise<CliResultByVerb["historyUndo"]>;
   movePath?(input: { fromPath: string; toPath: string; overwrite?: boolean }, origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileMove"]>;
   deletePath?(path: string, origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileDelete"]>;
   // Absent in a shared view, which keeps no copies of its own.
@@ -318,9 +329,16 @@ export interface CliRunMessageLink {
 
 export interface CliServerOptions {
   recordSuccess?(invocation: CliUsageInvocation): unknown;
+  // The server account this computer is connected to. Its verbs need no
+  // workspace.
+  serverAccount?: Pick<import("../workspaces/serverAccountDeletion").ServerAccountDeletion, "preview" | "delete">;
   stateDir: string;
   listWorkspaces(): readonly CliRegistryWorkspace[];
   openWorkspace(workspace: CliRegistryWorkspace): Promise<CliWorkspaceContext>;
+  links?: {
+    incoming(workspace: CliRegistryWorkspace, input: LinksInInput): Promise<LinksInResult>;
+    resolve(workspace: CliRegistryWorkspace, input: LinksResolveInput): Promise<LinksResolveResult>;
+  };
   // Messages, reactions, and decisions go through the same module renderer
   // chat uses, so a CLI or MCP write gets the same checks and effects.
   chatWrites: ChatWrites;
@@ -333,6 +351,8 @@ export interface CliServerOptions {
   // an automation that woke the agent and the agent cannot start each other
   // forever.
   agentRunDepth(workspaceId: string): number;
+  // Whether a run dohc dispatched holds the workspace's run slot.
+  dispatchedAgentRun(workspaceId: string): boolean;
   // Runs once a command has made its last durable change.
   onWrite?(workspace: CliWorkspaceContext): void | Promise<void>;
   // A chat read has no renderer poll behind it — with no window open, nothing
@@ -536,6 +556,7 @@ function rawMomentSummary(
 ) {
   return {
     id: moment.id,
+    ...(HistoryOperationId.safeParse(moment.metadata.correlationId).success ? { operationId: moment.metadata.correlationId } : {}),
     recordedAtMs: moment.recordedAtMs,
     source: "workspace-engine" as const,
     operation: moment.operation,
@@ -632,8 +653,19 @@ function writeActor(
   return options.agentRunDepth(context.workspaceId) > 0 ? "agent" : actor;
 }
 
+// The name an agent writing through this socket claims: its handshake or
+// --agent name. A run dohc dispatched is one agent that gives no name, as its
+// file edits and replies are, so while it holds the slot no write claims one.
+function claimedAgentName(
+  agent: string | undefined,
+  context: CliWorkspaceContext,
+  options: CliServerOptions,
+): string | undefined {
+  return options.dispatchedAgentRun(context.workspaceId) ? undefined : agent;
+}
+
 // Provenance for a CLI/MCP collection write, derived main-side only. Agent
-// traffic carries its handshake name, or `dohc-mcp` when unnamed,
+// traffic carries its claimed name, or `dohc-mcp` when unnamed,
 // acting on behalf of the local owner, at the depth of the
 // agent run in progress; a human write is attributed as this device's local
 // author under the workspace display name.
@@ -646,7 +678,7 @@ function collectionWriteAuthor(
   if (writeActor(actor, context, options) === "agent") {
     return {
       kind: "agent",
-      agentId: agent ?? "dohc-mcp",
+      agentId: claimedAgentName(agent, context, options) ?? UNNAMED_AGENT_ID,
       onBehalfOf: options.localPersonId(),
       depth: options.agentRunDepth(context.workspaceId),
     };
@@ -673,7 +705,7 @@ const CREATE_AS_AGENT_REFUSAL = "a document created through the CLI socket is re
 
 // Provenance for a document edit, derived here. A person types in the
 // editor, so every edit through this socket is an agent's on behalf of the
-// local owner, recorded under its handshake name or the unnamed agent label,
+// local owner, recorded under its claimed name or the unnamed agent label,
 // at the depth of the agent run in progress. Any process holding the socket
 // token could otherwise claim the person's typing.
 function documentEditOrigin(
@@ -682,7 +714,7 @@ function documentEditOrigin(
   options: CliServerOptions,
 ): LiveDocumentEditOrigin {
   return {
-    actorOriginId: agent ?? "dohc-mcp",
+    actorOriginId: claimedAgentName(agent, context, options) ?? UNNAMED_AGENT_ID,
     attribution: {
       actorKind: "agent",
       onBehalfOf: options.localPersonId(),
@@ -1711,12 +1743,10 @@ class RunMessageLinkRecoveryQueue {
           }),
         ),
       ];
-      const temporaryPath = `${path}.${process.pid}.tmp`;
-      writeFileSync(temporaryPath, `${JSON.stringify(stored)}\n`, {
+      atomicReplaceFileSync(path, (temporaryPath) => writeFileSync(temporaryPath, `${JSON.stringify(stored)}\n`, {
         encoding: "utf8",
         mode: 0o600,
-      });
-      renameSync(temporaryPath, path);
+      }));
       return true;
     } catch (error) {
       try {
@@ -1883,9 +1913,10 @@ async function startFileChat(
     return { created: false, result: mcpFailure(error, `failed to start a chat on: ${input.path}`) };
   }
   let message: ChatMessage;
+  const agentName = claimedAgentName(input.agent, context, options);
   try {
     message = await options.chatWrites.sendMessage(context, {
-      writer: { via: "cli", actor: "agent", ...(input.agent ? { agentName: input.agent } : {}) },
+      writer: { via: "cli", actor: "agent", ...(agentName ? { agentName } : {}) },
       threadId: thread.id,
       body,
       resolveAttachments: async () => [],
@@ -2067,6 +2098,7 @@ async function callerPaths(context: CliWorkspaceContext, cwd: string) {
       ? validateUserMaterializePath(path, { platform: process.platform })
       : validateUserReadPath(path, { platform: process.platform });
   return {
+    shared: isSharedWithMePath(relative(root, folder).split(sep).join("/")),
     rebase(path: string, mode: CliPathMode): string {
       const supplied = validate(path, mode);
       if (!supplied.ok) throw new CliCommandError(cliPathRejected(supplied.reason, path).reason);
@@ -2136,6 +2168,13 @@ async function dispatch(
   options: CliServerOptions,
   completion: { replayed: boolean },
 ): Promise<unknown> {
+  if (request.verb === "accessObject") {
+    const ref = request.args.ref;
+    if (ref.kind !== "path") return dispatchWorkspace(request, context, options, completion);
+    const paths = await callerPaths(context, request.args.cwd);
+    const rebased = { ...request, args: { ...request.args, ref: { ...ref, path: paths.rebase(ref.path, "read") } } };
+    return dispatchWorkspace(rebased, context, options, completion);
+  }
   const pathVerbs = new Set(["moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "fileWrite", "fileMove", "fileDelete", "appPublication"]);
   if (!pathVerbs.has(request.verb)) {
     validateRequestPathSpellings(request);
@@ -2259,6 +2298,20 @@ async function dispatchWorkspace(
     throw new CliCommandError("--choose needs --resolve <message>");
   }
   switch (request.verb) {
+    case "stopSync":
+      if (context.readOnly || !context.stopSync) throw new CliCommandError("Open the owning workspace to stop its sync.");
+      return context.stopSync(writeActor(request.args.actor, context, options) === "agent"
+        ? { kind: "agent", agentId: claimedAgentName(request.args.agent, context, options) ?? UNNAMED_AGENT_ID, onBehalfOf: options.localPersonId(), depth: options.agentRunDepth(context.workspaceId) }
+        : undefined);
+    case "shareCopy":
+      if (context.readOnly || !context.shareCopy) throw new CliCommandError("Share copy details require the owning workspace.");
+      return context.shareCopy({ shareId: request.args.shareId, grantId: request.args.grantId });
+    case "accessObject":
+      if (!context.access) throw new CliCommandError("Access observations are unavailable.");
+      return context.access.object(request.args);
+    case "accessSharing":
+      if (!context.access) throw new CliCommandError("Access observations are unavailable.");
+      return context.access.sharing(request.args);
     case "appPublication": {
       if (request.args.request.workspaceId !== context.workspaceId || context.readOnly || !context.appPublication) throw new CliCommandError("App publication requires the owning workspace.");
       if (options.agentRunDepth(context.workspaceId) > 0) throw new CliCommandError("Automations cannot use app publication.");
@@ -2558,6 +2611,7 @@ async function dispatchWorkspace(
             depth: entry.depth,
             recordedAtMs: entry.recordedAtMs,
             automationRun: entry.automationRun,
+            linkAuthor: entry.linkAuthor,
           })),
         };
       } catch (error) {
@@ -2730,6 +2784,20 @@ async function dispatchWorkspace(
         if (result.written?.length) await notifyWrite(options, context);
         return result;
       } catch (error) { return pathFreeFailure(error, "dohc could not write the files."); }
+    }
+
+    case "historyOperation":
+    case "historyUndo": {
+      if (request.verb === "historyUndo" && request.args.actor !== "agent") return { ok: false, reason: `An Undo through the CLI socket is recorded as an agent's; send actor "agent".` };
+      const paths = await callerPaths(context, request.args.cwd);
+      if (paths.shared) return { ok: false, reason: "History operations require the owning workspace. Open it to continue." };
+      if (!context.historyOperation || !context.historyUndo) return { ok: false, reason: "The workspace engine is not running." };
+      try {
+        if (request.verb === "historyOperation") return await context.historyOperation(request.args);
+        const result = await context.historyUndo(request.args, documentEditOrigin(request.args.agent, context, options));
+        if (result.ok) await notifyWrite(options, context);
+        return result;
+      } catch (error) { return pathFreeFailure(error, `dohc could not ${request.verb === "historyUndo" ? "undo" : "read"} this operation.`); }
     }
 
     case "fileMove":
@@ -3375,6 +3443,28 @@ async function dispatchWorkspace(
   }
 }
 
+async function dispatchLinks(
+  request: Extract<CliRequest, { verb: "linksIn" | "linksResolve" }>,
+  options: CliServerOptions,
+): Promise<unknown> {
+  const workspace = await resolveCliWorkspace(request.args.cwd, options.listWorkspaces());
+  if (!workspace) throw new CliCommandError("not inside a dohc workspace");
+  if (!options.links) throw new CliCommandError("Workspace links are unavailable.");
+  return request.verb === "linksIn"
+    ? options.links.incoming(workspace, { subject: request.args.subject, cursor: request.args.cursor })
+    : options.links.resolve(workspace, { source: request.args.source, literals: request.args.literals });
+}
+
+async function dispatchAccount(
+  request: Extract<CliRequest, { verb: "accountDeletePreview" | "accountDelete" }>,
+  options: CliServerOptions,
+): Promise<unknown> {
+  if (!options.serverAccount) throw new CliCommandError("Server accounts are unavailable.");
+  if (request.verb === "accountDeletePreview") return options.serverAccount.preview();
+  const { server, previewToken, password } = request.args;
+  return options.serverAccount.delete({ server, previewToken, password });
+}
+
 async function workspaceContextForRequest(
   request: CliRequest,
   options: CliServerOptions,
@@ -3463,8 +3553,11 @@ export async function handleCliRequestLine(
     // The caller's door labels counting only; authority never receives it.
     const { door: _door, ...request } = parsed.data;
     const completion = { replayed: false };
-    const context = await workspaceContextForRequest(request, options);
-    const unvalidated = await dispatch(request, context, options, completion);
+    const unvalidated = request.verb === "accountDeletePreview" || request.verb === "accountDelete"
+      ? await dispatchAccount(request, options)
+      : request.verb === "linksIn" || request.verb === "linksResolve"
+        ? await dispatchLinks(request, options)
+        : await dispatch(request, await workspaceContextForRequest(request, options), options, completion);
     const result = parseCliResult(parsed.data.verb, unvalidated);
     const response = cliTransportResponseSchema.parse({
       protocolVersion: CLI_PROTOCOL_VERSION,
