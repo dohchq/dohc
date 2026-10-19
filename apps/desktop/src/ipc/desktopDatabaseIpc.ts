@@ -9,7 +9,7 @@ import { registerWorkspaceDatabaseIpcHandlers } from "./workspaceDatabaseIpc";
 import { databaseImportOperations } from "./bridgeContract";
 import { registerOperations } from "./operationTable";
 import { withExclusiveWorkspaceOperation } from "../workspaces/workspaceAssets";
-import { assertDatabaseImportUnchanged, type DatabaseImportRecord } from "../workspaces/databaseImportUndo";
+import { assertDatabaseImportFile, assertDatabaseImportUnchanged, type DatabaseImportRecord } from "../workspaces/databaseImportUndo";
 import type { deleteWorkspacePathByHand } from "../workspaces/workspaceFileMoves";
 
 export function registerDesktopDatabaseIpcHandlers<
@@ -79,6 +79,7 @@ export function registerDesktopDatabaseIpcHandlers<
         files: shareViewFiles,
         databaseReader: workerDatabaseReader(operation.signal),
       }).readDatabasePage(input.relativePath, input.table, input.offset),
+    // Serialize edits with Undo without invalidating queued writes: database edits do not change paths.
     edit: (operation, input) => withExclusiveWorkspaceOperation(operation.workspace.rootPath, () =>
       editWorkspaceDatabaseInWorker({
         rootPath: operation.workspace.rootPath,
@@ -88,21 +89,21 @@ export function registerDesktopDatabaseIpcHandlers<
         nowMs: input.nowMs,
         operationId: input.operationId,
         signal: operation.signal,
-      })),
+      }), { markOnSuccess: false }),
     now: () => Date.now(),
     createId: randomUUID,
   });
 
   // This registration lives for the main process run, across renderer reloads.
   const imports = new Map<string, DatabaseImportRecord>();
-  const inactiveMessage = "Database import Undo stopped because this window changed workspaces.";
+  const inactiveMessage = "Database import undo stopped because this window changed workspaces. Open the original workspace, then try again.";
   registerOperations({
     handle: registerHandler, assertTrustedSender,
     withActiveWorkspace: (event: Event, workspaceId, message, work) =>
       withRendererWorkspaceOperation(event.sender, workspaceId, message, work),
   }, databaseImportOperations, {
     importToDatabase: (input, { event }) => withRendererWorkspaceOperation(
-      event.sender, input.workspaceId, "Database import stopped because this window changed workspaces.",
+      event.sender, input.workspaceId, "Database import stopped because this window changed workspaces. Open the original workspace, then try again.",
       async (operation) => {
         assertWritableWorkspace(operation.workspace);
         const result = await importOwnedWorkspaceDatabase({
@@ -122,7 +123,7 @@ export function registerDesktopDatabaseIpcHandlers<
         operation.signal.throwIfAborted();
         assertWritableWorkspace(operation.workspace);
         const record = imports.get(input.operationId);
-        if (!record) throw new Error("Cannot undo this import. Undo is no longer available.");
+        if (!record) throw new Error("Cannot undo this import. Undo is no longer available. Delete the database yourself if you don't want it.");
         if (record.workspaceId !== operation.workspace.workspaceId) {
           throw new Error("Cannot undo this import in another workspace. Open the workspace where you imported it.");
         }
@@ -132,10 +133,13 @@ export function registerDesktopDatabaseIpcHandlers<
           await assertDatabaseImportUnchanged(operation.workspace.rootPath, record);
           operation.signal.throwIfAborted();
         };
-        await admit();
-        // Consume before deletion: a failure after trashing must never delete a replacement on retry.
-        imports.delete(input.operationId);
-        return dependencies.deleteDatabaseImport(operation, record.path, markChanged, admit);
+        // Check the entry before delete preparation resolves it; hash only at final admission.
+        await assertDatabaseImportFile(operation.workspace.rootPath, record);
+        return dependencies.deleteDatabaseImport(operation, record.path, () => {
+          // The trash move succeeded, even if later History or recovery recording fails.
+          imports.delete(input.operationId);
+          markChanged();
+        }, admit);
       }, { markOnSuccess: false }),
     ),
   });

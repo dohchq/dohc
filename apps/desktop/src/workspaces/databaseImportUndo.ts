@@ -12,16 +12,21 @@ export interface DatabaseImportRecord {
   size: number;
 }
 
-/** Checks bytes without opening SQLite or creating a journal. Caller holds the workspace lock. */
-export async function assertDatabaseImportUnchanged(root: string, record: DatabaseImportRecord): Promise<void> {
-  const missing = () => new Error(`Cannot undo this import. ${record.path} is no longer here.`);
+export async function assertDatabaseImportFile(root: string, record: DatabaseImportRecord) {
+  const missing = () => new Error(`Cannot undo this import. ${record.path} is no longer here. Import the CSV again if you need the database.`);
   const entry = await lstat(join(root, record.path)).catch(error => {
     if (error.code === "ENOENT" || error.code === "ENOTDIR") throw missing();
     throw error;
   });
   if (!entry.isFile() || entry.isSymbolicLink()) {
-    throw new Error(`Cannot undo this import. ${record.path} is no longer the imported file.`);
+    throw new Error(`Cannot undo this import. ${record.path} is no longer the imported file. Keep it or delete it yourself.`);
   }
+  return entry;
+}
+
+/** Checks bytes without opening SQLite or creating a journal. Caller holds the workspace lock. */
+export async function assertDatabaseImportUnchanged(root: string, record: DatabaseImportRecord): Promise<void> {
+  const entry = await assertDatabaseImportFile(root, record);
   const { realTarget } = await resolveWorkspaceFile(root, record.path);
   const changed = () => new Error(`Cannot undo this import. ${record.path} changed after the import. Keep it or delete it yourself.`);
   if (entry.size !== record.size) throw changed();

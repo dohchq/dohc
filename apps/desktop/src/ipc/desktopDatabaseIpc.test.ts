@@ -23,6 +23,7 @@ import { readDeleteRecovery } from "../workspaces/workspaceDeleteRecovery";
 import { readWorkspaceEnginePolicy } from "../workspaces/workspaceEnginePolicyFile";
 import { databaseImportOperations, ImportToDatabaseResult } from "./bridgeContract";
 import { deferred } from "../testing/deferred";
+import { withStaleSensitiveWorkspaceOperation } from "../workspaces/workspaceAssets";
 
 class Sender {
   constructor(readonly id: number) {}
@@ -174,6 +175,33 @@ describe("desktop database IPC composition", () => {
     expect(log).toEqual([expect.objectContaining({ operationId: h.edit.mock.calls[0]![0].operationId, appliedAt: 1_700_000_000_000, author: { kind: "user", userId: "local" }, payload: { value: "changed" } })]);
   });
 
+  it("keeps a queued stale-sensitive write valid after a database edit", async () => {
+    const h = await harness();
+    await h.seed();
+    const reached = deferred<void>(), release = deferred<void>();
+    const edit = h.edit.getMockImplementation()!;
+    h.edit.mockImplementationOnce(async input => {
+      reached.resolve();
+      await release.promise;
+      return edit(input);
+    });
+    const pending = h.invoke(CHANNELS.applyDatabaseEdit);
+    const edited = expect(pending).resolves.toMatchObject({ version: 1 });
+    let written: Promise<void> | undefined;
+    try {
+      await reached.promise;
+      const write = withStaleSensitiveWorkspaceOperation(h.workspace.rootPath, async () => {
+        await writeFile(join(h.workspace.rootPath, "received.txt"), "received share");
+        return "written";
+      });
+      written = expect(write).resolves.toBe("written");
+    } finally {
+      release.resolve();
+      await Promise.all([edited, written]);
+    }
+    expect(await readFile(join(h.workspace.rootPath, "received.txt"), "utf8")).toBe("received share");
+  });
+
   it.each([CHANNELS.applyDatabaseEdit, databaseImportOperations.importToDatabase.channel, undoChannel])("refuses shared-view writes before %s work", async (channel) => {
     const h = await harness();
     h.registry.setShareView(h.workspace.workspaceId, sharedView);
@@ -311,13 +339,13 @@ describe("database import Undo", () => {
     const recovery = await readDeleteRecovery(h.workspace.rootPath, deletion.operationId);
     expect(recovery).toMatchObject({ base: result.path, tracked: true });
     expect(await readFile(join(h.workspace.rootPath, ".dohc", "trash", recovery!.staged!))).toEqual(bytes);
-    await expect(undo(h, result.operationId)).rejects.toThrow("Cannot undo this import. Undo is no longer available.");
+    await expect(undo(h, result.operationId)).rejects.toThrow("Cannot undo this import. Undo is no longer available. Delete the database yourself if you don't want it.");
   });
 
   it("refuses an unknown id without deleting anything", async () => {
     const h = await harness();
     await seed(h);
-    await expect(undo(h, "unknown")).rejects.toThrow("Cannot undo this import. Undo is no longer available.");
+    await expect(undo(h, "unknown")).rejects.toThrow("Cannot undo this import. Undo is no longer available. Delete the database yourself if you don't want it.");
     expect(h.remove).not.toHaveBeenCalled();
   });
 
@@ -341,10 +369,39 @@ describe("database import Undo", () => {
     await expect(undo(h, result.operationId)).resolves.toBeDefined();
   });
 
+  it("keeps Undo available when a sidecar appears during delete preparation", async () => {
+    const h = await harness(), result = await seed(h);
+    const sidecar = join(h.workspace.rootPath, result.path + "-wal");
+    const remove = h.remove.getMockImplementation()!;
+    h.remove.mockImplementationOnce(async (...args) => {
+      await writeFile(sidecar, "");
+      return remove(...args);
+    });
+    await expect(undo(h, result.operationId)).rejects.toThrow("Close programs using the database, then try again.");
+    expect(existsSync(join(h.workspace.rootPath, result.path))).toBe(true);
+    expect(h.deleted).not.toHaveBeenCalled();
+    await rm(sidecar);
+    await expect(undo(h, result.operationId)).resolves.toBeDefined();
+    expect(existsSync(join(h.workspace.rootPath, result.path))).toBe(false);
+  });
+
+  it("keeps Undo available when both trash routes fail", async () => {
+    const h = await harness(), result = await seed(h);
+    const trash = join(h.workspace.rootPath, ".dohc", "trash");
+    await mkdir(join(h.workspace.rootPath, ".dohc"), { recursive: true });
+    await writeFile(trash, "blocks fallback trash");
+    await expect(undo(h, result.operationId)).rejects.toThrow();
+    expect(existsSync(join(h.workspace.rootPath, result.path))).toBe(true);
+    expect(h.deleted).not.toHaveBeenCalled();
+    await rm(trash);
+    await expect(undo(h, result.operationId)).resolves.toBeDefined();
+    expect(existsSync(join(h.workspace.rootPath, result.path))).toBe(false);
+  });
+
   it("refuses a missing file with a reason", async () => {
     const h = await harness(), result = await seed(h);
     await rm(join(h.workspace.rootPath, result.path));
-    await expect(undo(h, result.operationId)).rejects.toThrow("Cannot undo this import. data.sqlite is no longer here.");
+    await expect(undo(h, result.operationId)).rejects.toThrow("Cannot undo this import. data.sqlite is no longer here. Import the CSV again if you need the database.");
   });
 
   it("refuses an alias substituted for the imported file", async () => {
@@ -353,7 +410,7 @@ describe("database import Undo", () => {
     await rm(join(h.workspace.rootPath, result.path));
     await writeFile(join(h.workspace.rootPath, "other.sqlite"), bytes);
     await symlink(join(h.workspace.rootPath, "other.sqlite"), join(h.workspace.rootPath, result.path));
-    await expect(undo(h, result.operationId)).rejects.toThrow("Cannot undo this import. data.sqlite is no longer the imported file.");
+    await expect(undo(h, result.operationId)).rejects.toThrow("Cannot undo this import. data.sqlite is no longer the imported file. Keep it or delete it yourself.");
   });
 
   it("runs concurrent Undo calls at most once", async () => {
@@ -399,7 +456,7 @@ describe("database import Undo isolation", () => {
     const input = { workspaceId: "workspace-a", operationId: result.operationId };
     await expect(h.invoke(undoChannel, input)).rejects.toThrow("History refused");
     await writeFile(join(h.workspace.rootPath, result.path), "replacement");
-    await expect(h.invoke(undoChannel, input)).rejects.toThrow("Cannot undo this import. Undo is no longer available.");
+    await expect(h.invoke(undoChannel, input)).rejects.toThrow("Cannot undo this import. Undo is no longer available. Delete the database yourself if you don't want it.");
     expect(await readFile(join(h.workspace.rootPath, result.path), "utf8")).toBe("replacement");
     expect(h.remove).toHaveBeenCalledTimes(1);
   });
