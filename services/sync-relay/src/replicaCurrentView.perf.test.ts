@@ -60,8 +60,9 @@ it.skipIf(process.env.DOHC_REPLICA_MEASURE!=="1")("round4 measures accepted disc
     const grant=context.db.prepare("INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,access,generation,status,created_at_ms) VALUES (?,?,'user','reader','view',1,'active',1)");
     const header=context.db.prepare("INSERT INTO sync_relay_replica_cuts(workspace_id,replication_epoch,stream_identity,incarnation,cut_seq,revision,log_cursor,journal_cursor) VALUES (?,'epoch','stream','test',1,0,0,0)");
     const file=context.db.prepare("INSERT INTO sync_relay_replica_cut_files VALUES (?,'main','a','docs/a.txt','text',?,6,NULL,NULL)");
-    const blob=context.db.prepare("INSERT INTO sync_relay_replica_cut_texts VALUES (?,?,0,?,1)");
-    for(let i=0;i<1000;i++){const id=i?`message-${i}`:"w";if(i){workspace.run(id);share.run(id,id);grant.run(id,id);}header.run(id);file.run(id,sha);blob.run(id,sha,Buffer.from(text));}
+    const blob=context.db.prepare("INSERT INTO sync_relay_replica_cut_texts VALUES (?,?,0,?)");
+    const reference=context.db.prepare("INSERT INTO sync_relay_replica_cut_text_refs VALUES (?,?,1)");
+    for(let i=0;i<1000;i++){const id=i?`message-${i}`:"w";if(i){workspace.run(id);share.run(id,id);grant.run(id,id);}header.run(id);file.run(id,sha);blob.run(id,sha,Buffer.from(text));reference.run(id,sha);}
     context.db.exec("COMMIT");
   }catch(e){context.db.exec("ROLLBACK");throw e;}
   const samples:number[]=[];measured.confirmations.length=0;const cpu=process.cpuUsage();
