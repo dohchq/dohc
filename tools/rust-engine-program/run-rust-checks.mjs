@@ -140,7 +140,7 @@ writeFileSync(join(scratchRunRoot, SCRATCH_SENTINEL), scratchRunId);
 // directory, such as Homebrew's Cellar. On macOS the test step first stages the
 // app compiler's pinned Node, and the reader's tests run it.
 const stagesReaderNode = platform() === "darwin";
-if (stagesReaderNode) process.env.DOHC_READER_TEST_NODE = readerTestNode;
+if (stagesReaderNode) process.env.DOHC_READER_TEST_NODE = readerTestNode();
 
 function run(cmd) {
   // shell:true so `cargo`/`cargo.exe` resolve identically under PowerShell,

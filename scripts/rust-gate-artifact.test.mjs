@@ -28,7 +28,6 @@ import {
   chmodSync,
   cpSync,
   mkdirSync,
-  realpathSync,
 } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -37,6 +36,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { arch, platform, availableParallelism } from "node:os";
 import { RUST_ARCH, RUST_OS } from "../tools/rust-engine-program/native-target.mjs";
 import { requireCiPassVerdict } from "../tools/rust-engine-program/require-ci-pass-verdict.mjs";
+import { readerTestNode } from "../tools/rust-engine-program/reader-test-node.mjs";
 
 const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const sourceHeadLog = () => execFileSync("git", ["rev-list", "--walk-reflogs", "--count", "HEAD"], { cwd: sourceRoot, encoding: "utf8" });
@@ -45,6 +45,9 @@ const repoRoot = mkdtempSync(join(tmpdir(), "dohc-gate-repo-"));
 try {
   cpSync(join(sourceRoot, "tools/rust-engine-program"), join(repoRoot, "tools/rust-engine-program"), { recursive: true });
   cpSync(join(sourceRoot, ".gitignore"), join(repoRoot, ".gitignore"));
+  // The gate names the macOS reader test Node from the shared Node pin table.
+  mkdirSync(join(repoRoot, "apps/desktop/scripts"), { recursive: true });
+  cpSync(join(sourceRoot, "apps/desktop/scripts/pinned-node.mjs"), join(repoRoot, "apps/desktop/scripts/pinned-node.mjs"));
   mkdirSync(join(repoRoot, ".hooks"));
   const git = (...args) => execFileSync("git", args, { cwd: repoRoot, stdio: "ignore" });
   git("init", "-b", "main");
@@ -53,7 +56,7 @@ try {
   git("config", "commit.gpgsign", "false");
   git("config", "user.name", "Gate fixture");
   git("config", "user.email", "gate-fixture@example.invalid");
-  git("add", "--force", "tools", ".gitignore");
+  git("add", "--force", "tools", "apps", ".gitignore");
   git("commit", "-m", "Gate fixture");
   git("commit", "--allow-empty", "-m", "Second commit for the HEAD-move probe");
 } catch (error) {
@@ -335,9 +338,7 @@ test("macOS reader tests run the staged pinned Node; other hosts keep node on PA
     assert.ok(nextestRun > 0);
     assert.equal(commands[nextestRun - 1] === "tools/rust-engine-program/reader-test-node.mjs", darwin);
     assert.equal(commands.includes("tools/rust-engine-program/reader-test-node.mjs"), darwin);
-    // The gate resolves its own location, so compare against the real path.
-    const staged = join(realpathSync(repoRoot), "target/reader-test-node/node");
-    assert.equal(child.includes(`DOHC_READER_TEST_NODE=${staged}`), darwin);
+    if (darwin) assert.ok(child.includes(`DOHC_READER_TEST_NODE=${readerTestNode()}`), child);
     assert.equal(child.includes("DOHC_READER_TEST_NODE="), darwin);
   } finally {
     rmSync(stub, { recursive: true, force: true });
