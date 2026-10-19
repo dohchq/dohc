@@ -21,13 +21,14 @@ thread_local! {
         reads: 0, writes: 0, rows: 0, inverses: 0, commits: 0,
     }) };
 }
+const INVERSE_PROBE: &str = "CREATE TEMP TRIGGER undo_proof_inverse AFTER INSERT ON moments WHEN NEW.metadata_origin='restore' BEGIN SELECT 'undo-proof-inverse'; END;";
 fn trace_store_work(event: rusqlite::trace::TraceEvent<'_>) {
     STORE_WORK.with(|cell| {
         let mut work = cell.get();
         match event {
             rusqlite::trace::TraceEvent::Stmt(_, sql) => {
                 let sql = sql.trim().to_ascii_uppercase();
-                if sql == "-- SELECT 'UNDO-PROOF-INVERSE'" {
+                if sql.starts_with("-- SELECT 'UNDO-PROOF-INVERSE'") {
                     work.inverses += 1;
                 }
                 let sql = sql.strip_prefix("-- ").unwrap_or(&sql);
@@ -48,6 +49,23 @@ fn trace_store_work(event: rusqlite::trace::TraceEvent<'_>) {
         }
         cell.set(work);
     });
+}
+#[test]
+fn store_work_probe_counts_each_inverse_row_in_one_statement() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch("CREATE TABLE moments(metadata_origin TEXT);")
+        .unwrap();
+    conn.execute_batch(INVERSE_PROBE).unwrap();
+    STORE_WORK.with(|cell| cell.set(StoreWork::default()));
+    conn.trace_v2(
+        rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+        Some(trace_store_work),
+    );
+    conn.execute_batch("INSERT INTO moments VALUES('restore'),('restore'),('api');")
+        .unwrap();
+    let work = STORE_WORK.with(std::cell::Cell::get);
+    assert_eq!(work.inverses, 2, "count rows, not inverse statements");
+    assert!(work.reads >= 2 && work.writes >= 1);
 }
 // Start on the actor, so queued Y.Doc work cannot enter this turn's counters.
 pub(super) fn begin_turn(request: &str) {
@@ -408,20 +426,25 @@ async fn an_alias_claimed_after_check_is_not_restored_before_it_reaches_disk() {
 async fn two_thousand_members_bound_store_work_and_ydoc_wait_with_p95_under_fifty_ms() {
     let (root, supervisor, actor) = setup(2000);
     let hold = actor.hold_link_drain();
-    actor.run(|store, _| {
-        store.read_with(|conn| {
-            // Count inserted inverse rows, including a regression that inserts
-            // several members with one SQL statement. Keep the engine's row hook.
-            conn.execute_batch("CREATE TEMP TRIGGER undo_proof_inverse AFTER INSERT ON moments WHEN NEW.metadata_origin='restore' BEGIN SELECT 'undo-proof-inverse'; END;")?;
-            conn.trace_v2(
-                rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT
-                    | rusqlite::trace::TraceEventCodes::SQLITE_TRACE_ROW,
-                Some(trace_store_work),
-            );
-            Ok::<_, rusqlite::Error>(())
-        }).map_err(StorageError::corrupt_public)?;
-        Ok::<_, RuntimeError>(())
-    }).await.unwrap();
+    actor
+        .run(|store, _| {
+            store
+                .read_with(|conn| {
+                    // Count inserted inverse rows, including a regression that inserts
+                    // several members with one SQL statement. Keep the engine's row hook.
+                    conn.execute_batch(INVERSE_PROBE)?;
+                    conn.trace_v2(
+                        rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT
+                            | rusqlite::trace::TraceEventCodes::SQLITE_TRACE_ROW,
+                        Some(trace_store_work),
+                    );
+                    Ok::<_, rusqlite::Error>(())
+                })
+                .map_err(StorageError::corrupt_public)?;
+            Ok::<_, RuntimeError>(())
+        })
+        .await
+        .unwrap();
     let gates = [
         Arc::new(tokio::sync::Mutex::new(())),
         Arc::new(tokio::sync::Mutex::new(())),
