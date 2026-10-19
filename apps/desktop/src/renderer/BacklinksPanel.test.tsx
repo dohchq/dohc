@@ -512,3 +512,25 @@ it("does not let a stale Notices retry request another document", async () => {
     expect(linksIn).toHaveBeenCalledTimes(count);
   } finally { vi.useRealTimers(); }
 });
+
+
+it("keeps a focus fallback without hiding exhausted refresh failures", async () => {
+  vi.useFakeTimers();
+  try {
+    const error = new Error("engine unavailable");
+    const linksIn = vi.fn().mockResolvedValueOnce(linkQueryPage(backlinksSource("Kept"))).mockRejectedValue(error);
+    const onError = vi.fn();
+    vi.stubGlobal("dohcDesktop", { linksIn });
+    render(<BacklinksPanel workspaceId="ws" path="target.md" onError={onError} />);
+    await act(async () => {});
+    act(() => window.dispatchEvent(new Event("focus")));
+    await act(async () => {});
+    await act(async () => vi.advanceTimersByTimeAsync(750));
+    expect(linksIn).toHaveBeenCalledTimes(4);
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onError).toHaveBeenCalledWith("dohc could not load linked mentions.", error, expect.any(Function));
+    expect(screen.getByTestId("backlink-source").textContent).toContain("Kept");
+    await act(async () => vi.advanceTimersByTimeAsync(60000));
+    expect(linksIn).toHaveBeenCalledTimes(4);
+  } finally { vi.useRealTimers(); }
+});

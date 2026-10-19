@@ -120,6 +120,7 @@ export function BacklinksPanel(props: {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let delay = 250;
     let failures = 0;
+    let publishedAnswer = false;
     const identity = { chatMentionsAvailable, workspaceId, path, refreshKey, focusNonce };
     const prior = previousRequest.current;
     const focusOnly = prior && sameBacklinksLoadBase(prior.identity, identity)
@@ -150,6 +151,7 @@ export function BacklinksPanel(props: {
     const publish = (outcome: BacklinksLoadOutcome) => {
       if (!active) return;
       if (outcome.ok) {
+        publishedAnswer = true;
         failures = 0;
         setLoaded({ workspaceId, path, ...outcome.result });
         if (!outcome.result.indexBuilding) {
@@ -174,7 +176,10 @@ export function BacklinksPanel(props: {
     const currentResponse = focusOnly && prior
       ? response.then(outcome => outcome.ok ? outcome : prior.response) : response;
     previousRequest.current = { identity, response: currentResponse };
-    void currentResponse.then(publish);
+    if (focusOnly && prior) void currentResponse.then(outcome => {
+      if (active && outcome.ok && !publishedAnswer) setLoaded({ workspaceId, path, ...outcome.result });
+    });
+    void response.then(publish);
     return () => { active = false; clearTimeout(timer); };
   }, [chatMentionsAvailable, workspaceId, path, refreshKey, focusNonce]);
 
