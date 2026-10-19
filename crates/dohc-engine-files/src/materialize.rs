@@ -2756,10 +2756,17 @@ fn move_aside(
         .into_iter()
         .map(|row| row.displaced_name)
         .collect();
+    let mut original_path = PathBuf::from(&moved.target_path);
+    if let Some(leaf) = other_leaf_spelling(target)
+        .as_deref()
+        .or_else(|| target.file_name())
+    {
+        original_path.set_file_name(leaf);
+    }
     let spec = DisplacementSpec {
         job_id: moved.job_id.clone(),
         workspace_id: moved.workspace_id.clone(),
-        target_path: moved.target_path.clone(),
+        target_path: original_path.to_string_lossy().replace('\\', "/"),
         displaced_name: unused_staged_name(staging, &moved.job_id, &taken)?,
         expected_sha256: content.to_owned(),
         content_sha256: Some(content.to_owned()),
