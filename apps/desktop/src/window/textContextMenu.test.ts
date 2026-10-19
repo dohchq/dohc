@@ -84,7 +84,7 @@ describe("text menu template", () => {
     });
   });
 
-  it("follows the macOS text menu: Look up and Speech, no Undo or Redo, and Paste and Match Style", () => {
+  it("follows the macOS text menu: Look up, Substitutions and Speech, no Undo or Redo, and Paste and Match Style", () => {
     const run = actions();
     const template = textMenuTemplate(params({
       ...editable,
@@ -96,7 +96,12 @@ describe("text menu template", () => {
       "the", "Add to dictionary", "-",
       "Look up “teh”", "-",
       "role:cut", "role:copy", "role:paste", "role:pasteAndMatchStyle", "role:selectAll", "-",
-      "Speech",
+      "Substitutions", "Speech",
+    ]);
+    // The same items as Edit > Substitutions and Edit > Speech.
+    expect(template.at(-2)?.submenu).toEqual([
+      { role: "showSubstitutions" }, { type: "separator" },
+      { role: "toggleSmartQuotes" }, { role: "toggleSmartDashes" }, { role: "toggleTextReplacement" },
     ]);
     expect(template.at(-1)?.submenu).toEqual([{ role: "startSpeaking" }, { role: "stopSpeaking" }]);
     click(template, "Look up “teh”");
@@ -112,8 +117,17 @@ describe("text menu template", () => {
   it("offers Paste and Match Style on macOS only while Paste applies", () => {
     const nothingToPaste = params({ isEditable: true, editFlags: { ...noFlags, canSelectAll: true } });
     expect(shape(textMenuTemplate(nothingToPaste, "darwin", actions()))).toEqual([
-      "role:cut", "role:copy", "role:paste", "role:selectAll",
+      "role:cut", "role:copy", "role:paste", "role:selectAll", "-", "Substitutions",
     ]);
+  });
+
+  it("offers Substitutions only in a macOS field that is not a password", () => {
+    const field = params(editable);
+    expect(shape(textMenuTemplate(field, "darwin", actions()))).toContain("Substitutions");
+    expect(shape(textMenuTemplate(field, "win32", actions()))).not.toContain("Substitutions");
+    expect(shape(textMenuTemplate(field, "linux", actions()))).not.toContain("Substitutions");
+    const password = params({ ...editable, formControlType: "input-password" });
+    expect(shape(textMenuTemplate(password, "darwin", actions()))).not.toContain("Substitutions");
   });
 
   it("offers Copy for a selection outside a field, and Look up only on macOS", () => {
@@ -167,13 +181,13 @@ describe("text menu on a window", () => {
     return { window, contents };
   }
 
-  it("pops the menu over the window for a right-click in the app's own page", () => {
+  it("pops the menu over the window and its page for a right-click in the app's own page", () => {
     const { window, contents } = windowWithContents();
     contents.emit("context-menu", {}, {
       ...params({ ...editable, misspelledWord: "teh", selectionText: "teh", dictionarySuggestions: ["the"] }),
       frame: mainFrame,
     });
-    expect(popup).toHaveBeenCalledExactlyOnceWith({ window });
+    expect(popup).toHaveBeenCalledExactlyOnceWith({ window, frame: mainFrame });
     const template = buildFromTemplate.mock.calls[0]![0] as MenuItemConstructorOptions[];
     click(template, "the");
     expect(contents.replaceMisspelling).toHaveBeenCalledExactlyOnceWith("the");
@@ -181,6 +195,15 @@ describe("text menu on a window", () => {
     expect(contents.session.addWordToSpellCheckerDictionary).toHaveBeenCalledExactlyOnceWith("teh");
     click(template, "Look up “teh”");
     expect(contents.showDefinitionForSelection).toHaveBeenCalledOnce();
+  });
+
+  it("keeps macOS's own items, such as Services, out of a password field's menu", () => {
+    const { window, contents } = windowWithContents();
+    contents.emit("context-menu", {}, {
+      ...params({ ...editable, selectionText: "hunter2", formControlType: "input-password" }),
+      frame: mainFrame,
+    });
+    expect(popup).toHaveBeenCalledExactlyOnceWith({ window });
   });
 
   it("leaves every other frame, a missing frame, and empty targets without a menu", () => {
