@@ -344,7 +344,7 @@ impl EngineService {
             }
             "engine.ping" => {
                 if self.replica_mode.is_some() {
-                    json!({"ok":true, "mode":"replica", "sandboxLevel":"none"})
+                    json!({"ok":true, "mode":"replica", "landlockAbi":crate::replica_sandbox::applied_policy_abi()})
                 } else {
                     engine_ping()
                 }

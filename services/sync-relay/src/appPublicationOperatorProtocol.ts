@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 export const OPERATOR_TIMEOUT_MS = 10_000;
 export const OPERATOR_MAX_REQUEST_BYTES = 8192;
@@ -23,4 +23,11 @@ export function parseDisableRequest(value: unknown): DisablePublicationRequest {
       typeof row.reason !== "string" || !row.reason.trim() || row.reason.length > 1024 ||
       Buffer.byteLength(row.reason) > 4096 || row.reason.includes("\0")) throw new Error("Invalid takedown request. Supply a publication ID and a reason of 1 to 1024 characters.");
   return {type: "disable-publication", publicationId: row.publicationId, reason: row.reason};
+}
+
+// Deployment configuration lives on /continuity, outside every replica store.
+export function operatorSecretPath(env: NodeJS.ProcessEnv = process.env): string {
+  if (env.DOHC_RELAY_DEPLOYMENT_CONFIG) return join(dirname(resolve(env.DOHC_RELAY_DEPLOYMENT_CONFIG)), "publication-operator.secret");
+  const key = createHash("sha256").update(resolve(env.SYNC_RELAY_DB_PATH ?? join(tmpdir(), "dohc-sync-relay.sqlite"))).digest("hex").slice(0, 24);
+  return join(tmpdir(), `dohc-relay-continuity-${key}`, "publication-operator.secret");
 }

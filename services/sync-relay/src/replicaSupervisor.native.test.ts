@@ -19,7 +19,7 @@ const engineBinary = requireEngineBinaryOrSkip();
 afterEach(closeTestStorages);
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
-it.skipIf(engineBinary.missing || process.platform === "win32")("supervised replica child converges through its socket in the four owner scenarios", async () => {
+it.skipIf(engineBinary.missing || process.platform !== "linux")("supervised replica child converges through its socket in the four owner scenarios", async () => {
   const executable = engineBinary.require();
   const root = await tempRoot("supervised-native"), storage = await testStorage();
   const owner = "replica-owner@dohc.test", workspaceId = "supervised", bearer = `user:${owner}`;
@@ -47,7 +47,7 @@ it.skipIf(engineBinary.missing || process.platform === "win32")("supervised repl
   const address = server.address(); if (!address || typeof address === "string") throw Error("Missing relay port.");
   const baseUrl = `http://127.0.0.1:${address.port}`;
   const stores = new Map<string, { dir: string }>();
-  const start = createReplicaEngineStarter({ engineExecutable: executable!, allowUnisolatedDevelopment: true });
+  const start = createReplicaEngineStarter({ engineExecutable: executable!, allowDevelopment: true });
   const failures: unknown[] = [];
   let attempts = 0, roleRefusals = 0;
   supervisor = createReplicaSupervisor({ storage, storeRoot: join(root, "replicas"), idleMs: 120_000,

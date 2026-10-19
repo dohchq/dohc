@@ -75,6 +75,31 @@ impl From<Envelope> for OutputItem {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args == ["--replica-sandbox-check"] {
+        let mut random = [0u8; 16];
+        getrandom::fill(&mut random)?;
+        let store = std::env::temp_dir().join(format!(
+            "dohc-sandbox-check-{:032x}",
+            u128::from_le_bytes(random)
+        ));
+        std::fs::create_dir(&store)?;
+        let result = std::process::Command::new(std::env::current_exe()?)
+            .arg("--replica-sandbox-check-store")
+            .arg(&store)
+            .status();
+        std::fs::remove_dir(&store)?;
+        if !result?.success() {
+            return Err(io::Error::other("replica sandbox check failed").into());
+        }
+        return Ok(());
+    }
+    if args.len() == 2 && args[0] == "--replica-sandbox-check-store" {
+        println!(
+            "Landlock policy ABI {}",
+            dohc_workspace_engine::replica_sandbox::apply(std::path::Path::new(&args[1]))?
+        );
+        return Ok(());
+    }
     if args == ["--projection-only"] {
         if std::env::var_os("DOHC_ENGINE_LIVE_HOST_CONFIG").is_some()
             || std::env::var_os("DOHC_ENGINE_OWNER_HOST_CONFIG").is_some()
@@ -88,6 +113,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
     let replica = args == ["--replica"];
+    if replica {
+        dohc_workspace_engine::replica_sandbox::apply(&std::env::current_dir()?)?;
+    }
     let passive = replica || args == ["--store-role", "passive"];
     if !args.is_empty() && !passive {
         return Err(io::Error::other("unknown engine arguments").into());
@@ -98,7 +126,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         .ok_or_else(|| {
             io::Error::new(io::ErrorKind::PermissionDenied, "engine auth token missing")
         })?;
-    tokio::runtime::Runtime::new()?.block_on(run_stdio(auth_token, passive, replica))
+    let runtime = if replica {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(4)
+            .enable_all()
+            .build()?
+    } else {
+        tokio::runtime::Runtime::new()?
+    };
+    runtime.block_on(run_stdio(auth_token, passive, replica))
 }
 
 fn passive_ingress(

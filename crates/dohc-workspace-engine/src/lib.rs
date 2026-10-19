@@ -4,6 +4,7 @@
 
 pub mod projection_stdio;
 mod replica_mode;
+pub mod replica_sandbox;
 
 mod automation_recovery;
 pub(crate) mod capture_driver;

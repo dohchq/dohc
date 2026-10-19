@@ -1,13 +1,13 @@
 import { createConnection } from "node:net";
 import { OPERATOR_MAX_RESPONSE_BYTES, OPERATOR_TIMEOUT_MS, type DisablePublicationRequest, type OperatorResponse } from "./appPublicationOperatorProtocol";
 
-export function requestPublicationTakedown(path: string, request: DisablePublicationRequest, timeoutMs = OPERATOR_TIMEOUT_MS): Promise<OperatorResponse> {
+export function requestPublicationTakedown(path: string, request: DisablePublicationRequest, secret: string, timeoutMs = OPERATOR_TIMEOUT_MS): Promise<OperatorResponse> {
   return new Promise((resolve, reject) => {
     const socket = createConnection(path);
     const deadline = setTimeout(() => socket.destroy(new Error("Publication takedown timed out. Check the relay before retrying.")), timeoutMs);
     socket.once("close", () => clearTimeout(deadline));
     socket.once("error", reject);
-    socket.once("connect", () => socket.write(JSON.stringify(request) + "\n"));
+    socket.once("connect", () => socket.write(JSON.stringify({...request, secret}) + "\n"));
     let bytes = Buffer.alloc(0);
     socket.on("data", chunk => {
       if (bytes.length + chunk.length > OPERATOR_MAX_RESPONSE_BYTES) {socket.destroy(new Error("Invalid operator response.")); return;}
