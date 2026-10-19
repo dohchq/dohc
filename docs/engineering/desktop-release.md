@@ -456,11 +456,11 @@ The 30-minute and sleep locks no longer limit this. Code that runs during a
 build can unlock the keychain, sign, and lock it again without the command
 noticing. Anyone with your login password can also open the release keychain,
 including from a backup of both keychain files. Without a saved password, a
-program can sign and read the PostHog key only while a release has the
-keychain unlocked, and cannot take the Developer ID key or the App Store
+program can sign, notarize, and read the PostHog key only while a release has
+the keychain unlocked, and cannot take the Developer ID key or the App Store
 Connect API key.
 
-If you think a program took them, revoke the App Store Connect API key and the
+If you think a program took the keys, revoke the App Store Connect API key and the
 PostHog key, and email product-security@apple.com to ask Apple to revoke the
 Developer ID certificate. You cannot revoke it from your account. After Apple
 revokes it, Macs no longer install releases signed with it.
