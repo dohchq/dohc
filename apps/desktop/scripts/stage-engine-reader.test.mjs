@@ -104,7 +104,7 @@ for (const platform of ["win32", "linux"]) test(`${platform} packaged resources 
   await chmod(join(resources, "engine-reader", staged.generation), 0o700);
   await rm(join(root, "source"), { recursive: true, force: true });
   const installed = await requireEngineReader(packaged, platform, "x64");
-  assert.deepEqual(JSON.parse(installedReaderConfig(packaged, platform)), installed);
+  assert.deepEqual(JSON.parse(installedReaderConfig(packaged, platform, "x64")), installed);
   assert.equal(installedReaderConfig(packaged, platform, "arm64"), undefined);
   assert.equal(installed.node, platform === "win32" ? join(packaged, "app-compiler/node.exe") : join(packaged, "engine-reader", staged.generation, "node"));
   // Every packaged asset fails closed before engine launch.

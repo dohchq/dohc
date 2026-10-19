@@ -161,14 +161,12 @@ impl Reader {
     fn with_deadlines(config: Option<Config>, deadlines: Deadlines) -> Self {
         let shared = Arc::new(Shared::default());
         let owned = shared.clone();
-        let owner = config
-            .filter(|_| cfg!(any(windows, target_os = "linux")))
-            .and_then(|config| {
-                thread::Builder::new()
-                    .name("markdown-reader".into())
-                    .spawn(move || drive(owned, config, deadlines))
-                    .ok()
-            });
+        let owner = config.and_then(|config| {
+            thread::Builder::new()
+                .name("markdown-reader".into())
+                .spawn(move || drive(owned, config, deadlines))
+                .ok()
+        });
         shared.state.lock().unwrap().closed = owner.is_none();
         Self {
             shared,

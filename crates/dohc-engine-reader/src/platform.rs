@@ -57,7 +57,7 @@ fn check_owner(metadata: &std::fs::Metadata, directory: bool) -> std::io::Result
     use std::os::unix::fs::MetadataExt;
     // SAFETY: geteuid has no pointer arguments or side effects.
     let owner = unsafe { libc::geteuid() };
-    let sticky_root = directory && metadata.uid() == 0 && metadata.mode() & libc::S_ISVTX != 0;
+    let sticky_root = directory && metadata.uid() == 0 && metadata.mode() & 0o1000 != 0;
     if !sticky_root
         && (metadata.mode() & 0o022 != 0 || (metadata.uid() != 0 && metadata.uid() != owner))
     {
