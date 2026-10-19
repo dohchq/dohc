@@ -4,6 +4,7 @@ use crate::{
     ydoc_apply::{map_collab_hard_error, project_ydoc_with_store},
 };
 use dohc_engine_collab::{DocKey, durable};
+use dohc_engine_storage::text;
 use dohc_engine_storage::{EngineStore, hex_sha256, replica::read_frontiers};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -180,7 +181,7 @@ pub fn collect_current_view_cached(
             let text = if !oversized_snapshot && file.content_kind == "text" && !known.contains(&sha) {
                 Some(CurrentViewText {sha256: sha.clone(), text: match text {
                     Some(text) => text,
-                    None => tx.query_row("SELECT text FROM blobs WHERE sha256=?1",[&sha],|r|r.get(0)).map_err(SyncError::corrupt)?,
+                    None => text::read(&tx, &sha).map_err(SyncError::corrupt)?,
                 }})
             } else {None};
             let size = file_bytes + text.as_ref().map(|t| serde_json::to_vec(t).map(|b| b.len())).transpose().map_err(SyncError::corrupt)?.unwrap_or(0) + 2;

@@ -1,3 +1,4 @@
+import { linksOperations } from "./linksOperations";
 import { WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 import { SharedDocumentOpenState } from "./sharedDocumentOpenState";
 import { shareCopyOperations } from "./shareCopyOperations";
@@ -448,6 +449,7 @@ export const RetryOwnerLiveSharePayload = WorkspaceIdPayload.extend({shareId: OW
 export type RetryOwnerLiveSharePayload = z.infer<typeof RetryOwnerLiveSharePayload>;
 
 export const ListWorkspaceFilesPayload = WorkspaceIdPayload.extend({
+  filePath: PATH_STRING.optional(),
   // Activity refreshes may reuse main's last complete listing. Every other
   // caller omits this and forces a disk/share walk, so direct mutations and
   // the Explorer's explicit refresh cannot observe a pre-watcher cache.
@@ -1182,37 +1184,6 @@ export const WorkspaceGraphResult = z.object({
 });
 export type WorkspaceGraphResult = z.infer<typeof WorkspaceGraphResult>;
 
-// Backlinks ("Linked mentions"): the open document's inbound links, derived
-// read-only in main from the same source graph. `path` is the open file; the
-// result lists every other file that links to it with a highlighted snippet per
-// mention. Bounds mirror workspaceGraph's MAX_BACKLINK_* caps (kept as literals
-// here so this shared contract never imports the main-only fs module).
-export const GetBacklinksPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  path: PATH_STRING,
-});
-export type GetBacklinksPayload = z.infer<typeof GetBacklinksPayload>;
-
-const BacklinkSnippet = z.object({
-  // A single source line, trimmed/windowed to ~160 chars (+ ellipses).
-  text: z.string().max(400),
-  line: z.number().int().positive(),
-  // [start, end) of the link within `text`; the UI marks this range.
-  highlightStart: z.number().int().nonnegative(),
-  highlightEnd: z.number().int().nonnegative(),
-});
-
-const BacklinkSource = z.object({
-  sourcePath: PATH_STRING,
-  sourceTitle: z.string().max(120),
-  snippets: z.array(BacklinkSnippet).max(20),
-});
-
-export const GetBacklinksResult = z.object({
-  sources: z.array(BacklinkSource).max(500),
-});
-export type GetBacklinksResult = z.infer<typeof GetBacklinksResult>;
-
 export const ListWorkspaceHeadingsPayload = z.object({
   workspaceId: WORKSPACE_ID,
   path: PATH_STRING,
@@ -1606,10 +1577,17 @@ const SHARED_AUTHOR_ID = z.string().min(1).refine(
 // Display only. This token grants no workspace or author authority.
 export const ActorPresentation = z.object({
   group: z.string(),
-  hue: z.enum(["rust", "amber", "teal", "blue", "indigo", "plum", "rose", "olive"]).nullable(),
+  hue: z.enum(["rust", "amber", "teal", "blue", "indigo", "plum", "rose"]).nullable(),
   self: z.boolean(),
 });
 export type ActorPresentation = z.infer<typeof ActorPresentation>;
+export const AgentColorChangedEvent = z.object({
+  workspaceId: WorkspaceIdPayload.shape.workspaceId,
+  group: z.string(),
+  hue: ActorPresentation.shape.hue,
+}).strict();
+export type AgentColorChangedEvent = z.infer<typeof AgentColorChangedEvent>;
+export const SetAgentColorPayload = AgentColorChangedEvent;
 
 // A Collection automation's name or its Collection's, as History reads it.
 export const AUTOMATION_AUTHOR_TEXT_MAX = 4096;
@@ -6889,7 +6867,7 @@ export type EngineYDocLineageReplacementEvent = z.infer<
 export const ReadOnlyTransitionCause = z.enum(["access-ended", "reconnecting", "lineage-failure"]);
 export type ReadOnlyTransitionCause = z.infer<typeof ReadOnlyTransitionCause>;
 
-export const SaveFailureReason = z.enum(["read-only", "privacy-denied"]).nullable();
+export const SaveFailureReason = z.enum(["read-only", "privacy-denied", "volume-shares-new-files"]).nullable();
 export type SaveFailureReason = z.infer<typeof SaveFailureReason>;
 
 export const EngineYDocSaveStateEvent = z.object({
@@ -7013,6 +6991,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof sharedChannelOperations>,
     OperationBridge<typeof relayShareOperations>,
     OperationBridge<typeof shareCopyOperations>,
+    OperationBridge<typeof linksOperations>,
     OperationBridge<typeof systemMotionOperations>,
     OperationBridge<typeof systemPrivacySettingsOperations>,
     OperationBridge<typeof serverAccountOperations>,
@@ -7092,7 +7071,6 @@ export interface DohcDesktopBridge
   readWorkspaceGraph(
     payload: ReadWorkspaceGraphPayload,
   ): Promise<WorkspaceGraphResult>;
-  getBacklinks(payload: GetBacklinksPayload): Promise<GetBacklinksResult>;
   listWorkspaceHeadings(
     payload: ListWorkspaceHeadingsPayload,
   ): Promise<ListWorkspaceHeadingsResult>;
@@ -7221,6 +7199,7 @@ export interface DohcDesktopBridge
   detectAgentTools(payload: AgentRunPayload): Promise<AgentToolsResult>;
   setTitlebarTheme(payload: SetTitlebarThemePayload): Promise<void>;
   onWindowFullScreen(listener: (event: WindowFullScreenEvent) => void): () => void;
+  onAgentColorChanged(listener: (event: AgentColorChangedEvent) => void): () => void;
   onUserSettingsChanged(
     listener: (result: DesktopUserSettingsResult) => void,
   ): () => void;

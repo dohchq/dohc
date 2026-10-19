@@ -1,3 +1,4 @@
+import { linksOperations } from "./ipc/linksOperations";
 import { shareHandoffOperations, shareMountOperations, shareProposalOperations, sharedChannelOperations, relayShareOperations } from "./ipc/shareOperations";
 import { chatOperations } from "./ipc/chatOperations";
 import { contextBridge, ipcRenderer, webUtils } from "electron";
@@ -28,6 +29,7 @@ import {
   serverAccountOperations,
   SitePreviewReplacedEvent,
   DesktopUserSettingsResult,
+  AgentColorChangedEvent,
   ShareDirectWritesPushedEvent,
   shareDirectWriteDeliveryOperations,
   EngineYDocLineageReplacementEvent,
@@ -144,6 +146,7 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(historyOperations, invoke),
   ...operationBridge(shareDirectWriteDeliveryOperations, invoke),
   ...operationBridge(shareCopyOperations, invoke),
+  ...operationBridge(linksOperations, invoke),
   ...operationBridge(accessOperations, invoke),
   platform: process.platform,
   devTools: devToolsGranted(process.argv),
@@ -217,7 +220,6 @@ const bridge: DohcDesktopBridge = {
   },
   readWorkspaceGraph: (payload) =>
     ipcRenderer.invoke(CHANNELS.readWorkspaceGraph, payload),
-  getBacklinks: (payload) => ipcRenderer.invoke(CHANNELS.getBacklinks, payload),
   listWorkspaceHeadings: (payload) =>
     ipcRenderer.invoke(CHANNELS.listWorkspaceHeadings, payload),
   readWorkspaceDatabase: (payload) =>
@@ -461,6 +463,7 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.setTitlebarTheme, payload),
   onWindowFullScreen: (listener) =>
     onEvent(CHANNELS.windowFullScreen, WindowFullScreenEvent, listener),
+  onAgentColorChanged: listener => onEvent(CHANNELS.agentColorChanged, AgentColorChangedEvent, listener),
   onUserSettingsChanged: (listener) =>
     onEvent(CHANNELS.userSettingsChanged, DesktopUserSettingsResult, listener),
   stepWindowZoom: (payload) =>

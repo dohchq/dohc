@@ -414,6 +414,7 @@ impl LiveApplicationIngress {
         mut request: Request,
         connection: &ConnectionHandle,
     ) -> Result<(), WireError> {
+        self.service.guard_replica_request(&mut request)?;
         if restore::is_method(&request.method) {
             return restore::begin(self, request, connection);
         }

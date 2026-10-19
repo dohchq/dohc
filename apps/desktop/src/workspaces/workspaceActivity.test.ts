@@ -89,10 +89,11 @@ describe("workspaceActivity capture hooks", () => {
   it("attaches observation after capture fails and queues sync only for capture announcements", async () => {
     let observation!: WorkspaceObservationCallbacks;
     const queueSync = vi.fn();
+    const queueWatchedUpload = vi.fn();
     const activity = createWorkspaceActivity(vi.fn(), {
       observationFor: (w, callbacks) => { observation = callbacks; return idleObservation(w, callbacks); },
       captureFor: () => { throw new Error("capture failed"); },
-      engineFor: () => ({ start: async () => {}, stop: async () => {}, queueSync, snapshot: () => ({}) }) as never,
+      engineFor: () => ({ start: async () => {}, stop: async () => {}, queueSync, queueWatchedUpload, snapshot: () => ({}) }) as never,
     });
     const status = await activity.open(workspace());
     expect(status.historyRecordingUnavailable).toBe(true);
@@ -100,6 +101,7 @@ describe("workspaceActivity capture hooks", () => {
     expect(queueSync).not.toHaveBeenCalled();
     observation.captured();
     expect(queueSync).toHaveBeenCalledOnce();
+    expect(queueWatchedUpload).toHaveBeenCalledExactlyOnceWith();
     await activity.stopAll();
   });
 
@@ -610,6 +612,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       queueSync: () => {
         queued += 1;
       },
+      queueWatchedUpload: () => {},
       queuePull: () => {},
       retryNow: async () => undefined,
       snapshot: () => ({
@@ -653,7 +656,7 @@ describe("workspaceActivity cloud sync nudge", () => {
   describe("the Collections wait across signing in and out", () => {
     // Signing in attaches this engine; it knows nothing about the wait.
     const syncEngine = () => ({
-      start: async () => {}, queueSync: () => {}, queuePull: () => {}, retryNow: async () => undefined, stop: async () => {},
+      start: async () => {}, queueSync: () => {}, queuePull: () => {}, queueWatchedUpload: () => {}, retryNow: async () => undefined, stop: async () => {},
       snapshot: () => ({
         syncFailure: null, retrying: false, syncing: true, lastSyncedAtMs: null, pendingChangeCount: 0,
         conflictCount: 0, authExpired: false, sharingDeclined: [],
@@ -817,6 +820,7 @@ describe("workspaceActivity cloud sync nudge", () => {
     const engine = {
       start: async () => {},
       queueSync: () => {},
+      queueWatchedUpload: () => {},
       queuePull: () => {},
       retryNow: async () => { passes += 1; },
       snapshot: () => ({
@@ -842,6 +846,7 @@ describe("workspaceActivity cloud sync nudge", () => {
     const engine = {
       start: async () => {},
       queueSync: () => {},
+      queueWatchedUpload: () => {},
       queuePull: () => {},
       retryNow: async () => undefined,
       snapshot: () => ({
@@ -877,6 +882,7 @@ describe("workspaceActivity cloud sync nudge", () => {
     const engine = {
       start: async () => {},
       queueSync: () => {},
+      queueWatchedUpload: () => {},
       queuePull: () => {},
       retryNow: async () => undefined,
       snapshot: () => ({
@@ -911,6 +917,7 @@ describe("workspaceActivity cloud sync nudge", () => {
     const engine = {
       start: async () => {},
       queueSync: () => {},
+      queueWatchedUpload: () => {},
       queuePull: () => {},
       retryNow: async () => undefined,
       snapshot: () => ({
@@ -964,6 +971,7 @@ describe("workspaceActivity cloud sync nudge", () => {
         return {
           start: async () => undefined,
           queueSync: () => undefined,
+          queueWatchedUpload: () => {},
           queuePull: () => undefined,
           retryNow: async () => undefined,
           snapshot: () => ({
@@ -1023,6 +1031,7 @@ describe("workspaceActivity cloud sync nudge", () => {
         engineFor: () => ({
           start: async () => undefined,
           queueSync: () => undefined,
+          queueWatchedUpload: () => {},
           queuePull: () => undefined,
           retryNow: async () => undefined,
           snapshot: () => ({
@@ -1193,6 +1202,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       engineFor: () => ({
         start: async () => undefined,
         queueSync: () => undefined,
+        queueWatchedUpload: () => {},
         queuePull: () => undefined,
         retryNow: async () => undefined,
         snapshot: () => ({

@@ -12,12 +12,8 @@
 use std::ffi::CString;
 use std::path::Path;
 
-/// The esbuild binary's package for the owner's own architecture.
-const ESBUILD: &str = if cfg!(target_arch = "aarch64") {
-    "node_modules/@esbuild/darwin-arm64/bin/esbuild"
-} else {
-    "node_modules/@esbuild/darwin-x64/bin/esbuild"
-};
+/// The staged esbuild binary. dohc ships for Apple silicon only.
+const ESBUILD: &str = "node_modules/@esbuild/darwin-arm64/bin/esbuild";
 
 /// An SBPL string literal for a canonical absolute path. Refuses paths that
 /// are not UTF-8 or that hold control characters, which SBPL or a log line

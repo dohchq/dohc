@@ -1,6 +1,7 @@
 // In-document find & replace — Cmd/Ctrl+F opens a find bar, and ⌥⌘F on macOS
 // or Ctrl+H elsewhere opens it with the replace row expanded. ⌘G on macOS or
-// F3 elsewhere finds the next match, with Shift the previous one. Search state
+// F3 elsewhere finds the next match, with Shift the previous one. macOS's
+// Edit > Find menu runs the same commands (`runFindCommand`). Search state
 // (query, case sensitivity, active-match index, the replace row's
 // open/value) lives entirely in a ProseMirror plugin, not React state: the
 // plugin is the single source of truth, `FindReplaceBar.tsx` just renders
@@ -24,7 +25,8 @@
 import { Extension, type Editor } from '@tiptap/core'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { Plugin, PluginKey, type EditorState, type Transaction } from '@tiptap/pm/state'
-import { Decoration, DecorationSet } from '@tiptap/pm/view'
+import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view'
+import type { EditorMenuCommand } from '../../ipc/channels'
 import { matchesShortcut } from '../../shortcuts/shortcutRegistry'
 
 export const findReplaceKey = new PluginKey<FindReplaceState>('dohc-find-replace')
@@ -270,16 +272,20 @@ export function makeFindReplacePlugin() {
       decorations(state) {
         return buildFindDecorations(state)
       },
-      // Find again works from the document while the bar has a query.
       handleKeyDown(view, event) {
         const step = findStepForKey(event)
-        const find = findReplaceKey.getState(view.state)
-        if (!step || !find?.open || !find.query) return false
-        view.dispatch(view.state.tr.setMeta(findReplaceKey, { type: step } satisfies FindReplaceAction))
-        return true
+        return step !== null && findAgain(view, step)
       },
     },
   })
+}
+
+// Find again works from the document while the bar has a query.
+function findAgain(view: EditorView, step: 'next' | 'prev'): boolean {
+  const find = findReplaceKey.getState(view.state)
+  if (!find?.open || !find.query) return false
+  view.dispatch(view.state.tr.setMeta(findReplaceKey, { type: step } satisfies FindReplaceAction))
+  return true
 }
 
 function openFindReplace(editor: Editor, replace: boolean) {
@@ -292,6 +298,16 @@ function openFindReplace(editor: Editor, replace: boolean) {
     query: selected || undefined,
   } satisfies FindReplaceAction)
   editor.view.dispatch(tr)
+}
+
+/** What each find shortcut runs, by its shortcut id. Returns whether the
+ *  editor took the command, as a keymap handler does. */
+export function runFindCommand(editor: Editor, command: EditorMenuCommand): boolean {
+  if (command === 'find-again-next' || command === 'find-again-previous') {
+    return findAgain(editor.view, command === 'find-again-next' ? 'next' : 'prev')
+  }
+  openFindReplace(editor, command === 'editor-replace')
+  return true
 }
 
 /** The Tiptap extension: wires Find and Replace, and registers the
@@ -308,14 +324,8 @@ export const findReplaceExtension = Extension.create({
     // the key reports the Option character ƒ.
     const replace = window.dohcDesktop?.platform === 'darwin' ? 'Mod-Alt-f' : 'Mod-h'
     return {
-      'Mod-f': ({ editor }) => {
-        openFindReplace(editor, false)
-        return true
-      },
-      [replace]: ({ editor }) => {
-        openFindReplace(editor, true)
-        return true
-      },
+      'Mod-f': ({ editor }) => runFindCommand(editor, 'editor-find'),
+      [replace]: ({ editor }) => runFindCommand(editor, 'editor-replace'),
     }
   },
 })

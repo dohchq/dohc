@@ -13,7 +13,7 @@ import {
   createRelaySyncEngine,
   type RelaySyncOperations,
 } from "./relaySyncEngine";
-import { createRelayLogWait } from "./relayLogWait";
+import { type RelayLogChange, createRelayLogWait } from "./relayLogWait";
 import { relayApiFetch } from "./sharedChannels";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 
@@ -90,8 +90,8 @@ function relayWaits(options: { ignoreAbort?: boolean } = {}) {
   }> = [];
   return {
     wait: (since: number, signal: AbortSignal) =>
-      new Promise<boolean>((resolve, reject) => {
-        started.push({ since, signal, resolve, reject });
+      new Promise<RelayLogChange>((resolve, reject) => {
+        started.push({ since, signal, resolve: hasMore => resolve({hasMore, watched: false}), reject });
         if (!options.ignoreAbort) signal.addEventListener("abort", () => reject(signal.reason));
       }),
     read: (index: number) => started[index]!,
@@ -110,7 +110,7 @@ function engine(input: {
   afterPass?: (pass: { failed: boolean }) => Promise<boolean>;
   operations?: RelaySyncOperations;
   idlePullMs?: number;
-  waitForChange?: (since: number, signal: AbortSignal) => Promise<boolean>;
+  waitForChange?: (since: number, signal: AbortSignal) => Promise<RelayLogChange>;
 }) {
   return createRelaySyncEngine({
     rootDir: "/tmp/workspace",
@@ -1452,7 +1452,7 @@ describe("relaySyncEngine", () => {
       idlePullMs: 5 * 60_000,
       waitForChange: (since) => {
         reads.push(since);
-        return new Promise((resolve) => setTimeout(() => resolve(false), 25_000));
+        return new Promise((resolve) => setTimeout(() => resolve({hasMore: false, watched: false}), 25_000));
       },
     });
     await sync.start();

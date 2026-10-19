@@ -51,6 +51,7 @@ import {
   isConflictStaleTargetRefusal,
   isEngineStoreBusyRefusal,
   isFileLockedRefusal,
+  isVolumeSharesNewFilesRefusal,
   isYdocUpdateAdmissionRefusal,
   ydocUpdateDependsOn,
   isTransientEngineRefusal,
@@ -577,8 +578,9 @@ export interface WorkspaceEngineCapture {
     // file, which is silent data loss.
     // Tokens identify settles across daemon generations. Lifecycle events are
     // separate from visible state: a busy outcome still reports "settling".
-    // Opening and corrective status reports claim no edits.
-    onSaveState?: (state: EngineYDocSaveState, token: number, event: EngineYDocSaveEvent, authorCapacity?: boolean) => void;
+    // Opening and corrective status reports claim no edits. `failure` is the
+    // error a failed settle met; capture sends no read-only cause.
+    onSaveState?: (state: EngineYDocSaveState, token: number, event: EngineYDocSaveEvent, authorCapacity?: boolean, readOnlyCause?: undefined, failure?: unknown) => void;
   }): Promise<WorkspaceEngineYDocProviderSession>;
   // WS-G2-C-2: flush + release any live Y.Doc session at OR under a
   // path before a destructive op that does not run through the capture chain
@@ -748,6 +750,9 @@ export interface WorkspaceEngineCapture {
   runRelaySync<T>(
     task: (materializePage: MaterializeRelayPullPage) => Promise<T>,
   ): Promise<T>;
+  // Journaled edits only. Owner-outbox acknowledgements use their live lane.
+  onDurableLocalChange(handler: (path: string) => void): () => void;
+  readonly shuttingDown: boolean;
   // Resolves when everything enqueued so far has been captured.
   flush(): Promise<void>;
   // Stops accepting work and resolves once in-flight capture is durably
@@ -863,6 +868,12 @@ function hasRefusalInCauseChain(
 
 function isFileLockedCause(error: unknown): boolean {
   return hasRefusalInCauseChain(error, isFileLockedRefusal);
+}
+
+// The volume adds sharing permissions to new files, so the engine refused to
+// write this one.
+export function isVolumeSharesNewFilesCause(error: unknown): boolean {
+  return hasRefusalInCauseChain(error, isVolumeSharesNewFilesRefusal);
 }
 
 // Blocked by something that clears on its own — a program outside dohc
@@ -1757,6 +1768,7 @@ export function createWorkspaceEngineCapture(
   let observationResync: Promise<void> = Promise.resolve();
   let stopped = false;
   let shuttingDown = false;
+  const durableLocalListeners = new Set<(path: string) => void>();
   let ydocOpenAbort = new AbortController();
   const captureWaitAbort = new AbortController();
   let daemonCaptureHealthTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2261,6 +2273,9 @@ export function createWorkspaceEngineCapture(
       readonly options: NonNullable<Parameters<EngineYdocProviderSession["applyLocalUpdate"]>[1]>;
       readonly editorVisible: boolean;
       acknowledged: boolean;
+      journalFinished?: boolean;
+      durableNotified?: boolean;
+      ownerOutbox?: boolean;
       sent: boolean;
       uncertainFailures: number;
       lastUncertainFailureAt: number | null;
@@ -2276,6 +2291,13 @@ export function createWorkspaceEngineCapture(
       pendingRecords.clear();
       pendingUpdateBytes = 0;
     };
+    const notifyDurable = (record: PendingRecord): void => {
+      if (!record.acknowledged || !record.journalFinished || record.durableNotified || record.ownerOutbox || stopped || shuttingDown) return;
+      record.durableNotified = true;
+      for (const handler of durableLocalListeners) {
+        try { handler(input.path); } catch (error) { onError("durable edit observer", error); }
+      }
+    };
     const acknowledge = (record: PendingRecord, doc: Y.Doc): void => {
       if (record.acknowledged) return;
       record.acknowledged = true;
@@ -2283,6 +2305,7 @@ export function createWorkspaceEngineCapture(
       Y.applyUpdate(doc, record.update);
       Y.applyUpdate(recordedDoc, record.update);
       retireCheckpointIfDurable();
+      notifyDurable(record);
       if (!record.editorVisible) {
         try { input.onRemoteUpdate(record.update, true); }
         catch (error) { onError(`Y.Doc record update observer of ${input.path}`, error); }
@@ -2631,9 +2654,10 @@ export function createWorkspaceEngineCapture(
               }
             } : undefined,
             onLocalEditError: requestReconnect,
-            onLocalUpdateAcknowledged: (id) => {
+            onLocalUpdateAcknowledged: (id, lane) => {
               for (const record of pendingRecords) {
                 if (record.options.idempotencyKey === id) {
+                  record.ownerOutbox = lane === "owner-outbox";
                   if (canonicalDoc !== null) acknowledge(record, canonicalDoc);
                   recordedStateVector = Y.encodeStateVector(recordedDoc);
                 }
@@ -3188,6 +3212,7 @@ export function createWorkspaceEngineCapture(
         idempotencyKey: applyOptions?.idempotencyKey ?? createId(),
       };
       let decided = false;
+      let durableRecord: PendingRecord | undefined;
       return append(async () => {
         if (canonicalDoc === null || closed) throw closedError();
         const doc = canonicalDoc;
@@ -3202,6 +3227,7 @@ export function createWorkspaceEngineCapture(
           acknowledged: false, sent: false, uncertainFailures: 0,
           lastUncertainFailureAt: null, unanswered: null, refusal: null,
         };
+        durableRecord = record;
         if (pendingRecords.size + queuedUpdateCount >= YDOC_PENDING_MAX_RECORDS ||
             pendingUpdateBytes + queuedUpdateBytes + update.byteLength > YDOC_PENDING_MAX_BYTES) {
           if (refuseRecord(record, new Error("pending-edits-limit"))) {
@@ -3309,6 +3335,12 @@ export function createWorkspaceEngineCapture(
         if (!decided || keyed) throw error;
         onError(`Y.Doc local update of ${input.path}`, error);
         return true;
+      }).then(changed => {
+        if (durableRecord) {
+          durableRecord.journalFinished = true;
+          notifyDurable(durableRecord);
+        }
+        return changed;
       });
     };
 
@@ -4254,9 +4286,10 @@ export function createWorkspaceEngineCapture(
           token: number,
           event: EngineYDocSaveEvent,
           authorCapacity?: boolean,
+          failure?: unknown,
         ): void => {
           try {
-            input.onSaveState?.(state, token, event, authorCapacity);
+            input.onSaveState?.(state, token, event, authorCapacity, undefined, failure);
           } catch {
             // Observer boundary: a renderer-facing status hook must never
             // re-enter the session or wedge the settle chain.
@@ -4505,6 +4538,7 @@ export function createWorkspaceEngineCapture(
             saveToken,
             "outcome",
             hasRefusalInCauseChain(error, isYdocAuthorCapacityRefusal),
+            error,
           );
         };
         let entry: LiveYDocSession | null = null;
@@ -7527,6 +7561,12 @@ export function createWorkspaceEngineCapture(
       });
     },
 
+    onDurableLocalChange(handler) {
+      if (stopped || shuttingDown) return () => {};
+      durableLocalListeners.add(handler);
+      return () => { durableLocalListeners.delete(handler); };
+    },
+    get shuttingDown() { return shuttingDown || stopped; },
     runRelaySync(task) {
       return enqueueResult("relay sync", async () => {
         // A joined daemon can pull before any capture task has opened the
@@ -7620,6 +7660,7 @@ export function createWorkspaceEngineCapture(
       // Everything already enqueued (including the watcher's final settled
       // batch) still runs; only new work is refused.
       stopped = true;
+      durableLocalListeners.clear();
       ydocOpenAbort.abort();
       if (daemonCaptureHealthTimer !== null) {
         clearTimeout(daemonCaptureHealthTimer);
@@ -7636,9 +7677,11 @@ export function createWorkspaceEngineCapture(
           } catch (error) {
             // A refused store was never opened, so nothing is pending in
             // it. Failing the stop here would block the move-aside rebuild,
-            // which closes the capture first.
-            const cancelled = captureWaitAbort.signal.aborted &&
-              error === captureWaitAbort.signal.reason;
+            // which closes the capture first. Quit abandons a store whose
+            // workspace never finished opening for the same reason.
+            const cancelled = (captureWaitAbort.signal.aborted &&
+              error === captureWaitAbort.signal.reason) ||
+              error instanceof EngineWorkspaceShuttingDownError;
             if (!cancelled && engineStoreRefusalOf(error) === null) throw error;
           }
         }

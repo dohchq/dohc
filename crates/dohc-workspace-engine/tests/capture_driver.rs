@@ -843,7 +843,7 @@ async fn a_policy_retire_pass_emits_a_moment_event() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_over_cap_policy_retire_keeps_the_pass_provenance_and_emits() {
-    // codex re-review P2s: the retained-over-cap retire runs through its own
+    // codex re-review P2s: the retained-unread retire runs through its own
     // sink and reports via not_owned_paths. With default provenance its
     // delete moment carried a NULL correlation id (splitting the reconcile
     // pass's history group), and gating the event on applied_paths

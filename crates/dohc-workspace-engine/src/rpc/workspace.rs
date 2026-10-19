@@ -672,6 +672,9 @@ impl EngineService {
             .as_object()
             .is_some_and(|object| object.contains_key("captureAuthor"));
         let params: WorkspaceOpenParams = parse(params)?;
+        if let Some(relay) = &params.relay {
+            relay.validate_transport(self.replica_mode.is_some())?;
+        }
         let capture_author_json = if capture_author_supplied {
             Some(validated_author(params.capture_author.as_ref())?)
         } else {

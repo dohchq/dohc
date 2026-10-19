@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
 import type { MenuItemConstructorOptions } from "electron";
-import { MENU_COMMANDS } from "../ipc/channels";
+import { MENU_COMMANDS, isEditorMenuCommand } from "../ipc/channels";
 import { COMMAND_ROWS, type StaticCommandId } from "../renderer/commands/commandRows";
 import { buildMenuTemplate } from "../window/applicationMenu";
 import {
@@ -25,13 +25,15 @@ describe("shortcut menu contract", () => {
     const { items, sendCommand, stepZoom } = menu(platform);
     const expected: string[] = [];
     for (const [id, row] of Object.entries(SHORTCUTS)) {
-      if (row.owner !== "shell" && row.owner !== "main" && row.owner !== "native") continue;
+      // macOS's Edit > Find also shows the editor's find keys.
+      const findItem = platform === "darwin" && isEditorMenuCommand(id);
+      if (row.owner !== "shell" && row.owner !== "main" && row.owner !== "native" && !findItem) continue;
       for (const [index, accelerator] of shortcutAccelerators(id as ShortcutId, platform).entries()) {
         expected.push(accelerator);
         const matches = items.filter((item) => item.accelerator === accelerator);
         expect(matches, id).toHaveLength(1);
         const item = matches[0]!;
-        if (row.owner === "shell") {
+        if (row.owner === "shell" || findItem) {
           expect(MENU_COMMANDS).toContain(id);
           expect(item.registerAccelerator).toBe(false);
           sendCommand.mockClear();
@@ -72,12 +74,19 @@ describe("shortcut menu contract", () => {
     }
     // macOS's app menu marks Settings with the ellipsis of a command that opens a window.
     const settingsLabel = platform === "darwin" ? "Settings…" : "Settings";
-    const rowLabels = Object.fromEntries([...MENU_COMMANDS, ...Object.values(zoomIds)].map((id) => [
-      id,
-      id === "command-palette" ? "Command palette" : id === "settings" ? settingsLabel : COMMAND_ROWS[id].label.replace(/^View: /, ""),
-    ]));
-    expect(labels).toEqual(rowLabels);
+    // Edit > Find, on macOS only, acts on the focused editor and has no rows.
+    const findLabels = platform === "darwin" ? {
+      "editor-find": "Find…", "editor-replace": "Find and replace…",
+      "find-again-next": "Find next", "find-again-previous": "Find previous",
+    } : {};
+    const rowLabels = Object.fromEntries([...MENU_COMMANDS, ...Object.values(zoomIds)].flatMap((id) =>
+      isEditorMenuCommand(id) ? [] : [[
+        id,
+        id === "command-palette" ? "Command palette" : id === "settings" ? settingsLabel : COMMAND_ROWS[id].label.replace(/^View: /, ""),
+      ]]));
+    expect(labels).toEqual({ ...rowLabels, ...findLabels });
     expect(labels).toEqual({
+      ...findLabels,
       "new-file": "New file", "new-folder": "New folder", "new-collection": "New collection",
       "open-workspace": "Open workspace folder…", "import-files": "Import files",
       "export-workspace": "Export workspace as zip", "close-tab": "Close tab",
@@ -89,22 +98,24 @@ describe("shortcut menu contract", () => {
     });
   });
 
-  it("emits all aliases and disables native registration only for shell owners", () => {
+  it("emits all aliases and leaves native registration only to main and native owners", () => {
     const row = SHORTCUTS["new-file"];
     const originalOwner = row.owner;
     const originalAccelerators = row.accelerators;
-    Reflect.set(row, "owner", "document");
     Reflect.set(row, "accelerators", ["CommandOrControl+N", "CommandOrControl+Shift+N"]);
     try {
-      const { items, sendCommand } = menu("win32");
-      const matches = items.filter((item) => item.label?.startsWith("New file"));
-      expect(matches.map((item) => item.accelerator)).toEqual(row.accelerators);
-      expect(matches.map((item) => item.visible === false)).toEqual([false, true]);
-      for (const item of matches) {
-        expect(item.registerAccelerator).toBeUndefined();
-        sendCommand.mockClear();
-        item.click!(undefined!, undefined!, undefined!);
-        expect(sendCommand).toHaveBeenCalledExactlyOnceWith(undefined, "new-file");
+      for (const [owner, registerAccelerator] of [["main", undefined], ["native", undefined], ["document", false], ["editor", false]] as const) {
+        Reflect.set(row, "owner", owner);
+        const { items, sendCommand } = menu("win32");
+        const matches = items.filter((item) => item.label?.startsWith("New file"));
+        expect(matches.map((item) => item.accelerator)).toEqual(row.accelerators);
+        expect(matches.map((item) => item.visible === false)).toEqual([false, true]);
+        for (const item of matches) {
+          expect(item.registerAccelerator, owner).toBe(registerAccelerator);
+          sendCommand.mockClear();
+          item.click!(undefined!, undefined!, undefined!);
+          expect(sendCommand).toHaveBeenCalledExactlyOnceWith(undefined, "new-file");
+        }
       }
     } finally {
       Reflect.set(row, "owner", originalOwner);

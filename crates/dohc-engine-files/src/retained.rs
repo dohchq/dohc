@@ -91,7 +91,10 @@ pub enum Inspection {
     },
     Release(Release),
 }
-/// Owns the descriptor until the last identity check and unlink.
+/// Owns the descriptor until the last identity check and unlink. On macOS it
+/// closes the descriptor just before the unlink, which an open file refuses.
+/// `remove` returns false when the source stays: its stamp changed, or, on
+/// macOS, a process has it open or its file system cannot tell.
 pub struct Release {
     path: PathBuf,
     file: std::fs::File,
@@ -114,18 +117,32 @@ impl Release {
         {
             return Ok(false);
         }
-        std::fs::remove_file(&self.path).map_err(|e| MaterializeError::io(&self.path, &e))?;
-        Ok(true)
+        // macOS cannot list another process's writers, but the file systems
+        // it knows refuse to unlink a file any process has open.
+        #[cfg(target_vendor = "apple")]
+        {
+            dohc_macos_files::remove_unless_open(self.file, &self.path)
+                .map_err(|e| MaterializeError::io(&self.path, &e))
+        }
+        #[cfg(not(target_vendor = "apple"))]
+        {
+            std::fs::remove_file(&self.path).map_err(|e| MaterializeError::io(&self.path, &e))?;
+            Ok(true)
+        }
     }
 }
 
+/// An unchanged source is kept, unread, until both its quiet period and
+/// `retry_at_ms` have passed. The caller backs off a refused release with
+/// `retry_at_ms`. A changed stamp is read at once.
 pub fn inspect(
     root: &Path,
     row: &RetainedDisplacement,
     now_ms: i64,
     held: bool,
+    retry_at_ms: i64,
 ) -> Result<Inspection, MaterializeError> {
-    inspect_with_reader(root, row, now_ms, held, read_source)
+    inspect_with_reader(root, row, now_ms, held, retry_at_ms, read_source)
 }
 
 fn read_source(file: &std::fs::File, path: &Path) -> Result<Vec<u8>, MaterializeError> {
@@ -141,6 +158,7 @@ fn inspect_with_reader(
     row: &RetainedDisplacement,
     now_ms: i64,
     held: bool,
+    retry_at_ms: i64,
     read: impl FnOnce(&std::fs::File, &Path) -> Result<Vec<u8>, MaterializeError>,
 ) -> Result<Inspection, MaterializeError> {
     let rel = Path::new(&row.source_path);
@@ -177,14 +195,15 @@ fn inspect_with_reader(
     if held && !identity_changed && !changed {
         return Ok(Inspection::Keep);
     }
-    if !held && !identity_changed && meta.nlink() > 1 {
+    if !held && !identity_changed && meta.nlink() > 1 && now_ms >= retry_at_ms {
         return Ok(Inspection::Release(Release {
             path,
             file,
             stamp: initial,
         }));
     }
-    let quiet = now_ms.saturating_sub(row.changed_at_ms) >= QUIET_PERIOD_MS;
+    let quiet =
+        now_ms.saturating_sub(row.changed_at_ms) >= QUIET_PERIOD_MS && now_ms >= retry_at_ms;
     if !identity_changed && !quiet && !changed {
         return Ok(Inspection::Keep);
     }
@@ -195,6 +214,16 @@ fn inspect_with_reader(
     let lease_checked = !identity_changed && !changed;
     #[cfg(target_os = "linux")]
     if lease_checked && writer_present(&file, &path)? {
+        return Ok(Inspection::Keep);
+    }
+    // A volume that cannot refuse a busy unlink never releases its source,
+    // so only a changed stamp needs a read there.
+    #[cfg(target_vendor = "apple")]
+    if !identity_changed
+        && !changed
+        && !dohc_macos_files::refuses_busy_unlink(&file)
+            .map_err(|e| MaterializeError::io(&path, &e))?
+    {
         return Ok(Inspection::Keep);
     }
     let bytes = read(&file, &path)?;
@@ -273,14 +302,14 @@ fn materialize_held_source_reads_only_after_stamp_changes() {
     };
     for _ in 0..10 {
         assert!(matches!(
-            inspect_with_reader(root, &row, 60_000, true, read).unwrap(),
+            inspect_with_reader(root, &row, 60_000, true, 0, read).unwrap(),
             Inspection::Keep
         ));
     }
     println!("10 quiet held inspections: {} reads", reads.get());
     assert_eq!(reads.get(), 0, "quiet held sources must not be read");
     std::fs::write(&source, b"late outside write").unwrap();
-    match inspect_with_reader(root, &row, 60_000, true, read).unwrap() {
+    match inspect_with_reader(root, &row, 60_000, true, 0, read).unwrap() {
         Inspection::Changed { current, bytes } => {
             assert_eq!(bytes, b"late outside write");
             row = current;
@@ -291,13 +320,13 @@ fn materialize_held_source_reads_only_after_stamp_changes() {
     assert_eq!(reads.get(), 1);
     for _ in 0..10 {
         assert!(matches!(
-            inspect_with_reader(root, &row, 90_000, true, read).unwrap(),
+            inspect_with_reader(root, &row, 90_000, true, 0, read).unwrap(),
             Inspection::Keep
         ));
     }
     assert_eq!(reads.get(), 1, "imported held sources must not be re-read");
     row.device = "previous mount".into();
-    match inspect_with_reader(root, &row, 90_000, true, read).unwrap() {
+    match inspect_with_reader(root, &row, 90_000, true, 0, read).unwrap() {
         Inspection::Changed { current, bytes } => {
             assert_eq!(bytes, b"late outside write");
             row = current;
@@ -305,16 +334,76 @@ fn materialize_held_source_reads_only_after_stamp_changes() {
         _ => panic!("held remounts must refresh the stamp once"),
     }
     assert!(matches!(
-        inspect_with_reader(root, &row, 90_000, true, read).unwrap(),
+        inspect_with_reader(root, &row, 90_000, true, 0, read).unwrap(),
         Inspection::Keep
     ));
     assert_eq!(reads.get(), 2);
     assert!(matches!(
-        inspect_with_reader(root, &row, 90_000, false, read).unwrap(),
+        inspect_with_reader(root, &row, 90_000, false, 0, read).unwrap(),
         Inspection::Release(_)
     ));
     assert_eq!(reads.get(), 3);
     println!(
         "20 quiet held inspections: 0 reads; changed source, remount and cleared hold: 1 read each"
     );
+}
+
+#[cfg(test)]
+#[test]
+fn a_backed_off_source_is_read_only_after_its_retry_time_or_a_change() {
+    use std::cell::Cell;
+    let scratch = dohc_test_scratch::ScratchDir::new_named("backed-off-reads").unwrap();
+    let root = scratch.path();
+    let source = root.join("source");
+    std::fs::write(&source, b"before").unwrap();
+    let (device, inode, size, mtime, ctime) = stamp(&std::fs::metadata(&source).unwrap());
+    let row = RetainedDisplacement {
+        displacement_id: 1,
+        job_id: "backed-off".into(),
+        workspace_id: "ws".into(),
+        target_path: "notes.md".into(),
+        source_path: "source".into(),
+        device,
+        inode,
+        digest: hex_sha256(b"before"),
+        size,
+        mtime,
+        ctime,
+        changed_at_ms: 0,
+    };
+    let reads = Cell::new(0);
+    let read = |file: &std::fs::File, path: &Path| {
+        reads.set(reads.get() + 1);
+        read_source(file, path)
+    };
+    let reader = std::fs::File::open(&source).unwrap();
+    let Inspection::Release(release) =
+        inspect_with_reader(root, &row, 60_000, false, 0, read).unwrap()
+    else {
+        panic!("a quiet unchanged source is released");
+    };
+    assert_eq!(reads.get(), 1);
+    #[cfg(target_vendor = "apple")]
+    assert!(!release.remove().unwrap(), "an open source stays on macOS");
+    #[cfg(not(target_vendor = "apple"))]
+    drop(release);
+    for now in 60_001..60_011 {
+        assert!(matches!(
+            inspect_with_reader(root, &row, now, false, 90_000, read).unwrap(),
+            Inspection::Keep
+        ));
+    }
+    assert_eq!(reads.get(), 1, "a backed-off source is not read");
+    assert!(matches!(
+        inspect_with_reader(root, &row, 90_000, false, 90_000, read).unwrap(),
+        Inspection::Release(_)
+    ));
+    assert_eq!(reads.get(), 2, "every release attempt reads first");
+    drop(reader);
+    std::fs::write(&source, b"changed").unwrap();
+    assert!(matches!(
+        inspect_with_reader(root, &row, 90_001, false, 1_000_000, read).unwrap(),
+        Inspection::Changed { .. }
+    ));
+    assert_eq!(reads.get(), 3, "a changed stamp is read at once");
 }

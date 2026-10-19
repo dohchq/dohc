@@ -1,3 +1,5 @@
+import { createWorkspaceLinksReader } from "./workspaces/workspaceLinks";
+import { linksOperations } from "./ipc/linksOperations";
 import { shareHandoffOperations, shareMountOperations, shareProposalOperations, sharedChannelOperations, relayShareOperations } from "./ipc/shareOperations";
 import { createOperationHistory } from "./workspaces/workspaceHistoryOperations";
 import { createReceivedFileReferenceScopes } from "./workspaces/workspaceFileReferenceScopes";
@@ -668,6 +670,7 @@ const {
   readOwnedWorkspaceAsset,
   readOwnedWorkspaceAssetFor,
   listOwnedWorkspaceFilesFor,
+  lookupOwnedWorkspaceFilesFor,
   ownedWorkspaceReadsFor,
 } = createDesktopWorkspaceReads({
   listDiskFiles: (rootPath, scope) => workspaceFilesWorker.list(rootPath, scope),
@@ -969,7 +972,7 @@ const {
   targetWindow,
   sendWorkspaceActivated,
   applyZoomLevelToWindows,
-  broadcastUserSettings,
+  broadcastUserSettings, broadcastAgentColor,
   refreshApplicationMenu,
   refreshNativeWorkspaceSurfaces,
   prepareForRendererReload,
@@ -2983,6 +2986,7 @@ async function withEngineAdapter<T>(
   );
 }
 
+const workspaceLinks = createWorkspaceLinksReader(withEngineAdapter, () => shareViewFiles);
 const resolveEngineFiles = createEngineFileResolver(withEngineAdapter, createReceivedFileReferenceScopes<EngineWorkspace>({
   findWorkspace,
   currentAttachment: workspaceId => workspaceAuthorities.currentBinding(workspaceId).attachmentId,
@@ -4778,6 +4782,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
       return { result, waiting };
     },
   }),
+  links: workspaceLinks,
   findWorkspace,
   listWorkspaces,
   openWorkspaceActivity,
@@ -5265,6 +5270,8 @@ function withShareViewFilesOperation<Result>(
 }
 
 shareViewFiles = {
+  linksIn: (target, input) => withShareViewFilesOperation(target, files => files.linksIn(target, input)),
+  linksResolve: (target, input) => withShareViewFilesOperation(target, files => files.linksResolve(target, input)),
   narrow: (lease, target, assertCurrent, commit) =>
     withShareViewFilesOperation(target, files => files.narrow(lease, target, assertCurrent, commit)),
   end: (lease, target, assertCurrent) =>
@@ -5277,8 +5284,10 @@ shareViewFiles = {
     ),
   read: (target, request) =>
     withShareViewFilesOperation(target, (files) => files.read(target, request)),
-  list: (target) =>
-    withShareViewFilesOperation(target, (files) => files.list(target)),
+  lookup: (target, paths) =>
+    withShareViewFilesOperation(target, files => files.lookup(target, paths)),
+  list: (target, options) =>
+    withShareViewFilesOperation(target, (files) => files.list(target, options)),
   projectionStatus: (target) =>
     withShareViewFilesOperation(target, (files) =>
       files.projectionStatus(target),
@@ -5699,7 +5708,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     updateAfterStartupFailure: () => updateAfterFailure("startup"),
     updateAfterWindowLoadFailure: () => updateAfterFailure("window-load"),
   },
-  launch: { finished: finishLaunch },
+  launch: { finished: finishLaunch, settled: () => desktopEngine.launchSettled() },
   beforeQuit: beforeQuitWithTypingRecovery,
   beforeQuitWithoutWindows: beforeQuitWithTypingRecovery,
   shutdown: {
@@ -5978,6 +5987,7 @@ const settingsIpc = createSettingsIpc<WebContents, IpcMainInvokeEvent, DesktopRe
   applyZoomLevelToWindows, applyThemeMode, refreshDispatchTray, openDispatchWorkspaces,
   setSpellCheckerEnabled: (enabled) => session.defaultSession.setSpellCheckerEnabled(enabled),
   chatDispatchService, withRendererWorkspaceOperation, notifyRenderer,
+  broadcastAgentColor,
   broadcastUserSettings: (settings) => {
     // Reports follow the switches before any window learns of them.
     telemetry.setPrivacy(privacyInEffect(settings));
@@ -6032,6 +6042,10 @@ function registerIpcHandlers(): void {
     withRendererWorkspaceOperation, remoteForWorkspace,
     currentCredentialGeneration: () => credentialCacheGeneration,
     relayJson: (credentials, path) => relayShareJsonWithCredentials(credentials, path),
+  });
+  registerOperations(operationBoundary, linksOperations, {
+    linksIn: ({ workspaceId: _workspaceId, ...input }, { operation }) => workspaceLinks.incoming(operation.workspace, input),
+    linksResolve: ({ workspaceId: _workspaceId, ...input }, { operation }) => workspaceLinks.resolve(operation.workspace, input),
   });
   registerOperations(operationBoundary, shareCopyOperations, {
     getShareCopyDetails: (input, { event }) => shareCopyHandler(event.sender, input),
@@ -6099,6 +6113,7 @@ function registerIpcHandlers(): void {
     withRendererWorkspaceOperation,
     exactRendererWorkspaceReferences,
     workspaceFileListings,
+    lookupOwnedWorkspaceFilesFor,
     workspaceFileMutations,
     listOwnedWorkspaceFilesFor,
     readOwnedWorkspaceTextFor,
@@ -6123,7 +6138,7 @@ function registerIpcHandlers(): void {
     assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine,
     withEngineAdapter, requireEngineCapture, readWorkspaceEnginePolicy, readSyncHistory, localAgentDisplayName: () => cachedAgentName ?? "Agent", localPersonId: localUserId,
     localPersonName: localUserDisplayName, localPerson,
-    localInstallationId, warmCredentialCache, currentCredentials: () => cachedCredentials,
+    stateDir, localInstallationId, warmCredentialCache, currentCredentials: () => cachedCredentials,
     historyCollections: async operation => {
       const { workspace } = operation;
       const local = await localDatasetHostFor(workspace, operation.signal);
@@ -6315,7 +6330,7 @@ function registerIpcHandlers(): void {
     },
     withAdapter: withEngineAdapter,
     compile: async (request, signal) => {
-      installedAppCompiler ??= createInstalledAppCompiler(resourcesBasePath(), app.runningUnderARM64Translation);
+      installedAppCompiler ??= createInstalledAppCompiler(resourcesBasePath());
       const compile = await installedAppCompiler;
       signal.throwIfAborted();
       return compile(request, { timeoutMs: 60_000, maxMemoryBytes: 1024 * 1024 * 1024, maxProcesses: 8,
@@ -6957,7 +6972,7 @@ function registerIpcHandlers(): void {
   registerChatsIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
     registerHandler: handleIpc,
     assertTrustedSender, chatScope, requireEngineCapture, linkedChatStoreFor, chatWrites,
-    assertWritableWorkspace, warmCredentialCache, localUserId,
+    stateDir, assertWritableWorkspace, warmCredentialCache, localUserId,
     localInstallationId, currentCredentials: () => cachedCredentials, chatRelayIdentityFor,
     readWorkspace: findWorkspace,
     syncWorkspaceSharedChannels, syncSharedChannelsForChatTarget,

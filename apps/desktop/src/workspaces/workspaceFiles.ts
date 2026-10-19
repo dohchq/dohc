@@ -251,10 +251,16 @@ export async function listFiles(
   rootPath: string,
   options: WorkspaceFileListingScope & {
     platform?: NodeJS.Platform;
+    paths?: readonly string[];
     includeContentIdentity?: boolean;
   } = {},
 ): Promise<{ files: WorkspaceFileEntry[]; folders: string[] }> {
   const platform = options.platform ?? process.platform;
+  const targets = options.paths === undefined ? null : new Set(options.paths);
+  const targetDirectories = targets === null ? null : new Set([...targets].flatMap(path => {
+    const segments = path.split("/");
+    return segments.slice(0, -1).map((_, index) => segments.slice(0, index + 1).join("/"));
+  }));
   const entries: WorkspaceFileListingEntry[] = [];
   // Directories ride along so empty folders stay visible in the explorer
   // tree (the walk already visits every dir — this is purely additive).
@@ -271,12 +277,12 @@ export async function listFiles(
       // workspace and leak names or recurse into foreign trees.
       if (hasEngineIgnoredSegment(rel, platform) || dirent.isSymbolicLink()) continue;
       if (dirent.isDirectory()) {
-        if (matchesFileListingScope(rel, options)) folders.push(rel);
-        if (directoryMayContainListedFiles(rel, options)) {
+        if (!targets && matchesFileListingScope(rel, options)) folders.push(rel);
+        if (targetDirectories ? targetDirectories.has(rel) : directoryMayContainListedFiles(rel, options)) {
           pending.push(walk(join(dir, dirent.name), rel));
         }
       } else if (dirent.isFile()) {
-        if (!matchesFileListingScope(rel, options)) continue;
+        if (targets ? !targets.has(rel) : !matchesFileListingScope(rel, options)) continue;
         const kind = classifyPath(rel).kind;
         const entry: WorkspaceFileListingEntry = { path: rel, kind };
         if (

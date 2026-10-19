@@ -123,22 +123,17 @@ function buildBlockControlDecorations(
 ): DecorationSet {
   const decorations: Decoration[] = [];
 
-  doc.forEach((node, offset, index) => {
-    const pos = offset;
+  // Only widgets: ProseMirror checks each node decoration against the
+  // document with a scan from its first block, so one per block makes every
+  // keystroke quadratic in the document's length.
+  doc.forEach((_node, pos) => {
     const ownerKey = owners.get(pos) ?? nextOwnerKey();
-    decorations.push(
-      Decoration.node(pos, pos + node.nodeSize, {
-        class: "dohc-block-node",
-        "data-dohc-block-index": String(index),
-      }),
-    );
     decorations.push(
       Decoration.widget(
         pos,
         (view, getPos) => {
           const wrap = document.createElement("span");
           wrap.className = "dohc-block-affordance";
-          wrap.setAttribute("data-dohc-block-index", String(index));
           wrap.setAttribute("contenteditable", "false");
 
           const plus = document.createElement("button");
@@ -214,7 +209,7 @@ function buildBlockControlDecorations(
           wrap.append(plus, handle);
           return wrap;
         },
-        { side: -1, key: `dohc-block-controls-${ownerKey}-${index}`, ownerKey },
+        { side: -1, key: `dohc-block-controls-${ownerKey}`, ownerKey },
       ),
     );
   });
@@ -244,30 +239,35 @@ function isSingleTextblockReplacement(
   return from.depth === 1 && from.sameParent(to) && from.parent.isTextblock;
 }
 
-function setVisibleBlockControl(
+/** The gutter of the top-level block that holds `target`. A block's gutter is
+ * the nearest gutter widget before the block's element, with nothing but
+ * other widgets between them. Another widget, such as a Mermaid preview,
+ * belongs to no block. */
+function blockControlAt(
   view: EditorView,
   target: EventTarget | null,
-  previousIndex: string | null | undefined,
-): string | null {
-  const element =
+): HTMLElement | null {
+  let element =
     target instanceof Element
       ? target
       : target instanceof Node
         ? target.parentElement
         : null;
-  const owner = element?.closest<HTMLElement>("[data-dohc-block-index]");
-  const activeIndex = owner?.dataset.dohcBlockIndex ?? null;
-  if (activeIndex === previousIndex) return activeIndex;
-
-  view.dom
-    .querySelectorAll<HTMLElement>(".dohc-block-affordance")
-    .forEach((control) => {
-      control.classList.toggle(
-        "is-visible",
-        activeIndex !== null && control.dataset.dohcBlockIndex === activeIndex,
-      );
-    });
-  return activeIndex;
+  while (element && element.parentElement !== view.dom) {
+    element = element.parentElement;
+  }
+  if (!(element instanceof HTMLElement)) return null;
+  if (element.classList.contains("ProseMirror-widget")) {
+    return element.classList.contains("dohc-block-affordance") ? element : null;
+  }
+  for (
+    let sibling = element.previousElementSibling;
+    sibling instanceof HTMLElement && sibling.classList.contains("ProseMirror-widget");
+    sibling = sibling.previousElementSibling
+  ) {
+    if (sibling.classList.contains("dohc-block-affordance")) return sibling;
+  }
+  return null;
 }
 
 /** Delete a whole top-level block after it has been selected from its gutter.
@@ -292,7 +292,13 @@ export function makeBlockControlsPlugin({
   onInsertRef: RefObject<(pos: number) => void>;
   onOpenMenuRef: RefObject<(pos: number, handle: HTMLElement) => void>;
 }) {
-  let activeBlockIndex: string | null | undefined;
+  let visibleControl: HTMLElement | null = null;
+  const showBlockControl = (control: HTMLElement | null) => {
+    if (control === visibleControl) return;
+    visibleControl?.classList.remove("is-visible");
+    control?.classList.add("is-visible");
+    visibleControl = control;
+  };
   const ghostSlot: DragGhostSlot = { current: null };
   let nextId = 0;
   const nextOwnerKey = () => String(nextId++);
@@ -311,7 +317,6 @@ export function makeBlockControlsPlugin({
       },
       apply(tr, old) {
         if (!tr.docChanged) return old.map(tr.mapping, tr.doc);
-        activeBlockIndex = undefined;
         if (isSingleTextblockReplacement(tr)) {
           return tr.doc.content.size === tr.before.content.size
             ? old
@@ -340,15 +345,11 @@ export function makeBlockControlsPlugin({
       },
       handleDOMEvents: {
         mousemove(view, event) {
-          activeBlockIndex = setVisibleBlockControl(
-            view,
-            event.target,
-            activeBlockIndex,
-          );
+          showBlockControl(blockControlAt(view, event.target));
           return false;
         },
-        mouseleave(view) {
-          activeBlockIndex = setVisibleBlockControl(view, null, activeBlockIndex);
+        mouseleave() {
+          showBlockControl(null);
           return false;
         },
       },

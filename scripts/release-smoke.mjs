@@ -7,10 +7,6 @@ import { join } from "node:path";
 
 import { resolveDesktopRelease } from "./resolve-desktop-release.mjs";
 import { updateDesktopPackageVersion } from "./update-desktop-package-version.mjs";
-import {
-  mergeUpdateManifests,
-  parseUpdateManifest,
-} from "./merge-update-manifests.mjs";
 import { createMockUpdateServer } from "./mock-update-server.mjs";
 
 async function main() {
@@ -41,29 +37,6 @@ async function runSmoke(root) {
 
   const stamp = await updateDesktopPackageVersion(nightly.version, { root });
   assert.equal(stamp.changed, true);
-
-  const merged = mergeUpdateManifests(
-    parseUpdateManifest(`
-version: ${nightly.version}
-files:
-  - url: dohc-arm64.zip
-    sha512: a
-    size: 1
-path: dohc-arm64.zip
-sha512: a
-`),
-    parseUpdateManifest(`
-version: ${nightly.version}
-files:
-  - url: dohc-x64.zip
-    sha512: b
-    size: 2
-path: dohc-x64.zip
-sha512: b
-`),
-    "mac",
-  );
-  assert.equal(merged.files.length, 2);
 
   await writeFile(join(root, "dohc-x64.zip"), "zip-bytes");
   await writeFile(

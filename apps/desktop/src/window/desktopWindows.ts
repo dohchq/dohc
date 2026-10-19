@@ -1,5 +1,5 @@
 import type { App, BrowserWindow, Dialog, Menu, WebContents } from "electron";
-import type { DesktopUserSettingsResult, MenuCommand, WorkspaceSummary } from "../ipc/bridgeContract";
+import type { AgentColorChangedEvent, DesktopUserSettingsResult, MenuCommand, WorkspaceSummary } from "../ipc/bridgeContract";
 import { CHANNELS } from "../ipc/channels";
 import { createWorkspaceWindowRegistry } from "../quitGuard";
 import { buildMenuTemplate } from "./applicationMenu";
@@ -235,6 +235,14 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
   function broadcastUserSettings(result: DesktopUserSettingsResult): void {
     for (const window of liveZoomedWindows()) {
       window.webContents.send(CHANNELS.userSettingsChanged, result);
+    }
+  }
+
+  function broadcastAgentColor(event: AgentColorChangedEvent): void {
+    for (const window of liveZoomedWindows()) {
+      if (dependencies.rendererWorkspaceSessions.current(window.webContents)?.workspaceId === event.workspaceId) {
+        window.webContents.send(CHANNELS.agentColorChanged, event);
+      }
     }
   }
 
@@ -555,7 +563,7 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     sendWorkspaceActivated,
     reportActivationFailure,
     applyZoomLevelToWindows,
-    broadcastUserSettings,
+    broadcastUserSettings, broadcastAgentColor,
     refreshApplicationMenu,
     refreshNativeWorkspaceSurfaces,
     prepareForRendererReload,

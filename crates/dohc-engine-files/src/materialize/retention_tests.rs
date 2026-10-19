@@ -57,7 +57,7 @@ fn sweep(store: &EngineStore, root: &Path, now: i64) {
                 &row.target_path,
             )
             .unwrap();
-            match inspect(root, &row, now, held).unwrap() {
+            match inspect(root, &row, now, held, 0).unwrap() {
                 Inspection::Release(token) => {
                     if crate::materialize::placement_is_held_in(
                         store,
@@ -68,7 +68,9 @@ fn sweep(store: &EngineStore, root: &Path, now: i64) {
                     {
                         continue;
                     }
-                    assert!(token.remove().unwrap());
+                    if !token.remove().unwrap() {
+                        continue;
+                    }
                     store.release_retained(row.displacement_id).unwrap();
                     cleanup_staging_directory(
                         store,
@@ -219,6 +221,43 @@ fn p0_linux_held_writable_descriptor_blocks_release() {
     drop(writer);
     sweep(&store, root, 90_001);
     assert!(!root.join(&row.source_path).exists());
+}
+#[cfg(target_vendor = "apple")]
+#[test]
+fn macos_open_descriptor_keeps_the_original_until_it_closes() {
+    use std::io::Write;
+    use std::os::unix::fs::MetadataExt;
+    let scratch = ScratchDir::new_named("macos-held-descriptor").unwrap();
+    let root = scratch.path();
+    let mut store = EngineStore::open(&root.join("engine.db"), 0).unwrap();
+    let target = root.join("notes.md");
+    std::fs::write(&target, b"before").unwrap();
+    let mut writer = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&target)
+        .unwrap();
+    let j = job(&mut store, "settle", "notes.md", b"before", b"after", 1);
+    materialize_one(&store, root, &j, &options(0, &StdReplacer)).unwrap();
+    let row = store.retained_displacements_after(0).unwrap().remove(0);
+    let source = root.join(&row.source_path);
+    sweep(&store, root, 90_000);
+    writer.write_all(b" appended after Q").unwrap();
+    assert!(
+        writer.metadata().unwrap().nlink() > 0,
+        "the original was unlinked while a writer still held it"
+    );
+    drop(writer);
+    sweep(&store, root, 90_001);
+    let row = store.retained_displacements_after(0).unwrap().remove(0);
+    assert_eq!(row.digest, hex_sha256(b"before appended after Q"));
+    let reader = std::fs::File::open(&source).unwrap();
+    sweep(&store, root, 200_000);
+    assert!(source.exists(), "a reader also keeps the original");
+    drop(reader);
+    sweep(&store, root, 200_001);
+    assert!(!source.exists());
+    assert!(store.retained_displacements_after(0).unwrap().is_empty());
+    assert_eq!(std::fs::read(&target).unwrap(), b"after");
 }
 #[cfg(unix)]
 #[test]
@@ -434,12 +473,12 @@ fn remounted_identity_compares_digest_and_never_keeps_forever() {
         .unwrap();
     let row = store.retained_displacements_after(0).unwrap().remove(0);
     assert!(matches!(
-        inspect(root, &row, 30_000, false).unwrap(),
+        inspect(root, &row, 30_000, false, 0).unwrap(),
         Inspection::Release(_)
     ));
     let source = root.join(&row.source_path);
     std::fs::write(&source, b"outside after mount").unwrap();
-    match inspect(root, &row, 30_001, false).unwrap() {
+    match inspect(root, &row, 30_001, false, 0).unwrap() {
         Inspection::Changed { current, bytes } => {
             assert_eq!(bytes, b"outside after mount");
             assert_ne!(current.device, row.device);
@@ -483,7 +522,7 @@ fn oversized_retained_source_becomes_a_recoverable_kept_copy() {
         .set_len(MAX_MATERIALIZE_BYTES as u64 + 1)
         .unwrap();
     assert!(matches!(
-        inspect(root, &row, 1, false).unwrap(),
+        inspect(root, &row, 1, false, 0).unwrap(),
         Inspection::Oversized
     ));
     store.keep_oversized_retained(&row, 1).unwrap();
@@ -1103,7 +1142,7 @@ fn checked_delete_release_failure_preserves_receipt_error_and_rolls_back() {
         } else {
             assert!(!root.join(&row.source_path).exists());
             assert!(matches!(
-                crate::retained::inspect(root, &row, 1000, false).unwrap(),
+                crate::retained::inspect(root, &row, 1000, false, 0).unwrap(),
                 crate::retained::Inspection::Missing
             ));
         }

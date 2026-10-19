@@ -1,5 +1,6 @@
 use super::*;
 use crate::{ContentKind, Ydoc};
+use dohc_engine_storage::text;
 
 /// A complete cut acquired by the authenticated owner transport. Parsing this
 /// value does not authenticate it. The renderer must not construct this input.
@@ -1271,13 +1272,7 @@ pub(super) fn read_adoption_source(
             return Err(ApplicationError::Corrupt);
         }
     }
-    let text: String = conn
-        .query_row(
-            "SELECT text FROM blobs WHERE sha256=?1 AND byte_length=?2",
-            params![digest, length],
-            |r| r.get(0),
-        )
-        .map_err(read_sql)?;
+    let text: String = text::read_sized(conn, &digest, length).map_err(read_sql)?;
     if text.len() as i64 != length || hex_sha256(text.as_bytes()) != digest {
         return Err(ApplicationError::Corrupt);
     }

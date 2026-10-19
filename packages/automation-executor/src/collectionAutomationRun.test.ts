@@ -1007,7 +1007,9 @@ describe("a stepwise run that stops", () => {
         expect(space.keys, `${when} ${at}`).toEqual(clean.keys);
       }
     }
-  }, 120_000);
+    // 300s: it replays the whole run three ways at every durable point. On a
+    // Windows host running three verification lanes it passed 120s, 2026-10-18.
+  }, 300_000);
 });
 
 describe("a run and its Undo", () => {

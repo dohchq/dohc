@@ -36,7 +36,7 @@ If the `dohc-verification-nightly` task is missing, run `pnpm verify:queue insta
    Name a flaky test as recurring when it is also flaky in another finished run in the last 7 days of `C:\w\_verification\history.jsonl`. Stop.
 7. If its state is `failed`, find the merge that broke main:
    1. List the failing tests from `result.json` and the failing step's log.
-   2. Run only those tests at `head` from `request.json` to confirm the failure.
+   2. Run only those tests at `head` from `request.json` to confirm the failure. A test that failed in the step `rust-linux` failed on Linux: run it in your own clone in WSL.
    3. Run `git bisect start <head> <base>` with `head` and `base` from `request.json`.
    4. Run `git bisect run <command>`, where the command runs only those tests. Do not run the full gate to bisect.
    5. Record the first bad commit, then run `git bisect reset`.

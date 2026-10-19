@@ -726,7 +726,7 @@ fn plan_of(
         from_generation: dohc_engine_files::ScanGeneration(0),
         to_generation: dohc_engine_files::ScanGeneration(1),
         ops,
-        retained_over_cap: Vec::new(),
+        retained_unread: Vec::new(),
         unconfirmed_removed: unconfirmed_removed
             .iter()
             .map(|path| (*path).to_owned())

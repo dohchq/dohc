@@ -4,6 +4,7 @@
     "desktop:accept-share-handoff",
     "desktop:acknowledge-reports-notice",
     "desktop:add-relay-share-link",
+    "desktop:agent-color-changed",
     "desktop:agent-run-state",
     "desktop:append-relay-share-discussion",
     "desktop:apply-database-edit",
@@ -89,7 +90,6 @@
     "desktop:folder-app-changed",
     "desktop:forget-workspace",
     "desktop:get-agent-run-status",
-    "desktop:get-backlinks",
     "desktop:get-capture-recovery-status",
     "desktop:get-chat-thread-revision",
     "desktop:get-collection",
@@ -122,6 +122,8 @@
     "desktop:join-shared-channel",
     "desktop:leave-dm",
     "desktop:leave-shared-channel",
+    "desktop:links-in",
+    "desktop:links-resolve",
     "desktop:list-automation-buttons",
     "desktop:list-automation-groups",
     "desktop:list-automation-holds",
@@ -261,6 +263,7 @@
     "desktop:search-workspace",
     "desktop:send-chat-message",
     "desktop:send-crash-report",
+    "desktop:set-agent-color",
     "desktop:set-app-pinned",
     "desktop:set-chat-follow",
     "desktop:set-chat-reaction",
@@ -342,6 +345,9 @@
     "desktop:mark-notices": "trusted-sender",
     "desktop:run-skipped-schedule-now": "trusted-sender",
     "desktop:retry-automation-notice": "trusted-sender",
-    "desktop:undo-history-operation": "trusted-sender"
+    "desktop:undo-history-operation": "trusted-sender",
+    "desktop:set-agent-color": "active-workspace",
+    "desktop:links-in": "active-workspace",
+    "desktop:links-resolve": "active-workspace"
   }
 }

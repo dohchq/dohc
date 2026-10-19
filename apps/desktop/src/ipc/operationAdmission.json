@@ -4,6 +4,7 @@
   "desktop:reload-user-settings": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:set-user-settings": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:set-app-pinned": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:set-agent-color": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:reset-user-settings": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:get-user-settings-file-path": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:open-user-settings-file": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
@@ -165,5 +166,7 @@
   "desktop:undo-relay-share": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:poll-relay-share-discussion-activity": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:cancel-relay-share-discussion-activity": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
-  "desktop:owner-restore": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null }
+  "desktop:owner-restore": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:links-in": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:links-resolve": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null }
 }

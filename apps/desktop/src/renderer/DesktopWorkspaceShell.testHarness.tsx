@@ -451,6 +451,7 @@ function makeBaseBridge(
       source: "stored" as const,
     })),
     setTitlebarTheme: vi.fn(async () => undefined),
+    onAgentColorChanged: vi.fn(() => () => undefined),
     onUserSettingsChanged: vi.fn(() => () => {}),
     onChatDispatchNotices: vi.fn(() => () => {}),
     // This computer's agent is idle until a test pushes a run.
@@ -487,7 +488,8 @@ function makeBaseBridge(
     // The linked-mentions panel bails without this, and its chat-mention read
     // is an ENGINE CAPTURE call — so a fake that omits it makes every
     // no-call pin on that read pass for the wrong reason.
-    getBacklinks: vi.fn(async () => ({ sources: [] as never[] })),
+    linksIn: vi.fn(async () => null),
+    linksResolve: vi.fn(async () => ({ versionId: "main", results: [], mountsCovered: true })),
     listChatFileMentions: vi.fn(async () => ({ mentions: [] as never[] })),
     // Typed to the payload the shell really sends: `includeChatMentions` is
     // the flag that decides whether main runs this read through

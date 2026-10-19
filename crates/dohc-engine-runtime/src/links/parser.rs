@@ -14,6 +14,8 @@ pub struct Occurrence {
     pub end_utf16: usize,
     pub line: usize,
     pub snippet: String,
+    pub highlight_start: usize,
+    pub highlight_end: usize,
 }
 pub struct Parsed {
     pub work: Work,
@@ -274,13 +276,40 @@ pub fn extract(text: &str) -> Result<Vec<Occurrence>, ()> {
                     return Err(());
                 }
                 let start_line = text[..i].rfind(['\n', '\r']).map_or(0, |n| n + 1);
-                let snippet: String = text[start_line..]
-                    .split(['\n', '\r'])
-                    .next()
-                    .unwrap_or("")
-                    .chars()
-                    .take(240)
-                    .collect();
+                let line_end = text[i..].find(['\n', '\r']).map_or(text.len(), |n| i + n);
+                let line = &text[start_line..line_end];
+                let trimmed = line.trim_start();
+                let trim_bytes = line.len() - trimmed.len();
+                let link_chars = text[i..end.min(line_end)].chars().take(161).count();
+                let context = (160 - link_chars.min(160)) / 2;
+                let before = &text[start_line + trim_bytes..i];
+                let window_start = if context == 0 {
+                    i
+                } else {
+                    before
+                        .char_indices()
+                        .rev()
+                        .nth(context - 1)
+                        .map_or(start_line + trim_bytes, |(n, _)| {
+                            start_line + trim_bytes + n
+                        })
+                };
+                let window_end = text[window_start..line_end]
+                    .char_indices()
+                    .nth(160)
+                    .map_or(line_end, |(n, _)| window_start + n);
+                let mut snippet = String::new();
+                if window_start > start_line + trim_bytes {
+                    snippet.push('…');
+                }
+                let highlight_start =
+                    snippet.encode_utf16().count() + text[window_start..i].encode_utf16().count();
+                snippet.push_str(&text[window_start..window_end]);
+                let highlight_end =
+                    highlight_start + text[i..end.min(window_end)].encode_utf16().count();
+                if window_end < line_end {
+                    snippet.push('…');
+                }
                 let fragment = literal.split_once('#').map(|(_, f)| f.to_owned());
                 out.push(Occurrence {
                     literal,
@@ -290,6 +319,8 @@ pub fn extract(text: &str) -> Result<Vec<Occurrence>, ()> {
                     end_utf16: utf16[end],
                     line: lines[i],
                     snippet,
+                    highlight_start,
+                    highlight_end,
                 });
             }
             i = end;

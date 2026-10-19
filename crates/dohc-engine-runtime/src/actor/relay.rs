@@ -30,6 +30,7 @@ use relay_push_tests::cache_tests::CursorFaults;
 #[derive(Clone, PartialEq, Eq)]
 pub struct RelayConfiguration {
     pub base_url: String,
+    pub socket_path: Option<std::path::PathBuf>,
     pub bearer_token: String,
     #[cfg(debug_assertions)]
     pub allow_insecure_loopback_for_tests: bool,
@@ -2102,6 +2103,12 @@ impl ActorHandle {
 fn build_http_transport(
     configuration: RelayConfiguration,
 ) -> Result<HttpRelayTransport, RelayError> {
+    if let Some(path) = &configuration.socket_path {
+        if !configuration.base_url.is_empty() {
+            return Err(RelayError::InvalidResponse);
+        }
+        return HttpRelayTransport::new_unix_socket(path, configuration.bearer_token);
+    }
     #[cfg(debug_assertions)]
     {
         let test_ca = test_relay_ca(
@@ -2152,6 +2159,7 @@ fn build_debug_http_transport(
 ) -> Result<HttpRelayTransport, RelayError> {
     let RelayConfiguration {
         base_url,
+        socket_path: _,
         bearer_token: token,
         allow_insecure_loopback_for_tests: insecure,
     } = configuration;
@@ -3830,6 +3838,7 @@ mod test_relay_ca_tests {
     fn configuration(base_url: &str, insecure: bool) -> RelayConfiguration {
         RelayConfiguration {
             base_url: base_url.to_owned(),
+            socket_path: None,
             bearer_token: "token".to_owned(),
             allow_insecure_loopback_for_tests: insecure,
         }

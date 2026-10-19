@@ -8,9 +8,11 @@ import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 
 export async function locateAccessVersionPath(workspaceId: string, path: string, versionId: string,
-  adapter: Pick<VersionedLiveAdapter, "listTextFileMetadata">): Promise<{ path: string; exists: boolean }> {
-  const files = await adapter.listTextFileMetadata({ workspaceId, versionId });
-  return { path, exists: files.some(file => file.path === path || file.path.startsWith(`${path}/`)) };
+  adapter: Pick<VersionedLiveAdapter, "resolveFiles" | "listTextFilePage">): Promise<{ path: string; exists: boolean }> {
+  const [file] = (await adapter.resolveFiles({ workspaceId, versionId, targets: [{ path }] })).results;
+  if (file?.status === "found" && file.path === path) return { path, exists: true };
+  const page = await adapter.listTextFilePage({ workspaceId, versionId, under: path, limit: 1 });
+  return { path, exists: page.files.length !== 0 };
 }
 
 export async function hasAccessChat(workspaceId: string, channelWireId: string,

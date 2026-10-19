@@ -95,6 +95,7 @@ async function harness() {
   const openDialog = vi.fn(async () => ({ canceled: true, filePaths: [] as string[] }));
   const saveDialog = vi.fn<() => Promise<{ canceled: boolean; filePath?: string }>>(async () => ({ canceled: true }));
   const listing = vi.fn(async () => listFiles(workspace.rootPath));
+  const lookup = vi.fn(async (_workspace: Workspace, paths: readonly string[]) => listFiles(workspace.rootPath, { paths }));
   const readText = vi.fn(async (_workspace: Workspace, path: string) => readWorkspaceText(workspace.rootPath, path));
   const assertWritable = vi.fn((entry: Workspace) => {
     const refusal = workspaceWriteRefusal(entry.shareView);
@@ -112,6 +113,7 @@ async function harness() {
     withRendererWorkspaceOperation: withOperation, exactRendererWorkspaceReferences: references,
     workspaceFileListings: listings, workspaceFileMutations: mutations,
     listOwnedWorkspaceFilesFor: listing, readOwnedWorkspaceTextFor: readText,
+    lookupOwnedWorkspaceFilesFor: lookup,
     assertWritableWorkspace: assertWritable, shareViewFiles: shareFiles,
     listWorkspaces: () => [workspace], ensureOwnedProjectionCurrent: repair,
     renderHtmlToPdf: renderPdf, notifyRenderer: notify,
@@ -155,7 +157,7 @@ async function harness() {
     return handler({ sender: { id: 1 }, trusted: isTrusted }, payload);
   };
   return {
-    workspace, listings, handlers, invoke, change, openDialog, saveDialog, listing, readText, repair,
+    workspace, lookup, listings, handlers, invoke, change, openDialog, saveDialog, listing, readText, repair,
     openPath, reveal, renderPdf, notify, capture, syncChannels, store, resolveFiles, buildMenu,
     retireRenderer: () => { rendererCurrent = false; },
     retirePhysical: () => { physicalCurrent = false; },
@@ -267,7 +269,7 @@ describe("registered workspace file handlers", () => {
       workspaceFileOperations.moveWorkspacePath.channel, workspaceFileOperations.deleteWorkspacePath.channel, workspaceFileOperations.undoHistoryOperation.channel, workspaceFileOperations.exportWorkspaceZip.channel,
       workspaceFileOperations.exportDocumentFile.channel, workspaceFileOperations.importWorkspaceFiles.channel, workspaceFileOperations.readWorkspaceText.channel,
       workspaceFileOperations.writeWorkspaceText.channel, workspaceFileOperations.writeWorkspaceAsset.channel, workspaceFileOperations.pickImageFiles.channel,
-      workspaceFileOperations.openFileExternally.channel, CHANNELS.readWorkspaceGraph, CHANNELS.getBacklinks,
+      workspaceFileOperations.openFileExternally.channel, CHANNELS.readWorkspaceGraph,
       CHANNELS.listWorkspaceHeadings, CHANNELS.showExplorerMenu, CHANNELS.showWorkbenchMenu,
     ]);
     for (const channel of h.handlers.keys()) {
@@ -472,8 +474,6 @@ describe("registered graph and heading handlers", () => {
     });
     expect(h.capture).not.toHaveBeenCalled();
     expect(h.resolveFiles).not.toHaveBeenCalled();
-    await expect(h.invoke(CHANNELS.getBacklinks, { workspaceId: "workspace", path: "beta.md" }))
-      .resolves.toMatchObject({ sources: [expect.objectContaining({ sourcePath: "alpha.md" })] });
     const headings = await h.invoke(CHANNELS.listWorkspaceHeadings, { workspaceId: "workspace", path: "beta.md" }) as { headings: { occurrence: number }[] };
     expect(headings.headings.map((heading) => heading.occurrence)).toEqual([0, 1]);
   });
@@ -660,3 +660,17 @@ describe("registered native menu handlers", () => {
     await expect(reading).rejects.toThrow();
   } finally { spy.mockRestore(); }
  });
+
+it("looks up one file through the registered channel without loading or replacing the workspace cache", async () => {
+  const h = await harness();
+  await writeFile(join(h.workspace.rootPath, "one.txt"), "one");
+  await mkdir(join(h.workspace.rootPath, "folder"));
+  for (const filePath of ["one.txt", "folder", "missing.txt"]) {
+    const result = await h.invoke(workspaceFileOperations.listWorkspaceFiles.channel, { workspaceId: "workspace", filePath });
+    expect(result).toMatchObject({ files: filePath === "one.txt" ? [{ path: "one.txt", kind: "file" }] : [] });
+  }
+  expect(h.listing).not.toHaveBeenCalled();
+  expect(h.lookup).toHaveBeenCalledTimes(3);
+  await h.invoke(workspaceFileOperations.listWorkspaceFiles.channel, { workspaceId: "workspace", allowCached: true });
+  expect(h.listing).toHaveBeenCalledOnce();
+});

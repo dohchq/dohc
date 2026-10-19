@@ -13,7 +13,9 @@ import {
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
-import { bridgeCaptureEventsToRenderer, bridgeNoAtomicPlacement } from "./captureActivityBridge";
+import {
+  CAPTURE_INITIAL_SETTLED_EVENT, COLLECTIONS_PROJECTED_EVENT, bridgeCaptureEventsToRenderer, bridgeNoAtomicPlacement,
+} from "./captureActivityBridge";
 import { bridgeAutomationClaimsToExecutors } from "./automationClaimsBridge";
 import type { WorkspaceActivityScope } from "../ipc/workspaceActivityBroadcast";
 import type { RegistryEntry } from "./registryStore";
@@ -337,6 +339,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   // settles; boot-time paths that need engine sessions await this first instead
   // of throwing the broken-invariant error at it.
   let engineDaemonStartup: Promise<boolean> = Promise.resolve(false);
+  // A workspace that opens proves the engine's workspace work, so the startup
+  // smoke runs only when none has opened by the time the launch settles.
+  const startupSmoke = Promise.withResolvers<"run" | "skip">();
   const relayTransportRoutes = new RelayTransportRouteGuard();
 
   // Narrowing for the engine-access gates. The invariant is real:
@@ -450,6 +455,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       let publications = 0;
       rustEngineDaemon = createRustEngineDaemon({
         ...(ingress ? {privateOwnerHost: ingress} : {}),
+        startupSmoke: startupSmoke.promise,
         ...testEngineRestartOverrides(),
         command: defaultEngineBinaryPath({
           isPackaged: app.isPackaged,
@@ -514,10 +520,12 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         },
       });
       await rustEngineDaemon.start();
-      // Collection projection completion is a separate derived-state wake.
-      // Workspace activity owns capture and file observation delivery.
+      // Collection projection completion is a separate derived-state wake, and
+      // so is the end of a new workspace's first read: reads refused during it
+      // can be answered now. Workspace activity owns capture and file
+      // observation delivery.
       bridgeCaptureEventsToRenderer({ onEvent: listener => rustEngineDaemon!.onEvent(event => {
-        if (event.name === "collections.projected") listener(event);
+        if (event.name === COLLECTIONS_PROJECTED_EVENT || event.name === CAPTURE_INITIAL_SETTLED_EVENT) listener(event);
       }) }, scope => notifyRenderer(scope ? { ...scope, pathSetChanged: false } : undefined));
       // The first placement that falls back on a drive without atomic
       // renames announces it at once; the capture health poll is a backstop.
@@ -547,7 +555,10 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       // with headroom. The renderer names the wait.
       rustEngineWorkspaceSessions = new EngineWorkspaceSessions(relaySource, {
         workspaceOpenDeadlineMs: 120_000,
-        onOpened: workspace => dependencies.onWorkspaceOpened?.(workspace.workspaceId),
+        onOpened: workspace => {
+          startupSmoke.resolve("skip");
+          dependencies.onWorkspaceOpened?.(workspace.workspaceId);
+        },
       });
       const sessions = rustEngineWorkspaceSessions;
       rustEngineRelayClient = new EngineRelayClient({
@@ -561,9 +572,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       });
       startOwnerHost();
       startOwnerDelivery();
-      console.info(
-        "[desktop] Rust engine daemon handshake complete; startup smoke running.",
-      );
+      console.info("[desktop] Rust engine daemon handshake complete.");
       // Marked here, where the handshake actually completes — the bootstrap
       // gate's await also covers the cached-settings read, which would inflate
       // this mark.
@@ -633,6 +642,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     start() {
       engineDaemonStartup = startRustEngineDaemon();
       return engineDaemonStartup;
+    },
+    launchSettled() {
+      startupSmoke.resolve("run");
     },
   };
 }

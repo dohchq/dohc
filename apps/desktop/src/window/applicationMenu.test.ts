@@ -279,7 +279,7 @@ describe("application menu template", () => {
     expect(template.map((entry) => entry.label ?? entry.role)).toEqual([
       "appMenu", // macOS titles it with the app name
       "File",
-      "editMenu",
+      "Edit",
       "View",
       "windowMenu",
       "Help",
@@ -319,9 +319,22 @@ describe("application menu template", () => {
     expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "settings");
   });
 
-  it("darwin: the standard Edit menu, Full Screen in View, and the palette in Help beside the menu search", () => {
+  it("darwin: the standard Edit menu with Find, Full Screen in View, and the palette in Help beside the menu search", () => {
     const { template, sendCommand } = build(false, "darwin");
-    expect(template.find((entry) => entry.role === "editMenu")).toEqual({ role: "editMenu" });
+    // Electron's editMenu role, with Find before Substitutions as in TextEdit.
+    const edit = items(template, "Edit");
+    expect(edit.map((entry) => entry.role ?? entry.label ?? entry.type)).toEqual([
+      "undo", "redo", "separator",
+      "cut", "copy", "paste", "pasteAndMatchStyle", "delete", "selectAll", "separator",
+      "Find", "Substitutions", "Speech",
+    ]);
+    expect(edit.find((entry) => entry.label === "Substitutions")?.submenu).toEqual([
+      { role: "showSubstitutions" }, { type: "separator" },
+      { role: "toggleSmartQuotes" }, { role: "toggleSmartDashes" }, { role: "toggleTextReplacement" },
+    ]);
+    expect(edit.find((entry) => entry.label === "Speech")?.submenu).toEqual([
+      { role: "startSpeaking" }, { role: "stopSpeaking" },
+    ]);
     const view = items(template, "View");
     expect(view.at(-1)).toEqual({ role: "togglefullscreen" });
     const help = template.at(-1)!;
@@ -334,9 +347,32 @@ describe("application menu template", () => {
     expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "command-palette");
   });
 
+  it("darwin: Edit > Find shows the editor's find keys and hands each item to the clicked window", () => {
+    const { template, sendCommand } = build(false, "darwin");
+    const find = items(template, "Edit").find((entry) => entry.label === "Find");
+    const entries = find?.submenu as MenuItemConstructorOptions[];
+    expect(entries.map(({ label, accelerator, registerAccelerator, enabled }) => ({ label, accelerator, registerAccelerator, enabled }))).toEqual([
+      { label: "Find…", accelerator: "CommandOrControl+F", registerAccelerator: false, enabled: true },
+      { label: "Find and replace…", accelerator: "CommandOrControl+Alt+F", registerAccelerator: false, enabled: true },
+      { label: "Find next", accelerator: "CommandOrControl+G", registerAccelerator: false, enabled: true },
+      { label: "Find previous", accelerator: "CommandOrControl+Shift+G", registerAccelerator: false, enabled: true },
+    ]);
+    const fakeWindow = { id: 13 };
+    for (const entry of entries) (entry.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
+    expect(sendCommand.mock.calls).toEqual([
+      [fakeWindow, "editor-find"],
+      [fakeWindow, "editor-replace"],
+      [fakeWindow, "find-again-next"],
+      [fakeWindow, "find-again-previous"],
+    ]);
+  });
+
   it.each(["win32", "linux"] as const)("%s keeps Edit, Go, and Help as they were, without macOS items", (platform) => {
     const { template } = build(false, platform);
     expect(template.map((entry) => entry.label)).toEqual(["File", "Edit", "View", "Go", "Help"]);
+    expect(items(template, "Edit").map((entry) => entry.role ?? entry.type)).toEqual([
+      "undo", "redo", "separator", "cut", "copy", "paste", "selectAll",
+    ]);
     expect(template.at(-1)?.role).toBe("help");
     expect(items(template, "Help").map((entry) => entry.label ?? entry.type)).toEqual([
       "Check for updates", "Update and restart", "separator", "About dohc",

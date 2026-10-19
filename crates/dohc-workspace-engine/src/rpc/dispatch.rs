@@ -17,6 +17,7 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
     (method.starts_with("sync.")
         && !matches!(method, "sync.remoteChanges" | "sync.collectionsWaiting"))
         || method.starts_with("share.")
+        || method.starts_with("links.")
         || method.starts_with("search.")
         || method.starts_with("collections.")
         || method.starts_with("liveApplication.")
@@ -142,9 +143,10 @@ impl EngineService {
     pub(crate) async fn dispatch_input(
         &self,
         ctx: RequestContext,
-        request: Request,
+        mut request: Request,
         input: crate::LiveApplicationInput,
     ) -> Result<ServiceResponse, WireError> {
+        self.guard_replica_request(&mut request)?;
         super::request::validate_request_ids(&request)?;
         self.ensure_configured_host_method(&ctx, &request)?;
         self.ensure_handle_allows_method(request.workspace.as_ref(), &request.method)?;
@@ -168,8 +170,9 @@ impl EngineService {
     pub(crate) async fn dispatch(
         &self,
         ctx: RequestContext,
-        request: Request,
+        mut request: Request,
     ) -> Result<ServiceResponse, WireError> {
+        self.guard_replica_request(&mut request)?;
         let id = request.id;
         super::request::validate_request_ids(&request)?;
         self.ensure_admissible_author(&request)?;
@@ -340,8 +343,23 @@ impl EngineService {
                 self.live_application_register(&ctx, request.workspace, request.params)
                     .await?
             }
-            "engine.ping" => engine_ping(),
+            "engine.ping" => {
+                if self.replica_mode.is_some() {
+                    json!({"ok":true, "mode":"replica", "sandboxLevel":"none"})
+                } else {
+                    engine_ping()
+                }
+            }
             "workspace.open" => Box::pin(self.workspace_open(&ctx, request.params)).await?,
+            "links.in" | "links.resolve" => {
+                self.links_read(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                    request.method == "links.in",
+                )
+                .await?
+            }
             "files.resolve" => {
                 self.files_resolve(&ctx, request.workspace, request.params)
                     .await?
@@ -1137,6 +1155,8 @@ impl EngineService {
             && !matches!(
                 method,
                 "workspace.close"
+                    | "links.in"
+                    | "links.resolve"
                     | "files.changesSince"
                     | "files.drain"
                     | "search.queryChatMessagesGranular"
@@ -1334,6 +1354,8 @@ mod tests {
             "versions.ensureMain"
         ));
         for method in [
+            "links.in",
+            "links.resolve",
             "files.resolve",
             "ydoc.ownerStop.request",
             "ydoc.ownerStop.release",

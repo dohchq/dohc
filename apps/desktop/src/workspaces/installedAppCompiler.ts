@@ -18,27 +18,22 @@ export function appBuildError(error: unknown): unknown {
 
 /**
  * Why this device cannot build apps, or undefined when it can. macOS 13.5 is
- * Darwin 22.6, the oldest release the pinned Node 24 runs on. `translated`
- * is true when Rosetta runs this x64 dohc on an Apple silicon Mac, where the
- * compiler's sandbox is unverified.
+ * Darwin 22.6, the oldest release the pinned Node 24 runs on.
  */
-export function appCompilerRefusal(platform: NodeJS.Platform, arch: string, kernel: string, translated: boolean): string | undefined {
+export function appCompilerRefusal(platform: NodeJS.Platform, arch: string, kernel: string): string | undefined {
   if (platform === "win32" && arch === "x64") return undefined;
-  if (platform !== "darwin" || (arch !== "arm64" && arch !== "x64")) return "Publishing and opening apps needs Windows x64 or macOS 13.5 or later.";
+  if (platform !== "darwin") return "Publishing and opening apps needs Windows x64, or an Apple silicon Mac with macOS 13.5 or later.";
+  if (arch !== "arm64") return "Publishing and opening apps needs an Apple silicon Mac with macOS 13.5 or later.";
   const [major = 0, minor = 0] = kernel.split(".").map(Number);
   if (major < 22 || (major === 22 && minor < 6)) return "Publishing and opening apps needs macOS 13.5 or later. Update macOS, then try again.";
-  if (translated) return "This Intel version of dohc can't publish or open apps on an Apple silicon Mac. Download the Apple silicon version from github.com/dohchq/dohc/releases, then try again.";
   return undefined;
 }
 
-/**
- * resourcesRoot is chosen by Electron main, never by an app or renderer.
- * Main passes app.runningUnderARM64Translation, which reads sysctl.proc_translated.
- */
-export async function createInstalledAppCompiler(resourcesRoot: string, translated: boolean) {
+/** resourcesRoot is chosen by Electron main, never by an app or renderer. */
+export async function createInstalledAppCompiler(resourcesRoot: string) {
   if (!isAbsolute(resourcesRoot)) throw new Error("Compiler resources path must be absolute.");
   const root = join(resourcesRoot, "app-compiler");
-  const refusal = appCompilerRefusal(process.platform, process.arch, release(), translated);
+  const refusal = appCompilerRefusal(process.platform, process.arch, release());
   if (refusal) throw new Error(refusal);
   // This installed module and its dependencies stay outside app.asar. It
   // resolves the worker and supervisor assets relative to its own location.

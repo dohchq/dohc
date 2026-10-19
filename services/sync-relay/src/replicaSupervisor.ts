@@ -1,7 +1,8 @@
 import {currentViewFileVisible, ReplicaCurrentViewRefused} from "./storage/replicaCurrentViews";
+import {historyObjectKey, sameHistoryState, historyStructuralReason, type ReplicaHistoryObservation} from "./storage/replicaHistoryPins";
 import type {ReplicaCurrentView, ReplicaCurrentViewPage, ReplicaCurrentViewPosition, ReplicaCurrentViewCursor, ReplicaCurrentViewSelector} from "@dohc/workspace-engine-client/daemon";
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { SyncRelayStorage } from "./storage";
 import { observeRelayWrites } from "./relayWriteChanges";
@@ -19,6 +20,7 @@ export interface ReplicaChild {
 export interface ReplicaChildInput {
   readonly storeDir: string;
   readonly lease: ReplicaReadLease;
+  readonly relayHandler: (request: Request) => Promise<Response>;
 }
 export interface ReplicaSupervisorOptions {
   readonly storage: SyncRelayStorage;
@@ -45,6 +47,8 @@ interface Entry {
   reportedOmissions?: Set<string>;
   quiet?: ReturnType<typeof setTimeout>;
   ceiling?: ReturnType<typeof setTimeout>;
+  history?: ReturnType<typeof setTimeout>;
+  historyObservations?: Map<string,ReplicaHistoryObservation>;
 }
 
 /** Explicit construction only. Production startup must wait for PR 6's readers. */
@@ -60,6 +64,16 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
   // Leases and stores belong to this process. Finish the crash sweep before activation.
   // Only this supervisor's replica-* stores are removed; anything else under the root stays.
   const ready = mkdir(options.storeRoot, { recursive: true, mode: 0o700 })
+    .then(async () => {
+      if (process.platform === "win32") return;
+      const root = await lstat(options.storeRoot);
+      if (root.isSymbolicLink()) throw new Error("Replica store root must not be a symlink.");
+      if (!root.isDirectory() || root.uid !== process.getuid!()) throw new Error("Replica store root must be a directory owned by the process user.");
+      if (root.mode & 0o022) throw new Error("Replica store root must not be writable by group or others.");
+      const limit = process.platform === "darwin" ? 104 : 108;
+      const bytes = Buffer.byteLength(join(resolve(options.storeRoot), "replica-XXXXXX", "relay.sock"));
+      if (bytes >= limit) throw new Error(`Replica socket path requires ${bytes + 1} bytes; this host permits ${limit}. Use a shorter store root.`);
+    })
     .then(() => readdir(options.storeRoot, { withFileTypes: true }))
     .then(found => Promise.all(found.filter(item => item.isDirectory() && item.name.startsWith("replica-"))
       .map(item => rm(join(options.storeRoot, item.name), { recursive: true, force: true }))));
@@ -70,8 +84,8 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
   let notificationDone = Promise.resolve();
   let finishNotification = () => {};
   const report = (entry: Entry, error: unknown) => options.onError?.(entry.lease.workspaceId, error);
-  const standingCurrent = (lease: ReplicaReadLease) => {
-    const standing = options.storage.readReplicaStanding(lease.workspaceId, lease.shareGrantBindings);
+  const standingCurrent = (lease: ReplicaReadLease, withGrants = true) => {
+    const standing = options.storage.readReplicaStanding(lease.workspaceId, withGrants ? lease.shareGrantBindings : undefined);
     return standing && standing.ownerUserId === lease.ownerUserId &&
       standing.replicationEpoch === lease.replicationEpoch && standing.streamIdentity === lease.streamIdentity ? standing : null;
   };
@@ -82,46 +96,105 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
     finishNotification();
   }
 
-  function persist(entry: Entry, view = entry.newest) {
+  function armHistory(entry: Entry) {
+    clearTimeout(entry.history); entry.history=undefined;
+    const due = options.storage.nextReplicaHistoryPinAt(entry.lease.workspaceId);
+    if (due !== null && !entry.stopping) {
+      entry.history=setTimeout(()=>{void flush(entry,true);
+      },Math.max(1,due-Date.now())); entry.history.unref();
+    }
+  }
+  function persist(entry: Entry, view = entry.newest, beforeStructuralChange = false, previous?: ReplicaCurrentView): boolean {
     clearTimeout(entry.quiet); clearTimeout(entry.ceiling);
     entry.quiet = entry.ceiling = undefined;
-    if (!entry.pendingView || !view) return;
+    if (!entry.pendingView || !view) return false;
     try {
-      entry.newest = options.storage.storeReplicaCurrentView(entry.lease, view);
+      const observations=[...(entry.historyObservations?.values() ?? [])].map(o=>beforeStructuralChange ? {...o,beforeStructuralChange:true} : o);
+      entry.newest = previous ? options.storage.advanceReplicaCurrentView(entry.lease,view,previous)
+        : options.storage.storeReplicaCurrentView(entry.lease, view,observations);
       entry.pendingView = false;
+      entry.historyObservations?.clear();
+      armHistory(entry);
+      return true;
     } catch (error) {
+      entry.newest = undefined; entry.pendingView = false;
       if (!(error instanceof ReplicaCurrentViewRefused)) throw error;
       report(entry, error);
-      entry.newest = undefined; entry.pendingView = false;
+      return false;
     }
+  }
+  async function flush(entry: Entry, sampleHistory = false) {
+    try {
+      const selectors = options.storage.replicaCurrentViewSelectors(entry.lease.workspaceId);
+      const pending = entry.newest;
+      // Restore can fence a pending view while the next journal page is in flight.
+      if (pending && [...pending.files, ...pending.omitted].some(file => !currentViewFileVisible(selectors, file))) {
+        await schedule(entry);
+      }
+      if (!entry.stopping) {
+        const persisted=persist(entry);
+        if (sampleHistory) {
+          if (!persisted) options.storage.sampleReplicaHistory(entry.lease);
+          armHistory(entry);
+        }
+      }
+    } catch (error) {report(entry, error); void retire(entry).catch(e => report(entry, e));}
   }
   function acceptView(entry: Entry, view: ReplicaCurrentView, spilled: boolean) {
     if (!principal.current(entry.lease)) return;
+    const previous = entry.newest ?? options.storage.readReplicaCurrentView(entry.lease.workspaceId) ?? undefined;
+    const next = new Map(view.files.map(f=>[historyObjectKey(f),f]));
+    const omitted = new Set(view.omitted.map(historyObjectKey));
+    if (entry.pendingView && previous?.files.some(f=>!omitted.has(historyObjectKey(f)) && historyStructuralReason(f,next.get(historyObjectKey(f))))) {
+      const selectors=options.storage.replicaCurrentViewSelectors(entry.lease.workspaceId);
+      const files=previous.files.filter(file=>currentViewFileVisible(selectors,file)), shas=new Set(files.map(file=>file.sha256));
+      persist(entry,{...previous,files,texts:previous.texts.filter(text=>shas.has(text.sha256)),
+        omitted:previous.omitted.filter(file=>currentViewFileVisible(selectors,file))},true);
+    }
+    entry.historyObservations ??= new Map();
+    const prior = new Map(previous?.files.map(f=>[historyObjectKey(f),f]) ?? []), now=Date.now();
+    let changed=!previous;
+    let structural=!previous;
+    for (const key of new Set([...prior.keys(),...next.keys()])) {
+      if (omitted.has(key)) continue;
+      const old=prior.get(key), file=next.get(key);
+      if (old && file && sameHistoryState(old,file)) continue;
+      changed=true;
+      if (!old || !file || historyStructuralReason(old,file) || old.contentKind !== file.contentKind) structural=true;
+      const identity=file ?? old!;
+      entry.historyObservations.set(key,{versionId:identity.versionId,objectId:identity.objectId,
+        firstChangedAtMs:entry.historyObservations.get(key)?.firstChangedAtMs ?? now,changedAtMs:now});
+    }
+    const priorOmitted=new Map(previous?.omitted.map(f=>[historyObjectKey(f),f]) ?? []);
+    if (view.omitted.length !== priorOmitted.size) changed=structural=true;
+    for (const file of view.omitted) {
+      const old=priorOmitted.get(historyObjectKey(file));
+      if (!old || old.path !== file.path || old.reason !== file.reason) changed=structural=true;
+      else if (old.sha256 !== file.sha256) changed=true;
+    }
+    if (previous && JSON.stringify(previous.omitted)!==JSON.stringify(view.omitted)) changed=true;
+    const fresh = !entry.newest;
     if (spilled) {
       entry.pendingView = true;
       persist(entry, view);
       return;
     }
-    const previous = entry.newest;
     const held = new Map(previous?.texts.map(t => [t.sha256, t.text]) ?? []);
     for (const text of view.texts) held.set(text.sha256, text.text);
     const needed = new Set(view.files.filter(f => f.contentKind === "text").map(f => f.sha256));
     view.texts = [...held].filter(([sha]) => needed.has(sha)).map(([sha256, text]) => ({sha256, text}));
-    const structure = (v: ReplicaCurrentView) => JSON.stringify([
-      v.files.map(f => [f.versionId, f.objectId, f.path, f.contentKind, f.lineageClaimId, f.restoreGeneration]),
-      v.omitted.map(f => [f.versionId, f.objectId, f.path, f.reason])]);
     entry.newest = view;
-    if (previous && JSON.stringify([previous.files, previous.omitted]) === JSON.stringify([view.files, view.omitted])) return;
+    if (!changed && !entry.pendingView && previous && (previous.revision !== view.revision || previous.logCursor !== view.logCursor || previous.journalCursor !== view.journalCursor)) {
+      entry.pendingView=true;persist(entry,view,false,previous);return;
+    }
+    if (!changed) {if (fresh) armHistory(entry); return;}
     entry.pendingView = true;
-    if (!previous || structure(previous) !== structure(view)) {
+    if (fresh || structural) {
       persist(entry);
       return;
     }
-    const flush = () => {
-      try {persist(entry);} catch (error) {report(entry, error); void retire(entry).catch(e => report(entry, e));}
-    };
-    clearTimeout(entry.quiet); entry.quiet = setTimeout(flush, 2000); entry.quiet.unref();
-    entry.ceiling ??= setTimeout(flush, 30_000); entry.ceiling.unref();
+    clearTimeout(entry.quiet); entry.quiet = setTimeout(()=>{void flush(entry);}, 2000); entry.quiet.unref();
+    entry.ceiling ??= setTimeout(()=>{void flush(entry);}, 30_000); entry.ceiling.unref();
   }
 
   async function retire(entry: Entry): Promise<void> {
@@ -130,11 +203,12 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
     principal.revoke(entry.lease);
     clearTimeout(entry.idle);
     clearTimeout(entry.quiet); clearTimeout(entry.ceiling);
+    clearTimeout(entry.history);
     entry.retirement = (async () => {
       // Startup may still own the directory and child. Wait before disposing either.
       try {
         await entry.run?.catch(() => {});
-        try { persist(entry); } catch (error) { report(entry,error); }
+        try { if (standingCurrent(entry.lease,false) && !persist(entry)) options.storage.sampleReplicaHistory(entry.lease); } catch (error) { report(entry,error); }
         options.storage.discardReplicaCurrentView(entry.lease);
         options.storage.releaseReplicaCurrentView(entry.lease);
         try { await entry.child?.close(); } catch (error) { report(entry, error); }
@@ -163,7 +237,7 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
       for (let attempt = 0; ; attempt++) {
         try {
           if (!entry.child && !entry.stopping && principal.current(entry.lease)) {
-            entry.child = await options.startChild({ storeDir: entry.storeDir!, lease: entry.lease });
+            entry.child = await options.startChild({ storeDir: entry.storeDir!, lease: entry.lease, relayHandler: principal.handle });
             const child = entry.child;
             void child.exited?.then(() => {
               // A first-pull crash belongs to the one-time fresh-store rebuild below.
@@ -316,7 +390,6 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
   }
 
   return {
-    handle: principal.handle,
     activate,
     // Recipient reads apply their own selector and fences in the read transaction.
     currentReadView(workspaceId: string) {

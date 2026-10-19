@@ -24,7 +24,7 @@ struct ResolveParams {
     targets: Vec<Value>,
 }
 
-fn resolve_target(value: Value) -> FileResolveTarget {
+pub(super) fn resolve_target(value: Value) -> FileResolveTarget {
     let Some(object) = value.as_object() else {
         return FileResolveTarget::Invalid;
     };

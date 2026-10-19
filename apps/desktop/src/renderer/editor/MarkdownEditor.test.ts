@@ -47,6 +47,8 @@ import {
 } from "@dohc/ydoc-projection";
 import { SHORTCUTS, shortcutAccelerators, type ShortcutId } from "../../shortcuts/shortcutRegistry";
 import { MarkdownEditor, type MarkdownEditorHandle } from "./MarkdownEditor";
+import { sendToFocusedEditor } from "./editorMenuCommands";
+import { findReplaceKey } from "./findReplace";
 import { measureParseWork } from "./markdownParseWork";
 import {
   findEmptyListItemParagraph,
@@ -2247,4 +2249,45 @@ it.each([["Win32", "win32"], ["MacIntel", "darwin"]] as const)("keeps the displa
   } finally {
     platformSpy.mockRestore();
   }
+});
+
+it("hands Edit > Find to the editor that has focus, including its find bar", async () => {
+  vi.stubGlobal("dohcDesktop", { platform: "darwin" });
+  // The find bar scrolls its active match into view.
+  Object.defineProperty(Element.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
+  const left = createRef<MarkdownEditorHandle>();
+  const right = createRef<MarkdownEditorHandle>();
+  const props = { value: "the cat, the mat, the hat", onDirty: vi.fn(), workspaceId: "ws", knownFiles: [] };
+  render(createElement("div", null,
+    createElement(MarkdownEditor, { ...props, key: "left", ref: left, path: "left.md" }),
+    createElement(MarkdownEditor, { ...props, key: "right", ref: right, path: "right.md" })));
+  const [leftSurface, rightSurface] = await waitFor(() => {
+    const surfaces = screen.getAllByTestId("markdown-editor");
+    expect(surfaces).toHaveLength(2);
+    return surfaces;
+  });
+  const find = (surface: HTMLElement) => findReplaceKey.getState(editorBehind(surface!).state);
+
+  // With focus outside every editor, the command does nothing.
+  act(() => sendToFocusedEditor("editor-find"));
+  expect(screen.queryByRole("search", { name: "find and replace" })).toBeNull();
+
+  act(() => right.current?.focus("start"));
+  await waitFor(() => expect(document.activeElement).toBe(rightSurface));
+  act(() => sendToFocusedEditor("editor-find"));
+  const input = await screen.findByPlaceholderText("Find");
+  await waitFor(() => expect(document.activeElement).toBe(input));
+  expect(find(rightSurface!)?.open).toBe(true);
+  expect(find(leftSurface!)?.open).toBe(false);
+
+  // From the find bar, as with ⌘G there.
+  fireEvent.change(input, { target: { value: "the" } });
+  act(() => sendToFocusedEditor("find-again-next"));
+  expect(find(rightSurface!)?.activeIndex).toBe(1);
+  act(() => sendToFocusedEditor("find-again-previous"));
+  act(() => sendToFocusedEditor("find-again-previous"));
+  expect(find(rightSurface!)?.activeIndex).toBe(2);
+  act(() => sendToFocusedEditor("editor-replace"));
+  expect(find(rightSurface!)?.replaceOpen).toBe(true);
+  expect(find(leftSurface!)?.open).toBe(false);
 });

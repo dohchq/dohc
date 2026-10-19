@@ -62,5 +62,5 @@ export function initializeReplicaCurrentViewSchema(db: SqliteDb) {
     DELETE FROM sync_relay_replica_cuts WHERE workspace_id=OLD.workspace_id;
     DELETE FROM sync_relay_replica_cut_texts WHERE workspace_id=OLD.workspace_id;
   END;
-  ${currentViewSweep}; DELETE FROM sync_relay_replica_cut_texts WHERE ref_count=0`);
+  ${currentViewSweep}`);
 }

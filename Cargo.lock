@@ -338,6 +338,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "base64 0.23.1",
+ "dohc-macos-files",
  "dohc-test-scratch",
  "getrandom 0.4.3",
  "libc",
@@ -403,6 +404,20 @@ dependencies = [
  "serde_json",
  "tokio",
  "ts-rs",
+]
+
+[[package]]
+name = "dohc-engine-reader"
+version = "0.1.0"
+dependencies = [
+ "dohc-engine-protocol",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -553,6 +568,7 @@ dependencies = [
  "dohc-engine-storage",
  "dohc-engine-sync",
  "dohc-engine-testkit",
+ "dohc-macos-files",
  "dohc-workspace-engine",
  "file-id",
  "fs4",

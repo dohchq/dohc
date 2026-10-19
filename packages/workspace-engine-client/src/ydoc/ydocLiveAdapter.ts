@@ -660,7 +660,7 @@ export class YdocAdapterSession {
   ownerDraft: YdocOwnerDraft | undefined;
   private readonly remoteUpdateListeners = new Set<(update: Uint8Array) => void>();
   private readonly durableLocalChangeListeners = new Set<() => void>();
-  private readonly localUpdateAcknowledgedListeners = new Set<(id: string) => void>();
+  private readonly localUpdateAcknowledgedListeners = new Set<(id: string, lane: "journal" | "owner-outbox") => void>();
   private readonly localUpdateRefusedListeners = new Set<(id: string, error: unknown) => void>();
   private readonly ownerDraftChangedListeners = new Set<() => void>();
   private readonly remoteApplyErrorListeners = new Set<
@@ -1028,7 +1028,13 @@ export class YdocAdapterSession {
     if (!this.continuesLineage(result)) throw this.refuseGeneration(generation, LINEAGE_CHANGED_WHILE_RECORDING);
     Y.applyUpdate(this.acknowledgedDoc, base64ToBytes(record.updateBase64));
     this.removePendingRecord(record);
-    if (!record.seed) this.notifyListeners(this.localUpdateAcknowledgedListeners, record.idempotencyKey);
+    if (!record.seed) {
+      const lane = "ownerDraft" in result ? "owner-outbox" : "journal";
+      for (const listener of this.localUpdateAcknowledgedListeners) {
+        try { listener(record.idempotencyKey, lane); }
+        catch (error) { this.surfaceSessionError(error); }
+      }
+    }
     if ("ownerDraft" in result && this.ownerDraft) {
       this.ownerDraft = { ...this.ownerDraft, outboxId: result.ownerDraft.outboxId,
         pendingBytes: result.ownerDraft.pendingBytes, state: result.ownerDraft.state };
@@ -1161,7 +1167,7 @@ export class YdocAdapterSession {
     return () => this.durableLocalChangeListeners.delete(handler);
   }
 
-  onLocalUpdateAcknowledged(handler: (id: string) => void): () => void {
+  onLocalUpdateAcknowledged(handler: (id: string, lane: "journal" | "owner-outbox") => void): () => void {
     this.localUpdateAcknowledgedListeners.add(handler);
     return () => this.localUpdateAcknowledgedListeners.delete(handler);
   }

@@ -26,3 +26,4 @@ pub(super) mod ydoc;
 mod owner_activation;
 
 pub(super) mod files;
+pub(super) mod links;

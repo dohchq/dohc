@@ -87,6 +87,9 @@ interface SessionEntry {
   readonly workspaceId: string;
   readonly rootPath: string;
   binding: EngineWorkspaceBinding | null;
+  // A binding was published once. Until then nothing was accepted through
+  // this session, so quit may abandon its open.
+  opened: boolean;
   opening: {
     client: EngineDaemonClient;
     promise: Promise<EngineWorkspaceBinding>;
@@ -224,13 +227,14 @@ export class EngineWorkspaceRetryDeadlineError extends Error {
   }
 }
 
-// A bounded region was asked to start after `beginShutdown`. It is refused
-// before the first daemon call, because the app is quitting and the work is
-// abandonable by construction.
+// Work that quit abandons: a bounded region asked to start after
+// `beginShutdown`, or a run that would wait on a workspace's first open.
+// Either is refused before it reaches the daemon or stops waiting, because the
+// app is quitting and the work is abandonable by construction.
 export class EngineWorkspaceShuttingDownError extends Error {
   constructor() {
     super(
-      "Rust engine refused a bounded retry region: the app is quitting. " +
+      "Rust engine refused work that waits on an open: the app is quitting. " +
         "Nothing new starts during teardown; retry after the next launch.",
     );
     this.name = "EngineWorkspaceShuttingDownError";
@@ -1026,6 +1030,7 @@ export class EngineWorkspaceSessions {
         workspaceId: workspace.workspaceId,
         rootPath: workspace.rootPath,
         binding: null,
+        opened: false,
         opening: null,
         closing: null,
         retiring: false,
@@ -1162,13 +1167,16 @@ export class EngineWorkspaceSessions {
       const client = this.source.currentClient();
       if (entry.binding?.client === client) return entry.binding;
       if (entry.binding?.client !== client) entry.binding = null;
-      if (entry.opening?.client === client) return await entry.opening.promise;
+      if (entry.opening?.client === client) {
+        return await this.untilFirstOpenAbandoned(entry, entry.opening.promise);
+      }
+      if (this.shuttingDown && !entry.opened) throw new EngineWorkspaceShuttingDownError();
 
       const promise = this.openWithClient(client, workspace);
       entry.opening = { client, promise };
       let binding: EngineWorkspaceBinding;
       try {
-        binding = await promise;
+        binding = await this.untilFirstOpenAbandoned(entry, promise);
       } finally {
         if (entry.opening?.promise === promise) entry.opening = null;
       }
@@ -1210,12 +1218,36 @@ export class EngineWorkspaceSessions {
         continue;
       }
       entry.binding = binding;
+      entry.opened = true;
       try {
         this.onOpened?.(workspace);
       } catch (error) {
         console.warn("[engine] workspace-open observer failed", error);
       }
       return binding;
+    }
+  }
+
+  // Quit does not wait on a workspace's first open. Nothing was accepted
+  // through the session yet, and the daemon finishes the open, then closes
+  // the workspace itself, after the app exits. A reopen is not abandoned:
+  // a live document's accepted write may need it.
+  private async untilFirstOpenAbandoned(
+    entry: SessionEntry,
+    open: Promise<EngineWorkspaceBinding>,
+  ): Promise<EngineWorkspaceBinding> {
+    if (entry.opened) return await open;
+    const quit = this.shutdownController.signal;
+    if (quit.aborted) throw new EngineWorkspaceShuttingDownError();
+    let abandon!: () => void;
+    const abandoned = new Promise<never>((_resolve, reject) => {
+      abandon = () => reject(new EngineWorkspaceShuttingDownError());
+    });
+    quit.addEventListener("abort", abandon, { once: true });
+    try {
+      return await Promise.race([open, abandoned]);
+    } finally {
+      quit.removeEventListener("abort", abandon);
     }
   }
 

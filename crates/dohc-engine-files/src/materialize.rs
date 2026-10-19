@@ -837,6 +837,13 @@ pub enum MaterializeError {
     /// The content or an on-disk file exceeded the materialization byte cap.
     #[error("materialization content {actual} bytes exceeds the cap")]
     TooLarge { actual: usize },
+    /// The volume gave a new temp ACL entries, so neither a secret nor a
+    /// file's own access could be kept. The write is refused like an io
+    /// failure.
+    #[error(
+        "this volume adds sharing permissions to new files, so dohc can't keep this file private"
+    )]
+    VolumeSharesNewFiles,
 }
 
 impl MaterializeError {
@@ -865,6 +872,7 @@ impl MaterializeError {
             MaterializeError::FileLocked => "file-locked",
             MaterializeError::RecoveryUnavailable => "recovery-unavailable",
             MaterializeError::TooLarge { .. } => "materialize-too-large",
+            MaterializeError::VolumeSharesNewFiles => "volume-shares-new-files",
         }
     }
 }
@@ -4321,6 +4329,72 @@ fn placement_is_held(
     Ok(false)
 }
 
+/// The existing disk-placement segment rule, including tracked peer names.
+fn materialize_segment_is_safe(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment != "."
+        && segment != ".."
+        && !segment.contains('\\')
+        && !segment.contains(':')
+}
+
+/// Admission for a new document opened by a link click. Existing tracked
+/// files keep the disk writer's broader rule.
+pub fn creation_segment_is_safe(segment: &str) -> bool {
+    if !materialize_segment_is_safe(segment)
+        || segment.contains('/')
+        || segment.chars().any(char::is_control)
+    {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        let name = segment.trim_end_matches(['.', ' ']);
+        let base = name
+            .split('.')
+            .next()
+            .unwrap_or(name)
+            .trim_end_matches(['.', ' ']);
+        let base = base.to_ascii_lowercase();
+        let named_device = matches!(
+            base.as_str(),
+            "con" | "prn" | "aux" | "nul" | "conin$" | "conout$" | "clock$"
+        );
+        let numbered_device = ["com", "lpt"].into_iter().any(|prefix| {
+            base.strip_prefix(prefix).is_some_and(|number| {
+                number.chars().count() == 1
+                    && number
+                        .chars()
+                        .any(|c| matches!(c, '1'..='9' | '¹' | '²' | '³'))
+            })
+        });
+        if named_device || numbered_device {
+            return false;
+        }
+        // Desktop: ^[^.\s]{1,8}~\d+(?:\.[^.\s]{1,3})?$
+        let (base, extension) = name
+            .split_once('.')
+            .map_or((name, None), |(b, e)| (b, Some(e)));
+        if let Some((stem, digits)) = base.rsplit_once('~') {
+            let plain = |text: &str| {
+                !text
+                    .chars()
+                    .any(|c| c == '.' || c.is_whitespace() || c == '\u{feff}')
+            };
+            if (1..=8).contains(&stem.encode_utf16().count())
+                && plain(stem)
+                && !digits.is_empty()
+                && digits.bytes().all(|byte| byte.is_ascii_digit())
+                && extension
+                    .is_none_or(|ext| (1..=3).contains(&ext.encode_utf16().count()) && plain(ext))
+            {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Resolve a workspace-relative forward-slash path to an absolute target under
 /// `root`, rejecting escapes, absolute inputs, and path-floor entries.
 fn resolve_target(root: &Path, rel: &str) -> Result<PathBuf, MaterializeError> {
@@ -4329,14 +4403,7 @@ fn resolve_target(root: &Path, rel: &str) -> Result<PathBuf, MaterializeError> {
     }
     let mut out = root.to_path_buf();
     for segment in rel.split('/') {
-        // Reject empty (`a//b`), current (`.`), parent (`..`), and any segment
-        // containing a backslash or drive-colon (Windows escape shapes).
-        if segment.is_empty()
-            || segment == "."
-            || segment == ".."
-            || segment.contains('\\')
-            || segment.contains(':')
-        {
+        if !materialize_segment_is_safe(segment) {
             return Err(MaterializeError::UnsafeTargetPath);
         }
         out.push(segment);
@@ -5037,9 +5104,10 @@ fn read_current_at_unix(
     read_current_file(std::fs::File::from(fd), display_path)
 }
 
-/// Who may open a temp. Apart from what the folder's ACL grants every new
-/// file, a temp gives nobody but the owner more access than the file it
-/// replaces.
+/// Who may open a temp. A temp gives nobody but the owner more access than
+/// the file it replaces. Only a new ordinary file takes what the folder's
+/// ACL grants every new file: on macOS the other temps never take it, and
+/// on Linux their 0600 mode empties a default ACL's mask.
 #[cfg(unix)]
 enum TempAccess {
     /// Only the owner: secret plaintext, or a target the engine cannot read.
@@ -5117,10 +5185,12 @@ impl Replaced {
         // can give the temp an ACL the file never had.
         #[cfg(target_os = "linux")]
         let acl_kept = !self.has_acl && !has_posix_acl(temp);
-        #[cfg(target_vendor = "apple")]
-        let acl_kept = dohc_macos_files::copy_acl(&self.file, temp).is_ok();
+        // The temp has no ACL yet, so none of the file's entries can block
+        // the attribute copy.
         #[cfg(target_vendor = "apple")]
         dohc_macos_files::copy_saved_xattrs(&self.file, temp);
+        #[cfg(target_vendor = "apple")]
+        let acl_kept = dohc_macos_files::copy_acl(&self.file, temp).is_ok();
         // No check exists for another Unix's ACLs.
         #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
         let acl_kept = false;
@@ -5156,6 +5226,16 @@ fn temp_mode(
     } else {
         mode | Mode::RUSR | Mode::WUSR
     }
+}
+
+#[cfg(all(test, target_vendor = "apple"))]
+#[test]
+fn a_volume_that_shares_new_files_reaches_the_caller_by_its_code() {
+    let refused = std::io::Error::other(dohc_macos_files::VolumeSharesNewFiles);
+    let err = temp_create_error(Path::new("ws/.env"), &refused);
+    assert!(matches!(err, MaterializeError::VolumeSharesNewFiles));
+    assert_eq!(err.code(), "volume-shares-new-files");
+    assert!(!err.to_string().contains(".env"), "{err}");
 }
 
 #[cfg(all(test, unix))]
@@ -5216,10 +5296,18 @@ fn write_temp_at_unix(
         TempAccess::New => 0o666,
         TempAccess::Owner | TempAccess::Like(_) => 0o600,
     });
-    let create = || rustix::fs::openat(parent_fd, name, flags, mode).map(std::fs::File::from);
+    let create = || -> std::io::Result<std::fs::File> {
+        #[cfg(target_vendor = "apple")]
+        if !matches!(access, TempAccess::New) {
+            return dohc_macos_files::create_uninherited(parent_fd, name, mode.bits())
+                .map(std::fs::File::from);
+        }
+        Ok(rustix::fs::openat(parent_fd, name, flags, mode)?.into())
+    };
+    let errno = |err: &std::io::Error| rustix::io::Errno::from_io_error(err);
     let mut file = match create() {
         Ok(file) => file,
-        Err(err) if err == rustix::io::Errno::EXIST => {
+        Err(err) if errno(&err) == Some(rustix::io::Errno::EXIST) => {
             let stale = match rustix::fs::openat(
                 parent_fd,
                 name,
@@ -5246,17 +5334,12 @@ fn write_temp_at_unix(
             rustix::fs::unlinkat(parent_fd, name, rustix::fs::AtFlags::empty())
                 .map_err(std::io::Error::from)
                 .map_err(|remove_err| MaterializeError::io(display_path, &remove_err))?;
-            create()
-                .map_err(std::io::Error::from)
-                .map_err(|retry_err| MaterializeError::io(display_path, &retry_err))?
+            create().map_err(|retry_err| temp_create_error(display_path, &retry_err))?
         }
-        Err(err) if err == rustix::io::Errno::LOOP => {
+        Err(err) if errno(&err) == Some(rustix::io::Errno::LOOP) => {
             return Err(MaterializeError::SymlinkTarget);
         }
-        Err(err) => {
-            let err = std::io::Error::from(err);
-            return Err(MaterializeError::io(display_path, &err));
-        }
+        Err(err) => return Err(temp_create_error(display_path, &err)),
     };
     if let TempAccess::Like(replaced) = &access {
         replaced.apply_to(&file);
@@ -5267,6 +5350,16 @@ fn write_temp_at_unix(
         return Err(MaterializeError::io(display_path, &err));
     }
     Ok(file)
+}
+
+/// The error for a temp that could not be created at `display_path`.
+#[cfg(unix)]
+fn temp_create_error(display_path: &Path, err: &std::io::Error) -> MaterializeError {
+    #[cfg(target_vendor = "apple")]
+    if dohc_macos_files::volume_shares_new_files(err) {
+        return MaterializeError::VolumeSharesNewFiles;
+    }
+    MaterializeError::io(display_path, err)
 }
 
 fn temp_sibling(target: &Path, job_id: &str) -> PathBuf {
@@ -7173,6 +7266,96 @@ mod tests {
             assert_eq!(failed_attempt, 1);
             std::fs::write(&self.0, b"external edit").expect("external editor saves");
         }
+    }
+
+    #[test]
+    fn disk_targets_reject_colon_segments() {
+        let scratch = Scratch::new("colon-segments");
+        for path in ["x.md:evil", "notes/x:evil.md"] {
+            assert!(matches!(
+                resolve_target(&scratch.root, path),
+                Err(MaterializeError::UnsafeTargetPath)
+            ));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn tracked_short_name_still_writes_probes_and_deletes() {
+        let scratch = Scratch::new("tracked-short-name");
+        let path = "draft~2.md";
+        assert_eq!(
+            crate::policy::classify_engine_file_path(path),
+            crate::policy::PathClassification::Tracked
+        );
+        std::fs::write(scratch.root.join(path), b"old\n").unwrap();
+        let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
+        let original = store.put_binary_blob(b"old\n").unwrap();
+        let updated = store.put_binary_blob(b"new\n").unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                enqueue_job(
+                    tx,
+                    &MaterializationJobSpec {
+                        job_id: "short-write".into(),
+                        workspace_id: "ws".into(),
+                        target_path: path.into(),
+                        content_sha256: updated.clone(),
+                        preimage: Preimage::Present(original.clone()),
+                        target_generation: 1,
+                        now_ms: 1,
+                    },
+                )
+            })
+            .unwrap();
+        let write = store
+            .load_materialization_job("short-write")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            materialize_one(&store, &scratch.root, &write, &options_with(&StdReplacer)).unwrap(),
+            JobOutcome::Completed
+        );
+        assert_eq!(std::fs::read(scratch.root.join(path)).unwrap(), b"new\n");
+        assert_eq!(
+            probe_projection_target(&scratch.root, path, ProjectionTargetKind::Plaintext),
+            ProjectionTargetState::Text {
+                sha256: updated.clone()
+            }
+        );
+        assert!(matches!(
+            projection_target_stamp(&scratch.root, path),
+            ProjectionTargetStamp::File { byte_length: 4, .. }
+        ));
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_storage::enqueue_delete_job(
+                    tx,
+                    &MaterializationJobSpec {
+                        job_id: "short-delete".into(),
+                        workspace_id: "ws".into(),
+                        target_path: path.into(),
+                        content_sha256: updated.clone(),
+                        preimage: Preimage::Present(updated.clone()),
+                        target_generation: 2,
+                        now_ms: 2,
+                    },
+                )
+            })
+            .unwrap();
+        let delete = store
+            .load_materialization_job("short-delete")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            materialize_one(&store, &scratch.root, &delete, &options_with(&StdReplacer)).unwrap(),
+            JobOutcome::Completed
+        );
+        assert!(!scratch.root.join(path).exists());
+        assert_eq!(
+            projection_target_stamp(&scratch.root, path),
+            ProjectionTargetStamp::Absent
+        );
     }
 
     #[test]

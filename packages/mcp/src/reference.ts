@@ -170,6 +170,8 @@ export const CHAT_EXAMPLES: Record<string, string[][]> = {
 // What each MCP tool returns. A CLI verb means the tool passes on that
 // verb's result schema; a string is written from the tool in tools.ts.
 export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
+  dohc_links_in: { cli: "linksIn" },
+  dohc_links_resolve: { cli: "linksResolve" },
   dohc_read_share_copy: { cli: "shareCopy" },
   dohc_dataset: "what that verb returns, listed under [`dohc dataset`](#dohc-dataset).",
   dohc_publish_app: "the requested action's result, listed under [`dohc app`](#dohc-app). Only `createLink` returns a bearer link `url` once, in `linkCreated`. `urlUnavailable` includes `grantId` so the owner can end it in dohc. Shared approval returns `published` with `appQuery` (`?app=<publicationId>`), never the link URL. Append `appQuery` before the fragment of any link URL, including one returned by `createLink`. Keep the link secret yourself.",
@@ -438,7 +440,9 @@ function shellBlock(line: string): string {
 // result; the JSON verbs of `dataset` and `app` return the result kinds
 // listed above.
 function verbReturns(command: string, name: string): string {
-  const socketVerb = command === "chat"
+  const socketVerb = command === "links"
+    ? ({ in: "linksIn", resolve: "linksResolve" } as const)[name as "in" | "resolve"]
+    : command === "chat"
     ? name
     : command === "history"
       ? HISTORY_RESULTS[name]
@@ -504,6 +508,7 @@ function commandSection(name: string, command: CliCommandSpec): string {
     command.summary,
     command.notes.join(" "),
     name === "access" ? ACCESS_NOTES : "",
+    name === "links" ? "`indexBuilding` is true while the link index is being built: seed work, pending updates, or eligible files without an index row. It carries across cursor pages; start a fresh walk to observe completion. `unchecked` names sources that could not be checked, including oversized files. These can keep `complete` false after building stops. `complete` describes the local index; `mountsCovered` separately reports mounted-share coverage. IPC, CLI, and MCP return these same fields." : "",
     name === "sync" ? "The pause result records who paused and when. A person author has kind person, personId, and self. Show you when self is true. Person pause labels do not use profile names. An agent author has kind agent, agentId, onBehalfOf, and depth. Agent names are provenance and grant no authority." : "",
     ...verbs.map(([verbName, verb]) => verbSection(name, verbName, verb)),
   ].filter(Boolean).join("\n\n");
