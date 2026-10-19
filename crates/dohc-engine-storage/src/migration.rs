@@ -4380,7 +4380,9 @@ mod tests {
         let mut conn = open_bare(&path);
         assert_eq!(
             run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("upgrade"),
-            MigrationOutcome::Applied { newly_applied: 1 }
+            MigrationOutcome::Applied {
+                newly_applied: BASELINE_MIGRATIONS.len() - before,
+            }
         );
         let runs = conn
             .prepare("SELECT run_id, failure_handled FROM agent_run_records ORDER BY started_at_ms")

@@ -2226,6 +2226,17 @@ pub fn text_blob_sha256(text: &str) -> String {
     hex(&hasher.finalize())
 }
 
+/// A pending Undo owns its version until every member has settled.
+pub fn ensure_no_pending_undo_in(conn: &Connection, ws: &str) -> Result<(), DomainError> {
+    let pending: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM engine_requests r INDEXED BY idx_engine_requests_kind JOIN history_undo_plans p ON p.request_id=r.request_id WHERE r.kind='history-undo-pending' AND p.workspace_id=?1)",[ws],|r|r.get(0)).map_err(DomainError::sql_corrupt)?;
+    if pending {
+        return Err(DomainError::InvalidInput {
+            reason: "An Undo is still running. Switch versions when it finishes.",
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{NEXT_MOMENT_ORDER_SQL, next_moment_order};
@@ -2342,15 +2353,4 @@ mod tests {
             "the high-water query must not scan either growing table: {details:?}"
         );
     }
-}
-
-/// A pending Undo owns its version until every member has settled.
-pub fn ensure_no_pending_undo_in(conn: &Connection, ws: &str) -> Result<(), DomainError> {
-    let pending: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM engine_requests r INDEXED BY idx_engine_requests_kind JOIN history_undo_plans p ON p.request_id=r.request_id WHERE r.kind='history-undo-pending' AND p.workspace_id=?1)",[ws],|r|r.get(0)).map_err(DomainError::sql_corrupt)?;
-    if pending {
-        return Err(DomainError::InvalidInput {
-            reason: "An Undo is still running. Switch versions when it finishes.",
-        });
-    }
-    Ok(())
 }
