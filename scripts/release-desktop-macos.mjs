@@ -24,6 +24,9 @@ export const RELEASE_REPOSITORY = "dohchq/dohc";
 export const DEFAULT_KEYCHAIN = join(homedir(), "Library/Keychains/dohc-release.keychain-db");
 export const DEFAULT_KEYCHAIN_PROFILE = "dohc-notary";
 export const POSTHOG_KEYCHAIN_SERVICE = "dohc-posthog-cli-api-key";
+// Saved in the login keychain, the release keychain's password lets the command unlock it without anyone at the Mac.
+export const SAVED_PASSWORD_SERVICE = "dohc-release-keychain-password";
+export const LOGIN_KEYCHAIN = join(homedir(), "Library/Keychains/login.keychain-db");
 // Each release's throwaway checkout and built files live here, outside every checkout.
 export const WORK_ROOT = join(homedir(), "dohc-release");
 // The workflow's publish job. It runs only after Preflight, which runs only on refs/heads/main.
@@ -95,6 +98,14 @@ const jsonLines = text => text.split("\n").filter(line => line.trim()).map(line 
 function readKeychainStatus(path) {
   const script = `ObjC.import("Security"); var ref = Ref(); $.SecKeychainOpen(${JSON.stringify(path)}, ref); var status = Ref(); var code = $.SecKeychainGetStatus(ref[0], status); code === 0 ? status[0] : code`;
   return Number(read(capture, "osascript", ["-l", "JavaScript", "-e", script]).trim());
+}
+
+// security reads a password from the terminal when it has one. A child in its
+// own session has no terminal, so it reads the password from its input, which
+// no other program can see.
+function unlockWithPassword(keychain, password) {
+  const result = spawnSync("security", ["unlock-keychain", keychain], { input: `${password}\n`, detached: true, encoding: "utf8", timeout: 60_000 });
+  return { status: result.error ? null : result.status, stderr: result.error?.message ?? result.stderr ?? "" };
 }
 
 /** Locks the release keychain, and returns why it could not, or null. */
@@ -266,18 +277,30 @@ export async function preflightMacRelease(options, {
 }
 
 /**
- * Waits for the release keychain to unlock. In a terminal, security asks for
- * its password; otherwise, the command waits for someone to unlock it. Before
- * packaging, a keychain that is already unlocked was open while the build ran
- * other code, so it is locked and unlocked again the same way.
+ * Unlocks the release keychain with the password saved in the login keychain.
+ * Without a saved password, security asks for it in a terminal; otherwise, the
+ * command waits for someone to unlock the keychain. Before packaging, a
+ * keychain that is already unlocked was open while the build ran other code,
+ * so it is locked and unlocked again the same way.
  */
-export async function unlockReleaseKeychain(plan, purpose, { keychainStatus, step, run, interactive, cancelled, wait = delay, now = Date.now, pollMs = 5000 }, { relock = false } = {}) {
+export async function unlockReleaseKeychain(plan, purpose, {
+  keychainStatus, step, run, interactive, cancelled, unlockWith = unlockWithPassword, wait = delay, now = Date.now, pollMs = 5000,
+}, { relock = false } = {}) {
   const unlocked = () => (keychainStatus(plan.keychain) & UNLOCKED) !== 0;
   if (unlocked()) {
     if (!relock) return;
     console.warn("\nThe release keychain was unlocked before packaging, so the install and builds ran with it open. Locking it, then unlocking it again.");
     const failure = lockKeychain(run, plan.keychain);
     if (failure) throw new Error(failure);
+  }
+  const saved = run("security", ["find-generic-password", "-s", SAVED_PASSWORD_SERVICE, "-w", LOGIN_KEYCHAIN]);
+  if (saved.status === 0) {
+    console.log(`\n${purpose} unlocks the release keychain with the password saved in the login keychain.`);
+    const result = unlockWith(plan.keychain, saved.stdout.replace(/\n$/, ""));
+    if (result.status !== 0 || !unlocked()) {
+      throw new Error(`The password saved as ${SAVED_PASSWORD_SERVICE} in the login keychain did not unlock the release keychain: ${result.stderr.trim()}\nSave it again as docs/engineering/desktop-release.md describes. Nothing was signed or uploaded.`);
+    }
+    return;
   }
   if (interactive) {
     console.log(`\n${purpose} needs the release keychain.`);

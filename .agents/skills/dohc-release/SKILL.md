@@ -53,8 +53,10 @@ A release is not finished until `pnpm release:macos` reports that the release ho
 Do not report a release as done before that, because no Mac shows that the step was missed.
 Follow "Add the macOS files" in the release procedure on the Apple silicon Mac that holds the release keychain.
 Run `pnpm release:macos --version <tag> --channel <channel> --dry-run` and read its upload plan.
-Run the real command from a clean checkout of `main`. It asks for the release keychain's password before it builds and before it packages.
-Ice types that password. Never ask for it, and never pass it to a command.
+Run the real command from a clean checkout of `main`.
+If Ice saved the release keychain's password in the login keychain, the command unlocks the keychain itself.
+Otherwise, it asks for the password before it builds and before it packages, and Ice types it.
+Never ask for that password, never read the saved one, and never pass it to a command.
 If an upload stops, run the same command again. It finishes from the files it kept in `~/dohc-release/<tag>/files`.
 If the command refuses, report its reason and stop.
 Run the `gh release delete-asset` commands it prints only when Ice asks.
