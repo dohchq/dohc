@@ -4381,7 +4381,7 @@ mod tests {
         assert_eq!(
             run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("upgrade"),
             MigrationOutcome::Applied {
-                newly_applied: BASELINE_MIGRATIONS.len() - before,
+                newly_applied: u32::try_from(BASELINE_MIGRATIONS.len() - before).unwrap(),
             }
         );
         let runs = conn
