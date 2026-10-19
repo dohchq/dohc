@@ -754,6 +754,12 @@ describe("automations wire schemas", () => {
     expect(() =>
       decodeWorkspaceResult(WORKSPACE_METHOD.syncRemoteChanges, { applied: 1.5 }),
     ).toThrow(ProtocolShapeError);
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.syncCollectionsWaiting, { waiting: true }),
+    ).toEqual({ waiting: true });
+    expect(() =>
+      decodeWorkspaceResult(WORKSPACE_METHOD.syncCollectionsWaiting, { waiting: "yes" }),
+    ).toThrow(ProtocolShapeError);
     expect(() =>
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsSettle, claim),
     ).toThrow(ProtocolShapeError);

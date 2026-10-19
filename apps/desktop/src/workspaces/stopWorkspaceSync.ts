@@ -14,19 +14,63 @@ export interface SyncStopOperation {
   assertCurrent(): void;
 }
 
-export function createWorkspaceSyncStop(dependencies: {
+export interface SyncPauseReopen {
+  closeActivity(workspaceId: string): Promise<unknown>;
+  closeRelay(workspace: RegistryEntry): Promise<void>;
+  openActivity(workspace: RegistryEntry): Promise<unknown>;
+  // The engine's answer, through the owner's open: Collection updates still
+  // wait for an unfinished pull.
+  collectionsWaiting(workspace: RegistryEntry): Promise<boolean>;
+  notify(workspaceId: string): void;
+}
+
+// Reopening removes the daemon's relay configuration without touching data,
+// and the local open abandons an unfinished pull. A file observation that
+// failed to open still lets the activity open, so the reopen counts only once
+// the engine answers that nothing waits. Every step runs, even if the window
+// changes workspaces, and the first failure is reported.
+export async function reopenWithoutSync(
+  dependencies: SyncPauseReopen,
+  workspace: RegistryEntry,
+): Promise<{ reopened: boolean; failure?: { error: unknown } }> {
+  let failure: { error: unknown } | undefined;
+  let reopened = false;
+  try {
+    await dependencies.closeActivity(workspace.workspaceId);
+  } catch (error) {
+    failure = { error };
+  }
+  try {
+    await dependencies.closeRelay(workspace);
+  } catch (error) {
+    failure ??= { error };
+  }
+  try {
+    await dependencies.openActivity(workspace);
+    if (await dependencies.collectionsWaiting(workspace)) {
+      throw new Error("Collection updates still wait for the unfinished pull.");
+    }
+    reopened = true;
+  } catch (error) {
+    failure ??= { error };
+  } finally {
+    try { dependencies.notify(workspace.workspaceId); } catch (error) { failure ??= { error }; }
+  }
+  return failure ? { reopened, failure } : { reopened };
+}
+
+export function createWorkspaceSyncStop(dependencies: SyncPauseReopen & {
   person(): Promise<WorkspaceSyncPauseAuthor>;
   pauseStatus(pause: WorkspaceSyncPause): WorkspaceSyncPauseStatus;
   withOwnerHostPaused<Result>(work: () => Promise<Result>): Promise<Result>;
   prepare(workspace: RegistryEntry): Promise<() => void>;
   resume(workspace: RegistryEntry): Promise<unknown>;
   pauseRemote(workspaceId: string, pause: WorkspaceSyncPause): void;
-  closeActivity(workspaceId: string): Promise<unknown>;
-  closeRelay(workspace: RegistryEntry): Promise<void>;
-  openActivity(workspace: RegistryEntry): Promise<unknown>;
   status(workspaceId: string): SyncStatusResult;
-  notify(workspaceId: string): void;
   cleanupFailed(workspaceId: string, error: unknown): void;
+  // Collection updates waited when sync paused, and the reopen that ends the
+  // wait did not finish.
+  reopenFailed(workspace: RegistryEntry): void;
   nowMs?: () => number;
 }) {
   return async (operation: SyncStopOperation, actor?: WorkspaceSyncPauseAuthor): Promise<CloudStopSyncResult> => {
@@ -50,7 +94,9 @@ export function createWorkspaceSyncStop(dependencies: {
         throw new Error("This workspace syncs through a received share. Open the owner's workspace to stop its sync.");
       }
       if (!workspace.remote) return result();
+      const collectionsWaiting = status.collectionsWaitingForSync !== undefined;
       let saved = false;
+      let reopened = false;
       try {
         await dependencies.withOwnerHostPaused(async () => {
           operation.assertCurrent();
@@ -70,30 +116,14 @@ export function createWorkspaceSyncStop(dependencies: {
             throw error;
           }
           // Once paused, finish resource cleanup even if the window changes workspaces.
-          // Reopening removes the daemon's relay configuration without touching data.
-          let failure: { error: unknown } | undefined;
-          try {
-            await dependencies.closeActivity(workspace.workspaceId);
-          } catch (error) {
-            failure = { error };
-          }
-          try {
-            await dependencies.closeRelay(workspace);
-          } catch (error) {
-            failure ??= { error };
-          }
-          try {
-            await dependencies.openActivity(workspace);
-          } catch (error) {
-            failure ??= { error };
-          } finally {
-            try { dependencies.notify(workspace.workspaceId); } catch (error) { failure ??= { error }; }
-          }
-          if (failure) throw failure.error;
+          const reopen = await reopenWithoutSync(dependencies, workspace);
+          reopened = reopen.reopened;
+          if (reopen.failure) throw reopen.failure.error;
         });
       } catch (error) {
         if (!saved) throw error;
         dependencies.cleanupFailed(workspaceId, error);
+        if (collectionsWaiting && !reopened) dependencies.reopenFailed(workspace);
       }
       // The saved pause is the outcome, even if its attachment retired during cleanup.
       try { operation.assertCurrent(); status = dependencies.status(workspaceId); } catch { /* Keep the saved outcome. */ }
