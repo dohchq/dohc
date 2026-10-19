@@ -22,7 +22,7 @@ function harness(kind: "workspace" | "share" = "workspace") {
   const fileMentionsPage = vi.fn(async () => page());
   const withAuthority = vi.fn(async (work: () => Promise<unknown>) => work());
   const scope = { kind, workspace, store: { fileMentionsPage }, withAuthority, access: "view" } as unknown as ChatScope;
-  const requireChatScope = vi.fn(async () => ({ ...scope, workspace }));
+  const requireChatScope = vi.fn(async (): Promise<ChatScope> => ({ ...scope, workspace }) as ChatScope);
   const sync = vi.fn(async () => 0);
   const read = createChatFileMentionsReader({ requireChatScope, syncWorkspaceSharedChannels: sync,
     readWorkspace: () => workspace, principalGeneration: () => generation });

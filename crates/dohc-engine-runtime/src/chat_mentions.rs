@@ -70,7 +70,10 @@ fn decode(
     let (format, v, s, a, pos): (u8, String, Value, String, Position) =
         serde_json::from_slice(bytes.as_bytes()).map_err(|_| invalid())?;
     if a != scope {
-        return Err(StorageError::InvalidInput { reason: "Chat access changed. Try again." }.into());
+        return Err(StorageError::InvalidInput {
+            reason: "Chat access changed. Try again.",
+        }
+        .into());
     }
     if format != 1 || v != version || s != *subject || pos.phase > 1 {
         return Err(invalid());
@@ -120,15 +123,30 @@ fn raw_window(
     let mut pos = after.clone();
     let mut window = Vec::new();
     while pos.phase < 2 {
-        if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
-        let column = if pos.phase == 0 { "object_id" } else { "path_hint" };
-        let subject_key = if pos.phase == 0 { subject["objectId"].as_str() } else { subject["path"].as_str() };
+        if token.is_cancelled() {
+            return Err(RuntimeError::Cancelled);
+        }
+        let column = if pos.phase == 0 {
+            "object_id"
+        } else {
+            "path_hint"
+        };
+        let subject_key = if pos.phase == 0 {
+            subject["objectId"].as_str()
+        } else {
+            subject["path"].as_str()
+        };
         if pos.finished {
             let key: Option<String> = if let Some(key) = subject_key {
-                if pos.key.is_empty() { Some(key.into()) } else { None }
+                if pos.key.is_empty() {
+                    Some(key.into())
+                } else {
+                    None
+                }
             } else {
-                c.query_row(&next_key_sql(column), params![ws,pos.key], |r| r.get(0))
-                    .optional().map_err(|_| invalid())?
+                c.query_row(&next_key_sql(column), params![ws, pos.key], |r| r.get(0))
+                    .optional()
+                    .map_err(|_| invalid())?
             };
             let Some(key) = key else {
                 pos.phase += 1;
@@ -143,24 +161,40 @@ fn raw_window(
         }
         let sql = window_sql(column, !pos.id.is_empty());
         let mut stmt = c.prepare_cached(&sql).map_err(|_| invalid())?;
-        let map = |r: &rusqlite::Row<'_>| Ok(Attachment {
-            id:r.get(0)?,thread:r.get(1)?,message:r.get(2)?,object:r.get(3)?,path:r.get(4)?,
-            heading:r.get(5)?,anchor:r.get(6)?,occurrence:r.get(7)?,time:r.get(8)?,
-        });
+        let map = |r: &rusqlite::Row<'_>| {
+            Ok(Attachment {
+                id: r.get(0)?,
+                thread: r.get(1)?,
+                message: r.get(2)?,
+                object: r.get(3)?,
+                path: r.get(4)?,
+                heading: r.get(5)?,
+                anchor: r.get(6)?,
+                occurrence: r.get(7)?,
+                time: r.get(8)?,
+            })
+        };
         let limit = (WORK - window.len() + 1) as i64;
         let rows = if pos.id.is_empty() {
-            stmt.query_map(params![ws,pos.key,limit],map)
+            stmt.query_map(params![ws, pos.key, limit], map)
         } else {
-            stmt.query_map(params![ws,pos.key,limit,pos.time,pos.id],map)
-        }.map_err(|_| invalid())?.collect::<Result<Vec<_>,_>>().map_err(|_| invalid())?;
+            stmt.query_map(params![ws, pos.key, limit, pos.time, pos.id], map)
+        }
+        .map_err(|_| invalid())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| invalid())?;
         let count = rows.len();
         for row in rows {
-            if window.len() == WORK { return Ok((window, true)); }
+            if window.len() == WORK {
+                return Ok((window, true));
+            }
             pos.time = row.time;
             pos.id = row.id.clone();
             window.push((row, pos.clone()));
         }
-        if count < limit as usize { pos.finished = true; }
+        if count < limit as usize {
+            pos.finished = true;
+        }
     }
     Ok((window, false))
 }

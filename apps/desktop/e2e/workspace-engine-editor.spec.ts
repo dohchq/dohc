@@ -346,7 +346,7 @@ test("@restart-durability-capture-before-reopen kept typing survives capture bef
     // This existing read flushes capture before an editor can hold a lease.
     await desktop.page.evaluate(async ({ workspaceId, path }) => {
       const api = (window as unknown as { dohcDesktop: {
-        chatFileMentionsPage(input: { workspaceId: string; path: string }): Promise<unknown>;
+        chatFileMentionsPage(input: { workspaceId: string; subject: { path: string } }): Promise<unknown>;
       } }).dohcDesktop;
       await api.chatFileMentionsPage({ workspaceId, subject: { path } });
     }, { workspaceId: workspace.workspaceId, path });
