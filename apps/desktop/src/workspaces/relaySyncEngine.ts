@@ -65,6 +65,11 @@ export interface CloudSyncEngineOptions {
   // `recovered` is true for the first successful pass after a failed one,
   // which is when the relay answers again.
   afterSuccessfulPull?: (pass: { recovered: boolean }) => Promise<void>;
+  // Runs as every pass ends, while the snapshot still says it is syncing, so
+  // the owner can read what the pass left behind, such as a pull it did not
+  // finish. Resolves whether that changed what the status shows. A failure
+  // is logged and never fails the pass.
+  afterPass?: (pass: { failed: boolean }) => Promise<boolean>;
   // Runs before each pull request is sent, and must finish any durable write
   // it needs before it returns. The function it returns runs when that pull
   // ends, whatever the outcome.
@@ -569,6 +574,16 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     return JSON.stringify([pendingChangeCount, conflictCount, sharingDeclined, ownerAdmissionPending]);
   }
 
+  async function afterPass(failed: boolean): Promise<boolean> {
+    if (!options.afterPass) return false;
+    try {
+      return await options.afterPass({ failed });
+    } catch (error) {
+      console.error(`[desktop] after-pass check failed for ${options.rootDir}:`, error);
+      return false;
+    }
+  }
+
   function mergeSharingDeclined(declines: readonly SharingDeclined[]): SharingDeclined[] {
     const byObject = new Map<string, SharingDeclined>();
     for (const declined of declines) {
@@ -621,18 +636,22 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         const eventsBefore = changeEvents;
         const stateBefore = visibleState();
         let applied = false;
+        let failed = false;
+        let statusChanged = false;
         syncing = true;
         retrying = retry !== undefined;
         if (!quiet) emitChange();
         try {
           applied = await doPass(retryClaim);
         } catch (error) {
+          failed = true;
           handleFailure(error, displacedDueAtMs, retry?.countsAsAttempt ?? true);
           if (rethrow) throw error;
         } finally {
+          statusChanged = await afterPass(failed);
           syncing = false;
           retrying = false;
-          if (!quiet || applied || changeEvents !== eventsBefore || visibleState() !== stateBefore) {
+          if (!quiet || applied || statusChanged || changeEvents !== eventsBefore || visibleState() !== stateBefore) {
             emitChange();
           }
         }

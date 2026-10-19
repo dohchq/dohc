@@ -78,7 +78,7 @@ Report whether this workspace is local-only or cloud-synced.
 
 No arguments.
 
-Returns `{ synced, scope, cloudConnected, credentialStatus, workspaceId?, serverUrl?, syncPause? }`. `scope` is `"local"` or `"cloud"`.
+Returns `{ synced, scope, cloudConnected, credentialStatus, collectionsWaiting?, workspaceId?, serverUrl?, syncPause? }`. `scope` is `"local"` or `"cloud"`. `collectionsWaiting` is `true` while Collection updates wait for a sync that has not finished. Files and documents still save. To continue offline, stop sync. The field is absent when the dohc app cannot answer.
 
 ### `dohc_stop_workspace_sync`
 

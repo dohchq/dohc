@@ -2083,6 +2083,9 @@ pub struct CollectionReconciliation {
     /// Automation claims for the records it added or removed on this
     /// computer, committed with the bindings. The caller announces them.
     pub automation_claims: Vec<dohc_engine_domain::AutomationClaim>,
+    /// An ordinary pull has not finished, so nothing ran. Its terminal
+    /// commit, or abandoning it, asks for the update again.
+    pub waits_for_pull: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2105,6 +2108,10 @@ fn reconcile_collections_on_store(
     }
     validate_workspace_root(root_dir, root_guard)?;
     let (reconciliation, automation_claims) = match store.write_with(faults, |tx| {
+        // Half a pull can lack a relation's target that a later page brings.
+        if dohc_engine_sync::ordinary_pull_unfinished_in(tx, workspace_id)? {
+            return Ok::<_, RuntimeError>(None);
+        }
         let reconciliation = reconcile_collections_in_tx(tx, workspace_id, version_id)?;
         // Added and removed records claim in the transaction that binds or
         // unbinds them.
@@ -2115,9 +2122,15 @@ fn reconcile_collections_on_store(
             &reconciliation.lifecycle,
             now_ms,
         )?;
-        Ok::<_, RuntimeError>((reconciliation, claims))
+        Ok(Some((reconciliation, claims)))
     })? {
-        TxnOutcome::Committed(committed) => committed,
+        TxnOutcome::Committed(Some(committed)) => committed,
+        TxnOutcome::Committed(None) => {
+            return Ok(CollectionReconciliation {
+                waits_for_pull: true,
+                ..Default::default()
+            });
+        }
         TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
     };
 
@@ -2261,6 +2274,7 @@ fn reconcile_collections_on_store(
         lease_held,
         changed_paths,
         automation_claims,
+        waits_for_pull: false,
     })
 }
 
@@ -2449,6 +2463,150 @@ mod collection_relation_cleanup_tests {
             .expect("state after cleanup");
         assert_eq!((after.0, after.1), (before.0, before.1));
         assert_eq!((after.2, after.3), (0, 0));
+    }
+
+    /// What reconciliation can change: bindings, relations, derived fields,
+    /// moments and automation claims.
+    fn collections_state(store: &EngineStore) -> Vec<i64> {
+        store
+            .read_with(|conn| {
+                [
+                    "SELECT COUNT(*) FROM collection_records",
+                    "SELECT COUNT(*) FROM collection_records WHERE adoption_state='adopted'",
+                    "SELECT COUNT(*) FROM collection_relation_edges",
+                    "SELECT COUNT(*) FROM collection_record_fields",
+                    "SELECT COUNT(*) FROM moments",
+                    "SELECT COUNT(*) FROM automation_claims",
+                ]
+                .iter()
+                .map(|query| conn.query_row(query, [], |row| row.get(0)))
+                .collect::<Result<Vec<i64>, _>>()
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn reconciliation_changes_nothing_while_an_ordinary_pull_is_unfinished() {
+        let scratch = ScratchDir::new().unwrap();
+        let mut store =
+            EngineStore::open(&dohc_engine_testkit::engine_db_path(&scratch).unwrap(), 1).unwrap();
+        ensure_mutation_version_on_store(&mut store, WORKSPACE_ID, VERSION_ID, 1, &NoFaults)
+            .unwrap();
+        let markdown = format!("---\nid: {SOURCE_ID}\nrelated: {TARGET_ID}\n---\n\nSource");
+        write_text(
+            &mut store,
+            "schema",
+            "tasks/collection.yaml",
+            "fields:\n  related:\n    type: relation\n    collection: tasks\n    many: false\n",
+            "schema-moment",
+            2,
+        );
+        write_text(
+            &mut store,
+            SOURCE_OBJECT_ID,
+            SOURCE_PATH,
+            &markdown,
+            "source-moment",
+            3,
+        );
+        write_text(
+            &mut store,
+            "target-object",
+            "tasks/target.md",
+            &format!("---\nid: {TARGET_ID}\n---\n\nTarget\n"),
+            "target-moment",
+            4,
+        );
+        std::fs::create_dir_all(scratch.path().join("tasks")).unwrap();
+        std::fs::write(scratch.path().join(SOURCE_PATH), &markdown).unwrap();
+        let mut cache = WriterDocCache::new();
+        let reconcile = |store: &mut EngineStore, cache: &mut WriterDocCache, now_ms| {
+            reconcile_collections_on_store(
+                store,
+                cache,
+                WORKSPACE_ID,
+                VERSION_ID,
+                scratch.path(),
+                None,
+                &LeaseRegistry::default(),
+                &(),
+                now_ms,
+                &NoFaults,
+                &CancellationToken::new(),
+                None,
+            )
+            .unwrap()
+        };
+        store
+            .write_with(&NoFaults, |tx| {
+                reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)?;
+                for (path, id) in [(SOURCE_PATH, SOURCE_ID), ("tasks/target.md", TARGET_ID)] {
+                    set_collection_adoption_state_in_tx(
+                        tx,
+                        WORKSPACE_ID,
+                        VERSION_ID,
+                        path,
+                        id,
+                        "adopted",
+                    )?;
+                }
+                Ok::<_, DomainError>(())
+            })
+            .unwrap();
+        // A page of an unfinished pull removed the relation's target.
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO sync_identity \
+                     (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms,ordinary_pull_token) \
+                     VALUES (?1,'origin','epoch','stream',1,'unfinished')",
+                    [WORKSPACE_ID],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)
+            })
+            .unwrap();
+        VersionedTextStore::new(&mut store)
+            .delete_text_file(
+                &dohc_engine_domain::DeleteTextFile {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    version_id: VERSION_ID.to_owned(),
+                    path: "tasks/target.md".to_owned(),
+                    moment_id: "target-delete".to_owned(),
+                    request_id: None,
+                    metadata_origin: "sync".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 6,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        let before = collections_state(&store);
+
+        let waiting = reconcile(&mut store, &mut cache, 7);
+        assert!(waiting.waits_for_pull);
+        assert!(waiting.changed_paths.is_empty());
+        assert!(waiting.automation_claims.is_empty());
+        assert_eq!(collections_state(&store), before, "nothing changed");
+        assert!(
+            std::fs::read_to_string(scratch.path().join(SOURCE_PATH))
+                .unwrap()
+                .contains(TARGET_ID),
+            "the relation stays in the source file"
+        );
+
+        // The pull finished: the next update cleans the relation.
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute("UPDATE sync_identity SET ordinary_pull_token=NULL", [])
+                    .map_err(dohc_engine_storage::StorageError::persist_public)
+            })
+            .unwrap();
+        let cleaned = reconcile(&mut store, &mut cache, 8);
+        assert!(!cleaned.waits_for_pull);
+        assert_eq!(cleaned.changed_paths, [SOURCE_PATH]);
+        assert_ne!(collections_state(&store), before);
     }
 
     #[test]

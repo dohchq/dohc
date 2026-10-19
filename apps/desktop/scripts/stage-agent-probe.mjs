@@ -4,7 +4,7 @@ import { copyFile, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from 
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { PINNED_NODE } from "./stage-app-compiler.mjs";
+import { PINNED_NODE } from "./pinned-node.mjs";
 
 const desktopRoot = fileURLToPath(new URL("..", import.meta.url));
 const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");

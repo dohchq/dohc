@@ -2,15 +2,17 @@ import {EventEmitter} from "node:events";
 import {Writable} from "node:stream";
 import {expect, it, vi} from "vitest";
 import {serveReplicaRelay} from "./replicaRelaySocket";
+import type {Server} from "node:http";
 import type {ReplicaReadLease} from "./replicaReadPrincipal";
 
-const mock = vi.hoisted(() => ({handler: undefined as any, server: undefined as any}));
+type Handler = (incoming: {method: string; url: string; headers: Record<string, string>}, outgoing: Writable) => Promise<void>;
+const mock = vi.hoisted(() => ({handler: undefined as Handler | undefined, server: undefined as (Pick<Server, "maxConnections"> & {setTimeout: ReturnType<typeof vi.fn>}) | undefined}));
 vi.mock("node:fs/promises", () => ({chmod: async () => {}}));
 vi.mock("node:http", async original => ({...await original<typeof import("node:http")>(),
-  createServer: (_: unknown, handler: unknown) => {
+  createServer: (_: unknown, handler: Handler) => {
     mock.handler = handler;
-    mock.server = Object.assign(new EventEmitter(), {listen: (_: unknown, done: () => void) => done(),
-      close: (done: () => void) => done(), closeAllConnections: () => {}});
+    mock.server = Object.assign(new EventEmitter(), {maxConnections: 0, listen: (_: unknown, done: () => void) => done(),
+      close: (done: () => void) => done(), closeAllConnections: () => {}, setTimeout: vi.fn()});
     return mock.server;
   },
 }));
@@ -28,7 +30,7 @@ it("streams a response without collecting its body", async () => {
   const outgoing = Object.assign(new Writable({write(chunk, _, done) {chunks.push(Buffer.from(chunk)); wrote(); done();}}),
     {setHeader() {}, writeHead() {}, headersSent: false});
   const ended = new Promise<never>((_, reject) => outgoing.once("finish", () => reject(Error("response ended before streaming"))));
-  const serving = mock.handler({method: "GET", url: "/sync/w/bootstrap", headers: {authorization: "Bearer lease"}}, outgoing);
+  const serving = mock.handler!({method: "GET", url: "/sync/w/bootstrap", headers: {authorization: "Bearer lease"}}, outgoing);
   try {
     await Promise.race([first, ended]);
     expect(Buffer.concat(chunks).toString()).toBe("streamed ");
@@ -40,6 +42,11 @@ it("streams a response without collecting its body", async () => {
 });
 it("caps connections above the child's serial request pattern", async () => {
   const socket = await serveReplicaRelay("private", {bearer: "lease"} as ReplicaReadLease, async () => new Response());
-  try {expect(mock.server.maxConnections).toBeGreaterThan(1); expect(mock.server.maxConnections).toBeLessThanOrEqual(8);}
+  try {expect(mock.server!.maxConnections).toBeGreaterThan(1); expect(mock.server!.maxConnections).toBeLessThanOrEqual(8);}
+  finally {await socket.close();}
+});
+it("sets a send/idle timeout for a child that stops reading", async () => {
+  const socket = await serveReplicaRelay("private", {bearer: "lease"} as ReplicaReadLease, async () => new Response());
+  try {expect(mock.server!.setTimeout).toHaveBeenCalledWith(10_000, expect.any(Function));}
   finally {await socket.close();}
 });

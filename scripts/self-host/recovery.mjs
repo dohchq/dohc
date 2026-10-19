@@ -15,9 +15,9 @@ Snapshot saves an encrypted relay snapshot of the running deployment in the dire
 Verify decrypts a snapshot with DOHC_SNAPSHOT_KEY and checks it. The new directory receives unencrypted relay data.
 The other commands stop this Compose project. Backup, check-backup, and archive restart its previously running services after success.
 Restore leaves services stopped for inspection. Replaced relay files remain in the relay volume.
-Backup, check-backup, and restore affect only relay data. Archive preserves all declared deployment volumes and configuration.
+Backup, check-backup, and restore affect only relay data. Archive preserves deployment data and configuration, excluding disposable replicas.
 The snapshot must match current continuity on the original host. Old snapshots and host loss are not supported.
-Archive saves all stopped named volumes and configuration, including private credentials. It provides no full-deployment restore.`;
+Archive saves stopped deployment volumes and configuration, including private credentials. It skips replicas and provides no full-deployment restore.`;
 
 const snapshotCommand = "/app/services/sync-relay/dist/relay-snapshot.js";
 

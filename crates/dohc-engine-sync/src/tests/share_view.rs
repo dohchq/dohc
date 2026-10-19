@@ -5301,6 +5301,7 @@ fn origination_and_conflict_outbox_wait_for_owner_contact_not_a_share_cursor() {
                 stream_identity: "stream-share".to_owned(),
                 bootstrap_complete: true,
                 settlement_report_id: None,
+                ordinary_pull: None,
             };
             let fault = ScriptedFaults::crash_at(FaultPoint::StorageAfterCommitBeforeAck);
             let contact = if first_contact_is_push {

@@ -1059,6 +1059,7 @@ it("refreshes a hidden head before the History timer samples it",async()=>{
     f.db.prepare("UPDATE sync_relay_shares SET selector_json=?").run('{"paths":[],"versionId":null}');
     latest={...latest,files:[],texts:[]};
     await vi.advanceTimersByTimeAsync(28000);
+    await supervisor.settled("w");
     expect(errors).toEqual([]);expect(pulls).toBe(3);
     expect(f.storage.readReplicaCurrentView("w")!.files).toEqual([]);
   } finally {await supervisor.close();}

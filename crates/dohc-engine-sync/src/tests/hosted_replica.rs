@@ -2811,6 +2811,7 @@ fn ordinary_only_machinery_stays_off_a_hosted_replica() {
         stream_identity: "stream-1".to_owned(),
         bootstrap_complete: true,
         settlement_report_id: None,
+        ordinary_pull: None,
     };
     assert!(
         client

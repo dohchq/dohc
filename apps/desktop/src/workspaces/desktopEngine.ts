@@ -1,3 +1,4 @@
+import { installedReaderConfig } from "./installedReaderConfig";
 import {reconcileOwnerLiveStops, type OwnerStopRetirementTarget} from "./ownerLiveStop";
 import { waitForEnginePublicationGate } from "./testEnginePublicationGate";
 import type { App, Dialog } from "electron";
@@ -19,6 +20,7 @@ import {
 import { bridgeAutomationClaimsToExecutors } from "./automationClaimsBridge";
 import type { WorkspaceActivityScope } from "../ipc/workspaceActivityBroadcast";
 import type { RegistryEntry } from "./registryStore";
+import { shareViewIsPresent } from "./shareViewMarker";
 import type { WorkspaceAuthorityOperation, WorkspaceAuthorityLease } from "./workspaceAuthorityOwner";
 import type { launchMarks as launchMarksImplementation } from "../performance/launchMarks";
 import type { desktopMarks as desktopMarksImplementation } from "../performance/desktopMarks";
@@ -42,6 +44,16 @@ export interface ServerOwnerDelivery {
     retire(binding: OwnerStopRetirementTarget, signal: AbortSignal): Promise<number | null>;
   } | null>;
 }
+/**
+ * Whether this workspace has no ordinary sync configured: Stop sync saved a
+ * pause, or the folder was attached again as local work. Sign-out, a lost
+ * connection and a detach keep its remote.
+ */
+export function hasNoOrdinarySync(entry: RegistryEntry | null): boolean {
+  return entry !== null && !entry.remote && entry.joinBootstrapPending !== true &&
+    !shareViewIsPresent(entry.shareView);
+}
+
 export type OwnerLiveDeliveryStatus = "preparing" | "active" | "retrying";
 type OwnerLiveDeliveryReason = "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted" | "restart-required";
 
@@ -58,6 +70,7 @@ interface CollectionAutomationsLifecycle {
 }
 
 interface DesktopEngineDependencies<State extends EngineAuthorityState> {
+  resourcesBasePath(): string;
   onWorkspaceOpened?(workspaceId: string): void;
   onRefusalsChanged?: () => void;
   serverOwnerDelivery?: ServerOwnerDelivery;
@@ -443,6 +456,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       const ingress = hostIngress ?? peerIngress ?? (serverOwnerConfig && {configPath: serverOwnerConfig.nativeConfigPath, client: serverOwnerConfig.nativeClient});
       let publications = 0;
       rustEngineDaemon = createRustEngineDaemon({
+        readerConfig: installedReaderConfig(dependencies.resourcesBasePath()),
         ...(ingress ? {privateOwnerHost: ingress} : {}),
         startupSmoke: startupSmoke.promise,
         ...testEngineRestartOverrides(),
@@ -536,6 +550,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       const relaySource = new RelayConfiguredDaemonClientSource(
         rustEngineDaemon,
         relayTransportRoutes,
+        workspaceId => hasNoOrdinarySync(dependencies.findWorkspace(workspaceId)),
       );
       rustEngineSessionSource = relaySource;
       // A fresh debug-engine adoption measured 18.7 s for 5,000 files and

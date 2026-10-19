@@ -76,7 +76,7 @@ test("agent probe staging recompiles when only its compile recipe changes",
   await writeFile(join(compilerRoot, "node.exe"), await readPinnedCompilerNode({ platform: "win32", arch: "x64", stagedNodePaths: [join(desktopRoot, "resources/app-compiler/node.exe")] }));
   // Copies of the real stager read the C# and relay bytes from desktopRoot, so only the recipe differs.
   const stager = (await readFile(new URL("./stage-agent-probe.mjs", import.meta.url), "utf8"))
-    .replace("\"./stage-app-compiler.mjs\"", JSON.stringify(new URL("./stage-app-compiler.mjs", import.meta.url).href));
+    .replace("\"./pinned-node.mjs\"", JSON.stringify(new URL("./pinned-node.mjs", import.meta.url).href));
   const unoptimized = stager.replace("\"/optimize+\"", "\"/optimize-\"");
   assert.notEqual(unoptimized, stager);
   const loadStager = async (name, text) => {

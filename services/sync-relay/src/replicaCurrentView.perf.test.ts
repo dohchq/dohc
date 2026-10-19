@@ -93,7 +93,7 @@ async function fixture() {
     grant:{grantId:"g",shareId:"s",principalKind:"user",principalUserId:"reader",principalEmail:null,access:"view",generation:1,status:"active",createdAtMs:1,revokedAtMs:null,parentGrantId:null}});
   return storage;
 }
-it.skipIf(process.platform==="win32"||binary.missing||process.env.DOHC_REPLICA_MEASURE!=="1")("pairs owner push costs with cuts enabled and disabled",async()=>{
+it.skipIf(process.platform!=="linux"||binary.missing||process.env.DOHC_REPLICA_MEASURE!=="1")("pairs owner push costs with cuts enabled and disabled",async()=>{
   const results=[],revisions=Number(process.env.DOHC_REPLICA_MEASURE_REVISIONS??100),hz=Number(process.env.DOHC_REPLICA_MEASURE_HZ??10);
   for(const bytes of process.env.DOHC_REPLICA_MEASURE_BYTES?[Number(process.env.DOHC_REPLICA_MEASURE_BYTES)]:[50_000,1_000_000])for(let pair=Number(process.env.DOHC_REPLICA_MEASURE_PAIR_START??0);pair<Number(process.env.DOHC_REPLICA_MEASURE_PAIRS??8);pair++)for(const enabled of process.env.DOHC_REPLICA_OFF_ONLY==="1"?[false]:process.env.DOHC_REPLICA_ON_ONLY==="1"?[true]:pair%2?[true,false]:[false,true]) {
     const root=await tempRoot("view-perf-relay");

@@ -512,6 +512,28 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
+  it("workspace_status reports whether Collection updates wait, as the engine answers", async () => {
+    await withWorkspace(async (ctx) => {
+      await bindCloudWorkspace(ctx);
+      // The desktop answers from the engine's pull token: set while a pull is
+      // unfinished, cleared by its terminal commit or by abandoning it.
+      for (const [pull, waiting] of [["unfinished", true], ["finished", false], ["abandoned", false]] as const) {
+        const asked: string[] = [];
+        const status = await workspaceStatus({ ...ctx, request: async (request) => {
+          asked.push(request.verb);
+          if (request.verb !== "collectionsWaiting") throw new Error(`unexpected CLI verb: ${request.verb}`);
+          expect(request.args).toEqual({ cwd: ctx.root, actor: "agent" });
+          return { ok: true, waiting };
+        } });
+        expect(status, pull).toMatchObject({ synced: true, collectionsWaiting: waiting });
+        expect(asked).toEqual(["collectionsWaiting"]);
+      }
+      const unanswered = await workspaceStatus({ ...ctx, request: async () => ({ ok: false, reason: "engine stopped" }) });
+      expect(unanswered).toMatchObject({ synced: true });
+      expect(unanswered).not.toHaveProperty("collectionsWaiting");
+    });
+  });
+
   it("writes, reads, and lists arbitrary visible files", async () => {
     await withWorkspace(async (ctx) => {
       const written = await writeWorkspaceFile(ctx, {

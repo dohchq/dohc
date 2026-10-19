@@ -177,7 +177,7 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_publish_app: "the requested action's result, listed under [`dohc app`](#dohc-app). Only `createLink` returns a bearer link `url` once, in `linkCreated`. `urlUnavailable` includes `grantId` so the owner can end it in dohc. Shared approval returns `published` with `appQuery` (`?app=<publicationId>`), never the link URL. Append `appQuery` before the fragment of any link URL, including one returned by `createLink`. Keep the link secret yourself.",
   dohc_list_workspaces: "`{ workspaces: { workspaceId, rootPath, kind, remote? }[] }`",
   dohc_stop_workspace_sync: { cli: "stopSync" },
-  dohc_workspace_status: "`{ synced, scope, cloudConnected, credentialStatus, workspaceId?, serverUrl?, syncPause? }`. `scope` is `\"local\"` or `\"cloud\"`.",
+  dohc_workspace_status: "`{ synced, scope, cloudConnected, credentialStatus, collectionsWaiting?, workspaceId?, serverUrl?, syncPause? }`. `scope` is `\"local\"` or `\"cloud\"`. `collectionsWaiting` is `true` while Collection updates wait for a sync that has not finished. Files and documents still save. To continue offline, stop sync. The field is absent when the dohc app cannot answer.",
   dohc_list_changes: { cli: "moments" },
   dohc_read_change: { cli: "moment" },
   dohc_read_operation: { cli: "historyOperation" },

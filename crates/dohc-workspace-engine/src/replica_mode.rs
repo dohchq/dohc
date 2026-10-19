@@ -13,9 +13,11 @@ pub(crate) struct ReplicaMode {
 
 impl ReplicaMode {
     pub(crate) fn new(root: &Path) -> std::io::Result<Self> {
-        Ok(Self {
-            root: root.canonicalize()?,
-        })
+        let root = root.canonicalize()?;
+        if root.to_str().is_none() {
+            return Err(std::io::Error::other("replica store path must be UTF-8"));
+        }
+        Ok(Self { root })
     }
 
     pub(crate) fn guard(&self, request: &mut Request) -> Result<(), WireError> {
@@ -80,6 +82,18 @@ impl ReplicaMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn refuses_non_utf8_root_before_json_serialization() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let path = root
+            .path()
+            .join(std::ffi::OsStr::from_bytes(b"replica-\xff"));
+        std::fs::create_dir(&path).unwrap();
+        assert!(ReplicaMode::new(&path).is_err());
+    }
 
     #[test]
     fn guard_uses_canonical_startup_paths() {
