@@ -647,15 +647,21 @@ test("a lane's clean removes read-only build output that git clean alone cannot"
     await git(["init", "-q"]);
     writeFileSync(join(root, ".gitignore"), "resources/\n");
     // As the Markdown reader's staging left it before #2243: a read-only folder holding read-only files.
-    const generation = join(root, "resources", "engine-reader", "generation");
-    mkdirSync(generation, { recursive: true });
-    writeFileSync(join(generation, "reader.cjs"), "");
-    chmodSync(join(generation, "reader.cjs"), 0o444);
-    chmodSync(generation, 0o555);
+    // The second one has a name Git would quote in its usual output.
+    const generations = [join(root, "resources", "engine-reader", "generation"), join(root, "généré")];
+    for (const generation of generations) {
+      mkdirSync(generation, { recursive: true });
+      writeFileSync(join(generation, "reader.cjs"), "");
+      chmodSync(join(generation, "reader.cjs"), 0o444);
+      chmodSync(generation, 0o555);
+    }
     await cleanCheckout(git, root);
     assert.equal(existsSync(join(root, "resources")), false);
+    assert.equal(existsSync(join(root, "généré")), false);
   } finally {
-    try { chmodSync(join(root, "resources", "engine-reader", "generation"), 0o755); } catch { /* Removed. */ }
+    for (const generation of [join(root, "resources", "engine-reader", "generation"), join(root, "généré")]) {
+      try { chmodSync(generation, 0o755); } catch { /* Removed. */ }
+    }
     rmSync(root, { recursive: true, force: true });
   }
 });

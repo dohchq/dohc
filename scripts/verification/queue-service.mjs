@@ -66,10 +66,11 @@ export const laneTemp = lane => join(dirname(lane), "tmp", basename(lane));
  * output, so after a failed clean, what remains becomes writable and the clean runs again.
  */
 export async function cleanCheckout(laneGit, root) {
-  const clean = ["clean", "-ffdx", "--exclude=node_modules", "--exclude=target"];
+  const caches = ["--exclude=node_modules", "--exclude=target"];
+  const clean = ["clean", "-ffdx", ...caches];
   try { return await laneGit(clean); } catch { /* Cleaned again below. */ }
-  for (const line of (await laneGit([...clean, "--dry-run"])).split(/\r?\n/u)) {
-    const path = /^Would remove (.+)$/u.exec(line)?.[1];
+  // What the clean left, as raw paths: -z neither quotes nor translates them.
+  for (const path of (await laneGit(["ls-files", "-z", "--others", "--directory", ...caches])).split("\0")) {
     if (path) await makeWritable(join(root, path));
   }
   return laneGit(clean);
