@@ -1,7 +1,9 @@
 name: Desktop Release
 
 # Releases start only by dispatch and run only on self-hosted runners.
-# Cloud runners stay off (AGENTS.md).
+# Cloud runners stay off (AGENTS.md). This workflow builds Windows and Linux.
+# The release owner adds the macOS files to the published release with
+# `pnpm release:macos` on a Mac (docs/engineering/desktop-release.md).
 on:
   workflow_dispatch:
     inputs:
@@ -26,7 +28,6 @@ on:
           - windows
           - linux
           - windows-linux
-          - all
       dry_run:
         description: Build and test without publishing artifacts
         required: true
@@ -275,15 +276,12 @@ jobs:
           DRY_RUN: ${{ needs.preflight.outputs.dry_run }}
           OS_NAME: ${{ matrix.os }}
           REQUIRE_SIGNING: ${{ matrix.require_signing }}
-          MACOS_CSC_LINK: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.MACOS_CSC_LINK || '' }}
-          WIN_CSC_LINK: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.WIN_CSC_LINK || '' }}
+          WIN_CSC_LINK: ${{ needs.preflight.outputs.dry_run != 'true' && matrix.os == 'Windows' && secrets.WIN_CSC_LINK || '' }}
         run: |
           set -euo pipefail
           require=0
           has_credentials=0
-          if [[ "$OS_NAME" == "macOS" && -n "$MACOS_CSC_LINK" ]]; then
-            has_credentials=1
-          elif [[ "$OS_NAME" == "Windows" && -n "$WIN_CSC_LINK" ]]; then
+          if [[ "$OS_NAME" == "Windows" && -n "$WIN_CSC_LINK" ]]; then
             has_credentials=1
           elif [[ "$REQUIRE_SIGNING" != "1" ]]; then
             has_credentials=1
@@ -301,14 +299,12 @@ jobs:
 
           echo "require=$require" >> "$GITHUB_OUTPUT"
 
+      # Each platform's signing secrets reach only its own target's job.
+      # Linux receives none.
       - name: Package smoke
         env:
           DOHC_REQUIRE_SIGNING: ${{ steps.signing.outputs.require }}
-          CSC_LINK: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.MACOS_CSC_LINK || '' }}
-          WIN_CSC_LINK: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.WIN_CSC_LINK || '' }}
-          APPLE_ID: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.APPLE_ID || '' }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
-          APPLE_TEAM_ID: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.APPLE_TEAM_ID || '' }}
+          WIN_CSC_LINK: ${{ needs.preflight.outputs.dry_run != 'true' && matrix.os == 'Windows' && secrets.WIN_CSC_LINK || '' }}
         run: pnpm smoke:package:desktop
 
       - name: Package desktop
@@ -316,22 +312,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           DOHC_REQUIRE_SIGNING: ${{ steps.signing.outputs.require }}
-          CSC_LINK: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.MACOS_CSC_LINK || '' }}
-          CSC_KEY_PASSWORD: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.MACOS_CSC_KEY_PASSWORD || '' }}
-          APPLE_ID: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.APPLE_ID || '' }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
-          APPLE_TEAM_ID: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.APPLE_TEAM_ID || '' }}
-          WIN_CSC_LINK: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.WIN_CSC_LINK || '' }}
-          WIN_CSC_KEY_PASSWORD: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.WIN_CSC_KEY_PASSWORD || '' }}
+          WIN_CSC_LINK: ${{ needs.preflight.outputs.dry_run != 'true' && matrix.os == 'Windows' && secrets.WIN_CSC_LINK || '' }}
+          WIN_CSC_KEY_PASSWORD: ${{ needs.preflight.outputs.dry_run != 'true' && matrix.os == 'Windows' && secrets.WIN_CSC_KEY_PASSWORD || '' }}
         run: |
           builder_args=(--publish never "-c.publish.channel=${{ needs.preflight.outputs.release_channel }}" "--${{ matrix.arch }}")
           if [[ "$DOHC_REQUIRE_SIGNING" == "1" ]]; then
             builder_args+=(-c.forceCodeSigning=true)
           else
             export CSC_IDENTITY_AUTO_DISCOVERY=false
-            if [[ "${{ matrix.os }}" == "macOS" ]]; then
-              builder_args+=(-c.mac.identity=null)
-            fi
           fi
           pnpm --filter @dohc/desktop exec electron-builder "${builder_args[@]}"
 
@@ -350,14 +338,6 @@ jobs:
         env:
           DOHC_E2E_NO_CHROMIUM_SANDBOX: "1"
         run: xvfb-run -a pnpm smoke:fuses:desktop
-
-      # Checks the bundle's signature and fuses, builds one app through the
-      # package's signed compiler, then boots it.
-      - name: macOS packaged smoke
-        if: runner.os == 'macOS'
-        env:
-          DOHC_SMOKE_PACKAGE_DIRECTORY: ${{ github.workspace }}/apps/desktop/release/mac-arm64/dohc.app
-        run: pnpm smoke:fuses:desktop
 
       - name: Windows packaged smoke
         if: runner.os == 'Windows'
@@ -428,12 +408,12 @@ jobs:
             local name
             name="$(basename "$source")"
             case "$source" in
-              */*.app/*|*/win-unpacked/*|*/linux-unpacked/*)
+              */win-unpacked/*|*/linux-unpacked/*)
                 return 1
                 ;;
             esac
             case "$name" in
-              latest*.yml|nightly*.yml|*.dmg|*.zip|*.exe|*.AppImage|*.deb|*.blockmap)
+              latest*.yml|nightly*.yml|*.exe|*.AppImage|*.deb|*.blockmap)
                 return 0
                 ;;
               *)

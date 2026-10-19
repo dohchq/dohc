@@ -12,11 +12,13 @@ targets and deployment requirements.
 | macOS | arm64 (Apple silicon) | `.dmg` | `.zip` |
 | Linux | x64 | AppImage and `.deb` | `.AppImage` and `.deb` |
 
-The desktop release workflow builds each target from the matching Rust engine
-target. macOS releases support Apple silicon only; there is no Intel build.
+The Desktop Release workflow builds Windows and Linux, each from the matching
+Rust engine target. The release owner builds macOS on an Apple silicon Mac with
+`pnpm release:macos`, which adds its files to the release the workflow published.
+macOS releases support Apple silicon only; there is no Intel build.
 Stable releases require signing credentials for Windows and macOS.
-Nightly builds may be unsigned for testing. An unsigned build is not a stable
-release.
+Nightly Windows builds may be unsigned for testing. The macOS command always
+signs and notarizes a release. An unsigned build is not a stable release.
 
 Ubuntu 24.04 and later block the unprivileged user namespaces that Chromium's
 sandbox needs, so the AppImage refuses to start there and says why. The `.deb`
@@ -27,7 +29,7 @@ the `.deb`.
 
 ## Keep signing credentials on reviewed code
 
-Store signing and notarization secrets in the GitHub `desktop-release` environment.
+Store the Windows signing secrets in the GitHub `desktop-release` environment.
 Do not store them as repository or organization secrets available to arbitrary branches.
 Restrict that environment to the `main` branch, with no tag rules.
 Review organization-level signing-secret access before adding credentials.
@@ -38,6 +40,12 @@ The release workflow starts only when someone dispatches it.
 Dispatches can start on other refs, but the preflight guard permits release jobs only on `main`.
 Pull requests use local verification. Dry runs receive empty signing credentials.
 The package and publish jobs both use the restricted environment.
+Only the Windows package job receives the Windows signing secrets. Linux receives none.
+
+The macOS signing identity and notarization credentials stay in a release
+keychain on the release owner's Mac. They never enter GitHub, and no workflow
+can read them. The keychain stays locked between releases, so publishing the
+macOS files needs the release owner to unlock it.
 
 ## Provide self-hosted runners
 
@@ -49,15 +57,14 @@ Every release job runs on a self-hosted runner. Cloud runners stay off.
 | Preflight, version check, and Publish for other selections | `self-hosted`, `windows`, `x64` |
 | Windows x64 package | `self-hosted`, `windows`, `x64` |
 | Linux x64 package | `self-hosted`, `linux`, `x64` |
-| macOS arm64 package | `self-hosted`, `macos`, `arm64` |
 
 A job waits in the queue until a runner with its labels is online.
 Each runner needs Git with bash, rustup, and the platform's native build tools.
 The coordinator runner also needs the GitHub CLI, `gh`, for the version check and publishing.
-Run the Windows and macOS runners in a signed-in desktop session for the packaged app check.
+Run the Windows runner in a signed-in desktop session for the packaged app check.
 The Linux runner also needs `xvfb-run` for the fuse smoke.
 After packaging, that check verifies the actual executable's fuse values and starts it with an isolated profile.
-The smoke looks for `apps/desktop/release/linux-unpacked` on Linux, and on a Mac for `apps/desktop/release/mac-arm64/dohc.app`. Point `DOHC_SMOKE_PACKAGE_DIRECTORY` at any other unpacked directory or app bundle.
+The smoke looks for `apps/desktop/release/linux-unpacked` on Linux and for `apps/desktop/release/mac-arm64/dohc.app` on a Mac. Point `DOHC_SMOKE_PACKAGE_DIRECTORY` at any other unpacked directory or app bundle.
 The package and publish jobs receive the environment's secrets.
 Register only runners that the release owner controls.
 On a shared Windows runner, set `DOHC_BUILD_SLOT_ROOT=C:\w\_locks` in the runner's `.env` file.
@@ -80,8 +87,6 @@ Check host disk space and build admission before a release.
 Coordinate WSL builds with other work on the PC and cap Cargo parallelism to the host's build budget.
 Do not share Windows slot records with Linux processes because their PID namespaces differ.
 The `windows-linux` selection packages its two targets sequentially.
-The `all` selection can package Windows and WSL Linux concurrently.
-Before selecting `all`, confirm that the PC has enough resources for both builds.
 
 WSLg can display the packaged app, and Xvfb supports automated startup checks.
 These checks do not prove Linux desktop installation, protocol registration, or real AppImage or `.deb` upgrades.
@@ -128,6 +133,7 @@ The Windows package job checks the executable with an isolated profile and test 
 For publication, dispatch again with `dry_run=false`.
 The new dispatch generates a new nightly version.
 The published prerelease records the source commit and includes generated release notes.
+Then [add the macOS files](#add-the-macos-files).
 
 ## Build a Linux nightly
 
@@ -142,14 +148,13 @@ Use `platforms=windows-linux` to prepare both packages from one commit and gener
 Both runners must be available. The Windows runner performs the coordinator jobs.
 Download both platform artifacts from the same run.
 
-Use `platforms=all` when Windows, macOS, and Linux runners are available.
 Only the selected platforms receive installers and update packages.
-Choose `all` when the release must update existing installations on every supported platform.
 Continue including every platform that previously shipped on the selected channel.
-For example, Windows and Linux history permits `windows-linux`; macOS history requires `all`.
+For example, Windows and Linux history requires `windows-linux`.
 An updater cannot find its platform manifest in a release that omits it.
 Before packaging a published release, the workflow checks every previous published release on that channel.
-It rejects a selection that omits an existing platform manifest.
+It rejects a selection that omits an existing Windows or Linux manifest.
+It does not check macOS, because the Mac command adds those files after the workflow publishes.
 Partial-platform dry runs remain available because they publish no update feed.
 
 Private repository downloads require repository access.
@@ -164,7 +169,8 @@ Complete the installer and update rehearsal below before publishing the first st
 Dispatch `Desktop Release` from `main` with `channel=latest` and the matching package version.
 Select the platforms that the release supports.
 Use `dry_run=true` to check unsigned packaging without publication.
-For publication, use `dry_run=false`. Stable Windows and macOS builds require signing.
+For publication, use `dry_run=false`. Stable Windows builds require signing.
+Then [add the macOS files](#add-the-macos-files).
 
 Pushing a tag does not start a release.
 The publish job creates the release as a draft at the dispatched commit and uploads every file to it.
@@ -175,6 +181,232 @@ Then bump the version, or delete the draft that a stopped run left, and dispatch
 A push to `main` starts no release.
 A second dispatch on the same channel waits for the running one to finish.
 GitHub keeps one waiting run per channel, and a newer dispatch replaces it.
+
+## Add the macOS files
+
+Follow these steps for every published release, nightly or stable.
+Run the command as soon as the workflow publishes.
+A Mac updater reads `<channel>-mac.yml` from the newest release on its channel.
+Until this command uploads that file, a Mac on that channel shows no update and no error.
+It updates at its first check after the file arrives.
+Windows and Linux still report a missing manifest as an error, because the workflow always uploads theirs.
+A custom `DOHC_UPDATE_URL` feed also reports it.
+The release is not finished until the command reports that the release holds the macOS files.
+
+1. Dispatch `Desktop Release` with `dry_run=false`. Wait until the run publishes the release.
+2. Record the release tag, such as `v0.1.1-nightly.20261019.42.1`, and its channel.
+3. On the Apple silicon Mac, run the command with `--dry-run` from any checkout that has it. Read the upload plan it prints.
+
+   ```sh
+   pnpm release:macos --version v0.1.1-nightly.20261019.42.1 --channel nightly --dry-run
+   ```
+
+4. Update a clean checkout of `main`, then run the same command from it without `--dry-run`.
+5. The command asks for the release keychain's password twice: before it builds, and before it packages. Type it each time.
+
+A real run opens the release keychain for two short periods. Before it builds,
+the command unlocks the keychain, checks that the identity is valid and that the
+notarytool profile signs in, reads the PostHog key into memory, and locks the
+keychain again. The install, the builds, and the source map upload then run
+with the keychain locked. The upload fetches `@posthog/cli` outside the
+lockfile and runs its install script, and only that step receives the PostHog
+key. Before packaging, the command unlocks the keychain again. electron-builder
+signs and notarizes the app, the command notarizes the DMG, and the keychain
+locks once Apple accepts it. If the keychain is already unlocked when
+packaging starts, someone opened it while the build ran. The command says so,
+locks it, and unlocks it again the usual way. The command also locks the
+keychain when it ends, however it ends.
+
+To unlock the keychain in a terminal, `security` asks for the password. Without
+a terminal, the command prints the `security unlock-keychain` command and waits
+up to 30 minutes for someone to run it.
+
+While the release keychain is unlocked, any program running as you can sign
+with the Developer ID identity through `codesign` and notarize with the profile
+through `notarytool`. Those periods cover the checks before the build,
+electron-builder, and both notarization waits.
+
+The command never changes the files of the checkout it runs from. It fetches
+the release commit and creates a throwaway worktree of it in
+`~/dohc-release/<tag>/checkout`. It installs dependencies there and builds the
+engine there with its own Cargo target folder. When it ends, it removes that
+worktree and Git's record of it. Only the files to upload stay, in
+`~/dohc-release/<tag>/files`, until the upload succeeds. A dry run uses
+`~/dohc-release/<tag>-dry-run` and keeps its files for inspection.
+
+The command stops before it builds unless all of these are true:
+
+- The host is an Apple silicon Mac, and Node runs as arm64.
+- The release is published, and its prerelease state matches the channel.
+- The release has no macOS files, or only part of an upload that the command
+  can finish, as [Finish an upload that stopped](#finish-an-upload-that-stopped) describes.
+- A Desktop Release run dispatched on `main` published the tag's commit: its
+  `Publish` job succeeded for that commit. For a nightly, that run and attempt
+  are the ones in the tag. The workflow runs `Publish` only after Preflight
+  passes on `refs/heads/main`, so a run dispatched on a tag named `main` does
+  not count. The commit must also be on the `main` branch's current commit.
+- The version is the one the workflow stamped. The command resolves it with
+  `scripts/resolve-desktop-release.mjs`, from the commit's package version and
+  the nightly date, run number, and attempt in the tag.
+- For a real run: the checkout that runs the command is clean and on `main`,
+  and your `gh` account can upload to `dohchq/dohc`. A dry run runs from any
+  checkout and prints which commit it ran from.
+- For a real run: the release keychain exists and holds one Developer ID
+  Application certificate and the notarytool profile. While the
+  `DOHC_POSTHOG_KEY` repository variable is set, it also holds the PostHog CLI
+  API key. A locked keychain shows all of this.
+
+When it first unlocks the keychain, the command checks that the identity is
+valid and that the notarytool profile signs in.
+
+The command then follows the workflow's package job. It stamps the version,
+builds the desktop and the `aarch64-apple-darwin` engine, and runs the package
+smoke. A real run builds with the repository's PostHog variables and uploads
+source maps after the engine build, before packaging, with the release keychain
+locked. electron-builder signs the
+app with the identity in the release keychain and notarizes and staples it
+through the notarytool profile. The command then notarizes and staples the DMG.
+
+Before it uploads, the command runs these checks:
+
+- `codesign --verify --deep --strict` on the app.
+- `spctl --assess` on the app.
+- `xcrun stapler validate` on the app and on the DMG.
+- The packaged fuse smoke, which also compiles one app through the packaged compiler and boots the app.
+- `scripts/verify-desktop-release-artifacts.mjs` for `mac` and `arm64`.
+
+The command uploads the DMG, the ZIP, and the ZIP's blockmap. It uploads
+`<channel>-mac.yml` only after the release holds each of those files with the
+size and SHA-256 digest that the command built, so the manifest never names a
+missing file. It refuses a manifest that names any other file. It then reads
+the release back and compares every file again. The manifest lists only the
+ZIP, which is what the Mac updater installs. Stapling changes the DMG's bytes
+after packaging, so the DMG stays out of the manifest.
+
+Ctrl-C, SIGTERM, or a closed terminal stops the command after the current step.
+It starts no further upload, removes the throwaway worktree, and locks the
+release keychain.
+
+| Flag | Meaning |
+| --- | --- |
+| `--version <version or tag>` | The release, such as `0.1.0` or `v0.1.1-nightly.20261019.42.1`. Required. |
+| `--channel latest\|nightly` | The release's channel. Required. |
+| `--keychain <path>` | The release keychain. The default is `~/Library/Keychains/dohc-release.keychain-db`. |
+| `--keychain-profile <name>` | The notarytool profile in the release keychain. The default is `dohc-notary`. |
+| `--dry-run` | Builds unsigned, runs every check that needs no signature, prints the upload plan, and uploads nothing. A dry run runs from any checkout, does not read or lock the release keychain, and sends no reports. |
+| `--rehearse` | Only with `--dry-run`. Builds the checkout's own commit instead of the release commit, and prints what a real run refuses instead of stopping. |
+
+A dry run skips `spctl` and `stapler`, because an unsigned app has no
+Developer ID signature or ticket.
+
+### Finish an upload that stopped
+
+If an upload fails or you stop it, the command keeps the built files in
+`~/dohc-release/<tag>/files` and says so. Run the same command again. A rebuild
+signs with new timestamps, so the rerun does not rebuild. It finishes the
+upload from the kept files when both of these are true:
+
+- The release holds only some of the DMG, the ZIP, and its blockmap, and no `<channel>-mac.yml`.
+- Each of those files on the release has the kept file's size and SHA-256
+  digest, and the ZIP that the rerun downloads has the SHA-512 that the kept
+  manifest names.
+
+The rerun first checks the kept files as the stopped run did. It runs the
+artifact verifier on them, unpacks the ZIP, and runs `codesign`, `spctl`, and
+`stapler` on the app and `stapler` on the DMG. It then uploads the missing
+files and, after the release holds all three, the manifest. It reads the
+release back. Finishing an upload signs nothing, so it does not unlock the
+release keychain. In any other state, the command stops and prints the
+`gh release delete-asset` commands that remove the macOS files from the
+release. Run them only for that release, then run the command again to build
+from the start. The command never offers to delete files from a release that
+already has a Mac update manifest, because Macs may already update from it.
+
+### Prepare the Mac once
+
+The Mac needs the repository's development tools, the Xcode command line
+tools, and `gh` signed in with write access to `dohchq/dohc`. The signing
+identity, the notarization credentials, and the PostHog key live only in a
+release keychain with its own password. Nothing goes in the login keychain or
+an environment variable, and no key file stays on the Mac. The release keychain
+is not in the keychain search list, so programs that search your keychains do
+not find it.
+
+1. Create the release keychain. `security` asks for a new password. Use one that differs from your login password:
+
+   ```sh
+   security create-keychain ~/Library/Keychains/dohc-release.keychain-db
+   ```
+
+2. Run `security list-keychains -d user`. If the list includes
+   `dohc-release.keychain-db`, set it back to your login keychain:
+
+   ```sh
+   security list-keychains -d user -s ~/Library/Keychains/login.keychain-db
+   ```
+
+3. Make the keychain lock itself after 30 minutes without use, and when the Mac sleeps:
+
+   ```sh
+   security set-keychain-settings -lut 1800 ~/Library/Keychains/dohc-release.keychain-db
+   ```
+
+   The command locks the keychain itself, so this limit matters only if the
+   command cannot. During a release, the longest time without use is one
+   notarization wait.
+4. Import the Developer ID Application certificate. `-x` makes its private key
+   non-exportable, and `-T` lets `codesign` use the key without asking. While
+   the keychain is unlocked, any program running as you can run `codesign`
+   with this identity:
+
+   ```sh
+   security import DeveloperIDApplication.p12 -k ~/Library/Keychains/dohc-release.keychain-db -x -T /usr/bin/codesign
+   ```
+
+   `security` asks for the `.p12` password. Then remove the `.p12` file from
+   the Mac and keep it only in an offline backup.
+5. Confirm that this command lists one valid `Developer ID Application` identity:
+
+   ```sh
+   security find-identity -v -p codesigning ~/Library/Keychains/dohc-release.keychain-db
+   ```
+
+6. Store the notarization credentials as a notarytool profile in the release
+   keychain. Use an App Store Connect team API key with the Developer role. It
+   can notarize but cannot sign in to your Apple ID, and you can revoke it in
+   App Store Connect:
+
+   ```sh
+   xcrun notarytool store-credentials dohc-notary --key AuthKey_<key ID>.p8 --key-id <key ID> --issuer <issuer ID> --keychain ~/Library/Keychains/dohc-release.keychain-db
+   ```
+
+   notarytool copies the key into the keychain. Then remove the `.p8` file
+   from the Mac. App Store Connect lets you download it only once, so keep it
+   only in an offline backup, or revoke the key and create another when you
+   need it again. If you cannot use an API key, use `--apple-id <Apple ID>
+   --team-id <team ID>` instead of the three key options. notarytool then asks
+   for an app-specific password, which can also sign in to that Apple ID. To
+   use another profile name, pass it to the command with `--keychain-profile`.
+7. While releases report to PostHog, store the PostHog CLI API key that
+   uploads source maps. `read` keeps the key out of your shell history.
+   `security -i` reads the command from its input, so the key is never in a
+   command line that other programs can see:
+
+   ```sh
+   read -rs key && printf 'add-generic-password -a "%s" -s dohc-posthog-cli-api-key -w "%s" "%s"\n' "$USER" "$key" ~/Library/Keychains/dohc-release.keychain-db | security -i; unset key
+   ```
+
+   Use a personal API key with the scopes in [Upload source maps](#upload-source-maps).
+   While the release keychain is unlocked, any program running as you can read
+   this key with `security`.
+8. Lock the release keychain:
+
+   ```sh
+   security lock-keychain ~/Library/Keychains/dohc-release.keychain-db
+   ```
+
+The first signed run can show a dialog that asks whether `codesign` may use
+the key. Enter the release keychain's password and choose **Always Allow**.
 
 ## Choose an update feed
 
@@ -431,7 +663,7 @@ Windows-only selections skip that Linux check.
 The Windows job runs the packaged executable with an isolated profile and test workspace.
 It checks startup, editing, disk persistence, and restart before uploading artifacts.
 
-These checks do not prove code signing, OS installer registration, update
+The workflow's checks do not prove code signing, OS installer registration, update
 installation, or an upgrade that preserves a user's profile. Release owners
 must run those checks on a disposable account for each platform before the
 first stable release.

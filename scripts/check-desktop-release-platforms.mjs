@@ -10,9 +10,10 @@ export function checkDesktopReleasePlatforms({ channel, platforms, releases }) {
   const selected = new Set(desktopReleaseTargets(platforms).map((target) => target.artifact_platform));
   if (!Array.isArray(releases)) throw new Error("Release history must be an array of GitHub releases.");
   const previous = new Set();
+  // The macOS manifest comes from the release command on a Mac, after this
+  // workflow publishes, so the workflow keeps only Windows and Linux.
   const manifests = new Map([
     [`${channel}.yml`, "win"],
-    [`${channel}-mac.yml`, "mac"],
     [`${channel}-linux.yml`, "linux"],
   ]);
   for (const release of releases) {
@@ -29,7 +30,7 @@ export function checkDesktopReleasePlatforms({ channel, platforms, releases }) {
   const missing = [...previous].filter((platform) => !selected.has(platform)).sort();
   if (missing.length) {
     throw new Error(
-      `The ${channel} channel already publishes ${missing.join(", ")} update manifests. Select platforms=all before publishing, or use dry_run=true to test only the selected platforms.`,
+      `The ${channel} channel already publishes ${missing.join(", ")} update manifests. Select platforms=windows-linux before publishing, or use dry_run=true to test only the selected platforms.`,
     );
   }
 }
@@ -45,7 +46,7 @@ async function main() {
     options[name.slice(2)] = value;
   }
   if (!options.channel || !options.platforms || !options.releases) {
-    throw new Error("Usage: check-desktop-release-platforms.mjs --channel latest|nightly --platforms windows|linux|windows-linux|all --releases <GitHub release history JSONL>");
+    throw new Error("Usage: check-desktop-release-platforms.mjs --channel latest|nightly --platforms windows|linux|windows-linux --releases <GitHub release history JSONL>");
   }
   const releases = (await readFile(options.releases, "utf8")).split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
   checkDesktopReleasePlatforms({ ...options, releases });

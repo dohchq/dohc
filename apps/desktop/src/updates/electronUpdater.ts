@@ -105,6 +105,23 @@ export function updatesEnabled(
 const OFFLINE_PATTERN =
   /ERR_INTERNET_DISCONNECTED|ERR_CONNECTION|ERR_NAME_NOT_RESOLVED|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|net::/i;
 const INSTALL_RESTART_FAILURE = "Could not restart into the update.";
+// electron-updater's code when the feed has no channel file for this
+// platform. GitHubProvider sets it on a 404 for <channel>-mac.yml in the
+// newest release; GenericProvider sets it for a custom feed.
+const CHANNEL_FILE_NOT_FOUND = "ERR_UPDATER_CHANNEL_FILE_NOT_FOUND";
+
+// What a failed check means for the person. The Mac files join a GitHub
+// release after the workflow publishes it (docs/engineering/desktop-release.md),
+// so until then a Mac finds no channel file there: no update yet, not a
+// failure. Windows and Linux files ship with the release, and a custom feed
+// has no such gap, so for them it means a broken feed.
+function checkFailure(error: unknown, macReleaseFeed: boolean): UpdateEvent {
+  if (macReleaseFeed && error instanceof Error && "code" in error && error.code === CHANNEL_FILE_NOT_FOUND) {
+    return { type: "not-available" };
+  }
+  const message = error instanceof Error ? error.message : "checkForUpdates failed";
+  return OFFLINE_PATTERN.test(message) ? { type: "offline" } : { type: "error", message };
+}
 
 function boundedPercent(percent: number): number {
   if (!Number.isFinite(percent)) return 0;
@@ -212,6 +229,7 @@ export async function startAutoUpdates(options: {
   autoUpdater.allowPrerelease = channel === "nightly";
   autoUpdater.allowDowngrade = false;
   const feedOverride = updateFeedOverride(env, options.isPackaged);
+  const macReleaseFeed = platform === "darwin" && feedOverride === null;
   if (feedOverride) {
     if (!options.isPackaged) autoUpdater.forceDevUpdateConfig = true;
     autoUpdater.setFeedURL({ provider: "generic", url: feedOverride });
@@ -249,11 +267,7 @@ export async function startAutoUpdates(options: {
     }
     checkInFlight = false;
     restartStaged = false;
-    dispatch(
-      OFFLINE_PATTERN.test(error.message)
-        ? { type: "offline" }
-        : { type: "error", message: error.message },
-    );
+    dispatch(checkFailure(error, macReleaseFeed));
   });
 
   const checkForUpdates = async (): Promise<UpdateCheckResult> => {
@@ -275,18 +289,14 @@ export async function startAutoUpdates(options: {
       return { checked: true, state: publicState() };
     } catch (error) {
       // The updater emits "error"; if it does not, leave the app usable and
-      // make the action visibly retryable.
+      // make the action visibly retryable. A check that found no update yet
+      // still ran.
+      const failure = checkFailure(error, macReleaseFeed);
       if (checkInFlight) {
         checkInFlight = false;
-        const message =
-          error instanceof Error ? error.message : "checkForUpdates failed";
-        dispatch(
-          OFFLINE_PATTERN.test(message)
-            ? { type: "offline" }
-            : { type: "error", message },
-        );
+        dispatch(failure);
       }
-      return { checked: false, state: publicState() };
+      return { checked: failure.type === "not-available", state: publicState() };
     }
   };
 

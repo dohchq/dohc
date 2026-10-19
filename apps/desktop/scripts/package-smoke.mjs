@@ -182,22 +182,22 @@ if (config) {
 }
 
 // --- signing labeling ------------------------------------------------------
-// A production-signed release is never implied: without CSC credentials the
-// build is loudly unsigned, and a release that requires signing fails here.
-const hasSigningCredentials = Boolean(process.env.CSC_LINK || process.env.WIN_CSC_LINK);
+// A production-signed release is never implied: without signing credentials
+// the build is loudly unsigned, and a release that requires signing fails here.
+// A Mac signs with a release keychain identity (CSC_NAME) and notarizes with a
+// notarytool keychain profile; electron-builder skips notarization without
+// one, and Gatekeeper blocks a signed Mac app that is not notarized.
+const mac = process.platform === "darwin";
+const hasSigningCredentials = mac
+  ? Boolean(process.env.CSC_NAME && process.env.APPLE_KEYCHAIN_PROFILE)
+  : Boolean(process.env.CSC_LINK || process.env.WIN_CSC_LINK);
 if (process.env.DOHC_REQUIRE_SIGNING === "1") {
-  check(hasSigningCredentials, "DOHC_REQUIRE_SIGNING=1 demands CSC_LINK/WIN_CSC_LINK in the env");
-  // electron-builder skips notarization without these, and Gatekeeper blocks
-  // a signed Mac app that is not notarized.
-  if (process.platform === "darwin") {
-    check(
-      Boolean(process.env.APPLE_ID && process.env.APPLE_APP_SPECIFIC_PASSWORD && process.env.APPLE_TEAM_ID),
-      "DOHC_REQUIRE_SIGNING=1 on macOS demands APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD and APPLE_TEAM_ID for notarization",
-    );
-  }
+  check(hasSigningCredentials, mac
+    ? "DOHC_REQUIRE_SIGNING=1 on macOS demands CSC_NAME and APPLE_KEYCHAIN_PROFILE in the env"
+    : "DOHC_REQUIRE_SIGNING=1 demands CSC_LINK/WIN_CSC_LINK in the env");
 }
 console.log(hasSigningCredentials
-  ? "SIGNING: credentials present (CSC env set)"
+  ? "SIGNING: credentials present"
   : "SIGNING: unsigned (dev)");
 
 if (failures.length > 0) {
