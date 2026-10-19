@@ -56,6 +56,8 @@ export function createShareReadQueries(
     | "currentObjectBlobByteLength"
     | "laterObjectMomentPaths"
     | "listLinkRevisionLogRows"
+    | "currentObjectPath"
+    | "readCurrentFileState"
   >,
   linkFreshnessPageSize: number,
   linkKey?: string | Uint8Array,
@@ -192,6 +194,7 @@ export function createShareReadQueries(
     audience: "authenticated" | "accountless",
     half?: "chat" | "files",
     recipient?: ReceivedRecipient,
+    currentOnly = false,
   ): {
     ops: Array<Record<string, unknown>>;
     nextCursor: number;
@@ -247,6 +250,31 @@ export function createShareReadQueries(
         if (recipient && original) tokenizeReceivedPayload({ identity, recipient, workspaceId, selector, chat: chatResolver,
           opKind: row.opKind, original, served: payload as Record<string, unknown>,
           ...(accountlessProjection ? { projectPath: accountlessProjection.projectPath } : {}) });
+        if (currentOnly) {
+          if (!fileSelector || !accountlessProjection || !recipient) return null;
+          const reset = { relaySeq: row.relaySeq, opKind: "files.reset", payload: {} };
+          if (row.opKind === "version.create") return reset;
+          if (row.opKind !== "moment.append") return null;
+          const objectId = original?.objectId;
+          const receivedObject = identity.object(recipient, workspaceId, objectId);
+          if (typeof objectId !== "string" || !receivedObject) return reset;
+          const versionId = targetVersionId(fileSelector);
+          const path = storage.currentObjectPath({ workspaceId, versionId, objectId });
+          const projected = path === null ? null : accountlessProjection.projectPath(path);
+          const current = path !== null && projected !== null
+            ? storage.readCurrentFileState({ workspaceId, versionId, selectorPaths: [path], limit: 1 })
+                .files.find(file => file.path === path)
+            : undefined;
+          return {
+            relaySeq: row.relaySeq,
+            opKind: "file.current",
+            payload: {
+              objectId: receivedObject,
+              file: current ? { objectId: receivedObject, path: projected,
+                blobSha256: current.blobSha256, contentKind: current.contentKind } : null,
+            },
+          };
+        }
         if (authenticatedMoment && original) {
           (payload as Record<string, unknown>).authors = sharedMomentAuthors(row.admittedAuthorSnapshot);
           const mark = original.attributionUnavailable;

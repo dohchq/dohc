@@ -5874,6 +5874,7 @@ describe("advertised public Edit release", () => {
     await showLinkPane(user);
     const choices = screen.getByRole("radiogroup", {name: "Link access"});
     await user.click(await within(choices).findByRole("radio", {name: "Edit"}));
+    expect(screen.getByText("People who can edit can see this file's full History.")).toBeTruthy();
     await user.click(screen.getByRole("button", {name: "Create link"}));
     expect(bridgeMock.createRelayShareLink).toHaveBeenCalledWith({workspaceId: "ws-1", paths: ["docs/plan.md"], access: "edit"});
   });

@@ -65,6 +65,236 @@ function withoutReceivedIdentity(value: unknown): unknown {
   return Object.fromEntries(Object.entries(value).filter(([key]) => key !== "objectId" && key !== "receivedSource").map(([key, item]) => [key, withoutReceivedIdentity(item)]));
 }
 const UNKNOWN_CAPABILITY = "z".repeat(43);
+it.each(["view", "comment"] as const)(
+  "current-only %s links never expose superseded fork snapshots",
+  async (access) => {
+    const storage = await newStorage(),
+      h = handler(storage);
+    await seed(h, access);
+    const old = await putBlob(h, "fork body"),
+      latest = await putBlob(h, "latest fork body");
+    await appendLog(
+      h,
+      OWNER,
+      WORKSPACE,
+      [
+        {
+          originSeq: 0,
+          opKind: "version.create",
+          recordedAtMs: 2000,
+          payload: {
+            versionId: "fork",
+            forkSnapshots: [
+              {
+                path: "docs/fork.md",
+                objectId: "fork-object",
+                blobSha256: old,
+              },
+            ],
+          },
+        },
+      ],
+      { originId: "fork" },
+    );
+    await appendMoments(
+      h,
+      [
+        moment(1, "docs/fork.md", "latest fork body", 3000, {
+          versionId: "fork",
+          objectId: "fork-object",
+          beforePath: "docs/fork.md",
+          beforeContent: "fork body",
+        }),
+      ],
+      { originId: "fork" },
+    );
+    const link = await createLink(h, {
+      paths: ["docs"],
+      versionId: "fork",
+      access,
+    });
+    const agent = await json(
+      await h(
+        request(null, "/sync/link-exchange", jsonBody({ secret: link.secret })),
+      ),
+    );
+    for (const capability of [link.capability, String(agent.capabilityToken)]) {
+      expect(
+        (await h(linkRequest(capability, `/sync/link/blobs/${old}`))).status,
+      ).toBe(404);
+      expect(
+        (await h(linkRequest(capability, "/sync/link/log?since=0"))).status,
+      ).toBe(404);
+      const changes = await json(
+        await h(linkRequest(capability, "/sync/link/log?current=true&since=0")),
+      );
+      expect(JSON.stringify(changes)).not.toContain(old);
+      expect(JSON.stringify(changes)).not.toContain("forkSnapshots");
+      expect(
+        (await json(await h(linkRequest(capability, "/sync/link/current"))))
+          .files,
+      ).toEqual([expect.objectContaining({ blobSha256: latest })]);
+      expect(
+        await (
+          await h(linkRequest(capability, `/sync/link/blobs/${latest}`))
+        ).text(),
+      ).toBe("latest fork body");
+    }
+  },
+);
+
+it("current-only downgrade immediately removes an Edit link's earlier History", async () => {
+  const storage = await newStorage(),
+    h = editHandler(storage),
+    link = await seed(h, "edit");
+  await putBlob(h, "later");
+  await appendMoments(h, [
+    moment(3, "docs/shared.md", "later", 2000, {
+      objectId: "object-shared",
+      beforePath: "docs/shared.md",
+      beforeContent: "# shared\n",
+    }),
+  ]);
+  expect(
+    (
+      await h(
+        linkRequest(link.capability, `/sync/link/blobs/${link.sharedSha}`),
+      )
+    ).status,
+  ).toBe(200);
+  const history = await json(
+    await h(linkRequest(link.capability, "/sync/link/log?since=0")),
+  );
+  expect(JSON.stringify(history)).toContain(link.sharedSha);
+  const shareId = storage.getShareGrant(link.grantId)!.shareId;
+  expect(
+    storage.retuneShareGrant({
+      shareId,
+      grantId: link.grantId,
+      access: "view",
+      changedAtMs: 4000,
+      expectedDependentGrantIds: [],
+      guard() {},
+    }).ok,
+  ).toBe(true);
+  expect(
+    (
+      await h(
+        linkRequest(link.capability, `/sync/link/blobs/${link.sharedSha}`),
+      )
+    ).status,
+  ).toBe(404);
+  expect(
+    (await h(linkRequest(link.capability, "/sync/link/log?since=0"))).status,
+  ).toBe(404);
+  expect(
+    (await h(linkRequest(link.capability, "/sync/link/current"))).status,
+  ).toBe(200);
+});
+it.each(["view", "comment"] as const)(
+  "current-only %s links and their agents refuse History before and after a wake",
+  async (access) => {
+    const storage = await newStorage(),
+      activity = new DiscussionActivityHub();
+    const h = handler(storage, { discussionActivity: activity });
+    const link = await seed(h, access);
+    const agent = await json(
+      await h(
+        request(null, "/sync/link-exchange", jsonBody({ secret: link.secret })),
+      ),
+    );
+    const latest = "current body",
+      latestSha = await putBlob(h, latest);
+    await appendMoments(h, [
+      moment(3, "docs/shared.md", latest, 2000, {
+        objectId: "object-shared",
+        beforePath: "docs/shared.md",
+        beforeContent: "# shared\n",
+      }),
+    ]);
+    for (const capability of [link.capability, String(agent.capabilityToken)]) {
+      expect(
+        (await h(linkRequest(capability, `/sync/link/blobs/${link.sharedSha}`)))
+          .status,
+      ).toBe(404);
+      expect(
+        (await h(linkRequest(capability, "/sync/link/log?since=0"))).status,
+      ).toBe(404);
+      const current = await json(
+        await h(linkRequest(capability, "/sync/link/current")),
+      );
+      expect(current.files).toEqual([
+        expect.objectContaining({ blobSha256: latestSha }),
+      ]);
+      expect(
+        await (
+          await h(linkRequest(capability, `/sync/link/blobs/${latestSha}`))
+        ).text(),
+      ).toBe(latest);
+      const changes = await json(
+        await h(linkRequest(capability, "/sync/link/log?current=true&since=0")),
+      );
+      expect(JSON.stringify(changes)).not.toMatch(
+        /payloadBefore|forkSnapshots|recordedAtMs/,
+      );
+      expect(JSON.stringify(changes)).not.toContain(link.sharedSha);
+      expect(changes.ops).toContainEqual(
+        expect.objectContaining({
+          opKind: "file.current",
+          payload: expect.objectContaining({
+            file: expect.objectContaining({ blobSha256: latestSha }),
+          }),
+        }),
+      );
+      const pending = h(
+        linkRequest(
+          capability,
+          `/sync/link/log?current=true&since=${current.nextCursor}&hold=30000`,
+        ),
+      );
+      expect(activity.stats().waiters).toBe(1);
+      const next = `wake-${capability}`,
+        nextSha = await putBlob(h, next);
+      const seq = capability === link.capability ? 4 : 5;
+      await appendMoments(h, [
+        moment(seq, "docs/shared.md", next, 8000 + seq * 1000, {
+          objectId: "object-shared",
+          beforePath: "docs/shared.md",
+          beforeContent: latest,
+        }),
+      ]);
+      const woke = await json(await pending);
+      expect(JSON.stringify(woke)).not.toMatch(
+        /payloadBefore|forkSnapshots|recordedAtMs/,
+      );
+      expect(JSON.stringify(woke)).not.toContain(latestSha);
+      expect(woke.ops).toContainEqual(
+        expect.objectContaining({
+          payload: expect.objectContaining({
+            file: expect.objectContaining({ blobSha256: nextSha }),
+          }),
+        }),
+      );
+      expect(
+        (await h(linkRequest(capability, `/sync/link/blobs/${latestSha}`)))
+          .status,
+      ).toBe(404);
+      // Restore the current body before the next independent holder follows it.
+      if (capability === link.capability)
+        await appendMoments(
+          h,
+          [
+            moment(0, "docs/shared.md", latest, 12500, {
+              objectId: "object-shared",
+              beforePath: "docs/shared.md",
+              beforeContent: next,
+            }),
+          ],
+          { originId: "restore" },
+        );
+    }
+  },
+);
 it("serves one link-grant identity to browser and agent holders, separated from other grants and named users", async () => {
   const storage = await newStorage(), h = handler(storage);
   const first = await seed(h);
@@ -73,7 +303,7 @@ it("serves one link-grant identity to browser and agent holders, separated from 
   const read = async (capability: string) => {
     const meta = await json(await h(linkRequest(capability, "/sync/link/share")));
     const current = await json(await h(linkRequest(capability, "/sync/link/current")));
-    const log = await json(await h(linkRequest(capability, "/sync/link/log?since=0&limit=100")));
+    const log = await json(await h(linkRequest(capability, "/sync/link/log?current=true&since=0&limit=100")));
     const files = new Map(); foldLogOps(files, log.ops as RelayOp[]);
     expect(filesFromAccumulator(files)).toEqual(current.files);
     return { receivedSource: meta.receivedSource, files: current.files };
@@ -157,6 +387,11 @@ afterEach(closeTestStorages);
 
 function handler(storage: SyncRelayStorage, options: HandlerOverrides = {}): SyncRelayHandler {
   return testHandler(storage, { resolveUserIdByEmail: undefined, lookupUserEmail: undefined, lookupVerifiedUserEmail: undefined, ...options });
+}
+
+function editHandler(storage: SyncRelayStorage, options: HandlerOverrides = {}): SyncRelayHandler {
+  return handler(storage,{publicEditRelease:{version:1},relayExchangeKey:"link-read-preflight-relay-key-at-least-32",
+    namedBrowserSessionLimits:{maxSessions:8,retentionMs:60_000,maxPendingRequests:4,maxRequestBytes:8192,maxResponseBytes:16384,timeoutMs:1000},...options});
 }
 
 class KeyIgnoringLinkReadRateLimiter extends TokenBucketLimiter {
@@ -248,7 +483,7 @@ async function createLink(
   );
   const secret = linkSecret(link.url);
   const exchange = await json(
-    await h(request(null, "/sync/link-exchange", jsonBody({ secret }))),
+    await h(request(null, "/sync/link-exchange", {...jsonBody({ secret }), headers: {"content-type":"application/json", "x-dohc-relay-exchange-key":"link-read-preflight-relay-key-at-least-32"}})),
   );
   return {
     capability: String(exchange.capabilityToken),
@@ -318,8 +553,8 @@ async function seed(
   };
 }
 
-async function seedThenRotate(h: SyncRelayHandler) {
-  const seeded = await seed(h, "view", {}, {
+async function seedThenRotate(h: SyncRelayHandler, access: "view" | "edit" = "view") {
+  const seeded = await seed(h, access, {}, {
     replicationEpoch: EPOCH_1,
     streamIdentity: STREAM_1,
   });
@@ -443,8 +678,8 @@ describe("relay capability reads", () => {
   it("parks a link log read until selected durable state advances", async () => {
     const storage = await newStorage();
     const activity = new DiscussionActivityHub();
-    const h = handler(storage, { discussionActivity: activity });
-    const seeded = await seed(h, "comment");
+    const h = editHandler(storage, { discussionActivity: activity });
+    const seeded = await seed(h, "edit");
     const initial = await json(
       await h(
         linkRequest(
@@ -601,13 +836,8 @@ describe("relay capability reads", () => {
       access: "view",
       generation: generationBeforeNarrowing,
     });
-    expect(
-      await Promise.race([
-        narrowedRead.then(() => "settled"),
-        Promise.resolve("pending"),
-      ]),
-    ).toBe("pending");
-    expect(activity.stats()).toEqual({ shares: 1, waiters: 1 });
+    expect((await narrowedRead).status).toBe(404);
+    expect(activity.stats()).toEqual({ shares: 0, waiters: 0 });
 
     const narrowedBody = "# selected after access narrowing\n";
     await putBlob(h, narrowedBody);
@@ -617,17 +847,11 @@ describe("relay capability reads", () => {
         beforeContent: raceBody,
       }),
     ]);
-    const narrowed = await json(await narrowedRead);
-    expect(narrowed).toMatchObject({
-      ops: [
-        expect.objectContaining({
-          originSeq: 5,
-          payload: expect.objectContaining({
-            payloadAfterBlobSha256: sha256(narrowedBody),
-          }),
-        }),
-      ],
-    });
+    expect((await narrowedRead).status).toBe(404);
+    const replacement = await createLink(h, {paths: ["docs"], access: "edit"});
+    seeded.capability = replacement.capability;
+    seeded.grantId = replacement.grantId;
+    const narrowed = await json(await h(linkRequest(seeded.capability, "/sync/link/current")));
 
     const revokedRead = h(
       linkRequest(
@@ -684,7 +908,7 @@ describe("relay capability reads", () => {
 
     const serializationRace = await createLink(h, {
       paths: ["docs"],
-      access: "view",
+      access: "edit",
     });
     const beforeSerializationRace = await json(
       await h(
@@ -738,7 +962,7 @@ describe("relay capability reads", () => {
       `${String(refusedSerialization.status)}:${await refusedSerialization.text()}`,
     ).toBe(`404:${LINK_REFUSAL_BODY}`);
 
-    const fresh = await createLink(h, { paths: ["docs"], access: "view" });
+    const fresh = await createLink(h, { paths: ["docs"], access: "edit" });
     const current = await json(
       await h(linkRequest(fresh.capability, "/sync/link/log?since=0&limit=500")),
     );
@@ -772,7 +996,7 @@ describe("relay capability reads", () => {
     expect(activity.stats()).toEqual({ shares: 0, waiters: 0 });
 
     const cappedActivity = new DiscussionActivityHub({ maxTotalWaiters: 1 });
-    const cappedHandler = handler(storage, { discussionActivity: cappedActivity });
+    const cappedHandler = editHandler(storage, { discussionActivity: cappedActivity });
     const capAbort = new AbortController();
     const filled = cappedHandler(
       request(
@@ -948,8 +1172,8 @@ describe("relay capability reads", () => {
 
   it("materializes the viewer CAS fold per version and uses the selected path index", async () => {
     const storage = await newStorage();
-    const h = handler(storage);
-    const seeded = await seed(h);
+    const h = editHandler(storage);
+    const seeded = await seed(h, "edit");
     const acceptedContent = "accepted\n";
     const staleContent = "stale\n";
     const neighborContent = "neighbor\n";
@@ -1119,8 +1343,8 @@ describe("relay capability reads", () => {
 
   it("refuses contradictory path aliases from current state and startup replay", async () => {
     const storage = await newStorage();
-    const h = handler(storage);
-    const seeded = await seed(h);
+    const h = editHandler(storage);
+    const seeded = await seed(h, "edit");
     const initialLog = await json(
       await h(linkRequest(seeded.capability, "/sync/link/log?since=0&limit=100")),
     );
@@ -1143,7 +1367,7 @@ describe("relay capability reads", () => {
     for (const malformed of [mismatchedWrite, mismatchedDelete]) {
       expect(
         filterOpForShare(
-          { paths: ["docs"], versionId: null, access: "view" },
+          { paths: ["docs"], versionId: null, access: "edit" },
           malformed.opKind,
           JSON.stringify(malformed.payload),
         ).allowed,
@@ -1209,8 +1433,8 @@ describe("relay capability reads", () => {
     "refuses a contradictory visible %s alias from every accountless view",
     async (alias) => {
       const storage = await newStorage();
-      const h = handler(storage);
-      const seeded = await seed(h);
+      const h = editHandler(storage);
+      const seeded = await seed(h, "edit");
       const initialLog = await json(
         await h(linkRequest(seeded.capability, "/sync/link/log?since=0&limit=100")),
       );
@@ -1287,8 +1511,8 @@ describe("relay capability reads", () => {
 
   it("refuses an all-visible cross-path write from every accountless view", async () => {
     const storage = await newStorage();
-    const h = handler(storage);
-    const seeded = await seed(h);
+    const h = editHandler(storage);
+    const seeded = await seed(h, "edit");
     const initialLog = await json(
       await h(linkRequest(seeded.capability, "/sync/link/log?since=0&limit=100")),
     );
@@ -1371,7 +1595,7 @@ describe("relay capability reads", () => {
     "does not expose a historical blob from a moment with %s",
     async (_case, shape) => {
       const storage = await newStorage();
-      const h = handler(storage);
+      const h = editHandler(storage);
       const wholeVersion = shape === "missing-after-path";
       const versionId = wholeVersion ? "snapshot-malformed" : "main";
       const seeded = await seed(
@@ -1382,7 +1606,7 @@ describe("relay capability reads", () => {
           : {},
       );
       const opened = await json(
-        await h(linkRequest(seeded.capability, "/sync/link/log?since=0&limit=100")),
+        await h(linkRequest(seeded.capability, "/sync/link/log?current=true&since=0&limit=100")),
       );
       const forgedContent = `${shape}\n`;
       const forgedSha = await putBlob(h, forgedContent);
@@ -1424,7 +1648,7 @@ describe("relay capability reads", () => {
           await h(
             linkRequest(
               seeded.capability,
-              `/sync/link/log?since=${since}&limit=100`,
+              `/sync/link/log?current=true&since=${since}&limit=100`,
             ),
           ),
         ),
@@ -1522,7 +1746,7 @@ describe("relay capability reads", () => {
     "does not materialize a canonical current file from a noncanonical %s",
     async (_field, shape) => {
       const storage = await newStorage();
-      const h = handler(storage);
+      const h = editHandler(storage);
       expect(
         (await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })))).status,
       ).toBe(200);
@@ -1572,7 +1796,7 @@ describe("relay capability reads", () => {
       const assertNoInventedFile = async (readHandler: SyncRelayHandler) => {
         const fullReplay = await json(
           await readHandler(
-            linkRequest(link.capability, "/sync/link/log?since=0&limit=100"),
+            linkRequest(link.capability, "/sync/link/log?current=true&since=0&limit=100"),
           ),
         );
         const replayed: FileAccumulator = new Map();
@@ -1607,7 +1831,7 @@ describe("relay capability reads", () => {
     "refuses noncanonical viewer paths in a %s",
     async (_case, shape, paths, versionId) => {
       const storage = await newStorage();
-      const h = handler(storage);
+      const h = editHandler(storage);
       expect(
         (await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })))).status,
       ).toBe(200);
@@ -1628,7 +1852,7 @@ describe("relay capability reads", () => {
       if (!liveFiles) throw new Error("initial current state was malformed");
       expect(filesFromAccumulator(liveFiles)).toEqual([]);
       const openedLog = await json(
-        await h(linkRequest(link.capability, "/sync/link/log?since=0&limit=100")),
+        await h(linkRequest(link.capability, "/sync/link/log?current=true&since=0&limit=100")),
       );
 
       const payload = shape === "moment"
@@ -1669,7 +1893,7 @@ describe("relay capability reads", () => {
         );
         const fullReplay = await json(
           await readHandler(
-            linkRequest(link.capability, "/sync/link/log?since=0&limit=100"),
+            linkRequest(link.capability, "/sync/link/log?current=true&since=0&limit=100"),
           ),
         );
         const replayed: FileAccumulator = new Map();
@@ -1690,7 +1914,7 @@ describe("relay capability reads", () => {
         await h(
           linkRequest(
             link.capability,
-            `/sync/link/log?since=${String(openedLog.nextCursor)}&limit=100`,
+            `/sync/link/log?current=true&since=${String(openedLog.nextCursor)}&limit=100`,
           ),
         ),
       );
@@ -1861,8 +2085,8 @@ describe("relay capability reads", () => {
   it("does not update durable link usage on metadata, log, or blob reads", async () => {
     const storage = await newStorage();
     let now = 2_000;
-    const h = handler(storage, { nowMs: () => now });
-    const seeded = await seed(h);
+    const h = editHandler(storage, { nowMs: () => now });
+    const seeded = await seed(h, "edit");
     expect(await ownerLinkUsage(h, seeded.grantId)).toEqual({
       lastUsedAtMs: 2_000,
       urlIssuedAtMs: 2_000,
@@ -2187,8 +2411,8 @@ describe("relay capability reads", () => {
     async (interruption) => {
       const chunkBytes = 64 * 1024;
       const storage = await newStorage();
-      const setupHandler = handler(storage);
-      const seeded = await seed(setupHandler);
+      const setupHandler = editHandler(storage);
+      const seeded = await seed(setupHandler, "edit");
       const content = "streamed JSON 界\n";
       await putBlob(setupHandler, content);
       await appendMoments(
@@ -2207,7 +2431,7 @@ describe("relay capability reads", () => {
         ? "/sync/link/log?since=0&limit=500"
         : "/sync/link/current";
 
-      const measuringHandler = handler(storage, {
+      const measuringHandler = editHandler(storage, {
         linkGrantEgressRateLimiter: new LinkEgressRateLimiter(
           LINK_GRANT_EGRESS_BUCKET_CAPACITY_BYTES,
           0.000_001,
@@ -2240,7 +2464,7 @@ describe("relay capability reads", () => {
           };
         },
       );
-      const h = handler(storage, { linkGrantEgressRateLimiter: egress });
+      const h = editHandler(storage, { linkGrantEgressRateLimiter: egress });
       const response = await h(linkRequest(seeded.capability, route));
       expect(response.status).toBe(200);
       expect(reserve).toHaveBeenNthCalledWith(
@@ -2781,7 +3005,7 @@ describe("relay capability reads", () => {
     ["blob", `/sync/link/blobs/${sha256("missing")}`],
   ])("answers an invalid capability on the %s route with the generic 404 refusal", async (_name, path) => {
     const storage = await newStorage();
-    const response = await handler(storage)(linkRequest(UNKNOWN_CAPABILITY, path));
+    const response = await editHandler(storage)(linkRequest(UNKNOWN_CAPABILITY, path));
 
     expect({ status: response.status, body: await response.text() }).toEqual({
       status: 404,
@@ -2805,8 +3029,8 @@ describe("relay capability reads", () => {
 
   it("matches the view recipient file and blob boundary without its identity metadata", async () => {
     const storage = await newStorage();
-    const h = handler(storage);
-    const { capability, sharedSha, hiddenSha } = await seed(h, "view");
+    const h = editHandler(storage);
+    const { capability, sharedSha, hiddenSha } = await seed(h, "edit");
 
     const recipientMeta = await json(await h(request(RECIPIENT, "/sync/shares/share-0")));
     const linkMetaResponse = await h(linkRequest(capability, "/sync/link/share"));
@@ -2817,9 +3041,9 @@ describe("relay capability reads", () => {
       subjectName: null,
       effectiveSelector: {
         ...(recipientMeta.selector as Record<string, unknown>),
-        access: "view",
+        access: "edit",
       },
-      access: "view",
+      access: "edit",
       lastSettledAtMs: 1_100,
       lastSettledKnown: true,
     });
@@ -2876,7 +3100,7 @@ describe("relay capability reads", () => {
 
   it("applies an accountless overwrite through the viewer fold", async () => {
     const storage = await newStorage();
-    const h = handler(storage);
+    const h = editHandler(storage);
     const realPath = "docs/readme.md";
     const projectedPath = "readme.md";
     const firstContent = "# First\n";
@@ -2895,7 +3119,7 @@ describe("relay capability reads", () => {
         beforeContent: firstContent,
       }),
     ]);
-    const link = await createLink(h, { paths: [realPath], access: "view" });
+    const link = await createLink(h, { paths: [realPath], access: "edit" });
 
     const linkLog = await json(
       await h(linkRequest(link.capability, "/sync/link/log?since=0&limit=100")),
@@ -2933,7 +3157,7 @@ describe("relay capability reads", () => {
 
   it("projects a nested file into the accountless namespace without changing authenticated paths", async () => {
     const storage = await newStorage();
-    const h = handler(storage);
+    const h = editHandler(storage);
     const realPath = "clients/acme/private/report.md";
     const projectedPath = "report.md";
     const before = "# Before\n";
@@ -2950,7 +3174,7 @@ describe("relay capability reads", () => {
       beforeContent: before,
     });
     await appendMoments(h, [storedMoment]);
-    const link = await createLink(h, { paths: [realPath], access: "view" });
+    const link = await createLink(h, { paths: [realPath], access: "edit" });
 
     const linkMeta = await json(
       await h(linkRequest(link.capability, "/sync/link/share")),
@@ -2958,12 +3182,12 @@ describe("relay capability reads", () => {
     expect(linkMeta.effectiveSelector).toEqual({
       paths: [projectedPath],
       versionId: null,
-      access: "view",
+      access: "edit",
     });
     expect(link.exchange.effectiveSelector).toEqual({
       paths: [projectedPath],
       versionId: null,
-      access: "view",
+      access: "edit",
     });
     const linkLog = await json(
       await h(linkRequest(link.capability, "/sync/link/log?since=0&limit=100")),
@@ -2999,20 +3223,20 @@ describe("relay capability reads", () => {
     const refreshed = await json(
       await h(request(null, "/sync/link-refresh", {
         method: "POST",
-        headers: { authorization: `LinkCapability ${link.capability}` },
+        headers: { authorization: `LinkCapability ${link.capability}`, "x-dohc-relay-exchange-key":"link-read-preflight-relay-key-at-least-32" },
       })),
     );
     expect(refreshed.effectiveSelector).toEqual({
       paths: [projectedPath],
       versionId: null,
-      access: "view",
+      access: "edit",
     });
   });
 
   it("projects a refused outward move as an accountless deletion", async () => {
     const storage = await newStorage();
-    const h = handler(storage);
-    const seeded = await seed(h);
+    const h = editHandler(storage);
+    const seeded = await seed(h, "edit");
     const initialLog = await json(
       await h(
         linkRequest(
@@ -3061,7 +3285,7 @@ describe("relay capability reads", () => {
 
     expect({
       rawFilterAllowed: filterOpForShare(
-        { paths: ["docs"], versionId: null, access: "view" },
+        { paths: ["docs"], versionId: null, access: "edit" },
         outwardMove.opKind,
         JSON.stringify(outwardMove.payload),
       ).allowed,
@@ -3170,8 +3394,8 @@ describe("relay capability reads", () => {
 
   it("projects an inward move as an accountless arrival so current and replay converge", async () => {
     const storage = await newStorage();
-    const h = handler(storage);
-    const seeded = await seed(h);
+    const h = editHandler(storage);
+    const seeded = await seed(h, "edit");
     const initialLog = await json(
       await h(
         linkRequest(
@@ -3196,7 +3420,7 @@ describe("relay capability reads", () => {
 
     expect(
       filterOpForShare(
-        { paths: ["docs"], versionId: null, access: "view" },
+        { paths: ["docs"], versionId: null, access: "edit" },
         inwardMove.opKind,
         JSON.stringify(inwardMove.payload),
       ).allowed,
@@ -3285,7 +3509,7 @@ describe("relay capability reads", () => {
 
   it("keeps a nested folder's visible name as its accountless root", async () => {
     const storage = await newStorage();
-    const h = handler(storage);
+    const h = editHandler(storage);
     const realRoot = "clients/acme/private/docs";
     const realPath = `${realRoot}/guides/start.md`;
 
@@ -3296,7 +3520,7 @@ describe("relay capability reads", () => {
     await appendMoments(h, [
       moment(0, realPath, "# Start\n", 1_100, { objectId: "object-start" }),
     ]);
-    const link = await createLink(h, { paths: [realRoot], access: "view" });
+    const link = await createLink(h, { paths: [realRoot], access: "edit" });
 
     const linkMeta = await json(
       await h(linkRequest(link.capability, "/sync/link/share")),
@@ -3316,7 +3540,7 @@ describe("relay capability reads", () => {
 
   it("disambiguates accountless roots with the same visible name", async () => {
     const storage = await newStorage();
-    const h = handler(storage);
+    const h = editHandler(storage);
     const firstRoot = "clients/acme/private/docs";
     const secondRoot = "teams/blue/private/docs";
     const firstPath = `${firstRoot}/first.md`;
@@ -3333,7 +3557,7 @@ describe("relay capability reads", () => {
     ]);
     const link = await createLink(h, {
       paths: [firstRoot, secondRoot],
-      access: "view",
+      access: "edit",
     });
 
     const linkMeta = await json(
@@ -3356,8 +3580,8 @@ describe("relay capability reads", () => {
 
   it("keeps accountless log pages to viewer artifact rows without changing authenticated logs", async () => {
     const storage = await newStorage();
-    const h = handler(storage);
-    const seeded = await seed(h, "view");
+    const h = editHandler(storage);
+    const seeded = await seed(h, "edit");
     expect(
       (
         await h(
@@ -3482,8 +3706,8 @@ describe("relay capability reads", () => {
 
   it("fills one accountless page across unrelated raw pages", async () => {
     const storage = await newStorage();
-    const h = handler(storage);
-    const seeded = await seed(h);
+    const h = editHandler(storage);
+    const seeded = await seed(h, "edit");
     const unrelatedRows = Array.from({ length: 1_500 }, (_, index) =>
       moment(
         index + 3,
@@ -3538,8 +3762,8 @@ describe("relay capability reads", () => {
 
   it("continues an accountless page after the raw-row work bound", async () => {
     const storage = await newStorage();
-    const h = handler(storage);
-    const seeded = await seed(h);
+    const h = editHandler(storage);
+    const seeded = await seed(h, "edit");
     const firstAdmitted = moment(3, "docs/before-bound.md", "# shared\n", 1_300);
     const unrelatedRows = Array.from(
       { length: MAX_RAW_ROWS_PER_LINK_PAGE - 1 },
@@ -3601,8 +3825,8 @@ describe("relay capability reads", () => {
 
   it("keeps link log pages and freshness above the workspace epoch floor", async () => {
     const storage = await newStorage();
-    const h = handler(storage);
-    const seeded = await seed(h, "view", {}, {
+    const h = editHandler(storage);
+    const seeded = await seed(h, "edit", {}, {
       replicationEpoch: EPOCH_1,
       streamIdentity: STREAM_1,
     });
@@ -3649,7 +3873,7 @@ describe("relay capability reads", () => {
 
   it("serves only blobs established above the workspace epoch floor", async () => {
     const storage = await newStorage();
-    const h = handler(storage);
+    const h = editHandler(storage);
     const seeded = await seedThenRotate(h);
 
     expect(
@@ -3673,7 +3897,7 @@ describe("relay capability reads", () => {
 
   it("recreates a pre-reset path from empty current state after epoch rotation", async () => {
     const storage = await newStorage();
-    const h = handler(storage);
+    const h = editHandler(storage);
     const seeded = await seedThenRotate(h);
     const recreatedContent = "# recreated after reset\n";
     const recreatedSha = await putBlob(h, recreatedContent);
@@ -3754,8 +3978,8 @@ describe("relay capability reads", () => {
 
   it("serves an earlier revision of a file still in the share", async () => {
     const storage = await newStorage();
-    const h = handler(storage);
-    const seeded = await seed(h);
+    const h = editHandler(storage);
+    const seeded = await seed(h, "edit");
     const replacement = "# replacement\n";
     const untouched = "# untouched\n";
     const replacementSha = await putBlob(h, replacement);
@@ -3789,8 +4013,8 @@ describe("relay capability reads", () => {
 
   it("propagates a retirement delete through the link log and withdraws its history", async () => {
     const storage = await newStorage();
-    const h = handler(storage);
-    const seeded = await seed(h);
+    const h = editHandler(storage);
+    const seeded = await seed(h, "edit");
     const replacement = "# replacement\n";
     const replacementSha = await putBlob(h, replacement);
     await appendMoments(h, [moment(3, "docs/shared.md", replacement, 1_300, {
@@ -3825,8 +4049,8 @@ describe("relay capability reads", () => {
 
   it("withdraws every revision of a file when it is deleted", async () => {
     const storage = await newStorage();
-    const h = handler(storage);
-    const seeded = await seed(h);
+    const h = editHandler(storage);
+    const seeded = await seed(h, "edit");
     const replacement = "# replacement\n";
     const replacementSha = await putBlob(h, replacement);
     await appendMoments(h, [
@@ -3857,8 +4081,8 @@ describe("relay capability reads", () => {
 
   it("follows a rename inside the share and withdraws history on a move out", async () => {
     const storage = await newStorage();
-    const h = handler(storage);
-    const seeded = await seed(h);
+    const h = editHandler(storage);
+    const seeded = await seed(h, "edit");
     const replacement = "# replacement\n";
     const replacementSha = await putBlob(h, replacement);
     await appendMoments(h, [
@@ -3895,8 +4119,8 @@ describe("relay capability reads", () => {
 
   it("withdraws history when a file passes through a path the share never admits", async () => {
     const storage = await newStorage();
-    const h = handler(storage);
-    const seeded = await seed(h);
+    const h = editHandler(storage);
+    const seeded = await seed(h, "edit");
     const replacement = "# replacement\n";
     const latest = "# latest\n";
     await putBlob(h, replacement);
@@ -3938,8 +4162,8 @@ describe("relay capability reads", () => {
 
   it("withdraws history on a move out and does not restore it on a move back in", async () => {
     const storage = await newStorage();
-    const h = handler(storage);
-    const seeded = await seed(h);
+    const h = editHandler(storage);
+    const seeded = await seed(h, "edit");
     const replacement = "# replacement\n";
     const replacementSha = await putBlob(h, replacement);
     await appendMoments(h, [
@@ -3974,8 +4198,8 @@ describe("relay capability reads", () => {
 
   it("finds a revision past more deleted copies than the candidate cap", async () => {
     const storage = await newStorage();
-    const h = handler(storage);
-    const seeded = await seed(h);
+    const h = editHandler(storage);
+    const seeded = await seed(h, "edit");
     const replacement = "# replacement\n";
     await putBlob(h, replacement);
     const copies = Array.from({ length: SHARED_BLOB_CANDIDATE_LIMIT }, (_, index) => [
@@ -4067,7 +4291,7 @@ describe("relay capability reads", () => {
     ).toBe(`404:${LINK_REFUSAL_BODY}`);
   });
 
-  it("serves a pinned version's fork snapshot after the file is edited on that version", async () => {
+  it("serves only the current file on a pinned view link", async () => {
     const storage = await newStorage();
     const h = handler(storage);
     const seeded = await seed(h, "view", { paths: ["docs"], versionId: "snapshot-1" });
@@ -4109,7 +4333,8 @@ describe("relay capability reads", () => {
       }),
     ]);
 
-    for (const [sha, content] of [[snapshotSha, snapshot], [editedSha, edited]] as const) {
+    expect((await h(linkRequest(seeded.capability, `/sync/link/blobs/${snapshotSha}`))).status).toBe(404);
+    for (const [sha, content] of [[editedSha, edited]] as const) {
       const response = await h(linkRequest(seeded.capability, `/sync/link/blobs/${sha}`));
       expect(response.status).toBe(200);
       expect(await response.text()).toBe(content);
@@ -4136,8 +4361,8 @@ describe("relay capability reads", () => {
 
   it("serves no revision recorded at or below the workspace epoch floor", async () => {
     const storage = await newStorage();
-    const h = handler(storage);
-    const seeded = await seedThenRotate(h);
+    const h = editHandler(storage);
+    const seeded = await seedThenRotate(h, "edit");
     const content = "# after rotation\n";
     const sha = await putBlob(h, content);
     await appendMoments(
@@ -4155,8 +4380,8 @@ describe("relay capability reads", () => {
 
   it("refuses an earlier revision once the link is revoked", async () => {
     const storage = await newStorage();
-    const h = handler(storage);
-    const seeded = await seed(h);
+    const h = editHandler(storage);
+    const seeded = await seed(h, "edit");
     const replacementSha = await putBlob(h, "# replacement\n");
     await appendMoments(h, [
       moment(3, "docs/shared.md", "# replacement\n", 1_300, {
@@ -4427,8 +4652,8 @@ describe("relay capability reads", () => {
 
   it("scopes path-share blob candidates before the cap without admitting prefix neighbors", async () => {
     const storage = await newStorage();
-    const h = handler(storage);
-    const seeded = await seed(h);
+    const h = editHandler(storage);
+    const seeded = await seed(h, "edit");
     const docs2OnlyContent = "# docs2 only\n";
     const docs2OnlySha = await putBlob(h, docs2OnlyContent);
     const privateCopies = Array.from(
@@ -4477,8 +4702,8 @@ describe("relay capability reads", () => {
 
   it("caps current-state blob candidates after stale objects are removed", async () => {
     const storage = await newStorage();
-    const h = handler(storage);
-    const seeded = await seed(h);
+    const h = editHandler(storage);
+    const seeded = await seed(h, "edit");
     const editedContent = "# edited\n";
     await putBlob(h, editedContent);
 
@@ -4711,8 +4936,8 @@ describe("relay capability reads", () => {
         fetchLogPage: racedMethod === "fetchLogPage" ? revokeAfter("fetchLogPage") : undefined,
         getBlob: racedMethod === "getBlob" ? revokeAfter("getBlob") : undefined,
       });
-      const h = handler(raced);
-      const seeded = await seed(h);
+      const h = editHandler(raced);
+      const seeded = await seed(h, "edit");
       grantId = seeded.grantId;
       armed = true;
       const path =
@@ -5038,13 +5263,13 @@ describe("relay capability reads", () => {
 
   it("uses a separate read bucket for link log pages", async () => {
     const storage = await newStorage();
-    const h = handler(storage, {
+    const h = editHandler(storage, {
       linkReadRateLimiter: new TokenBucketLimiter(1, 0.000_001, 10),
       linkGrantReadRateLimiter: new TokenBucketLimiter(1, 0.000_001, 10),
       linkLogReadRateLimiter: new TokenBucketLimiter(1, 0.000_001, 10),
       linkGrantLogReadRateLimiter: new TokenBucketLimiter(1, 0.000_001, 10),
     });
-    const seeded = await seed(h);
+    const seeded = await seed(h, "edit");
 
     expect((await h(linkRequest(seeded.capability, "/sync/link/share"))).status).toBe(200);
     const limitedBlob = await h(
@@ -5126,8 +5351,8 @@ describe("relay capability reads", () => {
     const storage = await newStorage();
     const budget = new LinkEgressRateLimiter(10_000, 1, 10);
     const reserve = vi.spyOn(budget, "reserve");
-    const h = handler(storage, { linkGrantEgressRateLimiter: budget });
-    const seeded = await seed(h);
+    const h = editHandler(storage, { linkGrantEgressRateLimiter: budget });
+    const seeded = await seed(h, "edit");
 
     const metadata = await h(linkRequest(seeded.capability, "/sync/link/share"));
     expect(metadata.status).toBe(200);
@@ -5162,7 +5387,7 @@ describe("relay capability reads", () => {
       vi.spyOn(egressLimiter, "reserve"),
     ];
     const storage = await newStorage();
-    const h = handler(storage, {
+    const h = editHandler(storage, {
       linkExchangeGlobalRateLimiter: exchangeLimiter,
       linkReadRateLimiter: readLimiter,
       linkGrantReadRateLimiter: grantReadLimiter,
@@ -5170,7 +5395,7 @@ describe("relay capability reads", () => {
       linkGrantLogReadRateLimiter: grantLogLimiter,
       linkGrantEgressRateLimiter: egressLimiter,
     });
-    const seeded = await seed(h);
+    const seeded = await seed(h, "edit");
     const blobPath = `/sync/link/blobs/${seeded.sharedSha}`;
 
     const publicBlob = await h(linkRequest(seeded.capability, blobPath));
@@ -5181,7 +5406,7 @@ describe("relay capability reads", () => {
     expect(
       (
         await h(
-          request(null, "/sync/link-exchange", jsonBody({ secret: seeded.secret })),
+          request(null, "/sync/link-exchange", {...jsonBody({ secret: seeded.secret }),headers:{"content-type":"application/json","x-dohc-relay-exchange-key":"link-read-preflight-relay-key-at-least-32"}}),
         )
       ).status,
      ).toBe(429);
@@ -5214,11 +5439,11 @@ describe("relay capability reads", () => {
 });
 
 it("exposes only the subject label to a valid link capability and stays opaque to probes", async () => {
-  const storage = await newStorage(), h = handler(storage), link = await seed(h);
+  const storage = await newStorage(), h = editHandler(storage), link = await seed(h, "edit");
   const shareId = storage.getShareGrant(link.grantId)!.shareId;
   storage.setShareLabels(shareId, {subjectName: "Trip plans"}, 1);
   const result = await json(await h(linkRequest(link.capability, "/sync/link/share")));
-  expect(result).toMatchObject({subjectName: "Trip plans", access: "view"});
+  expect(result).toMatchObject({subjectName: "Trip plans", access: "edit"});
   expect(result).not.toHaveProperty("sharerName");
   const probe = await h(linkRequest(UNKNOWN_CAPABILITY, "/sync/link/share"));
   expect(probe.status).toBe(404); expect(await probe.text()).toBe(LINK_REFUSAL_BODY);

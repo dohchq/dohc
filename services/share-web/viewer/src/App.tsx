@@ -299,6 +299,7 @@ export async function loadLog(
   signal?: AbortSignal,
   expectedEpochLogFloor?: number,
   holdMs?: number,
+  currentOnly = false,
 ): Promise<LoadedLog> {
   let cursor = initialCursor;
   let pageNumber = 0;
@@ -307,7 +308,7 @@ export async function loadLog(
     pageNumber += 1;
     const response = await apiWithThrottleRetry(
       session,
-      `/api/view/log?since=${cursor}&limit=500${
+      `/api/view/log?since=${cursor}&limit=500${currentOnly ? "&current=true" : ""}${
         pageNumber === 1 && holdMs !== undefined ? `&hold=${String(holdMs)}` : ""
       }`,
       signal,
@@ -321,7 +322,7 @@ export async function loadLog(
     };
     if (
       !Array.isArray(page.ops) ||
-      page.ops.some((op) => !relayOp(op)) ||
+      page.ops.some((op) => !relayOp(op, currentOnly)) ||
       typeof page.nextCursor !== "number" ||
       typeof page.hasMore !== "boolean" ||
       typeof page.epochLogFloor !== "number" ||
@@ -355,6 +356,7 @@ export async function loadLog(
     } else if (page.epochLogFloor !== foldEpochLogFloor) {
       throw new EpochFloorChangedError();
     }
+    if ((page.ops as RelayOp[]).some(op => op.opKind === "files.reset")) throw new EpochFloorChangedError();
     foldLogOps(fileAccumulator, page.ops as RelayOp[]);
     if (page.hasMore !== true) {
       return {
@@ -368,9 +370,18 @@ export async function loadLog(
   throw new Error("refused");
 }
 
-function relayOp(value: unknown): value is RelayOp {
+function relayOp(value: unknown, currentOnly = false): value is RelayOp {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
+  if (currentOnly) {
+    if (!Number.isSafeInteger(record.relaySeq) || Number(record.relaySeq) < 0) return false;
+    if (record.opKind === "files.reset") return true;
+    const payload = record.payload as {objectId?: unknown; file?: unknown} | null;
+    if (record.opKind !== "file.current" || !payload || typeof payload.objectId !== "string") return false;
+    if (payload.file === null) return true;
+    const files = accumulatorFromCurrentFiles([payload.file]);
+    return files !== null && [...files.values()][0]?.objectId === payload.objectId;
+  }
   return (
     typeof record.relaySeq === "number" &&
     Number.isSafeInteger(record.relaySeq) &&
@@ -453,6 +464,7 @@ export async function loadCurrentState(
 ): Promise<LoadedCurrentState> {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const projection = await loadCurrentProjection(session, signal);
+    if (projection.meta.access !== "edit") return projection;
     try {
       const caughtUp = await loadLog(
         session,
@@ -1223,6 +1235,7 @@ export function App() {
         const requestController = new AbortController();
         followerController = requestController;
         const requestStartedAtMs = Date.now();
+        let readingLog = true;
         try {
           const log = await loadLog(
             readySession,
@@ -1232,7 +1245,9 @@ export function App() {
             requestController.signal,
             previous.epochLogFloor,
             VIEW_LOG_HOLD_MS,
+            previous.meta.access !== "edit",
           );
+          readingLog = false;
           const meta = await loadMeta(readySession, requestController.signal);
           if (commit(previous, { ...log, meta }, expectedVersion) === null) {
             continue;
@@ -1250,6 +1265,12 @@ export function App() {
           }
         } catch (error: unknown) {
           if (!current || operationVersion !== expectedVersion) continue;
+          if (error instanceof ViewResponseError && error.status === 404 && readingLog && previous.meta.access === "edit") {
+            try {
+              const meta = await loadMeta(readySession, sessionController.signal);
+              if (meta.access !== "edit" && await refresh()) continue;
+            } catch { /* The terminal response below handles removed access. */ }
+          }
           if (error instanceof EpochFloorChangedError) {
             const reloaded = await refresh();
             if (reloaded) {

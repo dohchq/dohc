@@ -147,6 +147,13 @@ export function createLinkReadRoutes(
     const epochLogFloor = storage.getEpochLogFloor(share.workspaceId);
     if (route.route === "link-log") {
       const url = new URL(request.url);
+      const currentOnly = url.searchParams.get("current") === "true";
+      if (!currentOnly && capability.access !== "edit") throw notFound();
+      const freshRead = () => {
+        const fresh = requireFreshLinkRead(capabilityToken, capability);
+        if (!currentOnly && fresh.access !== "edit") throw notFound();
+        return fresh;
+      };
       const requestedSince = parseCursor(url.searchParams.get("since"));
       const since = Math.max(requestedSince, epochLogFloor);
       const limit = parseLimit(url.searchParams.get("limit"));
@@ -162,6 +169,7 @@ export function createLinkReadRoutes(
         undefined,
 
         ["link", capability.grantId],
+        currentOnly,
       );
       if (
         hold > 0 &&
@@ -172,7 +180,7 @@ export function createLinkReadRoutes(
         const deadlineAtMs = Date.now() + hold;
         let scanSince = since;
         for (;;) {
-          requireFreshLinkRead(capabilityToken, capability);
+          freshRead();
           const remainingHoldMs = Math.max(0, deadlineAtMs - Date.now());
           if (remainingHoldMs === 0) break;
           try {
@@ -184,10 +192,7 @@ export function createLinkReadRoutes(
                 signal: request.signal,
                 shouldPark: () => {
                   try {
-                    const fresh = requireFreshLinkRead(
-                      capabilityToken,
-                      capability,
-                    );
+                    const fresh = freshRead();
                     const currentEpochLogFloor = storage.getEpochLogFloor(
                       share.workspaceId,
                     );
@@ -203,6 +208,7 @@ export function createLinkReadRoutes(
                       undefined,
 
                       ["link", capability.grantId],
+                      currentOnly,
                     );
                     if (checked.ops.length > 0 || checked.hasMore) return false;
                     scanSince = checked.nextCursor;
@@ -220,7 +226,7 @@ export function createLinkReadRoutes(
             throw error;
           }
 
-          const fresh = requireFreshLinkRead(capabilityToken, capability);
+          const fresh = freshRead();
           const currentEpochLogFloor = storage.getEpochLogFloor(
             share.workspaceId,
           );
@@ -235,6 +241,7 @@ export function createLinkReadRoutes(
             undefined,
 
             ["link", capability.grantId],
+            currentOnly,
           );
           scanSince = page.nextCursor;
           if (
@@ -244,7 +251,7 @@ export function createLinkReadRoutes(
             Date.now() >= deadlineAtMs ||
             request.signal.aborted
           ) {
-            requireFreshLinkRead(capabilityToken, capability);
+            freshRead();
             return linkJsonResponse(capability.shareId, capability.grantId, {
               ok: true,
               ...page,
@@ -252,7 +259,7 @@ export function createLinkReadRoutes(
             });
           }
         }
-        const fresh = requireFreshLinkRead(capabilityToken, capability);
+        const fresh = freshRead();
         const currentEpochLogFloor = storage.getEpochLogFloor(
           share.workspaceId,
         );
@@ -267,15 +274,16 @@ export function createLinkReadRoutes(
           undefined,
 
           ["link", capability.grantId],
+          currentOnly,
         );
-        requireFreshLinkRead(capabilityToken, capability);
+        freshRead();
         return linkJsonResponse(capability.shareId, capability.grantId, {
           ok: true,
           ...page,
           epochLogFloor: currentEpochLogFloor,
         });
       }
-      requireFreshLinkRead(capabilityToken, capability);
+      freshRead();
       return linkJsonResponse(capability.shareId, capability.grantId, {
         ok: true,
         ...page,
@@ -285,18 +293,19 @@ export function createLinkReadRoutes(
 
     assertSha256(route.sha256);
     // A current file first, then an earlier revision of a file still in the share.
-    const byteLength = storage.currentFileBlobByteLength({
+    const currentByteLength = storage.currentFileBlobByteLength({
       workspaceId: share.workspaceId,
       versionId: targetVersionId(capability.effectiveSelector),
       selectorPaths: capability.effectiveSelector.paths,
       sha256: route.sha256,
       epochLogFloor,
-    }) ?? linkRevisionByteLength(
+    });
+    const byteLength = currentByteLength ?? (capability.access === "edit" ? linkRevisionByteLength(
       share.workspaceId,
       capability.effectiveSelector,
       route.sha256,
       epochLogFloor,
-    );
+    ) : null);
     if (
       byteLength === null ||
       !Number.isSafeInteger(byteLength) ||
@@ -324,7 +333,8 @@ export function createLinkReadRoutes(
     try {
       const blob = storage.getBlob(share.workspaceId, route.sha256);
       if (!blob || blob.byteLength !== byteLength) throw notFound();
-      requireFreshLinkRead(capabilityToken, capability);
+      const fresh = requireFreshLinkRead(capabilityToken, capability);
+      if (currentByteLength === null && fresh.access !== "edit") throw notFound();
       const response = respondWithLinkBytes(
         blob,
         capability.shareId,
