@@ -581,8 +581,8 @@ pub(super) fn workspace_unavailable() -> WireError {
 mod tests {
     #[test]
     fn changed_edge_source_has_a_restartable_wire_reason() {
-        let error = map_runtime(RuntimeError::LinksEdgesSourceChanged);
-        assert_eq!(error.code, ErrorCode::Conflict);
+        let error = super::map_runtime(dohc_engine_runtime::RuntimeError::LinksEdgesSourceChanged);
+        assert_eq!(error.code, dohc_engine_protocol::ErrorCode::Conflict);
         assert_eq!(error.message, "links-edges-source-changed");
     }
 

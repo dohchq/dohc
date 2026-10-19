@@ -845,7 +845,8 @@ export function GraphView(props: {
   useEffect(() => {
     let active = true;
     const graph = state.workspaceId === props.workspaceId ? state.graph : null;
-    if (!chatMentionsEnabled || walking || completedRequest.current !== requestIdentity || !graph) { setChatRows(null); return; }
+    if (!chatMentionsEnabled || !graph) { setChatRows(null); return; }
+    if (walking || completedRequest.current !== requestIdentity) return;
     const retry = () => { if (requestIdentityRef.current === requestIdentity) load(); };
     void (async () => {
       try {

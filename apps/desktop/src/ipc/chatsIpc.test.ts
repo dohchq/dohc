@@ -253,6 +253,7 @@ describe("chat sender binding", () => {
     ...mutations.map(({ channel, payload }) => ({ channel, payload })),
     { channel: chatOperations.listFileChats.channel, payload: { path: "notes/a.md" } },
     { channel: chatOperations.listChatFileMentions.channel, payload: { path: "notes/a.md" } },
+    { channel: chatOperations.listChatFileMentions.channel, payload: { paths: ["notes/a.md", "image.svg"] } },
     { channel: chatOperations.listChatBookmarks.channel, payload: {} },
     { channel: chatOperations.saveChatBookmark.channel, payload: { target: { kind: "thread", threadId: "thread" }, mode: "live" } },
     { channel: chatOperations.archiveChatBookmark.channel, payload: { bookmarkId: "bookmark" } },

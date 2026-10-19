@@ -752,6 +752,26 @@ describe("GraphView", () => {
     expect(screen.getByTestId("graph-link-count").textContent).toBe("2 links");
   });
 
+  it("keeps the chat overlay while a refreshed file walk is pending", async () => {
+    const held = deferred<LinksEdgesResult>();
+    const linksEdges = vi.fn().mockResolvedValue(page("a.md"));
+    const listChatFileMentions = vi.fn(async () => ({ mentions: [{
+      attachment: {objectId:"a.md",pathHint:"a.md"}, thread: {id:"thread",title:"Discussion"},
+    } as ChatFileMentionRecord] }));
+    vi.stubGlobal("dohcDesktop",{linksEdges,listChatFileMentions});
+    render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" onOpenPath={vi.fn()} chatMentionsAvailable />);
+    await screen.findAllByText("a.md");
+    fireEvent.click(screen.getByTestId("graph-chat-mentions-toggle"));
+    await screen.findAllByText("Discussion");
+    linksEdges.mockReturnValueOnce(held.promise);
+    fireEvent.click(screen.getByLabelText("Refresh graph"));
+    await screen.findByText("Gathering linked mentions");
+    expect(screen.getAllByText("Discussion")).toBeTruthy();
+    expect(listChatFileMentions).toHaveBeenCalledOnce();
+    await act(async()=>held.resolve(page("a.md")));
+    await waitFor(()=>expect(listChatFileMentions).toHaveBeenCalledTimes(2));
+  });
+
 });
 
 function page(path: string, nextCursor: string | null = null): LinksEdgesResult {
