@@ -1374,8 +1374,12 @@ pub(in crate::actor) fn proof(request: &str, members: usize, forward: bool) -> s
     for p in phases.iter().filter(|p| p.actor) {
         let w = p.store_work.unwrap();
         let cap = if forward { 16 } else { 1 };
+        // A write inverse replaces an existing search entry, including its FTS
+        // shadow rows. The delete-inverse proof above keeps its smaller bounds.
         assert!(
-            w.reads <= 128 * cap && w.writes <= 128 * cap && w.rows <= 256 * cap,
+            w.reads <= 128 * cap
+                && w.writes <= if forward { 128 * cap } else { 512 }
+                && w.rows <= if forward { 256 * cap } else { 512 },
             "{}: reads={} writes={} rows={}",
             p.phase,
             w.reads,
