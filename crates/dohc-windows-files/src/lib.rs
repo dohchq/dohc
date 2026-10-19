@@ -32,7 +32,7 @@ pub fn move_file_no_replace(from: &std::path::Path, to: &std::path::Path) -> std
 }
 
 #[cfg(windows)]
-/// Read the stored leaf name of an exact path, rejecting reparse points.
+/// Read the stored leaf name of an exact path, rejecting name-surrogate reparse points.
 pub fn stored_leaf_name(path: &std::path::Path) -> std::io::Result<std::ffi::OsString> {
     use std::io::{Error, ErrorKind};
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
@@ -44,9 +44,14 @@ pub fn stored_leaf_name(path: &std::path::Path) -> std::io::Result<std::ffi::OsS
 
     // FindFirstFileW accepts wildcards. Never turn an exact lookup into a search.
     // The verbatim path prefix can contain '?'; normal components cannot.
+    let is_wildcard = |c| {
+        [b'*', b'?', b'<', b'>', b'"']
+            .into_iter()
+            .any(|wildcard| c == u16::from(wildcard))
+    };
     if path.file_name().is_none()
         || path.components().any(|part| {
-            matches!(part, Component::Normal(name) if name.encode_wide().any(|c| c == 0 || c == u16::from(b'*') || c == u16::from(b'?')))
+            matches!(part, Component::Normal(name) if name.encode_wide().any(|c| c == 0 || is_wildcard(c)))
         })
     {
         return Err(Error::new(ErrorKind::InvalidInput, "expected an exact file path"));
@@ -91,10 +96,13 @@ pub fn stored_leaf_name(path: &std::path::Path) -> std::io::Result<std::ffi::OsS
             ));
         }
     }
-    if data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+    // Non-link reparse points, such as cloud placeholders, still name this file.
+    if data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        && data.dwReserved0 & 0x2000_0000 != 0
+    {
         return Err(Error::new(
             ErrorKind::InvalidInput,
-            "a reparse point has no spelling proof",
+            "a name-surrogate reparse point has no spelling proof",
         ));
     }
     let end = data.cFileName.iter().position(|&c| c == 0).ok_or_else(|| {

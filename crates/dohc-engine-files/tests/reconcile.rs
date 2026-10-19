@@ -287,7 +287,14 @@ fn a_symlink_is_never_another_spelling() {
 fn the_windows_name_lookup_rejects_wildcards_and_nul() {
     let ws = Scratch::new();
     ws.write("Notes.md", b"a");
-    for name in ["*.md", "Note?.md", "Notes.md\0"] {
+    for name in [
+        "*.md",
+        "Note?.md",
+        "<.md",
+        "Notes.>",
+        "Notes\"md",
+        "Notes.md\0",
+    ] {
         assert_eq!(
             dohc_windows_files::stored_leaf_name(&ws.path().join(name))
                 .expect_err("an exact path is required")
@@ -304,7 +311,7 @@ fn the_windows_name_lookup_rejects_wildcards_and_nul() {
 
 #[cfg(windows)]
 #[test]
-fn a_reparse_parent_inside_the_workspace_has_no_spelling_proof() {
+fn a_symlink_parent_with_a_different_stored_name_has_no_spelling_proof() {
     let ws = Scratch::new();
     ws.write("real/Notes.md", b"a");
     if !ws.try_symlink_dir("alias", &ws.path().join("real")) {
@@ -315,6 +322,25 @@ fn a_reparse_parent_inside_the_workspace_has_no_spelling_proof() {
         ws.path(),
         "alias/notes.md"
     ));
+}
+
+#[cfg(windows)]
+#[test]
+fn the_windows_name_lookup_rejects_a_symlink_leaf() {
+    let ws = Scratch::new();
+    ws.write("target.md", b"a");
+    if std::os::windows::fs::symlink_file(ws.path().join("target.md"), ws.path().join("Notes.md"))
+        .is_err()
+    {
+        eprintln!("SKIP: platform refused a file symlink");
+        return;
+    }
+    assert_eq!(
+        dohc_windows_files::stored_leaf_name(&ws.path().join("notes.md"))
+            .expect_err("a symlink leaf has no spelling proof")
+            .kind(),
+        ErrorKind::InvalidInput
+    );
 }
 
 /// Even when the leaf also changes case, a changed parent is not proven.

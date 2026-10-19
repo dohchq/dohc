@@ -319,16 +319,12 @@ fn stored_spelling(root: &Path, relative: &str) -> Option<String> {
     if stored.components().count() != tracked.len() {
         return None;
     }
-    // Query each component's directory entry on Windows. A handle's final
-    // path alone need not describe the spelling of the link we looked up.
+    // Query the leaf's directory entry on Windows: a file handle's final path
+    // need not name the hard link we looked up. Folders cannot be hard-linked.
     #[cfg(windows)]
     let stored = {
-        let mut lookup = root.clone();
-        let mut stored = PathBuf::new();
-        for part in &tracked {
-            lookup.push(part);
-            stored.push(dohc_windows_files::stored_leaf_name(&lookup).ok()?);
-        }
+        let mut stored = stored.to_path_buf();
+        stored.set_file_name(dohc_windows_files::stored_leaf_name(&root.join(relative)).ok()?);
         stored
     };
     let mut lookup = root.clone();
