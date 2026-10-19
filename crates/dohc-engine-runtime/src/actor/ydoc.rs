@@ -3386,7 +3386,9 @@ pub(super) fn ydoc_unload_pending(
         return Ok(None);
     };
     let projection = match close_projection(store, key, &marker, Some(root_dir), None) {
-        Err(RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState { .. })) => {
+        Err(RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState { .. }))
+            if marker.content_kind == ContentKind::Richdoc =>
+        {
             return Ok(Some(UnloadPending::Settlement));
         }
         result => result?,
