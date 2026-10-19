@@ -113,7 +113,8 @@ export function createAccessOwner<Workspace>(dependencies: {
       dependencies.assertCurrent(workspace);
       const result = await dependencies.refresh(workspace);
       dependencies.assertCurrent(workspace);
-      return result;
+      return result.status === "unavailable" && !dependencies.account()
+        ? { status: "unavailable", reason: "signed-out" } : result;
     },
   };
 }
@@ -133,8 +134,18 @@ export function createAccessAcquisition(dependencies: {
   return {
     async request(workspaceId: string): Promise<AccessRefreshResult> {
       const statuses = await Promise.all([dependencies.roster(workspaceId), dependencies.received()]);
-      for (const status of ["requested", "pending", "paced"] as const) if (statuses.includes(status)) return { status };
+      for (const status of ["requested", "joined", "paced"] as const) if (statuses.includes(status)) return { status };
       return { status: "unavailable", reason: "unreadable" };
     },
   };
+}
+
+export async function refreshAccessObservations(
+  operation: { workspace: { workspaceId: string }; assertCurrent(): void },
+  warmCredentials: () => Promise<unknown>,
+  acquisition: ReturnType<typeof createAccessAcquisition>,
+): Promise<AccessRefreshResult> {
+  await warmCredentials().catch(() => undefined);
+  operation.assertCurrent();
+  return acquisition.request(operation.workspace.workspaceId);
 }

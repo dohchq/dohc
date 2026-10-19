@@ -97,7 +97,7 @@ interface RosterState {
   noAnswer: { next: string; partial: boolean } | null;
   // A listing the registry has not saved yet.
   unsaved: { listing: RosterListing; pulledAfter: boolean; listedAtMs: number; context: unknown } | null;
-  running: Promise<void> | null;
+  running: Promise<"requested" | "unavailable"> | null;
   again: boolean;
   retry: ReturnType<typeof setTimeout> | null;
   changeGeneration: number;
@@ -203,10 +203,10 @@ export function createShareRosters(dependencies: {
     return state.noAnswer.partial || pulledSinceListing(workspaceId, state);
   }
 
-  async function listOnce(workspaceId: string, state: RosterState): Promise<void> {
+  async function listOnce(workspaceId: string, state: RosterState): Promise<"requested" | "unavailable"> {
     const workspace = dependencies.findWorkspace(workspaceId);
     const remote = workspace?.remote ?? workspace?.pausedRemote;
-    if (!workspace || !remote || workspace.shareView) return;
+    if (!workspace || !remote || workspace.shareView) return "unavailable";
     state.lastAttemptMs = nowMs();
     const listedAtMs = wallNowMs();
     const capturedContext = context(workspaceId);
@@ -226,11 +226,11 @@ export function createShareRosters(dependencies: {
     const currentRemote = current?.remote ?? current?.pausedRemote;
     if (state.retired || context(workspaceId) !== capturedContext || !current ||
         current.rootPath !== workspace.rootPath || currentRemote?.ownerUserId !== remote.ownerUserId ||
-        currentRemote?.serverUrl !== remote.serverUrl) return;
+        currentRemote?.serverUrl !== remote.serverUrl) return "unavailable";
     if (answer.kind === "unanswered") {
       state.invalidated = true;
       state.noAnswer = { next: answer.next, partial: (state.noAnswer?.partial ?? false) || answer.partial };
-      return;
+      return "unavailable";
     }
     state.noAnswer = null;
     state.checkedAtMs = listedAtMs;
@@ -239,16 +239,15 @@ export function createShareRosters(dependencies: {
     state.unsaved = { listing: answer.listing, listedAtMs, context: capturedContext, pulledAfter: pullRunning || state.pullStarts !== pullStartsBefore };
     save(workspaceId, state);
     dependencies.onListed?.(workspaceId);
+    return "requested";
   }
 
   // Pace Access requests independently of immediate share-change and pull
   // relisting for automation reach.
   function pacedRefresh(workspaceId: string): Promise<AccessRefreshResult["status"]> {
-    const workspace = dependencies.findWorkspace(workspaceId);
-    if (!workspace || !(workspace.remote ?? workspace.pausedRemote) || workspace.shareView) return Promise.resolve("unavailable");
     const state = stateFor(workspaceId);
-    if (state.running) return state.running.then(() => "pending");
-    if (due(state)) return refresh(workspaceId).then(() => "requested");
+    if (state.running) return state.running.then(status => status === "requested" ? "joined" : status);
+    if (due(state)) return refresh(workspaceId);
     if (!state.retry) {
       state.retry = setTimeout(() => {
         state.retry = null;
@@ -259,15 +258,17 @@ export function createShareRosters(dependencies: {
     return Promise.resolve("paced");
   }
 
-  function refresh(workspaceId: string): Promise<void> {
+  function refresh(workspaceId: string): Promise<"requested" | "unavailable"> {
     const state = stateFor(workspaceId);
     if (state.running) { state.again = true; return state.running; }
     if (state.retry) { clearTimeout(state.retry); state.retry = null; }
     const running = (async () => {
+      let status: "requested" | "unavailable";
       do {
         state.again = false;
-        await listOnce(workspaceId, state);
+        status = await listOnce(workspaceId, state);
       } while (state.again && !state.retired);
+      return status;
     })().finally(() => { state.running = null; });
     state.running = running;
     return running;

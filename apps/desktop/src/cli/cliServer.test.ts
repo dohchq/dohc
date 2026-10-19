@@ -518,7 +518,7 @@ describe("CLI socket server", () => {
       account: () => null, scope: id => id, assertCurrent: vi.fn(), permissions: vi.fn(), refresh: id => acquisition.request(id) });
     context.access = accessCliQueries(owner, work => Promise.resolve(work(context.workspaceId)));
     context.readOnly = true; registryWorkspace.readOnly = true;
-    const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "accessRefresh", args: { cwd: workspaceRoot, actor: "agent", reason: "sharing-open" } };
+    const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "accessRefresh", args: { cwd: workspaceRoot, actor: "agent" } };
     try {
       expect(await rawRequest(request)).toMatchObject({ ok: true, result: { status: "requested" } });
       expect(await rawRequest(request)).toMatchObject({ ok: true, result: { status: "paced" } });
@@ -533,7 +533,10 @@ describe("CLI socket server", () => {
       expect(await rawRequest(request)).toMatchObject({ ok: true, result: { status: "requested" } });
       expect(listRoster).toHaveBeenCalledTimes(2);
       context.access = undefined;
-      expect(await rawRequest(request)).toMatchObject({ ok: true, result: { status: "unavailable", reason: "unreadable" } });
+      for (const accessRequest of [request,
+        { ...request, verb: "accessObject", args: { ...request.args, ref: { kind: "file", objectId: "file" } } },
+        { ...request, verb: "accessSharing", args: { ...request.args, lane: "received" } },
+      ]) expect(await rawRequest(accessRequest)).toMatchObject({ ok: false, error: "dohc: Access observations are unavailable." });
     } finally { rosters.close(workspace.workspaceId); }
   });
 

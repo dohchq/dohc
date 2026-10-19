@@ -450,13 +450,13 @@ it.each(["accessObject", "accessSharing"] as const)("preserves withheld answers 
 });
 
 it("maps Access refresh and accepts only actionable request outcomes", () => {
-  const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "accessRefresh", args: { ...argsBase, reason: "sharing-open" } };
+  const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "accessRefresh", args: argsBase };
   expect(cliRequestSchema.safeParse(request).success).toBe(true);
   expect(CLI_CAPABILITIES.accessRefresh).toEqual(["access.refresh"]);
-  for (const extra of [{ workspaceId: "other" }, { accountId: "other" }, { reason: "loop" }]) {
+  for (const extra of [{ workspaceId: "other" }, { accountId: "other" }, { reason: "sharing-open" }]) {
     expect(cliRequestSchema.safeParse({ ...request, args: { ...request.args, ...extra } }).success).toBe(false);
   }
-  for (const status of ["requested", "pending", "paced"] as const) {
+  for (const status of ["requested", "joined", "paced"] as const) {
     expect(parseCliResult("accessRefresh", { status, bearerUrl: "secret" })).toEqual({ status });
     expect(JSON.parse(renderCliResult("accessRefresh", { status }))).toEqual({ status });
   }

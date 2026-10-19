@@ -2310,7 +2310,7 @@ async function dispatchWorkspace(
       if (context.readOnly || !context.shareCopy) throw new CliCommandError("Share copy details require the owning workspace.");
       return context.shareCopy({ shareId: request.args.shareId, grantId: request.args.grantId });
     case "accessRefresh":
-      if (!context.access) return { status: "unavailable", reason: "unreadable" };
+      if (!context.access) throw new CliCommandError("Access observations are unavailable.");
       return context.access.refresh();
     case "accessObject":
       if (!context.access) throw new CliCommandError("Access observations are unavailable.");

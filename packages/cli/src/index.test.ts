@@ -600,7 +600,7 @@ it("adds schemaVersion to incoming JSON and keeps an absent subject null", async
 it.each([false, true])("requests Sharing refresh with JSON output %s", async json => {
   const request = vi.fn(async () => ({ status: "paced" }));
   const result = await executeCli({ argv: ["access", "refresh", ...(json ? ["--json"] : [])], cwd: WORKSPACE, env: {}, request });
-  expect(request).toHaveBeenCalledExactlyOnceWith({ protocolVersion: CLI_PROTOCOL_VERSION, verb: "accessRefresh", args: { cwd: WORKSPACE, actor: "human", reason: "sharing-open" } });
+  expect(request).toHaveBeenCalledExactlyOnceWith({ protocolVersion: CLI_PROTOCOL_VERSION, verb: "accessRefresh", args: { cwd: WORKSPACE, actor: "human" } });
   expect(result.exitCode).toBe(0);
   expect(JSON.parse(result.stdout)).toEqual(json ? { schemaVersion: CLI_JSON_SCHEMA_VERSION, status: "paced" } : { status: "paced" });
 });

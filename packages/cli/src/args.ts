@@ -1067,7 +1067,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
     verbs: {
       refresh: {
         capabilityId: "access.refresh", operands: "", summary: "Request fresh Sharing observations with the same pacing as opening Sharing.",
-        notes: ["Reports requested, pending, paced, or unavailable. Read access sharing afterward to inspect observations; a request does not prove they finished."],
+        notes: ["Reports requested, joined, paced, or unavailable. Requested and joined wait for started or existing attempts to settle, without promising success. Paced follows the existing refresh schedule. Read access sharing afterward to inspect observations."],
         parse: input => { noExtraArgs(input.operands, "access refresh"); return { verb: "accessRefresh" }; },
       },
       object: {

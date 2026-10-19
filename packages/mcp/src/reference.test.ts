@@ -75,8 +75,8 @@ describe("CLI, MCP, and app channel reference", () => {
     expect(section).toContain("only the allowlisted AccessAnswer fields");
     expect(section).toContain("never return credentials, bearer URLs, invitation URLs, share codes, or link URLs");
     expect(section).toContain("Use `dohc access refresh` to request fresh Sharing inventories");
-    expect(section).toContain("A request does not prove observations finished or succeeded");
-    expect(section).toContain("`pending`, `paced`, or `unavailable`");
+    expect(section).toContain("Requested and joined wait for started or existing attempts to settle");
+    expect(section).toContain("`joined`, `paced`, or `unavailable`");
     expect(section).toContain("`freshness` is `fresh`, `stale`, or `unknown`");
     expect(section).toContain("`checkedAtMs`");
     expect(section).toContain("`coverage`");

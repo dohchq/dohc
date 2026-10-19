@@ -155,7 +155,7 @@ export function createReceivedShareAcquisition(dependencies: {
     refresh(): Promise<import("@dohc/workspace-contracts/access").AccessRefreshResult["status"]> {
       const scope = dependencies.scope();
       if (!scope) return Promise.resolve("unavailable");
-      if (pending && same(scope, pending.scope)) return pending.promise.then(() => "pending");
+      if (pending && same(scope, pending.scope)) return pending.promise.then(() => "joined");
       if (attempt && same(scope, attempt.scope) && nowMs() - attempt.atMs < 60_000) return Promise.resolve("paced");
       attempt = { scope, atMs: nowMs() };
       const checkedAtMs = wallNowMs();

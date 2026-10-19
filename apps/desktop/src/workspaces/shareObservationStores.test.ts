@@ -189,7 +189,7 @@ describe("account received observations", () => {
     expect(h.list).toHaveBeenCalledOnce();
     h.advance(500);
     answer.resolve(inventory());
-    expect(await Promise.all([first, second])).toEqual(["requested", "pending"]);
+    expect(await Promise.all([first, second])).toEqual(["requested", "joined"]);
     expect(a.observation()).toMatchObject({ checkedAtMs: 100, freshness: "fresh" });
     expect(h.onLive).toHaveBeenCalledOnce();
     expect(h.store.read(h.scope())?.listedAtMs).toBe(100);

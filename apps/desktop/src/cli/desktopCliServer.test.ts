@@ -181,7 +181,7 @@ describe("desktop CLI workspace context", () => {
     const server = f.create();
     await server.startDesktopCliServer();
     const token = "a".repeat(64);
-    const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "accessRefresh", args: { cwd: scratch, actor: "agent", reason: "sharing-open" } };
+    const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "accessRefresh", args: { cwd: scratch, actor: "agent" } };
     try {
       const answer = JSON.parse(await handleCliRequestLine(JSON.stringify(request), token, f.options()));
       expect(answer).toMatchObject({ ok: true, result: { status: "requested" } });
