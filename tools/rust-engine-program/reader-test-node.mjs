@@ -16,7 +16,7 @@
 // touches a published file: a reader that is starting compares the inode and
 // change time of the file it hashed.
 import { createHash } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { PINNED_NODE } from "../../apps/desktop/scripts/pinned-node.mjs";
@@ -24,8 +24,6 @@ import { testScratchParent } from "./scratch-leak-report.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
-// No stager takes this long, so an older temporary folder belongs to one that stopped.
-const abandonedMs = 60 * 60 * 1000;
 
 function pinnedHash() {
   const pin = process.platform === "darwin" && PINNED_NODE[`darwin-${process.arch}`];
@@ -51,11 +49,15 @@ async function published(node, hash) {
   return true;
 }
 
+// A temporary folder is named for its stager's PID. Remove it only once that
+// process is gone; a reused PID just keeps it until a later stage.
 async function removeAbandoned(folder) {
   for (const name of await readdir(folder)) {
-    if (!name.includes(".tmp-")) continue;
-    const stats = await lstat(join(folder, name)).catch(() => null);
-    if (stats?.isDirectory() && Date.now() - stats.mtimeMs > abandonedMs) await rm(join(folder, name), { recursive: true, force: true });
+    const owner = /\.tmp-(\d+)-[^-]+$/.exec(name)?.[1];
+    if (!owner) continue;
+    try { process.kill(Number(owner), 0); continue; }
+    catch (error) { if (error.code !== "ESRCH") continue; }
+    await rm(join(folder, name), { recursive: true, force: true });
   }
 }
 
@@ -67,7 +69,7 @@ export async function stageReaderTestNode({ root = repoRoot, parent, hash = pinn
   if (await published(node, hash)) return node;
   const bytes = await readNode([join(root, "apps/desktop/resources/app-compiler/node")]);
   if (sha256(bytes) !== hash) throw new Error("The reader test Node does not match its pin.");
-  const temporary = await mkdtemp(join(folder, `${hash}.tmp-`));
+  const temporary = await mkdtemp(join(folder, `${hash}.tmp-${process.pid}-`));
   try {
     await writeFile(join(temporary, "node"), bytes, { mode: 0o555, flag: "wx" });
     // A non-empty folder already in place means another stager published first.

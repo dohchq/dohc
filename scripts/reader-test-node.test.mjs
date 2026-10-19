@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { spawnSync } from "node:child_process";
 import { stageReaderTestNode } from "../tools/rust-engine-program/reader-test-node.mjs";
 import { testScratchParent } from "../tools/rust-engine-program/scratch-leak-report.mjs";
 
@@ -77,16 +78,20 @@ test("a damaged published Node is reported before any download, and never replac
   assert.deepEqual(readdirSync(dirname(dirname(node))), [hash]);
 });
 
-test("a stager removes temporary folders abandoned over an hour ago", posix, async t => {
+test("a stager removes temporary folders only once their stager has exited", posix, async t => {
   const parent = scratch(t);
   const folder = join(parent, "reader-test-node");
-  const abandoned = join(folder, `${hash}.tmp-crashed`);
-  const recent = join(folder, `${hash}.tmp-working`);
-  for (const path of [abandoned, recent]) mkdirSync(path, { recursive: true });
+  const exited = spawnSync(process.execPath, ["-e", ""]).pid;
+  const abandoned = join(folder, `${hash}.tmp-${exited}-crashed`);
+  const paused = join(folder, `${hash}.tmp-${process.pid}-paused`);
+  const unnamed = join(folder, `${hash}.tmp-unparsed`);
+  for (const path of [abandoned, paused, unnamed]) mkdirSync(path, { recursive: true });
   writeFileSync(join(abandoned, "node"), "partial");
-  const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
-  utimesSync(abandoned, twoHoursAgo, twoHoursAgo);
+  // Age proves nothing: a paused stager's folder can be old.
+  const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  for (const path of [abandoned, paused, unnamed]) utimesSync(path, dayAgo, dayAgo);
   await stageReaderTestNode({ parent, hash, readNode });
   assert.equal(existsSync(abandoned), false);
-  assert.equal(existsSync(recent), true, "another stager may still be writing here");
+  assert.equal(existsSync(paused), true, "a live stager may still be writing here");
+  assert.equal(existsSync(unnamed), true, "a folder without an owner is kept");
 });
