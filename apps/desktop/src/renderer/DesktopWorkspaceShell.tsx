@@ -209,6 +209,7 @@ import type { SentNotices } from "./shell/useSentNotices";
 import { useWorkspaceSearch } from "./workbench/useWorkspaceSearch";
 import {
   EngineHistoryView,
+  fileMomentSteps,
   type HistoryCollections,
 } from "./workbench/EngineHistory";
 import { HistoryHiddenState } from "./workbench/HistoryPolicyStates";
@@ -242,7 +243,7 @@ import {
   createEditorGroupRight,
   focusEditorGroup,
   versionCompareTabPath,
-  momentDiffTabPath,
+  openMomentDiff,
   collectionTabPath,
   transactionalCollectionTabPath,
   defaultWorkbenchState,
@@ -1100,9 +1101,12 @@ export function DesktopWorkspaceShell(props: {
     resolveMomentDiffPath,
   } = useTabTitles(workspaceId);
   const anyTabDirty = dirtyPaths.size > 0;
-  const activeDocumentPath = TAB_KINDS[parseTab(focusedTabPath)?.kind ?? "removed"].virtual
+  const focusedTab = parseTab(focusedTabPath);
+  const activeDocumentPath = TAB_KINDS[focusedTab?.kind ?? "removed"].virtual
     ? null
     : focusedTabPath;
+  // The change open in the focused group, which the timeline marks.
+  const openMomentId = focusedTab?.kind === "momentDiff" ? focusedTab.momentId : null;
   // Whether some tab holds what About covers, so its empty state says to
   // switch to that tab instead of to open one: any file, or a conversation
   // other than the focused one. A shared view has no conversations.
@@ -1695,6 +1699,9 @@ export function DesktopWorkspaceShell(props: {
     loadMore: loadMoreEngineHistory,
     observeVersion: observeEngineVersion,
   } = useHistoryPage(engineHistoryToken, workspaceId, markHistoryReady, !!shareView);
+  // Each loaded change's older and newer change to the same file, for the
+  // diff page's steps. One pass per History answer.
+  const momentSteps = useMemo(() => fileMomentSteps(engineHistory?.entries ?? []), [engineHistory]);
   // The sync and try snapshots ride the refresh response but are not the
   // timeline: no pagination competes for them, so they apply as soon as they
   // arrive. Each is its own lane with its own watermark, because a local
@@ -2717,7 +2724,7 @@ export function DesktopWorkspaceShell(props: {
     },
     [openCanonicalDmInTab, openChatThreadInPanel, openChatsNavInTab, openChatsTab],
   );
-  // Engine history diff: one tab per moment.
+  // Engine history diff: one diff tab per group, pointed at each moment.
   const openMomentDiffTab = useCallback(
     (momentId: string, filePath: string) => {
       const targetGroupId = wbRef.current.activeEditorGroup;
@@ -2734,9 +2741,7 @@ export function DesktopWorkspaceShell(props: {
             return;
           }
           rememberMomentDiffPath(momentId, filePath);
-          mutateWb((state) =>
-            openTab(state, momentDiffTabPath(momentId), targetGroupId),
-          );
+          mutateWb((state) => openMomentDiff(state, momentId, targetGroupId));
         })
         .catch((error) => {
           if (!isCurrentRequest()) return;
@@ -4468,6 +4473,7 @@ export function DesktopWorkspaceShell(props: {
           )
         }
         onOpenMoment={openMomentDiffTab}
+        openMomentId={openMomentId}
         unavailableSources={engineHistory.unavailableSources}
         omittedSources={engineHistory.omittedSources}
         collections={historyCollections}
@@ -5497,6 +5503,8 @@ export function DesktopWorkspaceShell(props: {
                     restoreRequest.momentId === groupTab.momentId
                   }
                   onRestoreRequestTaken={takeRestoreRequest}
+                  steps={groupTab.momentId === null ? undefined : momentSteps.get(groupTab.momentId)}
+                  onOpenMoment={openMomentDiffTab}
                 />
               )
             );

@@ -156,6 +156,110 @@ describe("History timeline rows", () => {
   });
 });
 
+describe("History timeline changes", () => {
+  const nova = { kind: "agent" as const, agentId: "nova", agentRunId: "run" };
+  const agentEdit = (id: string, minutes: number): TimelineEntry =>
+    file(id, { recordedAtMs: DAY - minutes * 60_000, agentAuthorName: "Nova", summary: "Updated plan.md", authors: [nova], authorPresentations: [{ group: "nova", hue: null, self: false }] });
+
+  it("draws each change on one line: who, the file, its folder, and the time", () => {
+    view({ entries: [agentEdit("m-2", 0), file("m-1", { recordedAtMs: DAY - 3_600_000 })] });
+    const [agent, local] = screen.getAllByTestId("engine-moment-open");
+    // The agent's square avatar leads, and its name follows in the agent voice.
+    expect(agent!.querySelector('[title="Nova"]')?.className).toContain("rounded");
+    expect(agent!.querySelector('[title="Nova"]')?.className).not.toContain("rounded-full");
+    expect(screen.getAllByTestId("engine-moment-source")[0]!.textContent).toBe("Nova");
+    // A local edit leads with its origin's mark, says its folder, and keeps
+    // its origin in words for screen readers.
+    expect(local!.querySelector('[title="Local file edit"] .lucide-hard-drive')).not.toBeNull();
+    expect(local!.textContent).toContain("plan.mdnotes");
+    expect(local!.textContent).not.toContain("Edited");
+    expect(screen.getAllByTestId("engine-moment-source")[1]!.className).toBe("sr-only");
+  });
+
+  it("folds an agent's edits to one file into one row that opens the newest and lists the rest", () => {
+    const calls = view({ entries: [agentEdit("m-3", 0), agentEdit("m-2", 5), agentEdit("m-1", 9)] });
+    expect(screen.getAllByTestId("engine-moment-open")).toHaveLength(1);
+    // The run's head names its file; each edit's summary is listed under it.
+    expect(screen.getByTestId("engine-moment-open").textContent).toMatch(/^plan\.mdNova/);
+    const toggle = screen.getByTestId("engine-moment-run-toggle");
+    expect(toggle.textContent).toBe("3");
+    expect(toggle.getAttribute("aria-label")).toBe("3 changes");
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(screen.getByTestId("engine-moment-open"));
+    expect(calls.open).toHaveBeenCalledWith("m-3", "notes/plan.md");
+
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    const rows = screen.getAllByTestId("engine-moment-open");
+    expect(rows.map((row) => row.dataset.momentId)).toEqual(["m-3", "m-2", "m-1"]);
+    fireEvent.click(rows[2]!);
+    expect(calls.open).toHaveBeenLastCalledWith("m-1", "notes/plan.md");
+  });
+
+  it("marks the open change, and only it, as selected", () => {
+    view({ entries: [file("m-2"), file("m-1")], openMomentId: "m-1" });
+    const [other, open] = screen.getAllByTestId("engine-moment-open");
+    expect(open!.getAttribute("aria-current")).toBe("true");
+    expect(open!.className.split(" ")).toContain("bg-selected");
+    expect(other!.hasAttribute("aria-current")).toBe(false);
+    expect(other!.className.split(" ")).not.toContain("bg-selected");
+  });
+
+  it("marks a run's open edit on the run's row or under it", () => {
+    view({ entries: [agentEdit("m-2", 0), agentEdit("m-1", 5)], openMomentId: "m-2" });
+    const run = screen.getByTestId("engine-moment-run");
+    expect(screen.getByTestId("engine-moment-open").getAttribute("aria-current")).toBe("true");
+    expect(run.firstElementChild!.className.split(" ")).toContain("bg-selected");
+  });
+
+  const describedBy = (control: HTMLElement) => {
+    const id = control.getAttribute("aria-describedby");
+    return id === null ? null : document.getElementById(id)?.textContent;
+  };
+
+  // The open change may be one a collapsed row hides. The row shows it holds
+  // it without opening; aria-current stays on the change itself.
+  it("marks a collapsed run that holds the open change, until it opens", () => {
+    view({ entries: [agentEdit("m-2", 0), agentEdit("m-1", 5)], openMomentId: "m-1" });
+    const row = screen.getByTestId("engine-moment-run").firstElementChild!;
+    const toggle = screen.getByTestId("engine-moment-run-toggle");
+    expect(row.className.split(" ")).toContain("bg-selected");
+    expect(screen.getByTestId("engine-moment-open").hasAttribute("aria-current")).toBe(false);
+    expect(describedBy(toggle)).toBe("Includes the open change");
+    fireEvent.click(toggle);
+    expect(row.className.split(" ")).not.toContain("bg-selected");
+    expect(describedBy(toggle)).toBeNull();
+    expect(screen.getAllByTestId("engine-moment-open")[1]!.getAttribute("aria-current")).toBe("true");
+  });
+
+  it("marks a collapsed pass that holds the open change, until it opens", () => {
+    view({ entries: [file("p-2", { correlationId: "pass" }), file("p-1", { correlationId: "pass", path: "notes/other.md" })], openMomentId: "p-1" });
+    const toggle = screen.getByTestId("engine-moment-group-toggle");
+    expect(toggle.className.split(" ")).toContain("bg-selected");
+    expect(describedBy(toggle)).toBe("Includes the open change");
+    fireEvent.click(toggle);
+    expect(toggle.className.split(" ")).not.toContain("bg-selected");
+    expect(screen.getAllByTestId("engine-moment-open")[1]!.getAttribute("aria-current")).toBe("true");
+  });
+
+  // The name says what a row opens. Its description tells one edit of the
+  // file from the next: what it did, who made it, and when.
+  it("describes each change by what it did, who made it, and when", () => {
+    view({ entries: [
+      agentEdit("m-3", 0),
+      agentEdit("m-2", 5),
+      file("m-1", { recordedAtMs: DAY - 3_600_000, namedAuthor: { userId: "sam", label: "Sam Rivera" },
+        authors: [{ kind: "named", userId: "sam", grantId: "grant-sam", grantGeneration: 1 }] }),
+    ] });
+    fireEvent.click(screen.getByTestId("engine-moment-run-toggle"));
+    const [newest, earlier, person] = screen.getAllByTestId("engine-moment-open").map(describedBy);
+    expect(newest).toMatch(/^Updated plan\.md, Agent Nova, /);
+    expect(earlier).toMatch(/^Updated plan\.md, Agent Nova, /);
+    expect(earlier).not.toBe(newest);
+    expect(person).toMatch(/^Edited plan\.md, Sam Rivera, /);
+  });
+});
+
 describe("History timeline sources", () => {
   it("names the Collections a partial page is missing, and Try again reads again", () => {
     const calls = view({ entries: [file("m-1")], unavailableSources: [{ datasetId: BUDGET }, { datasetId: "00000000-0000-4000-8000-000000000009" }] });

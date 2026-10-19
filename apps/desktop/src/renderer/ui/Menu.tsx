@@ -386,7 +386,7 @@ export function Menu(props: {
             if (isField(entry)) {
               const { field } = entry;
               return (
-                <div key={entry.id} className="py-0.5">
+                <div key={entry.id} className="relative py-0.5">
                   <input
                     ref={setElement}
                     autoFocus
@@ -413,8 +413,10 @@ export function Menu(props: {
                       event.preventDefault();
                       if (!field.busy) field.onSubmit();
                     }}
-                    className="h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle"
+                    className="h-7 w-full rounded-md border border-line bg-bg pl-2 pr-7 text-[13px] text-ink placeholder:text-subtle"
                   />
+                  {/* Enter submits every field; the key says so at its end. */}
+                  <kbd aria-hidden className="pointer-events-none absolute right-1.5 top-2 rounded border border-line bg-bg px-1 font-mono text-[10px] leading-[14px] text-subtle">↵</kbd>
                   {field.hint ? <p className="m-0 mt-1 px-2 text-[11px] leading-4 text-subtle">{field.hint}</p> : null}
                 </div>
               );
