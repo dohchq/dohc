@@ -862,6 +862,16 @@ async fn case_only_and_delete_only_operations_refuse() {
 #[tokio::test(flavor = "multi_thread")]
 async fn two_thousand_sources_resume_yield_and_undo_in_turns() {
     let mut f = Fixture::new(2000, 4999);
+    let initial_hold = f.actor.hold_link_drain();
+    let ws = f.ws.clone();
+    f.actor.run(move |store, _| {
+        undo_probe::enable_work_probe(store);
+        store.write_with(&NoFaults, |tx| tx.execute(
+            "INSERT INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) SELECT workspace_id,version_id,object_id,1 FROM snapshots WHERE workspace_id=?1 AND version_id='main' ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET revision=revision+1", [&ws]
+        ).map_err(StorageError::persist_public))?;
+        Ok(())
+    }).await.unwrap();
+
     let crash = Arc::new(CrashNth {
         point: FaultPoint::StorageAfterCommitBeforeAck,
         nth: 1001,
@@ -872,6 +882,7 @@ async fn two_thousand_sources_resume_yield_and_undo_in_turns() {
         Err(RuntimeError::OperationCrashed)
     ));
     f.restart().await;
+    drop(initial_hold);
     f.actor
         .run(|store, _| {
             undo_probe::enable_work_probe(store);
@@ -1073,8 +1084,15 @@ async fn undo_stops_remaining_forward_turns_before_taking_its_snapshot() {
     let reached = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(std::sync::Barrier::new(2));
     let (sent, wait) = (reached.clone(), release.clone());
-    probes().lock().unwrap().get_mut(&f.ws).unwrap().hook = Some(Arc::new(move |_, object| {
+    let (ws, root) = (f.ws.clone(), f.root.to_path_buf());
+    probes().lock().unwrap().get_mut(&f.ws).unwrap().hook = Some(Arc::new(move |conn, object| {
         if object == "source-0016" {
+            for i in 0..20 {
+                let path = format!("source-{i:04}.md");
+                let sha: String = conn.query_row("SELECT blob_sha256 FROM snapshots WHERE workspace_id=?1 AND version_id='main' AND path=?2", params![ws,path], |r| r.get(0)).unwrap();
+                let text = dohc_engine_storage::text::read(conn, &sha).unwrap();
+                std::fs::write(root.join(path), text).unwrap();
+            }
             sent.notify_one();
             wait.wait();
         }
