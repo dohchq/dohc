@@ -149,17 +149,28 @@ async fn workspace_open_resumes_interrupted_undo_and_places_every_inverse() {
             .unwrap()
             .is_empty()
     );
-    let replay = open
-        .actor
-        .preflight_history_undo(
-            "resume-undo".into(),
-            "dohc-operation:resume".into(),
-            "resume-request".into(),
-            None,
-        )
-        .await
-        .unwrap()
-        .unwrap();
+    // The recovery fence replies before its final placement task finishes.
+    let replay = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let replay = open
+                .actor
+                .preflight_history_undo(
+                    "resume-undo".into(),
+                    "dohc-operation:resume".into(),
+                    "resume-request".into(),
+                    None,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            if replay.materialized {
+                break replay;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("recovered inverses must finish placement");
     assert_eq!(replay.moments.len(), 6);
     assert!(replay.not_restored.is_empty());
     assert!(replay.materialized);
