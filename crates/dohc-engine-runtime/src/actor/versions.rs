@@ -957,6 +957,7 @@ pub(super) fn switch_active_version_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
+    store.read_with(|conn| dohc_engine_domain::ensure_no_pending_undo_in(conn, workspace_id))?;
     let previous = VersionedTextStore::new(store).get_active_version(workspace_id)?;
     let target = VersionedTextStore::new(store)
         .list_versions(workspace_id)?

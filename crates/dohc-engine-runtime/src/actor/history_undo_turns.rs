@@ -65,7 +65,13 @@ fn load(
     ) {
         return Ok(None);
     }
-    let body: String = conn.query_row("SELECT plan_json FROM history_undo_plans WHERE request_id=?1", [request], |r| r.get(0)).map_err(StorageError::corrupt_public)?;
+    let body: String = conn
+        .query_row(
+            "SELECT plan_json FROM history_undo_plans WHERE request_id=?1",
+            [request],
+            |r| r.get(0),
+        )
+        .map_err(StorageError::corrupt_public)?;
     let plan: Plan = serde_json::from_str(&body).map_err(|_| corrupt())?;
     let cursor = usize::try_from(cursor).map_err(|_| corrupt())?;
     if plan.workspace != ws
@@ -83,11 +89,17 @@ pub(super) fn not_restored(
     request: &str,
 ) -> Result<Vec<String>, RuntimeError> {
     let mut stmt = conn.prepare_cached("SELECT payload_hash FROM engine_requests WHERE kind='history-undo-skipped' AND request_id>=?1 AND request_id<?2 ORDER BY result_seq").map_err(StorageError::corrupt_public)?;
-    stmt.query_map([format!("{}:", undo_progress_key(request)), format!("{};", undo_progress_key(request))], |r| r.get(0))
-        .map_err(StorageError::corrupt_public)?
-        .collect::<Result<_, _>>()
-        .map_err(StorageError::corrupt_public)
-        .map_err(Into::into)
+    stmt.query_map(
+        [
+            format!("{}:", undo_progress_key(request)),
+            format!("{};", undo_progress_key(request)),
+        ],
+        |r| r.get(0),
+    )
+    .map_err(StorageError::corrupt_public)?
+    .collect::<Result<_, _>>()
+    .map_err(StorageError::corrupt_public)
+    .map_err(Into::into)
 }
 type DiskProof = (
     dohc_engine_files::ProjectionProbe,
@@ -158,6 +170,29 @@ impl ActorHandle {
             })
         }).await
     }
+    async fn wait_undo_checkpoint(
+        &self,
+        token: &crate::CancellationToken,
+        since: &mut Option<std::time::Instant>,
+    ) -> Result<(), RuntimeError> {
+        if token.is_cancelled() {
+            return Err(RuntimeError::Cancelled);
+        }
+        if since.get_or_insert_with(std::time::Instant::now).elapsed()
+            >= std::time::Duration::from_secs(1)
+        {
+            return Err(StorageError::FileLocked.into());
+        }
+        let wait = self.run(|store, _| Ok(store.checkpoint_cycle())).await?;
+        tokio::task::spawn_blocking(wait)
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        tokio::select! {
+            () = token.cancelled() => return Err(RuntimeError::Cancelled),
+            () = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+        }
+        Ok(())
+    }
     #[allow(clippy::too_many_arguments)]
     pub async fn history_undo_in_turns(
         &self,
@@ -169,7 +204,15 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         now: i64,
         gates: [Arc<tokio::sync::Mutex<()>>; 2],
+        recorder: Arc<dyn SelfWriteRecorder>,
+        token: crate::CancellationToken,
     ) -> Result<HistoryUndoResult, RuntimeError> {
+        dohc_engine_domain::validate_moment_metadata(
+            "restore",
+            Some("Undo"),
+            Some(&operation),
+            author.as_deref(),
+        )?;
         let (w, o, r, a) = (
             ws.clone(),
             operation.clone(),
@@ -203,7 +246,8 @@ impl ActorHandle {
         })
         .await
         .map_err(|_| RuntimeError::ActorUnavailable)??;
-        let deduped = prior.is_some();
+        let mut deduped = prior.as_ref().is_some_and(|(_, _, complete)| *complete);
+        let mut locked_since = None;
         let (plan, mut prepared_cursor) = if let Some((plan, cursor, _)) = prior {
             (Arc::new(plan), cursor)
         } else {
@@ -225,7 +269,8 @@ impl ActorHandle {
                 author.clone(),
             );
             let read_db = db.clone();
-            let prepared = tokio::task::spawn_blocking(move || {
+            let disk_root = root.clone();
+            let (prepared, body) = tokio::task::spawn_blocking(move || {
                 #[cfg(test)]
                 let started = Instant::now();
                 let mut store = EngineStore::open_read_only(&read_db)?;
@@ -260,33 +305,19 @@ impl ActorHandle {
                     started.elapsed(),
                     false,
                 );
-                Ok::<_, RuntimeError>(Plan {
+                let prepared = Plan {
                     workspace: w,
                     version,
                     operation: o,
                     request: r,
                     author: a,
                     members,
-                })
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)??;
-            let disk_root = root.clone();
-            let (prepared, body) = tokio::task::spawn_blocking(move || {
-                #[cfg(test)]
-                let started = Instant::now();
+                };
+                drop(store);
                 for member in &prepared.members {
                     disk_check(&disk_root, member)?;
                 }
                 let body = serde_json::to_string(&prepared).map_err(|_| corrupt())?;
-                #[cfg(test)]
-                tests::record_phase(
-                    &prepared.request,
-                    "all-member-disk-check (worker)",
-                    None,
-                    started.elapsed(),
-                    false,
-                );
                 Ok::<_, RuntimeError>((prepared, body))
             })
             .await
@@ -315,14 +346,43 @@ impl ActorHandle {
                 match outcome {
                     Ok(plan) => break plan,
                     Err(RuntimeError::Storage(StorageError::FileLocked)) => {
-                        tokio::task::yield_now().await
+                        self.wait_undo_checkpoint(&token, &mut locked_since).await?;
                     }
                     Err(error) => return Err(error),
                 }
             };
             (plan, 0)
         };
+        let mut placement_cursor = 0;
         loop {
+            for member in plan.members[placement_cursor..prepared_cursor]
+                .iter()
+                .filter(|m| m.effect.operation == "rename")
+            {
+                let (p, mut inverse, root, recorder) = (
+                    plan.clone(),
+                    member.effect.clone(),
+                    root.clone(),
+                    recorder.clone(),
+                );
+                inverse.moment_id = dohc_engine_domain::undo_member_moment_id(
+                    &undo_correlation_id(&p.workspace, &p.operation, &p.request),
+                    &inverse.moment_id,
+                );
+                inverse.before_path = Some(std::mem::replace(
+                    &mut inverse.path,
+                    inverse.before_path.take().ok_or_else(corrupt)?,
+                ));
+                self.run(move |store,_| {
+                    let exists: bool = store.read_with(|conn| conn.query_row("SELECT EXISTS(SELECT 1 FROM moments WHERE workspace_id=?1 AND moment_id=?2)",params![p.workspace,inverse.moment_id],|r|r.get(0))).map_err(StorageError::corrupt_public)?;
+                    if exists && !place_undo_members(store,&p.workspace,&p.version,&[inverse],&root,recorder.as_ref(),&dohc_engine_storage::NoFaults,now)? { return Err(StorageError::FileLocked.into()); }
+                    Ok(())
+                }).await?;
+            }
+            placement_cursor = prepared_cursor;
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
             if prepared_cursor == plan.members.len() {
                 let p = plan.clone();
                 return tokio::task::spawn_blocking(move || {
@@ -375,7 +435,8 @@ impl ActorHandle {
                     if index != prepared_cursor { return Ok(index); }
                     let member = p.members.get(index).ok_or_else(corrupt)?;
                     let active = VersionedTextStore::new(store).get_active_version(&p.workspace)?.version_id;
-                    let unchanged = active == p.version && store.read_with(|conn| signature(conn,&p.workspace,&p.version,&member.effect.object_id))? == member.head;
+                    if active != p.version { return Err(DomainError::InvalidInput {reason:"An Undo is still running. Switch versions when it finishes."}.into()); }
+                    let unchanged = store.read_with(|conn| signature(conn,&p.workspace,&p.version,&member.effect.object_id))? == member.head;
                     let target = member.effect.before_path.as_deref().unwrap_or(&member.effect.path);
                     let vacant: bool = store.read_with(|conn| conn.query_row("SELECT NOT EXISTS(SELECT 1 FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND path=?3)",params![p.workspace,p.version,target],|r|r.get(0))).map_err(StorageError::corrupt_public)?;
                     let admitted = store.read_with(|conn| check_undo_ownership(conn,&p.workspace,&p.version,&member.effect));
@@ -383,39 +444,53 @@ impl ActorHandle {
                         probe.stamp(target) != dohc_engine_files::ProjectionTargetStamp::Absent || source.as_ref().is_some_and(|stamp| probe.stamp(&member.effect.path) != *stamp)
                     });
                     let changed = !unchanged || !vacant || matches!(&admitted,Err(RuntimeError::Domain(DomainError::UndoRefused {..}) | RuntimeError::Sync(dohc_engine_sync::SyncError::LiveDocumentBindingActive))) || disk_changed;
-                    if !changed { admitted?; disk?; }
+                    let checks = if changed { Err(DomainError::UndoRefused {path:member.effect.path.clone(),reason:"source changed"}.into()) } else { admitted.and(disk.map(|_| ())) };
                     #[cfg(test)]
                     { check_time = started.elapsed(); }
-                    match store.write_background_with(f.as_ref(),|tx| -> Result<(),RuntimeError> {
-                        if changed {
-                            let path = tx.query_row("SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![p.workspace,p.version,member.effect.object_id],|r| r.get::<_,String>(0)).optional().map_err(StorageError::corrupt_public)?.unwrap_or_else(|| member.effect.path.clone());
-                            tx.execute("INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) VALUES(?1,?2,?3,?4,'history-undo-skipped')",params![format!("{}:{cursor}",undo_progress_key(&p.request)),path,cursor,now]).map_err(StorageError::persist_public)?;
-                        } else {
-                            tx.execute_batch("SAVEPOINT undo_member").map_err(StorageError::persist_public)?;
+                    let advanced = match store.write_background_with(f.as_ref(),|tx| -> Result<bool,RuntimeError> {
+                        tx.execute_batch("SAVEPOINT undo_member").map_err(StorageError::persist_public)?;
+                        let inverse = checks.and_then(|()| {
                             let objects = serde_json::to_string(&[&member.effect.object_id]).map_err(|_| corrupt())?;
                             crate::search::index::begin_file_search_index_batch(tx,&policy,&p.workspace,&p.version,&objects).map_err(super::super::search::search_domain)?;
-                            let inverse = undo_member_in_tx(tx,&p.workspace,&p.version,&undo_correlation_id(&p.workspace,&p.operation,&p.request),p.author.as_deref(),now,member.effect.clone(),|tx,m| publish_undo_member(tx,&p.workspace,&p.version,&policy,m,now));
-                            match inverse {
-                                Ok(_) => tx.execute_batch("RELEASE undo_member").map_err(StorageError::persist_public)?,
-                                Err(DomainError::UndoRefused {path,..}) => {
-                                    tx.execute_batch("ROLLBACK TO undo_member; RELEASE undo_member").map_err(StorageError::persist_public)?;
-                                    tx.execute("INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) VALUES(?1,?2,?3,?4,'history-undo-skipped')",params![format!("{}:{cursor}",undo_progress_key(&p.request)),path,cursor,now]).map_err(StorageError::persist_public)?;
-                                },
-                                Err(error) => return Err(error.into()),
+                            undo_member_in_tx(tx,&p.workspace,&p.version,&undo_correlation_id(&p.workspace,&p.operation,&p.request),p.author.as_deref(),now,member.effect.clone(),|tx,m| publish_undo_member(tx,&p.workspace,&p.version,&policy,m,now)).map_err(Into::into)
+                        });
+                        match inverse {
+                            Ok(_) => tx.execute_batch("RELEASE undo_member").map_err(StorageError::persist_public)?,
+                            Err(error) => {
+                                tx.execute_batch("ROLLBACK TO undo_member; RELEASE undo_member").map_err(StorageError::persist_public)?;
+                                if matches!(&error,RuntimeError::Storage(StorageError::FileLocked)) { return Err(error); }
+                                let refusal = matches!(&error,RuntimeError::Domain(DomainError::UndoRefused {..}));
+                                if !refusal {
+                                    tx.execute("UPDATE history_undo_plans SET attempts=attempts+1,last_error=?2 WHERE request_id=?1",params![p.request,error.to_string()]).map_err(StorageError::persist_public)?;
+                                    let attempts: i64 = tx.query_row("SELECT attempts FROM history_undo_plans WHERE request_id=?1",[&p.request],|r|r.get(0)).map_err(StorageError::corrupt_public)?;
+                                    if attempts<3 { return Ok(false); }
+                                    tx.execute("UPDATE history_undo_plans SET errors_json=json_set(errors_json,?2,?3) WHERE request_id=?1",params![p.request,format!("$.\"{cursor}\""),error.to_string()]).map_err(StorageError::persist_public)?;
+                                }
+                                let path = tx.query_row("SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![p.workspace,p.version,member.effect.object_id],|r| r.get::<_,String>(0)).optional().map_err(StorageError::corrupt_public)?.unwrap_or_else(|| member.effect.path.clone());
+                                tx.execute("INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) VALUES(?1,?2,?3,?4,'history-undo-skipped')",params![format!("{}:{cursor}",undo_progress_key(&p.request)),path,cursor,now]).map_err(StorageError::persist_public)?;
                             }
                         }
+                        tx.execute("UPDATE history_undo_plans SET attempts=0,last_error=NULL WHERE request_id=?1",[&p.request]).map_err(StorageError::persist_public)?;
                         tx.execute("UPDATE engine_requests SET result_seq=?2,kind=?3,committed_at=?4 WHERE request_id=?1",params![p.request,cursor+1,if index+1==p.members.len() {"history-undo-complete"} else {"history-undo-pending"},now]).map_err(StorageError::persist_public)?;
-                        Ok(())
-                    })? { TxnOutcome::Committed(()) => {}, TxnOutcome::Crashed {..} => return Err(RuntimeError::OperationCrashed) }
-                    Ok(index + 1)
+                        Ok(true)
+                    })? { TxnOutcome::Committed(advanced) => advanced, TxnOutcome::Crashed {..} => return Err(RuntimeError::OperationCrashed) };
+                    Ok(index + usize::from(advanced))
                 });
                 #[cfg(test)]
                 tests::record(&p.request, prepared_cursor, &p.members[prepared_cursor].effect.operation, prepared_cursor + 1 == p.members.len(), started.elapsed(), check_time);
                 outcome
             }).await;
             match next {
-                Ok(cursor) => prepared_cursor = cursor,
-                Err(RuntimeError::Storage(StorageError::FileLocked)) => {}
+                Ok(cursor) => {
+                    if cursor > prepared_cursor {
+                        deduped = false;
+                    }
+                    prepared_cursor = cursor;
+                    locked_since = None;
+                }
+                Err(RuntimeError::Storage(StorageError::FileLocked)) => {
+                    self.wait_undo_checkpoint(&token, &mut locked_since).await?;
+                }
                 Err(error) => return Err(error),
             }
             tokio::task::yield_now().await;

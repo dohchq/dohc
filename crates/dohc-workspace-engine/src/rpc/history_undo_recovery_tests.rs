@@ -112,6 +112,8 @@ async fn workspace_open_resumes_interrupted_undo_and_places_every_inverse() {
                 Arc::new(CrashAfter(AtomicUsize::new(3))),
                 10,
                 [open.capture_apply_gate.clone(), open.session_ops.clone()],
+                Arc::new(()),
+                dohc_engine_runtime::CancellationToken::new(),
             )
             .await,
         Err(dohc_engine_runtime::RuntimeError::OperationCrashed)

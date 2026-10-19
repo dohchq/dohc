@@ -107,6 +107,25 @@ impl Checkpoints {
         })
     }
 
+    pub(crate) fn next_cycle(&self) -> impl FnOnce() + Send + use<> {
+        let completed = self.completed.clone();
+        let requests = self.requests.clone();
+        let before = *completed.0.lock().unwrap();
+        move || {
+            if let Some(requests) = requests {
+                let _ = requests.try_send(());
+            }
+            let (sequence, signal) = &*completed;
+            let _wait = signal
+                .wait_timeout_while(
+                    sequence.lock().unwrap(),
+                    std::time::Duration::from_millis(100),
+                    |s| *s <= before,
+                )
+                .unwrap();
+        }
+    }
+
     pub(crate) fn request_full(&self) {
         // Preserve full requests when the channel already holds ordinary work.
         self.full_requested.store(true, Ordering::Release);

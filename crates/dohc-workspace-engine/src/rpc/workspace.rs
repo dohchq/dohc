@@ -1239,55 +1239,6 @@ impl EngineService {
             None
         };
         let session_ops = Arc::new(tokio::sync::Mutex::new(()));
-        let undo_recovery = if requested_mode == WorkspaceOpenMode::Full {
-            let (actor, ws, root, gates, recorder) = (
-                actor.clone(),
-                params.workspace_id.clone(),
-                root.clone(),
-                [capture_apply_gate.clone(), session_ops.clone()],
-                Arc::new(self.self_writes.scoped(&root)),
-            );
-            Some(tokio::spawn(async move {
-                match actor.pending_history_undos(ws.clone()).await {
-                    Ok(requests) => {
-                        for (operation, request, author) in requests {
-                            match actor
-                                .history_undo_in_turns(
-                                    ws.clone(),
-                                    operation,
-                                    request,
-                                    author,
-                                    root.clone(),
-                                    Arc::new(NoFaults),
-                                    now_ms,
-                                    gates.clone(),
-                                )
-                                .await
-                            {
-                                Ok(result) => {
-                                    actor
-                                        .history_undo_place(
-                                            ws.clone(),
-                                            result,
-                                            root.clone(),
-                                            recorder.clone(),
-                                            now_ms,
-                                            |_| {},
-                                        )
-                                        .await;
-                                }
-                                Err(error) => {
-                                    eprintln!("engine: Undo recovery will retry on open: {error}")
-                                }
-                            }
-                        }
-                    }
-                    Err(error) => eprintln!("engine: Undo recovery unavailable: {error}"),
-                }
-            }))
-        } else {
-            None
-        };
         lock(&self.handles).insert(
             handle.clone(),
             Arc::new(OpenWorkspace {
@@ -1308,7 +1259,7 @@ impl EngineService {
                 projects_collections: params.project_collections,
                 collection_projection: Arc::new(Mutex::new(collection_projection)),
                 automation_recovery: Arc::new(Mutex::new(automation_recovery)),
-                undo_recovery: Arc::new(Mutex::new(undo_recovery)),
+                undo_recovery: Arc::new(Mutex::new(None)),
                 capture_apply_gate,
                 capture_holds: CaptureHolds::default(),
                 session_ops,
@@ -1318,6 +1269,43 @@ impl EngineService {
                 pulls_in_flight: Default::default(),
             }),
         );
+        if requested_mode == WorkspaceOpenMode::Full {
+            let open = self.open(Some(&handle))?;
+            let recovery = open.clone();
+            let fence = self.version_fence();
+            let recovery_handle = handle.clone();
+            *lock(&open.undo_recovery) = Some(tokio::spawn(async move {
+                let outcome = async {
+                    let pending = recovery
+                        .actor
+                        .pending_history_undos(recovery.workspace_id.clone())
+                        .await
+                        .map_err(map_runtime)?;
+                    for (operation_id, request_id, author_json) in pending {
+                        let cancellation = OperationCancellation::new(&RequestContext::unbounded());
+                        fence
+                            .fence_version_snapshot(
+                                &cancellation,
+                                recovery.clone(),
+                                &recovery_handle,
+                                "history.undo",
+                                "Undo settlement",
+                                super::versions::VersionFenceIntent::Undo {
+                                    operation_id,
+                                    request_id,
+                                    author_json,
+                                },
+                            )
+                            .await?;
+                    }
+                    Ok::<_, WireError>(())
+                }
+                .await;
+                if let Err(error) = outcome {
+                    eprintln!("engine: Undo recovery will retry on open: {error:?}");
+                }
+            }));
+        }
         open_guard.disarm();
         Ok(json!({ "workspace": handle }))
     }
