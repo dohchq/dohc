@@ -4301,6 +4301,57 @@ fn placement_is_held(
     Ok(false)
 }
 
+/// Whether a single segment can be written on this host. Shared by disk
+/// placement and link creation; capture and reads keep their own path floor.
+pub fn materialize_segment_is_safe(segment: &str) -> bool {
+    if segment.is_empty()
+        || matches!(segment, "." | "..")
+        || segment.contains(['/', '\\', ':'])
+        || segment.chars().any(char::is_control)
+    {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        let name = segment.trim_end_matches(['.', ' ']);
+        let base = name
+            .split('.')
+            .next()
+            .unwrap_or(name)
+            .trim_end_matches(['.', ' ']);
+        let base = base.to_ascii_lowercase();
+        if matches!(
+            base.as_str(),
+            "con" | "prn" | "aux" | "nul" | "conin$" | "conout$" | "clock$"
+        )
+            || ["com", "lpt"].iter().any(|prefix| {
+                base.strip_prefix(prefix).is_some_and(|number| {
+                    number.chars().count() == 1
+                        && number.chars().any(|c| matches!(c, '1'..='9' | '¹' | '²' | '³'))
+                })
+            })
+        {
+            return false;
+        }
+        // Match the desktop's generic 8.3-shaped write hazard.
+        if let Some((stem, tail)) = name.rsplit_once('~') {
+            let (digits, extension) = tail
+                .split_once('.')
+                .map_or((tail, None), |(d, e)| (d, Some(e)));
+            let plain = |text: &str| !text.chars().any(|c| c == '.' || c.is_whitespace());
+            if (1..=8).contains(&stem.chars().count())
+                && plain(stem)
+                && !digits.is_empty()
+                && digits.bytes().all(|byte| byte.is_ascii_digit())
+                && extension.is_none_or(|ext| (1..=3).contains(&ext.chars().count()) && plain(ext))
+            {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Resolve a workspace-relative forward-slash path to an absolute target under
 /// `root`, rejecting escapes, absolute inputs, and path-floor entries.
 fn resolve_target(root: &Path, rel: &str) -> Result<PathBuf, MaterializeError> {
@@ -4309,14 +4360,7 @@ fn resolve_target(root: &Path, rel: &str) -> Result<PathBuf, MaterializeError> {
     }
     let mut out = root.to_path_buf();
     for segment in rel.split('/') {
-        // Reject empty (`a//b`), current (`.`), parent (`..`), and any segment
-        // containing a backslash or drive-colon (Windows escape shapes).
-        if segment.is_empty()
-            || segment == "."
-            || segment == ".."
-            || segment.contains('\\')
-            || segment.contains(':')
-        {
+        if !materialize_segment_is_safe(segment) {
             return Err(MaterializeError::UnsafeTargetPath);
         }
         out.push(segment);
@@ -7133,6 +7177,29 @@ mod tests {
         fn wait_before_retry(&self, failed_attempt: u32) {
             assert_eq!(failed_attempt, 1);
             std::fs::write(&self.0, b"external edit").expect("external editor saves");
+        }
+    }
+
+    #[test]
+    fn disk_targets_reject_colon_segments() {
+        let scratch = Scratch::new("colon-segments");
+        for path in ["x.md:evil", "notes/x:evil.md"] {
+            assert!(matches!(
+                resolve_target(&scratch.root, path),
+                Err(MaterializeError::UnsafeTargetPath)
+            ));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn disk_targets_reject_device_and_short_names() {
+        let scratch = Scratch::new("unsafe-segments");
+        for path in ["CON.txt", "NUL .txt", "COM¹.md", "report~1.pdf"] {
+            assert!(matches!(
+                resolve_target(&scratch.root, path),
+                Err(MaterializeError::UnsafeTargetPath)
+            ));
         }
     }
 

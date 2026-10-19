@@ -98,13 +98,6 @@ pub(super) fn creation_path(source: &str, raw: &str, kind: &str) -> Option<Strin
         || target.chars().any(char::is_control)
         || target.starts_with("//")
         || relative.as_bytes().get(1) == Some(&b':')
-        || relative
-            .split('/')
-            .filter(|part| !matches!(*part, "" | "." | ".."))
-            .any(|part| {
-                dohc_engine_files::policy::classify_engine_file_path(part)
-                    != dohc_engine_files::policy::PathClassification::Tracked
-            })
     {
         return None;
     }
@@ -118,6 +111,22 @@ pub(super) fn creation_path(source: &str, raw: &str, kind: &str) -> Option<Strin
     } else {
         format!("{directory}/{target}")
     };
+    let mut prefix = String::new();
+    for part in candidate
+        .split('/')
+        .filter(|part| !matches!(*part, "" | "." | ".."))
+    {
+        if !prefix.is_empty() {
+            prefix.push('/');
+        }
+        prefix.push_str(part);
+        if !dohc_engine_files::materialize::materialize_segment_is_safe(part)
+            || dohc_engine_files::policy::classify_engine_file_path(&prefix)
+                != dohc_engine_files::policy::PathClassification::Tracked
+        {
+            return None;
+        }
+    }
     let mut path = super::normalize_path(&candidate)?;
     if path.is_empty() {
         return None;
@@ -125,8 +134,11 @@ pub(super) fn creation_path(source: &str, raw: &str, kind: &str) -> Option<Strin
     if (kind == "wikilink" || without_extension(&path) == path) && !markdown_extension(&path) {
         path.push_str(".md");
     }
-    if dohc_engine_files::policy::classify_engine_file_path(&path)
-        != dohc_engine_files::policy::PathClassification::Tracked
+    if !path
+        .split('/')
+        .all(dohc_engine_files::materialize::materialize_segment_is_safe)
+        || dohc_engine_files::policy::classify_engine_file_path(&path)
+            != dohc_engine_files::policy::PathClassification::Tracked
     {
         return None;
     }
@@ -326,6 +338,49 @@ mod tests {
     fn creation_rejects_decoded_secret_segment() {
         assert_eq!(
             creation_path("source.md", "notes/%2Eenv/x", "markdown"),
+            None
+        );
+    }
+
+    #[test]
+    fn creation_rejects_colon_segments() {
+        assert_eq!(creation_path("source.md", "x.md:evil", "wikilink"), None);
+        assert_eq!(
+            creation_path("source.md", "notes/x.md%3Aevil", "markdown"),
+            None
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn creation_rejects_windows_device_and_short_names() {
+        for literal in [
+            "CON.txt",
+            "NUL .txt",
+            "COM¹.md",
+            "report~1.pdf",
+            "notes/LPT9/new.md",
+        ] {
+            assert_eq!(
+                creation_path("source.md", literal, "markdown"),
+                None,
+                "{literal}"
+            );
+        }
+    }
+
+    #[test]
+    fn creation_allows_nested_shared_with_me() {
+        assert_eq!(
+            creation_path("source.md", "notes/shared-with-me/new", "wikilink"),
+            Some("notes/shared-with-me/new.md".into())
+        );
+        assert_eq!(
+            creation_path("notes/source.md", "./shared-with-me/new", "markdown"),
+            Some("notes/shared-with-me/new.md".into())
+        );
+        assert_eq!(
+            creation_path("source.md", "shared-with-me/new", "wikilink"),
             None
         );
     }

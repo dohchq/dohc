@@ -534,3 +534,27 @@ it("keeps a focus fallback without hiding exhausted refresh failures", async () 
     expect(linksIn).toHaveBeenCalledTimes(4);
   } finally { vi.useRealTimers(); }
 });
+
+
+it.each(["focus", "refreshKey"])("keeps a Notices retry working after a same-document %s refresh", async (trigger) => {
+  vi.useFakeTimers();
+  try {
+    const linksIn = vi.fn().mockRejectedValue(new Error("unavailable"));
+    const onError = vi.fn();
+    vi.stubGlobal("dohcDesktop", { linksIn });
+    const view = render(<BacklinksPanel workspaceId="ws" path="target.md" onError={onError} />);
+    await act(async () => {});
+    await act(async () => vi.advanceTimersByTimeAsync(750));
+    expect(onError).toHaveBeenCalledOnce();
+    const retry = onError.mock.calls[0]![2];
+    linksIn.mockResolvedValue(linkQueryPage(backlinksSource("Refreshed")));
+    if (trigger === "focus") act(() => window.dispatchEvent(new Event("focus")));
+    else view.rerender(<BacklinksPanel workspaceId="ws" path="target.md" refreshKey={1} onError={onError} />);
+    await act(async () => {});
+    const count = linksIn.mock.calls.length;
+    linksIn.mockResolvedValue(linkQueryPage(backlinksSource("Retried")));
+    await act(async () => retry());
+    expect(linksIn).toHaveBeenCalledTimes(count + 1);
+    expect(screen.getByTestId("backlink-source").textContent).toContain("Retried");
+  } finally { vi.useRealTimers(); }
+});

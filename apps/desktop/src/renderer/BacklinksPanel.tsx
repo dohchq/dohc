@@ -7,7 +7,7 @@ import { bridge } from "./bridge";
 import { useAsyncResponseEffect } from "./useAsyncResponseEffect";
 
 import type { LinksInResult } from "@dohc/workspace-contracts/links";
-type BacklinksResult = { sources: BacklinkSource[]; complete: boolean; indexBuilding: boolean };
+type BacklinksResult = { sources: BacklinkSource[]; indexBuilding: boolean };
 type BacklinkSource = { sourcePath: string; sourceTitle: string; snippets: { text: string; line: number; highlightStart: number; highlightEnd: number }[] };
 function sourcesFor(entries: NonNullable<LinksInResult>["entries"]): BacklinkSource[] {
   const sources = new Map<string, BacklinkSource>();
@@ -23,7 +23,6 @@ type LoadedBacklinks = {
   workspaceId: string;
   path: string;
   sources: BacklinkSource[];
-  complete: boolean;
   indexBuilding: boolean;
 };
 type BacklinksLoadIdentity = {
@@ -93,6 +92,11 @@ export function BacklinksPanel(props: {
   const [open, setOpen] = useState(true);
   const [loadedChats, setLoadedChats] = useState<{ workspaceId: string; path: string; mentions: ChatFileMentionRecord[] } | null>(null);
   const { workspaceId, path, refreshKey } = props;
+  const currentDocument = useRef<{ workspaceId: string; path: string } | null>(null);
+  useEffect(() => {
+    currentDocument.current = { workspaceId, path };
+    return () => { currentDocument.current = null; };
+  }, [workspaceId, path]);
   // Absent reads as unavailable: a caller that has not decided must not make
   // dohc ask for a capability it may not have.
   const chatMentionsAvailable = props.chatMentionsAvailable === true;
@@ -132,20 +136,18 @@ export function BacklinksPanel(props: {
       try {
         const entries: NonNullable<LinksInResult>["entries"] = [];
         let cursor: string | undefined;
-        let complete = true;
         let indexBuilding = false;
         do {
           const page = await linksIn({ workspaceId, subject: { path }, ...(cursor ? { cursor } : {}) });
           if (!active && page?.nextCursor) return { ok: false };
           entries.push(...(page?.entries ?? []));
-          complete &&= page?.complete ?? true;
           indexBuilding ||= page?.indexBuilding ?? false;
           cursor = page?.nextCursor ?? undefined;
           // Keep the previous list until the walk ends, but expose its current index state.
-          if (active) setLoaded(previous => ({ workspaceId, path, complete, indexBuilding,
+          if (active) setLoaded(previous => ({ workspaceId, path, indexBuilding,
             sources: previous?.workspaceId === workspaceId && previous.path === path ? previous.sources : [] }));
         } while (cursor);
-        return { ok: true, result: { sources: sourcesFor(entries), complete, indexBuilding } };
+        return { ok: true, result: { sources: sourcesFor(entries), indexBuilding } };
       } catch (error) { return { ok: false, error }; }
     };
     const publish = (outcome: BacklinksLoadOutcome) => {
@@ -161,7 +163,11 @@ export function BacklinksPanel(props: {
       } else if (++failures >= 3) {
         setWalkInFlight(false);
         reportError.current?.("dohc could not load linked mentions.", outcome.error,
-          () => { if (active) setFocusNonce(nonce => nonce + 1); });
+          () => {
+            if (currentDocument.current?.workspaceId === workspaceId && currentDocument.current.path === path) {
+              setFocusNonce(nonce => nonce + 1);
+            }
+          });
         return;
       }
       timer = setTimeout(() => {
