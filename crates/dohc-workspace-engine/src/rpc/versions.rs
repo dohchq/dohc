@@ -1046,7 +1046,8 @@ impl VersionFence {
             Ok(VersionFenceOutcome::Committed(version))
         };
         if undo {
-            return fence.await;
+            // Fork and switch share this future type with the inline Undo continuation.
+            return Box::pin(fence).await;
         }
         // Version switches finish even if their request leaves.
         tokio::spawn(fence)

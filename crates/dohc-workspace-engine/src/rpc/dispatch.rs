@@ -627,7 +627,7 @@ impl EngineService {
                 self.history_operation(&ctx, request.workspace, request.params)
                     .await?
             }
-            "history.undo" => Box::pin(self.history_undo(&ctx, request)).await?,
+            "history.undo" => self.history_undo(&ctx, request).await?,
             "history.page" => {
                 self.history_page(&ctx, request.workspace, request.params)
                     .await?
@@ -1212,6 +1212,45 @@ mod tests {
         // InProcessTransport test callers carry dispatch state on the default thread stack.
         // The supervisor spawns request futures on the heap; growth still costs memory per request.
         println!("dispatch: {bytes} bytes; call_with_input: {input_bytes} bytes");
+        let ctx = RequestContext::unbounded();
+        let arms = [
+            (
+                "history.undo",
+                future_size(|| service.history_undo(&ctx, request())),
+            ),
+            (
+                "versions.createNamed",
+                future_size(|| service.versions_create_named(&ctx, request())),
+            ),
+            (
+                "versions.setActive",
+                future_size(|| service.versions_set_active(&ctx, None, json!({}))),
+            ),
+            (
+                "versionedText.rename",
+                future_size(|| service.versioned_text_rename(&ctx, request())),
+            ),
+            (
+                "versionedText.delete",
+                future_size(|| service.versioned_text_delete(&ctx, request())),
+            ),
+            (
+                "workspace.open",
+                future_size(|| service.workspace_open(&ctx, json!({}))),
+            ),
+            (
+                "workspace.close",
+                future_size(|| service.workspace_close(None)),
+            ),
+        ];
+        for (arm, size) in arms {
+            println!("{arm}: {size} bytes");
+        }
+        if let Ok(dir) = std::env::var("DOHC_HISTORY_UNDO_EVIDENCE_DIR") {
+            let sizes = json!({"dispatch":bytes,"callWithInput":input_bytes,"arms":arms});
+            let path = std::path::Path::new(&dir).join("future-sizes.json");
+            std::fs::write(path, serde_json::to_vec_pretty(&sizes).unwrap()).unwrap();
+        }
         assert!(bytes <= 5 * 1024, "dispatch future uses {bytes} bytes");
         assert!(
             input_bytes <= 6 * 1024,
