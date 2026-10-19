@@ -10,8 +10,8 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { basename, join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
@@ -962,7 +962,7 @@ test("the Mac release command reads its release from a version or tag and a chan
   assert.deepEqual(parseMacReleaseArgs(["--", "--version", NIGHTLY_TAG, "--channel", "nightly"]), {
     version: "0.1.1-nightly.20261019.42.1", channel: "nightly", keychain: DEFAULT_KEYCHAIN, keychainProfile: "dohc-notary", dryRun: false, rehearse: false,
   });
-  assert.match(DEFAULT_KEYCHAIN, /\/Library\/Keychains\/dohc-release\.keychain-db$/);
+  assert.equal(DEFAULT_KEYCHAIN, join(homedir(), "Library/Keychains/dohc-release.keychain-db"));
   assert.equal(parseMacReleaseArgs(["--version", "0.1.0", "--channel", "latest", "--keychain-profile", "notary"]).keychainProfile, "notary");
   for (const args of [[], ["--version", "0.1.0"], ["--version", "0.1.0", "--channel", "stable"], [...nightlyArgs, "--sign"]]) {
     assert.throws(() => parseMacReleaseArgs(args), /pnpm release:macos/);
@@ -1260,7 +1260,7 @@ test("a Mac release uploads the manifest only after the release holds every file
   await resumed.result;
   assert.deepEqual(resumed.steps, [[paths[2]], [paths[3]]], "a rerun uploads only what the release lacks");
 
-  const keep = new RegExp(`\\nThe built files stay in ${directory.replaceAll("/", "\\/")}\\. Run the same command again`);
+  const keep = new RegExp(`\\nThe built files stay in ${RegExp.escape(directory)}\\. Run the same command again`);
   const lacking = await publishWith(release, { views: [[], done.slice(0, 2)] });
   await assert.rejects(lacking.result, /does not hold these files as built: dohc-0\.1\.0-mac-arm64\.zip\.blockmap\./);
   assert.deepEqual(lacking.steps, [paths.slice(0, 3)], "the manifest does not upload while a file it needs is missing");
@@ -1316,7 +1316,7 @@ test("a real Mac release opens the release keychain only to check signing and to
   const uploads = new Map();
   const asset = path => {
     const bytes = readFileSync(path);
-    return { name: path.split("/").at(-1), state: "uploaded", size: bytes.length, digest: `sha256:${createHash("sha256").update(bytes).digest("hex")}` };
+    return { name: basename(path), state: "uploaded", size: bytes.length, digest: `sha256:${createHash("sha256").update(bytes).digest("hex")}` };
   };
   const step = async (command, args, env) => {
     const line = [command, ...args].join(" ");
@@ -1334,7 +1334,7 @@ test("a real Mac release opens the release keychain only to check signing and to
       const sha512 = createHash("sha512").update(zip).digest("base64");
       writeFileSync(join(release, names.manifest), updateManifest({ version: "0.1.0", files: [{ url: names.zip, sha512, size: zip.length }], path: names.zip, sha512 }));
     }
-    if (command === "gh" && args[1] === "upload") for (const path of args.slice(5)) uploads.set(path.split("/").at(-1), asset(path));
+    if (command === "gh" && args[1] === "upload") for (const path of args.slice(5)) uploads.set(basename(path), asset(path));
   };
   const run = (command, args) => {
     const line = [command, ...args].join(" ");
