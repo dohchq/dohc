@@ -1,5 +1,5 @@
 use super::ActorHandle;
-use super::versions::switch_projection_job_id;
+use super::versions::{projection_target_contains, switch_projection_job_id};
 use crate::error::RuntimeError;
 use dohc_engine_crypto::{SecretDataKey, SecretPlaintext, load_key_file};
 use dohc_engine_domain::{
@@ -740,6 +740,17 @@ pub(super) fn replay_pending_materializations(
                     coordinates
                 };
                 if job.operation == MaterializationOperation::Delete {
+                    if retire_live_projection_delete(
+                        store,
+                        root_dir,
+                        scope.workspace_id,
+                        &job,
+                        now_ms,
+                        Some(holds),
+                    )? {
+                        summary.completed += 1;
+                        continue;
+                    }
                     match materialize_secret_delete_one(
                         store,
                         root_dir,
@@ -949,6 +960,17 @@ pub(super) fn replay_pending_materializations(
                     })
                 }
             } else {
+                if retire_live_projection_delete(
+                    store,
+                    root_dir,
+                    scope.workspace_id,
+                    &job,
+                    now_ms,
+                    Some(holds),
+                )? {
+                    summary.completed += 1;
+                    continue;
+                }
                 materialize_one(
                     store,
                     root_dir,
@@ -1063,6 +1085,52 @@ pub(super) fn replay_pending_materializations(
     Ok(summary)
 }
 
+fn retire_live_projection_delete(
+    store: &EngineStore,
+    root_dir: &std::path::Path,
+    workspace_id: &str,
+    job: &MaterializationJob,
+    now_ms: i64,
+    holds: Option<&dohc_engine_files::PlacementHolds>,
+) -> Result<bool, RuntimeError> {
+    if job.operation != MaterializationOperation::Delete {
+        return Ok(false);
+    }
+    let loaded_holds;
+    let holds = match holds {
+        Some(holds) => holds,
+        None => {
+            loaded_holds = dohc_engine_files::PlacementHolds::load(store, workspace_id)?;
+            &loaded_holds
+        }
+    };
+    if holds.blocks(&job.target_path) {
+        return Ok(false);
+    }
+    let paths = store.read_with(|conn| {
+        let mut statement = conn.prepare_cached(
+            "WITH active AS (SELECT COALESCE(\
+                (SELECT a.version_id FROM active_versions a JOIN versions v \
+                 ON v.workspace_id=a.workspace_id AND v.version_id=a.version_id \
+                 WHERE a.workspace_id=?1), \
+                (SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=?1)) AS version_id) \
+             SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=(SELECT version_id FROM active) \
+             UNION SELECT path FROM secret_files WHERE workspace_id=?1 AND version_id=(SELECT version_id FROM active)",
+        ).map_err(StorageError::corrupt_public)?;
+        statement.query_map([workspace_id], |row| row.get::<_, String>(0))
+            .map_err(StorageError::corrupt_public)?
+            .collect::<Result<Vec<_>, _>>().map_err(StorageError::corrupt_public)
+    })?;
+    let targets = paths.iter().map(String::as_str).collect();
+    // A merge can leave the old spelling's delete pending after its write
+    // reached disk. Use the switch planner's rule before unlinking that entry.
+    if !projection_target_contains(root_dir, &job.target_path, &targets, &mut None) {
+        return Ok(false);
+    }
+    store.mark_materialization_complete(&job.job_id, now_ms)?;
+    Ok(true)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn materialize_pending_job(
     store: &EngineStore,
@@ -1076,6 +1144,14 @@ pub(super) fn materialize_pending_job(
 ) -> (bool, PostCommitMaterializeOutcome) {
     if job.job_id.starts_with("restore-delete-mat_") {
         return (false, PostCommitMaterializeOutcome::Skipped);
+    }
+    match retire_live_projection_delete(store, root_dir, workspace_id, job, now_ms, holds) {
+        Ok(true) => return (true, PostCommitMaterializeOutcome::Applied),
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("engine: checking materialization delete failed: {error}");
+            return (false, PostCommitMaterializeOutcome::Error);
+        }
     }
     // Register before replacement: the watcher may observe the write as soon
     // as the atomic rename lands. Every non-applied outcome retracts the

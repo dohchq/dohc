@@ -497,7 +497,7 @@ fn complete_held_switch_jobs(
     Ok(())
 }
 
-fn projection_target_contains<'a>(
+pub(super) fn projection_target_contains<'a>(
     root: &std::path::Path,
     path: &str,
     targets: &HashSet<&'a str>,
