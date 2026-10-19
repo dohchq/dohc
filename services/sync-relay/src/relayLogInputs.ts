@@ -1,6 +1,7 @@
 import { sha256Hex } from "@dohc/workspace-core/hash";
 import { parseLiveAuthorContext, parseLiveAuthorSnapshot, type LiveAuthorContext } from "@dohc/live-session-contract/live-authorship";
 import { stableJsonStringify } from "./canonicalJson";
+import { accountDisplayName } from "./discussionRoutes";
 import { badRequest, relayError } from "./errors";
 import { parseString } from "./requestInputs";
 import type { SyncRelayLogInput } from "./storage";
@@ -90,7 +91,7 @@ export function parseLogOp(value: unknown): SyncRelayLogInput {
 export type LogAuthorNameLookup = (userId: string) => Promise<string | null> | string | null;
 
 async function authenticatedDisplayName(actorUserId: string, lookupUserDisplayName?: LogAuthorNameLookup, fallback = "Unnamed"): Promise<string> {
-  const name = (await lookupUserDisplayName?.(actorUserId))?.trim() || fallback;
+  const name = await accountDisplayName(lookupUserDisplayName, actorUserId) ?? fallback;
   try {
     parseLiveAuthorSnapshot([{kind: "human", humanId: actorUserId, humanName: name}]);
     return name;
@@ -106,7 +107,7 @@ export async function parseNamedShareLogOps(
 ): Promise<SyncRelayLogInput[]> {
   let lookup: Promise<string | null> | undefined;
   // A failed lookup leaves the post unnamed rather than refusing it.
-  const accountName = () => lookup ??= Promise.resolve().then(() => lookupUserDisplayName?.(actorUserId) ?? null).catch(() => null);
+  const accountName = () => lookup ??= accountDisplayName(lookupUserDisplayName, actorUserId);
   const ops = await parseAuthenticatedLogOps(values, actorUserId, accountName);
   const chatOps = ops.filter(op => op.opKind === "chat.message.append" || op.opKind === "chat.reaction.set");
   if (chatOps.length === 0) return ops;
@@ -171,12 +172,7 @@ export async function parseAuthenticatedLogOps(
     op.payloadJson = stableJsonStringify(stored);
   }
   if (!contexts.some(context => context?.kind === "account" && context.accountId === actorUserId)) return ops;
-  let humanName: string;
-  try {
-    humanName = await authenticatedDisplayName(actorUserId, lookupUserDisplayName);
-  } catch {
-    return ops;
-  }
+  const humanName = await authenticatedDisplayName(actorUserId, lookupUserDisplayName);
   for (const [index, context] of contexts.entries()) {
     if (context?.kind !== "account" || context.accountId !== actorUserId) continue;
     ops[index]!.admittedAuthorSnapshot = parseLiveAuthorSnapshot([
