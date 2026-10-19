@@ -62,7 +62,27 @@ function readFences(storage: StorageContext, where: string, args: unknown[]) {
   return statement.all(...args);
 }
 
-function indexView(view: ReplicaCurrentView, previous?: ViewIndex["files"]): ViewIndex | null {
+type Row = ViewFile | ReplicaCurrentView["omitted"][number];
+function validRow(file:Row, path:IndexedFile["path"]|null, same=false) {
+  if (!path || path.path !== file.path || !file.objectId || !same && !shaPattern.test(file.sha256)) return false;
+  return "contentKind" in file ? same || ["text","binary"].includes(file.contentKind) && Number.isSafeInteger(file.byteLength) && file.byteLength >= 0 &&
+    (file.lineageClaimId === null ? file.restoreGeneration === null : shaPattern.test(file.lineageClaimId) && Number.isSafeInteger(file.restoreGeneration) && file.restoreGeneration! >= 1)
+    : file.reason === "text-frame-limit";
+}
+
+function validateChanges(changes:ReplicaCurrentView) {
+  for(const file of [...changes.files,...changes.omitted]) {
+    if(!validRow(file,prepareSharePath(file.path)))throw new Error("Invalid replica read index.");
+    Object.freeze(file);
+  }
+  const shas=new Set<string>();
+  for(const text of changes.texts) {
+    if(shas.has(text.sha256) || !shaPattern.test(text.sha256))throw new Error("Invalid replica read index.");
+    shas.add(text.sha256);Object.freeze(text);
+  }
+}
+
+function indexView(view: ReplicaCurrentView, previous?: ViewIndex["files"], heldTexts?:ReplicaMap<string>): ViewIndex | null {
   if (indexes.has(view)) return indexes.get(view)!;
   indexes.set(view,null);
   const paths = new Set<string>(), objects = new Set<string>();
@@ -76,12 +96,9 @@ function indexView(view: ReplicaCurrentView, previous?: ViewIndex["files"]): Vie
       prior.row.sha256 === file.sha256 && prior.row.byteLength === file.byteLength && prior.row.lineageClaimId === file.lineageClaimId &&
       prior.row.restoreGeneration === file.restoreGeneration;
     const path = same ? prior.path : prepareSharePath(file.path);
-    if (!path || path.path !== file.path || !file.objectId || !same && !shaPattern.test(file.sha256) || paths.has(key) || objects.has(object)) return null;
+    if (!path || !validRow(file,path,!!same) || paths.has(key) || objects.has(object)) return null;
     paths.add(key); objects.add(object); Object.freeze(file);
     if ("contentKind" in file) {
-      if (!same && (!["text","binary"].includes(file.contentKind) || !Number.isSafeInteger(file.byteLength) || file.byteLength < 0 ||
-        (file.lineageClaimId === null ? file.restoreGeneration !== null : !shaPattern.test(file.lineageClaimId) ||
-          !Number.isSafeInteger(file.restoreGeneration) || file.restoreGeneration! < 1))) return null;
       if (byteLengths.has(file.sha256) && byteLengths.get(file.sha256) !== file.byteLength) return null;
       byteLengths.set(file.sha256,file.byteLength);
       let version = files.get(file.versionId);
@@ -90,7 +107,6 @@ function indexView(view: ReplicaCurrentView, previous?: ViewIndex["files"]): Vie
       projectedFile(indexed,file.path);
       version.set(file.path,indexed); lineages.set(indexed.lineage,indexed);
     } else {
-      if (file.reason !== "text-frame-limit") return null;
       omitted.set(object,{row:file,path});
       omittedPaths.set(key,file.objectId);
     }
@@ -101,17 +117,17 @@ function indexView(view: ReplicaCurrentView, previous?: ViewIndex["files"]): Vie
   }
   // Metadata and verified text only. No grant or selector decision is cached.
   Object.freeze(view.files); Object.freeze(view.omitted); Object.freeze(view.texts); Object.freeze(view);
-  const index: ViewIndex = {files:new ReplicaMap([...files].map(([version,rows])=>[version,new ReplicaMap(rows)])),texts:new ReplicaMap(texts),textChecks:new Map<string,boolean>(),lineages:new ReplicaMap(lineages),omittedPaths:new ReplicaMap(omittedPaths),inventories:[],decoded:new Map<string,{text:string; bytes:number}>(),decodedBytes:0,omitted:new ReplicaMap(omitted)}; indexes.set(view,index);
+  const index: ViewIndex = {files:new ReplicaMap([...files].map(([version,rows])=>[version,new ReplicaMap(rows)])),texts:heldTexts ?? new ReplicaMap(texts),textChecks:new Map<string,boolean>(),lineages:new ReplicaMap(lineages),omittedPaths:new ReplicaMap(omittedPaths),inventories:[],decoded:new Map<string,{text:string; bytes:number}>(),decodedBytes:0,omitted:new ReplicaMap(omitted)}; indexes.set(view,index);
   return index;
 }
 
-/** Validate the changed rows and publish a separate index for this complete live view. */
+/** Validate changes; update an existing index only when at most half the rows changed. */
 export function publishReplicaCurrentViewIndex(view:ReplicaCurrentView, previous:ReplicaCurrentView|undefined,
-  changes:ReplicaCurrentView, before:Array<ViewFile|ReplicaCurrentView["omitted"][number]>, texts:ReplicaMap<string>, replacement?:ReplicaCurrentView,cold=false) {
-  const prior=previous && indexes.get(previous), delta=indexView(replacement && (!cold || prior) ? replacement : changes,prior?.files);
-  if (!delta || previous && !prior && !cold) throw new Error("Invalid replica read index.");
-  if(previous && !prior && cold)return;
-  if (!prior || replacement) {delta.texts=texts;indexes.set(view,delta);return;}
+  changes:ReplicaCurrentView, before:Array<Row>, texts:ReplicaMap<string>, smallChange:boolean) {
+  const prior=previous && indexes.get(previous);
+  if(!prior || !smallChange) {validateChanges(changes);return;}
+  const delta=indexView(changes,prior.files,texts);
+  if (!delta) throw new Error("Invalid replica read index.");
   const files=prior.files.fork(), lineages=prior.lineages.fork(), omittedPaths=prior.omittedPaths.fork(), omitted=prior.omitted.fork();
   const versions=new Set([...before,...changes.files,...changes.omitted].map(f=>f.versionId));
   for(const version of versions) files.set(version,files.get(version)?.fork() ?? new ReplicaMap());
@@ -125,16 +141,13 @@ export function publishReplicaCurrentViewIndex(view:ReplicaCurrentView, previous
   indexes.set(view,{...delta,files,lineages,omittedPaths,omitted,texts});
 }
 
-export function publishPersistedReplicaIndex(saved:ReplicaCurrentView, source:ReplicaCurrentView, unchanged=false) {
-  if(saved===source)return;
+export function publishPersistedReplicaIndex(readSaved:()=>ReplicaCurrentView|null, source:ReplicaCurrentView, unchanged:boolean) {
+  if(!unchanged)return;
   const index=indexes.get(source);
   if(!index)return;
-  if (index && (unchanged || saved.files.every(f=>{
-    const row=index.files.get(f.versionId)?.get(f.path)?.row;
-    return row && row.objectId===f.objectId && row.sha256===f.sha256 && row.byteLength===f.byteLength && row.contentKind===f.contentKind && row.lineageClaimId===f.lineageClaimId && row.restoreGeneration===f.restoreGeneration;
-  }) && saved.files.length===source.files.length && saved.omitted.length===source.omitted.length)) {
-    indexes.set(saved,{...index,texts:new ReplicaMap(),textChecks:new Map(),inventories:[],decoded:new Map(),decodedBytes:0});
-  } else indexView(saved,index?.files);
+  const saved=readSaved();
+  if(!saved || saved===source)return;
+  indexes.set(saved,{...index,texts:new ReplicaMap(),textChecks:new Map(),inventories:[],decoded:new Map(),decodedBytes:0});
 }
 
 function projectedFile(indexed: IndexedFile, path: string) {

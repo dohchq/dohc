@@ -52,7 +52,8 @@ interface Entry {
   newest?: ReplicaCurrentView;
   manifest?: ReplicaManifest;
   selectorDigest?: string;
-  storedView?: ReplicaCurrentView;
+  // Storage holds the adopted manifest's files and omissions, regardless of cache identity.
+  storedManifest?: boolean;
   resync?: boolean;
   knownStored?: string[];
   pendingView?: boolean;
@@ -121,7 +122,7 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
       },Math.max(1,due-Date.now())); entry.history.unref();
     }
   }
-  function persist(entry: Entry, view = entry.newest, beforeStructuralChange = false, previous?: ReplicaCurrentView, adopting = false): boolean {
+  function persist(entry: Entry, view = entry.newest, beforeStructuralChange = false, previous?: ReplicaCurrentView, mode: "current" | "adopt" | "filtered" = "current"): boolean {
     clearTimeout(entry.quiet); clearTimeout(entry.ceiling);
     entry.quiet = entry.ceiling = undefined;
     if (!entry.pendingView || !view) return false;
@@ -130,20 +131,19 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
       const saved = previous ? options.storage.advanceReplicaCurrentView(entry.lease,view,previous)
         : options.storage.storeReplicaCurrentView(entry.lease, view,observations);
       const exact=!!previous || saved.files.length===view.files.length && saved.files.every((f,i)=>sameHistoryState(f,view.files[i]!) && f.byteLength===view.files[i]!.byteLength);
-      const stored=options.storage.readReplicaCurrentView(entry.lease.workspaceId);
-      if(stored)publishPersistedReplicaIndex(stored,view,exact);
-      entry.storedView=exact && (view===entry.newest || adopting) ? view : undefined;
-      if(!entry.storedView)entry.resync=true;
-      if(!previous && (adopting || entry.knownStored)) {
+      publishPersistedReplicaIndex(()=>options.storage.readReplicaCurrentView(entry.lease.workspaceId),view,exact);
+      entry.storedManifest=exact && mode!=="filtered";
+      if(!entry.storedManifest)entry.resync=true;
+      if(!previous && (mode==="adopt" || entry.knownStored)) {
         const shas=new Set(saved.files.filter(f=>f.contentKind==="text").map(f=>f.sha256));
-        entry.knownStored=adopting ? [...shas] : entry.knownStored!.filter(sha=>shas.has(sha));
+        entry.knownStored=mode==="adopt" ? [...shas] : entry.knownStored!.filter(sha=>shas.has(sha));
       }
       entry.pendingView = false;
-      if(entry.storedView)entry.historyObservations?.clear();
+      if(entry.storedManifest)entry.historyObservations?.clear();
       armHistory(entry);
       return true;
     } catch (error) {
-      entry.newest = undefined; entry.pendingView = false; entry.storedView=undefined; entry.resync=true;
+      entry.newest = undefined; entry.pendingView = false; entry.storedManifest=undefined; entry.resync=true;
       if (!(error instanceof ReplicaCurrentViewRefused)) throw error;
       report(entry, error);
       return false;
@@ -157,7 +157,7 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
     const omitted=previous.omitted.filter(file=>currentViewFileVisible(selectors,file));
     if(files.length===previous.files.length && omitted.length===previous.omitted.length)return persist(entry,previous,beforeStructuralChange);
     return persist(entry,{...previous,files,texts:previous.texts.filter(text=>shas.has(text.sha256)),
-      omitted},beforeStructuralChange);
+      omitted},beforeStructuralChange,undefined,"filtered");
   }
   async function flush(entry: Entry, sampleHistory = false) {
     clearTimeout(entry.quiet); clearTimeout(entry.ceiling);
@@ -183,6 +183,7 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
     const previous=entry.newest ?? options.storage.readReplicaCurrentView(entry.lease.workspaceId) ?? undefined;
     const result=manifest.apply(page,delta,removed);
     const {view,changed,structural,predecessor}=result;
+    if(!entry.manifest && !entry.resync)entry.storedManifest=!!manifest.view && !changed;
     if (entry.pendingView && previous && predecessor) {
       persistVisible(entry,true);
     }
@@ -193,21 +194,22 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
       entry.historyObservations.set(key,{versionId:identity.versionId,objectId:identity.objectId,
         firstChangedAtMs:entry.historyObservations.get(key)?.firstChangedAtMs ?? now,changedAtMs:now});
     }
+    if(changed)entry.storedManifest=false;
     const fresh=!entry.newest;
     if (spilled) {
       entry.pendingView=true;
-      if(persist(entry,view,false,undefined,true)) {
+      if(persist(entry,view,false,undefined,"adopt")) {
         entry.manifest=result.next;entry.selectorDigest=selectorDigest;entry.newest=view;
-        if(!delta && entry.storedView===view)entry.resync=false;
+        if(!delta && entry.storedManifest)entry.resync=false;
       }
       return;
     }
     entry.newest=view;
-    const adopt=()=>{entry.manifest=result.next;entry.selectorDigest=selectorDigest;if(!delta && entry.storedView===view)entry.resync=false;};
-    if (!changed && !entry.pendingView && previous && entry.storedView===previous && !entry.resync && (previous.revision!==view.revision || previous.logCursor!==view.logCursor || previous.journalCursor!==view.journalCursor)) {
+    const adopt=()=>{entry.manifest=result.next;entry.selectorDigest=selectorDigest;if(!delta && entry.storedManifest)entry.resync=false;};
+    if (!changed && !entry.pendingView && previous && entry.storedManifest && !entry.resync && (previous.revision!==view.revision || previous.logCursor!==view.logCursor || previous.journalCursor!==view.journalCursor)) {
       entry.pendingView=true;if(persist(entry,view,false,previous))adopt();return;
     }
-    if (!changed && !entry.resync) {if(!entry.pendingView && entry.storedView===previous)entry.storedView=view;adopt();if(fresh)armHistory(entry);return;}
+    if (!changed && !entry.resync) {adopt();if(fresh)armHistory(entry);return;}
     entry.pendingView=true;
     if(fresh || structural || entry.resync) {if(persist(entry))adopt();return;}
     adopt();
@@ -318,8 +320,7 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
                 const selectors = options.storage.replicaCurrentViewSelectors(entry.lease.workspaceId);
                 const selectorDigest=createHash("sha256").update(JSON.stringify(selectors)).digest("hex");
                 const stored=entry.resync || !entry.manifest ? options.storage.readReplicaCurrentView(entry.lease.workspaceId) : undefined;
-                const manifest=entry.resync || !entry.manifest ? (stored ? (entry.manifest ? new ReplicaManifest().apply(stored,false,[]).next : ReplicaManifest.fromStored(stored)) : new ReplicaManifest()) : entry.manifest;
-                if(!entry.manifest && !entry.resync && stored)entry.storedView=stored;
+                const manifest=entry.resync || !entry.manifest ? (stored ? ReplicaManifest.fromStored(stored) : new ReplicaManifest()) : entry.manifest;
                 if(entry.resync && entry.manifest) {manifest.texts=entry.manifest.texts.fork();manifest.textBytes=entry.manifest.textBytes;}
                 const since=!entry.resync && entry.selectorDigest===selectorDigest && manifest.view ? {revision:manifest.view.revision,logCursor:manifest.view.logCursor,journalCursor:manifest.view.journalCursor} : undefined;
                 if (entry.stopping || !principal.current(entry.lease)) return;
@@ -369,7 +370,7 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
                         texts: [...texts].map(([sha256, text]) => ({sha256, text}))});
                     } catch (error) {
                       if (error instanceof ReplicaCurrentViewRefused) {
-                        entry.resync=true;entry.storedView=undefined;
+                        entry.resync=true;entry.storedManifest=undefined;
                         report(entry, error);
                         options.storage.discardReplicaCurrentView(entry.lease);
                         if (entry.dirty) continue draining;

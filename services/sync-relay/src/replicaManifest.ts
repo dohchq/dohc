@@ -14,22 +14,20 @@ export class ReplicaManifest {
   private lengths=new ReplicaMap<{bytes:number;count:number}>();
   textBytes=0;
   view?:ReplicaCurrentView;
-  private cold=false;
   private stored?:ReplicaCurrentView;
-  /** A restart keeps the existing lazy cold-read path until the first read. */
+  /** Compare stored rows directly before building the retained maps once. */
   static fromStored(view:ReplicaCurrentView) {
-    const manifest=new ReplicaManifest();manifest.cold=true;manifest.stored=view;manifest.view=view;
+    const manifest=new ReplicaManifest();manifest.stored=view;manifest.view=view;
     return manifest;
   }
   apply(page:ReplicaCurrentView, delta:boolean, removed:ReplicaCurrentViewPage["removed"]) {
     const next=new ReplicaManifest();
     if(delta && this.stored)throw new Error("Stored replica manifest requires a full collection.");
-    next.cold=this.cold;
     next.rows=this.rows.fork();next.paths=this.paths.fork();next.omissions=this.omissions.fork();next.texts=this.texts.fork();next.refs=this.refs.fork();next.lengths=this.lengths.fork();next.textBytes=this.textBytes;
     const incoming=[...page.files,...page.omitted], entries=incoming.map(f=>[historyObjectKey(f),f] as const), additions=new Map(entries);
     if(additions.size!==incoming.length)throw new Error("Duplicate replica object.");
     const before:Row[]=[], observations:Array<{versionId:string;objectId:string}>=[];
-    let changed=!this.view, structural=!this.view, predecessor=false;
+    let changed=!this.view, structural=!this.view, predecessor=false, changeCount=0;
     const shas=new Set<string>();
     const release=(row:Row)=>{
       next.rows.delete(historyObjectKey(row));next.paths.delete(pathKey(row));
@@ -41,6 +39,7 @@ export class ReplicaManifest {
     const compare=(old:Row|undefined,file:Row|undefined)=>{
       const same=old && file && ("contentKind" in old && "contentKind" in file ? sameHistoryState(old,file) && old.byteLength===file.byteLength : !("contentKind" in old) && !("contentKind" in file) && old.path===file.path && old.sha256===file.sha256 && old.reason===file.reason);
       if(same)return;
+      changeCount++;
       if(old)before.push(old);
       if(file)changedRows.push(file);
       changed=true;
@@ -54,8 +53,7 @@ export class ReplicaManifest {
       else for(const [key,old] of this.rows) {compare(old,additions.get(key));additions.delete(key);}
       for(const file of additions.values())compare(undefined,file);
     }
-    const bulk=!delta && (!!this.stored || before.length+changedRows.length>this.rows.size/2);
-    const replaceIndex=bulk && before.length+changedRows.length>(this.stored ? this.stored.files.length+this.stored.omitted.length : this.rows.size)/2;
+    const bulk=!delta && (!this.rows.size || before.length+changedRows.length>this.rows.size/2);
     const rows=bulk ? new Map(entries) : next.rows, paths=bulk ? new Map<string,string>() : next.paths;
     const omissions=bulk ? new Map<string,ReplicaCurrentView["omitted"][number]>() : next.omissions;
     const lengths=bulk ? new Map<string,{bytes:number;count:number}>() : next.lengths, refs=bulk ? new Map<string,number>() : next.refs;
@@ -84,7 +82,7 @@ export class ReplicaManifest {
       get texts(){return texts??=[...next.texts].map(([sha256,text])=>({sha256,text}));}};
     publishReplicaCurrentViewIndex(view,this.view,{...page,
       files:changedRows.filter((f):f is ReplicaCurrentView["files"][number]=>"contentKind" in f),
-      omitted:changedRows.filter((f):f is ReplicaCurrentView["omitted"][number]=>!("contentKind" in f))},before,next.texts,replaceIndex ? {...page,files:[...page.files],omitted:[...page.omitted],texts:[...page.texts]} : undefined,this.cold);
+      omitted:changedRows.filter((f):f is ReplicaCurrentView["omitted"][number]=>!("contentKind" in f))},before,next.texts,changeCount<=Math.max(this.stored ? this.stored.files.length+this.stored.omitted.length : this.rows.size,next.rows.size)/2);
     next.view=view;
     return {next,view,changed,structural,predecessor,observations};
   }

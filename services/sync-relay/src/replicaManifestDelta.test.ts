@@ -7,6 +7,65 @@ import type {StorageContext} from "./storage/context";
 import {ReplicaManifest} from "./replicaManifest";
 
 afterEach(async()=>{vi.useRealTimers();await closeTestStorages();});
+it("does not reload the stored manifest after a lazy restart header advance",async()=>{
+  const f=await fixture(3);
+  try {
+    await f.supervisor.evict("w");
+    const read=vi.spyOn(f.storage,"readReplicaCurrentView"),advance=f.storage.advanceReplicaCurrentView.bind(f.storage);
+    const save=vi.spyOn(f.storage,"advanceReplicaCurrentView").mockImplementation((...args)=>{const saved=advance(...args);read.mockClear();return saved;});
+    f.override(async()=>({workspaceId:"w",revision:2,logCursor:0,journalCursor:0,files:f.files,texts:[],refusedFiles:[],delta:false,removed:[],moved:false,nextCursor:null}));
+    await f.supervisor.activate("w");
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(read).not.toHaveBeenCalled();
+    expect(f.errors).toEqual([]);
+  } finally {await f.supervisor.close();}
+});
+it("advances the restart header after the stored cache changes identity",async()=>{
+  const f=await fixture(3),db=inspectDatabase(storagePath(f.storage));
+  try {
+    await f.supervisor.evict("w");
+    db.exec("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,relay_seq) VALUES('w','device',1,'workspace.init','{}',1,1)");
+    f.storage.createShare({share:{shareId:"new",workspaceId:"w",granterUserId:"owner",selectorJson:'{"paths":["docs"],"versionId":null}',createdAtMs:2},grant:{grantId:"new",shareId:"new",principalKind:"user",principalUserId:"reader",principalEmail:null,access:"view",generation:1,status:"active",createdAtMs:2,revokedAtMs:null,parentGrantId:null}});
+    const advance=vi.spyOn(f.storage,"advanceReplicaCurrentView");
+    f.override(async()=>{
+      const before=f.storage.readReplicaCurrentView("w")!;
+      forgetReplicaCurrentViewStoredCache(f.storage as unknown as StorageContext,"w");
+      expect(f.storage.readReplicaCurrentView("w")).not.toBe(before);
+      return {workspaceId:"w",revision:2,logCursor:1,journalCursor:0,files:f.files,texts:[],refusedFiles:[],delta:false,removed:[],moved:false,nextCursor:null};
+    });
+    await f.supervisor.activate("w");
+    expect(advance).toHaveBeenCalledTimes(1);
+    expect(f.storage.readReplicaCurrentView("w")).toMatchObject({revision:2,logCursor:1});
+    const input={...f.input,grantId:"new"};
+    expect(f.storage.listReplicaHistoryPins(input,f.supervisor)).toMatchObject({status:"ready"});
+    await f.supervisor.evict("w");
+    forgetReplicaCurrentViewStoredCache(f.storage as unknown as StorageContext,"w");
+    expect(f.storage.listReplicaHistoryPins(input)).toMatchObject({status:"ready"});
+    expect(f.errors).toEqual([]);
+  } finally {await f.supervisor.close();}
+});
+it("leaves a large replacement index lazy even when the predecessor was indexed",async()=>{
+  const f=await fixture(100);
+  try {
+    expect(f.storage.listReplicaCurrentViewFiles(f.input,f.supervisor).status).toBe("ready");
+    f.update({delta:false,files:f.files.map(file=>({...file,path:file.path.replace("docs/","docs/replaced/")}))});
+    await f.supervisor.activate("w");
+    const view=f.supervisor.currentReadView("w")!.view,files=view.files;
+    let enumerations=0;
+    Object.defineProperty(view,"files",{get(){enumerations++;return files;},configurable:true});
+    expect(f.storage.listReplicaCurrentViewFiles(f.input,f.supervisor)).toMatchObject({status:"ready",files:expect.arrayContaining([expect.objectContaining({path:"docs/replaced/000000.md"})])});
+    expect(enumerations).toBeGreaterThan(0);
+    const replacements=files.slice(0,30).map(file=>({...file,objectId:`new-${file.objectId}`,path:file.path.replace("replaced/","new/")}));
+    f.update({delta:false,files:[...files.slice(30),...replacements]});
+    await f.supervisor.activate("w");
+    const mixed=f.supervisor.currentReadView("w")!.view,mixedFiles=mixed.files;
+    let mixedEnumerations=0;
+    Object.defineProperty(mixed,"files",{get(){mixedEnumerations++;return mixedFiles;},configurable:true});
+    expect(f.storage.listReplicaCurrentViewFiles(f.input,f.supervisor)).toMatchObject({status:"ready",files:expect.arrayContaining([expect.objectContaining({path:replacements[0]!.path})])});
+    expect(mixedEnumerations).toBeGreaterThan(0);
+    expect(f.errors).toEqual([]);
+  } finally {await f.supervisor.close();}
+});
 it("keeps restart indexing lazy, then updates the index after its first read",async()=>{
   const f=await fixture(3);
   try {
@@ -28,7 +87,7 @@ it("keeps restart indexing lazy, then updates the index after its first read",as
     } finally {Object.defineProperty(next,"files",descriptor);}
   } finally {await f.supervisor.close();}
 });
-it("validates changed rows before publishing a deferred cold view",()=>{
+it("validates changed rows before publishing a deferred view",()=>{
   const file={versionId:"main",objectId:"o",path:"docs/a.md",contentKind:"text" as const,sha256:sha256(""),byteLength:0,lineageClaimId:null,restoreGeneration:null};
   const stored={workspaceId:"w",revision:1,logCursor:0,journalCursor:0,files:[file],texts:[],omitted:[]};
   const manifest=ReplicaManifest.fromStored(stored);
@@ -122,6 +181,7 @@ it("R1: a one-entry edit retains the other 19,999 entries without enumerating a 
 it("R1: first open and first list after an atomic path swap use the published index and retain the prior view",async()=>{
   const f=await fixture(100);
   try {
+    expect(f.storage.listReplicaCurrentViewFiles(f.input,f.supervisor).status).toBe("ready");
     const prior=f.supervisor.currentReadView("w")!;
     const a=f.files[0]!,b=f.files[1]!;
     f.update({files:[{...a,path:b.path},{...b,path:a.path}]});await f.supervisor.activate("w");
