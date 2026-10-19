@@ -46,3 +46,11 @@ it.each(["hidden", "missing"])("requires null reasons when visibility is %s", vi
     expect(AccessAnswer.safeParse({ ...answer, unknownReason: "unreadable", coverage: { ...answer.coverage, kind } }).success).toBe(false);
   }
 });
+
+it("keeps refresh outcomes distinct from completed observations", async () => {
+  const { AccessRefreshResult } = await import("./access");
+  for (const status of ["requested", "joined", "paced"] as const) expect(AccessRefreshResult.parse({ status, token: "secret" })).toEqual({ status });
+  expect(AccessRefreshResult.parse({ status: "unavailable", reason: "signed-out" })).toEqual({ status: "unavailable", reason: "signed-out" });
+  expect(AccessRefreshResult.safeParse({ status: "complete" }).success).toBe(false);
+  expect(AccessRefreshResult.safeParse({ status: "unavailable" }).success).toBe(false);
+});

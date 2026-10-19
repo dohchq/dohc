@@ -117,7 +117,7 @@ import { createWorkspaceFileOpens } from "./window/workspaceFileOpens";
 import { confirmOpenPathWorkspace, createOpenPathOpener } from "./workspaces/openPathTarget";
 import { runInWorkspaceAuthorityLane } from "./workspaces/workspaceAuthorityLane";
 import { randomUUID } from "node:crypto";
-import { accessCliQueries, createAccessAcquisition, createAccessOwner, ownerAccessRoster } from "./access/accessOwner";
+import { accessCliQueries, createAccessAcquisition, createAccessOwner, ownerAccessRoster, refreshAccessObservations } from "./access/accessOwner";
 import { hasAccessChat, locateAccessVersionPath, resolveAccessFileObject, resolveAccessObject } from "./access/accessObjectResolution";
 import { createShareCopyHandler, createShareCopyReader } from "./ipc/shareCopyHandler";
 import { shareCopyOperations } from "./ipc/shareCopyOperations";
@@ -1601,11 +1601,7 @@ const accessOwner = createAccessOwner<AccessWorkspaceOperation>({
     relayUrl: cachedCredentials.relayUrl, generation: credentialCacheGeneration } : null,
   roster: ({ workspace }) => ownerAccessRoster(workspace, cachedCredentials, shareRosters.observation),
   received: () => receivedShareAcquisition.observation(),
-  refresh: async operation => {
-    await warmCredentialCache().catch(() => undefined);
-    operation.assertCurrent();
-    await accessAcquisition.request(operation.workspace.workspaceId);
-  },
+  refresh: operation => refreshAccessObservations(operation, warmCredentialCache, accessAcquisition),
   resolve: async (operation, ref) => {
     const workspace = operation.workspace;
     return resolveAccessObject(workspace, ref, {
@@ -6038,7 +6034,7 @@ function registerIpcHandlers(): void {
   registerOperations(operationBoundary, accessOperations, {
     getObjectAccess: (input, { operation }) => accessOwner.object(operation!, input),
     listSharingAccess: (input, { operation }) => accessOwner.sharing(operation!, input),
-    requestAccessRefresh: (_input, { operation }) => accessOwner.refresh(operation!),
+    requestAccessRefresh: async (_input, { operation }) => { await accessOwner.refresh(operation!); },
   });
   const windowIpc = createWindowIpc<WebContents, IpcMainInvokeEvent, IpcMainEvent>({
     registerHandler: handleIpc,

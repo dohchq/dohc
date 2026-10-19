@@ -28,6 +28,7 @@ type CliCommandBody =
   | { verb: "accountDeletePreview" }
   | { verb: "accountDelete"; server: string; previewToken: string }
   | { verb: "accessObject"; ref: AccessObjectRef; cursor?: string }
+  | { verb: "accessRefresh" }
   | { verb: "accessSharing"; lane: "granted" | "received"; cursor?: string }
   | { verb: "documentRead" | "fileChats"; path: string }
   | { verb: "fileChatStart"; path: string; title: string; body: string; stdin: boolean; agent?: string; requestId?: string; runId?: string }
@@ -1065,10 +1066,15 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
     },
   },
   access: {
-    summary: "Read observed object grants and Sharing inventories.",
+    summary: "Read observed grants and request fresh Sharing inventories.",
     notes: ["Answers describe observed grants, not authorization. An empty page means no matching grants within its coverage.",
       "Paths resolve from your current folder. Received selectors use their source workspace's coordinates."],
     verbs: {
+      refresh: {
+        capabilityId: "access.refresh", operands: "", summary: "Request fresh Sharing observations with the same pacing as opening Sharing.",
+        notes: ["Reports requested, joined, paced, or unavailable. Requested and joined wait for started or existing attempts to settle, without promising success. Paced follows the existing refresh schedule. Read access sharing afterward to inspect observations."],
+        parse: input => { noExtraArgs(input.operands, "access refresh"); return { verb: "accessRefresh" }; },
+      },
       object: {
         capabilityId: "access.object.read", summary: "Read the grants covering an object.", operands: "<reference-json>",
         flags: [{ name: "--cursor", value: "cursor", text: "Continue the previous answer." }],

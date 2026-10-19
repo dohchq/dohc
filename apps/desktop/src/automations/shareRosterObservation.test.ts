@@ -130,3 +130,22 @@ it("reuses the parsed observation until the underlying roster changes", async ()
   expect(r.observation("w").listing).toBe(first);
   r.close("w");
 });
+
+it.each(["missing", "local-only", "share-view"] as const)("uses listOnce's eligibility rule for a %s workspace", async kind => {
+  const h = harness();
+  const workspace = kind === "missing" ? null : kind === "local-only" ? { ...h.entry, remote: undefined }
+    : { ...h.entry, shareView: { shareId: "share", relayUrl: "https://relay.test", recipientUserId: "friend",
+      granterEmail: null, genericChatWritable: false,
+      grantedSelector: { paths: ["doc.md"], versionId: null, access: "view" as const } } };
+  const listRoster = vi.fn(async () => answered), saveRoster = vi.fn();
+  const r = createShareRosters({ findWorkspace: () => workspace, saveRoster, markRosterPulled: vi.fn(),
+    listRoster, localUserId: async () => null, localPersonId: async () => null,
+    syncHistory: async () => "never-synced", logError: vi.fn() });
+  try {
+    expect(await r.requestRefresh("w")).toBe("unavailable");
+    r.sharesChanged("w");
+    await r.requestRefresh("w");
+    expect(listRoster).not.toHaveBeenCalled(); expect(saveRoster).not.toHaveBeenCalled();
+    expect(r.observation("w")).toMatchObject({ checkedAtMs: null, freshness: "unknown" });
+  } finally { r.close("w"); }
+});

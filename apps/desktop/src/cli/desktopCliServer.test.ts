@@ -19,6 +19,7 @@ import { CHATS_METHOD, WORKSPACE_METHOD, type VersionedLiveAdapter } from "@dohc
 import { executeCli } from "@dohc/cli";
 import { CLI_JSON_SCHEMA_VERSION, CLI_PROTOCOL_VERSION, cliTransportResponseSchema, type CliRequestWithoutToken } from "@dohc/cli/protocol";
 import { VersionedTextStoreError } from "@dohc/workspace-contracts/engine";
+import { accessCliQueries, createAccessOwner } from "../access/accessOwner";
 import { createDesktopCliServer } from "./desktopCliServer";
 import { handleCliRequestLine } from "./cliServer";
 import type { CliServerOptions, CliServerHandle } from "./cliServer";
@@ -159,6 +160,42 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
 afterEach(() => vi.restoreAllMocks());
 
 describe("desktop CLI workspace context", () => {
+  it("routes Access refresh to the IPC owner for the socket workspace only", async () => {
+    const scratch = await createTestScratch("cli-access-refresh-");
+    const f = fixture(scratch);
+    f.rows.set("other", { ...f.workspace, workspaceId: "other", rootPath: join(scratch, "other") });
+    const refreshedWorkspaces: string[] = [];
+    const refresh = vi.fn(async (operation: Parameters<Parameters<Dependencies["withPhysicalWorkspaceOperation"]>[1]>[0]) => {
+      operation.assertCurrent();
+      refreshedWorkspaces.push(operation.workspace.workspaceId);
+      return { status: "requested" as const };
+    });
+    const owner = createAccessOwner({
+      resolve: async (_operation, ref) => ({ ref, visibility: "visible" }),
+      roster: () => ({ listing: null, checkedAtMs: null, freshness: "unknown" }),
+      received: () => ({ inventory: null, checkedAtMs: null, freshness: "unknown" }),
+      account: () => null, scope: () => "scope", assertCurrent: operation => operation.assertCurrent(),
+      permissions: async () => { throw new Error("unused"); }, refresh,
+    });
+    f.dependencies.access = id => accessCliQueries(owner, work => f.dependencies.withPhysicalWorkspaceOperation(id, work));
+    const server = f.create();
+    await server.startDesktopCliServer();
+    const token = "a".repeat(64);
+    const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "accessRefresh", args: { cwd: scratch, actor: "agent" } };
+    try {
+      const answer = JSON.parse(await handleCliRequestLine(JSON.stringify(request), token, f.options()));
+      expect(answer).toMatchObject({ ok: true, result: { status: "requested" } });
+      expect(refresh).toHaveBeenCalledOnce();
+      expect(refreshedWorkspaces).toEqual(["workspace"]);
+      const forged = { ...request, args: { ...request.args, workspaceId: "other" } };
+      expect(JSON.parse(await handleCliRequestLine(JSON.stringify(forged), token, f.options()))).toMatchObject({ ok: false });
+      expect(refresh).toHaveBeenCalledOnce();
+      // IPC calls this same owner directly with its captured operation.
+      await f.dependencies.withPhysicalWorkspaceOperation("workspace", operation => owner.refresh(operation));
+      expect(refresh).toHaveBeenCalledTimes(2);
+    } finally { await f.handle.close(); }
+  });
+
   it("binds sync stop to the registered workspace and fences a retired attachment", async () => {
     const f = fixture();
     f.dependencies.stopWorkspaceSync = vi.fn(async (operation, author) => {
