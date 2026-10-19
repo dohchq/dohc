@@ -146,6 +146,19 @@ describe("electron updater configuration", () => {
     await expect(startWith(active, { platform: "linux" })).resolves.not.toBeNull();
   });
 
+  // patches/electron-updater@6.8.9.patch: upstream asks again after a cancelled prompt and then reports success.
+  it("installs a .deb under one password prompt and never lets apt-get remove a package", async () => {
+    const { DebUpdater } = await import("electron-updater");
+    const commands: string[][] = [];
+    const cancelled = (command: string[]) => {
+      commands.push(command);
+      throw new Error("Command pkexec exited with code 126");
+    };
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    expect(() => DebUpdater.installWithCommandRunner("dpkg", "/tmp/dohc.deb", cancelled, logger)).toThrow("126");
+    expect(commands).toEqual([["dpkg", "-i", "/tmp/dohc.deb", "||", "apt-get", "install", "-f", "-y", "--no-remove"]]);
+  });
+
   it("sets nightly channel flags explicitly", async () => {
     const updater = fakeUpdater();
     await startWith(updater, { currentVersion: "1.2.4-nightly.20260621.123" });

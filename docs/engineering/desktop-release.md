@@ -20,7 +20,9 @@ release.
 
 Ubuntu 24.04 and later block the unprivileged user namespaces that Chromium's
 sandbox needs, so the AppImage refuses to start there and says why. The `.deb`
-installs an AppArmor profile that allows them. Point Ubuntu and Debian users to
+installs an AppArmor profile that allows them. The profile covers every process
+dohc starts, including the engine, chat runners, and the commands agents run, so
+each of them can also create user namespaces. Point Ubuntu and Debian users to
 the `.deb`.
 
 ## Keep signing credentials on reviewed code
@@ -183,7 +185,9 @@ Set it only in a launch environment you control, and use a trusted HTTPS endpoin
 The app downloads available updates. On Windows and macOS it installs them on quit.
 On Linux an update installs only when the person selects Restart to update: the
 AppImage replaces itself, and the `.deb` installs with `dpkg` after the system
-asks for an administrator password.
+asks once for an administrator password. If `dpkg` reports missing dependencies,
+`apt-get` adds them under the same password but never removes a package
+(`patches/electron-updater@6.8.9.patch`). A cancelled prompt fails the update.
 Controlling the feed controls update metadata and the artifacts offered to the app.
 Download hashes alone do not authenticate a feed whose metadata an attacker controls.
 Windows publisher checks depend on the packaged `app-update.yml` configuration.
@@ -192,9 +196,10 @@ Do not assume unsigned builds have the same update guarantees as signed releases
 Development builds honor the override only with `DOHC_DESKTOP_MOCK_UPDATES=1`.
 Before launch, test tampered updates against signed Windows and macOS release artifacts.
 Linux updates have no signature. The app checks only the SHA-512 that the same
-release's manifest lists, as T3 Code does, so whoever controls the feed or
-`DOHC_UPDATE_URL` can offer a package that the `.deb` installs as root. A signed
-apt repository would add a signature for the `.deb`.
+release's manifest lists, when the download finishes, as T3 Code does. Whoever can
+publish a GitHub release or set `DOHC_UPDATE_URL` can offer an AppImage that runs
+as the person, or a package that the `.deb` installs as root. A signed apt
+repository would add a signature for the `.deb`.
 
 ## Configure usage and error reports
 

@@ -20,8 +20,8 @@ export async function checkForUpdateBeforeMain(failure: LaunchFailure): Promise<
     isPackaged: app.isPackaged,
     currentVersion: app.getVersion(),
   });
-  // Declining a downloaded update quits: relaunching this build would race
-  // the install that runs on quit.
+  // Declining a downloaded update quits: on Windows and macOS, relaunching
+  // this build would race the install that runs on quit.
   let declined = false;
   try {
     const restarting = await createUpdateAfterFailure({

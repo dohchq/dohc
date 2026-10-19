@@ -131,8 +131,9 @@ export function publicUpdateState(
   // latches once quitAndInstall runs and never clears, so gating on it stranded
   // the update for the rest of the run whenever the restart was interrupted —
   // a late recovery warning whose "Go back" then had nothing to go back to.
-  // The restart is not lost: electron-updater installs it on the next quit,
-  // and the renderer finishes the staged one by resuming that quit.
+  // The restart is not lost: electron-updater installs it on the next quit
+  // (on Linux, quitAndInstall already installed it), and the renderer
+  // finishes the staged one by resuming that quit.
   const canInstall = state.status === "ready";
   return {
     status: state.status,
@@ -299,7 +300,8 @@ export async function startAutoUpdates(options: {
     }
     if (restartStaged) {
       // The latch is spent, but the restart is not lost: electron-updater
-      // installs it on the next quit. What remains is exactly that quit, and
+      // installs it on the next quit (on Linux, the spent call already
+      // installed it). What remains is exactly that quit, and
       // it is MAIN's to make. The renderer must not have
       // to know — it held this fact in a module variable, which a reload
       // reset while this latch stayed set, stranding the update for the rest

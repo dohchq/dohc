@@ -56,6 +56,7 @@ overrides:
 patchedDependencies:
   '@legendapp/list@3.3.11': 56c507d27b1a74272bcf6c9f183befb96d9f9a39d2f5d42018bb34db0f52e52b
   app-builder-lib@26.15.3: 43a9677d5c0d33b767329d8638103ec8ed4bdc14cfe2a4dfc930b673f3081946
+  electron-updater@6.8.9: ca9ceebec359f2e5c61db4dcca9743d1b54fd5d495bbdd29c986ac9ce6418292
   prosemirror-view@1.42.2: ff50e393ba12e965d83fe14200353a218c5530b5741560ce8340528f678cdcb9
 
 importers:
@@ -157,7 +158,7 @@ importers:
         version: 4.0.0
       electron-updater:
         specifier: ^6.8.9
-        version: 6.8.9(supports-color@7.2.0)
+        version: 6.8.9(patch_hash=ca9ceebec359f2e5c61db4dcca9743d1b54fd5d495bbdd29c986ac9ce6418292)(supports-color@7.2.0)
       esbuild:
         specifier: 0.28.1
         version: 0.28.1
@@ -10663,7 +10664,7 @@ snapshots:
 
   electron-to-chromium@1.5.433: {}
 
-  electron-updater@6.8.9(supports-color@7.2.0):
+  electron-updater@6.8.9(patch_hash=ca9ceebec359f2e5c61db4dcca9743d1b54fd5d495bbdd29c986ac9ce6418292)(supports-color@7.2.0):
     dependencies:
       builder-util-runtime: 9.7.0(supports-color@7.2.0)
       fs-extra: 10.1.0
