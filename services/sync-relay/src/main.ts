@@ -1,5 +1,5 @@
 import {parsePublicEditRelease} from "@dohc/security-contract";
-import {accountDisplayName} from "./discussionRoutes";
+import {accountDisplayName} from "./accountDisplayName";
 import { APP_PUBLICATION_MAX_FILES, APP_PUBLICATION_MAX_METADATA_BYTES, APP_PUBLICATION_MAX_BUNDLE_BYTES } from "@dohc/security-contract/app-publication";
 import { createWorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
 import { createSessionActorResolver, UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";

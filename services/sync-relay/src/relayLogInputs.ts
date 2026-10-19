@@ -1,7 +1,7 @@
 import { sha256Hex } from "@dohc/workspace-core/hash";
 import { parseLiveAuthorContext, parseLiveAuthorSnapshot, type LiveAuthorContext } from "@dohc/live-session-contract/live-authorship";
 import { stableJsonStringify } from "./canonicalJson";
-import { accountDisplayName } from "./discussionRoutes";
+import { accountDisplayName } from "./accountDisplayName";
 import { badRequest, relayError } from "./errors";
 import { parseString } from "./requestInputs";
 import type { SyncRelayLogInput } from "./storage";
@@ -112,8 +112,7 @@ export async function parseNamedShareLogOps(
   const chatOps = ops.filter(op => op.opKind === "chat.message.append" || op.opKind === "chat.reaction.set");
   if (chatOps.length === 0) return ops;
   // Chat names a person without an account name "Unnamed", as the relay's other chat and discussion routes do.
-  const name = await authenticatedDisplayName(actorUserId, accountName, "Unnamed");
-  const humanName = name.length <= 200 && name.isWellFormed() ? name : "Unnamed";
+  const humanName = await authenticatedDisplayName(actorUserId, accountName);
   const snapshot = parseLiveAuthorSnapshot([{kind: "human", humanId: actorUserId, humanName}]);
   for (const op of chatOps) {
     op.admittedAuthorSnapshot = snapshot;

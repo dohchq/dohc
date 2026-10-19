@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { parseAuthenticatedLogOps, parseNamedShareLogOps } from "./relayLogInputs";
 import { stableJsonStringify } from "./canonicalJson";
-import { DISCUSSION_DISPLAY_NAME_LOOKUP_DEADLINE_MS } from "./discussionRoutes";
+import { ACCOUNT_NAME_LOOKUP_DEADLINE_MS } from "./accountDisplayName";
 
 it.each([false, true])("bounds a hung account-name lookup and preserves the authenticated principal (named share=%s)", async named => {
   vi.useFakeTimers();
@@ -15,7 +15,7 @@ it.each([false, true])("bounds a hung account-name lookup and preserves the auth
     const parse = named ? parseNamedShareLogOps : parseAuthenticatedLogOps;
     const admission = parse(named ? [edit, {...message("human"), originSeq: 1}] : [edit], "recipient", lookup)
       .then(ops => {result = ops;});
-    await vi.advanceTimersByTimeAsync(DISCUSSION_DISPLAY_NAME_LOOKUP_DEADLINE_MS - 1);
+    await vi.advanceTimersByTimeAsync(ACCOUNT_NAME_LOOKUP_DEADLINE_MS - 1);
     expect(result).toBeUndefined();
     await vi.advanceTimersByTimeAsync(1);
     expect(result).toBeDefined();
